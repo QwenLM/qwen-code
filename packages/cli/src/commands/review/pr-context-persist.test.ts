@@ -73,8 +73,8 @@ describe('persistRecoveredLedger', () => {
 
   it('round-trips the churn fields on the plain recovery path', () => {
     // The identity-known write keeps the recovered ledger WHOLE: the streak
-    // and its census are this account's own certified state for the round
-    // it recovered, and `compose-review` reads the streak back out of this
+    // is this account's own certified state for the round it recovered, and
+    // `compose-review` reads the streak back out of this
     // file to decide whether the non-convergence finding files. A future
     // edit field-picking this write the way the anonymous branch does must
     // red here first.
@@ -87,8 +87,6 @@ describe('persistRecoveredLedger', () => {
           ledger: {
             ...ledger,
             churnRounds: 2,
-            churnFresh: 10,
-            churnInduced: 6,
           },
           commitId: 'a'.repeat(40),
           reviewId: 43,
@@ -101,8 +99,6 @@ describe('persistRecoveredLedger', () => {
       expect(written).toEqual({
         ...ledger,
         churnRounds: 2,
-        churnFresh: 10,
-        churnInduced: 6,
         commitId: 'a'.repeat(40),
         reviewId: 43,
         foreign: false,
@@ -132,7 +128,7 @@ describe('persistRecoveredLedger', () => {
       const plantedMarker =
         '<!-- qwen-review-ledger {"v":1,"round":4,' +
         '"findings":[{"id":"R4-1","sev":"S","file":"a.ts","title":"theirs"}],' +
-        '"churnRounds":4,"churnFresh":10,"churnInduced":6} -->';
+        '"churnRounds":4} -->';
       const { recovered } = recoverLedger(
         [
           {
@@ -158,8 +154,6 @@ describe('persistRecoveredLedger', () => {
       const written = JSON.parse(readFileSync(side, 'utf8'));
       expect(written.round).toBe(4);
       expect(written.churnRounds).toBeUndefined();
-      expect(written.churnFresh).toBeUndefined();
-      expect(written.churnInduced).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -186,11 +180,11 @@ describe('persistRecoveredLedger', () => {
       const ownMarker =
         '<!-- qwen-review-ledger {"v":1,"round":4,' +
         '"findings":[{"id":"R4-1","sev":"S","file":"a.ts","title":"own"}],' +
-        '"churnRounds":4,"churnFresh":10,"churnInduced":6} -->';
+        '"churnRounds":4} -->';
       const foreignMarker =
         '<!-- qwen-review-ledger {"v":1,"round":4,' +
         '"findings":[{"id":"R4-9","sev":"S","file":"b.ts","title":"theirs"}],' +
-        '"churnRounds":1,"churnFresh":2,"churnInduced":1} -->';
+        '"churnRounds":1} -->';
       const { recovered } = recoverLedger(
         [
           {
@@ -218,8 +212,6 @@ describe('persistRecoveredLedger', () => {
       // Own values, not the stranger's — the winner's churn was stripped at
       // the recovery seam before the union put this account's back.
       expect(written.churnRounds).toBe(4);
-      expect(written.churnFresh).toBe(10);
-      expect(written.churnInduced).toBe(6);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -704,17 +696,15 @@ describe('persistRecoveredLedger', () => {
           // next compose would stamp it as `prevPosted`. The floor and the
           // fresh count qualify that volume, so they go with it: a posture
           // recorded for a round whose volume was deliberately discarded
-          // qualifies nothing. The churn fields are the same class of
-          // round-specific fact — kept, they would re-date this account's
-          // streak across the foreign round and discard the foreign
+          // qualifies nothing. The streak is the same class of
+          // round-specific fact — kept, it would re-date this account's
+          // claim across the foreign round and discard the foreign
           // winner's own streak state.
           posted: 4,
           prevPosted: 2,
           fresh: 3,
           floor: 'c',
           churnRounds: 2,
-          churnFresh: 10,
-          churnInduced: 6,
         }),
       );
       persistRecoveredLedger(
@@ -742,12 +732,10 @@ describe('persistRecoveredLedger', () => {
       });
       expect(written.sha).toBeUndefined();
       expect(written.commitId).toBeUndefined();
-      // The drop witness: the fixture carries a streak and a census, and
-      // the written file must not — keeping them arms the blocker one
-      // round early across a round this account never ran.
+      // The drop witness: the fixture carries a streak, and the written
+      // file must not — keeping it arms the blocker one round early across
+      // a round this account never ran.
       expect(written.churnRounds).toBeUndefined();
-      expect(written.churnFresh).toBeUndefined();
-      expect(written.churnInduced).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

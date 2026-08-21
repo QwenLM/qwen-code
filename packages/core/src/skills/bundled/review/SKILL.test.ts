@@ -662,6 +662,15 @@ describe('bundled review skill', () => {
     expect(body).toContain(
       '**Fix witness** — the test that must go RED if that fix is removed',
     );
+    // The third half, at BOTH sites the exemption lives: the format's
+    // declaration and the posting rule's silence clause. Rewriting either
+    // into a bar on reporting ships green under every other assertion here.
+    expect(body).toContain(
+      'or `N/A` when the fix adds no guard, branch or behaviour a test can pin',
+    );
+    expect(body).toContain(
+      'A finding whose `fixWitness` is `N/A` adds nothing',
+    );
     // The aggregate slot: Step 6 names Fix witness in the pattern-aggregated
     // format, so the Step 4 template it points at must carry the slot — an
     // aggregate whose fix adds a guard otherwise ships every expanded comment
@@ -716,12 +725,25 @@ describe('bundled review skill', () => {
     // The census is the numerator/denominator the non-convergence finding is
     // computed from, and three clauses have to survive together: what to
     // count, that ABSENCE is not zero (a zeros pair carries the streak but
-    // stamps a false measured round into the marker telemetry), and that the
+    // states a measured round that found nothing), and that the
     // model does not get to rule on its own
     // numbers — without the last, the narrated-away-cap failure reappears
     // wearing a different hat.
     const body = skillBody();
     expect(body).toContain('convergence: {"fresh": N, "induced": M}');
+    // What to COUNT — the shape pins above do not reach the definition:
+    // fix-induced findings count in `fresh` whichever way they were id'd,
+    // `induced` is a subset of `fresh`, and the count keys on attribution,
+    // not on new lines. Deleting any clause leaves the suite green and the
+    // model miscounts exactly the churning rounds the bar is built for.
+    expect(body).toContain(
+      'Fix-induced findings count whether they took a previous id or a new one',
+    );
+    expect(body).toContain('(they are new defects; the id is bookkeeping)');
+    expect(body).toContain('`induced` is a SUBSET of `fresh`');
+    expect(body).toContain(
+      'It is the attributed count, not the count of findings on new lines',
+    );
     expect(body).toContain('**Omitting is not the same as zero**');
     expect(body).toContain('**You count; the module rules.**');
     expect(body).toContain(

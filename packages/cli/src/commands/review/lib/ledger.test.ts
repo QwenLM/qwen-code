@@ -877,7 +877,7 @@ describe('the volume fields — telemetry across the untrusted boundary', () => 
   });
 });
 
-describe('the convergence census and the churn streak', () => {
+describe('the churn streak', () => {
   const base = { v: 1 as const, round: 3, findings: [] };
   const handCrafted = (over: Record<string, unknown>) =>
     `<!-- qwen-review-ledger ${JSON.stringify({
@@ -887,63 +887,22 @@ describe('the convergence census and the churn streak', () => {
       ...over,
     })} -->`;
 
-  it('round-trips the census as a pair', () => {
-    const l = parseLedger(
-      serializeLedger({ ...base, churnFresh: 11, churnInduced: 7 }),
-    )!;
-    expect(l.churnFresh).toBe(11);
-    expect(l.churnInduced).toBe(7);
-  });
-
-  it.each([
-    ['only a denominator', { churnFresh: 11 }],
-    ['only a numerator', { churnInduced: 7 }],
-    ['a float denominator', { churnFresh: 11.5, churnInduced: 7 }],
-    ['a negative numerator', { churnFresh: 11, churnInduced: -1 }],
-    ['string digits', { churnFresh: '11', churnInduced: '7' }],
-  ])('reads %s as no census at all', (_label, over) => {
-    // Half a ratio is not a smaller reading, it is an unreadable one: a
-    // numerator with no denominator would put a number in front of a reader
-    // that means less than the silence it replaced. The work list beside it
-    // must survive either way — this is a PR body any account can write.
-    const l = parseLedger(handCrafted(over))!;
-    expect(l.findings).toHaveLength(1);
-    expect(l.churnFresh).toBeUndefined();
-    expect(l.churnInduced).toBeUndefined();
-  });
-
-  it('writes the census as a pair or not at all', () => {
-    // Same rule on the write side, independently: a serializer that can emit
-    // what its own parser refuses round-trips to nothing.
-    expect(serializeLedger({ ...base, churnFresh: 11 })).not.toContain(
-      '"churnFresh"',
-    );
-    expect(serializeLedger({ ...base, churnInduced: 7 })).not.toContain(
-      '"churnInduced"',
-    );
-  });
-
   // The boundary is located by the PROPERTY, never by a byte count: the
   // serializer self-sheds, so `serializeLedger(...).length` can never be
   // observed above the cap and any arithmetic built on it measures the shed
-  // output rather than the pressure. (The first cut of these two tests did
-  // exactly that, and a hard-coded 50-finding fixture instead sheds all the
-  // way past both volumes into the work list — which proves nothing about
-  // either ordering.) So: grow the last entry's path a byte at a time until
-  // the census is the thing that stops fitting, and keep the render one byte
-  // BELOW that as the control.
-  const withCensus = (findings: LedgerFinding[], over: Partial<Ledger> = {}) =>
+  // output rather than the pressure. So: grow the last entry's path a byte
+  // at a time until the carried volume is the thing that stops fitting, and
+  // keep the render one byte BELOW that as the control.
+  const withVolume = (findings: LedgerFinding[], over: Partial<Ledger> = {}) =>
     serializeLedger({
       ...base,
       ...over,
       findings,
       posted: 12,
       prevPosted: 9,
-      churnFresh: 11,
-      churnInduced: 7,
     });
 
-  const atTheCensusBoundary = (over: Partial<Ledger> = {}) => {
+  const atTheVolumeBoundary = (over: Partial<Ledger> = {}) => {
     const findings: LedgerFinding[] = [];
     for (let i = 0; i < LEDGER_MAX_FINDINGS; i++) {
       const next: LedgerFinding = {
@@ -952,7 +911,7 @@ describe('the convergence census and the churn streak', () => {
         file: `packages/cli/src/commands/review/deep/path/file-${i}.ts`,
         title: 'x'.repeat(LEDGER_MAX_TITLE),
       };
-      if (withCensus([...findings, next], over).includes('"churnFresh"')) {
+      if (withVolume([...findings, next], over).includes('"prevPosted"')) {
         findings.push(next);
       } else {
         break;
@@ -960,7 +919,7 @@ describe('the convergence census and the churn streak', () => {
     }
     // Whole findings are ~130 bytes each, so the coarse fill lands up to one
     // entry short. Pad the last entry's PATH — the one capped field with room
-    // left — until the census is exactly what no longer fits.
+    // left — until the carried volume is exactly what no longer fits.
     const grow = (n: number): LedgerFinding[] => {
       const fs = findings.slice();
       const last = fs[fs.length - 1];
@@ -969,45 +928,26 @@ describe('the convergence census and the churn streak', () => {
     };
     const room = LEDGER_MAX_FILE - findings[findings.length - 1].file.length;
     let pad = 0;
-    while (pad < room && withCensus(grow(pad), over).includes('"churnFresh"')) {
+    while (pad < room && withVolume(grow(pad), over).includes('"prevPosted"')) {
       pad++;
     }
     return { over: grow(pad), under: grow(pad - 1) };
   };
 
-  it("sheds the census on the FIRST byte squeeze, ahead of this round's volume", () => {
-    // Priority: the census (with the carried volume it shares a rung with)
-    // < this round's own volume < the anchor pair < the work list.  The body
-    // states these numbers in prose where the reader meets them; the marker
-    // copy only spares a later round the re-derivation.
-    const { over, under } = atTheCensusBoundary();
-
-    // The control proves the fixture is AT the boundary rather than merely
-    // over-fat: one byte less and the census fits.
-    expect(withCensus(under)).toContain('"churnFresh":11');
-
-    const written = withCensus(over);
-    expect(written.length).toBeLessThanOrEqual(LEDGER_MAX_BYTES);
-    expect(written).not.toContain('"churnFresh"');
-    expect(written).not.toContain('"churnInduced"');
-    expect(written).not.toContain('"prevPosted"');
-    // ...and everything below that rung survives the bytes it paid.
-    expect(written).toContain('"posted":12');
-    expect(parseLedger(written)?.findings).toHaveLength(over.length);
-    expect(parseLedger(written)?.dropped).toBeUndefined();
-  });
-
-  it('keeps the streak through that same squeeze', () => {
+  it('keeps the streak through the FIRST byte squeeze', () => {
     // The streak is NOT telemetry: it is the review's own standing claim
     // about the pull request, and `compose-review` reads it back to decide
     // whether to file the non-convergence finding. The pull request most
     // likely to be churning is also the one whose marker is closest to its
     // byte cap, so shedding the streak there would disarm the mechanism on
     // exactly the pull requests it exists for.
-    const { over } = atTheCensusBoundary({ churnRounds: 3 });
-    const written = withCensus(over, { churnRounds: 3 });
+    const { over, under } = atTheVolumeBoundary({ churnRounds: 3 });
+    // The control proves the fixture is AT the boundary rather than merely
+    // over-fat: one byte less and the carried volume still fits.
+    expect(withVolume(under, { churnRounds: 3 })).toContain('"prevPosted":9');
+    const written = withVolume(over, { churnRounds: 3 });
     expect(written.length).toBeLessThanOrEqual(LEDGER_MAX_BYTES);
-    expect(written).not.toContain('"churnFresh"');
+    expect(written).not.toContain('"prevPosted"');
     expect(written).toContain('"churnRounds":3');
     expect(parseLedger(written)?.churnRounds).toBe(3);
     expect(parseLedger(written)?.findings).toHaveLength(over.length);
@@ -1036,8 +976,6 @@ describe('the convergence census and the churn streak', () => {
         findings: fat(n),
         posted: 12,
         prevPosted: 9,
-        churnFresh: 11,
-        churnInduced: 7,
         churnRounds: 3,
       });
       if (!written.includes('"posted"')) break;

@@ -1504,7 +1504,6 @@ export function composeReview(
       // is evidence of absence.
       complete: prevRound > 0 && !prevFacts.truncated,
     },
-    churnCensus,
     churnRounds,
   );
   // `postedInline` came out of the body composer on the same input, so only
@@ -1838,7 +1837,6 @@ function ledgerMarkerFor(
   floorKind: CriticalFloorKind | undefined,
   floorKnown: boolean,
   carriedWorkList: { ids: ReadonlySet<string>; complete: boolean },
-  churnCensus: { fresh: number; induced: number } | null,
   churnRounds: number,
 ): string | null {
   try {
@@ -1992,11 +1990,6 @@ function ledgerMarkerFor(
       floor: floorKind === undefined ? 'o' : 'c',
       // The part of that volume the trend is about — see `Ledger.fresh`.
       fresh: freshInline,
-      // The census under its own keys — `fresh` above is the module-computed
-      // posted-first-time count, and one key cannot carry both readings.
-      ...(churnCensus === null
-        ? {}
-        : { churnFresh: churnCensus.fresh, churnInduced: churnCensus.induced }),
       ...(churnRounds > 0 ? { churnRounds } : {}),
     });
   } catch {

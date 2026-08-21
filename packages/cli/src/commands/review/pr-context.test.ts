@@ -1357,9 +1357,9 @@ describe('latestLedger — the split trust surface', () => {
   });
 
   it('drops the churn state from ANOTHER account, keeping the work list', () => {
-    // The streak and its census are the same class of claim as the anchor:
-    // facts ABOUT the round that posted them, certified by the account that
-    // ran it. `stripAnchor` drops the range claim at this seam; left riding,
+    // The streak is the same class of claim as the anchor: a fact ABOUT
+    // the round that posted it, certified by the account that ran it.
+    // `stripAnchor` drops the range claim at this seam; left riding,
     // a foreign marker's `churnRounds` reaches the side file through the
     // identity-known write path, and any account that can submit a review
     // can plant a streak — this account's next honest above-bar round then
@@ -1372,16 +1372,12 @@ describe('latestLedger — the split trust surface', () => {
       round: 4,
       findings: [{ id: 'R4-1', sev: 'C', file: 'a.ts', title: 't' }],
       churnRounds: 4,
-      churnFresh: 10,
-      churnInduced: 6,
     };
     const foreign = latestLedger(
       [review('ci-bot', '2026-01-01T00:00:00Z', serializeLedger(churning))],
       'maintainer',
     );
     expect(foreign?.ledger.churnRounds).toBeUndefined();
-    expect(foreign?.ledger.churnFresh).toBeUndefined();
-    expect(foreign?.ledger.churnInduced).toBeUndefined();
     expect(foreign?.ledger.findings).toEqual(churning.findings);
     expect(foreign?.ledger.round).toBe(4);
     // The OWN account's churn state round-trips through the same seam: it is
@@ -1393,8 +1389,6 @@ describe('latestLedger — the split trust surface', () => {
       'bot',
     );
     expect(own?.ledger.churnRounds).toBe(4);
-    expect(own?.ledger.churnFresh).toBe(10);
-    expect(own?.ledger.churnInduced).toBe(6);
   });
 
   it("recovers the winning review's own commit_id as the age reference", () => {
@@ -1595,7 +1589,7 @@ describe('latestLedger — the split trust surface', () => {
     const own =
       'x <!-- qwen-review-ledger {"v":1,"round":9,"findings":[],' +
       '"posted":4,"prevPosted":2,"fresh":3,"floor":"c",' +
-      '"churnRounds":2,"churnFresh":10,"churnInduced":6,' +
+      '"churnRounds":2,' +
       '"sha":"deadbeef00112233"} -->';
     const anonymous = latestLedger(
       [review('maintainer', '2026-01-09T00:00:00Z', own)],
@@ -1616,8 +1610,6 @@ describe('latestLedger — the split trust surface', () => {
     // round early. Unpinned, a refactor gating this strip on `me &&` —
     // mirroring the volume strip's deliberate asymmetry — ships green.
     expect(anonymous?.ledger.churnRounds).toBeUndefined();
-    expect(anonymous?.ledger.churnFresh).toBeUndefined();
-    expect(anonymous?.ledger.churnInduced).toBeUndefined();
   });
 
   it("restores this account's own volume when it restores its own findings", () => {
@@ -1666,14 +1658,14 @@ describe('latestLedger — the split trust surface', () => {
     const own =
       'x <!-- qwen-review-ledger {"v":1,"round":8,"findings":[' +
       '{"id":"R8-9","sev":"C","file":"a.ts","title":"certified"}' +
-      '],"posted":6,"churnRounds":4,"churnFresh":10,"churnInduced":6} -->';
+      '],"posted":6,"churnRounds":4} -->';
     // The foreign marker carries its OWN churn state as well: the seam
     // strip must keep it out of the winner, and the restore must not let
     // it outrank or keep out the own numbers.
     const foreign =
       'y <!-- qwen-review-ledger {"v":1,"round":8,"findings":[' +
       '{"id":"R8-1","sev":"S","file":"b.ts","title":"theirs"}' +
-      '],"posted":99,"churnRounds":1,"churnFresh":2,"churnInduced":2} -->';
+      '],"posted":99,"churnRounds":1} -->';
     const found = latestLedger(
       [
         review('bot', '2026-01-01T00:00:00Z', own),
@@ -1683,8 +1675,6 @@ describe('latestLedger — the split trust surface', () => {
     );
     expect(found?.merged).toBe(true);
     expect(found?.ledger.churnRounds).toBe(4);
-    expect(found?.ledger.churnFresh).toBe(10);
-    expect(found?.ledger.churnInduced).toBe(6);
   });
 
   it('restores an own TRUE-ZERO volume even with nothing to merge', () => {
@@ -2415,6 +2405,13 @@ describe('renderLedgerSection', () => {
     expect(md).toContain('| R2-1 | Critical | `src/a.ts:7` | leak |');
     expect(md).toContain('| R2-2 | Suggestion | `src/b.ts` | gap |');
     expect(md).toContain('owed a this-round ruling');
+    // The parenthetical reads as exhaustive, so it must ENUMERATE: a round
+    // that takes it as the whole vocabulary rules a fix-induced case as
+    // `fixed` plus a fresh id — the induced census stays 0 and the churn
+    // streak never arms.
+    expect(md).toContain(
+      '(fixed / still stands / cannot tell / fix-induced / superseded by <class-id>)',
+    );
   });
 });
 

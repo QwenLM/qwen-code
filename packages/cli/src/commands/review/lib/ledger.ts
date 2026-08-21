@@ -167,17 +167,6 @@ export interface Ledger {
    */
   fresh?: number;
   /**
-   * This round's convergence census, under keys distinct from `fresh` (the
-   * posted-first-time count the volume trend reads): `churnFresh` is how many
-   * findings first appeared this round, `churnInduced` how many of those SKILL
-   * Step 6's fix-induced rule ATTRIBUTED to a previous entry's fix — not
-   * merely how many sit on newly pushed lines. Telemetry with the same
-   * fail-open contract as `posted`: the body already states the numbers in
-   * prose, and a marker that lost them costs a trend line, never a verdict.
-   */
-  churnFresh?: number;
-  churnInduced?: number;
-  /**
    * How many rounds — this one included — have been counted against the
    * churn bar since the last round measured converging; a round that could
    * not measure carries the count without adding to it. This is the ONE
@@ -461,19 +450,6 @@ export function serializeLedger(ledger: Ledger): string {
       if (volume === 'both') {
         const prevPostedOut = volumeOf(ledger.prevPosted);
         if (prevPostedOut !== undefined) payload.prevPosted = prevPostedOut;
-        // The census sheds on the FIRST squeeze, with the carried volume and
-        // ahead of this round's own: the body states these numbers in prose
-        // where the reader actually meets them, and the marker copy only
-        // spares a later round the re-derivation. The streak below is the
-        // half that decides anything, and it is not in this tier at all.
-        const churnFreshOut = volumeOf(ledger.churnFresh);
-        const churnInducedOut = volumeOf(ledger.churnInduced);
-        // Written as a pair or not at all, mirroring the parser: half a
-        // ratio is not a smaller reading, it is an unreadable one.
-        if (churnFreshOut !== undefined && churnInducedOut !== undefined) {
-          payload.churnFresh = churnFreshOut;
-          payload.churnInduced = churnInducedOut;
-        }
       }
     }
     // The streak rides ABOVE the shed cascade — see the field's own note. It
@@ -720,20 +696,11 @@ export function parseLedger(body: string | undefined): Ledger | null {
     // no gate reads.
     const posted = volumeOf(raw.posted);
     const prevPosted = volumeOf(raw.prevPosted);
-    const churnFresh = volumeOf(raw.churnFresh);
-    const churnInduced = volumeOf(raw.churnInduced);
-    // The census is read as a PAIR or not at all: `churnInduced` alone names
-    // a numerator with no denominator, and `churnFresh` alone a denominator
-    // whose numerator a reader would have to guess at — either half on its
-    // own is a ratio nobody can compute, and rendering one would put a number
-    // in the body that means less than the silence it replaced.
-    const census = churnFresh !== undefined && churnInduced !== undefined;
     // The streak survives a truncated work list for the same reason the
-    // volumes do — it qualifies no range — and unlike them it is read even
-    // when the census beside it did not, because it is the field the
-    // non-convergence rule reads and the census is only what the body
-    // quotes. Clamped on read as on write; a shape the serializer would not
-    // have written does not survive. Clamped to the marker's own ROUND too:
+    // volumes do — it qualifies no range — and it is the field the
+    // non-convergence rule reads. Clamped on read as on write; a shape
+    // the serializer would not have written does not survive. Clamped to
+    // the marker's own ROUND too:
     // the streak counts rounds INSIDE the round it rides, and the pipeline's
     // own writes advance it at most once per round, so a legitimate marker
     // can never carry more counted rounds than rounds it claims. The marker
@@ -766,7 +733,6 @@ export function parseLedger(body: string | undefined): Ledger | null {
       ...(model ? { model } : {}),
       ...(posted === undefined ? {} : { posted }),
       ...(prevPosted === undefined ? {} : { prevPosted }),
-      ...(census ? { churnFresh, churnInduced } : {}),
       ...(churnRounds === 0 ? {} : { churnRounds }),
       ...(floor === undefined ? {} : { floor }),
       ...(fresh === undefined ? {} : { fresh }),

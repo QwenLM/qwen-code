@@ -9930,8 +9930,6 @@ describe('the convergence census and the non-convergence finding', () => {
     const r = round({ fresh: 10, induced: 6 });
     const l = parseLedger(r.body)!;
     expect(l.churnRounds).toBe(1);
-    expect(l.churnFresh).toBe(10);
-    expect(l.churnInduced).toBe(6);
     // One round above the bar is an ordinary re-review — the fix round
     // touched the code, so of course this round's findings are on it.
     expect(r.body).not.toContain('is not converging');
@@ -10021,7 +10019,6 @@ describe('the convergence census and the non-convergence finding', () => {
     const r = round({ fresh: 10, induced: 2 });
     const l = parseLedger(r.body)!;
     expect(l.churnRounds).toBeUndefined();
-    expect(l.churnFresh).toBe(10);
     expect(r.body).not.toContain('is not converging');
   });
 
@@ -10041,8 +10038,6 @@ describe('the convergence census and the non-convergence finding', () => {
     const r = round(undefined);
     const l = parseLedger(r.body)!;
     expect(l.churnRounds).toBe(CHURN_STREAK_TO_FILE);
-    expect(l.churnFresh).toBeUndefined();
-    expect(l.churnInduced).toBeUndefined();
     expect(r.body).not.toContain('is not converging');
   });
 
@@ -10075,8 +10070,6 @@ describe('the convergence census and the non-convergence finding', () => {
     // legitimate round-1 census can only carry `induced = 0`, which never
     // trips the bar, so refusing it changes no verdict.
     expect(l.churnRounds).toBeUndefined();
-    expect(l.churnFresh).toBeUndefined();
-    expect(l.churnInduced).toBeUndefined();
     expect(r.body).not.toContain('is not converging');
     // The refusal arms nothing but breaks nothing: round 2, with a real
     // predecessor, reads its honest above-bar census and arms the streak
@@ -10107,10 +10100,8 @@ describe('the convergence census and the non-convergence finding', () => {
     expect(r.event).toBe('APPROVE');
     expect(r.body).not.toContain('is not converging');
     const l = parseLedger(r.body)!;
-    // The refused census writes nothing; the streak carries, exactly as an
+    // The refused census arms nothing; the streak carries, exactly as an
     // absent census does.
-    expect(l.churnFresh).toBeUndefined();
-    expect(l.churnInduced).toBeUndefined();
     expect(l.churnRounds).toBe(1);
   });
 
@@ -10223,8 +10214,6 @@ describe('the convergence census and the non-convergence finding', () => {
     });
     const l = parseLedger(mixed.body)!;
     expect(l.churnRounds).toBeUndefined();
-    expect(l.churnFresh).toBe(4);
-    expect(l.churnInduced).toBe(1);
     expect(mixed.body).not.toContain('is not converging');
   });
 
@@ -10241,9 +10230,6 @@ describe('the convergence census and the non-convergence finding', () => {
     const r = round({ fresh: 3, induced: 3 });
     const l = parseLedger(r.body)!;
     expect(l.churnRounds).toBe(1);
-    // The census itself still rides the marker as telemetry.
-    expect(l.churnFresh).toBe(3);
-    expect(l.churnInduced).toBe(3);
     expect(r.body).not.toContain('is not converging');
   });
 
@@ -10362,7 +10348,5 @@ describe('the convergence census and the non-convergence finding', () => {
     expect(r.event).toBe('COMMENT');
     const l = parseLedger(r.body)!;
     expect(l.churnRounds).toBe(1);
-    expect(l.churnFresh).toBeUndefined();
-    expect(l.churnInduced).toBeUndefined();
   });
 });

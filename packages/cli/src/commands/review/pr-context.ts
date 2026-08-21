@@ -1438,11 +1438,7 @@ function pickChurnState(ledger: Ledger): Partial<Ledger> {
  * restore silently loses this account's own data on the merged same-round
  * recoveries the union exists to protect. Same hazard, same remedy.
  */
-export const CHURN_FIELDS = [
-  'churnRounds',
-  'churnFresh',
-  'churnInduced',
-] as const;
+export const CHURN_FIELDS = ['churnRounds'] as const;
 
 /** Drop the whole churn group from a record, whatever shape it is in. */
 export function withoutChurn<T extends Record<string, unknown>>(record: T): T {
@@ -1673,7 +1669,7 @@ export function renderLedgerSection(
   return [
     '## Previous /review round (machine ledger)',
     '',
-    `Round ${ledger.round}${ledger.sha ? `, reviewed at \`${code(ledger.sha)}\`${ledger.model ? ` by \`${code(ledger.model)}\`` : ''}` : ''}, recovered from ${author ? (merged ? `**@${cell(author)}**'s round-${ledger.round} marker MERGED over this account's own latest findings — entries this account certified are its own claims, the rest are @${cell(author)}'s, and no incremental anchor travelled with the foreign marker (the sha never crosses accounts; this round is full-range unless a local cache supplies one)` : `the marker **@${cell(author)}**'s last posted review carried — another account, so these are THEIR claims and no incremental anchor travelled with them (the sha never crosses accounts; this round is full-range unless a local cache supplies one)`) : `the marker this account's last posted review carried`}. **Every entry below is owed a this-round ruling** (fixed / still stands / cannot tell / superseded by <class-id>) under Step 6's previous-round rules — the ledger is a work list, not a verdict; re-assert each claim against the code before repeating or retiring it.${ledger.sha ? ` ${anchorRuling(ledger, running, code, persistedSha)}` : ''}`,
+    `Round ${ledger.round}${ledger.sha ? `, reviewed at \`${code(ledger.sha)}\`${ledger.model ? ` by \`${code(ledger.model)}\`` : ''}` : ''}, recovered from ${author ? (merged ? `**@${cell(author)}**'s round-${ledger.round} marker MERGED over this account's own latest findings — entries this account certified are its own claims, the rest are @${cell(author)}'s, and no incremental anchor travelled with the foreign marker (the sha never crosses accounts; this round is full-range unless a local cache supplies one)` : `the marker **@${cell(author)}**'s last posted review carried — another account, so these are THEIR claims and no incremental anchor travelled with them (the sha never crosses accounts; this round is full-range unless a local cache supplies one)`) : `the marker this account's last posted review carried`}. **Every entry below is owed a this-round ruling** (fixed / still stands / cannot tell / fix-induced / superseded by <class-id>) under Step 6's previous-round rules — the ledger is a work list, not a verdict; re-assert each claim against the code before repeating or retiring it.${ledger.sha ? ` ${anchorRuling(ledger, running, code, persistedSha)}` : ''}`,
     // A truncated ledger must not read like a complete one. `dropped` exists
     // to draw that line, and this is the only place a reader sees the list.
     ...(ledger.dropped
