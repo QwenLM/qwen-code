@@ -2201,6 +2201,54 @@ describe('BackgroundTaskRegistry', () => {
       );
     });
 
+    it('counts a top-level reserved background launch as remaining', () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 2,
+      });
+      const callback = vi.fn();
+      registry.setNotificationCallback(callback);
+
+      registry.register(makeRegistration('completed'));
+      const reservation = registry.tryReserveBackgroundSlot(undefined, null);
+
+      registry.complete('completed', 'done');
+
+      expect(callback).toHaveBeenCalledOnce();
+      expect(callback.mock.calls[0]![1]).toContain('<remaining>1</remaining>');
+      expect(callback.mock.calls[0]![1]).toContain(
+        '<all-terminal>false</all-terminal>',
+      );
+      registry.releaseBackgroundSlot(reservation!);
+    });
+
+    it('counts a top-level queued background launch as remaining', async () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 2,
+      });
+      const callback = vi.fn();
+      registry.setNotificationCallback(callback);
+
+      registry.register(makeRegistration('completed'));
+      const blocker = registry.tryReserveBackgroundSlot();
+      const reservationPromise = registry.waitForBackgroundSlot(
+        new AbortController().signal,
+        undefined,
+        null,
+      );
+      expect(registry.getQueuedCount()).toBe(1);
+
+      registry.complete('completed', 'done');
+
+      expect(callback).toHaveBeenCalledOnce();
+      expect(callback.mock.calls[0]![1]).toContain('<remaining>1</remaining>');
+      expect(callback.mock.calls[0]![1]).toContain(
+        '<all-terminal>false</all-terminal>',
+      );
+      const reservation = await reservationPromise;
+      registry.releaseBackgroundSlot(reservation);
+      registry.releaseBackgroundSlot(blocker!);
+    });
+
     it('counts a same-owner reserved background launch as remaining', () => {
       registry = new BackgroundTaskRegistry({
         maxConcurrentBackgroundAgents: 2,
