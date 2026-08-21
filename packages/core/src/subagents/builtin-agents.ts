@@ -20,11 +20,22 @@ export const DEFAULT_BUILTIN_SUBAGENT_TYPE = 'general-purpose';
  * Canonical name of the subagent type the bundled `review` skill launches.
  *
  * Exported so the review command that writes the launch instruction emits the
- * same literal this registry defines: the skill's `subagent_type` is the only
- * thing that decides which branch of `AgentCore.prepareTools` a review agent
- * takes, and a drifted literal would silently fall back to
- * {@link DEFAULT_BUILTIN_SUBAGENT_TYPE} — which declares no `tools`, and so
- * inherits the full surface including deferred tools.
+ * same literal this registry defines. Two things follow from that literal, and
+ * they fail in opposite directions:
+ *
+ * - A drifted literal does NOT fall back. `AgentTool.execute` substitutes
+ *   {@link DEFAULT_BUILTIN_SUBAGENT_TYPE} only when `subagent_type` is
+ *   omitted, and `SubagentManager.loadSubagent` ends at `getBuiltinAgent`
+ *   with no default, so an unknown non-empty type fails every launch loudly
+ *   with `Subagent "<name>" not found`. Loud is the good case: a *valid* drift
+ *   — back to `general-purpose`, which declares no `tools` — is the silent
+ *   one, and that is what the tests here and in the review skill pin.
+ * - The name is not the only input. `loadSubagent` resolves session > project
+ *   > user > extension > builtin, and builtin names are not reserved, so a
+ *   user-authored `review-agent` shadows this entry — and if theirs declares
+ *   no `tools`, the review is back on the inherit-everything branch. That
+ *   precedence is deliberate (it is how any builtin is customised), so this
+ *   is a documented consequence rather than something to guard against here.
  */
 export const REVIEW_BUILTIN_SUBAGENT_TYPE = 'review-agent';
 
@@ -284,8 +295,11 @@ Guidelines:
       // instead, which is what `Explore` and `statusline-setup` already do.
       // Measured on the same diff, same launch prompt: 3,447 tokens per turn,
       // and one agent's delivered prompt fell from 139,013 to 55,733 (-59.9%).
-      // Roughly a sixth of that saving is second-order: without SKILL the
-      // per-launch skills catalogue is not injected either.
+      // 12,476 of that 83,280-token saving — 15%, a sixth — is second-order:
+      // without SKILL the skills catalogue is not injected into the agent's
+      // first user message, which is 3,119 tokens lighter and is re-sent on
+      // every one of the four turns. See DESIGN.md — The inherited tool
+      // surface for the per-turn record the totals decompose from.
       //
       // Deliberately absent: TOOL_SEARCH, which would let an agent widen the
       // list at runtime. Revealing a deferred tool writes to the registry the

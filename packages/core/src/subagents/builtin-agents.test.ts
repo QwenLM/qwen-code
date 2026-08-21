@@ -178,6 +178,28 @@ describe('BuiltinAgentRegistry', () => {
       ]);
     });
 
+    it('pins the contract lines of its system prompt', () => {
+      // Without these the prompt is unpinned: a probe blanking it to '' left
+      // every other test in this change green, while every dimension agent
+      // would have launched with no instructions at all — the same silent
+      // failure the `tools` assertions above exist to prevent.
+      const prompt =
+        BuiltinAgentRegistry.getBuiltinAgent(REVIEW_BUILTIN_SUBAGENT_TYPE)
+          ?.systemPrompt ?? '';
+
+      expect(prompt).toContain('one dimension of a code review');
+      // The brief outranks the launch prompt, and the diff is read from a file.
+      expect(prompt).toContain('Read the brief first');
+      // Scope: a defect outside the assigned ranges belongs to another agent.
+      expect(prompt).toContain('Review only the diff ranges you were assigned');
+      // The output contract the orchestrator's aggregation depends on.
+      expect(prompt).toContain(
+        'Report findings in the format your brief specifies',
+      );
+      // A question would block forever — these run with no human in the loop.
+      expect(prompt).toContain('never ask a question');
+    });
+
     it('omits the tools that would re-open the inherited surface', () => {
       const tools =
         BuiltinAgentRegistry.getBuiltinAgent(REVIEW_BUILTIN_SUBAGENT_TYPE)

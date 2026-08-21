@@ -679,7 +679,10 @@ describe('bundled review skill', () => {
     expect(body).toContain(
       `set \`subagent_type: "${REVIEW_BUILTIN_SUBAGENT_TYPE}"\` and \`run_in_background: false\``,
     );
-    // The type must exist, or every launch falls back to the default.
+    // The type must exist, or every launch fails outright: an unknown
+    // `subagent_type` is not substituted with the default — only an omitted
+    // one is — so the review would die on `Subagent "…" not found` rather
+    // than quietly run under `general-purpose`.
     expect(
       BuiltinAgentRegistry.getBuiltinAgent(REVIEW_BUILTIN_SUBAGENT_TYPE),
     ).toBeDefined();

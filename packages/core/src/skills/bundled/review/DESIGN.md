@@ -1098,6 +1098,19 @@ Measured with a recording endpoint, on a 6-file / 115-line diff, driving one rea
 
 Of the 51, thirty-five were `computer_use__*` desktop-automation schemas, 11,011 tokens per turn on their own. Across a 13-agent roster the difference between the first and last row is ~1.08M prompt tokens on a 115-line change.
 
-The middle row is the alternative that was measured and rejected: making the deferral that trims the orchestrator apply to subagents too. It saves less, because deferral is not designed to go below the core tool set — it holds back MCP and low-frequency built-ins and declares the ~14 core tools regardless, so a subagent would still carry `skill`, `tool_search`, `notebook_edit` and the rest. An explicit list goes under that floor. About a sixth of the remaining gap is second-order: with no `skill` tool, the per-launch skills catalogue is not injected into the agent's first user turn either (504 tokens against 3,623).
+The per-turn record behind the first and last rows, so the totals above can be re-derived rather than taken on trust — `system` + `messages` + `tools` is that turn's whole prompt:
+
+| turn | what the agent did | `general-purpose` sys / msgs / tools | `review-agent` sys / msgs / tools |
+| ---- | ------------------ | ------------------------------------ | --------------------------------- |
+| 1    | read the brief     | 5,286 / 3,623 / 21,178               | 5,316 / 504 / 3,447               |
+| 2    | read diff page 1   | 5,286 / 6,349 / 21,178               | 5,316 / 3,230 / 3,447             |
+| 3    | read diff page 2   | 5,286 / 10,609 / 21,178              | 5,316 / 7,490 / 3,447             |
+| 4    | report             | 5,286 / 12,576 / 21,178              | 5,316 / 9,457 / 3,447             |
+
+The 83,280-token gap decomposes exactly: tool declarations 4 × 17,731 = **70,924**, the skills catalogue 4 × 3,119 = **12,476**, and the system prompt −120 (this agent's is marginally longer than `general-purpose`'s).
+
+The middle row is the alternative that was measured and rejected: making the deferral that trims the orchestrator apply to subagents too. It saves less, because deferral is not designed to go below the core tool set — it holds back MCP and low-frequency built-ins and declares the ~14 core tools regardless, so a subagent would still carry `skill`, `tool_search`, `notebook_edit` and the rest. An explicit list goes under that floor.
+
+The catalogue line above is the second-order half, and it is **15%** of the gap — a sixth, not the 3.7% a per-turn-against-a-four-turn-total reading gives. Omitting `SKILL` means `willHaveSkillTool()` no longer injects the skills catalogue into the agent's first user message; that message is 3,119 tokens lighter (504 against 3,623), and because the first message is re-sent on every subsequent turn the saving is charged four times, not once. Any per-turn figure in this section is charged per turn.
 
 It is also the smaller change. Applying deferral to subagents would alter every `tools: ['*']` config in the way that branch's comment warns about, and `revealDeferredTool` writes to the registry the parent session shares — so one subagent discovering a tool would rewrite the orchestrator's declaration list and void its prompt-cache prefix. A review-specific type touches nothing outside the review.
