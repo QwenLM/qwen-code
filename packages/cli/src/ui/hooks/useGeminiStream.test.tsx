@@ -57,6 +57,14 @@ const mockSendMessageStream = vi
   .mockReturnValue((async function* () {})());
 const mockStartChat = vi.fn();
 const mockRunVisionBridge = vi.hoisted(() => vi.fn());
+// Mirrors GeminiChat's user-content push counter: production pushes the
+// submission's user content once before any model attempt and rolls the
+// push back only on setup errors, so tests that simulate an ACCEPTED
+// submission bump this (ideally inside the mocked stream generator,
+// before yielding events) while blocked/pre-send failures leave it
+// untouched. The tool-round boundary teammate settlement uses it to
+// tell "never reached the model" apart from "accepted then failed".
+const mockUserContentPushCount = { value: 0 };
 
 const MockedGeminiClientClass = vi.hoisted(() =>
   vi.fn().mockImplementation(function (this: any, _config: any) {
@@ -64,6 +72,9 @@ const MockedGeminiClientClass = vi.hoisted(() =>
     this.startChat = mockStartChat;
     this.sendMessageStream = mockSendMessageStream;
     this.addHistory = vi.fn();
+    this.getChat = vi.fn().mockReturnValue({
+      getUserContentPushCount: vi.fn(() => mockUserContentPushCount.value),
+    });
     this.consumePendingMemoryTaskPromises = vi.fn().mockReturnValue([]);
     this.recordCompletedToolCall = vi.fn();
     // Default to the fast-path accessor returning an empty Set so the
@@ -351,6 +362,7 @@ describe('useGeminiStream', () => {
     mockSendMessageStream
       .mockClear()
       .mockReturnValue((async function* () {})());
+    mockUserContentPushCount.value = 0;
     handleAtCommandSpy = vi.spyOn(atCommandProcessor, 'handleAtCommand');
     mockRunVisionBridge.mockReset();
     mockCleanupReviewWorktreeLeases.mockReset();
@@ -383,15 +395,38 @@ describe('useGeminiStream', () => {
     const setToolCalls = (newToolCalls: TrackedToolCall[]) => {
       currentToolCalls = newToolCalls;
     };
+    // Capture the scheduler's onComplete callback so tests can drive the
+    // real tool-round boundary (`handleCompletedTools`) without
+    // re-implementing this harness. The mock returns the production
+    // 3-tuple shape of `useReactToolScheduler`.
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | undefined;
 
-    mockUseReactToolScheduler.mockImplementation(() => [
-      currentToolCalls,
-      mockScheduleToolCalls,
-      mockCancelAllToolCalls,
-      mockMarkToolsAsSubmitted,
-    ]);
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [
+        currentToolCalls,
+        mockScheduleToolCalls,
+        mockMarkToolsAsSubmitted,
+      ];
+    });
 
     const client = geminiClient || mockConfig.getGeminiClient();
+
+    const baseProps = {
+      client,
+      history: [] as HistoryItem[],
+      addItem: mockAddItem as unknown as UseHistoryManagerReturn['addItem'],
+      config: mockConfig,
+      onDebugMessage: mockOnDebugMessage,
+      handleSlashCommand: mockHandleSlashCommand as unknown as (
+        cmd: PartListUnion,
+      ) => Promise<SlashCommandProcessorResult | false>,
+      shellModeActive: false,
+      loadedSettings: mockLoadedSettings,
+      toolCalls: initialToolCalls as TrackedToolCall[] | undefined,
+    };
 
     const { result, rerender } = renderHook(
       (props: {
@@ -440,19 +475,7 @@ describe('useGeminiStream', () => {
         );
       },
       {
-        initialProps: {
-          client,
-          history: [],
-          addItem: mockAddItem as unknown as UseHistoryManagerReturn['addItem'],
-          config: mockConfig,
-          onDebugMessage: mockOnDebugMessage,
-          handleSlashCommand: mockHandleSlashCommand as unknown as (
-            cmd: PartListUnion,
-          ) => Promise<SlashCommandProcessorResult | false>,
-          shellModeActive: false,
-          loadedSettings: mockLoadedSettings,
-          toolCalls: initialToolCalls,
-        },
+        initialProps: baseProps,
       },
     );
     return {
@@ -461,6 +484,20 @@ describe('useGeminiStream', () => {
       mockMarkToolsAsSubmitted,
       mockSendMessageStream,
       client,
+      // The scheduler's onComplete as captured at the last render; driving
+      // this is what drives the real tool-round boundary submission.
+      getLastOnComplete: () => capturedOnComplete,
+      completeToolRound: async (completed: TrackedToolCall[]) => {
+        expect(
+          capturedOnComplete,
+          'useReactToolScheduler onComplete was never registered',
+        ).toBeDefined();
+        await act(async () => {
+          await capturedOnComplete?.(completed);
+        });
+      },
+      rerenderWithToolCalls: (toolCalls: TrackedToolCall[]) =>
+        rerender({ ...baseProps, toolCalls }),
     };
   };
 
@@ -1570,54 +1607,19 @@ describe('useGeminiStream', () => {
       endTime: Date.now(),
     });
 
+    // Thin wrapper over the file-level `renderTestHook` harness (which
+    // captures the scheduler's onComplete and can rerender with new
+    // tool calls): adds only the team-manager mock plus the
+    // `leaderCallback()` accessor used to queue teammate messages.
     function renderBusyMultiRoundTask(initialToolCalls: TrackedToolCall[]) {
       const mockManager = { setLeaderMessageCallback: vi.fn() };
       (mockConfig.getTeamManager as unknown as Mock).mockReturnValue(
         mockManager,
       );
 
-      let currentToolCalls = initialToolCalls;
-      let capturedOnComplete:
-        | ((completedTools: TrackedToolCall[]) => Promise<void>)
-        | undefined;
-
-      mockUseReactToolScheduler.mockImplementation((onComplete) => {
-        capturedOnComplete = onComplete;
-        return [
-          currentToolCalls,
-          mockScheduleToolCalls,
-          mockMarkToolsAsSubmitted,
-        ];
-      });
-
-      const client = new MockedGeminiClientClass(mockConfig);
-      const utils = renderHook(
-        (props: { toolCalls: TrackedToolCall[] }) => {
-          currentToolCalls = props.toolCalls;
-          return useGeminiStream(
-            client,
-            [],
-            mockAddItem,
-            mockConfig,
-            true,
-            mockLoadedSettings,
-            mockOnDebugMessage,
-            mockHandleSlashCommand,
-            false,
-            () => 'vscode' as EditorType,
-            () => {},
-            () => Promise.resolve(),
-            false,
-            () => {},
-            () => {},
-            () => {},
-            () => {},
-            80,
-            24,
-            undefined, // midTurnDrainRef
-          );
-        },
-        { initialProps: { toolCalls: initialToolCalls } },
+      const utils = renderTestHook(
+        initialToolCalls,
+        new MockedGeminiClientClass(mockConfig),
       );
 
       const leaderCallback = () => {
@@ -1632,18 +1634,9 @@ describe('useGeminiStream', () => {
 
       return {
         result: utils.result,
-        rerenderWithToolCalls: (toolCalls: TrackedToolCall[]) =>
-          utils.rerender({ toolCalls }),
+        rerenderWithToolCalls: utils.rerenderWithToolCalls,
         leaderCallback,
-        completeToolRound: async (completed: TrackedToolCall[]) => {
-          expect(
-            capturedOnComplete,
-            'useReactToolScheduler onComplete was never registered',
-          ).toBeDefined();
-          await act(async () => {
-            await capturedOnComplete?.(completed);
-          });
-        },
+        completeToolRound: utils.completeToolRound,
       };
     }
 
@@ -1802,6 +1795,238 @@ describe('useGeminiStream', () => {
         expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
       });
       expect(mockSendMessageStream.mock.calls[1][0]).toBe(secondModelText);
+    });
+
+    it('does not deliver a boundary-drained envelope twice when the accepted submission then fails mid-stream', async () => {
+      const { rerenderWithToolCalls, leaderCallback, completeToolRound } =
+        renderBusyMultiRoundTask([createExecutingToolCall()]);
+
+      act(() => {
+        leaderCallback()(teammateModelText, teammateDisplay);
+      });
+
+      // The round submission is ACCEPTED — its user content (tool
+      // responses + envelope) lands in the session history before any
+      // model attempt, which the push counter records — and only then
+      // hits a terminal API error mid-stream.
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          mockUserContentPushCount.value += 1;
+          yield {
+            type: ServerGeminiEventType.Error,
+            value: { error: { message: 'model overloaded' } },
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const completed = createCompletedToolCall();
+      rerenderWithToolCalls([completed]);
+      await completeToolRound([completed]);
+
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      });
+
+      // The failure fires onDeliveryFailed AFTER acceptance, so the
+      // envelope must NOT be requeued — it already reached the model
+      // with the accepted submission, and a redelivery would hand the
+      // leader the same report twice. The Idle fallback therefore has
+      // nothing left to deliver once the task ends.
+      rerenderWithToolCalls([]);
+      await act(async () => {
+        await Promise.resolve();
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+
+    it('restores a boundary-drained envelope when a UserPromptSubmit hook blocks the round submission', async () => {
+      const { rerenderWithToolCalls, leaderCallback, completeToolRound } =
+        renderBusyMultiRoundTask([createExecutingToolCall()]);
+
+      act(() => {
+        leaderCallback()(teammateModelText, teammateDisplay);
+      });
+
+      // A user-configured UserPromptSubmit hook blocks the boundary
+      // submission: the client yields UserPromptSubmitBlocked and
+      // returns without any model call, so the push counter never
+      // advances. ToolResult is not in the hook's exclusion list, so
+      // this is reachable with any user hook installed.
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.UserPromptSubmitBlocked,
+            value: {
+              reason: 'blocked by hook',
+              originalPrompt: 'tool results',
+            },
+          };
+        })(),
+      );
+
+      const completed = createCompletedToolCall();
+      rerenderWithToolCalls([completed]);
+      await completeToolRound([completed]);
+
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      });
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'user_prompt_submit_blocked' }),
+        expect.any(Number),
+      );
+
+      // The block counts as a delivery failure for the drained batch:
+      // the envelope is restored and the hook-exempt Teammate fallback
+      // delivers it exactly once once the state settles to Idle.
+      rerenderWithToolCalls([]);
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      expect(mockSendMessageStream).toHaveBeenLastCalledWith(
+        teammateModelText,
+        expect.any(AbortSignal),
+        expect.any(String),
+        expect.objectContaining({
+          type: SendMessageType.Teammate,
+          notificationDisplayText: teammateDisplay,
+        }),
+      );
+    });
+
+    it('records boundary-delivered teammate envelopes via the chat-recording path', async () => {
+      const recordNotification = vi.fn();
+      mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+        recordThought: vi.fn(),
+        initialize: vi.fn(),
+        recordMessage: vi.fn(),
+        recordMessageTokens: vi.fn(),
+        recordToolCalls: vi.fn(),
+        getConversationFile: vi.fn(),
+        recordNotification,
+      });
+
+      const { rerenderWithToolCalls, leaderCallback, completeToolRound } =
+        renderBusyMultiRoundTask([createExecutingToolCall()]);
+
+      act(() => {
+        leaderCallback()(teammateModelText, teammateDisplay);
+      });
+
+      const completed = createCompletedToolCall();
+      rerenderWithToolCalls([completed]);
+      await completeToolRound([completed]);
+
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      });
+
+      // The ToolResult submission never reaches the Teammate-keyed
+      // recordNotification branch in client.ts, so the boundary
+      // settlement journals the envelope explicitly — same record
+      // shape the Idle Teammate path produces — keeping a resumed
+      // session from losing the `● …` item and the envelope.
+      expect(recordNotification).toHaveBeenCalledWith(
+        [{ text: teammateModelText }],
+        teammateDisplay,
+        undefined,
+        undefined,
+      );
+
+      // Recorded-and-delivered envelopes are not requeued: the task
+      // ends without a second delivery.
+      rerenderWithToolCalls([]);
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps queued teammate messages out of continuations that survive generation change', async () => {
+      const {
+        result,
+        rerenderWithToolCalls,
+        leaderCallback,
+        completeToolRound,
+      } = renderBusyMultiRoundTask([createExecutingToolCall()]);
+
+      act(() => {
+        leaderCallback()(teammateModelText, teammateDisplay);
+      });
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+
+      // Schedule the next round through a continuation whose owner
+      // survives generation change (the shape detached tool
+      // continuations use): its round submission must NOT drain the
+      // teammate queue, because nothing on that path would restore a
+      // consumed envelope to the right generation.
+      const survivingController = new AbortController();
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: { callId: 'surviving-tool', name: 'testTool', args: {} },
+          };
+        })(),
+      );
+      await act(async () => {
+        await result.current.submitQuery(
+          [
+            {
+              functionResponse: {
+                id: 'setup-tool',
+                name: 'testTool',
+                response: { output: 'done' },
+              },
+            },
+          ],
+          SendMessageType.ToolResult,
+          'prompt-id-surviving',
+          {
+            toolContinuationOwner: {
+              promptId: 'prompt-id-surviving',
+              signal: survivingController.signal,
+              survivesGenerationChange: true,
+              detachedAbortController: survivingController,
+            },
+          },
+        );
+      });
+      await waitFor(() => {
+        expect(mockScheduleToolCalls).toHaveBeenCalled();
+      });
+
+      const survivingCompleted = createCompletedToolCall('surviving-tool');
+      rerenderWithToolCalls([survivingCompleted]);
+      await completeToolRound([survivingCompleted]);
+
+      // The round submission carries only the tool-response parts —
+      // the envelope stayed queued.
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      expect(mockSendMessageStream.mock.calls[1][0]).toEqual(
+        survivingCompleted.response.responseParts,
+      );
+
+      // Once the task ends, the Idle fallback delivers the envelope.
+      rerenderWithToolCalls([]);
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(3);
+      });
+      expect(mockSendMessageStream).toHaveBeenLastCalledWith(
+        teammateModelText,
+        expect.any(AbortSignal),
+        expect.any(String),
+        expect.objectContaining({ type: SendMessageType.Teammate }),
+      );
     });
   });
 
