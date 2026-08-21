@@ -38,6 +38,8 @@ const reviewVerificationRunner = readFileSync(
   reviewVerificationRunnerPath,
   'utf8',
 );
+const pushAndReportScriptPath = '.github/scripts/autofix-push-and-report.sh';
+const pushAndReportScript = readFileSync(pushAndReportScriptPath, 'utf8');
 const upsertDeferredScript = readFileSync(
   '.github/scripts/upsert-deferred-issue.sh',
   'utf8',
@@ -92,10 +94,21 @@ const publishPrStep =
   workflow.match(
     /- name: 'Publish PR'[\s\S]*?(?=\n[ ]{6}- name: 'Withdraw claim on failure')/,
   )?.[0] ?? '';
-const pushAndReportStep =
+// The step's body lives in a sibling script (the workflow file was at 90% of
+// GitHub's 500 KB start-runs limit, 98% of the repo's own gate). Assertions about what the round does when
+// it pushes and reports belong to the script; assertions about when it runs and
+// what reaches it belong to the `if:`/`env:` still in the YAML. Concatenating
+// keeps both under one name, so a line moving between the two does not silently
+// drop the invariant that pinned it.
+const pushAndReportStepYaml =
   workflow.match(
     /- name: 'Push and report'[\s\S]*?(?=\n[ ]{6}- name: 'Report dry-run \/ failure')/,
   )?.[0] ?? '';
+const pushAndReportStep = `${pushAndReportStepYaml}\n${pushAndReportScript}`;
+// Census assertions below count sites across the whole pipeline. The push
+// step's body is a sibling script now, so counting `workflow` alone would let
+// an extraction silently drop a site from the count it is meant to pin.
+const workflowWithScripts = `${workflow}\n${pushAndReportScript}`;
 const prepareStep =
   workflow.match(
     /- name: 'Prepare branch and feedback'[\s\S]*?(?=\n[ ]{6}- name: 'Post autofix status comment')/,
@@ -1548,7 +1561,9 @@ describe('qwen-autofix workflow', () => {
     // filter, so the agent never sees it as feedback.
     expect(reviewScanJob).toContain('autofix-redcheck head=([0-9a-f]+)');
     expect(
-      workflow.match(/<!-- autofix-redcheck head=\$\{REPORT_HEAD\} -->/g) ?? [],
+      workflowWithScripts.match(
+        /<!-- autofix-redcheck head=\$\{REPORT_HEAD\} -->/g,
+      ) ?? [],
     ).toHaveLength(3);
     // Every step that EMITS the marker must define REPORT_HEAD itself — a
     // shell variable does not cross step boundaries — and no step may define
@@ -1562,10 +1577,19 @@ describe('qwen-autofix workflow', () => {
     // merges them and the misplacement stays invisible — that is how the
     // first version of this assertion passed while the bug was live.
     let emitterSteps = 0;
-    for (const m of workflow.matchAll(
-      /\n {6}- name: '(?:[^']+)'\n([\s\S]*?)(?=\n {6}- name: '|\n {2}[a-z][a-z0-9-]*:\n|$)/g,
-    )) {
-      const body = m[1];
+    // The push step's body is a sibling script, so it is no longer one of the
+    // YAML step blocks — it is checked as one more block here. The pairing is
+    // per emitting UNIT (step body or the script it invokes), which is the
+    // scope a shell variable actually spans.
+    const emitterBodies = [
+      ...[
+        ...workflow.matchAll(
+          /\n {6}- name: '(?:[^']+)'\n([\s\S]*?)(?=\n {6}- name: '|\n {2}[a-z][a-z0-9-]*:\n|$)/g,
+        ),
+      ].map((m) => m[1]),
+      pushAndReportScript,
+    ];
+    for (const body of emitterBodies) {
       const emits = body.includes(
         '<!-- autofix-redcheck head=${REPORT_HEAD} -->',
       );
@@ -2794,10 +2818,10 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain(
       'git -c http.sslVerify=true -c credential.helper= fetch "https://github.com/${HEAD_REPO}.git" "refs/heads/${BRANCH}"',
     );
-    expect(workflow).toContain(
+    expect(workflowWithScripts).toContain(
       'PUSH_URL="https://github.com/${HEAD_REPO}.git"',
     );
-    expect(workflow).toContain(
+    expect(workflowWithScripts).toContain(
       'git_auth push --no-verify "${PUSH_URL}" "${PUSH_SHA}:refs/heads/${BRANCH}"',
     );
     // The allow-edits grant rides the classic-PAT path only — prepare must
@@ -3077,7 +3101,7 @@ describe('qwen-autofix workflow', () => {
     // forces a deliberate test update, however it is spaced or line-wrapped:
     // bump this count AND pipe the new site through the normalizer (bumping
     // the count below too) — bumping this pin alone leaves toBe(12) green.
-    expect(workflow.split('--paginate').length - 1).toBe(21);
+    expect(workflowWithScripts.split('--paginate').length - 1).toBe(21);
     // scan ic + pr-events + ic re-fetch + scan rv/rc + prepare rv/rc/ic +
     // report COMMENTS_JSON fallback + the cap-branch release-evidence events
     // fetch (R4-1) + the scan park gate's rv/rc fetches (the wake mirror
@@ -8019,7 +8043,7 @@ exit 1
     // the push path (a drift in only the no-op or failure suffix would
     // otherwise survive green).
     const roundTrip = (roundVar, { omitMeasuredAt = false } = {}) => {
-      const line = workflow.match(
+      const line = workflowWithScripts.match(
         new RegExp(
           `echo "<!-- autofix-growth-now src=\\$\\{GROWTH_SRC:-0\\}[^\\n]*round=\\$\\{${roundVar}\\}[^\\n]*-->"`,
         ),
@@ -8065,9 +8089,11 @@ exit 1
     // run= identity the reader dedupes on — push stamps NEXT_ROUND, no-op
     // ROUND, the failure/handoff report MARK_ROUND.
     expect(
-      workflow.match(/<!-- autofix-growth-now src=\$\{GROWTH_SRC:-0\}/g) ?? [],
+      workflowWithScripts.match(
+        /<!-- autofix-growth-now src=\$\{GROWTH_SRC:-0\}/g,
+      ) ?? [],
     ).toHaveLength(3);
-    expect(workflow).toContain(
+    expect(workflowWithScripts).toContain(
       'over=${CRITICAL_ONLY_GROWTH:-false} round=${MARK_ROUND} run=${GITHUB_RUN_ID}${MEASURED_AT:+ measured=${MEASURED_AT}} key=',
     );
     // The failure/handoff report step binds the three growth outputs so its
@@ -8097,10 +8123,10 @@ exit 1
     ]) {
       expect(pushAndReportStep).toContain(bind);
     }
-    expect(workflow).toContain(
+    expect(workflowWithScripts).toContain(
       'over=${CRITICAL_ONLY_GROWTH:-false} round=${NEXT_ROUND} run=${GITHUB_RUN_ID}${MEASURED_AT:+ measured=${MEASURED_AT}} key=',
     );
-    expect(workflow).toContain(
+    expect(workflowWithScripts).toContain(
       'over=${CRITICAL_ONLY_GROWTH:-false} round=${ROUND} run=${GITHUB_RUN_ID}${MEASURED_AT:+ measured=${MEASURED_AT}} key=',
     );
     // Both report STEPS bind MEASURED_AT (push+no-op share one env block, the
@@ -8545,9 +8571,16 @@ exit 1
     // runner user and WORKDIR is a predictable path they can write, so a
     // re-read could be overwritten after the gate looked (a forged re-arm,
     // or a conflict verdict flipped back to sound, defeating the park).
-    const emitMarkerFn = pushAndReportStep.match(
-      /emit_growth_audit_marker\(\) \{[\s\S]*?\n {10}\}/,
-    )?.[0];
+    // The two copies live at different indentations now — one in a sibling
+    // script at column 0, one still inline in the YAML at ten — so compare
+    // them dedented. The invariant is that the LOGIC does not drift, and an
+    // indentation-sensitive compare would have to be deleted the moment
+    // either copy moves, which is exactly when it earns its keep.
+    const dedentBlock = (block) => block.replace(/^ {10}/gm, '');
+    const emitMarkerRe = /emit_growth_audit_marker\(\) \{[\s\S]*?\n {0,10}\}/;
+    const emitMarkerFn = dedentBlock(
+      pushAndReportStep.match(emitMarkerRe)?.[0] ?? '',
+    );
     expect(emitMarkerFn).toBeTruthy();
     expect(emitMarkerFn).not.toContain('growth-audit.json');
     expect(emitMarkerFn).toContain('AUDIT_VERDICT');
@@ -8555,9 +8588,9 @@ exit 1
     // step is a fresh shell). A drift between the copies — marker format,
     // re-arm suppression, the win= fallback — would ship green unless
     // pinned: extract both and require them identical.
-    const emitMarkerFnFailure = reviewAddressReportStep.match(
-      /emit_growth_audit_marker\(\) \{[\s\S]*?\n {10}\}/,
-    )?.[0];
+    const emitMarkerFnFailure = dedentBlock(
+      reviewAddressReportStep.match(emitMarkerRe)?.[0] ?? '',
+    );
     expect(emitMarkerFnFailure).toBeTruthy();
     expect(emitMarkerFnFailure).toBe(emitMarkerFn);
     // Both report steps consume the single verdict Finalize verification
@@ -9000,7 +9033,9 @@ exit 1
     // every feedback filter already excludes it, and never touches the
     // POSITIONAL autofix-eval parsers. Exactly one more occurrence exists:
     // the prepare-side scan() parse.
-    expect(workflow.split('<!-- autofix-growth-base src=').length - 1).toBe(3);
+    expect(
+      workflowWithScripts.split('<!-- autofix-growth-base src=').length - 1,
+    ).toBe(3);
     expect(
       pushAndReportStep.split(
         '<!-- autofix-growth-base src=${GROWTH_BASE_SRC} test=${GROWTH_BASE_TEST} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->',
@@ -10330,6 +10365,62 @@ exit 1
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it('runs the extracted push-and-report body from the trusted staged copy only', () => {
+    // The body of 'Push and report' lives in a sibling script: the workflow
+    // file had reached 90% of GitHub's 500 KB start-runs limit — 98% of the
+    // repo's own gate — past which GitHub silently stops starting runs. Extraction moved the trust problem
+    // with it — by the time this step runs, the agent and the verification
+    // gate have executed branch code on this host, so the ${GITHUB_WORKSPACE}
+    // copy is branch-controlled. Only the trusted-base copy staged before any
+    // of that may execute, and only once its digest matches the one the stage
+    // step parked in GITHUB_OUTPUT (expression context, which a disk write
+    // cannot reach).
+    const stageStep =
+      reviewAddressJob.match(
+        /- name: 'Stage trusted schema gate and agent runner'[\s\S]*?(?=\n {6}- name: ')/,
+      )?.[0] ?? '';
+    expect(stageStep).toContain(
+      'cp .github/scripts/autofix-push-and-report.sh "${RUNNER_TEMP}/autofix-push-and-report.sh"',
+    );
+    expect(stageStep).toContain(
+      'push_report_sha256=$(sha256sum "${RUNNER_TEMP}/autofix-push-and-report.sh"',
+    );
+    expect(pushAndReportStepYaml).toContain(
+      "PUSH_REPORT_SHA256: '${{ steps.stage.outputs.push_report_sha256 }}'",
+    );
+
+    const verifyLine =
+      'echo "${PUSH_REPORT_SHA256}  ${RUNNER_TEMP}/autofix-push-and-report.sh" | timeout 30 sha256sum -c - > /dev/null';
+    const call = 'bash "${RUNNER_TEMP}/autofix-push-and-report.sh"';
+    expect(pushAndReportStepYaml).toContain(verifyLine);
+    expect(pushAndReportStepYaml.indexOf(verifyLine)).toBeLessThan(
+      pushAndReportStepYaml.indexOf(call),
+    );
+    // Same mutants the resanitize gate below pins: a trailing `|| true` or a
+    // swapped target turns the check into a decoration while presence and
+    // ordering assertions stay green.
+    expect(pushAndReportStepYaml).not.toMatch(/sha256sum -c[^\n]*\|\| true/);
+    // An empty digest means the stage step never copied the file (it is absent
+    // from the trusted base before this lands). Running anyway would execute
+    // whatever happens to sit at that path.
+    expect(pushAndReportStepYaml).toContain(
+      'if [[ -z "${PUSH_REPORT_SHA256}" ]]; then',
+    );
+    // A FIFO or directory planted at the staged path must be a refusal, not a
+    // block until timeout-minutes: the type is checked and both reads bounded.
+    expect(pushAndReportStepYaml).toContain("timeout 10 stat -c '%F'");
+    // The workspace copy must never be what runs.
+    expect(pushAndReportStepYaml).not.toMatch(
+      /bash [^\n]*\.github\/scripts\/autofix-push-and-report\.sh/,
+    );
+    // GitHub runs `run:` blocks as `bash --noprofile --norc -eo pipefail`. The
+    // script must set the same flags — and NOT add `-u`, which would turn the
+    // body's unguarded optional-output reads into hard failures and make this
+    // a behaviour change instead of a move.
+    expect(pushAndReportScript).toMatch(/^set -eo pipefail$/m);
+    expect(pushAndReportScript).not.toMatch(/^set -[a-z]*u/m);
+  });
+
   it('re-sanitizes git config and resets the helper list at every PAT-bearing git step', () => {
     // The job-start sanitize is pre-checkout hygiene; the gates then run
     // branch test code on the host and the sandboxed agent has the
@@ -10557,11 +10648,13 @@ exit 1
     // sslVerify=false would otherwise read the credential off the wire.
     // Count equality pins a future push site to ship with both or fail.
     const helperSites =
-      workflow.match(/-c credential\."https:\/\/github\.com"\.helper=/g) ?? [];
+      workflowWithScripts.match(
+        /-c credential\."https:\/\/github\.com"\.helper=/g,
+      ) ?? [];
     // Tolerant of the intermediate `-c` transport/protocol flags git_auth
     // also carries between the sslVerify pin and the helper reset.
     const resetSites =
-      workflow.match(
+      workflowWithScripts.match(
         /-c http\.sslVerify=true (?:-c [^\n]*?)?-c credential\.helper= -c credential\."https:\/\/github\.com"\.helper=/g,
       ) ?? [];
     expect(helperSites).toHaveLength(3);
@@ -11373,7 +11466,7 @@ exit 1
     // with a stubbed gh against fixture ic.json histories. String pins
     // alone cannot catch a census that silently zeroes.
     const digestBlock = pushAndReportStep.match(
-      /if \[\[ "\$\{OUTCOME\}" == "fixed" && "\$\{MAX_ROUNDS\}" == "\$\{TAKEOVER_MAX_ROUNDS\}" \]\][\s\S]*?\n {10}fi\n/,
+      /if \[\[ "\$\{OUTCOME\}" == "fixed" && "\$\{MAX_ROUNDS\}" == "\$\{TAKEOVER_MAX_ROUNDS\}" \]\][\s\S]*?\nfi\n/,
     )?.[0];
     expect(digestBlock).toBeTruthy();
     // Cross-pin: each census grep needle must match the actual headline
@@ -11809,7 +11902,7 @@ exit 1
     // AND both no-secret verification checkouts (convention: every host
     // checkout of an agent-writable branch severs hooks).
     expect(
-      `${workflow}\n${reviewVerificationRunner}`.split(
+      `${workflowWithScripts}\n${reviewVerificationRunner}`.split(
         'git config core.hooksPath /dev/null',
       ).length - 1,
     ).toBe(5);
@@ -12710,7 +12803,9 @@ exit 1
     // time; the agent file rides the artifact dump and the repair cleanup;
     // SKILL documents the fourth disposition. The script is executed from
     // that content, never opened by path, at both call sites.
-    expect(workflow.split('bash -c "${UPSERT_SRC}"').length - 1).toBe(2);
+    expect(
+      workflowWithScripts.split('bash -c "${UPSERT_SRC}"').length - 1,
+    ).toBe(2);
     // R10-8: bound EVERY execution of the staged path, not one spelling —
     // `sh …`, `bash -- …`, `source …`, `. …`, `exec bash …` all re-open it.
     expect(workflow).not.toMatch(
@@ -12878,7 +12973,7 @@ exit 1
     // Four clean children: the two deferred-findings upserts plus the two
     // verification-gate launches (the gate runs after the agent step's
     // branch code, so its bash must inherit nothing at all).
-    expect(workflow.split('/usr/bin/env -i \\').length - 1).toBe(4);
+    expect(workflowWithScripts.split('/usr/bin/env -i \\').length - 1).toBe(4);
     // R5-6: the failure-path child is near-verbatim of run_deferred_upsert's
     // child — tie their shared security scaffold together so drift in one is
     // caught. Compare the allow-list + prelude (everything up to where the
@@ -14872,7 +14967,7 @@ exit 1
     // backslashes — a NO-OP on both GNU and BSD sed, verified) left the count
     // at four and this test green, shipping an unescaped publish site.
     const escapeSiteRe = /sed(?: -e)? 's\/<!--\/[^']*\/g'/g;
-    const escapeSites = workflow.match(escapeSiteRe) ?? [];
+    const escapeSites = workflowWithScripts.match(escapeSiteRe) ?? [];
     expect(escapeSites).toHaveLength(12);
     // The next agent-derived publish site lives in
     // upsert-deferred-issue.sh (line builder). It escapes INSIDE jq, not in a
@@ -16810,7 +16905,7 @@ exit 1
     // thread to work out what the bot handled. The agent cannot resolve threads
     // itself (its sandbox carries no token), so it records the inline-comment
     // ids it implemented and the push step maps each to its thread.
-    const lines = workflow.split('\n');
+    const lines = pushAndReportScript.split('\n');
     const i = lines.findIndex((l) => l.includes("CAN_RESOLVE_THREADS='false'"));
     const j = lines.findIndex(
       (l, k) => k > i && l.trim().startsWith('echo "🧵 confirmed'),
@@ -17337,7 +17432,7 @@ exit 1
     // summary — so the reviewer who opened that thread saw silence and could
     // not tell the finding had been read. Observed on #7731: five open threads,
     // every one of them answered nowhere but a separate summary comment.
-    const lines = workflow.split('\n');
+    const lines = pushAndReportScript.split('\n');
     const i = lines.findIndex((l) => l.includes('comment-replies.json" ]] &&'));
     const j = lines.findIndex(
       (l, k) => k > i && l.trim().startsWith('echo "🧵 replied on'),
