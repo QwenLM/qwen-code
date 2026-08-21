@@ -86,6 +86,10 @@ jobs:
             echo "::error::A production dispatch must run from protected main"
             exit 1
           fi
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.dry_run }}" != "true" && "${{ inputs.notarize }}" != "true" ]]; then
+            echo "::error::A production dispatch must enable macOS codesigning and notarization"
+            exit 1
+          fi
           if [[ "$GITHUB_REF" == refs/tags/cua-driver-rs-v* ]]; then
             git fetch origin main
             if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
@@ -440,7 +444,7 @@ jobs:
             --issuer "$APPLE_NOTARY_ISSUER_ID" \
             --wait --timeout 20m
           xcrun stapler staple release/QwenCuaDriver.app
-          spctl -a -vv -t exec release/QwenCuaDriver.app || true
+          spctl -a -vv -t exec release/QwenCuaDriver.app
           rm -f release/QwenCuaDriver.app.zip notary_key.p8
       - name: 'Package'
         working-directory: 'packages/cua-driver/rust'
