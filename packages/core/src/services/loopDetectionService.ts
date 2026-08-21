@@ -625,10 +625,7 @@ export class LoopDetectionService {
       return false;
     }
 
-    this.streamContentHistory += content;
-
-    this.truncateAndUpdate();
-    return this.analyzeContentChunksForLoop();
+    return this.appendToContentHistoryAndAnalyze(content);
   }
 
   /**
@@ -644,6 +641,17 @@ export class LoopDetectionService {
    * appended to the shared history and analyzed only.
    */
   private checkReasoningContentLoop(content: string): boolean {
+    return this.appendToContentHistoryAndAnalyze(content);
+  }
+
+  /**
+   * Shared append/truncate/analyze tail behind checkContentLoop and
+   * checkReasoningContentLoop, so the history contract lives in one copy:
+   * a future change to the sequence (normalising before append, an extra
+   * reset, different truncation handling) applies to both channels instead
+   * of silently leaving the reasoning path on the old behaviour.
+   */
+  private appendToContentHistoryAndAnalyze(content: string): boolean {
     this.streamContentHistory += content;
 
     this.truncateAndUpdate();
