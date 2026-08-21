@@ -17,7 +17,14 @@
 // new file reported "no changes to review".
 
 import type { CommandModule } from 'yargs';
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -122,6 +129,8 @@ function anchorRefusalReason(
   model: string,
   headSha: string | null,
   target: string,
+  /** The path `target` was flattened from, when the review names one. */
+  source: string | undefined,
   skippedCount: number,
   treeHeldStill: boolean,
 ): string | null {
@@ -161,6 +170,21 @@ function anchorRefusalReason(
     // describes a different reviewed scope entirely.
     return `the cache belongs to target ${display(cache.target.slice(0, 64))}, not ${display(target)}`;
   }
+  if ((cache.source ?? undefined) !== source) {
+    // …and the TOKEN alone cannot answer that question, because
+    // `safeTarget` is not injective: `src/foo.ts` and `src_foo.ts` flatten to
+    // one token, as do `foo.ts`/`.foo.ts` and `foo..bar`/`foo/bar`. Under
+    // matching HEAD and identity the token gate passed each file the other's
+    // cache — scoping against a state describing a different file, and
+    // erasing that file's anchor and open findings on promotion. The capture
+    // records the path it flattened; compare that.
+    //
+    // A cache from before the field carries none, which reads as a mismatch
+    // against a file review and costs one full round — the safe direction.
+    return `the cache belongs to source path ${display(
+      (cache.source ?? 'an unrecorded path').slice(0, 96),
+    )}, not ${display(source ?? 'an unrecorded path')}`;
+  }
   if (cache.stateId !== stateIdOf(cache.headSha, cache.files)) {
     // Integrity: a shape-valid cache whose hashes were edited without
     // recomputing stateId is not the state any clean round certified.
@@ -172,6 +196,24 @@ function anchorRefusalReason(
     return 'HEAD moved since the last local round';
   }
   return null;
+}
+
+/**
+ * The cache file `--cache` names: the path itself, or `<dir>/<target>.json`
+ * when it names a directory. Null when a directory holds no cache for this
+ * target, which every caller already treats as "no anchor".
+ */
+function resolveCachePath(given: string, target: string): string | null {
+  let isDir = false;
+  try {
+    isDir = statSync(given).isDirectory();
+  } catch {
+    // Missing is not a directory; `readLocalCache` reports it as unreadable.
+    return given;
+  }
+  if (!isDir) return given;
+  const candidate = join(given, `${target}.json`);
+  return existsSync(candidate) ? candidate : null;
 }
 
 function runCaptureLocal(args: CaptureLocalArgs): void {
@@ -190,13 +232,12 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   // One deriver, in code. A caller that passes an explicit `--target` still
   // wins: the plain local review names `local`, and the cache-target gate
   // below compares whatever was used.
-  const target =
+  const sourcePath =
     file !== undefined && (args.target === undefined || args.target === 'local')
-      ? safeTarget(
-          repoRelativeOf(gitOpt('rev-parse', '--show-toplevel') ?? '.', file)
-            .rel,
-        )
-      : args.target;
+      ? repoRelativeOf(gitOpt('rev-parse', '--show-toplevel') ?? '.', file).rel
+      : undefined;
+  const target =
+    sourcePath !== undefined ? safeTarget(sourcePath) : args.target;
 
   const capture = captureLocalDiff({
     file,
@@ -262,20 +303,42 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   // and the same-bytes straddle is what poisons the hashes. "No editor does
   // that by accident" is no answer to an autosave racing an undo.
   //
-  // Re-hashing is one extra pass over the plan's paths, on the same batched
-  // `hash-object` the first pass uses.
-  const recapture = captureLocalDiff({
-    file,
-    includeUntracked: args.untracked,
-  });
-  const rehashes = hashWorktreeFiles(capture.repoRoot, planPaths);
+  // THREE consecutive states, not two, and the two kinds interleaved.
+  //
+  // Pairwise agreement never tied a capture to the hashes recorded beside
+  // it: sampling B0 H0 B1 H1 and asking only "B0 == B1" and "H0 == H1"
+  // passes for three phase-aligned writes — X→Y before the hash pass, Y→X
+  // before the re-capture, X→Y after it. Both checks hold, `treeHeldStill`
+  // is true, and the candidate certifies Y's identity for a round that
+  // reviewed X. Promoted, the next round compares cache Y against tree Y,
+  // finds no delta and says "No changes" over bytes no round ever read —
+  // the exact promise this guard exists to keep.
+  //
+  // Interleaved sampling does not make that impossible; nothing short of
+  // holding the tree still can, and this module cannot. It raises the price
+  // from three timed writes to five, and every write has to land in a
+  // window bounded by the neighbouring sample of the OTHER kind. The
+  // honest description is a tightened sample, not a proof — and every
+  // failure of it withholds the candidate, so the cost of being wrong is a
+  // full round, never a false certification.
+  //
+  // The extra pass is one more `git diff` and one more batched
+  // `hash-object` over paths already read twice.
+  const captures = [capture.diff];
+  const hashPasses = [hashes];
+  for (let i = 0; i < 2; i++) {
+    captures.push(
+      captureLocalDiff({ file, includeUntracked: args.untracked }).diff,
+    );
+    hashPasses.push(hashWorktreeFiles(capture.repoRoot, planPaths));
+  }
   const treeHeldStill =
-    capture.diff.equals(recapture.diff) &&
+    captures.every((d) => d.equals(captures[0])) &&
     // `movedSince`, not `changedSince`: a path unhashable on both reads did
     // not move between them, and treating it as a move would withhold the
     // candidate on every round holding a pending deletion — the same
     // conflation that made the convergence stop unreachable.
-    movedSince(hashes, rehashes).length === 0;
+    hashPasses.every((h) => movedSince(hashPasses[0], h).length === 0);
   const candidate: LocalCacheCandidate = {
     v: 1,
     target,
@@ -294,6 +357,16 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     // empty string means the runtime published nothing, which the gate reads
     // as a mismatch rather than a pass.
     lastModelId: roundModelIdFrom(process.env),
+    // The path the target token was FLATTENED from, when there is one.
+    //
+    // `safeTarget` is not injective: `src/foo.ts` and `src_foo.ts` both
+    // flatten to `src_foo.ts`, as do `foo.ts`/`.foo.ts` and
+    // `foo..bar`/`foo/bar`. This PR newly keys the review cache by that
+    // token, so the gate below — comparing tokens alone — could not tell two
+    // different files apart: a review of `src_foo.ts` accepted `src/foo.ts`'s
+    // cache, scoped against a state describing another file, and promoting it
+    // erased the first file's anchor and its open findings.
+    ...(sourcePath !== undefined ? { source: sourcePath } : {}),
   };
   const candidatePath = tmpFile(target, 'cache-candidate.json');
   // The field rides the plan ONLY when a candidate exists to promote: Step 8
@@ -355,13 +428,43 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   let diffBytes = capture.diff;
   let plan = fullPlan;
   let incremental: IncrementalBlock | undefined;
+  /**
+   * Machine-readable: this round has nothing to review, and that is a
+   * DECIDED outcome rather than a failure.
+   *
+   * Both stops used to exist only as a stderr sentence the orchestrator
+   * matched on, so the parent (`qwen review run`) could not tell them from a
+   * round that fell over: it polls for a composed verdict, finds none, and
+   * exits 1 with "Review did not complete". A user who committed without
+   * fixing a blocker gets that on every later round, over a round whose own
+   * output rendered the blocker as still standing.
+   */
+  let nothingToReview: { reason: string } | undefined;
   if (args.cache) {
-    const cache = readLocalCache(args.cache);
+    // A DIRECTORY resolves to this command's own target, because the caller
+    // cannot name the file.
+    //
+    // The cache is `<dir>/<target>.json`, and `target` exists only after the
+    // derivation above — the whole point of which is that a hand-applied
+    // recipe disagreed with it. Step 1 has to decide whether a cache exists
+    // BEFORE running this command, so it was left predicting the name: for
+    // `ln -s src srclink` then a review of `srclink/foo.ts`, the typed
+    // spelling flattens to `srclink_foo.ts` while this command canonicalises
+    // to `src_foo.ts`. The prediction misses, `--cache` is never passed, and
+    // the round silently loses both incremental scoping and the findings
+    // ledger — in exactly the spelling classes the canonicalisation exists
+    // to handle, with no refusal line printed anywhere.
+    //
+    // Passing the directory ends the guessing: one deriver, and a caller
+    // that knows only where caches live. A file path still works unchanged.
+    const cachePath = resolveCachePath(args.cache, target);
+    const cache = cachePath === null ? null : readLocalCache(cachePath);
     const refusal = anchorRefusalReason(
       cache,
       roundModelIdFrom(process.env),
       headSha,
       target,
+      sourcePath,
       capture.skipped.length,
       treeHeldStill,
     );
@@ -459,8 +562,9 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
         // path with no diff section left is still a change, and "no
         // changes" must not be claimed over it.
         stateMoved.length === 0 && stateChanged.length === 0
-          ? `No changes since the last local review round (same model, same ` +
-              `HEAD, same content) — nothing to re-review.`
+          ? ((nothingToReview = { reason: 'unchanged-since-last-round' }),
+            `No changes since the last local review round (same model, same ` +
+              `HEAD, same content) — nothing to re-review.`)
           : stateMoved.length === 0
             ? // Nothing MOVED, but the scope is not empty: a path unhashable
               // on both sides stays in it, because "could not capture it
@@ -492,6 +596,15 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     }
   }
 
+  // Decided BEFORE the report is written, because the branch that prints the
+  // clean-tree warning runs after it. Only the genuinely clean shape counts:
+  // a capture that SKIPPED files reviewed nothing AND could not read what it
+  // skipped, so that round owes a "Not reviewed" section and must never read
+  // as complete.
+  if (plan.diffLines === 0 && !incremental && capture.skipped.length === 0) {
+    nothingToReview = { reason: 'clean-tree' };
+  }
+
   const diffPath = tmpFile(target, 'diff.txt');
   // Write the bytes, not the string: a re-encode would rewrite the content of
   // every hunk touching a file git handed us in a non-UTF-8 encoding.
@@ -516,6 +629,7 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     untrackedFiles: capture.untracked,
     skippedFiles: capture.skipped,
     ...(incremental ? { incremental } : {}),
+    ...(nothingToReview ? { nothingToReview } : {}),
     ...(cacheCandidatePath ? { cacheCandidatePath } : {}),
     ...planEffortField(args.effort),
   };
@@ -615,11 +729,16 @@ export const captureLocalCommand: CommandModule = {
       .option('cache', {
         type: 'string',
         describe:
-          "The previous local round's review cache " +
-          '(`.qwen/review-cache/<target>.json`). When its anchor validates — ' +
-          'same model, same HEAD — the capture is scoped to files whose ' +
-          'content changed since that round, widened by one import hop; on ' +
-          'any refusal it degrades to the full capture and says why.',
+          "The previous local round's review cache — the file, or the " +
+          'DIRECTORY holding it (`.qwen/review-cache`), in which case this ' +
+          'command resolves `<dir>/<target>.json` from the target IT ' +
+          'derives. Prefer the directory for a file review: the target is ' +
+          "this command's to compute, and a caller that predicts the name " +
+          'gets it wrong for any non-canonical spelling. When the anchor ' +
+          'validates — same identity, same HEAD — the capture is scoped to ' +
+          'files whose content changed since that round, widened by one ' +
+          'import hop; on any refusal it degrades to the full capture and ' +
+          'says why.',
       }),
   handler: (argv) => {
     runCaptureLocal(argv as unknown as CaptureLocalArgs);

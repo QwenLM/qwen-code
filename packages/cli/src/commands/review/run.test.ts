@@ -308,6 +308,15 @@ describe('target-pinned artifact patterns', () => {
   });
 });
 
+describe('a decided stop counts as completed', () => {
+  it('exits 0 when the capture said there was nothing to review', () => {
+    // `compose-review` runs only in Step 6; both stops fire in Step 1, so no
+    // composed verdict exists. Polling for the verdict alone reported
+    // "Review did not complete" over a round whose own output was decided.
+    expect(exitCodeFor(true, null, 'none')).toBe(0);
+  });
+});
+
 describe('exitCodeFor', () => {
   it('splits completed / no-verdict / blocking into 0 / 1 / 3', () => {
     expect(exitCodeFor(true, 'APPROVE', 'none')).toBe(0);

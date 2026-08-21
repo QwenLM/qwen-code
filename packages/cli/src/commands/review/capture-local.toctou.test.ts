@@ -35,9 +35,11 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
 
 const captures: Array<{ diff: Buffer }> = [];
 /**
- * Successive `hashWorktreeFiles` answers, when a test needs the two passes to
+ * Successive `hashWorktreeFiles` answers, when a test needs the passes to
  * disagree. Empty means "use the real one" — every other test in this file
- * hashes for real.
+ * hashes for real. A list shorter than the number of passes REPEATS its last
+ * entry, which reads as "the tree stopped moving": a fixture says what it is
+ * about and the guard's extra samples see a settled tree.
  */
 const hashPasses: Array<Record<string, string>> = [];
 vi.mock('./lib/local-anchor.js', async (importOriginal) => {
@@ -46,7 +48,9 @@ vi.mock('./lib/local-anchor.js', async (importOriginal) => {
     ...real,
     hashWorktreeFiles: (...args: Parameters<typeof real.hashWorktreeFiles>) =>
       hashPasses.length > 0
-        ? (hashPasses.shift() as Record<string, string>)
+        ? ((hashPasses.length > 1
+            ? hashPasses.shift()
+            : hashPasses[0]) as Record<string, string>)
         : real.hashWorktreeFiles(...args),
   };
 });
@@ -55,7 +59,7 @@ vi.mock('./lib/local-diff.js', async (importOriginal) => {
   return {
     ...real,
     captureLocalDiff: vi.fn(() => {
-      const next = captures.shift();
+      const next = captures.length > 1 ? captures.shift() : captures[0];
       if (!next) throw new Error('fixture exhausted');
       return {
         diff: next.diff,
@@ -177,6 +181,40 @@ describe('capture-local — TOCTOU candidate withholding', () => {
     );
     // The full capture is what the plan reviews.
     expect(readFileSync(report().diffPath).equals(DIFF_A)).toBe(true);
+  });
+
+  it('catches a PHASE-ALIGNED write the pairwise guard let through', () => {
+    // Two samples of each kind, compared pairwise, never tied a capture to
+    // the hashes recorded beside it. Three timed writes defeat it: X→Y
+    // before the hash pass, Y→X before the re-capture, X→Y after it. The two
+    // captures agree (X, X) and the two hash passes agree (Y, Y), so
+    // `treeHeldStill` is true — and the candidate certifies Y's identity for
+    // a round that reviewed X. Promoted, the next round compares cache Y
+    // against tree Y, finds no delta and says "No changes" over bytes no
+    // round ever read.
+    //
+    // Interleaving a third sample of each kind means the write pattern has
+    // to keep alternating; this one stops, and the third hash pass reads
+    // what the captures did.
+    captures.push(
+      { diff: DIFF_A },
+      { diff: Buffer.from(DIFF_A) },
+      { diff: Buffer.from(DIFF_A) },
+    );
+    hashPasses.push(
+      { 'a.ts': '100644:oid-Y' },
+      { 'a.ts': '100644:oid-Y' },
+      { 'a.ts': '100644:oid-X' },
+    );
+    run();
+    expect(
+      existsSync(
+        join(repo, '.qwen/tmp/qwen-review-local-cache-candidate.json'),
+      ),
+    ).toBe(false);
+    expect(stderrLines.join('\n')).toContain(
+      'working tree changed while the capture was being hashed',
+    );
   });
 
   it('catches a same-bytes revert that STRADDLES the hash pass', () => {

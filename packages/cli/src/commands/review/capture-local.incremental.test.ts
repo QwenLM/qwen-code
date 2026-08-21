@@ -388,6 +388,140 @@ describe('capture-local — incremental local rounds', () => {
   });
 });
 
+describe('capture-local — the decided stops are machine-readable', () => {
+  it('marks the unchanged-since-last-round stop in the plan', () => {
+    // `compose-review` runs only in Step 6, and this stop fires in Step 1, so
+    // no composed verdict exists — and `qwen review run` polls for exactly
+    // that, reporting "Review did not complete" over a round whose own output
+    // was decided. The signal is a field the CLI wrote, not a sentence the
+    // model chose off stderr.
+    seedDirtyTree();
+    const cachePath = promoteCandidate(
+      capture({ model: 'model-a' }),
+      'model-a',
+    );
+    const second = capture({ cache: cachePath, model: 'model-a' });
+    expect(second.chunks.length).toBe(0);
+    expect(second['nothingToReview']).toEqual({
+      reason: 'unchanged-since-last-round',
+    });
+  });
+
+  it('does NOT mark a capture that SKIPPED files — it read nothing, twice over', () => {
+    // The safety half. An empty diff beside a non-empty skip list is not a
+    // clean tree: that round could not read what it skipped, owes a "Not
+    // reviewed" section, and must never reach the parent as complete —
+    // exactly the failure this command exists to end, arriving through the
+    // front door.
+    seedDirtyTree();
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'all committed');
+    // A symlink to a DIRECTORY is skipped, not reviewed.
+    mkdirSync(join(repo, 'somedir'), { recursive: true });
+    symlinkSync(join(repo, 'somedir'), join(repo, 'dirlink'));
+
+    const plan = capture();
+    expect((plan['skippedFiles'] as unknown[]).length).toBeGreaterThan(0);
+    expect(plan['nothingToReview']).toBeUndefined();
+  });
+
+  it('marks a genuinely clean tree', () => {
+    // `seedDirtyTree` commits a base and then dirties it; committing that
+    // work leaves the tree clean, which is the shape this stop is about.
+    seedDirtyTree();
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'all committed');
+
+    const plan = capture();
+    expect(plan.chunks.length).toBe(0);
+    expect(plan['nothingToReview']).toEqual({ reason: 'clean-tree' });
+  });
+});
+
+describe('capture-local — --cache takes the DIRECTORY', () => {
+  it('resolves the cache from the target IT derived, not one the caller guessed', () => {
+    // The name is `<target>.json`, and `target` is derived inside this
+    // command — so a caller running BEFORE it has to predict, and predicting
+    // is wrong for any non-canonical spelling. Through a symlinked
+    // directory, the typed path flattens to `srclink_foo.ts` while the
+    // command canonicalises to `src_foo.ts`: the prediction misses, the
+    // cache is never passed, and the round silently loses both incremental
+    // scoping and the findings ledger.
+    seedDirtyTree();
+    write('src/foo.ts', 'export const real = 1;\n');
+    symlinkSync(join(repo, 'src'), join(repo, 'srclink'));
+
+    // Round 1 through the SYMLINKED spelling.
+    const first = capture({ file: 'srclink/foo.ts', model: 'model-a' });
+    expect(first['target']).toBe('src_foo.ts');
+    const cacheDir = join(repo, '.qwen/review-cache');
+    mkdirSync(cacheDir, { recursive: true });
+    writeFileSync(
+      join(cacheDir, 'src_foo.ts.json'),
+      readFileSync(first.cacheCandidatePath, 'utf8'),
+    );
+
+    // Round 2 hands over the DIRECTORY and never names the file.
+    write('src/foo.ts', 'export const real = 2;\n');
+    const second = capture({
+      file: 'srclink/foo.ts',
+      cache: cacheDir,
+      model: 'model-a',
+    });
+    expect(second.incremental?.scope?.deltaFiles).toEqual(['src/foo.ts']);
+  });
+
+  it('reads a directory holding no cache for this target as no anchor', () => {
+    seedDirtyTree();
+    const cacheDir = join(repo, '.qwen/review-cache');
+    mkdirSync(cacheDir, { recursive: true });
+    expect(capture({ cache: cacheDir, model: 'model-a' }).incremental).toBe(
+      undefined,
+    );
+  });
+});
+
+describe('capture-local — the cache key is the SOURCE path, not the token', () => {
+  it('refuses a cache whose flattened token collides with another file', () => {
+    // `safeTarget` is not injective: `src/foo.ts` and `src_foo.ts` both
+    // flatten to `src_foo.ts`, and this PR keys the cache by that token. The
+    // token gate alone passed each file the other's cache — scoping against a
+    // state describing a different file, and erasing that file's anchor and
+    // open findings on promotion.
+    seedDirtyTree();
+    write('src_foo.ts', 'export const collide = 1;\n');
+    write('src/foo.ts', 'export const real = 1;\n');
+
+    const first = capture({ file: 'src/foo.ts', model: 'model-a' });
+    expect(first['target']).toBe('src_foo.ts');
+    const candidate = JSON.parse(
+      readFileSync(first.cacheCandidatePath, 'utf8'),
+    ) as Record<string, unknown>;
+    expect(candidate['source']).toBe('src/foo.ts');
+    mkdirSync(join(repo, '.qwen/review-cache'), { recursive: true });
+    const cachePath = join(repo, '.qwen/review-cache/src_foo.ts.json');
+    writeFileSync(cachePath, JSON.stringify(candidate));
+
+    // The OTHER file, whose token is the same one.
+    const other = capture({
+      file: 'src_foo.ts',
+      cache: cachePath,
+      model: 'model-a',
+    });
+    expect(other['target']).toBe('src_foo.ts');
+    expect(other.incremental).toBeUndefined();
+
+    // …and the file the cache actually belongs to still scopes.
+    write('src/foo.ts', 'export const real = 2;\n');
+    const same = capture({
+      file: 'src/foo.ts',
+      cache: cachePath,
+      model: 'model-a',
+    });
+    expect(same.incremental).toBeDefined();
+  });
+});
+
 describe('capture-local — the local same-model gate', () => {
   const A = 'qwen3-max@aaaaaaaa';
   const B = 'qwen3-max@bbbbbbbb';
