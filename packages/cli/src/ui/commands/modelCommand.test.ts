@@ -1510,6 +1510,47 @@ describe('modelCommand', () => {
     },
   );
 
+  it('should reject an image model without valid endpoint credentials', async () => {
+    const setValue = vi.fn();
+    const setImageModel = vi.fn();
+    const resolveImageGenerationModel = vi.fn().mockReturnValue(undefined);
+    const baseUrl = 'https://images.example.com/api/v1';
+    mockContext = createMockCommandContext({
+      services: {
+        config: {
+          getAllConfiguredModels: vi.fn().mockReturnValue([
+            {
+              id: 'dual-role-model',
+              authType: AuthType.USE_OPENAI,
+              baseUrl,
+              supportsImageGeneration: true,
+            },
+          ]),
+          resolveImageGenerationModel,
+          setImageModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      '--image dual-role-model',
+    );
+
+    expect(resolveImageGenerationModel).toHaveBeenCalledWith(
+      `openai:dual-role-model\0${baseUrl}`,
+    );
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content:
+        "Image model 'dual-role-model' must declare a valid HTTPS baseUrl and credential environment variable.",
+    });
+    expect(setValue).not.toHaveBeenCalled();
+    expect(setImageModel).not.toHaveBeenCalled();
+  });
+
   it('should reject a vision-only model from /model --image', async () => {
     const setValue = vi.fn();
     const setImageModel = vi.fn();
