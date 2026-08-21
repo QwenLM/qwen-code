@@ -2,6 +2,7 @@
 
 Supersedes the in-step approach attempted in PR #9214 (frozen).
 Tracks the structural close for issue #9089. Findings inventory: issue #9524.
+Adjacent, same question on the review side: issue #9556.
 
 ## Problem statement
 
@@ -107,6 +108,15 @@ the patch itself, with checks that need no branch execution:
 6. the head SHA still matches the lease recorded before the agent ran
    (`--force-with-lease`).
 
+Every one of these is computed from the **patch text** on the trusted side.
+None of them may re-read a value the `execute` job wrote — not a line count it
+reported, not a footprint list it declared, not a base SHA it echoed back. This
+check class is the one this pipeline has repeatedly failed to make
+forgery-proof (it is what R11-8 is about), and it is only sound here because
+the input is a file the publish job parses itself. An implementation that
+shortcuts to "read the count the gate already computed" reintroduces the whole
+problem.
+
 Anything that requires _executing_ the branch (build, typecheck, unit tests)
 stays in `execute` and is **advisory**. This is a real reduction in what
 "verified" means, and it should be stated plainly in the status comment. The
@@ -196,14 +206,17 @@ regenerated findings in #9214.
   the current egress/IP policy?
 - `issue-autofix` has the same shape and should follow the same split, but it
   creates a branch and a PR rather than pushing to an existing head; its
-  publish-side checks differ and are not designed here.
+  publish-side checks differ and are not designed here. Sequencing constraint:
+  that follow-up must land **before** step 5 deletes machinery `issue-autofix`
+  still depends on — the deletion pass is per cluster precisely so this can be
+  checked one cluster at a time.
 
 <details>
 <summary>中文说明</summary>
 
 # autofix：为携带 PAT 的步骤做 runner 级隔离
 
-取代 PR #9214 中尝试的"步骤内加固"方案（该 PR 已冻结）。对应 issue #9089 的结构性收口，发现清单见 issue #9524。
+取代 PR #9214 中尝试的"步骤内加固"方案（该 PR 已冻结）。对应 issue #9089 的结构性收口，发现清单见 issue #9524。评审侧的同一问题见 issue #9556。
 
 ## 问题
 
@@ -225,7 +238,7 @@ regenerated findings in #9214.
 ## 方案
 
 - **A. 拆成 `execute` 与 `publish` 两个 job。** `execute` 承载一切分支代码，不持有任何写权限凭据，只产出 `fix.patch` + 报告 + 仅供参考的 `verdict.txt`；`publish` 全新检出基线分支，**不执行任何分支代码**（无 npm、无构建、无测试、无仓库脚本、无 git hook），下载产物、自行判定、应用补丁并用 PAT 推送。`$GITHUB_ENV`/`$GITHUB_OUTPUT`/`$HOME`/`$RUNNER_TEMP` 与存活进程都不跨 job 边界。
-- **B. `publish` 自行推导，不信任 verdict。** 威胁模型中 `execute` 被假定为已失陷，因此对其 verdict 的任何签名都无济于事。`publish` 只做无需执行分支代码的判定：补丁能否干净应用于记录的基线 SHA、路径是否在足迹白名单内、是否触碰 `.github/workflows/**` 与锁文件、净增行是否在增长预算内、提交信息是否符合规范、head SHA 是否仍匹配租约。构建与测试留在 `execute`，且**降级为仅供参考**——这一点必须写进状态评论。诚实的对比基准不是"原本可用的保证"：现有 verdict 本就可伪造（R11-8），而在 #9214 分支上它根本没被产生过（R9-1/R9-2）。
+- **B. `publish` 自行推导，不信任 verdict。** 威胁模型中 `execute` 被假定为已失陷，因此对其 verdict 的任何签名都无济于事。`publish` 只做无需执行分支代码的判定：补丁能否干净应用于记录的基线 SHA、路径是否在足迹白名单内、是否触碰 `.github/workflows/**` 与锁文件、净增行是否在增长预算内、提交信息是否符合规范、head SHA 是否仍匹配租约。这些判定**一律基于补丁文本、在可信侧自行计算**，不得回读 `execute` 写出的任何值——它报告的行数、它声明的足迹清单、它回显的基线 SHA 都不行。这一类检查正是本流水线反复未能做到防伪的地方（R11-8 说的就是它），此处成立只是因为输入是发布侧自己解析的一个文件；若实现图省事去读门已经算好的数字，整个问题就原样回来了。构建与测试留在 `execute`，且**降级为仅供参考**——这一点必须写进状态评论。诚实的对比基准不是"原本可用的保证"：现有 verdict 本就可伪造（R11-8），而在 #9214 分支上它根本没被产生过（R9-1/R9-2）。
 - **C. `execute` 使用一次性注册（`--ephemeral`）**，或退而求其次用 job 级 `container:` 提供独立 `HOME`；后者是缓解，前者才是收口。属基础设施改动，排在最后。
 - **D. 按血缘杀进程树，而不是按 env 标记。** 用 `systemd-run --scope` / cgroup 取代 `AUTOFIX_AGENT_TREE` 标记匹配（R8-8、R9-3、R11-10 的来源）：cgroup 归属无法由环境变量伪造，跨 leg 误杀与自杀都不再可能。
 - **E. 删掉 A–D 让其失去意义的机制。** 本项工作的目的是**更小**的信任面，而不是再加一层。PAT 离开共享主机、判定移到可信侧之后，步骤内的枚举式机制（env 固定块、暂存脚本摘要链、指纹集、标记清扫及其契约测试）守护的是一个已不再承载秘密的边界，删除它属于本次改动的一部分——"以防万一"留下的守卫正是 #9214 里不断再生发现的东西。
@@ -244,6 +257,6 @@ regenerated findings in #9214.
 
 ## 风险与未决问题
 
-"已验证"会弱化为"确定性检查 + 仅供参考的构建/测试"，必须在状态评论中明示；产物传递增加一次上传/下载与一次检出；ECS 池是否允许 `--ephemeral` 注册；当前出网/IP 策略下，携带 PAT 的 `publish` 能否放在 GitHub 托管 runner 上；`issue-autofix` 形态相同但它是新建分支并开 PR，其发布侧判定不同，本文未涵盖。
+"已验证"会弱化为"确定性检查 + 仅供参考的构建/测试"，必须在状态评论中明示；产物传递增加一次上传/下载与一次检出；ECS 池是否允许 `--ephemeral` 注册；当前出网/IP 策略下，携带 PAT 的 `publish` 能否放在 GitHub 托管 runner 上；`issue-autofix` 形态相同但它是新建分支并开 PR，其发布侧判定不同，本文未涵盖——排期约束是：该后续项必须在推进步骤 5 删除 `issue-autofix` 仍依赖的机制**之前**落地，删除之所以按簇分 PR，正是为了逐簇核对这一点。
 
 </details>
