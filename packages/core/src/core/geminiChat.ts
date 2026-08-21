@@ -2218,6 +2218,11 @@ export class GeminiChat {
     this.lastPromptTokenCountIsEstimated = isEstimated;
     this.lastOutputTokenCount = 0;
     this.tokenCountsRouteKey = this.currentRouteKey();
+    // A fresh count supersedes anything this route retained while another
+    // route owned the slots. Without the delete this writer alone among the
+    // count writers would leave an entry for tokenCountsRouteKey behind,
+    // breaking the map's documented invariant (#9506).
+    this.tokenCountsByRouteKey.delete(this.tokenCountsRouteKey);
   }
 
   isLastPromptTokenCountEstimated(): boolean {
@@ -2314,6 +2319,14 @@ export class GeminiChat {
       signal,
     });
 
+    // ChatCompressionService reads the keyless count getters, which adopt
+    // the ACTIVE route — flipping the slots away from the request route
+    // adopted above whenever the two differ (non-exact override sends).
+    // Re-adopt the request route so neither the COMPRESSED stamp below nor
+    // the caller's post-compression sizing anchors on the flipped
+    // attribution (#9506).
+    this.adoptTokenCountsForRoute(options?.requestRouteKey);
+
     if (info.compressionStatus === CompressionStatus.COMPRESSED && newHistory) {
       // ChatCompressionService owns provenance. Keep a conservative fallback
       // for older/custom implementations that omit the field, but preserve an
@@ -2328,6 +2341,12 @@ export class GeminiChat {
       this.setHistory(newHistory);
       debugLogger.debug('[FILE_READ_CACHE] clear after auto tryCompress');
       this.config.getFileReadCache().clear();
+      // Compression rewrote the shared history every retained entry sizes,
+      // so ALL retained counts are stale — not just the current route's.
+      // Drop them, or a later keyed read adopts a pre-compression count and
+      // the session-token-limit gate blocks a prompt that fits the
+      // compressed history (#9506).
+      this.tokenCountsByRouteKey.clear();
       this.setLastPromptTokenCount(
         info.newTokenCount,
         info.newTokenCountIsEstimated,
@@ -2439,9 +2458,10 @@ export class GeminiChat {
     this.lastPromptTokenCount = adjustedTokenCount;
     this.lastPromptTokenCountIsEstimated = true;
     this.tokenCountsRouteKey = this.currentRouteKey();
-    // The adjusted count supersedes anything this route retained while
-    // another route owned the slots (#9506).
-    this.tokenCountsByRouteKey.delete(this.tokenCountsRouteKey);
+    // Fast compression rewrote the shared history every retained entry
+    // sizes, so ALL retained counts are stale — the other routes' entries
+    // describe the same pre-compression history (#9506).
+    this.tokenCountsByRouteKey.clear();
     this.telemetryService?.setLastPromptTokenCount(adjustedTokenCount);
     this.consecutiveFailures = 0;
 
@@ -2695,6 +2715,15 @@ export class GeminiChat {
       // Capture the key so the rollback below restores the resurrected
       // count's original route attribution along with the count itself.
       const tokenCountsRouteKeyBeforeHardRescue = this.tokenCountsRouteKey;
+      // Snapshot the retention map too: the rescue's compression consumes
+      // retained entries mid-flight (ChatCompressionService's keyless getter
+      // reads adopt the active route, deleting-and-consuming its entry) and
+      // a successful compression clears the map outright. Without the
+      // snapshot the rollback would restore the slots but not the map,
+      // leaving the resurrected route's count nowhere (#9506).
+      const retainedTokenCountsBeforeHardRescue = new Map(
+        this.tokenCountsByRouteKey,
+      );
       const hardRescueFailureCountBeforeHardRescue =
         this.hardRescueFailureCount;
       if (shouldForceFromHard) {
@@ -2773,13 +2802,18 @@ export class GeminiChat {
           this.lastPromptTokenCountIsEstimated =
             lastPromptTokenCountWasEstimatedBeforeHardRescue;
           this.tokenCountsRouteKey = tokenCountsRouteKeyBeforeHardRescue;
-          // Keep the retention-map invariant (no entry for the slot's key):
-          // the resurrected count supersedes anything retained for the
-          // request route while the rescue ran (#9506).
-          if (tokenCountsRouteKeyBeforeHardRescue !== undefined) {
-            this.tokenCountsByRouteKey.delete(
-              tokenCountsRouteKeyBeforeHardRescue,
-            );
+          // Restore the retention map alongside the slots: the rescue's
+          // compression consumed/cleared entries mid-flight, and without
+          // the restore the resurrected route's count would survive
+          // nowhere — its next gate read would pass with 0 (#9506). The
+          // snapshot predates the rescue, so it already satisfies the
+          // invariant (no entry for the resurrected slot key).
+          this.tokenCountsByRouteKey.clear();
+          for (const [
+            retainedRouteKey,
+            retainedCounts,
+          ] of retainedTokenCountsBeforeHardRescue) {
+            this.tokenCountsByRouteKey.set(retainedRouteKey, retainedCounts);
           }
           this.telemetryService?.setLastPromptTokenCount(
             lastPromptTokenCountBeforeHardRescue,
@@ -5051,6 +5085,17 @@ export class GeminiChat {
           if (lastPromptTokenCount) {
             // Always update the per-chat counter so this chat (including
             // subagents) can make its own compaction decisions.
+            // Retain whatever route's counts currently occupy the slots
+            // before overwriting them: a foreign-keyed slot holds another
+            // route's state that its next keyed read still needs — mid-send
+            // compression can leave the slots keyed to the active route
+            // even though this report comes from the request route (#9506).
+            if (
+              this.tokenCountsRouteKey !== undefined &&
+              this.tokenCountsRouteKey !== routeKey
+            ) {
+              this.retainCurrentTokenCounts();
+            }
             this.lastPromptTokenCount = lastPromptTokenCount;
             this.lastPromptTokenCountIsEstimated = false;
             this.lastOutputTokenCount = hasUsablePromptTokenCount

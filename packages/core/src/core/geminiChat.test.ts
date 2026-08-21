@@ -15905,6 +15905,267 @@ describe('GeminiChat', async () => {
       expect(rescueChat.getLastPromptTokenCount()).toBe(0);
     });
 
+    it('restores the retention map when a failed hard-rescue rolls counts back (#9506)', async () => {
+      // The rescue's own compression consumes retained map entries
+      // mid-flight (the service's keyless getter reads adopt the active
+      // route) and a successful compression clears the map outright. The
+      // rollback must restore the pre-rescue snapshot, or the resurrected
+      // route's over-limit count survives nowhere and its next
+      // session-token-limit gate read passes with 0.
+      vi.mocked(mockConfig.getModelRouteIdentity).mockReturnValue(
+        'active@route',
+      );
+      const rescueChat = new GeminiChat(
+        mockConfig,
+        config,
+        [{ role: 'user', parts: [{ text: 'x'.repeat(720_000) }] }],
+        {
+          recordAssistantTurn: vi.fn(),
+        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        uiTelemetryService,
+      );
+      rescueChat.setLastPromptTokenCount(190_000, false);
+      vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation((model) =>
+        model ? `${model}@route` : 'active@route',
+      );
+
+      vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      ).mockImplementationOnce(async (chatToCompress) => {
+        // Mirror the real service's unconditional keyless reads: they
+        // adopt the ACTIVE route, consuming its retained entry mid-rescue.
+        chatToCompress.getLastPromptTokenCount();
+        chatToCompress.isLastPromptTokenCountEstimated();
+        return {
+          newHistory: [
+            { role: 'user', parts: [{ text: 'still large summary' }] },
+          ],
+          info: {
+            originalTokenCount: 180_000,
+            newTokenCount: 178_000,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+        };
+      });
+
+      await expect(
+        rescueChat.sendMessageStream(
+          'override-model',
+          { message: 'continue' },
+          'prompt-rescue-retention-map-restore',
+        ),
+      ).rejects.toThrow(/compression status: COMPRESSED/i);
+
+      expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
+      // The active route's over-limit count survived the failed rescue:
+      // its next keyed read must still see it, not 0.
+      expect(rescueChat.getLastPromptTokenCount('active@route')).toBe(190_000);
+      expect(rescueChat.getLastPromptTokenCount('override-model@route')).toBe(
+        0,
+      );
+    });
+
+    it('re-adopts the request route after the compression service flips the slots (#9506)', async () => {
+      // ChatCompressionService.compress reads the KEYLESS count getters,
+      // which adopt the ACTIVE route. On a non-exact override send whose
+      // request route differs, that flips the slots back to the active
+      // route's retained counts mid-rescue. When the summarization side
+      // query then fails, the post-rescue stop check must size from the
+      // honest history-walk estimate, not the flipped foreign count.
+      vi.mocked(mockConfig.getModelRouteIdentity).mockReturnValue(
+        'active@route',
+      );
+      const rescueChat = new GeminiChat(
+        mockConfig,
+        config,
+        [{ role: 'user', parts: [{ text: 'x'.repeat(720_000) }] }],
+        {
+          recordAssistantTurn: vi.fn(),
+        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        uiTelemetryService,
+      );
+      rescueChat.setLastPromptTokenCount(150_000, false);
+      vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation((model) =>
+        model ? `${model}@route` : 'active@route',
+      );
+
+      vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      ).mockImplementationOnce(async (chatToCompress) => {
+        chatToCompress.getLastPromptTokenCount();
+        chatToCompress.isLastPromptTokenCountEstimated();
+        return {
+          newHistory: null,
+          info: {
+            originalTokenCount: 180_000,
+            newTokenCount: 0,
+            compressionStatus:
+              CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
+          },
+        };
+      });
+
+      await expect(
+        rescueChat.sendMessageStream(
+          'override-model',
+          { message: 'continue' },
+          'prompt-rescue-flip-re-adopt',
+        ),
+      ).rejects.toThrow(/Context is too large to send safely/i);
+
+      expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
+      // The active route's retained count survived the failed rescue.
+      expect(rescueChat.getLastPromptTokenCount('active@route')).toBe(150_000);
+    });
+
+    it('retains a foreign-keyed slot occupant when the usage stamp re-keys (#9506)', async () => {
+      // Mid-send compression can leave the slots keyed to the ACTIVE route
+      // when the response's usage report arrives for the REQUEST route.
+      // The stamp must retain the displaced occupant before overwriting
+      // it, or the active route's count is destroyed and its next keyed
+      // read returns 0 — bypassing the session token limit.
+      vi.mocked(mockConfig.getModelRouteIdentity).mockReturnValue(
+        'active@route',
+      );
+      const stampChat = new GeminiChat(
+        mockConfig,
+        config,
+        [{ role: 'user', parts: [{ text: 'x'.repeat(720_000) }] }],
+        {
+          recordAssistantTurn: vi.fn(),
+          // Successful hard-rescue compression records after the
+          // post-compression guard passes (deferred recording).
+          recordChatCompression: vi.fn(),
+        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        uiTelemetryService,
+      );
+      stampChat.setLastPromptTokenCount(150_000, false);
+      vi.mocked(mockConfig.getModelRouteIdentity).mockImplementation((model) =>
+        model ? `${model}@route` : 'active@route',
+      );
+
+      vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      ).mockImplementationOnce(async (chatToCompress) => {
+        chatToCompress.getLastPromptTokenCount();
+        chatToCompress.isLastPromptTokenCountEstimated();
+        return {
+          newHistory: [{ role: 'user', parts: [{ text: 'summary' }] }],
+          info: {
+            originalTokenCount: 180_000,
+            newTokenCount: 60_000,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+        };
+      });
+      vi.mocked(
+        mockContentGenerator.generateContentStream,
+      ).mockResolvedValueOnce(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: { parts: [{ text: 'ok' }], role: 'model' },
+                finishReason: 'STOP',
+                index: 0,
+              },
+            ],
+            usageMetadata: {
+              promptTokenCount: 61_000,
+              totalTokenCount: 62_000,
+            },
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+
+      const stream = await stampChat.sendMessageStream(
+        'override-model',
+        { message: 'continue' },
+        'prompt-stamp-retains-occupant',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      // The request route's fresh API report occupies the slots...
+      expect(stampChat.getLastPromptTokenCount('override-model@route')).toBe(
+        61_000,
+      );
+      // ...and the active route's post-compression count was retained,
+      // not destroyed by the re-keying stamp.
+      expect(stampChat.getLastPromptTokenCount('active@route')).toBe(60_000);
+    });
+
+    it('drops stale retained counts when a successful compression rewrites the history (#9506)', async () => {
+      // Compression rewrites the shared history every retained entry
+      // sizes. Retained pre-compression counts must not survive the
+      // success path, or a later keyed read adopts one and the session-
+      // token-limit gate blocks a prompt that fits the compressed history.
+      chat.setLastPromptTokenCount(691_000, false);
+      switchRoute('override@route');
+      // The crossing retains the original route's count under its own key.
+      expect(chat.getLastPromptTokenCount()).toBe(0);
+
+      vi.spyOn(
+        ChatCompressionService.prototype,
+        'compress',
+      ).mockResolvedValueOnce({
+        newHistory: [{ role: 'user', parts: [{ text: 'summary' }] }],
+        info: {
+          originalTokenCount: 691_000,
+          newTokenCount: 50_000,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+      });
+
+      await chat.tryCompress('prompt-compression-drops-retained', true);
+
+      expect(chat.getLastPromptTokenCount()).toBe(50_000);
+      expect(chat.getLastPromptTokenCount('gemini-pro@test0001')).toBe(0);
+    });
+
+    it('drops all retained counts when fast compression rewrites the history (#9506)', () => {
+      // compressFast rewrites the same shared history the other routes'
+      // retained entries size; clearing only the active route's entry
+      // would leave stale pre-compression counts adoptable by later keyed
+      // reads.
+      vi.mocked(mockConfig.getClearContextOnIdle).mockReturnValue({
+        toolResultsThresholdMinutes: 30,
+        toolResultsNumToKeep: 1,
+      });
+      const fastChat = new GeminiChat(
+        mockConfig,
+        config,
+        [
+          { role: 'user', parts: [{ text: 'question' }] },
+          {
+            role: 'model',
+            parts: [
+              { text: 'reasoning '.repeat(100), thought: true },
+              { text: 'answer' },
+            ],
+          },
+        ],
+        {
+          recordChatCompression: vi.fn(),
+        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        uiTelemetryService,
+      );
+      fastChat.setLastPromptTokenCount(691_000, false);
+      // Cross routes so the count is retained under the original key.
+      switchRoute('other-route@fast');
+      expect(fastChat.getLastPromptTokenCount()).toBe(0);
+
+      const result = fastChat.compressFast();
+
+      expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      // The retained pre-compression entry did not survive the rewrite.
+      expect(fastChat.getLastPromptTokenCount('gemini-pro@test0001')).toBe(0);
+    });
+
     it('does not anchor an exact route output clamp on the active route count', async () => {
       // Authoritative count recorded by the ACTIVE route. An exact `\0`
       // route send targets a different serialization, so its output clamp
