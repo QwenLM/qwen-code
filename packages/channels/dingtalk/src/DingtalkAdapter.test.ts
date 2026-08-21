@@ -914,6 +914,30 @@ function seedMentionTarget(
   ).mentionTargets.set(messageId, staffId);
 }
 
+/** Drives a group robot message through `onMessage` for the given chat. */
+function driveRobotMessage(
+  channel: DingtalkChannelInstance,
+  conversationId: string,
+): void {
+  const downstream = {
+    data: JSON.stringify({
+      msgId: `msg-${conversationId}`,
+      conversationType: '2',
+      conversationId,
+      sessionWebhook: 'https://oapi.dingtalk.com/robot/send?access_token=token',
+      senderNick: 'Alice',
+      senderStaffId: 'staff-1',
+      senderId: 'sender-1',
+      isInAtList: true,
+      text: { content: '@qwen-code hello' },
+    }),
+    headers: { messageId: `msg-${conversationId}` },
+  } as unknown as DWClientDownStream;
+  (channel as unknown as { onMessage(d: DWClientDownStream): void }).onMessage(
+    downstream,
+  );
+}
+
 function deferredPromise<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
   let reject!: (reason?: unknown) => void;
@@ -4724,6 +4748,83 @@ describe('DingtalkChannel outbound file delivery', () => {
     }
   });
 
+  it('delivers webhook files before the text their receipts ride', async () => {
+    // R12-3: the webhook reply paths used to deliver the receipt-bearing
+    // text BEFORE the files — the exact ordering R3-6 reversed for
+    // `pushProactive`. A webhook-wide rejection after the text chunks left
+    // a permanent `[File sent: …]` receipt with no surviving correction:
+    // the corrective notice rides the same dying webhook. Files now go out
+    // first, so no chunk ever ships a receipt for a file that fails.
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid123');
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      const { events, fileCalls, markdownCalls } = stubFileReplyFetch({
+        fileHandler: () =>
+          new Response(JSON.stringify({ errcode: 310000 }), { status: 200 }),
+        markdownHandler: (markdownCall) =>
+          markdownCall === 0
+            ? new Response(JSON.stringify({ errcode: 130101 }), { status: 200 })
+            : new Response(JSON.stringify({ errcode: 0 }), { status: 200 }),
+      });
+
+      await expect(
+        channel.sendMessage('cid123', `report body\n[FILE: ${file.path}]`),
+      ).rejects.toThrow(/no delivered notice: report\.txt/);
+
+      expect(fileCalls()).toHaveLength(1);
+      // The file was attempted BEFORE any markdown chunk could ship a
+      // receipt for it.
+      expect(events.indexOf('file')).toBeLessThan(events.indexOf('markdown'));
+      // The markdown that goes out carries the failure marker, never the
+      // receipt — call 0 is the rejected notice, call 1 the rewritten text.
+      const texts = markdownCalls().map((call) => {
+        const body = JSON.parse(String((call[1] as RequestInit).body)) as {
+          markdown: { text: string };
+        };
+        return body.markdown.text;
+      });
+      expect(texts.join('\n')).toContain('[File delivery failed: report.txt]');
+      expect(texts.join('\n')).not.toContain('[File sent: report.txt]');
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rewrites the receipt in the reply text when the notice lands', async () => {
+    // R12-3 sibling: when the failure notice DOES land, the text still used
+    // to ship the `[File sent: …]` receipt the notice corrects — the
+    // recipient kept both the false receipt and the correction. Mirror
+    // R3-6: a failed delivery rewrites its baked receipt before any chunk
+    // sends, and the turn resolves because the correction was delivered.
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid123');
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      const { fileCalls, markdownCalls } = stubFileReplyFetch({
+        fileHandler: () =>
+          new Response(JSON.stringify({ errcode: 310000 }), { status: 200 }),
+      });
+
+      await channel.sendMessage('cid123', `report body\n[FILE: ${file.path}]`);
+
+      expect(fileCalls()).toHaveLength(1);
+      expect(markdownCalls()).toHaveLength(2);
+      const texts = markdownCalls().map((call) => {
+        const body = JSON.parse(String((call[1] as RequestInit).body)) as {
+          markdown: { text: string };
+        };
+        return body.markdown.text;
+      });
+      expect(texts.join('\n')).toContain('[File delivery failed: report.txt]');
+      expect(texts.join('\n')).not.toContain('[File sent: report.txt]');
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
   it('uploads and sends a native file after path-free Markdown', async () => {
     const file = createTempFile('周报 final.PDF');
     try {
@@ -4761,7 +4862,9 @@ describe('DingtalkChannel outbound file delivery', () => {
           fileType: 'pdf',
         },
       });
-      expect(events).toEqual(['upload-token', 'upload', 'markdown', 'file']);
+      // R12-3: the file is delivered BEFORE the text chunk its receipt
+      // rides, so a webhook-wide rejection can never strand a receipt.
+      expect(events).toEqual(['upload-token', 'upload', 'file', 'markdown']);
     } finally {
       rmSync(file.dir, { recursive: true, force: true });
     }
@@ -4883,13 +4986,78 @@ describe('DingtalkChannel outbound file delivery', () => {
         ),
       ).rejects.toThrow(/no delivered notice: report\.txt/);
 
-      // R2-5: the delivery attempt now precedes finalization, so a send that
-      // can never deliver (no webhook) also never bakes its receipt into the
-      // card — the throw remains the outcome, and the silent return the R5-1
-      // fix removed stays removed.
-      expect(closeOutput).not.toHaveBeenCalled();
+      // R2-5: the delivery attempt still precedes finalization, so a send
+      // that can never deliver (no webhook) never bakes its receipt into the
+      // card. R12-2: the delivery throw now closes the display with EMPTY
+      // text before rethrowing, so the answer finalizes display-sanitized
+      // with receipts off instead of being replaced by the failed-terminal
+      // branch — the R5-1 throw remains the turn's outcome.
+      expect(closeOutput).toHaveBeenCalledWith(
+        'segment-1',
+        '',
+        'completed',
+        segment,
+      );
       expect(uploadCalls()).toHaveLength(1);
       expect(fileCalls()).toHaveLength(0);
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('finalizes the completed display when card-path file delivery fails', async () => {
+    // R12-2: `onResponseComplete`'s card path called `sendReplyFiles` with
+    // no try/catch — a throw exited before `closeOutput`, and ChannelBase's
+    // failed close then replaced the completed final answer with the generic
+    // failure card even though the robot/card API was still alive. Mirrors
+    // R10-1: close the display with empty text (the fallback sanitizer
+    // strips the markers, so no receipt survives) before rethrowing.
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid-1');
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      stubFileReplyFetch({
+        fileHandler: () =>
+          new Response(JSON.stringify({ errcode: 310000 }), { status: 200 }),
+        markdownHandler: () =>
+          new Response(JSON.stringify({ errcode: 130101 }), { status: 200 }),
+      });
+      const closeOutput = vi.fn().mockResolvedValue(true);
+      (
+        channel as unknown as {
+          interactionPresenter: { closeOutput: typeof closeOutput };
+        }
+      ).interactionPresenter = { closeOutput };
+      const segment = {
+        channelName: 'dingtalk',
+        sessionId: 'session-1',
+        runId: 'run-1',
+        segmentId: 'segment-1',
+        owner: { kind: 'channel_user', id: 'owner-1' },
+        target: {
+          channelName: 'dingtalk',
+          chatId: 'cid-1',
+          senderId: 'owner-1',
+          isGroup: true,
+        },
+      } as ChannelOutputSegmentContext;
+
+      await expect(
+        getCompleteHook(channel)(
+          'cid-1',
+          `[FILE: ${file.path}]`,
+          'session-1',
+          segment,
+        ),
+      ).rejects.toThrow(/no delivered notice: report\.txt/);
+
+      expect(closeOutput).toHaveBeenCalledWith(
+        'segment-1',
+        '',
+        'completed',
+        segment,
+      );
     } finally {
       rmSync(file.dir, { recursive: true, force: true });
     }
@@ -5210,7 +5378,9 @@ describe('DingtalkChannel outbound file delivery', () => {
             ? new Response('rejected', { status: 500 })
             : new Response(JSON.stringify({ errcode: 0 }), { status: 200 }),
         markdownHandler: (markdownCall) => {
-          if (markdownCall === 1) throw new Error('notice unavailable');
+          // R12-3: files go out before the text chunks, so the first
+          // markdown POST is the failure notice, not the receipt chunk.
+          if (markdownCall === 0) throw new Error('notice unavailable');
           return new Response(JSON.stringify({ errcode: 0 }), { status: 200 });
         },
       });
@@ -5251,8 +5421,10 @@ describe('DingtalkChannel outbound file delivery', () => {
       const { fileCalls, markdownCalls } = stubFileReplyFetch({
         fileHandler: () =>
           new Response(JSON.stringify({ errcode: 310000 }), { status: 200 }),
+        // R12-3: files go out before the text chunks, so the first
+        // markdown POST is the failure notice, not the receipt chunk.
         markdownHandler: (markdownCall) =>
-          markdownCall === 1
+          markdownCall === 0
             ? new Response(JSON.stringify({ errcode: 130101 }), { status: 200 })
             : new Response(JSON.stringify({ errcode: 0 }), { status: 200 }),
       });
@@ -5274,7 +5446,7 @@ describe('DingtalkChannel outbound file delivery', () => {
   it('fails a plain text reply when the webhook answers a non-2xx status', async () => {
     // The other half of the swallow: `!resp.ok` was logged and then followed by
     // `return true`, so a 429/5xx from the sessionWebhook was booked as sent
-    // and the `sendTextThenFiles` rescue never engaged for it either.
+    // and the file-rescue delivery never engaged for it either.
     const channel = createChannel();
     seedWebhook(channel, 'cid123');
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
@@ -5303,6 +5475,63 @@ describe('DingtalkChannel outbound file delivery', () => {
     await expect(channel.sendMessage('cid123', 'hello')).rejects.toThrow(
       /API code 310000/,
     );
+  });
+
+  it('skips the generic apology when the turn failed on reply delivery', async () => {
+    // R12-1: every delivery failure threw into `onMessage`'s catch-all, which
+    // POSTed 'Sorry, something went wrong processing your message.' through
+    // the same webhook — a factually wrong apology for a turn whose
+    // processing succeeded and whose only failure was a webhook rejection.
+    // The lifecycle failed event and the status card's failure surface are
+    // the user-facing failure signal; the apology stays reserved for
+    // processing failures.
+    const channel = createChannel();
+    seedWebhook(channel, 'cid123');
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ errcode: 130101, errmsg: 'flow' }), {
+        status: 200,
+      }),
+    );
+    // The exact error the reply delivery throws on the webhook rejection.
+    const deliveryError: unknown = await channel
+      .sendMessage('cid123', 'the answer')
+      .catch((error: unknown) => error);
+    (
+      channel as unknown as { handleInbound: ReturnType<typeof vi.fn> }
+    ).handleInbound.mockRejectedValueOnce(deliveryError);
+
+    driveRobotMessage(channel, 'cid123');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    // Only the failed answer POST — no apology rides the dying webhook.
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the generic apology for a processing failure', async () => {
+    // R12-1 control: the apology skip is scoped to delivery failures — a
+    // genuine processing failure still answers the user.
+    const channel = createChannel();
+    seedWebhook(channel, 'cid123');
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(
+        new Response(JSON.stringify({ errcode: 0 }), { status: 200 }),
+      );
+    (
+      channel as unknown as { handleInbound: ReturnType<typeof vi.fn> }
+    ).handleInbound.mockRejectedValueOnce(new Error('agent bridge crashed'));
+
+    driveRobotMessage(channel, 'cid123');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const apologyPosts = fetchSpy.mock.calls.filter((call) =>
+      String((call[1] as RequestInit | undefined)?.body ?? '').includes(
+        'Sorry, something went wrong processing your message.',
+      ),
+    );
+    expect(apologyPosts).toHaveLength(1);
   });
 
   it('opens and uploads at most five files from one response', async () => {
@@ -5359,18 +5588,21 @@ describe('DingtalkChannel outbound file delivery', () => {
       });
       const segmentContent = vi.fn().mockReturnValue(`[FILE: ${file.path}]`);
       const acceptsLateDelivery = vi.fn().mockReturnValue(true);
+      const terminalSettled = vi.fn().mockResolvedValue(undefined);
       (
         channel as unknown as {
           interactionPresenter: {
             closeOutput: typeof closeOutput;
             segmentContent: typeof segmentContent;
             acceptsLateDelivery: typeof acceptsLateDelivery;
+            terminalSettled: typeof terminalSettled;
           };
         }
       ).interactionPresenter = {
         closeOutput,
         segmentContent,
         acceptsLateDelivery,
+        terminalSettled,
       };
       const segment = {
         channelName: 'dingtalk',
@@ -5580,12 +5812,14 @@ describe('DingtalkChannel outbound file delivery', () => {
       const acceptsLateDelivery = vi.fn().mockReturnValue(true);
       // R10-3: a live run's card retained nothing — the fallback delivers.
       const terminalCardRetained = vi.fn().mockReturnValue(false);
+      const terminalSettled = vi.fn().mockResolvedValue(undefined);
       (
         channel as unknown as {
           interactionPresenter: {
             closeOutput: typeof closeOutput;
             segmentContent: typeof segmentContent;
             acceptsLateDelivery: typeof acceptsLateDelivery;
+            terminalSettled: typeof terminalSettled;
             terminalCardRetained: typeof terminalCardRetained;
           };
         }
@@ -5593,6 +5827,7 @@ describe('DingtalkChannel outbound file delivery', () => {
         closeOutput,
         segmentContent,
         acceptsLateDelivery,
+        terminalSettled,
         terminalCardRetained,
       };
       const segment = {
@@ -5640,18 +5875,21 @@ describe('DingtalkChannel outbound file delivery', () => {
       });
       const segmentContent = vi.fn().mockReturnValue(`[FILE: ${file.path}]`);
       const acceptsLateDelivery = vi.fn().mockReturnValue(true);
+      const terminalSettled = vi.fn().mockResolvedValue(undefined);
       (
         channel as unknown as {
           interactionPresenter: {
             closeOutput: typeof closeOutput;
             segmentContent: typeof segmentContent;
             acceptsLateDelivery: typeof acceptsLateDelivery;
+            terminalSettled: typeof terminalSettled;
           };
         }
       ).interactionPresenter = {
         closeOutput,
         segmentContent,
         acceptsLateDelivery,
+        terminalSettled,
       };
       const segment = {
         channelName: 'dingtalk',
@@ -5704,18 +5942,21 @@ describe('DingtalkChannel outbound file delivery', () => {
       const closeOutput = vi.fn().mockResolvedValue(true);
       const segmentContent = vi.fn().mockReturnValue(`[FILE: ${file.path}]`);
       const acceptsLateDelivery = vi.fn().mockReturnValue(true);
+      const terminalSettled = vi.fn().mockResolvedValue(undefined);
       (
         channel as unknown as {
           interactionPresenter: {
             closeOutput: typeof closeOutput;
             segmentContent: typeof segmentContent;
             acceptsLateDelivery: typeof acceptsLateDelivery;
+            terminalSettled: typeof terminalSettled;
           };
         }
       ).interactionPresenter = {
         closeOutput,
         segmentContent,
         acceptsLateDelivery,
+        terminalSettled,
       };
       const segment = {
         channelName: 'dingtalk',
@@ -5771,6 +6012,7 @@ describe('DingtalkChannel outbound file delivery', () => {
       const segmentContent = vi.fn().mockReturnValue(`[FILE: ${file.path}]`);
       const isRunActive = vi.fn().mockReturnValue(false);
       const acceptsLateDelivery = vi.fn().mockReturnValue(true);
+      const terminalSettled = vi.fn().mockResolvedValue(undefined);
       // R10-3: the card retained nothing — the fallback still delivers.
       const terminalCardRetained = vi.fn().mockReturnValue(false);
       (
@@ -5780,6 +6022,7 @@ describe('DingtalkChannel outbound file delivery', () => {
             segmentContent: typeof segmentContent;
             isRunActive: typeof isRunActive;
             acceptsLateDelivery: typeof acceptsLateDelivery;
+            terminalSettled: typeof terminalSettled;
             terminalCardRetained: typeof terminalCardRetained;
           };
         }
@@ -5788,6 +6031,7 @@ describe('DingtalkChannel outbound file delivery', () => {
         segmentContent,
         isRunActive,
         acceptsLateDelivery,
+        terminalSettled,
         terminalCardRetained,
       };
       const segment = {
@@ -5839,6 +6083,7 @@ describe('DingtalkChannel outbound file delivery', () => {
       const closeOutput = vi.fn().mockResolvedValue(false);
       const segmentContent = vi.fn().mockReturnValue(`[FILE: ${file.path}]`);
       const acceptsLateDelivery = vi.fn().mockReturnValue(true);
+      const terminalSettled = vi.fn().mockResolvedValue(undefined);
       const terminalCardRetained = vi.fn().mockReturnValue(true);
       (
         channel as unknown as {
@@ -5846,6 +6091,7 @@ describe('DingtalkChannel outbound file delivery', () => {
             closeOutput: typeof closeOutput;
             segmentContent: typeof segmentContent;
             acceptsLateDelivery: typeof acceptsLateDelivery;
+            terminalSettled: typeof terminalSettled;
             terminalCardRetained: typeof terminalCardRetained;
           };
         }
@@ -5853,6 +6099,7 @@ describe('DingtalkChannel outbound file delivery', () => {
         closeOutput,
         segmentContent,
         acceptsLateDelivery,
+        terminalSettled,
         terminalCardRetained,
       };
       const segment = {
@@ -5879,6 +6126,84 @@ describe('DingtalkChannel outbound file delivery', () => {
       expect(terminalCardRetained).toHaveBeenCalledWith('run-1', 'segment-1');
       expect(fileCalls()).toHaveLength(1);
       expect(markdownCalls()).toHaveLength(0);
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('holds the boundary fallback until the completion finalization settles', async () => {
+    // R10-3 (round 12): `retainedSegmentId` is written inside the enqueued
+    // finalization — after `statusCards.complete` plus the card API calls —
+    // while the boundary gate read `terminalCardRetained` synchronously. A
+    // completion landing in that tail read `false` and the fallback
+    // delivered the same content the card then retained. The gate must
+    // await the settlement instead of racing it.
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid-1');
+      const fileGate = deferredPromise<Response>();
+      const { events, fileCalls, markdownCalls } = stubFileReplyFetch({
+        fileHandler: () => fileGate.promise as unknown as Response,
+      });
+      const completeGate = deferredPromise<boolean>();
+      const statusCards = {
+        ensure: vi.fn(),
+        replace: vi.fn(),
+        complete: vi.fn(() => completeGate.promise),
+      };
+      const presenter = new DingtalkInteractionPresenter({
+        statusCards: statusCards as never,
+        sendFallback: vi.fn(),
+      });
+      presenter.registerRun('run-1', 'owner-1', {
+        chatId: 'cid-1',
+        isGroup: true,
+      });
+      const segment = {
+        channelName: 'dingtalk',
+        sessionId: 'session-1',
+        runId: 'run-1',
+        segmentId: 'segment-1',
+        owner: { kind: 'channel_user', id: 'owner-1' },
+        target: {
+          channelName: 'dingtalk',
+          chatId: 'cid-1',
+          senderId: 'owner-1',
+          isGroup: true,
+        },
+      } as ChannelOutputSegmentContext;
+      presenter.appendOutput(segment, `[FILE: ${file.path}]`);
+      (
+        channel as unknown as {
+          interactionPresenter: DingtalkInteractionPresenter;
+        }
+      ).interactionPresenter = presenter;
+
+      const boundary = getOutputSegmentEndHook(channel)(
+        'cid-1',
+        'session-1',
+        segment,
+        'response_boundary',
+      );
+      await vi.waitFor(() => expect(events).toContain('file'));
+
+      // The run completes while the file delivery is in flight; the card
+      // finalization hangs on the status-card API.
+      presenter.terminalizeRun('run-1', 'completed');
+      fileGate.resolve(
+        new Response(JSON.stringify({ errcode: 0 }), { status: 200 }),
+      );
+      // Flush the delivery tail — pre-fix the fallback already POSTed.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(markdownCalls()).toHaveLength(0);
+
+      // The card retained the segment — the fallback stays suppressed.
+      completeGate.resolve(true);
+      await boundary;
+      expect(fileCalls()).toHaveLength(1);
+      expect(markdownCalls()).toHaveLength(0);
+      expect(presenter.terminalCardRetained('run-1', 'segment-1')).toBe(true);
     } finally {
       rmSync(file.dir, { recursive: true, force: true });
     }

@@ -287,6 +287,46 @@ describe('DingtalkInteractionPresenter', () => {
     expect(presenter.terminalCardRetained('run-3', 'segment-A')).toBe(false);
   });
 
+  it('settles the retained-segment gate with the terminal finalization', async () => {
+    // R10-3 (round 12): `retainedSegmentId` used to be written only INSIDE
+    // the enqueued finalization — after `statusCards.complete` and the card
+    // API calls resolve — while a boundary close still in flight read the
+    // gate synchronously. A completion landing in that tail read `false`
+    // and delivered the retained segment a second time. The gate must
+    // settle together with the finalization instead of racing it.
+    const completeGate = deferred<boolean>();
+    const statusCards = {
+      ensure: vi.fn(),
+      replace: vi.fn(),
+      complete: vi.fn(() => completeGate.promise),
+    };
+    const presenter = new DingtalkInteractionPresenter({
+      statusCards: statusCards as never,
+    });
+    presenter.registerRun('run-1', 'owner-1', target);
+    presenter.appendOutput(segment('segment-B'), 'active content');
+
+    presenter.terminalizeRun('run-1', 'completed');
+
+    expect(presenter.terminalCardRetained('run-1', 'segment-B')).toBe(false);
+    let settled = false;
+    const settlement = presenter.terminalSettled('run-1').then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    completeGate.resolve(true);
+    await settlement;
+    expect(presenter.terminalCardRetained('run-1', 'segment-B')).toBe(true);
+
+    // A run the presenter never registered has no finalization to await.
+    await expect(
+      presenter.terminalSettled('run-missing'),
+    ).resolves.toBeUndefined();
+  });
+
   it('removes stale segment presentations on a terminal close', async () => {
     // R9-2: `closeOutput` answered false on `run.terminal` BEFORE deleting,
     // and `terminalizeRun` deletes only the active segment — a boundary

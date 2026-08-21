@@ -95,6 +95,7 @@ export class DingtalkInteractionPresenter {
     {
       reason: 'completed' | 'failed' | 'cancelled';
       retainedSegmentId?: string;
+      finalization?: Promise<void>;
     }
   >();
 
@@ -220,6 +221,18 @@ export class DingtalkInteractionPresenter {
    */
   terminalCardRetained(runId: string, segmentId: string): boolean {
     return this.terminalReasons.get(runId)?.retainedSegmentId === segmentId;
+  }
+
+  /**
+   * R10-3: `retainedSegmentId` settles only when the terminal finalization
+   * resolves — the card write chain plus the DingTalk finalization calls can
+   * outlast a boundary close still in flight, and a gate reading
+   * `terminalCardRetained` before then sees `false` and delivers the
+   * retained segment a second time. Await this before consulting that gate;
+   * it resolves immediately for runs with no recorded finalization.
+   */
+  terminalSettled(runId: string): Promise<void> {
+    return this.terminalReasons.get(runId)?.finalization ?? Promise.resolve();
   }
 
   closeOutput(
@@ -421,6 +434,13 @@ export class DingtalkInteractionPresenter {
         }
       }
     });
+    const entry = this.terminalReasons.get(runId);
+    if (entry) {
+      entry.finalization = finalization.then(
+        () => undefined,
+        () => undefined,
+      );
+    }
     void finalization.then(
       () => {
         if (this.runs.get(runId) === run) this.runs.delete(runId);

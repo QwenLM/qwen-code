@@ -283,6 +283,18 @@ async function readDingTalkErrorCode(
   return undefined;
 }
 
+/**
+ * R12-1: a reply-delivery failure. ChannelBase's turn runner books the turn
+ * failed and rethrows, and the error lands in `onMessage`'s catch-all —
+ * which answers a generic 'Sorry, something went wrong processing your
+ * message.' That apology claims the message PROCESSING failed, factually
+ * wrong for a turn whose processing succeeded and whose only failure was a
+ * webhook rejecting a delivery chunk. The lifecycle failed event and the
+ * status card's failure surface already signal the failure to the user, so
+ * the catch-all skips its reply for this class.
+ */
+class DingTalkDeliveryError extends Error {}
+
 export class DingtalkChannel extends ChannelBase {
   private client: DWClient;
   private readonly atSender: boolean;
@@ -902,7 +914,7 @@ export class DingtalkChannel extends ChannelBase {
         process.stderr.write(
           `[DingTalk:${this.name}] sendMessage failed: HTTP ${resp.status} ${detail}\n`,
         );
-        throw new Error(
+        throw new DingTalkDeliveryError(
           `DingTalk sendMessage failed: HTTP ${resp.status}${detail ? ` ${detail}` : ''}`,
         );
       }
@@ -915,60 +927,45 @@ export class DingtalkChannel extends ChannelBase {
         process.stderr.write(
           `[DingTalk:${this.name}] sendMessage failed: API code ${code}\n`,
         );
-        throw new Error(`DingTalk sendMessage failed: API code ${code}`);
+        throw new DingTalkDeliveryError(
+          `DingTalk sendMessage failed: API code ${code}`,
+        );
       }
     }
     return true;
   }
 
   /**
-   * Send the text, then the files — and send the files even when the text
-   * send throws part-way through.
-   *
-   * R1-6: `prepareOutgoingContent` uploads the files and bakes their
-   * `[File sent: …]` receipts INTO the text before anything is delivered, and
-   * text over `CHUNK_LIMIT` goes out as several POSTs. If a later chunk fails,
-   * the receipt is already in the user's chat while the files never arrive and
-   * no notice is emitted — because the per-file `[File delivery failed: …]`
-   * notice lives inside the delivery path the throw skipped. ChannelBase marks
-   * the delivery failed and never retries, so the chat keeps a receipt for a
-   * file that does not exist.
-   *
-   * Running the delivery on the failure path either lands the files or emits
-   * their notices. The text error is rethrown unchanged afterwards, so the
-   * caller's failure accounting is untouched; a failure inside the delivery
-   * itself is logged rather than allowed to replace it.
-   *
-   * `sendText` returning `false` is the "no webhook for this chat" answer, not
-   * a failure — it keeps the pre-existing behaviour of skipping the files.
+   * R12-3 (mirrors R3-6 on the webhook path): files go out BEFORE the text
+   * chunks their receipts ride. The old order shipped the receipts first; a
+   * webhook-wide rejection after the text chunks (quota, revocation — the
+   * causes R2-9's own comment enumerates) left a permanent `[File sent: …]`
+   * receipt with no surviving correction, because the corrective notice
+   * rides the same dying webhook. `sendReplyFiles` rewrites each failed
+   * delivery's baked receipt into the failure marker before any chunk sends,
+   * so the text only ever claims a delivery that happened; R1-6's concern —
+   * files stranded by a text failure — is subsumed by the order itself. The
+   * chunk failure takes precedence over the delivery failure, same as
+   * `pushProactive`.
    */
-  private async sendTextThenFiles(
-    sendText: () => Promise<boolean | void>,
-    sendFiles: () => Promise<void>,
+  private async deliverPreparedReply(
+    chatId: string,
+    prepared: PreparedDingTalkOutput,
+    atUserId?: string,
   ): Promise<void> {
+    const { text, deliveryError } = await this.sendReplyFiles(
+      chatId,
+      prepared.files,
+      prepared.text,
+    );
     let textError: unknown;
-    let deliverFiles = true;
     try {
-      deliverFiles = (await sendText()) !== false;
+      await this.sendPreparedReply(chatId, text, atUserId);
     } catch (error) {
       textError = error;
     }
-    if (deliverFiles) {
-      try {
-        await sendFiles();
-      } catch (deliveryError) {
-        if (textError === undefined) throw deliveryError;
-        process.stderr.write(
-          `[DingTalk:${this.name}] file delivery after a failed text send also failed: ${sanitizeLogText(
-            deliveryError instanceof Error
-              ? deliveryError.message
-              : String(deliveryError),
-            300,
-          )}\n`,
-        );
-      }
-    }
     if (textError !== undefined) throw textError;
+    if (deliveryError !== undefined) throw deliveryError;
   }
 
   private async sendReply(
@@ -983,10 +980,7 @@ export class DingtalkChannel extends ChannelBase {
     const prepared = await this.prepareOutgoingContent(text);
     // R7-4: residue-only input sanitizes to nothing — nothing to send.
     if (!prepared.text && prepared.files.length === 0) return;
-    await this.sendTextThenFiles(
-      () => this.sendPreparedReply(chatId, prepared.text, atUserId),
-      () => this.sendReplyFiles(chatId, prepared.files),
-    );
+    await this.deliverPreparedReply(chatId, prepared, atUserId);
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
@@ -1311,8 +1305,9 @@ export class DingtalkChannel extends ChannelBase {
   private async sendReplyFiles(
     chatId: string,
     files: readonly PreparedDingTalkFile[],
-  ): Promise<void> {
-    if (files.length === 0) return;
+    receiptText?: string,
+  ): Promise<{ text: string; deliveryError?: DingTalkDeliveryError }> {
+    if (files.length === 0) return { text: receiptText ?? '' };
     const webhook = this.webhooks.get(chatId);
     if (!webhook) {
       // R5-1: returning here drops every prepared file silently. The card path
@@ -1325,7 +1320,7 @@ export class DingtalkChannel extends ChannelBase {
       // the turn would resolve successfully while the chat keeps a permanent
       // receipt for a file that was never delivered. The notice itself needs
       // the same missing webhook, so there is nothing to emit: fail the send.
-      throw new Error(
+      throw new DingTalkDeliveryError(
         `DingTalk file delivery failed with no delivered notice: ${files
           .map((file) => sanitizeLogText(file.fileName, 255))
           .join(', ')}`,
@@ -1341,8 +1336,17 @@ export class DingtalkChannel extends ChannelBase {
     // the undelivered notices instead and fail the send once every file has had
     // its turn.
     const undeliveredNotices: string[] = [];
+    // R12-3 (mirrors R3-6): a caller delivering text whose `[File sent: …]`
+    // receipts were baked before delivery passes that text as `receiptText`;
+    // a failed delivery rewrites its baked receipt into the failure marker
+    // BEFORE any chunk sends, so the text only ever claims a delivery that
+    // happened. Card callers pass nothing and keep the pre-existing shape.
+    let outgoingText = receiptText;
+    let receiptFrom = 0;
 
     for (const file of files) {
+      const receipt = `[File sent: ${file.fileName}]`;
+      const receiptAt = outgoingText?.indexOf(receipt, receiptFrom) ?? -1;
       try {
         await this.postRobotFileMessage(
           webhook,
@@ -1356,6 +1360,7 @@ export class DingtalkChannel extends ChannelBase {
           },
           'session-webhook',
         );
+        if (receiptAt !== -1) receiptFrom = receiptAt + receipt.length;
       } catch (error) {
         process.stderr.write(
           `[DingTalk:${this.name}] outbound file delivery failed (${sanitizeLogText(
@@ -1366,11 +1371,16 @@ export class DingtalkChannel extends ChannelBase {
             300,
           )}\n`,
         );
+        const notice = `[File delivery failed: ${file.fileName}]`;
+        if (receiptAt !== -1 && outgoingText !== undefined) {
+          outgoingText =
+            outgoingText.slice(0, receiptAt) +
+            notice +
+            outgoingText.slice(receiptAt + receipt.length);
+          receiptFrom = receiptAt + notice.length;
+        }
         try {
-          await this.sendPreparedReply(
-            chatId,
-            `[File delivery failed: ${file.fileName}]`,
-          );
+          await this.sendPreparedReply(chatId, notice);
         } catch (noticeError) {
           process.stderr.write(
             `[DingTalk:${this.name}] file failure notice failed: ${sanitizeLogText(
@@ -1385,11 +1395,21 @@ export class DingtalkChannel extends ChannelBase {
       }
     }
 
-    if (undeliveredNotices.length > 0) {
-      throw new Error(
-        `DingTalk file delivery failed with no delivered notice: ${undeliveredNotices.join(', ')}`,
-      );
-    }
+    const deliveryError =
+      undeliveredNotices.length > 0
+        ? new DingTalkDeliveryError(
+            `DingTalk file delivery failed with no delivered notice: ${undeliveredNotices.join(', ')}`,
+          )
+        : undefined;
+    // Callers without a receipt carrier (the card paths) observe the failure
+    // only through this throw, so it stays their observable outcome (R2-9);
+    // receipt-rewriting callers deliver the corrected text first and fail
+    // the turn afterwards.
+    if (deliveryError && outgoingText === undefined) throw deliveryError;
+    return {
+      text: outgoingText ?? '',
+      ...(deliveryError ? { deliveryError } : {}),
+    };
   }
 
   private async sendProactiveFile(
@@ -1962,10 +1982,7 @@ export class DingtalkChannel extends ChannelBase {
       ? this.sessionMentionTargets.get(sessionId)
       : undefined;
     if (atUserId) this.sessionMentionTargets.delete(sessionId);
-    await this.sendTextThenFiles(
-      () => this.sendPreparedReply(chatId, prepared.text, atUserId),
-      () => this.sendReplyFiles(chatId, prepared.files),
-    );
+    await this.deliverPreparedReply(chatId, prepared, atUserId);
   }
 
   private async sendFallbackReply(
@@ -2002,7 +2019,23 @@ export class DingtalkChannel extends ChannelBase {
       // sendReplyFiles throw) keeps the receipts off the card entirely; a
       // failure with a delivered notice keeps the same correction the
       // reply path has always relied on.
-      await this.sendReplyFiles(chatId, prepared.files);
+      try {
+        await this.sendReplyFiles(chatId, prepared.files);
+      } catch (error) {
+        // R12-2 (mirrors R10-1): the throw used to exit before
+        // `closeOutput`, and ChannelBase's failed close replaced the
+        // completed final answer with the generic failure card even though
+        // the robot/card API was still alive. The empty text keeps R2-5's
+        // intent — the display sanitizer strips the markers, so no receipt
+        // survives the failed delivery.
+        await this.interactionPresenter.closeOutput(
+          segment.segmentId,
+          '',
+          'completed',
+          segment,
+        );
+        throw error;
+      }
       if (
         await this.interactionPresenter.closeOutput(
           segment.segmentId,
@@ -2132,7 +2165,10 @@ export class DingtalkChannel extends ChannelBase {
     if (!presenter.acceptsLateDelivery(segment.runId)) return;
     // R10-3: a run COMPLETING during the prepare finalizes the continuity
     // card retaining this segment's content; the fallback would deliver the
-    // same content a second time. Files already went out above.
+    // same content a second time. Files already went out above. The retained
+    // flag settles only when that finalization resolves, so await the
+    // settlement instead of racing it.
+    await presenter.terminalSettled(segment.runId);
     if (presenter.terminalCardRetained(segment.runId, segment.segmentId)) {
       return;
     }
@@ -2650,6 +2686,12 @@ export class DingtalkChannel extends ChannelBase {
         process.stderr.write(
           `[DingTalk:${this.name}] Error handling message: ${err}\n`,
         );
+        // R12-1: a reply-delivery failure already has its user-facing
+        // signal — the lifecycle failed event and the status card's failure
+        // state. The generic apology would claim a processing failure that
+        // did not happen, over the same webhook that just rejected the
+        // delivery.
+        if (err instanceof DingTalkDeliveryError) return;
         this.sendMessage(
           chatId,
           'Sorry, something went wrong processing your message.',
