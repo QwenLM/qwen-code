@@ -1,5 +1,5 @@
 {
-  "name": "@trycua/cua-driver",
+  "name": "@qwen-code/qwen-cua-driver",
   "version": "0.20.0",
   "description": "Rust-backed Cua Driver SDK and embedded Node host",
   "type": "module",

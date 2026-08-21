@@ -194,7 +194,7 @@ try {
       "--ts-dir",
       typescriptOutput,
       "--lib-package-base",
-      "@trycua/cua-driver",
+      "@qwen-code/qwen-cua-driver",
       "--lib-node-triple",
       "--no-format",
     ],

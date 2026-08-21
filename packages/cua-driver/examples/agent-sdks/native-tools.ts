@@ -9,7 +9,7 @@ import {
   PressKeyInput,
   ToolResult,
   TypeTextInput,
-} from '@trycua/cua-driver';
+} from '@qwen-code/qwen-cua-driver';
 
 type McpContent =
   | { type: 'text'; text: string }

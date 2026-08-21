@@ -19,8 +19,8 @@ const nodeTriple =
       : `linux-${process.arch}-${process.report.getReport().header.glibcVersionRuntime ? "gnu" : "musl"}`
 const library = path.resolve(
   testDirectory,
-  "../node_modules/@trycua",
-  `cua-driver-${nodeTriple}`,
+  "../node_modules/@qwen-code",
+  `qwen-cua-driver-${nodeTriple}`,
   libraryName,
 )
 
@@ -28,8 +28,8 @@ test(
   "embedded subpath is the same generated Rust host as the SDK root",
   { skip: !existsSync(library) },
   async () => {
-    const root = await import("@trycua/cua-driver")
-    const embedded = await import("@trycua/cua-driver/embedded")
+    const root = await import("@qwen-code/qwen-cua-driver")
+    const embedded = await import("@qwen-code/qwen-cua-driver/embedded")
 
     assert.equal(embedded.EmbeddedCuaDriverHost, root.EmbeddedCuaDriverHost)
     assert.equal(embedded.EmbeddedDriverHostOptions, root.EmbeddedDriverHostOptions)

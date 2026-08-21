@@ -42,8 +42,8 @@ const localPackage = join(
   driverRoot,
   "typescript",
   "node_modules",
-  "@trycua",
-  `cua-driver-${nodeTriple}`,
+  "@qwen-code",
+  `qwen-cua-driver-${nodeTriple}`,
 )
 mkdirSync(localPackage, { recursive: true })
 copyFileSync(source, join(localPackage, file))
@@ -61,7 +61,7 @@ writeFileSync(
   join(localPackage, "package.json"),
   `${JSON.stringify(
     {
-      name: `@trycua/cua-driver-${nodeTriple}`,
+      name: `@qwen-code/qwen-cua-driver-${nodeTriple}`,
       version: "0.0.0-local",
       private: true,
     },

@@ -21,8 +21,8 @@ const nodeTriple =
       : `linux-${process.arch}-${process.report.getReport().header.glibcVersionRuntime ? "gnu" : "musl"}`
 const library = path.resolve(
   testDirectory,
-  "../node_modules/@trycua",
-  `cua-driver-${nodeTriple}`,
+  "../node_modules/@qwen-code",
+  `qwen-cua-driver-${nodeTriple}`,
   libraryName,
 )
 
@@ -71,12 +71,12 @@ process.stdin.on("end", () => server.close(() => process.exit(0)));
     )
     chmodSync(binaryPath, 0o755)
 
-    const { EmbeddedCuaDriverHost } = await import("@trycua/cua-driver/embedded")
+    const { EmbeddedCuaDriverHost } = await import("@qwen-code/qwen-cua-driver/embedded")
     const embedded = new EmbeddedCuaDriverHost(binaryPath, "com.example.t3")
 
     try {
       const connection = await embedded.start()
-      const sdk = await import("@trycua/cua-driver")
+      const sdk = await import("@qwen-code/qwen-cua-driver")
       const driver = sdk.CuaDriver.connect(connection.socketPath)
       assert.equal(driver.socketPath(), connection.socketPath)
       assert.deepEqual(JSON.parse(await driver.listToolsJson()), {
@@ -122,7 +122,7 @@ test(
     try {
       await readyPromise
       assert.equal(existsSync(socketPath), true)
-      const sdk = await import("@trycua/cua-driver")
+      const sdk = await import("@qwen-code/qwen-cua-driver")
       const {
         ActionEffect,
         ActionRoute,
@@ -137,11 +137,11 @@ test(
       } = sdk
       assert.equal("StdioMcpTransport" in sdk, false)
       await assert.rejects(
-        import("@trycua/cua-driver/sdk"),
+        import("@qwen-code/qwen-cua-driver/sdk"),
         error => error?.code === "ERR_PACKAGE_PATH_NOT_EXPORTED",
       )
       await assert.rejects(
-        import("@trycua/cua-driver/native"),
+        import("@qwen-code/qwen-cua-driver/native"),
         error => error?.code === "ERR_PACKAGE_PATH_NOT_EXPORTED",
       )
       const driver = CuaDriver.connect(socketPath)
@@ -235,7 +235,7 @@ test(
   "generated Node SDK can own the runtime in process",
   { skip: !existsSync(library), timeout: 10_000 },
   async () => {
-    const { CuaDriver, DriverExecutionMode } = await import("@trycua/cua-driver")
+    const { CuaDriver, DriverExecutionMode } = await import("@qwen-code/qwen-cua-driver")
     const driver = CuaDriver.create(undefined)
     try {
       assert.equal(driver.executionMode(), DriverExecutionMode.Embedded)

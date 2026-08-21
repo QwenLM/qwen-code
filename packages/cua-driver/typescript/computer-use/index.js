@@ -1,5 +1,5 @@
 /**
- * Standalone Computer Use facade over the named @trycua/cua-driver SDK.
+ * Standalone Computer Use facade over the named @qwen-code/qwen-cua-driver SDK.
  * The caller owns revision delivery state; CuaDriver owns native identity,
  * authorization, transport, and cleanup.
  */
@@ -12,7 +12,7 @@ const DEFAULT_SESSION_TTL_SECONDS = 60 * 60;
 const DEFAULT_IDLE_TTL_SECONDS = 5 * 60;
 
 async function loadCuaDriver() {
-  return import("@trycua/cua-driver");
+  return import("@qwen-code/qwen-cua-driver");
 }
 
 export class ComputerUseError extends Error {
