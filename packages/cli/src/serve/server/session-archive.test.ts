@@ -9,6 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  SessionIdCaseConflictError,
   SessionService,
   SessionWriterConflictError,
   SessionWriterLostError,
@@ -29,8 +30,10 @@ import {
   archiveDaemonSessions,
   assertSessionArchived,
   assertSessionLoadable,
+  assertSessionRestorable,
   deleteDaemonSessionIfOrphan,
   deleteDaemonSessions,
+  resolveSessionIdForRestore,
   SessionArchiveCoordinator,
   unarchiveDaemonSessions,
   DaemonDrainingError,
@@ -67,7 +70,7 @@ describe('assertSessionLoadable', () => {
     expect(getLocationSpy).toHaveBeenCalledWith(sessionId);
   });
 
-  it('resolves active/archive conflicts to the active copy for loading', async () => {
+  it('rejects active/archive conflicts using project-aware JSONL heads', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-446655440001';
     writeSessionFile(workspaceDir, sessionId, 'active');
     writeSessionFile(workspaceDir, sessionId, 'archived');
@@ -76,12 +79,57 @@ describe('assertSessionLoadable', () => {
       'getSessionLocation',
     );
 
-    // Loads read the active copy (CLI resume parity); only mutations refuse
-    // a session persisted in both states.
-    await expect(assertSessionLoadable(workspaceDir, sessionId)).resolves.toBe(
-      'active',
-    );
+    await expect(
+      assertSessionLoadable(workspaceDir, sessionId),
+    ).rejects.toThrow(SessionConflictError);
     expect(getLocationSpy).toHaveBeenCalledWith(sessionId);
+  });
+
+  it('resolves an exact active/archive conflict only for restore', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440001';
+    writeSessionFile(workspaceDir, sessionId, 'active');
+    writeSessionFile(workspaceDir, sessionId, 'archived');
+    const service = new SessionService(workspaceDir);
+
+    await expect(resolveSessionIdForRestore(service, sessionId)).resolves.toBe(
+      sessionId,
+    );
+    await expect(
+      assertSessionRestorable(workspaceDir, sessionId, sessionId),
+    ).resolves.toBe('active');
+  });
+
+  it('does not restore a differently spelled active/archive conflict', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440001';
+    const storageSessionId = sessionId.toUpperCase();
+    vi.spyOn(SessionService.prototype, 'getSessionLocation').mockResolvedValue(
+      'conflict',
+    );
+
+    await expect(
+      assertSessionRestorable(workspaceDir, storageSessionId, sessionId),
+    ).rejects.toThrow(SessionConflictError);
+  });
+
+  it('maps a differently spelled active/archive conflict without another read', async () => {
+    const sessionId = '550e8400-e29b-41d4-a716-446655440001';
+    const candidateSessionId = sessionId.toUpperCase();
+    const service = new SessionService(workspaceDir);
+    const conflict = new SessionIdCaseConflictError(
+      sessionId,
+      candidateSessionId,
+    );
+    vi.spyOn(service, 'findSessionIdIgnoringCase').mockRejectedValue(conflict);
+    const getLocation = vi
+      .spyOn(service, 'getSessionLocation')
+      .mockRejectedValue(
+        Object.assign(new Error('catalog failed'), { code: 'EIO' }),
+      );
+
+    await expect(
+      resolveSessionIdForRestore(service, sessionId),
+    ).rejects.toThrow(SessionConflictError);
+    expect(getLocation).not.toHaveBeenCalled();
   });
 
   it('ignores archived files that do not belong to this project', async () => {

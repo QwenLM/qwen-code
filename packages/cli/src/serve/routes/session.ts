@@ -13,7 +13,6 @@ import {
   GROUP_COLOR_OPTIONS,
   GitWorktreeService,
   SessionOrganizationError,
-  SessionIdCaseConflictError,
   SESSION_TRANSCRIPT_MAX_LIMIT,
   SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES,
   SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
@@ -30,7 +29,6 @@ import {
   type SessionGroupColor,
   type SessionGroupPresetColor,
   type SessionArchiveState,
-  type SessionService,
   parseGoalControlRequest,
 } from '@qwen-code/qwen-code-core';
 import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifacts';
@@ -95,9 +93,11 @@ import {
   archiveDaemonSessions,
   assertSessionArchived,
   assertSessionLoadable,
+  assertSessionRestorable,
   deleteDaemonSessionIfOrphan,
   deleteDaemonSessions,
   logSessionArchiveWarning,
+  resolveSessionIdForRestore,
   type SessionArchiveCoordinator,
   unarchiveDaemonSessions,
 } from '../server/session-archive.js';
@@ -1143,7 +1143,6 @@ export function registerSessionRoutes(
     route: string,
     sessionIds: readonly string[],
     archiveState: SessionArchiveState | 'any',
-    options: { allowActiveConflict?: boolean } = {},
   ): Promise<WorkspaceRuntime | undefined> => {
     const target = resolveQualifiedSessionTarget(req, res);
     if (!target) return undefined;
@@ -1159,16 +1158,10 @@ export function registerSessionRoutes(
     const service = createWorkspaceRuntimeSessionService(runtime);
     for (const sessionId of sessionIds) {
       const location = await service.getSessionLocation(sessionId);
-      const usesActiveCopy =
-        options.allowActiveConflict === true &&
-        archiveState === 'active' &&
-        location === 'conflict';
-      if (location === 'conflict' && !usesActiveCopy) {
-        throw new SessionConflictError(sessionId);
-      }
+      if (location === 'conflict') throw new SessionConflictError(sessionId);
       if (
         location === undefined ||
-        (archiveState !== 'any' && location !== archiveState && !usesActiveCopy)
+        (archiveState !== 'any' && location !== archiveState)
       ) {
         throw new SessionNotFoundError(sessionId);
       }
@@ -1650,16 +1643,14 @@ export function registerSessionRoutes(
     const activeInRuntime = async (
       runtime: WorkspaceRuntime,
     ): Promise<boolean> => {
-      const service = createWorkspaceRuntimeSessionService(runtime);
-      const location = await service.getSessionLocation(sessionId);
-      if (location === 'archived') {
-        throw new SessionArchivedError(sessionId);
-      }
-      // Both readable states still have one active copy. Treat that copy as an
-      // ownership candidate; the scans below reject multiple candidate
-      // runtimes before any transcript is read.
-      if (location !== 'active' && location !== 'conflict') return false;
+      const location = await assertSessionLoadable(
+        runtime.workspaceCwd,
+        sessionId,
+        runtime.sessionRuntimeBaseDir,
+      );
+      if (location !== 'active') return false;
       if (!isInternalWorkspaceRuntime(runtime)) return true;
+      const service = createWorkspaceRuntimeSessionService(runtime);
       return (
         (await readLoadableLiveConversationMetadata(sessionId, service)) !==
         undefined
@@ -1725,24 +1716,7 @@ export function registerSessionRoutes(
       for (const ordinaryRuntime of workspaceRegistry.list()) {
         const ordinaryService =
           createWorkspaceRuntimeSessionService(ordinaryRuntime);
-        let collides = false;
-        try {
-          const persistedSessionId =
-            await ordinaryService.findSessionIdIgnoringCase(sessionId);
-          collides =
-            persistedSessionId !== undefined &&
-            (await ordinaryService.sessionExistsInAnyState(persistedSessionId));
-        } catch (error) {
-          if (
-            error instanceof SessionIdCaseConflictError &&
-            error.reason === 'unreadable_transcript'
-          ) {
-            continue;
-          }
-          // Other failed scans cannot prove that the internal owner is unique.
-          collides = true;
-        }
-        if (collides) {
+        if (await ordinaryService.sessionExistsInAnyState(sessionId)) {
           ordinaryCollisions.push(ordinaryRuntime);
         }
       }
@@ -1901,17 +1875,6 @@ export function registerSessionRoutes(
     }
     const matches = new Set<WorkspaceRuntime>();
     if (owner.kind === 'found') matches.add(owner.runtime);
-    const persistedSessionIdInRuntime = async (
-      service: SessionService,
-    ): Promise<string | undefined> => {
-      if (await service.sessionExistsInAnyState(sessionId)) return sessionId;
-      if (owner.kind !== 'not_found') return undefined;
-      const candidate = await service.findSessionIdIgnoringCase(sessionId);
-      return candidate !== undefined &&
-        (await service.sessionExistsInAnyState(candidate))
-        ? candidate
-        : undefined;
-    };
     for (const entry of workspaceRegistry.listAllEntries()) {
       const generation = entry.current;
       if (!entry.internal || !generation) continue;
@@ -1920,13 +1883,13 @@ export function registerSessionRoutes(
       }
       const runtime = generation.runtime;
       const service = createWorkspaceRuntimeSessionService(runtime);
-      const persistedSessionId = await persistedSessionIdInRuntime(service);
+      const exists = await service.sessionExistsInAnyState(sessionId);
       if (!assertCurrentInternalGeneration(entry, generation, res)) {
         return undefined;
       }
-      if (persistedSessionId === undefined) continue;
+      if (!exists) continue;
       const metadata = await readLoadableLiveConversationMetadata(
-        persistedSessionId,
+        sessionId,
         service,
       );
       if (!assertCurrentInternalGeneration(entry, generation, res)) {
@@ -1938,7 +1901,7 @@ export function registerSessionRoutes(
     if (owner.kind !== 'found' || isInternalWorkspaceRuntime(owner.runtime)) {
       for (const runtime of workspaceRegistry.list()) {
         const service = createWorkspaceRuntimeSessionService(runtime);
-        if ((await persistedSessionIdInRuntime(service)) !== undefined) {
+        if (await service.sessionExistsInAnyState(sessionId)) {
           matches.add(runtime);
         }
       }
@@ -3155,35 +3118,19 @@ export function registerSessionRoutes(
           async () => {
             const sessionService =
               createWorkspaceRuntimeSessionService(runtime);
-            let persistedSessionId: string | undefined;
-            try {
-              persistedSessionId =
-                await sessionService.findSessionIdIgnoringCase(sessionId);
-            } catch (error) {
-              if (error instanceof SessionIdCaseConflictError) {
-                let bothStates = false;
-                try {
-                  bothStates =
-                    (await sessionService.getSessionLocation(
-                      error.candidateSessionId ?? sessionId,
-                    )) === 'conflict';
-                } catch {
-                  // This recheck only refines the response; preserve the known
-                  // conflict when storage cannot classify it a second time.
-                  throw error;
-                }
-                if (bothStates) throw new SessionConflictError(sessionId);
-              }
-              throw error;
-            }
+            const persistedSessionId = await resolveSessionIdForRestore(
+              sessionService,
+              sessionId,
+            );
             if (persistedSessionId) {
               restoredStorageSessionId = persistedSessionId;
             } else if (isInternalWorkspaceRuntime(runtime)) {
               throw new SessionNotFoundError(sessionId);
             }
-            const location = await assertSessionLoadable(
+            const location = await assertSessionRestorable(
               workspaceCwd,
               restoredStorageSessionId,
+              sessionId,
               runtime.sessionRuntimeBaseDir,
             );
             if (location === undefined && isInternalWorkspaceRuntime(runtime)) {
@@ -3875,9 +3822,7 @@ export function registerSessionRoutes(
     await handleSessionExport(req, res, {
       route,
       resolveRuntime: (sessionId) =>
-        resolveQualifiedSessionRuntime(req, res, route, [sessionId], 'active', {
-          allowActiveConflict: true,
-        }),
+        resolveQualifiedSessionRuntime(req, res, route, [sessionId], 'active'),
       workspaceQualified: true,
     });
   });
@@ -4004,7 +3949,6 @@ export function registerSessionRoutes(
               route,
               [sessionId],
               'active',
-              { allowActiveConflict: true },
             ));
           if (!runtime) return undefined;
           const assertRuntimeGenerationOpen =
@@ -5437,8 +5381,6 @@ export function registerSessionRoutes(
             // metadata. It intentionally applies to persisted and archived sessions.
             const sessionService =
               createWorkspaceRuntimeSessionService(runtime);
-            let organizationSessionId = sessionId;
-            let caseAliasesResolvedToSession = false;
             let exists =
               await sessionService.sessionExistsInAnyState(sessionId);
             if (!exists) {
@@ -5447,19 +5389,6 @@ export function registerSessionRoutes(
                 exists = summary.workspaceCwd === runtime.workspaceCwd;
               } catch {
                 exists = false;
-              }
-            }
-            try {
-              const persistedSessionId =
-                await sessionService.findSessionIdIgnoringCase(sessionId);
-              if (persistedSessionId !== undefined) {
-                organizationSessionId = persistedSessionId;
-                caseAliasesResolvedToSession = true;
-                exists = true;
-              }
-            } catch (error) {
-              if (!exists || error instanceof SessionIdCaseConflictError) {
-                throw error;
               }
             }
             if (!exists) {
@@ -5513,20 +5442,15 @@ export function registerSessionRoutes(
 
             const organization = await createSessionOrganizationService(
               runtime.workspaceCwd,
-            ).updateSessionOrganization(
-              organizationSessionId,
-              {
-                ...(rawIsPinned !== undefined ? { isPinned: rawIsPinned } : {}),
-                ...(rawGroupId !== undefined
-                  ? { groupId: rawGroupId as string | null }
-                  : {}),
-                ...(rawColor !== undefined
-                  ? { color: rawColor as SessionGroupPresetColor | null }
-                  : {}),
-              },
-              sessionId,
-              { caseAliasesResolvedToSession },
-            );
+            ).updateSessionOrganization(sessionId, {
+              ...(rawIsPinned !== undefined ? { isPinned: rawIsPinned } : {}),
+              ...(rawGroupId !== undefined
+                ? { groupId: rawGroupId as string | null }
+                : {}),
+              ...(rawColor !== undefined
+                ? { color: rawColor as SessionGroupPresetColor | null }
+                : {}),
+            });
             invalidateSessionListsAndMarkCatalog(runtime, [
               'active',
               'archived',

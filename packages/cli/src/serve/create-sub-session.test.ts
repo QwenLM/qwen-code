@@ -769,32 +769,6 @@ describe('sub-session launcher', () => {
     launcher.stop();
   });
 
-  it('sent mode: restores a mixed-case parent under its canonical live id', async () => {
-    const parentSessionId = '550e8400-e29b-41d4-a716-446655440003';
-    const fake = makeFakeBridge({
-      events: (pid) => [chunk('durable result'), turnComplete(pid)],
-      reapedParentSessionId: parentSessionId,
-    });
-    const launcher = createSubSessionLauncher({
-      getBridge: () => fake.bridge,
-      boundWorkspace: WS,
-      notifySentCompletion: true,
-    });
-
-    await launcher.launch({
-      prompt: 'finish after the parent goes idle',
-      completion: 'sent',
-      callerSessionId: parentSessionId.toUpperCase(),
-    });
-
-    await vi.waitFor(() => expect(fake.notifications).toHaveLength(1));
-    expect(fake.resumes).toEqual([
-      { sessionId: parentSessionId, workspaceCwd: WS },
-    ]);
-    expect(fake.notifications[0]).toMatchObject({ sessionId: parentSessionId });
-    launcher.stop();
-  });
-
   it('sent mode: relocates a reaped isolated parent before delivering its automatic continuation', async () => {
     const fake = makeFakeBridge({
       events: (pid) => [chunk('durable result'), turnComplete(pid)],

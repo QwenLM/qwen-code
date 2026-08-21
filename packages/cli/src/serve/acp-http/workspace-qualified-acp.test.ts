@@ -13,7 +13,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import WebSocket from 'ws';
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
-import { SessionService, Storage } from '@qwen-code/qwen-code-core';
+import { Storage } from '@qwen-code/qwen-code-core';
 import { type AcpHttpHandle, mountAcpHttp } from './index.js';
 import { DeviceFlowRegistry } from '../auth/device-flow.js';
 import { CdpTunnelRegistry } from '../cdp-tunnel/cdp-tunnel-registry.js';
@@ -958,42 +958,18 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
     expect(response['error']).toMatchObject({ code: -32602 });
   });
 
-  it('preserves aliased organization in the selected workspace only', async () => {
+  it('updates persisted organization in the selected workspace only', async () => {
     const sessionId = '550e8400-e29b-41d4-a716-446655440180';
-    const persistedSessionId = sessionId.toUpperCase();
-    await writeStoredSession(persistedSessionId, '/ws-b');
-    const organizationService = createSessionOrganizationService('/ws-b');
-    const group = await organizationService.createGroup({
-      name: 'Legacy mixed-case',
-      color: 'blue',
-    });
-    await organizationService.updateSessionOrganization(persistedSessionId, {
-      groupId: group.id,
-      color: 'purple',
-    });
-    const sessionExistsInAnyState =
-      SessionService.prototype.sessionExistsInAnyState;
-    const existsSpy = vi
-      .spyOn(SessionService.prototype, 'sessionExistsInAnyState')
-      .mockImplementation(function (this: SessionService, candidateSessionId) {
-        return candidateSessionId === sessionId
-          ? Promise.resolve(true)
-          : sessionExistsInAnyState.call(this, candidateSessionId);
-      });
+    await writeStoredSession(sessionId, '/ws-b');
 
     const response = await sendWsRequest('/workspaces/secondary-id/acp', {
       jsonrpc: '2.0',
       id: 2,
       method: '_qwen/session/update_organization',
-      params: { sessionId: persistedSessionId, isPinned: true },
-    }).finally(() => existsSpy.mockRestore());
-
-    expect(response['result']).toMatchObject({
-      sessionId,
-      isPinned: true,
-      groupId: group.id,
-      color: 'purple',
+      params: { sessionId, isPinned: true },
     });
+
+    expect(response['result']).toMatchObject({ sessionId, isPinned: true });
     const listed = await sendWsRequest('/workspaces/secondary-id/acp', {
       jsonrpc: '2.0',
       id: 3,
@@ -1001,14 +977,7 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
       params: { view: 'organized', group: 'pinned' },
     });
     expect(listed['result']).toMatchObject({
-      sessions: [
-        expect.objectContaining({
-          sessionId: persistedSessionId,
-          isPinned: true,
-          groupId: group.id,
-          color: 'purple',
-        }),
-      ],
+      sessions: [expect.objectContaining({ sessionId, isPinned: true })],
     });
 
     const legacy = await sendWsRequest('/acp', {
@@ -1023,88 +992,10 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
       await createSessionOrganizationService('/ws-b').readSnapshot();
     const primarySnapshot =
       await createSessionOrganizationService('/ws').readSnapshot();
-    expect(secondarySnapshot.sessions.get(persistedSessionId)).toMatchObject({
+    expect(secondarySnapshot.sessions.get(sessionId)).toMatchObject({
       isPinned: true,
-      groupId: group.id,
-      color: 'purple',
     });
-    expect(secondarySnapshot.sessions.has(sessionId)).toBe(false);
     expect(primarySnapshot.sessions.has(sessionId)).toBe(false);
-  });
-
-  it('preserves a third organization spelling during a partial update', async () => {
-    const sessionId = '550e8400-e29b-41d4-a716-446655440182';
-    const persistedSessionId = sessionId.toUpperCase();
-    const legacyOrganizationId = sessionId.replace('e29b', 'E29B');
-    await writeStoredSession(persistedSessionId, '/ws-b');
-    const organizationService = createSessionOrganizationService('/ws-b');
-    const group = await organizationService.createGroup({
-      name: 'Legacy organization update',
-      color: 'blue',
-    });
-    await organizationService.updateSessionOrganization(legacyOrganizationId, {
-      groupId: group.id,
-      color: 'purple',
-    });
-
-    const response = await sendWsRequest('/workspaces/secondary-id/acp', {
-      jsonrpc: '2.0',
-      id: 2,
-      method: '_qwen/session/update_organization',
-      params: { sessionId, isPinned: true },
-    });
-
-    expect(response['result']).toMatchObject({
-      sessionId,
-      isPinned: true,
-      groupId: group.id,
-      color: 'purple',
-    });
-    const snapshot = await organizationService.readSnapshot();
-    expect(snapshot.sessions.has(legacyOrganizationId)).toBe(false);
-    expect(snapshot.sessions.has(sessionId)).toBe(false);
-    expect(snapshot.sessions.get(persistedSessionId)).toMatchObject({
-      isPinned: true,
-      groupId: group.id,
-      color: 'purple',
-    });
-  });
-
-  it('preserves exact organization updates when the optional alias scan fails', async () => {
-    const sessionId = '550e8400-e29b-41d4-a716-446655440181';
-    await writeStoredSession(sessionId, '/ws-b');
-    const organizationService = createSessionOrganizationService('/ws-b');
-    const group = await organizationService.createGroup({
-      name: 'Exact session',
-      color: 'blue',
-    });
-    await organizationService.updateSessionOrganization(sessionId, {
-      groupId: group.id,
-      color: 'purple',
-    });
-    const findSessionId = vi
-      .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
-      .mockRejectedValue(
-        Object.assign(new Error('directory scan failed'), { code: 'EIO' }),
-      );
-
-    try {
-      const response = await sendWsRequest('/workspaces/secondary-id/acp', {
-        jsonrpc: '2.0',
-        id: 2,
-        method: '_qwen/session/update_organization',
-        params: { sessionId, isPinned: true },
-      });
-
-      expect(response['result']).toMatchObject({
-        sessionId,
-        isPinned: true,
-        groupId: group.id,
-        color: 'purple',
-      });
-    } finally {
-      findSessionId.mockRestore();
-    }
   });
 
   it('rejects an untrusted workspace with 403 untrusted_workspace', async () => {

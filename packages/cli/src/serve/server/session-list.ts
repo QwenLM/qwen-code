@@ -17,7 +17,6 @@ import type {
   AcpSessionBridge,
   BridgeSessionSummary,
 } from '../acp-session-bridge.js';
-import { normalizeSessionIdForLookup } from '../../config/session-id.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
 import {
@@ -443,7 +442,6 @@ function mergeLiveSessionSummary(
   return {
     ...existing,
     ...live,
-    sessionId: existing.sessionId,
     createdAt: existing.createdAt,
     displayName: live.displayName ?? existing.displayName,
     // Immutable lineage; the persisted transcript is authoritative, and a live
@@ -457,172 +455,6 @@ function mergeLiveSessionSummary(
     hasActivePrompt: live.hasActivePrompt,
     isArchived: false,
   };
-}
-
-function indexUniquePersistedSessionIds(
-  sessionIds: Iterable<string>,
-): Map<string, string | undefined> {
-  const byCanonicalId = new Map<string, string | undefined>();
-  for (const sessionId of sessionIds) {
-    const canonicalId = normalizeSessionIdForLookup(sessionId);
-    if (!byCanonicalId.has(canonicalId)) {
-      byCanonicalId.set(canonicalId, sessionId);
-    } else if (byCanonicalId.get(canonicalId) !== sessionId) {
-      byCanonicalId.set(canonicalId, undefined);
-    }
-  }
-  return byCanonicalId;
-}
-
-function persistedSessionIdForLiveEntry(
-  liveSessionId: string,
-  bySessionId: ReadonlyMap<string, BridgeSessionSummary>,
-  byCanonicalId: ReadonlyMap<string, string | undefined>,
-): string | undefined {
-  if (bySessionId.has(liveSessionId)) return liveSessionId;
-  return byCanonicalId.get(normalizeSessionIdForLookup(liveSessionId));
-}
-
-async function verifyPersistedAliasUniqueness(
-  sessionService: SessionService,
-  bySessionId: ReadonlyMap<string, BridgeSessionSummary>,
-  byCanonicalId: ReadonlyMap<string, string | undefined>,
-  lookupSessionIds: Iterable<string>,
-  signal?: AbortSignal,
-): Promise<Map<string, string | undefined>> {
-  const verified = new Map(byCanonicalId);
-  const lookupByCanonicalId = new Map<string, string>();
-  for (const sessionId of lookupSessionIds) {
-    if (bySessionId.has(sessionId)) continue;
-    const canonicalId = normalizeSessionIdForLookup(sessionId);
-    if (verified.get(canonicalId) !== undefined) {
-      lookupByCanonicalId.set(canonicalId, sessionId);
-    }
-  }
-  if (lookupByCanonicalId.size === 0) return verified;
-
-  const lookupIds = [...lookupByCanonicalId.values()];
-  let resolved: Map<string, string | undefined>;
-  try {
-    resolved = await sessionService.findSessionIdsIgnoringCase(lookupIds);
-  } catch {
-    signal?.throwIfAborted();
-    resolved = new Map();
-    for (const sessionId of lookupIds) {
-      signal?.throwIfAborted();
-      try {
-        resolved.set(
-          sessionId,
-          await sessionService.findSessionIdIgnoringCase(sessionId),
-        );
-      } catch {
-        signal?.throwIfAborted();
-        resolved.set(sessionId, undefined);
-      }
-    }
-  }
-  signal?.throwIfAborted();
-
-  for (const [canonicalId, lookupId] of lookupByCanonicalId) {
-    if (resolved.get(lookupId) !== verified.get(canonicalId)) {
-      // A page-local spelling is not an alias when another readable case twin
-      // exists elsewhere in the catalog, or when uniqueness cannot be proven.
-      verified.set(canonicalId, undefined);
-    }
-  }
-  return verified;
-}
-
-async function persistedSessionExistsForLiveEntry(
-  sessionService: SessionService,
-  liveSessionId: string,
-  signal?: AbortSignal,
-): Promise<boolean> {
-  if (
-    await sessionService.sessionExists(liveSessionId, {
-      ...(signal ? { signal } : {}),
-    })
-  ) {
-    return true;
-  }
-  signal?.throwIfAborted();
-  let persistedSessionId: string | undefined;
-  try {
-    persistedSessionId =
-      await sessionService.findSessionIdIgnoringCase(liveSessionId);
-  } catch {
-    signal?.throwIfAborted();
-    // An optional alias probe cannot authoritatively suppress the live row.
-    return false;
-  }
-  signal?.throwIfAborted();
-  return (
-    persistedSessionId !== undefined &&
-    (await sessionService.sessionExists(persistedSessionId, {
-      ...(signal ? { signal } : {}),
-    }))
-  );
-}
-
-async function persistedLiveSessionIdsOutsidePage(
-  sessionService: SessionService,
-  liveSessionIds: readonly string[],
-  bySessionId: ReadonlyMap<string, BridgeSessionSummary>,
-  byCanonicalId: ReadonlyMap<string, string | undefined>,
-  shouldProbe: boolean,
-  signal?: AbortSignal,
-): Promise<ReadonlySet<string>> {
-  if (!shouldProbe) return new Set();
-  const unmatched = [
-    ...new Set(
-      liveSessionIds.filter(
-        (sessionId) =>
-          persistedSessionIdForLiveEntry(
-            sessionId,
-            bySessionId,
-            byCanonicalId,
-          ) === undefined,
-      ),
-    ),
-  ];
-  if (unmatched.length === 0) return new Set();
-
-  let resolved: Map<string, string | undefined>;
-  try {
-    resolved = await sessionService.findSessionIdsIgnoringCase(unmatched);
-  } catch {
-    signal?.throwIfAborted();
-    const individual = new Set<string>();
-    for (const sessionId of unmatched) {
-      signal?.throwIfAborted();
-      if (
-        await persistedSessionExistsForLiveEntry(
-          sessionService,
-          sessionId,
-          signal,
-        )
-      ) {
-        individual.add(sessionId);
-      }
-      signal?.throwIfAborted();
-    }
-    return individual;
-  }
-  signal?.throwIfAborted();
-
-  const active = await Promise.all(
-    unmatched.map(async (sessionId) => {
-      const persistedSessionId = resolved.get(sessionId);
-      if (persistedSessionId === undefined) return undefined;
-      return (await sessionService.sessionExists(persistedSessionId, {
-        ...(signal ? { signal } : {}),
-      }))
-        ? sessionId
-        : undefined;
-    }),
-  );
-  signal?.throwIfAborted();
-  return new Set(active.filter((sessionId) => sessionId !== undefined));
 }
 
 function clonePersistedSummary(
@@ -865,47 +697,16 @@ function nextEmittedSessionIds(options: {
   return kept.map((entry) => entry.sessionId);
 }
 
-type ListedSessionOrganization = {
-  groupId: string | null;
-  color?: SessionGroupPresetColor | null;
-  isPinned: boolean;
-  pinnedAt?: string;
-  updatedAt: string;
-};
-
-function organizationForListedSession(
-  sessions: ReadonlyMap<string, ListedSessionOrganization>,
-  sessionId: string,
-  persistedSessionIdByCanonicalId: ReadonlyMap<string, string | undefined>,
-  organizationByCanonicalId: ReadonlyMap<string, ListedSessionOrganization>,
-): ListedSessionOrganization | undefined {
-  const canonicalId = normalizeSessionIdForLookup(sessionId);
-  if (persistedSessionIdByCanonicalId.get(canonicalId) === sessionId) {
-    const exact = sessions.get(sessionId);
-    const alias = organizationByCanonicalId.get(canonicalId);
-    if (!exact || !alias) return exact ?? alias;
-    return exact.updatedAt >= alias.updatedAt ? exact : alias;
-  }
-  return sessions.get(sessionId);
-}
-
-function indexNewestOrganizationByCanonicalId(
-  sessions: ReadonlyMap<string, ListedSessionOrganization>,
-): Map<string, ListedSessionOrganization> {
-  const byCanonicalId = new Map<string, ListedSessionOrganization>();
-  for (const [sessionId, organization] of sessions) {
-    const canonicalId = normalizeSessionIdForLookup(sessionId);
-    const existing = byCanonicalId.get(canonicalId);
-    if (!existing || organization.updatedAt > existing.updatedAt) {
-      byCanonicalId.set(canonicalId, organization);
-    }
-  }
-  return byCanonicalId;
-}
-
 function applyOrganization(
   session: BridgeSessionSummary,
-  organization: ListedSessionOrganization | undefined,
+  organization:
+    | {
+        groupId: string | null;
+        color?: SessionGroupPresetColor | null;
+        isPinned: boolean;
+        pinnedAt?: string;
+      }
+    | undefined,
 ): BridgeSessionSummary {
   return {
     ...session,
@@ -931,9 +732,6 @@ async function listOrganizedWorkspaceSessionsForResponse(
   readOptions.signal?.throwIfAborted();
   const snapshot = await organizationService.readSnapshot();
   readOptions.signal?.throwIfAborted();
-  const organizationByCanonicalId = indexNewestOrganizationByCanonicalId(
-    snapshot.sessions,
-  );
   const knownGroupIds = new Set(snapshot.groups.map((group) => group.id));
   const group = options.group ?? 'all';
   if (
@@ -972,30 +770,12 @@ async function listOrganizedWorkspaceSessionsForResponse(
     readOptions.signal,
   );
   readOptions.signal?.throwIfAborted();
-  let persistedSessionIdByCanonicalId = indexUniquePersistedSessionIds(
-    persisted.sessions.map((session) => session.sessionId),
-  );
   for (const session of persisted.sessions) {
-    bySessionId.set(session.sessionId, clonePersistedSummary(session));
-  }
-  persistedSessionIdByCanonicalId = await verifyPersistedAliasUniqueness(
-    sessionService,
-    bySessionId,
-    persistedSessionIdByCanonicalId,
-    snapshot.sessions.keys(),
-    readOptions.signal,
-  );
-  for (const [sessionId, session] of bySessionId) {
     bySessionId.set(
-      sessionId,
+      session.sessionId,
       applyOrganization(
-        session,
-        organizationForListedSession(
-          snapshot.sessions,
-          sessionId,
-          persistedSessionIdByCanonicalId,
-          organizationByCanonicalId,
-        ),
+        clonePersistedSummary(session),
+        snapshot.sessions.get(session.sessionId),
       ),
     );
   }
@@ -1011,41 +791,41 @@ async function listOrganizedWorkspaceSessionsForResponse(
   if (readOptions.mergeLive !== false && archiveState !== 'archived') {
     try {
       const liveSessions = bridge.listWorkspaceSessions(workspaceCwd);
-      persistedSessionIdByCanonicalId = await verifyPersistedAliasUniqueness(
-        sessionService,
-        bySessionId,
-        persistedSessionIdByCanonicalId,
-        liveSessions.map((session) => session.sessionId),
-        readOptions.signal,
-      );
       for (const live of liveSessions) {
-        const persistedSessionId = persistedSessionIdForLiveEntry(
-          live.sessionId,
-          bySessionId,
-          persistedSessionIdByCanonicalId,
-        );
-        const listedSessionId = persistedSessionId ?? live.sessionId;
-        liveSessionIds.add(listedSessionId);
-        const existing = bySessionId.get(listedSessionId);
-        const organization = organizationForListedSession(
-          snapshot.sessions,
-          listedSessionId,
-          persistedSessionIdByCanonicalId,
-          organizationByCanonicalId,
-        );
+        liveSessionIds.add(live.sessionId);
+        const existing = bySessionId.get(live.sessionId);
+        const organization = snapshot.sessions.get(live.sessionId);
         if (existing) {
           // Merged on every page, not just the first: the page-1 cursor is
           // encoded from merged activity keys, so a later page that keyed the
           // same row by its persisted mtime alone would re-admit a row whose
           // watermark leads storage and return it twice.
           bySessionId.set(
-            listedSessionId,
+            live.sessionId,
             applyOrganization(
               mergeLiveSessionSummary(existing, live),
               organization,
             ),
           );
-        } else if (isFirstPage) {
+        } else if (
+          // A live-only row has no persisted key to page by, so it stays a
+          // first-page-only insertion as before.
+          isFirstPage &&
+          // `listAllPersistedSummaries` already scanned every persisted
+          // session when the scan wasn't truncated, so a `sessionId` missing
+          // from `bySessionId` is definitively new — no disk re-check
+          // needed. Re-checking here raced a session that persists its
+          // first write (e.g. a `displayName` update) between the scan
+          // above and this point: `existing` stayed undefined but
+          // `sessionExists` flipped to true, silently dropping the live
+          // session from the response instead of merging it.
+          (!persisted.truncated ||
+            !(await (readOptions.signal
+              ? sessionService.sessionExists(live.sessionId, {
+                  signal: readOptions.signal,
+                })
+              : sessionService.sessionExists(live.sessionId))))
+        ) {
           bySessionId.set(
             live.sessionId,
             applyOrganization(
@@ -1180,9 +960,6 @@ async function listWorkspaceSessionsByMetadataForResponse(
   for (const session of persisted.sessions) {
     bySessionId.set(session.sessionId, clonePersistedSummary(session));
   }
-  let persistedSessionIdByCanonicalId = indexUniquePersistedSessionIds(
-    bySessionId.keys(),
-  );
   // Activity floors: the key a row falls back to once its live entry is gone.
   const persistedTimeById = new Map(
     persisted.sessions.map((session) => [
@@ -1195,29 +972,26 @@ async function listWorkspaceSessionsByMetadataForResponse(
   let liveMergeFailed = false;
   if (readOptions.mergeLive !== false && archiveState !== 'archived') {
     try {
-      const liveSessions = bridge.listWorkspaceSessions(workspaceCwd);
-      persistedSessionIdByCanonicalId = await verifyPersistedAliasUniqueness(
-        sessionService,
-        bySessionId,
-        persistedSessionIdByCanonicalId,
-        liveSessions.map((session) => session.sessionId),
-        readOptions.signal,
-      );
-      for (const live of liveSessions) {
-        const persistedSessionId = persistedSessionIdForLiveEntry(
-          live.sessionId,
-          bySessionId,
-          persistedSessionIdByCanonicalId,
-        );
-        const listedSessionId = persistedSessionId ?? live.sessionId;
-        liveSessionIds.add(listedSessionId);
-        const existing = bySessionId.get(listedSessionId);
+      for (const live of bridge.listWorkspaceSessions(workspaceCwd)) {
+        liveSessionIds.add(live.sessionId);
+        const existing = bySessionId.get(live.sessionId);
         if (existing) {
           bySessionId.set(
-            listedSessionId,
+            live.sessionId,
             mergeLiveSessionSummary(existing, live),
           );
-        } else {
+        } else if (
+          // See the matching comment in
+          // `listOrganizedWorkspaceSessionsForResponse`: an untruncated scan
+          // already covers every persisted session, so skip the racy
+          // re-check when nothing was truncated.
+          !persisted.truncated ||
+          !(await (readOptions.signal
+            ? sessionService.sessionExists(live.sessionId, {
+                signal: readOptions.signal,
+              })
+            : sessionService.sessionExists(live.sessionId)))
+        ) {
           bySessionId.set(live.sessionId, {
             ...live,
             createdAt: live.createdAt,
@@ -1411,9 +1185,6 @@ async function listWorkspaceSessionsForResponseInRuntime(
     readOptions.signal,
   );
   readOptions.signal?.throwIfAborted();
-  let persistedSessionIdByCanonicalId = indexUniquePersistedSessionIds(
-    bySessionId.keys(),
-  );
 
   if (archiveState === 'archived' || readOptions.mergeLive === false) {
     const sessions = [...bySessionId.values()];
@@ -1423,31 +1194,10 @@ async function listWorkspaceSessionsForResponseInRuntime(
   }
 
   const liveSessions = bridge.listWorkspaceSessions(workspaceCwd);
-  persistedSessionIdByCanonicalId = await verifyPersistedAliasUniqueness(
-    sessionService,
-    bySessionId,
-    persistedSessionIdByCanonicalId,
-    liveSessions.map((session) => session.sessionId),
-    readOptions.signal,
-  );
-  const persistedLiveSessionIds = await persistedLiveSessionIdsOutsidePage(
-    sessionService,
-    liveSessions.map((session) => session.sessionId),
-    bySessionId,
-    persistedSessionIdByCanonicalId,
-    isFirstPage && persisted.nextCursor != null,
-    readOptions.signal,
-  );
   for (const live of liveSessions) {
-    const persistedSessionId = persistedSessionIdForLiveEntry(
-      live.sessionId,
-      bySessionId,
-      persistedSessionIdByCanonicalId,
-    );
-    const listedSessionId = persistedSessionId ?? live.sessionId;
-    const existing = bySessionId.get(listedSessionId);
+    const existing = bySessionId.get(live.sessionId);
     if (existing) {
-      bySessionId.set(listedSessionId, mergeLiveSessionSummary(existing, live));
+      bySessionId.set(live.sessionId, mergeLiveSessionSummary(existing, live));
     } else if (
       isFirstPage &&
       // If this is a complete scan (no further pages), a missing
@@ -1458,7 +1208,11 @@ async function listWorkspaceSessionsForResponseInRuntime(
       // silently dropping the live session from the response instead of
       // merging it.
       (persisted.nextCursor == null ||
-        !persistedLiveSessionIds.has(live.sessionId))
+        !(await (readOptions.signal
+          ? sessionService.sessionExists(live.sessionId, {
+              signal: readOptions.signal,
+            })
+          : sessionService.sessionExists(live.sessionId))))
     ) {
       bySessionId.set(live.sessionId, {
         ...live,

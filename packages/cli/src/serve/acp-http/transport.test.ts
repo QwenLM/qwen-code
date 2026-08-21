@@ -4609,35 +4609,38 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     },
   );
 
-  it('session/load restores an active/archive conflicted session from its active copy', async () => {
-    await withRuntimeDir(async () => {
-      const sessionId = '550e8400-e29b-41d4-a716-446655440321';
-      await writeStoredSession(sessionId);
-      await writeStoredSession(sessionId, 'archived');
+  it.each(['session/load', 'session/resume'] as const)(
+    '%s restores an active/archive conflicted session from its active copy',
+    async (method) => {
+      await withRuntimeDir(async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440321';
+        await writeStoredSession(sessionId);
+        await writeStoredSession(sessionId, 'archived');
 
-      const connId = await initialize();
-      const connStream = await openStream(connId);
-      const got = takeFrames(connStream, 1);
-      await new Promise((r) => setTimeout(r, 50));
-      await post(connId, {
-        jsonrpc: '2.0',
-        id: 212,
-        method: 'session/load',
-        params: { sessionId },
+        const connId = await initialize();
+        const connStream = await openStream(connId);
+        const got = takeFrames(connStream, 1);
+        await new Promise((r) => setTimeout(r, 50));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 212,
+          method,
+          params: { sessionId },
+        });
+
+        const [frame] = (await got) as Array<{
+          id: number;
+          result?: unknown;
+          error?: { code: number; message: string };
+        }>;
+        // Loads read the active copy (CLI resume parity): a session left in
+        // both states by a crashed archive stays loadable over ACP.
+        expect(frame.id).toBe(212);
+        expect(frame.error).toBeUndefined();
+        expect(frame.result).toEqual(expect.any(Object));
       });
-
-      const [frame] = (await got) as Array<{
-        id: number;
-        result?: unknown;
-        error?: { code: number; message: string };
-      }>;
-      // Loads read the active copy (CLI resume parity): a session left in
-      // both states by a crashed archive stays loadable over ACP.
-      expect(frame.id).toBe(212);
-      expect(frame.error).toBeUndefined();
-      expect(frame.result).toEqual(expect.any(Object));
-    });
-  });
+    },
+  );
 
   it('session/load preserves sanitized session writer RPC errors', async () => {
     await withRuntimeDir(async () => {
@@ -5021,6 +5024,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           SessionArchiveCoordinator.prototype,
           'runSharedMany',
         );
+        const findSessionId = vi.spyOn(
+          SessionService.prototype,
+          'findSessionIdIgnoringCase',
+        );
 
         try {
           const connId = await initialize();
@@ -5046,7 +5053,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
             [sessionId],
             expect.any(Function),
           );
+          expect(findSessionId).toHaveBeenCalledTimes(1);
         } finally {
+          findSessionId.mockRestore();
           runSharedMany.mockRestore();
         }
       });
@@ -5054,7 +5063,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   );
 
   it.each(['session/load', 'session/resume'] as const)(
-    '%s restores a case twin persisted in both states from its active copy',
+    '%s keeps a differently spelled both-states conflict strict',
     async (method) => {
       await withRuntimeDir(async () => {
         const sessionId =
@@ -5074,11 +5083,11 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           method,
           params: { sessionId },
         });
-        // Loads read the active copy regardless of which spelling resolves,
-        // so the verdict cannot flip with the filesystem's case sensitivity.
         expect(await reader.next()).toMatchObject({
           id: 231,
-          result: expect.any(Object),
+          error: {
+            data: expect.objectContaining({ errorKind: 'session_conflict' }),
+          },
         });
         reader.close();
       });
@@ -5086,7 +5095,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   );
 
   it.each(['session/load', 'session/resume'] as const)(
-    '%s converts an in-guard both-states conflict to actionable session conflict',
+    '%s preserves a known case conflict without secondary classification',
     async (method) => {
       await withRuntimeDir(async () => {
         const sessionId =
@@ -5103,8 +5112,8 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           .mockRejectedValue(conflict);
         const getSessionLocation = vi
           .spyOn(SessionService.prototype, 'getSessionLocation')
-          .mockImplementation(async (candidateId) =>
-            candidateId === storageSessionId ? 'conflict' : undefined,
+          .mockRejectedValue(
+            Object.assign(new Error('catalog failed'), { code: 'EIO' }),
           );
 
         try {
@@ -5127,61 +5136,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
             },
           });
           reader.close();
-          // The conversion must re-check the resolver's candidate spelling:
-          // the request-case id finds nothing on a case-sensitive filesystem.
-          expect(getSessionLocation).toHaveBeenCalledWith(storageSessionId);
-        } finally {
-          getSessionLocation.mockRestore();
-          findSessionId.mockRestore();
-        }
-      });
-    },
-  );
-
-  it.each(['session/load', 'session/resume'] as const)(
-    '%s preserves an in-guard conflict when its classification recheck fails',
-    async (method) => {
-      await withRuntimeDir(async () => {
-        const sessionId =
-          method === 'session/load'
-            ? '550e8400-e29b-41d4-a716-44665544014d'
-            : '550e8400-e29b-41d4-a716-44665544014e';
-        const storageSessionId = sessionId.toUpperCase();
-        const conflict = new SessionIdCaseConflictError(
-          sessionId,
-          storageSessionId,
-        );
-        const findSessionId = vi
-          .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
-          .mockRejectedValue(conflict);
-        const getSessionLocation = vi
-          .spyOn(SessionService.prototype, 'getSessionLocation')
-          .mockRejectedValue(
-            Object.assign(new Error('read failed'), { code: 'EIO' }),
-          );
-
-        try {
-          const connId = await initialize();
-          const stream = await openStream(connId);
-          const reader = frameReader(stream);
-          await post(connId, {
-            jsonrpc: '2.0',
-            id: 233,
-            method,
-            params: { sessionId },
-          });
-          expect(await reader.next()).toMatchObject({
-            id: 233,
-            error: {
-              message: conflict.message,
-              data: expect.objectContaining({
-                errorKind: 'session_conflict',
-                sessionId,
-              }),
-            },
-          });
-          reader.close();
-          expect(getSessionLocation).toHaveBeenCalledWith(storageSessionId);
+          expect(getSessionLocation).not.toHaveBeenCalled();
         } finally {
           getSessionLocation.mockRestore();
           findSessionId.mockRestore();
@@ -5342,8 +5297,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         expect.objectContaining({
           id: 219,
           error: expect.objectContaining({
-            message: expect.stringContaining('by case'),
-            data: expect.objectContaining({ errorKind: 'session_conflict' }),
+            data: expect.objectContaining({
+              errorKind: 'session_conflict',
+              sessionId,
+            }),
           }),
         }),
       );

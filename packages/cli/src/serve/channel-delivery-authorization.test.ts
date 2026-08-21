@@ -102,28 +102,6 @@ describe('ChannelDeliveryAuthorizationStore', () => {
     ).toBe(true);
   });
 
-  it('matches scheduled authorization across canonical UUID spellings', () => {
-    const store = new ChannelDeliveryAuthorizationStore();
-    const sessionId = '550e8400-e29b-41d4-a716-446655440001';
-    store.registerScheduledTask(workspace, {
-      sessionId: sessionId.toUpperCase(),
-      taskId: 'task-1',
-      target,
-      recurring: true,
-    });
-
-    expect(
-      store.consume(workspace, {
-        sessionId,
-        deliveryId: 'task-1:2000',
-        source: 'scheduled',
-        taskId: 'task-1',
-        firedAt: 2_000,
-        target,
-      }),
-    ).toBe(true);
-  });
-
   it('consumes a one-shot scheduled authorization once', () => {
     const store = new ChannelDeliveryAuthorizationStore();
     store.registerScheduledTask(workspace, {

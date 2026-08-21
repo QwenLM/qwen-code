@@ -5,6 +5,7 @@
  */
 
 import {
+  SessionIdCaseConflictError,
   SessionService,
   type SessionLocation,
 } from '@qwen-code/qwen-code-core';
@@ -549,10 +550,42 @@ export async function assertSessionLoadable(
     throw new SessionArchivedError(sessionId);
   }
   if (location === 'conflict') {
-    // Both state copies are readable (a crash inside archiveSessions leaves
-    // that behind). Loading reads the active copy — parity with the CLI
-    // resume path — so the session is loadable; archive-state mutations keep
-    // refusing via assertSessionArchived and the archive pipeline's guard.
+    throw new SessionConflictError(sessionId);
+  }
+  return location;
+}
+
+export async function resolveSessionIdForRestore(
+  service: SessionService,
+  sessionId: string,
+): Promise<string | undefined> {
+  try {
+    return await service.findSessionIdIgnoringCase(sessionId);
+  } catch (error) {
+    if (error instanceof SessionIdCaseConflictError) {
+      if (error.candidateSessionId === sessionId) return sessionId;
+      throw new SessionConflictError(sessionId);
+    }
+    throw error;
+  }
+}
+
+export async function assertSessionRestorable(
+  workspaceCwd: string,
+  sessionId: string,
+  requestedSessionId: string,
+  runtimeBaseDir?: string,
+): Promise<SessionLocation> {
+  const location = await new SessionService(workspaceCwd, {
+    runtimeBaseDir,
+  }).getSessionLocation(sessionId);
+  if (location === 'archived') {
+    throw new SessionArchivedError(sessionId);
+  }
+  if (location === 'conflict') {
+    if (sessionId !== requestedSessionId) {
+      throw new SessionConflictError(requestedSessionId);
+    }
     return 'active';
   }
   return location;

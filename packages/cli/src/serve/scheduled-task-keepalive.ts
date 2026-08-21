@@ -41,7 +41,6 @@ import {
   type DurableCronTask,
 } from '@qwen-code/qwen-code-core';
 import { MAX_SESSION_RESTORE_TIMEOUT_MS } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
-import { normalizeSessionIdForLookup } from '../config/session-id.js';
 import { scheduledTaskSessionName } from './routes/scheduled-tasks.js';
 
 const log = createDebugLogger('SCHED_KEEPALIVE');
@@ -60,13 +59,12 @@ function collectBoundSessionIds(tasks: readonly DurableCronTask[]): string[] {
       task.enabled === false || // disabled (e.g. archived) — let it be reaped
       taskHasLegacyCondition(task) || // legacy guarded — can never fire, don't pin
       typeof sessionId !== 'string' ||
-      sessionId.length === 0
+      sessionId.length === 0 ||
+      seen.has(sessionId)
     ) {
       continue;
     }
-    const liveSessionId = normalizeSessionIdForLookup(sessionId);
-    if (seen.has(liveSessionId)) continue;
-    seen.add(liveSessionId);
+    seen.add(sessionId);
     ids.push(sessionId);
   }
   return ids;
@@ -239,9 +237,8 @@ async function bindAndNameSessions(
 
   for (const task of needsName) {
     const sessionId = task.sessionId!;
-    const liveSessionId = normalizeSessionIdForLookup(sessionId);
     try {
-      bridge.updateSessionMetadata(liveSessionId, {
+      bridge.updateSessionMetadata(sessionId, {
         displayName: scheduledTaskSessionName(task.prompt),
       });
       renamed.add(sessionId);
@@ -327,29 +324,28 @@ export function startScheduledTaskKeepalive(
       log.debug('keepalive: onTasksRead failed', err);
     }
     for (const sessionId of collectBoundSessionIds(tasks)) {
-      const liveSessionId = normalizeSessionIdForLookup(sessionId);
       try {
-        bridge.recordHeartbeat(liveSessionId);
-        reviveState.delete(liveSessionId); // resident again — reset any backoff
+        bridge.recordHeartbeat(sessionId);
+        reviveState.delete(sessionId); // resident again — reset any backoff
       } catch (err) {
         // Heartbeat failed → the session isn't resident. For an ENABLED bound
         // task that means the reaper let it go while the task was disabled/
         // archived and it's now re-enabled: revive it so its in-child scheduler
         // resumes. Best-effort and debug-only (an expected, recoverable case).
-        const state = reviveState.get(liveSessionId);
-        if (reviving.has(liveSessionId)) {
+        const state = reviveState.get(sessionId);
+        if (reviving.has(sessionId)) {
           continue; // a prior revive is still running — don't spawn a duplicate
         }
         if (state && Date.now() < state.nextAttemptAt) {
           continue; // still backing off from prior revive failures
         }
         log.debug('keepalive: recordHeartbeat failed for', sessionId, err);
-        reviving.add(liveSessionId);
+        reviving.add(sessionId);
         const metadata = await new SessionService(
           boundWorkspace,
         ).readCreationMetadata(sessionId);
         const resume = bridge.resumeSession({
-          sessionId: liveSessionId,
+          sessionId,
           workspaceCwd: boundWorkspace,
           ...metadata,
         });
@@ -358,7 +354,7 @@ export function startScheduledTaskKeepalive(
         void resume
           .catch(() => {})
           .finally(() => {
-            reviving.delete(liveSessionId);
+            reviving.delete(sessionId);
           });
         try {
           await withTimeout(
@@ -367,7 +363,7 @@ export function startScheduledTaskKeepalive(
             `resumeSession(${sessionId})`,
           );
           log.debug('keepalive: revived non-resident session', sessionId);
-          reviveState.delete(liveSessionId);
+          reviveState.delete(sessionId);
         } catch (loadErr) {
           // Back off exponentially so a permanently-gone transcript isn't
           // retried every interval for the daemon's lifetime.
@@ -376,7 +372,7 @@ export function startScheduledTaskKeepalive(
             intervalMs * 2 ** Math.min(failures - 1, 6),
             MAX_REVIVE_BACKOFF_MS,
           );
-          reviveState.set(liveSessionId, {
+          reviveState.set(sessionId, {
             failures,
             nextAttemptAt: Date.now() + backoff,
           });
@@ -391,20 +387,12 @@ export function startScheduledTaskKeepalive(
     }
     // Drop backoff state and renamed entries for sessions no longer bound to any task.
     if (reviveState.size > 0 || renamed.size > 0) {
-      const persistedSessionIds = new Set(tasks.map((task) => task.sessionId));
-      const liveSessionIds = new Set(
-        [...persistedSessionIds]
-          .filter(
-            (sessionId): sessionId is string =>
-              typeof sessionId === 'string' && sessionId.length > 0,
-          )
-          .map(normalizeSessionIdForLookup),
-      );
+      const live = new Set(tasks.map((t) => t.sessionId));
       for (const id of reviveState.keys()) {
-        if (!liveSessionIds.has(id)) reviveState.delete(id);
+        if (!live.has(id)) reviveState.delete(id);
       }
       for (const id of renamed) {
-        if (!persistedSessionIds.has(id)) renamed.delete(id);
+        if (!live.has(id)) renamed.delete(id);
       }
     }
 
@@ -560,7 +548,7 @@ export async function rehydrateScheduledTaskSessions(deps: {
       boundWorkspace,
     ).readCreationMetadata(sessionId);
     const resume = bridge.resumeSession({
-      sessionId: normalizeSessionIdForLookup(sessionId),
+      sessionId,
       workspaceCwd: boundWorkspace,
       ...metadata,
     });

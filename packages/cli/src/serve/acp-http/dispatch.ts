@@ -12,7 +12,6 @@ import {
   GROUP_COLOR_OPTIONS,
   Storage,
   SessionService,
-  SessionIdCaseConflictError,
   SessionOrganizationError,
   SESSION_WRITER_RPC_CODES,
   type SessionGroupColor,
@@ -35,7 +34,6 @@ import {
   PermissionForbiddenError,
   PermissionPolicyNotImplementedError,
   SessionArchivingError,
-  SessionConflictError,
 } from '../acp-session-bridge.js';
 import type {
   BridgeChannelQuarantinedError,
@@ -130,11 +128,12 @@ import {
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
 import {
   archiveDaemonSessions,
-  assertSessionLoadable,
+  assertSessionRestorable,
   deleteDaemonSessionIfOrphan,
   deleteDaemonSessions,
   DaemonDrainingError,
   logSessionArchiveWarning,
+  resolveSessionIdForRestore,
   SessionArchiveCoordinator,
   unarchiveDaemonSessions,
 } from '../server/session-archive.js';
@@ -1850,35 +1849,19 @@ export class AcpDispatcher {
                   runtimeBaseDir: sessionRuntime.sessionRuntimeBaseDir,
                 });
                 let storageSessionId = sessionId;
-                let persistedSessionId: string | undefined;
-                try {
-                  persistedSessionId =
-                    await sessionService.findSessionIdIgnoringCase(sessionId);
-                } catch (error) {
-                  if (error instanceof SessionIdCaseConflictError) {
-                    let bothStates = false;
-                    try {
-                      bothStates =
-                        (await sessionService.getSessionLocation(
-                          error.candidateSessionId ?? sessionId,
-                        )) === 'conflict';
-                    } catch {
-                      // This recheck only refines the response; preserve the known
-                      // conflict when storage cannot classify it a second time.
-                      throw error;
-                    }
-                    if (bothStates) throw new SessionConflictError(sessionId);
-                  }
-                  throw error;
-                }
+                const persistedSessionId = await resolveSessionIdForRestore(
+                  sessionService,
+                  sessionId,
+                );
                 if (persistedSessionId) {
                   storageSessionId = persistedSessionId;
                 } else if (this.liveSessionIsolation) {
                   throw new SessionNotFoundError(sessionId);
                 }
-                await assertSessionLoadable(
+                await assertSessionRestorable(
                   cwd,
                   storageSessionId,
+                  sessionId,
                   sessionRuntime.sessionRuntimeBaseDir,
                 );
                 // Re-seed the persisted parent lineage so a restored sub-session
@@ -2935,8 +2918,6 @@ export class AcpDispatcher {
           }
           await this.archiveCoordinator.runSharedMany([sessionId], async () => {
             const sessionService = new SessionService(this.boundWorkspace);
-            let organizationSessionId = sessionId;
-            let caseAliasesResolvedToSession = false;
             let exists =
               await sessionService.sessionExistsInAnyState(sessionId);
             if (!exists) {
@@ -2947,42 +2928,22 @@ export class AcpDispatcher {
                 exists = false;
               }
             }
-            try {
-              const persistedSessionId =
-                await sessionService.findSessionIdIgnoringCase(sessionId);
-              if (persistedSessionId !== undefined) {
-                organizationSessionId = persistedSessionId;
-                caseAliasesResolvedToSession = true;
-                exists = true;
-              }
-            } catch (error) {
-              if (!exists || error instanceof SessionIdCaseConflictError) {
-                throw error;
-              }
-            }
             if (!exists) {
               throw new AcpParamError(`Session not found: ${sessionId}`);
             }
             const organization = await createSessionOrganizationService(
               this.boundWorkspace,
-            ).updateSessionOrganization(
-              organizationSessionId,
-              {
-                ...(typeof params['isPinned'] === 'boolean'
-                  ? { isPinned: params['isPinned'] }
-                  : {}),
-                ...('groupId' in params
-                  ? { groupId: params['groupId'] as string | null }
-                  : {}),
-                ...('color' in params
-                  ? {
-                      color: params['color'] as SessionGroupPresetColor | null,
-                    }
-                  : {}),
-              },
-              sessionId,
-              { caseAliasesResolvedToSession },
-            );
+            ).updateSessionOrganization(sessionId, {
+              ...(typeof params['isPinned'] === 'boolean'
+                ? { isPinned: params['isPinned'] }
+                : {}),
+              ...('groupId' in params
+                ? { groupId: params['groupId'] as string | null }
+                : {}),
+              ...('color' in params
+                ? { color: params['color'] as SessionGroupPresetColor | null }
+                : {}),
+            });
             this.invalidateSessionListsAndMarkCatalog(['active', 'archived']);
             this.replyConn(conn, id, { sessionId, ...organization });
           });

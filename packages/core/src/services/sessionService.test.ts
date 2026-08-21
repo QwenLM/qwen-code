@@ -2637,74 +2637,6 @@ describe('SessionService', () => {
         .mockResolvedValue([] as never);
     });
 
-    it('resolves the requested spelling when it is the only candidate', async () => {
-      readdirSpy
-        .mockResolvedValueOnce([`${sessionIdA}.jsonl`] as never)
-        .mockResolvedValueOnce([] as never);
-      const getLocation = vi
-        .spyOn(sessionService, 'getSessionLocation')
-        .mockResolvedValue('active');
-
-      await expect(
-        sessionService.findSessionIdIgnoringCase(sessionIdA),
-      ).resolves.toBe(sessionIdA);
-      expect(getLocation).toHaveBeenCalledTimes(1);
-      expect(readdirSpy).toHaveBeenCalledTimes(2);
-    });
-
-    it('scans both state catalogs once when resolving a batch', async () => {
-      const legacySessionId = sessionIdA.toUpperCase();
-      readdirSpy
-        .mockResolvedValueOnce([
-          `${legacySessionId}.jsonl`,
-          `${sessionIdB}.jsonl`,
-        ] as never)
-        .mockResolvedValueOnce([] as never);
-      const getLocation = vi
-        .spyOn(sessionService, 'getSessionLocation')
-        .mockResolvedValue('active');
-
-      await expect(
-        sessionService.findSessionIdsIgnoringCase([sessionIdA, sessionIdB]),
-      ).resolves.toEqual(
-        new Map([
-          [sessionIdA, legacySessionId],
-          [sessionIdB, sessionIdB],
-        ]),
-      );
-      expect(readdirSpy).toHaveBeenCalledTimes(2);
-      expect(getLocation).toHaveBeenCalledTimes(2);
-    });
-
-    it('rejects an exact spelling with a readable case twin', async () => {
-      const legacySessionId = sessionIdA.toUpperCase();
-      readdirSpy
-        .mockResolvedValueOnce([
-          `${sessionIdA}.jsonl`,
-          `${legacySessionId}.jsonl`,
-        ] as never)
-        .mockResolvedValueOnce([] as never);
-      vi.spyOn(sessionService, 'getSessionLocation').mockResolvedValue(
-        'active',
-      );
-      statSyncSpy.mockImplementation(
-        (filePath: fs.PathLike) =>
-          ({
-            dev: 1,
-            ino: String(filePath).includes(legacySessionId) ? 43 : 42,
-            isFile: () => true,
-          }) as fs.Stats,
-      );
-
-      await expect(
-        sessionService.findSessionIdIgnoringCase(sessionIdA),
-      ).rejects.toMatchObject({
-        name: 'SessionIdCaseConflictError',
-        sessionId: sessionIdA,
-        candidateSessionId: undefined,
-      });
-    });
-
     it('finds a legacy mixed-case transcript', async () => {
       const legacySessionId = sessionIdA.toUpperCase();
       readdirSpy
@@ -2786,9 +2718,7 @@ describe('SessionService', () => {
       });
     });
 
-    it('resolves the requested spelling when it exists in both states', async () => {
-      // Loads read the active copy (CLI resume parity), so a session left in
-      // both states by a crashed archive stays reachable by its own spelling.
+    it('rejects one spelling that exists in both active and archive state', async () => {
       readdirSpy.mockResolvedValue([`${sessionIdA}.jsonl`] as never);
       const getLocation = vi
         .spyOn(sessionService, 'getSessionLocation')
@@ -2796,24 +2726,13 @@ describe('SessionService', () => {
 
       await expect(
         sessionService.findSessionIdIgnoringCase(sessionIdA),
-      ).resolves.toBe(sessionIdA);
+      ).rejects.toMatchObject({
+        name: 'SessionIdCaseConflictError',
+        sessionId: sessionIdA,
+        candidateSessionId: sessionIdA,
+        message: `Session "${sessionIdA}" is persisted in both active and archived states.`,
+      });
       expect(getLocation).toHaveBeenCalledTimes(1);
-      expect(readdirSpy).toHaveBeenCalledTimes(2);
-    });
-
-    it('resolves a case twin persisted in both active and archive state', async () => {
-      const legacySessionId = sessionIdA.toUpperCase();
-      readdirSpy.mockResolvedValue([`${legacySessionId}.jsonl`] as never);
-      vi.spyOn(sessionService, 'getSessionLocation').mockImplementation(
-        async (id) => (id === legacySessionId ? 'conflict' : undefined),
-      );
-
-      // Loads read the active copy, so a twin left in both states by a
-      // crashed archive resolves instead of flipping the verdict with the
-      // filesystem's case sensitivity.
-      await expect(
-        sessionService.findSessionIdIgnoringCase(sessionIdA),
-      ).resolves.toBe(legacySessionId);
     });
 
     it('rejects a present-but-unreadable single candidate as occupying the id', async () => {
@@ -2916,12 +2835,12 @@ describe('SessionService', () => {
       // The twin raced away between enumeration and the presence check, so
       // nothing but the request's own unreadable file is left to occupy the id.
       const legacySessionId = sessionIdA.toUpperCase();
-      readdirSpy
-        .mockResolvedValueOnce([
+      readdirSyncSpy
+        .mockReturnValueOnce([
           `${sessionIdA}.jsonl`,
           `${legacySessionId}.jsonl`,
         ] as never)
-        .mockResolvedValueOnce([] as never);
+        .mockReturnValueOnce([] as never);
       vi.spyOn(sessionService, 'getSessionLocation').mockResolvedValue(
         undefined,
       );
@@ -3093,93 +3012,6 @@ describe('SessionService', () => {
       await expect(
         sessionService.findSessionIdIgnoringCase(sessionIdA),
       ).resolves.toBe(legacySessionId);
-    });
-
-    it('rechecks the other state when a readable candidate moves mid-resolution', async () => {
-      const legacySessionId = sessionIdA.toUpperCase();
-      const mixedSessionId = sessionIdA.replace('e29b', 'E29b');
-      readdirSpy
-        .mockResolvedValueOnce([
-          `${mixedSessionId}.jsonl`,
-          `${legacySessionId}.jsonl`,
-        ] as never)
-        .mockResolvedValueOnce([`${mixedSessionId}.jsonl`] as never);
-      vi.spyOn(sessionService, 'getSessionLocation').mockImplementation(
-        async (id) => {
-          if (id === mixedSessionId) return 'conflict';
-          return id === legacySessionId ? 'active' : undefined;
-        },
-      );
-      let mixedStateReads = 0;
-      statSyncSpy.mockImplementation((filePath: fs.PathLike) => {
-        if (String(filePath).includes(`${mixedSessionId}.jsonl`)) {
-          mixedStateReads += 1;
-          if (mixedStateReads === 1) {
-            throw Object.assign(new Error('moved'), { code: 'ENOENT' });
-          }
-          return { dev: 1, ino: 8, isFile: () => true } as fs.Stats;
-        }
-        return { dev: 1, ino: 7, isFile: () => true } as fs.Stats;
-      });
-
-      await expect(
-        sessionService.findSessionIdIgnoringCase(sessionIdA),
-      ).rejects.toMatchObject({
-        name: 'SessionIdCaseConflictError',
-        sessionId: sessionIdA,
-      });
-    });
-
-    it('checks a state created after candidate enumeration', async () => {
-      const legacySessionId = sessionIdA.toUpperCase();
-      const mixedSessionId = sessionIdA.replace('e29b', 'E29b');
-      readdirSpy
-        .mockResolvedValueOnce([
-          `${mixedSessionId}.jsonl`,
-          `${legacySessionId}.jsonl`,
-        ] as never)
-        .mockResolvedValueOnce([] as never);
-      vi.spyOn(sessionService, 'getSessionLocation').mockImplementation(
-        async (id) => (id === sessionIdA ? undefined : 'active'),
-      );
-      let mixedStateReads = 0;
-      statSyncSpy.mockImplementation((filePath: fs.PathLike) => {
-        if (String(filePath).includes(`${mixedSessionId}.jsonl`)) {
-          mixedStateReads += 1;
-          if (mixedStateReads === 1) {
-            throw Object.assign(new Error('moved'), { code: 'ENOENT' });
-          }
-          return { dev: 1, ino: 8, isFile: () => true } as fs.Stats;
-        }
-        return { dev: 1, ino: 7, isFile: () => true } as fs.Stats;
-      });
-
-      await expect(
-        sessionService.findSessionIdIgnoringCase(sessionIdA),
-      ).rejects.toMatchObject({
-        name: 'SessionIdCaseConflictError',
-        sessionId: sessionIdA,
-      });
-    });
-
-    it('resolves absent when every readable candidate vanishes mid-resolution', async () => {
-      const legacySessionId = sessionIdA.toUpperCase();
-      const mixedSessionId = sessionIdA.replace('e29b', 'E29b');
-      readdirSpy
-        .mockResolvedValueOnce([`${mixedSessionId}.jsonl`] as never)
-        .mockResolvedValueOnce([`${legacySessionId}.jsonl`] as never);
-      vi.spyOn(sessionService, 'getSessionLocation').mockImplementation(
-        async (id) => (id === sessionIdA ? undefined : 'active'),
-      );
-      statSyncSpy.mockImplementation(() => {
-        throw Object.assign(new Error('gone'), { code: 'ENOENT' });
-      });
-      existsSyncSpy.mockReturnValue(false);
-
-      await expect(
-        sessionService.findSessionIdIgnoringCase(sessionIdA),
-      ).resolves.toBeUndefined();
-      expect(existsSyncSpy).toHaveBeenCalled();
     });
   });
 

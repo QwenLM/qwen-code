@@ -370,8 +370,6 @@ export class SessionOrganizationService {
   async updateSessionOrganization(
     sessionId: string,
     input: UpdateSessionOrganizationInput,
-    aliasSessionId?: string,
-    options: { caseAliasesResolvedToSession?: boolean } = {},
   ): Promise<SessionOrganizationView> {
     const hasUpdate =
       input.groupId !== undefined ||
@@ -379,25 +377,7 @@ export class SessionOrganizationService {
       input.color !== undefined;
     return this.withStoreLock(async () => {
       const store = await this.readStore();
-      const aliasSessionIds = new Set([sessionId]);
-      if (aliasSessionId !== undefined) {
-        aliasSessionIds.add(aliasSessionId);
-      }
-      if (options.caseAliasesResolvedToSession === true) {
-        const canonicalSessionId = sessionId.toLowerCase();
-        for (const candidateSessionId of Object.keys(store.sessions)) {
-          if (candidateSessionId.toLowerCase() === canonicalSessionId) {
-            aliasSessionIds.add(candidateSessionId);
-          }
-        }
-      }
-      let current = viewOrganization(undefined);
-      for (const candidateSessionId of aliasSessionIds) {
-        const candidate = viewOrganization(store.sessions[candidateSessionId]);
-        if (candidate.updatedAt > current.updatedAt) {
-          current = candidate;
-        }
-      }
+      const current = viewOrganization(store.sessions[sessionId]);
       if (!hasUpdate) {
         return current;
       }
@@ -430,11 +410,6 @@ export class SessionOrganizationService {
       }
       current.updatedAt = now;
       store.sessions[sessionId] = serializeOrganization(current);
-      for (const candidateSessionId of aliasSessionIds) {
-        if (candidateSessionId !== sessionId) {
-          delete store.sessions[candidateSessionId];
-        }
-      }
       await this.writeStore(store);
       return viewOrganization(store.sessions[sessionId]);
     });
