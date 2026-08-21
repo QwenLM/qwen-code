@@ -17,10 +17,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
-  ensureAoneAuthenticated: vi.fn(),
+  ensureAoneAuthenticated: vi.fn((): string => 'reviewer'),
   getMrAuthorAndHead: vi.fn(),
   listMrComments: vi.fn((): unknown[] => []),
-  aoneWhoami: vi.fn(() => 'reviewer'),
   getMrStatusChecks: vi.fn(),
   writeFileSync: vi.fn(),
   readFileSync: vi.fn((..._a: unknown[]): string => {
@@ -40,7 +39,6 @@ vi.mock('./lib/platform/aone.js', async (importOriginal) => {
     ...actual,
     getMrAuthorAndHead: mocks.getMrAuthorAndHead,
     listMrComments: mocks.listMrComments,
-    aoneWhoami: mocks.aoneWhoami,
     getMrStatusChecks: mocks.getMrStatusChecks,
   };
 });
@@ -224,12 +222,14 @@ describe('aoneCommentToPresubmitComment (a1 → GitHub-shaped input)', () => {
 describe('presubmit handler (Aone backing)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // The auth gate doubles as the account read (#9629) — ONE whoami per
+    // run, before the MR fetch.
+    mocks.ensureAoneAuthenticated.mockReturnValue('reviewer');
     mocks.getMrAuthorAndHead.mockReturnValue({
       author: 'mr-author',
       headSha: 'sha-reviewed',
     });
     mocks.listMrComments.mockReturnValue([]);
-    mocks.aoneWhoami.mockReturnValue('reviewer');
     mocks.getMrStatusChecks.mockReturnValue([
       { name: 'test', state: 'success' },
     ]);

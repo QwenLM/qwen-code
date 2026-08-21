@@ -384,7 +384,24 @@ Enterprise paragraph.
     Still open: dedup/self-PR backing for Aone, `composeUrl`, cleanup
     audit, the ai_comment marking flag (a1-side), the render-adjudication
     carve-out.
-  - **Landed (2026-08-21): the dedup/self-PR backing for Aone** —
+  - **Self-PR backing (2026-08-21, #9616):** `presubmit` became
+    platform-aware. On an Aone target it runs the backed slice —
+    self-PR detection (`a1 auth whoami`'s `account` vs the `mr view`
+    author, one fetch, case-insensitive, fail-soft on a missing author,
+    fail-closed on a thrown `mr view`) and head drift (`sourceBranch` IS
+    the head under AGit-Flow; no compare API exists, so `compare` is
+    null and a drifted head is always anchors-at-risk) — and reports the
+    unbacked slice neutral (`no_checks` with zero checks, zero existing
+    comments: no downgrades from them, no overlap blocks). Same report
+    shape as GitHub, so Step 7's apply-the-report rules and
+    compose-review's downgrade fields are unchanged; the verdict cap
+    stays forced in `submit` (pr-context is still unbacked). SKILL.md's
+    Aone list names presubmit as reduced-backing instead of skipped, and
+    the "no self-PR detection" caveat is gone from both docs. Still
+    open: dedup backing for Aone, `composeUrl`, cleanup audit, the
+    ai_comment marking flag (a1-side), the render-adjudication
+    carve-out.
+  - **Landed (2026-08-21, #9627): the dedup backing for Aone** —
     `comment-status` and `presubmit` route an Aone target at the a1 reads
     (`mr view` author+head, `mr status` gates, `mr comment list`,
     `auth whoami`) and reuse the SAME pure classification core the GitHub

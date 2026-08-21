@@ -8,7 +8,11 @@
 // gh-API queries and emits a single JSON report describing self-PR status,
 // CI / build status, existing Qwen Code comment classification, and the
 // downgrade decisions the LLM should apply when constructing the review
-// event.
+// event. On an Aone target the command routes at the `a1` CLI instead and
+// emits the SAME report shape through the same shared writer: self-PR
+// detection (the gate's whoami account vs the MR author), head drift
+// (`sourceBranch` is the live head; no compare API, so `compare` stays
+// null), merge-gate classification, and the existing-comment dedup.
 
 import type { CommandModule } from 'yargs';
 import { writeFileSync, readFileSync } from 'node:fs';
@@ -19,8 +23,11 @@ import {
   ghApiAllNested,
   currentUser,
   ensureAuthenticated,
+  isOwnerRepo,
   setGhHost,
 } from './lib/gh.js';
+import { detectPlatformKind } from './lib/platform/registry.js';
+import { ensureAoneAuthenticated } from './lib/platform/aone-client.js';
 import {
   LEADING_INVISIBLE_RE,
   carriedClaimLine,
@@ -32,11 +39,8 @@ import {
   LEDGER_ID_SHAPE,
   LEDGER_ID_TOKEN,
 } from './lib/ledger.js';
-import { detectPlatformKind } from './lib/platform/registry.js';
-import { ensureAoneAuthenticated } from './lib/platform/aone-client.js';
 import {
   aoneAccountName,
-  aoneWhoami,
   getMrAuthorAndHead,
   getMrStatusChecks,
   listMrComments,
@@ -747,6 +751,19 @@ function classifyExistingComments(
   return buckets;
 }
 
+/**
+ * The self-PR test both platform paths run: a case-insensitive match of the
+ * PR author against the reviewing account. The `author !== ''` guard is the
+ * load-bearing half — a deleted-author MR and an unreadable reviewer account
+ * are BOTH reachable, and without it the comparison computes '' === '' and
+ * downgrades a stranger's PR as a self-review (house-pinned on the GitHub
+ * path since #9212). Stated once so the next normalization rule cannot be
+ * applied to one platform's copy only and silently diverge the paths.
+ */
+function isSelfReview(author: string, me: string): boolean {
+  return author !== '' && author.toLowerCase() === me.toLowerCase();
+}
+
 async function runPresubmit(args: PresubmitArgs): Promise<void> {
   const {
     pr_number: prNumber,
@@ -790,7 +807,7 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
   const author = prMeta.author ?? '';
   const liveHeadSha = prMeta.headSha ?? '';
   const me = currentUser();
-  const isSelfPr = author !== '' && author.toLowerCase() === me.toLowerCase();
+  const isSelfPr = isSelfReview(author, me);
 
   // --- Head drift ---------------------------------------------------------
   // Detail is best-effort: the drift itself (and its downgrade) never
@@ -1080,27 +1097,41 @@ async function runPresubmitAone(args: PresubmitArgs): Promise<void> {
   } = args;
   const newFindingsPath = args['new-findings'];
 
-  if (ownerRepo.indexOf('/') < 0) {
-    throw new Error('owner_repo must look like "owner/repo"');
-  }
-  // Validate the raw token BEFORE coercing — the comment-status twin carries
-  // the full rationale: Number() alone accepts '012'/'1e3'/' 12'/'12.0' and
-  // would compute this MR's dedup state from a different MR than the
-  // report's label carries.
+  // Usage errors surface BEFORE the auth gate and the platform-fetch
+  // try/catch: a malformed positional is a deterministic invocation
+  // problem, not a metadata blip — catching it below would emit a
+  // "metadata unavailable" downgrade report instead of failing the call.
+  // The id grammar matches the comment-status twin (fetch-pr's digit
+  // grammar): Number() alone accepts '012'/'1e3'/' 12'/'12.0' and would
+  // compute this MR's dedup state from a different MR than the report's
+  // label carries; the id also reaches `a1 repo mr view` as a positional,
+  // and a `-1` would parse as a flag if it rode through.
   if (!/^[1-9]\d*$/.test(prNumber)) {
     throw new Error(
       'pr_number must be a positive integer (the Aone global MR id)',
     );
   }
+  // The same shape check the Aone reader seam applies (meta/fetch-pr
+  // already refused anything else before this command could run).
+  if (!isOwnerRepo(ownerRepo)) {
+    throw new TypeError(
+      `expected owner/repo, got ${JSON.stringify(ownerRepo)}`,
+    );
+  }
   const mrId = Number(prNumber);
 
-  ensureAoneAuthenticated();
+  // The auth gate doubles as the account read: ONE whoami per run, run
+  // BEFORE the MR fetch — a whoami failure aborts at the gate's
+  // actionable error, and no account fetch remains after the MR fetch
+  // that could throw uncaught and orphan the graceful metaUnavailable
+  // report below (#9629 review).
+  const me = ensureAoneAuthenticated();
 
   // --- Self-MR detection + live head (one mr view) ----------------------
   // Same two failure classes as the GitHub path: an UNREADABLE mr view is
   // fail-CLOSED (metaUnavailable — neither self-PR nor drift can be
-  // checked, so the Approve caps); a readable view with an absent author is
-  // fail-soft (isSelfPr false).
+  // checked, so the Approve caps); a readable view with an absent author
+  // (deleted account) is fail-soft (isSelfPr false).
   let mrAuthor = '';
   let liveHeadSha = '';
   let metaUnavailable = false;
@@ -1111,9 +1142,7 @@ async function runPresubmitAone(args: PresubmitArgs): Promise<void> {
   } catch {
     metaUnavailable = true;
   }
-  const me = aoneWhoami();
-  const isSelfPr =
-    mrAuthor !== '' && mrAuthor.toLowerCase() === me.toLowerCase();
+  const isSelfPr = isSelfReview(mrAuthor, me);
 
   // --- Head drift ---------------------------------------------------------
   // Aone has no compare endpoint — the delta would be a local
@@ -1230,7 +1259,8 @@ export const presubmitCommand: CommandModule = {
       .positional('owner_repo', {
         type: 'string',
         demandOption: true,
-        describe: 'GitHub "owner/repo"',
+        describe:
+          'Target coordinate: GitHub "owner/repo" or Aone "group/project"',
       })
       .positional('out_path', {
         type: 'string',

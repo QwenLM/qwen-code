@@ -648,4 +648,21 @@ describe('bundled review skill', () => {
       'the URL a `pr-url` target carried, or else assemble',
     );
   });
+
+  it('runs comment-status and presubmit on Aone targets — backed, not skipped', () => {
+    // Revert guard (#9616, #9627): comment-status and presubmit used to sit
+    // on the Aone skip list and the skill carried the "no dedup backing" /
+    // "self-PR detection has no Aone backing" caveats — repeat rounds
+    // re-posted every finding and a review of the user's own MR got no
+    // downgrade. Both subcommands are now a1-backed with the full semantics;
+    // restoring either the skip or a caveat must fail here, not slip
+    // through.
+    const body = skillBody();
+    expect(body).toContain('`comment-status`, `presubmit`) work unchanged');
+    expect(body).toContain('(`comment-status` and `presubmit` ARE a1-backed');
+    expect(body).toContain('the MR author is matched against `a1 auth whoami`');
+    expect(body).not.toContain('self-PR detection has no Aone backing');
+    expect(body).not.toContain('no dedup backing yet');
+    expect(body).not.toContain('`pr-context`, `comment-status`, `presubmit`');
+  });
 });
