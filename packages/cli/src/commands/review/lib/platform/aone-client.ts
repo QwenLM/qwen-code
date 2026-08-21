@@ -112,25 +112,23 @@ export function a1JsonOnce<T>(...args: string[]): T | undefined {
 }
 
 /**
- * Login of the currently authenticated Aone account — the sibling of
- * gh.ts's `currentUser`. Reads the `account` field of
- * `a1 auth whoami --format json`; empty when whoami succeeds but names no
- * account (presubmit's self-PR comparison then fails soft, like the GitHub
- * path's empty login).
+ * Fail fast with an actionable message when `a1` cannot run, and return the
+ * authenticated account. Runs `a1 auth whoami --format json` ONCE — the
+ * JSON spelling fully subsumes a plain auth gate, so presubmit reads its
+ * self-PR comparison account off this call instead of spawning a second
+ * whoami (which retried its own delays a second time under the same
+ * transient outage, and could throw uncaught after the report's graceful
+ * path had already been decided). A missing binary (ENOENT — the dominant
+ * first-run state for this new dependency) is a different remedy than an
+ * unauthenticated one. An EXEC-successful answer that does not parse or
+ * names no account returns '': the exec's success already proves the auth
+ * state, and an unreadable account fails presubmit's self-PR comparison
+ * soft, like the GitHub path's empty login.
  */
-export function aoneCurrentUser(): string {
-  const out = a1Json<{ account?: unknown }>('auth', 'whoami');
-  return typeof out.account === 'string' ? out.account.trim() : '';
-}
-
-/**
- * Fail fast with an actionable message when `a1` cannot run. A missing
- * binary (ENOENT — the dominant first-run state for this new dependency) is
- * a different remedy than an unauthenticated one.
- */
-export function ensureAoneAuthenticated(): void {
+export function ensureAoneAuthenticated(): string {
+  let raw: string;
   try {
-    a1('auth', 'whoami');
+    raw = a1('auth', 'whoami', '--format', 'json');
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
       throw new Error('a1 CLI not found on PATH — install the `a1` CLI first.');
@@ -145,9 +143,9 @@ export function ensureAoneAuthenticated(): void {
       );
     }
     // execFileSync failure messages BEGIN with the fixed preamble
-    // "Command failed: a1 auth whoami"; a1's real first stderr line is the
-    // first NON-empty line after it. `.split('\n')[0]` would render only the
-    // preamble and drop the cause.
+    // "Command failed: a1 auth whoami --format json"; a1's real first stderr
+    // line is the first NON-empty line after it. `.split('\n')[0]` would
+    // render only the preamble and drop the cause.
     const cause =
       e.message
         .split('\n')
@@ -164,5 +162,11 @@ export function ensureAoneAuthenticated(): void {
         (cause ? ` — ${cause}` : '') +
         ` (if you have not logged in, run \`a1 auth login\`)`,
     );
+  }
+  try {
+    const out = JSON.parse(raw) as { account?: unknown };
+    return typeof out.account === 'string' ? out.account.trim() : '';
+  } catch {
+    return '';
   }
 }

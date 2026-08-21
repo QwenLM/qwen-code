@@ -27,10 +27,7 @@ import {
   setGhHost,
 } from './lib/gh.js';
 import { detectPlatformKind } from './lib/platform/registry.js';
-import {
-  aoneCurrentUser,
-  ensureAoneAuthenticated,
-} from './lib/platform/aone-client.js';
+import { ensureAoneAuthenticated } from './lib/platform/aone-client.js';
 import { mrPresubmitFacts } from './lib/platform/aone.js';
 import {
   LEADING_INVISIBLE_RE,
@@ -605,6 +602,63 @@ function classifyExistingComments(
   return buckets;
 }
 
+/**
+ * The self-PR test both platform paths run: a case-insensitive match of the
+ * PR author against the reviewing account. The `author !== ''` guard is the
+ * load-bearing half — a deleted-author MR and an unreadable reviewer account
+ * are BOTH reachable, and without it the comparison computes '' === '' and
+ * downgrades a stranger's PR as a self-review (house-pinned on the GitHub
+ * path since #9212). Stated once so the next normalization rule cannot be
+ * applied to one platform's copy only and silently diverge the paths.
+ */
+function isSelfReview(author: string, me: string): boolean {
+  return author !== '' && author.toLowerCase() === me.toLowerCase();
+}
+
+/**
+ * The report envelope BOTH platform paths emit. Consumers read the file as
+ * untyped JSON (compose-review's downgrade flags via toBool), so a key
+ * missing from one path's literal degrades silently there — the boolean
+ * reads as false and a downgrade that should fire doesn't. Typing both
+ * literals against one interface makes a field added to the envelope a
+ * compile error on the path that forgot it: the "SAME report shape"
+ * invariant enforced by the compiler instead of convention. The bodies
+ * legitimately diverge in what they COMPUTE.
+ */
+interface PresubmitReport {
+  prNumber: string;
+  commitSha: string;
+  ownerRepo: string;
+  isSelfPr: boolean;
+  ciStatus: {
+    class: 'all_pass' | 'any_failure' | 'all_pending' | 'no_checks';
+    failedCheckNames: string[];
+    skippedCheckNames: string[];
+    totalChecks: number;
+  };
+  existingComments: {
+    total: number;
+    byBucket: {
+      stale: number;
+      resolved: number;
+      overlap: number;
+      repost: number;
+      noConflict: number;
+    };
+    overlap: CommentSummary[];
+    repost: CommentSummary[];
+    stale: CommentSummary[];
+    resolved: CommentSummary[];
+    noConflict: CommentSummary[];
+  };
+  downgradeApprove: boolean;
+  downgradeRequestChanges: boolean;
+  downgradeReasons: string[];
+  blockOnExistingComments: boolean;
+  findingsFileInvalid: boolean;
+  headDrift: HeadDrift;
+}
+
 async function runPresubmit(args: PresubmitArgs): Promise<void> {
   const {
     pr_number: prNumber,
@@ -648,7 +702,7 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
   const author = prMeta.author ?? '';
   const liveHeadSha = prMeta.headSha ?? '';
   const me = currentUser();
-  const isSelfPr = author !== '' && author.toLowerCase() === me.toLowerCase();
+  const isSelfPr = isSelfReview(author, me);
 
   // --- Head drift ---------------------------------------------------------
   // Detail is best-effort: the drift itself (and its downgrade) never
@@ -805,7 +859,7 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
     );
   }
 
-  const result = {
+  const result: PresubmitReport = {
     prNumber,
     commitSha,
     ownerRepo,
@@ -906,7 +960,12 @@ async function runAonePresubmit(args: PresubmitArgs): Promise<void> {
     );
   }
 
-  ensureAoneAuthenticated();
+  // The auth gate doubles as the account read: ONE whoami per run (the
+  // JSON spelling fully subsumes the plain gate), run BEFORE the MR fetch —
+  // a whoami failure aborts at the gate's actionable error, and there is no
+  // second a1 call after the fetch that could throw uncaught and orphan the
+  // graceful metaUnavailable report below.
+  const me = ensureAoneAuthenticated();
 
   // --- Self-PR detection + live head (one fetch) -------------------------
   // The same two failure classes as the GitHub path. A readable MR whose
@@ -926,8 +985,7 @@ async function runAonePresubmit(args: PresubmitArgs): Promise<void> {
   } catch {
     metaUnavailable = true;
   }
-  const me = aoneCurrentUser();
-  const isSelfPr = author !== '' && author.toLowerCase() === me.toLowerCase();
+  const isSelfPr = isSelfReview(author, me);
 
   // --- Head drift ---------------------------------------------------------
   // Under AGit-Flow `sourceBranch` IS the head; Aone has no compare API, so
@@ -951,15 +1009,15 @@ async function runAonePresubmit(args: PresubmitArgs): Promise<void> {
   }
 
   const noComments: CommentSummary[] = [];
-  const result = {
+  const result: PresubmitReport = {
     prNumber,
     commitSha,
     ownerRepo,
     isSelfPr,
     ciStatus: {
-      class: 'no_checks' as const,
-      failedCheckNames: [] as string[],
-      skippedCheckNames: [] as string[],
+      class: 'no_checks',
+      failedCheckNames: [],
+      skippedCheckNames: [],
       totalChecks: 0,
     },
     existingComments: {

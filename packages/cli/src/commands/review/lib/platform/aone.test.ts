@@ -417,6 +417,38 @@ describe('aoneReader.getCommentBody', () => {
   });
 });
 
+describe('aoneReader.getPrMeta — the live-head read behind meta.headSha', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('maps mr view onto PrMeta (head sha, web url)', () => {
+    a1JsonMock.mockReturnValue({
+      mergeRequest: {
+        sourceBranch: 'sha123',
+        detailUrl: 'https://code.alibaba-inc.com/g/p/codereview/7',
+      },
+    });
+    expect(aoneReader.getPrMeta(7, 'g/p')).toEqual({
+      number: 7,
+      headSha: 'sha123',
+      webUrl: 'https://code.alibaba-inc.com/g/p/codereview/7',
+    });
+  });
+
+  it('trims a padded sourceBranch — one normalization for every head read', () => {
+    // Step 7's reviewed-SHA fallback reads meta.headSha while presubmit's
+    // drift check compares the TRIMMED live head; the pre-fix untrimmed
+    // copy made a padded server value read as drift ("PR head advanced
+    // during review") on an MR that never moved — and as a submit-time
+    // refusal at the pre-write gate (#9629 review).
+    a1JsonMock.mockReturnValue({
+      mergeRequest: { sourceBranch: '  sha123\n', detailUrl: '' },
+    });
+    expect(aoneReader.getPrMeta(7, 'g/p').headSha).toBe('sha123');
+  });
+});
+
 describe('aoneReader.getFetchMeta / fetchHeadRefSpec', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -440,6 +472,16 @@ describe('aoneReader.getFetchMeta / fetchHeadRefSpec', () => {
     expect(meta.additions).toBeUndefined();
     expect(meta.deletions).toBeUndefined();
     expect(meta.changedFiles).toBeUndefined();
+  });
+
+  it('trims a padded sourceBranch into headRefOid — one normalization for the head', () => {
+    // fetch-pr compares headRefOid against the fetched SHA; the pre-fix
+    // untrimmed copy read a padded server value as a different head
+    // (#9629 review).
+    a1JsonMock.mockReturnValue({
+      mergeRequest: { sourceBranch: '  sha123\n', targetBranch: 'master' },
+    });
+    expect(aoneReader.getFetchMeta(7, 'g/p').headRefOid).toBe('sha123');
   });
 
   it('uses the merge-requests refspec with the global id', () => {
@@ -502,7 +544,7 @@ describe("mrPresubmitFacts (the presubmit gate's Aone seam)", () => {
   it('type-guards a non-string username instead of letting it crash presubmit', () => {
     // `username` is server-controlled; a non-string surviving `?? ''` would
     // reach `.toLowerCase()` outside presubmit's fetch try/catch and die
-    // with no report. Parity with aoneCurrentUser's `typeof === 'string'`.
+    // with no report. Parity with the gate's account read (`typeof === 'string'`).
     a1JsonMock.mockReturnValue({
       mergeRequest: { sourceBranch: 'sha123', author: { username: 42 } },
     });
