@@ -5315,6 +5315,34 @@ export const useGeminiStream = (
           `restoring ${entries.length} teammate message(s) after failed/cancelled submission`,
         );
         restore();
+        // The same envelopes were already baked into the Ctrl+Y retry
+        // payload: `submitQuery` stored `finalQueryToSend` (envelope
+        // parts included) in `lastPromptRef` before the client call
+        // failed. Strip them — the batch is back in the queue for the
+        // Idle fallback, and a retry that re-sends them would hand the
+        // leader the identical report twice (retry + Idle drain). The
+        // trailing-match guard keeps this a no-op when the restore
+        // fires before `submitQuery` stored the payload (cancel and
+        // preempt paths below) or after a later submission overwrote
+        // it.
+        const lastPrompt = lastPromptRef.current;
+        if (Array.isArray(lastPrompt)) {
+          const cut = lastPrompt.length - entries.length;
+          if (
+            cut >= 0 &&
+            entries.every((entry, i) => {
+              const part = lastPrompt[cut + i];
+              return (
+                typeof part === 'object' &&
+                part !== null &&
+                'text' in part &&
+                part.text === entry.modelText
+              );
+            })
+          ) {
+            lastPromptRef.current = cut > 0 ? lastPrompt.slice(0, cut) : null;
+          }
+        }
       };
       const submissionSettlement: SteerInput | undefined =
         drainedSteer || drainedTeammates

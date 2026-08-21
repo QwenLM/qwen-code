@@ -1919,6 +1919,148 @@ describe('useGeminiStream', () => {
       );
     });
 
+    it('does not re-send the restored envelope when retrying a failed boundary submission (Ctrl+Y)', async () => {
+      // Hold the Idle drain behind the goal gate (queued user messages)
+      // so Ctrl+Y can fire before the restored batch is redelivered —
+      // the reported scenario: the Idle drain is goal-gated while a user
+      // message is queued, but Retry is admissible.
+      let queuedUserMessages = true;
+      let pendingSubmissionCount = 0;
+      const goalQueueRef = {
+        current: {
+          hasQueuedUserMessages: vi.fn(() => queuedUserMessages),
+          getPendingSubmissionCount: vi.fn(() => pendingSubmissionCount),
+          claimGoalTurn: vi.fn(),
+        },
+      };
+
+      const mockManager = { setLeaderMessageCallback: vi.fn() };
+      (mockConfig.getTeamManager as unknown as Mock).mockReturnValue(
+        mockManager,
+      );
+
+      const client = new MockedGeminiClientClass(mockConfig);
+      // Settlement shim matching the real client: a send that provably
+      // never pushed (blocked, or threw before the history push) is
+      // settled by restore; otherwise accept.
+      client.sendMessageStream = (...args: any[]) => {
+        const stream = mockSendMessageStream(...args);
+        const settlement = args[3]?.steerInput as SteerInput | undefined;
+        return (async function* () {
+          let blocked = false;
+          try {
+            for await (const event of stream) {
+              blocked ||=
+                event.type === ServerGeminiEventType.UserPromptSubmitBlocked;
+              yield event;
+            }
+          } catch (error) {
+            settlement?.restore();
+            throw error;
+          }
+          if (blocked) settlement?.restore();
+          else settlement?.accept();
+        })();
+      };
+
+      const utils = renderTestHook(
+        [createExecutingToolCall()],
+        client,
+        undefined,
+        undefined,
+        undefined,
+        goalQueueRef as never,
+      );
+      const leaderCallback = () => {
+        const callback = (
+          mockManager.setLeaderMessageCallback as Mock
+        ).mock.calls.at(-1)?.[0] as
+          | ((modelText: string, display: string) => void)
+          | undefined;
+        expect(callback).toBeDefined();
+        return callback!;
+      };
+
+      act(() => {
+        leaderCallback()(teammateModelText, teammateDisplay);
+      });
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+
+      // The boundary submission throws before the history push (e.g. a
+      // UserPromptSubmit hook that throws on the ToolResult prompt —
+      // ToolResult is not hook-exempt). The batch is restored and the
+      // failed prompt becomes retryable (lastPromptErroredRef).
+      const normalStream = () =>
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })();
+      // The first (boundary) send throws before the history push; the
+      // throw propagates out of sendMessageStream into submitQuery's
+      // catch, which restores the carrier and sets lastPromptErroredRef.
+      mockSendMessageStream
+        .mockImplementation(normalStream)
+        .mockImplementationOnce(() => {
+          throw new Error('UserPromptSubmit hook failed');
+        });
+
+      const completed = createCompletedToolCall();
+      utils.rerenderWithToolCalls([completed]);
+      await utils.completeToolRound([completed]);
+
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      });
+      // The first (failed) attempt carried the envelope.
+      expect(mockSendMessageStream.mock.calls[0][0]).toEqual([
+        ...completed.response.responseParts,
+        { text: teammateModelText },
+      ]);
+
+      // Clear the tool calls so streamingState settles to Idle (the
+      // mocked scheduler's markToolsAsSubmitted is a no-op, so the
+      // completed-but-unsubmitted call would otherwise hold the state at
+      // Responding and block Ctrl+Y). The goal gate still holds the Idle
+      // drain, so the restored batch stays queued.
+      utils.rerenderWithToolCalls([]);
+      await waitFor(() => {
+        expect(utils.result.current.streamingState).toBe(StreamingState.Idle);
+      });
+
+      // Ctrl+Y retry of the failed continuation. The envelope is back in
+      // the queue, so the retry payload must NOT carry it again.
+      await act(async () => {
+        await utils.result.current.retryLastPrompt();
+      });
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      expect(mockSendMessageStream.mock.calls[1][0]).toEqual(
+        completed.response.responseParts,
+      );
+
+      // Release the goal gate (and change the pending count so the Idle
+      // drain effect's `goalQueuePendingCount` dep re-runs it): the
+      // restored envelope is delivered exactly once by the Idle fallback.
+      queuedUserMessages = false;
+      pendingSubmissionCount = 1;
+      utils.rerenderWithToolCalls([]);
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(3);
+      });
+      expect(mockSendMessageStream).toHaveBeenLastCalledWith(
+        teammateModelText,
+        expect.any(AbortSignal),
+        expect.any(String),
+        expect.objectContaining({
+          type: SendMessageType.Teammate,
+          notificationDisplayText: teammateDisplay,
+        }),
+      );
+    });
+
     it('delivers and records every envelope in a boundary batch', async () => {
       const recordNotification = vi.fn();
       mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
