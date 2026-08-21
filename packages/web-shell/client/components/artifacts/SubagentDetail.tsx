@@ -6,6 +6,7 @@ import {
 } from '@qwen-code/webui/daemon-react-sdk';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall, Message } from '../../adapters/types';
+import { WEB_SHELL_MAX_TRANSCRIPT_BLOCKS } from '../../constants/sessions';
 import { useAnimationFrameTranscriptBlocks } from '../../hooks/useAnimationFrameTranscriptBlocks';
 import { useMessagesFromBlocks } from '../../hooks/useMessages';
 import { useSessionArtifacts } from '../../hooks/useSessionArtifacts';
@@ -365,6 +366,7 @@ export function SubagentDetail({
       workspaceCwd={workspaceCwd}
       clientId={instance.clientId}
       maxQueued={256}
+      maxBlocks={WEB_SHELL_MAX_TRANSCRIPT_BLOCKS}
       subagentTranscriptMode="full"
       suppressOwnUserEcho
     >

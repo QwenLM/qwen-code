@@ -21,6 +21,9 @@ import {
   LEDGER_MAX_MODEL,
   LEDGER_MAX_ROUND,
   LEDGER_MAX_VOLUME,
+  LEDGER_MAX_ID,
+  LEDGER_ID_SHAPE,
+  isLedgerFinding,
   type Ledger,
   type LedgerFinding,
 } from './ledger.js';
@@ -438,6 +441,251 @@ describe('ledger marker', () => {
   });
 });
 
+describe('a shortened work list must never read as complete', () => {
+  const f = (id: string): LedgerFinding => ({
+    id,
+    sev: 'S',
+    file: 'a.ts',
+    title: 't',
+  });
+
+  it('counts what the FILTER rejected, not only what the cap sliced', () => {
+    // `dropped` decides two things: the anchor is withheld while it is set,
+    // and it now publishes the "may be an undercount" caveat. Entries the
+    // filter rejected are findings the next round will never rule on, so a
+    // list short by them that still certifies its range retires a posted
+    // Critical silently AND scopes the next review past its code.
+    const marker =
+      '<!-- qwen-review-ledger {"v":1,"round":3,"findings":[' +
+      '{"id":"R3-1","sev":"S","file":"a.ts","title":"kept"},' +
+      '{"id":"nope","sev":"S","file":"b.ts","title":"rejected"}' +
+      '],"sha":"deadbeef00112233"} -->';
+    const parsed = parseLedger(marker)!;
+    expect(parsed.findings.map((x) => x.id)).toEqual(['R3-1']);
+    expect(parsed.dropped).toBe(1);
+    expect(parsed.sha).toBeUndefined();
+  });
+
+  it('never writes an id its own parser would refuse', () => {
+    // The id cap slices without re-validating, so an over-long id is cut
+    // mid-token and stops being the grammar. Emitted, the next round's
+    // filter drops it — the finding retires with no ruling, and the loss is
+    // invisible unless it is counted here, where `dropped` still counts it.
+    const long = `R${'1'.repeat(30)}-7`;
+    const marker = serializeLedger({
+      v: 1,
+      round: 2,
+      findings: [f('R2-1'), { ...f(long), file: 'b.ts' }],
+      sha: 'deadbeef00112233',
+    });
+    // The MARKER, not merely the parse: dropped on the write side the loss is
+    // declared in the bytes and the anchor is withheld by the writer; left in,
+    // the marker spends its budget on a token its own reader will refuse.
+    expect(marker).not.toContain('R1111');
+    expect(marker).toContain('"dropped":1');
+    const parsed = parseLedger(marker)!;
+    expect(parsed.findings.map((x) => x.id)).toEqual(['R2-1']);
+    expect(parsed.dropped).toBe(1);
+    expect(parsed.sha).toBeUndefined();
+  });
+
+  it('writes no floor beside a volume that did not survive', () => {
+    // The floor qualifies `posted`. Written whenever the rung ADMITS the
+    // group rather than whenever the volume survived it, it is bytes spent
+    // on the shed cascade that the parser then discards — on the same ladder
+    // the serializer prices at a lost anchor.
+    const marker = serializeLedger({
+      v: 1,
+      round: 2,
+      findings: [f('R2-1')],
+      posted: -3 as unknown as number,
+      floor: 'c',
+    });
+    expect(marker).not.toContain('floor');
+  });
+
+  it('refuses a round-0 id at both ends of the bound', () => {
+    // Rounds start at 1, so `R0-*` is not an id this pipeline can mint — but
+    // it passes the shape, and every reader that turns an id into a round
+    // rejects round 0 and then reads the rejection as "no carried id", i.e.
+    // as FRESH. Admitted, a re-posted `R0-1` counts as first-time work every
+    // round and the trend narrates divergence at a settled steady state.
+    expect(
+      isLedgerFinding({ id: 'R0-1', sev: 'C', file: 'x.ts', title: 't' }, 9),
+    ).toBe(false);
+    expect(
+      parseLedger(
+        '<!-- qwen-review-ledger {"v":1,"round":3,"findings":[' +
+          '{"id":"R0-1","sev":"C","file":"x.ts","title":"boom"}' +
+          ']} -->',
+      )?.findings,
+    ).toEqual([]);
+    // The write side applies the same test, so a stray id the model minted
+    // out of range never reaches a marker its own reader would refuse.
+    const marker = serializeLedger({
+      v: 1,
+      round: 3,
+      findings: [f('R3-1'), { ...f('R0-1'), file: 'b.ts' }],
+    });
+    expect(marker).not.toContain('R0-1');
+    expect(marker).toContain('"dropped":1');
+  });
+
+  it('round-trips the stand-in exception flag, and clamps a forged dropped', () => {
+    // [1] The flag has to survive serialize -> parse, not merely exist on
+    // the builder's output: it is the only thing separating a real file
+    // spelled like a stand-in from the stand-in itself, and it crosses the
+    // marker boundary on every round.
+    const marker = serializeLedger({
+      v: 1,
+      round: 3,
+      findings: [
+        { id: 'R3-1', sev: 'C', file: '(body)', title: 'a stand-in' },
+        { id: 'R3-2', sev: 'S', file: '(body)', title: 'a real file', k: 1 },
+      ],
+    });
+    const back = parseLedger(marker)!;
+    expect(back.findings[0].k).toBeUndefined();
+    expect(back.findings[1].k).toBe(1);
+    // The stand-in costs no marker bytes; only the exception is spelled.
+    expect(marker.match(/"k":1/g)).toHaveLength(1);
+  });
+
+  it('clamps a forged `dropped` instead of publishing it', () => {
+    // It renders into the model-facing PARTIAL line and publishes the
+    // undercount caveat, and unlike a forged finding it cannot be re-ruled.
+    const parsed = parseLedger(
+      '<!-- qwen-review-ledger {"v":1,"round":3,"findings":[],"dropped":1e308} -->',
+    )!;
+    // Clamped through the same reader the other counts use, so the PARTIAL
+    // line cannot render `1e+308 further finding(s)`.
+    expect(parsed.dropped).toBe(LEDGER_MAX_VOLUME);
+    // A non-count is still no count at all.
+    expect(
+      parseLedger(
+        '<!-- qwen-review-ledger {"v":1,"round":3,"findings":[],"dropped":-4} -->',
+      )?.dropped,
+    ).toBeUndefined();
+  });
+
+  it('refuses an over-long id rather than cutting it into a different one', () => {
+    // Admitted and then sliced, the entry silently changes identity between
+    // the round that posted it and the round that rules on it.
+    const long = `R2-${'9'.repeat(LEDGER_MAX_ID)}`;
+    expect(long.length).toBeGreaterThan(LEDGER_MAX_ID);
+    expect(
+      isLedgerFinding({ id: long, sev: 'S', file: 'a.ts', title: 't' }, 9),
+    ).toBe(false);
+  });
+
+  it('bounds an id round by the CAP, not only by the claimed round', () => {
+    // The side-file route's round is whatever was written to it, which the
+    // admission test's own comment says is not always clamped.
+    expect(
+      isLedgerFinding(
+        {
+          id: `R${LEDGER_MAX_ROUND + 1}-1`,
+          sev: 'S',
+          file: 'a.ts',
+          title: 't',
+        },
+        Number.MAX_SAFE_INTEGER,
+      ),
+    ).toBe(false);
+    expect(
+      isLedgerFinding(
+        { id: `R${LEDGER_MAX_ROUND}-1`, sev: 'S', file: 'a.ts', title: 't' },
+        Number.MAX_SAFE_INTEGER,
+      ),
+    ).toBe(true);
+  });
+
+  it('keeps the fresh count only beside a volume that bounds it', () => {
+    const ok = parseLedger(
+      '<!-- qwen-review-ledger {"v":1,"round":3,"findings":[],"posted":5,"fresh":2} -->',
+    )!;
+    expect(ok.fresh).toBe(2);
+    // Larger than the total it is part of: not a count of anything.
+    const over = parseLedger(
+      '<!-- qwen-review-ledger {"v":1,"round":3,"findings":[],"posted":2,"fresh":5} -->',
+    )!;
+    expect(over.fresh).toBeUndefined();
+    // No total: nothing for it to be a part of.
+    const bare = parseLedger(
+      '<!-- qwen-review-ledger {"v":1,"round":3,"findings":[],"fresh":5} -->',
+    )!;
+    expect(bare.fresh).toBeUndefined();
+  });
+
+  it('refuses an over-long id rather than emitting a cut one under it', () => {
+    // The cut can still match the grammar — `R3-` plus twenty-two nines
+    // slices to a well-formed twenty-four — so validating after the slice
+    // emitted a DIFFERENT id under the same entry: the next round's readback
+    // of the posted claim returns the full id, matches no ledger entry, and
+    // the finding retires with no ruling while the list reads as complete.
+    const cuttable = `R3-${'9'.repeat(22)}`;
+    expect(cuttable.length).toBeGreaterThan(LEDGER_MAX_ID);
+    expect(LEDGER_ID_SHAPE.test(cuttable.slice(0, LEDGER_MAX_ID))).toBe(true);
+    const marker = serializeLedger({
+      v: 1,
+      round: 3,
+      findings: [
+        { ...f('R3-1'), file: 'a.ts' },
+        { ...f(cuttable), file: 'b.ts' },
+      ],
+      sha: 'deadbeef00112233',
+    });
+    expect(marker).not.toContain(cuttable.slice(0, LEDGER_MAX_ID));
+    const parsed = parseLedger(marker)!;
+    expect(parsed.findings.map((x) => x.id)).toEqual(['R3-1']);
+    expect(parsed.dropped).toBe(1);
+    expect(parsed.sha).toBeUndefined();
+  });
+
+  it('clamps the SUMMED dropped, not only its declared term', () => {
+    // `raw.findings.length` is attacker-chosen — a body of tens of thousands
+    // of single-character invalid entries fits GitHub's limit — and the
+    // total is interpolated verbatim into the model-facing PARTIAL line.
+    const junk = Array.from({ length: 400 }, () => ({ id: 'x' }));
+    const parsed = parseLedger(
+      `<!-- qwen-review-ledger {"v":1,"round":3,"dropped":${LEDGER_MAX_VOLUME},"findings":${JSON.stringify(junk)}} -->`,
+    )!;
+    expect(parsed.dropped).toBe(LEDGER_MAX_VOLUME);
+  });
+
+  it('normalises an unrecognised clustering hint instead of dropping the finding', () => {
+    // `k` decides nothing. The marker is a cross-environment carrier by
+    // design, so a later version adding a third kind — or a hand edit, or a
+    // foreign marker — would otherwise make every older CLI drop those
+    // findings from the work list: they would owe no Step 6 ruling and
+    // retire with nobody ruling on them.
+    const marker =
+      '<!-- qwen-review-ledger {"v":1,"round":3,"findings":[' +
+      '{"id":"R3-1","sev":"C","file":"(body)","title":"t","k":"d"}' +
+      ']} -->';
+    const parsed = parseLedger(marker)!;
+    expect(parsed.findings).toEqual([
+      { id: 'R3-1', sev: 'C', file: '(body)', title: 't' },
+    ]);
+    expect(parsed.dropped).toBeUndefined();
+  });
+
+  it('bounds an id round even when the marker round does not', () => {
+    // The round is printed verbatim in a public body, and the side-file read
+    // shares this admission test with no clamp of its own.
+    expect(
+      isLedgerFinding(
+        { id: 'R99999999999999999999-1', sev: 'S', file: 'a.ts', title: 't' },
+        Number.MAX_SAFE_INTEGER,
+      ),
+    ).toBe(false);
+    // A leading space is the bypass the whole-shape test closes.
+    expect(
+      isLedgerFinding({ id: ' R9-1', sev: 'S', file: 'a.ts', title: 't' }, 99),
+    ).toBe(false);
+  });
+});
+
 // The prefix-anchored readback both ledger read sides share wholesale:
 // compose-review's ledger builder and presubmit's re-post extractor.
 describe('LEDGER_ID_READBACK', () => {
@@ -640,17 +888,19 @@ describe('the convergence census and the churn streak', () => {
     })} -->`;
 
   it('round-trips the census as a pair', () => {
-    const l = parseLedger(serializeLedger({ ...base, fresh: 11, induced: 7 }))!;
-    expect(l.fresh).toBe(11);
-    expect(l.induced).toBe(7);
+    const l = parseLedger(
+      serializeLedger({ ...base, churnFresh: 11, churnInduced: 7 }),
+    )!;
+    expect(l.churnFresh).toBe(11);
+    expect(l.churnInduced).toBe(7);
   });
 
   it.each([
-    ['only a denominator', { fresh: 11 }],
-    ['only a numerator', { induced: 7 }],
-    ['a float denominator', { fresh: 11.5, induced: 7 }],
-    ['a negative numerator', { fresh: 11, induced: -1 }],
-    ['string digits', { fresh: '11', induced: '7' }],
+    ['only a denominator', { churnFresh: 11 }],
+    ['only a numerator', { churnInduced: 7 }],
+    ['a float denominator', { churnFresh: 11.5, churnInduced: 7 }],
+    ['a negative numerator', { churnFresh: 11, churnInduced: -1 }],
+    ['string digits', { churnFresh: '11', churnInduced: '7' }],
   ])('reads %s as no census at all', (_label, over) => {
     // Half a ratio is not a smaller reading, it is an unreadable one: a
     // numerator with no denominator would put a number in front of a reader
@@ -658,15 +908,19 @@ describe('the convergence census and the churn streak', () => {
     // must survive either way — this is a PR body any account can write.
     const l = parseLedger(handCrafted(over))!;
     expect(l.findings).toHaveLength(1);
-    expect(l.fresh).toBeUndefined();
-    expect(l.induced).toBeUndefined();
+    expect(l.churnFresh).toBeUndefined();
+    expect(l.churnInduced).toBeUndefined();
   });
 
   it('writes the census as a pair or not at all', () => {
     // Same rule on the write side, independently: a serializer that can emit
     // what its own parser refuses round-trips to nothing.
-    expect(serializeLedger({ ...base, fresh: 11 })).not.toContain('"fresh"');
-    expect(serializeLedger({ ...base, induced: 7 })).not.toContain('"induced"');
+    expect(serializeLedger({ ...base, churnFresh: 11 })).not.toContain(
+      '"churnFresh"',
+    );
+    expect(serializeLedger({ ...base, churnInduced: 7 })).not.toContain(
+      '"churnInduced"',
+    );
   });
 
   // The boundary is located by the PROPERTY, never by a byte count: the
@@ -685,8 +939,8 @@ describe('the convergence census and the churn streak', () => {
       findings,
       posted: 12,
       prevPosted: 9,
-      fresh: 11,
-      induced: 7,
+      churnFresh: 11,
+      churnInduced: 7,
     });
 
   const atTheCensusBoundary = (over: Partial<Ledger> = {}) => {
@@ -698,7 +952,7 @@ describe('the convergence census and the churn streak', () => {
         file: `packages/cli/src/commands/review/deep/path/file-${i}.ts`,
         title: 'x'.repeat(LEDGER_MAX_TITLE),
       };
-      if (withCensus([...findings, next], over).includes('"fresh"')) {
+      if (withCensus([...findings, next], over).includes('"churnFresh"')) {
         findings.push(next);
       } else {
         break;
@@ -715,7 +969,7 @@ describe('the convergence census and the churn streak', () => {
     };
     const room = LEDGER_MAX_FILE - findings[findings.length - 1].file.length;
     let pad = 0;
-    while (pad < room && withCensus(grow(pad), over).includes('"fresh"')) {
+    while (pad < room && withCensus(grow(pad), over).includes('"churnFresh"')) {
       pad++;
     }
     return { over: grow(pad), under: grow(pad - 1) };
@@ -730,12 +984,12 @@ describe('the convergence census and the churn streak', () => {
 
     // The control proves the fixture is AT the boundary rather than merely
     // over-fat: one byte less and the census fits.
-    expect(withCensus(under)).toContain('"fresh":11');
+    expect(withCensus(under)).toContain('"churnFresh":11');
 
     const written = withCensus(over);
     expect(written.length).toBeLessThanOrEqual(LEDGER_MAX_BYTES);
-    expect(written).not.toContain('"fresh"');
-    expect(written).not.toContain('"induced"');
+    expect(written).not.toContain('"churnFresh"');
+    expect(written).not.toContain('"churnInduced"');
     expect(written).not.toContain('"prevPosted"');
     // ...and everything below that rung survives the bytes it paid.
     expect(written).toContain('"posted":12');
@@ -753,7 +1007,7 @@ describe('the convergence census and the churn streak', () => {
     const { over } = atTheCensusBoundary({ churnRounds: 3 });
     const written = withCensus(over, { churnRounds: 3 });
     expect(written.length).toBeLessThanOrEqual(LEDGER_MAX_BYTES);
-    expect(written).not.toContain('"fresh"');
+    expect(written).not.toContain('"churnFresh"');
     expect(written).toContain('"churnRounds":3');
     expect(parseLedger(written)?.churnRounds).toBe(3);
     expect(parseLedger(written)?.findings).toHaveLength(over.length);
@@ -782,8 +1036,8 @@ describe('the convergence census and the churn streak', () => {
         findings: fat(n),
         posted: 12,
         prevPosted: 9,
-        fresh: 11,
-        induced: 7,
+        churnFresh: 11,
+        churnInduced: 7,
         churnRounds: 3,
       });
       if (!written.includes('"posted"')) break;
