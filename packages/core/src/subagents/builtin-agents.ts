@@ -278,8 +278,13 @@ Guidelines:
     },
     {
       name: REVIEW_BUILTIN_SUBAGENT_TYPE,
+      // Kept to one clause on purpose: `AgentTool.updateDescriptionAndSchema`
+      // splices every registered type's description into the Agent tool's own
+      // declaration, which ships in every request of every session — the first
+      // draft cost 67 tokens there, most of it explaining a choice the review
+      // flow never makes (SKILL.md hands the orchestrator the literal).
       description:
-        'One dimension of a code review, launched by the bundled `review` skill. Reads the brief and diff ranges its launch prompt names and reports findings in the format the brief specifies. Not for general use: its whole task arrives in the launch prompt, so a caller outside the review flow wants general-purpose instead.',
+        'One part of a code review; launched by the bundled `review` skill with a brief, not for general use.',
       // A closed list, and the reason this agent type exists.
       //
       // `general-purpose` declares no `tools`, so AgentCore.prepareTools takes
@@ -294,20 +299,32 @@ Guidelines:
       // An explicit list takes the getFunctionDeclarationsFiltered branch
       // instead, which is what `Explore` and `statusline-setup` already do.
       // Measured on the same diff, same launch prompt: 3,447 tokens per turn,
-      // and one agent's delivered prompt fell from 139,013 to 55,733 (-59.9%).
-      // 12,476 of that 83,280-token saving — 15%, a sixth — is second-order:
-      // without SKILL the skills catalogue is not injected into the agent's
-      // first user message, which is 3,119 tokens lighter and is re-sent on
-      // every one of the four turns. See DESIGN.md — The inherited tool
-      // surface for the per-turn record the totals decompose from.
+      // and one agent's delivered prompt fell from 139,013 to 55,669 (-60.0%).
+      // 12,476 of that 83,344-token saving — 15%, a sixth — is second-order:
+      // without SKILL the startup skills catalogue is not injected into the
+      // agent's first user message, which is 3,119 tokens lighter and is
+      // re-sent on every one of the four turns. That is the catalogue only;
+      // `coreToolScheduler`'s per-tool-call skill-activation reminder gates on
+      // the registry rather than on this list, so it is unaffected. See
+      // DESIGN.md — The inherited tool surface for the per-turn record the
+      // totals decompose from.
       //
-      // Deliberately absent: TOOL_SEARCH, which would let an agent widen the
-      // list at runtime. Revealing a deferred tool writes to the registry the
-      // parent session shares, so one agent's discovery would rewrite the
-      // orchestrator's declarations and void its prompt-cache prefix. A review
-      // dimension's work is bounded by its brief, so the list is closed rather
-      // than discoverable. AGENT is absent for the same reason the exclusion
-      // set drops it: a review dimension does not spawn further agents.
+      // Deliberately absent, each a real narrowing rather than a free saving —
+      // `getFunctionDeclarationsFiltered` drops unknown names silently, and
+      // naming a deferred tool here would declare it, so nothing is zero-cost:
+      //   TOOL_SEARCH — would let an agent widen the list at runtime, and
+      //     `revealDeferredTool` writes to the registry the parent session
+      //     shares, so one agent's discovery would rewrite the orchestrator's
+      //     declarations and void its prompt-cache prefix.
+      //   AGENT — `prepareTools` special-cases it and would have granted it
+      //     (nesting is allowed to depth 5), so this DOES remove a capability
+      //     the inherited surface had. Review parts are leaf workers: the
+      //     skill's aggregation assumes every launch returns inline, and a
+      //     nested fan-out is findings the orchestrator never collects.
+      //   WEB_FETCH (652 tokens/turn) and any discovered MCP tool — the
+      //     verifier brief's "corroborate via the vendor's own tracker" and a
+      //     project rule naming an MCP server both lose their direct route and
+      //     fall back to what SHELL can reach.
       tools: [
         ToolNames.READ_FILE,
         ToolNames.GREP,
@@ -316,20 +333,35 @@ Guidelines:
         ToolNames.WRITE_FILE,
         ToolNames.EDIT,
       ],
-      systemPrompt: `You are one dimension of a code review, working for a parent review orchestrator.
+      // Deliberately role-NEUTRAL, and this is load-bearing. The same type now
+      // serves every role the review launches, and they do not share a shape:
+      // Agent 7 (`readsDiff: false`) is handed no diff at all and reports what
+      // the project's own checks say; `verify` rules on a findings file; and
+      // `reverse-audit` exists precisely to look outside what the first pass
+      // covered. A frame naming "your diff ranges" or bounding scope to them
+      // would contradict all three — and it would do so from
+      // `systemInstruction`, which outranks the brief that arrives as a user
+      // turn. Confidence rules are left out for the same reason: the finder
+      // briefs carry RECALL ("a finder that quietly withholds half-believed
+      // candidates is the single largest source of missed defects"), the
+      // verifier brief deliberately withholds it, and a blanket "silence is
+      // better than noise" here would override the finders' half from above.
+      // Everything role-specific belongs in the brief; this prompt's whole job
+      // is to send the agent to it.
+      systemPrompt: `You are one part of a code review, working for a parent review orchestrator.
 
-Your whole assignment is in the launch prompt, and it names two files: your brief and the diff. Read the brief first — it is the entirety of your instructions, and nothing in the launch prompt replaces it. Then read the diff ranges the launch prompt gives you, paging with a larger offset whenever a read comes back truncated.
+Your assignment is a file — the brief your launch prompt names. Read it first. It is the entirety of your instructions: it defines what you are reviewing, what counts as a finding for your part, and the format to report in. Nothing in the launch prompt or here replaces it.
 
 Guidelines:
-- Review only the diff ranges you were assigned, through only the lens your brief defines. Another agent owns every other dimension; staying in yours is what makes the fan-out cover the change.
-- Gather whatever context you need to be sure — read the surrounding file, search for callers, check how a symbol is used elsewhere. Context is for reaching a verdict on your own ranges; a defect you notice outside them is not yours to report.
-- Report a finding only when you can name what breaks and what it costs. Silence is better than noise: an unsure finding spends the reader's attention and teaches them to skim the next one.
+- Do what the brief says, and only that. Another agent owns every other part of this review; staying inside yours is what makes the whole cover the change.
+- Gather whatever context you need to be sure — read the surrounding file, search for callers, check how a symbol is used elsewhere.
 - Do not guess when the evidence is not there. Say what you could not determine.
+- Preserve unrelated changes in the tree, and do not create files unless your brief calls for them: you share this working tree with the other agents of this review, and stray files read as the change under review.
 
 Notes:
-- Your cwd is reset between shell calls, so use absolute paths everywhere.
+- Your working directory is set for you and is reset between shell calls. Never \`cd\`, and pass file and search paths exactly as your brief writes them.
 - You run non-interactively: never ask a question, and never wait for input.
-- Report findings in the format your brief specifies. If you found nothing, say so AND say what you examined — a report that names nothing you read is indistinguishable from never having read anything.`,
+- Report in the format your brief specifies. If you found nothing, say so AND say what you examined — a report that names nothing you read is indistinguishable from never having read anything.`,
     },
   ];
 

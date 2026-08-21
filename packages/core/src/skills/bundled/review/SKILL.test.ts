@@ -682,15 +682,24 @@ describe('bundled review skill', () => {
     // The type must exist, or every launch fails outright: an unknown
     // `subagent_type` is not substituted with the default — only an omitted
     // one is — so the review would die on `Subagent "…" not found` rather
-    // than quietly run under `general-purpose`.
+    // than quietly run under `general-purpose`. `not.toBeNull()`, because
+    // `getBuiltinAgent` returns `null` on a miss and `toBeDefined()` accepts
+    // it: under `toBeDefined` a renamed or deleted entry sailed through.
     expect(
       BuiltinAgentRegistry.getBuiltinAgent(REVIEW_BUILTIN_SUBAGENT_TYPE),
-    ).toBeDefined();
-    // No stray *directive* may survive — Step 3B named the type too, and one
-    // missed site sends a whole topology down the expensive branch. Prose that
-    // names `general-purpose` as the thing NOT to fall back to is the point of
-    // the rule, so only the two launch-shaped forms are banned.
-    expect(body).not.toContain('subagent_type: "general-purpose"');
-    expect(body).not.toContain('`general-purpose` subagent');
+    ).not.toBeNull();
+    // Every `subagent_type` the skill names, as a set — the positive form,
+    // because a ban on literals only catches the spellings it enumerates: a
+    // reworded "Each is a general-purpose subagent" (no backticks) passed one.
+    // `fork` appears only as the type the rule forbids.
+    expect(
+      [...body.matchAll(/subagent_type: "([^"]+)"/g)].map((m) => m[1]),
+    ).toEqual([REVIEW_BUILTIN_SUBAGENT_TYPE, 'fork']);
+    // Step 3B names the type in prose rather than as a `subagent_type:`
+    // literal, so it needs its own positive pin — one missed site sends a
+    // whole topology down the expensive branch.
+    expect(body).toContain(`\`${REVIEW_BUILTIN_SUBAGENT_TYPE}\` subagent`);
+    expect(body).not.toContain('general-purpose` subagent');
+    expect(body).not.toContain('a general-purpose subagent');
   });
 });

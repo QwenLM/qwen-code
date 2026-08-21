@@ -167,7 +167,10 @@ describe('BuiltinAgentRegistry', () => {
         REVIEW_BUILTIN_SUBAGENT_TYPE,
       );
 
-      expect(agent).toBeDefined();
+      // `getBuiltinAgent` returns `null` on a miss, and vitest's
+      // `toBeDefined()` accepts `null` — so this must be `not.toBeNull()` or a
+      // renamed/removed entry sails through.
+      expect(agent).not.toBeNull();
       expect(agent?.tools).toEqual([
         ToolNames.READ_FILE,
         ToolNames.GREP,
@@ -183,46 +186,69 @@ describe('BuiltinAgentRegistry', () => {
       // every other test in this change green, while every dimension agent
       // would have launched with no instructions at all — the same silent
       // failure the `tools` assertions above exist to prevent.
-      const prompt =
-        BuiltinAgentRegistry.getBuiltinAgent(REVIEW_BUILTIN_SUBAGENT_TYPE)
-          ?.systemPrompt ?? '';
-
-      expect(prompt).toContain('one dimension of a code review');
-      // The brief outranks the launch prompt, and the diff is read from a file.
-      expect(prompt).toContain('Read the brief first');
-      // Scope: a defect outside the assigned ranges belongs to another agent.
-      expect(prompt).toContain('Review only the diff ranges you were assigned');
-      // The output contract the orchestrator's aggregation depends on.
-      expect(prompt).toContain(
-        'Report findings in the format your brief specifies',
+      const agent = BuiltinAgentRegistry.getBuiltinAgent(
+        REVIEW_BUILTIN_SUBAGENT_TYPE,
       );
+      expect(agent).not.toBeNull();
+      const prompt = agent!.systemPrompt;
+
+      expect(prompt).toContain('one part of a code review');
+      // The brief outranks everything else, including this prompt.
+      expect(prompt).toContain('Read it first');
+      expect(prompt).toContain('It is the entirety of your instructions');
+      // The shared-tree restraint `general-purpose` used to carry.
+      expect(prompt).toContain('Preserve unrelated changes in the tree');
+      // The output contract the orchestrator's aggregation depends on.
+      expect(prompt).toContain('Report in the format your brief specifies');
       // A question would block forever — these run with no human in the loop.
       expect(prompt).toContain('never ask a question');
+
+      // Role-NEUTRAL: this prompt is `systemInstruction` for every role the
+      // review launches, including one that reads no diff (Agent 7) and two
+      // that rule on a findings file. A frame bounding scope to "your diff
+      // ranges", or a blanket confidence bar, would override their briefs
+      // from above — see the comment on the entry itself.
+      expect(prompt).not.toContain('diff ranges');
+      expect(prompt).not.toContain('Silence is better than noise');
     });
 
     it('omits the tools that would re-open the inherited surface', () => {
-      const tools =
-        BuiltinAgentRegistry.getBuiltinAgent(REVIEW_BUILTIN_SUBAGENT_TYPE)
-          ?.tools ?? [];
+      const agent = BuiltinAgentRegistry.getBuiltinAgent(
+        REVIEW_BUILTIN_SUBAGENT_TYPE,
+      );
+      // Without this a missing entry collapses to `[]`, which satisfies every
+      // `not.toContain` below trivially.
+      expect(agent).not.toBeNull();
+      const tools = agent!.tools ?? [];
 
       // TOOL_SEARCH lets an agent reveal deferred tools at runtime, and
       // revealDeferredTool writes to the registry the parent session shares —
       // one agent's discovery would rewrite the orchestrator's declarations
       // and void its prompt-cache prefix.
       expect(tools).not.toContain(ToolNames.TOOL_SEARCH);
-      // SKILL is not merely unused: its presence injects the per-launch skills
+      // SKILL is not merely unused: its presence injects the startup skills
       // catalogue into the agent's first user turn, which measured 3,623
       // tokens against 504 without it.
       expect(tools).not.toContain(ToolNames.SKILL);
-      // A review dimension does not spawn further agents.
+      // AGENT would otherwise be granted — `prepareTools` special-cases it and
+      // nesting is allowed by default — so this is a deliberate capability
+      // removal: review parts are leaf workers whose findings must return
+      // inline for the orchestrator to aggregate.
       expect(tools).not.toContain(ToolNames.AGENT);
     });
 
     it('leaves general-purpose as the only builtin that inherits every tool', () => {
       // general-purpose inherits everything by design; every other builtin
-      // must declare a list, or it silently inherits the same surface.
+      // must declare a real list. `prepareTools` takes the inherit branch on
+      // `hasWildcard || (no strings && no inline decls)`, so a declared
+      // `['*']` is the same surface as declaring nothing — both are caught.
       const inheriting = BuiltinAgentRegistry.getBuiltinAgents()
-        .filter((agent) => !agent.tools || agent.tools.length === 0)
+        .filter(
+          (agent) =>
+            !agent.tools ||
+            agent.tools.length === 0 ||
+            agent.tools.includes('*'),
+        )
         .map((agent) => agent.name);
 
       expect(inheriting).toEqual([DEFAULT_BUILTIN_SUBAGENT_TYPE]);

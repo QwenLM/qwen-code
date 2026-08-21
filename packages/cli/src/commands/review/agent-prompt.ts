@@ -2455,12 +2455,26 @@ function runRoster(
   const paramNote =
     typeof wt === 'string' && wt
       ? `\n\n**Agent tool parameters (worktree mode):** Set ` +
-        `\`working_dir: "${wt}"\` and ` +
-        `\`subagent_type: "${REVIEW_BUILTIN_SUBAGENT_TYPE}"\`, \`run_in_background: false\` ` +
-        `on EVERY agent call below. Do NOT set \`isolation\` — the worktree ` +
-        `already exists; \`isolation\` creates a new copy and is mutually ` +
-        `exclusive with \`working_dir\`.`
+        `\`working_dir: "${wt}"\` on EVERY agent call below. Do NOT set ` +
+        `\`isolation\` — the worktree already exists; \`isolation\` creates a ` +
+        `new copy and is mutually exclusive with \`working_dir\`.`
       : '';
+  // The type belongs OUTSIDE that gate. It was written inside it because the
+  // block began as a `working_dir` reminder, and worktrees are the only mode
+  // that needs one — but the type is needed by all four (local diff, file
+  // path and cross-repo lightweight reviews have no worktree and were
+  // therefore told nothing). Omitting it is not a no-op: `AgentTool.execute`
+  // substitutes `general-purpose` for an omitted `subagent_type`, which
+  // declares no `tools` and so takes prepareTools' inherit-everything branch —
+  // 13 agents × 4 turns × ~17.7k tokens of tool declarations, the entire cost
+  // this type exists to remove. Before the review had its own type, forgetting
+  // the parameter was harmless because the default WAS the right answer.
+  const typeNote =
+    `\n\n**Set \`subagent_type: "${REVIEW_BUILTIN_SUBAGENT_TYPE}"\` and ` +
+    `\`run_in_background: false\` on EVERY agent call below**, in every review ` +
+    `mode. An omitted \`subagent_type\` is not left blank — it resolves to the ` +
+    `general-purpose default, which inherits every tool in the session and ` +
+    `re-declares them on each agent's every turn.`;
   // The Agent tool's `description` is the task name the user watches in the
   // TUI while the agent runs, and nothing downstream reads it — the delivery
   // check compares prompts, coverage reads transcripts. So it is the one part
@@ -2487,6 +2501,7 @@ function runRoster(
         `--chunk <id>, or --role <r> (--file <path> for an invariant agent), ` +
         `plus the same --rules this call was given.` +
         descNote +
+        typeNote +
         paramNote,
       ...blocks,
       `───── end of roster — ${roster.length} agents ─────`,

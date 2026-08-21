@@ -1585,6 +1585,38 @@ describe('--roster — every prompt the plan requires, in one call', () => {
     }
   });
 
+  it('names the review-agent subagent type in EVERY review mode', () => {
+    // The type note used to live inside the worktree-only `paramNote`, so the
+    // three modes with no worktree — local diff, file path, cross-repo
+    // lightweight — were told nothing, and an omitted `subagent_type` resolves
+    // to `general-purpose`: the inherit-everything branch, and the whole cost
+    // this type removes. PLAN carries no `worktreePath`, which is the branch
+    // the old test never reached.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-roster-type-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, JSON.stringify(PLAN));
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        roster: true,
+      });
+
+      const printed = (writeStdoutLine as unknown as Mock).mock
+        .calls[0][0] as string;
+      expect(printed).toContain(
+        `\`subagent_type: "${REVIEW_BUILTIN_SUBAGENT_TYPE}"\``,
+      );
+      // The directive form only. The note names `general-purpose` on purpose,
+      // as the default an omission resolves to — banning the word would ban
+      // the warning.
+      expect(printed).not.toContain('subagent_type: "general-purpose"');
+      // …and no worktree parameters leaked into a mode that has no worktree.
+      expect(printed).not.toContain('working_dir');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('names the review-agent subagent type in the worktree parameter note', () => {
     // The roster is the last text the orchestrator reads before constructing
     // agent calls, so this note is where a worktree-mode run learns its
@@ -1610,7 +1642,10 @@ describe('--roster — every prompt the plan requires, in one call', () => {
       expect(printed).toContain(
         `\`subagent_type: "${REVIEW_BUILTIN_SUBAGENT_TYPE}"\``,
       );
-      expect(printed).not.toContain('general-purpose');
+      expect(printed).not.toContain('subagent_type: "general-purpose"');
+      // The worktree branch keeps its own parameters and nothing else.
+      expect(printed).toContain('working_dir');
+      expect(printed).not.toContain('isolation: "worktree"');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
