@@ -853,6 +853,51 @@ describe('submit posts an authorised Aone target through a1', () => {
     );
   });
 
+  it('a whitespace-PADDED recorded host posts — the gate trims like setGhHost', () => {
+    // parse-args records --host VERBATIM, but every read path trims —
+    // padded hosts are a known-good input class (registry.ts) because
+    // setGhHost trims internally before its own HOSTNAME_RE check. The
+    // pre-validation must test the TRIMMED value, or a padded recorded
+    // host that posted fine pre-PR refuses as invalid-host with the
+    // re-record remedy — the costliest fix for stray whitespace.
+    authMock.mockReturnValue({
+      ok: true,
+      why: 'the user asked for this review to be published',
+      recordedHost: ' ghe.alibaba-inc.com ',
+    });
+    getPlatformReaderMock.mockReturnValue({ kind: 'github' });
+    ghWithInputMock.mockReturnValue('');
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    expect(process.exitCode).toBeUndefined();
+    expect(submitAoneMock).not.toHaveBeenCalled();
+    expect(ghWithInputMock).toHaveBeenCalledTimes(1);
+    expect(setGhHostMock).toHaveBeenCalledTimes(1);
+    expect(postedJson().posted).toBe(true);
+
+    // All-whitespace is NOT a padded host: it trims to '' which fails
+    // HOSTNAME_RE, so the structured refusal stands. Pin it so the trim
+    // fix cannot go further and normalize this shape into an absent
+    // host (which would restore setGhHost's raw TypeError exit-1, or
+    // worse, post unbound).
+    process.exitCode = undefined;
+    stdoutMock.mockClear();
+    stderrMock.mockClear();
+    authMock.mockReturnValue({
+      ok: true,
+      why: 'the user asked for this review to be published',
+      recordedHost: '   ',
+    });
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    expect(process.exitCode).toBe(3);
+    expect(postedJson()).toEqual({ posted: false, reason: 'invalid-host' });
+    expect(submitAoneMock).not.toHaveBeenCalled();
+    expect(ghWithInputMock).toHaveBeenCalledTimes(1);
+  });
+
   it('an INVALID cwd-origin host refuses naming the origin arm', () => {
     // The third provenance arm: no flag, no recorded host — the bound
     // host is the origin of the clone the cwd probe ran on.

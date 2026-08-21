@@ -747,7 +747,10 @@ function submit(
     // runSubmit: a failed command with a stack trace instead of the
     // exit-3 refusal shape Step 7 treats as a complete, correct outcome.
     // Same answer, structured shape, naming the offender and its origin.
-    if (boundHost !== undefined && !HOSTNAME_RE.test(boundHost)) {
+    // Test the TRIMMED value: setGhHost trims internally before its own
+    // check, and a padded host is a known-good input class that must
+    // post, not refuse.
+    if (boundHost !== undefined && !HOSTNAME_RE.test(boundHost.trim())) {
       // A recorded offender gets NO flag remedy: any valid flag
       // contradicts the recorded host (hostsEquivalent cannot match a
       // value that fails HOSTNAME_RE), and a flag equivalent to it
