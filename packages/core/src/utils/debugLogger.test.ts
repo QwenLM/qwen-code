@@ -336,12 +336,11 @@ describe('debugLogger', () => {
 
       await vi.runAllTimersAsync();
 
-      expect(fs.appendFile).toHaveBeenCalledWith(
+      expect(fs.appendFile).toHaveBeenCalledExactlyOnceWith(
         Storage.getDebugLogPath('session-C'),
         expect.stringContaining('[OVERRIDE] message from C'),
         'utf8',
       );
-      expect(fs.appendFile).toHaveBeenCalledOnce();
     });
 
     it('honors runWithoutDebugLogSession suppression inside sessionIdContext', async () => {
@@ -499,17 +498,50 @@ describe('debugLogger', () => {
       );
     });
 
-    it('does not refresh the alias for writes of the current session', async () => {
+    it('serializes alias updates so two sessions do not race unlink/symlink', async () => {
       resetDebugLoggingState();
-      setDebugLogSession(uuidSession);
-      await vi.runAllTimersAsync();
       vi.clearAllMocks();
 
+      // Each symlink call returns a deferred promise so we can control when
+      // the serialized update finishes and observe the next one waiting.
+      const deferreds: Array<{ resolve: () => void }> = [];
+      vi.mocked(fs.symlink).mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            deferreds.push({ resolve });
+          }),
+      );
+      vi.mocked(fs.unlink).mockResolvedValue(undefined);
+
+      const sessionA = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+      const sessionB = '7ba7b810-9dad-11d1-80b4-00c04fd430c8';
       const logger = createDebugLogger();
-      logger.info('same-session message');
+
+      sessionIdContext.run(sessionA, () => {
+        logger.info('message from A');
+      });
+      sessionIdContext.run(sessionB, () => {
+        logger.info('message from B');
+      });
+
+      // Let the first serialized alias update reach fs.symlink.
       await vi.runAllTimersAsync();
 
-      expect(fs.symlink).not.toHaveBeenCalled();
+      expect(fs.symlink).toHaveBeenCalledOnce();
+      expect(fs.symlink).toHaveBeenLastCalledWith(
+        `${sessionA}.txt`,
+        expectedLatestPath,
+      );
+
+      // Finish the first update; the second should now start.
+      deferreds[0]!.resolve();
+      await vi.runAllTimersAsync();
+
+      expect(fs.symlink).toHaveBeenCalledTimes(2);
+      expect(fs.symlink).toHaveBeenLastCalledWith(
+        `${sessionB}.txt`,
+        expectedLatestPath,
+      );
     });
   });
 
