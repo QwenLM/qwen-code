@@ -712,7 +712,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       '%s reasoning effort',
       (model) => {
         it.each(['low', 'medium', 'high', 'xhigh', 'max'] as const)(
-          'passes %s through as reasoning_effort',
+          'normalizes %s into reasoning_effort',
           (effort) => {
             const generator = new DashScopeOpenAICompatibleProvider(
               {
@@ -733,13 +733,63 @@ describe('DashScopeOpenAICompatibleProvider', () => {
               'test-prompt-id',
             ) as unknown as Record<string, unknown>;
 
-            expect(result['reasoning_effort']).toBe(effort);
+            const expected =
+              model === 'qwen3.8-max'
+                ? {
+                    low: 'low',
+                    medium: 'medium',
+                    high: 'xhigh',
+                    xhigh: 'xhigh',
+                    max: 'xhigh',
+                  }[effort]
+                : effort;
+            expect(result['reasoning_effort']).toBe(expected);
             expect(result['enable_thinking']).toBeUndefined();
             expect(result['reasoning']).toBeUndefined();
           },
         );
       },
     );
+
+    it('ignores inherited registry names without throwing', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'constructor',
+          reasoning: { effort: 'high' },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+
+      expect(() =>
+        generator.buildRequest(
+          { ...baseRequest, model: 'constructor' },
+          'test-prompt-id',
+        ),
+      ).not.toThrow();
+    });
+
+    it('preserves primitive nested reasoning without throwing', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          model: 'glm-5.2',
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const result = generator.buildRequest(
+        {
+          ...baseRequest,
+          model: 'glm-5.2',
+          reasoning: 'high',
+        } as unknown as Parameters<typeof generator.buildRequest>[0],
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+
+      expect(result['reasoning']).toBe('high');
+    });
 
     it.each([
       {
@@ -1308,13 +1358,13 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         'test-prompt-id',
       ) as unknown as Record<string, unknown>;
 
-      expect(result['reasoning_effort']).toBe('high');
+      expect(result['reasoning_effort']).toBe('xhigh');
       expect(result['enable_thinking']).toBeUndefined();
       expect(mockDebugLogger.warn).toHaveBeenCalledWith(
         'DashScope: dropped conflicting thinking knobs',
         {
           model: 'qwen3.8-max',
-          reasoningEffort: 'high',
+          reasoningEffort: 'xhigh',
           dropped: ['enable_thinking'],
         },
       );
@@ -1371,7 +1421,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         'DashScope: dropped conflicting thinking knobs',
         {
           model: 'qwen3.8-max',
-          reasoningEffort: 'high',
+          reasoningEffort: 'xhigh',
           dropped: ['reasoning_effort'],
         },
       );
@@ -1401,7 +1451,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         'DashScope: dropped conflicting thinking knobs',
         {
           model: 'qwen3.8-max',
-          reasoningEffort: 'high',
+          reasoningEffort: 'xhigh',
           dropped: ['reasoning_effort'],
         },
       );
@@ -1555,7 +1605,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         'DashScope: dropped conflicting thinking knobs',
         {
           model: 'qwen3.8-max',
-          reasoningEffort: 'high',
+          reasoningEffort: 'xhigh',
           dropped: ['enable_thinking', 'thinking_budget'],
         },
       );

@@ -19,6 +19,9 @@ describe('model configuration manifest', () => {
         defaultEffort: 'xhigh',
       },
     });
+    expect(getModelConfiguration('Qwen3.8-Max')).toEqual(
+      getModelConfiguration('qwen3.8-max'),
+    );
   });
 
   it.each([
@@ -71,6 +74,17 @@ describe('model configuration manifest', () => {
         defaultEffort: 'max',
       },
     });
+    expect(
+      getModelConfiguration('Kimi-K3', {
+        authType: OPENAI,
+        baseUrl: 'https://api.moonshot.cn/v1',
+      }),
+    ).toEqual(
+      getModelConfiguration('kimi-k3', {
+        authType: OPENAI,
+        baseUrl: 'https://api.moonshot.cn/v1',
+      }),
+    );
   });
 
   it('requires a supported OpenAI endpoint for non-Qwen controls', () => {
@@ -97,7 +111,6 @@ describe('model configuration manifest', () => {
     'vendor/qwen3.8-max',
     'qwen3.7-plus-latest',
     'vendor/qwen3.7-plus',
-    'QWEN3.7-PLUS',
     'qwen3-max-2026-01-23',
     'qwen3-coder-plus',
     'qwen3-coder-next',

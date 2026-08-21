@@ -3765,19 +3765,17 @@ export class Config {
    * Refresh authentication and rebuild ContentGenerator.
    */
   async refreshAuth(authMethod: AuthType, isInitialAuth?: boolean) {
-    // The global reasoning effort (settings.model.reasoningEffort, seeded into
-    // the generation config by the CLI) is NOT a provider field, but
+    // The session reasoning override is NOT a provider field, but
     // syncAfterAuthRefresh → applyResolvedModelDefaults overwrites every
     // MODEL_GENERATION_CONFIG_FIELDS entry — including `reasoning` — with the
-    // provider preset's value (undefined for reasoning). Capture the effort
-    // before the sync wipes it and re-apply it after the config is rebuilt, so
-    // /effort survives an auth refresh, including the initial one at startup.
-    // `reasoning` is `false | { effort?, ... } | undefined`; the truthy check
-    // already excludes both `false` and `undefined`.
+    // provider preset's value (undefined for reasoning). Capture the user
+    // effort or disabled state before the sync wipes it and re-apply it after
+    // the config is rebuilt.
     const priorReasoning = this.modelsConfig.getGenerationConfig().reasoning;
     const priorReasoningEffort = priorReasoning
       ? priorReasoning.effort
       : undefined;
+    const priorReasoningDisabled = priorReasoning === false;
 
     // Sync modelsConfig state for this auth refresh
     const modelId = this.modelsConfig.getModel();
@@ -3809,8 +3807,10 @@ export class Config {
     // fires — and the resolved model can differ from the pre-auth one.
     this.publishModelEnv();
 
-    // Re-apply the user's reasoning effort that the provider sync above wiped.
-    if (priorReasoningEffort) {
+    // Re-apply the user's reasoning override that the provider sync above wiped.
+    if (priorReasoningDisabled) {
+      this.setReasoningDisabled(true);
+    } else if (priorReasoningEffort) {
       this.setReasoningEffort(priorReasoningEffort);
     }
 
@@ -4661,6 +4661,23 @@ export class Config {
     applyEffort(this.modelsConfig?.getGenerationConfig());
   }
 
+  setReasoningDisabled(disabled: boolean): void {
+    const reasoning = disabled ? false : undefined;
+    const applyDisabled = (
+      cfg: { reasoning?: ContentGeneratorConfig['reasoning'] } | undefined,
+    ): void => {
+      if (cfg) {
+        cfg.reasoning = reasoning;
+      }
+    };
+    applyDisabled(this.contentGeneratorConfig);
+    const runtimeCfg = getRuntimeContentGenerator()?.contentGeneratorConfig;
+    if (runtimeCfg && runtimeCfg !== this.contentGeneratorConfig) {
+      applyDisabled(runtimeCfg);
+    }
+    applyDisabled(this.modelsConfig?.getGenerationConfig());
+  }
+
   /**
    * Whether `model` is the same entry as the current primary model — matched on
    * the provider identity (auth type, and baseUrl when both carry one), not just
@@ -4821,12 +4838,11 @@ export class Config {
       return;
     }
 
-    // Reasoning effort is a global, model-independent preference (set via
-    // /effort). Capture it before the rebuild and re-apply after, so switching
-    // models never silently drops the user's chosen effort — neither the
-    // hot-update path (which copies a fixed field set, not `reasoning`) nor the
-    // full refresh path (which rebuilds the config from scratch).
+    // Reasoning is a session preference. Capture the effort or disabled state
+    // before the rebuild so switching models does not silently drop it.
     const priorReasoningEffort = this.getReasoningEffort();
+    const priorReasoningDisabled =
+      this.contentGeneratorConfig.reasoning === false;
 
     // Keep full history (including thought parts) on model switch.
     // Some OpenAI-compatible reasoning models (e.g. DeepSeek) require
@@ -4852,11 +4868,9 @@ export class Config {
       );
 
       // Hot-update fields (qwen-oauth models share the same auth + client).
-      // Deliberately does NOT copy `reasoning`: it is a global, model-independent
-      // preference captured in `priorReasoningEffort` above and re-applied via
-      // setReasoningEffort() below. Do not add `reasoning` here — that would
-      // overwrite the live tier with the new model's default and make the
-      // restore a no-op.
+      // Deliberately does NOT copy `reasoning`: the session preference is
+      // restored below. Copying it here would overwrite the live choice with
+      // the new model's default before the restore.
       this.contentGeneratorConfig.model = config.model;
       this.contentGeneratorConfig.samplingParams = config.samplingParams;
       this.contentGeneratorConfig.contextWindowSize = config.contextWindowSize;
@@ -4914,24 +4928,26 @@ export class Config {
         this.contentGeneratorConfigSources['toolResultContentFormat'] =
           sources['toolResultContentFormat'];
       }
-      if (priorReasoningEffort) {
+      if (priorReasoningDisabled) {
+        this.setReasoningDisabled(true);
+      } else if (priorReasoningEffort) {
         this.setReasoningEffort(priorReasoningEffort);
       }
       resetPreloadedContentGenerator(this.contentGenerator);
       return;
     }
 
-    // Full refresh path. `refreshAuth` re-applies the reasoning effort it
-    // captures, but on a model *switch* that capture is already stale: the
+    // Full refresh path. `refreshAuth` re-applies the reasoning override it
+    // captures, but on a model *switch* that source is already stale: the
     // preceding switchModel() ran applyResolvedModelDefaults(), which overwrote
     // modelsConfig's `reasoning` with the new model's preset (undefined for most
     // models), BEFORE this callback fires. So refreshAuth reads `undefined` and
-    // cannot restore the tier. Re-apply here from `priorReasoningEffort`, which
-    // we captured off the still-intact live contentGeneratorConfig above. This is
-    // a no-op when the new model disables thinking (`reasoning: false`), since
-    // setReasoningEffort() skips that case and never silently re-enables it.
+    // cannot restore the choice. Re-apply here from the still-intact live
+    // contentGeneratorConfig captured above.
     await this.refreshAuth(authType);
-    if (priorReasoningEffort) {
+    if (priorReasoningDisabled) {
+      this.setReasoningDisabled(true);
+    } else if (priorReasoningEffort) {
       this.setReasoningEffort(priorReasoningEffort);
     }
   }

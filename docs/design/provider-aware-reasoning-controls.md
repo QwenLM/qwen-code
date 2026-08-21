@@ -58,8 +58,10 @@ Provider adapters remain responsible for the final request shape:
 
 The resolver requires the OpenAI protocol for all new provider-aware entries.
 Unknown, self-hosted, Anthropic-compatible, and spoofed hostnames receive no
-new controls or provider-specific fields. The previously merged Qwen entries
-retain their exact-ID behavior.
+new controls or provider-specific fields. Model IDs are matched as complete,
+case-normalized IDs; aliases, vendor prefixes, preview names, and dated suffixes
+do not inherit capabilities. The previously merged Qwen entries retain that
+whole-ID behavior.
 
 ## Deliberate exclusions
 

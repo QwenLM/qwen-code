@@ -6005,17 +6005,16 @@ class QwenAgent implements Agent {
               `Unknown reasoning effort: ${value}. Choose one of: ${choices.join(', ')}`,
             );
           }
-          const generation = session.getConfig().getContentGeneratorConfig();
+          const config = session.getConfig();
           if (selected === ACP_REASONING_EFFORT_NONE) {
-            generation.reasoning = false;
+            config.setReasoningDisabled(true);
           } else if (selected === ACP_REASONING_EFFORT_DEFAULT) {
-            generation.reasoning = undefined;
+            config.setReasoningDisabled(false);
           } else {
-            const current = generation.reasoning;
-            generation.reasoning = {
-              ...(current || {}),
-              effort: selected,
-            };
+            if (config.getContentGeneratorConfig().reasoning === false) {
+              config.setReasoningDisabled(false);
+            }
+            config.setReasoningEffort(selected);
           }
           break;
         }

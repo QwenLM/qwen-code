@@ -4598,6 +4598,46 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('reasoning effort override', () => {
+    it('syncs reasoning controls without dropping sibling settings', () => {
+      const config = new Config({
+        ...baseParams,
+        generationConfig: {
+          reasoning: { effort: 'low', budget_tokens: 4096 },
+        },
+      });
+      (
+        config as unknown as {
+          contentGeneratorConfig: ContentGeneratorConfig;
+        }
+      ).contentGeneratorConfig = {
+        model: 'qwen3.8-max',
+        authType: AuthType.QWEN_OAUTH,
+        reasoning: { effort: 'low', budget_tokens: 4096 },
+      };
+
+      config.setReasoningEffort('max');
+      expect(config.getContentGeneratorConfig().reasoning).toEqual({
+        effort: 'max',
+        budget_tokens: 4096,
+      });
+      expect(config.getModelsConfig().getGenerationConfig().reasoning).toEqual({
+        effort: 'max',
+        budget_tokens: 4096,
+      });
+
+      config.setReasoningDisabled(true);
+      expect(config.getContentGeneratorConfig().reasoning).toBe(false);
+      expect(config.getModelsConfig().getGenerationConfig().reasoning).toBe(
+        false,
+      );
+
+      config.setReasoningDisabled(false);
+      expect(config.getContentGeneratorConfig().reasoning).toBeUndefined();
+      expect(
+        config.getModelsConfig().getGenerationConfig().reasoning,
+      ).toBeUndefined();
+    });
+
     it('reports a higher-priority DashScope knob that shadows reasoning effort', () => {
       const config = new Config({
         ...baseParams,
@@ -4797,6 +4837,29 @@ describe('Server Config (config.ts)', () => {
       expect(config.getContentGeneratorConfig().reasoning).toEqual({
         effort: 'max',
       });
+    });
+
+    it('preserves disabled reasoning across an auth refresh', async () => {
+      const config = new Config({
+        ...baseParams,
+        generationConfig: { reasoning: false },
+      });
+      const authType = AuthType.USE_OPENAI;
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'glm-5.2',
+          authType,
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+
+      await config.refreshAuth(authType);
+
+      expect(config.getContentGeneratorConfig().reasoning).toBe(false);
+      expect(config.getModelsConfig().getGenerationConfig().reasoning).toBe(
+        false,
+      );
     });
 
     it('re-applies the reasoning effort on a full-refresh model switch that wiped modelsConfig', async () => {

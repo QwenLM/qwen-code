@@ -47,8 +47,7 @@ function providerFromHostname(hostname: string): string | undefined {
     isHostOrSubdomain(hostname, 'dashscope.aliyuncs.com') ||
     isHostOrSubdomain(hostname, 'dashscope-intl.aliyuncs.com') ||
     isHostOrSubdomain(hostname, 'dashscope-us.aliyuncs.com') ||
-    (hostname.startsWith('token-plan.') &&
-      isHostOrSubdomain(hostname, 'maas.aliyuncs.com')) ||
+    isHostOrSubdomain(hostname, 'maas.aliyuncs.com') ||
     hostname.endsWith('.alibaba-inc.com') ||
     hostname.endsWith('.aliyun-inc.com')
   ) {

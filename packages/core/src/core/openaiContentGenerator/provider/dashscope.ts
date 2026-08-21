@@ -23,6 +23,7 @@ import {
 } from '../../modalityDefaults.js';
 import {
   DASHSCOPE_REGIONAL_HOSTS,
+  isDashScopeModelStudioHostname,
   normalizeModelReasoningEffort,
   resolveModelReasoningConfiguration,
   type ModelReasoningConfiguration,
@@ -155,8 +156,8 @@ function withoutNullishThinkingKnobs(
 function withoutNestedReasoningEffort(
   request: Record<string, unknown>,
 ): Record<string, unknown> {
-  const reasoning = request['reasoning'] as Record<string, unknown> | undefined;
-  if (!reasoning || !('effort' in reasoning)) {
+  const reasoning = request['reasoning'];
+  if (!reasoning || typeof reasoning !== 'object' || !('effort' in reasoning)) {
     return request;
   }
   const next = { ...request };
@@ -218,15 +219,8 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       hostname = null;
     }
 
-    // Matches an official regional host or any subdomain of one.
-    const isDashscopeOrigin =
-      hostname !== null &&
-      DASHSCOPE_REGIONAL_HOSTS.some(
-        (host) => hostname === host || hostname.endsWith('.' + host),
-      );
-
-    const isMaasOrigin =
-      hostname !== null && hostname.endsWith('.maas.aliyuncs.com');
+    const isModelStudioOrigin =
+      hostname !== null && isDashScopeModelStudioHostname(hostname);
 
     // Internal Alibaba domains proxying to DashScope-compatible APIs.
     // Covers *.alibaba-inc.com and *.aliyun-inc.com.
@@ -252,8 +246,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
 
     if (
       normalizedProxyUrl &&
-      !isDashscopeOrigin &&
-      !isMaasOrigin &&
+      !isModelStudioOrigin &&
       !isInternalOrigin &&
       !isAliCloudApiOrigin &&
       !isProxyMatch
@@ -276,8 +269,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     }
 
     return (
-      isDashscopeOrigin ||
-      isMaasOrigin ||
+      isModelStudioOrigin ||
       isInternalOrigin ||
       isAliCloudApiOrigin ||
       isProxyMatch
@@ -548,15 +540,15 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       return {};
     }
     const wireModel = this.resolveWireModel(model);
-    if (isTieredEffortWireModel(wireModel)) {
-      return { reasoning_effort: reasoning.effort };
-    }
     if (modelReasoning && !modelReasoning.toggleOnly) {
       const effort = normalizeModelReasoningEffort(
         modelReasoning,
         reasoning.effort,
       );
       return effort ? { reasoning_effort: effort } : {};
+    }
+    if (isTieredEffortWireModel(wireModel)) {
+      return { reasoning_effort: reasoning.effort };
     }
     if (isQwenFamilyWireModel(wireModel)) {
       return { enable_thinking: true };

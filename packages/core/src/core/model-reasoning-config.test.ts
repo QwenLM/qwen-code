@@ -19,18 +19,59 @@ const TOKEN_PLAN =
 const CODING_PLAN = 'https://coding.dashscope.aliyuncs.com/v1';
 
 describe('resolveModelReasoningConfiguration', () => {
-  it('keeps the exact Qwen manifest independent of provider route', () => {
-    expect(
-      resolveModelReasoningConfiguration({ modelId: 'qwen3.8-max' }),
-    ).toEqual({
+  it.each([
+    {},
+    { authType: OPENAI, baseUrl: 'https://self-hosted.example/v1' },
+    { authType: OPENAI, baseUrl: STANDARD },
+  ])('keeps the Qwen manifest independent of provider route', (route) => {
+    const expected = {
       thinking: true,
       efforts: ['low', 'medium', 'xhigh'],
       defaultEffort: 'xhigh',
-    });
+    };
     expect(
-      resolveModelReasoningConfiguration({ modelId: 'qwen3.8-max-preview' }),
+      resolveModelReasoningConfiguration({
+        modelId: 'qwen3.8-max',
+        ...route,
+      }),
+    ).toEqual(expected);
+    expect(
+      resolveModelReasoningConfiguration({
+        modelId: 'Qwen3.8-Max',
+        ...route,
+      }),
+    ).toEqual(expected);
+    expect(
+      resolveModelReasoningConfiguration({
+        modelId: 'qwen3.8-max-preview',
+        ...route,
+      }),
     ).toBeUndefined();
   });
+
+  it.each(['constructor', 'toString', '__proto__'])(
+    'does not read inherited registry entry %s',
+    (modelId) => {
+      expect(resolveModelReasoningConfiguration({ modelId })).toBeUndefined();
+    },
+  );
+
+  it.each([
+    ['DEEPSEEK-V4-PRO', 'https://api.deepseek.com', 'high'],
+    ['Kimi-K3', 'https://api.moonshot.cn/v1', 'max'],
+    ['GlM-5.2', 'https://api.z.ai/api/paas/v4', 'max'],
+  ])(
+    'normalizes the complete model ID %s',
+    (modelId, baseUrl, defaultEffort) => {
+      expect(
+        resolveModelReasoningConfiguration({
+          modelId,
+          authType: OPENAI,
+          baseUrl,
+        }),
+      ).toMatchObject({ thinking: true, defaultEffort });
+    },
+  );
 
   it.each([
     ['deepseek-v4-pro', ['high', 'max']],
@@ -62,6 +103,35 @@ describe('resolveModelReasoningConfiguration', () => {
       defaultEffort: 'high',
     });
   });
+
+  it.each([
+    {
+      modelId: 'deepseek-v4-pro',
+      baseUrl: TOKEN_PLAN,
+      efforts: ['high', 'max'],
+    },
+    {
+      modelId: 'deepseek-v4-flash',
+      baseUrl: TOKEN_PLAN,
+      efforts: ['high', 'max'],
+    },
+    {
+      modelId: 'deepseek-v4-flash-0731',
+      baseUrl: STANDARD,
+      efforts: ['low', 'high', 'max'],
+    },
+  ])(
+    'registers $modelId on its Alibaba route',
+    ({ modelId, baseUrl, efforts }) => {
+      expect(
+        resolveModelReasoningConfiguration({
+          modelId,
+          authType: OPENAI,
+          baseUrl,
+        }),
+      ).toEqual({ thinking: true, efforts, defaultEffort: 'high' });
+    },
+  );
 
   it('does not register DeepSeek on Coding Plan', () => {
     expect(
@@ -214,6 +284,34 @@ describe('resolveModelReasoningConfiguration', () => {
     });
   });
 
+  it('keeps route-specific Kimi inclusions and exclusions', () => {
+    for (const modelId of ['kimi-k2.5', 'kimi-k2.6', 'kimi-k3']) {
+      expect(
+        resolveModelReasoningConfiguration({
+          modelId,
+          authType: OPENAI,
+          baseUrl: STANDARD,
+        }),
+      ).toBeUndefined();
+    }
+    expect(
+      resolveModelReasoningConfiguration({
+        modelId: 'kimi-k2.6',
+        authType: OPENAI,
+        baseUrl: TOKEN_PLAN,
+      }),
+    ).toEqual({ thinking: true, toggleOnly: true });
+    for (const baseUrl of [TOKEN_PLAN, CODING_PLAN]) {
+      expect(
+        resolveModelReasoningConfiguration({
+          modelId: 'kimi-k3',
+          authType: OPENAI,
+          baseUrl,
+        }),
+      ).toBeUndefined();
+    }
+  });
+
   it('does not add controls for thinking-only K2.7', () => {
     expect(
       resolveModelReasoningConfiguration({
@@ -245,6 +343,8 @@ describe('classifyModelReasoningEndpoint', () => {
     ['https://api.deepseek.com', 'deepseek'],
     ['https://api.moonshot.cn/v1', 'moonshot'],
     ['https://api.z.ai/api/paas/v4', 'zai'],
+    ['https://z.ai/api/paas/v4', 'zai'],
+    ['https://custom.bigmodel.cn/api/paas/v4', 'zai'],
     ['https://open.bigmodel.cn/api/coding/paas/v4', 'zai'],
     [STANDARD, 'alibaba-standard'],
     [
@@ -253,10 +353,35 @@ describe('classifyModelReasoningEndpoint', () => {
     ],
     [TOKEN_PLAN, 'alibaba-token-plan'],
     [CODING_PLAN, 'alibaba-coding-plan'],
+    ['https://coding-intl.dashscope.aliyuncs.com/v1', 'alibaba-coding-plan'],
+    [
+      'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+      'alibaba-standard',
+    ],
+    [
+      'https://dashscope-us.aliyuncs.com/compatible-mode/v1',
+      'alibaba-standard',
+    ],
+    ['not a url', 'unknown'],
+    ['http://', 'unknown'],
   ])('classifies %s as %s', (baseUrl, family) => {
     expect(classifyModelReasoningEndpoint({ authType: OPENAI, baseUrl })).toBe(
       family,
     );
+  });
+
+  it('registers GLM 5.2 on an international standard endpoint', () => {
+    expect(
+      resolveModelReasoningConfiguration({
+        modelId: 'glm-5.2',
+        authType: OPENAI,
+        baseUrl: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+      }),
+    ).toEqual({
+      thinking: true,
+      efforts: ['high', 'max'],
+      defaultEffort: 'high',
+    });
   });
 });
 
@@ -269,9 +394,11 @@ describe('normalizeModelReasoningEffort', () => {
     })!;
     expect(normalizeModelReasoningEffort(configuration, 'medium')).toBe('high');
     expect(normalizeModelReasoningEffort(configuration, 'xhigh')).toBe('max');
+    expect(normalizeModelReasoningEffort(configuration, 'high')).toBe('high');
+    expect(normalizeModelReasoningEffort(configuration, 'max')).toBe('max');
   });
 
-  it('drops stale efforts from toggle-only and non-alias models', () => {
+  it('drops toggle-only efforts and clamps tiered models', () => {
     const toggle = resolveModelReasoningConfiguration({
       modelId: 'kimi-k2.6',
       authType: OPENAI,
@@ -283,6 +410,8 @@ describe('normalizeModelReasoningEffort', () => {
       baseUrl: 'https://api.moonshot.cn/v1',
     })!;
     expect(normalizeModelReasoningEffort(toggle, 'high')).toBeUndefined();
-    expect(normalizeModelReasoningEffort(kimiK3, 'medium')).toBeUndefined();
+    expect(normalizeModelReasoningEffort(kimiK3, 'low')).toBe('low');
+    expect(normalizeModelReasoningEffort(kimiK3, 'medium')).toBe('high');
+    expect(normalizeModelReasoningEffort(kimiK3, 'max')).toBe('max');
   });
 });

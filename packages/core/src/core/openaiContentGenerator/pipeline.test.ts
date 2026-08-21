@@ -821,6 +821,18 @@ describe('ContentGenerationPipeline', () => {
         expectedToolChoice: 'required',
       },
       {
+        name: 'preserve required tool selection for an unregistered non-Qwen model',
+        baseUrl:
+          'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+        model: 'MiniMax-M2.5',
+        extraBody: { enable_thinking: true },
+        thinkingMandatory: undefined,
+        reasoning: undefined,
+        includeThoughts: true,
+        expectedThinking: true,
+        expectedToolChoice: 'required',
+      },
+      {
         name: 'preserve required tool selection for direct mandatory Kimi K3',
         baseUrl: 'https://api.moonshot.cn/v1',
         model: 'kimi-k3',
@@ -1850,7 +1862,7 @@ describe('ContentGenerationPipeline', () => {
       mockContentGeneratorConfig = {
         ...mockContentGeneratorConfig,
         baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-        model: 'qwen3.5-flash',
+        model: 'qwen3.8-max',
       } as ContentGeneratorConfig;
       mockConfig = {
         ...mockConfig,

@@ -63,8 +63,8 @@ function rewriteReasoningEffort(
   effort: (typeof REASONING_EFFORT_TIERS)[number] | undefined,
 ): OpenAI.Chat.ChatCompletionCreateParams {
   const raw = request as unknown as Record<string, unknown>;
-  const nested = raw['reasoning'] as { effort?: unknown } | undefined;
-  if (!nested || !('effort' in nested)) {
+  const nested = raw['reasoning'];
+  if (!nested || typeof nested !== 'object' || !('effort' in nested)) {
     return request;
   }
 
@@ -75,7 +75,7 @@ function rewriteReasoningEffort(
   if (Object.keys(nested).length === 1) {
     delete next['reasoning'];
   } else {
-    const { effort: _drop, ...rest } = nested as Record<string, unknown>;
+    const { effort: _drop, ...rest } = nested;
     next['reasoning'] = rest;
   }
   return next as unknown as OpenAI.Chat.ChatCompletionCreateParams;

@@ -1204,9 +1204,7 @@ export class ContentGenerationPipeline {
           };
         }
       } else if (!thinkingMandatory && isDashScope) {
-        const canDisable =
-          modelReasoning?.toggleOnly || modelReasoning?.canDisable !== false;
-        if (modelReasoning && canDisable) {
+        if (modelReasoning) {
           typed['enable_thinking'] = false;
         }
       }

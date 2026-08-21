@@ -117,6 +117,18 @@ describe('mapReasoningControls', () => {
       efforts: ['low', 'high', 'max'],
     });
   });
+
+  it('rejects tiers without an off option or mandatory metadata', () => {
+    expect(
+      mapReasoningControls([
+        {
+          id: 'reasoning_effort',
+          currentValue: 'high',
+          options: [{ value: 'low' }, { value: 'high' }],
+        },
+      ]),
+    ).toBeUndefined();
+  });
 });
 
 describe('getReplayTokenCount', () => {
