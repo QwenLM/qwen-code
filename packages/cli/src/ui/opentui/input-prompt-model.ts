@@ -15,8 +15,9 @@
  *  - completion-mode detection (AT `@path`, line-led SLASH `/cmd`, mid-input
  *    `/cmd`) — mirrors useCommandCompletion's cursor-line scan exactly,
  *    including the backslash-escaped-space boundary rule;
- *  - slash suggestions ranked like useSlashCompletion's prefix fallback
- *    (exact > prefix, name beats alias, registration order);
+ *  - slash suggestions ranked like useSlashCompletion's fuzzy path (fzf
+ *    v2 over names + altNames, strength/priority/recency-weighted ordering,
+ *    prefix fallback when fzf cannot run);
  *  - suggestion acceptance with the original trailing-space rule
  *    (directories keep the caret adjacent so `@dir/` can be continued);
  *  - submit decisions (trim guard, trailing-`\` becomes a newline);
@@ -28,6 +29,7 @@
  */
 
 import { escapePath } from '@qwen-code/qwen-code-core';
+import { Fzf, type FzfResultItem } from 'fzf';
 import type { Suggestion } from '../utils/suggestions.js';
 import { MAX_SUGGESTIONS_TO_SHOW } from '../utils/suggestions.js';
 import {
@@ -42,6 +44,7 @@ import {
 import { getCommandDisplayName } from '../../services/commandMetadata.js';
 import { toCodePoints } from '../utils/textUtils.js';
 import type { InputHistory } from './input-history.js';
+import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
 
 export { MAX_SUGGESTIONS_TO_SHOW };
 
@@ -146,11 +149,13 @@ export function detectCompletionTarget(
 }
 
 /**
- * Ranking strength mirroring useSlashCompletion's CommandMatchStrength for
- * the prefix-matching path (the deterministic fallback the original always
- * exercises for prefix queries).
+ * Ranking strength mirroring useSlashCompletion's CommandMatchStrength:
+ * fuzzy hits rank below segment-boundary prefixes (`mcp-servers` for `se`),
+ * which rank below plain prefixes, which rank below exact matches.
  */
 const enum MatchStrength {
+  FUZZY = 0,
+  SEGMENT_PREFIX = 1,
   PREFIX = 2,
   EXACT = 3,
 }
@@ -158,20 +163,81 @@ const enum MatchStrength {
 interface RankedMatch {
   command: SlashCommand;
   strength: MatchStrength;
+  completionPriority: number;
+  recentScore: number;
   isAliasMatch: boolean;
   score: number;
+  start: number;
   itemLength: number;
   originalIndex: number;
   matchedAlias?: string;
 }
 
+const RECENT_DECAY_MS = 10 * 60 * 1000;
+
+function isSegmentBoundary(value: string, start: number): boolean {
+  if (start <= 0) {
+    return false;
+  }
+  return ['-', '_', '/', ' '].includes(value[start - 1] ?? '');
+}
+
+/** useSlashCompletion's getCommandMatchStrength port (fzf `start` aware). */
+function getMatchStrength(
+  matchedValue: string,
+  query: string,
+  start: number,
+): MatchStrength {
+  const normalizedValue = matchedValue.toLowerCase();
+  const normalizedQuery = query.toLowerCase();
+  if (normalizedValue === normalizedQuery) return MatchStrength.EXACT;
+  if (normalizedValue.startsWith(normalizedQuery)) return MatchStrength.PREFIX;
+  if (
+    start > 0 &&
+    normalizedValue.slice(start).startsWith(normalizedQuery) &&
+    isSegmentBoundary(normalizedValue, start)
+  ) {
+    return MatchStrength.SEGMENT_PREFIX;
+  }
+  return MatchStrength.FUZZY;
+}
+
+/** useSlashCompletion's getRecentScore port (count × 10 + fresh-use bonus). */
+function getRecentScore(
+  command: SlashCommand,
+  recentCommands?: RecentSlashCommands,
+  now = Date.now(),
+): number {
+  const recent = recentCommands?.get(command.name);
+  if (!recent) return 0;
+  const ageMs = Math.max(0, now - recent.usedAt);
+  return recent.count * 10 + 10 * Math.max(0, 1 - ageMs / RECENT_DECAY_MS);
+}
+
+function getMatchedAlias(
+  command: SlashCommand,
+  matchedValue: string,
+): string | undefined {
+  return command.altNames?.find(
+    (altName) => altName.toLowerCase() === matchedValue.toLowerCase(),
+  );
+}
+
+/**
+ * useSlashCompletion's compareRankedCommandMatches port: match strength, then
+ * completionPriority, then name-over-alias, then recency, then fzf score,
+ * match position, item length, and registration order.
+ */
 function compareRankedMatches(left: RankedMatch, right: RankedMatch): number {
   const leftIsName = left.matchedAlias === undefined ? 1 : 0;
   const rightIsName = right.matchedAlias === undefined ? 1 : 0;
   return (
     right.strength - left.strength ||
-    right.score - left.score ||
+    right.completionPriority - left.completionPriority ||
     rightIsName - leftIsName ||
+    right.recentScore - left.recentScore ||
+    right.score - left.score ||
+    left.start - right.start ||
     left.itemLength - right.itemLength ||
     left.originalIndex - right.originalIndex
   );
@@ -350,25 +416,171 @@ export function isPerfectSlashMatch(parsed: CommandParseResult): boolean {
 }
 
 /**
- * Prefix suggestion builder (useSlashCompletion's deterministic fallback)
- * over one command level: matches the partial against every visible command's
- * name AND altNames, keeps the best match per command, and orders exact
- * matches first. An empty partial lists every visible command at the level
- * (the original's "no query yet" case, e.g. `/directory ` → its subcommands).
+ * Suggestion builder over one command level, porting useSlashCompletion's
+ * useCommandSuggestions: an empty partial lists every visible command with
+ * recently-used ones first; a non-empty partial goes through the fzf fuzzy
+ * matcher (names AND altNames indexed, case-insensitive, v2 algorithm) with
+ * the prefix fallback when fzf cannot run. Ranking follows the original's
+ * compareRankedCommandMatches (strength → completionPriority → name-over-
+ * alias → recency → fzf score → position → length → registration order).
  */
 export function subcommandSuggestions(
   parsed: CommandParseResult,
+  recentCommands?: RecentSlashCommands,
 ): Suggestion[] {
   const level = parsed.currentLevel ?? [];
   const visible = level.filter((cmd) => cmd.description && !cmd.hidden);
   const partial = parsed.partial;
 
   if (partial === '') {
-    return visible.map((command) =>
-      toCommandSuggestion(command, undefined, true),
+    const ranked = visible.map((cmd, originalIndex): RankedMatch => {
+      const isAliasMatch = false;
+      return {
+        command: cmd,
+        // Every candidate matches an empty query the same way; the recent-
+        // first ordering below is what actually differentiates rows.
+        strength: MatchStrength.PREFIX,
+        completionPriority: cmd.completionPriority ?? 0,
+        recentScore: getRecentScore(cmd, recentCommands),
+        isAliasMatch,
+        score: 0,
+        start: 0,
+        itemLength: cmd.name.length,
+        originalIndex,
+        matchedAlias: undefined,
+      };
+    });
+    ranked.sort((left, right) => {
+      // Recently used commands are the most prominent with no query typed.
+      const recentDifference = right.recentScore - left.recentScore;
+      if (recentDifference !== 0) {
+        return recentDifference;
+      }
+      return compareRankedMatches(left, right);
+    });
+    return ranked.map((match) =>
+      toCommandSuggestion(match.command, undefined, true),
     );
   }
 
+  const ranked = fuzzyOrPrefixSuggestions(
+    level,
+    visible,
+    partial,
+    recentCommands,
+  );
+  return ranked.map((match) =>
+    toCommandSuggestion(match.command, match.matchedAlias, false),
+  );
+}
+
+interface FzfCommandCacheEntry {
+  fzf: Fzf<string[]>;
+  commandMap: Map<string, SlashCommand>;
+}
+
+// One Fzf instance per command-level array — keyed by the level's stable
+// reference (a subCommands array or the root list), NOT the filtered copy
+// the caller builds (which would defeat the WeakMap on every keystroke).
+const fzfInstanceCache = new WeakMap<
+  readonly SlashCommand[],
+  FzfCommandCacheEntry
+>();
+
+function getFzfForCommands(
+  commands: readonly SlashCommand[],
+): FzfCommandCacheEntry | null {
+  if (commands.length === 0) return null;
+  const cached = fzfInstanceCache.get(commands);
+  if (cached) return cached;
+
+  const commandItems: string[] = [];
+  const commandMap = new Map<string, SlashCommand>();
+  commands.forEach((cmd) => {
+    if (cmd.description && !cmd.hidden) {
+      commandItems.push(cmd.name);
+      commandMap.set(cmd.name, cmd);
+      cmd.altNames?.forEach((alt) => {
+        commandItems.push(alt);
+        commandMap.set(alt, cmd);
+      });
+    }
+  });
+  if (commandItems.length === 0) return null;
+
+  try {
+    const entry: FzfCommandCacheEntry = {
+      fzf: new Fzf(commandItems, {
+        fuzzy: 'v2',
+        casing: 'case-insensitive',
+      }),
+      commandMap,
+    };
+    fzfInstanceCache.set(commands, entry);
+    return entry;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * fzf-ranked matches with the prefix fallback (useCommandSuggestions's
+ * performFuzzySearch + getPrefixSuggestions), keeping the best match per
+ * command when both a name and an alias hit. `level` is the cache-key
+ * source; `visible` its description/hidden-filtered view.
+ */
+function fuzzyOrPrefixSuggestions(
+  level: readonly SlashCommand[],
+  visible: readonly SlashCommand[],
+  partial: string,
+  recentCommands?: RecentSlashCommands,
+): RankedMatch[] {
+  const fzfInstance = getFzfForCommands(level);
+  if (fzfInstance) {
+    try {
+      const results = fzfInstance.fzf.find(partial);
+      // Registration order over the full level (the original indexes
+      // commandsToSearch the same way; fzf only holds visible items).
+      const commandOrder = new Map(level.map((cmd, index) => [cmd, index]));
+      const best = new Map<SlashCommand, RankedMatch>();
+      results.forEach((result: FzfResultItem) => {
+        const cmd = fzfInstance.commandMap.get(result.item);
+        const originalIndex = cmd ? commandOrder.get(cmd) : undefined;
+        if (!cmd || originalIndex === undefined) return;
+        const match: RankedMatch = {
+          command: cmd,
+          strength: getMatchStrength(result.item, partial, result.start),
+          completionPriority: cmd.completionPriority ?? 0,
+          recentScore: getRecentScore(cmd, recentCommands),
+          isAliasMatch: result.item !== cmd.name,
+          score: result.score,
+          start: result.start,
+          itemLength: result.item.length,
+          originalIndex,
+          matchedAlias: getMatchedAlias(cmd, result.item),
+        };
+        const existing = best.get(cmd);
+        if (!existing || compareRankedMatches(match, existing) < 0) {
+          best.set(cmd, match);
+        }
+      });
+      return Array.from(best.values()).sort(compareRankedMatches);
+    } catch {
+      // fall through to the prefix path
+    }
+  }
+  return prefixSuggestions(visible, partial, recentCommands);
+}
+
+/**
+ * The deterministic prefix fallback (useSlashCompletion's
+ * getPrefixSuggestions): exact matches score 100, plain prefixes 80.
+ */
+function prefixSuggestions(
+  visible: readonly SlashCommand[],
+  partial: string,
+  recentCommands?: RecentSlashCommands,
+): RankedMatch[] {
   const lowerPartial = partial.toLowerCase();
   const ranked: RankedMatch[] = [];
   visible.forEach((cmd, originalIndex) => {
@@ -383,8 +595,11 @@ export function subcommandSuggestions(
         return {
           command: cmd,
           strength: exact ? MatchStrength.EXACT : MatchStrength.PREFIX,
+          completionPriority: cmd.completionPriority ?? 0,
+          recentScore: getRecentScore(cmd, recentCommands),
           isAliasMatch,
           score: exact ? 100 : 80,
+          start: 0,
           itemLength: matchedValue.length,
           originalIndex,
           matchedAlias: isAliasMatch ? matchedValue : undefined,
@@ -393,12 +608,7 @@ export function subcommandSuggestions(
       .sort(compareRankedMatches)[0];
     if (best) ranked.push(best);
   });
-
-  return ranked
-    .sort(compareRankedMatches)
-    .map((match) =>
-      toCommandSuggestion(match.command, match.matchedAlias, false),
-    );
+  return ranked.sort(compareRankedMatches);
 }
 
 /**
@@ -410,10 +620,11 @@ export function subcommandSuggestions(
 export function slashSuggestions(
   query: string,
   commands: readonly SlashCommand[],
+  recentCommands?: RecentSlashCommands,
 ): Suggestion[] {
   const parsed = parseSlashCommandQuery(query, commands);
   if (parsed.isArgumentCompletion) return [];
-  return subcommandSuggestions(parsed);
+  return subcommandSuggestions(parsed, recentCommands);
 }
 
 /** Maps `command.completion()` results onto suggestions (ink toSuggestion). */

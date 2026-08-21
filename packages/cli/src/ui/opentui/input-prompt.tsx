@@ -63,6 +63,7 @@ import {
 } from '../utils/clipboardUtils.js';
 import path from 'node:path';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
+import type { RecentSlashCommand } from '../hooks/useSlashCompletion.js';
 import type { Suggestion } from '../utils/suggestions.js';
 import { toCodePoints } from '../utils/textUtils.js';
 import { C } from './theme.js';
@@ -186,6 +187,8 @@ export interface InputPromptProps {
   queueLength?: number;
   /** Pops all queued prompts into the composer (returns joined text). */
   onPopQueue?: () => string | null;
+  /** Recently used slash commands feeding recency-weighted ranking. */
+  recentSlashCommands?: ReadonlyMap<string, RecentSlashCommand>;
 }
 
 export function OpenTuiInputPrompt(props: InputPromptProps) {
@@ -201,6 +204,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     onEscapeArmedChange,
     queueLength = 0,
     onPopQueue,
+    recentSlashCommands,
   } = props;
 
   const { width } = useTerminalDimensions();
@@ -220,6 +224,10 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   }, [props.composerHandle]);
   const userMessagesRef = useRef(userMessages);
   userMessagesRef.current = userMessages;
+  // Read through a ref inside refreshCompletion so recency updates never
+  // widen the callback's dependency list (it stays keyed to config only).
+  const recentSlashCommandsRef = useRef(recentSlashCommands);
+  recentSlashCommandsRef.current = recentSlashCommands;
 
   const historyRef = useRef<InputHistory | null>(null);
   if (!historyRef.current) {
@@ -388,10 +396,12 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
         return;
       }
 
-      // Sub-command level: prefix candidates from the parsed command tree
-      // (`/cmd ` → its subCommands, `/dir ad` → `add`).
+      // Sub-command level: ranked candidates from the parsed command tree
+      // (`/cmd ` → its subCommands, `/dir ad` → `add`), recency-weighted.
       slashSearchSeqRef.current++;
-      setSuggestions(subcommandSuggestions(parsed));
+      setSuggestions(
+        subcommandSuggestions(parsed, recentSlashCommandsRef.current),
+      );
       setActiveIndex(0);
       setLoadingSuggestions(false);
       return;
@@ -435,6 +445,12 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     }
     refreshCompletion();
   }, [textVersion, refreshCompletion]);
+
+  // A finished command flips the recency map; re-rank an open dropdown the
+  // way useCommandSuggestions re-runs when its recentCommands dep changes.
+  useEffect(() => {
+    refreshCompletion();
+  }, [recentSlashCommands, refreshCompletion]);
 
   const applyTextToEditor = useCallback((line: string, cursorCol?: number) => {
     const el = editorRef.current;

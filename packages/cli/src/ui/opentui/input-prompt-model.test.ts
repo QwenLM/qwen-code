@@ -34,6 +34,7 @@ import {
   type CommandParseResult,
 } from './input-prompt-model.js';
 import { CommandKind, type SlashCommand } from '../commands/types.js';
+import type { RecentSlashCommand } from '../hooks/useSlashCompletion.js';
 import type { Suggestion } from '../utils/suggestions.js';
 
 function cmd(
@@ -197,6 +198,98 @@ describe('subcommandSuggestions / slashSuggestions', () => {
       'add',
       'list',
     ]);
+  });
+});
+
+describe('fuzzy + recency ranking (useSlashCompletion port)', () => {
+  function recent(
+    entries: Array<[string, Partial<RecentSlashCommand>]>,
+  ): ReadonlyMap<string, RecentSlashCommand> {
+    return new Map(
+      entries.map(([name, entry]) => [
+        name,
+        { name, usedAt: Date.now(), count: 1, ...entry },
+      ]),
+    );
+  }
+
+  it('matches beyond prefixes (`/mcpser` → mcp-servers)', () => {
+    const suggestions = slashSuggestions('/mcpser', [
+      cmd({ name: 'mcp-servers' }),
+      cmd({ name: 'about' }),
+    ]);
+    expect(suggestions.map((s) => s.value)).toEqual(['mcp-servers']);
+  });
+
+  it('ranks a name match over an alias match (`/re` → resume before clear)', () => {
+    const suggestions = slashSuggestions('/re', [
+      cmd({ name: 'clear', altNames: ['reset'] }),
+      cmd({ name: 'resume' }),
+    ]);
+    expect(suggestions.map((s) => s.value)).toEqual(['resume', 'clear']);
+  });
+
+  it('ranks prefix > segment-prefix > fuzzy (`/ser`)', () => {
+    const suggestions = slashSuggestions('/ser', [
+      cmd({ name: 'answers' }),
+      cmd({ name: 'mcp-servers' }),
+      cmd({ name: 'services' }),
+    ]);
+    expect(suggestions.map((s) => s.value)).toEqual([
+      'services',
+      'mcp-servers',
+      'answers',
+    ]);
+  });
+
+  it('carries the matched alias on alias hits (`/reset`)', () => {
+    const suggestions = slashSuggestions('/reset', [
+      cmd({ name: 'clear', altNames: ['reset'] }),
+    ]);
+    expect(suggestions[0]?.value).toBe('clear');
+    expect(suggestions[0]?.matchedAlias).toBe('reset');
+  });
+
+  it('boosts recent commands for non-empty queries', () => {
+    const suggestions = slashSuggestions(
+      '/m',
+      [cmd({ name: 'model' }), cmd({ name: 'memory' })],
+      recent([['memory', {}]]),
+    );
+    expect(suggestions.map((s) => s.value)).toEqual(['memory', 'model']);
+  });
+
+  it('lists recently used commands first for an empty query', () => {
+    const suggestions = slashSuggestions(
+      '/',
+      TEST_COMMANDS,
+      recent([['heuristic', {}]]),
+    );
+    expect(suggestions[0]?.value).toBe('heuristic');
+  });
+
+  it('weights repeat use above a single recent use', () => {
+    const suggestions = slashSuggestions(
+      '/',
+      [cmd({ name: 'alpha' }), cmd({ name: 'beta' })],
+      recent([
+        ['alpha', { count: 1 }],
+        ['beta', { count: 3 }],
+      ]),
+    );
+    expect(suggestions.map((s) => s.value)).toEqual(['beta', 'alpha']);
+  });
+
+  it('decays recency over time', () => {
+    const suggestions = slashSuggestions(
+      '/',
+      [cmd({ name: 'alpha' }), cmd({ name: 'beta' })],
+      recent([
+        ['alpha', { usedAt: Date.now() }],
+        ['beta', { usedAt: Date.now() - 20 * 60 * 1000 }],
+      ]),
+    );
+    expect(suggestions.map((s) => s.value)).toEqual(['alpha', 'beta']);
   });
 });
 

@@ -144,6 +144,7 @@ import { OpenTuiDialogMount } from './dialog-mount.js';
 import { OpenTuiFolderTrustGate } from './folder-trust-gate.js';
 import { loadSettings, type LoadedSettings } from '../../config/settings.js';
 import type { SlashCommand } from '../commands/types.js';
+import type { RecentSlashCommand } from '../hooks/useSlashCompletion.js';
 import {
   createExitGuard,
   exitGuardHint,
@@ -989,6 +990,11 @@ function App({
   // to dispatcher.cancel() and concurrent command submission.
   const [commandProcessing, setCommandProcessing] = useState(false);
   const commandProcessingRef = useRef(false);
+  // Recency feed for /-completion ranking (dispatcher.recentCommandList,
+  // copied on the processing=false edge after a command updates it).
+  const [recentSlashCommands, setRecentSlashCommands] = useState<
+    ReadonlyMap<string, RecentSlashCommand>
+  >(() => new Map());
 
   // Folder-trust startup gate (#56): undecided workspaces show the trust
   // prompt before anything else (ink DialogManager priority parity). While
@@ -1399,6 +1405,13 @@ function App({
           setProcessing: (processing) => {
             commandProcessingRef.current = processing;
             setCommandProcessing(processing);
+            // The dispatcher records recency before executing, so the
+            // false edge always observes the updated map.
+            if (!processing) {
+              setRecentSlashCommands(
+                new Map(dispatcherRef.current?.recentCommandList ?? []),
+              );
+            }
           },
           reloadCommands: () =>
             void dispatcherRef.current
@@ -3348,6 +3361,7 @@ function App({
               setStreaming(false);
             }}
             placeholder="Type your message or @path/to/file"
+            recentSlashCommands={recentSlashCommands}
             focus={
               !dialog &&
               !folderTrustGateOpen &&
