@@ -115,11 +115,14 @@ cap is 100, so a seed of 4 leaves 96.
 ## Accepted and rejected forms
 
 The literal prefix must match `@qwen-code /takeover` byte-for-byte and the tail
-must be a bare 1–2 digit integer. Leading spaces and tabs on the first line, and
-all trailing whitespace, are trimmed — but a blank line before the command is
-not, so it must start the comment's first line. Nothing else is tolerated, and
-anything unrecognized fails closed to "not an exact command" — no label, no
-seed, no partial effect.
+must be a bare 1–2 digit integer. The command has to be the very first thing in
+the comment: **no leading whitespace of any kind** — space, tab, or blank line.
+The router prefilters on the _raw_ comment body with `startsWith`, so a body
+with leading whitespace never starts a job at all, and the trim
+that runs inside that job never gets the chance
+([af-004](./qwen-autofix.md#af-004)). Trailing whitespace is harmless. Anything
+else fails closed — no label, no seed, no partial effect, and, when the router
+never started, not even a log line.
 
 | Body                                 | Result                                      |
 | ------------------------------------ | ------------------------------------------- |
@@ -132,7 +135,8 @@ seed, no partial effect.
 | `@qwen-code /takeover from 100`      | **nothing** — 3 digits rejected             |
 | `@qwen-code /takeover  from 4`       | **nothing** — double space                  |
 | `please @qwen-code /takeover from 4` | **nothing** — must start the comment        |
-| blank line, then the command         | **nothing** — must start the first line     |
+| `  @qwen-code /takeover from 4`      | **nothing** — leading spaces                |
+| blank line, then the command         | **nothing** — leading newline               |
 | `@qwen-code /takeover from 4 please` | **nothing** — must end the comment          |
 
 ## Reading the result
