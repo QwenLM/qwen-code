@@ -361,20 +361,28 @@ export async function listAgentViewSessionSnapshots(
     roster.sessions.map((entry) => [sanitizeSessionId(entry.sessionId), entry]),
   );
   const snapshots = await Promise.all(
-    states.map(async (state) => ({
-      sessionId: state.sessionId,
-      state,
-      launch: redactAgentViewLaunch(
-        await readAgentViewLaunch(state.sessionId, options),
-      ),
-      activity: redactAgentViewActivity(
-        await readAgentViewActivity(state.sessionId, options),
-      ),
-      worker: redactAgentViewWorker(
-        await readAgentViewWorker(state.sessionId, options),
-      ),
-      rosterEntry: rosterEntries.get(sanitizeSessionId(state.sessionId)),
-    })),
+    states.map(async (state) => {
+      const snapshot = {
+        sessionId: state.sessionId,
+        state,
+        rosterEntry: rosterEntries.get(sanitizeSessionId(state.sessionId)),
+      };
+      if (state.ownership === 'unmanaged') {
+        return snapshot;
+      }
+      return {
+        ...snapshot,
+        launch: redactAgentViewLaunch(
+          await readAgentViewLaunch(state.sessionId, options),
+        ),
+        activity: redactAgentViewActivity(
+          await readAgentViewActivity(state.sessionId, options),
+        ),
+        worker: redactAgentViewWorker(
+          await readAgentViewWorker(state.sessionId, options),
+        ),
+      };
+    }),
   );
   return snapshots.sort((left, right) =>
     right.state.updatedAt.localeCompare(left.state.updatedAt),

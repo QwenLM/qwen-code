@@ -21,6 +21,7 @@ import type {
   AgentViewRosterEntry,
   AgentViewSessionSnapshot,
   AgentViewSessionStateFile,
+  AgentViewWorkerFile,
   AgentViewWorkerControlEvent,
   AgentViewWorkerEvent,
 } from './protocol.js';
@@ -93,6 +94,7 @@ const DEFAULT_SUPERVISOR_AUTO_EXIT_GRACE_MS = 10 * 60 * 1000;
 const DEFAULT_WORKER_READY_TIMEOUT_MS = 15_000;
 const DEFAULT_GRACEFUL_STOP_TIMEOUT_MS = 10_000;
 const DEFAULT_HOST_EXIT_TIMEOUT_MS = 10_000;
+const UNMANAGED_TOMBSTONE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_ATTACH_LEASE_HEARTBEAT_MS =
   DEFAULT_AGENT_VIEW_ATTACH_LEASE_TTL_MS / 3;
 
@@ -289,6 +291,9 @@ class AgentViewSupervisorProcessHandler
       (this.options.now?.() ?? new Date()).getTime(),
     )) {
       if (snapshot.state.ownership === 'unmanaged') {
+        if (await this.gcUnmanagedSession(snapshot.state)) {
+          changed = true;
+        }
         continue;
       }
       if (snapshot.state.ownership === 'removing') {
@@ -348,6 +353,43 @@ class AgentViewSupervisorProcessHandler
           ),
         ),
     );
+  }
+
+  private async gcUnmanagedSession(
+    snapshotState: AgentViewSessionStateFile,
+  ): Promise<boolean> {
+    const cutoff =
+      (this.options.now?.() ?? new Date()).getTime() -
+      UNMANAGED_TOMBSTONE_RETENTION_MS;
+    const updatedAt = Date.parse(snapshotState.updatedAt);
+    if (!Number.isFinite(updatedAt) || updatedAt >= cutoff) {
+      return false;
+    }
+    try {
+      return await this.workers.withHostSetupLock(
+        snapshotState.sessionId,
+        async () => {
+          const state = await readAgentViewSessionState(
+            snapshotState.sessionId,
+            this.store,
+          );
+          if (
+            state?.ownership !== 'unmanaged' ||
+            state.updatedAt !== snapshotState.updatedAt ||
+            Date.parse(state.updatedAt) >= cutoff
+          ) {
+            return false;
+          }
+          await fs.promises.rm(
+            getAgentViewSessionPaths(state.sessionId, this.store).sessionDir,
+            { recursive: true, force: true },
+          );
+          return true;
+        },
+      );
+    } catch {
+      return false;
+    }
   }
   subscribe(
     _params: Record<string, unknown> | undefined,
@@ -517,7 +559,10 @@ class AgentViewSupervisorProcessHandler
         const connected =
           this.workers.has(adoption.sessionId) ||
           (await this.workers.reconnectSessionHostLocked(adoption.sessionId));
-        const worker = await readAgentViewWorker(adoption.sessionId, store);
+        const worker = await readAgentViewWorkerForLiveness(
+          adoption.sessionId,
+          store,
+        );
         const pidAlive =
           isPidRunning(worker?.hostPid) || isPidRunning(worker?.workerPid);
         if (connected || pidAlive || worker?.hostEndpoint) {
@@ -1588,6 +1633,7 @@ class AgentViewSupervisorProcessHandler
     }, DEFAULT_ATTACH_LEASE_HEARTBEAT_MS);
     heartbeat.unref?.();
     let bridged = false;
+    let propagatingError = false;
     try {
       if (
         controller.signal.aborted ||
@@ -1613,6 +1659,9 @@ class AgentViewSupervisorProcessHandler
         pty: host,
         detachSignal: controller.signal,
       });
+    } catch (error) {
+      propagatingError = true;
+      throw error;
     } finally {
       clearInterval(heartbeat);
       const wasCurrent = this.attachSockets.get(sessionId) === socket;
@@ -1630,7 +1679,9 @@ class AgentViewSupervisorProcessHandler
           // Best-effort: a store error during detach must not mask
           // the original error from the try block.
         }
-        socket.end();
+        if (bridged || !propagatingError) {
+          socket.end();
+        }
       }
       // Pre-bridge failure: leave the socket open so the RPC layer can
       // deliver the structured error envelope instead of a bare EOF.
@@ -2004,7 +2055,10 @@ class WorkerRegistry {
       await markStoppedSession(sessionId, this.store, 'alive');
       return;
     }
-    const storedWorker = await readAgentViewWorker(sessionId, this.store);
+    const storedWorker = await readAgentViewWorkerForLiveness(
+      sessionId,
+      this.store,
+    );
     if (
       [storedWorker?.hostPid, storedWorker?.workerPid].some(
         (pid) => pid !== undefined && isPidRunning(pid),
@@ -2558,7 +2612,7 @@ class WorkerRegistry {
   }
 
   private async assertNoStoredWorkerProcess(sessionId: string): Promise<void> {
-    const worker = await readAgentViewWorker(sessionId, this.store);
+    const worker = await readAgentViewWorkerForLiveness(sessionId, this.store);
     for (const pid of [worker?.hostPid, worker?.workerPid]) {
       if (!pid) continue;
       if (isPidRunning(pid)) {
@@ -2821,6 +2875,9 @@ class WorkerRegistry {
       state.sessionState === 'stopped' &&
       state.processState === 'alive'
     ) {
+      if (this.hostSetupQueues.has(state.sessionId)) {
+        return state;
+      }
       return this.withHostSetupLock(state.sessionId, async () => {
         const latest = await readAgentViewSessionState(
           state.sessionId,
@@ -2847,7 +2904,10 @@ class WorkerRegistry {
         }
         return state;
       }
-      const worker = await readAgentViewWorker(state.sessionId, this.store);
+      const worker = await readAgentViewWorkerForLiveness(
+        state.sessionId,
+        this.store,
+      );
       if (isPidRunning(worker?.hostPid) || isPidRunning(worker?.workerPid)) {
         return state;
       }
@@ -2863,7 +2923,10 @@ class WorkerRegistry {
       const connected =
         this.ptyHosts.has(state.sessionId) || (await reconnectHost());
       if (!connected) {
-        const worker = await readAgentViewWorker(state.sessionId, this.store);
+        const worker = await readAgentViewWorkerForLiveness(
+          state.sessionId,
+          this.store,
+        );
         if (isPidRunning(worker?.hostPid) || isPidRunning(worker?.workerPid)) {
           return state;
         }
@@ -2937,7 +3000,10 @@ class WorkerRegistry {
           : ((await readAgentViewSessionState(state.sessionId, this.store)) ??
               state);
       }
-      const worker = await readAgentViewWorker(state.sessionId, this.store);
+      const worker = await readAgentViewWorkerForLiveness(
+        state.sessionId,
+        this.store,
+      );
       if (isPidRunning(worker?.hostPid) || isPidRunning(worker?.workerPid)) {
         return state;
       }
@@ -2982,11 +3048,29 @@ class WorkerRegistry {
     ) {
       return state;
     }
+    if (!reconnect) {
+      if (this.hostSetupQueues.has(state.sessionId)) {
+        return state;
+      }
+      return this.withHostSetupLock(state.sessionId, async () => {
+        const latest = await readAgentViewSessionState(
+          state.sessionId,
+          this.store,
+        );
+        if (!latest) return state;
+        return this.refreshMissingWorkerState(latest, () =>
+          this.reconnectSessionHostLocked(state.sessionId),
+        );
+      });
+    }
     if (await reconnectHost()) {
       return state;
     }
 
-    const worker = await readAgentViewWorker(state.sessionId, this.store);
+    const worker = await readAgentViewWorkerForLiveness(
+      state.sessionId,
+      this.store,
+    );
     if (isPidRunning(worker?.hostPid) || isPidRunning(worker?.workerPid)) {
       return state;
     }
@@ -3029,6 +3113,9 @@ class WorkerRegistry {
       },
       this.store,
     );
+    if (appliedPatch) {
+      await clearAgentViewWorkerPids(state.sessionId, this.store);
+    }
     return appliedPatch ? { ...state, ...appliedPatch } : state;
   }
 }
@@ -3589,6 +3676,33 @@ async function readOrThrowIfAbsent<T>(
   }
   throw new Error(
     `Agent View record at ${filePath} is temporarily unreadable. Retry the operation.`,
+  );
+}
+
+async function readAgentViewWorkerForLiveness(
+  sessionId: string,
+  options: AgentViewStoreOptions,
+): Promise<AgentViewWorkerFile | undefined> {
+  const workerPath = getAgentViewSessionPaths(sessionId, options).workerPath;
+  for (let attempt = 0; attempt <= 3; attempt++) {
+    const worker = await readAgentViewWorker(sessionId, options);
+    if (worker) {
+      return worker;
+    }
+    try {
+      await fs.promises.access(workerPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return undefined;
+      }
+      throw error;
+    }
+    if (attempt < 3) {
+      await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+    }
+  }
+  throw new Error(
+    `Agent View record at ${workerPath} is temporarily unreadable. Retry the operation.`,
   );
 }
 
