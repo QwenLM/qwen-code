@@ -54,7 +54,13 @@ export function SessionPrBadge({ prs, tabIndex }: SessionPrBadgeProps) {
         openExternalLink(event, latest.url);
       }}
       onDoubleClick={(event) => event.stopPropagation()}
-      onKeyDown={(event) => event.stopPropagation()}
+      onKeyDown={(event) => {
+        // Only swallow Enter — the badge must not block roving-listbox
+        // navigation keys (ArrowUp/Down/Home/End/Space) in picker dialogs.
+        // Enter would otherwise activate the native anchor on top of the
+        // dialog's confirm handling.
+        if (event.key === 'Enter') event.stopPropagation();
+      }}
     >
       #{latest.number}
       {multiple ? ` +${openable.length - 1}` : ''}

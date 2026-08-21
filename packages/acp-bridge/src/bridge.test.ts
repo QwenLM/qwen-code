@@ -26692,6 +26692,27 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('does not apply the pr binding when the combined displayName is invalid', async () => {
+      // Mirror of the invalid-pr case: the validate-everything-first rule
+      // must protect both directions — a reorder regression would persist,
+      // publish, and catalog-bump a binding for a rejected request.
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      expect(() =>
+        bridge.updateSessionMetadata(session.sessionId, {
+          displayName: 'bad\nname',
+          pr: { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+        }),
+      ).toThrow(InvalidSessionMetadataError);
+      expect(bridge.getSessionSummary(session.sessionId).prs).toBeUndefined();
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
     it.each([
       [
         'non-integer number',

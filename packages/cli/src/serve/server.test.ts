@@ -15506,6 +15506,107 @@ describe('createServeApp', () => {
       expect(merged?.prs?.map((p) => p.number)).toEqual([9500, 9517]);
     });
 
+    it('dedupes by number on merge, preferring the live url', async () => {
+      // Overlap is the common production case (a route binding is persisted
+      // AND enters the live entry). Without the number-keyed filter the
+      // merged list duplicates the number and the badge renders `#9517 +1`
+      // for a one-PR session.
+      const id = '550e8400-e29b-41d4-a716-446655440004';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('2026-05-17T12:00:05.000Z'),
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 9517,
+        url: 'https://github.com/o/r/pull/9517',
+      });
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            prs: [
+              { number: 9517, url: 'https://github.com/o/r/pull/9517?v=2' },
+            ],
+          },
+        ],
+      });
+
+      const result = await listWorkspaceSessionsForResponse(bridge, WS_BOUND);
+
+      const merged = result.sessions.find((s) => s.sessionId === id);
+      expect(merged?.prs).toEqual([
+        { number: 9517, url: 'https://github.com/o/r/pull/9517?v=2' },
+      ]);
+    });
+
+    it('survives PR sidecars on the organized listing path', async () => {
+      const id = '550e8400-e29b-41d4-a716-446655440005';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('2026-05-17T12:00:05.000Z'),
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 9500,
+        url: 'https://github.com/o/r/pull/9500',
+      });
+
+      const result = await listWorkspaceSessionsForResponse(
+        fakeBridge(),
+        WS_BOUND,
+        { view: 'organized', group: 'all' },
+      );
+
+      const listed = result.sessions.find((s) => s.sessionId === id);
+      expect(listed?.prs?.map((p) => p.number)).toEqual([9500]);
+    });
+
+    it('survives PR sidecars on the archived listing path', async () => {
+      const id = '550e8400-e29b-41d4-a716-446655440006';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('2026-05-17T12:00:05.000Z'),
+        state: 'archived',
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(
+        id,
+        'archived',
+      );
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 9500,
+        url: 'https://github.com/o/r/pull/9500',
+      });
+
+      const result = await listWorkspaceSessionsForResponse(
+        fakeBridge(),
+        WS_BOUND,
+        { archiveState: 'archived' },
+      );
+
+      const listed = result.sessions.find((s) => s.sessionId === id);
+      expect(listed?.prs?.map((p) => p.number)).toEqual([9500]);
+    });
+
     it('passes fractional cursor values to SessionService without truncating', async () => {
       const listSessionsSpy = vi
         .spyOn(SessionService.prototype, 'listSessions')

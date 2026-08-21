@@ -5363,11 +5363,12 @@ export class DaemonClient {
           if (typeof body.displayName === 'string') {
             result.displayName = body.displayName;
           }
-          if (
-            Array.isArray(body.prs) &&
-            body.prs.every(isDaemonSessionPrInfo)
-          ) {
-            result.prs = body.prs;
+          if (Array.isArray(body.prs)) {
+            // Per-entry gate: a buggy or hostile daemon response cannot
+            // surface a non-http(s) url or malformed number downstream (the
+            // tooltip renders these as links). Valid entries survive.
+            const valid = body.prs.filter(isDaemonSessionPrInfo);
+            if (valid.length > 0) result.prs = valid;
           }
           return result;
         }

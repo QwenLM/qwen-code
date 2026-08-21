@@ -11,7 +11,7 @@ if (!Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = () => {};
 }
 
-const sessions = [
+let sessions = [
   {
     sessionId: 's0',
     displayName: 'S0',
@@ -38,6 +38,7 @@ const sessions = [
     updatedAt: '2026-01-01T00:00:00Z',
   },
 ];
+const initialSessions = sessions.slice();
 
 const releaseSessionMock = vi.fn().mockResolvedValue(undefined);
 let scopedSessionsOptions: unknown;
@@ -112,6 +113,7 @@ afterEach(() => {
   container?.remove();
   root = null;
   container = null;
+  sessions = initialSessions.slice();
 });
 
 describe('ReleaseSessionDialog selection', () => {
@@ -239,6 +241,34 @@ describe('ReleaseSessionDialog selection', () => {
     expect(rows().some(isConfirmed)).toBe(false);
     expect(rows().some(isCursor)).toBe(false);
     expect(dangerButton().disabled).toBe(true);
+  });
+
+  it('matches a session by its bound PR number in the filter', () => {
+    sessions.splice(
+      0,
+      sessions.length,
+      {
+        sessionId: 'pr-session',
+        displayName: 'Fix CI',
+        clientCount: 1,
+        updatedAt: '2026-01-01T00:00:00Z',
+        prs: [{ number: 9517, url: 'https://github.com/o/r/pull/9517' }],
+      },
+      {
+        sessionId: 'other',
+        displayName: 'Unrelated',
+        clientCount: 1,
+        updatedAt: '2026-01-01T00:00:00Z',
+      },
+    );
+    mount();
+
+    typeFilter('#9517');
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0].textContent).toContain('Fix CI');
+
+    typeFilter('#9999');
+    expect(rows()).toHaveLength(0);
   });
 
   it('does not confirm any row when all visible rows are non-releasable', () => {

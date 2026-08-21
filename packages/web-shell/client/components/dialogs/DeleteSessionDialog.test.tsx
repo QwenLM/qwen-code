@@ -221,6 +221,32 @@ describe('DeleteSessionDialog selection', () => {
     expect(dangerButton().disabled).toBe(true);
   });
 
+  it('matches a session by its bound PR number in the filter', () => {
+    sessions = [
+      {
+        sessionId: 'pr-session',
+        displayName: 'Fix CI',
+        clientCount: 1,
+        updatedAt: '2026-01-01T00:00:00Z',
+        prs: [{ number: 9517, url: 'https://github.com/o/r/pull/9517' }],
+      },
+      {
+        sessionId: 'other',
+        displayName: 'Unrelated',
+        clientCount: 1,
+        updatedAt: '2026-01-01T00:00:00Z',
+      },
+    ];
+    mount();
+
+    typeFilter('#9517');
+    expect(rows()).toHaveLength(1);
+    expect(rows()[0].textContent).toContain('Fix CI');
+
+    typeFilter('#9999');
+    expect(rows()).toHaveLength(0);
+  });
+
   it('prunes stale checked ids after an unfiltered session refresh', async () => {
     mount();
 
