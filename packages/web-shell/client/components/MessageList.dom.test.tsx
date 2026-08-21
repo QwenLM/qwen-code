@@ -1879,40 +1879,6 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(parallelAgentsSummary(c)).toBeNull();
   });
 
-  it('defers automatic collapse of a latest-turn group while still responding', () => {
-    vi.useFakeTimers();
-    const firstAgent = agentMsg('agent-1');
-    const secondAgent = agentMsg('agent-2');
-    firstAgent.tools[0]!.status = 'pending';
-    secondAgent.tools[0]!.status = 'pending';
-    const c = mount([userMsg('u1'), firstAgent, secondAgent], undefined, {
-      isResponding: true,
-    });
-    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
-      'true',
-    );
-    const completedMessages = [
-      userMsg('u1'),
-      agentMsg('agent-1'),
-      agentMsg('agent-2'),
-      asstMsg('u1-answer'),
-    ];
-
-    rerenderMessages(c, completedMessages, { isResponding: true });
-    act(() => vi.advanceTimersByTime(3_000));
-    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
-      'true',
-    );
-
-    rerenderMessages(c, completedMessages, { isResponding: false });
-    act(() => vi.advanceTimersByTime(1_500));
-    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
-      'false',
-    );
-    act(() => vi.advanceTimersByTime(180));
-    expect(parallelAgentsSummary(c)).toBeNull();
-  });
-
   it('defers only the group that owns the awaited agent notification', () => {
     vi.useFakeTimers();
     const agentA1 = describedAgentMsg('agent-a1', 'group A task');
@@ -1963,46 +1929,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     ]);
   });
 
-  it('keeps deferring a latest-turn agent group when a monitor notification arrives mid-response', () => {
-    vi.useFakeTimers();
-    const firstAgent = agentMsg('agent-1');
-    const secondAgent = agentMsg('agent-2');
-    firstAgent.tools[0]!.status = 'pending';
-    secondAgent.tools[0]!.status = 'pending';
-    const c = mount([userMsg('u1'), firstAgent, secondAgent], undefined, {
-      isResponding: true,
-    });
-    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
-      'true',
-    );
-    const completedMessages = [
-      userMsg('u1'),
-      agentMsg('agent-1'),
-      agentMsg('agent-2'),
-      asstMsg('u1-answer'),
-      monitorNotificationMsg('monitor'),
-    ];
-
-    rerenderMessages(c, completedMessages, { isResponding: true });
-    // A non-agent notification must not strip the latest-turn deferral while
-    // the response is still streaming.
-    act(() => vi.advanceTimersByTime(3_000));
-    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
-      'true',
-    );
-
-    rerenderMessages(c, completedMessages, { isResponding: false });
-    act(() => vi.advanceTimersByTime(1_500));
-    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
-      'false',
-    );
-    act(() => vi.advanceTimersByTime(180));
-    // The turn itself stays open for the monitor notification's reply.
-    expect(c.querySelector('[data-agent-collapse-exit="true"]')).toBeNull();
-    expect(parallelAgentsSummary(c)?.hasAttribute('aria-disabled')).toBe(false);
-  });
-
-  it('defers every latest-turn group while the response awaits the agent summary', () => {
+  it('defers only the owner group while the response awaits the agent summary', () => {
     vi.useFakeTimers();
     const agentA1 = describedAgentMsg('agent-a1', 'group A task');
     const agentA2 = describedAgentMsg('agent-a2', 'group A task');
@@ -2035,19 +1962,20 @@ describe('MessageList — turn collapse (DOM)', () => {
     ];
     rerenderMessages(c, completedMessages, { isResponding: true });
 
-    // Past group B's 1500ms window: the non-owning group stays deferred too
-    // while the latest background item is the awaited agent notification.
+    // Past group B's 1500ms window: only the group owning the awaited
+    // notification stays deferred; group B, whose completion is already on
+    // screen, collapses to its summary row even while the response streams.
     act(() => vi.advanceTimersByTime(1_680));
     expect(c.textContent).toContain('group A task');
-    expect(c.textContent).toContain('group B task');
+    expect(c.textContent).not.toContain('group B task');
     expect(summaries().map((b) => b.getAttribute('aria-expanded'))).toEqual([
-      'true',
+      'false',
       'true',
     ]);
 
-    // Once the response ends, only the owner group stays deferred. The
-    // collapsed group keeps its launch position while the pinned owner group
-    // renders at the turn's tail.
+    // Once the response ends the outcome is unchanged: the collapsed group
+    // keeps its launch position while the pinned owner group renders at the
+    // turn's tail.
     rerenderMessages(c, completedMessages);
     act(() => vi.advanceTimersByTime(1_680));
     expect(c.textContent).toContain('group A task');
@@ -2056,6 +1984,43 @@ describe('MessageList — turn collapse (DOM)', () => {
       'false',
       'true',
     ]);
+  });
+
+  it('collapses a completed agent group despite a monitor notification mid-response', () => {
+    vi.useFakeTimers();
+    const firstAgent = agentMsg('agent-1');
+    const secondAgent = agentMsg('agent-2');
+    firstAgent.tools[0]!.status = 'pending';
+    secondAgent.tools[0]!.status = 'pending';
+    const c = mount([userMsg('u1'), firstAgent, secondAgent], undefined, {
+      isResponding: true,
+    });
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'true',
+    );
+    const completedMessages = [
+      userMsg('u1'),
+      agentMsg('agent-1'),
+      agentMsg('agent-2'),
+      asstMsg('u1-answer'),
+      monitorNotificationMsg('monitor'),
+    ];
+
+    rerenderMessages(c, completedMessages, { isResponding: true });
+    // A non-agent notification does not defer the agent group: it collapses
+    // as soon as the agents finish, even while the response is streaming.
+    act(() => vi.advanceTimersByTime(1_680));
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'false',
+    );
+
+    rerenderMessages(c, completedMessages, { isResponding: false });
+    act(() => vi.advanceTimersByTime(1_500));
+    // No exit sequence re-runs for an already-collapsed group, and the turn
+    // stays open for the monitor notification's reply, so the summary row
+    // remains in place.
+    expect(c.querySelector('[data-agent-collapse-exit="true"]')).toBeNull();
+    expect(parallelAgentsSummary(c)?.hasAttribute('aria-disabled')).toBe(false);
   });
 
   it('renders collapse metrics in the standalone turn row', () => {
@@ -4333,5 +4298,231 @@ describe('MessageList — turn collapse (DOM)', () => {
     await nextFrame();
 
     expect(onCanScrollToBottomChange).toHaveBeenLastCalledWith(true);
+  });
+
+  it('collapses an automatically expanded parallel-agents group as soon as its agents finish, even while the main agent keeps responding', () => {
+    vi.useFakeTimers();
+    const active1 = agentMsg('agent-1');
+    active1.tools[0]!.status = 'in_progress';
+    const active2 = agentMsg('agent-2');
+    active2.tools[0]!.status = 'in_progress';
+    const c = mount([userMsg('u1'), active1, active2], undefined, {
+      isResponding: true,
+    });
+
+    // The group auto-expands while the agents are live.
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'true',
+    );
+
+    // Both agents finish while the main agent still streams its answer; the
+    // group collapses without waiting for the whole turn to end.
+    const done1 = agentMsg('agent-1');
+    done1.tools[0]!.status = 'completed';
+    const done2 = agentMsg('agent-2');
+    done2.tools[0]!.status = 'completed';
+    rerenderMessages(c, [userMsg('u1'), done1, done2, asstMsg('a1')], {
+      isResponding: true,
+    });
+    act(() => {
+      vi.advanceTimersByTime(2_000);
+    });
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'false',
+    );
+    expect(has(c, 'a1')).toBe(true);
+
+    // Once the turn ends, the completed turn folds the summary away.
+    rerenderMessages(c, [userMsg('u1'), done1, done2, asstMsg('a1')], {
+      isResponding: false,
+    });
+    act(() => {
+      vi.advanceTimersByTime(2_000);
+    });
+    expect(parallelAgentsSummary(c)).toBeNull();
+    expect(has(c, 'u1')).toBe(true);
+    expect(has(c, 'a1')).toBe(true);
+  });
+
+  it('returns a completed parallel-agents group to its chronological position while later tools run', () => {
+    vi.useFakeTimers();
+    const active1 = agentMsg('agent-1');
+    active1.tools[0]!.status = 'in_progress';
+    const active2 = agentMsg('agent-2');
+    active2.tools[0]!.status = 'in_progress';
+    const c = mount([userMsg('u1'), active1, active2], undefined, {
+      isResponding: true,
+    });
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'true',
+    );
+
+    // Agents complete while the main agent continues with a new tool call.
+    const done1 = agentMsg('agent-1');
+    done1.tools[0]!.status = 'completed';
+    const done2 = agentMsg('agent-2');
+    done2.tools[0]!.status = 'completed';
+    rerenderMessages(c, [userMsg('u1'), done1, done2, toolMsg('g1')], {
+      isResponding: true,
+    });
+    act(() => {
+      vi.advanceTimersByTime(2_000);
+    });
+
+    // The group collapsed back to its summary row and returned above the
+    // later tool (chronological order) instead of staying pinned at the
+    // bottom of the turn.
+    const summary = parallelAgentsSummary(c);
+    expect(summary?.getAttribute('aria-expanded')).toBe('false');
+    const laterTool = c.querySelector('[data-testid="msg-g1"]');
+    expect(laterTool).toBeTruthy();
+    expect(
+      (summary as HTMLElement).compareDocumentPosition(
+        laterTool as HTMLElement,
+      ) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
+  });
+
+  it('auto-collapses a background-agent group once the summary narration lands', () => {
+    vi.useFakeTimers();
+    const active1 = agentMsg('agent-1');
+    active1.tools[0]!.status = 'in_progress';
+    const active2 = agentMsg('agent-2');
+    active2.tools[0]!.status = 'in_progress';
+    const c = mount([userMsg('u1'), active1, active2], undefined, {
+      isResponding: true,
+    });
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'true',
+    );
+
+    // Both agents complete; completion notifications land and the model
+    // narrates the summary afterwards.
+    const done1 = agentMsg('agent-1');
+    done1.tools[0]!.status = 'completed';
+    const done2 = agentMsg('agent-2');
+    done2.tools[0]!.status = 'completed';
+    const settled = [
+      userMsg('u1'),
+      done1,
+      done2,
+      asstMsg('launched'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      backgroundNotificationMsg('bg-2', 'call-agent-2'),
+      thinkingMsg('t1'),
+      asstMsg('summary'),
+    ];
+    rerenderMessages(c, settled, { isResponding: true });
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'true',
+    );
+
+    rerenderMessages(c, settled, { isResponding: false });
+    act(() => {
+      vi.advanceTimersByTime(2_000);
+    });
+    expect(parallelAgentsSummary(c)).toBeNull();
+    expect(has(c, 'u1')).toBe(true);
+    expect(has(c, 'summary')).toBe(true);
+  });
+
+  it('collapses a background-agent group once the awaited summary grace expires', () => {
+    vi.useFakeTimers();
+    const active1 = agentMsg('agent-1');
+    active1.tools[0]!.status = 'in_progress';
+    const active2 = agentMsg('agent-2');
+    active2.tools[0]!.status = 'in_progress';
+    const c = mount([userMsg('u1'), active1, active2], undefined, {
+      isResponding: true,
+    });
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'true',
+    );
+
+    // The model already answered before the agents reconciled; their
+    // completion notifications land afterwards with no follow-up narration.
+    const done1 = agentMsg('agent-1');
+    done1.tools[0]!.status = 'completed';
+    const done2 = agentMsg('agent-2');
+    done2.tools[0]!.status = 'completed';
+    rerenderMessages(
+      c,
+      [
+        userMsg('u1'),
+        done1,
+        done2,
+        asstMsg('final'),
+        backgroundNotificationMsg('bg-1', 'call-agent-1'),
+        backgroundNotificationMsg('bg-2', 'call-agent-2'),
+      ],
+      { isResponding: false },
+    );
+    // The turn is awaiting the summary the model is expected to narrate, so
+    // the group stays expanded through the bounded grace window…
+    act(() => {
+      vi.advanceTimersByTime(4_999);
+    });
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'true',
+    );
+
+    // …but a summary that never arrives cannot pin it open forever: once the
+    // grace expires the group collapses and the completed turn folds it back
+    // into the turn summary (the trailing completion notification stays as
+    // the turn's final content, mirroring the pre-notification answer fold).
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    act(() => {
+      vi.advanceTimersByTime(2_000);
+    });
+    expect(parallelAgentsSummary(c)).toBeNull();
+    expect(has(c, 'u1')).toBe(true);
+    expect(has(c, 'bg-2')).toBe(true);
+    expect(has(c, 'final')).toBe(false);
+  });
+
+  it('does not restart the awaited-summary grace for a monitor notification', () => {
+    vi.useFakeTimers();
+    const active1 = agentMsg('agent-1');
+    active1.tools[0]!.status = 'in_progress';
+    const active2 = agentMsg('agent-2');
+    active2.tools[0]!.status = 'in_progress';
+    const c = mount([userMsg('u1'), active1, active2], undefined, {
+      isResponding: true,
+    });
+    const done1 = agentMsg('agent-1');
+    done1.tools[0]!.status = 'completed';
+    const done2 = agentMsg('agent-2');
+    done2.tools[0]!.status = 'completed';
+    const settled = [
+      userMsg('u1'),
+      done1,
+      done2,
+      asstMsg('final'),
+      backgroundNotificationMsg('bg-1', 'call-agent-1'),
+      backgroundNotificationMsg('bg-2', 'call-agent-2'),
+    ];
+    rerenderMessages(c, settled, { isResponding: false });
+
+    // A monitor banner lands mid-wait. It is not the awaited agent summary,
+    // so it must neither restart the 5s bound nor re-arm an expired one;
+    // the group still collapses when the grace window closes.
+    rerenderMessages(c, [...settled, monitorNotificationMsg('monitor')], {
+      isResponding: false,
+    });
+    act(() => {
+      vi.advanceTimersByTime(4_999);
+    });
+    expect(parallelAgentsSummary(c)?.getAttribute('aria-expanded')).toBe(
+      'true',
+    );
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    act(() => {
+      vi.advanceTimersByTime(2_000);
+    });
+    expect(parallelAgentsSummary(c)).toBeNull();
   });
 });
