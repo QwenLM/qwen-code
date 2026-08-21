@@ -43,6 +43,7 @@ import {
 } from '@qwen-code/sdk/daemon';
 import {
   createDaemonSessionActions,
+  getWorkspaceModelsAfterSessionClear,
   getPromptSettledKey,
   normalizeWorkspaceIdentity,
   resolveSessionRestoreTimeouts,
@@ -2926,6 +2927,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               sessionId: undefined,
               context: undefined,
               reasoning: undefined,
+              models: getWorkspaceModelsAfterSessionClear(current),
               goalState: undefined,
               error: undefined,
               errorStatus: undefined,
@@ -3074,6 +3076,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 sessionId: undefined,
                 context: undefined,
                 reasoning: undefined,
+                models: getWorkspaceModelsAfterSessionClear(current),
                 goalState: undefined,
                 error: message,
                 errorStatus: resolveConnectionErrorStatus(
@@ -3102,6 +3105,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               sessionId: undefined,
               context: undefined,
               reasoning: undefined,
+              models: getWorkspaceModelsAfterSessionClear(current),
               goalState: undefined,
               error: message,
               errorStatus: resolveConnectionErrorStatus(
@@ -3434,6 +3438,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                         sessionId: undefined,
                         context: undefined,
                         reasoning: undefined,
+                        models: getWorkspaceModelsAfterSessionClear(current),
                         goalState: undefined,
                         loadingTranscript: undefined,
                         catchingUp: undefined,

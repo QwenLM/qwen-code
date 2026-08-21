@@ -656,6 +656,67 @@ describe('DaemonSessionProvider', () => {
     expect(connection?.models?.[0]?.reasoningPreview?.effort).toBe('xhigh');
   });
 
+  it('restores workspace reasoning preview after clearing live context models', async () => {
+    sdkMocks.workspaceProviders.mockResolvedValue(
+      workspaceProvidersWithReasoningPreview(),
+    );
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'lazy-session',
+        context: vi.fn(async () => ({
+          v: 1 as const,
+          sessionId: 'lazy-session',
+          workspaceCwd: '/mock-workspace',
+          state: {
+            configOptions: reasoningConfigOptions('medium'),
+            models: {
+              currentModelId: 'qwen3.8-max',
+              availableModels: [
+                {
+                  modelId: 'qwen3.8-max',
+                  baseModelId: 'qwen3.8-max',
+                  name: 'Qwen 3.8 Max',
+                  contextLimit: 131_072,
+                },
+              ],
+            },
+          },
+        })),
+      }),
+    );
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'lazy-session',
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(connection?.context?.sessionId).toBe('lazy-session');
+    expect(connection?.models?.[0]?.reasoningPreview).toBeUndefined();
+
+    await act(async () => {
+      await actions?.clearSession();
+    });
+
+    expect(connection?.sessionId).toBeUndefined();
+    expect(connection?.context).toBeUndefined();
+    expect(connection?.models?.[0]?.reasoningPreview).toEqual({
+      enabled: true,
+      effort: 'xhigh',
+      efforts: ['low', 'medium', 'xhigh'],
+    });
+  });
+
   it('populates git branch from the active session workspace', async () => {
     sdkMocks.sessions.push(createMockSession());
     let connection: DaemonConnectionState | undefined;
