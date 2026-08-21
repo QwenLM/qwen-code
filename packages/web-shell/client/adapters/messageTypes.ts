@@ -162,6 +162,11 @@ export interface DaemonSystemMessage extends DaemonMessageMeta {
   source?: string;
   data?: unknown;
   images?: Array<{ data: string; mimeType: string }>;
+  files?: Array<{
+    name: string;
+    mimeType: string;
+    attachmentId?: string;
+  }>;
 }
 
 export interface DaemonUserShellMessage extends DaemonMessageMeta {

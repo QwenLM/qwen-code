@@ -23,6 +23,7 @@ import type {
 import { DAEMON_PLAN_TOOL_CALL_ID } from './types.js';
 import { createDaemonToolResultTextPreview } from './toolPreview.js';
 import {
+  capDetails,
   getFirstString,
   getOutputText,
   getString,
@@ -61,7 +62,6 @@ const MCP_RESTART_REFUSED_REASONS = new Set<string>([
 ]);
 
 const MALFORMED_MEMORY_CHANGED = 'malformed memory_changed payload';
-const MAX_DETAILS_LENGTH = 4096;
 const SESSION_RECORDING_DEGRADED_MESSAGE =
   'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording.';
 
@@ -409,7 +409,10 @@ function normalizeUnrecognizedEvent(
       ...base,
       type: 'debug',
       debugReason: 'unrecognized_event',
-      text: `${event.type} (unrecognized daemon event): ${stringifyRedactedJson(event.data)}`,
+      text: debugBlockText(
+        `${event.type} (unrecognized daemon event)`,
+        event.data,
+      ),
     },
   ];
 }
@@ -785,7 +788,7 @@ function normalizeSessionUpdate(
         ...base,
         type: 'debug',
         debugReason: 'malformed_payload',
-        text: `session_update: ${stringifyRedactedJson(event.data)}`,
+        text: debugBlockText('session_update', event.data),
       },
     ];
   }
@@ -998,7 +1001,7 @@ function normalizeSessionUpdate(
           debugReason: kind?.trim()
             ? 'unrecognized_session_update'
             : 'malformed_payload',
-          text: `${kind ?? 'session_update'}: ${stringifyRedactedJson(update)}`,
+          text: debugBlockText(kind ?? 'session_update', update),
         },
       ];
   }
@@ -1282,9 +1285,15 @@ function asDaemonErrorKind(
     : undefined;
 }
 
-function capDetails(details: string): string {
-  if (details.length <= MAX_DETAILS_LENGTH) return details;
-  return `${details.slice(0, MAX_DETAILS_LENGTH)}... [truncated]`;
+/**
+ * Builds the `text` of a `debug` block that embeds an unrecognized or
+ * malformed payload, capped at the producer. One such block is appended per
+ * frame, so a high-frequency frame could otherwise accumulate 100KB blocks up
+ * to the transcript block cap; capping here means a future debug branch
+ * cannot drop the cap.
+ */
+function debugBlockText(prefix: string, data: unknown): string {
+  return capDetails(`${prefix}: ${stringifyRedactedJson(data)}`);
 }
 
 function normalizePermissionRequest(
@@ -1297,7 +1306,7 @@ function normalizePermissionRequest(
         ...base,
         type: 'debug',
         debugReason: 'malformed_payload',
-        text: `permission_request: ${stringifyRedactedJson(event.data)}`,
+        text: debugBlockText('permission_request', event.data),
       },
     ];
   }
@@ -1309,7 +1318,7 @@ function normalizePermissionRequest(
         ...base,
         type: 'debug',
         debugReason: 'malformed_payload',
-        text: `permission_request: ${stringifyRedactedJson(event.data)}`,
+        text: debugBlockText('permission_request', event.data),
       },
     ];
   }
@@ -1343,7 +1352,7 @@ function normalizePermissionResolved(
         ...base,
         type: 'debug',
         debugReason: 'malformed_payload',
-        text: `${event.type}: ${stringifyRedactedJson(event.data)}`,
+        text: debugBlockText(event.type, event.data),
       },
     ];
   }

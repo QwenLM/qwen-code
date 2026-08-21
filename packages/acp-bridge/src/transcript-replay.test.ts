@@ -112,14 +112,30 @@ describe('createTranscriptReplayMachine', () => {
     ).toEqual([]);
   });
 
+  it('replays user-initiated Goal controls as user messages', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      goalStateRecord('goal-create', 'create', GOAL),
+    );
+
+    expect(projected[0]).toMatchObject({
+      sessionUpdate: 'user_message_chunk',
+      content: { type: 'text', text: `/goal ${GOAL.objective}` },
+      _meta: {
+        source: 'goal_control',
+        'qwen.session.recordId': 'goal-create',
+      },
+    });
+  });
+
   it('projects goal_state through v2-first metadata', () => {
     const projected = updates(
       createTranscriptReplayMachine(),
       goalStateRecord('goal-create', 'create', GOAL),
     );
 
-    expect(projected).toHaveLength(1);
-    expect(projected[0]?._meta).toMatchObject({
+    expect(projected).toHaveLength(2);
+    expect(projected[1]?._meta).toMatchObject({
       goalState: { v: 2, goal: GOAL, activity: 'idle' },
       goalStatus: { kind: 'set', condition: GOAL.objective },
       'qwen.session.recordId': 'goal-create',
@@ -138,7 +154,7 @@ describe('createTranscriptReplayMachine', () => {
       goalStateRecord('goal-clear', 'clear', null),
     );
 
-    expect(projected[0]?._meta).toMatchObject({
+    expect(projected[1]?._meta).toMatchObject({
       goalState: { v: 2, goal: null, activity: 'idle' },
       goalStatus: { kind: 'cleared', condition: GOAL.objective },
       'qwen.session.recordId': 'goal-clear',
@@ -205,7 +221,7 @@ describe('createTranscriptReplayMachine', () => {
 
     expect(
       updates(machine, goalStateRecord('goal-create', 'create', GOAL)),
-    ).toHaveLength(1);
+    ).toHaveLength(2);
 
     const turned: GoalRecord = {
       ...GOAL,
@@ -325,7 +341,7 @@ describe('createTranscriptReplayMachine', () => {
 
     expect(
       updates(machine, goalStateRecord('goal-create', 'create', GOAL)),
-    ).toHaveLength(1);
+    ).toHaveLength(2);
 
     const turnedOnce: GoalRecord = {
       ...GOAL,

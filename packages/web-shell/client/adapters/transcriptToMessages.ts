@@ -283,6 +283,37 @@ function getMidTurnInjectedImages(
   return images.length > 0 ? images : undefined;
 }
 
+function getMidTurnInjectedFiles(
+  data: unknown,
+): Array<{ name: string; mimeType: string; attachmentId: string }> | undefined {
+  if (!data || typeof data !== 'object') return undefined;
+  const items = (data as { items?: unknown }).items;
+  if (!Array.isArray(items)) return undefined;
+  const files = items.flatMap((item) => {
+    if (!item || typeof item !== 'object') return [];
+    const content = (item as { content?: unknown }).content;
+    if (!Array.isArray(content)) return [];
+    return content.flatMap((block) => {
+      if (!block || typeof block !== 'object') return [];
+      const record = block as Record<string, unknown>;
+      return record['type'] === 'resource' &&
+        typeof record['attachmentId'] === 'string'
+        ? [
+            {
+              name: record['attachmentId'],
+              attachmentId: record['attachmentId'],
+              mimeType:
+                typeof record['mimeType'] === 'string'
+                  ? record['mimeType']
+                  : 'application/octet-stream',
+            },
+          ]
+        : [];
+    });
+  });
+  return files.length > 0 ? files : undefined;
+}
+
 /**
  * Collect text content blocks from mid-turn injected message items. The
  * degraded-media drain echo ships an empty `messages` array whose items carry
@@ -442,6 +473,13 @@ export function transcriptBlocksToDaemonMessages(
           data: img.data,
           mimeType: img.mimeType || 'image/*',
         }));
+        const files = textBlock.files?.map((file) => ({
+          name: file.name,
+          mimeType: file.mimeType || 'text/plain',
+          ...(file.data !== undefined ? { data: file.data } : {}),
+          ...(file.text !== undefined ? { text: file.text } : {}),
+          ...(file.attachmentId ? { attachmentId: file.attachmentId } : {}),
+        }));
         if (source === 'mid_turn_message_injected') {
           messages.push({
             id: block.id,
@@ -451,6 +489,7 @@ export function transcriptBlocksToDaemonMessages(
             source,
             timestamp: blockTime,
             ...(images && images.length > 0 ? { images } : {}),
+            ...(files && files.length > 0 ? { files } : {}),
           });
           needsNewContentMessage = true;
           break;
@@ -468,15 +507,7 @@ export function transcriptBlocksToDaemonMessages(
         if (images && images.length > 0) {
           msg.images = images;
         }
-        if (textBlock.files && textBlock.files.length > 0) {
-          msg.files = textBlock.files.map((file) => ({
-            name: file.name,
-            mimeType: file.mimeType || 'text/plain',
-            ...(file.data !== undefined ? { data: file.data } : {}),
-            ...(file.text !== undefined ? { text: file.text } : {}),
-            ...(file.attachmentId ? { attachmentId: file.attachmentId } : {}),
-          }));
-        }
+        if (files && files.length > 0) msg.files = files;
         messages.push(msg);
         break;
       }
@@ -953,6 +984,9 @@ export function transcriptBlocksToDaemonMessages(
           const midTurnInjectedImages = getMidTurnInjectedImages(
             statusBlock.data,
           );
+          const midTurnInjectedFiles = getMidTurnInjectedFiles(
+            statusBlock.data,
+          );
           messages.push({
             id: block.id,
             role: 'system',
@@ -968,6 +1002,7 @@ export function transcriptBlocksToDaemonMessages(
               ? { data: statusBlock.data }
               : {}),
             ...(midTurnInjectedImages ? { images: midTurnInjectedImages } : {}),
+            ...(midTurnInjectedFiles ? { files: midTurnInjectedFiles } : {}),
           });
           needsNewContentMessage = true;
           break;

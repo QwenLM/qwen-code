@@ -588,3 +588,48 @@ describe('AssistantMessage markdown tables', () => {
     expect(container.textContent).not.toContain('Copy table');
   });
 });
+
+describe('AssistantMessage copy without the async Clipboard API (issue #9485)', () => {
+  it('falls back to execCommand and still shows the copied state', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: undefined,
+    });
+    let copiedViaFallback: string | null = null;
+    const originalExecCommand = document.execCommand;
+    const execCommandMock = vi.fn().mockImplementation((command: string) => {
+      if (command === 'copy') {
+        copiedViaFallback = document.querySelector('textarea')?.value ?? null;
+      }
+      return true;
+    });
+    document.execCommand = execCommandMock;
+
+    try {
+      const container = render(
+        <AssistantMessage content="copy me" showFooterActions />,
+      );
+      const button = container.querySelector<HTMLButtonElement>(
+        'button[title="Copy"]',
+      );
+      expect(button).not.toBeNull();
+
+      await act(async () => {
+        button?.click();
+      });
+
+      expect(execCommandMock).toHaveBeenCalledWith('copy');
+      expect(copiedViaFallback).toBe('copy me');
+      // The button should flip to the check icon even without the async API.
+      expect(
+        button?.querySelector('path[d="m3.5 8.3 3 3L12.8 5"]'),
+      ).not.toBeNull();
+    } finally {
+      document.execCommand = originalExecCommand;
+      if (descriptor) {
+        Object.defineProperty(navigator, 'clipboard', descriptor);
+      }
+    }
+  });
+});

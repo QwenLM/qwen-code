@@ -969,9 +969,26 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         payload,
         this.goalState?.goal ?? null,
       );
+      const goalControlCommand = projectGoalControlCommand(
+        payload.cause,
+        payload.snapshot,
+      );
       this.goalState = payload.snapshot;
       this.goalCause = payload.cause;
       if (bookkeepingOnly) return;
+      if (goalControlCommand) {
+        yield emit(
+          createTranscriptMessageUpdate({
+            role: 'user',
+            text: goalControlCommand,
+            ...meta,
+            extra: {
+              source: 'goal_control',
+              'qwen.session.recordId': record.uuid,
+            },
+          }),
+        );
+      }
       const { type: _type, ...goalStatus } = projection.goalStatus;
       yield emit(
         createTranscriptMessageUpdate({
@@ -1171,6 +1188,40 @@ function withTranscriptSegmentId(
       },
     },
   } as unknown as SessionUpdate;
+}
+
+function projectGoalControlCommand(
+  cause: GoalStateCause,
+  snapshot: GoalSnapshotV2,
+): string | undefined {
+  switch (cause) {
+    case 'create':
+    case 'replace':
+      return snapshot.goal ? `/goal ${snapshot.goal.objective}` : undefined;
+    case 'edit':
+      return snapshot.goal
+        ? `/goal edit ${snapshot.goal.objective}`
+        : undefined;
+    case 'pause':
+    case 'resume':
+    case 'clear':
+      return `/goal ${cause}`;
+    case 'turn_finished':
+    case 'checkpoint':
+    case 'verifier_accept':
+    case 'verifier_reject':
+    case 'complete':
+    case 'blocked':
+    case 'usage_limited':
+    case 'migrated':
+      return undefined;
+    default:
+      return assertNever(cause);
+  }
+}
+
+function assertNever(value: never): never {
+  throw new Error(`Unsupported Goal state cause: ${String(value)}`);
 }
 
 function parseTranscriptGoalStatus(

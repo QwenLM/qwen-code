@@ -7,6 +7,10 @@ import {
 import { useI18n } from '../../i18n';
 import { useTranscriptRenderMode } from '../../transcriptRenderMode';
 import { formatTimestamp } from '../MessageTimestamp';
+import {
+  warnClipboardWriteFailure,
+  writeClipboardText,
+} from '../../utils/clipboard';
 import type { DaemonSessionGenerationEvent } from '@qwen-code/sdk/daemon';
 import { Button } from '../ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
@@ -58,16 +62,12 @@ export const AssistantMessage = memo(function AssistantMessage({
     }
   }, [branchPending, onBranchSession]);
   const handleCopy = useCallback(() => {
-    const write = navigator.clipboard?.writeText(content);
-    if (!write) {
-      return;
-    }
-    void write
+    void writeClipboardText(content)
       .then(() => {
         setCopied(true);
         window.setTimeout(() => setCopied(false), 2000);
       })
-      .catch(() => {});
+      .catch(warnClipboardWriteFailure);
   }, [content]);
   return (
     <div className={styles.message}>

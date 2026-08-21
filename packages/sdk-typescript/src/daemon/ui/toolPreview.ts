@@ -12,6 +12,7 @@ import type {
   DaemonTranscriptTodoItem,
 } from './types.js';
 import {
+  capDetails,
   getFirstString,
   isRecord,
   isSensitiveKey,
@@ -519,7 +520,9 @@ function collectPreviewRows(
     if (isRecord(value)) continue;
     rows.push({
       label: key,
-      value: isSensitiveKey(key) ? '[redacted]' : stringifyRedactedJson(value),
+      value: isSensitiveKey(key)
+        ? '[redacted]'
+        : capDetails(stringifyRedactedJson(value)),
     });
   }
   return rows;
