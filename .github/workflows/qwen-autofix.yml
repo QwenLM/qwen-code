@@ -3830,9 +3830,12 @@ jobs:
           # Absent from the trusted base until the PR that adds it merges, and
           # this step runs under -e: tolerate the miss here and let the
           # invoking step's empty-digest guard fail closed with a message,
-          # rather than killing the round at staging time. Same rule as
+          # rather than killing the round at staging time. Any cp failure
+          # removes the destination, so a PARTIAL write (ENOSPC/EIO on the
+          # shared pool) is recorded as NO digest — fail closed — instead of
+          # a truncated body executing in the PAT-bearing step. Same rule as
           # upsert-deferred-issue.sh below.
-          cp .github/scripts/autofix-push-and-report.sh "${RUNNER_TEMP}/autofix-push-and-report.sh" 2> /dev/null || true
+          cp .github/scripts/autofix-push-and-report.sh "${RUNNER_TEMP}/autofix-push-and-report.sh" 2> /dev/null || rm -f "${RUNNER_TEMP}/autofix-push-and-report.sh"
           # The staged copies' trusted-base provenance holds at cp time only:
           # RUNNER_TEMP is writable by the branch/agent code later steps run
           # on this host, so record each digest in GITHUB_OUTPUT — expression
@@ -5637,10 +5640,66 @@ jobs:
           # the agent and the verification gate have already executed branch
           # code on this host. Run the trusted-base copy staged before any of
           # that, and prove it is the same bytes first: the digest rides step
-          # output (expression context), which a disk write cannot reach.
-          # Both reads are bounded and type-checked, so a FIFO or a directory
-          # planted at the staged path is a refusal here rather than a hang
-          # until timeout-minutes.
+          # output (expression context), which a disk write after staging
+          # cannot reach.
+          #
+          # The whole verify-and-run sequence lives in ONE env -i clean
+          # child (this file's pattern for privileged work): the step shell
+          # inherits every $GITHUB_ENV plant earlier steps left — including
+          # BASH_FUNC_* imports, which bash loads as functions before line 1,
+          # ahead of PATH — so no pinning in THIS shell can defend a bare
+          # word end to end (even `exit` is shadowable), while the clean
+          # child imports nothing. Inside it the staged path is opened
+          # ONCE: the digest is computed over the bytes read and those same
+          # bytes execute, so a cross-step watcher cannot swap the file
+          # between a check and a later execution read. The type check and
+          # bounded reads make a planted FIFO or directory a refusal rather
+          # than a hang until timeout-minutes.
+          LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \
+            /usr/bin/env -i \
+            PATH="${TRUSTED_PATH}" \
+            HOME="${HOME}" \
+            RUNNER_TEMP="${RUNNER_TEMP}" \
+            GITHUB_RUN_ID="${GITHUB_RUN_ID}" \
+            GITHUB_STEP_SUMMARY="${GITHUB_STEP_SUMMARY}" \
+            PUSH_REPORT_SHA256="${PUSH_REPORT_SHA256}" \
+            GITHUB_TOKEN="${GITHUB_TOKEN}" \
+            OUTCOME="${OUTCOME}" \
+            CONFLICT="${CONFLICT}" \
+            NEWEST="${NEWEST}" \
+            EFFECTIVE_ROUND="${EFFECTIVE_ROUND}" \
+            ROUND_START="${ROUND_START}" \
+            MODEL="${MODEL}" \
+            CHECKED_OUT_HEAD="${CHECKED_OUT_HEAD}" \
+            VERIFIED_HEAD="${VERIFIED_HEAD}" \
+            RESANITIZE_SHA256="${RESANITIZE_SHA256}" \
+            UPSERT_SRC="${UPSERT_SRC}" \
+            TRUSTED_PATH="${TRUSTED_PATH}" \
+            GROWTH_BASE_NEW="${GROWTH_BASE_NEW}" \
+            GROWTH_BASE_SRC="${GROWTH_BASE_SRC}" \
+            GROWTH_BASE_TEST="${GROWTH_BASE_TEST}" \
+            GROWTH_BASE_WIN="${GROWTH_BASE_WIN}" \
+            GROWTH_SRC="${GROWTH_SRC}" \
+            GROWTH_TEST="${GROWTH_TEST}" \
+            CRITICAL_ONLY_GROWTH="${CRITICAL_ONLY_GROWTH}" \
+            KISS_AUDIT="${KISS_AUDIT}" \
+            AUDIT_VERDICT="${AUDIT_VERDICT}" \
+            MEASURED_AT="${MEASURED_AT}" \
+            REPO="${REPO}" \
+            WORKDIR="${WORKDIR}" \
+            PR="${PR}" \
+            BRANCH="${BRANCH}" \
+            ISSUE="${ISSUE}" \
+            ROUND="${ROUND}" \
+            MAX_ROUNDS="${MAX_ROUNDS}" \
+            WINDOW="${WINDOW}" \
+            HEAD_REPO="${HEAD_REPO}" \
+            AUTOFIX_BOT="${AUTOFIX_BOT}" \
+            TAKEOVER_LABEL="${TAKEOVER_LABEL}" \
+            TAKEOVER_COMMAND="${TAKEOVER_COMMAND}" \
+            TAKEOVER_MAX_ROUNDS="${TAKEOVER_MAX_ROUNDS}" \
+            bash --norc <<'AUTOFIX_PUSH_REPORT_GATE'
+          set -eo pipefail
           if [[ -z "${PUSH_REPORT_SHA256}" ]]; then
             echo '::error::the stage step recorded no digest for autofix-push-and-report.sh — refusing to run it.'
             exit 1
@@ -5649,8 +5708,19 @@ jobs:
             echo '::error::the staged autofix-push-and-report.sh is not a regular file — refusing to run it.'
             exit 1
           fi
-          echo "${PUSH_REPORT_SHA256}  ${RUNNER_TEMP}/autofix-push-and-report.sh" | timeout 30 sha256sum -c - > /dev/null
-          bash "${RUNNER_TEMP}/autofix-push-and-report.sh"
+          # Single open: capture the staged bytes once (the trailing-newline
+          # marker keeps them byte-identical), verify the digest of exactly
+          # those bytes, and run those same bytes — no second read-open for
+          # a watcher to race.
+          push_report_body="$(timeout 30 cat "${RUNNER_TEMP}/autofix-push-and-report.sh"; printf 'x')"
+          push_report_body="${push_report_body%x}"
+          push_report_digest="$(printf '%s' "${push_report_body}" | sha256sum | cut -d' ' -f1)"
+          if [[ "${push_report_digest}" != "${PUSH_REPORT_SHA256}" ]]; then
+            echo '::error::the staged autofix-push-and-report.sh does not match the digest the stage step recorded — refusing to run it.'
+            exit 1
+          fi
+          bash --norc -c "${push_report_body}"
+          AUTOFIX_PUSH_REPORT_GATE
 
       - name: 'Report dry-run / failure'
         if: |-

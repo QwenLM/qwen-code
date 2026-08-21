@@ -10382,6 +10382,13 @@ exit 1
     expect(stageStep).toContain(
       'cp .github/scripts/autofix-push-and-report.sh "${RUNNER_TEMP}/autofix-push-and-report.sh"',
     );
+    // ANY cp failure removes the destination: ENOENT (absent from the trusted
+    // base before this lands) and partial write (ENOSPC/EIO on the shared
+    // pool) both land at the consumer's empty-digest fail-closed guard. A
+    // bare `|| true` would record a digest of the truncated bytes instead.
+    expect(stageStep).toContain(
+      '|| rm -f "${RUNNER_TEMP}/autofix-push-and-report.sh"',
+    );
     expect(stageStep).toContain(
       'push_report_sha256=$(sha256sum "${RUNNER_TEMP}/autofix-push-and-report.sh"',
     );
@@ -10389,16 +10396,40 @@ exit 1
       "PUSH_REPORT_SHA256: '${{ steps.stage.outputs.push_report_sha256 }}'",
     );
 
-    const verifyLine =
-      'echo "${PUSH_REPORT_SHA256}  ${RUNNER_TEMP}/autofix-push-and-report.sh" | timeout 30 sha256sum -c - > /dev/null';
-    const call = 'bash "${RUNNER_TEMP}/autofix-push-and-report.sh"';
-    expect(pushAndReportStepYaml).toContain(verifyLine);
-    expect(pushAndReportStepYaml.indexOf(verifyLine)).toBeLessThan(
+    // The whole verify-and-run sequence runs in ONE env -i clean child (the
+    // file's established pattern for privileged work): the step shell
+    // inherits every $GITHUB_ENV plant, and BASH_FUNC_* imports become
+    // functions before line 1 — ahead of PATH — so no pin in the step shell
+    // can defend a bare word end to end. Pin the launch shape, including the
+    // LD_* prefix that env -i itself cannot strip.
+    expect(pushAndReportStepYaml).toMatch(
+      /LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \\\n\s*\/usr\/bin\/env -i \\\n\s*PATH="\$\{TRUSTED_PATH\}"/,
+    );
+    expect(pushAndReportStepYaml).toContain('bash --norc <<');
+
+    // Single open: the staged path is type-checked, then read ONCE; the
+    // digest is computed over the captured bytes and those same bytes
+    // execute. A second read-open (or executing the path directly) is the
+    // check-then-use window a cross-step watcher swaps bytes through.
+    expect(pushAndReportStepYaml).toContain(
+      'timeout 30 cat "${RUNNER_TEMP}/autofix-push-and-report.sh"',
+    );
+    expect(
+      pushAndReportStepYaml.split('${RUNNER_TEMP}/autofix-push-and-report.sh')
+        .length - 1,
+    ).toBe(2);
+    const digestCheck =
+      'push_report_digest="$(printf \'%s\' "${push_report_body}" | sha256sum | cut -d\' \' -f1)"';
+    const call = 'bash --norc -c "${push_report_body}"';
+    expect(pushAndReportStepYaml).toContain(digestCheck);
+    expect(pushAndReportStepYaml).toContain(call);
+    expect(pushAndReportStepYaml.indexOf(digestCheck)).toBeLessThan(
       pushAndReportStepYaml.indexOf(call),
     );
-    // Same mutants the resanitize gate below pins: a trailing `|| true` or a
-    // swapped target turns the check into a decoration while presence and
-    // ordering assertions stay green.
+    // Never the path-opening verify form, and never softened.
+    expect(pushAndReportStepYaml).not.toMatch(
+      /sha256sum -c[^\n]*autofix-push-and-report\.sh/,
+    );
     expect(pushAndReportStepYaml).not.toMatch(/sha256sum -c[^\n]*\|\| true/);
     // An empty digest means the stage step never copied the file (it is absent
     // from the trusted base before this lands). Running anyway would execute
@@ -10407,18 +10438,41 @@ exit 1
       'if [[ -z "${PUSH_REPORT_SHA256}" ]]; then',
     );
     // A FIFO or directory planted at the staged path must be a refusal, not a
-    // block until timeout-minutes: the type is checked and both reads bounded.
+    // block until timeout-minutes: the type is checked BEFORE the invocation
+    // (bash's open of the script is the one unbounded read) and the refusal
+    // actually exits (a defanged guard body re-opens the planted-FIFO
+    // double-open). Both mutants verified red under this pin set.
     expect(pushAndReportStepYaml).toContain("timeout 10 stat -c '%F'");
-    // The workspace copy must never be what runs.
-    expect(pushAndReportStepYaml).not.toMatch(
-      /bash [^\n]*\.github\/scripts\/autofix-push-and-report\.sh/,
+    expect(
+      pushAndReportStepYaml.indexOf("timeout 10 stat -c '%F'"),
+    ).toBeLessThan(pushAndReportStepYaml.indexOf(call));
+    expect(pushAndReportStepYaml).toMatch(
+      /stat -c '%F'[\s\S]*?not a regular file[\s\S]*?exit 1/,
     );
+    // The workspace copy must never be what runs — in ANY execution spelling
+    // (R10-8 precedent), and on BOTH halves: a digest-verified staged copy
+    // delegating to the branch-controlled workspace copy would execute
+    // branch bytes in the PAT-bearing step.
+    for (const half of [pushAndReportStepYaml, pushAndReportScript]) {
+      expect(half).not.toMatch(
+        /(?:^|\s)(?:exec\s+)?(?:ba|da|k|z)?sh\b[^\n|]*\.github\/scripts\/autofix-push-and-report\.sh/m,
+      );
+      expect(half).not.toMatch(
+        /(?:^|\s)(?:source|\.)\s+"?\.github\/scripts\/autofix-push-and-report\.sh/m,
+      );
+    }
     // GitHub runs `run:` blocks as `bash --noprofile --norc -eo pipefail`. The
     // script must set the same flags — and NOT add `-u`, which would turn the
     // body's unguarded optional-output reads into hard failures and make this
-    // a behaviour change instead of a move.
+    // a behaviour change instead of a move. Pin the exact column-0 set-line
+    // inventory: a spelling-based negative (`^set -[a-z]*u`) misses
+    // `set -o nounset`, `set -E -u` and a later `set +e`. The script has
+    // exactly one column-0 set line today (the indented `set -uo pipefail`
+    // inside the upsert child string is correctly outside this inventory).
     expect(pushAndReportScript).toMatch(/^set -eo pipefail$/m);
-    expect(pushAndReportScript).not.toMatch(/^set -[a-z]*u/m);
+    expect(pushAndReportScript.match(/^set .*$/gm)).toEqual([
+      'set -eo pipefail',
+    ]);
   });
 
   it('re-sanitizes git config and resets the helper list at every PAT-bearing git step', () => {
@@ -12839,6 +12893,15 @@ exit 1
     // before any gated work. Exactly two clean-child launches (both arms of
     // 'Push and report' share run_deferred_upsert; the failure path has its
     // own).
+    // 'Push and report' ALSO carries the wrapper's own clean-child launch
+    // (the gate that verifies and runs the staged script) ahead of the
+    // upsert function in the concatenated YAML+script text; anchor these
+    // slices at the function so they keep targeting the UPSERT child. The
+    // failure step has no function — its child is inline, anchored at 0.
+    const upsertChildAnchor = (step) => {
+      const fn = step.indexOf('run_deferred_upsert');
+      return fn === -1 ? 0 : fn;
+    };
     for (const step of [pushAndReportStep, reviewAddressReportStep]) {
       // LD_* is stripped by a command-prefix assignment BEFORE /usr/bin/env,
       // the one channel env -i cannot block (ld.so preloads into the env
@@ -12860,9 +12923,15 @@ exit 1
       // Anchor on the launch LINE, not the first textual mention: a comment
       // elsewhere in the step names `/usr/bin/env -i` too, and slicing from
       // there swallowed the whole step (which quietly weakened these pins).
-      const argStart = step.indexOf('LD_PRELOAD= LD_AUDIT=');
+      const argStart = step.indexOf(
+        'LD_PRELOAD= LD_AUDIT=',
+        upsertChildAnchor(step),
+      );
       expect(argStart).toBeGreaterThan(-1);
-      const argList = step.slice(argStart, step.indexOf('bash --norc -c'));
+      const argList = step.slice(
+        argStart,
+        step.indexOf('bash --norc -c', argStart),
+      );
       expect(argList.length).toBeGreaterThan(0);
       // R9-10: contains-only pins accept a symmetric ADDITION that widens the
       // child's environment. Enumerate what is actually passed and compare
@@ -12923,7 +12992,7 @@ exit 1
       // …scoped to the upsert child: the step still runs the pre-existing
       // resanitize digest gate, which is a different staged script.
       const childBlock = step.slice(
-        step.indexOf('LD_PRELOAD= LD_AUDIT='),
+        step.indexOf('LD_PRELOAD= LD_AUDIT=', upsertChildAnchor(step)),
         step.indexOf("' > /dev/null 2>&1 ; } 3>&1 )"),
       );
       expect(childBlock.length).toBeGreaterThan(0);
@@ -12970,10 +13039,12 @@ exit 1
       const launchIdx = argStart;
       expect(execIdx).toBeGreaterThan(launchIdx);
     }
-    // Four clean children: the two deferred-findings upserts plus the two
+    // Five clean children: the two deferred-findings upserts, the two
     // verification-gate launches (the gate runs after the agent step's
-    // branch code, so its bash must inherit nothing at all).
-    expect(workflowWithScripts.split('/usr/bin/env -i \\').length - 1).toBe(4);
+    // branch code, so its bash must inherit nothing at all), and the
+    // push-and-report wrapper's gate, which verifies and runs the staged
+    // script for the same reason.
+    expect(workflowWithScripts.split('/usr/bin/env -i \\').length - 1).toBe(5);
     // R5-6: the failure-path child is near-verbatim of run_deferred_upsert's
     // child — tie their shared security scaffold together so drift in one is
     // caught. Compare the allow-list + prelude (everything up to where the
@@ -12981,6 +13052,7 @@ exit 1
     // absorb the one-level indent difference.
     const childCore = (step) =>
       step
+        .slice(upsertChildAnchor(step))
         .match(
           /LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \\[\s\S]*?could not create a gh config dir[^\n]*\n\s*exit 0\n\s*fi\n\s*export GH_CONFIG_DIR/,
         )?.[0]
@@ -13753,7 +13825,7 @@ exit 1
       // …scoped to the clean child: warnings elsewhere in the step reach the
       // log directly and never pass through the neutralizing replay.
       const child = step.slice(
-        step.indexOf('LD_PRELOAD= LD_AUDIT='),
+        step.indexOf('LD_PRELOAD= LD_AUDIT=', upsertChildAnchor(step)),
         step.indexOf("' > /dev/null 2>&1 ; } 3>&1 )"),
       );
       const wrapperWarnings =
