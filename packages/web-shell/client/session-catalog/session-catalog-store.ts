@@ -1,5 +1,6 @@
 import type {
   DaemonClient,
+  DaemonSessionArchiveState,
   DaemonSessionLiveState,
   DaemonSessionListPage,
   DaemonSessionListPageOptions,
@@ -436,6 +437,28 @@ export class SessionCatalogStore {
     workspaceCwd: string,
     options: { background?: boolean; interactive?: boolean } = {},
   ): void {
+    this.invalidateEntries(workspaceCwd, undefined, options);
+  }
+
+  /**
+   * Invalidate only the catalog entries whose archive state matches, e.g.
+   * 'active' for a pin toggle and ['active', 'archived'] for an archive
+   * move. Cheaper than invalidateWorkspace when unrelated queries (other
+   * archive states, unfiltered variants) are mounted for the same workspace.
+   */
+  invalidateSessionLists(
+    workspaceCwd: string,
+    archiveStates: ReadonlyArray<DaemonSessionArchiveState>,
+    options: { background?: boolean; interactive?: boolean } = {},
+  ): void {
+    this.invalidateEntries(workspaceCwd, archiveStates, options);
+  }
+
+  private invalidateEntries(
+    workspaceCwd: string,
+    archiveStates: ReadonlyArray<DaemonSessionArchiveState> | undefined,
+    options: { background?: boolean; interactive?: boolean },
+  ): void {
     const background = options.background === true;
     const hidden = this.isHidden();
     const liveStateEnabled = this.isWorkspaceLiveStateEnabled(workspaceCwd);
@@ -448,6 +471,12 @@ export class SessionCatalogStore {
     }
     for (const entry of this.entries.values()) {
       if (entry.query.workspaceCwd !== workspaceCwd) continue;
+      if (
+        archiveStates &&
+        !archiveStates.includes(entry.query.options.archiveState ?? 'active')
+      ) {
+        continue;
+      }
       entry.desiredRevision += 1;
       entry.invalidated = true;
       entry.retryAt = undefined;
@@ -506,6 +535,161 @@ export class SessionCatalogStore {
       this.setSnapshot(entry, {
         ...entry.snapshot,
         page: { ...entry.snapshot.page, sessions },
+      });
+    }
+  }
+
+  /**
+   * Drop a session from cached pages whose archive state matches — the
+   * write-through companion to an archive/unarchive RPC that already
+   * succeeded on the daemon. The nextCursor is left untouched so load-more
+   * keeps following the server's cursor; the targeted invalidation issued
+   * alongside this call refreshes the authoritative page ordering.
+   */
+  removeSession(
+    workspaceCwd: string,
+    sessionId: string,
+    options: {
+      archiveStates?: ReadonlyArray<DaemonSessionArchiveState>;
+    } = {},
+  ): void {
+    for (const entry of this.entries.values()) {
+      if (entry.query.workspaceCwd !== workspaceCwd || !entry.snapshot.page) {
+        continue;
+      }
+      if (
+        options.archiveStates &&
+        !options.archiveStates.includes(
+          entry.query.options.archiveState ?? 'active',
+        )
+      ) {
+        continue;
+      }
+      if (
+        !entry.snapshot.page.sessions.some(
+          (session) =>
+            session.workspaceCwd === workspaceCwd &&
+            session.sessionId === sessionId,
+        )
+      ) {
+        continue;
+      }
+      const sessions = entry.snapshot.page.sessions.filter(
+        (session) =>
+          !(
+            session.workspaceCwd === workspaceCwd &&
+            session.sessionId === sessionId
+          ),
+      );
+      this.setSnapshot(entry, {
+        ...entry.snapshot,
+        page: { ...entry.snapshot.page, sessions },
+      });
+    }
+  }
+
+  /**
+   * Write a daemon-confirmed pin state through to cached pages. The pinned
+   * section renders from its own `group: 'pinned'` query, whose cached page
+   * cannot learn about the pin until its refetch lands — so the session is
+   * added to (or removed from) pinned pages directly, while every other
+   * page holding the session is patched in place. Without this, a pin
+   * leaves the row absent from the sidebar for a refetch round-trip and an
+   * unpin shows the same row in both lists at once.
+   */
+  applySessionPin(workspaceCwd: string, session: DaemonSessionSummary): void {
+    for (const entry of this.entries.values()) {
+      if (entry.query.workspaceCwd !== workspaceCwd || !entry.snapshot.page) {
+        continue;
+      }
+      const matches = (candidate: DaemonSessionSummary) =>
+        candidate.workspaceCwd === workspaceCwd &&
+        candidate.sessionId === session.sessionId;
+      if (entry.query.options.group === 'pinned') {
+        const page = entry.snapshot.page;
+        if (!session.isPinned) {
+          if (!page.sessions.some(matches)) continue;
+          this.setSnapshot(entry, {
+            ...entry.snapshot,
+            page: {
+              ...page,
+              sessions: page.sessions.filter(
+                (candidate) => !matches(candidate),
+              ),
+            },
+          });
+          continue;
+        }
+        if (page.sessions.some(matches)) continue;
+        this.setSnapshot(entry, {
+          ...entry.snapshot,
+          page: { ...page, sessions: [...page.sessions, session] },
+        });
+        continue;
+      }
+      let changed = false;
+      const sessions = entry.snapshot.page.sessions.map((candidate) => {
+        if (!matches(candidate)) return candidate;
+        changed = true;
+        return {
+          ...candidate,
+          isPinned: session.isPinned,
+          ...(session.pinnedAt !== undefined
+            ? { pinnedAt: session.pinnedAt }
+            : {}),
+        };
+      });
+      if (!changed) continue;
+      this.setSnapshot(entry, {
+        ...entry.snapshot,
+        page: { ...entry.snapshot.page, sessions },
+      });
+    }
+  }
+
+  /**
+   * Insert a daemon-confirmed session into cached pages of the opposite
+   * archive state — the write-through companion to an archive/unarchive
+   * RPC, so the row appears in its destination list without waiting for
+   * the refetch. Pinned-group pages stay server-owned (membership there
+   * depends on the daemon's pin filter, not the archive state).
+   */
+  addSession(
+    workspaceCwd: string,
+    session: DaemonSessionSummary,
+    options: {
+      archiveStates?: ReadonlyArray<DaemonSessionArchiveState>;
+    } = {},
+  ): void {
+    if (session.workspaceCwd !== workspaceCwd) return;
+    for (const entry of this.entries.values()) {
+      if (entry.query.workspaceCwd !== workspaceCwd || !entry.snapshot.page) {
+        continue;
+      }
+      if (entry.query.options.group === 'pinned') continue;
+      if (
+        options.archiveStates &&
+        !options.archiveStates.includes(
+          entry.query.options.archiveState ?? 'active',
+        )
+      ) {
+        continue;
+      }
+      if (
+        entry.snapshot.page.sessions.some(
+          (candidate) =>
+            candidate.workspaceCwd === workspaceCwd &&
+            candidate.sessionId === session.sessionId,
+        )
+      ) {
+        continue;
+      }
+      this.setSnapshot(entry, {
+        ...entry.snapshot,
+        page: {
+          ...entry.snapshot.page,
+          sessions: [...entry.snapshot.page.sessions, session],
+        },
       });
     }
   }

@@ -1164,15 +1164,32 @@ export function WebShellSidebar({
   ] = useState(false);
   const [workspaceSessionsReloadToken, setWorkspaceSessionsReloadToken] =
     useState(0);
+  const [workspaceScopedReloadTokens, setWorkspaceScopedReloadTokens] =
+    useState<ReadonlyMap<string, number>>(() => new Map());
   const [autoExpandWorkspace, setAutoExpandWorkspace] = useState<{
     id: string;
     key: string;
   } | null>(null);
   // Keep the token for WorkspaceSection's group and Git consumers. Session
-  // catalogs are invalidated directly through their owning workspace.
-  const bumpWorkspaceReload = useCallback(() => {
-    setWorkspaceSessionsReloadToken((v) => v + 1);
+  // catalogs are invalidated directly through their owning workspace. A
+  // workspace-scoped bump only signals sections for that workspace.
+  const bumpWorkspaceReload = useCallback((workspaceCwd?: string) => {
+    if (workspaceCwd === undefined) {
+      setWorkspaceSessionsReloadToken((v) => v + 1);
+      return;
+    }
+    setWorkspaceScopedReloadTokens((prev) => {
+      const next = new Map(prev);
+      next.set(workspaceCwd, (prev.get(workspaceCwd) ?? 0) + 1);
+      return next;
+    });
   }, []);
+  const getWorkspaceReloadToken = useCallback(
+    (workspaceCwd: string) =>
+      workspaceSessionsReloadToken +
+      (workspaceScopedReloadTokens.get(workspaceCwd) ?? 0),
+    [workspaceSessionsReloadToken, workspaceScopedReloadTokens],
+  );
 
   useEffect(() => {
     // The five-row preview is scoped per source and per primary workspace;
@@ -1430,6 +1447,10 @@ export function WebShellSidebar({
       ...(includePrimaryWorkspaceSessions ? primaryPinnedSessions : []),
       ...secondaryPinnedSessions,
     ]) {
+      // A stale pinned page can briefly still hold a just-unpinned session
+      // that the main list already shows; filtering on the field keeps the
+      // row from appearing in both lists at once.
+      if (!session.isPinned) continue;
       if (!matchesSessionSource(session, selectedSessionSource)) continue;
       byId.set(
         getSessionIdentity(
@@ -1439,7 +1460,21 @@ export function WebShellSidebar({
         session,
       );
     }
-    return [...byId.values()];
+    // The pinned section is ordered by pin time (oldest pin first) instead
+    // of the daemon's activity-time ordering, so re-ordering one row does
+    // not reshuffle the whole section. sessionId breaks ties deterministically.
+    return [...byId.values()].sort(
+      (a: DaemonSessionSummary, b: DaemonSessionSummary) => {
+        const aAt = a.pinnedAt ? Date.parse(a.pinnedAt) : 0;
+        const bAt = b.pinnedAt ? Date.parse(b.pinnedAt) : 0;
+        if (aAt !== bAt) return aAt - bAt;
+        return a.sessionId < b.sessionId
+          ? -1
+          : a.sessionId > b.sessionId
+            ? 1
+            : 0;
+      },
+    );
   }, [
     includePrimaryWorkspaceSessions,
     primaryWorkspaceCwd,
@@ -3006,24 +3041,47 @@ export function WebShellSidebar({
         setSessionBusy(sessionId, false, session.workspaceCwd);
         return;
       }
+      let confirmed = false;
       sessionActions
         .updateSessionOrganization(sessionId, {
           isPinned: !session.isPinned,
         })
-        .then(() => {
-          bumpWorkspaceReload();
+        .then((result) => {
+          confirmed = true;
+          const workspaceCwd = session.workspaceCwd ?? primaryWorkspaceCwd;
+          if (!workspaceCwd) return;
+          // Write the daemon-confirmed organization straight into the cached
+          // pages — including the pinned section's own `group: 'pinned'`
+          // query, which cannot see the new member until its refetch lands —
+          // then reconcile list ordering with a targeted refresh.
+          sessionCatalogController.applySessionPin(workspaceCwd, {
+            ...session,
+            isPinned: result.isPinned,
+            ...(result.pinnedAt !== undefined
+              ? { pinnedAt: result.pinnedAt }
+              : {}),
+          });
+          sessionCatalogController.invalidateSessionLists(
+            workspaceCwd,
+            ['active'],
+            { interactive: true },
+          );
         })
         .catch((err: unknown) => onError(err, t('sidebar.organizationFailed')))
         .finally(() => {
-          const workspaceCwd = session.workspaceCwd ?? primaryWorkspaceCwd;
-          if (workspaceCwd) {
-            sessionCatalogController.refreshWorkspace(workspaceCwd);
+          if (!confirmed) {
+            // The RPC may have applied server-side before failing on the
+            // client (network drop mid-response), so reconcile fully on
+            // failure instead of trusting the untouched cache.
+            const workspaceCwd = session.workspaceCwd ?? primaryWorkspaceCwd;
+            if (workspaceCwd) {
+              sessionCatalogController.refreshWorkspace(workspaceCwd);
+            }
           }
           setSessionBusy(sessionId, false, session.workspaceCwd);
         });
     },
     [
-      bumpWorkspaceReload,
       getIdentityForSession,
       getSessionWorkspaceActions,
       onError,
@@ -3046,6 +3104,7 @@ export function WebShellSidebar({
       const scope = resolveSessionWorkspaceScope(session);
       setSessionBusy(sessionId, true, session.workspaceCwd);
       void (async () => {
+        let archived = false;
         try {
           if (scope.kind === 'locked' || scope.kind === 'restricted') {
             const result = await workspace.client
@@ -3056,19 +3115,66 @@ export function WebShellSidebar({
             );
             if (itemError) {
               onError(new Error(itemError.error), t('sidebar.archiveFailed'));
+            } else if (result.notFound.includes(sessionId)) {
+              // Same contract as the primary branch below: a not-found
+              // outcome must not count as success, or the write-through
+              // would seed a phantom row into the archived pages.
+              onError(
+                new Error(`session not found: ${sessionId}`),
+                t('sidebar.archiveFailed'),
+              );
+            } else {
+              archived = true;
             }
           } else if (scope.kind === 'primary') {
-            await archiveSession(sessionId);
+            // archiveSession resolves to false when the daemon reports the
+            // session missing without an error entry — treat that as a
+            // failure instead of a silent no-op.
+            const ok = await archiveSession(sessionId);
+            if (!ok) {
+              onError(
+                new Error(`session not found: ${sessionId}`),
+                t('sidebar.archiveFailed'),
+              );
+            } else {
+              archived = true;
+            }
           } else {
             return;
+          }
+          if (archived) {
+            const workspaceCwd = session.workspaceCwd ?? primaryWorkspaceCwd;
+            if (workspaceCwd) {
+              // The RPC already succeeded on the daemon, so drop the row
+              // from active pages immediately and seed it into archived
+              // pages instead of waiting for the refetch.
+              sessionCatalogController.removeSession(workspaceCwd, sessionId, {
+                archiveStates: ['active'],
+              });
+              sessionCatalogController.addSession(
+                workspaceCwd,
+                { ...session, isArchived: true },
+                { archiveStates: ['archived'] },
+              );
+            }
           }
         } catch (err) {
           onError(err, t('sidebar.archiveFailed'));
         } finally {
-          bumpWorkspaceReload();
           const workspaceCwd = session.workspaceCwd ?? primaryWorkspaceCwd;
-          if (scope.kind !== 'primary' && workspaceCwd) {
-            sessionCatalogController.refreshWorkspace(workspaceCwd);
+          if (workspaceCwd) {
+            if (scope.kind !== 'primary') {
+              // Batch endpoints can report a per-item error after partially
+              // applying the change, so reconcile even on failure. Primary
+              // scope relies on the catalog hook's own invalidation (its
+              // finally), mirroring confirmDeleteSession.
+              sessionCatalogController.invalidateSessionLists(
+                workspaceCwd,
+                ['active', 'archived'],
+                { interactive: true },
+              );
+            }
+            bumpWorkspaceReload(workspaceCwd);
           }
           setSessionBusy(sessionId, false, session.workspaceCwd);
         }
@@ -3098,6 +3204,7 @@ export function WebShellSidebar({
       const scope = resolveSessionWorkspaceScope(session);
       setSessionBusy(sessionId, true, session.workspaceCwd);
       void (async () => {
+        let unarchived = false;
         try {
           if (scope.kind === 'locked' || scope.kind === 'restricted') {
             const result = await workspace.client
@@ -3108,19 +3215,60 @@ export function WebShellSidebar({
             );
             if (itemError) {
               onError(new Error(itemError.error), t('sidebar.unarchiveFailed'));
+            } else if (result.notFound.includes(sessionId)) {
+              // Same contract as the primary branch below: a not-found
+              // outcome must not count as success, or the write-through
+              // would materialize a deleted session into the active pages.
+              onError(
+                new Error(`session not found: ${sessionId}`),
+                t('sidebar.unarchiveFailed'),
+              );
+            } else {
+              unarchived = true;
             }
           } else if (scope.kind === 'primary') {
-            await unarchiveSession(sessionId);
+            // Same not-found contract as archive: false means the daemon
+            // skipped the session without reporting an error entry.
+            const ok = await unarchiveSession(sessionId);
+            if (!ok) {
+              onError(
+                new Error(`session not found: ${sessionId}`),
+                t('sidebar.unarchiveFailed'),
+              );
+            } else {
+              unarchived = true;
+            }
           } else {
             return;
+          }
+          if (unarchived) {
+            const workspaceCwd = session.workspaceCwd ?? primaryWorkspaceCwd;
+            if (workspaceCwd) {
+              // Drop the row from archived pages immediately and seed it
+              // back into active pages instead of waiting for the refetch.
+              sessionCatalogController.removeSession(workspaceCwd, sessionId, {
+                archiveStates: ['archived'],
+              });
+              sessionCatalogController.addSession(
+                workspaceCwd,
+                { ...session, isArchived: false },
+                { archiveStates: ['active'] },
+              );
+            }
           }
         } catch (err) {
           onError(err, t('sidebar.unarchiveFailed'));
         } finally {
-          bumpWorkspaceReload();
           const workspaceCwd = session.workspaceCwd ?? primaryWorkspaceCwd;
-          if (scope.kind !== 'primary' && workspaceCwd) {
-            sessionCatalogController.refreshWorkspace(workspaceCwd);
+          if (workspaceCwd) {
+            if (scope.kind !== 'primary') {
+              sessionCatalogController.invalidateSessionLists(
+                workspaceCwd,
+                ['active', 'archived'],
+                { interactive: true },
+              );
+            }
+            bumpWorkspaceReload(workspaceCwd);
           }
           setSessionBusy(sessionId, false, session.workspaceCwd);
         }
@@ -4970,7 +5118,7 @@ export function WebShellSidebar({
                   </>
                 )}
                 client={workspace.client}
-                reloadToken={workspaceSessionsReloadToken}
+                reloadToken={getWorkspaceReloadToken(ws.cwd)}
                 untrustedLabel={t('sidebar.workspaceUntrusted')}
                 readOnlyLabel={t('sidebar.workspaceReadOnly')}
                 trustToOpenLabel={t('sidebar.workspaceTrustToOpen')}
@@ -5078,7 +5226,7 @@ export function WebShellSidebar({
                               : undefined
                           }
                           client={workspace.client}
-                          reloadToken={workspaceSessionsReloadToken}
+                          reloadToken={getWorkspaceReloadToken(ws.cwd)}
                           untrustedLabel={t('sidebar.workspaceUntrusted')}
                           readOnlyLabel={t('sidebar.workspaceReadOnly')}
                           trustToOpenLabel={t('sidebar.workspaceTrustToOpen')}
