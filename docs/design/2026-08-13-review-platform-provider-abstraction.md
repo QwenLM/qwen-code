@@ -44,6 +44,13 @@ Everything below was confirmed by running the commands, not from docs.
 | Whoami                         | `gh api user --jq .login`                                              | `a1 auth whoami -f json` → `account`                                                                                                                                                                                  |
 | Repo identity for bare numbers | `gh repo view --json owner,name,url`                                   | remote URL path (`group/repo`) + `a1 repo view`; `a1 repo link` binding if present                                                                                                                                    |
 
+Post-publication addendum (2026-08-21): the `Inline comment (write)` row
+above creates comments that read back `isAiComment: false` — there is no
+auto-marking for the posting identity and a1 exposes no flag to request it
+(Q4, resolved by a controlled probe — see the open questions section).
+Created comments join the `discussion` gate only, never the `ai_comment`
+gate.
+
 ## Goals / non-goals
 
 **Goals**
@@ -187,9 +194,13 @@ id directly; no id↔iid mapping is needed anywhere in the pipeline.
   The merge gate already blocks on unresolved discussions, so inline Critical
   comments left unresolved carry the blocking semantics. This is a semantic
   difference from GitHub and is called out in the terminal report.
-- AI-comment marking: probe whether `comment create` sets `isAiComment`
-  automatically or needs a flag; qwen-posted comments SHOULD carry it, because
-  Aone has a dedicated `ai_comment` merge gate. (Open question Q4.)
+- AI-comment marking: **probed 2026-08-21 (Q4 resolved — see the open
+  questions section).** `comment create` does NOT auto-set `isAiComment` for
+  the posting identity, and a1 (v0.1.90) has no flag to request it, so
+  qwen-posted comments join the generic `discussion` gate only — the
+  dedicated `ai_comment` merge gate does not track them. Until a1 ships a
+  marking flag, `submit`'s REQUEST_CHANGES note discloses the gate split;
+  the marking itself is blocked on the a1 feature request.
 
 ### D7 — One-commit CRs and the incremental cache
 
@@ -369,6 +380,22 @@ Enterprise paragraph.
     terminal; a missing captured diff refuses the whole post. Probe
     evidence and pinned semantics:
     `docs/design/2026-08-21-review-aone-removed-line-anchoring.md`.
+  - **AI-gate probe (2026-08-21, issue #9614):** Q4 was resolved by a
+    controlled write probe on a scratch CR — `comment create` auto-sets
+    NOTHING (both a general and an inline probe read back
+    `isAiComment: false`, re-checked against an async classifier), and
+    v0.1.90 exposes no marking flag — and Q3 was re-confirmed (still no
+    native reject; `mr comment resolve` and `mr cr list` are new on the
+    surface). Since the marking cannot be requested today, the write path
+    DISCLOSES the gate split instead of silently implying participation:
+    the REQUEST_CHANGES note names the posted comments as unflagged, joins
+    them to the discussion gate only, and says the repo's `ai_comment`
+    gate does not track them; SKILL.md's Aone paragraph carries the same
+    fact for the relay. Marking stays open as an a1 feature request; when
+    the flag ships it wires at `createMrComment` (the sole write seam).
+    Still open: dedup/self-PR backing for Aone, `composeUrl`, cleanup
+    audit, the ai_comment marking flag (a1-side), the render-adjudication
+    carve-out.
 - **Phase 4 — semantic gaps.** Incremental-cache ancestry fallback, build-test
   repo-config escape hatch, publish-assets gating polish, generic-GitLab
   (glab) evaluation.
@@ -403,12 +430,27 @@ create --file/--line` and `-f json` stability? Provider version floor TBD.
    client-side hunk validation in submit's Aone branch, with the GitHub
    422-recovery degrade (Critical → body, Suggestion → discarded) performed
    in code and disclosed in the terminal.
-3. **Q3 — REQUEST_CHANGES.** Confirm no native reject/unapprove API exists
-   (a1 surface + platform docs); if one exists, prefer it over the blocking
-   header.
-4. **Q4 — AI-comment marking.** Does `comment create` auto-set `isAiComment`
-   for bot/token identities, or is there a flag? Determines whether qwen
-   comments fall under the `ai_comment` merge gate or the `discussion` gate.
+3. **Q3 — REQUEST_CHANGES.** ~~Confirm no native reject/unapprove API
+   exists.~~ **Re-confirmed 2026-08-21 on a1 v0.1.90:** the `repo mr` surface
+   (approve/close/comment/cr/create/diff/edit/list/merge/remind/reopen/
+   reviewers/status/view/workitem) still has no reject/request-changes/
+   unapprove. The blocking header stands. Two surface changes observed:
+   `mr comment resolve` (inline comments only) and `mr cr list` now exist;
+   the a1 FAQ documents `mr create --enable-ai-review`, but the v0.1.90
+   binary refuses it (`unknown flag`).
+4. **Q4 — AI-comment marking.** ~~Does `comment create` auto-set
+   `isAiComment`?~~ **Resolved 2026-08-21 by a controlled probe** (scratch
+   CR on a scratch repo, posting identity a personal account): one general
+   and one inline comment posted via `a1 repo mr comment create` both read
+   back `isAiComment: false` — immediately and ~3 min later (async
+   classifier ruled out) — and v0.1.90 exposes no marking flag. Read-side
+   corroboration: across 68 recent MRs on maxcompute/odps_src (a repo whose
+   gates include `ai_comment`) zero comments carried the flag — CI-bot and
+   human-posted "AI 评审" comments alike — so it is neither identity- nor
+   content-derived; it appears to be server-side state only the platform's
+   own AI-review service sets. Qwen comments therefore fall under the
+   `discussion` gate only; the remedy is a marking flag requested from the
+   a1 CLI (feature request), wired at `createMrComment` when it ships.
 5. **Q5 — Partial failure in batched submit.** GitHub's Create Review is
    atomic; Aone is N+1 calls. Policy: post inline first, summary last (summary
    references nothing not yet posted), and on mid-batch failure report exactly
