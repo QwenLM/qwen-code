@@ -11189,35 +11189,45 @@ exit 1
     // it the gate's checks run with inverted CI semantics and the 18
     // deliberately-skipped TUI-input tests un-skip inside the gate (one flakes
     // ~5s, reject_fix fires retryable on a fix the PR's own CI passes green).
-    // A contains-only pin accepts a symmetric DROP, so enumerate the full
-    // allowlist of BOTH gate launches (first pass + repair pass) as a sorted
-    // multiset — a symmetric duplicate or a dropped entry both fail here.
-    const gateAllowlist = (step) => {
-      const argStart = step.indexOf('/usr/bin/env -i \\');
-      expect(argStart, 'gate step lacks the env -i launch').toBeGreaterThan(-1);
-      const argList = step.slice(argStart, step.indexOf('bash --norc'));
-      const passed = (
-        argList.match(/[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|[^\s\\]*)/g) ?? []
-      )
-        .map((m) => m.split('=')[0])
-        .sort();
-      expect(passed).toEqual(
-        [
-          'PATH',
-          'HOME',
-          'RUNNER_TEMP',
-          'WORKDIR',
-          'BRANCH',
-          'GITHUB_OUTPUT',
-          'CI',
-          'KISS_AUDIT',
-          'FOOTPRINT_ENFORCE',
-        ].sort(),
-      );
-      expect(argList).toContain('CI="${CI:-true}"');
-    };
-    gateAllowlist(reviewVerificationGateStep);
-    gateAllowlist(repairVerificationGateStep);
+    // Pin the launch STRUCTURALLY — one verbatim adjacency chain from the
+    // LD_* prefix through the digest-verified script, every entry in order
+    // with its exact value — not as text tokens: shell edits that preserve
+    // token text (a commented-out entry, a dropped `\`, an =-less operand, a
+    // quote suffix, an entry smuggled behind a `bash --norc` value, the
+    // launch head moved into a comment) each broke the child's isolation
+    // while every token-level pin stayed green (R2-1). Anchoring the chain
+    // on the LD_* prefix pins the one channel env -i cannot block; the
+    // body-side unset and PATH export that protect the pre-launch digest
+    // check are pinned with it (R3-1, R2-2).
+    const gateLaunchPin = new RegExp(
+      [
+        'LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH=',
+        '/usr/bin/env -i',
+        'PATH="${TRUSTED_PATH}"',
+        'HOME="${HOME}"',
+        'RUNNER_TEMP="${RUNNER_TEMP}"',
+        'WORKDIR="${WORKDIR}"',
+        'BRANCH="${BRANCH}"',
+        'GITHUB_OUTPUT="${GITHUB_OUTPUT}"',
+        'CI="${CI:-true}"',
+        'KISS_AUDIT="${KISS_AUDIT:-false}"',
+        'FOOTPRINT_ENFORCE="${FOOTPRINT_ENFORCE:-advisory}"',
+        'bash --norc "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
+      ]
+        .map((token) => token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+        .join(' \\\\\n\\s*'),
+    );
+    for (const step of [
+      reviewVerificationGateStep,
+      repairVerificationGateStep,
+    ]) {
+      expect(step).toMatch(gateLaunchPin);
+      // Exactly one launch per step: a second, unpinned `bash --norc` (the
+      // pinned block demoted into a never-run arm) must fail here (R2-1).
+      expect((step.match(/bash --norc/g) ?? []).length).toBe(1);
+      expect(step).toContain('unset LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH');
+      expect(step).toContain('export PATH="${TRUSTED_PATH}"');
+    }
     expect(
       reviewVerifyGate.indexOf(
         'bash "${RUNNER_TEMP}/check-autofix-contracts.sh"',
