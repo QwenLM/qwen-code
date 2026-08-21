@@ -639,13 +639,20 @@ describe('bundled review skill', () => {
     // Revert guard: the tail-fetch must stay `--out … to the command the note
     // names` (a restored `--jq .body > file` redirect is rejected by yargs on
     // the welded command-body notes, so the tail is never fetched), and the
-    // Posted: fallback must stay grounded on Step 1's meta output / the pr-url.
+    // Posted: fallback must stay CODE — the provider fills a missing url
+    // (composed on GitHub, reader-backed on Aone), and the model never
+    // regresses to hand-assembling a link.
     const body = skillBody();
     expect(body).toContain(
       'add `--out .qwen/tmp/qwen-review-{target}-body-<id>.md` to the command the note names',
     );
+    expect(body).toContain('`submit` fills the gap itself');
     expect(body).toContain(
-      'the URL a `pr-url` target carried, or else assemble',
+      'the provider re-queries the platform through the reader',
     );
+    // The coordinates relay survives for the one case the reader cannot
+    // serve — an Aone platform that returned no page link.
+    expect(body).toContain("relay the target's coordinates");
+    expect(body).toContain('Never assemble an Aone link yourself');
   });
 });

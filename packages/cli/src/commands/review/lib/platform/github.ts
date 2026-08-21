@@ -9,7 +9,15 @@
 // this module owns the GitHub API *shapes* so the subcommands and the skill
 // prose never name an endpoint.
 
-import { ensureAuthenticated, gh, ghApi, ghRaw, isOwnerRepo } from '../gh.js';
+import {
+  ensureAuthenticated,
+  getGhHost,
+  gh,
+  ghApi,
+  ghRaw,
+  isOwnerRepo,
+  resolveGhHost,
+} from '../gh.js';
 import type {
   ClosingIssueRef,
   CommentKind,
@@ -261,5 +269,18 @@ export const githubReader: ReviewPlatformReader = {
       deletions: view.deletions,
       changedFiles: view.changedFiles,
     };
+  },
+
+  composeUrl(prNumber: number, ownerRepo: string): string {
+    checkOwnerRepo(ownerRepo);
+    // The PR-page grammar is deterministic — no API call. The host is the
+    // one gh calls are currently routed at (a subcommand's setGhHost), else
+    // the operator-exported GH_HOST a gh child would inherit, else
+    // github.com — the routing precedence this codebase applies, so the
+    // composed link lands where the review ran (every submit write routes
+    // a host before reaching here; gh's own hosts.yml fallback is
+    // unreachable through this pipeline).
+    const host = getGhHost() ?? resolveGhHost(undefined) ?? 'github.com';
+    return `https://${host}/${ownerRepo}/pull/${prNumber}`;
   },
 };

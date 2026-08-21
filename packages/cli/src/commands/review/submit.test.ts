@@ -3344,8 +3344,9 @@ describe('submit receipt (producer half of the audit contract)', () => {
 // carries `html_url` — the deep link to the review — and submit relays it in
 // both channels, because a summary without it leaves the user to reassemble
 // the PR address by hand. Best-effort like the receipt: a response without it
-// (or an unparseable one) must never fail a review that DID post, and never
-// invents a link either.
+// (or an unparseable one) must never fail a review that DID post — the
+// provider composes the PR-page URL instead, so the receipt carries a link
+// either way.
 describe('the posted-review link', () => {
   const authorizedPost = (over: Record<string, unknown> = {}) =>
     args({ userAuthorized: true, ...over });
@@ -3373,18 +3374,33 @@ describe('the posted-review link', () => {
     expect(postedLine).toContain(url);
   });
 
-  it('omits url when the response carries none — a link is relayed, never built', () => {
+  it('composes the PR-page url when the response carries no deep link', () => {
+    // A response without html_url used to leave the receipt linkless and the
+    // skill prose assembled the URL by hand. That assembly is code now: the
+    // provider composes the PR page from the routed host and the target the
+    // post took — the Posted line is never without a link on GitHub.
     ghMock.mockImplementationOnce(() => JSON.stringify({ id: 42 }));
     runSubmit(authorizedPost());
-    expect(stdoutJson().posted).toBe(true);
-    expect('url' in stdoutJson()).toBe(false);
+    expect(stdoutJson()).toMatchObject({
+      posted: true,
+      url: 'https://github.com/QwenLM/qwen-code/pull/6771',
+    });
+    const postedLine = writeStderrSpy.mock.calls
+      .map((c) => c[0] as string)
+      .find((l) => l.startsWith('Posted '));
+    expect(postedLine).toContain(
+      'https://github.com/QwenLM/qwen-code/pull/6771',
+    );
   });
 
   it('still reports posted:true when the response is unparseable', () => {
-    // ghMock's default return is '' — JSON.parse throws, and both the receipt
-    // and the link ride the same best-effort read of a post that succeeded.
+    // ghMock's default return is '' — JSON.parse throws, and the receipt and
+    // the link ride the same best-effort read of a post that succeeded; the
+    // composed fallback still lands in the JSON.
     runSubmit(authorizedPost());
     expect(stdoutJson().posted).toBe(true);
-    expect('url' in stdoutJson()).toBe(false);
+    expect(stdoutJson().url).toBe(
+      'https://github.com/QwenLM/qwen-code/pull/6771',
+    );
   });
 });

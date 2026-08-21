@@ -15,7 +15,15 @@ vi.mock('node:child_process', () => ({
   execFileSync: mockExecFileSync,
 }));
 
-import { a1, a1JsonOnce, a1Once } from './aone-client.js';
+import {
+  a1,
+  a1JsonOnce,
+  a1Once,
+  a1VersionAtLeast,
+  A1_MIN_VERSION,
+  ensureAoneAuthenticated,
+  parseA1Version,
+} from './aone-client.js';
 
 function transientError(): Error {
   // The message shape execFileSync produces, carrying a transient marker
@@ -168,5 +176,143 @@ describe('a1 (the read path) transient-error retry — the POSITIVE side', () =>
     });
     expect(() => a1('repo', 'mr', 'view', '7')).toThrow();
     expect(mockExecFileSync).toHaveBeenCalledTimes(3); // 1 initial + 2 retries
+  });
+});
+
+describe('parseA1Version / a1VersionAtLeast', () => {
+  it('parses the `a1 --version` line', () => {
+    expect(parseA1Version('a1 version 0.2.51 (2026-08-20)')).toEqual([
+      0, 2, 51,
+    ]);
+    // The tag URL a1 prints beside the version carries the same triple —
+    // the `version` anchor keeps the parse on the real version either way.
+    expect(
+      parseA1Version(
+        'a1 version 0.1.90\nhttps://code.alibaba-inc.com/aone/a1/tags/v0.1.90',
+      ),
+    ).toEqual([0, 1, 90]);
+  });
+
+  it('returns undefined when no triple is present', () => {
+    expect(parseA1Version('a1, the Aone CLI')).toBeUndefined();
+    expect(parseA1Version('')).toBeUndefined();
+  });
+
+  it('anchors at the `version` token — a dotted build date before it does not supply the triple', () => {
+    expect(
+      parseA1Version('built 2026.08.20\na1 version 0.2.51 (2026-08-20)'),
+    ).toEqual([0, 2, 51]);
+    // The bare-triple fallback serves a variant that dropped the token.
+    expect(parseA1Version('a1 0.1.90')).toEqual([0, 1, 90]);
+  });
+
+  it('the floor constant itself parses', () => {
+    expect(parseA1Version(A1_MIN_VERSION)).toEqual([0, 1, 90]);
+  });
+
+  it('compares component-wise NUMERICALLY, not lexicographically', () => {
+    const floor = parseA1Version(A1_MIN_VERSION)!;
+    expect(a1VersionAtLeast([0, 1, 90], floor)).toBe(true); // the floor itself
+    expect(a1VersionAtLeast([0, 1, 89], floor)).toBe(false);
+    expect(a1VersionAtLeast([0, 1, 9], floor)).toBe(false); // lexicographic would say 9 > 90
+    expect(a1VersionAtLeast([0, 2, 0], floor)).toBe(true);
+    expect(a1VersionAtLeast([1, 0, 0], floor)).toBe(true);
+    expect(a1VersionAtLeast([0, 10, 0], [0, 9, 0])).toBe(true); // lexicographic would say 10 < 9
+  });
+});
+
+describe('ensureAoneAuthenticated — presence, version floor, auth', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('refuses a version below the floor BEFORE any auth call, with an actionable upgrade message', () => {
+    // The stale-install class the floor exists for: an a1 that runs and
+    // answers whoami fine but lacks the comment-create flags — without the
+    // floor it fails obscurely deep in a review. The refusal names the
+    // found version, the floor, and where to upgrade; and it fires before
+    // the login check (upgrading is the remedy for both).
+    mockExecFileSync.mockReturnValueOnce('a1 version 0.1.89 (2026-07-01)\n');
+    let message = '';
+    try {
+      ensureAoneAuthenticated();
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    expect(message).toMatch(/a1 0\.1\.89 is older than the 0\.1\.90/);
+    expect(message).toMatch(/Upgrade the a1 CLI/);
+    expect(message).toContain('code.alibaba-inc.com/aone/a1');
+    // The probe is `a1 --version`, and the whoami call never ran.
+    expect(mockExecFileSync).toHaveBeenCalledTimes(1);
+    expect(mockExecFileSync.mock.calls[0][1]).toEqual(['--version']);
+  });
+
+  it('accepts the floor version itself and proceeds to the auth check', () => {
+    mockExecFileSync
+      .mockReturnValueOnce(`a1 version ${A1_MIN_VERSION} (2026-07-15)\n`)
+      .mockReturnValueOnce('account: someone\n');
+    expect(() => ensureAoneAuthenticated()).not.toThrow();
+    expect(mockExecFileSync).toHaveBeenCalledTimes(2);
+    expect(mockExecFileSync.mock.calls[1][1]).toEqual(['auth', 'whoami']);
+  });
+
+  it('accepts a newer version', () => {
+    mockExecFileSync
+      .mockReturnValueOnce('a1 version 0.2.51 (2026-08-20)\n')
+      .mockReturnValueOnce('account: someone\n');
+    expect(() => ensureAoneAuthenticated()).not.toThrow();
+    expect(mockExecFileSync).toHaveBeenCalledTimes(2);
+  });
+
+  it('an unreadable version warns and fails OPEN — the auth check still runs', () => {
+    // A variant output format is not a stale install; refusing it would
+    // brick a possibly-fine a1 this check merely cannot read.
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    mockExecFileSync
+      .mockReturnValueOnce('a1, the Aone CLI\n')
+      .mockReturnValueOnce('account: someone\n');
+    expect(() => ensureAoneAuthenticated()).not.toThrow();
+    expect(stderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('WARNING: could not read the a1 version'),
+    );
+    expect(mockExecFileSync).toHaveBeenCalledTimes(2);
+    stderrSpy.mockRestore();
+  });
+
+  it('a FAILED version probe (non-ENOENT) warns and fails OPEN too — the auth check still runs', () => {
+    // Same fail-open class as an unparseable output, disclosed the same
+    // way: an a1 whose --version crashed is not disproven, and the floor
+    // must not brick it.
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    mockExecFileSync
+      .mockImplementationOnce(() => {
+        throw new Error('Command failed: a1 --version\nsegfault\n');
+      })
+      .mockReturnValueOnce('account: someone\n');
+    expect(() => ensureAoneAuthenticated()).not.toThrow();
+    expect(stderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('WARNING: the a1 version probe failed'),
+    );
+    expect(mockExecFileSync).toHaveBeenCalledTimes(2);
+    stderrSpy.mockRestore();
+  });
+
+  it('a missing binary keeps the install message (the probe hits ENOENT first)', () => {
+    const enoent = new Error('spawn a1 ENOENT') as NodeJS.ErrnoException;
+    enoent.code = 'ENOENT';
+    mockExecFileSync.mockImplementation(() => {
+      throw enoent;
+    });
+    expect(() => ensureAoneAuthenticated()).toThrow(/a1 CLI not found on PATH/);
+    expect(mockExecFileSync).toHaveBeenCalledTimes(1);
+  });
+
+  it('a fresh-enough a1 that is not logged in still gets the login remedy', () => {
+    mockExecFileSync
+      .mockReturnValueOnce('a1 version 0.2.51 (2026-08-20)\n')
+      .mockImplementationOnce(() => {
+        throw new Error('Command failed: a1 auth whoami\nnot logged in\n');
+      });
+    expect(() => ensureAoneAuthenticated()).toThrow(/a1 auth login/);
   });
 });

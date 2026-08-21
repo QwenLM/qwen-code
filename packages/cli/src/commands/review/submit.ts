@@ -75,9 +75,11 @@ import {
 import { gitOpt } from './lib/git.js';
 import {
   AonePartialPostError,
+  aoneReader,
   submitAoneReview,
   type AoneSubmitResult,
 } from './lib/platform/aone.js';
+import { githubReader } from './lib/platform/github.js';
 import {
   CRITICAL_PREFIX,
   SUGGESTION_PREFIX,
@@ -990,11 +992,20 @@ export function runSubmit(
       process.exitCode = 3;
       return;
     }
+    // URL for the Posted line: normally the receipt carries the MR's own
+    // detailUrl from the pre-write read; when it comes up empty, the
+    // reader-backed composeUrl re-queries the platform — it never ASSEMBLES
+    // a link (the nested-group owner/repo collapse could name a different
+    // repo). '' survives '': the skill then relays the target's coordinates.
+    const postedUrl =
+      result.webUrl !== ''
+        ? result.webUrl
+        : aoneReader.composeUrl(args.pr, args.repo);
     writeStderrLine(
       `Posted ${event} to ${args.repo}#${args.pr} — ${auth.why}` +
         (cappedBy.length ? ` (capped by ${cappedBy.join(', ')})` : '') +
         '.' +
-        (result.webUrl ? ` ${result.webUrl}` : ''),
+        (postedUrl ? ` ${postedUrl}` : ''),
     );
     if (event === 'REQUEST_CHANGES') {
       // D6: no native reject exists on Aone — the blocking header and any
@@ -1052,7 +1063,7 @@ export function runSubmit(
           floorEnforced: floorEnforced.length,
           summaryPosted: result.summaryPosted,
           ...(event === 'APPROVE' ? { approved: result.approved } : {}),
-          ...(result.webUrl ? { url: result.webUrl } : {}),
+          ...(postedUrl ? { url: postedUrl } : {}),
         },
         null,
         2,
@@ -1089,6 +1100,11 @@ export function runSubmit(
   } catch {
     /* response metadata only — the post itself succeeded */
   }
+  // No deep link in GitHub's answer (or an unparseable one): the provider
+  // COMPOSES the PR-page URL — deterministic grammar, no API call, and the
+  // host axis binds to the routing the write just took. This used to be a
+  // prose assembly in the skill; the receipt carries it now.
+  reviewUrl ??= githubReader.composeUrl(args.pr, args.repo);
   // Receipt for cleanup's bypass audit: EVERY review this session was
   // authorised to create, by id. The audit lists reviews by the reviewing
   // account inside the window and flags any the receipt does not vouch for —

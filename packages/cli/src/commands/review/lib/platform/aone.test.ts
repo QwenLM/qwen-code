@@ -455,6 +455,44 @@ describe('aoneReader.getFetchMeta / fetchHeadRefSpec', () => {
   });
 });
 
+describe('aoneReader.composeUrl', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('returns the platform detailUrl — the reader is the ONLY link source', () => {
+    // An Aone MR link can never be ASSEMBLED from owner/repo: the collapse
+    // to the last two segments names a different repo for a nested-group
+    // project. The URL is always the platform's own detailUrl.
+    a1JsonMock.mockReturnValue({
+      mergeRequest: {
+        detailUrl:
+          'https://code.alibaba-inc.com/odps/odps_src/codereview/29295886',
+      },
+    });
+    expect(aoneReader.composeUrl(29295886, 'odps/odps_src')).toBe(
+      'https://code.alibaba-inc.com/odps/odps_src/codereview/29295886',
+    );
+  });
+
+  it('returns empty when the platform serves no detailUrl', () => {
+    a1JsonMock.mockReturnValue({ mergeRequest: { sourceBranch: 'sha' } });
+    expect(aoneReader.composeUrl(7, 'g/p')).toBe('');
+  });
+
+  it('returns empty (never throws) when the fetch fails — a missing link must not fail a landed post', () => {
+    a1JsonMock.mockImplementation(() => {
+      throw new Error('Command failed: a1 repo mr view 7\nnetwork\n');
+    });
+    expect(aoneReader.composeUrl(7, 'g/p')).toBe('');
+  });
+
+  it('refuses a malformed ownerRepo before any a1 call', () => {
+    expect(() => aoneReader.composeUrl(7, 'not-a-repo')).toThrow(TypeError);
+    expect(a1JsonMock).not.toHaveBeenCalled();
+  });
+});
+
 describe('aoneReader.fetchDiff', () => {
   beforeEach(() => {
     vi.clearAllMocks();

@@ -112,11 +112,101 @@ export function a1JsonOnce<T>(...args: string[]): T | undefined {
 }
 
 /**
- * Fail fast with an actionable message when `a1` cannot run. A missing
- * binary (ENOENT — the dominant first-run state for this new dependency) is
- * a different remedy than an unauthenticated one.
+ * The oldest `a1` this provider runs against. The provider's platform facts
+ * — the `mr comment create --file/--line/--message` flags, the native
+ * `mr approve`, and stable `--format json` output across every subcommand
+ * it calls — were probed against a1 0.1.90 (the facts table in
+ * docs/design/2026-08-13-review-platform-provider-abstraction.md; open
+ * question Q1 resolved to the probed version, since nothing older was
+ * verified). An older install is missing flags the provider passes and
+ * fails obscurely deep in a review; the floor turns that into a
+ * first-run error whose message names the remedy.
+ */
+export const A1_MIN_VERSION = '0.1.90';
+
+/** The `major.minor.patch` triple of an `a1 --version` line such as
+ *  `a1 version 0.2.51 (2026-08-20)`. Anchored at the `version` token
+ *  first — a banner that prints a dotted build date BEFORE the version
+ *  must not supply the triple the floor compares; the bare-triple parse
+ *  is the fallback for a variant that dropped the token. */
+export function parseA1Version(
+  out: string,
+): [number, number, number] | undefined {
+  const m =
+    /version[^\d]*(\d+)\.(\d+)\.(\d+)/i.exec(out) ??
+    /(\d+)\.(\d+)\.(\d+)/.exec(out);
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : undefined;
+}
+
+/** Numeric component-wise compare — a lexicographic one reads 0.10.0 < 0.9.0. */
+export function a1VersionAtLeast(
+  version: [number, number, number],
+  floor: [number, number, number],
+): boolean {
+  for (let i = 0; i < 3; i++) {
+    if (version[i] !== floor[i]) return version[i] > floor[i];
+  }
+  return true;
+}
+
+/**
+ * Fail fast with an actionable message when `a1` cannot run. Three distinct
+ * states, three distinct remedies: a missing binary (ENOENT — the dominant
+ * first-run state for this dependency) → install; a version below
+ * A1_MIN_VERSION → upgrade; an unauthenticated login → `a1 auth login`.
+ * The checks run in that order — presence, then version, then auth — so a
+ * stale install is named BEFORE a login that upgrading would invalidate
+ * anyway.
  */
 export function ensureAoneAuthenticated(): void {
+  // `a1 --version` is a local op — no auth, no network — so it can precede
+  // the login check.
+  let versionOut: string | undefined;
+  try {
+    versionOut = a1('--version');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error('a1 CLI not found on PATH — install the `a1` CLI first.');
+    }
+    // The binary runs but the version probe failed — no floor ruling is
+    // possible. Absent evidence, not evidence of absence: fall through to
+    // the auth check rather than refusing an a1 whose `--version` this
+    // check merely cannot read — disclosed, like the unparseable-output
+    // arm below.
+    const why = (err instanceof Error ? err.message : String(err)).split(
+      '\n',
+    )[0];
+    process.stderr.write(
+      `WARNING: the a1 version probe failed ` +
+        `(${JSON.stringify((why ?? '').slice(0, 80))}) — the review ` +
+        `provider requires a1 >= ${A1_MIN_VERSION}; continuing without a ` +
+        `floor ruling.\n`,
+    );
+  }
+  if (versionOut !== undefined) {
+    // The constant parses — the `!` is a compile-time formality.
+    const floor = parseA1Version(A1_MIN_VERSION)!;
+    const version = parseA1Version(versionOut);
+    if (version === undefined) {
+      // Disclosed fail-open: an unreadable version gets the benefit of the
+      // doubt (a variant output format is not a stale install), and a
+      // genuine staleness still fails later on its missing flags — but at
+      // least this run was warned what the provider expects.
+      process.stderr.write(
+        `WARNING: could not read the a1 version from ` +
+          `${JSON.stringify(versionOut.slice(0, 80))} — the review ` +
+          `provider requires a1 >= ${A1_MIN_VERSION}; continuing.\n`,
+      );
+    } else if (!a1VersionAtLeast(version, floor)) {
+      throw new Error(
+        `a1 ${version.join('.')} is older than the ${A1_MIN_VERSION} this ` +
+          `review provider requires — it depends on the comment-create ` +
+          `flags and stable \`--format json\` output introduced there. ` +
+          `Upgrade the a1 CLI (https://code.alibaba-inc.com/aone/a1) ` +
+          `and retry.`,
+      );
+    }
+  }
   try {
     a1('auth', 'whoami');
   } catch (err) {

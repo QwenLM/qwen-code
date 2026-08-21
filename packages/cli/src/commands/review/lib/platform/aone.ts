@@ -597,6 +597,21 @@ export const aoneReader: ReviewPlatformReader = {
       // Aone does not report diff stats; fetch-pr computes them locally.
     };
   },
+
+  composeUrl(prNumber: number, ownerRepo: string): string {
+    checkOwnerRepo(ownerRepo);
+    // Reader-backed by construction: an Aone MR link can NEVER be assembled
+    // from owner/repo — the collapse to the last two segments names a
+    // different (possibly nonexistent) repo for a nested-group project —
+    // so the only source is the platform's own detailUrl. A fetch failure
+    // degrades to '': a missing link must not fail a post that already
+    // landed — the caller relays the target's coordinates instead.
+    try {
+      return mrView(prNumber, ownerRepo).detailUrl ?? '';
+    } catch {
+      return '';
+    }
+  },
 };
 
 // ---------------------------------------------------------------------------

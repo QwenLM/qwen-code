@@ -11,18 +11,36 @@
 // negative cases (a path that legitimately exists untouched, a count from a
 // suite this review did not run) carry as much weight here as the positives.
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import yargs, { type Argv } from 'yargs';
+
+// The Aone half of the platform registry — mocked so the body-fetch routing
+// tests never reach a real `a1`. importOriginal keeps parseRemoteUrl and the
+// write-path exports the registry module re-exports untouched.
+const { aoneFetchMetaMock } = vi.hoisted(() => ({
+  aoneFetchMetaMock: vi.fn(),
+}));
+vi.mock('./lib/platform/aone.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./lib/platform/aone.js')>();
+  return {
+    ...actual,
+    aoneReader: { ...actual.aoneReader, getFetchMeta: aoneFetchMetaMock },
+  };
+});
+
 import {
   testPlanCommand,
   extractTestPlanSection,
   extractClaims,
   observedTestCounts,
   npmScriptOf,
+  platformBodyFetcher,
+  fetchPrBody,
   runTestPlan,
   type TestPlanClaim,
   type TestPlanArgs,
@@ -1000,6 +1018,116 @@ describe('runTestPlan', () => {
     expect(r.note).toMatch(/1 contradicted/);
     expect(r.note).toMatch(/1 reproduced/);
     expect(r.note).toMatch(/1 unchecked/);
+  });
+});
+
+describe('platformBodyFetcher — the body fetch routes through the platform reader', () => {
+  // The gap this closes: the body fetch used to be `gh pr view` always, so
+  // on an Aone target the Test Plan went unchecked on EVERY run. Routed
+  // through the reader, the MR description (already in the reader's fetch
+  // metadata) backs it — no new API surface.
+  beforeEach(() => {
+    aoneFetchMetaMock.mockReset();
+  });
+
+  it('routes an Aone host at the reader: the MR description', () => {
+    aoneFetchMetaMock.mockReturnValue({ body: '## Test Plan\n\nran it' });
+    const fetcher = platformBodyFetcher('gitlab.alibaba-inc.com');
+    expect(fetcher('maxcompute/odps_src', '29295886')).toBe(
+      '## Test Plan\n\nran it',
+    );
+    expect(aoneFetchMetaMock).toHaveBeenCalledWith(
+      29295886,
+      'maxcompute/odps_src',
+    );
+  });
+
+  it('the web host is Aone too — one platform under two host names', () => {
+    aoneFetchMetaMock.mockReturnValue({ body: 'x' });
+    expect(platformBodyFetcher('code.alibaba-inc.com')('g/p', '7')).toBe('x');
+  });
+
+  it('an absent description degrades to an empty body, not a fetch failure', () => {
+    // An MR with no description is a legal shape — it reads as "no Test
+    // Plan section", the same as a body-less PR on GitHub, never as a
+    // failed fetch.
+    aoneFetchMetaMock.mockReturnValue({});
+    expect(platformBodyFetcher('gitlab.alibaba-inc.com')('g/p', '7')).toBe('');
+  });
+
+  it('refuses a malformed MR id before any platform call', () => {
+    const fetcher = platformBodyFetcher('gitlab.alibaba-inc.com');
+    expect(() => fetcher('g/p', 'not-a-number')).toThrow(TypeError);
+    expect(() => fetcher('g/p', '0')).toThrow(TypeError);
+    // Non-decimal spellings a bare `Number()` would admit — '0x10' is MR
+    // 16, not an error; the decimal-shape gate refuses them all.
+    expect(() => fetcher('g/p', '0x10')).toThrow(TypeError);
+    expect(() => fetcher('g/p', '1e3')).toThrow(TypeError);
+    expect(() => fetcher('g/p', ' 7 ')).toThrow(TypeError);
+    // A past-2^53 id would double-round to a DIFFERENT MR — isSafeInteger
+    // (the pipeline's isDiffLine gate) rejects it instead.
+    expect(() => fetcher('g/p', '9007199254740993')).toThrow(TypeError);
+    expect(aoneFetchMetaMock).not.toHaveBeenCalled();
+  });
+
+  it('routes a non-Aone host at the GitHub fetcher (behavior unchanged)', () => {
+    expect(platformBodyFetcher('github.com')).toBe(fetchPrBody);
+  });
+
+  describe('end to end through runTestPlan', () => {
+    let dir: string;
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), 'qwen-test-plan-aone-'));
+      writeFileSync(join(dir, 'diff.txt'), 'diff');
+    });
+    afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+    const planFile = (files: string[]) => {
+      const p = join(dir, 'plan.json');
+      writeFileSync(
+        p,
+        JSON.stringify({
+          files: files.map((path) => ({ path, kind: 'source' })),
+          diffPathAbsolute: join(dir, 'diff.txt'),
+        }),
+      );
+      return p;
+    };
+
+    it('rules on an MR description exactly as it rules on a PR body', () => {
+      aoneFetchMetaMock.mockReturnValue({
+        body: '## Test Plan\n\nAdded `packages/cli/src/a.test.ts`',
+      });
+      const r = runTestPlan(
+        {
+          plan: planFile(['packages/cli/src/a.test.ts']),
+          pr: '29295886',
+          repo: 'maxcompute/odps_src',
+          worktree: dir,
+        },
+        platformBodyFetcher('gitlab.alibaba-inc.com'),
+      );
+      expect(r.found).toBe(true);
+      expect(r.claims).toHaveLength(1);
+      expect(r.claims[0].verdict).toBe('reproduces');
+    });
+
+    it('a failed a1 fetch degrades to the unchecked note, same as a failed gh fetch', () => {
+      aoneFetchMetaMock.mockImplementation(() => {
+        throw new Error('Command failed: a1 repo mr view\nnot logged in');
+      });
+      const r = runTestPlan(
+        {
+          plan: planFile([]),
+          pr: '7',
+          repo: 'g/p',
+          worktree: dir,
+        },
+        platformBodyFetcher('gitlab.alibaba-inc.com'),
+      );
+      expect(r.found).toBe(false);
+      expect(r.note).toMatch(/could not be fetched/);
+    });
   });
 });
 
