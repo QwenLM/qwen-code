@@ -422,9 +422,51 @@ Enterprise paragraph.
     the flag ships it wires at `createMrComment` (the sole write seam).
     Still open: dedup/self-PR backing for Aone, `composeUrl`, the
     ai_comment marking flag (a1-side), the render-adjudication carve-out.
+  - **Self-PR backing (2026-08-21, #9616):** `presubmit` became
+    platform-aware. On an Aone target it runs the backed slice —
+    self-PR detection (`a1 auth whoami`'s `account` vs the `mr view`
+    author, one fetch, case-insensitive, fail-soft on a missing author,
+    fail-closed on a thrown `mr view`) and head drift (`sourceBranch` IS
+    the head under AGit-Flow; no compare API exists, so `compare` is
+    null and a drifted head is always anchors-at-risk) — and reports the
+    unbacked slice neutral (`no_checks` with zero checks, zero existing
+    comments: no downgrades from them, no overlap blocks). Same report
+    shape as GitHub, so Step 7's apply-the-report rules and
+    compose-review's downgrade fields are unchanged; the verdict cap
+    stays forced in `submit` (pr-context is still unbacked). SKILL.md's
+    Aone list names presubmit as reduced-backing instead of skipped, and
+    the "no self-PR detection" caveat is gone from both docs. Still
+    open: dedup backing for Aone, `composeUrl`, the
+    ai_comment marking flag (a1-side), the render-adjudication
+    carve-out.
 - **Phase 4 — semantic gaps.** Incremental-cache ancestry fallback, build-test
   repo-config escape hatch, publish-assets gating polish, generic-GitLab
   (glab) evaluation.
+  - **Landed (2026-08-21): the incremental-cache ancestry fallback (D7,
+    #9618).** `resolveIncrementalAnchor` gained a `noAncestry` mode that
+    `fetch-pr` selects when the platform is Aone: an AGit-Flow update
+    AMENDS the single CR commit in place, orphaning the cached head, so
+    the anchor-behind-head test failed for EVERY update and an
+    amend-and-re-review never scoped. Both ancestry tests — the
+    anchor-behind-head test and the behind-merge-base clamp — are
+    skipped (the clamp only ever fired when the update ALSO rebased onto
+    newer master, moving the merge base past the cached head; a pure
+    amend passed it); after the fetch both heads are local, so
+    `anchor..head` IS the update's delta, and the narrowing step
+    assembles the published scope from the CR's own diff exactly as it
+    does for an ancestrally valid GitHub anchor (an amended-and-rebased
+    update's delta carries the rebase drift, but the join reads it only
+    for which files changed — no drift byte reaches the published scope
+    — and drift touching a file outside the CR's diff falls back to the
+    full range there).
+    The existence checks and the `base-untrusted` refusal stay — they
+    guard presence and the base-derived capture, not the lineage. The
+    head-drift checks Aone has were confirmed to compare the live
+    `sourceBranch` SHA against the reviewed SHA the same way D7 names —
+    submit's pre-write gate and mid-batch re-read, and fetch-pr's resume
+    probe; none consults a platform compare API or an ancestry test.
+    GitHub keeps the tests: there an ancestor-less anchor is a
+    force-push, and the tests are the detection.
 
 ## Testing strategy
 

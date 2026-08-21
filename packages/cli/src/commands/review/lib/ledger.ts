@@ -172,10 +172,12 @@ export interface Ledger {
  * A usable anchor: abbreviated-to-full hex, matching what `git rev-parse`
  * emits. The parser drops a field that fails this rather than the ledger —
  * the findings are still a work list even when the anchor is garbage — and
- * `fetch-pr --since` additionally verifies the anchor is an ancestor of the
- * fetched head before scoping to it (in the CLI; the orchestrator never runs
- * git against an anchor), so a tampered sha costs a full-range review, never
- * a mis-scoped one.
+ * `fetch-pr --since` additionally validates the anchor against the fetched
+ * history — existence always; ancestry except on Aone, where AGit-Flow
+ * amends orphan the cached head (design D7) — before scoping to it (in the
+ * CLI; the orchestrator never runs git against an anchor). The published
+ * scope is joined against the CR's own diff either way, so a tampered sha
+ * costs a full-range review, never a mis-scoped one.
  *
  * Exported because `fetch-pr --since` gates on the SAME shape: an anchor the
  * marker will not carry must not be one the fetch accepts, or a
