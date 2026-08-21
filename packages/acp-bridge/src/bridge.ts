@@ -9749,29 +9749,33 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 ? ` by client ${JSON.stringify(context.clientId)}`
                 : ''),
           );
-          if (nextDisplayName) {
-            entry.connection
-              .extMethod(SERVE_CONTROL_EXT_METHODS.sessionTitle, {
-                sessionId,
-                displayName: nextDisplayName,
-                titleSource: nextTitleSource,
-              })
-              .then((res: unknown) => {
-                const r = res as { persisted?: boolean } | undefined;
-                if (r && r.persisted === false) {
-                  writeStderrLine(
-                    `qwen serve: displayName for ${sessionId} was not persisted`,
-                  );
-                }
-              })
-              .catch((err: unknown) => {
+          entry.connection
+            .extMethod(SERVE_CONTROL_EXT_METHODS.sessionTitle, {
+              sessionId,
+              // Persist clears too, as an empty-title tombstone: the title
+              // readers treat an empty custom_title record as "no title",
+              // so without this write a daemon restart / idle-reap cold
+              // restore re-seeds the just-deleted name (with 'manual'
+              // provenance) from the stale persisted record, and the next
+              // /clear carry resurrects it (#8977).
+              displayName: nextDisplayName ?? '',
+              titleSource: nextTitleSource,
+            })
+            .then((res: unknown) => {
+              const r = res as { persisted?: boolean } | undefined;
+              if (r && r.persisted === false) {
                 writeStderrLine(
-                  `qwen serve: failed to persist displayName for ${sessionId}: ${
-                    err instanceof Error ? err.message : String(err)
-                  }`,
+                  `qwen serve: displayName for ${sessionId} was not persisted`,
                 );
-              });
-          }
+              }
+            })
+            .catch((err: unknown) => {
+              writeStderrLine(
+                `qwen serve: failed to persist displayName for ${sessionId}: ${
+                  err instanceof Error ? err.message : String(err)
+                }`,
+              );
+            });
           try {
             entry.events.publish({
               type: 'session_metadata_updated',

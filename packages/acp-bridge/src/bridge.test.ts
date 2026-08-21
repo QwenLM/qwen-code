@@ -26393,8 +26393,32 @@ describe('createAcpSessionBridge', () => {
     });
 
     it('publishes a JSON-survivable null marker when the title is cleared (#8977)', async () => {
+      // The persisted custom_title records in write order — the stand-in for
+      // the transcript's title file. The sessionTitle ext-method appends one
+      // record per call, and a cold restore seeds the fresh bridge from the
+      // LAST record, honoring an empty title as "no title" (the
+      // readSessionTitleInfoFromFileSync contract).
+      const persistedTitles: Array<{
+        displayName: string;
+        titleSource?: 'manual' | 'auto';
+      }> = [];
       const bridge = makeBridge({
-        channelFactory: async () => makeChannel().channel,
+        channelFactory: async () =>
+          makeChannel({
+            extMethodImpl: (method, params) => {
+              if (method === SERVE_CONTROL_EXT_METHODS.sessionTitle) {
+                persistedTitles.push({
+                  displayName: params['displayName'] as string,
+                  ...(params['titleSource'] !== undefined
+                    ? {
+                        titleSource: params['titleSource'] as 'manual' | 'auto',
+                      }
+                    : {}),
+                });
+              }
+              return { persisted: true };
+            },
+          }).channel,
       });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       bridge.updateSessionMetadata(session.sessionId, {
@@ -26434,6 +26458,16 @@ describe('createAcpSessionBridge', () => {
         false,
       );
 
+      // The clear must reach the persisted store too, as an empty-title
+      // tombstone — without it a daemon restart / idle-reap cold restore
+      // re-seeds the just-deleted name from the stale record.
+      await vi.waitFor(() => expect(persistedTitles).toHaveLength(2));
+      expect(persistedTitles[0]).toEqual({
+        displayName: 'Named session',
+        titleSource: 'manual',
+      });
+      expect(persistedTitles[1]).toEqual({ displayName: '' });
+
       const reloaded = await bridge.loadSession({
         sessionId: session.sessionId,
         workspaceCwd: WS_A,
@@ -26444,6 +26478,32 @@ describe('createAcpSessionBridge', () => {
       await bridge.closeSession(session.sessionId);
       await drain;
       await bridge.shutdown();
+
+      // Cold restore: a fresh bridge seeded from the persisted title store
+      // (as the session/load + session/resume handlers do via
+      // getSessionTitleInfo) must still see no title. Loading through the
+      // still-live entry above never touches the persisted state, so it
+      // alone cannot prove the clear is durable.
+      const lastPersisted = persistedTitles[persistedTitles.length - 1];
+      const persistedTitleFields = lastPersisted?.displayName
+        ? {
+            displayName: lastPersisted.displayName,
+            ...(lastPersisted.titleSource !== undefined
+              ? { titleSource: lastPersisted.titleSource }
+              : {}),
+          }
+        : {};
+      const coldBridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const restored = await coldBridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+        ...persistedTitleFields,
+      });
+      expect(restored.displayName).toBeUndefined();
+      expect(restored.titleSource).toBeUndefined();
+      await coldBridge.shutdown();
     });
 
     it('persists a manual source when the name matches an auto title (#8977)', async () => {
