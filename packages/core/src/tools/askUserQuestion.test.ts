@@ -353,6 +353,44 @@ describe('AskUserQuestionTool', () => {
       expect(result.llmContent).not.toContain('Host cancelled approval');
     });
 
+    it('should return the answers when the user overrides an auto-cancel', async () => {
+      const params = {
+        questions: [
+          {
+            question: 'Test?',
+            header: 'Test',
+            options: [
+              { label: 'A', description: 'Option A' },
+              { label: 'B', description: 'Option B' },
+            ],
+            multiSelect: false,
+          },
+        ],
+      };
+
+      const invocation = tool.build(params);
+      const confirmation = await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      );
+
+      // The pipeline auto-cancels with a reason, the question is re-presented
+      // and this time the user answers it. `cancelReason` is deliberately not
+      // reset by the ProceedOnce branch, so the ordering between `wasAnswered`
+      // and `cancelReason` in execute() is what keeps the stale reason out.
+      await confirmation.onConfirm(ToolConfirmationOutcome.Cancel, {
+        cancelMessage: 'Host cancelled approval',
+      });
+      await confirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce, {
+        answers: { '0': 'A' },
+      });
+
+      const result = await invocation.execute(new AbortController().signal);
+      expect(result.llmContent).toContain(
+        'User has provided the following answers',
+      );
+      expect(result.llmContent).not.toContain('Host cancelled approval');
+    });
+
     it('should return formatted answers when user provides them', async () => {
       const params = {
         questions: [

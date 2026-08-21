@@ -209,13 +209,10 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
             break;
           case ToolConfirmationOutcome.Cancel: {
             this.wasAnswered = false;
-            // The confirmation pipeline uses `cancelMessage` to explain WHY the
-            // question was never put to the user (host could not render the
-            // approval surface, SDK denial, hook denial, stale approval...).
-            // Dropping it here is what made a pipeline failure indistinguishable
-            // from a real user decline in the tool result.
-            const reason = payload?.cancelMessage?.trim();
-            this.cancelReason = reason ? reason : undefined;
+            // `cancelMessage` explains WHY the question never reached the user.
+            // Dropping it is what made a pipeline failure indistinguishable
+            // from a real user decline.
+            this.cancelReason = payload?.cancelMessage?.trim() || undefined;
             break;
           }
           default:
@@ -248,9 +245,9 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
       }
 
       if (!this.wasAnswered) {
-        // Only report a user decision when there is no pipeline reason to
-        // report; "User declined..." is reserved for a real user-initiated
-        // cancel, which carries no `cancelMessage`.
+        // Fallback for any execute() reached without answers: a cancel that
+        // carried no reason, or no confirmation round at all (an allow rule can
+        // skip it -- this tool does not override requiresUserInteraction()).
         const cancellationMessage =
           this.cancelReason ?? 'User declined to answer the questions.';
         return {
