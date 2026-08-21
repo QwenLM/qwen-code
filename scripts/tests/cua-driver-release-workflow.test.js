@@ -5,6 +5,7 @@
  */
 
 import { readFileSync } from 'node:fs';
+import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync('.github/workflows/cd-cua-driver.yml', 'utf8');
 
