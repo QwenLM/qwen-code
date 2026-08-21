@@ -160,6 +160,27 @@ function ownsActivityReorder(entry: CatalogEntry): boolean {
   );
 }
 
+function liveSessionSnapshotsEqual(
+  previous: ReadonlyMap<string, DaemonSessionLiveState>,
+  next: ReadonlyMap<string, DaemonSessionLiveState>,
+): boolean {
+  if (previous.size !== next.size) return false;
+  for (const [sessionId, session] of next) {
+    const prior = previous.get(sessionId);
+    if (
+      !prior ||
+      prior.clientCount !== session.clientCount ||
+      prior.hasActivePrompt !== session.hasActivePrompt ||
+      prior.isWaitingForPermission !== session.isWaitingForPermission ||
+      prior.isWaitingForUserQuestion !== session.isWaitingForUserQuestion ||
+      prior.updatedAt !== session.updatedAt
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function getPollInterval(entry: CatalogEntry): number | undefined {
   let interval: number | undefined;
   for (const subscriber of entry.subscribers) {
@@ -191,6 +212,11 @@ export class SessionCatalogStore {
     string,
     Map<string, number>
   >();
+  private readonly liveSessionsByWorkspace = new Map<
+    string,
+    ReadonlyMap<string, DaemonSessionLiveState>
+  >();
+  private readonly liveSessionListeners = new Map<string, Set<() => void>>();
   private activeRequests = 0;
   private activeBackgroundRequests = 0;
   private queueSequence = 0;
@@ -220,6 +246,7 @@ export class SessionCatalogStore {
         this.liveStateWorkspaceUsers.delete(workspaceCwd);
         this.liveStateWorkspaceRefreshRequests.delete(workspaceCwd);
         this.liveStatePendingActivity.delete(workspaceCwd);
+        this.clearLiveSessions(workspaceCwd);
         for (const entry of this.entries.values()) {
           if (entry.query.workspaceCwd !== workspaceCwd) continue;
           this.resetPollSchedule(entry);
@@ -510,10 +537,38 @@ export class SessionCatalogStore {
     }
   }
 
+  getLiveSession(
+    workspaceCwd: string,
+    sessionId: string,
+  ): DaemonSessionLiveState | undefined {
+    return this.liveSessionsByWorkspace.get(workspaceCwd)?.get(sessionId);
+  }
+
+  hasLiveSessions(workspaceCwd: string): boolean {
+    return this.liveSessionsByWorkspace.has(workspaceCwd);
+  }
+
+  subscribeLiveSessions(
+    workspaceCwd: string,
+    listener: () => void,
+  ): () => void {
+    const existing = this.liveSessionListeners.get(workspaceCwd);
+    const listeners = existing ?? new Set<() => void>();
+    if (!existing) this.liveSessionListeners.set(workspaceCwd, listeners);
+    listeners.add(listener);
+    return () => {
+      listeners.delete(listener);
+      if (listeners.size === 0) {
+        this.liveSessionListeners.delete(workspaceCwd);
+      }
+    };
+  }
+
   applyLiveState(
     workspaceCwd: string,
     liveSessions: readonly DaemonSessionLiveState[],
   ): ReadonlySet<string> {
+    this.recordLiveSessions(workspaceCwd, liveSessions);
     const liveById = new Map(
       liveSessions.map((session) => [session.sessionId, session]),
     );
@@ -594,6 +649,34 @@ export class SessionCatalogStore {
       });
     }
     return absorbed;
+  }
+
+  // The live-state response lists every live session regardless of catalog
+  // paging; keep it so a per-session lookup never depends on the connected
+  // session happening to sit inside a loaded page (#9487).
+  private recordLiveSessions(
+    workspaceCwd: string,
+    liveSessions: readonly DaemonSessionLiveState[],
+  ): void {
+    const next = new Map<string, DaemonSessionLiveState>();
+    for (const session of liveSessions) {
+      next.set(session.sessionId, session);
+    }
+    const previous = this.liveSessionsByWorkspace.get(workspaceCwd);
+    if (previous && liveSessionSnapshotsEqual(previous, next)) return;
+    this.liveSessionsByWorkspace.set(workspaceCwd, next);
+    const listeners = this.liveSessionListeners.get(workspaceCwd);
+    if (listeners) {
+      for (const listener of [...listeners]) listener();
+    }
+  }
+
+  private clearLiveSessions(workspaceCwd: string): void {
+    if (!this.liveSessionsByWorkspace.delete(workspaceCwd)) return;
+    const listeners = this.liveSessionListeners.get(workspaceCwd);
+    if (listeners) {
+      for (const listener of [...listeners]) listener();
+    }
   }
 
   async stageWorkspaceRefresh(
@@ -770,6 +853,8 @@ export class SessionCatalogStore {
     this.liveStateWorkspaceUsers.clear();
     this.liveStateWorkspaceRefreshRequests.clear();
     this.liveStatePendingActivity.clear();
+    this.liveSessionsByWorkspace.clear();
+    this.liveSessionListeners.clear();
     this.entries.clear();
     this.queue.length = 0;
     this.removeVisibilityListener();
