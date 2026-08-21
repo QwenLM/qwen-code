@@ -393,14 +393,21 @@ export function buildInstallPlan(
       )
       .map((model) => model.id) ?? [],
   );
+  const freeFormProvider = config.baseUrl === undefined;
   const ownsModel = config.mergeModelsByIdentity
-    ? (Array.isArray(config.baseUrl) || config.baseUrl === undefined) &&
+    ? (Array.isArray(config.baseUrl) || freeFormProvider) &&
       providerOwnsModel
       ? (model: ProviderModelConfig) =>
           providerOwnsModel(model) &&
           (normalizeBaseUrlForMatching(model.baseUrl) === selectedEndpoint ||
             (model.baseUrl === undefined &&
-              migratedLegacyModelIds.has(model.id)))
+              // A free-form provider (custom-openai-compatible) seeds every
+              // baseUrl-less entry into its models field, so a deselected one
+              // must be removed like any other omitted entry; otherwise the
+              // deselection silently no-ops. Endpoint-scoped (baseUrl array)
+              // providers only own a baseUrl-less entry when it was preserved
+              // (and thus migrated) in this very run.
+              (freeFormProvider || migratedLegacyModelIds.has(model.id))))
       : undefined
     : providerOwnsModel;
   const firstModel = models[0];

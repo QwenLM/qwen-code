@@ -15,6 +15,7 @@ import {
   CODING_PLAN_ENV_KEY,
   CODING_PLAN_GLOBAL_BASE_URL,
   codingPlanProvider,
+  CUSTOM_API_KEY_ENV_PREFIX,
   customProvider,
   generateCustomEnvKey,
   KIMI_API_ENV_KEY,
@@ -987,6 +988,47 @@ describe('applyProviderInstallPlan', () => {
         envKey,
       },
       siblingModel,
+    ]);
+  });
+
+  it('removes a deselected baseUrl-less legacy custom model', async () => {
+    const baseUrl = 'https://new.example/v1';
+    const envKey = generateCustomEnvKey(AuthType.USE_OPENAI, baseUrl);
+    // Legacy entry predating baseUrl stamping (old env-key shape, no baseUrl).
+    const legacyModel = {
+      id: 'legacy-custom',
+      name: 'legacy-custom',
+      envKey: `${CUSTOM_API_KEY_ENV_PREFIX}OPENAI`,
+    };
+    const adapter = createAdapter({
+      [AuthType.USE_OPENAI]: [legacyModel],
+    });
+    // The wizard seeds legacy-custom, the user deselects it and submits only
+    // my-model — the omitted baseUrl-less entry must be removed like any
+    // other omitted entry.
+    const plan = buildInstallPlan(customProvider, {
+      protocol: AuthType.USE_OPENAI,
+      baseUrl,
+      apiKey: 'sk-new',
+      modelIds: ['my-model'],
+    });
+
+    try {
+      await applyProviderInstallPlan(plan, {
+        settings: adapter,
+        doRefreshAuth: false,
+      });
+    } finally {
+      delete process.env[envKey];
+    }
+
+    expect(adapter.setValue).toHaveBeenCalledWith('modelProviders.openai', [
+      {
+        id: 'my-model',
+        name: 'my-model',
+        baseUrl,
+        envKey,
+      },
     ]);
   });
 
