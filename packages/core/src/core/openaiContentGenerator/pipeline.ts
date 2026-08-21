@@ -897,10 +897,31 @@ export class ContentGenerationPipeline {
           yield response;
         }
       } else if (context.pendingThinkingTagCandidate) {
-        throw new InvalidStreamError(
-          'Model response leaked thinking tags.',
-          'PROTOCOL_TAG_LEAK',
-        );
+        const heldCandidateText = context.pendingThinkingTagCandidate.text;
+        context.pendingThinkingTagCandidate = undefined;
+        if (/<\/?think(?:ing)?/i.test(heldCandidateText)) {
+          throw new InvalidStreamError(
+            'Model response leaked thinking tags.',
+            'PROTOCOL_TAG_LEAK',
+          );
+        }
+        // Sub-word fragment (e.g. a truncated '<thi'): it can no longer
+        // become a tag once the stream has ended. Release it as literal
+        // text — aligned with the finish-time checks — instead of
+        // hard-failing a truncated turn.
+        const pendingParts = context.pendingUntrustedResponseParts;
+        context.pendingUntrustedResponseParts = undefined;
+        const response = new GenerateContentResponse();
+        response.candidates = [
+          {
+            content: {
+              parts: [...(pendingParts ?? []), { text: heldCandidateText }],
+              role: 'model',
+            },
+            index: 0,
+          },
+        ];
+        yield response;
       }
 
       if (context.pendingPostDemotionTagTail) {

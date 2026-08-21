@@ -1601,11 +1601,13 @@ describe('OpenAIContentConverter', () => {
       ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
     });
 
-    it('rejects a truncated tag prefix after a balanced block at stream finish (issue #9348 fail-closed)', () => {
-      // '<thi' classifies as pending, never leaked, and the finish-time
-      // leading-tag check needs a complete opener — without a dedicated
-      // fail-closed check the fragment would be released as visible text
-      // while the chunk-split twin throws.
+    it('releases a sub-word tag fragment after a balanced block at stream finish (issue #9348)', () => {
+      // '<thi' is one visible char short of the '<think' tag word, so it can
+      // no longer become a tag once the stream has ended. The post-demotion
+      // tag-tail finish release and the pipeline EOF backstop already release
+      // the identical fragment (e.g. one visible char later, 'A<thi'), so the
+      // demotion-rest finish check must agree instead of hard-failing a
+      // truncated turn that the tag-leak retry would regenerate verbatim.
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
@@ -1614,21 +1616,27 @@ describe('OpenAIContentConverter', () => {
         stream,
       );
 
-      expect(() =>
-        converter.convertOpenAIChunkToGemini(
-          streamChunk(
-            'truncated-prefix',
-            { content: '<thinking>a</thinking><thi' },
-            'stop',
-          ),
-          stream,
+      const truncated = converter.convertOpenAIChunkToGemini(
+        streamChunk(
+          'truncated-prefix',
+          { content: '<thinking>a</thinking><thi' },
+          'stop',
         ),
-      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+        stream,
+      );
+
+      expect(truncated.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'a' },
+        { text: '<thi' },
+      ]);
+      expect(stream.pendingPostDemotionTagTail).toBeUndefined();
     });
 
-    it('rejects a split truncated tag prefix after a balanced block at stream finish (issue #9348 fail-closed)', () => {
-      // The tail re-held after a demotion must fail closed at finish instead
-      // of being released as a literal by the undecided-prefix release path.
+    it('releases a split sub-word tag fragment held at stream finish (issue #9348)', () => {
+      // Chunk-split twin of the test above: the sub-word fragment is re-held
+      // after the demotion and the stream then finishes. The held candidate
+      // contains no full tag word, so the finish-time candidate check must
+      // release it as literal text like the single-chunk shape.
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
@@ -1642,7 +1650,80 @@ describe('OpenAIContentConverter', () => {
       );
 
       expect(first.candidates?.[0]?.content?.parts).toEqual([]);
+      const finish = finishStream(stream, 'stop');
+      expect(finish.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'a' },
+        { text: '<thi' },
+      ]);
+      expect(stream.pendingThinkingTagCandidate).toBeUndefined();
+    });
+
+    it('still fails closed on a split full tag word held at stream finish (issue #9348 fail-closed)', () => {
+      // Regression guard for the sub-word release: a held fragment containing
+      // a full tag word ('<think') must keep failing closed at finish,
+      // because its chunk-split twin throws via the hold path once the tag
+      // completes.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const first = converter.convertOpenAIChunkToGemini(
+        streamChunk('first-block', {
+          content: '<thinking>a</thinking><think',
+        }),
+        stream,
+      );
+
+      expect(first.candidates?.[0]?.content?.parts).toEqual([]);
       expect(() => finishStream(stream, 'stop')).toThrowError(
+        expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
+      );
+    });
+
+    it('releases a sub-word tag candidate at finish before any demotion (issue #9348)', () => {
+      // A structured-reasoning turn truncated by max_tokens before any
+      // complete tag: the held candidate is a sub-word fragment that can no
+      // longer become a tag, so finish releases it as literal text — aligned
+      // with the demotion-rest, tag-tail, and EOF-backstop paths.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const fragment = converter.convertOpenAIChunkToGemini(
+        streamChunk('fragment', { content: '<thi' }),
+        stream,
+      );
+
+      expect(fragment.candidates?.[0]?.content?.parts).toEqual([]);
+      const finish = finishStream(stream, 'length');
+      expect(finish.candidates?.[0]?.content?.parts).toEqual([
+        { text: '<thi' },
+      ]);
+      expect(stream.pendingThinkingTagCandidate).toBeUndefined();
+    });
+
+    it('still fails closed on a full tag word candidate at finish before any demotion (issue #9348 fail-closed)', () => {
+      // Twin of the test above with a full tag word: '<think' can still
+      // complete into a tag in the chunk-split twin, so it stays fail-closed.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('fragment', { content: '<think' }),
+        stream,
+      );
+
+      expect(() => finishStream(stream, 'length')).toThrowError(
         expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
       );
     });

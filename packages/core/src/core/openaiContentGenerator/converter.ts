@@ -1797,13 +1797,20 @@ export function convertOpenAIChunkToGemini(
             requestContext.pendingThinkingTagCandidate = { text: rest };
             visibleText = '';
           } else if (
-            // At finish an undigested tail (e.g. a truncated '<thi' prefix)
-            // is a leak: the chunk-split twin throws via the hold path, so
+            // Fail closed only when the undigested tail contains a full tag
+            // word (e.g. a '<thinking' truncated before '>'): its chunk-split
+            // twin throws via the hold path once the tag completes, so
             // releasing it here would make the outcome chunking-dependent.
             // ('leaked' is classified only when the stream has finished, so
-            // it is fully subsumed by this finish-time check.)
+            // it is fully subsumed by this finish-time check.) A sub-word
+            // fragment (e.g. '<thi') can no longer become a tag once the
+            // stream has ended; release it as literal text like the
+            // post-demotion tag-tail finish release and the pipeline EOF
+            // backstop, so the outcome does not depend on whether a visible
+            // character landed right before the truncation point.
             choice.finish_reason &&
-            restState !== 'clean'
+            restState !== 'clean' &&
+            /<\/?think(?:ing)?/i.test(rest)
           ) {
             throwProtocolTagLeak(requestContext);
           } else {
@@ -1851,7 +1858,19 @@ export function convertOpenAIChunkToGemini(
         visibleText = '';
 
         if (choice.finish_reason && !closingTagName) {
-          throwProtocolTagLeak(requestContext);
+          if (/<\/?think(?:ing)?/i.test(combinedCandidateText)) {
+            throwProtocolTagLeak(requestContext);
+          }
+          // Sub-word fragment (e.g. a truncated '<thi'): it can no longer
+          // become a tag once the stream has ended. Release it as literal
+          // text — aligned with the demotion-rest finish check, the
+          // post-demotion tag-tail finish release, and the pipeline EOF
+          // backstop — instead of hard-failing a truncated turn.
+          requestContext.pendingThinkingTagCandidate = undefined;
+          if (combinedCandidateText) {
+            parts.push({ text: combinedCandidateText });
+          }
+          visibleText = combinedCandidateText;
         }
       } else if (pendingTagCandidate) {
         parts = parts.filter((part) => !getVisibleText(part));

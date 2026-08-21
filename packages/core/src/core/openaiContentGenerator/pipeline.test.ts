@@ -2802,6 +2802,52 @@ describe('ContentGenerationPipeline', () => {
       ]);
     });
 
+    it('releases a held sub-word thinking-tag candidate as literal text at clean stream EOF', async () => {
+      // The EOF candidate check must agree with the finish-time checks: a
+      // held candidate with no full tag word can no longer become a tag once
+      // the stream has ended, so it is emitted verbatim instead of
+      // hard-failing a truncated turn.
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'response-id',
+            choices: [{ delta: { content: '<thi' }, finish_reason: null }],
+          } as OpenAI.Chat.ChatCompletionChunk;
+        },
+      };
+      const emptyResponse = new GenerateContentResponse();
+      emptyResponse.candidates = [
+        { content: { parts: [], role: 'model' }, index: 0 },
+      ];
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToGemini as Mock).mockImplementation(
+        (_chunk, context) => {
+          context.pendingThinkingTagCandidate = { text: '<thi' };
+          return emptyResponse;
+        },
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        'test-prompt-id',
+      );
+      const results = [];
+      for await (const result of resultGenerator) results.push(result);
+
+      expect(results).toHaveLength(1);
+      expect(results[0]?.candidates?.[0]?.content?.parts).toEqual([
+        { text: '<thi' },
+      ]);
+    });
+
     it('does not log protocol-tag sanitization before a held finish is yielded', async () => {
       const request: GenerateContentParameters = {
         model: 'test-model',
