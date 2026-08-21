@@ -1074,10 +1074,6 @@ function buildCliParser(rawArgv: string[]): Argv {
               return '--json-schema cannot be used with --acp; structured output is only honoured by the headless non-interactive flow.';
             }
             const hasPrompt = !!argv['prompt'];
-            const query = argv['query'] as string | string[] | undefined;
-            const hasPositionalQuery = Array.isArray(query)
-              ? query.length > 0
-              : !!query;
             // Allow stdin piping (`echo "..." | qwen --json-schema ...`):
             // when stdin is not a TTY, the prompt is supplied via the pipe
             // and headless mode runs normally. Only reject true interactive
@@ -1086,7 +1082,7 @@ function buildCliParser(rawArgv: string[]): Argv {
             // termination handler in the TUI loop, so silently launching
             // the TUI would strand the run.
             const stdinIsPiped = !process.stdin.isTTY;
-            if (!hasPrompt && !hasPositionalQuery && !stdinIsPiped) {
+            if (!hasPrompt && !hasQuery && !stdinIsPiped) {
               return '--json-schema only applies to non-interactive mode; pass a prompt via -p, as a positional argument, or piped via stdin.';
             }
           }

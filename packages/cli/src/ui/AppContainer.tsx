@@ -2320,7 +2320,6 @@ export const AppContainer = (props: AppContainerProps) => {
     livePanelFocused: bgLivePanelFocused,
   } = useBackgroundTaskViewState();
   const { closeDialog: closeBgTasksDialog } = useBackgroundTaskViewActions();
-
   // Prompt suggestion state
   const [promptSuggestion, setPromptSuggestion] = useState<string | null>(null);
   const prevStreamingStateRef = useRef<StreamingState>(StreamingState.Idle);
@@ -3552,8 +3551,10 @@ export const AppContainer = (props: AppContainerProps) => {
       !!shellConfirmationRequest ||
       !!confirmationRequest ||
       !!loopDetectionConfirmationRequest,
-    hasForegroundShell: Boolean(activePtyId || embeddedShellFocused),
-    hasBackgroundFocusDialog: bgTasksDialogOpen,
+    hasForegroundShell: Boolean(
+      activePtyId || embeddedShellFocused || agentViewState.agentShellFocused,
+    ),
+    hasBackgroundFocusDialog: bgTasksDialogOpen || bgLivePanelFocused,
     hasQueuedPrompt:
       goalQueueRef.current?.hasQueuedUserMessages?.() === true ||
       (goalQueueRef.current?.getPendingSubmissionCount?.() ?? 0) > 0,

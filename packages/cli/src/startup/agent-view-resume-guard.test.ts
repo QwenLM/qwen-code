@@ -17,6 +17,9 @@ import {
 } from './agent-view-resume-guard.js';
 
 const mockReadAgentViewSessionState = vi.hoisted(() => vi.fn());
+const mockRequireValidWorkerToken = vi.hoisted(() =>
+  vi.fn().mockResolvedValue(undefined),
+);
 const mockRelease = vi.hoisted(() =>
   vi.fn().mockResolvedValue({ released: true }),
 );
@@ -31,9 +34,14 @@ vi.mock('../agent-view/supervisor-runner.js', () => ({
   ensureAgentViewSupervisor: vi.fn(async () => ({ release: mockRelease })),
 }));
 
+vi.mock('../agent-view/supervisor-process.js', () => ({
+  requireValidWorkerToken: mockRequireValidWorkerToken,
+}));
+
 describe('managed Agent View resume guards', () => {
   beforeEach(() => {
     mockReadAgentViewSessionState.mockReset();
+    mockRequireValidWorkerToken.mockReset().mockResolvedValue(undefined);
     mockRelease.mockReset().mockResolvedValue({ released: true });
   });
 
@@ -92,6 +100,11 @@ describe('managed Agent View resume guards', () => {
       isManagedAgentViewContinueBlocked('session-1', workerEnv('session-1')),
     ).resolves.toBe(false);
 
+    expect(mockRequireValidWorkerToken).toHaveBeenCalledWith(
+      'session-1',
+      { token: 'token-1' },
+      {},
+    );
     expect(mockReadAgentViewSessionState).not.toHaveBeenCalled();
   });
 
@@ -140,6 +153,22 @@ describe('managed Agent View resume guards', () => {
         QWEN_AGENT_VIEW_SESSION_ID: 'other-session',
       }),
     ).resolves.toBe(true);
+  });
+
+  it('does not bypass guards when a complete worker env has an invalid token', async () => {
+    mockRequireValidWorkerToken.mockRejectedValue(
+      new Error('Agent View worker token is invalid.'),
+    );
+    mockReadAgentViewSessionState.mockResolvedValue(state('managed', 'alive'));
+
+    await expect(
+      isManagedAgentViewResumeBlocked('session-1', workerEnv('session-1')),
+    ).resolves.toBe(true);
+    await expect(
+      isManagedAgentViewContinueBlocked('session-1', workerEnv('session-1')),
+    ).resolves.toBe(true);
+
+    expect(mockReadAgentViewSessionState).toHaveBeenCalledTimes(2);
   });
 
   it('blocks --resume and --continue during the adopting window', async () => {
@@ -241,6 +270,20 @@ describe('managed Agent View resume guards', () => {
     );
 
     expect(mockRelease).not.toHaveBeenCalled();
+  });
+
+  it('does not skip release when a complete worker env has an invalid token', async () => {
+    mockRequireValidWorkerToken.mockRejectedValue(
+      new Error('Agent View worker token is invalid.'),
+    );
+    mockReadAgentViewSessionState.mockResolvedValue(state('managed', 'exited'));
+
+    await releaseExitedManagedSessionForContinue(
+      'session-1',
+      workerEnv('session-1'),
+    );
+
+    expect(mockRelease).toHaveBeenCalledWith('session-1');
   });
 
   it('releases ownership when the worker env belongs to another session', async () => {

@@ -29,6 +29,14 @@ const agentViewHandoffMocks = vi.hoisted(() => ({
   reportWorkerState: vi.fn(async () => undefined),
 }));
 
+const agentViewStateMock = vi.hoisted(() =>
+  vi.fn(() => ({
+    activeView: 'main',
+    agents: new Map(),
+    agentShellFocused: false as boolean,
+  })),
+);
+
 vi.mock('../agent-view/managed-detach.js', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('../agent-view/managed-detach.js')>();
@@ -208,10 +216,7 @@ vi.mock('./hooks/useProviderUpdates.js', () => ({
 vi.mock('./contexts/VimModeContext.js');
 vi.mock('./contexts/SessionContext.js');
 vi.mock('./contexts/AgentViewContext.js', () => ({
-  useAgentViewState: vi.fn(() => ({
-    activeView: 'main',
-    agents: new Map(),
-  })),
+  useAgentViewState: agentViewStateMock,
   useAgentViewActions: vi.fn(() => ({
     switchToAgent: vi.fn(),
     switchToNext: vi.fn(),
@@ -320,6 +325,11 @@ describe('AppContainer State Management', () => {
     agentViewHandoffMocks.readWorkerSideband.mockReturnValue(undefined);
     agentViewHandoffMocks.sendWorkerEvent.mockResolvedValue(undefined);
     agentViewHandoffMocks.reportWorkerState.mockResolvedValue(undefined);
+    agentViewStateMock.mockReturnValue({
+      activeView: 'main',
+      agents: new Map(),
+      agentShellFocused: false,
+    });
     restoreCiEnv = clearCiEnv();
     vi.stubEnv('TERM', 'xterm-256color');
     originalStdoutIsTTY = process.stdout.isTTY;
@@ -6759,6 +6769,29 @@ describe('AppContainer State Management', () => {
         hasPendingUserQuestion: true,
         hasPendingToolConfirmation: true,
       });
+    });
+
+    it('treats a focused agent shell as a foreground shell', () => {
+      agentViewStateMock.mockReturnValue({
+        activeView: 'main',
+        agents: new Map(),
+        agentShellFocused: true,
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      const calls = mockedUseSlashCommandProcessor.mock.calls;
+      const gateRef = calls[calls.length - 1]?.at(-1) as {
+        current: Record<string, boolean | undefined>;
+      };
+      expect(gateRef.current['hasForegroundShell']).toBe(true);
     });
   });
 });
