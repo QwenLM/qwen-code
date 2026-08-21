@@ -257,10 +257,11 @@ describe('session catalog hooks', () => {
 });
 
 describe('useSessionHasActivePrompt (#9487)', () => {
-  function setQualifiedPage(sessions: unknown[]): void {
+  function setQualifiedPage(sessions: unknown[]): ReturnType<typeof vi.fn> {
     const listPage = vi.fn().mockResolvedValue({ sessions });
     (mocks.workspace.client as { workspaceByCwd: unknown }).workspaceByCwd =
       vi.fn(() => ({ listWorkspaceSessionsPage: listPage }));
+    return listPage;
   }
 
   function ActivePromptProbe({ sessionId = 'sess-1' }: { sessionId?: string }) {
@@ -271,6 +272,39 @@ describe('useSessionHasActivePrompt (#9487)', () => {
     );
     return <span>{String(value)}</span>;
   }
+
+  it('does not load the catalog while live-state is retained', async () => {
+    const listPage = setQualifiedPage([
+      { sessionId: 'sess-1', workspaceCwd: '/work', hasActivePrompt: true },
+    ]);
+    const store = getSessionCatalogStore(
+      mocks.workspace.client as DaemonClient,
+    );
+    const releaseLiveState = store.retainWorkspaceLiveState('/work');
+
+    await act(async () => {
+      root.render(<ActivePromptProbe />);
+      for (let i = 0; i < 8; i += 1) await Promise.resolve();
+    });
+
+    expect(listPage).not.toHaveBeenCalled();
+    expect(container.textContent).toBe('false');
+    releaseLiveState();
+  });
+
+  it('loads the catalog fallback when live-state is not retained', async () => {
+    const listPage = setQualifiedPage([
+      { sessionId: 'sess-1', workspaceCwd: '/work', hasActivePrompt: true },
+    ]);
+
+    await act(async () => {
+      root.render(<ActivePromptProbe />);
+      for (let i = 0; i < 8; i += 1) await Promise.resolve();
+    });
+
+    expect(listPage).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toBe('true');
+  });
 
   it('prefers the daemon live-state snapshot over a catalog page', async () => {
     setQualifiedPage([

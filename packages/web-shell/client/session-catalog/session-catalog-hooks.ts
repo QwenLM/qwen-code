@@ -1,4 +1,11 @@
-import { useCallback, useMemo, useRef, useSyncExternalStore } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from 'react';
 import { useSessions, useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
 import type {
   DaemonClient,
@@ -178,11 +185,28 @@ export function useSessionHasActivePrompt(
     () => false,
   );
   // The live-state response is authoritative and independent of catalog
-  // paging; only fall back to scanning a catalog page on daemons without it.
+  // paging. Arm the full-catalog fallback only when nothing tracks live-state
+  // for this workspace — i.e. the daemon lacks workspace_session_live_state.
+  // Evaluating in an effect (after mount) lets the sidebar's live-state
+  // retain win first; deciding at render time would fire one redundant
+  // full-catalog fetch on every page load before the first live-state
+  // response arrives, breaking the "no catalog polling" smoke contract.
+  const [catalogFallbackArmed, setCatalogFallbackArmed] = useState(false);
+  useEffect(() => {
+    setCatalogFallbackArmed(
+      Boolean(
+        workspaceCwd &&
+          !hasLiveSessions &&
+          !store.isWorkspaceLiveStateEnabled(workspaceCwd),
+      ),
+    );
+  }, [store, workspaceCwd, hasLiveSessions]);
   const catalogQuery = useMemo<SessionCatalogQuery | undefined>(() => {
-    if (hasLiveSessions || !workspaceCwd) return undefined;
+    if (!catalogFallbackArmed || hasLiveSessions || !workspaceCwd) {
+      return undefined;
+    }
     return { routeKind: 'qualified', workspaceCwd, options: {} };
-  }, [hasLiveSessions, workspaceCwd]);
+  }, [catalogFallbackArmed, hasLiveSessions, workspaceCwd]);
   // autoLoad keeps the fallback page loading (and the store's error-retry
   // timer armed) for observer panes that never trigger an invalidation.
   const { sessions } = useSessionCatalogQuery(client, catalogQuery, {
