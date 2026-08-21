@@ -140,7 +140,7 @@ task-oriented guides — what a maintainer types and what happens next — see:
 - [76. run — Upper bound on review targets emitted per scan (fan-out defense-in-depth; excess…](#af-076)
 - [77. run — Upper bound on candidates INSPECTED per scan: idle candidates consume serial API…](#af-077)
 - [78. run — Commit-status context stamped PENDING on a PR head when a scan dispatches a…](#af-078)
-- [79. run — Consecutive-failure sub-cap, distinct from the total round cap above. The total…](#af-079)
+- [79. run — Consecutive-failure sub-cap, distinct from the total round cap (MAX_ROUNDS,…](#af-079)
 - [80. run — Cumulative agent-timeout sub-cap, the sibling of the consecutive cap for the…](#af-080)
 - [81. route · Decide phases — Real-time review triggers: process the SAME managed set the scheduled scan does,…](#af-081)
 - [82. route · Decide phases — Comment-command sugar over the labels: TAKEOVER_COMMAND applies TAKEOVER_LABEL,…](#af-082)
@@ -184,7 +184,7 @@ task-oriented guides — what a maintainer types and what happens next — see:
 - [120. review-address · Prepare branch and feedback — Growth audit: a budget breach engages Critical-only AND makes the round a…](#af-120)
 - [121. review-address · Prepare branch and feedback — Conflict-handoff idempotence: a conflict verdict parks the PR at a genuinely…](#af-121)
 - [122. review-address · Prepare branch and feedback — Growth audit (a size signal triggers a JUDGMENT, never a stop): the window is…](#af-122)
-- [123. review-address · Prepare branch and feedback — The agent below runs for up to 130 minutes and the verification gate adds more,…](#af-123)
+- [123. review-address · Post autofix status comment — The agent below runs for up to 130 minutes and the verification gate adds more,…](#af-123)
 - [124. review-address · Triage and address — The primary attempt's real budget: 120m, with a 10-minute margin under the…](#af-124)
 - [125. review-address · Triage and address — Prepare severed hooks for its PAT-bearing git ops; THIS step holds no PAT, so…](#af-125)
 - [126. review-address · Repair deterministic rejection — Which side is corrupt is NOT known here — jq -s fails if EITHER input is…](#af-126)
@@ -2283,12 +2283,12 @@ sha does not exist in this repo's object store.
 
 <a id="af-079"></a>
 
-### 79. run — Consecutive-failure sub-cap, distinct from the total round cap above. The total…
+### 79. run — Consecutive-failure sub-cap, distinct from the total round cap (MAX_ROUNDS,…
 
 In `run`.
 
 ```text
-Consecutive-failure sub-cap, distinct from the total round cap above. The
+Consecutive-failure sub-cap, distinct from the total round cap (MAX_ROUNDS, documented at its declaration in qwen-autofix.yml). The
 total cap bounds how many PRODUCTIVE rounds a PR may take; this bounds how
 many rounds may fail IN A ROW with nothing pushed. Under takeover a PR gets
 up to 100 rounds, but a PR that fails to push this many times running is not
@@ -2376,7 +2376,7 @@ still routes.
 
 ### 84. issue-autofix · Sanitize workspace git config — Rather than denylist each exec-vector family (which kept missing new ones), KEEP…
 
-In `issue-autofix` · `Sanitize workspace git config`.
+Duplicated verbatim in 3 places: `issue-autofix` · `Sanitize workspace git config`, `build-cli` · `Sanitize workspace git config`, `review-address` · `Sanitize workspace git config`.
 
 ```text
 Rather than denylist each exec-vector family (which kept missing
@@ -3154,9 +3154,9 @@ bring new evidence to repeat it.
 
 <a id="af-123"></a>
 
-### 123. review-address · Prepare branch and feedback — The agent below runs for up to 130 minutes and the verification gate adds more,…
+### 123. review-address · Post autofix status comment — The agent below runs for up to 130 minutes and the verification gate adds more,…
 
-In `review-address` · `Prepare branch and feedback`.
+In `review-address` · `Post autofix status comment`.
 
 ```text
 The agent below runs for up to 130 minutes and the verification gate adds

@@ -31,10 +31,22 @@ GROWTH_ALLOWANCE="${WORKFLOW_SIZE_GROWTH_ALLOWANCE:-4096}"
 # the slack for the next unreviewed 25 KB.
 SLACK_BYTES=20000
 
+status=0
 declare -A baseline=()
 if [[ -r "${BASELINE_FILE}" ]]; then
-  while read -r recorded name; do
+  # The || clause keeps an unterminated final line, which read reports as a
+  # failure and the loop would otherwise silently drop.
+  while read -r recorded name extra || [[ -n "${recorded}" ]]; do
     [[ -z "${recorded}" || "${recorded}" == \#* ]] && continue
+    # Fail closed on malformed lines: bash evaluates a leading-zero value as
+    # OCTAL at the arithmetic sites below, a non-numeric one errors both
+    # comparisons to false (the ratchet would fail OPEN), and extra fields
+    # key differently in the vitest mirror.
+    if [[ -z "${name}" || -n "${extra}" || ! "${recorded}" =~ ^(0|[1-9][0-9]*)$ ]]; then
+      echo "::error file=${BASELINE_FILE}::${BASELINE_FILE} entry '${recorded}${name:+ ${name}}${extra:+ ${extra}}' is malformed — expected exactly '<bytes> <file>' with a decimal byte count (no leading zeros)"
+      status=1
+      continue
+    fi
     baseline["${name}"]="${recorded}"
   done <"${BASELINE_FILE}"
 else
@@ -42,7 +54,6 @@ else
   exit 1
 fi
 
-status=0
 shopt -s nullglob
 for file in .github/workflows/*.yml .github/workflows/*.yaml; do
   if ! size="$(wc -c <"${file}")"; then

@@ -4,8 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, win32 } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 // GitHub does not start runs for a workflow file over 500 KB (512,000 bytes)
@@ -23,9 +32,10 @@ const gateBytes = Number(
   gateScript.match(/GATE_BYTES="\$\{WORKFLOW_SIZE_GATE_BYTES:-(\d+)\}"/)?.[1],
 );
 
-const workflowFiles = readdirSync(WORKFLOW_DIR)
-  .filter((name) => name.endsWith('.yml') || name.endsWith('.yaml'))
-  .map((name) => join(WORKFLOW_DIR, name));
+const workflowNames = readdirSync(WORKFLOW_DIR).filter(
+  (name) => name.endsWith('.yml') || name.endsWith('.yaml'),
+);
+const workflowFiles = workflowNames.map((name) => join(WORKFLOW_DIR, name));
 
 describe('workflow file size', () => {
   it('keeps the gate below GitHub 500 KB start-runs limit', () => {
@@ -59,13 +69,18 @@ describe('workflow size growth ratchet', () => {
   // gave 25 KB back in one feature commit two days later. The ratchet turns
   // that drift into a reviewed line.
   const baselinePath = join(WORKFLOW_DIR, '.size-baseline');
+  const baselineLines = readFileSync(baselinePath, 'utf8')
+    .split('\n')
+    .filter((l) => l.trim() && !l.trimStart().startsWith('#'));
   const baseline = new Map(
-    readFileSync(baselinePath, 'utf8')
-      .split('\n')
-      .filter((l) => l.trim() && !l.trimStart().startsWith('#'))
+    baselineLines
       .map((l) => l.trim().split(/\s+/))
       .map(([bytes, name]) => [name, Number(bytes)]),
   );
+  // node:path join emits backslashes on the merge-queue Windows lane, where
+  // splitting on '/' alone finds no separator and hands back the whole path
+  // as the key — every baseline lookup must accept both separators.
+  const workflowName = (file) => file.split(/[\\/]/).pop();
   const allowance = Number(
     gateScript.match(
       /GROWTH_ALLOWANCE="\$\{WORKFLOW_SIZE_GROWTH_ALLOWANCE:-(\d+)\}"/,
@@ -76,18 +91,24 @@ describe('workflow size growth ratchet', () => {
     expect(allowance).toBeGreaterThan(0);
   });
 
+  it('keys win32-style paths by the file name too (merge-queue Windows lane)', () => {
+    for (const name of workflowNames) {
+      expect(workflowName(win32.join(WORKFLOW_DIR, name))).toBe(name);
+    }
+  });
+
   it.each(workflowFiles)('%s has a baseline entry', (file) => {
-    expect(baseline.has(file.split('/').pop())).toBe(true);
+    expect(baseline.has(workflowName(file))).toBe(true);
   });
 
   it.each(workflowFiles)('%s is within its baseline allowance', (file) => {
     const bytes = Buffer.byteLength(readFileSync(file));
-    const recorded = baseline.get(file.split('/').pop());
+    const recorded = baseline.get(workflowName(file));
     expect(bytes).toBeLessThanOrEqual(recorded + allowance);
   });
 
   it('records no file that no longer exists', () => {
-    const present = new Set(workflowFiles.map((f) => f.split('/').pop()));
+    const present = new Set(workflowFiles.map((f) => workflowName(f)));
     expect([...baseline.keys()].filter((n) => !present.has(n))).toEqual([]);
   });
 
@@ -96,7 +117,133 @@ describe('workflow size growth ratchet', () => {
     // rejects, so the two gates can never disagree about what is allowed.
     expect([...baseline].filter(([, b]) => b > gateBytes)).toEqual([]);
   });
+
+  it('keeps every baseline entry in the format the gate parses', () => {
+    // The gate fails closed on lines that are not exactly '<bytes> <file>'
+    // with a decimal byte count; this mirror must red on the same lines here
+    // instead of keying on field 2 while CI keys on the rest of the line.
+    for (const line of baselineLines) {
+      const fields = line.trim().split(/\s+/);
+      expect(fields, line).toHaveLength(2);
+      expect(fields[0], line).toMatch(/^(0|[1-9][0-9]*)$/);
+    }
+  });
 });
+
+describe.skipIf(process.platform === 'win32')(
+  'check-workflow-size.sh execution',
+  () => {
+    // The block above re-implements the gate's arithmetic in JS; only running
+    // the real script pins its decision branches (growth, missing entry,
+    // missing baseline, slack warning, malformed line).
+    const gatePath = join(
+      process.cwd(),
+      '.github',
+      'scripts',
+      'check-workflow-size.sh',
+    );
+    const runGate = ({ files, baseline }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'workflow-size-gate-'));
+      try {
+        const fixtureDir = join(dir, WORKFLOW_DIR);
+        mkdirSync(fixtureDir, { recursive: true });
+        for (const [name, bytes] of Object.entries(files)) {
+          writeFileSync(join(fixtureDir, name), 'a'.repeat(bytes));
+        }
+        if (baseline !== undefined) {
+          writeFileSync(join(fixtureDir, '.size-baseline'), baseline);
+        }
+        return spawnSync('bash', [gatePath], { cwd: dir, encoding: 'utf8' });
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+
+    it('passes a workflow at its recorded size', () => {
+      const result = runGate({
+        files: { 'small.yml': 100 },
+        baseline: '100 small.yml\n',
+      });
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain('✅');
+    });
+
+    it('fails a workflow grown past its baseline plus allowance', () => {
+      const result = runGate({
+        files: { 'small.yml': 5000 },
+        baseline: '100 small.yml\n',
+      });
+      expect(result.status).toBe(1);
+      expect(result.stdout).toContain('grew to 5000 bytes');
+    });
+
+    it('fails a workflow with no baseline entry', () => {
+      const result = runGate({
+        files: { 'small.yml': 100 },
+        baseline: '# header only\n',
+      });
+      expect(result.status).toBe(1);
+      expect(result.stdout).toContain('has no entry');
+      expect(result.stdout).toContain("Add '100 small.yml'");
+    });
+
+    it('fails closed when the baseline file is missing', () => {
+      const result = runGate({ files: { 'small.yml': 100 } });
+      expect(result.status).toBe(1);
+      expect(result.stdout).toContain('missing or unreadable');
+    });
+
+    it('fails closed on a value that is not a decimal byte count', () => {
+      // Bash evaluates leading zeros as octal and errors on non-numeric
+      // values at the arithmetic sites; either failure mode used to leave
+      // the ratchet green.
+      for (const bad of ['4l9995', '1e3', '09023', '0070142']) {
+        const result = runGate({
+          files: { 'small.yml': 100 },
+          baseline: `${bad} small.yml\n`,
+        });
+        expect(result.status, bad).toBe(1);
+        expect(result.stdout, bad).toContain('is malformed');
+      }
+    });
+
+    it('fails closed on a line with extra fields', () => {
+      const result = runGate({
+        files: { 'small.yml': 100 },
+        baseline: '70142 small.yml # bumped for the build-cache job\n',
+      });
+      expect(result.status).toBe(1);
+      expect(result.stdout).toContain('is malformed');
+    });
+
+    it('keeps an unterminated final baseline line', () => {
+      const result = runGate({
+        files: { 'small.yml': 100 },
+        baseline: '100 small.yml',
+      });
+      expect(result.status).toBe(0);
+    });
+
+    it('warns when a file shrinks far below its baseline', () => {
+      const result = runGate({
+        files: { 'small.yml': 100 },
+        baseline: '30000 small.yml\n',
+      });
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain('::warning');
+      expect(result.stdout).toContain('under its recorded 30000');
+    });
+
+    it('fails a file past the absolute gate', () => {
+      const result = runGate({
+        files: { 'big.yml': 470_001 },
+        baseline: '470001 big.yml\n',
+      });
+      expect(result.status).toBe(1);
+      expect(result.stdout).toContain("past this repo's");
+    });
+  },
+);
 
 describe('qwen-autofix.yml design-record pointers', () => {
   const workflow = readFileSync(join(WORKFLOW_DIR, 'qwen-autofix.yml'), 'utf8');
