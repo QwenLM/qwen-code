@@ -537,6 +537,37 @@ describe('PlanExecutionView', () => {
     container.remove();
   });
 
+  it('floors the completion percentage so a nearly-done plan never reads 100%', () => {
+    // 2-of-3 completed is where floor and round diverge (66 vs 67); the
+    // existing 1-of-3 fixture (33) is identical under both, so it cannot
+    // catch a floor→round regression that would report a premature 100%
+    // for plans with 200+ steps.
+    const twoOfThree: TodoItem[] = [
+      { id: 'research', content: 'Research', status: 'completed' },
+      { id: 'build', content: 'Build', status: 'completed' },
+      { id: 'verify', content: 'Verify', status: 'pending' },
+    ];
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <PlanExecutionView todos={twoOfThree} tools={[]} tasks={[]} />
+        </I18nProvider>,
+      );
+    });
+
+    expect(container.textContent).toContain('66%');
+    expect(container.textContent).not.toContain('67%');
+    expect(container.textContent).toContain('2 / 3');
+    const progress = container.querySelector('[role="progressbar"]');
+    expect(progress?.getAttribute('aria-valuenow')).toBe('66');
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
   it('locates the active step once and exposes a manual locate action', () => {
     const rect = (left: number, width: number) =>
       ({
@@ -565,6 +596,14 @@ describe('PlanExecutionView', () => {
     const widthSpy = vi
       .spyOn(HTMLElement.prototype, 'clientWidth', 'get')
       .mockReturnValue(300);
+    // Pin the viewport height too: locate centres the focused step on BOTH
+    // axes — a tall graph overflows the fixed-height workflow page downwards,
+    // and scrollTo preserves scrollTop when only `left` is passed. With
+    // clientHeight 240 and a node of height 80 at top 0:
+    // top = 0 + 0 - 0 - (240 - 80) / 2 = -80.
+    const heightSpy = vi
+      .spyOn(HTMLElement.prototype, 'clientHeight', 'get')
+      .mockReturnValue(240);
     const scrollTo = vi.fn();
     const originalScrollTo = HTMLElement.prototype.scrollTo;
     Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
@@ -591,7 +630,11 @@ describe('PlanExecutionView', () => {
           </I18nProvider>,
         );
       });
-      expect(scrollTo).toHaveBeenCalledWith({ left: 550, behavior: 'auto' });
+      expect(scrollTo).toHaveBeenCalledWith({
+        left: 550,
+        top: -80,
+        behavior: 'auto',
+      });
 
       act(() => {
         root.render(
@@ -613,6 +656,7 @@ describe('PlanExecutionView', () => {
       });
       expect(scrollTo).toHaveBeenLastCalledWith({
         left: 550,
+        top: -80,
         behavior: 'smooth',
       });
     } finally {
@@ -621,6 +665,7 @@ describe('PlanExecutionView', () => {
       animationSpy.mockRestore();
       rectSpy.mockRestore();
       widthSpy.mockRestore();
+      heightSpy.mockRestore();
       if (originalScrollTo) {
         Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
           configurable: true,
