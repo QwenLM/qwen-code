@@ -1057,6 +1057,50 @@ describe('validateNewSideAnchors — the Aone write-path gate', () => {
     expect(v.reason).toContain('sits in no new-side hunk');
   });
 
+  it('refuses the clamped position INSIDE a pure-deletion hunk — the newCount guard', () => {
+    // gone.ts's `@@ -3,2 +2,0 @@` parses to newStart=2, newCount=0,
+    // newEnd=2 (clamped). Line 3 sits outside the clamped range with or
+    // without the guard, so it cannot witness it; line 2 sits INSIDE
+    // [newStart, newEnd] and is rejected ONLY by the `newCount > 0` guard.
+    // Deleting that guard flips this to valid — an off-diff anchor passing.
+    const [v] = validateNewSideAnchors(MULTI_DIFF, [
+      { path: 'gone.ts', line: 2 },
+    ]);
+    expect(v.valid).toBe(false);
+    expect(v.reason).toContain('sits in no new-side hunk');
+  });
+
+  it('refuses a non-integer line — a fraction is not a postable anchor', () => {
+    // 11.5 sits inside the hunk's span, but it is not a whole line; the
+    // platform would post it nowhere meaningful. The gate must reject the
+    // input domain, not certify it against the hunk range.
+    const [v] = validateNewSideAnchors(PAY_DIFF, [
+      { path: 'src/pay.ts', line: 11.5 },
+    ]);
+    expect(v.valid).toBe(false);
+    expect(v.reason).toContain('positive whole number');
+  });
+
+  it('refuses a non-integer startLine too', () => {
+    const [v] = validateNewSideAnchors(PAY_DIFF, [
+      { path: 'src/pay.ts', line: 12, startLine: 10.5 },
+    ]);
+    expect(v.valid).toBe(false);
+    expect(v.reason).toContain('positive whole number');
+  });
+
+  it('refuses a reversed range even when both numbers sit in hunks', () => {
+    // With hunks [1-4] and [21-22], {line:10, startLine:21} sets lo=21,
+    // hi=10; lo > hi degenerates the containment test and line 10 — the
+    // GAP between the hunks — would certify. The range ends before it
+    // begins; reject the domain before the hunk scan.
+    const [v] = validateNewSideAnchors(MULTI_DIFF, [
+      { path: 'multi.ts', line: 10, startLine: 21 },
+    ]);
+    expect(v.valid).toBe(false);
+    expect(v.reason).toContain('ends before it begins');
+  });
+
   it('validates a batch positionally, one verdict per check', () => {
     const verdicts = validateNewSideAnchors(PAY_DIFF, [
       { path: 'src/pay.ts', line: 11 },

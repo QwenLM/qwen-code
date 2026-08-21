@@ -643,6 +643,17 @@ export interface NewSideAnchorVerdict {
 }
 
 /**
+ * A postable line — a positive whole number. This boundary vouches for
+ * hand-typed numbers, so it rejects the input domain itself before the
+ * hunk scan: a fraction inside a hunk's span, or a reversed range whose
+ * `lo > hi` degenerates the containment test, would otherwise certify an
+ * anchor the platform (which validates nothing) then posts silently wrong.
+ */
+function isWholeLine(n: number): boolean {
+  return Number.isSafeInteger(n) && n > 0;
+}
+
+/**
  * Validate hand-typed line anchors against a captured diff's NEW side —
  * the check GitHub performs server-side (and answers with an
  * all-or-nothing 422), performed client-side for the Aone write path,
@@ -669,6 +680,21 @@ export function validateNewSideAnchors(
   const byPath = new Map<string, DiffFile>(files.map((f) => [f.path, f]));
 
   return checks.map((check) => {
+    if (
+      !isWholeLine(check.line) ||
+      (check.startLine !== undefined && !isWholeLine(check.startLine))
+    ) {
+      return {
+        valid: false,
+        reason: 'line is not a positive whole number',
+      };
+    }
+    if (check.startLine !== undefined && check.startLine > check.line) {
+      return {
+        valid: false,
+        reason: 'the range ends before it begins',
+      };
+    }
     if (
       (check.side !== undefined && check.side !== 'RIGHT') ||
       (check.startSide !== undefined && check.startSide !== 'RIGHT')

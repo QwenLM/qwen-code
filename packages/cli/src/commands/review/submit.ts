@@ -400,6 +400,106 @@ function structuralProblems(payload: ReviewPayload): string[] {
   return problems;
 }
 
+/**
+ * The per-comment shape checks the consistency gate refuses. One statement,
+ * two readers: `inconsistencies` reports them as the loud refusal, and the
+ * Aone anchor gate consults them to decide a comment is too malformed to
+ * anchor and must be LEFT to that refusal instead of relocated/discarded.
+ * Both boundaries must agree on what is too malformed to anchor, or a shape
+ * the gate disposes is a refusal the operator never hears — so the list is
+ * written once here and any future shape rule lands in both places at once.
+ */
+function commentShapeProblems(
+  c: ReviewComment,
+  i: number,
+  attribution: boolean,
+): string[] {
+  const problems: string[] = [];
+  const at = `comments[${i}]`;
+  // `path` must be a non-empty STRING — a truthy non-string (a number, an
+  // object) is not a path the write seam can post, and `!c.path` alone lets
+  // it through to the platform.
+  if (typeof c.path !== 'string' || c.path === '') {
+    problems.push(`${at} has no \`path\``);
+  }
+  if (!c.body) problems.push(`${at} has no \`body\` — an empty comment`);
+
+  // The verdict above was counted from these markers, so a body carrying
+  // neither weighed nothing in it. Step 6 already refuses unmarked drafts,
+  // but the skill's own re-compose instruction expects the comment set to
+  // churn after Step 6 — and a marker lost in that churn reaches exactly
+  // this boundary, the one that posts. A blocker that weighs nothing
+  // approves the review it should block.
+  if (c.body && severityOf(c) === null) {
+    problems.push(
+      `${at} opens with neither ${CRITICAL_PREFIX} nor ` +
+        `${SUGGESTION_PREFIX} — the verdict counts comments by their ` +
+        `severity marker, and an unmarked one weighs nothing in it`,
+    );
+  }
+
+  // A body that renders as nothing is the empty case wearing scaffolding.
+  // The check runs the FULL post-transform chain (plus the canonical
+  // footer that normalize may have appended) and projects through
+  // rendersAsNothing: whitespace-only, Cf-only, HTML-comment-only, and
+  // hollowed-fence residue all render as nothing on GitHub, and a
+  // scaffolded-but-invisible comment that posts counts toward the verdict
+  // and re-promotes as an unanswerable blocker.
+  if (c.body && severityOf(c) !== null) {
+    const stripped = stripReviewFooter(stripForUnattributedPost(c.body));
+    if (rendersAsNothing(stripped)) {
+      problems.push(
+        `${at} renders as nothing (marker-only, empty comment, or ` +
+          `otherwise invisible) — redraft it with the finding's description`,
+      );
+    } else if (!attribution && swallowsAppendedMarker(stripped)) {
+      // The prefix strip can move a fence delimiter to line-leading
+      // position on a draft whose delimiter sat mid-line; the unclosed
+      // fence then swallows the appended invisible marker as visible
+      // code and the claim into its info string. The exposure is
+      // created by the strip, so the check runs on the post-strip
+      // shape, mirroring the fence refusal the body lists apply.
+      problems.push(
+        `${at} leaves a code fence open in its posted shape — the ` +
+          `invisible marker this mode appends would post inside it as ` +
+          `visible code. Redraft it quoting the code inline or ` +
+          `indented instead`,
+      );
+    }
+  }
+
+  if (!isDiffLine(c.line)) {
+    problems.push(
+      `${at} has no usable \`line\` (${JSON.stringify(c.line)}) — a line is a ` +
+        `positive whole number; resolve its anchor first`,
+    );
+  }
+
+  // A multi-line comment without both side fields is a 422 that takes the
+  // whole review with it. `start_line` must also *be* a line, and must come
+  // before the line it ends on.
+  if (c.start_line !== undefined) {
+    if (!isDiffLine(c.start_line)) {
+      problems.push(
+        `${at} has a \`start_line\` of ${JSON.stringify(c.start_line)}, ` +
+          `which is not a positive whole number`,
+      );
+    } else if (isDiffLine(c.line) && c.start_line > c.line) {
+      problems.push(
+        `${at} starts at ${c.start_line} and ends at ${c.line} — a range ` +
+          `cannot end before it begins`,
+      );
+    }
+    if (c.side !== 'RIGHT' || c.start_side !== 'RIGHT') {
+      problems.push(
+        `${at} sets \`start_line\` without \`side\` and ` +
+          `\`start_side\` — GitHub 422s the entire review`,
+      );
+    }
+  }
+  return problems;
+}
+
 function inconsistencies(
   payload: ReviewPayload,
   event: string,
@@ -422,83 +522,7 @@ function inconsistencies(
   // each of these discards every blocker in the review along with itself. The
   // API is the wrong place to find out.
   comments.forEach((c, i) => {
-    const at = `comments[${i}]`;
-    if (!c.path) problems.push(`${at} has no \`path\``);
-    if (!c.body) problems.push(`${at} has no \`body\` — an empty comment`);
-
-    // The verdict above was counted from these markers, so a body carrying
-    // neither weighed nothing in it. Step 6 already refuses unmarked drafts,
-    // but the skill's own re-compose instruction expects the comment set to
-    // churn after Step 6 — and a marker lost in that churn reaches exactly
-    // this boundary, the one that posts. A blocker that weighs nothing
-    // approves the review it should block.
-    if (c.body && severityOf(c) === null) {
-      problems.push(
-        `${at} opens with neither ${CRITICAL_PREFIX} nor ` +
-          `${SUGGESTION_PREFIX} — the verdict counts comments by their ` +
-          `severity marker, and an unmarked one weighs nothing in it`,
-      );
-    }
-
-    // A body that renders as nothing is the empty case wearing scaffolding.
-    // The check runs the FULL post-transform chain (plus the canonical
-    // footer that normalize may have appended) and projects through
-    // rendersAsNothing: whitespace-only, Cf-only, HTML-comment-only, and
-    // hollowed-fence residue all render as nothing on GitHub, and a
-    // scaffolded-but-invisible comment that posts counts toward the verdict
-    // and re-promotes as an unanswerable blocker.
-    if (c.body && severityOf(c) !== null) {
-      const stripped = stripReviewFooter(stripForUnattributedPost(c.body));
-      if (rendersAsNothing(stripped)) {
-        problems.push(
-          `${at} renders as nothing (marker-only, empty comment, or ` +
-            `otherwise invisible) — redraft it with the finding's description`,
-        );
-      } else if (!attribution && swallowsAppendedMarker(stripped)) {
-        // The prefix strip can move a fence delimiter to line-leading
-        // position on a draft whose delimiter sat mid-line; the unclosed
-        // fence then swallows the appended invisible marker as visible
-        // code and the claim into its info string. The exposure is
-        // created by the strip, so the check runs on the post-strip
-        // shape, mirroring the fence refusal the body lists apply.
-        problems.push(
-          `${at} leaves a code fence open in its posted shape — the ` +
-            `invisible marker this mode appends would post inside it as ` +
-            `visible code. Redraft it quoting the code inline or ` +
-            `indented instead`,
-        );
-      }
-    }
-
-    if (!isDiffLine(c.line)) {
-      problems.push(
-        `${at} has no usable \`line\` (${JSON.stringify(c.line)}) — a line is a ` +
-          `positive whole number; resolve its anchor first`,
-      );
-    }
-
-    // A multi-line comment without both side fields is a 422 that takes the
-    // whole review with it. `start_line` must also *be* a line, and must come
-    // before the line it ends on.
-    if (c.start_line !== undefined) {
-      if (!isDiffLine(c.start_line)) {
-        problems.push(
-          `${at} has a \`start_line\` of ${JSON.stringify(c.start_line)}, ` +
-            `which is not a positive whole number`,
-        );
-      } else if (isDiffLine(c.line) && c.start_line > c.line) {
-        problems.push(
-          `${at} starts at ${c.start_line} and ends at ${c.line} — a range ` +
-            `cannot end before it begins`,
-        );
-      }
-      if (c.side !== 'RIGHT' || c.start_side !== 'RIGHT') {
-        problems.push(
-          `${at} sets \`start_line\` without \`side\` and ` +
-            `\`start_side\` — GitHub 422s the entire review`,
-        );
-      }
-    }
+    problems.push(...commentShapeProblems(c, i, attribution));
   });
   return problems;
 }
@@ -792,29 +816,15 @@ export function runSubmit(
     const disclosures: string[] = [];
     comments.forEach((c, i) => {
       const sev = severityOf(c);
-      // Unmarked comments and comments too malformed to anchor are not
-      // the gate's to dispose — the consistency gate below owns those
-      // refusals, unchanged. The gate rules only WELL-FORMED anchors.
-      // (A reversed range is a shape error, not an anchor one — but a
-      // non-RIGHT `side` is the gate's: the old side is unanchorable on
-      // Aone regardless of shape, and relocating it is the point. A
-      // body that renders as nothing — marker-only, invisible residue —
-      // is likewise the consistency gate's, under its OWN projection,
-      // which includes the footer normalize appended: relocating it
-      // would post a claimless placeholder where the draft owed a
-      // renders-as-nothing refusal.)
+      // Comments too malformed to anchor are not the gate's to dispose — the
+      // consistency gate below owns those refusals, unchanged, and the gate
+      // reads the SAME shape list (commentShapeProblems) that gate reports,
+      // so the two cannot drift: whatever the consistency gate would loudly
+      // refuse, the gate leaves to it. The gate rules only WELL-FORMED
+      // anchors. A single-line comment on a declared non-RIGHT side is
+      // well-formed but unanchorable on Aone — relocating it is the point.
       if (
-        sev === null ||
-        typeof c.path !== 'string' ||
-        c.path === '' ||
-        !isDiffLine(c.line) ||
-        (c.start_line !== undefined &&
-          (!isDiffLine(c.start_line) ||
-            (isDiffLine(c.line) && c.start_line > c.line))) ||
-        (typeof c.body === 'string' &&
-          rendersAsNothing(
-            stripReviewFooter(stripForUnattributedPost(c.body)),
-          )) ||
+        commentShapeProblems(c, i, attribution).length > 0 ||
         verdicts[i]?.valid === true
       ) {
         kept.push(c);

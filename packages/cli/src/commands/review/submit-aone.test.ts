@@ -1473,4 +1473,148 @@ describe('the Aone anchor gate — the validation the platform does not perform'
     expect(out['anchorsRelocated']).toBe(1);
     expect(out['anchorsDiscarded']).toBe(0);
   });
+
+  it('refuses a truthy NON-STRING path loudly at the consistency gate — never the write seam', () => {
+    // A number (or object) `path` is not postable. The gate leaves it to the
+    // consistency gate as a shape problem, and that gate must refuse it by
+    // TYPE: `!c.path` alone lets a truthy 42 through to a platform that
+    // validates nothing, where execFileSync would stringify it into --file.
+    const garbagePath = {
+      commit_id: 'abc123',
+      comments: [{ path: 42, line: 12, body: '**[Critical]** Garbage path.' }],
+      state: { modelId: 'test-model' },
+    };
+    expect(() =>
+      runSubmit(base({ review: writeReview(garbagePath) }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).toThrow(/has no `path`/);
+    expect(submitAoneMock).not.toHaveBeenCalled();
+  });
+
+  it('leaves an open-fence body to the fence refusal even when unanchorable (attribution off)', () => {
+    // The gate must not silently dispose a shape the consistency gate loudly
+    // refuses. An attribution-off body that leaves a code fence open used to
+    // be relocated/discarded when its anchor was out-of-hunk, while the same
+    // body with a valid anchor got the loud fence refusal — one shape defect,
+    // two outcomes keyed on anchor position. Both now refuse loudly.
+    const fence = {
+      commit_id: 'abc123',
+      comments: [
+        { path: 'src/foo.ts', line: 9999, body: '**[Critical]** ``` leaked' },
+      ],
+      state: { modelId: 'test-model' },
+    };
+    expect(() =>
+      runSubmit(base({ review: writeReview(fence) }), 'unknown', {
+        defaultComment: false,
+        attribution: false,
+      }),
+    ).toThrow(/leaves a code fence open/);
+    expect(submitAoneMock).not.toHaveBeenCalled();
+  });
+
+  it('leaves a start_line-without-side comment to the whole-post refusal even when unanchorable', () => {
+    // A multi-line comment missing side/start_side is a GitHub-422 shape the
+    // consistency gate refuses; the gate must not instead dispose it just
+    // because its anchor is out-of-hunk. Same shape, same loud refusal,
+    // regardless of anchor position.
+    const noSide = {
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 9999,
+          start_line: 9998,
+          body: '**[Critical]** Multi-line but no side fields.',
+        },
+      ],
+      state: { modelId: 'test-model' },
+    };
+    expect(() =>
+      runSubmit(base({ review: writeReview(noSide) }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).toThrow(/sets `start_line` without/);
+    expect(submitAoneMock).not.toHaveBeenCalled();
+  });
+
+  it('merges gate discards into an ARRAY suggestionsDiscarded (the list form older revisions write)', () => {
+    // compose-review counts an array suggestionsDiscarded by length; the gate
+    // must add its discards to that length, not replace or drop it. Mutating
+    // `sd.length + anchorsDiscarded` to `sd.length` would silently lose the
+    // gate's discards from the posted total.
+    const arrayList = {
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 9999,
+          body: '**[Suggestion]** Would misanchor.',
+        },
+      ],
+      state: { modelId: 'test-model', suggestionsDiscarded: ['x', 'y'] },
+    };
+    expect(() =>
+      runSubmit(base({ review: writeReview(arrayList) }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(input['suggestionsDiscarded']).toBe(3);
+  });
+
+  it('leaves a GARBAGE suggestionsDiscarded untouched for compose to refuse', () => {
+    // A shape that is neither number nor array nor absent is compose's to
+    // refuse with a field-naming error. The gate must pass it through RAW —
+    // laundering it into its own discard count would post a number compose
+    // owes a loud refusal for.
+    const garbageCount = {
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 9999,
+          body: '**[Suggestion]** Would misanchor.',
+        },
+      ],
+      state: { modelId: 'test-model', suggestionsDiscarded: 'two' },
+    };
+    expect(() =>
+      runSubmit(base({ review: writeReview(garbageCount) }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(input['suggestionsDiscarded']).toBe('two');
+    expect(postedJson()['anchorsDiscarded']).toBe(1);
+  });
+
+  it('merges a relocated Critical into an EXISTING bodyCriticals array, keeping order', () => {
+    // The realistic double-degrade path: resolve-anchors already moved an
+    // unanchorable Critical into bodyCriticals upstream, then the gate
+    // relocates another. Both entries must survive — dropping the prior one
+    // would silently lose an already-relocated blocker from the summary body.
+    const withExisting = {
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 9999,
+          body: '**[Critical]** Would misanchor.',
+        },
+      ],
+      state: { modelId: 'test-model', bodyCriticals: ['prior blocker'] },
+    };
+    expect(() =>
+      runSubmit(base({ review: writeReview(withExisting) }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(input['bodyCriticals']).toEqual([
+      'prior blocker',
+      'src/foo.ts:9999 — Would misanchor.',
+    ]);
+  });
 });
