@@ -119,16 +119,15 @@ either form resolves to the same module at runtime. Pick by intent:
 
 Both variants are stable across the F1 lift.
 
-## Backward compatibility
+## CLI integration
 
 CLI code imports event-bus and in-memory channel primitives directly from
 `@qwen-code/acp-bridge/eventBus` and
 `@qwen-code/acp-bridge/inMemoryChannel`.
 
-`packages/cli/src/serve/acp-session-bridge.ts` remains as the CLI-local
-compatibility facade for the broader bridge surface, forwarding previously
-exported symbols (`createHttpAcpBridge`, `defaultSpawnChannelFactory`,
-`BridgeClient`, typed errors, and type aliases) from the lifted subpaths.
+The CLI imports the broader bridge surface from its owning package subpaths.
+Its public serve entrypoint still re-exports the supported bridge factories,
+types, errors, and status helpers for downstream compatibility.
 
 ## See also
 

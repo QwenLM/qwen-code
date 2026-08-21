@@ -62,6 +62,7 @@ import {
   getPersistedClientId,
   persistStableClientId,
 } from './clientLifecycle.js';
+import type { SessionAttachmentLifecycle } from './attachment-lifecycle.js';
 import type {
   ActivePrompt,
   AddDaemonSessionNotice,
@@ -149,10 +150,6 @@ export function resolveSessionRestoreTimeouts(
   };
 }
 
-function clearPendingLoadTimeout(load: PendingSessionLoad): void {
-  if (load.timeout !== undefined) clearTimeout(load.timeout);
-}
-
 export function normalizeWorkspaceIdentity(value: string | undefined): string {
   return value ? value.replace(/\\/g, '/').replace(/\/+$/, '') || '/' : '';
 }
@@ -162,12 +159,9 @@ export interface CreateDaemonSessionActionsArgs {
   sessionRef: RefBox<DaemonSessionClient | undefined>;
   activePromptsRef: RefBox<Map<string, ActivePrompt>>;
   settledPromptsRef: RefBox<Map<string, SettledPrompt>>;
-  pendingSessionLoadRef: RefBox<PendingSessionLoad | undefined>;
-  pendingSessionLoadIdRef: RefBox<number>;
+  attachmentLifecycle: SessionAttachmentLifecycle;
   sessionConfigGeneration: WeakMap<DaemonSessionClient, number>;
   heartbeatSupportedRef: RefBox<boolean>;
-  manualSessionClearRef: RefBox<boolean>;
-  skipNextCleanupDetachSessionRef: RefBox<DaemonSessionClient | undefined>;
   passiveAssistantDoneTimerRef: TimerRef;
   getCreateSessionRequest: () => CreateSessionRequest;
   createDetachedSession: (
@@ -236,12 +230,9 @@ export function createDaemonSessionActions({
   sessionRef,
   activePromptsRef,
   settledPromptsRef,
-  pendingSessionLoadRef,
-  pendingSessionLoadIdRef,
+  attachmentLifecycle,
   sessionConfigGeneration,
   heartbeatSupportedRef,
-  manualSessionClearRef,
-  skipNextCleanupDetachSessionRef,
   passiveAssistantDoneTimerRef,
   getCreateSessionRequest,
   createDetachedSession,
@@ -440,19 +431,9 @@ export function createDaemonSessionActions({
     settledPromptsRef.current.clear();
     setPromptStatus('idle');
     clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
-    if (pendingSessionLoadRef.current) {
-      if (
-        skipNextCleanupDetachSessionRef.current?.sessionId ===
-        pendingSessionLoadRef.current.sessionId
-      ) {
-        skipNextCleanupDetachSessionRef.current = undefined;
-      }
-      clearPendingLoadTimeout(pendingSessionLoadRef.current);
-      pendingSessionLoadRef.current.reject(
-        new DOMException('Session cleared', 'AbortError'),
-      );
-      pendingSessionLoadRef.current = undefined;
-    }
+    attachmentLifecycle.cancelPendingLoad(
+      new DOMException('Session cleared', 'AbortError'),
+    );
     store.reset();
     setRestoreSessionId(undefined);
     setRestoreWorkspaceCwd(undefined);
@@ -464,74 +445,48 @@ export function createDaemonSessionActions({
     signal?: AbortSignal,
     replaySource?: PendingSessionLoad['replaySource'],
   ): Promise<void> {
-    const loadId = pendingSessionLoadIdRef.current + 1;
-    pendingSessionLoadIdRef.current = loadId;
-    if (pendingSessionLoadRef.current) {
-      clearPendingLoadTimeout(pendingSessionLoadRef.current);
-      pendingSessionLoadRef.current.reject(
-        new DOMException(
-          `Session ${mode} superseded by a newer request`,
-          'AbortError',
-        ),
-      );
-    }
-    const loadPromise = new Promise<void>((resolve, reject) => {
-      const restoreTimeouts = resolveSessionRestoreTimeouts(
-        getConnection().capabilities,
-      );
-      const watchdogTimeoutMs =
+    const restoreTimeouts = resolveSessionRestoreTimeouts(
+      getConnection().capabilities,
+    );
+    return attachmentLifecycle.startPendingLoad({
+      sessionId,
+      mode,
+      watchdogTimeoutMs:
         mode === 'attach'
           ? ATTACH_WATCHDOG_TIMEOUT_MS
-          : restoreTimeouts.watchdogTimeoutMs;
-      const timeout =
-        watchdogTimeoutMs === undefined
-          ? undefined
-          : setTimeout(() => {
-              if (pendingSessionLoadRef.current?.id === loadId) {
-                pendingSessionLoadRef.current = undefined;
-                if (sessionRef.current?.sessionId !== sessionId) {
-                  manualSessionClearRef.current = true;
-                  setRestoreSessionId(undefined);
-                  setRestoreWorkspaceCwd(undefined);
-                  setConnection((current) => {
-                    if (
-                      current.status !== 'connecting' ||
-                      current.sessionId !== sessionId
-                    ) {
-                      return current;
-                    }
-                    return {
-                      ...getConnectionAfterSessionClear(current, sessionId),
-                      status: 'disconnected',
-                      sessionId: undefined,
-                    };
-                  });
-                }
-                reject(
-                  dispatchActionError(
-                    addNotice,
-                    `${capitalize(mode)} session failed`,
-                    new Error(`Session ${mode} timed out`),
-                    getSessionLoadNoticeOperation(mode),
-                  ),
-                );
-              }
-            }, watchdogTimeoutMs);
-      pendingSessionLoadRef.current = {
-        id: loadId,
-        sessionId,
-        mode,
-        timeout,
-        ...(mode !== 'attach'
-          ? { requestTimeoutMs: restoreTimeouts.requestTimeoutMs }
-          : {}),
-        resolve,
-        reject,
-        ...(signal ? { signal } : {}),
-        ...(replaySource ? { replaySource } : {}),
-      };
+          : restoreTimeouts.watchdogTimeoutMs,
+      ...(mode !== 'attach'
+        ? { requestTimeoutMs: restoreTimeouts.requestTimeoutMs }
+        : {}),
+      ...(signal ? { signal } : {}),
+      ...(replaySource ? { replaySource } : {}),
+      onTimeout: () => {
+        if (sessionRef.current?.sessionId !== sessionId) {
+          attachmentLifecycle.markManuallyCleared();
+          setRestoreSessionId(undefined);
+          setRestoreWorkspaceCwd(undefined);
+          setConnection((current) => {
+            if (
+              current.status !== 'connecting' ||
+              current.sessionId !== sessionId
+            ) {
+              return current;
+            }
+            return {
+              ...getConnectionAfterSessionClear(current, sessionId),
+              status: 'disconnected',
+              sessionId: undefined,
+            };
+          });
+        }
+        return dispatchActionError(
+          addNotice,
+          `${capitalize(mode)} session failed`,
+          new Error(`Session ${mode} timed out`),
+          getSessionLoadNoticeOperation(mode),
+        );
+      },
     });
-    return loadPromise;
   }
 
   function startSessionSwitch(
@@ -549,14 +504,14 @@ export function createDaemonSessionActions({
         new DOMException('Session load cancelled', 'AbortError'),
       );
     }
-    manualSessionClearRef.current = false;
+    attachmentLifecycle.allowAutomaticAttachment();
     const loadPromise = startPendingSessionLoad(
       sessionId,
       mode,
       signal,
       replaySource,
     );
-    const pendingLoad = pendingSessionLoadRef.current;
+    const pendingLoad = attachmentLifecycle.pendingLoad;
     const currentSession = sessionRef.current;
     const currentSessionId = currentSession?.sessionId;
     const activePrompt = currentSessionId
@@ -589,13 +544,11 @@ export function createDaemonSessionActions({
           );
         });
       if (reloadingCurrentSession) {
-        skipNextCleanupDetachSessionRef.current = currentSession;
+        attachmentLifecycle.preserveCleanupDetach(currentSession);
         void loadPromise
           .then(detachCurrentSession, () => undefined)
           .finally(() => {
-            if (skipNextCleanupDetachSessionRef.current === currentSession) {
-              skipNextCleanupDetachSessionRef.current = undefined;
-            }
+            attachmentLifecycle.releaseCleanupDetachExemption(currentSession);
           });
       } else {
         void detachCurrentSession();
@@ -635,8 +588,8 @@ export function createDaemonSessionActions({
       // replaced the connecting state.
       if (
         !isAbortError(error) &&
-        (pendingSessionLoadRef.current === undefined ||
-          pendingSessionLoadRef.current === pendingLoad)
+        (attachmentLifecycle.pendingLoad === undefined ||
+          attachmentLifecycle.pendingLoad === pendingLoad)
       ) {
         setConnection((current) => ({
           ...current,
@@ -1296,7 +1249,7 @@ export function createDaemonSessionActions({
         return request;
       };
       try {
-        manualSessionClearRef.current = false;
+        attachmentLifecycle.allowAutomaticAttachment();
         // Fold the initial approval mode into the create request so the daemon
         // applies it atomically at spawn (`POST /session` →
         // `spawnOrAttach({ approvalMode })`), avoiding a follow-up
@@ -1349,7 +1302,7 @@ export function createDaemonSessionActions({
           ),
           'Create session timed out',
         );
-        if (manualSessionClearRef.current) {
+        if (attachmentLifecycle.isManuallyCleared) {
           try {
             await withActionTimeout(
               nextSession.detach(),
@@ -1365,7 +1318,7 @@ export function createDaemonSessionActions({
         }
         persistStableClientId(nextSession.clientId, nextSession.sessionId);
         sessionRef.current = nextSession;
-        skipNextCleanupDetachSessionRef.current = nextSession;
+        attachmentLifecycle.preserveCleanupDetach(nextSession);
         setConnection((current) => ({
           ...current,
           status: 'connected',
@@ -1405,7 +1358,7 @@ export function createDaemonSessionActions({
 
     async clearSession() {
       const session = sessionRef.current;
-      manualSessionClearRef.current = true;
+      attachmentLifecycle.markManuallyCleared();
       clearActiveSessionState();
       sessionRef.current = undefined;
       setConnection((current) =>
@@ -1421,7 +1374,7 @@ export function createDaemonSessionActions({
     },
 
     async newSession() {
-      manualSessionClearRef.current = false;
+      attachmentLifecycle.allowAutomaticAttachment();
       clearActiveSessionState();
       setConnection((current) => ({
         ...current,
@@ -2141,7 +2094,7 @@ export function createDaemonSessionActions({
         'branch_session',
       );
       const sourceSessionId = session.sessionId;
-      const loadGeneration = pendingSessionLoadIdRef.current;
+      const loadGeneration = attachmentLifecycle.generation;
       branchInFlight = true;
       try {
         const branchRequest: Promise<DaemonBranchSessionResult> =
@@ -2159,7 +2112,7 @@ export function createDaemonSessionActions({
         const result = await branchRequest;
         const switchStarted =
           sessionRef.current === session &&
-          pendingSessionLoadIdRef.current === loadGeneration;
+          attachmentLifecycle.generation === loadGeneration;
         const restored =
           atRecordId === undefined
             ? (result as DaemonBranchedSession)

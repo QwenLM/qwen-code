@@ -47,6 +47,7 @@ import {
   normalizeWorkspaceIdentity,
   resolveSessionRestoreTimeouts,
 } from './actions.js';
+import { SessionAttachmentLifecycle } from './attachment-lifecycle.js';
 import {
   eventPromptId,
   findLiveJournalRepairSuffix,
@@ -114,7 +115,6 @@ import type {
   DaemonSessionOwnerGuard,
   DaemonSessionProviderProps,
   DaemonWorkspaceEventSignals,
-  PendingSessionLoad,
   SettledPrompt,
 } from './types.js';
 
@@ -944,10 +944,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const lastSessionIdRef = useRef<string | undefined>(undefined);
   const activePromptsRef = useRef<Map<string, ActivePrompt>>(new Map());
   const settledPromptsRef = useRef<Map<string, SettledPrompt>>(new Map());
-  const pendingSessionLoadRef = useRef<PendingSessionLoad | undefined>(
-    undefined,
+  const [attachmentLifecycle] = useState(
+    () => new SessionAttachmentLifecycle(),
   );
-  const pendingSessionLoadIdRef = useRef(0);
   const liveJournalRepairRef = useRef<LiveJournalRepairEpisode | undefined>(
     undefined,
   );
@@ -962,10 +961,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const heartbeatFailureStateRef = useRef<HeartbeatFailureState>({
     consecutiveFailures: 0,
   });
-  const manualSessionClearRef = useRef(false);
-  const skipNextCleanupDetachSessionRef = useRef<
-    DaemonSessionClient | undefined
-  >(undefined);
   const settledRestoredActivePromptSessionsRef = useRef<
     WeakSet<DaemonSessionClient>
   >(new WeakSet());
@@ -1101,8 +1096,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       restoreMode === 'load' &&
       restoreSessionId !== undefined &&
       restoreSessionId === sessionRef.current?.sessionId &&
-      sessionRef.current === skipNextCleanupDetachSessionRef.current;
-    const effectPendingSessionLoad = pendingSessionLoadRef.current;
+      attachmentLifecycle.isCleanupDetachPreserved(sessionRef.current);
+    const effectPendingSessionLoad = attachmentLifecycle.pendingLoad;
     let runnerSession = sessionRef.current;
 
     // ── Batched transcript dispatch ────────────────────────────────
@@ -1189,7 +1184,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         !repair ||
         repair.attempted ||
         !repair.terminalSeen ||
-        pendingSessionLoadRef.current ||
+        attachmentLifecycle.pendingLoad ||
         transcriptHistoryRef.current.loading ||
         sessionRef.current?.sessionId !== repair.sessionId ||
         hasCurrentSessionActivePromptRef.current()
@@ -1232,7 +1227,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         | undefined;
       let reconnectSessionId = restoreSessionId;
       let shouldCreateFreshSession =
-        !manualSessionClearRef.current &&
+        !attachmentLifecycle.isManuallyCleared &&
         !restoreSessionId &&
         newSessionNonce > 0;
       let reconnectAttempt = 0;
@@ -1358,7 +1353,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               capabilityFeatures.includes(WORKSPACE_ACP_STATUS_FEATURE);
             if (
               (shouldDeferInitialSessionCreation ||
-                manualSessionClearRef.current) &&
+                attachmentLifecycle.isManuallyCleared) &&
               !restoreSessionId &&
               !reconnectSessionId &&
               !shouldCreateFreshSession
@@ -1416,7 +1411,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               );
               const preserveClearedSessionCommands =
                 skillsResult.status === 'rejected' ||
-                (manualSessionClearRef.current &&
+                (attachmentLifecycle.isManuallyCleared &&
                   deferredSkillCommands.length === 0);
               setConnection((current) => ({
                 ...current,
@@ -1512,8 +1507,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               }));
             }
             const attemptedLoad =
-              pendingSessionLoadRef.current?.sessionId === targetSessionId
-                ? pendingSessionLoadRef.current
+              attachmentLifecycle.pendingLoad?.sessionId === targetSessionId
+                ? attachmentLifecycle.pendingLoad
                 : undefined;
             const restoreRequestTimeoutMs =
               attemptedLoad?.requestTimeoutMs ??
@@ -1596,7 +1591,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               preservingTranscriptDuringLoad &&
               attemptedLoad?.sessionId === nextSession.sessionId &&
               (attemptedLoad.signal?.aborted ||
-                pendingSessionLoadRef.current !== attemptedLoad)
+                attachmentLifecycle.pendingLoad !== attemptedLoad)
             ) {
               const previousSession = sessionRef.current;
               if (nextSession !== previousSession) {
@@ -1607,18 +1602,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   );
                 });
               }
-              if (pendingSessionLoadRef.current === attemptedLoad) {
-                pendingSessionLoadRef.current = undefined;
-                if (attemptedLoad.timeout !== undefined) {
-                  clearTimeout(attemptedLoad.timeout);
-                }
-                attemptedLoad.reject(
-                  new DOMException('Session load cancelled', 'AbortError'),
-                );
-              }
-              if (skipNextCleanupDetachSessionRef.current === previousSession) {
-                skipNextCleanupDetachSessionRef.current = undefined;
-              }
+              attachmentLifecycle.rejectPendingLoad(
+                attemptedLoad,
+                new DOMException('Session load cancelled', 'AbortError'),
+              );
+              attachmentLifecycle.releaseCleanupDetachExemption(
+                previousSession,
+              );
               loadingRequestedSession = false;
               if (previousSession?.sessionId === nextSession.sessionId) {
                 session = previousSession;
@@ -1656,24 +1646,17 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                     );
                   });
                 }
-                if (pendingSessionLoadRef.current === attemptedLoad) {
-                  pendingSessionLoadRef.current = undefined;
-                  if (attemptedLoad.timeout !== undefined) {
-                    clearTimeout(attemptedLoad.timeout);
-                  }
-                  attemptedLoad.reject(
-                    new Error(
-                      nextSession.replayDegraded === true
-                        ? 'Fresh replay is degraded'
-                        : 'Fresh replay does not contain the complete target turn',
-                    ),
-                  );
-                }
-                if (
-                  skipNextCleanupDetachSessionRef.current === previousSession
-                ) {
-                  skipNextCleanupDetachSessionRef.current = undefined;
-                }
+                attachmentLifecycle.rejectPendingLoad(
+                  attemptedLoad,
+                  new Error(
+                    nextSession.replayDegraded === true
+                      ? 'Fresh replay is degraded'
+                      : 'Fresh replay does not contain the complete target turn',
+                  ),
+                );
+                attachmentLifecycle.releaseCleanupDetachExemption(
+                  previousSession,
+                );
                 if (previousSession?.sessionId === nextSession.sessionId) {
                   session = previousSession;
                   reconnectSessionId = previousSession.sessionId;
@@ -1773,7 +1756,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           hasCurrentSessionActivePromptRef.current = hasSessionActivePrompt;
           setPromptStatus(hasSessionActivePrompt() ? 'streaming' : 'idle');
 
-          const pendingLoad = pendingSessionLoadRef.current;
+          const pendingLoad = attachmentLifecycle.pendingLoad;
           const pendingLoadToResolve =
             pendingLoad?.sessionId === activeSession.sessionId
               ? pendingLoad
@@ -2249,14 +2232,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             lastHandledSessionIdRef.current = activeSession.sessionId;
             lastHandledWorkspaceRef.current = activeSession.workspaceCwd;
             lastHandledClientIdRef.current = undefined;
-            pendingSessionLoadRef.current = undefined;
-            if (pendingLoadToResolve.timeout !== undefined) {
-              clearTimeout(pendingLoadToResolve.timeout);
-            }
-            if (skipNextCleanupDetachSessionRef.current === activeSession) {
-              skipNextCleanupDetachSessionRef.current = undefined;
-            }
-            pendingLoadToResolve.resolve();
+            attachmentLifecycle.resolvePendingLoad(pendingLoadToResolve);
+            attachmentLifecycle.releaseCleanupDetachExemption(activeSession);
           }
 
           const canReuseSessionMetadata =
@@ -2931,7 +2908,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             }));
             return;
           }
-          if (manualSessionClearRef.current) {
+          if (attachmentLifecycle.isManuallyCleared) {
             session = undefined;
             sessionRef.current = undefined;
             hasCurrentSessionActivePromptRef.current = () => false;
@@ -2993,7 +2970,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const message =
             error instanceof Error ? error.message : String(error);
           const errorStatus = extractHttpStatus(error);
-          const pendingLoad = pendingSessionLoadRef.current;
+          const pendingLoad = attachmentLifecycle.pendingLoad;
           const restoreRetryDelayMs = getRestoreInProgressRetryDelayMs(error);
           const pendingLoadMatches =
             pendingLoad === undefined ||
@@ -3021,7 +2998,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             );
             if (
               pendingLoad !== undefined &&
-              pendingSessionLoadRef.current !== pendingLoad
+              attachmentLifecycle.pendingLoad !== pendingLoad
             ) {
               return;
             }
@@ -3047,17 +3024,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             (pendingLoad.sessionId === restoreSessionId ||
               pendingLoad.sessionId === reconnectSessionId)
           ) {
-            if (
-              skipNextCleanupDetachSessionRef.current?.sessionId ===
-              pendingLoad.sessionId
-            ) {
-              skipNextCleanupDetachSessionRef.current = undefined;
-            }
-            pendingSessionLoadRef.current = undefined;
-            if (pendingLoad.timeout !== undefined) {
-              clearTimeout(pendingLoad.timeout);
-            }
-            pendingLoad.reject(error);
+            attachmentLifecycle.rejectPendingLoad(pendingLoad, error);
           }
           if (isAuthFailure || isTerminal) {
             // Auth failures (401/403) and terminal session errors (404/410)
@@ -3226,7 +3193,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         session === undefined && sessionRef.current === undefined;
       const keepSessionForNextEffect =
         ownsCurrentSession &&
-        session === skipNextCleanupDetachSessionRef.current;
+        attachmentLifecycle.isCleanupDetachPreserved(session);
       const isUnmounting = !mountedRef.current;
       if (ownsCurrentSession || ownsEmptyState) {
         // A same-attachment effect restart must flush events already yielded by
@@ -3244,17 +3211,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       }
       if (
         effectPendingSessionLoad !== undefined &&
-        pendingSessionLoadRef.current === effectPendingSessionLoad &&
+        attachmentLifecycle.isCurrentLoad(effectPendingSessionLoad) &&
         (ownsCurrentSession || ownsEmptyState) &&
         (!keepSessionForNextEffect || isUnmounting)
       ) {
-        if (pendingSessionLoadRef.current.timeout !== undefined) {
-          clearTimeout(pendingSessionLoadRef.current.timeout);
-        }
-        pendingSessionLoadRef.current.reject(
+        attachmentLifecycle.rejectPendingLoad(
+          effectPendingSessionLoad,
           new DOMException('Session load interrupted by cleanup', 'AbortError'),
         );
-        pendingSessionLoadRef.current = undefined;
       }
       if (
         ownsCurrentSession &&
@@ -3275,6 +3239,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       }
     };
   }, [
+    attachmentLifecycle,
     autoConnect,
     autoReconnect,
     resolvedBaseUrl,
@@ -3407,7 +3372,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             setPromptStatus('idle');
             if (sessionRef.current === session) {
               if (missingSession) {
-                manualSessionClearRef.current = true;
+                attachmentLifecycle.markManuallyCleared();
               }
               sessionRef.current = undefined;
             }
@@ -3441,6 +3406,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       clearInterval(timer);
     };
   }, [
+    attachmentLifecycle,
     connection.sessionId,
     connection.status,
     heartbeatFailureThreshold,
@@ -3454,12 +3420,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         sessionRef,
         activePromptsRef,
         settledPromptsRef,
-        pendingSessionLoadRef,
-        pendingSessionLoadIdRef,
+        attachmentLifecycle,
         sessionConfigGeneration: sessionConfigGenerationRef.current,
         heartbeatSupportedRef,
-        manualSessionClearRef,
-        skipNextCleanupDetachSessionRef,
         passiveAssistantDoneTimerRef,
         hasSessionActivePrompt: () =>
           hasCurrentSessionActivePromptRef.current(),
@@ -3549,6 +3512,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       }),
     [
       addNotice,
+      attachmentLifecycle,
       clientId,
       resolvedBaseUrl,
       resolvedToken,

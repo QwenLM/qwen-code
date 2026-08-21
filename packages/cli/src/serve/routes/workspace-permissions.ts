@@ -20,8 +20,7 @@ import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import { WorkspacePermissionRulesSessionRequiredError } from '../workspace-service/types.js';
 import { parseAndValidateWorkspaceClientId } from '../server/request-helpers.js';
 import {
-  requireTrustedWorkspaceRuntime,
-  resolveWorkspaceRuntimeFromParam,
+  resolveTrustedWorkspaceRuntimeFromParam,
   sendGenerationClosedError,
 } from '../workspace-route-runtime.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
@@ -197,12 +196,12 @@ export function registerWorkspaceQualifiedPermissionsRoutes(
   },
 ): void {
   app.get('/workspaces/:workspace/permissions', (req, res) => {
-    const runtime = resolveWorkspaceRuntimeFromParam(
+    const runtime = resolveTrustedWorkspaceRuntimeFromParam(
       deps.workspaceRegistry,
       req,
       res,
     );
-    if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+    if (!runtime) return;
     try {
       res
         .status(200)
@@ -228,12 +227,12 @@ export function registerWorkspaceQualifiedPermissionsRoutes(
     '/workspaces/:workspace/permissions',
     deps.mutate({ strict: true }),
     async (req, res) => {
-      const runtime = resolveWorkspaceRuntimeFromParam(
+      const runtime = resolveTrustedWorkspaceRuntimeFromParam(
         deps.workspaceRegistry,
         req,
         res,
       );
-      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+      if (!runtime) return;
       const body = deps.safeBody(req);
       const scope = body['scope'];
       const ruleType = body['ruleType'];

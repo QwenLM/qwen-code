@@ -63,13 +63,13 @@ import {
   createClientMcpServerProvider,
 } from './acp-http/client-mcp-sender-registry.js';
 import { CdpTunnelRegistry } from './cdp-tunnel/cdp-tunnel-registry.js';
+import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
+import { createAcpSessionBridge } from '@qwen-code/acp-bridge/bridge';
 import {
-  canonicalizeWorkspace,
-  createAcpSessionBridge,
   MAX_SESSION_RESTORE_TIMEOUT_MS,
   resolveSessionRestoreTimeoutMs,
-  type AcpSessionBridge,
-} from './acp-session-bridge.js';
+} from '@qwen-code/acp-bridge/sessionRestoreTimeout';
+import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
   type ServeAuthProviderInstallRequest,
   type ServeAuthProviderInstallResult,
@@ -313,7 +313,7 @@ export {
   resolveBoundWorkspacesFromIdeEnv,
   resolveBridgeFsFactory,
 } from './server/fs-factory.js';
-export { PromptDeadlineExceededError } from './acp-session-bridge.js';
+export { PromptDeadlineExceededError } from '@qwen-code/acp-bridge/bridgeErrors';
 export { resolvePromptDeadlineMs } from './server/prompt-deadline.js';
 export { detectFromLoopback } from './server/request-helpers.js';
 export {

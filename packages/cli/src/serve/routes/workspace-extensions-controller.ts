@@ -21,7 +21,7 @@ import {
 } from '../../i18n/index.js';
 import { resolveSupportedLanguage } from '../../i18n/languages.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
-import type { AcpSessionBridge } from '../acp-session-bridge.js';
+import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import { parseAndValidateWorkspaceClientId } from '../server/request-helpers.js';
 import {
   STATUS_SCHEMA_VERSION,

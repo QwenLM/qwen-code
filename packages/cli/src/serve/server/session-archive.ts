@@ -8,14 +8,14 @@ import {
   SessionService,
   type SessionLocation,
 } from '@qwen-code/qwen-code-core';
-import type { AcpSessionBridge } from '../acp-session-bridge.js';
+import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
   SessionArchivedError,
   SessionArchivingError,
   SessionConflictError,
   SessionNotArchivedError,
   SessionNotFoundError,
-} from '../acp-session-bridge.js';
+} from '@qwen-code/acp-bridge/bridgeErrors';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { safeLogValue } from './request-helpers.js';
 import { normalizeSessionIdForLookup } from '../../config/session-id.js';

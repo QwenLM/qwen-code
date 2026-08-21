@@ -12,7 +12,7 @@ import {
 } from '../server/request-helpers.js';
 import {
   requireTrustedWorkspaceRuntime,
-  resolveWorkspaceRuntimeFromParam,
+  resolveTrustedWorkspaceRuntimeFromParam,
 } from '../workspace-route-runtime.js';
 import type {
   WorkspaceRegistry,
@@ -326,12 +326,12 @@ export function registerWorkspaceQualifiedSkillsRoutes(
     '/workspaces/:workspace/skills/install',
     deps.mutate({ strict: true }),
     async (req, res) => {
-      const runtime = resolveWorkspaceRuntimeFromParam(
+      const runtime = resolveTrustedWorkspaceRuntimeFromParam(
         deps.workspaceRegistry,
         req,
         res,
       );
-      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+      if (!runtime) return;
       const input = parseSkillInstallRequest(req, res, deps.safeBody);
       if (!input) return;
       const clientId = parseAndValidateWorkspaceClientId(
@@ -357,12 +357,12 @@ export function registerWorkspaceQualifiedSkillsRoutes(
     '/workspaces/:workspace/skills/:name',
     deps.mutate({ strict: true }),
     async (req, res) => {
-      const runtime = resolveWorkspaceRuntimeFromParam(
+      const runtime = resolveTrustedWorkspaceRuntimeFromParam(
         deps.workspaceRegistry,
         req,
         res,
       );
-      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+      if (!runtime) return;
       const rawSkillName = req.params['name'];
       const scope = parseDeleteScope(req, res);
       if (!rawSkillName || !scope) return;
@@ -397,12 +397,12 @@ export function registerWorkspaceQualifiedSkillsRoutes(
     '/workspaces/:workspace/skills/enable',
     deps.mutate({ strict: true }),
     async (req, res) => {
-      const runtime = resolveWorkspaceRuntimeFromParam(
+      const runtime = resolveTrustedWorkspaceRuntimeFromParam(
         deps.workspaceRegistry,
         req,
         res,
       );
-      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+      if (!runtime) return;
       const input = parseSkillBatchToggleRequest(req, res, deps.safeBody);
       if (!input) return;
       const clientId = parseAndValidateWorkspaceClientId(
@@ -427,12 +427,12 @@ export function registerWorkspaceQualifiedSkillsRoutes(
     '/workspaces/:workspace/skills/:name/enable',
     deps.mutate({ strict: true }),
     async (req, res) => {
-      const runtime = resolveWorkspaceRuntimeFromParam(
+      const runtime = resolveTrustedWorkspaceRuntimeFromParam(
         deps.workspaceRegistry,
         req,
         res,
       );
-      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+      if (!runtime) return;
       const input = parseSkillToggleRequest(req, res, deps.safeBody);
       if (!input) return;
       const clientId = parseAndValidateWorkspaceClientId(

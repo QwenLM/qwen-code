@@ -24,7 +24,7 @@ import {
   SessionConflictError,
   SessionNotArchivedError,
   SessionNotFoundError,
-} from '../acp-session-bridge.js';
+} from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   archiveDaemonSessions,
   assertSessionArchived,

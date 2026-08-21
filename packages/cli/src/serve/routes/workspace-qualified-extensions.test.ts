@@ -26,7 +26,7 @@ import {
   createWorkspaceRegistry,
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
-import type { AcpSessionBridge } from '../acp-session-bridge.js';
+import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import { ConversationWorkspace } from '../conversations/conversation-workspace.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 

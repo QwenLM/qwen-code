@@ -91,6 +91,21 @@ import type {
 } from './hooks/useComposerCore';
 import type { PromptFile, PromptImage } from './adapters/promptTypes';
 import type { AttachmentPreviewRequest } from './adapters/messageTypes';
+import {
+  PromptAdmissionAttempt,
+  findUserMessageByIdentity,
+  getLatestUserBlock,
+  getLatestUserBlockId,
+  getRetryableTurnError,
+  matchesTurnErrorIdentity,
+  matchesUserMessageIdentity,
+  retryOwnerMatchesCurrent,
+  retryTranscriptIdentityMatches,
+  type CancelledRetryOwner,
+  type FailedPromptRetry,
+  type TranscriptTurnErrorIdentity,
+  type TranscriptUserMessageIdentity,
+} from './prompt-admission';
 import { StatusBar, type StatusBarHandle } from './components/StatusBar';
 import { GoalStatusStrip } from './components/GoalStatusStrip';
 import composerStatusStyles from './components/ComposerStatusStack.module.css';
@@ -521,26 +536,6 @@ interface FailedPrompt {
   owner: CancelledRetryOwner;
 }
 
-interface TranscriptUserMessageIdentity {
-  block: DaemonTranscriptBlock;
-}
-
-interface TranscriptTurnErrorIdentity {
-  block: DaemonTranscriptBlock;
-}
-
-interface FailedPromptRetry {
-  sessionId: string;
-  messageId: string;
-  startedAt: number;
-  admitted: boolean;
-  settled: boolean;
-  owner: CancelledRetryOwner;
-  transcriptIdentity:
-    | { kind: 'failed-prompt'; identity: TranscriptUserMessageIdentity }
-    | { kind: 'turn-error'; identity: TranscriptTurnErrorIdentity };
-}
-
 type CancelledRetryState =
   | {
       kind: 'failed-prompt';
@@ -561,30 +556,6 @@ type CancelledRetryState =
     };
 
 type CancelledRetryRestoreResult = 'restored' | 'pending' | 'invalid';
-
-interface CancelledRetryOwner {
-  sessionId?: string;
-  workspaceCwd?: string;
-  sessionKey?: string;
-  sourceVersion: number;
-  snapshot: DaemonSessionOwnerSnapshot;
-}
-
-function retryOwnerMatchesCurrent(
-  owner: CancelledRetryOwner,
-  sessionId: string | undefined,
-  workspaceCwd: string | undefined,
-  sourceVersion: number,
-): boolean {
-  const workspaceMatches =
-    (owner.workspaceCwd !== undefined && owner.workspaceCwd === workspaceCwd) ||
-    owner.snapshot.isCurrent();
-  return (
-    owner.sessionId === sessionId &&
-    owner.sourceVersion === sourceVersion &&
-    workspaceMatches
-  );
-}
 
 interface CancelledRetryEntry {
   owner?: CancelledRetryOwner;
@@ -622,128 +593,11 @@ interface UnknownPromptAdmission {
   payloadAvailable: boolean;
 }
 
-function getLatestUserBlockId(
-  blocks: readonly DaemonTranscriptBlock[],
-): string | undefined {
-  return getLatestUserBlock(blocks)?.id;
-}
-
-function getLatestUserBlock(
-  blocks: readonly DaemonTranscriptBlock[],
-): DaemonTranscriptBlock | undefined {
-  for (let index = blocks.length - 1; index >= 0; index -= 1) {
-    const block = blocks[index];
-    if (
-      block?.kind === 'user' &&
-      block.meta?.['source'] !== 'background_notification'
-    ) {
-      return block;
-    }
-  }
-  return undefined;
-}
-
-function matchesUserMessageIdentity(
-  block: DaemonTranscriptBlock | undefined,
-  identity: TranscriptUserMessageIdentity | undefined,
-  allowLocalId = false,
-): boolean {
-  if (!identity) return block === undefined;
-  if (!block || block.kind !== 'user' || identity.block.kind !== 'user') {
-    return false;
-  }
-  if (block === identity.block) return true;
-  if (allowLocalId && block.id === identity.block.id) return true;
-  const expectedRecords = identity.block.sourceRecordIds;
-  const currentRecords = block.sourceRecordIds;
-  return (
-    expectedRecords !== undefined &&
-    expectedRecords.length > 0 &&
-    currentRecords !== undefined &&
-    currentRecords.length === expectedRecords.length &&
-    currentRecords.every((record, index) => record === expectedRecords[index])
-  );
-}
-
-function findUserMessageByIdentity(
-  blocks: readonly DaemonTranscriptBlock[],
-  identity: TranscriptUserMessageIdentity,
-  allowLocalId = false,
-): DaemonTranscriptBlock | undefined {
-  for (let index = blocks.length - 1; index >= 0; index -= 1) {
-    const block = blocks[index];
-    if (
-      block?.kind === 'user' &&
-      block.meta?.['source'] !== 'background_notification' &&
-      matchesUserMessageIdentity(block, identity, allowLocalId)
-    ) {
-      return block;
-    }
-  }
-  return undefined;
-}
-
 function getLogicalSessionKey(
   sessionId: string | undefined,
   workspaceCwd: string | undefined,
 ): string | undefined {
   return sessionId ? `${workspaceCwd ?? ''}\0${sessionId}` : undefined;
-}
-
-function getRetryableTurnError(
-  blocks: readonly DaemonTranscriptBlock[],
-): DaemonTranscriptBlock | undefined {
-  for (let i = blocks.length - 1; i >= 0; i--) {
-    const block = blocks[i];
-    if (block?.kind === 'user') {
-      if (block.meta?.['source'] === 'background_notification') continue;
-      break;
-    }
-    if (block?.kind === 'error' && block.source === 'turn_error') {
-      return block;
-    }
-    if (block?.kind !== 'debug') break;
-  }
-  return undefined;
-}
-
-function matchesTurnErrorIdentity(
-  block: DaemonTranscriptBlock | undefined,
-  identity: TranscriptTurnErrorIdentity,
-): boolean {
-  if (
-    !block ||
-    block.kind !== 'error' ||
-    block.source !== 'turn_error' ||
-    identity.block.kind !== 'error' ||
-    identity.block.source !== 'turn_error'
-  ) {
-    return false;
-  }
-  if (block === identity.block) return true;
-  const expectedPromptId = identity.block.promptId;
-  if (expectedPromptId) return block.promptId === expectedPromptId;
-  return (
-    identity.block.eventId !== undefined &&
-    block.eventId === identity.block.eventId
-  );
-}
-
-function retryTranscriptIdentityMatches(
-  blocks: readonly DaemonTranscriptBlock[],
-  transcriptIdentity: FailedPromptRetry['transcriptIdentity'],
-  allowLocalUserId = false,
-): boolean {
-  return transcriptIdentity.kind === 'failed-prompt'
-    ? matchesUserMessageIdentity(
-        getLatestUserBlock(blocks),
-        transcriptIdentity.identity,
-        allowLocalUserId,
-      )
-    : matchesTurnErrorIdentity(
-        getRetryableTurnError(blocks),
-        transcriptIdentity.identity,
-      );
 }
 
 interface LocalAnchoredMessage {
@@ -5851,8 +5705,7 @@ export function App({
       } else if (opts?.clearComposerOnPromptStart) {
         editorRef.current?.clear();
       }
-      let admissionStarted = false;
-      let admitted = false;
+      const admissionAttempt = new PromptAdmissionAttempt();
       const promptOptions: SendPromptOptionsWithRetry = {
         images,
         files,
@@ -5860,13 +5713,13 @@ export function App({
         optimisticUserMessage: opts?.optimisticUserMessage,
         retry: opts?.retry,
         onAdmissionStarted: () => {
-          admissionStarted = true;
+          admissionAttempt.markStarted();
           opts?.onAdmissionStarted?.(
             connectionRef.current.sessionId ?? allocatedSessionId,
           );
         },
         onAdmitted: () => {
-          admitted = true;
+          admissionAttempt.markAdmitted();
           if (sessionIdAfterEnsure && promptWorkspaceCwd) {
             sessionCatalogController.promptAdmitted(
               promptWorkspaceCwd,
@@ -5918,9 +5771,9 @@ export function App({
         return await resultPromise;
       } catch (error) {
         if (
-          admissionStarted &&
-          !admitted &&
-          !isDefinitelyRejectedPromptAdmission(error) &&
+          admissionAttempt.classifyFailure(
+            isDefinitelyRejectedPromptAdmission(error),
+          ) === 'unknown' &&
           promptWorkspaceCwd
         ) {
           sessionCatalogController.promptAdmissionUncertain(promptWorkspaceCwd);
@@ -6190,17 +6043,18 @@ export function App({
       owner: retryOwner,
       transcriptIdentity: retryTranscriptIdentity,
     });
-    let admitted = false;
-    let admissionStarted = false;
+    const admissionAttempt = new PromptAdmissionAttempt(() =>
+      retryOwnerIsCurrent(retryOwner),
+    );
     sendPrompt(failed.text, failed.images, failed.files, {
       optimisticUserMessage: false,
       inputAnnotations: failed.inputAnnotations,
       onAdmissionStarted: () => {
-        admissionStarted = true;
+        admissionAttempt.markStarted();
       },
       onAdmitted: () => {
-        admitted = true;
-        if (!retryOwnerIsCurrent(retryOwner)) return;
+        admissionAttempt.markAdmitted();
+        if (!admissionAttempt.isCurrent()) return;
         setFailedPromptRetry((current) =>
           current?.transcriptIdentity === retryTranscriptIdentity
             ? retryTranscriptIsCurrent()
@@ -6218,9 +6072,11 @@ export function App({
       },
     })
       .catch((error: unknown) => {
-        if (!retryOwnerIsCurrent(retryOwner)) return;
-        const definitelyRejected = isDefinitelyRejectedPromptAdmission(error);
-        if (admissionStarted && !admitted && !definitelyRejected) {
+        if (!admissionAttempt.isCurrent()) return;
+        const failure = admissionAttempt.classifyFailure(
+          isDefinitelyRejectedPromptAdmission(error),
+        );
+        if (failure === 'unknown') {
           if (!retryTranscriptIsCurrent()) return;
           updateUnknownPromptAdmission({
             sessionId: failed.sessionId,
@@ -6238,7 +6094,7 @@ export function App({
           );
           return;
         }
-        if (!admitted) {
+        if (failure !== 'after-admission') {
           restoreOrDeferCancelledRetry(retryOwner, {
             kind: 'failed-prompt',
             attemptId: retryAttemptId,
@@ -6250,7 +6106,7 @@ export function App({
         }
       })
       .finally(() => {
-        if (!retryOwnerIsCurrent(retryOwner)) return;
+        if (!admissionAttempt.isCurrent()) return;
         setFailedPromptRetry((current) =>
           current?.transcriptIdentity === retryTranscriptIdentity
             ? retryTranscriptIsCurrent()
@@ -8950,6 +8806,9 @@ export function App({
           (admissionOwner.sessionId === undefined ||
             (connectionRef.current.sessionId === admissionOwner.sessionId &&
               getComposerWorkspaceCwd() === admissionOwner.workspaceCwd));
+        const admissionAttempt = new PromptAdmissionAttempt(
+          admissionOwnerIsCurrent,
+        );
         const { trackSendFailure = false, ...sendOptions } = opts ?? {};
         const deferComposerCommit =
           Boolean(onSubmitBeforeRef.current) ||
@@ -8957,8 +8816,6 @@ export function App({
         const clearComposerOnPromptStart =
           !connectionRef.current.sessionId || deferComposerCommit;
         let optimisticUserMessage: OptimisticUserMessage | undefined;
-        let admitted = false;
-        let admissionStarted = false;
         let admissionSessionId: string | undefined;
         sendPrompt(promptText, promptImages, promptFiles, {
           ownerRef: admissionAttachment,
@@ -8968,11 +8825,11 @@ export function App({
             ? commitComposerAccepted
             : undefined,
           onAdmissionStarted: (sessionId) => {
-            admissionStarted = true;
+            admissionAttempt.markStarted();
             admissionSessionId = sessionId;
           },
           onAdmitted: () => {
-            admitted = true;
+            admissionAttempt.markAdmitted();
           },
           ...(trackSendFailure
             ? {
@@ -8982,10 +8839,12 @@ export function App({
               }
             : {}),
         }).catch((error: unknown) => {
-          if (!admissionOwnerIsCurrent()) return;
+          if (!admissionAttempt.isCurrent()) return;
           const failedMessage = optimisticUserMessage;
-          const definitelyRejected = isDefinitelyRejectedPromptAdmission(error);
-          if (admissionStarted && !admitted && !definitelyRejected) {
+          const failure = admissionAttempt.classifyFailure(
+            isDefinitelyRejectedPromptAdmission(error),
+          );
+          if (failure === 'unknown') {
             updateFailedPrompt(null);
             const uncertainSessionId =
               failedMessage?.sessionId ??
@@ -9011,7 +8870,7 @@ export function App({
           }
           if (
             trackSendFailure &&
-            !admitted &&
+            failure !== 'after-admission' &&
             failedMessage &&
             failedMessage.sessionId === connectionRef.current.sessionId &&
             matchesUserMessageIdentity(
@@ -10260,18 +10119,19 @@ export function App({
         owner: retryOwner,
         transcriptIdentity: retryTranscriptIdentity,
       });
-      let admissionStarted = false;
-      let admitted = false;
+      const admissionAttempt = new PromptAdmissionAttempt(() =>
+        retryOwnerIsCurrent(retryOwner),
+      );
       sendPrompt(retryText, retryImages, retryFiles, {
         optimisticUserMessage: false,
         retry: true,
         inputAnnotations: retryInputAnnotations,
         onAdmissionStarted: () => {
-          admissionStarted = true;
+          admissionAttempt.markStarted();
         },
         onAdmitted: () => {
-          admitted = true;
-          if (!retryOwnerIsCurrent(retryOwner)) return;
+          admissionAttempt.markAdmitted();
+          if (!admissionAttempt.isCurrent()) return;
           setFailedPromptRetry((current) =>
             current?.transcriptIdentity === retryTranscriptIdentity
               ? retryTranscriptIsCurrent()
@@ -10296,9 +10156,11 @@ export function App({
         },
       })
         .catch((error: unknown) => {
-          if (!retryOwnerIsCurrent(retryOwner)) return;
-          const definitelyRejected = isDefinitelyRejectedPromptAdmission(error);
-          if (admissionStarted && !admitted && !definitelyRejected) {
+          if (!admissionAttempt.isCurrent()) return;
+          const failure = admissionAttempt.classifyFailure(
+            isDefinitelyRejectedPromptAdmission(error),
+          );
+          if (failure === 'unknown') {
             if (!retryTranscriptIsCurrent()) return;
             updateUnknownPromptAdmission({
               sessionId: retrySessionId,
@@ -10316,7 +10178,7 @@ export function App({
             );
             return;
           }
-          if (!admitted) {
+          if (failure !== 'after-admission') {
             restoreOrDeferCancelledRetry(retryOwner, {
               kind: 'turn-error',
               attemptId: retryAttemptId,
@@ -10364,7 +10226,7 @@ export function App({
           }
         })
         .finally(() => {
-          if (!retryOwnerIsCurrent(retryOwner)) return;
+          if (!admissionAttempt.isCurrent()) return;
           setFailedPromptRetry((current) =>
             current?.transcriptIdentity === retryTranscriptIdentity
               ? retryTranscriptIsCurrent()

@@ -7,10 +7,12 @@
 import {
   TotalSessionLimitExceededError,
   WorkspaceDrainingError,
-  type BridgeFreshSessionAdmission,
-  type BridgeFreshSessionAdmissionContext,
-  type BridgeFreshSessionReservation,
-} from './acp-session-bridge.js';
+} from '@qwen-code/acp-bridge/bridgeErrors';
+import type {
+  BridgeFreshSessionAdmission,
+  BridgeFreshSessionAdmissionContext,
+  BridgeFreshSessionReservation,
+} from '@qwen-code/acp-bridge/bridgeOptions';
 
 interface SessionCountSource {
   readonly sessionCount: number;

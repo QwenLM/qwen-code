@@ -16,9 +16,8 @@ import type { SendBridgeError } from '../server/error-response.js';
 import { safeBody } from '../server/request-helpers.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import {
-  requireTrustedWorkspaceRuntime,
   resolveContainedCwdOrFail,
-  resolveWorkspaceRuntimeFromParam,
+  resolveTrustedWorkspaceRuntimeFromParam,
   sendGenerationClosedError,
 } from '../workspace-route-runtime.js';
 import { applyReadHeaders } from './workspace-file-read.js';
@@ -86,13 +85,12 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
 
   app.get('/workspaces/:workspace/github/prs', async (req, res) => {
     const route = 'GET /workspaces/:workspace/github/prs';
-    const runtime = resolveWorkspaceRuntimeFromParam(
+    const runtime = resolveTrustedWorkspaceRuntimeFromParam(
       deps.workspaceRegistry,
       req,
       res,
     );
     if (!runtime) return;
-    if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
 
     applyReadHeaders(res);
     try {
@@ -154,13 +152,12 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
     deps.mutate({ strict: true }),
     async (req, res) => {
       const route = 'POST /workspaces/:workspace/github/prs/create';
-      const runtime = resolveWorkspaceRuntimeFromParam(
+      const runtime = resolveTrustedWorkspaceRuntimeFromParam(
         deps.workspaceRegistry,
         req,
         res,
       );
       if (!runtime) return;
-      if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
       try {
         runtime.generationGuard?.assertOpen();
       } catch (err) {
@@ -242,13 +239,12 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
 
   app.get('/workspaces/:workspace/github/default-branch', async (req, res) => {
     const route = 'GET /workspaces/:workspace/github/default-branch';
-    const runtime = resolveWorkspaceRuntimeFromParam(
+    const runtime = resolveTrustedWorkspaceRuntimeFromParam(
       deps.workspaceRegistry,
       req,
       res,
     );
     if (!runtime) return;
-    if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
 
     applyReadHeaders(res);
     try {

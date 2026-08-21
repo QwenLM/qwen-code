@@ -7,7 +7,7 @@
 import * as fs from 'node:fs';
 import path from 'node:path';
 import type { Request, Response } from 'express';
-import { canonicalizeWorkspace } from './acp-session-bridge.js';
+import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import type {
   WorkspaceEntry,
   WorkspaceRegistry,
@@ -211,6 +211,22 @@ export function sendConversationRuntimeUnavailable(res: Response): void {
     code: 'conversation_runtime_unavailable',
     retryable: true,
   });
+}
+
+export function resolveTrustedWorkspaceRuntimeFromParam(
+  registry: WorkspaceRegistry,
+  req: Request,
+  res: Response,
+  paramName = 'workspace',
+): WorkspaceRuntime | null {
+  const runtime = resolveWorkspaceRuntimeFromParam(
+    registry,
+    req,
+    res,
+    paramName,
+  );
+  if (!runtime) return null;
+  return requireTrustedWorkspaceRuntime(runtime, res) ? runtime : null;
 }
 
 export function sendWorkspaceRuntimeUnavailable(

@@ -35,8 +35,6 @@ import {
   PermissionPolicyNotImplementedError,
   PromptQueueFullError,
   RestoreInProgressError,
-  SessionRestoreTimeoutError,
-  SessionArtifactAuthorizationError,
   SessionArchivedError,
   SessionArchivingError,
   SessionBusyError,
@@ -53,7 +51,9 @@ import {
   WorkspaceMismatchError,
   WorkspaceDrainingError,
   TotalSessionLimitExceededError,
-} from '../acp-session-bridge.js';
+} from '@qwen-code/acp-bridge/bridgeErrors';
+import { SessionRestoreTimeoutError } from '@qwen-code/acp-bridge/status';
+import { SessionArtifactAuthorizationError } from '@qwen-code/acp-bridge/sessionArtifacts';
 import type { DaemonLogger } from '../daemon-logger.js';
 import { mapWorkspaceSkillToggleError } from '../workspace-service/types.js';
 import { sendGenerationClosedError } from '../workspace-route-runtime.js';

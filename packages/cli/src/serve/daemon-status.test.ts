@@ -14,7 +14,7 @@ import type {
 import type {
   AcpSessionBridge,
   BridgeDaemonStatusSnapshot,
-} from './acp-session-bridge.js';
+} from '@qwen-code/acp-bridge/bridgeTypes';
 import { DeviceFlowRegistry } from './auth/device-flow.js';
 import {
   buildDaemonStatusResponse,

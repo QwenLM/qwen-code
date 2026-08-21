@@ -25,10 +25,8 @@ import {
   setGeminiMdFilename,
 } from '@qwen-code/qwen-code-core';
 import { createMutationGate } from './auth.js';
-import {
-  InvalidClientIdError,
-  type AcpSessionBridge,
-} from './acp-session-bridge.js';
+import { InvalidClientIdError } from '@qwen-code/acp-bridge/bridgeErrors';
+import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import { mountWorkspaceMemoryRoutes } from './workspace-memory.js';
 

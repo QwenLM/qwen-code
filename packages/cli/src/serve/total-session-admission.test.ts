@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest';
 import {
   TotalSessionLimitExceededError,
   WorkspaceDrainingError,
-} from './acp-session-bridge.js';
+} from '@qwen-code/acp-bridge/bridgeErrors';
 import { createTotalSessionAdmissionController } from './total-session-admission.js';
 
 describe('createTotalSessionAdmissionController', () => {

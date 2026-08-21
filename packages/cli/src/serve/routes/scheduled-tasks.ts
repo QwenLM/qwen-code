@@ -1346,8 +1346,8 @@ export function registerWorkspaceQualifiedScheduledTasksRoutes(
         req,
         res,
       );
-      if (!runtime) return null;
-      if (!requireTrustedWorkspaceRuntime(runtime, res)) return null;
+      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res))
+        return null;
       if (
         runtime.provenance === 'live-conversation' &&
         !deps.conversationRuntimeActivity

@@ -456,9 +456,6 @@ describe('CLI entry import boundary', () => {
     expect(runServeSource).not.toMatch(/from ['"]\.\/server\.js['"]/);
     expect(runServeSource).not.toMatch(/from ['"]\.\/web-shell-static\.js['"]/);
     expect(runServeSource).not.toMatch(
-      /from ['"]\.\/acp-session-bridge\.js['"]/,
-    );
-    expect(runServeSource).not.toMatch(
       /from ['"]@qwen-code\/acp-bridge\/bridge['"]/,
     );
     expect(runServeSource).not.toMatch(
@@ -468,15 +465,12 @@ describe('CLI entry import boundary', () => {
     expect(runServeSource).toContain("import('@qwen-code/acp-bridge/bridge')");
   });
 
-  it('keeps request helpers from value-importing the ACP compatibility shim', () => {
+  it('keeps request helpers on narrow ACP type and workspace-path imports', () => {
     const requestHelpersSource = readFileSync(
       'src/serve/server/request-helpers.ts',
       'utf8',
     );
 
-    expect(requestHelpersSource).not.toMatch(
-      /from ['"]\.\.\/acp-session-bridge\.js['"]/,
-    );
     expect(requestHelpersSource).toContain(
       "import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';",
     );
@@ -495,14 +489,6 @@ describe('CLI entry import boundary', () => {
     );
 
     expect(graph.unresolvedLocalImports).toEqual([]);
-    const forbiddenLocalFiles = [...graph.localFiles].filter(
-      (filePath) => filePath === 'src/serve/acp-session-bridge.ts',
-    );
-    expect(
-      forbiddenLocalFiles,
-      `Unexpected static source graph files:\n${forbiddenLocalFiles.join('\n')}`,
-    ).toEqual([]);
-
     const forbiddenExternalImports = [
       '@qwen-code/acp-bridge',
       '@qwen-code/acp-bridge/bridge',

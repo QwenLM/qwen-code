@@ -36,7 +36,10 @@ import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifact
 import {
   CHANNEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
+  type AcpSessionBridge,
   type BridgeBranchedSession,
+  type BridgePromptContentBlock,
+  type BridgeSessionCatalogVersion,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { parseSessionSource } from '@qwen-code/acp-bridge';
 import {
@@ -57,21 +60,18 @@ import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { parseCallerSuppliedSessionId } from '../../config/session-id.js';
 import { isChannelDeliveryError } from '../../runtime/channel-delivery-ipc.js';
 import { parseChannelDelivery } from '../../runtime/channel-delivery.js';
+import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import {
-  canonicalizeWorkspace,
   InvalidClientIdError,
   InvalidSessionMetadataError,
   PromptQueueFullError,
-  SessionArtifactValidationError,
   SessionArchivedError,
   SessionConflictError,
   SessionNotFoundError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
-  type AcpSessionBridge,
-  type BridgePromptContentBlock,
-  type BridgeSessionCatalogVersion,
-} from '../acp-session-bridge.js';
+} from '@qwen-code/acp-bridge/bridgeErrors';
+import { SessionArtifactValidationError } from '@qwen-code/acp-bridge/sessionArtifacts';
 import type { DaemonLogger } from '../daemon-logger.js';
 import type { SendBridgeError } from '../server/error-response.js';
 import { resolvePromptDeadlineMs } from '../server/prompt-deadline.js';

@@ -99,7 +99,6 @@ import {
   InvalidClientIdError,
   InvalidPermissionOptionError,
   InvalidSessionMetadataError,
-  MAX_WORKSPACE_PATH_LENGTH,
   McpServerNotFoundError,
   McpServerRestartFailedError,
   PermissionForbiddenError,
@@ -107,9 +106,6 @@ import {
   PromptQueueFullError,
   RestoreInProgressError,
   BridgeChannelQuarantinedError,
-  SessionRestoreTimeoutError,
-  SessionArtifactAuthorizationError,
-  SessionArtifactValidationError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
   SessionBusyError,
@@ -118,19 +114,27 @@ import {
   TotalSessionLimitExceededError,
   WorkspaceDrainingError,
   WorkspaceMismatchError,
-  type BridgeHeartbeatResult,
-  type BridgeHeartbeatState,
-  type BridgeDaemonStatusSnapshot,
-  type BridgeRestoredSession,
-  type BridgeClientRequestContext,
-  type BridgeTurnStatus,
-  type BridgeRestoreSessionRequest,
-  type BridgeSession,
-  type BridgeSessionSummary,
-  type BridgeSpawnRequest,
-  type AcpSessionBridge,
-  type SessionMetadataUpdate,
-} from './acp-session-bridge.js';
+} from '@qwen-code/acp-bridge/bridgeErrors';
+import { MAX_WORKSPACE_PATH_LENGTH } from '@qwen-code/acp-bridge/workspacePaths';
+import { SessionRestoreTimeoutError } from '@qwen-code/acp-bridge/status';
+import {
+  SessionArtifactAuthorizationError,
+  SessionArtifactValidationError,
+} from '@qwen-code/acp-bridge/sessionArtifacts';
+import type {
+  BridgeHeartbeatResult,
+  BridgeHeartbeatState,
+  BridgeDaemonStatusSnapshot,
+  BridgeRestoredSession,
+  BridgeClientRequestContext,
+  BridgeTurnStatus,
+  BridgeRestoreSessionRequest,
+  BridgeSession,
+  BridgeSessionSummary,
+  BridgeSpawnRequest,
+  AcpSessionBridge,
+  SessionMetadataUpdate,
+} from '@qwen-code/acp-bridge/bridgeTypes';
 import type {
   BridgeEvent,
   SubscribeOptions,

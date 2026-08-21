@@ -28,7 +28,7 @@ import type { WorkspaceFileSystemFactory } from '../fs/index.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
-import { SessionNotFoundError } from '../acp-session-bridge.js';
+import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import { SessionArchiveCoordinator } from '../server/session-archive.js';
 import { createRequestedSessionIdAdmission } from '../session-id-admission.js';
 

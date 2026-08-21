@@ -10,8 +10,8 @@ import { DaemonDrainingError } from '../server/session-archive.js';
 import {
   BridgeChannelQuarantinedError,
   RestoreInProgressError,
-  SessionRestoreTimeoutError,
-} from '../acp-session-bridge.js';
+} from '@qwen-code/acp-bridge/bridgeErrors';
+import { SessionRestoreTimeoutError } from '@qwen-code/acp-bridge/status';
 import { toRpcError } from './dispatch.js';
 import { RPC } from './json-rpc.js';
 

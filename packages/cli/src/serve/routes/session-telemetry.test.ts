@@ -8,10 +8,8 @@ import path from 'node:path';
 import express, { type Response } from 'express';
 import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import {
-  SessionNotFoundError,
-  type AcpSessionBridge,
-} from '../acp-session-bridge.js';
+import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
+import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
   createWorkspaceRegistry,
   type WorkspaceRuntime,

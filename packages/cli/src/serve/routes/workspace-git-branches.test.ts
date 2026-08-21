@@ -11,7 +11,7 @@ import * as path from 'node:path';
 import express from 'express';
 import request from 'supertest';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { AcpSessionBridge } from '../acp-session-bridge.js';
+import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import { sendBridgeError } from '../server/error-response.js';
 import {
   createWorkspaceGenerationGuard,

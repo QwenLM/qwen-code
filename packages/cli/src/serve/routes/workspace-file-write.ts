@@ -7,7 +7,7 @@
 import * as path from 'node:path';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import express from 'express';
-import type { AcpSessionBridge } from '../acp-session-bridge.js';
+import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
   MAX_UPLOAD_BYTES,
   hasSuspiciousPathPattern,
@@ -26,8 +26,7 @@ import {
 } from './workspace-file-read.js';
 import {
   getWorkspaceRouteContext,
-  requireTrustedWorkspaceRuntime,
-  resolveWorkspaceRuntimeFromParam,
+  resolveTrustedWorkspaceRuntimeFromParam,
   setWorkspaceRouteContext,
 } from '../workspace-route-runtime.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
@@ -334,13 +333,12 @@ export function registerWorkspaceQualifiedFileWriteRoutes(
   deps: RegisterDeps & { workspaceRegistry: WorkspaceRegistry },
 ): void {
   const resolve = (req: Request, res: Response): boolean => {
-    const runtime = resolveWorkspaceRuntimeFromParam(
+    const runtime = resolveTrustedWorkspaceRuntimeFromParam(
       deps.workspaceRegistry,
       req,
       res,
     );
     if (!runtime) return false;
-    if (!requireTrustedWorkspaceRuntime(runtime, res)) return false;
     setWorkspaceRouteContext(req, {
       runtime,
       routePrefix: 'POST /workspaces/:workspace',
@@ -565,9 +563,12 @@ function fileUploadAdmission(
           if (!registry) {
             throw new Error('workspace registry is not configured');
           }
-          const runtime = resolveWorkspaceRuntimeFromParam(registry, req, res);
+          const runtime = resolveTrustedWorkspaceRuntimeFromParam(
+            registry,
+            req,
+            res,
+          );
           if (!runtime) return;
-          if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
           setWorkspaceRouteContext(req, {
             runtime,
             routePrefix: 'POST /workspaces/:workspace',

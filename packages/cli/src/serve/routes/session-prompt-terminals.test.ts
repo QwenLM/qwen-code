@@ -16,10 +16,8 @@ import {
   appendPromptLedgerRecord,
   readPromptLedgerRecords,
 } from '@qwen-code/acp-bridge/promptLedger';
-import {
-  SessionNotFoundError,
-  type AcpSessionBridge,
-} from '../acp-session-bridge.js';
+import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
+import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
   createWorkspaceRegistry,
   type WorkspaceRuntime,

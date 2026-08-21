@@ -30,18 +30,20 @@ import {
 // `sendPermissionVoteError` uses, so `instanceof` matches the class the bridge
 // actually throws (the core re-export is a distinct identity at runtime).
 import {
+  type BridgeChannelQuarantinedError,
   CancelSentinelCollisionError,
   InvalidPermissionOptionError,
   PermissionForbiddenError,
   PermissionPolicyNotImplementedError,
+  type RestoreInProgressError,
   SessionArchivingError,
   SessionConflictError,
-} from '../acp-session-bridge.js';
-import type {
-  BridgeChannelQuarantinedError,
-  RestoreInProgressError,
-  SessionRestoreTimeoutError,
-} from '../acp-session-bridge.js';
+  SessionNotFoundError,
+  SessionShellClientRequiredError,
+  SessionShellDisabledError,
+  WorkspaceMismatchError,
+} from '@qwen-code/acp-bridge/bridgeErrors';
+import type { SessionRestoreTimeoutError } from '@qwen-code/acp-bridge/status';
 import { FsError } from '../fs/errors.js';
 import {
   TooManyActiveDeviceFlowsError,
@@ -65,12 +67,6 @@ import {
   canonicalizeWorkspace,
 } from '@qwen-code/acp-bridge/workspacePaths';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
-import {
-  SessionNotFoundError,
-  SessionShellClientRequiredError,
-  SessionShellDisabledError,
-  WorkspaceMismatchError,
-} from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   SessionArtifactAuthorizationError,
   SessionArtifactValidationError,

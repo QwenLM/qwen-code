@@ -9,8 +9,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SessionIdCaseConflictError } from '@qwen-code/qwen-code-core';
-import type { AcpSessionBridge } from './acp-session-bridge.js';
-import { SessionNotFoundError } from './acp-session-bridge.js';
+import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
+import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import { SessionArchiveCoordinator } from './server/session-archive.js';
 import {
   createRequestedSessionIdAdmission,

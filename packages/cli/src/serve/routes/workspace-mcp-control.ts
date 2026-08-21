@@ -5,7 +5,7 @@
  */
 
 import type { Application, Request, RequestHandler, Response } from 'express';
-import type { AcpSessionBridge } from '../acp-session-bridge.js';
+import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { SendBridgeError } from '../server/error-response.js';
 import {
   createBuildWorkspaceCtx,
@@ -14,14 +14,8 @@ import {
   validateMcpRuntimeServerName,
 } from '../server/request-helpers.js';
 import type { DaemonWorkspaceService } from '../workspace-service/index.js';
-import {
-  requireTrustedWorkspaceRuntime,
-  resolveWorkspaceRuntimeFromParam,
-} from '../workspace-route-runtime.js';
-import type {
-  WorkspaceRegistry,
-  WorkspaceRuntime,
-} from '../workspace-registry.js';
+import { resolveTrustedWorkspaceRuntimeFromParam } from '../workspace-route-runtime.js';
+import type { WorkspaceRegistry } from '../workspace-registry.js';
 
 interface RegisterWorkspaceMcpControlRoutesDeps {
   boundWorkspace: string;
@@ -357,16 +351,6 @@ export function registerWorkspaceMcpControlRoutes(
   );
 }
 
-function resolveTrustedMcpRuntime(
-  registry: WorkspaceRegistry,
-  req: Request,
-  res: Response,
-): WorkspaceRuntime | null {
-  const runtime = resolveWorkspaceRuntimeFromParam(registry, req, res);
-  if (!runtime) return null;
-  return requireTrustedWorkspaceRuntime(runtime, res) ? runtime : null;
-}
-
 export function registerWorkspaceQualifiedMcpControlRoutes(
   app: Application,
   deps: Pick<
@@ -380,7 +364,7 @@ export function registerWorkspaceQualifiedMcpControlRoutes(
     '/workspaces/:workspace/mcp/initialize',
     deps.mutate({ strict: true }),
     async (req, res) => {
-      const runtime = resolveTrustedMcpRuntime(
+      const runtime = resolveTrustedWorkspaceRuntimeFromParam(
         deps.workspaceRegistry,
         req,
         res,
@@ -402,7 +386,7 @@ export function registerWorkspaceQualifiedMcpControlRoutes(
     '/workspaces/:workspace/mcp/reload',
     deps.mutate({ strict: true }),
     async (req, res) => {
-      const runtime = resolveTrustedMcpRuntime(
+      const runtime = resolveTrustedWorkspaceRuntimeFromParam(
         deps.workspaceRegistry,
         req,
         res,
@@ -426,7 +410,7 @@ export function registerWorkspaceQualifiedMcpControlRoutes(
     '/workspaces/:workspace/mcp/:server/restart',
     deps.mutate({ strict: true }),
     async (req, res) => {
-      const runtime = resolveTrustedMcpRuntime(
+      const runtime = resolveTrustedWorkspaceRuntimeFromParam(
         deps.workspaceRegistry,
         req,
         res,
@@ -505,7 +489,7 @@ export function registerWorkspaceQualifiedMcpControlRoutes(
       `/workspaces/:workspace/mcp/:server/${routeAction}`,
       deps.mutate({ strict: true }),
       async (req, res) => {
-        const runtime = resolveTrustedMcpRuntime(
+        const runtime = resolveTrustedWorkspaceRuntimeFromParam(
           deps.workspaceRegistry,
           req,
           res,
@@ -553,7 +537,7 @@ export function registerWorkspaceQualifiedMcpControlRoutes(
     '/workspaces/:workspace/mcp/servers',
     deps.mutate({ strict: true }),
     async (req, res) => {
-      const runtime = resolveTrustedMcpRuntime(
+      const runtime = resolveTrustedWorkspaceRuntimeFromParam(
         deps.workspaceRegistry,
         req,
         res,
@@ -609,7 +593,7 @@ export function registerWorkspaceQualifiedMcpControlRoutes(
     '/workspaces/:workspace/mcp/servers/:name',
     deps.mutate({ strict: true }),
     async (req, res) => {
-      const runtime = resolveTrustedMcpRuntime(
+      const runtime = resolveTrustedWorkspaceRuntimeFromParam(
         deps.workspaceRegistry,
         req,
         res,

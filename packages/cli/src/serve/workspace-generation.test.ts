@@ -7,7 +7,7 @@
 import express from 'express';
 import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
-import type { AcpSessionBridge } from './acp-session-bridge.js';
+import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import { createMutationGate } from './auth.js';
 import { mountWorkspaceGenerationRoutes } from './workspace-generation.js';
 

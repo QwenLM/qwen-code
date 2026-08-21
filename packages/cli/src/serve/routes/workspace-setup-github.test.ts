@@ -15,7 +15,7 @@ import {
   canonicalizeWorkspace,
   createWorkspaceFileSystemFactory,
 } from '../fs/index.js';
-import type { AcpSessionBridge } from '../acp-session-bridge.js';
+import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import type { ServeOptions } from '../types.js';
 import {

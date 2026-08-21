@@ -13,8 +13,7 @@ import {
 } from '../server/request-helpers.js';
 import type { DaemonWorkspaceService } from '../workspace-service/index.js';
 import {
-  requireTrustedWorkspaceRuntime,
-  resolveWorkspaceRuntimeFromParam,
+  resolveTrustedWorkspaceRuntimeFromParam,
   sendGenerationClosedError,
 } from '../workspace-route-runtime.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
@@ -133,12 +132,12 @@ export function registerWorkspaceQualifiedToolsRoutes(
     '/workspaces/:workspace/tools/:name/enable',
     deps.mutate({ strict: true }),
     async (req, res) => {
-      const runtime = resolveWorkspaceRuntimeFromParam(
+      const runtime = resolveTrustedWorkspaceRuntimeFromParam(
         deps.workspaceRegistry,
         req,
         res,
       );
-      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+      if (!runtime) return;
       const rawToolName = req.params['name'];
       if (!rawToolName || typeof rawToolName !== 'string') {
         res.status(400).json({

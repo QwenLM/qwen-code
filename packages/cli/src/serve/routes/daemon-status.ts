@@ -7,7 +7,7 @@
 import type { Application } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { AcpHttpHandle } from '../acp-http/index.js';
-import type { AcpSessionBridge } from '../acp-session-bridge.js';
+import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import type {
   DeviceFlowProviderId,
   DeviceFlowRegistry,

@@ -55,7 +55,7 @@
 
 - Event-bus primitives are imported from `@qwen-code/acp-bridge/eventBus`.
 - Status primitives are imported from `@qwen-code/acp-bridge/status`.
-- `serve/acp-session-bridge.ts` remains as the CLI-local compatibility facade for the broader bridge surface.
+- The broader bridge surface is imported directly from its owning `@qwen-code/acp-bridge` subpaths.
 
 ## Flow
 

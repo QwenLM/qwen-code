@@ -15,8 +15,8 @@ import type {
   BridgeWorkspaceMemoryForgetResult,
   BridgeWorkspaceMemoryRememberRequest,
   BridgeWorkspaceMemoryRememberResult,
-} from './acp-session-bridge.js';
-import { WorkspaceDrainingError } from './acp-session-bridge.js';
+} from '@qwen-code/acp-bridge/bridgeTypes';
+import { WorkspaceDrainingError } from '@qwen-code/acp-bridge/bridgeErrors';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import {
   mountWorkspaceMemoryRememberRoutes,

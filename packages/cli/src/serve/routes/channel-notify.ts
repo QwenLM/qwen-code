@@ -19,7 +19,7 @@ import {
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import {
   requireTrustedWorkspaceRuntime,
-  resolveWorkspaceRuntimeFromParam,
+  resolveTrustedWorkspaceRuntimeFromParam,
 } from '../workspace-route-runtime.js';
 
 interface RegisterChannelNotifyRoutesDeps {
@@ -110,12 +110,12 @@ export function registerChannelNotifyRoutes(
     '/workspaces/:workspace/notify',
     deps.mutate({ strict: true }),
     async (req, res) => {
-      const runtime = resolveWorkspaceRuntimeFromParam(
+      const runtime = resolveTrustedWorkspaceRuntimeFromParam(
         deps.workspaceRegistry,
         req,
         res,
       );
-      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+      if (!runtime) return;
       if (runtime.provenance === 'live-conversation') {
         res.status(400).json({
           error:

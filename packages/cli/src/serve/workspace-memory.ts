@@ -16,7 +16,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { isServeDebugMode } from './debug-mode.js';
-import type { AcpSessionBridge } from './acp-session-bridge.js';
+import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
   createIdleWorkspaceMemoryStatus,
   STATUS_SCHEMA_VERSION,
