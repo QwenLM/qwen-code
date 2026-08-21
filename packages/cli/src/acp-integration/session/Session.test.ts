@@ -5520,12 +5520,18 @@ describe('Session', () => {
       ]);
     });
 
-    it('records daemon media references for transcript replay', async () => {
-      const mediaReference = {
+    it('records daemon attachment references for transcript replay', async () => {
+      const imageReference = {
         type: 'image' as const,
-        mediaId: 'media-1',
+        attachmentId: 'image.png',
         mimeType: 'image/png',
         size: 3,
+      };
+      const fileReference = {
+        type: 'resource' as const,
+        attachmentId: 'notes.json',
+        mimeType: 'application/json',
+        size: 6,
       };
       mockChat.sendMessageStream = vi
         .fn()
@@ -5536,9 +5542,17 @@ describe('Session', () => {
         prompt: [
           { type: 'text', text: 'describe this' },
           { type: 'image', data: 'AQID', mimeType: 'image/png' },
+          {
+            type: 'resource',
+            resource: {
+              uri: 'attachment:///notes.json',
+              mimeType: 'application/json',
+              text: '你好',
+            },
+          },
         ],
         _meta: {
-          'qwen.daemon.mediaReferences': [mediaReference],
+          'qwen.daemon.attachmentReferences': [imageReference, fileReference],
         },
       });
 
@@ -5548,15 +5562,15 @@ describe('Session', () => {
         {
           displayText: 'describe this',
           hookContext: '',
-          mediaReferences: [mediaReference],
+          attachmentReferences: [imageReference, fileReference],
         },
       );
     });
 
-    it('records every media reference allowed by the session store', async () => {
-      const mediaReferences = Array.from({ length: 256 }, (_, index) => ({
+    it('records 256 attachment references from one prompt', async () => {
+      const attachmentReferences = Array.from({ length: 256 }, (_, index) => ({
         type: 'image' as const,
-        mediaId: `media-${index}`,
+        attachmentId: `media-${index}`,
         mimeType: 'image/png',
         size: 3,
       }));
@@ -5568,14 +5582,42 @@ describe('Session', () => {
         sessionId: 'test-session-id',
         prompt: [{ type: 'text', text: 'describe these' }],
         _meta: {
-          'qwen.daemon.mediaReferences': mediaReferences,
+          'qwen.daemon.attachmentReferences': attachmentReferences,
         },
       });
 
       expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
         'describe these',
         undefined,
-        expect.objectContaining({ mediaReferences }),
+        expect.objectContaining({ attachmentReferences }),
+      );
+    });
+
+    it('records empty file attachment references', async () => {
+      const attachmentReference = {
+        type: 'resource' as const,
+        attachmentId: 'empty.txt',
+        mimeType: 'text/plain',
+        size: 0,
+      };
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'inspect this' }],
+        _meta: {
+          'qwen.daemon.attachmentReferences': [attachmentReference],
+        },
+      });
+
+      expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+        'inspect this',
+        undefined,
+        expect.objectContaining({
+          attachmentReferences: [attachmentReference],
+        }),
       );
     });
 
@@ -11615,6 +11657,22 @@ describe('Session', () => {
                   data: 'iVBORw0KGgo=',
                 },
                 {
+                  type: 'resource',
+                  resource: {
+                    uri: 'attachment:///mixed-notes.txt',
+                    mimeType: 'text/plain',
+                    text: 'mixed private contents',
+                  },
+                },
+                {
+                  type: 'resource',
+                  resource: {
+                    uri: 'attachment:///mixed.pdf',
+                    mimeType: 'application/pdf',
+                    blob: 'AP8B',
+                  },
+                },
+                {
                   type: 'audio',
                   mimeType: 'audio/wav',
                   data: 'UklGRgAAAA==',
@@ -11636,12 +11694,24 @@ describe('Session', () => {
                 },
               ],
               displayText: 'please inspect this image',
-              mediaReferences: [
+              attachmentReferences: [
                 {
                   type: 'image',
-                  mediaId: 'image-1',
+                  attachmentId: 'image-1',
                   mimeType: 'image/png',
                   size: 8,
+                },
+                {
+                  type: 'resource',
+                  attachmentId: 'mixed-notes.txt',
+                  mimeType: 'text/plain',
+                  size: 22,
+                },
+                {
+                  type: 'resource',
+                  attachmentId: 'mixed.pdf',
+                  mimeType: 'application/pdf',
+                  size: 3,
                 },
               ],
             },
@@ -11654,14 +11724,49 @@ describe('Session', () => {
                 },
               ],
               displayText: '',
-              mediaReferences: [
+              attachmentReferences: [
                 {
                   type: 'image',
-                  mediaId: 'image-2',
+                  attachmentId: 'image-2',
                   mimeType: 'image/png',
                   size: 10,
                 },
               ],
+            },
+            {
+              content: [
+                { type: 'text', text: 'inspect notes' },
+                {
+                  type: 'resource',
+                  resource: {
+                    uri: 'attachment:///notes.txt',
+                    mimeType: 'text/plain',
+                    text: 'private attachment contents',
+                  },
+                },
+              ],
+              displayText: 'inspect notes',
+              attachmentReferences: [
+                {
+                  type: 'resource',
+                  attachmentId: 'notes.txt',
+                  mimeType: 'text/plain',
+                  size: 27,
+                },
+              ],
+            },
+            {
+              content: [
+                {
+                  type: 'resource',
+                  resource: {
+                    uri: 'attachment:///inline-only.txt',
+                    mimeType: 'text/plain',
+                    text: 'inline only contents',
+                  },
+                },
+              ],
+              displayText: '',
             },
           ],
         });
@@ -11696,12 +11801,18 @@ describe('Session', () => {
         };
         const midTurnParts: Part[] = [
           {
-            text: '\n[User message received during tool execution]: please inspect this image',
+            text: '\n[User message received during tool execution]: please inspect this image@attachment:///mixed-notes.txt@attachment:///mixed.pdf',
           },
           {
             inlineData: {
               mimeType: 'image/png',
               data: 'iVBORw0KGgo=',
+            },
+          },
+          {
+            inlineData: {
+              mimeType: 'application/pdf',
+              data: 'AP8B',
             },
           },
           audioFallbackPart,
@@ -11737,15 +11848,83 @@ describe('Session', () => {
         expect(
           mockChatRecordingService.recordMidTurnUserMessage,
         ).toHaveBeenCalledWith(
-          [midTurnParts[0], midTurnParts[2]],
+          [midTurnParts[0], midTurnParts[3]],
           'please inspect this image',
           undefined,
           [
             {
               type: 'image',
-              mediaId: 'image-1',
+              attachmentId: 'image-1',
               mimeType: 'image/png',
               size: 8,
+            },
+            {
+              type: 'resource',
+              attachmentId: 'mixed-notes.txt',
+              mimeType: 'text/plain',
+              size: 22,
+            },
+            {
+              type: 'resource',
+              attachmentId: 'mixed.pdf',
+              mimeType: 'application/pdf',
+              size: 3,
+            },
+          ],
+        );
+        expect(
+          mockChatRecordingService.recordMidTurnUserMessage,
+        ).toHaveBeenCalledWith(
+          [
+            {
+              text: '\n[User message received during tool execution]: @attachment:///inline-only.txt',
+            },
+            {
+              text: 'File: attachment:///inline-only.txt\ninline only contents',
+            },
+          ],
+          '[User message with attachments]',
+        );
+        expect(
+          mockChatRecordingService.recordMidTurnUserMessage.mock.calls.flatMap(
+            ([parts]) => parts,
+          ),
+        ).not.toContainEqual({
+          text: 'File: attachment:///notes.txt\nprivate attachment contents',
+        });
+        expect(
+          mockChatRecordingService.recordMidTurnUserMessage.mock.calls.flatMap(
+            ([parts]) => parts,
+          ),
+        ).not.toContainEqual({
+          text: 'File: attachment:///mixed-notes.txt\nmixed private contents',
+        });
+        expect(
+          mockChatRecordingService.recordMidTurnUserMessage.mock.calls.flatMap(
+            ([parts]) => parts,
+          ),
+        ).not.toContainEqual({
+          inlineData: {
+            mimeType: 'application/pdf',
+            data: 'AP8B',
+          },
+        });
+        expect(
+          mockChatRecordingService.recordMidTurnUserMessage,
+        ).toHaveBeenCalledWith(
+          [
+            {
+              text: '\n[User message received during tool execution]: inspect notes@attachment:///notes.txt',
+            },
+          ],
+          'inspect notes',
+          undefined,
+          [
+            {
+              type: 'resource',
+              attachmentId: 'notes.txt',
+              mimeType: 'text/plain',
+              size: 27,
             },
           ],
         );
@@ -11758,7 +11937,7 @@ describe('Session', () => {
           [
             {
               type: 'image',
-              mediaId: 'image-2',
+              attachmentId: 'image-2',
               mimeType: 'image/png',
               size: 10,
             },
@@ -11902,10 +12081,10 @@ describe('Session', () => {
               displayText: '',
               // One reference for two image blocks -> references will NOT be
               // persisted, so displayText must not be ''.
-              mediaReferences: [
+              attachmentReferences: [
                 {
                   type: 'image',
-                  mediaId: 'ref-1',
+                  attachmentId: 'ref-1',
                   mimeType: 'image/png',
                   size: 4,
                 },
@@ -11999,10 +12178,10 @@ describe('Session', () => {
                 },
               ],
               displayText: 'voice note',
-              mediaReferences: [
+              attachmentReferences: [
                 {
                   type: 'image',
-                  mediaId: 'image-1',
+                  attachmentId: 'image-1',
                   mimeType: 'image/png',
                   size: 4,
                 },
@@ -12105,10 +12284,10 @@ describe('Session', () => {
                 },
               ],
               displayText: 'compare with image',
-              mediaReferences: [
+              attachmentReferences: [
                 {
                   type: 'image',
-                  mediaId: 'image-1',
+                  attachmentId: 'image-1',
                   mimeType: 'image/png',
                   size: 8,
                 },
@@ -12156,7 +12335,7 @@ describe('Session', () => {
             [
               {
                 type: 'image',
-                mediaId: 'image-1',
+                attachmentId: 'image-1',
                 mimeType: 'image/png',
                 size: 8,
               },
@@ -17528,6 +17707,62 @@ describe('Session', () => {
         expect(
           mockChatRecordingService.recordBranchCheckpointTransaction,
         ).not.toHaveBeenCalled();
+      });
+
+      it('notifies the bridge that the Goal turn ended', async () => {
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-end-signal',
+        };
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation((turnKey: string) =>
+          turnKey === 'goal-runtime:turn-end-signal' ? permit : undefined,
+        );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        expect(boundGoalHost).toBeDefined();
+        await boundGoalHost!.startGoalTurn({
+          permit,
+          continuationContext: 'check weather',
+        });
+
+        await vi.waitFor(() => {
+          expect(mockClient.extNotification).toHaveBeenCalledWith(
+            '_qwencode/end_turn',
+            {
+              sessionId: 'test-session-id',
+              reason: 'end_turn',
+              source: 'goal',
+              promptId: expect.stringMatching(
+                /^test-session-id########\d+$/,
+              ) as unknown as string,
+            },
+          );
+        });
+        expect(mockClient.extNotification).toHaveBeenCalledWith(
+          '_qwencode/start_turn',
+          {
+            sessionId: 'test-session-id',
+            source: 'goal',
+          },
+        );
       });
 
       it('settles a Goal turn whose prompt rejects before the turn body runs', async () => {
@@ -28265,7 +28500,7 @@ describe('Session', () => {
       });
     });
 
-    it('drops repeated duplicate provider functionCall ids after the first synthetic response', async () => {
+    it('records repeated duplicate provider calls without returning results', async () => {
       const execute = vi.fn().mockResolvedValue({
         llmContent: 'should not run',
         returnDisplay: 'should not run',
@@ -28294,6 +28529,7 @@ describe('Session', () => {
           ],
         ]),
       );
+      const usedIds = new Set(['shell_1']);
       const [duplicatePart] = core.normalizeModelToolCallIds(
         [
           {
@@ -28304,7 +28540,7 @@ describe('Session', () => {
             },
           },
         ],
-        new Set(['shell_1']),
+        usedIds,
         new Set<string>(),
       );
       const duplicateCall = duplicatePart.functionCall!;
@@ -28314,6 +28550,19 @@ describe('Session', () => {
       ).runToolCalls(new AbortController().signal, 'prompt-history-dup', [
         duplicateCall,
       ]);
+      const [repeatedPart] = core.normalizeModelToolCallIds(
+        [
+          {
+            functionCall: {
+              id: 'shell_1',
+              name: 'read_file',
+              args: { file_path: 'b.ts' },
+            },
+          },
+        ],
+        usedIds,
+        new Set<string>(),
+      );
       const toolLoopState: DaemonToolLoopState = {
         totalToolCalls: 0,
         invalidToolParamErrors: new Map<string, number>(),
@@ -28323,13 +28572,14 @@ describe('Session', () => {
         repeatedToolFailureMode: 'off',
         repeatedToolFailureState: createRepeatedToolFailureGuardState(),
       };
+      expect(repeatedPart.functionCall?.id).toBe('shell_1__qwen_dup_3');
       const secondResult = await (
         session as unknown as ToolCallInternals
       ).runToolCalls(
         new AbortController().signal,
         'prompt-history-dup',
         [
-          duplicateCall,
+          repeatedPart.functionCall!,
           { id: 'fresh_shell', name: 'read_file', args: { file_path: 'c.ts' } },
         ],
         toolLoopState,
@@ -28354,9 +28604,39 @@ describe('Session', () => {
         core.LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
       );
       expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledTimes(
-        1,
+        3,
       );
-      expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(1);
+      expect(
+        mockChatRecordingService.recordToolResult.mock.calls
+          .slice(1)
+          .map(([parts, metadata]) => ({
+            callId: metadata.callId,
+            responseId: parts[0]?.functionResponse?.id,
+            error: parts[0]?.functionResponse?.response?.['error'],
+            status: metadata.status,
+            executionStatus: metadata.executionStatus,
+          })),
+      ).toEqual([
+        {
+          callId: 'shell_1__qwen_dup_3',
+          responseId: 'shell_1__qwen_dup_3',
+          error: expect.stringContaining(
+            'loop detection stopped the current turn',
+          ),
+          status: 'error',
+          executionStatus: 'not_started',
+        },
+        {
+          callId: 'fresh_shell',
+          responseId: 'fresh_shell',
+          error: expect.stringContaining(
+            'loop detection stopped the current turn',
+          ),
+          status: 'error',
+          executionStatus: 'not_started',
+        },
+      ]);
+      expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(3);
     });
 
     it('suppresses duplicate TodoWrite calls without emitting plan updates', async () => {

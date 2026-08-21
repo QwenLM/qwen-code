@@ -8,6 +8,8 @@ Qwen Code provides a comprehensive suite of tools for interacting with the local
 
 `list_directory` lists the names of files and subdirectories directly within a specified directory path. It can optionally ignore entries matching provided glob patterns.
 
+**Note:** This tool is opt-in and disabled by default because `glob` covers directory listing in most cases. Enable it by setting `tools.listDirectory.enabled` to `true` in your settings, or by explicitly listing `list_directory` in the `coreTools` allowlist (`--core-tools` / `tools.core`).
+
 - **Tool name:** `list_directory`
 - **Display name:** ListFiles
 - **File:** `ls.ts`
