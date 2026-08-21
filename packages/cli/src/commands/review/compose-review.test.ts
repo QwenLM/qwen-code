@@ -2711,6 +2711,11 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
       expect(lines.some((l) => l.startsWith('CONVERGENCE: Convergence:'))).toBe(
         true,
       );
+      // Its sibling, for the same reason: the health note is the FIRST thing
+      // the ladder sheds, and the trim notice points the reader here.
+      expect(lines.some((l) => l.startsWith('HEALTH: Mechanism health:'))).toBe(
+        true,
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -10035,6 +10040,19 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     });
     expect(deterministic.body).not.toContain('engaged in name');
 
+    // A PATHLESS Suggestion is excluded for the same reason by a different
+    // route: it cannot become a deferral entry at all, so no floor could
+    // have moved it — the same structural exclusion `floorEnforcedReroute`
+    // makes.
+    const pathless = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [{ line: 1, body: '**[Suggestion]** a plain nit' }],
+    });
+    expect(pathless.body).not.toContain('engaged in name');
+
     // A Suggestion the floor WOULD have deferred still fires it.
     const deferrable = composeReview({
       planPath: plan(),
@@ -10145,6 +10163,32 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     // the default configuration, so the posture gap is real and manifested.
     expect(r.body).toContain('engaged in name and not in effect');
     expect(r.health?.en).toContain('Mechanism health:');
+  });
+
+  it('withholds land-and-defer while a blocker could not be ruled on', () => {
+    // A round capped `cannot-tell-existing-critical` posts zero Criticals
+    // precisely BECAUSE existing ones could not be ruled on: the entries
+    // ride their own channel, are never counted, and were never shown fixed.
+    // Passed as a confirmed zero, the body would carry "Unresolved, please
+    // confirm:" and "no Critical is open" at once, and the artifact would
+    // tell a machine consumer to merge.
+    sideFile({ round: 5, posted: 1, fresh: 1, findings: [] });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      cannotTellCriticals: ['a.ts:12 — an existing blocker, unruled'],
+      draftedComments: [
+        { path: 'a.ts', line: 1, body: '**[Suggestion]** a plain nit' },
+      ],
+    });
+    expect(r.cappedBy).toContain('cannot-tell-existing-critical');
+    expect(r.body).toContain('Convergence:');
+    expect(r.body).not.toContain('No Critical finding is open');
+    expect((r.recommendations ?? []).map((x) => x.code)).not.toContain(
+      'land-and-defer',
+    );
   });
 
   it('names an auto-resolved floor the way the enforcement note does', () => {

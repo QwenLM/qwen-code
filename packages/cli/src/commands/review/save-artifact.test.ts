@@ -516,6 +516,13 @@ describe('saveReviewArtifact', () => {
     const saved = JSON.parse(readFileSync(paths.out, 'utf8'));
     expect(saved.verdict.health.en).toBe('Mechanism health: …');
     expect(saved.verdict.health.zh).toBe('机制健康：…');
+    rmSync(paths.out, { force: true });
+
+    // A present value of the wrong shape is refused, like every sibling.
+    writeJson(paths.composed, { ...verdict, health: { en: 'x' } });
+    expect(() =>
+      saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' }),
+    ).toThrow(/health\.zh/);
   });
 
   it('PRESERVES an absent postedFresh and refuses a present one of the wrong shape', () => {

@@ -2670,7 +2670,18 @@ function composeReviewBody(
         ...(convergence.criticalFloorKind === undefined
           ? {}
           : { criticalFloorKind: convergence.criticalFloorKind }),
-        openCriticals,
+        // Only when the blocker state is ESTABLISHED. A round capped
+        // `cannot-tell-existing-critical` posts zero Criticals precisely
+        // BECAUSE existing ones could not be ruled on — the entries ride
+        // their own channel, are never counted here, and were never shown
+        // fixed — and `findings-unverified-at-compose` is the same shape.
+        // The module's own rule then withholds `land-and-defer`: an absent
+        // count is not a count of none. Passed anyway, the body would carry
+        // "Unresolved, please confirm:" and "no Critical is open" at once,
+        // and the artifact would tell a machine consumer to merge.
+        ...(cannotTell.length === 0 && !findingsUnverifiedAtCompose
+          ? { openCriticals }
+          : {}),
       })
     : null;
   // A fact about the round, not about the diagnosis: it rides in the marker
@@ -3729,7 +3740,9 @@ function composeReviewBody(
   // paragraph here that comments on the SHAPE of the review history rather
   // than on the diff.
   //
-  // `trim: 0` — its OWN rank, shed before every other. An untagged block
+  // `trim: 0` — its own rank, shed before every other EXCEPT the
+  // mechanism-health note below it (rank -1, and see there for why it goes
+  // first). An untagged block
   // ranks with the blockers and the verdict-qualifying sentences, and the
   // rounds this fires on are precisely the high-volume rounds most likely to
   // overflow: unranked, an advisory paragraph that decides nothing survived
@@ -4949,14 +4962,22 @@ function ledgerClaimLine(body: unknown): string {
  * the posture working as specified as the posture failing — and the tag is
  * read off the CLAIM LINE only, the same window `floorEnforcedReroute` uses,
  * because the body's tail is writable surface a footer can forge.
+ *
+ * A pathless comment is excluded for the same reason by a different route:
+ * it cannot become a deferral entry at all, so no floor could have moved it.
  */
 function deferrableSuggestionsInline(drafted: unknown): number {
   if (!Array.isArray(drafted)) return 0;
   let n = 0;
-  for (const c of drafted as Array<{ body?: unknown }>) {
+  for (const c of drafted as Array<{ body?: unknown; path?: unknown }>) {
     if (severityOf(c) !== 'suggestion') continue;
     const claim = carriedClaimLine(typeof c.body === 'string' ? c.body : '');
     if (claim !== null && DETERMINISTIC_TAG_RE.test(claim)) continue;
+    // A pathless comment cannot become a deferral entry, so the floor leaves
+    // it inline at any posture — the same structural exclusion the reroute
+    // makes, and counting it would accuse the floor of failing to move
+    // something it has nowhere to move to.
+    if (typeof c.path !== 'string' || c.path.trim() === '') continue;
     n++;
   }
   return n;

@@ -33,7 +33,10 @@ import { EFFORT_LEVELS, type ReviewEffort } from './parse-args.js';
 import { REVIEWS_DIR } from './lib/paths.js';
 import { isSameFile } from './lib/same-file.js';
 import { volumeOf } from './lib/ledger.js';
-import type { Recommendation } from './lib/convergence.js';
+import {
+  RECOMMENDATION_CODES,
+  type Recommendation,
+} from './lib/convergence.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 
 interface PersistedVerdict
@@ -213,13 +216,6 @@ function event(value: unknown, label: string): ReviewEvent {
   return value;
 }
 
-const RECOMMENDATION_CODES: ReadonlySet<string> = new Set([
-  'root-cause-triage',
-  'land-and-defer',
-  'batch-fixes',
-  'stem-surface',
-]);
-
 /**
  * A recommendation code, checked against the closed set rather than cast
  * into it. The set is a contract a caller wires actions to, and a cast
@@ -232,7 +228,7 @@ function recommendationCode(
   label: string,
 ): Recommendation['code'] {
   const code = string(value, label);
-  if (!RECOMMENDATION_CODES.has(code)) {
+  if (!(RECOMMENDATION_CODES as readonly string[]).includes(code)) {
     throw new Error(`${label} must be one of the known recommendation codes.`);
   }
   return code as Recommendation['code'];
@@ -355,7 +351,6 @@ function validateVerdict(value: unknown): PersistedVerdict {
       };
     });
   }
-  // The fresh count reads by the same rules as the total it is part of.
   // Same reasoning as the paragraph above, and more so: this block is the
   // FIRST thing the ladder sheds.
   const rawHealth = verdict['health'];
@@ -367,6 +362,7 @@ function validateVerdict(value: unknown): PersistedVerdict {
       zh: string(h['zh'], 'Composed verdict.health.zh'),
     };
   }
+  // The fresh count reads by the same rules as the total it is part of.
   const rawFresh = verdict['postedFresh'];
   const freshAbsent = rawFresh === undefined || rawFresh === null;
   const postedFresh = freshAbsent ? undefined : volumeOf(rawFresh);

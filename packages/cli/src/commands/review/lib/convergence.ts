@@ -220,11 +220,19 @@ export type CriticalFloorKind = 'explicit' | 'auto-resolved';
  * That is the whole menu: eleven codes in the design, four emitted here,
  * seven named above.
  */
-export type RecommendationCode =
-  | 'root-cause-triage'
-  | 'land-and-defer'
-  | 'batch-fixes'
-  | 'stem-surface';
+export const RECOMMENDATION_CODES = [
+  'root-cause-triage',
+  'land-and-defer',
+  'batch-fixes',
+  'stem-surface',
+] as const;
+
+/**
+ * Derived from the runtime list above, not declared beside it: a validator
+ * needs the membership check and a caller needs the type, and two hand-kept
+ * copies of a closed vocabulary drift the moment one gains a code.
+ */
+export type RecommendationCode = (typeof RECOMMENDATION_CODES)[number];
 
 /** One matched recommendation and the measurement that matched it. */
 export interface Recommendation {
@@ -248,14 +256,16 @@ export interface MechanismHealth {
    */
   postureNotEngaging: boolean;
   /**
-   * This round's SCOPE did not close cleanly — which withholds the
-   * incremental anchor — and the round it recovered carried none either. Two
+   * This round did not close cleanly — unproven scope, a dimension gap that
+   * is not depth-only, or any verdict cap other than an unreviewable
+   * dimension — which withholds the incremental anchor, and the round it
+   * recovered carried none either. Two
    * consecutive withholds mean the next round re-reads the whole diff, and
    * the round after that, until something clears it: the closed loop
    * measured at 119 minutes and 34M tokens on a PR whose code had not
    * changed a line.
    *
-   * A stated limit: the scope is the only withholding leg visible from here.
+   * A stated limit: those are the only withholding legs visible from here.
    * The marker also withholds when the plan carries no fetched sha, when it
    * cannot be read, and when the round's model identity drifted — those are
    * decided where the marker is built, with the plan in hand, and a round
@@ -630,10 +640,10 @@ export function renderMechanismHealth(
   }
   if (h.anchorChainBroken) {
     en.push(
-      `this round's scope did not close cleanly, so it withholds the incremental anchor — and the round it recovered had none either, so the next review re-reads the whole diff and will keep doing so until a round closes cleanly`,
+      `this round did not close cleanly, so it withholds the incremental anchor — and the round it recovered had none either, so the next review re-reads the whole diff and will keep doing so until a round closes cleanly`,
     );
     zh.push(
-      `本轮的作用域未能干净收尾，因而扣留了增量锚点，而它恢复到的那一轮也没有锚点，因此下一次评审将重读整个 diff——并会一直如此，直到某一轮干净收尾`,
+      `本轮未能干净收尾，因而扣留了增量锚点，而它恢复到的那一轮也没有锚点，因此下一次评审将重读整个 diff——并会一直如此，直到某一轮干净收尾`,
     );
   }
   if (en.length === 0) return null;
