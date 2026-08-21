@@ -60,9 +60,25 @@ export function git(...args: string[]): string {
  * every other subcommand would try to open the name as an ordinary file.
  */
 export function gitWithInput(input: Buffer, args: string[]): string {
-  return execFileSync('git', args, { ...gitOpts(), encoding: 'utf8', input })
-    .replace(/\r\n/g, '\n')
-    .trim();
+  return gitWithInputRaw(input, args).replace(/\r\n/g, '\n').trim();
+}
+
+/**
+ * `gitWithInput` with the output UNTOUCHED — no CRLF rewrite, no trim.
+ *
+ * For a NUL-delimited protocol the convenience form is a corruption. `git
+ * check-attr --stdin -z` echoes each path back as a record key, and a path
+ * may legally begin with whitespace or contain `\r\n`: the trim eats the
+ * leading byte of the first record so its key no longer matches the path that
+ * was asked about, and the CRLF rewrite can collide one record's key with a
+ * sibling's. The caller then reads a MALFORMED identity rather than an honest
+ * `UNHASHABLE` — and in one concrete direction it fails OPEN, because the
+ * eaten record is the `diff` attribute, so a `diff=<driver>` path never folds
+ * its driver's `binary` setting in and the config-side binary↔text flip the
+ * identity exists to track goes invisible.
+ */
+export function gitWithInputRaw(input: Buffer, args: string[]): string {
+  return execFileSync('git', args, { ...gitOpts(), encoding: 'utf8', input });
 }
 
 /**

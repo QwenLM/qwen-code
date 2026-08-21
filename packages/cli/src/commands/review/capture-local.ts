@@ -46,6 +46,7 @@ import {
 import { operatorReviewSettings } from './lib/review-settings.js';
 import { hasReviewDeadline } from './lib/deadline.js';
 import { gitOpt } from './lib/git.js';
+import { certifierMatchesRound, roundModelIdFrom } from './lib/round-model.js';
 import {
   changedSince,
   movedSince,
@@ -66,7 +67,6 @@ interface CaptureLocalArgs {
   untracked: boolean;
   effort?: ReviewEffort;
   cache?: string;
-  model?: string;
 }
 
 type CaptureLocalResult = PlanReport & {
@@ -118,7 +118,8 @@ function display(path: string): string {
  */
 function anchorRefusalReason(
   cache: ReturnType<typeof readLocalCache>,
-  model: string | undefined,
+  /** The identity running THIS round, provider-qualified; empty means none. */
+  model: string,
   headSha: string | null,
   target: string,
   skippedCount: number,
@@ -144,18 +145,16 @@ function anchorRefusalReason(
     return `the capture SKIPPED ${skippedCount} file(s) whose content cannot be certified`;
   }
   if (!cache) return 'the cache is missing or unreadable';
-  if (!model) {
-    // The same-model contract cannot be verified without knowing who is
-    // reviewing; an unverifiable contract is a failed one.
-    return '--cache was given without --model';
-  }
-  if (cache.lastModelId !== model) {
+  if (!certifierMatchesRound(cache.lastModelId, model)) {
     // `display()`: the model id is a string out of the model-written cache
     // file — printed raw, a crafted value forges warning lines or emits
     // terminal escapes. Capped for the same reason.
+    // The same-model contract cannot be verified when either side is
+    // missing, and an unverifiable contract is a failed one — which is what
+    // `certifierMatchesRound` answers for an empty running identity too.
     return `the previous local round was reviewed by ${display(
       (cache.lastModelId ?? 'an unrecorded model').slice(0, 64),
-    )}, not ${model}`;
+    )}, not ${display(model || 'an unrecorded model')}`;
   }
   if (cache.target !== target) {
     // A cache belonging to another target (a different file-path review)
@@ -226,16 +225,13 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   // unhashed and two captures differing only in which head file git paired as
   // the source would compare as "no changes".
   //
-  // DEFENSIVE at this commit, not a live fix: the local capture diffs `HEAD`
-  // against the worktree and nothing else, and `git diff -M HEAD` renders a
-  // move as delete + add rather than pairing it (measured — a staged move of
-  // a 95%-similar file still comes back as two sections). So no local plan
-  // carries `renameFrom` today. The line is here because the cost is one
-  // set union and the failure it prevents is silent, and because the moment
-  // this capture grows a `--cached` range — the obvious next step for staged
-  // review — renames appear and the anchor would be wrong without it. There
-  // is deliberately no test: none could be written that exercises this rather
-  // than passing for another reason.
+  // LIVE, not defensive. An earlier version of this comment claimed the
+  // opposite on the strength of a measurement that did not hold: the pinned
+  // flags include `--find-renames` (`lib/diff-flags.ts`), and the capture's
+  // own command over a staged `git mv` renders one rename section, not two —
+  // `similarity index 100%` for a pure move and `95%` for a move with a small
+  // edit. Local plans therefore DO carry `renameFrom`, which is what makes
+  // the slice filter below a live fix rather than a spare part.
   const planPaths = [
     ...new Set(
       fullPlan.files.flatMap((f) =>
@@ -286,6 +282,18 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     headSha,
     files: hashes,
     stateId: stateIdOf(headSha, hashes),
+    // Recorded HERE, from the identity the runtime published, rather than
+    // merged in by Step 8 from `{{model}}`. `{{model}}` interpolates the BARE
+    // model id while `roundModelIdFrom` is provider-qualified
+    // (`<model>@<digest of authType + baseUrl>`), so two provider
+    // configurations exposing one model name wrote — and compared — equal,
+    // and each passed the other's gate. That is the identity-channel class
+    // the PR flow closed by moving the comparison into the command; a local
+    // round is the same contract ("an anchor is honoured only under the model
+    // whose clean verdict certified it") and needs the same treatment. An
+    // empty string means the runtime published nothing, which the gate reads
+    // as a mismatch rather than a pass.
+    lastModelId: roundModelIdFrom(process.env),
   };
   const candidatePath = tmpFile(target, 'cache-candidate.json');
   // The field rides the plan ONLY when a candidate exists to promote: Step 8
@@ -351,7 +359,7 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     const cache = readLocalCache(args.cache);
     const refusal = anchorRefusalReason(
       cache,
-      args.model,
+      roundModelIdFrom(process.env),
       headSha,
       target,
       capture.skipped.length,
@@ -405,7 +413,22 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
       diffBytes = sliceDiffByLines(
         capture.diff,
         fullPlan.files
-          .filter((f) => keep.has(f.path))
+          // Either SIDE of a rename keeps the section. A rename section is
+          // labelled with its NEW path, while `changedSince` reports the
+          // deleted SOURCE — its recorded identity is UNHASHABLE, which never
+          // equals itself, so the source is in `keep` on every round and the
+          // target is in none. Matching `f.path` alone cut the whole section:
+          // a zero-byte slice, a plan with no chunks, `deltaFiles` naming a
+          // path no section carries, and the branch below still printing
+          // "Their sections are in scope". The stop sentence cannot fire
+          // either (`stateChanged` is non-empty), and the candidate re-records
+          // the same state, so every round repeats it — a review cycle spun
+          // over an empty diff with no convergence until HEAD moves.
+          .filter(
+            (f) =>
+              keep.has(f.path) ||
+              (f.renameFrom !== undefined && keep.has(f.renameFrom)),
+          )
           .map((f) => ({ startLine: f.diffStart, endLine: f.diffEnd })),
       );
       plan = buildDiffPlan(diffBytes.toString('utf8'));
@@ -597,13 +620,6 @@ export const captureLocalCommand: CommandModule = {
           'same model, same HEAD — the capture is scoped to files whose ' +
           'content changed since that round, widened by one import hop; on ' +
           'any refusal it degrades to the full capture and says why.',
-      })
-      .option('model', {
-        type: 'string',
-        describe:
-          'The model running this review. Required for `--cache` to take ' +
-          'effect: an anchor is honoured only under the model whose clean ' +
-          'verdict certified it.',
       }),
   handler: (argv) => {
     runCaptureLocal(argv as unknown as CaptureLocalArgs);

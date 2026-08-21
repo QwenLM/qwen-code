@@ -48,7 +48,17 @@ function run(argv: Record<string, unknown>): void {
 function seed(candidate: unknown, ledger: unknown): Record<string, string> {
   const candidatePath = join(dir, 'candidate.json');
   const ledgerPath = join(dir, 'ledger.json');
-  writeFileSync(candidatePath, JSON.stringify(candidate));
+  // Every real candidate carries the identity that certified the round — both
+  // captures record it — so a fixture that omits it is testing something else
+  // and gets the default. A test about the field itself passes its own (or
+  // `null` to leave it out).
+  const withModel =
+    candidate !== null &&
+    typeof candidate === 'object' &&
+    !('lastModelId' in candidate)
+      ? { ...candidate, lastModelId: 'candidate-model@aaaaaaaa' }
+      : candidate;
+  writeFileSync(candidatePath, JSON.stringify(withModel));
   writeFileSync(ledgerPath, JSON.stringify(ledger));
   return {
     candidate: candidatePath,
@@ -64,10 +74,13 @@ describe('cache-commit', () => {
         v: 1,
         target: 'pr-7',
         lastCommitSha: 'real-sha',
+        lastModelId: 'm1',
         fileVerdicts: { 'a.ts': { base: 'b', head: 'h' } },
       },
       {
-        lastModelId: 'm1',
+        // The bare token an orchestrator could type. The candidate's
+        // provider-qualified one must win it, like every other anchor field.
+        lastModelId: 'bare-name',
         round: 2,
         verdict: 'Approve',
         findings: [],
@@ -81,14 +94,18 @@ describe('cache-commit', () => {
       unknown
     >;
     expect(cache['lastCommitSha']).toBe('real-sha');
+    // The candidate's, not the bare token the ledger carried.
     expect(cache['lastModelId']).toBe('m1');
     expect(cache['round']).toBe(2);
     expect(cache['fileVerdicts']).toEqual({ 'a.ts': { base: 'b', head: 'h' } });
     expect(typeof cache['lastReviewDate']).toBe('string');
   });
 
-  it('refuses a ledger without lastModelId — the same-model contract needs one', () => {
-    const argv = seed({ v: 1, target: 'pr-7' }, { round: 1 });
+  it('refuses a CANDIDATE without lastModelId — the capture records who certified', () => {
+    // Not the ledger: a ledger value is one the orchestrator typed, and the
+    // only token it can type is the bare `{{model}}`, which two providers
+    // exposing one model name share.
+    const argv = seed({ v: 1, target: 'pr-7', lastModelId: '' }, { round: 1 });
     expect(() => run(argv)).toThrow(/lastModelId/);
     expect(existsSync(argv['out'])).toBe(false);
   });
@@ -111,7 +128,7 @@ describe('cache-commit', () => {
         files: { 'a.ts': 'x' },
         stateId: 's',
       },
-      { lastModelId: 'm1', round: 1, verdict: 'Comment', findings: [] },
+      { round: 1, verdict: 'Comment', findings: [] },
     );
     argv['out'] = join(dir, 'cache/local.json');
     run(argv);
@@ -120,7 +137,7 @@ describe('cache-commit', () => {
       unknown
     >;
     expect(cache['stateId']).toBe('s');
-    expect(cache['lastModelId']).toBe('m1');
+    expect(cache['lastModelId']).toBe('candidate-model@aaaaaaaa');
   });
 
   it('refuses a candidate whose target does not match --out', () => {
@@ -146,7 +163,7 @@ describe('cache-commit', () => {
         round: 99,
         verdict: 'Approve',
         findings: [],
-        lastModelId: 'candidate-model',
+        lastModelId: 'candidate-model@aaaaaaaa',
       },
       {
         lastModelId: 'm1',
@@ -164,7 +181,7 @@ describe('cache-commit', () => {
     expect(cache['round']).toBe(2);
     expect(cache['verdict']).toBe('Request changes');
     expect(cache['findings']).toEqual([{ id: 'R1-1' }]);
-    expect(cache['lastModelId']).toBe('m1');
+    expect(cache['lastModelId']).toBe('candidate-model@aaaaaaaa');
     expect(cache['lastCommitSha']).toBe('real-sha');
     expect(cache['lastReviewDate']).not.toBe('1999-01-01T00:00:00Z');
   });
@@ -225,12 +242,12 @@ describe('cache-commit', () => {
     // a tampered candidate is policing none — the next round hands
     // lastCommitSha to git as an argument.
     const esc = String.fromCharCode(0x1b);
-    const bad1 = seed({ v: 1, target: 'pr-7' }, { lastModelId: `m${esc}[31m` });
+    const bad1 = seed({ v: 1, target: 'pr-7', lastModelId: `m${esc}[31m` }, {});
     expect(() => run(bad1)).toThrow(/lastModelId. carries control/);
     expect(existsSync(bad1['out'])).toBe(false);
     const bad2 = seed(
       { v: 1, target: 'pr-7', lastCommitSha: `abc${esc}[2J` },
-      { lastModelId: 'm1' },
+      {},
     );
     expect(() => run(bad2)).toThrow(/lastCommitSha. carries control/);
     expect(existsSync(bad2['out'])).toBe(false);
@@ -318,7 +335,7 @@ describe('cache-commit', () => {
   );
 
   it('refuses an EMPTY lastModelId, not just a missing one', () => {
-    const argv = seed({ v: 1, target: 'pr-7' }, { lastModelId: '' });
+    const argv = seed({ v: 1, target: 'pr-7', lastModelId: '' }, {});
     expect(() => run(argv)).toThrow(/lastModelId/);
   });
 });

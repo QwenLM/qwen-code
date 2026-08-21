@@ -22,15 +22,24 @@ vi.mock('./git.js', () => ({
   // the second these tests would exercise the unknown-attributes fallback
   // rather than the batching they are about.
   gitWithInput: vi.fn((input: Buffer, args: string[]) =>
-    args.includes('check-attr')
-      ? String(input)
-          .split('\0')
-          .filter((p) => p !== '')
-          .map((p) => `${p}\0diff\0unspecified\0`)
-          .join('')
-      : 'link-oid',
+    args.includes('check-attr') ? checkAttr(input) : 'link-oid',
+  ),
+  // `check-attr --stdin -z` goes through the RAW variant: the convenience
+  // form's `.trim()` steals the first record's key from a path that begins
+  // with whitespace.
+  gitWithInputRaw: vi.fn((input: Buffer, args: string[]) =>
+    args.includes('check-attr') ? checkAttr(input) : 'link-oid',
   ),
 }));
+
+/** `git check-attr --stdin -z`'s echo, for the one attribute these ask for. */
+function checkAttr(input: Buffer): string {
+  return String(input)
+    .split('\0')
+    .filter((p) => p !== '')
+    .map((p) => `${p}\0diff\0unspecified\0`)
+    .join('');
+}
 
 import { hashWorktreeFiles, UNHASHABLE } from './local-anchor.js';
 

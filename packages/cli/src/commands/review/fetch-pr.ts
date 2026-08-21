@@ -1593,6 +1593,15 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
                 lastCommitSha: fetchedSha,
                 mergeBaseSha,
                 fileVerdicts: pairs,
+                // WHO certified this anchor, recorded HERE rather than merged
+                // in by Step 8 from `{{model}}`. That interpolates the BARE
+                // model id, while every identity this CLI compares is
+                // provider-qualified — two provider configurations exposing
+                // one model name wrote the same token and passed each other's
+                // same-model gate, which is the contract the anchor rests on.
+                // Empty when the runtime published nothing, which every
+                // consumer reads as a mismatch.
+                lastModelId: roundModelIdFrom(process.env),
               },
               null,
               2,

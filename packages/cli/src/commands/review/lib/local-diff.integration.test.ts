@@ -256,6 +256,69 @@ describe('captureLocalDiff — untracked files', () => {
     expect(res.text).not.toContain('.qwen/tmp');
   });
 
+  it('excludes plumbing a round in ANOTHER directory wrote', () => {
+    // The three `paths.ts` constants are cwd-relative for EVERY invocation,
+    // so a round run from `sub/` writes `sub/.qwen/…`. A filter built from
+    // THIS invocation's cwd matches none of it, and a repo that does not
+    // ignore `.qwen` then hands the next root-invoked round the previous
+    // round's cache, reports and args record as the user's untracked work —
+    // and the cache changes every round by construction, so an incremental
+    // round could never again report "no changes".
+    write('sub/.qwen/review-cache/local.json', '{"lastCommitSha":"abc"}\n');
+    write('sub/.qwen/reviews/2026-01-01-local.md', '# round\n');
+    write('sub/.qwen/tmp/qwen-review-local-cache-candidate.json', '{}\n');
+    write('sub/real.ts', 'export const r = 1;\n');
+
+    const res = capture();
+    expect(res.untracked).toEqual(['sub/real.ts']);
+    expect(res.text).not.toContain('.qwen');
+  });
+
+  it('keeps a directory that merely LOOKS like plumbing', () => {
+    // Segment-exact: `.qwen-notes` and `tmp` are the user's.
+    write('.qwen-notes/tmp/a.md', 'mine\n');
+    write('tmp/reviews/b.md', 'also mine\n');
+
+    const res = capture();
+    expect(res.untracked.sort()).toEqual([
+      '.qwen-notes/tmp/a.md',
+      'tmp/reviews/b.md',
+    ]);
+  });
+
+  it('reviews a plumbing path the user NAMED, instead of dropping it mutely', () => {
+    // `/review .qwen/reviews/round-notes.md` is a deliberate request. Filtered
+    // out, the round reported "the working tree is clean — 0 chunks" over the
+    // one file it was asked about, with no `Not reviewed` record: mute, which
+    // the SkippedFile contract forbids.
+    write('.qwen/reviews/round-notes.md', '# notes\n');
+    write('.qwen/reviews/other.md', '# not asked for\n');
+
+    const res = capture({ file: '.qwen/reviews/round-notes.md' });
+    expect(res.untracked).toEqual(['.qwen/reviews/round-notes.md']);
+    expect(res.text).toContain('round-notes.md');
+    // …and only the named one: its siblings are still plumbing.
+    expect(res.text).not.toContain('other.md');
+  });
+
+  it('drops a TRACKED plumbing section, which ignore rules never reach', () => {
+    // Ignore rules do not apply to tracked files, so a repo that once
+    // committed its `.qwen` plumbing gets the cache back in `git diff HEAD`
+    // every round — and Step 8 rewrites that cache after every clean round,
+    // so the section is there by construction. The round reviews its own
+    // ledger JSON and `changedSince` never empties.
+    write('.qwen/review-cache/local.json', '{"lastCommitSha":"old"}\n');
+    git('add', '-f', '.qwen/review-cache/local.json');
+    git('commit', '-q', '--no-verify', '-m', 'committed plumbing');
+    write('.qwen/review-cache/local.json', '{"lastCommitSha":"new"}\n');
+    write('tracked.ts', 'export const a = 2;\n');
+
+    const res = capture();
+    expect(res.text).not.toContain('.qwen/review-cache');
+    // …while the real tracked change survives.
+    expect(res.text).toContain('tracked.ts');
+  });
+
   it('reports an oversized tracked diff instead of inlining it', () => {
     // The aggregate budget covered only untracked files; a tracked diff could
     // grow to the 512 MiB gitRaw buffer. Stage one big tracked file past the

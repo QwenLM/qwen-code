@@ -104,12 +104,24 @@ type Plan = Record<string, unknown> & {
 
 function capture(extra: Record<string, unknown> = {}): Plan {
   const out = join(repo, 'plan.json');
-  (captureLocalCommand.handler as (argv: unknown) => void)({
-    out,
-    target: 'local',
-    untracked: true,
-    ...extra,
-  });
+  // The identity is the RUNTIME's, not a flag: `capture-local` reads
+  // `QWEN_CODE_MODEL_IDENTITY` the way the child shell publishes it. Tests
+  // name a model the same way they always did; the harness puts it where the
+  // command actually looks.
+  const { model, ...argv } = extra as { model?: string };
+  const prev = process.env['QWEN_CODE_MODEL_IDENTITY'];
+  if (model !== undefined) process.env['QWEN_CODE_MODEL_IDENTITY'] = model;
+  try {
+    (captureLocalCommand.handler as (argv: unknown) => void)({
+      out,
+      target: 'local',
+      untracked: true,
+      ...argv,
+    });
+  } finally {
+    if (prev === undefined) delete process.env['QWEN_CODE_MODEL_IDENTITY'];
+    else process.env['QWEN_CODE_MODEL_IDENTITY'] = prev;
+  }
   return JSON.parse(readFileSync(out, 'utf8')) as Plan;
 }
 
@@ -373,6 +385,95 @@ describe('capture-local — incremental local rounds', () => {
     const diff = readFileSync(join(repo, plan.diffPath), 'utf8');
     expect(diff).toContain('new-untracked');
     expect(diff).not.toContain('bystander');
+  });
+});
+
+describe('capture-local — the local same-model gate', () => {
+  const A = 'qwen3-max@aaaaaaaa';
+  const B = 'qwen3-max@bbbbbbbb';
+
+  it('records the PROVIDER-QUALIFIED identity in the candidate itself', () => {
+    // Step 8 used to merge `lastModelId: "{{model}}"` in afterwards, and
+    // `{{model}}` interpolates the BARE model id. The capture records what
+    // the runtime published instead, so the token that gets compared is the
+    // one that distinguishes two providers exposing one model name.
+    seedDirtyTree();
+    const plan = capture({ model: A });
+    const candidate = JSON.parse(
+      readFileSync(plan.cacheCandidatePath, 'utf8'),
+    ) as { lastModelId?: string };
+    expect(candidate.lastModelId).toBe(A);
+  });
+
+  it('refuses an anchor another PROVIDER certified under the same name', () => {
+    // The failure the bare comparison allowed: two provider configurations
+    // exposing `qwen3-max` compared equal, so provider B honoured provider
+    // A's anchor and scoped — and then certified — over code only A read.
+    seedDirtyTree();
+    const round1 = capture({ model: A });
+    const candidate = JSON.parse(
+      readFileSync(round1.cacheCandidatePath, 'utf8'),
+    ) as Record<string, unknown>;
+    mkdirSync(join(repo, '.qwen/review-cache'), { recursive: true });
+    const cachePath = join(repo, '.qwen/review-cache/local.json');
+    // Promoted verbatim — the candidate already carries who certified it.
+    writeFileSync(cachePath, JSON.stringify(candidate));
+
+    write(CHANGED, 'export const v = 2;\n');
+    const other = capture({ cache: cachePath, model: B });
+    expect(other.incremental).toBeUndefined();
+
+    // …and the same provider still scopes.
+    const same = capture({ cache: cachePath, model: A });
+    expect(same.incremental?.scope?.deltaFiles).toEqual([CHANGED]);
+  });
+
+  it('treats a runtime that published NO identity as a mismatch', () => {
+    // An unverifiable contract is a failed one: empty never matches, so the
+    // round degrades to the full capture rather than honouring an anchor it
+    // cannot attribute.
+    seedDirtyTree();
+    const cachePath = promoteCandidate(capture({ model: A }), A);
+    write(CHANGED, 'export const v = 2;\n');
+    expect(
+      capture({ cache: cachePath, model: '' }).incremental,
+    ).toBeUndefined();
+  });
+});
+
+describe('capture-local — a staged move across rounds', () => {
+  it('keeps the rename section when only its deleted SOURCE is in scope', () => {
+    // The capture's pinned flags include `--find-renames`, so a staged move
+    // comes back as ONE section labelled with the NEW path — a comment here
+    // once claimed otherwise on the strength of a measurement that did not
+    // hold. `changedSince` reports the deleted SOURCE (its recorded identity
+    // is UNHASHABLE, which never equals itself), so on the round after the
+    // move the keep-set holds the source and no section is labelled with it.
+    // Matching the new side alone cut the whole section: a zero-byte slice, a
+    // plan with no chunks, `deltaFiles` naming a path no section carries, and
+    // the "their sections are in scope" line printed over it. The stop
+    // sentence cannot fire either, and the candidate re-records the same
+    // state — so the cycle repeats until HEAD moves.
+    seedDirtyTree();
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'round 1 work');
+    git('mv', CHANGED, 'src/moved.ts');
+
+    const round1 = capture();
+    expect(round1.files.map((f) => f.path)).toContain('src/moved.ts');
+    const cache = promoteCandidate(round1, 'model-a');
+
+    // Round 2: nothing moved since round 1.
+    const round2 = capture({ cache, model: 'model-a' });
+    const scope = round2.incremental?.scope;
+    expect(scope).toBeDefined();
+    // The source is what changed since the anchor…
+    expect(scope!.deltaFiles).toContain(CHANGED);
+    // …and the section it names is PUBLISHED, not sliced away.
+    const sliced = readFileSync(join(repo, round2.diffPath), 'utf8');
+    expect(sliced).toContain(`rename from ${CHANGED}`);
+    expect(sliced).toContain('rename to src/moved.ts');
+    expect(round2.chunks.length).toBeGreaterThan(0);
   });
 });
 

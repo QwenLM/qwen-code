@@ -82,6 +82,16 @@ const CANDIDATE_FIELDS = [
   'lastCommitSha',
   'mergeBaseSha',
   'fileVerdicts',
+  // The identity that certified the round, and an ANCHOR field like the rest
+  // of this list even though it names a model rather than a tree. The capture
+  // records it from what the runtime published — provider-qualified,
+  // `<model>@<digest>` — because the alternative is a token routed through
+  // the orchestrator's output, and `{{model}}` interpolates the BARE model
+  // id: two provider configurations exposing one model name write the same
+  // string and pass each other's same-model gate, which is the whole contract
+  // the anchor rests on. Left out of this list, a hand-written ledger key
+  // would win the collision and put that bare token back in the cache.
+  'lastModelId',
 ] as const;
 
 function runCacheCommit(args: CacheCommitArgs): void {
@@ -91,11 +101,19 @@ function runCacheCommit(args: CacheCommitArgs): void {
   // The two fields every incremental check reads are non-negotiable: a cache
   // without a model has no same-model contract to enforce, and Step 1 would
   // fail-open it into a full review forever; better to refuse loudly now.
-  const ledgerModel = ledger['lastModelId'];
-  if (typeof ledgerModel !== 'string' || ledgerModel === '') {
+  //
+  // Read off the CANDIDATE, which is where both captures record it, and never
+  // off the ledger. A ledger value is one the orchestrator typed, and the only
+  // token it can type is `{{model}}` — the BARE model id, which two provider
+  // configurations exposing one model name share. The captures record what the
+  // runtime published instead, provider-qualified, so the string that gets
+  // compared is the one that tells those two apart.
+  const candidateModel = candidate['lastModelId'];
+  if (typeof candidateModel !== 'string' || candidateModel === '') {
     throw new Error(
-      'cache-commit: the ledger must carry a non-empty `lastModelId` — the ' +
-        'incremental anchor is a same-model contract.',
+      'cache-commit: the candidate must carry a non-empty `lastModelId` — ' +
+        'the incremental anchor is a same-model contract, and the capture is ' +
+        'what records who certified it.',
     );
   }
   // The promoted cache is read back by commands that print these values on a
@@ -109,12 +127,6 @@ function runCacheCommit(args: CacheCommitArgs): void {
   const controlled = (v: unknown): boolean =>
     // eslint-disable-next-line no-control-regex
     typeof v === 'string' && /[\u0000-\u001f\u007f]/.test(v);
-  if (controlled(ledgerModel)) {
-    throw new Error(
-      'cache-commit: `lastModelId` carries control characters — refusing to ' +
-        'persist a value that forges terminal output when read back.',
-    );
-  }
   for (const key of CANDIDATE_FIELDS) {
     if (controlled(candidate[key])) {
       throw new Error(

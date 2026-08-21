@@ -25,8 +25,9 @@
 // any other.
 
 import { lstatSync, statSync, type Stats } from 'node:fs';
-import { join, relative, resolve, sep } from 'node:path';
+import { join, sep } from 'node:path';
 import { repoRelativeOf } from './paths.js';
+import { parseDiff, sliceDiffByLines } from './diff-plan.js';
 import {
   LITERAL_PATHSPECS,
   NULL_DEVICE,
@@ -286,6 +287,54 @@ function diffUntracked(repoRoot: string, path: string): Buffer {
  * `file` scopes the capture to a single path (a `/review <file-path>` target).
  * Nothing here writes to the index, the worktree, or any ref.
  */
+/**
+ * Is this repo-relative path the review's own plumbing?
+ *
+ * Segment-exact at ANY depth, not anchored to the cwd. The three constants in
+ * `paths.ts` are cwd-relative for every invocation, so a round started from
+ * `sub/` writes `sub/.qwen/…` — which a filter built from THIS invocation's
+ * cwd does not match. A repo that does not ignore `.qwen` then lets the next
+ * root-invoked round capture the previous round's cache, reports, and args
+ * record as the user's untracked work, and the cache changes every round by
+ * construction, so an incremental round could never again report "no
+ * changes". Matching the segment wherever it sits closes both directions with
+ * no dependence on where either round ran.
+ *
+ * Segment-exact matters for the same reason `toRepoPathspec` records: a
+ * directory named `.qwen-notes` or `tmpfiles` is the user's, not ours.
+ */
+function isReviewPlumbing(repoRelPath: string): boolean {
+  return /(?:^|\/)\.qwen\/(?:tmp|review-cache|reviews)(?:\/|$)/.test(
+    repoRelPath,
+  );
+}
+
+/**
+ * The tracked diff with the review's own plumbing sections removed.
+ *
+ * Ignore rules never apply to TRACKED files, so a repo that once committed
+ * its `.qwen` plumbing gets the cache back in `git diff HEAD` every round —
+ * and Step 8 rewrites that cache after every clean round, so the section is
+ * there by construction. The round then reviews its own ledger JSON, and
+ * `changedSince` can never empty: the incremental loop can never report "no
+ * changes". Exactly the pathology the untracked filter beside this exists to
+ * prevent, on the half it could not reach.
+ *
+ * An explicit `--file` has already pathspec-limited the capture to one path,
+ * so whatever came back is what the user asked for; nothing is dropped then.
+ */
+function dropPlumbingSections(diff: Buffer, pathspec?: string): Buffer {
+  if (pathspec !== undefined || diff.length === 0) return diff;
+  const files = parseDiff(diff.toString('utf8')).files;
+  if (!files.some((f) => isReviewPlumbing(f.path))) return diff;
+  return sliceDiffByLines(
+    diff,
+    files
+      .filter((f) => !isReviewPlumbing(f.path))
+      .map((f) => ({ startLine: f.diffStart, endLine: f.diffEnd })),
+  );
+}
+
 export function captureLocalDiff(opts: {
   file?: string;
   includeUntracked?: boolean;
@@ -321,7 +370,7 @@ export function captureLocalDiff(opts: {
     base,
   ];
   if (pathspec) trackedArgs.push('--', pathspec);
-  const trackedDiff = gitRaw(...trackedArgs);
+  const trackedDiff = dropPlumbingSections(gitRaw(...trackedArgs), pathspec);
 
   const untracked: string[] = [];
   const skipped: SkippedFile[] = [];
@@ -357,27 +406,15 @@ export function captureLocalDiff(opts: {
     // never again report "no changes". None of it is ever the change under
     // review; drop it.
     //
-    // The prefixes are computed, not hardcoded: `ls-files` returns
-    // repo-root-relative paths while the review writes its plumbing relative
-    // to the CWD the command was invoked from (`paths.ts` documents those
-    // three constants as cwd-relative), and a capture started from a
-    // subdirectory — supported, and pinned by this module's own `--file`
-    // tests — puts the plumbing at `<subdir>/.qwen/…` where a root-anchored
-    // filter matches nothing.
-    const cwdPrefix = relative(repoRoot, resolve(process.cwd())).replace(
-      /\\/g,
-      '/',
-    );
-    const selfDirs = ['.qwen/tmp', '.qwen/review-cache', '.qwen/reviews']
-      .flatMap((d) => (cwdPrefix === '' ? [d] : [d, `${cwdPrefix}/${d}`]))
-      // A cwd outside the repo (or above it) yields a `..` prefix that names
-      // nothing `ls-files` can return; keep the root form only. Segment-exact,
-      // for the reason `toRepoPathspec` records below: a directory literally
-      // named `..config` is not an escape, and dropping its prefix would put
-      // the plumbing back in the capture.
-      .filter((d) => d !== '..' && !d.startsWith('../'));
+    // …unless the user NAMED one. An explicit `--file` under `.qwen/reviews`
+    // is a deliberate request to review that file — round notes, a saved
+    // report — and dropping it here left the round claiming "the working tree
+    // is clean, 0 chunks" over the one file it was asked about, with no
+    // `Not reviewed` record: mute, which this module's `SkippedFile` contract
+    // forbids. Only the explicitly named path is exempt; its siblings are
+    // still plumbing.
     const candidates = listUntracked(repoRoot, pathspec).filter(
-      (p) => !selfDirs.some((d) => p === d || p.startsWith(`${d}/`)),
+      (p) => p === pathspec || !isReviewPlumbing(p),
     );
 
     if (candidates.length > MAX_UNTRACKED_FILES) {

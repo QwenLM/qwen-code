@@ -26,7 +26,7 @@
 import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, readlinkSync } from 'node:fs';
 import { join } from 'node:path';
-import { gitOpt, gitWithInput } from './git.js';
+import { gitOpt, gitWithInput, gitWithInputRaw } from './git.js';
 
 /**
  * Per-file identity for a path whose state CANNOT be captured: a directory
@@ -48,14 +48,29 @@ export interface LocalCacheCandidate {
   files: Record<string, string>;
   /** Content-addressed id of the whole reviewed state, for display and logs. */
   stateId: string;
+  /**
+   * The identity reviewing this round, provider-qualified, as the runtime
+   * published it — written by the CAPTURE, not merged in afterwards.
+   *
+   * Step 8 used to add it from `{{model}}`, which interpolates the BARE model
+   * id: two provider configurations exposing one model name recorded the same
+   * token and passed each other's same-model gate, which is the contract's
+   * whole point. Empty when the runtime published no identity, and the gate
+   * reads empty as a mismatch — an unverifiable contract is a failed one.
+   */
+  lastModelId: string;
 }
 
 /**
  * The cache Step 8 writes from a candidate — the candidate's fields plus the
- * model-written ledger (`lastModelId`, `round`, `findings`, …). Only the
- * fields the scoping decision reads are typed; the rest ride as data.
+ * model-written ledger (`round`, `findings`, …). Only the fields the scoping
+ * decision reads are typed; the rest ride as data. `lastModelId` is inherited
+ * from the candidate and optional here only because a cache written before it
+ * moved into the capture may not carry one — which the gate treats as a
+ * mismatch, so such a cache costs a full round and never a wrong scope.
  */
-export interface LocalReviewCache extends LocalCacheCandidate {
+export interface LocalReviewCache
+  extends Omit<LocalCacheCandidate, 'lastModelId'> {
   lastModelId?: string;
 }
 
@@ -216,7 +231,18 @@ function renderingAttributes(
     // `-z` on both sides: NUL-delimited input and output, so a path holding a
     // newline or a colon cannot forge a record — the same reason every
     // listing in this file is byte-faithful.
-    raw = gitWithInput(Buffer.from(`${paths.join('\0')}\0`), [
+    //
+    // …and RAW, because the convenience wrapper is not. Its `.trim()` eats a
+    // leading whitespace byte — legal in a path on Linux and macOS — so the
+    // first record's echoed key stops matching the path that was asked
+    // about, and every record shifts onto a phantom key: the path gets a
+    // MALFORMED identity instead of an honest `UNHASHABLE`. That fails OPEN
+    // in one direction, because the stolen record is the `diff` attribute, so
+    // a `diff=<driver>` path never folds its driver's `binary` setting in and
+    // the config-side binary↔text flip this whole function exists to track
+    // goes invisible. The `\r\n` → `\n` rewrite can collide one record's key
+    // with a sibling's the same way.
+    raw = gitWithInputRaw(Buffer.from(`${paths.join('\0')}\0`), [
       '-C',
       repoRoot === '' ? '.' : repoRoot,
       'check-attr',
