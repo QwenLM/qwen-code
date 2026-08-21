@@ -1199,6 +1199,102 @@ describe('LoopDetectionService', () => {
     });
   });
 
+  describe('Repetitive reasoning streamed as thought deltas (issue #9656)', () => {
+    // On OpenAI-compatible providers the model's reasoning is streamed as
+    // many small thought parts (createOpenAIReasoningThoughtPart), each of
+    // which becomes one Thought event via getThoughtSummary in turn.ts.
+    // getResponseText filters thought parts out, so the reasoning text never
+    // reaches the Content events that feed checkContentLoop. The
+    // Thought-only detector compares whole deltas adjacently, so a verbatim
+    // sentence chant whose stream chunking does not align with the sentence
+    // boundary never produces three consecutive identical Thought events and
+    // the turn spins forever. These tests stream the repeated sentence with
+    // a deliberately misaligned delta size so no two adjacent deltas are
+    // identical.
+    const streamAsMisalignedThoughtDeltas = (
+      text: string,
+      deltaSize: number,
+    ): boolean => {
+      let detected = false;
+      for (let i = 0; i < text.length && !detected; i += deltaSize) {
+        detected = service.addAndCheck(
+          createThoughtEvent('', text.slice(i, i + deltaSize)),
+        );
+      }
+      return detected;
+    };
+
+    it('detects a verbatim-repeated sentence chanted in the reasoning stream', () => {
+      service.reset('');
+
+      const sentence = "让我先看看这个报告文件，理解'性能不稳定'具体指什么。";
+      // 11 does not divide the sentence length, so the delta boundaries
+      // shift inside the sentence on every repetition and no two adjacent
+      // Thought events carry identical text.
+      expect(sentence.length % 11).not.toBe(0);
+
+      const detected = streamAsMisalignedThoughtDeltas(sentence.repeat(40), 11);
+
+      expect(detected).toBe(true);
+      expect(service.getLastLoopType()).toBe(
+        LoopType.CHANTING_IDENTICAL_SENTENCES,
+      );
+    });
+
+    it('detects misaligned verbatim repetition with ASCII reasoning too', () => {
+      service.reset('');
+
+      // The chunk-hash detector clusters repeat occurrences within
+      // 1.5 * CONTENT_CHUNK_SIZE (75) characters, so the repeated unit must
+      // stay under that window — same constraint as visible-content
+      // chanting.
+      const sentence =
+        'Let me look at the report file to understand the flaky performance. ';
+      expect(sentence.length % 13).not.toBe(0);
+      expect(sentence.length).toBeLessThanOrEqual(75);
+
+      const detected = streamAsMisalignedThoughtDeltas(sentence.repeat(40), 13);
+
+      expect(detected).toBe(true);
+      expect(service.getLastLoopType()).toBe(
+        LoopType.CHANTING_IDENTICAL_SENTENCES,
+      );
+    });
+
+    it('does not halt on a long, varied reasoning stream', () => {
+      service.reset('');
+
+      // A productive reasoning stream: every step differs, chunked the same
+      // misaligned way. Must not trip either detector.
+      let text = '';
+      for (let i = 0; i < 200; i++) {
+        text += `Step ${i}: consider aspect ${i * 7 + 3} of the problem. `;
+      }
+
+      const detected = streamAsMisalignedThoughtDeltas(text, 13);
+
+      expect(detected).toBe(false);
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
+    it('still fires REPETITIVE_THOUGHTS for identical whole-thought repeats', () => {
+      service.reset('');
+
+      // The pre-existing structured-thought detector keeps priority: three
+      // identical complete thoughts fire before the chunk-hash detector is
+      // relevant.
+      let loopType: LoopType | null = null;
+      for (let i = 0; i < 3; i++) {
+        service.addAndCheck(
+          createThoughtEvent('Plan', 'Inspect the migration script.'),
+        );
+        loopType = service.getLastLoopType();
+      }
+
+      expect(loopType).toBe(LoopType.REPETITIVE_THOUGHTS);
+    });
+  });
+
   describe('Read File Loop Detection', () => {
     // Cold-start exemption: a prompt that has not yet fired any non-read-like
     // tool is still in its opening-exploration phase, so the detector gives

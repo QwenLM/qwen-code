@@ -302,6 +302,21 @@ export class LoopDetectionService {
       case GeminiEventType.Thought: {
         this.trackThought(event.value);
         this.loopDetected = this.checkRepetitiveThoughts();
+        if (!this.loopDetected) {
+          // Also route the thought text into the content-repetition detector.
+          // OpenAI-compatible providers stream reasoning as thought parts,
+          // which getResponseText filters out of Content events, so a
+          // verbatim chant in the thinking stage never reaches
+          // checkContentLoop. The Thought-only check above compares whole
+          // stream deltas adjacently, which misaligned chunking defeats —
+          // the chunk-hash detector accumulates the text across deltas and
+          // catches the repetition regardless of chunk boundaries
+          // (issue #9656).
+          const thoughtText = this.getThoughtText(event.value);
+          if (thoughtText) {
+            this.loopDetected = this.checkContentLoop(thoughtText);
+          }
+        }
         break;
       }
       default:
@@ -710,6 +725,18 @@ export class LoopDetectionService {
       originalIndex + CONTENT_CHUNK_SIZE,
     );
     return originalChunk === currentChunk;
+  }
+
+  /**
+   * Joins a thought summary back into raw text for the content-repetition
+   * detector. For reasoning streamed from OpenAI-compatible providers the
+   * subject is empty and the description is the reasoning delta, so this
+   * yields the reasoning text verbatim.
+   */
+  private getThoughtText(summary: ThoughtSummary): string {
+    return [summary.subject, summary.description]
+      .filter((part) => part.length > 0)
+      .join(' ');
   }
 
   /**
