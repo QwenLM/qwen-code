@@ -110,6 +110,7 @@ vi.mock('../../config/settings.js', async (importOriginal) => {
 const { runSubmit, submitCommand } = await import('./submit.js');
 
 let dir: string;
+let savedCwd: string;
 let savedSessionId: string | undefined;
 let savedGhHost: string | undefined;
 
@@ -192,6 +193,12 @@ function args(over: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'review-submit-'));
+  // Run from the per-test fixture dir: the anchor gate's captured diff
+  // and the slow-path recordings are seeded at cwd-relative convention
+  // paths, and seeding them in the REAL vitest cwd would overwrite (and
+  // cleanup-delete) a same-numbered live capture sitting there.
+  savedCwd = process.cwd();
+  process.chdir(dir);
   ghMock.mockClear();
   ghViewMock.mockClear();
   aoneSubmitMock.mockClear();
@@ -217,6 +224,7 @@ beforeEach(() => {
   delete process.env['GH_HOST'];
 });
 afterEach(() => {
+  process.chdir(savedCwd);
   rmSync(dir, { recursive: true, force: true });
   process.exitCode = undefined;
   if (savedSessionId === undefined) delete process.env['QWEN_CODE_SESSION_ID'];

@@ -1193,8 +1193,17 @@ describe('the Aone anchor gate — the validation the platform does not perform'
     ).not.toThrow();
     const req = submitAoneMock.mock.calls[0][0] as AoneSubmitRequest;
     expect(req.comments).toEqual([]);
+    // The entry cites the CLAIMED line (`line`, the range's end), not the
+    // start — an operator chasing the blocker must land on line 40
+    // (outside the hunk, visibly wrong), not on line 12, which sits
+    // inside the hunk and looks fine.
     const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
-    expect(input['bodyCriticals']).toHaveLength(1);
+    expect(input['bodyCriticals']).toEqual([
+      'src/foo.ts:40 — Range crosses out of the hunk.',
+    ]);
+    expect(stderrMock).toHaveBeenCalledWith(
+      expect.stringContaining('relocated into the summary body: src/foo.ts:40'),
+    );
   });
 
   it('relocates a stacked-marker draft without leaking the second marker into the entry', () => {
@@ -1707,6 +1716,15 @@ describe('the Aone anchor gate — the validation the platform does not perform'
     expect(out.wouldPost).toBe(true);
     expect(out['anchorsRelocated']).toBe(1);
     expect(out['anchorsDiscarded']).toBe(0);
+    // The preview must compose from the gate-CORRECTED payload, exactly
+    // what the real post composes — skipping the payload rewrite under
+    // dry-run keeps the counters intact (assigned before the rewrite)
+    // while diverging the preview verdict from the real post: the one
+    // thing --dry-run exists to prevent.
+    const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(input['bodyCriticals']).toEqual(['src/foo.ts:4 — Would misanchor.']);
+    expect(input['criticalsInline']).toBe(0);
+    expect(input['suggestionsInline']).toBe(1);
   });
 
   it('refuses a truthy NON-STRING path loudly at the consistency gate — never the write seam', () => {
@@ -1856,6 +1874,142 @@ describe('the Aone anchor gate — the validation the platform does not perform'
     expect(input['bodyCriticals']).toEqual([
       'prior blocker',
       'src/foo.ts:9999 — Would misanchor.',
+    ]);
+  });
+
+  it('relocates through the PLACEHOLDER when the claim line is empty — never the footer', () => {
+    // The body has substance past the marker (the ':' survives the
+    // renders-as-nothing projection), but the marker-stripped FIRST line
+    // reduces to empty once the separator strip eats the newline+colon.
+    // The extraction must strip the appended footer FIRST and then fall
+    // back to the placeholder — without the footer strip, the extraction
+    // falls THROUGH into the footer's first line and posts it as the
+    // claim.
+    const emptyClaim = {
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 9999,
+          body: '**[Critical]**\n:\n',
+        },
+      ],
+      state: { modelId: 'test-model' },
+    };
+    expect(() =>
+      runSubmit(base({ review: writeReview(emptyClaim) }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(input['bodyCriticals']).toEqual(['src/foo.ts:9999 — finding']);
+  });
+
+  it('relocates a range whose START sits outside every hunk and END inside', () => {
+    // The spill shape only `startLine` can catch: dropping the mapping of
+    // `start_line` into the anchor check posts this inline with no
+    // degrade or disclosure — the end line alone validates.
+    const startOut = {
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 12,
+          start_line: 4,
+          side: 'RIGHT',
+          start_side: 'RIGHT',
+          body: '**[Critical]** Start outside, end inside.',
+        },
+      ],
+      state: { modelId: 'test-model' },
+    };
+    expect(() =>
+      runSubmit(base({ review: writeReview(startOut) }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    const req = submitAoneMock.mock.calls[0][0] as AoneSubmitRequest;
+    expect(req.comments).toEqual([]);
+    const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(input['bodyCriticals']).toEqual([
+      'src/foo.ts:12 — Start outside, end inside.',
+    ]);
+  });
+
+  it('merges gate discards from zero when suggestionsDiscarded is 0 — the >= 0 boundary', () => {
+    // Mutating `>= 0` to `> 0` falls through into the stand-down arm:
+    // the posted body then names zero discarded suggestions while the
+    // terminal and the JSON both say one — the permanent record
+    // contradicts the disclosure.
+    const zeroCount = {
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 9999,
+          body: '**[Suggestion]** Would misanchor.',
+        },
+      ],
+      state: { modelId: 'test-model', suggestionsDiscarded: 0 },
+    };
+    expect(() =>
+      runSubmit(base({ review: writeReview(zeroCount) }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(input['suggestionsDiscarded']).toBe(1);
+  });
+
+  it('refuses an EMPTY path loudly at the consistency gate — never a gate disposal', () => {
+    // Guards the `|| c.path === ''` arm of the shape check: without it,
+    // an empty path is not a shape problem, so the gate rules it
+    // unanchorable (file '' is not in the diff) and relocates the
+    // Critical as a pathless body entry — replacing the loud refusal the
+    // pre-PR `!c.path` check already performed.
+    const emptyPath = {
+      commit_id: 'abc123',
+      comments: [
+        { path: '', line: 12, body: '**[Critical]** Pathless finding.' },
+      ],
+      state: { modelId: 'test-model' },
+    };
+    expect(() =>
+      runSubmit(base({ review: writeReview(emptyPath) }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).toThrow(/has no `path`/);
+    expect(submitAoneMock).not.toHaveBeenCalled();
+  });
+
+  it('relocates a declared LEFT start_side even without a start_line', () => {
+    // Guards the mapping of `start_side` into the anchor check: dropped,
+    // a comment with no start_line passes the shape checks and validates
+    // on its line alone — the gate KEEPS an old-side finding and the
+    // platform posts it at a new-side line, the silent-wrong-line class
+    // this PR exists to prevent.
+    const leftStartSide = {
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 12,
+          start_side: 'LEFT',
+          body: '**[Critical]** About the old side.',
+        },
+      ],
+      state: { modelId: 'test-model' },
+    };
+    expect(() =>
+      runSubmit(base({ review: writeReview(leftStartSide) }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    const req = submitAoneMock.mock.calls[0][0] as AoneSubmitRequest;
+    expect(req.comments).toEqual([]);
+    const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(input['bodyCriticals']).toEqual([
+      'src/foo.ts:12 — About the old side.',
     ]);
   });
 });

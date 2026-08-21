@@ -135,7 +135,12 @@ function isDiffLine(n: unknown): n is number {
  * newline), so compose-review's one-line entry ingestion carries it as-is.
  */
 function relocatedAoneCriticalEntry(c: ReviewComment): string {
-  const rawClaim = typeof c.body === 'string' ? carriedClaimLine(c.body) : null;
+  // The body arrives footer-appended — strip the canonical footer FIRST,
+  // or an empty claim line lets the extraction fall THROUGH into the
+  // footer text and post it as the claim (the separator strip eats the
+  // newline+colon and the footer's first line becomes the "claim").
+  const body = typeof c.body === 'string' ? stripReviewFooter(c.body) : null;
+  const rawClaim = body === null ? null : carriedClaimLine(body);
   // A looping model drafts stacked markers and every other strip iterates
   // to a fixpoint; compose quotes this entry as-is behind the template
   // marker, so a carried second marker would post inside the blocker line.

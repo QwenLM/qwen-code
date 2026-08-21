@@ -1030,6 +1030,23 @@ describe('validateNewSideAnchors — the Aone write-path gate', () => {
     expect(v.valid).toBe(true);
   });
 
+  it('accepts an equal-boundary range — start_line === line is a shape GitHub itself produces', () => {
+    // Guards the `>` in the reversed-range check: mutated to `>=`, a
+    // shape-clean equal-boundary comment would be refused as ending
+    // before it begins, demoting a Critical from an inline post to a
+    // body relocation with no failing test to surface it.
+    const [v] = validateNewSideAnchors(PAY_DIFF, [
+      {
+        path: 'src/pay.ts',
+        line: 12,
+        startLine: 12,
+        side: 'RIGHT',
+        startSide: 'RIGHT',
+      },
+    ]);
+    expect(v).toEqual({ valid: true });
+  });
+
   it('refuses a multi-line range that spills past the hunk', () => {
     const [v] = validateNewSideAnchors(PAY_DIFF, [
       { path: 'src/pay.ts', line: 15, startLine: 12 },
