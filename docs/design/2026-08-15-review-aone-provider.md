@@ -66,8 +66,9 @@ findings), and `--comment` on an Aone target refuses cleanly.
   the GitHub path pins — see the Phase 3 note in
   `2026-08-13-review-platform-provider-abstraction.md` for the shape mapping
   (parentNoteId threading, `closed` → resolved, `outdated` → stale, no
-  commit anchors, drift with no compare API). Only `pr-context` remains
-  unbacked (the context-unavailable cap stays until it lands).
+  commit anchors, drift with no compare API). Of the flows deferred in
+  this section, only `pr-context` remains unbacked (the
+  context-unavailable cap stays until it lands).
 
 `--comment` on an Aone target refuses with a clear message (posting is Phase 3).
 

@@ -185,6 +185,9 @@ describe('comment-status handler (Aone backing)', () => {
     expect(thread(20).anchor.line).toBeNull();
     expect(thread(21).anchor.outdated).toBe(false);
     expect(thread(21).anchor.line).toBe(7);
+    // The live shape (path + line, not outdated) is line-scoped — every
+    // posted line-anchored Aone finding rides this branch.
+    expect(thread(21).anchor.isFileLevel).toBe(false);
     expect(report.summary.outdated).toBe(1);
   });
 
@@ -195,12 +198,23 @@ describe('comment-status handler (Aone backing)', () => {
         note: 'an MR-level summary comment',
         author: { username: 'someone' },
       },
+      {
+        // The platform flag on a pathless comment must not fabricate a
+        // rewrite — there is no path to be outdated against.
+        id: 31,
+        note: 'an MR-level summary the platform calls outdated',
+        outdated: true,
+        author: { username: 'someone' },
+      },
     ]);
     await run();
     const report = reportWritten();
-    const thread = report.threads[0];
-    expect(thread.anchor.isFileLevel).toBe(true);
-    expect(thread.anchor.outdated).toBe(false);
+    const thread = (id: number) =>
+      report.threads.find((t: { rootId: number }) => t.rootId === id);
+    expect(thread(30).anchor.isFileLevel).toBe(true);
+    expect(thread(30).anchor.outdated).toBe(false);
+    expect(thread(31).anchor.isFileLevel).toBe(true);
+    expect(thread(31).anchor.outdated).toBe(false);
   });
 
   it('degrades code facts to unknown — a1 comments carry no commit anchor', async () => {
@@ -313,6 +327,18 @@ describe('comment-status handler (Aone backing)', () => {
     await expect(run({ pr_number: 'not-a-number' })).rejects.toThrow(
       /positive integer/,
     );
+  });
+
+  it('rejects pr_number tokens that coerce to a DIFFERENT MR id', async () => {
+    // Number() alone accepts these, so the runner would query one MR while
+    // the worktree path and the report carry the caller's label — the
+    // exact label/content divergence fetch-pr's /^[1-9]\d*$/ grammar
+    // refuses (its validation comment names the '1e3' case).
+    for (const token of ['012', '1e3', '0x1f', ' 12', '12.0']) {
+      await expect(run({ pr_number: token })).rejects.toThrow(
+        /positive integer/,
+      );
+    }
   });
 
   it('rejects an owner_repo with no slash', async () => {

@@ -1083,12 +1083,16 @@ async function runPresubmitAone(args: PresubmitArgs): Promise<void> {
   if (ownerRepo.indexOf('/') < 0) {
     throw new Error('owner_repo must look like "owner/repo"');
   }
-  const mrId = Number(prNumber);
-  if (!Number.isInteger(mrId) || mrId <= 0) {
+  // Validate the raw token BEFORE coercing — the comment-status twin carries
+  // the full rationale: Number() alone accepts '012'/'1e3'/' 12'/'12.0' and
+  // would compute this MR's dedup state from a different MR than the
+  // report's label carries.
+  if (!/^[1-9]\d*$/.test(prNumber)) {
     throw new Error(
       'pr_number must be a positive integer (the Aone global MR id)',
     );
   }
+  const mrId = Number(prNumber);
 
   ensureAoneAuthenticated();
 
@@ -1236,7 +1240,7 @@ export const presubmitCommand: CommandModule = {
       .option('host', {
         type: 'string',
         describe:
-          'Host for this PR (GitHub Enterprise, or an Aone host to select the a1 backend). Routes every gh call in this command via GH_HOST; omit for github.com.',
+          "The host the target lives on. An Aone host (*.alibaba-inc.com) selects the a1 backend; omitted: detected from the clone's origin, else GitHub (GH_HOST, then github.com).",
       })
       .option('new-findings', {
         type: 'string',
