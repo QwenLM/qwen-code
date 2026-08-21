@@ -884,8 +884,9 @@ export interface WebShellProps {
   /** Called when prompt status changes (idle/waiting/responding). */
   onStreamingStateChange?: (state: DaemonStreamingState) => void;
   /**
-   * Called with the initial merged agent task snapshot and whenever its
-   * contents change.
+   * Called with the initial merged agent task snapshot and when its roster,
+   * status, or stable metadata changes. Poll-only runtime, stats, and activity
+   * updates are suppressed.
    */
   onAgentTasksChange?: (tasks: readonly DaemonSessionAgentTaskStatus[]) => void;
   /**
@@ -4030,7 +4031,11 @@ export function App({
       lastReportedAgentTasksRef.current = undefined;
       return;
     }
-    const snapshot = JSON.stringify(environmentAgentTasks);
+    const snapshot = JSON.stringify(environmentAgentTasks, (key, value) =>
+      key === 'runtimeMs' || key === 'stats' || key === 'recentActivities'
+        ? undefined
+        : value,
+    );
     if (snapshot === lastReportedAgentTasksRef.current) return;
     lastReportedAgentTasksRef.current = snapshot;
     onAgentTasksChange(environmentAgentTasks);
