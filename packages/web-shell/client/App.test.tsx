@@ -4260,6 +4260,13 @@ describe('environment agent tasks', () => {
       toolUseId: 'agent-call',
     });
 
+    const mergeCallCount = onAgentTasksChange.mock.calls.length;
+    testState.messages = [...testState.messages];
+    testState.backgroundTasks = [...testState.backgroundTasks];
+    rerender(props);
+    await flush();
+    expect(onAgentTasksChange).toHaveBeenCalledTimes(mergeCallCount);
+
     mockConnection.sessionId = 'session-2';
     testState.ownerVersion += 1;
     testState.messages = [];

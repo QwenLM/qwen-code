@@ -883,7 +883,10 @@ export interface WebShellProps {
   onConnectionChange?: (status: string) => void;
   /** Called when prompt status changes (idle/waiting/responding). */
   onStreamingStateChange?: (state: DaemonStreamingState) => void;
-  /** Called whenever the active session's merged agent task list changes. */
+  /**
+   * Called with the initial merged agent task snapshot and whenever its
+   * contents change.
+   */
   onAgentTasksChange?: (tasks: readonly DaemonSessionAgentTaskStatus[]) => void;
   /**
    * Called whenever transcript blocks change. Receives the full blocks array
@@ -4021,8 +4024,16 @@ export function App({
     () => getEnvironmentAgentTasks(messages, sessionTasks),
     [messages, sessionTasks],
   );
+  const lastReportedAgentTasksRef = useRef<string | undefined>(undefined);
   useEffect(() => {
-    onAgentTasksChange?.(environmentAgentTasks);
+    if (!onAgentTasksChange) {
+      lastReportedAgentTasksRef.current = undefined;
+      return;
+    }
+    const snapshot = JSON.stringify(environmentAgentTasks);
+    if (snapshot === lastReportedAgentTasksRef.current) return;
+    lastReportedAgentTasksRef.current = snapshot;
+    onAgentTasksChange(environmentAgentTasks);
   }, [environmentAgentTasks, onAgentTasksChange]);
   const backgroundTasks = useMemo(
     () => sessionTasks.filter((task) => task.kind !== 'agent'),

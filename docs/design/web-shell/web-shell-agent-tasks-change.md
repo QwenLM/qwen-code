@@ -15,4 +15,7 @@ records, preserving the existing correlation and deduplication behavior.
 The callback is independent of the built-in header and overview-panel
 configuration. It reports an empty list when no agent tasks are available, so
 hosts can derive visibility with `tasks.length > 0` and clear stale state when
-the session changes. It adds no task requests and does not block rendering.
+the session changes. The initial snapshot is delivered after mount; subsequent
+snapshots with identical task content are suppressed even when streaming or
+polling replaces the source arrays. It adds no task requests and does not block
+rendering.
