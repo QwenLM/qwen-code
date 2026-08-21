@@ -26,13 +26,14 @@ import {
 describe('SettingsSchema', () => {
   describe('getSettingsSchema', () => {
     it('should describe prompt hooks supported by the runtime', () => {
-      const hook =
-        getSettingsSchema().hooks.properties.PreToolUse.items.properties?.hooks
-          .items;
+      const hookProperties =
+        getSettingsSchema().hooks.properties.PreToolUse.items.properties?.[
+          'hooks'
+        ]?.items?.properties;
 
-      expect(hook.properties?.type.enum).toContain('prompt');
-      expect(hook.properties?.prompt).toMatchObject({ type: 'string' });
-      expect(hook.properties?.model).toMatchObject({ type: 'string' });
+      expect(hookProperties?.['type']?.enum).toContain('prompt');
+      expect(hookProperties?.['prompt']).toMatchObject({ type: 'string' });
+      expect(hookProperties?.['model']).toMatchObject({ type: 'string' });
     });
 
     it('should contain all expected top-level settings', () => {
