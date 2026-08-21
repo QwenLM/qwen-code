@@ -2201,6 +2201,170 @@ describe('BackgroundTaskRegistry', () => {
       );
     });
 
+    it('counts a same-owner reserved background launch as remaining', () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 2,
+      });
+      const callback = vi.fn();
+      registry.setNotificationCallback(callback);
+
+      registry.register(
+        makeRegistration('completed', { parentAgentId: 'parent-a' }),
+      );
+      const reservation = registry.tryReserveBackgroundSlot(
+        undefined,
+        'parent-a',
+      );
+
+      registry.complete('completed', 'done');
+
+      expect(callback).toHaveBeenCalledOnce();
+      expect(callback.mock.calls[0]![1]).toContain('<remaining>1</remaining>');
+      expect(callback.mock.calls[0]![1]).toContain(
+        '<all-terminal>false</all-terminal>',
+      );
+      registry.releaseBackgroundSlot(reservation!);
+    });
+
+    it('does not count another owner reserved background launch', () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 2,
+      });
+      const callback = vi.fn();
+      registry.setNotificationCallback(callback);
+
+      registry.register(
+        makeRegistration('completed', { parentAgentId: 'parent-a' }),
+      );
+      const reservation = registry.tryReserveBackgroundSlot(
+        undefined,
+        'parent-b',
+      );
+
+      registry.complete('completed', 'done');
+
+      expect(callback).toHaveBeenCalledOnce();
+      expect(callback.mock.calls[0]![1]).toContain('<remaining>0</remaining>');
+      expect(callback.mock.calls[0]![1]).toContain(
+        '<all-terminal>true</all-terminal>',
+      );
+      registry.releaseBackgroundSlot(reservation!);
+    });
+
+    it('does not count a legacy reservation with no owner', () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 2,
+      });
+      const callback = vi.fn();
+      registry.setNotificationCallback(callback);
+
+      registry.register(
+        makeRegistration('completed', { parentAgentId: 'parent-a' }),
+      );
+      const reservation = registry.tryReserveBackgroundSlot();
+
+      registry.complete('completed', 'done');
+
+      expect(callback).toHaveBeenCalledOnce();
+      expect(callback.mock.calls[0]![1]).toContain('<remaining>0</remaining>');
+      expect(callback.mock.calls[0]![1]).toContain(
+        '<all-terminal>true</all-terminal>',
+      );
+      registry.releaseBackgroundSlot(reservation!);
+    });
+
+    it('counts one outstanding launch while it moves from queue to reservation to registration', async () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 3,
+      });
+      const callback = vi.fn();
+      registry.setNotificationCallback(callback);
+
+      registry.register(
+        makeRegistration('first', { parentAgentId: 'parent-a' }),
+      );
+      registry.register(
+        makeRegistration('second', { parentAgentId: 'parent-a' }),
+      );
+      const blocker = registry.tryReserveBackgroundSlot(undefined, 'parent-b');
+      const reservationPromise = registry.waitForBackgroundSlot(
+        new AbortController().signal,
+        undefined,
+        'parent-a',
+      );
+      expect(registry.getQueuedCount()).toBe(1);
+
+      registry.complete('first', 'done');
+
+      expect(callback.mock.calls[0]![1]).toContain('<remaining>2</remaining>');
+      const reservation = await reservationPromise;
+      expect(registry.getQueuedCount()).toBe(0);
+
+      registry.complete('second', 'done');
+
+      expect(callback.mock.calls[1]![1]).toContain('<remaining>1</remaining>');
+      registry.register(
+        makeRegistration('child', { parentAgentId: 'parent-a' }),
+        { slotReservation: reservation },
+      );
+      registry.register(
+        makeRegistration('third', { parentAgentId: 'parent-a' }),
+      );
+
+      registry.complete('third', 'done');
+
+      expect(callback.mock.calls[2]![1]).toContain('<remaining>1</remaining>');
+      registry.complete('child', 'done');
+      registry.releaseBackgroundSlot(blocker!);
+    });
+
+    it('stops counting an aborted queued background launch', async () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 2,
+      });
+      const callback = vi.fn();
+      registry.setNotificationCallback(callback);
+      registry.register(
+        makeRegistration('completed', { parentAgentId: 'parent-a' }),
+      );
+      const blocker = registry.tryReserveBackgroundSlot(undefined, 'parent-b');
+      const abortController = new AbortController();
+      const reservationPromise = registry.waitForBackgroundSlot(
+        abortController.signal,
+        undefined,
+        'parent-a',
+      );
+
+      abortController.abort();
+      await expect(reservationPromise).rejects.toThrow(
+        'Agent launch cancelled while waiting for a background slot.',
+      );
+      registry.complete('completed', 'done');
+
+      expect(callback.mock.calls[0]![1]).toContain('<remaining>0</remaining>');
+      registry.releaseBackgroundSlot(blocker!);
+    });
+
+    it('stops counting a released reserved background launch', () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 2,
+      });
+      const callback = vi.fn();
+      registry.setNotificationCallback(callback);
+      registry.register(
+        makeRegistration('completed', { parentAgentId: 'parent-a' }),
+      );
+      const reservation = registry.tryReserveBackgroundSlot(
+        undefined,
+        'parent-a',
+      );
+
+      registry.releaseBackgroundSlot(reservation!);
+      registry.complete('completed', 'done');
+
+      expect(callback.mock.calls[0]![1]).toContain('<remaining>0</remaining>');
+    });
+
     it('counts a paused same-owner background agent as remaining', () => {
       const callback = vi.fn();
       registry.setNotificationCallback(callback);
