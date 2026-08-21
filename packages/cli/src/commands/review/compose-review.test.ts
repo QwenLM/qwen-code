@@ -10323,6 +10323,87 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     );
   });
 
+  it('still offers the ending when the only cap is the depth-only dimension', () => {
+    // The positive side of the gate's `!anchorFailsClosed` conjunct: the
+    // build-and-test dimension gap caps every round in this repository, and
+    // the gate passes `openCriticals` through it — tightened to
+    // `cappedBy.length === 0`, the machine-readable merge ending would never
+    // fire in production and nothing would redden.
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      fetchedSha: 'deadbeef00112233',
+    });
+    writeFileSync(
+      join(dirname(planPath), 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify({
+        v: 1,
+        round: 4,
+        posted: 9,
+        fresh: 1,
+        findings: [{ id: 'R2-1', sev: 'S', file: 'src/a.ts', title: 'x' }],
+      }),
+    );
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'src/a.ts', line: 1, body: '**[Suggestion]** again' },
+      ],
+      unreviewedDimensions: [
+        'build-and-test — the integration suite never ran',
+      ],
+    });
+    expect(r.cappedBy).toEqual(['unreviewed-dimension']);
+    expect(r.dimensionGapsAreDepthOnly).toBe(true);
+    expect(parseLedger(r.body)?.sha).toBe('deadbeef00112233');
+    expect(r.body).toContain('No Critical finding is open');
+    expect((r.recommendations ?? []).map((x) => x.code)).toContain(
+      'land-and-defer',
+    );
+  });
+
+  it('still offers the ending over a foreign work list merged over this one', () => {
+    // The provenance leg withholds on a PURE-FOREIGN list — this account's
+    // entries are in no work list at all — but a MERGED foreign list
+    // protects them under their own ids. Simplified to `foreign !== true`,
+    // the ending would silently disappear from rounds whose merged list is
+    // complete and certified.
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      fetchedSha: 'deadbeef00112233',
+    });
+    writeFileSync(
+      join(dirname(planPath), 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify({
+        v: 1,
+        round: 4,
+        posted: 9,
+        fresh: 1,
+        foreign: true,
+        merged: true,
+        findings: [{ id: 'R2-1', sev: 'S', file: 'src/a.ts', title: 'x' }],
+      }),
+    );
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'src/a.ts', line: 1, body: '**[Suggestion]** again' },
+      ],
+    });
+    expect(r.body).toContain("merged over this account's own entries");
+    expect(r.body).toContain('No Critical finding is open');
+    expect((r.recommendations ?? []).map((x) => x.code)).toContain(
+      'land-and-defer',
+    );
+  });
+
   it('names an auto-resolved floor the way the enforcement note does', () => {
     // `auto` is the DEFAULT, so the explicit-flag wording claims a flag that
     // was never passed — beside a floor-enforcement note in the same body
