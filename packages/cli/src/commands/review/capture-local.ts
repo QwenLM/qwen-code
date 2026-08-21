@@ -268,20 +268,42 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   // and the same-bytes straddle is what poisons the hashes. "No editor does
   // that by accident" is no answer to an autosave racing an undo.
   //
-  // Re-hashing is one extra pass over the plan's paths, on the same batched
-  // `hash-object` the first pass uses.
-  const recapture = captureLocalDiff({
-    file,
-    includeUntracked: args.untracked,
-  });
-  const rehashes = hashWorktreeFiles(capture.repoRoot, planPaths);
+  // THREE consecutive states, not two, and the two kinds interleaved.
+  //
+  // Pairwise agreement never tied a capture to the hashes recorded beside
+  // it: sampling B0 H0 B1 H1 and asking only "B0 == B1" and "H0 == H1"
+  // passes for three phase-aligned writes — X→Y before the hash pass, Y→X
+  // before the re-capture, X→Y after it. Both checks hold, `treeHeldStill`
+  // is true, and the candidate certifies Y's identity for a round that
+  // reviewed X. Promoted, the next round compares cache Y against tree Y,
+  // finds no delta and says "No changes" over bytes no round ever read —
+  // the exact promise this guard exists to keep.
+  //
+  // Interleaved sampling does not make that impossible; nothing short of
+  // holding the tree still can, and this module cannot. It raises the price
+  // from three timed writes to five, and every write has to land in a
+  // window bounded by the neighbouring sample of the OTHER kind. The
+  // honest description is a tightened sample, not a proof — and every
+  // failure of it withholds the candidate, so the cost of being wrong is a
+  // full round, never a false certification.
+  //
+  // The extra pass is one more `git diff` and one more batched
+  // `hash-object` over paths already read twice.
+  const captures = [capture.diff];
+  const hashPasses = [hashes];
+  for (let i = 0; i < 2; i++) {
+    captures.push(
+      captureLocalDiff({ file, includeUntracked: args.untracked }).diff,
+    );
+    hashPasses.push(hashWorktreeFiles(capture.repoRoot, planPaths));
+  }
   const treeHeldStill =
-    capture.diff.equals(recapture.diff) &&
+    captures.every((d) => d.equals(captures[0])) &&
     // `movedSince`, not `changedSince`: a path unhashable on both reads did
     // not move between them, and treating it as a move would withhold the
     // candidate on every round holding a pending deletion — the same
     // conflation that made the convergence stop unreachable.
-    movedSince(hashes, rehashes).length === 0;
+    hashPasses.every((h) => movedSince(hashPasses[0], h).length === 0);
   const candidate: LocalCacheCandidate = {
     v: 1,
     target,
