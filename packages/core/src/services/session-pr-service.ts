@@ -106,6 +106,29 @@ export async function writeSessionPrs(
   await atomicWriteJSON(filePath, { prs } satisfies SessionPrList);
 }
 
+/**
+ * Union two binding lists, deduping by PR number and keeping each number's
+ * freshest entry (by createdAt), ordered by binding time and capped. Used
+ * when an archive-state move finds both halves of a split pair: the sidecar
+ * is the append-only binding history, so the halves are merged instead of
+ * one being stranded.
+ */
+export function mergeSessionPrLists(
+  base: SessionPr[],
+  incoming: SessionPr[],
+): SessionPr[] {
+  const byNumber = new Map<number, SessionPr>();
+  for (const entry of [...base, ...incoming]) {
+    const known = byNumber.get(entry.number);
+    if (!known || entry.createdAt >= known.createdAt) {
+      byNumber.set(entry.number, entry);
+    }
+  }
+  return [...byNumber.values()]
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+    .slice(-SESSION_PR_LIST_LIMIT);
+}
+
 // Serializes read-modify-write cycles per sidecar path: concurrent bindings
 // for the same session must not interleave (read [] → read [] → write [A] →
 // write [B] would silently drop A). A failed predecessor must not block
@@ -134,8 +157,12 @@ export function upsertSessionPr(
   const previous = upsertQueue.get(filePath) ?? Promise.resolve();
   const next = previous.catch(() => undefined).then(run);
   upsertQueue.set(filePath, next);
-  void next.finally(() => {
+  // The cleanup chain must absorb `next`'s rejection too — a derived
+  // finally/catch promise would otherwise reject unhandled whenever the
+  // queued write fails, even though every caller awaits `next` itself.
+  const cleanup = (): void => {
     if (upsertQueue.get(filePath) === next) upsertQueue.delete(filePath);
-  });
+  };
+  void next.then(cleanup, cleanup);
   return next;
 }

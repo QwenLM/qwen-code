@@ -42,6 +42,8 @@ import {
   SessionIdCaseConflictError,
   SessionService,
   Storage,
+  readSessionPrs,
+  upsertSessionPr,
 } from '@qwen-code/qwen-code-core';
 import {
   resetHomeEnvBootstrapForTesting,
@@ -418,8 +420,53 @@ class FakeBridge {
   async getSessionSupportedCommandsStatus(sessionId: string) {
     return { v: 1, sessionId, availableCommands: [], availableSkills: [] };
   }
-  updateSessionMetadata(_s: string, metadata: unknown) {
-    return metadata;
+  /** Per-session in-memory pr bindings, mirroring the real bridge's
+   * `entry.prs`: a re-created entry (restart/close/archive-restore) starts
+   * empty and is only re-hydrated when the serve layer seeds it. */
+  metadataPrsBySession = new Map<
+    string,
+    Array<{ number: number; url: string }>
+  >();
+  seedSessionPrsCalls: Array<{
+    sessionId: string;
+    prs: Array<{ number: number; url: string }>;
+  }> = [];
+
+  seedSessionPrs(
+    sessionId: string,
+    prs: Array<{ number: number; url: string }>,
+  ) {
+    this.seedSessionPrsCalls.push({ sessionId, prs });
+    const existing = this.metadataPrsBySession.get(sessionId) ?? [];
+    if (existing.length > 0) return;
+    this.metadataPrsBySession.set(
+      sessionId,
+      prs.map(({ number, url }) => ({ number, url })),
+    );
+  }
+
+  updateSessionMetadata(
+    sessionId: string,
+    metadata: { displayName?: string; pr?: { number: number; url: string } },
+  ) {
+    if (metadata.pr) {
+      const bound = metadata.pr;
+      const existing = this.metadataPrsBySession.get(sessionId) ?? [];
+      const latest = existing[existing.length - 1];
+      if (!(latest?.number === bound.number && latest.url === bound.url)) {
+        this.metadataPrsBySession.set(sessionId, [
+          ...existing.filter((entry) => entry.number !== bound.number),
+          { number: bound.number, url: bound.url },
+        ]);
+      }
+    }
+    const prs = this.metadataPrsBySession.get(sessionId) ?? [];
+    return {
+      ...(metadata.displayName !== undefined
+        ? { displayName: metadata.displayName }
+        : {}),
+      ...(prs.length > 0 ? { prs } : {}),
+    };
   }
 
   recordHeartbeat() {
@@ -5311,6 +5358,231 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       resolverSpy?.mockRestore();
       registry.dispose();
       rememberLane.dispose();
+    }
+  });
+
+  it('replies the full persisted binding history when binding a pr over ACP after an entry re-creation', async () => {
+    // Daemon restart / close / archive-restore re-creates the bridge entry
+    // with an empty in-memory pr list. Binding a new PR over ACP must then
+    // reply (and broadcast) the FULL persisted history from the sidecar —
+    // the `SessionMetadataUpdate.prs` contract is "full binding list after
+    // the update", not just this daemon lifetime's bindings.
+    const sessionId = '550e8400-e29b-41d4-a716-446655440137';
+    const runtimeBaseDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-acp-pr-metadata-'),
+    );
+    const archiveCoordinator = new SessionArchiveCoordinator();
+    const registry = new ConnectionRegistry();
+    const rememberLane = new WorkspaceRememberTaskLane(
+      bridge as unknown as HttpAcpBridge,
+    );
+    const dispatcher = new AcpDispatcher(
+      bridge as unknown as HttpAcpBridge,
+      TEST_WORKSPACE,
+      () => process.env,
+      fakeWorkspace,
+      rememberLane,
+      createRequestedSessionIdAdmission({
+        archiveCoordinator,
+        getBridges: () => [bridge as unknown as HttpAcpBridge],
+        getPersistenceTargets: () => [
+          { workspaceCwd: TEST_WORKSPACE, runtimeBaseDir },
+        ],
+      }),
+      undefined,
+      undefined,
+      false,
+      registry,
+      archiveCoordinator,
+      () => true,
+      () => undefined,
+      undefined,
+      runtimeBaseDir,
+    );
+    const conn = registry.create(true)!;
+    conn.ownSession(sessionId);
+    conn.getOrCreateSession(sessionId).clientId = 'client-pr-metadata';
+    const frames: unknown[] = [];
+    conn.attachConnStream({
+      kind: 'sse',
+      isClosed: false,
+      async send(message: unknown): Promise<void> {
+        frames.push(message);
+      },
+      async sendSerialized(payload: Buffer) {
+        frames.push(JSON.parse(payload.toString('utf8')));
+        return 'delivered' as const;
+      },
+      close(): void {},
+    } satisfies TransportStream);
+
+    try {
+      const service = new SessionService(TEST_WORKSPACE, { runtimeBaseDir });
+      const sidecarPath = service.getPrSessionPathForArchiveState(
+        sessionId,
+        'active',
+      );
+      // History persisted before the "restart"; the bridge entry is fresh.
+      await upsertSessionPr(sidecarPath, {
+        number: 9100,
+        url: 'https://github.com/o/r/pull/9100',
+      });
+
+      await dispatcher.handle(conn, {
+        jsonrpc: '2.0',
+        id: 471,
+        method: '_qwen/session/update_metadata',
+        params: {
+          sessionId,
+          metadata: {
+            pr: { number: 9101, url: 'https://github.com/o/r/pull/9101' },
+          },
+        },
+      });
+      await waitUntil(() =>
+        frames.some(
+          (frame) =>
+            typeof frame === 'object' &&
+            frame !== null &&
+            'id' in frame &&
+            (frame as { id: unknown }).id === 471,
+        ),
+      );
+
+      const reply = frames.find(
+        (frame) =>
+          typeof frame === 'object' &&
+          frame !== null &&
+          'id' in frame &&
+          (frame as { id: unknown }).id === 471,
+      ) as
+        | { result?: { prs?: Array<{ number: number; url: string }> } }
+        | undefined;
+      expect(reply?.result?.prs?.map((entry) => entry.number)).toEqual([
+        9100, 9101,
+      ]);
+      // The entry must be re-hydrated from the sidecar BEFORE the mutation
+      // so the `session_metadata_updated` event payload is complete too.
+      expect(bridge.seedSessionPrsCalls).toHaveLength(1);
+      expect(bridge.seedSessionPrsCalls[0]?.sessionId).toBe(sessionId);
+      expect(
+        bridge.seedSessionPrsCalls[0]?.prs.map((entry) => entry.number),
+      ).toEqual([9100]);
+      const persisted = await readSessionPrs(sidecarPath);
+      expect(persisted?.map((entry) => entry.number)).toEqual([9100, 9101]);
+    } finally {
+      registry.dispose();
+      rememberLane.dispose();
+      await fs.rm(runtimeBaseDir, { recursive: true, force: true });
+    }
+  });
+
+  it('replies the persisted sidecar list, not the bridge echo, when they disagree over ACP', async () => {
+    // The in-memory list can diverge from the sidecar when an earlier
+    // upsert failed after the bridge already recorded the binding. The
+    // reply contract is the AUTHORITATIVE persisted list (what the REST
+    // routes echo), not this-daemon memory.
+    const sessionId = '550e8400-e29b-41d4-a716-446655440138';
+    const runtimeBaseDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-acp-pr-disagree-'),
+    );
+    const archiveCoordinator = new SessionArchiveCoordinator();
+    const registry = new ConnectionRegistry();
+    const rememberLane = new WorkspaceRememberTaskLane(
+      bridge as unknown as HttpAcpBridge,
+    );
+    const dispatcher = new AcpDispatcher(
+      bridge as unknown as HttpAcpBridge,
+      TEST_WORKSPACE,
+      () => process.env,
+      fakeWorkspace,
+      rememberLane,
+      createRequestedSessionIdAdmission({
+        archiveCoordinator,
+        getBridges: () => [bridge as unknown as HttpAcpBridge],
+        getPersistenceTargets: () => [
+          { workspaceCwd: TEST_WORKSPACE, runtimeBaseDir },
+        ],
+      }),
+      undefined,
+      undefined,
+      false,
+      registry,
+      archiveCoordinator,
+      () => true,
+      () => undefined,
+      undefined,
+      runtimeBaseDir,
+    );
+    const conn = registry.create(true)!;
+    conn.ownSession(sessionId);
+    conn.getOrCreateSession(sessionId).clientId = 'client-pr-disagree';
+    const frames: unknown[] = [];
+    conn.attachConnStream({
+      kind: 'sse',
+      isClosed: false,
+      async send(message: unknown): Promise<void> {
+        frames.push(message);
+      },
+      async sendSerialized(payload: Buffer) {
+        frames.push(JSON.parse(payload.toString('utf8')));
+        return 'delivered' as const;
+      },
+      close(): void {},
+    } satisfies TransportStream);
+
+    try {
+      const service = new SessionService(TEST_WORKSPACE, { runtimeBaseDir });
+      const sidecarPath = service.getPrSessionPathForArchiveState(
+        sessionId,
+        'active',
+      );
+      await upsertSessionPr(sidecarPath, {
+        number: 9100,
+        url: 'https://github.com/o/r/pull/9100',
+      });
+      // This-daemon memory holds a binding whose persistence failed earlier.
+      bridge.metadataPrsBySession.set(sessionId, [
+        { number: 9999, url: 'https://github.com/o/r/pull/9999' },
+      ]);
+
+      await dispatcher.handle(conn, {
+        jsonrpc: '2.0',
+        id: 472,
+        method: '_qwen/session/update_metadata',
+        params: {
+          sessionId,
+          metadata: {
+            pr: { number: 9101, url: 'https://github.com/o/r/pull/9101' },
+          },
+        },
+      });
+      await waitUntil(() =>
+        frames.some(
+          (frame) =>
+            typeof frame === 'object' &&
+            frame !== null &&
+            'id' in frame &&
+            (frame as { id: unknown }).id === 472,
+        ),
+      );
+
+      const reply = frames.find(
+        (frame) =>
+          typeof frame === 'object' &&
+          frame !== null &&
+          'id' in frame &&
+          (frame as { id: unknown }).id === 472,
+      ) as
+        | { result?: { prs?: Array<{ number: number; url: string }> } }
+        | undefined;
+      expect(reply?.result?.prs?.map((entry) => entry.number)).toEqual([
+        9100, 9101,
+      ]);
+    } finally {
+      registry.dispose();
+      rememberLane.dispose();
+      await fs.rm(runtimeBaseDir, { recursive: true, force: true });
     }
   });
 

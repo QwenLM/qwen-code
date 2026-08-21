@@ -410,7 +410,10 @@ async function enrichWorktreeSidecars(
 async function enrichPrSidecars(
   bySessionId: Map<string, BridgeSessionSummary>,
   sessionService: SessionService,
-  archiveState: SessionArchiveState = 'active',
+  // Required (no default): silently defaulting to 'active' would let a
+  // future archived-listing call site that omits the argument enrich from
+  // the wrong chats dir and drop every binding.
+  archiveState: SessionArchiveState,
   signal?: AbortSignal,
 ): Promise<void> {
   for (const [sessionId, summary] of bySessionId) {

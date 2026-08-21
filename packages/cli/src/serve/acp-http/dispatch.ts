@@ -22,6 +22,7 @@ import {
   WorkspaceMemoryFileTooLargeError,
   WorkspaceMemoryWriteTimeoutError,
   writeWorkspaceContextFile,
+  readSessionPrs,
   upsertSessionPr,
   type SessionArchiveState,
   type SubagentLevel,
@@ -871,6 +872,16 @@ export function toRpcError(err: unknown): {
         data: {
           errorKind: 'session_archiving',
           sessionId: (err as { sessionId?: unknown }).sessionId,
+        },
+      };
+    case 'InvalidSessionMetadataError':
+      return {
+        code: RPC.INVALID_PARAMS,
+        message: errMsg(err),
+        data: {
+          httpStatus: 400,
+          errorKind: 'invalid_metadata',
+          field: (err as { field?: unknown }).field,
         },
       };
     case 'SessionNotFoundError':
@@ -2900,6 +2911,21 @@ export class AcpDispatcher {
             const metadata = isObject(params['metadata'])
               ? (params['metadata'] as Record<string, unknown>)
               : {};
+            const service = new SessionService(this.boundWorkspace, {
+              runtimeBaseDir: this.sessionRuntimeBaseDir,
+            });
+            // Bridge entries are re-created without prs on daemon restart,
+            // close/reload, and archive/restore, and the bridge itself is
+            // storage-agnostic — so hydrate the persisted binding history
+            // before the mutation. Otherwise the reply AND the
+            // `session_metadata_updated` event echo only this daemon
+            // lifetime's bindings, silently dropping earlier ones.
+            const hydratedPrs = await readSessionPrs(
+              service.getPrSessionPathForArchiveState(sessionId, 'active'),
+            );
+            if (hydratedPrs && hydratedPrs.length > 0) {
+              this.bridge.seedSessionPrs?.(sessionId, hydratedPrs);
+            }
             let result: ReturnType<HttpAcpBridge['updateSessionMetadata']>;
             try {
               result = this.bridge.updateSessionMetadata(
@@ -2921,16 +2947,21 @@ export class AcpDispatcher {
                 typeof boundPr['number'] === 'number' &&
                 typeof boundPr['url'] === 'string'
               ) {
-                const service = new SessionService(this.boundWorkspace, {
-                  runtimeBaseDir: this.sessionRuntimeBaseDir,
-                });
-                await upsertSessionPr(
-                  service.getPrSessionPathForArchiveState(sessionId, 'active'),
-                  {
-                    number: boundPr['number'],
-                    url: boundPr['url'],
-                  },
-                );
+                const persistedPrs = (
+                  await upsertSessionPr(
+                    service.getPrSessionPathForArchiveState(
+                      sessionId,
+                      'active',
+                    ),
+                    {
+                      number: boundPr['number'],
+                      url: boundPr['url'],
+                    },
+                  )
+                ).map(({ number, url }) => ({ number, url }));
+                // Reply with the authoritative persisted list, mirroring the
+                // REST metadata routes.
+                result = { ...result, prs: persistedPrs };
               }
             } finally {
               this.invalidateSessionLists(['active']);

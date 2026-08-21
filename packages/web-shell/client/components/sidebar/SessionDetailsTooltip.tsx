@@ -11,6 +11,7 @@ import {
 import { useI18n } from '../../i18n';
 import { useExternalLinkOpener } from '../../hooks/useExternalLinkOpener';
 import { writeClipboardText } from '../../utils/clipboard';
+import { isExternalOpenUrl } from '../../utils/externalOpen';
 import { workspaceBasename } from '../../utils/workspace';
 import { Popover, PopoverAnchor, PopoverContent } from '../ui/popover';
 import styles from './WebShellSidebar.module.css';
@@ -143,23 +144,26 @@ export function SessionDetailsTooltip({
             <span title={branch}>{branch}</span>
           </div>
         )}
-        {[...(session.prs ?? [])].reverse().map((pr) => (
-          <div className={styles.sessionDetailsRow} key={pr.number}>
-            <GitPullRequestIcon aria-hidden="true" />
-            <a
-              href={pr.url}
-              target="_blank"
-              rel="noreferrer"
-              title={pr.url}
-              onClick={(event) => {
-                event.stopPropagation();
-                openExternalLink(event, pr.url);
-              }}
-            >
-              {t('sidebar.sessionPr', { number: pr.number })}
-            </a>
-          </div>
-        ))}
+        {[...(session.prs ?? [])]
+          .reverse()
+          .filter((pr) => isExternalOpenUrl(pr.url))
+          .map((pr) => (
+            <div className={styles.sessionDetailsRow} key={pr.number}>
+              <GitPullRequestIcon aria-hidden="true" />
+              <a
+                href={pr.url}
+                target="_blank"
+                rel="noreferrer"
+                title={pr.url}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  openExternalLink(event, pr.url);
+                }}
+              >
+                {t('sidebar.sessionPr', { number: pr.number })}
+              </a>
+            </div>
+          ))}
         <div className={styles.sessionDetailsRow}>
           <RadioTowerIcon aria-hidden="true" />
           <span>{status}</span>
