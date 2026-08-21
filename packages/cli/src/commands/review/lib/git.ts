@@ -78,7 +78,21 @@ export function gitWithInput(input: Buffer, args: string[]): string {
  * identity exists to track goes invisible.
  */
 export function gitWithInputRaw(input: Buffer, args: string[]): string {
-  return execFileSync('git', args, { ...gitOpts(), encoding: 'utf8', input });
+  return execFileSync('git', args, {
+    ...gitOpts(),
+    encoding: 'utf8',
+    input,
+    // The same raised ceiling `gitRaw` takes, for the same reason. The one
+    // caller is `check-attr --stdin -z`, which emits roughly three records
+    // per path: this repository's ~6,270 hashable source files produce about
+    // 1.16 MB, over `execFileSync`'s 1 MB default. Past it the call throws
+    // ENOBUFS, `renderingAttributes`' blanket catch answers an empty map, and
+    // every identity becomes UNHASHABLE — which never equals itself, so every
+    // path reads as changed on every round while the stateId stays stable and
+    // no refusal ever prints. The whole target is silently re-reviewed for
+    // ever and the unchanged-since stop becomes unreachable.
+    maxBuffer: 512 * 1024 * 1024,
+  });
 }
 
 /**

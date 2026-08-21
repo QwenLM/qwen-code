@@ -28,6 +28,7 @@
 // fail-closed and effort gates decide whether this command runs at all. What
 // stops being the model's call is the bytes.
 
+import { createHash } from 'node:crypto';
 import type { CommandModule } from 'yargs';
 import { readFileSync, mkdirSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
@@ -82,6 +83,16 @@ const CANDIDATE_FIELDS = [
   'lastCommitSha',
   'mergeBaseSha',
   'fileVerdicts',
+  // The path the target token was flattened from, on a file review. The next
+  // round's anchor gate compares it (`safeTarget` is not injective, so the
+  // token alone cannot tell two files apart), and this allowlist is what
+  // decides whether it survives promotion. Left out, every file-path review
+  // promoted through this command lost its anchor permanently: the promoted
+  // cache carried no `source`, the gate refused it as "an unrecorded path",
+  // and every later round degraded to a full review. The hand-merge this
+  // command replaced spread the whole candidate, so it survived there — the
+  // mechanical allowlist is precisely what dropped it.
+  'source',
   // The identity that certified the round, and an ANCHOR field like the rest
   // of this list even though it names a model rather than a tree. The capture
   // records it from what the runtime published — provider-qualified,
@@ -125,8 +136,16 @@ function runCacheCommit(args: CacheCommitArgs): void {
   // because the threat this command polices is a tampered candidate, and
   // policing one field of it is policing none.
   const controlled = (v: unknown): boolean =>
+    // C1 (U+0080–U+009F) as well as C0 and DEL. A C0-only sweep let U+009B
+    // (8-bit CSI) and U+009D (8-bit OSC) through into the cache, which sits
+    // at a deterministic in-repo path this command's own threat model calls
+    // tamperable; the next round reads the value back and prints it on a
+    // refusal through escapers that share the same C0-only blind spot, so the
+    // sequence reaches the operator's terminal intact and xterm/VTE-class
+    // terminals act on it. House convention already sweeps C1 (`budget.ts`,
+    // `textUtils.ts`, `memory/indexer.ts`).
     // eslint-disable-next-line no-control-regex
-    typeof v === 'string' && /[\u0000-\u001f\u007f]/.test(v);
+    typeof v === 'string' && /[\u0000-\u001f\u007f-\u009f]/.test(v);
   for (const key of CANDIDATE_FIELDS) {
     if (controlled(candidate[key])) {
       throw new Error(
@@ -139,8 +158,30 @@ function runCacheCommit(args: CacheCommitArgs): void {
 
   // Bind the promotion to its target: `pr-7`'s candidate committed to
   // `pr-8.json` erases pr-8's ledger under pr-7's anchor. The out path's
-  // basename IS the target by the cache's naming contract.
-  const outTarget = basename(args.out).replace(/\.json$/, '');
+  // basename IS the target by the cache's naming contract — except for a FILE
+  // review, whose cache is `file-<token>-<digest of the source path>.json`
+  // because the flattened token alone does not discriminate the subject
+  // (`src/foo.ts` and `src_foo.ts` share one). Both halves are checked there:
+  // the token against the candidate's `target`, and the digest against its
+  // `source`, so promoting one file's candidate into another file's cache is
+  // refused even when their tokens collide.
+  const stem = basename(args.out).replace(/\.json$/, '');
+  const fileForm = /^file-(.*)-([0-9a-f]{8})$/.exec(stem);
+  const outTarget = fileForm ? fileForm[1] : stem;
+  if (fileForm) {
+    const source = candidate['source'];
+    const expected =
+      typeof source === 'string'
+        ? createHash('sha256').update(source).digest('hex').slice(0, 8)
+        : null;
+    if (expected !== fileForm[2]) {
+      throw new Error(
+        `cache-commit: --out names the cache of a different source path ` +
+          `than the candidate's (${inertText(String(source ?? 'none'), 96)}) ` +
+          '— refusing to promote across file targets.',
+      );
+    }
+  }
   if (candidate['target'] !== outTarget) {
     const hint =
       typeof candidate['target'] === 'string' &&

@@ -24,6 +24,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { stateIdOf } from './lib/local-anchor.js';
+import { cacheCommitCommand } from './cache-commit.js';
 import { captureLocalCommand } from './capture-local.js';
 import { buildChunkAgentPrompt } from './agent-prompt.js';
 import { isolateHostGitConfig } from './lib/test-utils.js';
@@ -388,6 +389,70 @@ describe('capture-local — incremental local rounds', () => {
   });
 });
 
+describe('capture-local — promotion through the REAL cache-commit', () => {
+  it("keeps a file review's anchor across the promotion", () => {
+    // The unit tests either side of this seam both passed while the seam
+    // itself was broken: `cache-commit`'s allowlist dropped `source`, and
+    // this suite's own `promoteCandidate` helper spreads the whole candidate
+    // instead of running the command — so the field survived in every test
+    // and in no real round. Drive the actual command.
+    seedDirtyTree();
+    write('src/foo.ts', 'export const real = 1;\n');
+
+    const first = capture({ file: 'src/foo.ts', model: 'model-a' });
+    const ledgerPath = join(repo, '.qwen/tmp/ledger.json');
+    writeFileSync(
+      ledgerPath,
+      JSON.stringify({ round: 1, verdict: 'Comment', findings: [] }),
+    );
+    mkdirSync(join(repo, '.qwen/review-cache'), { recursive: true });
+    (cacheCommitCommand.handler as (argv: unknown) => void)({
+      candidate: first.cacheCandidatePath,
+      ledger: ledgerPath,
+      out: first['cachePath'],
+    });
+
+    write('src/foo.ts', 'export const real = 2;\n');
+    const second = capture({
+      file: 'src/foo.ts',
+      cache: join(repo, '.qwen/review-cache'),
+      model: 'model-a',
+    });
+    expect(second.incremental?.scope?.deltaFiles).toEqual(['src/foo.ts']);
+  });
+});
+
+describe('capture-local — the cache namespace discriminates the subject', () => {
+  it('gives a file review its own key, so colliding targets keep separate ledgers', () => {
+    // The anchor gate's `source` check is the second layer, not the first: it
+    // can only refuse a cache the round already opened, which leaves the
+    // LEDGER — read and written by the orchestrator, not the gate — sharing
+    // one file. `safeTarget` is not injective, so `src/foo.ts` and
+    // `src_foo.ts` flattened to one key and erased each other's findings.
+    seedDirtyTree();
+    write('src_foo.ts', 'export const collide = 1;\n');
+    write('src/foo.ts', 'export const real = 1;\n');
+
+    const a = capture({ file: 'src/foo.ts', model: 'model-a' });
+    const b = capture({ file: 'src_foo.ts', model: 'model-a' });
+    expect(a['target']).toBe(b['target']); // the token still collides…
+    expect(a['cachePath']).not.toBe(b['cachePath']); // …the cache key does not
+  });
+
+  it('keeps a root file named `local` out of the whole-tree cache', () => {
+    // The token space reserves nothing: `safeTarget('local') === 'local'`, so
+    // a root file by that name produced the whole-tree key byte for byte and
+    // the two rounds served each other their ledgers.
+    seedDirtyTree();
+    write('local', 'not the whole tree\n');
+
+    const wholeTree = capture({ model: 'model-a' });
+    const rootFile = capture({ file: 'local', model: 'model-a' });
+    expect(rootFile['target']).toBe(wholeTree['target']);
+    expect(rootFile['cachePath']).not.toBe(wholeTree['cachePath']);
+  });
+});
+
 describe('capture-local — the decided stops are machine-readable', () => {
   it('marks the unchanged-since-last-round stop in the plan', () => {
     // `compose-review` runs only in Step 6, and this stop fires in Step 1, so
@@ -425,6 +490,72 @@ describe('capture-local — the decided stops are machine-readable', () => {
     expect(plan['nothingToReview']).toBeUndefined();
   });
 
+  it('marks the scope-emptied round, which neither other stop reaches', () => {
+    // The third decided shape. A cached path that VANISHED — the change
+    // discarded with `git checkout --` — is a change by design, so the
+    // unchanged-since stop cannot fire; and the clean-tree stop is gated on
+    // `!incremental`. The slice keeps nothing, so the plan carried
+    // `chunks: []` with an `incremental` block and no field at all: neither
+    // SKILL stop fired, `agent-prompt --roster` threw on the first
+    // diff-reading role, and the parent reported "Review did not complete".
+    seedDirtyTree();
+    const cachePath = promoteCandidate(
+      capture({ model: 'model-a' }),
+      'model-a',
+    );
+    // Discard every reviewed change; HEAD does not move.
+    git('checkout', '--', '.');
+
+    const plan = capture({ cache: cachePath, model: 'model-a' });
+    expect(plan.chunks.length).toBe(0);
+    expect(plan['incremental']).toBeDefined();
+    expect(plan['nothingToReview']).toEqual({ reason: 'scope-emptied' });
+  });
+
+  it('publishes the stop at a name the PARENT can predict, with blocker state', () => {
+    // `--out` is the orchestrator's to choose — it must be, because the
+    // CLI-derived target token does not exist yet at Step 1 — so a parent
+    // polling the plan by name found nothing for every file review and
+    // reported "Review did not complete" over a decided round. The sidecar is
+    // named from the same target the parent derives.
+    //
+    // It carries the ledger's open blocker count too. A decided stop is not
+    // automatically a clean one: the common shape is a user who committed
+    // without fixing a Critical, and reported with no verdict at all
+    // `--fail-on request-changes` returned 0 over a blocker the round itself
+    // was calling standing.
+    seedDirtyTree();
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'all committed');
+    mkdirSync(join(repo, '.qwen/review-cache'), { recursive: true });
+    writeFileSync(
+      join(repo, '.qwen/review-cache/local.json'),
+      JSON.stringify({
+        findings: [
+          { id: 'R1-1', severity: 'Critical', status: 'open' },
+          { id: 'R1-2', severity: 'Critical', status: 'fixed' },
+          { id: 'R1-3', severity: 'Suggestion', status: 'open' },
+        ],
+      }),
+    );
+
+    // Deliberately NOT the name a parent could guess.
+    const out = join(repo, 'somewhere-else.json');
+    (captureLocalCommand.handler as (argv: unknown) => void)({
+      out,
+      target: 'local',
+      untracked: true,
+    });
+
+    const sidecar = JSON.parse(
+      readFileSync(join(repo, '.qwen/tmp/qwen-review-local-stop.json'), 'utf8'),
+    ) as Record<string, unknown>;
+    expect(sidecar['reason']).toBe('clean-tree');
+    // Only the OPEN Criticals count: a fixed one is gone and a Suggestion
+    // blocks nothing.
+    expect(sidecar['openBlockers']).toBe(1);
+  });
+
   it('marks a genuinely clean tree', () => {
     // `seedDirtyTree` commits a base and then dirties it; committing that
     // work leaves the tree clean, which is the shape this stop is about.
@@ -456,8 +587,11 @@ describe('capture-local — --cache takes the DIRECTORY', () => {
     expect(first['target']).toBe('src_foo.ts');
     const cacheDir = join(repo, '.qwen/review-cache');
     mkdirSync(cacheDir, { recursive: true });
+    // Written where the CAPTURE says this target's cache lives — the same
+    // field the orchestrator reads. A file review's cache is namespaced by
+    // source path, so a hand-spelled `<token>.json` is not it.
     writeFileSync(
-      join(cacheDir, 'src_foo.ts.json'),
+      first['cachePath'] as string,
       readFileSync(first.cacheCandidatePath, 'utf8'),
     );
 

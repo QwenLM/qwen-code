@@ -101,6 +101,47 @@ describe('cache-commit', () => {
     expect(typeof cache['lastReviewDate']).toBe('string');
   });
 
+  it('carries `source` across the promotion, so a file review keeps its anchor', () => {
+    // `safeTarget` is not injective, so the next round's anchor gate compares
+    // the SOURCE path rather than the token — and this allowlist is what
+    // decides whether it survives. Dropped, every file-path review lost its
+    // anchor permanently: the promoted cache carried no `source`, the gate
+    // refused it as "an unrecorded path", and every later round degraded to a
+    // full review. The hand-merge this command replaced spread the whole
+    // candidate, so the mechanical allowlist is precisely what lost it.
+    const argv = seed(
+      {
+        v: 1,
+        target: 'src_foo.ts',
+        source: 'src/foo.ts',
+        headSha: 'h',
+        files: {},
+        stateId: 's',
+      },
+      { round: 1, verdict: 'Comment', findings: [] },
+    );
+    argv['out'] = join(dir, 'cache/src_foo.ts.json');
+    run(argv);
+    const cache = JSON.parse(readFileSync(argv['out'], 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    expect(cache['source']).toBe('src/foo.ts');
+  });
+
+  it('refuses C1 control characters, not just C0 and DEL', () => {
+    // The cache sits at a deterministic in-repo path this command's own
+    // threat model calls tamperable, and the next round prints these values
+    // on a refusal through escapers that share a C0-only blind spot — so
+    // U+009B (8-bit CSI) reaches the operator's terminal intact.
+    const argv = seed(
+      { v: 1, target: 'pr-7', lastModelId: 'm\u009b[31m' },
+      { round: 1 },
+    );
+    expect(() => run(argv)).toThrow(/carries control/);
+    expect(existsSync(argv['out'])).toBe(false);
+  });
+
   it('refuses a CANDIDATE without lastModelId — the capture records who certified', () => {
     // Not the ledger: a ledger value is one the orchestrator typed, and the
     // only token it can type is the bare `{{model}}`, which two providers

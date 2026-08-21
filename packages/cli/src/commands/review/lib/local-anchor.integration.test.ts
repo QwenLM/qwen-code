@@ -40,6 +40,33 @@ afterEach(() => {
   gitIsolation.dispose();
 });
 
+describe('hashWorktreeFiles — the attributes probe is not buffer-bound', () => {
+  it('answers for a path count whose check-attr output passes 1 MB', () => {
+    // `check-attr --stdin -z` emits roughly three NUL records per path, so a
+    // few thousand files pass `execFileSync`'s 1 MB default and the call
+    // throws ENOBUFS. The blanket catch then answers an empty attribute map
+    // and every identity becomes UNHASHABLE — which never equals itself, so
+    // every path reads as changed on every round. Nothing surfaces: the
+    // stateId stays stable, so the anchor still validates and no refusal ever
+    // prints, while the whole target is silently re-reviewed for ever and the
+    // unchanged-since stop is unreachable.
+    const paths: string[] = [];
+    for (let i = 0; i < 4000; i++) {
+      const rel = `f${i}-${'p'.repeat(60)}.ts`;
+      writeFileSync(join(repo, rel), 'export const a = 1;\n');
+      paths.push(rel);
+    }
+
+    const out = hashWorktreeFiles(repo, paths);
+
+    expect(Object.keys(out)).toHaveLength(paths.length);
+    // Attributes reached the identity — an ENOBUFS would have left every one
+    // of these UNHASHABLE instead.
+    expect(out[paths[0]]).toContain('diff=');
+    expect(Object.values(out).some((v) => v === 'unhashable')).toBe(false);
+  });
+});
+
 describe('hashWorktreeFiles — the attributes probe is byte-faithful', () => {
   it('keeps the record of a path that begins with whitespace', () => {
     // A leading space is legal in a path on Linux and macOS, and

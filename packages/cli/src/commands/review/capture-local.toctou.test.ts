@@ -183,6 +183,28 @@ describe('capture-local — TOCTOU candidate withholding', () => {
     expect(readFileSync(report().diffPath).equals(DIFF_A)).toBe(true);
   });
 
+  it('does not call a MOVED tree clean, even with an empty capture', () => {
+    // The two stops contradicted each other. A review starting on an empty
+    // tree, with an autosave landing inside the capture window, withholds the
+    // candidate and refuses the anchor — and then wrote `clean-tree` anyway,
+    // because capture 0's diff is empty. stderr printed both lines back to
+    // back, the round stopped on the second, and the just-written change went
+    // unreviewed while the run was recorded as clean.
+    captures.push(
+      { diff: Buffer.from('') },
+      { diff: DIFF_A },
+      { diff: DIFF_A },
+    );
+    run();
+    const plan = JSON.parse(
+      readFileSync(join(repo, 'plan.json'), 'utf8'),
+    ) as Record<string, unknown>;
+    expect(plan['nothingToReview']).toBeUndefined();
+    expect(stderrLines.join('\n')).toContain(
+      'working tree changed while the capture was being hashed',
+    );
+  });
+
   it('catches a PHASE-ALIGNED write the pairwise guard let through', () => {
     // Two samples of each kind, compared pairwise, never tied a capture to
     // the hashes recorded beside it. Three timed writes defeat it: X→Y
