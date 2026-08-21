@@ -1515,14 +1515,8 @@ export const useGeminiStream = (
       }
       // An active inline override keeps images raw (the vision bridge is skipped
       // for it), so the size clamp has to run here regardless of whether the
-      // turn also carried audio. Note: modelOverrideResolutionFailed is NOT a
-      // reason to clamp-and-return here. A fail-closed resolution failure
-      // clears the inline override, so the images are now destined for the
-      // default session model — not the override route — and must flow
-      // through applyVisionBridgeIfNeeded, which never forwards images to a
-      // text-only model. Clamping and early-returning would skip the bridge
-      // and forward under-limit images raw (the headless and ACP twins both
-      // fall through to the vision bridge in this state).
+      // turn also carried audio. This branch early-returns because the active
+      // override route owns the images — they must not also be bridged.
       if (
         nextParts !== null &&
         (targetSupportsImage || inlineModelOverrideActiveRef.current)
@@ -1545,6 +1539,26 @@ export const useGeminiStream = (
           preOverrideParts,
           mediaRouted,
         };
+      }
+      // R33-2: a fail-closed resolution failure clears the inline override, so
+      // the images are now destined for the default session model. If that model
+      // supports images, applyVisionBridgeIfNeeded below early-returns the parts
+      // unchanged, which would bypass QWEN_CODE_MAX_INLINE_MEDIA_BYTES — so clamp
+      // them here first (the headless twin clamps this exact state in
+      // nonInteractiveCli.ts). Unlike the override clamp above, this must NOT
+      // early-return: when the session model is text-only the vision bridge must
+      // still run instead of receiving raw images (R35-1).
+      if (
+        nextParts !== null &&
+        modelOverrideResolutionFailed &&
+        hasImageParts(nextParts)
+      ) {
+        nextParts = (Array.isArray(nextParts) ? nextParts : [nextParts]).map(
+          (part) =>
+            typeof part === 'string' || !hasImageParts([part])
+              ? part
+              : clampInlineMediaPart(part),
+        );
       }
       const visionResult = await applyVisionBridgeIfNeeded(
         nextParts,
@@ -5578,7 +5592,13 @@ export const useGeminiStream = (
           );
         },
         onDeliveryFailed: () => {
-          drainedSteer?.restore();
+          // A failed drained continuation must recover through exactly one path.
+          // When the drain's bridge failed, the pristine media was already
+          // stored for Ctrl+Y in steerRetryQuery (passed as preOverrideParts
+          // above); re-queueing the same message via restore() here would
+          // deliver it twice — once via the retry payload and again when the
+          // queue re-drains. Only re-queue when nothing was stored for retry.
+          if (!steerRetryQuery) drainedSteer?.restore();
           endToolInteraction(
             'error',
             'tool continuation delivery failed',
