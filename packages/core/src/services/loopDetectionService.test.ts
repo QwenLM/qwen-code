@@ -1293,6 +1293,59 @@ describe('LoopDetectionService', () => {
 
       expect(loopType).toBe(LoopType.REPETITIVE_THOUGHTS);
     });
+
+    it('includes the subject when accumulating structured thought text', () => {
+      service.reset('');
+
+      for (let i = 0; i < 40; i++) {
+        const subject = `Distinct reasoning stage ${i.toString().padStart(2, '0')}`;
+        expect(
+          service.addAndCheck(createThoughtEvent(subject, 'Continue.')),
+        ).toBe(false);
+      }
+    });
+
+    it('does not let a thought markdown fence suppress visible chanting', () => {
+      service.reset('');
+      service.addAndCheck(createThoughtEvent('', 'Consider this fence: ```'));
+
+      const chant = 'Visible output is stuck repeating this sentence. ';
+      let detected = false;
+      for (let i = 0; i < 40 && !detected; i++) {
+        detected = service.addAndCheck(createContentEvent(chant));
+      }
+
+      expect(detected).toBe(true);
+    });
+
+    it('keeps content chanting evidence across interleaved varied thoughts', () => {
+      service.reset('');
+
+      const chant = 'Visible output keeps repeating the same sentence. ';
+      let detected = false;
+      for (let i = 0; i < 40 && !detected; i++) {
+        detected = service.addAndCheck(createContentEvent(chant));
+        if (!detected) {
+          detected = service.addAndCheck(
+            createThoughtEvent(
+              '',
+              `Reasoning step ${i}: inspect another angle.`,
+            ),
+          );
+        }
+      }
+
+      expect(detected).toBe(true);
+    });
+
+    it('detects reasoning chants containing markdown list syntax', () => {
+      service.reset('');
+
+      const chant = 'TODO:\n- fix the bug\n';
+      const detected = streamAsMisalignedThoughtDeltas(chant.repeat(60), 7);
+
+      expect(detected).toBe(true);
+    });
   });
 
   describe('Read File Loop Detection', () => {
