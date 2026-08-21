@@ -2484,6 +2484,16 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
       '**Fix witness:** <the test that must go RED if that fix is removed',
     );
     expect(brief).toContain('**This field never gates reporting**');
+    // The exemption TAIL, pinned beside the prefix. The prefix assertion
+    // above stops before it, so deleting or rewording `or "N/A" ...` shipped
+    // green — and the two copies of the finding format (SKILL.md, pinned by
+    // SKILL.test.ts, and this embedded one) could drift on exactly that
+    // clause. Finders would then read a brief that mandates Fix witness with
+    // no way out, and rounds would start demanding tests for fixes that add
+    // no guard at all — a rename, a comment, a docs line.
+    expect(brief).toContain(
+      'or "N/A" when the fix adds no guard, branch or behaviour a test can pin',
+    );
   });
 
   it('injects generic repository context into reviewers and a narrow verification boundary into Agent 7', () => {

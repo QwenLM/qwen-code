@@ -1222,14 +1222,14 @@ export function persistRecoveredLedger(
           // This was the one seam where they did not fall together.
           model: _droppedModel,
           commitId: _droppedCommitId,
-          churnRounds: _droppedChurnRounds,
-          churnFresh: _droppedChurnFresh,
-          churnInduced: _droppedChurnInduced,
           ...rest
         } = existing;
-        // Through the shared projection, not a second hand-kept list: the
-        // volume group grew twice and this branch was updated neither time.
-        const kept = withoutVolume(rest);
+        // Both groups through their shared projections, not a second
+        // hand-kept list: the volume group grew twice and this branch was
+        // updated neither time, and the churn group carries a streak that
+        // DECIDES a blocker — re-dated across a round this account never ran,
+        // it arms the non-convergence finding early.
+        const kept = withoutChurn(withoutVolume(rest));
         mkdirSync(dirname(sideFilePath), { recursive: true });
         writeAtomic(
           JSON.stringify(
@@ -1404,20 +1404,10 @@ function stripAnchor(ledger: Ledger): Ledger {
  * the third is API provenance about their round.
  */
 function stripChurnState(ledger: Ledger): Ledger {
-  if (
-    ledger.churnRounds === undefined &&
-    ledger.churnFresh === undefined &&
-    ledger.churnInduced === undefined
-  ) {
-    return ledger;
-  }
-  const {
-    churnRounds: _churnRounds,
-    churnFresh: _churnFresh,
-    churnInduced: _churnInduced,
-    ...rest
-  } = ledger;
-  return rest;
+  if (CHURN_FIELDS.every((f) => ledger[f] === undefined)) return ledger;
+  return withoutChurn(
+    ledger as unknown as Record<string, unknown>,
+  ) as unknown as Ledger;
 }
 
 /**
@@ -1429,10 +1419,46 @@ function stripChurnState(ledger: Ledger): Ledger {
  * marker parser reads the pair together.
  */
 function pickChurnState(ledger: Ledger): Partial<Ledger> {
-  const out: Partial<Ledger> = {};
-  if (ledger.churnRounds !== undefined) out.churnRounds = ledger.churnRounds;
-  if (ledger.churnFresh !== undefined) out.churnFresh = ledger.churnFresh;
-  if (ledger.churnInduced !== undefined) out.churnInduced = ledger.churnInduced;
+  return pickChurn(
+    ledger as unknown as Record<string, unknown>,
+  ) as Partial<Ledger>;
+}
+
+/**
+ * The convergence state group, named ONCE.
+ *
+ * Three production seams shed or restore this group — the recovery strip
+ * above, the union's restore beside it, and the anonymous-advance branch that
+ * rewrites the side file by hand — and the adjacent volume group already paid
+ * for the alternative: `withoutVolume`'s own note records how a hand-kept
+ * list on each seam is exactly how `floor` came to be shed at one and kept at
+ * the other. Nothing reds when a fourth field is added and one enumeration is
+ * missed: missing the anonymous-advance branch leaves it in the side file
+ * after the counter advances past the round it describes, and missing the
+ * restore silently loses this account's own data on the merged same-round
+ * recoveries the union exists to protect. Same hazard, same remedy.
+ */
+export const CHURN_FIELDS = [
+  'churnRounds',
+  'churnFresh',
+  'churnInduced',
+] as const;
+
+/** Drop the whole churn group from a record, whatever shape it is in. */
+export function withoutChurn<T extends Record<string, unknown>>(record: T): T {
+  const out = { ...record };
+  for (const field of CHURN_FIELDS) delete out[field];
+  return out;
+}
+
+/** The churn group PRESENT in a record — the restore half of the same list. */
+export function pickChurn(
+  record: Record<string, unknown>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const field of CHURN_FIELDS) {
+    if (record[field] !== undefined) out[field] = record[field];
+  }
   return out;
 }
 

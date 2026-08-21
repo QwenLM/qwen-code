@@ -1595,6 +1595,7 @@ describe('latestLedger — the split trust surface', () => {
     const own =
       'x <!-- qwen-review-ledger {"v":1,"round":9,"findings":[],' +
       '"posted":4,"prevPosted":2,"fresh":3,"floor":"c",' +
+      '"churnRounds":2,"churnFresh":10,"churnInduced":6,' +
       '"sha":"deadbeef00112233"} -->';
     const anonymous = latestLedger(
       [review('maintainer', '2026-01-09T00:00:00Z', own)],
@@ -1605,6 +1606,18 @@ describe('latestLedger — the split trust surface', () => {
     expect(anonymous?.ledger.fresh).toBe(3);
     expect(anonymous?.ledger.floor).toBe('c');
     expect(anonymous?.ledger.sha).toBeUndefined();
+    // ...and the churn group goes WITH the anchor, not with the volume —
+    // the asymmetry is the point of carrying both strips. A blip in
+    // `gh api user` makes every marker read foreign; the volume is kept
+    // because a number nobody can attribute is not a number a stranger
+    // chose, but the streak DECIDES the non-convergence blocker, so a
+    // foreign one riding the anonymous walk into the side file would re-date
+    // a streak across a round this account never ran and arm the blocker a
+    // round early. Unpinned, a refactor gating this strip on `me &&` —
+    // mirroring the volume strip's deliberate asymmetry — ships green.
+    expect(anonymous?.ledger.churnRounds).toBeUndefined();
+    expect(anonymous?.ledger.churnFresh).toBeUndefined();
+    expect(anonymous?.ledger.churnInduced).toBeUndefined();
   });
 
   it("restores this account's own volume when it restores its own findings", () => {

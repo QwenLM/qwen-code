@@ -165,6 +165,66 @@ describe('persistRecoveredLedger', () => {
     }
   });
 
+  it("a SAME-round union carries this account's own churn state to disk", () => {
+    // The other half of the strip, end to end. The test above is CROSS-round,
+    // so the churn state is already absent by the time the write runs and a
+    // second drop there would be a no-op — it can never redden. This arm is
+    // the one that can: the own marker describes the SAME round the foreign
+    // winner claims, so the union restores own churn over the stripped
+    // winner, and the restore only means anything if it survives the
+    // identity-known write.
+    //
+    // Unpinned, extending the persist branch's churn drop to this path — the
+    // duplicated-seam drift `withoutVolume`'s own note records, where `floor`
+    // was shed at one seam and kept at the other — silently discards this
+    // account's own restored streak on merged rounds while the whole review
+    // suite stays green, resetting the streak on exactly the rounds the
+    // restore exists to protect.
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    try {
+      const ownMarker =
+        '<!-- qwen-review-ledger {"v":1,"round":4,' +
+        '"findings":[{"id":"R4-1","sev":"S","file":"a.ts","title":"own"}],' +
+        '"churnRounds":4,"churnFresh":10,"churnInduced":6} -->';
+      const foreignMarker =
+        '<!-- qwen-review-ledger {"v":1,"round":4,' +
+        '"findings":[{"id":"R4-9","sev":"S","file":"b.ts","title":"theirs"}],' +
+        '"churnRounds":1,"churnFresh":2,"churnInduced":1} -->';
+      const { recovered } = recoverLedger(
+        [
+          {
+            id: 1,
+            user: { login: 'bot' },
+            submitted_at: '2026-01-01T00:00:00Z',
+            body: ownMarker,
+          },
+          {
+            id: 2,
+            user: { login: 'stranger' },
+            submitted_at: '2026-01-02T00:00:00Z',
+            body: foreignMarker,
+          },
+        ],
+        'bot',
+      );
+      expect(recovered?.foreign).toBe(true);
+      persistRecoveredLedger(side, recovered, {
+        noOwnReview: false,
+        identityKnown: true,
+      });
+      const written = JSON.parse(readFileSync(side, 'utf8'));
+      expect(written.round).toBe(4);
+      // Own values, not the stranger's — the winner's churn was stripped at
+      // the recovery seam before the union put this account's back.
+      expect(written.churnRounds).toBe(4);
+      expect(written.churnFresh).toBe(10);
+      expect(written.churnInduced).toBe(6);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('records that the winning marker came from another account', () => {
     // The convergence diagnosis CITES the round numbers carried in this work
     // list, in a body this account posts. Recovery adopts the highest-round

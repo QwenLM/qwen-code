@@ -9945,13 +9945,13 @@ describe('the convergence census and the non-convergence finding', () => {
     // reversion to "consecutive" reds) and the half-or-more premise (a
     // reversion to "most" reds at the even-fresh boundary the bar allows).
     expect(r.body).toContain(
-      'This pull request is not converging. Of the 11 findings first filed ' +
-        "in round 4, 7 were introduced by the previous round's fixes for " +
-        "this review's own findings — the 2nd round counted against the " +
+      'This pull request is not converging. Of the 11 defects round 4 ' +
+        "newly identified, 7 were introduced by the previous round's fixes " +
+        "for this review's own findings — the 2nd round counted against the " +
         'churn bar (rounds that could not measure carry the count rather ' +
         'than reset it), and in every counted round at least half of its ' +
-        'first-appearing findings were introduced by the previous ' +
-        "round's fixes.",
+        "newly identified defects were introduced by the previous round's " +
+        'fixes.',
     );
     // It blocks. A claim that the loop cannot close itself is worth nothing
     // if the review then approves the pull request anyway.
@@ -10173,6 +10173,59 @@ describe('the convergence census and the non-convergence finding', () => {
     const l = parseLedger(onePast.body)!;
     expect(l.churnRounds).toBe(1);
     expect(onePast.body).not.toContain('is not converging');
+  });
+
+  it("never borrows the posting trend's words for its own count", () => {
+    // The two counts in one body: this blocker counts DEFECTS newly
+    // identified, the convergence diagnosis counts inline comments POSTED
+    // for the first time, and they legitimately differ — a fix-induced
+    // defect re-reported under a carried id is new here and a re-post
+    // there. They collided in VOCABULARY, not arithmetic: "findings first
+    // filed in round 4" sat beside "2 of them reported for the first time"
+    // over the same round, so one body published two numbers under one
+    // phrase and neither could be trusted. Pin the separation from both
+    // sides — the words this sentence must use, and the ones it must not.
+    prevLedger({ round: 3, churnRounds: 1 });
+    const r = round({ fresh: 11, induced: 7 });
+    expect(r.body).toContain('11 defects round 4 newly identified');
+    expect(r.body).toContain('newly identified defects were introduced');
+    expect(r.body).not.toContain('first filed');
+    expect(r.body).not.toContain('first-appearing');
+  });
+
+  it('sums the channels rather than taking the largest of them', () => {
+    // Every arm above populates exactly ONE channel, so the suite pinned
+    // which channels are counted but never that they are ADDED. A
+    // non-additive reduction — `Math.max(drafted, body, deferred)` — ships
+    // green against all of them and diverges only where two channels are
+    // populated together, which is the ordinary shape of a round with body
+    // blockers beside inline findings.
+    //
+    // Split 4 across two channels at the equality boundary: the sum reads 4,
+    // accepts the census, and (1 of 4 induced, below the bar) RESETS the
+    // streak. Under a max mutant the denominator reads 2, `fresh > reported`
+    // trips, the census is refused, and the streak CARRIES — so a converging
+    // round keeps a standing claim it should have cleared, and the blocker
+    // lands a round early on the next above-bar round.
+    prevLedger({ round: 3, churnRounds: 1 });
+    const mixed = composeReview({
+      planPath: coveredPlan(['verify', 'reverse-audit'], { prNumber: 8255 }),
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      convergence: { fresh: 4, induced: 1 },
+      draftedComments: [
+        { path: 'src/a.ts', line: 3, body: '**[Suggestion]** one' },
+        { path: 'src/a.ts', line: 4, body: '**[Suggestion]** two' },
+      ],
+      bodyCriticals: ['blocker 1', 'blocker 2'],
+    });
+    const l = parseLedger(mixed.body)!;
+    expect(l.churnRounds).toBeUndefined();
+    expect(l.churnFresh).toBe(4);
+    expect(l.churnInduced).toBe(1);
+    expect(mixed.body).not.toContain('is not converging');
   });
 
   it('CARRIES the streak through a below-minimum census', () => {

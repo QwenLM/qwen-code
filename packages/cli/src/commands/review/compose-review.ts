@@ -1594,6 +1594,23 @@ export function aboveChurnBar(
  * Deliberately not anchored: the claim is about the pull request, not about a
  * line, and hanging it on whichever file happened to churn most would invite
  * a fix at that line for a defect that is not there.
+ *
+ * **It counts DEFECTS, and it must not borrow the posting trend's words.**
+ * The same body carries the convergence diagnosis, which counts inline
+ * comments POSTED for the first time — and the two numbers legitimately
+ * differ: a fix-induced defect re-reported under the id it came from is
+ * newly identified here and a re-post there, so a round can newly identify
+ * six defects while posting two first-time comments. Both readings are
+ * right; what broke was the vocabulary, when this sentence said "findings
+ * first filed" beside the diagnosis's "reported for the first time" and one
+ * body published two numbers under one phrase. Hence "defects … newly
+ * identified" — distinct words for a distinct quantity.
+ *
+ * Do NOT "reconcile" the two by changing either count. Excluding carried-id
+ * re-reports from `fresh` would put `induced` outside it and every such
+ * census would be refused as impossible; counting them as first-time POSTS
+ * would tell the volume trend a re-post is new work, which is the reading
+ * `isFreshDraft` exists to refuse. The divergence is the design.
  */
 export function nonConvergenceCritical(
   census: { fresh: number; induced: number },
@@ -1601,13 +1618,13 @@ export function nonConvergenceCritical(
   thisRound: number,
 ): string {
   return (
-    `This pull request is not converging. Of the ${census.fresh} findings ` +
-    `first filed in round ${thisRound}, ${census.induced} were introduced by ` +
-    `the previous round's fixes for this review's own findings — the ` +
+    `This pull request is not converging. Of the ${census.fresh} defects ` +
+    `round ${thisRound} newly identified, ${census.induced} were introduced ` +
+    `by the previous round's fixes for this review's own findings — the ` +
     `${streak}${ordinalSuffix(streak)} round counted against the churn bar ` +
     `(rounds that could not measure carry the count rather than reset it), ` +
-    `and in every counted round at least half of its first-appearing ` +
-    `findings were introduced by the previous round's fixes. Filing more ` +
+    `and in every counted round at least half of its newly identified ` +
+    `defects were introduced by the previous round's fixes. Filing more ` +
     `findings will not close this: split the change into separately ` +
     `reviewable pieces, or ` +
     `reconsider the approach under review, and re-request review after. ` +
