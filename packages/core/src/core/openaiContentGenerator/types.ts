@@ -101,10 +101,21 @@ export interface RequestContext {
    * candidate machinery is disengaged, so a thinking tag assembled across
    * chunk boundaries would never appear complete in any one chunk; any
    * trailing suffix that could still complete into a tag is held here, the
-   * leak gate runs on tail + next chunk, and finish fails closed if the held
-   * suffix never resolves.
+   * leak gate runs on tail + next chunk, and finish fails closed when the
+   * held suffix already contains a full tag word (sub-word fragments are
+   * released as literal text — they can no longer become a tag).
    */
   pendingPostDemotionTagTail?: string;
+  /**
+   * Raw content-channel text the inline thinking demotion machinery consumed
+   * on the demotion chunk (issue #9348). Providers re-send deltas (see
+   * normalizeStreamingTextDelta) and replays shorter than its exact-repeat
+   * window pass through verbatim, so an exact re-send of this consumed text
+   * is dropped before the candidate machinery / post-demotion gate — it
+   * would otherwise hard-fail a legitimate demoted turn with
+   * PROTOCOL_TAG_LEAK, corrupt a still-held rest, or duplicate thought parts.
+   */
+  postDemotionConsumedText?: string;
   pendingThinkingTagCandidate?: {
     text: string;
     closingTagName?: 'think' | 'thinking';

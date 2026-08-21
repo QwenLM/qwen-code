@@ -1151,19 +1151,25 @@ function canBeStandaloneThinkingTagPrefix(text: string): boolean {
  * tag (a prefix of `<think(ing)?>` / `</think(ing)?>`, including optional
  * whitespace before `>`), or '' when the tail cannot become one. Capped like
  * the candidate machinery so an undecided tail cannot grow the hold
- * unboundedly.
+ * unboundedly — but a still-completable suffix that outgrew the cap is
+ * reported via `overCapStillPossible` so the caller fails closed (mirroring
+ * the candidate machinery's overflow policy) instead of releasing a
+ * whitespace-padded tag into visible output.
  */
-function trailingPotentialThinkingTagSuffix(text: string): string {
+function trailingPotentialThinkingTagSuffix(text: string): {
+  suffix: string;
+  overCapStillPossible: boolean;
+} {
   const lastTagStart = text.lastIndexOf('<');
-  if (lastTagStart === -1) return '';
+  if (lastTagStart === -1) return { suffix: '', overCapStillPossible: false };
   const suffix = text.slice(lastTagStart);
-  if (
-    suffix.length > MAX_THINKING_TAG_CANDIDATE_LENGTH ||
-    !canBeStandaloneThinkingTagPrefix(suffix)
-  ) {
-    return '';
+  if (!canBeStandaloneThinkingTagPrefix(suffix)) {
+    return { suffix: '', overCapStillPossible: false };
   }
-  return suffix;
+  if (suffix.length > MAX_THINKING_TAG_CANDIDATE_LENGTH) {
+    return { suffix: '', overCapStillPossible: true };
+  }
+  return { suffix, overCapStillPossible: false };
 }
 
 /**
@@ -1654,6 +1660,29 @@ export function convertOpenAIChunkToGemini(
       parts = parts.filter((part) => !getVisibleText(part));
       visibleText = '';
     }
+    // Replay defense for the demotion route (symmetric to replayedTagPrefix
+    // above): providers re-send deltas (see normalizeStreamingTextDelta) and
+    // replays shorter than its exact-repeat window pass through verbatim.
+    // Once a demotion consumed tag-bearing text, an exact re-send of that
+    // text — or of the currently held tag-fragment tail — must not re-enter
+    // the candidate machinery or the post-demotion gate: it would hard-fail a
+    // legitimate demoted turn, corrupt a held rest, or emit a duplicated tail
+    // fragment. Scoped to tag-shaped replays (a genuine chunk carrying a
+    // complete tag post-demotion fails closed anyway) so repeated prose is
+    // untouched.
+    if (
+      requestContext.inlineThinkingBlockDemoted === true &&
+      visibleText &&
+      ((requestContext.pendingPostDemotionTagTail !== undefined &&
+        visibleText === requestContext.pendingPostDemotionTagTail) ||
+        (requestContext.postDemotionConsumedText !== undefined &&
+          requestContext.postDemotionConsumedText.endsWith(visibleText) &&
+          (THINKING_TAG_PATTERN.test(visibleText) ||
+            requestContext.pendingThinkingTagCandidate !== undefined)))
+    ) {
+      parts = parts.filter((part) => !getVisibleText(part));
+      visibleText = '';
+    }
     const combinedCandidateText =
       (pendingTagCandidate?.text ?? '') + visibleText;
     const hasStructuredReasoning =
@@ -1740,6 +1769,11 @@ export function convertOpenAIChunkToGemini(
           extractLeadingBalancedThinkingBlocks(combinedCandidateText);
         if (balancedInlineThinkingBlocks) {
           requestContext.inlineThinkingBlockDemoted = true;
+          // Raw text the demotion consumed on this chunk, kept so an exact
+          // provider re-send of it can be dropped before the candidate
+          // machinery and the post-demotion gate (see the replay defense at
+          // the top of this block).
+          requestContext.postDemotionConsumedText = combinedCandidateText;
           parts = parts.filter((part) => !getVisibleText(part));
           for (const innerThought of balancedInlineThinkingBlocks.innerThoughts) {
             parts.push(createOpenAIReasoningThoughtPart(innerThought));
@@ -1842,19 +1876,37 @@ export function convertOpenAIChunkToGemini(
       if (THINKING_TAG_PATTERN.test(combinedVisibleText)) {
         throwProtocolTagLeak(requestContext);
       }
-      const heldTagSuffix =
+      const { suffix: heldTagSuffix, overCapStillPossible } =
         trailingPotentialThinkingTagSuffix(combinedVisibleText);
-      const resolvedVisibleText = combinedVisibleText.slice(
+      if (overCapStillPossible) {
+        // A still-completable suffix (e.g. a whitespace-padded '<thinking'
+        // assembled across chunks) outgrew the cap: releasing it would let
+        // the padded tag slip past the fail-closed gate above, so mirror the
+        // candidate machinery's isPossibleTag overflow policy and fail
+        // closed instead.
+        throwProtocolTagLeak(requestContext);
+      }
+      let resolvedVisibleText = combinedVisibleText.slice(
         0,
         combinedVisibleText.length - heldTagSuffix.length,
       );
       requestContext.pendingPostDemotionTagTail = heldTagSuffix || undefined;
       if (choice.finish_reason && requestContext.pendingPostDemotionTagTail) {
-        // Stream finished with an unresolved tag fragment (e.g. a truncated
-        // '<thi' prefix) held back: the chunk-split twin throws via the gate
-        // above once the tag completes, so releasing it here would make the
-        // outcome chunking-dependent. Fail closed like the demotion-rest path.
-        throwProtocolTagLeak(requestContext);
+        // Fail closed only when the held tail already contains a full tag
+        // word (e.g. a '<thinking' truncated before '>'): its chunk-split
+        // twin throws via the gate above once the tag completes, so
+        // releasing it here would make the outcome chunking-dependent. A
+        // sub-word fragment ('<', '<t', '<T' — e.g. a generic type cut by
+        // max_tokens) can no longer become a tag once the stream has ended,
+        // so release it as literal text instead of hard-failing a
+        // legitimate demoted turn.
+        if (
+          /<\/?think(?:ing)?/i.test(requestContext.pendingPostDemotionTagTail)
+        ) {
+          throwProtocolTagLeak(requestContext);
+        }
+        resolvedVisibleText = combinedVisibleText;
+        requestContext.pendingPostDemotionTagTail = undefined;
       }
       parts = parts.filter((part) => !getVisibleText(part));
       if (resolvedVisibleText) {
