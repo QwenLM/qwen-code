@@ -29726,6 +29726,205 @@ describe('Session', () => {
       );
     });
 
+    it('preserves the armed carrying message when the cron loop is aborted between laps (R23-27)', async () => {
+      setUpToolSearchCarryingCronSchema();
+      let cronCallback:
+        | ((job: { prompt: string; cronExpr?: string }) => void)
+        | undefined;
+      const scheduler = {
+        size: 1,
+        hasPendingWork: true,
+        start: vi.fn(
+          (callback: (job: { prompt: string; cronExpr?: string }) => void) => {
+            cronCallback = callback;
+          },
+        ),
+        stop: vi.fn(),
+        getExitSummary: vi.fn().mockReturnValue(undefined),
+      };
+      mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream());
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start session' }],
+      });
+
+      // Gate the mid-turn drain so the cron loop suspends AFTER the tool
+      // batch committed its mark (rollback snapshot armed) and BEFORE the
+      // next lap's top-of-lap abort check — the exact window a user
+      // prompt uses to preempt the daemon loop.
+      let resolveDrain!: () => void;
+      const drainGate = new Promise<void>((resolve) => {
+        resolveDrain = resolve;
+      });
+      mockClient.extMethod = vi
+        .fn()
+        .mockImplementation(async (method: string) => {
+          if (method === TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD) {
+            return { claimed: true, hasQueuedPrompt: false };
+          }
+          if (method === 'craft/drainMidTurnQueue') {
+            await drainGate;
+            return { messages: [], hasQueuedPrompt: false };
+          }
+          return { messages: [], hasQueuedPrompt: false };
+        });
+
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockImplementationOnce(() => Promise.resolve(toolSearchStream()));
+      const internals = session as unknown as {
+        cronCompletion: Promise<void> | null;
+        cronAbortController: AbortController | null;
+      };
+
+      cronCallback?.({ prompt: 'scheduled prompt', cronExpr: '* * * * *' });
+      // Wait until the batch committed its mark and the loop parked in the
+      // gated drain between runToolCalls and the next lap's abort check.
+      await vi.waitFor(
+        () => {
+          expect(presentedProxySchemas.get(core.ToolNames.CRON_CREATE)).toBe(
+            'fp',
+          );
+        },
+        { timeout: 15000 },
+      );
+      await vi.waitFor(
+        () => {
+          expect(mockClient.extMethod).toHaveBeenCalledWith(
+            'craft/drainMidTurnQueue',
+            expect.anything(),
+          );
+        },
+        { timeout: 15000 },
+      );
+      // A user prompt preempts the loop (prompt() aborts the cron
+      // controller); then release the drain so the loop reaches the
+      // top-of-lap abort check with the armed carrying message.
+      internals.cronAbortController?.abort();
+      resolveDrain();
+      await vi.waitFor(
+        () => {
+          expect(internals.cronCompletion).toBeNull();
+        },
+        { timeout: 15000 },
+      );
+
+      // R23-27: the abort check must preserve the carrying message
+      // (mirroring the main prompt loop) — its functionResponse parts back
+      // the committed mark. Before the fix the message was dropped
+      // unpreserved, orphaning the mark for a schema that never entered
+      // model context (fail-open at the #6721 gate).
+      expect(mockChat.addHistory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          role: 'user',
+          parts: expect.arrayContaining([
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({
+                id: 'search_call',
+              }),
+            }),
+          ]),
+        }),
+      );
+      expect(presentedProxySchemas.get(core.ToolNames.CRON_CREATE)).toBe('fp');
+      expect(
+        mockToolRegistry.restoreProxySchemaPresentationSnapshot,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('preserves the armed carrying message when the notification loop is aborted between laps (R23-27)', async () => {
+      setUpToolSearchCarryingCronSchema();
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream());
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start session' }],
+      });
+
+      let resolveDrain!: () => void;
+      const drainGate = new Promise<void>((resolve) => {
+        resolveDrain = resolve;
+      });
+      mockClient.extMethod = vi
+        .fn()
+        .mockImplementation(async (method: string) => {
+          if (method === TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD) {
+            return { claimed: true, hasQueuedPrompt: false };
+          }
+          if (method === 'craft/drainMidTurnQueue') {
+            await drainGate;
+            return { messages: [], hasQueuedPrompt: false };
+          }
+          return { messages: [], hasQueuedPrompt: false };
+        });
+
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockImplementationOnce(() => Promise.resolve(toolSearchStream()));
+      const internals = session as unknown as {
+        notificationCompletion: Promise<void> | null;
+        notificationAbortController: AbortController | null;
+      };
+      const backgroundCallback = mockBackgroundTaskRegistry
+        .setNotificationCallback.mock.calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string; toolUseId?: string },
+      ) => void;
+
+      backgroundCallback('done', '<task-notification />', {
+        agentId: 'agent-1',
+        status: 'completed',
+      });
+      await vi.waitFor(
+        () => {
+          expect(presentedProxySchemas.get(core.ToolNames.CRON_CREATE)).toBe(
+            'fp',
+          );
+        },
+        { timeout: 15000 },
+      );
+      await vi.waitFor(
+        () => {
+          expect(mockClient.extMethod).toHaveBeenCalledWith(
+            'craft/drainMidTurnQueue',
+            expect.anything(),
+          );
+        },
+        { timeout: 15000 },
+      );
+      internals.notificationAbortController?.abort();
+      resolveDrain();
+      await vi.waitFor(
+        () => {
+          expect(internals.notificationCompletion).toBeNull();
+        },
+        { timeout: 15000 },
+      );
+
+      expect(mockChat.addHistory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          role: 'user',
+          parts: expect.arrayContaining([
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({
+                id: 'search_call',
+              }),
+            }),
+          ]),
+        }),
+      );
+      expect(presentedProxySchemas.get(core.ToolNames.CRON_CREATE)).toBe('fp');
+      expect(
+        mockToolRegistry.restoreProxySchemaPresentationSnapshot,
+      ).not.toHaveBeenCalled();
+    });
+
     it('does not resurrect marks across a mid-send compression clear (main loop)', async () => {
       setUpToolSearchCarryingCronSchema();
       // Simulate what compression does to the ledger: tryCompressChat applies

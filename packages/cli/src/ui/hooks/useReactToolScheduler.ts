@@ -113,6 +113,9 @@ export function useReactToolScheduler(
   getPreferredEditor: () => EditorType | undefined,
   onEditorClose: () => void,
   onToolResultFullTurnModel?: (model: string) => boolean,
+  onDeferredToolCallNormalizationRejected?: (
+    request: ToolCallRequestInfo,
+  ) => void,
 ): [TrackedToolCall[], ScheduleFn, MarkToolsAsSubmittedFn] {
   const [toolCallsForDisplay, setToolCallsForDisplay] = useState<
     TrackedToolCall[]
@@ -205,6 +208,7 @@ export function useReactToolScheduler(
         getPreferredEditor,
         onEditorClose,
         onToolResultFullTurnModel,
+        onDeferredToolCallNormalizationRejected,
       }),
     [
       config,
@@ -214,6 +218,7 @@ export function useReactToolScheduler(
       getPreferredEditor,
       onEditorClose,
       onToolResultFullTurnModel,
+      onDeferredToolCallNormalizationRejected,
     ],
   );
 

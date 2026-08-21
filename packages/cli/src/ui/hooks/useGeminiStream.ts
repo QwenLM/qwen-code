@@ -859,11 +859,6 @@ export const useGeminiStream = (
     new Set<AbortController>(),
   );
   const pendingCompletedToolBatchesRef = useRef<TrackedToolCall[][]>([]);
-  // The callIds actually included in the most recent accepted tool-result
-  // send (post history-dedup). The deferred-batch flush reads this so it
-  // commits carried proxy-schema presentations only for calls whose result
-  // truly entered the model context (issue #6721).
-  const lastDeliveredToolCallIdsRef = useRef<Set<string> | null>(null);
   /**
    * Commit the pending proxy-schema presentations carried by completed
    * tool_search results once their delivery is accepted (issue #6721).
@@ -888,7 +883,10 @@ export const useGeminiStream = (
     [config],
   );
   const handleCompletedToolsRef = useRef<
-    (completedTools: TrackedToolCall[]) => Promise<boolean | void>
+    (
+      completedTools: TrackedToolCall[],
+      onDeliveredCallIds?: (deliveredCallIds: Set<string>) => void,
+    ) => Promise<boolean | void>
   >(async () => {});
   const immediateDuplicateToolResponsesRef = useRef<{
     promptId: string | undefined;
@@ -941,6 +939,29 @@ export const useGeminiStream = (
       getPreferredEditor,
       onEditorClose,
       canUseToolResultFullTurnModel,
+      (rejectedRequest) => {
+        // R23-30: the scheduler rejected this deferred wrapper request at
+        // normalization, but the admission pass above already recorded it
+        // in the replay guard. Nothing ran for it, and the rejection text
+        // instructs the model to re-issue the call — release the record so
+        // an identical re-issue under a reused provider tool-call id is
+        // not suppressed as a replay. Guard on the fingerprint so a
+        // colliding entry recorded by a different (actually handled) call
+        // is never deleted.
+        const providerCallId = rejectedRequest.providerCallId;
+        if (!providerCallId) return;
+        const fingerprint = getCachedToolCallFingerprint(
+          rejectedRequest,
+          rejectedRequest.name,
+          rejectedRequest.args,
+        );
+        if (
+          handledToolCallFingerprintsRef.current.get(providerCallId) ===
+          fingerprint
+        ) {
+          handledToolCallFingerprintsRef.current.delete(providerCallId);
+        }
+      },
     );
 
   const pendingToolCallGroupDisplay = useMemo(
@@ -4122,8 +4143,22 @@ export const useGeminiStream = (
             }
             if (pendingCompletedTools.size > 0) {
               const flushedTools = [...pendingCompletedTools.values()];
-              const flushedAccepted =
-                await handleCompletedToolsRef.current(flushedTools);
+              // Capture the delivered callIds from the flush's OWN
+              // handleCompletedTools invocation via a synchronous sink.
+              // A shared ref read across the acceptance await raced: a
+              // batch completing inside the continuation's
+              // time-to-first-token window ran handleCompletedTools'
+              // entry reset before this read, leaving the delivered set
+              // null/foreign and silently skipping the commit (R23-1).
+              // The sink fires before the send is issued, so the capture
+              // cannot interleave.
+              let flushedDeliveredIds: Set<string> | undefined;
+              const flushedAccepted = await handleCompletedToolsRef.current(
+                flushedTools,
+                (deliveredCallIds) => {
+                  flushedDeliveredIds = deliveredCallIds;
+                },
+              );
               // Issue #6721: the scheduler settled these deferred batches
               // with `false` (delivery not yet accepted), leaving their
               // pending schema presentations uncommitted. Now that the
@@ -4136,13 +4171,11 @@ export const useGeminiStream = (
               // real result. Committing a dropped call's presentations would
               // open the #6721 gate for a schema that never entered the
               // model context, so filter to the delivered set.
-              if (flushedAccepted === true) {
-                const deliveredIds = lastDeliveredToolCallIdsRef.current;
-                const deliveredTools = deliveredIds
-                  ? flushedTools.filter((toolCall) =>
-                      deliveredIds.has(toolCall.request.callId),
-                    )
-                  : [];
+              if (flushedAccepted === true && flushedDeliveredIds) {
+                const deliveredIds = flushedDeliveredIds;
+                const deliveredTools = flushedTools.filter((toolCall) =>
+                  deliveredIds.has(toolCall.request.callId),
+                );
                 commitCarriedProxySchemaPresentations(deliveredTools);
               }
             }
@@ -4310,10 +4343,15 @@ export const useGeminiStream = (
   );
 
   const handleCompletedTools = useCallback(
-    async (completedToolCallsFromScheduler: TrackedToolCall[]) => {
-      // Reset per invocation: if this send early-returns or delivers a
-      // different set, the flush must not commit against a stale set.
-      lastDeliveredToolCallIdsRef.current = null;
+    async (
+      completedToolCallsFromScheduler: TrackedToolCall[],
+      // Deferred-batch flush only: receives the callIds this invocation
+      // actually delivers (post history-dedup), fired synchronously before
+      // the send is issued. The flush commits carried proxy-schema
+      // presentations against THIS set rather than a shared ref read across
+      // the acceptance await (R23-1).
+      onDeliveredCallIds?: (deliveredCallIds: Set<string>) => void,
+    ) => {
       const completedAndReadyToSubmitTools =
         completedToolCallsFromScheduler.filter(
           (
@@ -4554,6 +4592,16 @@ export const useGeminiStream = (
           )
         : [];
       for (const toolCall of secondaryTools) {
+        // Issue #6721: secondary-interaction calls are dropped from this
+        // send (marked submitted and filtered out of `geminiTools` below),
+        // but the scheduler settles this batch's pending schema
+        // presentations against ONE batch-level acceptance boolean over the
+        // whole completed array — so an accepted owning send would commit
+        // the dropped calls' carried presentations for schemas that never
+        // entered model context. Strip them here, mirroring the dedup-block
+        // strip above. (The deferred flush is already safe: it filters to
+        // the delivered set, which excludes secondary calls.)
+        toolCall.response.pendingProxySchemaPresentations = undefined;
         const secondaryOwner = ownerForToolCall(toolCall);
         if (secondaryOwner && toolCall.request.prompt_id) {
           secondaryInteractionOwners.set(
@@ -4669,7 +4717,13 @@ export const useGeminiStream = (
           'invalid Goal tool context',
           'continuation_goal_context_invalid',
         );
-        return;
+        // Issue #6721 delivery contract: the batch was fail-closed WITHOUT
+        // addHistory or a send — nothing entered model context, so report
+        // delivery-not-accepted and let the scheduler discard the batch's
+        // pending schema presentations. A bare `return` (undefined) decodes
+        // as accepted at settlement and would commit presentations for
+        // schemas that never reached the model.
+        return false;
       }
       if (!toolGoalPermit && toolGoalContexts.length > 0) {
         const active = activeGoalTurnRef.current;
@@ -4703,7 +4757,9 @@ export const useGeminiStream = (
             'missing Goal tool context',
             'continuation_goal_context_missing',
           );
-          return;
+          // Fail-closed without addHistory — see the
+          // continuation_goal_context_invalid exit for the delivery contract.
+          return false;
         }
       }
       let toolGoalBinding: GoalTurnBinding | undefined;
@@ -4727,7 +4783,9 @@ export const useGeminiStream = (
             'stale Goal tool context',
             'continuation_goal_context_stale',
           );
-          return;
+          // Fail-closed without addHistory — see the
+          // continuation_goal_context_invalid exit for the delivery contract.
+          return false;
         }
         toolGoalBinding =
           existing ??
@@ -4895,11 +4953,13 @@ export const useGeminiStream = (
         orderedResponses.push(...queue);
       }
 
-      // Record the callIds this send will actually deliver (post dedup),
-      // so the deferred-batch flush commits carried presentations only for
-      // calls whose result enters the model context.
-      lastDeliveredToolCallIdsRef.current = new Set(
-        orderedResponses.map(({ request }) => request.callId),
+      // Hand the deferred-batch flush the callIds this send will actually
+      // deliver (post dedup), so it commits carried presentations only for
+      // calls whose result enters the model context. Fired synchronously
+      // here — before submitQuery below — so the capture cannot race with
+      // any concurrent handleCompletedTools invocation (R23-1).
+      onDeliveredCallIds?.(
+        new Set(orderedResponses.map(({ request }) => request.callId)),
       );
 
       const finalizedResponses = await finalizeToolResponses(
@@ -5093,6 +5153,10 @@ export const useGeminiStream = (
         } else {
           endToolInteraction('ok');
         }
+        // Deliberate bare `return` (undefined ⇒ accepted at settlement):
+        // the addHistory above put the carrying results into the model
+        // context, so this batch's presentations ARE backed by history.
+        // Every other bare-return discard exit above returns `false`.
         return;
       }
 

@@ -7681,6 +7681,13 @@ export class Session implements SessionContext {
                 turnCount++;
                 if (ac.signal.aborted) {
                   this.todoStopGuard.suspend();
+                  // Mirror the main prompt loop's abort check: preserve the
+                  // carrying message (its functionResponse parts may back
+                  // committed proxy-schema presentations — dropping it here
+                  // would orphan the ledger marks for schemas that never
+                  // enter model context, failing the #6721 gate open on a
+                  // later guessed-argument tool_call).
+                  this.#preserveUnsentMessageHistory(nextMessage, true);
                   return;
                 }
 
@@ -8416,6 +8423,9 @@ export class Session implements SessionContext {
           while (nextMessage !== null) {
             if (ac.signal.aborted) {
               this.todoStopGuard.suspend();
+              // Mirror the main prompt loop's abort check — see the cron
+              // loop's top-of-lap abort for the #6721 rationale.
+              this.#preserveUnsentMessageHistory(nextMessage, true);
               await this.#emitBackgroundNotificationEndTurn('cancelled');
               return;
             }
@@ -9584,6 +9594,18 @@ export class Session implements SessionContext {
           onFullTurnModel,
           presentationSnapshot,
           pendingPresentationsInBatch,
+          (rejectedFc) => {
+            // R23-30: release the admission-time replay record for a
+            // gate-rejected wrapper call — see runTool's parameter doc.
+            const pid = getProviderToolCallId(rejectedFc) ?? rejectedFc.id;
+            if (!pid) return;
+            if (
+              handledToolCallFingerprints.get(pid) ===
+              getFunctionCallFingerprint(rejectedFc)
+            ) {
+              handledToolCallFingerprints.delete(pid);
+            }
+          },
         )
           .then((r) => {
             results[idx] = r;
@@ -9829,6 +9851,16 @@ export class Session implements SessionContext {
       name: string;
       fingerprint: string;
     }>,
+    /**
+     * R23-30: fired with the raw FunctionCall when deferred-wrapper
+     * normalization rejects it. The admission pass in runToolCalls recorded
+     * the call for duplicate-provider-id replay detection before the gate
+     * ran; nothing executed for a rejected call, and the rejection text
+     * instructs the model to re-issue it, so the caller releases that
+     * record to keep the instructed retry from being suppressed as a
+     * replay on providers that reuse tool-call ids.
+     */
+    onNormalizationRejected?: (fc: FunctionCall) => void,
   ): Promise<RunToolResult> {
     const callId = fc.id ?? generatedCallId ?? `${fc.name}-${Date.now()}`;
     let args = (fc.args ?? {}) as Record<string, unknown>;
@@ -10088,6 +10120,11 @@ export class Session implements SessionContext {
       // attempted target and recordings retain the structured error type.
       responseToolName = normalizedRequest.providerName;
       telemetryProviderName = normalizedRequest.providerName;
+      try {
+        onNormalizationRejected?.(fc);
+      } catch {
+        // Replay-record bookkeeping must never break the rejection path.
+      }
       return earlyErrorResponse(
         normalizedRequest.error,
         normalizedRequest.targetName ?? normalizedRequest.providerName,

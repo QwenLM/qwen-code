@@ -10,6 +10,7 @@ import type {
   Config,
   CronJob,
   CronScheduler,
+  GeminiChat,
   GoalRuntime,
   GoalSnapshotV2,
   GoalTurnHost,
@@ -1025,6 +1026,57 @@ export async function runNonInteractive(
     // the regular options.sendMessageType / UserQuery selection applies.
     let continueSendType: SendMessageType | null = null;
 
+    // Issue #6721 ledger rollback for the headless surface (R23-33):
+    // headless batches commit their carried proxy-schema presentations at
+    // scheduler settlement (their void onAllToolCallsComplete decodes as
+    // accepted), which runs BEFORE the carrying tool results enter history.
+    // If the carrying send then never pushes — a blocking UserPromptSubmit
+    // hook decision, a turn interrupt, a thrown send — the committed marks
+    // survive while the schema never reached the model; in reusable
+    // stream-json sessions the registry outlives the turn, and a later
+    // model-emitted tool_call passes the gate on guessed arguments. Mirror
+    // Session.ts: arm a pre-batch snapshot and restore it whenever the
+    // carrying send did not push. Declared outside the turn try/finally so
+    // every terminal path (including catch) can settle.
+    let pendingPresentationSnapshot: ReadonlyMap<string, string> | undefined;
+    let pendingPresentationGeneration = 0;
+    let presentationSendChat: GeminiChat | undefined;
+    let presentationPushCountBeforeSend = 0;
+    const settlePendingPresentationLedger = (): void => {
+      if (!pendingPresentationSnapshot) return;
+      const snapshot = pendingPresentationSnapshot;
+      const generation = pendingPresentationGeneration;
+      pendingPresentationSnapshot = undefined;
+      const pushed =
+        (presentationSendChat?.getUserContentPushCount?.() ?? 0) >
+        presentationPushCountBeforeSend;
+      if (pushed) return;
+      try {
+        config
+          .getToolRegistry()
+          .restoreProxySchemaPresentationSnapshot(snapshot, generation);
+      } catch {
+        // Test doubles may expose a registry without the restore API; a
+        // ledger rollback must never break the exit path.
+      }
+    };
+    const armPresentationLedgerRollback = (): void => {
+      // Settle any still-armed snapshot against the last send before arming
+      // a fresh one: a new batch means the previous batch's carrying send
+      // either pushed (clear) or never did (restore).
+      settlePendingPresentationLedger();
+      try {
+        const registry = config.getToolRegistry();
+        pendingPresentationSnapshot =
+          registry.getProxySchemaPresentationSnapshot();
+        pendingPresentationGeneration =
+          registry.getProxySchemaPresentationGeneration();
+      } catch {
+        pendingPresentationSnapshot = undefined;
+        pendingPresentationGeneration = 0;
+      }
+    };
+
     try {
       process.stdout.on('error', stdoutErrorHandler);
 
@@ -1899,6 +1951,28 @@ export async function runNonInteractive(
           );
           if (gated.ok) continue;
           gateRejectedRequests.add(requestInfo);
+          // R23-30: the admission loop above already recorded this call
+          // against its provider id for replay detection. Nothing executed
+          // for it, and the rejection text itself instructs the model to
+          // re-issue the call — release the record so an identical re-issue
+          // under a reused provider tool-call id is not suppressed as a
+          // replay (and a second one does not trip the repeated-duplicate
+          // breaker). Guard on the fingerprint so an entry recorded by a
+          // different, actually-handled call is never deleted.
+          const rejectedProviderCallId = getProviderResponseId(requestInfo);
+          if (rejectedProviderCallId) {
+            const rejectedFingerprint = getCachedToolCallFingerprint(
+              requestInfo,
+              requestInfo.name,
+              requestInfo.args,
+            );
+            if (
+              handledToolCallFingerprints.get(rejectedProviderCallId) ===
+              rejectedFingerprint
+            ) {
+              handledToolCallFingerprints.delete(rejectedProviderCallId);
+            }
+          }
           const gateErrorRequest: ToolCallRequestInfo = {
             ...requestInfo,
             ...(gated.targetName ? { name: gated.targetName } : {}),
@@ -2442,6 +2516,11 @@ export async function runNonInteractive(
 
         const toolCallRequests: ToolCallRequestInfo[] = [];
         const apiStartTime = Date.now();
+        // R23-33: baseline for the push-count comparison that decides
+        // whether this send backs the armed batch's committed marks.
+        presentationSendChat = geminiClient.getChat();
+        presentationPushCountBeforeSend =
+          presentationSendChat.getUserContentPushCount?.() ?? 0;
         const responseStream = geminiClient.sendMessageStream(
           currentMessages[0]?.parts || [],
           abortController.signal,
@@ -2547,6 +2626,10 @@ export async function runNonInteractive(
           // `modelOverride` so the next turn's sendMessageStream sees
           // it; the drain turn updates a per-item `itemModelOverride`
           // scoped to that drain item.
+          // R23-33: arm the ledger rollback BEFORE the batch executes
+          // (settlement commits the batch's presentations before the
+          // carrying send below can push them into history).
+          armPresentationLedgerRollback();
           const {
             responseParts: toolResponseParts,
             repeatedDuplicateProviderToolCall,
@@ -2590,6 +2673,10 @@ export async function runNonInteractive(
               role: 'user',
               parts: toolResponseParts,
             });
+            // R23-33: the carrying parts entered history via addHistory
+            // (bypassing sendMessageStream), so the armed batch's committed
+            // marks ARE backed — drop the rollback snapshot.
+            pendingPresentationSnapshot = undefined;
             await config.getChatRecordingService?.()?.flush();
             await finishGoalTurn(activeGoalTurn);
             activeGoalTurn = undefined;
@@ -2768,6 +2855,11 @@ export async function runNonInteractive(
               const itemToolCallRequests: ToolCallRequestInfo[] = [];
               const itemApiStartTime = Date.now();
               selectActiveInteraction(itemPromptId, itemIsFirstTurn);
+              // R23-33: push-count baseline for this drain send (see the
+              // main-loop send site).
+              presentationSendChat = geminiClient.getChat();
+              presentationPushCountBeforeSend =
+                presentationSendChat.getUserContentPushCount?.() ?? 0;
               const itemStream = geminiClient.sendMessageStream(
                 itemMessages[0]?.parts || [],
                 abortController.signal,
@@ -2853,6 +2945,9 @@ export async function runNonInteractive(
                 // sendMessageStream picks up the per-item override),
                 // while the main loop binds to the session-scoped
                 // `modelOverride`.
+                // R23-33: arm before the batch executes — same rationale
+                // as the main-loop arm site.
+                armPresentationLedgerRollback();
                 const {
                   responseParts: itemToolResponseParts,
                   repeatedDuplicateProviderToolCall,
@@ -3138,6 +3233,11 @@ export async function runNonInteractive(
         }
       }
     } catch (error) {
+      // R23-33: the carrying send threw (abort/interrupt/API error). If it
+      // never pushed the armed batch's results into history, roll the
+      // presentation ledger back so the committed marks don't outlive the
+      // turn (fail-closed).
+      settlePendingPresentationLedger();
       const budgetExceeded = budgetEnforcer.getExceeded();
       const failureMessage =
         error instanceof Error ? error.message : String(error);
@@ -3254,6 +3354,11 @@ export async function runNonInteractive(
       }
       await handleError(error, config);
     } finally {
+      // R23-33: settle any still-armed snapshot on EVERY terminal path
+      // (success, loop-detected, structured-output, blocked sends that
+      // ended the run): if the last armed batch's carrying send never
+      // pushed, its committed marks must not survive the run.
+      settlePendingPresentationLedger();
       await failClosedActiveGoalTurn(
         'Headless Goal host stopped before its permit was released',
       );

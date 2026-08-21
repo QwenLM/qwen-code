@@ -2952,6 +2952,105 @@ describe('runNonInteractive', () => {
       ).toContain('no presented schema');
     });
 
+    it('releases the replay record for a gate-rejected wrapper call so the instructed retry is not suppressed (R23-30)', async () => {
+      // R23-30: the admission loop records every admitted call against its
+      // provider id BEFORE the #6721 gate runs. The gate's rejection text
+      // instructs the model to "call tool_call again with the matching
+      // arguments" — with the record retained, an identical re-issue under
+      // a reused provider tool-call id ({name}_{index} schemes restart at
+      // 0) is classified as a replay and suppressed, and a second re-issue
+      // trips the repeated-duplicate breaker. The record must be released
+      // when the gate rejects: nothing executed, so there are no side
+      // effects to protect.
+      setupMetricsMock();
+      vi.mocked(mockToolRegistry.getTool).mockReturnValue({
+        kind: Kind.Other,
+      } as unknown as ReturnType<typeof mockToolRegistry.getTool>);
+      // The first gate check (turn 1) rejects; later checks pass — as if a
+      // tool_search delivered the schema between the turns.
+      let gateChecks = 0;
+      vi.mocked(mockToolRegistry.hasPresentedProxySchema).mockImplementation(
+        () => {
+          gateChecks += 1;
+          return gateChecks > 1;
+        },
+      );
+      const executed: Array<{ callId: string; name: string }> = [];
+      mockCoreExecuteToolCall.mockImplementation(
+        async (_config: unknown, request: ToolCallRequestInfo) => {
+          executed.push({ callId: request.callId, name: request.name });
+          return {
+            responseParts: [
+              {
+                functionResponse: {
+                  id: request.callId,
+                  name: request.name,
+                  response: { output: 'ok' },
+                },
+              },
+            ],
+          };
+        },
+      );
+
+      // A provider that reuses tool-call ids: same providerCallId, same
+      // (name, args) fingerprint, only the internal callId differs.
+      const wrapperEvent = (callId: string): ServerGeminiStreamEvent => ({
+        type: GeminiEventType.ToolCallRequest,
+        value: {
+          callId,
+          providerCallId: 'tool_call_0',
+          name: ToolNames.DEFERRED_TOOL_CALL,
+          args: { name: 'deferred_target', arguments: { x: 1 } },
+          isClientInitiated: false,
+          prompt_id: 'p-gate-retry',
+        },
+      });
+      mockGeminiClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([wrapperEvent('proxy-attempt-1')]),
+        )
+        .mockReturnValueOnce(
+          createStreamFromEvents([wrapperEvent('proxy-attempt-2')]),
+        )
+        .mockReturnValueOnce(createStreamFromEvents(finishTurn));
+
+      await runNonInteractive(mockConfig, mockSettings, 'go', 'p-gate-retry');
+
+      // Turn 1: the gate rejected (no presented schema) and shipped the
+      // re-call instruction.
+      const turn2Parts = mockGeminiClient.sendMessageStream.mock
+        .calls[1][0] as Part[];
+      const rejection = turn2Parts.find(
+        (part) => part.functionResponse?.id === 'proxy-attempt-1',
+      );
+      expect(
+        String(rejection?.functionResponse?.response?.['error']),
+      ).toContain('no presented schema');
+
+      // Turn 2: the identical re-issue under the reused provider id is NOT
+      // suppressed as a replay — the gate passes and the call executes.
+      // (executeToolCall is module-mocked, so the request arrives still in
+      // wrapper shape; the real scheduler unwraps it in _schedule.)
+      // Before the fix the admission-time record survived the gate
+      // rejection and the re-issue was answered with "Duplicate provider
+      // tool call id" (and one more would trip GLOBAL_TOOL_CALL_DUPLICATE).
+      expect(executed).toEqual([
+        { callId: 'proxy-attempt-2', name: ToolNames.DEFERRED_TOOL_CALL },
+      ]);
+      const turn3Parts = mockGeminiClient.sendMessageStream.mock
+        .calls[2][0] as Part[];
+      expect(
+        turn3Parts.some(
+          (part) =>
+            typeof part.functionResponse?.response?.['error'] === 'string' &&
+            String(part.functionResponse?.response?.['error']).includes(
+              'Duplicate provider tool call id',
+            ),
+        ),
+      ).toBe(false);
+    });
+
     it('finalizes concurrent results in request order despite out-of-order completion', async () => {
       setupMetricsMock();
       vi.mocked(mockToolRegistry.getTool).mockReturnValue({
@@ -3003,6 +3102,268 @@ describe('runNonInteractive', () => {
         .map((part) => part.functionResponse?.id)
         .filter((id): id is string => id === 'a' || id === 'b' || id === 'c');
       expect(ids).toEqual(['a', 'b', 'c']);
+    });
+
+    it('rolls the presentation ledger back when the headless carrying send never pushes (R23-33)', async () => {
+      // R23-33: headless batches commit their carried proxy-schema
+      // presentations at scheduler settlement (void onAllToolCallsComplete
+      // decodes as accepted) BEFORE the carrying results enter history.
+      // When the carrying send then never pushes (a blocking
+      // UserPromptSubmit hook returns without pushing), the committed
+      // marks must be rolled back — in reusable stream-json sessions the
+      // registry outlives the turn and a later tool_call would pass the
+      // #6721 gate on a schema the model never saw.
+      setupMetricsMock();
+      const presentedLedger = new Map<string, string>();
+      const restoreSpy = vi.fn();
+      const registryExtras = {
+        getProxySchemaPresentationSnapshot: vi.fn(
+          () => new Map(presentedLedger),
+        ),
+        getProxySchemaPresentationGeneration: vi.fn(() => 0),
+        restoreProxySchemaPresentationSnapshot: restoreSpy,
+      };
+      Object.assign(mockToolRegistry, registryExtras);
+
+      const pushCount = 0;
+      const chatStub = {
+        getUserContentPushCount: vi.fn(() => pushCount),
+      };
+      mockGeminiClient.getChat = vi.fn(
+        () => chatStub,
+      ) as unknown as typeof mockGeminiClient.getChat;
+
+      mockCoreExecuteToolCall.mockImplementation(
+        async (_config: unknown, request: ToolCallRequestInfo) => {
+          // Simulate the settlement commit landing during the batch (the
+          // real scheduler commits the search's carried presentations when
+          // the void headless consumer settles accepted).
+          presentedLedger.set('cron_create', 'fp');
+          return {
+            responseParts: [
+              {
+                functionResponse: {
+                  id: request.callId,
+                  name: request.name,
+                  response: { output: '<functions>cron_create</functions>' },
+                },
+              },
+            ],
+          };
+        },
+      );
+
+      let markAtCarryingSend: string | undefined;
+      mockGeminiClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            {
+              type: GeminiEventType.ToolCallRequest,
+              value: {
+                callId: 'search-1',
+                name: ToolNames.TOOL_SEARCH,
+                args: { query: 'cron' },
+                isClientInitiated: false,
+                prompt_id: 'p-headless-rollback',
+              },
+            },
+          ]),
+        )
+        .mockImplementationOnce(() => {
+          // The carrying send is blocked (hook decision): it yields
+          // nothing and never pushes user content — pushCount stays.
+          markAtCarryingSend = presentedLedger.get('cron_create');
+          return createStreamFromEvents([]);
+        });
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'go',
+        'p-headless-rollback',
+      );
+
+      // The batch committed its mark before the carrying send...
+      expect(markAtCarryingSend).toBe('fp');
+      // ...and the run-end settlement restored the PRE-BATCH snapshot
+      // (empty — the arm ran before the batch executed), so the mark does
+      // not outlive a schema that never reached the model.
+      expect(restoreSpy).toHaveBeenCalledTimes(1);
+      const restoredSnapshot = restoreSpy.mock.calls[0][0] as Map<
+        string,
+        string
+      >;
+      expect(restoredSnapshot.has('cron_create')).toBe(false);
+      expect(restoreSpy.mock.calls[0][1]).toBe(0);
+    });
+
+    it('keeps committed presentations when the headless carrying send pushes (R23-33)', async () => {
+      // Positive control for the R23-33 rollback: when the carrying send
+      // pushes the results into history, the committed marks are backed
+      // and must NOT be rolled back.
+      setupMetricsMock();
+      const presentedLedger = new Map<string, string>();
+      const restoreSpy = vi.fn();
+      Object.assign(mockToolRegistry, {
+        getProxySchemaPresentationSnapshot: vi.fn(
+          () => new Map(presentedLedger),
+        ),
+        getProxySchemaPresentationGeneration: vi.fn(() => 0),
+        restoreProxySchemaPresentationSnapshot: restoreSpy,
+      });
+
+      let pushCount = 0;
+      const chatStub = {
+        getUserContentPushCount: vi.fn(() => pushCount),
+      };
+      mockGeminiClient.getChat = vi.fn(
+        () => chatStub,
+      ) as unknown as typeof mockGeminiClient.getChat;
+
+      mockCoreExecuteToolCall.mockImplementation(
+        async (_config: unknown, request: ToolCallRequestInfo) => {
+          presentedLedger.set('cron_create', 'fp');
+          return {
+            responseParts: [
+              {
+                functionResponse: {
+                  id: request.callId,
+                  name: request.name,
+                  response: { output: '<functions>cron_create</functions>' },
+                },
+              },
+            ],
+          };
+        },
+      );
+
+      mockGeminiClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            {
+              type: GeminiEventType.ToolCallRequest,
+              value: {
+                callId: 'search-1',
+                name: ToolNames.TOOL_SEARCH,
+                args: { query: 'cron' },
+                isClientInitiated: false,
+                prompt_id: 'p-headless-delivered',
+              },
+            },
+          ]),
+        )
+        .mockImplementationOnce(() => {
+          // The carrying send pushes the user content (pushCount advances)
+          // and the model answers.
+          pushCount += 1;
+          return createStreamFromEvents([
+            { type: GeminiEventType.Content, value: 'done' },
+            {
+              type: GeminiEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 1 },
+              },
+            },
+          ]);
+        });
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'go',
+        'p-headless-delivered',
+      );
+
+      expect(presentedLedger.get('cron_create')).toBe('fp');
+      expect(restoreSpy).not.toHaveBeenCalled();
+    });
+
+    it('rolls the presentation ledger back on a recoverable interrupt before the carrying send pushes (R23-33)', async () => {
+      // R23-33 trigger 2: reusable stream-json sessions reuse one registry
+      // across messages; a control interrupt (TurnInterruptedError) aborts
+      // the turn before the carrying send pushes, and runNonInteractive
+      // returns 130 without exiting the process. The committed marks must
+      // not survive into the next message.
+      setupMetricsMock();
+      const presentedLedger = new Map<string, string>();
+      const restoreSpy = vi.fn();
+      Object.assign(mockToolRegistry, {
+        getProxySchemaPresentationSnapshot: vi.fn(
+          () => new Map(presentedLedger),
+        ),
+        getProxySchemaPresentationGeneration: vi.fn(() => 0),
+        restoreProxySchemaPresentationSnapshot: restoreSpy,
+      });
+
+      const pushCount = 0;
+      const chatStub = {
+        getUserContentPushCount: vi.fn(() => pushCount),
+      };
+      mockGeminiClient.getChat = vi.fn(
+        () => chatStub,
+      ) as unknown as typeof mockGeminiClient.getChat;
+
+      mockCoreExecuteToolCall.mockImplementation(
+        async (_config: unknown, request: ToolCallRequestInfo) => {
+          presentedLedger.set('cron_create', 'fp');
+          return {
+            responseParts: [
+              {
+                functionResponse: {
+                  id: request.callId,
+                  name: request.name,
+                  response: { output: '<functions>cron_create</functions>' },
+                },
+              },
+            ],
+          };
+        },
+      );
+
+      const turnAbortController = new AbortController();
+      mockGeminiClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            {
+              type: GeminiEventType.ToolCallRequest,
+              value: {
+                callId: 'search-1',
+                name: ToolNames.TOOL_SEARCH,
+                args: { query: 'cron' },
+                isClientInitiated: false,
+                prompt_id: 'p-headless-interrupt',
+              },
+            },
+          ]),
+        )
+        .mockImplementationOnce(() => {
+          // The control interrupt lands before the carrying send pushes.
+          turnAbortController.abort(
+            new TurnInterruptedError('turn interrupted by control request'),
+          );
+          return createStreamFromEvents([]);
+        });
+
+      const exitCode = await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'go',
+        'p-headless-interrupt',
+        {
+          abortController: turnAbortController,
+          recoverableCancellation: true,
+        },
+      );
+
+      expect(exitCode).toBe(130);
+      expect(presentedLedger.get('cron_create')).toBe('fp');
+      expect(restoreSpy).toHaveBeenCalledTimes(1);
+      const restoredSnapshot = restoreSpy.mock.calls[0][0] as Map<
+        string,
+        string
+      >;
+      expect(restoredSnapshot.has('cron_create')).toBe(false);
     });
 
     it('hard-caps the aggregate headless tool response before the next model turn', async () => {

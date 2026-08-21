@@ -819,6 +819,7 @@ describe('CoreToolScheduler', () => {
     setApprovalMode?: ReturnType<typeof vi.fn>;
     onAllToolCallsComplete?: ReturnType<typeof vi.fn>;
     disableCompletionCallback?: boolean;
+    onDeferredToolCallNormalizationRejected?: ReturnType<typeof vi.fn>;
     onToolCallsUpdate?: ReturnType<typeof vi.fn>;
     memoryMonitor?: { scheduleCheck: () => void };
     toolOutputBatchBudget?: number;
@@ -974,6 +975,8 @@ describe('CoreToolScheduler', () => {
       getPreferredEditor: () => 'vscode',
       onEditorClose: vi.fn(),
       onToolResultFullTurnModel: options.onToolResultFullTurnModel,
+      onDeferredToolCallNormalizationRejected:
+        options.onDeferredToolCallNormalizationRejected,
     });
 
     return {
@@ -2797,6 +2800,44 @@ describe('CoreToolScheduler', () => {
 
       expect(hasPresentedProxySchema(ToolNames.CRON_CREATE, cronTool)).toBe(
         true,
+      );
+    });
+
+    it('notifies the surface when a wrapper call fails normalization (R23-30)', async () => {
+      // Delivery surfaces record admitted calls for duplicate-provider-id
+      // replay detection BEFORE the scheduler gates them. When the gate
+      // rejects a wrapper call its error text instructs the model to
+      // re-issue the call, so the surface must hear about the rejection to
+      // release that record — the notification carries the ORIGINAL wrapper
+      // request (same identity the surface recorded at admission).
+      const cronTool = new MockTool({
+        name: ToolNames.CRON_CREATE,
+        shouldDefer: true,
+      });
+      const toolsByName = new Map<string, MockTool>([
+        [ToolNames.CRON_CREATE, cronTool],
+      ]);
+      const onDeferredToolCallNormalizationRejected = vi.fn();
+      const { scheduler } = createSchedulerForLegacyToolTests({
+        toolsByName,
+        // No schema presented this session: the #6721 gate rejects.
+        presentDeferredSchemas: false,
+        onDeferredToolCallNormalizationRejected,
+      });
+
+      const request: ToolCallRequestInfo = {
+        callId: 'wrapper-rejected',
+        providerCallId: 'tool_call_0',
+        name: ToolNames.DEFERRED_TOOL_CALL,
+        args: { name: ToolNames.CRON_CREATE, arguments: { prompt: 'x' } },
+        isClientInitiated: false,
+        prompt_id: 'p-wrapper-rejected',
+      };
+      await scheduler.schedule(request, new AbortController().signal);
+
+      expect(onDeferredToolCallNormalizationRejected).toHaveBeenCalledTimes(1);
+      expect(onDeferredToolCallNormalizationRejected).toHaveBeenCalledWith(
+        request,
       );
     });
   });

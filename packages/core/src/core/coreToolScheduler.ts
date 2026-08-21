@@ -1232,6 +1232,20 @@ interface CoreToolSchedulerOptions {
   onToolResultFullTurnModel?: (model: string) => boolean;
   /** Lets an outer owner suppress a scheduler result it already emitted. */
   shouldObserveProducer?: (callId: string) => boolean;
+  /**
+   * Fired with the ORIGINAL wrapper request when a deferred `tool_call`
+   * request fails normalization (issue #6721's presented-schema gate or a
+   * malformed-shape rejection). Nothing executed for the rejected call, so
+   * surfaces that record admitted calls for duplicate-provider-id replay
+   * detection can release that record: the rejection message itself
+   * instructs the model to re-issue the call, and on providers that reuse
+   * tool-call ids (`{name}_{index}` schemes restarting at 0) a retained
+   * record would classify the instructed identical re-issue as a replay and
+   * suppress it (R23-30).
+   */
+  onDeferredToolCallNormalizationRejected?: (
+    request: ToolCallRequestInfo,
+  ) => void;
 }
 
 // ─── Tool Concurrency Helpers ────────────────────────────────
@@ -1405,6 +1419,9 @@ export class CoreToolScheduler {
   private onEditorClose: () => void;
   private chatRecordingService?: ChatRecordingService;
   private onToolResultFullTurnModel?: (model: string) => boolean;
+  private onDeferredToolCallNormalizationRejected?: (
+    request: ToolCallRequestInfo,
+  ) => void;
   private shouldObserveProducer: (callId: string) => boolean;
   private isFinalizingToolCalls = false;
   private postToolBatchEnabledForBatch = false;
@@ -1475,6 +1492,8 @@ export class CoreToolScheduler {
     this.onEditorClose = options.onEditorClose;
     this.chatRecordingService = options.chatRecordingService;
     this.onToolResultFullTurnModel = options.onToolResultFullTurnModel;
+    this.onDeferredToolCallNormalizationRejected =
+      options.onDeferredToolCallNormalizationRejected;
     this.shouldObserveProducer = options.shouldObserveProducer ?? (() => true);
   }
 
@@ -2506,6 +2525,18 @@ export class CoreToolScheduler {
               ),
               durationMs: 0,
             });
+            // R23-30: notify the delivery surface so it can release the
+            // replay-guard record it made for this wrapper call at
+            // admission — nothing executed for it, and the error text
+            // instructs the model to re-issue the call (which a retained
+            // record would suppress as a replay on providers that reuse
+            // tool-call ids).
+            try {
+              this.onDeferredToolCallNormalizationRejected?.(reqInfo);
+            } catch {
+              // Surface-side bookkeeping failure must never break
+              // scheduling; the rejection response is already recorded.
+            }
             continue;
           }
           effectiveReqInfo = normalizedRequest.request;
