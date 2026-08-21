@@ -48,8 +48,10 @@ import type {
   DaemonSessionArtifact,
   DaemonWorkspaceCapability,
   DaemonWorkspaceGitStatus,
+  GoalSnapshotV2,
 } from '@qwen-code/sdk/daemon';
 
+import { isGoalGateBlocked as isGoalGateBlockedFor } from './utils/goalGate';
 import { type SessionGitIntent } from './components/GitModePopover';
 import {
   SESSION_LIST_PAGE_SIZE,
@@ -88,7 +90,11 @@ import type {
   EditorHandle,
 } from './hooks/useComposerCore';
 import type { PromptFile, PromptImage } from './adapters/promptTypes';
+import type { AttachmentPreviewRequest } from './adapters/messageTypes';
 import { StatusBar, type StatusBarHandle } from './components/StatusBar';
+import { GoalStatusStrip } from './components/GoalStatusStrip';
+import composerStatusStyles from './components/ComposerStatusStack.module.css';
+import { GoalEditDialog } from './components/dialogs/GoalEditDialog';
 import { StreamingStatus } from './components/StreamingStatus';
 import {
   ToastHost,
@@ -104,7 +110,6 @@ import {
 } from './components/panels/EnvironmentPanel';
 import { ChatContextHeader } from './components/ChatContextHeader';
 import { WelcomeHeader } from './components/WelcomeHeader';
-import { NewSessionDotField } from './components/NewSessionDotField';
 import { ApprovalModeDialog } from './components/dialogs/ApprovalModeDialog';
 import { ResumeDialog } from './components/dialogs/ResumeDialog';
 import { DialogShell } from './components/dialogs/DialogShell';
@@ -140,7 +145,10 @@ import {
   getFileChangePreviewContent,
   TURN_OUTPUT_KINDS,
 } from './components/artifacts/TurnOutputs';
-import { useArtifactWorkspaceTarget } from './components/artifacts/useArtifactWorkspaceTarget';
+import {
+  resolveArtifactWorkspaceOwner,
+  useArtifactWorkspaceTarget,
+} from './components/artifacts/useArtifactWorkspaceTarget';
 import {
   getArtifactsByTurn,
   getFileChangesByTurn,
@@ -157,11 +165,8 @@ import {
 } from './utils/splitUrl';
 import { ScheduledTasksDialog } from './components/dialogs/ScheduledTasksDialog';
 import { GoalsDialog } from './components/dialogs/GoalsDialog';
-import {
-  goalArgOf,
-  isGoalClearCommand,
-  isGoalClearKeyword,
-} from './utils/goalCondition';
+import { parseWebShellGoalCommand } from './utils/goalCondition';
+import { buildGoalControlRequest } from './utils/goalControlRequest';
 import { ExtensionsManagerPage } from './components/extensions/ExtensionsManagerPage';
 import { PluginManagerPage } from './components/plugins/PluginManagerPage';
 import { ChannelsManagerPage } from './components/channels/ChannelsManagerPage';
@@ -252,11 +257,6 @@ import {
 } from './components/messages/StatusMessage';
 import type { SerializedMcpStatusMessage } from './components/messages/McpStatusMessage';
 import { McpManagerPage } from './components/mcp/McpManagerPage';
-import {
-  GOAL_STATUS_ACTIVE_EVENT,
-  parseGoalStatusMessage,
-  serializeGoalStatusMessage,
-} from './components/messages/GoalStatusMessage';
 import { BtwMessage } from './components/messages/BtwMessage';
 import {
   createAndAttachSessionForPrompt,
@@ -270,8 +270,12 @@ import {
   type ComposerPlaceholderState,
 } from './utils/composerInputState';
 import { isDefinitelyRejectedPromptAdmission } from './utils/promptAdmission';
+import { base64ToBlob } from './utils/base64';
 import type { ACPToolCall, Message, PermissionRequest } from './adapters/types';
-import { isBackgroundSubAgentToolCall } from './adapters/toolClassification';
+import {
+  backgroundShellTaskId,
+  isBackgroundSubAgentToolCall,
+} from './adapters/toolClassification';
 import {
   computeTodoDetails,
   computeTodoTimeline,
@@ -483,11 +487,6 @@ const MODE_TITLE_KEY: Record<ModelDialogMode, string> = {
 
 function normalizeHiddenCommand(command: string): string {
   return command.trim().replace(/^\/+/, '').toLowerCase();
-}
-
-interface ActiveGoalStatus {
-  condition: string;
-  setAt: number;
 }
 
 interface SendPromptOptionsWithRetry {
@@ -747,40 +746,6 @@ function retryTranscriptIdentityMatches(
       );
 }
 
-type GoalStatusTranscriptBlock = DaemonTranscriptBlock & {
-  text: string;
-  source?: string;
-  data?: unknown;
-};
-
-function parseGoalStatusFromBlock(block: DaemonTranscriptBlock) {
-  const statusBlock = block as GoalStatusTranscriptBlock;
-  if (statusBlock.source !== 'goal') return null;
-  return (
-    parseGoalStatusMessage(statusBlock.data) ??
-    parseGoalStatusMessage(statusBlock.text)
-  );
-}
-
-function getLatestActiveGoalFromBlocks(
-  blocks: readonly DaemonTranscriptBlock[],
-): ActiveGoalStatus | null {
-  for (let i = blocks.length - 1; i >= 0; i--) {
-    const block = blocks[i];
-    if (block.kind !== 'status') continue;
-    const status = parseGoalStatusFromBlock(block);
-    if (!status) continue;
-    if (status.kind === 'set' || status.kind === 'checking') {
-      return {
-        condition: status.condition,
-        setAt: status.setAt ?? block.serverTimestamp ?? block.createdAt,
-      };
-    }
-    return null;
-  }
-  return null;
-}
-
 interface LocalAnchoredMessage {
   anchorAfterId?: string;
   anchorIndex: number;
@@ -949,6 +914,16 @@ export interface WebShellProps {
    * `true`/omitted still requires the capability to be satisfied.
    */
   fileUploadEnabled?: boolean;
+  /**
+   * Directory that drag-and-dropped files upload into, **relative to the
+   * workspace root**. Use a relative path WITHOUT a leading `/` — e.g.
+   * `'uploads'`, `'uploads/images'`, or omit it to upload into the
+   * workspace root (the default). A leading-slash path like `'/uploads'`
+   * is rejected by the daemon as outside the workspace. The directory
+   * (including intermediate components) is created automatically on upload
+   * when it does not exist.
+   */
+  fileUploadDirectory?: string;
   /** Additional @ mention categories shown alongside built-in files/extensions. */
   atProviders?: readonly WebShellAtProvider[];
   /** Icon URLs for custom composer tag kinds used by @ mention chips. */
@@ -1095,6 +1070,7 @@ function imageTabId(src: string): string {
   }
   return `image:${hash.toString(36)}`;
 }
+
 type ChatWidthMode = `${typeof DEFAULT_CHAT_MAX_WIDTH}` | 'wide';
 
 const CHAT_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-chat-width';
@@ -1340,6 +1316,7 @@ function parseRenameArgument(
 function isBackgroundTaskToolCall(tool: ACPToolCall): boolean {
   const name = tool.toolName.toLowerCase();
   if (name === 'monitor') return true;
+  if (backgroundShellTaskId(tool) !== undefined) return true;
   if (tool.args?.is_background !== true) return false;
   return (
     name === 'shell' ||
@@ -1816,6 +1793,7 @@ export function App({
   atProviders,
   composerTagIcons,
   fileUploadEnabled,
+  fileUploadDirectory,
   renderToolHeaderExtra,
   renderWelcomeHeader,
   renderWelcomeFooter,
@@ -2075,6 +2053,7 @@ export function App({
       markdown,
       loadingPhrases,
       fileUploadEnabled,
+      fileUploadDirectory,
     }),
     [
       composerTagIcons,
@@ -2101,6 +2080,7 @@ export function App({
       markdown,
       loadingPhrases,
       fileUploadEnabled,
+      fileUploadDirectory,
     ],
   );
   const CustomFooter = renderFooter;
@@ -2223,6 +2203,14 @@ export function App({
   const artifactWorkspaceTarget = useArtifactWorkspaceTarget(
     connection.workspaceCwd,
   );
+  const artifactWorkspaceCwd = artifactWorkspaceTarget?.workspaceCwd;
+  const artifactWorkspaceActions = artifactWorkspaceTarget?.actions;
+  const artifactWorkspaceCwdRef = useRef(artifactWorkspaceCwd);
+  const artifactWorkspaceActionsRef = useRef(artifactWorkspaceActions);
+  const workspaceCapabilitiesRef = useRef(workspace.capabilities);
+  artifactWorkspaceCwdRef.current = artifactWorkspaceCwd;
+  artifactWorkspaceActionsRef.current = artifactWorkspaceActions;
+  workspaceCapabilitiesRef.current = workspace.capabilities;
   const dynamicWorkspaceRegistrationSupported =
     workspace.capabilities?.features?.includes(
       'dynamic_workspace_registration',
@@ -3405,6 +3393,107 @@ export function App({
     },
     [getDefaultReviewPanelWidth, t],
   );
+  const openAttachmentPanel = useCallback(
+    (
+      file: AttachmentPreviewRequest,
+      workspaceCwd = connection.workspaceCwd,
+      sourceSessionId = connection.sessionId,
+    ) => {
+      const open = (resolvedFile: AttachmentPreviewRequest) => {
+        const workspacePath = resolvedFile.workspacePath ?? resolvedFile.name;
+        const workspaceId = resolveArtifactWorkspaceOwner(
+          workspaceCapabilitiesRef.current,
+          workspaceCwd,
+        )?.id;
+        const previewOnly =
+          resolvedFile.text !== undefined ||
+          resolvedFile.data !== undefined ||
+          resolvedFile.attachmentId !== undefined;
+        const tab: ArtifactPanelTab = {
+          id: previewOnly
+            ? `attachment:${sourceSessionId ?? ''}:${resolvedFile.attachmentId ?? workspacePath}`
+            : `file:${workspaceCwd ?? ''}:${workspacePath}`,
+          kind: 'file',
+          title: resolvedFile.name,
+          workspacePath,
+          ...(resolvedFile.text !== undefined
+            ? { previewContent: resolvedFile.text }
+            : {}),
+          ...(resolvedFile.data ? { previewData: resolvedFile.data } : {}),
+          ...(resolvedFile.mimeType
+            ? { previewMimeType: resolvedFile.mimeType }
+            : {}),
+          ...(previewOnly ? { previewOnly: true } : {}),
+          ...(workspaceCwd ? { workspaceCwd } : {}),
+          ...(workspaceId ? { workspaceId } : {}),
+        };
+        setArtifactPanelTabs((tabs) =>
+          tabs.some((item) => item.id === tab.id)
+            ? tabs.map((item) => (item.id === tab.id ? tab : item))
+            : [tab, ...tabs],
+        );
+        setActiveArtifactPanelTabId(tab.id);
+        setArtifactPanelWidth((width) =>
+          artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+        );
+        setArtifactPanelOpen(true);
+      };
+      if (
+        file.attachmentId &&
+        file.text === undefined &&
+        file.data === undefined
+      ) {
+        const owner = sessionOwnerGuard.capture();
+        void sessionActions
+          .readAttachment(file.attachmentId)
+          .then((attachment) => {
+            if (!owner.isCurrent()) return;
+            open({
+              ...file,
+              data: base64ToBlob(attachment.data, attachment.mimeType),
+              mimeType: attachment.mimeType,
+            });
+          })
+          .catch((error: unknown) => {
+            if (!owner.isCurrent()) return;
+            pushToast(
+              'error',
+              formatError(error, 'Failed to preview attachment'),
+            );
+          });
+        return;
+      }
+      if (
+        file.workspacePath &&
+        file.text === undefined &&
+        file.data === undefined &&
+        artifactWorkspaceCwdRef.current === workspaceCwd &&
+        artifactWorkspaceActionsRef.current
+      ) {
+        const owner = sessionOwnerGuard.capture();
+        void artifactWorkspaceActionsRef.current
+          .stat(file.workspacePath)
+          .then((stat) => {
+            if (!owner.isCurrent() || stat.type !== 'file') return;
+            open(file);
+          })
+          .catch((error: unknown) => {
+            if (!owner.isCurrent()) return;
+            pushToast('error', formatError(error, 'Failed to preview file'));
+          });
+        return;
+      }
+      open(file);
+    },
+    [
+      connection.workspaceCwd,
+      connection.sessionId,
+      getDefaultReviewPanelWidth,
+      pushToast,
+      sessionActions,
+      sessionOwnerGuard,
+    ],
+  );
   const openShellPanel = useCallback(
     (
       task: DaemonSessionShellTaskStatus,
@@ -3550,6 +3639,22 @@ export function App({
         openImagePanel(request.src, request.alt);
         return;
       }
+      if (request.kind === 'attachment') {
+        openAttachmentPanel(
+          {
+            name: request.title,
+            ...(request.mimeType ? { mimeType: request.mimeType } : {}),
+            ...(request.data ? { data: request.data } : {}),
+            ...(request.text !== undefined ? { text: request.text } : {}),
+            ...(request.workspacePath
+              ? { workspacePath: request.workspacePath }
+              : {}),
+          },
+          request.workspaceCwd,
+          request.sourceSessionId,
+        );
+        return;
+      }
       if (request.kind === 'subagent') {
         openSubagentPanelForSession(
           request.tool,
@@ -3606,6 +3711,7 @@ export function App({
       openReviewPanel,
       openScheduledTaskPanel,
       openImagePanel,
+      openAttachmentPanel,
       openSubagentPanelForSession,
     ],
   );
@@ -3912,6 +4018,24 @@ export function App({
     connection.status === 'connected',
     backgroundTasksRefreshTrigger,
   );
+  const terminalBackgroundShellTaskIdsKey = useMemo(
+    () =>
+      sessionTasks
+        .filter((task) => task.kind === 'shell' && task.status !== 'running')
+        .map((task) => task.id)
+        .join(','),
+    [sessionTasks],
+  );
+  // Preserve Set identity when polling returns an equivalent task snapshot.
+  const terminalBackgroundShellTaskIds = useMemo(
+    () =>
+      new Set(
+        terminalBackgroundShellTaskIdsKey
+          ? terminalBackgroundShellTaskIdsKey.split(',')
+          : [],
+      ),
+    [terminalBackgroundShellTaskIdsKey],
+  );
   const environmentAgentTasks = useMemo(
     () => getEnvironmentAgentTasks(messages, sessionTasks),
     [messages, sessionTasks],
@@ -4049,13 +4173,30 @@ export function App({
   useEffect(() => {
     assignComposerRef(composerRef, editorRef.current ?? emptyComposerApi);
   }, [composerRef]);
-  const [activeGoal, setActiveGoal] = useState<ActiveGoalStatus | null>(null);
-  useLayoutEffect(() => setActiveGoal(null), [logicalSessionKey]);
+  const [goalSnapshot, setGoalSnapshot] = useState<GoalSnapshotV2 | null>(null);
+  const goalSnapshotRef = useRef<GoalSnapshotV2 | null>(null);
+  goalSnapshotRef.current = goalSnapshot;
+  const [goalControlBusy, setGoalControlBusy] = useState(false);
+  // Which control operation owns the busy latch, mirroring ChatPane's twin. A
+  // finishing operation must not release the latch under a newer one that is
+  // still in flight, or the strip re-enables mid-control and a second dispatch
+  // races the first against the same expected revision.
+  const goalControlOpSeqRef = useRef(0);
+  const goalControlOwnerRef = useRef<
+    { opId: number; sessionId: string | undefined } | undefined
+  >(undefined);
+  const [goalEditOpen, setGoalEditOpen] = useState(false);
+  const [goalEditError, setGoalEditError] = useState<string | null>(null);
+  useLayoutEffect(() => {
+    setGoalSnapshot(null);
+    goalControlOwnerRef.current = undefined;
+    setGoalControlBusy(false);
+    setGoalEditOpen(false);
+    setGoalEditError(null);
+  }, [logicalSessionKey]);
   const [isCreatingMissingSession, setIsCreatingMissingSession] =
     useState(false);
   const creatingMissingSessionRef = useRef(false);
-  const activeGoalRef = useRef<ActiveGoalStatus | null>(null);
-  activeGoalRef.current = activeGoal;
   const {
     followupState,
     onAcceptFollowup,
@@ -5231,6 +5372,16 @@ export function App({
   }, []);
   const connectionRef = useRef(connection);
   connectionRef.current = connection;
+  /**
+   * Whether a local action must be held back because a Goal owns the session.
+   * Reads the latest connection through the ref so callers get the gate as of
+   * call time; the fail-closed hydration convention lives in the shared
+   * predicate, which every Goal gate in the client shares.
+   */
+  const isGoalGateBlocked = useCallback(
+    () => isGoalGateBlockedFor(connectionRef.current),
+    [],
+  );
   const refreshActiveSessionDisplayName = useCallback(async () => {
     const activeConnection = connectionRef.current;
     if (!activeConnection.sessionId || !activeConnection.workspaceCwd) return;
@@ -5379,28 +5530,25 @@ export function App({
   const onSessionCreatedRef = useRef(onSessionCreated);
   onSessionCreatedRef.current = onSessionCreated;
   /**
-   * The session a failed `/goal` submit left behind.
+   * The session a failed Goal creation left behind.
    *
-   * Setting a goal starts a fresh session and then sends `/goal <condition>`
-   * into it, but the daemon session is not created by the "new session" step —
-   * `ensureSessionForPrompt` creates it lazily *inside* `sendPrompt`. So a
-   * prompt that fails leaves a session that exists but never got its goal.
+   * Creating a Goal from the Goals page allocates a fresh session and then
+   * installs the Goal in it; the daemon session is created lazily, so an
+   * attempt that fails leaves a session that exists but never got its Goal.
    *
-   * The Goals form keeps the condition and lets the user retry. Without this
-   * ref every retry would abandon that session and create another, piling up
-   * blank chats in the sidebar. Remembering it lets the retry reuse it — no
-   * session is ever deleted.
+   * The form keeps the condition and lets the user retry. Without this ref
+   * every retry would abandon that session and create another, piling up blank
+   * chats in the sidebar. Remembering it lets the retry reuse it — no session
+   * is ever deleted.
    *
    * Only valid while the Goals page stays mounted. The moment the user leaves,
    * that session is reachable from the composer and may stop being a scratch
-   * session, so the effect below forgets it: a later goal then starts a fresh
+   * session, so the effect below forgets it: a later Goal then starts a fresh
    * session rather than landing on top of a conversation.
    */
   const strandedGoalSessionRef = useRef<string | undefined>(undefined);
   useEffect(() => {
-    if (mainView !== 'goals') {
-      strandedGoalSessionRef.current = undefined;
-    }
+    if (mainView !== 'goals') strandedGoalSessionRef.current = undefined;
   }, [mainView]);
   const ensureSessionForPrompt = useCallback(() => {
     const currentSessionId = connectionRef.current.sessionId;
@@ -5981,7 +6129,11 @@ export function App({
     [pushToast],
   );
   const handleFailedPromptRetry = useCallback(() => {
-    if (sessionWriteBlockedRef.current || promptPreparationOwnerRef.current) {
+    if (
+      sessionWriteBlockedRef.current ||
+      promptPreparationOwnerRef.current ||
+      isGoalGateBlocked()
+    ) {
       return;
     }
     let failed = failedPromptRef.current;
@@ -6117,6 +6269,7 @@ export function App({
     t,
     updateFailedPrompt,
     updateUnknownPromptAdmission,
+    isGoalGateBlocked,
   ]);
   const canMutateMidTurn =
     connection.capabilities?.features.includes(
@@ -6127,17 +6280,16 @@ export function App({
       'session_mid_turn_message_query',
     ) === true;
   const canInjectMidTurnMedia =
-    connection.capabilities?.features.includes('session_media') === true;
+    connection.capabilities?.features.includes('session_attachments') === true;
   const {
     queuedPrompts,
     queuedTexts,
     enqueuePrompt: rawEnqueuePrompt,
     removeQueuedPrompt,
+    insertQueuedPrompt,
     editQueuedPrompt,
     editLastQueuedPrompt,
     clearQueuedPrompts,
-    restoreUnknownQueuedPrompt,
-    discardUnknownQueuedPrompt,
   } = useQueuedPrompts({
     connected,
     writeBlocked: sessionWriteBlocked,
@@ -6147,7 +6299,12 @@ export function App({
     canMutateMidTurn,
     canQueryMidTurn,
     canInjectMidTurnMedia,
+    workspaceFileActions: artifactWorkspaceActions,
     streamingState,
+    holdQueuedPromptsLocally:
+      connection.sessionId !== undefined &&
+      (connection.goalState === undefined ||
+        connection.goalState.goal?.status === 'active'),
     sessionActions,
     store,
     editorRef,
@@ -6929,7 +7086,7 @@ export function App({
           reloadWorkspaceSettings(),
         ]);
       };
-      if (streamingStateRef.current !== 'idle') {
+      if (streamingStateRef.current !== 'idle' || isGoalGateBlocked()) {
         handleLanguageChange(previousLanguage);
         blockLocalCommandDuringTurn();
         return;
@@ -6952,6 +7109,7 @@ export function App({
       selectedLanguage,
       sessionActions,
       sessionOwnerGuard,
+      isGoalGateBlocked,
     ],
   );
 
@@ -7252,8 +7410,8 @@ export function App({
           ? new Error(`Turn error (block ${lastTurnErrorIdRef.current})`)
           : undefined;
       if (workspaceCwd) {
-        sessionCatalogController.turnCompleted(workspaceCwd);
-        if (!connectionRef.current.displayName) {
+        sessionCatalogController.turnCompleted(workspaceCwd, sessionId);
+        if (!sessionDisplayName) {
           scheduleDelayedActiveSessionDisplayNameRefresh(
             sessionId,
             workspaceCwd,
@@ -7279,6 +7437,7 @@ export function App({
     connection.workspaceCwd,
     scheduleDelayedActiveSessionDisplayNameRefresh,
     sessionCatalogController,
+    sessionDisplayName,
     streamingState,
   ]);
 
@@ -7421,43 +7580,29 @@ export function App({
   ]);
 
   useEffect(() => {
-    const nextGoal = getLatestActiveGoalFromBlocks(blocks);
-    setActiveGoal((current) => {
-      if (!nextGoal) return current ? null : current;
-      if (
-        current?.condition === nextGoal.condition &&
-        current.setAt === nextGoal.setAt
-      ) {
-        return current;
-      }
-      return nextGoal;
-    });
-  }, [blocks]);
+    setGoalSnapshot(connection.goalState ?? null);
+  }, [connection.goalState, connection.sessionId, logicalSessionKey]);
 
+  const connectionGoalComplete =
+    connection.goalState?.goal?.status === 'complete';
   useEffect(() => {
-    const onGoalStatusActive = (event: Event) => {
-      const detail = (
-        event as CustomEvent<{
-          active?: boolean;
-          condition?: string;
-          setAt?: number;
-        }>
-      ).detail;
-      if (!detail?.active) {
-        setActiveGoal(null);
-        return;
-      }
-      if (!detail.condition) return;
-      setActiveGoal({
-        condition: detail.condition,
-        setAt: detail.setAt ?? Date.now(),
-      });
-    };
+    setGoalEditOpen(false);
+    setGoalEditError(null);
+  }, [
+    connection.goalState?.goal?.goalId,
+    connection.sessionId,
+    connectionGoalComplete,
+  ]);
 
-    window.addEventListener(GOAL_STATUS_ACTIVE_EVENT, onGoalStatusActive);
-    return () =>
-      window.removeEventListener(GOAL_STATUS_ACTIVE_EVENT, onGoalStatusActive);
-  }, []);
+  const activeGoal =
+    goalSnapshot?.goal && goalSnapshot.goal.status !== 'complete'
+      ? {
+          condition: goalSnapshot.goal.objective,
+          setAt: goalSnapshot.goal.createdAt,
+        }
+      : null;
+  const liveGoalSnapshot =
+    goalSnapshot?.goal?.status === 'complete' ? null : goalSnapshot;
 
   // Auto-recap: fire when the user returns after being away ≥ 3 minutes
   const hiddenAtRef = useRef<number | null>(null);
@@ -8322,6 +8467,13 @@ export function App({
   const enqueueManualRun = useCallback(
     (prompt: string): Promise<void> =>
       new Promise<void>((resolve, reject) => {
+        // Session-less means no Goal can exist (and `sendPrompt` allocates a
+        // session itself), so gate on the shared predicate rather than on a
+        // bare `goalState === undefined`, which also fires with no session.
+        if (isGoalGateBlocked()) {
+          reject(new Error(t('scheduledTasks.error.goalActive')));
+          return;
+        }
         let admitted = false;
         const admit = () => {
           if (admitted) return;
@@ -8339,7 +8491,7 @@ export function App({
           },
         );
       }),
-    [sendPrompt],
+    [isGoalGateBlocked, sendPrompt, t],
   );
   // Enqueue the pending bound run once its session is the current, fully-loaded
   // one — driven both by the effect below (when the session switch changes a
@@ -8353,7 +8505,8 @@ export function App({
     if (
       !pending ||
       conn.sessionId !== pending.sessionId ||
-      conn.loadingTranscript
+      conn.loadingTranscript ||
+      conn.goalState === undefined
     ) {
       return;
     }
@@ -8436,6 +8589,7 @@ export function App({
     connection.sessionId,
     connection.loadingTranscript,
     connection.catchingUp,
+    connection.goalState,
     tryFireBoundRun,
   ]);
 
@@ -8482,61 +8636,103 @@ export function App({
     [handleOpenMonitorDetails, handleOpenShellDetails, openTasksPanel],
   );
 
-  const dispatchGoalSet = useCallback(
-    (condition: string, setAt: number) => {
-      setActiveGoal({ condition, setAt });
-      store.dispatch([
-        {
-          type: 'status',
-          text: serializeGoalStatusMessage({
-            kind: 'set',
-            condition,
-            setAt,
-          }),
-        },
-      ]);
+  const refreshGoal = useCallback(async () => {
+    const owner = sessionOwnerGuard.capture();
+    const response = await sessionActions.getGoal();
+    if (owner.isCurrent()) setGoalSnapshot(response.snapshot);
+    return response.snapshot;
+  }, [sessionActions, sessionOwnerGuard]);
+
+  const controlCurrentGoal = useCallback(
+    async (
+      action: 'create' | 'replace' | 'edit' | 'pause' | 'resume' | 'clear',
+      objective?: string,
+    ) => {
+      const busyOwner = sessionOwnerGuard.capture();
+      const busySessionId = connectionRef.current.sessionId;
+      const expectedGoalId = goalSnapshotRef.current?.goal?.goalId;
+      const opId = ++goalControlOpSeqRef.current;
+      goalControlOwnerRef.current = { opId, sessionId: busySessionId };
+      setGoalControlBusy(true);
+      try {
+        const snapshot = await refreshGoal();
+        const goal = snapshot.goal;
+        if (
+          (action === 'replace' || action === 'edit') &&
+          goal?.goalId !== expectedGoalId
+        ) {
+          throw new Error(t('goals.error.goalUnavailable'));
+        }
+        const request = buildGoalControlRequest(action, goal, objective, {
+          emptyObjective: t('goals.error.emptyCondition'),
+          goalUnavailable: t('goals.error.goalUnavailable'),
+        });
+
+        if (!busyOwner.isCurrent()) {
+          throw new Error(t('goals.error.goalUnavailable'));
+        }
+        const owner = sessionOwnerGuard.capture();
+        try {
+          const response = await sessionActions.controlGoal(request);
+          if (owner.isCurrent()) setGoalSnapshot(response.snapshot);
+          return response.snapshot;
+        } catch (error) {
+          if (owner.isCurrent()) await refreshGoal().catch(() => undefined);
+          throw error;
+        }
+      } finally {
+        // A newer operation (or a session change) owns the latch now; leave it
+        // to whoever owns it rather than releasing it under them.
+        if (goalControlOwnerRef.current?.opId === opId) {
+          goalControlOwnerRef.current = undefined;
+          if (connectionRef.current.sessionId === busySessionId) {
+            setGoalControlBusy(false);
+          }
+        }
+      }
     },
-    [store],
+    [refreshGoal, sessionActions, sessionOwnerGuard, t],
   );
 
-  const dispatchGoalCleared = useCallback(
-    (goal: ActiveGoalStatus | null) => {
-      if (!goal) return;
-      store.dispatch([
-        {
-          type: 'status',
-          text: serializeGoalStatusMessage({
-            kind: 'cleared',
-            condition: goal.condition,
-            durationMs: Date.now() - goal.setAt,
-          }),
-        },
-      ]);
-      setActiveGoal(null);
+  const createGoalForAllocatedSession = useCallback(
+    async (sessionId: string, objective: string) => {
+      const opId = ++goalControlOpSeqRef.current;
+      goalControlOwnerRef.current = { opId, sessionId };
+      setGoalControlBusy(true);
+      try {
+        const response = await workspaceActions.controlGoal(sessionId, {
+          action: 'create',
+          objective,
+        });
+        // The workspace-scoped control does not write `connection.goalState`
+        // the way `sessionActions.controlGoal` does, so install the create
+        // response directly. Until it lands, `holdQueuedPromptsLocally` reads
+        // false and the sync effect re-derives the local snapshot to null — a
+        // prompt typed in that window would go straight to the daemon instead
+        // of the Goal queue, and no Goal strip would render.
+        sessionActions.applyGoalSnapshot(sessionId, response.snapshot);
+        if (
+          !connectionRef.current.sessionId ||
+          connectionRef.current.sessionId === sessionId
+        ) {
+          setGoalSnapshot(response.snapshot);
+        }
+        if (connectionRef.current.sessionId === sessionId) {
+          await refreshGoal();
+        }
+        return response.snapshot;
+      } finally {
+        // Same ownership rule as `controlCurrentGoal`: a create that settles
+        // after the user switched sessions must not release a latch a newer
+        // control now holds, or the strip re-enables mid-control and a second
+        // dispatch loses the daemon's CAS with a 409.
+        if (goalControlOwnerRef.current?.opId === opId) {
+          goalControlOwnerRef.current = undefined;
+          setGoalControlBusy(false);
+        }
+      }
     },
-    [store],
-  );
-
-  const handleBusyGoalClear = useCallback(
-    (text: string) => {
-      if (sessionWriteBlocked) return false;
-      if (!requireActiveSessionForLocalCommand()) return false;
-      const owner = sessionOwnerGuard.capture();
-      store.appendLocalUserMessage(text);
-      sessionActions.clearGoal().catch((error: unknown) => {
-        if (!owner.isCurrent()) return;
-        reportError(error, 'Failed to clear /goal');
-      });
-      return true;
-    },
-    [
-      reportError,
-      requireActiveSessionForLocalCommand,
-      sessionWriteBlocked,
-      sessionActions,
-      sessionOwnerGuard,
-      store,
-    ],
+    [refreshGoal, sessionActions, workspaceActions],
   );
 
   const loadRewindSnapshots = useCallback(
@@ -8562,70 +8758,125 @@ export function App({
   );
 
   const handleGoalSlashCommand = useCallback(
-    (
-      text: string,
-      images?: PromptImage[],
-      files?: PromptFile[],
-      opts?: {
-        sendToDaemon?: boolean;
-        commitComposerAccepted?: ComposerSubmitCommit;
-      },
-    ) => {
-      const goalArg = goalArgOf(text);
-      const sendToDaemon = opts?.sendToDaemon ?? true;
-      const sendGoalPrompt = () => {
-        const owner = { current: sessionOwnerGuard.capture() };
-        const deferComposerCommit =
-          Boolean(onSubmitBeforeRef.current) ||
-          createSessionPromiseRef.current !== null;
-        const clearComposerOnPromptStart =
-          !connectionRef.current.sessionId || deferComposerCommit;
-        sendPrompt(text, images, files, {
-          ownerRef: owner,
-          clearComposerOnPromptStart,
-          commitComposerAccepted: clearComposerOnPromptStart
-            ? opts?.commitComposerAccepted
-            : undefined,
-        }).catch((error: unknown) => {
-          if (!owner.current.isCurrent()) return;
-          reportError(error, 'Failed to send /goal command');
-        });
-        return clearComposerOnPromptStart ? false : true;
-      };
-
-      if (goalArg && isGoalClearKeyword(goalArg)) {
-        if (!sendToDaemon) {
-          store.appendLocalUserMessage(text);
-          dispatchGoalCleared(activeGoalRef.current);
-          return true;
-        }
-        return handleBusyGoalClear(text);
-      } else if (goalArg) {
-        if (!sendToDaemon) {
-          store.appendLocalUserMessage(text);
-          dispatchGoalSet(goalArg, Date.now());
-          return true;
-        }
-        return sendGoalPrompt();
+    (text: string, hasAttachments: boolean) => {
+      if (hasAttachments) {
+        pushToast('error', t('goals.error.attachmentsUnsupported'));
+        return false;
+      }
+      const operation = parseWebShellGoalCommand(text);
+      if (operation.kind === 'status') {
+        openGoals();
+        return true;
+      }
+      if (operation.kind === 'error') {
+        pushToast(
+          'error',
+          t('goals.error.requiresObjective', { keyword: operation.keyword }),
+        );
+        return false;
+      }
+      // Returning true wipes the composer, so the preconditions that can be
+      // checked here must be checked before that happens — a control typed
+      // without a session would otherwise lose its text to a toast.
+      if (!connectionRef.current.sessionId && operation.kind !== 'set') {
+        pushToast('error', t('localCommand.noSession'));
+        return false;
+      }
+      // The strip disables its buttons while a control is in flight; the
+      // composer has no disabled state, so it has to refuse here. Two controls
+      // read the same snapshot and stamp the same `expectedGoalId`/
+      // `expectedRevision`, and the daemon rejects the loser with a 409.
+      if (goalControlOwnerRef.current) {
+        pushToast('error', t('goals.error.controlBusy'));
+        return false;
       }
 
-      // Bare `/goal` opens the Goals page instead of asking the daemon to print
-      // its status as text — the same move `/schedule` makes. Nothing is sent,
-      // so the composer is cleared by returning true.
-      openGoals();
+      void (async () => {
+        const sourceOwner = sessionOwnerGuard.capture();
+        const sourceSessionId = connectionRef.current.sessionId;
+        let allocatedSessionId: string | undefined;
+        if (!connectionRef.current.sessionId) {
+          if (operation.kind !== 'set') {
+            throw new Error(t('localCommand.noSession'));
+          }
+          allocatedSessionId = await ensureSessionForPrompt();
+        }
+        const currentSessionId = connectionRef.current.sessionId;
+        const ownAllocationSucceeded =
+          sourceSessionId === undefined &&
+          allocatedSessionId !== undefined &&
+          (currentSessionId === undefined ||
+            currentSessionId === allocatedSessionId);
+        if (
+          (!sourceOwner.isCurrent() && !ownAllocationSucceeded) ||
+          (sourceSessionId !== undefined
+            ? currentSessionId !== sourceSessionId
+            : currentSessionId !== undefined &&
+              currentSessionId !== allocatedSessionId)
+        ) {
+          return;
+        }
+        if (!connectionRef.current.sessionId && !allocatedSessionId) {
+          throw new Error(t('localCommand.noSession'));
+        }
+        store.appendLocalUserMessage(text);
+        const action = operation.kind === 'set' ? 'replace' : operation.kind;
+        const objective =
+          operation.kind === 'set' || operation.kind === 'edit'
+            ? operation.objective
+            : undefined;
+        if (allocatedSessionId && operation.kind === 'set') {
+          await createGoalForAllocatedSession(
+            allocatedSessionId,
+            operation.objective,
+          );
+        } else {
+          await controlCurrentGoal(action, objective);
+        }
+      })().catch((error: unknown) => {
+        reportError(error, `Failed to ${operation.kind} /goal`);
+      });
       return true;
     },
     [
-      dispatchGoalCleared,
-      dispatchGoalSet,
-      handleBusyGoalClear,
+      controlCurrentGoal,
+      createGoalForAllocatedSession,
+      ensureSessionForPrompt,
       openGoals,
+      pushToast,
       reportError,
-      sendPrompt,
       sessionOwnerGuard,
       store,
-      connectionRef,
+      t,
     ],
+  );
+
+  const runGoalControl = useCallback(
+    (action: 'pause' | 'resume' | 'clear') => {
+      void controlCurrentGoal(action).catch((error: unknown) => {
+        reportError(error, t(`goals.error.${action}Failed`));
+      });
+    },
+    [controlCurrentGoal, reportError, t],
+  );
+
+  const handleGoalEditSave = useCallback(
+    (objective: string) => {
+      const owner = sessionOwnerGuard.capture();
+      setGoalEditError(null);
+      void controlCurrentGoal('edit', objective)
+        .then(() => {
+          if (owner.isCurrent()) setGoalEditOpen(false);
+        })
+        .catch((error: unknown) => {
+          if (!owner.isCurrent()) return;
+          setGoalEditError(
+            error instanceof Error ? error.message : String(error),
+          );
+          reportError(error, t('goals.error.editFailed'));
+        });
+    },
+    [controlCurrentGoal, reportError, sessionOwnerGuard, t],
   );
 
   const hiddenCommands = useMemo(
@@ -8671,7 +8922,8 @@ export function App({
         pushToast('warning', t('editor.connectionDisconnected'));
         return false;
       }
-      const promptBlocked = streamingStateRef.current !== 'idle';
+      const promptBlocked =
+        streamingStateRef.current !== 'idle' || isGoalGateBlocked();
       const submitPromptFromEditor = (
         promptText: string,
         promptImages: PromptImage[] | undefined,
@@ -8854,21 +9106,12 @@ export function App({
             return true;
           }
           if (cmd === 'goal') {
-            // A bare `/goal` just opens the Goals page; it neither sends a
-            // prompt nor touches the session, so it works mid-turn too.
-            if (!goalArgOf(text)) {
-              openGoals();
-              return true;
-            }
-            if (promptBlocked) {
-              if (isGoalClearCommand(text)) {
-                return handleBusyGoalClear(text);
-              }
-              return blockLocalCommandDuringTurn();
-            }
-            return handleGoalSlashCommand(text, images, files, {
-              commitComposerAccepted,
-            });
+            return handleGoalSlashCommand(
+              text,
+              (images?.length ?? 0) > 0 ||
+                (files?.length ?? 0) > 0 ||
+                (metadata?.inputAnnotations?.length ?? 0) > 0,
+            );
           }
           if (cmd === 'theme') {
             const themeArg = text.slice(match[0].length).trim().toLowerCase();
@@ -8929,8 +9172,14 @@ export function App({
               }
               const nextLanguage = normalizeLanguage(languageArg);
               const owner = { current: sessionOwnerGuard.capture() };
+              // The daemon sync is what keeps the agent answering in the
+              // language the chrome just switched to, so when it cannot run
+              // (turn in flight, or a Goal owning the session) refuse the
+              // command instead of switching the UI alone — the language
+              // picker treats the identical condition the same way.
+              if (promptBlocked) return blockLocalCommandDuringTurn();
               handleLanguageChange(nextLanguage);
-              if (!promptBlocked) {
+              {
                 const deferComposerCommit =
                   Boolean(onSubmitBeforeRef.current) ||
                   createSessionPromiseRef.current !== null;
@@ -9680,7 +9929,7 @@ export function App({
       } else if (text.startsWith('!')) {
         const cmd = text.slice(1).trim();
         if (!cmd) return false;
-        if (promptBlocked) {
+        if (streamingStateRef.current !== 'idle') {
           queuedShellCommandsRef.current.push(cmd);
           pushToast('info', t('queue.shellQueued'));
           return true;
@@ -9775,7 +10024,6 @@ export function App({
       closeMobileDrawer,
       openPanel,
       openScheduledTasks,
-      openGoals,
       createNewSession,
       ensureSessionForPrompt,
       finishPromptPreparation,
@@ -9784,7 +10032,6 @@ export function App({
       gitDiffWorkspaceCwd,
       sessionWorktree,
       gitHubPrsSupported,
-      handleBusyGoalClear,
       handleGoalSlashCommand,
       handleThemeChange,
       handleSetMode,
@@ -9813,6 +10060,7 @@ export function App({
       workspaceActions,
       updateFailedPrompt,
       updateUnknownPromptAdmission,
+      isGoalGateBlocked,
     ],
   );
 
@@ -9939,7 +10187,11 @@ export function App({
   );
 
   const handleRetry = useCallback(() => {
-    if (sessionWriteBlockedRef.current || promptPreparationOwnerRef.current) {
+    if (
+      sessionWriteBlockedRef.current ||
+      promptPreparationOwnerRef.current ||
+      isGoalGateBlocked()
+    ) {
       return;
     }
     if (
@@ -10135,6 +10387,7 @@ export function App({
     store,
     t,
     updateUnknownPromptAdmission,
+    isGoalGateBlocked,
   ]);
 
   useEffect(() => {
@@ -10524,7 +10777,7 @@ export function App({
 
   const handleFastModelSelect = useCallback(
     (modelId: string) => {
-      if (streamingState !== 'idle') {
+      if (streamingState !== 'idle' || isGoalGateBlocked()) {
         blockLocalCommandDuringTurn();
         return;
       }
@@ -10580,6 +10833,7 @@ export function App({
       reloadWorkspaceSettings,
       modelSettingScope,
       sessionOwnerGuard,
+      isGoalGateBlocked,
     ],
   );
 
@@ -11185,6 +11439,19 @@ export function App({
               />
             </DialogShell>
           )}
+          {goalEditOpen && goalSnapshot?.goal && (
+            <GoalEditDialog
+              objective={goalSnapshot.goal.objective}
+              saving={goalControlBusy}
+              error={goalEditError}
+              onSave={handleGoalEditSave}
+              onClose={() => {
+                if (goalControlBusy) return;
+                setGoalEditOpen(false);
+                setGoalEditError(null);
+              }}
+            />
+          )}
           {showAuthDialog && (
             <DialogShell
               title={t('auth.title')}
@@ -11574,10 +11841,6 @@ export function App({
                 .filter(Boolean)
                 .join(' ')}
             >
-              {isChatEmptyState &&
-                !showMissingSessionState &&
-                !activePanel &&
-                mainView === 'chat' && <NewSessionDotField />}
               {sidebarOptions.enabled &&
                 sidebarOptions.showCompactToggle &&
                 (!chatHeaderEnabled || isChatEmptyState) &&
@@ -11916,73 +12179,67 @@ export function App({
                   <div className={styles.fullPageBody}>
                     <GoalsDialog
                       onCreateGoal={async (condition) => {
-                        // Setting a goal registers the Stop hook AND kicks off
-                        // the first turn, so it has to travel the prompt path.
-                        // Start a FRESH session so the goal loop doesn't take
-                        // over the conversation the user was already having.
-                        //
-                        // Unless a previous attempt in this same visit to the
-                        // page already made one and then failed to send: that
-                        // session never got its goal and is still current, so
-                        // reuse it. Creating another would strand it, and a user
-                        // retrying a few times would end up with a column of
-                        // blank chats in the sidebar.
-                        //
-                        // Leaving the page forgets it (see the effect on
-                        // `strandedGoalSessionRef`), so this can never reuse a
-                        // session the user has since talked to.
                         const stranded = strandedGoalSessionRef.current;
                         const canReuseStranded =
                           stranded !== undefined &&
                           connectionRef.current.sessionId === stranded;
                         if (!canReuseStranded) {
-                          // `keepView`: createNewSession switches to the chat by
-                          // default, which would unmount this form before the
-                          // prompt is even sent and leave a later rejection with
-                          // nowhere to render — the exact failure the deferred
-                          // switch below exists to prevent.
+                          strandedGoalSessionRef.current = undefined;
                           const created = await createNewSession(undefined, {
                             keepView: true,
                           });
-                          // createNewSession already surfaced the failure; don't
-                          // drop the goal into the wrong (still-current) session.
-                          // `false` keeps the form open with the typed condition
-                          // still in it — returning normally would read as
-                          // "created" and reset it.
                           if (!created) return false;
-                          onSessionIdChange?.(undefined);
                         }
-                        // Switch to the chat only once the prompt is admitted.
-                        // Switching first unmounts the Goals page, and a later
-                        // rejection would then have nowhere to render: the user
-                        // would land in an empty session with no explanation.
-                        // Letting this reject keeps the error in the form the
-                        // user is looking at.
-                        const owner = {
-                          current: sessionOwnerGuard.capture(),
-                        };
+                        const allocationOwner = sessionOwnerGuard.capture();
+                        const sourceSessionId =
+                          connectionRef.current.sessionId;
+                        const allocatedSessionId =
+                          await ensureSessionForPrompt();
+                        const currentSessionId =
+                          connectionRef.current.sessionId;
+                        const ownAllocationSucceeded =
+                          sourceSessionId === undefined &&
+                          allocatedSessionId !== undefined &&
+                          (currentSessionId === undefined ||
+                            currentSessionId === allocatedSessionId);
+                        if (
+                          (!allocationOwner.isCurrent() &&
+                            !ownAllocationSucceeded) ||
+                          (sourceSessionId !== undefined
+                            ? currentSessionId !== sourceSessionId
+                            : currentSessionId !== undefined &&
+                              currentSessionId !== allocatedSessionId)
+                        ) {
+                          return false;
+                        }
+                        if (
+                          !connectionRef.current.sessionId &&
+                          !allocatedSessionId
+                        ) {
+                          return false;
+                        }
+                        const owner = sessionOwnerGuard.capture();
                         try {
-                          await sendPrompt(
-                            `/goal ${condition}`,
-                            undefined,
-                            undefined,
-                            {
-                              clearComposerOnPromptStart: true,
-                              ownerRef: owner,
-                            },
-                          );
-                          if (!owner.current.isCurrent()) return false;
+                          if (allocatedSessionId) {
+                            await createGoalForAllocatedSession(
+                              allocatedSessionId,
+                              condition,
+                            );
+                          } else {
+                            await controlCurrentGoal('create', condition);
+                          }
                         } catch (error) {
-                          // `sendPrompt` creates the session lazily, so by now
-                          // one may exist even though the prompt never landed.
-                          // Remember it so the retry reuses it rather than
-                          // stranding it.
-                          if (owner.current.isCurrent()) {
+                          if (
+                            owner.isCurrent() &&
+                            mainViewRef.current === 'goals'
+                          ) {
                             strandedGoalSessionRef.current =
+                              allocatedSessionId ??
                               connectionRef.current.sessionId;
                           }
                           throw error;
                         }
+                        if (!owner.isCurrent()) return false;
                         strandedGoalSessionRef.current = undefined;
                         setMainView('chat');
                       }}
@@ -12039,6 +12296,7 @@ export function App({
                         onError={reportError}
                         onImageIngestionNotice={pushToast}
                         onSlashCommand={onSlashCommand}
+                        onOpenGoals={openGoals}
                         onRightPanelOpen={handleTurnOutputOpen}
                         onOpenMonitor={openMonitorPanel}
                         onPaneArtifactsChange={handlePaneArtifactsChange}
@@ -12069,8 +12327,9 @@ export function App({
                   hasWelcomeMiddle
                     ? styles.chatViewWithWelcomeMiddle
                     : undefined,
-                  // Marker class (no declarations): keeps the ':not(...)'
-                  // exclusion in App.module.css matching.
+                  // Positioning hook: completes the compound selector in
+                  // App.module.css that keeps this wrap relative so the
+                  // absolutely-positioned bottom panels keep their anchor.
                   CustomFooter ? styles.chatViewWithCustomFooter : undefined,
                   activePanel ||
                   mainView !== 'chat' ||
@@ -12141,6 +12400,9 @@ export function App({
                               <MessageList
                                 ref={messageListRef}
                                 messages={displayMessages}
+                                terminalBackgroundShellTaskIds={
+                                  terminalBackgroundShellTaskIds
+                                }
                                 pendingApproval={pendingToolApproval}
                                 onShowContextDetail={handleShowContextDetail}
                                 loadingTranscript={connection.loadingTranscript}
@@ -12213,6 +12475,7 @@ export function App({
                                 }
                                 onTurnOutputOpen={handleTurnOutputOpen}
                                 onImagePreview={openImagePanel}
+                                onAttachmentPreview={openAttachmentPanel}
                                 onReviewChanges={openReviewPanel}
                                 onOpenArtifact={openArtifactPanel}
                                 onOpenScheduledTask={openScheduledTaskPanel}
@@ -12377,7 +12640,17 @@ export function App({
                           />
                         </div>
                       )}
-                      <div className={styles.composer}>
+                      {/* A pending approval overlay owns the footer: drop the
+                          composer out of layout (kept mounted so the draft
+                          survives) instead of leaving a live input below the
+                          dialog. */}
+                      <div
+                        className={
+                          approvalOverlayActive && mainView === 'chat'
+                            ? `${styles.composer} ${styles.composerHidden}`
+                            : styles.composer
+                        }
+                      >
                         {streamingState !== 'idle' ? (
                           suppressFailedPromptRetryStreaming ? null : (
                             <StreamingStatus
@@ -12474,16 +12747,38 @@ export function App({
                             )}
                           </div>
                         )}
-                        <QueuedPromptDisplay
-                          prompts={queuedPrompts}
-                          t={t}
-                          canMutateMidTurn={canMutateMidTurn}
-                          onDelete={removeQueuedPrompt}
-                          onEdit={editQueuedPrompt}
-                          onRestoreUnknown={restoreUnknownQueuedPrompt}
-                          onDiscardUnknown={discardUnknownQueuedPrompt}
-                          onImagePreview={openImagePanel}
-                        />
+                        {(queuedPrompts.length > 0 ||
+                          liveGoalSnapshot?.goal) && (
+                          <div
+                            className={composerStatusStyles.root}
+                            data-testid="composer-status-stack"
+                          >
+                            <QueuedPromptDisplay
+                              prompts={queuedPrompts}
+                              t={t}
+                              canMutateMidTurn={canMutateMidTurn}
+                              canInsertMidTurn={streamingState !== 'idle'}
+                              onDelete={removeQueuedPrompt}
+                              onInsert={insertQueuedPrompt}
+                              onEdit={editQueuedPrompt}
+                              onImagePreview={openImagePanel}
+                              onAttachmentPreview={openAttachmentPanel}
+                            />
+                            {liveGoalSnapshot?.goal && (
+                              <GoalStatusStrip
+                                snapshot={liveGoalSnapshot}
+                                busy={goalControlBusy}
+                                onEdit={() => {
+                                  setGoalEditError(null);
+                                  setGoalEditOpen(true);
+                                }}
+                                onPause={() => runGoalControl('pause')}
+                                onResume={() => runGoalControl('resume')}
+                                onClear={() => runGoalControl('clear')}
+                              />
+                            )}
+                          </div>
+                        )}
                         {CustomComposerHeader && (
                           <div className={styles.composerHeader}>
                             <CustomComposerHeader
@@ -12507,6 +12802,7 @@ export function App({
                           }
                           onImageIngestionNotice={pushToast}
                           onImagePreview={openImagePanel}
+                          onAttachmentPreview={openAttachmentPanel}
                           onCycleMode={handleCycleMode}
                           onToggleShortcuts={handleToggleShortcuts}
                           onCancel={handleCancel}
@@ -12625,7 +12921,6 @@ export function App({
                           composerInput={composerInput}
                           composerInputVersion={composerInputVersion}
                           placeholderText={composerPlaceholderText}
-                          animatePlaceholder={isChatEmptyState}
                         />
                         {CustomComposerFooter && (
                           <CustomComposerFooter
@@ -12651,6 +12946,7 @@ export function App({
                                     (connection.contextWindow ?? 0)
                                   : 0
                               }
+                              goalSnapshot={goalSnapshot}
                               activeGoal={activeGoal}
                               tasks={footerTasks}
                               availableModes={MODES_CYCLE}
@@ -12678,6 +12974,7 @@ export function App({
                                   (connection.contextWindow ?? 0)
                                 : 0
                             }
+                            goalSnapshot={goalSnapshot}
                             activeGoal={activeGoal}
                             tasks={footerTasks}
                             availableModes={MODES_CYCLE}
@@ -12714,8 +13011,6 @@ export function App({
                               ? backgroundTasks
                               : []
                           }
-                          activeGoal={activeGoal}
-                          onOpenGoals={openGoals}
                           hideSettings={hideSettings}
                           onToggleShortcuts={handleToggleShortcuts}
                           compact={true}

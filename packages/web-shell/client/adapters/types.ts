@@ -16,7 +16,7 @@ import type {
   DaemonToolGroupMessage,
   DaemonUserMessage,
   DaemonUserShellMessage,
-} from './messageTypes';
+} from './messageTypes.js';
 import type { DaemonStreamingState } from '@qwen-code/webui/daemon-react-sdk';
 
 export type Message = DaemonMessage;

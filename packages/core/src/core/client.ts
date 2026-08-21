@@ -83,6 +83,7 @@ import type { UserPromptRecordPayload } from '../services/chatRecordingService.j
 // Tools
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
 import { AUTO_SKILL_THRESHOLD } from '../memory/manager.js';
+import { buildRelevantAutoMemoryPrompt } from '../memory/recall.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
 import { isProjectSkillPath } from '../skills/skill-paths.js';
 import { ToolNames } from '../tools/tool-names.js';
@@ -171,6 +172,7 @@ import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
 
 const MAX_TURNS = 100;
 const MAX_RECENT_TOOL_NAMES_FOR_MEMORY = 20;
+const INITIAL_MEMORY_RECALL_WAIT_MS = 100;
 
 export enum SendMessageType {
   UserQuery = 'userQuery',
@@ -297,12 +299,21 @@ function sameActiveGoalProjection(
  * Lifecycle:
  *  1. Created on UserQuery/Cron — the recall promise fires immediately,
  *     `pendingMemoryPrefetch` is set to this handle.
- *  2. Consumed at either of two opportunistic points: a zero-wait
- *     `settledAt !== null` poll just before the UserQuery main request,
- *     or — if recall hadn't settled yet — on the first ToolResult turn.
+ *  2. Consumed at either of two points: a bounded wait just before the
+ *     UserQuery main request, or — if recall remains pending — on the first
+ *     ToolResult turn.
  *  3. Aborted-and-discarded by every cleanup path (resetChat,
  *     MaxSessionTurns, etc.) or replaced when a new UserQuery arrives.
  */
+/**
+ * Publication slot for recall's deterministic result, plus a one-shot
+ * listener for its arrival.
+ */
+type MemoryFastResultBox = {
+  current: RelevantAutoMemoryPromptResult | null;
+  onArrive?: () => void;
+};
+
 type MemoryPrefetchHandle = {
   promise: Promise<RelevantAutoMemoryPromptResult>;
   /** Set by promise.finally(). null until the promise settles. */
@@ -315,6 +326,19 @@ type MemoryPrefetchHandle = {
   terminalLogged: boolean;
   firedAt: number;
   controller: AbortController;
+  /**
+   * Deterministic result published by recall before it blocks on the model
+   * selector. A box rather than a plain field because recall can invoke the
+   * callback before this handle object exists.
+   *
+   * `onArrive` lets the bounded initial wait stop as soon as there is
+   * something to deliver, instead of always spending the whole budget.
+   */
+  fastResultRef: MemoryFastResultBox;
+  /** True after the fast result was injected — prevents double-inject and double-log. */
+  fastDelivered: boolean;
+  /** Paths injected by the fast phase, excluded from the later refined delivery. */
+  fastDeliveredPaths: Set<string>;
 };
 
 /** Tools that can write to the skills directory, used to detect skillsModifiedInSession. */
@@ -647,6 +671,16 @@ export class GeminiClient {
   }
 
   /**
+   * Walk-only accessor for the handled tool-call id → (name, args)
+   * fingerprint map used by duplicate provider-id replay detection. Same
+   * no-clone rationale as {@link getHistoryFunctionResponseIds}. See
+   * `GeminiChat.getHistoryToolCallFingerprints` for the implementation.
+   */
+  getHistoryToolCallFingerprints(): Map<string, string> {
+    return this.getChat().getHistoryToolCallFingerprints();
+  }
+
+  /**
    * Pop orphaned trailing user entries from the in-memory chat history.
    * Used by:
    *   - The Retry submit path (sendMessageStream below), which drops a
@@ -851,11 +885,25 @@ export class GeminiClient {
     handle: MemoryPrefetchHandle,
     discardReason: MemoryRecallDiscardReason,
   ): void {
+    const result = handle.result ?? EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
+    // A settled result whose every document the fast phase already injected
+    // was not lost, whatever ended the turn — most often a tool-free turn
+    // reaching `no_safe_delivery_point`. Reporting those under the
+    // cancellation reason would inflate the "memory never reached the model"
+    // bucket with turns that did get it, so apply the same rule the
+    // ToolResult consume point uses. A partial overlap still reports the
+    // cancellation reason: the documents outside `fastDeliveredPaths`
+    // genuinely had no delivery point.
+    const everyDocAlreadyDelivered =
+      result.selectedDocs.length > 0 &&
+      result.selectedDocs.every((doc) =>
+        handle.fastDeliveredPaths.has(doc.filePath),
+      );
     this.logMemoryPrefetchDelivery(
       handle,
       'discarded',
-      handle.result ?? EMPTY_RELEVANT_AUTO_MEMORY_RESULT,
-      discardReason,
+      result,
+      everyDocAlreadyDelivered ? 'already_delivered' : discardReason,
     );
   }
 
@@ -873,37 +921,146 @@ export class GeminiClient {
   }
 
   /**
-   * Atomically consume the pending prefetch if it has already settled.
-   * Returns the recall result (caller decides where to inject it in
-   * `requestToSend`), or `null` if there's nothing to consume yet.
+   * Atomically consume the pending prefetch, optionally waiting for a bounded
+   * initial-turn budget. Budget expiry leaves the recall running for the next
+   * safe delivery point.
    *
    * Centralises the consume-and-mark dance so the UserQuery and ToolResult
    * inject sites can't drift on the guard logic.
    */
   private async tryConsumeMemoryPrefetch(
     deliveryPoint: Exclude<MemoryRecallDeliveryPoint, 'discarded'>,
+    waitMs = 0,
   ): Promise<RelevantAutoMemoryPromptResult | null> {
     const handle = this.pendingMemoryPrefetch;
-    if (!handle || handle.settledAt === null || handle.consumed) {
+    if (!handle || handle.consumed) {
       return null;
     }
+
+    // `waitMs` is a ceiling, not a fixed cost. The wait ends on whichever
+    // comes first: recall settling, the deterministic result being published,
+    // cancellation, or the budget expiring.
+    //
+    // Ending on the fast result matters more than it looks. That result is
+    // published once recall has scanned the memory tree, which is milliseconds
+    // for an ordinary tree — while the model selector is a network round trip
+    // that this design already assumes will miss the budget. Spending the rest
+    // of the budget after the fast result is in hand therefore buys an
+    // outcome that almost never arrives, and charges every user turn for it.
+    // See `recall-scan-latency.test.ts` for the scan measurements.
+    //
+    // Consequence worth stating plainly, because the branch below reads as
+    // if it still arbitrated: on the initial turn, once the deterministic
+    // scorer matches anything, the fast result wins — the selector's speed is
+    // irrelevant. `onFastResult` is published before recall even issues the
+    // selector request, so `settledAt` is necessarily null when the wait ends
+    // on it. The settled-recall branch is reached at this point only when no
+    // fast result exists at all: no `Config`, or nothing matched
+    // lexically. That is deliberate, not incidental — a model side query does
+    // not complete inside this ceiling, so arbitrating between them would
+    // cost every turn the remainder of the budget to win a race that does not
+    // happen. The selector's judgement reaches the model at the ToolResult
+    // delivery point instead. Pinned by "delivers the fast result even when
+    // the selector settles inside the budget".
+    if (
+      handle.settledAt === null &&
+      handle.fastResultRef.current === null &&
+      waitMs > 0
+    ) {
+      await new Promise<void>((resolve) => {
+        const finish = () => {
+          clearTimeout(timer);
+          handle.controller.signal.removeEventListener('abort', finish);
+          if (handle.fastResultRef.onArrive === finish) {
+            handle.fastResultRef.onArrive = undefined;
+          }
+          resolve();
+        };
+
+        const timer = setTimeout(finish, waitMs);
+        if (handle.controller.signal.aborted) {
+          finish();
+        } else {
+          handle.controller.signal.addEventListener('abort', finish, {
+            once: true,
+          });
+          handle.fastResultRef.onArrive = finish;
+          void handle.promise.then(finish, finish);
+        }
+      });
+    }
+
+    if (this.pendingMemoryPrefetch !== handle || handle.consumed) {
+      return null;
+    }
+
+    // Budget expired with the selector still in flight. Inject the
+    // deterministic result now rather than gambling on a later tool call:
+    // a turn that makes none has no safe delivery point at all. The handle
+    // stays pending so the model-selected result can still land later.
+    if (handle.settledAt === null) {
+      if (deliveryPoint !== 'initial' || handle.fastDelivered) {
+        return null;
+      }
+      const fast = handle.fastResultRef.current;
+      if (!fast?.prompt) {
+        return null;
+      }
+      handle.fastDelivered = true;
+      for (const doc of fast.selectedDocs) {
+        this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
+        handle.fastDeliveredPaths.add(doc.filePath);
+      }
+      logMemoryRecallDelivery(
+        this.config,
+        new MemoryRecallDeliveryEvent({
+          phase: 'fast',
+          delivery_point: 'initial',
+          strategy: fast.strategy,
+          docs_selected: fast.selectedDocs.length,
+          latency_ms: Date.now() - handle.firedAt,
+        }),
+      );
+      return fast;
+    }
+
     handle.consumed = true;
     this.pendingMemoryPrefetch = undefined;
     const result = await handle.promise; // already settled, returns immediately
-    if (result.prompt) {
-      for (const doc of result.selectedDocs) {
+    // Drop anything the fast phase already put in front of the model. Both
+    // results come from the same scan, so the selector never saw the fast
+    // documents as excluded and can legitimately re-select them.
+    const remainingDocs = result.selectedDocs.filter(
+      (doc) => !handle.fastDeliveredPaths.has(doc.filePath),
+    );
+    const deduped =
+      remainingDocs.length === result.selectedDocs.length
+        ? result
+        : {
+            ...result,
+            selectedDocs: remainingDocs,
+            prompt:
+              remainingDocs.length > 0
+                ? buildRelevantAutoMemoryPrompt(remainingDocs)
+                : '',
+          };
+
+    if (deduped.prompt) {
+      for (const doc of deduped.selectedDocs) {
         this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
       }
-      this.logMemoryPrefetchDelivery(handle, deliveryPoint, result);
+      this.logMemoryPrefetchDelivery(handle, deliveryPoint, deduped);
     } else {
       this.logMemoryPrefetchDelivery(
         handle,
         'discarded',
         result,
-        'no_relevant_results',
+        result.selectedDocs.length > 0
+          ? 'already_delivered'
+          : 'no_relevant_results',
       );
     }
-    return result;
+    return deduped;
   }
 
   async resetChat(): Promise<void> {
@@ -2770,6 +2927,7 @@ export class GeminiClient {
           } else {
             signal.addEventListener('abort', onParentAbort, { once: true });
           }
+          const fastResultRef: MemoryFastResultBox = { current: null };
           const promise = this.config
             .getMemoryManager()
             .recall(
@@ -2780,6 +2938,10 @@ export class GeminiClient {
                 excludedFilePaths: this.surfacedRelevantAutoMemoryPaths,
                 recentTools: [...this.recentCompletedToolNames],
                 abortSignal: controller.signal,
+                onFastResult: (result) => {
+                  fastResultRef.current = result;
+                  fastResultRef.onArrive?.();
+                },
               },
             )
             .catch((error: unknown) => {
@@ -2810,6 +2972,9 @@ export class GeminiClient {
             terminalLogged: false,
             firedAt: Date.now(),
             controller,
+            fastResultRef,
+            fastDelivered: false,
+            fastDeliveredPaths: new Set<string>(),
           };
           void promise.then((result) => {
             handle.result = result;
@@ -3137,14 +3302,12 @@ export class GeminiClient {
           }
         }
 
-        // Zero-wait poll: consume only if the prefetch has already settled.
-        // Done AFTER the async reminder setup above so recall settling during
-        // those awaits still gets caught here. (settledAt is set in
-        // promise.finally(); microtask ordering guarantees it's visible
-        // after any await prior to this point — flatMapTextParts above is
-        // the natural drain.) If still not settled, skip — the ToolResult
-        // inject point will retry on the next turn.
-        const userQueryMemory = await this.tryConsumeMemoryPrefetch('initial');
+        const userQueryMemory = await this.tryConsumeMemoryPrefetch(
+          'initial',
+          messageType === SendMessageType.UserQuery
+            ? INITIAL_MEMORY_RECALL_WAIT_MS
+            : 0,
+        );
         if (userQueryMemory?.prompt) {
           // Unshift to the front of systemReminders: on a UserQuery turn
           // requestToSend leads with user text, so positioning memory at
@@ -3911,6 +4074,7 @@ export class GeminiClient {
             chat.getGenerationConfig(),
             cachedHistory,
             this.config.getModel(),
+            this.config.getSessionId(),
           );
         } catch {
           // Best-effort — don't block the main flow
