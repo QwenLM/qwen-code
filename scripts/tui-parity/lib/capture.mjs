@@ -45,7 +45,9 @@ function spawnScriptPty(cmd, args, opts = {}) {
       } catch {
         try {
           child.kill(sig);
-        } catch {}
+        } catch {
+          // already dead — nothing further to signal
+        }
       }
     },
     write: (d) => child.stdin.write(d),
