@@ -2,7 +2,7 @@
   "name": "@qwen-code/computer-use",
   "version": "0.1.0",
   "private": true,
-  "description": "Thin Computer Use wrapper over the typed @trycua/cua-driver TypeScript SDK: versioned accessibility observation revisions plus opaque element-token actions for ordinary Node.js programs.",
+  "description": "Thin Computer Use wrapper over the typed @qwen-code/qwen-cua-driver TypeScript SDK: versioned accessibility observation revisions plus opaque element-token actions for ordinary Node.js programs.",
   "type": "module",
   "license": "MIT",
   "main": "./index.js",
@@ -27,6 +27,6 @@
     "test:integration": "npm run test:e2e"
   },
   "dependencies": {
-    "@trycua/cua-driver": "file:.."
+    "@qwen-code/qwen-cua-driver": "file:.."
   }
 }

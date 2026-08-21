@@ -41,7 +41,7 @@ The public integration split remains:
 The product boundary is reflected directly in packaging:
 
 - Python client applications import the Rust-backed SDK from `cua_driver`.
-- TypeScript client applications import it from `@trycua/cua-driver`.
+- TypeScript client applications import it from `@qwen-code/qwen-cua-driver`.
 - Agents configure `cua-driver mcp` through their runtime's existing MCP client
   and do not import either language package.
 - The language-native MCP facades and their contract generator were removed.
@@ -121,9 +121,10 @@ The product boundary is reflected directly in packaging:
 - A built macOS arm64 wheel was installed into a clean Python 3.12 environment;
   `cua_driver.CuaDriver.connect(None)` loaded the packaged library and
   returned the canonical daemon socket path.
-- An actual 382.3 kB npm tarball (1.2 MB unpacked) was installed into a clean
-  project; the root imported without native code and
-  `@trycua/cua-driver` loaded the packaged dylib successfully.
+- A pre-rename 382.3 kB npm tarball (1.2 MB unpacked) was installed into a
+  clean project and loaded the packaged dylib successfully. That result used
+  the upstream npm identity and is historical only; it is not current Qwen
+  release evidence.
 - The macOS dylib install ID is the relocatable
   `@rpath/libcua_driver_sdk.dylib`, and release CI asserts it before signing.
 - After promoting the SDK to each package root, a fresh macOS arm64 wheel and
@@ -149,3 +150,17 @@ The product boundary is reflected directly in packaging:
   A developer's host-local tarball is never published.
 - MCP/CLI remains unchanged as the agent boundary; the language package roots
   are the Rust-backed application SDK.
+
+### Qwen-owned npm identity
+
+- The TypeScript SDK is `@qwen-code/qwen-cua-driver`; its six optional native
+  packages use the same Qwen scope and `qwen-cua-driver-<triple>` basename.
+- `@qwen-code/computer-use` depends exactly on the matching Qwen driver version.
+  Neither package imports or resolves the published upstream driver package.
+- Clean tarballs for the root SDK, macOS arm64 native payload, and wrapper were
+  installed together in an empty project. `ComputerUse.create()`, trusted
+  session creation, native application discovery, and cleanup succeeded with
+  no upstream-scoped package installed.
+- The frozen 0.12.6 TypeScript compatibility fixture keeps its historical
+  import unchanged and passes when the Qwen SDK tarball is installed under a
+  test-only npm alias. It is not a production dependency or publication target.

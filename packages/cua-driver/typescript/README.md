@@ -7,7 +7,7 @@ Rust-backed TypeScript/Node SDK for Cua Driver client applications.
 The package root exposes the native SDK:
 
 ```ts
-import { CuaDriver } from "@trycua/cua-driver"
+import { CuaDriver } from "@qwen-code/qwen-cua-driver"
 ```
 
 `EmbeddedCuaDriverHost` is exported from both the package root and the
@@ -36,7 +36,7 @@ import {
   GetDesktopStateInput,
   SetAgentCursorThemeInput,
   StartSessionInput,
-} from "@trycua/cua-driver"
+} from "@qwen-code/qwen-cua-driver"
 
 const driver = CuaDriver.create(undefined) // same process; no daemon
 await driver.startSession(
@@ -117,7 +117,7 @@ bundle `qwen-cua-driver`, start it as a direct child, and connect both applicati
 code and its agent runtime to the same private daemon:
 
 ```ts
-import { CuaDriver, EmbeddedCuaDriverHost } from "@trycua/cua-driver"
+import { CuaDriver, EmbeddedCuaDriverHost } from "@qwen-code/qwen-cua-driver"
 
 const embedded = new EmbeddedCuaDriverHost(
   "/path/inside/YourApp.app/Contents/Resources/qwen-cua-driver",
@@ -152,7 +152,7 @@ import {
   hasRequiredMacOSPermissions,
   openMacOSScreenRecordingSettings,
   requestMacOSPermissions,
-} from "@trycua/cua-driver/electron"
+} from "@qwen-code/qwen-cua-driver/electron"
 
 const permissions = requestMacOSPermissions()
 if (!hasRequiredMacOSPermissions(permissions) && !permissions.screenRecording) {

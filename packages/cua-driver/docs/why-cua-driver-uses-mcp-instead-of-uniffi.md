@@ -20,7 +20,7 @@ are not competing protocol choices.
 | Surface                    | Consumer                                                  | Public shape                                        | What provides runtime portability                                                                                              |
 | -------------------------- | --------------------------------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
 | Cua as an agent MCP or CLI | Codex, Claude Code, another agent, or a shell             | `qwen-cua-driver mcp` and `qwen-cua-driver call`    | MCP and the executable protocol already work from any capable runtime.                                                         |
-| Cua as an imported SDK     | Python, TypeScript, Swift, Kotlin, or another application | `cua_driver` or `@trycua/cua-driver`                | Python and Node call a shared Rust daemon-client implementation through experimental UniFFI bindings.                          |
+| Cua as an imported SDK     | Python, TypeScript, Swift, Kotlin, or another application | `cua_driver` or `@qwen-code/qwen-cua-driver`        | Python and Node call a shared Rust daemon-client implementation through experimental UniFFI bindings.                          |
 
 The [Codex and Claude Agent SDK examples](../examples/agent-sdks/README.md)
 make the first surface concrete. Each agent SDK receives the same stdio MCP
@@ -31,7 +31,7 @@ imports a generated Cua client.
 
 1. Keep MCP and the CLI as the canonical agent boundary. Do not require a Cua
    language package merely to connect an MCP-capable agent.
-2. Make `cua-driver` and `@trycua/cua-driver` application SDK packages backed
+2. Make `cua-driver` and `@qwen-code/qwen-cua-driver` application SDK packages backed
    by UniFFI. Remove their language-native MCP facades because those duplicate
    a runtime-neutral protocol client that agent runtimes already provide. This
    deliberately makes the package API breaking before publication.
@@ -122,7 +122,7 @@ The package name is the SDK entrypoint; no transport suffix is required:
 | Runtime | Rust-backed application SDK | Agent integration |
 | --- | --- | --- |
 | Python | `cua_driver` | Configure `qwen-cua-driver mcp` in the agent runtime |
-| TypeScript | `@trycua/cua-driver` | Configure `qwen-cua-driver mcp` in the agent runtime |
+| TypeScript | `@qwen-code/qwen-cua-driver` | Configure `qwen-cua-driver mcp` in the agent runtime |
 
 There is no public `/sdk`, `/mcp`, or `/native` entrypoint. “Native” describes
 the private generated loader and platform library, not the product API. The

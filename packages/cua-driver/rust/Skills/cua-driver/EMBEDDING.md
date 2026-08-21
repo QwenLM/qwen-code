@@ -47,7 +47,7 @@ create `CuaDriver` directly. This path does not start an executable or open a
 socket, and TCC checks execute as the importing application:
 
 ```ts
-import { CuaDriver } from '@trycua/cua-driver';
+import { CuaDriver } from '@qwen-code/qwen-cua-driver';
 
 const driver = CuaDriver.create(undefined);
 try {
@@ -140,13 +140,13 @@ migration.
 
 ### Node and Electron daemon hosts
 
-Use the embedded host in `@trycua/cua-driver` instead of implementing process
+Use the embedded host in `@qwen-code/qwen-cua-driver` instead of implementing process
 and socket management in every host. It starts a private daemon directly, waits
 until its socket accepts connections, returns SDK and MCP connection details,
 and owns restart and cleanup:
 
 ```ts
-import { CuaDriver, EmbeddedCuaDriverHost } from '@trycua/cua-driver';
+import { CuaDriver, EmbeddedCuaDriverHost } from '@qwen-code/qwen-cua-driver';
 
 const embedded = new EmbeddedCuaDriverHost(
   '/path/inside/YourApp.app/Contents/Resources/qwen-cua-driver',

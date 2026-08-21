@@ -35,6 +35,8 @@ ordinary Node.js program
 
 The wrapper calls the typed SDK directly. It does not route calls through Qwen Code or a second tool protocol. It preserves cua-driver's existing runtime, permission, transport, and lifecycle behavior.
 
+The TypeScript SDK is distributed as `@qwen-code/qwen-cua-driver`, with matching Qwen-scoped native optional packages. The synchronized TryCua release is source provenance only; neither the wrapper nor a published Qwen artifact imports or resolves the upstream npm package.
+
 ## Observation revision contract
 
 CUA Driver adds the opt-in `accessibility.observation_revision.v1` capability. Existing callers that do not opt in continue receiving the current full snapshot and snapshot-token behavior.
@@ -73,13 +75,13 @@ Stable action tokens resolve through the current revision. An unchanged element 
 
 ## Platform identity
 
-| Platform path | Identity rule | Revision v1 behavior |
-| --- | --- | --- |
-| macOS AX | retained `AXUIElementRef`, compared with Core Foundation equality | diff when capture and identity are complete |
-| Windows UIA | RuntimeId candidate confirmed by `IUIAutomation::CompareElements` | diff when identity is confirmed |
-| Windows MSAA | no approved stable identity | explicit full-only fallback |
-| Linux AT-SPI | unique D-Bus owner plus object path | diff while the owner remains live and unchanged |
-| Linux X11 fallback | no approved stable identity | explicit full-only fallback |
+| Platform path      | Identity rule                                                     | Revision v1 behavior                            |
+| ------------------ | ----------------------------------------------------------------- | ----------------------------------------------- |
+| macOS AX           | retained `AXUIElementRef`, compared with Core Foundation equality | diff when capture and identity are complete     |
+| Windows UIA        | RuntimeId candidate confirmed by `IUIAutomation::CompareElements` | diff when identity is confirmed                 |
+| Windows MSAA       | no approved stable identity                                       | explicit full-only fallback                     |
+| Linux AT-SPI       | unique D-Bus owner plus object path                               | diff while the owner remains live and unchanged |
+| Linux X11 fallback | no approved stable identity                                       | explicit full-only fallback                     |
 
 Provider invalidation, truncation, subtree read failure, target ambiguity, or fallback capture forces full output.
 

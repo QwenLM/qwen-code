@@ -30,7 +30,7 @@ const FfiType = {
 const sdkLibrary = resolveLibPath({
   crateName: "cua_driver_sdk",
   callerUrl: import.meta.url,
-  npmPackageBase: "@trycua/cua-driver-",
+  npmPackageBase: "@qwen-code/qwen-cua-driver-",
   tripleStyle: "node",
 })
 const runtimePath = join(dirname(sdkLibrary), "cua_driver_node_runtime.node")

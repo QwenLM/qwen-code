@@ -3,7 +3,7 @@
 /** Assemble the public TypeScript package and its optional native packages.
  *
  * The generated UniFFI loader resolves the SDK cdylib from an OS/architecture
- * package. Keeping native payloads separate lets `@trycua/cua-driver` remain
+ * package. Keeping native payloads separate lets `@qwen-code/qwen-cua-driver` remain
  * one stable public package while npm installs only the matching binary.
  */
 
@@ -72,7 +72,7 @@ const stagingRoot = mkdtempSync(join(outputRoot, ".cua-driver-npm-staging-"))
 const optionalDependencies = {}
 let nativeCount = 0
 for (const platform of platforms) {
-  const name = `@trycua/cua-driver-${platform.triple}`
+  const name = `@qwen-code/qwen-cua-driver-${platform.triple}`
   optionalDependencies[name] = version
   const source = join(nativeRoot, platform.triple, platform.file)
   if (!existsSync(source)) {
@@ -135,9 +135,12 @@ pack(rootStage)
 const computerUseManifest = JSON.parse(
   readFileSync(join(computerUseRoot, "package.json"), "utf8"),
 )
-if (computerUseManifest.dependencies?.["@trycua/cua-driver"] !== "file:..") {
+if (
+  computerUseManifest.dependencies?.["@qwen-code/qwen-cua-driver"] !==
+  "file:.."
+) {
   throw new Error(
-    "Computer Use source must use the sibling @trycua/cua-driver package",
+    "Computer Use source must use the sibling @qwen-code/qwen-cua-driver package",
   )
 }
 const computerUseStage = join(stagingRoot, "computer-use")
@@ -151,12 +154,12 @@ writeJson(join(computerUseStage, "package.json"), {
   scripts: undefined,
   dependencies: {
     ...computerUseManifest.dependencies,
-    "@trycua/cua-driver": version,
+    "@qwen-code/qwen-cua-driver": version,
   },
 })
 pack(computerUseStage)
 
 rmSync(stagingRoot, { recursive: true })
 console.log(
-  `Packed @trycua/cua-driver ${version}, @qwen-code/computer-use ${computerUseManifest.version}, and ${nativeCount} native package(s).`,
+  `Packed @qwen-code/qwen-cua-driver ${version}, @qwen-code/computer-use ${computerUseManifest.version}, and ${nativeCount} native package(s).`,
 )

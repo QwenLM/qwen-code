@@ -1855,7 +1855,7 @@ const getter: () => NativeModuleInterface = () => {
     const libPath = resolveLibPath({
       crateName: "cua_driver_sdk",
       callerUrl: import.meta.url,
-      npmPackageBase: "@trycua/cua-driver-",
+      npmPackageBase: "@qwen-code/qwen-cua-driver-",
       tripleStyle: "node",
     });
     const mod_ = UniffiNativeModule.open(libPath);

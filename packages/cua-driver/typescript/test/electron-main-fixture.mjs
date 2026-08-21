@@ -65,13 +65,13 @@ const waitForExit = async (pid) => {
 
 try {
   const { EmbeddedCuaDriverHost, EmbeddedDriverHostState } = await import(
-    "@trycua/cua-driver/embedded"
+    "@qwen-code/qwen-cua-driver/embedded"
   )
   const host = new EmbeddedCuaDriverHost(binaryPath, "com.example.electron-host")
   const connection = await host.start()
   const socketPath = connection.socketPath
   const pid = connection.pid
-  const { CuaDriver } = await import("@trycua/cua-driver")
+  const { CuaDriver } = await import("@qwen-code/qwen-cua-driver")
   const driver = CuaDriver.connect(socketPath)
   const tools = JSON.parse(await driver.listToolsJson())
   driver.uniffiDestroy()

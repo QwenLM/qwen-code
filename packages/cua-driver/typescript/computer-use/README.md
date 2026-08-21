@@ -1,6 +1,6 @@
 # @qwen-code/computer-use
 
-Thin Computer Use wrapper over the typed [`@trycua/cua-driver`](..) TypeScript
+Thin Computer Use wrapper over the typed [`@qwen-code/qwen-cua-driver`](..) TypeScript
 SDK for ordinary Node.js programs. It does not depend on Qwen Code, a Node
 REPL, or a Skill.
 
