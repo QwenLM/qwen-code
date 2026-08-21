@@ -225,6 +225,12 @@ jobs:
       - uses: 'dtolnay/rust-toolchain@stable'
         with:
           targets: '${{ matrix.target }}'
+      - name: 'Verify Rust target installation'
+        shell: 'bash'
+        run: |
+          set -euo pipefail
+          rustup target add "${{ matrix.target }}"
+          rustup target list --installed | grep -Fx "${{ matrix.target }}"
       - uses: 'actions/cache@v4'
         with:
           path: |
