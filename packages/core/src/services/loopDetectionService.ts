@@ -862,12 +862,20 @@ export class LoopDetectionService {
     end: number,
     stride: number,
   ): boolean {
-    const region = this.streamContentHistory.slice(start, end);
-    if (region.length < MIN_PERIODIC_REGION_LENGTH) {
+    const regionLength = end - start;
+    if (regionLength < MIN_PERIODIC_REGION_LENGTH) {
       return false;
     }
-    for (let i = 0; i + stride < region.length; i++) {
-      if (region[i] !== region[i + stride]) {
+    // Compare in place instead of slicing the region out: near-periodic
+    // chants (the target input class) fail verification repeatedly while
+    // their equally-spaced occurrence runs persist, so once a run reaches
+    // length 5 this check can fire on up to every streamed character, and
+    // a slice would copy up to ~4 KB of history per call.
+    for (let i = 0; i + stride < regionLength; i++) {
+      if (
+        this.streamContentHistory[start + i] !==
+        this.streamContentHistory[start + i + stride]
+      ) {
         return false;
       }
     }
