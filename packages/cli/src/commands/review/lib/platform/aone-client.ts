@@ -149,39 +149,43 @@ export function a1VersionAtLeast(
   return true;
 }
 
-/** The cause inside an execFileSync failure message, extracted ONCE for the
- *  transport: the message BEGINS with the fixed "Command failed: <argv>"
- *  preamble, so line zero is NEVER the cause — the cause is the first
- *  NON-empty line after it. A failure with no cause line (a killed child
- *  with no stderr) returns '': falling back to the preamble would disclose
- *  a fixed constant AS the cause. Both a1 and git invocations share this
- *  message shape. */
+/** The cause inside a failure message, extracted ONCE for the transport —
+ *  shape-aware, because two shapes arrive. An execFileSync failure BEGINS
+ *  with the fixed "Command failed: <argv>" / "spawnSync a1 <errno>"
+ *  preamble, so line zero is NEVER the cause there: the cause is the first
+ *  NON-empty line after it, and a failure with no cause line (a killed
+ *  child with no stderr) returns '' — falling back to the preamble would
+ *  disclose a fixed constant AS the cause. A message WITHOUT the preamble
+ *  IS the cause: the provider's own throws (mrView's no-mergeRequest
+ *  refusal, a1Json's JSON.parse SyntaxError) are single-line diagnostics,
+ *  and a preamble-blind slice(1) discarded exactly the line these warnings
+ *  exist to surface. Both a1 and git invocations share the exec shape. */
 export function execErrorCause(err: unknown): string {
-  const lines = (err instanceof Error ? err.message : String(err)).split('\n');
-  return (
-    lines
-      .slice(1)
-      .map((l) => l.trim())
-      .find(Boolean) ?? ''
-  );
+  const message = err instanceof Error ? err.message : String(err);
+  const lines = message.split('\n').map((l) => l.trim());
+  const candidates = /^(Command failed:|spawnSync |spawn )/.test(message)
+    ? lines.slice(1)
+    : lines;
+  return candidates.find(Boolean) ?? '';
 }
 
 /**
  * Fail fast with an actionable message when `a1` cannot run, and return the
  * authenticated account. Three failure states, three distinct remedies: a
- * missing binary (ENOENT — the dominant first-run state for this
- * dependency) → install; a version below A1_MIN_VERSION → upgrade; an
- * unauthenticated login → `a1 auth login`. The checks run in that order —
- * presence, then version, then auth — so a stale install is named BEFORE a
- * login that upgrading would invalidate anyway. The whoami runs ONCE,
- * `--format json`: the JSON spelling fully subsumes a plain auth gate, so
- * presubmit reads its self-MR comparison account off this call instead of
- * spawning a second whoami (which retried its own delays a second time
- * under the same transient outage, and could throw uncaught after the
- * report's graceful path had already been decided). An EXEC-successful
- * answer that does not parse or names no account returns '': the exec's
- * success already proves the auth state, and an unreadable account fails
- * presubmit's self-MR comparison soft, like the GitHub path's empty login.
+ * missing or not-runnable binary (ENOENT/EACCES/ENOEXEC — the dominant
+ * first-run state for this dependency) → install; a version below
+ * A1_MIN_VERSION → upgrade; an unauthenticated login → `a1 auth login`.
+ * The checks run in that order — presence, then version, then auth — so
+ * a stale install is named BEFORE a login that upgrading would invalidate
+ * anyway. The whoami runs ONCE, `--format json`: the JSON spelling fully
+ * subsumes a plain auth gate, so presubmit reads its self-MR comparison
+ * account off this call instead of spawning a second whoami (which retried
+ * its own delays a second time under the same transient outage, and could
+ * throw uncaught after the report's graceful path had already been
+ * decided). An EXEC-successful answer that does not parse or names no
+ * account returns '': the exec's success already proves the auth state,
+ * and an unreadable account fails presubmit's self-MR comparison soft,
+ * like the GitHub path's empty login.
  */
 export function ensureAoneAuthenticated(): string {
   // `a1 --version` is a local op — no auth, no network — so it can precede
@@ -190,8 +194,15 @@ export function ensureAoneAuthenticated(): string {
   try {
     versionOut = a1('--version');
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      throw new Error('a1 CLI not found on PATH — install the `a1` CLI first.');
+    // EACCES/ENOEXEC join ENOENT: a present-but-not-runnable a1 (chmod a-x,
+    // a half-finished update) has the same remedy as a missing one — and a
+    // fall-through here lands in whoami, which blames the login: the one
+    // remedy a permissions problem cannot be fixed by.
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'EACCES' || code === 'ENOEXEC') {
+      throw new Error(
+        'a1 CLI not found on PATH or not executable — install the `a1` CLI first.',
+      );
     }
     // The binary runs but the version probe failed — no floor ruling is
     // possible. Absent evidence, not evidence of absence: fall through to

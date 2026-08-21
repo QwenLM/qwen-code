@@ -566,6 +566,43 @@ describe('aoneReader.composeUrl', () => {
     stderrSpy.mockRestore();
   });
 
+  it('a NON-exec failure keeps its one diagnostic line as the cause', () => {
+    // The platform answered without the field: mrView throws the
+    // no-mergeRequest refusal itself — a single-line message with no exec
+    // preamble. A preamble-blind slice(1) discarded exactly this line,
+    // leaving the warning cause-less on the platform-anomaly state it must
+    // keep distinguishable from a transport failure.
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    a1JsonMock.mockReturnValue({});
+    expect(aoneReader.composeUrl(7, 'g/p')).toBe('');
+    expect(stderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('WARNING: the Aone MR-link lookup failed'),
+    );
+    expect(stderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('a1 returned no mergeRequest for #7 of g/p'),
+    );
+    stderrSpy.mockRestore();
+  });
+
+  it('a JSON.parse SyntaxError from the fetch rides the warning too', () => {
+    // a1 answered unparseably (a gateway's HTML error page): the
+    // SyntaxError carries no exec preamble, so its message IS the cause.
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    a1JsonMock.mockImplementation(() => {
+      throw new SyntaxError(
+        'Unexpected token \'<\', "<html>502 "... is not valid JSON',
+      );
+    });
+    expect(aoneReader.composeUrl(7, 'g/p')).toBe('');
+    expect(stderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('WARNING: the Aone MR-link lookup failed'),
+    );
+    expect(stderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Unexpected token'),
+    );
+    stderrSpy.mockRestore();
+  });
+
   it('refuses a malformed ownerRepo before any a1 call', () => {
     expect(() => aoneReader.composeUrl(7, 'not-a-repo')).toThrow(TypeError);
     expect(a1JsonMock).not.toHaveBeenCalled();

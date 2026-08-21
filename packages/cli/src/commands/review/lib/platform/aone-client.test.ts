@@ -248,6 +248,20 @@ describe("execErrorCause — the transport's ONE cause extraction", () => {
   it('tolerates a non-Error throw', () => {
     expect(execErrorCause('Command failed: a1 x\nboom')).toBe('boom');
   });
+
+  it('a message WITHOUT the exec preamble IS the cause — the provider-throw shapes', () => {
+    // mrView's no-mergeRequest refusal and a1Json's JSON.parse SyntaxError
+    // are single-line diagnostics with no exec preamble; a slice(1) on them
+    // discards the one line composeUrl's warning exists to surface. The
+    // preamble-less message itself is the diagnostic.
+    expect(
+      execErrorCause(new Error('a1 returned no mergeRequest for #7 of g/p')),
+    ).toBe('a1 returned no mergeRequest for #7 of g/p');
+    const syntax = new SyntaxError(
+      'Unexpected token \'<\', "<html>502 "... is not valid JSON',
+    );
+    expect(execErrorCause(syntax)).toBe(syntax.message);
+  });
 });
 
 describe('ensureAoneAuthenticated — presence, version floor, and the account', () => {
@@ -396,6 +410,28 @@ describe('ensureAoneAuthenticated — presence, version floor, and the account',
     });
     expect(() => ensureAoneAuthenticated()).toThrow(/a1 CLI not found on PATH/);
     expect(mockExecFileSync).toHaveBeenCalledTimes(1);
+  });
+
+  it('a present-but-unexecutable a1 (EACCES/ENOEXEC) gets the install remedy, not the login blame', () => {
+    // chmod a-x / corrupt install: `a1 --version` throws single-line
+    // `spawnSync a1 EACCES`. Not ENOENT — before the presence arm widened
+    // it fell open into whoami, which blamed the login: the one remedy a
+    // permissions problem cannot be fixed by, against the "three failure
+    // states, three distinct remedies" contract.
+    for (const code of ['EACCES', 'ENOEXEC']) {
+      mockExecFileSync.mockClear();
+      const notRunnable = Object.assign(new Error(`spawnSync a1 ${code}`), {
+        code,
+      });
+      mockExecFileSync.mockImplementation(() => {
+        throw notRunnable;
+      });
+      expect(() => ensureAoneAuthenticated()).toThrow(
+        /a1 CLI not found on PATH/,
+      );
+      // One spawn: the presence arm rules BEFORE any whoami blame.
+      expect(mockExecFileSync).toHaveBeenCalledTimes(1);
+    }
   });
 
   it('a fresh-enough a1 that is not logged in still gets the login remedy', () => {
