@@ -1649,7 +1649,11 @@ describe('runNonInteractive', () => {
     );
 
     await vi.waitFor(() =>
-      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel),
+      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel, {
+        cancelMessage: expect.stringContaining(
+          'requires an explicit interactive approval surface',
+        ),
+      }),
     );
     expect(processStderrSpy).toHaveBeenCalledWith(
       expect.stringContaining(
@@ -1710,7 +1714,11 @@ describe('runNonInteractive', () => {
     );
 
     await vi.waitFor(() =>
-      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel),
+      expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel, {
+        cancelMessage: expect.stringContaining(
+          `current approval mode (${ApprovalMode.DEFAULT})`,
+        ),
+      }),
     );
     expect(processStderrSpy).toHaveBeenCalledWith(
       expect.stringContaining(

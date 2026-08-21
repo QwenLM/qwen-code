@@ -171,17 +171,28 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
     return `Ask user ${questionCount} question${questionCount > 1 ? 's' : ''}`;
   }
 
+  private get isAcpMode(): boolean {
+    return (
+      this._config.getExperimentalZedIntegration() ||
+      this._config.getInputFormat() === InputFormat.STREAM_JSON
+    );
+  }
+
+  override requiresUserInteraction(): boolean {
+    return this._config.isInteractive() || this.isAcpMode;
+  }
+
+  override canAutoApproveOnAllow(): boolean {
+    return false;
+  }
+
   /**
    * ask_user_question always requires user confirmation so the user can
    * provide answers. In non-interactive mode without ACP support, we skip
    * confirmation (and subsequently skip execution).
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
-    const isAcpMode =
-      this._config.getExperimentalZedIntegration() ||
-      this._config.getInputFormat() === InputFormat.STREAM_JSON;
-
-    if (!this._config.isInteractive() && !isAcpMode) {
+    if (!this._config.isInteractive() && !this.isAcpMode) {
       // Non-interactive + no ACP: skip entirely
       return 'allow';
     }
@@ -224,12 +235,8 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
     try {
       // Check if we're in a mode that supports user interaction
       // ACP mode (VSCode extension, etc.) uses non-interactive mode but can still collect user input
-      const isAcpMode =
-        this._config.getExperimentalZedIntegration() ||
-        this._config.getInputFormat() === InputFormat.STREAM_JSON;
-
       // In non-interactive mode without ACP support, we cannot collect user input
-      if (!this._config.isInteractive() && !isAcpMode) {
+      if (!this._config.isInteractive() && !this.isAcpMode) {
         const errorMessage =
           'Cannot ask user questions in non-interactive mode without ACP support. Please run in interactive mode or enable ACP mode to use this tool.';
         return {

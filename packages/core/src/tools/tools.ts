@@ -63,6 +63,13 @@ export interface ToolInvocation<
   requiresUserInteraction?(): boolean;
 
   /**
+   * Whether a host-level allow decision may be confirmed without forwarding
+   * an interaction payload. Tools that collect data through their approval
+   * surface should return false so the host-provided payload is preserved.
+   */
+  canAutoApproveOnAllow?(): boolean;
+
+  /**
    * Constructs the confirmation dialog details for this invocation.
    * Only called when the final permission decision is `'ask'` and the user
    * needs to be prompted interactively.
@@ -113,6 +120,10 @@ export abstract class BaseToolInvocation<
 
   requiresUserInteraction(): boolean {
     return false;
+  }
+
+  canAutoApproveOnAllow(): boolean {
+    return true;
   }
 
   /**
