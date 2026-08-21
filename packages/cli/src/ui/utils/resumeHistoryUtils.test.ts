@@ -636,7 +636,7 @@ describe('resumeHistoryUtils', () => {
 
   it('restores media-reference mid-turn messages as an attachment placeholder', () => {
     // Image-only mid-turn messages are recorded with an empty displayText and
-    // mediaReferences; resuming must not fall back to the raw internal prefix.
+    // attachmentReferences; resuming must not fall back to the raw internal prefix.
     const conversation = {
       messages: [
         {
@@ -651,10 +651,10 @@ describe('resumeHistoryUtils', () => {
           },
           systemPayload: {
             displayText: '',
-            mediaReferences: [
+            attachmentReferences: [
               {
                 type: 'image',
-                mediaId: 'image-1',
+                attachmentId: 'image-1',
                 mimeType: 'image/png',
                 size: 8,
               },
@@ -684,7 +684,7 @@ describe('resumeHistoryUtils', () => {
 
   it('restores media-reference ordinary user messages as an attachment placeholder', () => {
     // Image-only prompts are recorded with an empty displayText and
-    // mediaReferences; resuming must keep the prompt visible instead of
+    // attachmentReferences; resuming must keep the prompt visible instead of
     // dropping it from the restored history.
     const conversation = {
       messages: [
@@ -700,10 +700,10 @@ describe('resumeHistoryUtils', () => {
           systemPayload: {
             displayText: '',
             hookContext: '',
-            mediaReferences: [
+            attachmentReferences: [
               {
                 type: 'image',
-                mediaId: 'image-1',
+                attachmentId: 'image-1',
                 mimeType: 'image/png',
                 size: 8,
               },

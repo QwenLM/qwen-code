@@ -185,6 +185,7 @@ export { FORK_SUBAGENT_TYPE } from './tools/agent/fork-subagent.js';
 export type {
   WorkflowTool,
   WorkflowParams,
+  WorkflowToolResult,
 } from './tools/workflow/workflow.js';
 export type {
   TodoWriteTool,
