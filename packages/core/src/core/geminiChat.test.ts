@@ -343,6 +343,10 @@ describe('GeminiChat', async () => {
       // state afterwards (re-adding a post-setHistory clear un-tracks a
       // resident body and doubles its tokens on the next invoke).
       expect(skillTool.trackSkills).toHaveBeenLastCalledWith(['demo']);
+      // Third sync primitive pinned too (R4-7): a targeted unload
+      // inserted after setHistory's reconcile would un-track the
+      // resident body and neither of the assertions above would see it.
+      expect(skillTool.unloadSkills).not.toHaveBeenCalled();
       const lastClear =
         skillTool.clearLoadedSkills.mock.invocationCallOrder.at(-1);
       const lastTrack = skillTool.trackSkills.mock.invocationCallOrder.at(-1);
@@ -400,8 +404,17 @@ describe('GeminiChat', async () => {
 
       await chat.tryCompress('prompt-skill-fork', true);
 
+      // Pin the compression's observable effect FIRST (R4-11): zero
+      // tracker calls alone also hold when nothing happens at all, so
+      // the forked chat's own history must actually carry the summary.
+      expect(chat.getHistory()).toEqual([
+        { role: 'user', parts: [{ text: 'summary' }] },
+        { role: 'model', parts: [{ text: 'ack' }] },
+      ]);
+      expect(chat.getLastPromptTokenCount()).toBe(30_000);
       expect(skillTool.clearLoadedSkills).not.toHaveBeenCalled();
       expect(skillTool.trackSkills).not.toHaveBeenCalled();
+      expect(skillTool.unloadSkills).not.toHaveBeenCalled();
     });
   });
 
@@ -4588,6 +4601,14 @@ describe('GeminiChat', async () => {
         ),
       ).rejects.toThrow(/compression status: COMPRESSED/i);
 
+      // The verbatim restore itself must still run on the forked path
+      // (only the tracker reconcile is fork-guarded): the oversized
+      // entry is back at index 2, byte-identical to the pre-compression
+      // original — mirroring the non-forked twin's restore pin (R4-10).
+      expect(chatWithRecording.getHistory()).toHaveLength(4);
+      expect(chatWithRecording.getHistory()[2].parts?.[0].text).toBe(
+        originalHistory[2].parts?.[0].text,
+      );
       expect(skillTool.clearLoadedSkills).not.toHaveBeenCalled();
       expect(skillTool.trackSkills).not.toHaveBeenCalled();
       expect(skillTool.unloadSkills).not.toHaveBeenCalled();
@@ -15837,6 +15858,129 @@ describe('GeminiChat', async () => {
           info: expect.objectContaining({ newTokenCountIsEstimated: true }),
         }),
       );
+    });
+
+    it('compressFast reconciles loaded-skill tracking through its internal setHistory (R4-9)', () => {
+      // The ONLY tracking sync for /compress-fast is the setHistory at
+      // the end of compressFast: swapping it for a direct `this.history
+      // =` assignment would evict bodies while names stay tracked (the
+      // #6762 deadlock) and ship green without this pin.
+      const skillTool = {
+        unloadSkills: vi.fn(),
+        clearLoadedSkills: vi.fn(),
+        trackSkills: vi.fn(),
+      };
+      vi.mocked(mockConfig.getClearContextOnIdle).mockReturnValue({
+        toolResultsThresholdMinutes: 30,
+        toolResultsNumToKeep: 2,
+      });
+      const skillBody = buildSkillLlmContent('/demo', 'demo body '.repeat(50));
+      const recordingChat = new GeminiChat(
+        mockConfig,
+        config,
+        [],
+        {
+          recordChatCompression: vi.fn(),
+        } as unknown as ConstructorParameters<typeof GeminiChat>[3],
+        uiTelemetryService,
+      );
+      recordingChat.setHistory([
+        // Oldest tool result: outside the keepRecent=2 window, blanked.
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'c0',
+                name: 'run_shell_command',
+                args: { command: 'ls' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'c0',
+                name: 'run_shell_command',
+                response: { output: 'old output '.repeat(100) },
+              },
+            },
+          ],
+        },
+        // Resident skill call/body pair: survives and must stay tracked.
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 's0',
+                name: 'skill',
+                args: { skill: 'demo' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 's0',
+                name: 'skill',
+                response: { output: skillBody },
+              },
+            },
+          ],
+        },
+        // Newest tool result: occupies the second keep slot.
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'c1',
+                name: 'run_shell_command',
+                args: { command: 'pwd' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'c1',
+                name: 'run_shell_command',
+                response: { output: 'new output' },
+              },
+            },
+          ],
+        },
+      ]);
+      // Wire the tracker AFTER the setup swap: setHistory reconciles on
+      // every replacement, and the setup swap is not the behavior under
+      // test (R3-6).
+      vi.mocked(mockConfig.getToolRegistry).mockReturnValue({
+        getTool: vi.fn().mockReturnValue(skillTool),
+      } as unknown as ReturnType<Config['getToolRegistry']>);
+
+      const result = recordingChat.compressFast();
+
+      expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(result.microcompactMeta?.toolsCleared).toBe(1);
+      expect(result.microcompactMeta?.evictedSkillNames).toEqual([]);
+      // Clear-before-track on the surviving body, and no third write.
+      expect(skillTool.trackSkills).toHaveBeenLastCalledWith(['demo']);
+      expect(skillTool.unloadSkills).not.toHaveBeenCalled();
+      const lastClear =
+        skillTool.clearLoadedSkills.mock.invocationCallOrder.at(-1);
+      const lastTrack = skillTool.trackSkills.mock.invocationCallOrder.at(-1);
+      expect(lastClear).toBeDefined();
+      expect(lastClear).toBeLessThan(lastTrack!);
     });
   });
 

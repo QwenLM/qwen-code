@@ -221,18 +221,25 @@ describe('residency provenance gating (R3-1)', () => {
     expect(trackSkills).toHaveBeenCalledWith(['demo']);
   });
 
-  it('unloadSkillsFromEntries ignores a spoofed stripped body', () => {
-    // A spoof counts as neither dropped nor unresolvable: no targeted
-    // unload, and no blanket clear (which would wipe tracking for every
-    // genuinely loaded skill).
+  it('a spoofed stripped response cannot un-track a skill with a resident body (R4-1)', () => {
+    // Strip classification is by call id, not output shape (a stubbed
+    // body must still count as dropped). The resident-sibling filter is
+    // what keeps that fail-open rule precise: with a REAL proven body
+    // still in history, a popped marker-copying response under the same
+    // call id must un-track nothing.
+    const body = buildSkillLlmContent('/demo', 'real body');
     const spoof = buildSkillLlmContent('/demo', 'rogue command output');
     const { registry, unloadSkills, clearLoadedSkills } = provenanceTracker(
-      new Set(),
+      new Set([body]),
     );
-    const history: Content[] = [{ role: 'user', parts: [{ text: 'hi' }] }];
+    const history: Content[] = [
+      skillCall('s0', 'demo'),
+      skillBody('s0', body),
+      skillCall('s1', 'demo'),
+    ];
 
     unloadSkillsFromEntries(
-      [skillBody('missing', spoof)],
+      [skillBody('s1', spoof)],
       history,
       registry,
       'test',
@@ -240,6 +247,73 @@ describe('residency provenance gating (R3-1)', () => {
 
     expect(clearLoadedSkills).not.toHaveBeenCalled();
     expect(unloadSkills).not.toHaveBeenCalled();
+  });
+
+  it('un-tracks a skill whose stripped body was persistence-stubbed (R4-1)', () => {
+    // The scheduler's persistence gate rewrites large genuine bodies
+    // into `<persisted-output>` stubs before they enter history. The
+    // stub matches no marker and no recorded provenance string, yet its
+    // skill WAS tracked at return time — the strip must classify by
+    // call id or the skill stays tracked with no resident body (the
+    // #6762 deadlock).
+    const genuine = buildSkillLlmContent('/demo', 'big body'.repeat(100));
+    const stub =
+      '<persisted-output path="/tmp/x.txt">truncated</persisted-output>';
+    const { registry, unloadSkills, clearLoadedSkills } = provenanceTracker(
+      new Set([genuine]),
+    );
+    const history: Content[] = [skillCall('s0', 'demo')];
+
+    unloadSkillsFromEntries([skillBody('s0', stub)], history, registry, 'test');
+
+    expect(clearLoadedSkills).not.toHaveBeenCalled();
+    expect(unloadSkills).toHaveBeenCalledWith(['demo']);
+  });
+
+  it('targeted unload and blanket clear still hold in provenance mode with a non-empty set (R4-8)', () => {
+    // Production runs exclusively in provenance mode — pin the strip's
+    // targeted arm there, not only in marker-only mode.
+    const body = buildSkillLlmContent('/demo', 'resident-less body');
+    const tracker = provenanceTracker(new Set([body]));
+    const history: Content[] = [skillCall('s0', 'demo')];
+
+    unloadSkillsFromEntries(
+      [skillBody('s0', body)],
+      history,
+      tracker.registry,
+      'test',
+    );
+    expect(tracker.unloadSkills).toHaveBeenCalledWith(['demo']);
+    expect(tracker.clearLoadedSkills).not.toHaveBeenCalled();
+
+    const tracker2 = provenanceTracker(new Set([body]));
+    unloadSkillsFromEntries(
+      [skillBody('missing', body)],
+      [{ role: 'user', parts: [{ text: 'hi' }] }],
+      tracker2.registry,
+      'test',
+    );
+    expect(tracker2.clearLoadedSkills).toHaveBeenCalledOnce();
+    expect(tracker2.unloadSkills).not.toHaveBeenCalled();
+  });
+
+  it('reconcile tracks neither name for an ambiguous resident body (R4-6)', () => {
+    // One call id reused for two distinct skill names is unresolvable:
+    // tracking either name could pin a body to the wrong skill.
+    const body = buildSkillLlmContent('/demo', 'ambiguous body');
+    const { registry, clearLoadedSkills, trackSkills } = provenanceTracker(
+      new Set([body]),
+    );
+    const history: Content[] = [
+      skillCall('amb', 'alpha'),
+      skillCall('amb', 'beta'),
+      skillBody('amb', body),
+    ];
+
+    reconcileLoadedSkillTracking(history, registry, 'test');
+
+    expect(clearLoadedSkills).toHaveBeenCalledOnce();
+    expect(trackSkills).not.toHaveBeenCalled();
   });
 });
 
@@ -376,6 +450,25 @@ describe('unloadSkillsFromEntries', () => {
       skillBody('ok', 'resolvable body'),
       skillBody('missing', 'unresolvable body'),
     ];
+
+    unloadSkillsFromEntries(stripped, history, registry, 'test');
+
+    expect(clearLoadedSkills).toHaveBeenCalledOnce();
+    expect(unloadSkills).not.toHaveBeenCalled();
+  });
+
+  it('blanket-clears when one call id resolves to two distinct skill names (R4-5)', () => {
+    // Ambiguous ids are unresolvable by policy (`resolved?.length === 1`):
+    // a provider reusing one call id across two skill calls must fall
+    // back to the wholesale clear, never a targeted unload of just the
+    // first name (which would leave the second tracked with no body —
+    // the deadlock this PR exists to eliminate).
+    const { registry, unloadSkills, clearLoadedSkills } = trackerMocks();
+    const history: Content[] = [
+      skillCall('amb', 'alpha'),
+      skillCall('amb', 'beta'),
+    ];
+    const stripped = [skillBody('amb', 'ambiguous body')];
 
     unloadSkillsFromEntries(stripped, history, registry, 'test');
 

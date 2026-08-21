@@ -621,20 +621,24 @@ export interface MicrocompactMeta {
   unresolvedEvictedReads: number;
   /**
    * Names of skills whose blanked Skill result dropped the loaded body
-   * from history; the caller un-tracks them so the dedup guard re-arms
-   * and `/context` stops reporting a phantom `active` entry. A skill
-   * whose full body still survives this pass (via `buildKeptSkillNames`)
-   * is suppressed from this list — otherwise the next invocation would
-   * re-append the body, doubling its tokens. Within one load cycle a
-   * body is always older than its dedup confirmations, so a kept
-   * confirmation never suppresses (only a kept full body does).
+   * from history. DIAGNOSTIC ONLY — no production consumer. Loaded-skill
+   * tracking is rebuilt from the applied history by `setHistory`'s
+   * `reconcileLoadedSkillTracking` at every application site (pre-send
+   * microcompaction, tryCompress, compact_history); callers must NOT
+   * second-write tracking from this field (the removed post-setHistory
+   * sync degraded ground truth — see the R3-2 tests). A skill whose
+   * full body still survives this pass (via `buildKeptSkillNames`) is
+   * suppressed from this list; within one load cycle a body is always
+   * older than its dedup confirmations, so a kept confirmation never
+   * suppresses (only a kept full body does).
    */
   evictedSkillNames: string[];
   /**
    * Count of blanked Skill results whose skill name could NOT be
-   * recovered. Non-zero means the caller MUST fall back to clearing all
-   * loaded-skill tracking — a stale entry would leave that skill
-   * permanently unreloadable behind the dedup guard.
+   * recovered. DIAGNOSTIC ONLY — same contract as `evictedSkillNames`:
+   * tracking sync belongs to `setHistory`'s reconcile, which rebuilds
+   * from the actually-applied history and so needs no fallback signal
+   * here. Callers must NOT clear tracking based on this field.
    */
   unresolvedEvictedSkills: number;
 }

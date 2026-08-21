@@ -629,6 +629,10 @@ describe('SkillTool', () => {
         '/test/project',
         mockRuntimeConfig,
       );
+      // Provenance recording, positive half (R4-3): the exact returned
+      // body string is the ONLY residency proof downstream — a byte
+      // mismatch would fail-closed every residency check.
+      expect([...skillTool.getGenuineSkillBodyOutputs()]).toEqual([llmText]);
     });
 
     it('records usage while Auto Skill generation is disabled', async () => {
@@ -1371,6 +1375,12 @@ describe('SkillTool', () => {
       // ever un-track it — tracking here would deadlock a later
       // same-named file skill behind the dedup guard forever.
       expect([...skillTool.getLoadedSkillNames()]).toEqual([]);
+      // Provenance recording, negative half (R4-3): delegated output
+      // must NOT enter the genuine set, or marker-shaped command text
+      // would become 'proven' and reconcile would track a name no
+      // eviction path can ever un-track (the R1-14 deadlock reached
+      // through the provenance set).
+      expect([...skillTool.getGenuineSkillBodyOutputs()]).toEqual([]);
     });
 
     it('should fall through to not-found error when executor returns null', async () => {

@@ -3334,6 +3334,53 @@ describe('Gemini Client (client.ts)', () => {
       expect(clearLoadedSkills).not.toHaveBeenCalled();
     });
 
+    it('wires the registry provenance set into pre-send microcompaction (R4-4)', async () => {
+      mockFileReadCacheStub();
+      const genuineOutputs = new Set<string>(['recorded-body']);
+      const reg = vi.mocked(mockConfig.getToolRegistry)() as unknown as {
+        getTool: ReturnType<typeof vi.fn>;
+      };
+      reg.getTool.mockImplementation((name: string) =>
+        name === 'skill'
+          ? {
+              unloadSkills: vi.fn(),
+              clearLoadedSkills: vi.fn(),
+              trackSkills: vi.fn(),
+              getGenuineSkillBodyOutputs: () => genuineOutputs,
+            }
+          : null,
+      );
+
+      const { history } = await makeReadFileResponses(5);
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory: vi.fn(),
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
+
+      const mcSpy = vi.mocked(microcompactHistory);
+      mcSpy.mockClear();
+
+      const stream = client.sendMessageStream(
+        [{ text: 'hi' }],
+        new AbortController().signal,
+        'prompt-mc-provenance-wiring',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      // The registry's provenance set must reach microcompactHistory
+      // verbatim: dropping the option at this call site shipped green
+      // while the R3-1 residency gate never engaged in production.
+      expect(mcSpy).toHaveBeenCalled();
+      expect(mcSpy.mock.calls[0]![3]?.genuineSkillBodyOutputs).toBe(
+        genuineOutputs,
+      );
+    });
+
     it('does not abort the turn when microcompaction cleanup fails', async () => {
       const { markReadEvictedFromHistory } = mockFileReadCacheStub();
       markReadEvictedFromHistory.mockImplementation(() => {

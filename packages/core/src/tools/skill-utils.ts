@@ -486,13 +486,21 @@ export function reconcileLoadedSkillTracking(
  * unlike a blanket clear, resident bodies elsewhere keep their tracking.
  * A skill with ANOTHER resident body keeps its tracking too: un-tracking
  * it would disarm the dedup guard while a body is still resident, letting
- * a duplicate body through on the next invoke. If ANY stripped body's call
- * id cannot be resolved to a name — including when other bodies in the
+ * a duplicate body through on the next invoke. Classification is by call
+ * id, NOT by output shape (R4-1): the scheduler's persistence gate
+ * rewrites large genuine bodies into `<persisted-output>` stubs before
+ * they enter history, and a shape/provenance check would skip such a
+ * stripped response — leaving its skill tracked with no resident body,
+ * the deadlock this PR exists to eliminate. The strip direction is
+ * fail-open on purpose: over-un-tracking costs at most one duplicate
+ * body on the next invoke, while under-un-tracking deadlocks reload
+ * (the reconcile direction stays provenance-gated instead, where the
+ * asymmetry is reversed). If ANY stripped skill response's call id
+ * cannot be resolved to a name — including when other responses in the
  * same batch DO resolve — tracking is cleared wholesale instead:
- * over-clearing only costs one duplicated body on the next invoke, while
- * leaving the stripped body's skill tracked makes it unreloadable behind
- * the dedup guard. Marker-matching outputs SkillTool never produced
- * (spoofed command results) count as neither dropped nor unresolvable.
+ * over-clearing only costs one duplicated body per skill on re-invoke,
+ * while leaving the stripped body's skill tracked makes it unreloadable
+ * behind the dedup guard.
  */
 export function unloadSkillsFromEntries(
   entries: Content[],
@@ -507,12 +515,13 @@ export function unloadSkillsFromEntries(
   for (const entry of entries) {
     for (const part of entry.parts ?? []) {
       const fr = part.functionResponse;
-      if (
-        fr?.name !== ToolNames.SKILL ||
-        !isProvenSkillBody(fr.response?.['output'], genuineOutputs)
-      ) {
+      if (fr?.name !== ToolNames.SKILL) {
         continue;
       }
+      // Call-id classification deliberately ignores the output content:
+      // a persistence-stubbed body (R4-1) carries neither markers nor
+      // the recorded provenance string, yet its skill was tracked when
+      // SkillTool returned the pre-stub body.
       const resolved = fr.id ? callIdToSkillName.get(fr.id) : undefined;
       if (resolved?.length === 1) {
         dropped.add(resolved[0]!);
