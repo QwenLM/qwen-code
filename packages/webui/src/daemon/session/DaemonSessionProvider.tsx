@@ -1459,9 +1459,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             activePromptsRef.current.has(`${activeSession.sessionId}:shell`);
           hasCurrentSessionActivePrompt = hasSessionActivePrompt;
           hasCurrentSessionActivePromptRef.current = hasSessionActivePrompt;
-          setPromptStatus((current) =>
-            hasSessionActivePrompt() ? 'streaming' : current,
-          );
+          setPromptStatus(hasSessionActivePrompt() ? 'streaming' : 'idle');
 
           const pendingLoad = pendingSessionLoadRef.current;
           const pendingLoadToResolve =
@@ -2371,6 +2369,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   passiveAssistantDoneTimerRef,
                   'passive_observer',
                   3000,
+                  () => setPromptStatus('idle'),
                 );
               }
               const pendingRepair = liveJournalRepairRef.current;
