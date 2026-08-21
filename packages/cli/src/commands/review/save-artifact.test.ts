@@ -467,6 +467,32 @@ describe('saveReviewArtifact', () => {
     expect(saved.verdict.convergence.zh).toBe('收敛情况：…');
   });
 
+  it('carries the matched recommendation codes into the artifact', () => {
+    // The machine-readable half. Dropped by the allow-list, a caller reading
+    // the durable record sees the prose and not the codes it would key on.
+    const paths = fixture();
+    writeJson(paths.composed, {
+      ...verdict,
+      recommendations: [
+        { code: 'root-cause-triage', basis: '2 file(s) …' },
+        { code: 'land-and-defer', basis: 'this round posts no Critical …' },
+      ],
+    });
+    saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+    const saved = JSON.parse(readFileSync(paths.out, 'utf8'));
+    expect(
+      saved.verdict.recommendations.map((r: { code: string }) => r.code),
+    ).toEqual(['root-cause-triage', 'land-and-defer']);
+    expect(saved.verdict.recommendations[0].basis).toBe('2 file(s) …');
+    rmSync(paths.out, { force: true });
+
+    // A present value of the wrong shape is refused like every sibling.
+    writeJson(paths.composed, { ...verdict, recommendations: 'nope' });
+    expect(() =>
+      saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' }),
+    ).toThrow(/recommendations/);
+  });
+
   it('PRESERVES an absent postedFresh and refuses a present one of the wrong shape', () => {
     // Same distinction as its sibling: a round that recorded no fresh count
     // is not a round that produced none.

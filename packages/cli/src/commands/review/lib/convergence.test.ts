@@ -7,7 +7,9 @@
 import { describe, it, expect } from 'vitest';
 import {
   diagnoseConvergence,
+  recommendationsFor,
   renderConvergenceDiagnosis,
+  renderMechanismHealth,
   MAX_RENDERED_CLUSTERS,
   type ConvergenceDiagnosis,
   type DraftedFinding,
@@ -647,6 +649,133 @@ describe('diagnoseConvergence — the trigger table', () => {
   });
 });
 
+describe('recommendationsFor — measurement to advice, no constants', () => {
+  const base: ConvergenceDiagnosis = {
+    round: 6,
+    posted: 4,
+    fresh: 2,
+    prevPosted: 4,
+    prevFresh: 2,
+    clusters: [{ file: 'src/a.ts', priorRounds: [3, 5], thisRound: 2 }],
+    volumeNotShrinking: true,
+    truncatedEvidence: false,
+    foreignEvidence: false,
+    mergedEvidence: false,
+  };
+
+  it('matches each code to the fact it names, and names it', () => {
+    const r = recommendationsFor(base);
+    expect(r.map((x) => x.code)).toEqual([
+      'root-cause-triage',
+      'batch-fixes',
+      'stem-surface',
+    ]);
+    // Every basis is a deterministic fact, not a judgement.
+    expect(r[0].basis).toContain('src/a.ts');
+    expect(r[1].basis).toContain('round 6 produced 2 first-time finding(s)');
+    expect(r[2].basis).toContain('did not resolve to critical');
+  });
+
+  it('offers the floor rung only where a rung is left to take', () => {
+    const atFloor = recommendationsFor({
+      ...base,
+      criticalFloorKind: 'explicit',
+    });
+    expect(atFloor.map((x) => x.code)).not.toContain('stem-surface');
+    expect(atFloor.map((x) => x.code)).toContain('batch-fixes');
+  });
+
+  it('matches land-and-defer only on a round with no open blocker', () => {
+    expect(
+      recommendationsFor({ ...base, openCriticals: 0 }).map((x) => x.code),
+    ).toContain('land-and-defer');
+    expect(
+      recommendationsFor({ ...base, openCriticals: 2 }).map((x) => x.code),
+    ).not.toContain('land-and-defer');
+    // Absent is not zero: an unrecorded count is not a count of none.
+    expect(recommendationsFor(base).map((x) => x.code)).not.toContain(
+      'land-and-defer',
+    );
+  });
+
+  it('matches nothing a signal did not fire', () => {
+    const volumeOnly = recommendationsFor({
+      ...base,
+      clusters: [],
+    });
+    expect(volumeOnly.map((x) => x.code)).not.toContain('root-cause-triage');
+    const clusterOnly = recommendationsFor({
+      ...base,
+      volumeNotShrinking: false,
+    });
+    expect(clusterOnly.map((x) => x.code)).toEqual(['root-cause-triage']);
+  });
+
+  it('is what the paragraph renders, not a second list beside it', () => {
+    // Derived rather than stored, so the codes a caller wires and the prose
+    // a human reads cannot describe different rounds.
+    const withLand = { ...base, openCriticals: 0 };
+    const prose = renderConvergenceDiagnosis(withLand);
+    expect(prose.en).toContain('shared root cause');
+    expect(prose.en).toContain('Batching the remaining fixes');
+    expect(prose.en).toContain('--severity-floor critical');
+    expect(prose.en).toContain('No Critical finding is open on this round');
+    expect(prose.zh).toContain('本轮没有未决的 Critical');
+    // ...and the narrowed floor case drops exactly the rung it dropped.
+    const atFloor = renderConvergenceDiagnosis({
+      ...base,
+      clusters: [],
+      criticalFloorKind: 'explicit',
+    });
+    expect(atFloor.en).not.toContain('dropping this PR');
+  });
+});
+
+describe('renderMechanismHealth — is the machinery working', () => {
+  it('says nothing when nothing is wrong with it', () => {
+    expect(
+      renderMechanismHealth({
+        postureNotEngaging: false,
+        anchorChainBroken: false,
+      }),
+    ).toBeNull();
+  });
+
+  it('states a posture that is engaged in name and not in effect', () => {
+    const r = renderMechanismHealth({
+      postureNotEngaging: true,
+      anchorChainBroken: false,
+    })!;
+    expect(r.en).toContain('engaged in name and not in effect');
+    expect(r.zh).toContain('名义上生效、实际未生效');
+    // Stated, never prescribed.
+    expect(r.en).toContain('Stated, not acted on');
+    expect(r.en).not.toMatch(/should |must |re-anchor/i);
+  });
+
+  it('states an anchor chain that has stopped', () => {
+    const r = renderMechanismHealth({
+      postureNotEngaging: false,
+      anchorChainBroken: true,
+    })!;
+    expect(r.en).toContain('re-reads the whole diff');
+    expect(r.zh).toContain('重读整个 diff');
+    // The design once prescribed a re-anchor round here; the measurements
+    // did not bear out its premise, so the shape is disclosed and nothing
+    // is recommended.
+    expect(r.en).not.toContain('raise');
+  });
+
+  it('states both when both hold', () => {
+    const r = renderMechanismHealth({
+      postureNotEngaging: true,
+      anchorChainBroken: true,
+    })!;
+    expect(r.en).toContain('engaged in name');
+    expect(r.en).toContain('re-reads the whole diff');
+  });
+});
+
 describe('renderConvergenceDiagnosis — what the author reads', () => {
   const base: ConvergenceDiagnosis = {
     round: 6,
@@ -667,7 +796,7 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
       'round 6 posted 4 inline comment(s), 2 of them reported for the first time',
     );
     expect(r.en).toContain('the previous round posted 4');
-    expect(r.en).toContain('`src/a.ts` (findings in rounds 3, 5, 2 more now)');
+    expect(r.en).toContain('`src/a.ts` (findings in rounds 3, 5; 2 more now)');
     expect(r.zh).toContain('第 6 轮发布了 4 条行内评论，其中 2 条是首次提出');
     expect(r.zh).toContain('第 3、5 轮已出过发现，本轮又有 2 条');
   });
@@ -680,8 +809,8 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
       ...base,
       clusters: [{ file: 'src/a.ts', priorRounds: [4], thisRound: 1 }],
     });
-    expect(one.en).toContain('`src/a.ts` (findings in round 4, 1 more now)');
-    expect(one.en).not.toContain('in rounds 4,');
+    expect(one.en).toContain('`src/a.ts` (findings in round 4; 1 more now)');
+    expect(one.en).not.toContain('in rounds 4;');
   });
 
   it('says the observation withheld nothing — scoped to the observation', () => {

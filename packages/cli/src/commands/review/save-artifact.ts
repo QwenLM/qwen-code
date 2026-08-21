@@ -33,6 +33,7 @@ import { EFFORT_LEVELS, type ReviewEffort } from './parse-args.js';
 import { REVIEWS_DIR } from './lib/paths.js';
 import { isSameFile } from './lib/same-file.js';
 import { volumeOf } from './lib/ledger.js';
+import type { Recommendation } from './lib/convergence.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 
 interface PersistedVerdict
@@ -292,7 +293,6 @@ function validateVerdict(value: unknown): PersistedVerdict {
       'Composed verdict.postedInline must be a non-negative integer.',
     );
   }
-  // The fresh count reads by the same rules as the total it is part of.
   // The convergence paragraph is the ONE clause the overflow ladder sheds
   // first, and the artifact is where a trimmed round's record lives. Dropped
   // by this allow-list, the durable record of a round whose body shed it
@@ -305,6 +305,30 @@ function validateVerdict(value: unknown): PersistedVerdict {
       en: string(c['en'], 'Composed verdict.convergence.en'),
       zh: string(c['zh'], 'Composed verdict.convergence.zh'),
     };
+  }
+  // The fresh count reads by the same rules as the total it is part of.
+  // The machine-readable half of the observation. Dropped by this
+  // allow-list, a caller reading the durable record sees the prose and not
+  // the codes it would key on.
+  const rawRecs = verdict['recommendations'];
+  let recommendations: Recommendation[] | undefined;
+  if (rawRecs !== undefined && rawRecs !== null) {
+    if (!Array.isArray(rawRecs)) {
+      throw new Error('Composed verdict.recommendations must be an array.');
+    }
+    recommendations = rawRecs.map((entry, i) => {
+      const r = object(entry, `Composed verdict.recommendations[${i}]`);
+      return {
+        code: string(
+          r['code'],
+          `Composed verdict.recommendations[${i}].code`,
+        ) as Recommendation['code'],
+        basis: string(
+          r['basis'],
+          `Composed verdict.recommendations[${i}].basis`,
+        ),
+      };
+    });
   }
   // The fresh count reads by the same rules as the total it is part of.
   const rawFresh = verdict['postedFresh'];
@@ -367,6 +391,7 @@ function validateVerdict(value: unknown): PersistedVerdict {
     ...(postedInline === undefined ? {} : { postedInline }),
     ...(postedFresh === undefined ? {} : { postedFresh }),
     ...(convergence === undefined ? {} : { convergence }),
+    ...(recommendations === undefined ? {} : { recommendations }),
     lowSignal:
       lowSignal === null
         ? null

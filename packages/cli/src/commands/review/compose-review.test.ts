@@ -9099,7 +9099,7 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     });
     expect(r.body).toContain('Convergence:');
     expect(r.body).toContain(
-      '`src/a.ts` (findings in rounds 2, 4, 2 more now)',
+      '`src/a.ts` (findings in rounds 2, 4; 2 more now)',
     );
     // An observation, not a gate: the verdict and its caps are untouched.
     expect(r.cappedBy).not.toContain('convergence');
@@ -9287,7 +9287,7 @@ describe('convergence diagnosis reaches the POSTED body', () => {
       ],
     });
     expect(r.body).toContain('Convergence:');
-    expect(r.body).toContain('findings in round 2, 1 more now');
+    expect(r.body).toContain('findings in round 2; 1 more now');
   });
 
   it('discloses a work list that was truncated or recovered from elsewhere', () => {
@@ -9815,6 +9815,175 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     expect(r.floorEnforced).toEqual([]);
     expect(r.body).not.toContain('already resolve to a critical posting floor');
     expect(parseLedger(r.body)?.floor).toBe('o');
+  });
+
+  it('carries the matched recommendations on the composed result', () => {
+    // The machine-readable half: a caller applies ITS policy to these codes
+    // without parsing prose, and without this module owning a threshold.
+    sideFile({
+      round: 4,
+      posted: 9,
+      fresh: 9,
+      findings: [{ id: 'R2-1', sev: 'S', file: 'src/a.ts', title: 'x' }],
+    });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'src/a.ts', line: 1, body: '**[Suggestion]** again' },
+      ],
+    });
+    const codes = (r.recommendations ?? []).map((x) => x.code);
+    expect(codes).toContain('root-cause-triage');
+    // No Critical posts this round, so the ending is available and named.
+    expect(codes).toContain('land-and-defer');
+    expect(r.body).toContain('No Critical finding is open on this round');
+    // Every code carries the fact it was matched from.
+    for (const rec of r.recommendations ?? []) {
+      expect(rec.basis.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('emits no recommendations on a round that produced no diagnosis', () => {
+    sideFile({ round: 4, posted: 9, fresh: 9, findings: [] });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'src/new.ts', line: 1, body: '**[Suggestion]** unrelated' },
+      ],
+    });
+    expect(r.body).not.toContain('Convergence:');
+    expect(r.recommendations).toBeUndefined();
+  });
+
+  it('discloses a posture that is engaged in name and not in effect', () => {
+    // The floor resolved to critical and Suggestion-level findings posted
+    // inline anyway — a mechanism failure, which is otherwise indis-
+    // tinguishable from a round with nothing to do.
+    // The default configuration: the state names no floor, so the reporting
+    // reading folds to `auto` and resolves critical from round 6 while the
+    // enforcement backstop — strict on purpose — fails open.
+    sideFile({ round: 5, posted: 1, fresh: 1, floor: 'c', findings: [] });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'a.ts', line: 1, body: '**[Critical]** boom' },
+        { path: 'b.ts', line: 2, body: '**[Suggestion]** nit' },
+      ],
+    });
+    expect(r.floorEnforced).toEqual([]);
+    expect(r.body).toContain('Mechanism health:');
+    expect(r.body).toContain('engaged in name and not in effect');
+
+    // With the floor NAMED, both readings agree and nothing is disclosed.
+    const named = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      severityFloor: 'auto',
+      criticalsInline: 1,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'a.ts', line: 1, body: '**[Critical]** boom' },
+        { path: 'b.ts', line: 2, body: '**[Suggestion]** nit' },
+      ],
+    });
+    expect(named.body).not.toContain('engaged in name and not in effect');
+  });
+
+  it('names the merged provenance end to end, not only in the unit', () => {
+    // The wiring runs pr-context -> side file -> prevLedgerFacts -> the
+    // rendered caveat, and only the last hop had an assertion.
+    sideFile({
+      round: 4,
+      posted: 9,
+      fresh: 9,
+      foreign: true,
+      merged: true,
+      findings: [{ id: 'R2-1', sev: 'S', file: 'src/a.ts', title: 'x' }],
+    });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'src/a.ts', line: 1, body: '**[Suggestion]** again' },
+      ],
+    });
+    expect(r.body).toContain("merged over this account's own entries");
+    expect(r.body).toContain('so some of those rounds');
+  });
+
+  it('discloses an anchor chain that has stopped', () => {
+    // Two consecutive withholds mean every later round re-reads the whole
+    // diff until one closes cleanly — the closed loop measured at 119
+    // minutes on a PR whose code had not changed a line. The plan here
+    // names no fetched sha and the round caps, so this round withholds too.
+    sideFile({ round: 4, posted: 9, fresh: 9, findings: [] });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [{ path: 'a.ts', line: 1, body: '**[Critical]** boom' }],
+    });
+    expect(parseLedger(r.body)?.sha).toBeUndefined();
+    expect(r.body).toContain('Mechanism health:');
+    expect(r.body).toContain('re-reads the whole diff');
+
+    // A predecessor that DID anchor is a chain that has not stopped.
+    sideFile({
+      round: 4,
+      posted: 9,
+      fresh: 9,
+      sha: 'deadbeef00112233',
+      findings: [],
+    });
+    const anchored = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [{ path: 'a.ts', line: 1, body: '**[Critical]** boom' }],
+    });
+    expect(anchored.body).not.toContain('re-reads the whole diff');
+  });
+
+  it('agrees with the ledger about an out-of-bounds claimed id', () => {
+    // `idFor` refuses to carry an id the serializer would reject and mints a
+    // fresh one. Read as a re-post here, the marker's own work list would
+    // gain a round-N entry that entered no fresh count — one end calling a
+    // comment carried while the other calls it new. The list is SHORTENED
+    // on purpose: over a whole one the stray-id rescue already reaches this
+    // draft, so the bound is what carries the case here.
+    const long = `R2-${'9'.repeat(24)}`;
+    sideFile({
+      round: 4,
+      posted: 9,
+      fresh: 9,
+      dropped: 3,
+      findings: [{ id: 'R2-1', sev: 'S', file: 'src/a.ts', title: 'x' }],
+    });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/a.ts', line: 1, body: `**[Critical]** ${long}: boom` },
+      ],
+    });
+    expect(parseLedger(r.body)?.findings.map((x) => x.id)).toEqual(['R5-1']);
+    expect(r.postedFresh).toBe(1);
+    expect(parseLedger(r.body)?.fresh).toBe(1);
   });
 
   it('names an auto-resolved floor the way the enforcement note does', () => {
