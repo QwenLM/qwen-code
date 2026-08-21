@@ -152,7 +152,6 @@ interface PlanReport {
   worktreePath?: unknown;
   mergeBaseSha?: unknown;
   host?: unknown;
-  incremental?: unknown;
   repositoryContext?: unknown;
   /**
    * The two size fields the topology gate reads (#9242) and the ones
@@ -170,6 +169,163 @@ interface PlanReport {
   srcDiffLines?: unknown;
   diffLines?: unknown;
   budget?: { agentToolBudget?: unknown; reverseAuditRounds?: unknown };
+  /** Present only on a `--since`-scoped round — see incrementalScopeOf. */
+  incremental?: unknown;
+}
+
+/**
+ * The `incremental.scope` block a `--since`-scoped plan carries, re-validated field by
+ * field: the plan is parsed off disk with an unchecked cast, and a malformed
+ * block must degrade to "not an incremental round" (full-scope briefs, which
+ * are always safe) rather than render `undefined` into an agent's contract.
+ */
+interface IncrementalScope {
+  anchor: string;
+  deltaFiles: string[];
+  interaction: Array<{ path: string; importsChanged: string[] }>;
+}
+
+/**
+ * The per-file scope bullets for ONE chunk's files — uncapped, because the
+ * agent holding that chunk is the sole reviewer of those files and has no
+ * other source for their class.
+ */
+function chunkScopeBullets(
+  incremental: IncrementalScope,
+  chunk: DiffChunk | undefined,
+): string[] {
+  if (!chunk) return [];
+  const paths = new Set(
+    (Array.isArray(chunk.files) ? chunk.files : [])
+      .map((f) => f?.path)
+      .filter((p): p is string => typeof p === 'string'),
+  );
+  const delta = incremental.deltaFiles.filter((p) => paths.has(p));
+  const seam = incremental.interaction.filter((e) => paths.has(e.path));
+  if (delta.length === 0 && seam.length === 0) return [];
+  return [
+    "Your territory's files, by scope class:",
+    ...delta.map(
+      (p) =>
+        `- ${inertPath(p)} — **changed since the last round**: review its hunks in full.`,
+    ),
+    ...seam.map(
+      (e) =>
+        `- ${inertPath(e.path)} — **interaction only**: cleared last round, back in ` +
+        `scope because it imports ${e.importsChanged.map(inertPath).join(', ')}. ` +
+        `Review that seam, not the rest of its diff.`,
+    ),
+  ];
+}
+
+const SCOPE_LIST_CAP = 30;
+/** Edge lists are capped per entry in the WHOLE-DIFF frame — the entry cap
+ *  alone still let one interaction row carry hundreds of imports into every
+ *  brief. The chunk-level bullets are uncapped on purpose: that agent is the
+ *  sole reviewer of its files' seams and has nowhere to recover a tail. */
+const SCOPE_EDGE_CAP = 8;
+function cappedEdges(edges: readonly string[]): string {
+  const shown = edges.slice(0, SCOPE_EDGE_CAP).map(inertPath);
+  const rest = edges.length - SCOPE_EDGE_CAP;
+  return shown.join(', ') + (rest > 0 ? ` (+${rest} more)` : '');
+}
+/**
+ * The per-file scope lists a whole-diff brief renders under its incremental
+ * frame. Capped per class: past the cap the tail is counted, not listed —
+ * the plan's own `incremental.scope` block remains the complete record.
+ *
+ * This doc used to sit above `chunkScopeBullets`, the function that is
+ * explicitly UNCAPPED, where hover picked it up and the cap rationale read
+ * as documentation of its own contradiction.
+ */
+function scopeFileLists(incremental: IncrementalScope): string[] {
+  const cap = <T>(items: T[], render: (item: T) => string): string => {
+    const shown = items.slice(0, SCOPE_LIST_CAP).map(render);
+    const rest = items.length - SCOPE_LIST_CAP;
+    return shown.join(', ') + (rest > 0 ? ` (+${rest} more)` : '');
+  };
+  const out: string[] = [];
+  if (incremental.deltaFiles.length > 0) {
+    out.push(
+      `Changed since the last round (full review): ` +
+        `${cap(incremental.deltaFiles, inertPath)}.`,
+    );
+  }
+  if (incremental.interaction.length > 0) {
+    out.push(
+      `Interaction only (cleared last round; check the seam with what each ` +
+        `imports): ${cap(
+          incremental.interaction,
+          (e) =>
+            `${inertPath(e.path)} (imports ${cappedEdges(e.importsChanged)})`,
+        )}.`,
+    );
+  }
+  return out;
+}
+
+function incrementalScopeOf(report: PlanReport): IncrementalScope | null {
+  // `incremental.scope`, not `incremental`: the outer block is the anchor
+  // RULING (`since`/`effective`/`reason`), and the scope it produced is
+  // nested under it — absent on every refusal and every up-to-date round, so
+  // reading the outer object for these fields would find nothing anyway. Both
+  // levels stay defensively parsed: the plan is `JSON.parse`d with an
+  // unchecked cast, and a malformed block must degrade to "not an incremental
+  // round" (full-scope briefs, which are always safe) rather than render
+  // `undefined` into an agent's contract.
+  const raw = (report.incremental as { scope?: unknown } | undefined | null)
+    ?.scope as
+    | {
+        anchor?: unknown;
+        deltaFiles?: unknown;
+        interaction?: unknown;
+      }
+    | undefined
+    | null;
+  if (!raw || typeof raw.anchor !== 'string' || raw.anchor === '') return null;
+  const strings = (v: unknown): string[] =>
+    Array.isArray(v)
+      ? v.filter((s): s is string => typeof s === 'string' && s.length > 0)
+      : [];
+  const interaction = Array.isArray(raw.interaction)
+    ? raw.interaction
+        .filter(
+          (e): e is { path: string; importsChanged?: unknown } =>
+            !!e &&
+            typeof (e as { path?: unknown }).path === 'string' &&
+            (e as { path: string }).path.length > 0 &&
+            // An interaction entry IS its edge: with no surviving
+            // importsChanged the brief would read "because it imports ,
+            // which changed" — a seam pointing at nothing.
+            strings((e as { importsChanged?: unknown }).importsChanged).length >
+              0,
+        )
+        .map((e) => ({
+          path: e.path,
+          importsChanged: strings(e.importsChanged),
+        }))
+    : [];
+  // The SAME validity notion the roster applies
+  // (`incrementalInteractionPaths`): a partially corrupt delta list
+  // invalidates the block wholesale. The two consumers used to disagree —
+  // the roster widened on a list this function still filtered and narrowed
+  // with, so one plan told a chunk agent "interaction only" for a file the
+  // roster said it could not safely classify.
+  if (
+    !Array.isArray(raw.deltaFiles) ||
+    raw.deltaFiles.some((p) => typeof p !== 'string')
+  ) {
+    return null;
+  }
+  const deltaFiles = strings(raw.deltaFiles);
+  // Degrade-to-full-scope means DEGRADE: a block whose lists all failed
+  // validation must not render an incremental frame with zero scope bullets.
+  if (deltaFiles.length === 0 && interaction.length === 0) return null;
+  return {
+    anchor: raw.anchor,
+    deltaFiles,
+    interaction,
+  };
 }
 
 /** A heavy file's entry, which is the only kind an invariant agent can be built from. */
@@ -558,6 +714,70 @@ export function buildChunkAgentPrompt(
     );
   }
 
+  // Incremental rounds carry two scopes in one diff, and the difference is
+  // the agent's whole brief for the second kind: an interaction file's diff
+  // was already reviewed clean once, and re-litigating it from scratch is how
+  // an incremental round quietly costs what it saved — or worse, re-reports
+  // findings the previous round already ruled on.
+  const incremental = incrementalScopeOf(report);
+  if (incremental) {
+    const chunkPaths = new Set(
+      (Array.isArray(chunk.files) ? chunk.files : [])
+        .map((f) => f?.path)
+        .filter((p): p is string => typeof p === 'string'),
+    );
+    const deltaHere = incremental.deltaFiles.filter((p) => chunkPaths.has(p));
+    const seamHere = incremental.interaction.filter((e) =>
+      chunkPaths.has(e.path),
+    );
+    const lines = [
+      '',
+      `**This is an INCREMENTAL round** — the diff holds only what changed since the ` +
+        `previous clean review round (anchor \`${inertPath(incremental.anchor.slice(0, 12))}\`), ` +
+        `plus still-clean files one import hop from a change. Your files' scopes:`,
+    ];
+    if (deltaHere.length > 0) {
+      lines.push(
+        ...deltaHere.map(
+          (p) =>
+            `- ${inertPath(p)} — **changed since the last round**: its hunks here are ` +
+            `its full change against the review's base (the previous round's clean verdict ` +
+            `no longer covers this file); review them in full, as usual.`,
+        ),
+      );
+    }
+    if (seamHere.length > 0) {
+      lines.push(
+        ...seamHere.map(
+          (e) =>
+            `- ${inertPath(e.path)} — **unchanged, cleared by the previous round**, back in ` +
+            `scope because it imports ${e.importsChanged.map(inertPath).join(', ')}, ` +
+            `which ` +
+            `changed. Review the INTERACTION only: do this file's uses of what it imports ` +
+            `still hold — signatures, argument contracts, invariants, error behaviour — ` +
+            `now that the imported side moved? Read the changed side from the worktree to ` +
+            `answer that. Do not re-review the rest of this file's diff from scratch, and ` +
+            `do not report defects in it that the change it imports does not affect.`,
+        ),
+      );
+      lines.push(
+        // The generic duties below this block (the line-by-line walk, the
+        // deletion audit, every-dimension ownership) predate incremental
+        // scope and address the ordinary case. Without this sentence an
+        // agent obeys whichever instruction it read last — measured in
+        // review: told "interaction only", then told "audit all deletions
+        // in your territory", it re-opened round-1 findings.
+        `Where those general duties below conflict with a file's scope class ` +
+          `above, the scope class WINS: for an interaction file, every duty ` +
+          `applies only to its interaction surface with what changed.`,
+      );
+    }
+    // A frame with a header and no scope bullets tells the agent nothing and
+    // implies its files are out of scope — render it only when at least one
+    // of this chunk's files actually carries a class.
+    if (deltaHere.length > 0 || seamHere.length > 0) parts.push(...lines);
+  }
+
   parts.push(
     '',
     'You may also `read_file` the **full source files** above from the worktree whenever a ' +
@@ -871,9 +1091,53 @@ function diffReadingBlock(
     (c) => c.maxLineChars > READ_FILE_CHAR_CAP,
   );
 
+  // Whole-diff readers (dimension agents, auditors) get the incremental frame
+  // once, up front: without it, "the diff" reads as the whole PR, and an agent
+  // that notices most of the PR is absent invents its own explanation — or
+  // walks the worktree re-reviewing scope the previous round already cleared.
+  const incremental = incrementalScopeOf(report);
+
   const parts = [
     '## The diff',
     '',
+    ...(incremental
+      ? [
+          `**Incremental round.** This diff is scoped to what changed since the previous ` +
+            `clean review round (anchor \`${inertPath(incremental.anchor.slice(0, 12))}\`), plus ` +
+            `still-clean files one import hop from a change — each of those is in scope ` +
+            `only for its interaction with what it imports. The rest of the change was ` +
+            `reviewed clean last round and is deliberately absent; do not go find it. ` +
+            `A defect in absent code is reportable only when a change IN this diff is ` +
+            `what makes it wrong now. Where the sweep duties below (walk every ` +
+            `hunk, audit every deletion, own every dimension) conflict with a ` +
+            `file's scope class, the scope class WINS: for an interaction file ` +
+            `every duty applies only to its interaction surface with what ` +
+            `changed — its other hunks were cleared last round and re-reporting ` +
+            `them is the cost this scoping exists to prevent.`,
+          '',
+          // A whole-diff reader must know WHICH file carries which scope —
+          // told only that the two classes coexist, it cannot tell the file
+          // owed a full review from the one owed a seam check. Capped so a
+          // wide round cannot flood the brief; the chunk briefs always carry
+          // their own files' classes in full.
+          ...scopeFileLists(incremental),
+          '',
+        ]
+      : []),
+    // A CHUNK-scoped role brief (the reverse auditors) owns one territory and
+    // is its sole reviewer: the capped global list above can elide its own
+    // files past entry 30, leaving the agent no way to learn their class or
+    // recover the tail. Its own files are therefore listed in full, exactly
+    // as the bare chunk agent's brief lists them.
+    ...(incremental && scoped
+      ? [
+          ...chunkScopeBullets(
+            incremental,
+            chunks.find((c) => c.id === chunkId),
+          ),
+          '',
+        ]
+      : []),
     scoped
       ? `Your territory is **chunk ${chunkId}** of the diff. It is a file on disk — ` +
         'nothing in this prompt contains the code. Read your chunk:'
@@ -1541,11 +1805,13 @@ export function buildRoleBrief(
           `\`${wt}\`. Do not \`cd\` elsewhere and do not build the user's main checkout.`,
       );
     }
-    // On a delta-scoped incremental round the probe's range must match the
-    // round's scope: test-efficacy recomputes its own diff as base..HEAD, and
-    // handed the merge base it would reverse hunks and delete mutants from
-    // commits an earlier round already reviewed — spending the probe budget
-    // out of scope and reporting survivors this round's diff never contains.
+    // On a narrowed incremental round the probe's range must cover the
+    // published scope: test-efficacy recomputes its own diff as base..HEAD.
+    // The published hunks are hunks of `diffBase..head` — the merge-base
+    // range the producer assembled them from — so that range covers every
+    // one of them and never a byte the PR's diff does not display; the
+    // anchor range, by contrast, can carry hunks an undo round netted out
+    // of the PR's diff, which no comment can anchor on.
     const inc = report.incremental as
       | { effective?: unknown; upToDate?: unknown; diffBase?: unknown }
       | undefined;

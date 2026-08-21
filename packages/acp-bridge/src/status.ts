@@ -176,6 +176,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
   workspaceMemoryDream: 'qwen/control/workspace/memory/dream',
   // Runtime MCP server mutation ext-methods
   sessionTaskCancel: 'qwen/control/session/task/cancel',
+  sessionGoalControl: 'qwen/control/session/goal/control',
   sessionGoalClear: 'qwen/control/session/goal/clear',
   /**
    * Read a live session's `/goal` state. The active goal lives only in the

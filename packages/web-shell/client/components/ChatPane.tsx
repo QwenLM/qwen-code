@@ -17,6 +17,7 @@ import {
   useActions,
   useConnection,
   useDaemonFollowupSuggestion,
+  useDaemonSessionOwnerGuard,
   useStreamingState,
   useTranscriptHistory,
   useTranscriptStore,
@@ -61,6 +62,9 @@ import {
 } from '../utils/todos';
 import { findMonitorTaskForTool } from '../utils/monitorTasks';
 import { invokeSlashCommandHandler } from '../utils/slash-command-action';
+import { parseWebShellGoalCommand } from '../utils/goalCondition';
+import { buildGoalControlRequest } from '../utils/goalControlRequest';
+import { isGoalGateBlocked } from '../utils/goalGate';
 import type { WebShellSlashCommandHandler } from '../App';
 import { getModelDisplayName } from '../utils/modelDisplay';
 import {
@@ -83,6 +87,9 @@ import { MessageList } from './MessageList';
 import { StreamingStatus } from './StreamingStatus';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
 import { QueuedPromptDisplay } from './QueuedPromptDisplay';
+import { GoalStatusStrip } from './GoalStatusStrip';
+import composerStatusStyles from './ComposerStatusStack.module.css';
+import { GoalEditDialog } from './dialogs/GoalEditDialog';
 import { ToolApproval } from './messages/ToolApproval';
 import { AskUserQuestion } from './messages/AskUserQuestion';
 import type {
@@ -90,6 +97,7 @@ import type {
   TurnOutputOpenRequest,
 } from './artifacts/TurnOutputs';
 import { TURN_OUTPUT_KINDS } from './artifacts/TurnOutputs';
+import { useArtifactWorkspaceTarget } from './artifacts/useArtifactWorkspaceTarget';
 import {
   getArtifactsByTurn,
   getFileChangesByTurn,
@@ -181,6 +189,7 @@ export interface ChatPaneProps {
   onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
   /** Host slash-command callback shared with the main chat composer. */
   onSlashCommand?: WebShellSlashCommandHandler;
+  onOpenGoals?: () => void;
   onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
   onOpenMonitor?: (
     task: DaemonSessionMonitorTaskStatus,
@@ -222,6 +231,7 @@ export function ChatPane({
   onError,
   onImageIngestionNotice,
   onSlashCommand,
+  onOpenGoals,
   onRightPanelOpen,
   onOpenMonitor,
   onPaneArtifactsChange,
@@ -240,7 +250,11 @@ export function ChatPane({
     useWebShellCustomization();
   const connection = useConnection();
   const actions = useActions();
+  const sessionOwnerGuard = useDaemonSessionOwnerGuard();
   const workspace = useWorkspace();
+  const attachmentWorkspaceTarget = useArtifactWorkspaceTarget(
+    connection.workspaceCwd,
+  );
   const sessionCatalogController = useSessionCatalogController(
     workspace.client,
   );
@@ -249,6 +263,39 @@ export function ChatPane({
   const transcriptHistory = useTranscriptHistory();
   const store = useTranscriptStore();
   const streamingState = useStreamingState();
+  const [goalControlBusy, setGoalControlBusy] = useState(false);
+  const goalControlOpSeqRef = useRef(0);
+  const goalControlOwnerRef = useRef<
+    { opId: number; sessionId: string | undefined } | undefined
+  >(undefined);
+  const [goalEditOpen, setGoalEditOpen] = useState(false);
+  const [goalEditError, setGoalEditError] = useState<string | null>(null);
+  const connectionRef = useRef(connection);
+  connectionRef.current = connection;
+  const connectionGoalComplete =
+    connection.goalState?.goal?.status === 'complete';
+  const liveGoalSnapshot = connectionGoalComplete
+    ? undefined
+    : connection.goalState;
+  useEffect(() => {
+    const owner = goalControlOwnerRef.current;
+    // Release the busy latch only when no control operation owns it, or when
+    // its owner belongs to a session we have left (that operation's `finally`
+    // can no longer release it here). Releasing it while an operation is still
+    // in flight — which a server-side goal replacement would otherwise do —
+    // re-enables the strip and lets a second control dispatch against the same
+    // expected revision, so one of the two loses with a 409.
+    if (!owner || owner.sessionId !== connection.sessionId) {
+      goalControlOwnerRef.current = undefined;
+      setGoalControlBusy(false);
+    }
+    setGoalEditOpen(false);
+    setGoalEditError(null);
+  }, [
+    connection.goalState?.goal?.goalId,
+    connection.sessionId,
+    connectionGoalComplete,
+  ]);
   const { artifacts } = useSessionArtifacts();
   const openSubagentDetails = useCallback(
     (tool: ACPToolCall) => {
@@ -534,6 +581,7 @@ export function ChatPane({
     queuedTexts,
     enqueuePrompt,
     removeQueuedPrompt,
+    insertQueuedPrompt,
     editQueuedPrompt,
     editLastQueuedPrompt,
     clearQueuedPrompts,
@@ -545,7 +593,9 @@ export function ChatPane({
     canMutateMidTurn,
     canQueryMidTurn,
     canInjectMidTurnMedia,
+    workspaceFileActions: attachmentWorkspaceTarget?.actions,
     streamingState,
+    holdQueuedPromptsLocally: isGoalGateBlocked(connection),
     sessionActions: actions,
     store,
     editorRef,
@@ -565,6 +615,86 @@ export function ChatPane({
     return undefined;
   }, [messages, isResponding]);
 
+  const controlGoal = useCallback(
+    async (
+      action: 'replace' | 'edit' | 'pause' | 'resume' | 'clear',
+      objective?: string,
+    ) => {
+      const busyOwner = sessionOwnerGuard.capture();
+      const busySessionId = connectionRef.current.sessionId;
+      const expectedGoalId = connectionRef.current.goalState?.goal?.goalId;
+      const opId = ++goalControlOpSeqRef.current;
+      goalControlOwnerRef.current = { opId, sessionId: busySessionId };
+      setGoalControlBusy(true);
+      try {
+        const snapshot = (await actions.getGoal()).snapshot;
+        const goal = snapshot.goal;
+        if (
+          (action === 'replace' || action === 'edit') &&
+          goal?.goalId !== expectedGoalId
+        ) {
+          throw new Error(t('goals.error.goalUnavailable'));
+        }
+        const request = buildGoalControlRequest(action, goal, objective, {
+          emptyObjective: t('goals.error.emptyCondition'),
+          goalUnavailable: t('goals.error.goalUnavailable'),
+        });
+        if (!busyOwner.isCurrent()) {
+          throw new Error(t('goals.error.goalUnavailable'));
+        }
+        try {
+          return await actions.controlGoal(request);
+        } catch (error) {
+          await actions.getGoal().catch(() => undefined);
+          throw error;
+        }
+      } finally {
+        // A newer operation (or a session change) owns the latch now; leave it
+        // to whoever owns it rather than releasing it under them.
+        if (goalControlOwnerRef.current?.opId === opId) {
+          goalControlOwnerRef.current = undefined;
+          if (connectionRef.current.sessionId === busySessionId) {
+            setGoalControlBusy(false);
+          }
+        }
+      }
+    },
+    [actions, sessionOwnerGuard, t],
+  );
+
+  const runGoalControl = useCallback(
+    (action: 'pause' | 'resume' | 'clear') => {
+      const owner = sessionOwnerGuard.capture();
+      void controlGoal(action).catch((error: unknown) => {
+        // A control dropped because the pane moved to another session is not a
+        // failure the user needs to see — `handleGoalEditSave` and the main
+        // composer swallow the same race.
+        if (!owner.isCurrent()) return;
+        reportError(error, t(`goals.error.${action}Failed`));
+      });
+    },
+    [controlGoal, reportError, sessionOwnerGuard, t],
+  );
+
+  const handleGoalEditSave = useCallback(
+    (objective: string) => {
+      const owner = sessionOwnerGuard.capture();
+      setGoalEditError(null);
+      void controlGoal('edit', objective)
+        .then(() => {
+          if (owner.isCurrent()) setGoalEditOpen(false);
+        })
+        .catch((error: unknown) => {
+          if (!owner.isCurrent()) return;
+          setGoalEditError(
+            error instanceof Error ? error.message : String(error),
+          );
+          reportError(error, t('goals.error.editFailed'));
+        });
+    },
+    [controlGoal, reportError, sessionOwnerGuard, t],
+  );
+
   const handleSubmit = useCallback(
     (
       text: string,
@@ -577,10 +707,67 @@ export function ChatPane({
       if (!trimmed && (images?.length ?? 0) === 0 && (files?.length ?? 0) === 0)
         return false;
       if (admissionPayloadLocked) return false;
+      // The host handler is documented as running before Web Shell handles a
+      // slash command, so it gets `/goal` first here exactly as it does in the
+      // main composer — otherwise an override works on one surface only.
       if (
         trimmed &&
         invokeSlashCommandHandler(text, onSlashCommandRef.current, reportError)
       ) {
+        return true;
+      }
+      if (/^\/goal(?:\s|$)/i.test(trimmed)) {
+        // The same guard App.tsx applies before any slash handling: a control
+        // that cannot reach the daemon must leave the text in the composer
+        // instead of consuming it, appending a transcript entry, and failing
+        // later at `requireSessionForAction` with only a toast.
+        if (
+          shouldBlockComposerSubmit({
+            connectionStatus: connection.status,
+            hasSession: Boolean(connection.sessionId),
+          })
+        ) {
+          return false;
+        }
+        if (
+          (images?.length ?? 0) > 0 ||
+          (files?.length ?? 0) > 0 ||
+          (metadata?.inputAnnotations?.length ?? 0) > 0
+        ) {
+          const message = t('goals.error.attachmentsUnsupported');
+          reportError(new Error(message), message);
+          return false;
+        }
+        const operation = parseWebShellGoalCommand(trimmed);
+        if (operation.kind === 'status') {
+          // A pane without a Goals surface (the side-task pane passes no
+          // handler) would otherwise consume the text and open nothing.
+          if (!onOpenGoals) {
+            reportError(
+              new Error(t('goals.error.goalsUnavailable')),
+              t('goals.error.goalsUnavailable'),
+            );
+            return false;
+          }
+          onOpenGoals();
+          return true;
+        }
+        if (operation.kind === 'error') {
+          const message = t('goals.error.requiresObjective', {
+            keyword: operation.keyword,
+          });
+          reportError(new Error(message), message);
+          return false;
+        }
+        const action = operation.kind === 'set' ? 'replace' : operation.kind;
+        const objective =
+          operation.kind === 'set' || operation.kind === 'edit'
+            ? operation.objective
+            : undefined;
+        store.appendLocalUserMessage(text);
+        void controlGoal(action, objective).catch((error: unknown) => {
+          reportError(error, `Failed to ${operation.kind} /goal`);
+        });
         return true;
       }
       if (
@@ -602,7 +789,17 @@ export function ChatPane({
           onFirstPromptAdmitted(trimmed);
         }
       };
-      if (streamingStateRef.current === 'idle') {
+      // Fail CLOSED on a hydrating `goalState`, exactly as the local hold
+      // above does: the load makes the composer writable before `goal()`
+      // resolves, and the daemon has no server-side prompt gate for an active
+      // Goal, so a direct send in that window bypasses the Goal queue.
+      if (
+        streamingStateRef.current === 'idle' &&
+        !isGoalGateBlocked({
+          sessionId: connection.sessionId,
+          goalState: connection.goalState,
+        })
+      ) {
         const admissionOwner = admissionOwnerRef.current;
         let admissionStarted = false;
         let admitted = false;
@@ -675,13 +872,20 @@ export function ChatPane({
       admissionPayloadLocked,
       catalogOwnerCwd,
       clearFollowup,
+      // The whole snapshot, not just the status: the gate distinguishes an
+      // absent (hydrating) snapshot from a Goal-less one, and both read as an
+      // undefined status.
+      connection.goalState,
       connection.sessionId,
       connection.status,
+      controlGoal,
       enqueuePrompt,
       onFirstPromptAdmitted,
       onImageIngestionNotice,
+      onOpenGoals,
       reportError,
       sessionCatalogController,
+      store,
       t,
     ],
   );
@@ -931,6 +1135,19 @@ export function ChatPane({
       data-testid="chat-pane"
       aria-label={headerLabel}
     >
+      {goalEditOpen && connection.goalState?.goal && (
+        <GoalEditDialog
+          objective={connection.goalState.goal.objective}
+          saving={goalControlBusy}
+          error={goalEditError}
+          onSave={handleGoalEditSave}
+          onClose={() => {
+            if (goalControlBusy) return;
+            setGoalEditOpen(false);
+            setGoalEditError(null);
+          }}
+        />
+      )}
       {!embedded && (
         <header
           className={`${styles.header} ${workspaceAccentClass ?? ''}`.trim()}
@@ -1113,14 +1330,37 @@ export function ChatPane({
               token count + cancel hint, but no rotating "witty" loading
               phrase. */}
           <StreamingStatus startedAt={activeTurnStartedAt} showPhrase={false} />
-          <QueuedPromptDisplay
-            prompts={queuedPrompts}
-            t={t}
-            canMutateMidTurn={canMutateMidTurn}
-            onDelete={removeQueuedPrompt}
-            onEdit={editQueuedPrompt}
-            onImagePreview={handleImagePreview}
-          />
+          {(queuedPrompts.length > 0 || liveGoalSnapshot?.goal) && (
+            <div
+              className={composerStatusStyles.root}
+              data-testid="composer-status-stack"
+            >
+              <QueuedPromptDisplay
+                prompts={queuedPrompts}
+                t={t}
+                canMutateMidTurn={canMutateMidTurn}
+                canInsertMidTurn={streamingState !== 'idle'}
+                onDelete={removeQueuedPrompt}
+                onInsert={insertQueuedPrompt}
+                onEdit={editQueuedPrompt}
+                onImagePreview={handleImagePreview}
+                onAttachmentPreview={handleAttachmentPreview}
+              />
+              {liveGoalSnapshot?.goal && (
+                <GoalStatusStrip
+                  snapshot={liveGoalSnapshot}
+                  busy={goalControlBusy}
+                  onEdit={() => {
+                    setGoalEditError(null);
+                    setGoalEditOpen(true);
+                  }}
+                  onPause={() => runGoalControl('pause')}
+                  onResume={() => runGoalControl('resume')}
+                  onClear={() => runGoalControl('clear')}
+                />
+              )}
+            </div>
+          )}
           {unknownPromptAdmission && (
             <div
               className={styles.admissionUnknown}

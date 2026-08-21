@@ -2807,6 +2807,23 @@ describe('mergeExcludeTools', () => {
     expect(config.getToolSearchThreshold()).toBe(10);
   });
 
+  it('should default tools.listDirectory.enabled to false', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+    expect(config.isLsToolEnabled()).toBe(false);
+  });
+
+  it('should enable list_directory when tools.listDirectory.enabled is true', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: { listDirectory: { enabled: true } },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.isLsToolEnabled()).toBe(true);
+  });
+
   it('should force tools.toolSearch.threshold to 0 in safe mode', async () => {
     process.argv = ['node', 'script.js', '--safe-mode'];
     const argv = await parseArguments();
