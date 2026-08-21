@@ -24,9 +24,15 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import { repoRelativeOf, REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
+import {
+  repoRelativeOf,
+  REVIEW_CACHE_DIR,
+  REVIEW_TMP_DIR,
+  tmpFile,
+} from './lib/paths.js';
 import { safeTarget } from '../../utils/paths.js';
 import { planEffortField } from './lib/effort.js';
 import type { ReviewEffort } from './parse-args.js';
@@ -89,6 +95,13 @@ type CaptureLocalResult = PlanReport & {
   incremental?: IncrementalBlock;
   /** Where this round's content anchor landed — Step 8 promotes it on a clean run. */
   cacheCandidatePath: string;
+  /**
+   * Where this target's review cache lives — resolved here, not predicted.
+   *
+   * Every ledger read and the Step 8 write name `<target>.json`, and
+   * `target` does not exist until this command derives it from `--file`.
+   */
+  cachePath: string;
 };
 
 /**
@@ -203,6 +216,71 @@ function resolveCachePath(given: string, target: string): string | null {
   if (!isDir) return given;
   const candidate = join(given, `${target}.json`);
   return existsSync(candidate) ? candidate : null;
+}
+
+/**
+ * How many blockers the cached ledger still holds open.
+ *
+ * A decided stop is not necessarily a CLEAN one: SKILL.md's two stop branches
+ * both open by rendering the cache's still-open findings, and the common shape
+ * is a user who commits without fixing a Critical — leaving a permanently
+ * clean tree that stops every later round. Without this the stop reached
+ * `qwen review run` with no verdict at all, so `--fail-on request-changes`
+ * returned 0 over a blocker the round itself was reporting as standing: the
+ * gate passed the moment the author stopped touching the tree, which is the
+ * inverse of its purpose.
+ *
+ * Read from the same file the skill's stop branches read. Unreadable, absent
+ * or malformed answers 0 — the round is then no worse off than it was.
+ */
+function openBlockersInCache(
+  cacheArg: string | undefined,
+  target: string,
+  source: string | undefined,
+): number {
+  const path =
+    cacheArg !== undefined
+      ? resolveCachePath(cacheArg, target)
+      : cachePathFor(target, source);
+  if (path === null) return 0;
+  try {
+    const raw = JSON.parse(readFileSync(path, 'utf8')) as {
+      findings?: unknown;
+    };
+    if (!Array.isArray(raw.findings)) return 0;
+    return raw.findings.filter((f) => {
+      const e = f as { severity?: unknown; status?: unknown };
+      return e?.severity === 'Critical' && e?.status === 'open';
+    }).length;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Where a target's review cache lives.
+ *
+ * The whole-tree round keeps `local.json`. A FILE review gets its own
+ * namespace and a digest of the source path, because the flattened token
+ * alone does not discriminate the subject and the ledger layer has no other
+ * key: `safeTarget` is not injective (`src/foo.ts` and `src_foo.ts` flatten
+ * to one token, so two file reviews shared one cache and erased each other's
+ * findings), and the token space reserves nothing (a root file literally
+ * named `local` produced the whole-tree key byte for byte, and one named
+ * `pr-<n>` produced PR <n>'s).
+ *
+ * The anchor gate's `source` check is the second layer, not the first: it can
+ * only refuse a cache the round already opened, which leaves the LEDGER —
+ * read and written by the orchestrator, not by the gate — sharing the file.
+ *
+ * Safe to change the spelling of because nothing predicts it any more: the
+ * plan publishes this path and every reader takes it from there. A cache
+ * under the old name is simply not found, which costs one full round.
+ */
+function cachePathFor(target: string, source: string | undefined): string {
+  if (source === undefined) return join(REVIEW_CACHE_DIR, `${target}.json`);
+  const digest = createHash('sha256').update(source).digest('hex').slice(0, 8);
+  return join(REVIEW_CACHE_DIR, `file-${target}-${digest}.json`);
 }
 
 function runCaptureLocal(args: CaptureLocalArgs): void {
@@ -546,8 +624,67 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   // a capture that SKIPPED files reviewed nothing AND could not read what it
   // skipped, so that round owes a "Not reviewed" section and must never read
   // as complete.
-  if (plan.diffLines === 0 && !incremental && capture.skipped.length === 0) {
+  if (
+    plan.diffLines === 0 &&
+    !incremental &&
+    capture.skipped.length === 0 &&
+    // …and the guard has to agree. `treeHeldStill` false means a write landed
+    // inside the capture window — the exact race the three-pass sampling
+    // exists to catch — so capture 0's empty diff describes a tree that no
+    // longer exists. Without this the round printed both "the working tree
+    // changed while the capture was being hashed" AND "the working tree is
+    // clean", stopped on the second, and recorded the just-written change as
+    // reviewed-and-clean. Same discipline as the skipped-content gate beside
+    // it: a stop is a DECIDED outcome, and neither unread nor moved content
+    // can be decided.
+    treeHeldStill
+  ) {
     nothingToReview = { reason: 'clean-tree' };
+  }
+
+  // …and the third decided shape, which the two above miss because both are
+  // gated on `!incremental`. A cached path that VANISHED (deleted, or the
+  // change discarded with `git checkout --`) is a change by design, so
+  // `stateChanged` is non-empty and the unchanged-since stop cannot fire —
+  // but it carries no section, the widening pulls nothing in, and the slice
+  // keeps zero. The plan then had `chunks: []` with an `incremental` block
+  // and no field at all: neither SKILL stop fired, `agent-prompt --roster`
+  // threw "the plan has no `chunks[]`" on the first diff-reading role, and
+  // the parent reported "Review did not complete" over a decided round.
+  if (
+    // …and only when no MORE SPECIFIC stop already fired. The
+    // unchanged-since-last-round round also keeps zero sections, and it has a
+    // reason of its own that SKILL.md branches on separately; overwriting it
+    // here sent that round down the wrong branch.
+    nothingToReview === undefined &&
+    incremental !== undefined &&
+    plan.chunks.length === 0 &&
+    capture.skipped.length === 0 &&
+    treeHeldStill
+  ) {
+    nothingToReview = { reason: 'scope-emptied' };
+  }
+
+  // Published at a name the PARENT can predict, beside the plan rather than
+  // inside it. `qwen review run` has to find this without knowing `--out`:
+  // that path is the orchestrator's to choose (SKILL.md says so, and it must,
+  // because the CLI-derived `<target>` token does not exist yet at Step 1),
+  // so a parent polling `qwen-review-<target>-plan.json` found nothing for
+  // every file review and reported "Review did not complete" over a decided
+  // round. This name is derived from the same `target` the parent derives.
+  if (nothingToReview) {
+    writeFileSync(
+      tmpFile(target, 'stop.json'),
+      `${JSON.stringify(
+        {
+          ...nothingToReview,
+          openBlockers: openBlockersInCache(args.cache, target, sourcePath),
+        },
+        null,
+        2,
+      )}\n`,
+      'utf8',
+    );
   }
 
   const diffPath = tmpFile(target, 'diff.txt');
@@ -575,6 +712,15 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     skippedFiles: capture.skipped,
     ...(incremental ? { incremental } : {}),
     ...(nothingToReview ? { nothingToReview } : {}),
+    // Where this target's cache lives, resolved by the deriver rather than
+    // predicted by the reader. Every ledger read and the Step 8 write name
+    // `<target>.json`, and `target` does not exist until this command derives
+    // it — `safeTarget` is not hand-reproducible in the cases that matter
+    // (past 64 characters it suffixes a digest, and symlink canonicalisation
+    // diverges from any hand recipe). A round-2 medium review of
+    // `srclink/foo.ts` predicted `srclink_foo.ts.json`, found nothing, and
+    // ruled on zero ledger entries over a Critical that still stood.
+    cachePath: cachePathFor(target, sourcePath),
     cacheCandidatePath,
     ...planEffortField(args.effort),
   };

@@ -195,15 +195,18 @@ const escapeRe = (s: string): string =>
  * The capture's own "nothing to review" verdict for this target, if it wrote
  * one this run.
  *
- * Read off the plan the CLI wrote, and fenced by the run epoch the same way
- * every other artifact here is: a plan left by an earlier run must not make
- * this one look decided.
+ * Read off a sidecar the CLI writes beside the plan, and fenced by the run
+ * epoch the same way every other artifact here is: a stop left by an earlier
+ * run must not make this one look decided.
  */
 function nothingToReviewFrom(
   cls: RunTargetClass,
   cutoffMs: number,
-): { reason: string } | null {
-  const name = `qwen-review-${planStemFor(cls)}-plan.json`;
+): { reason: string; openBlockers: number } | null {
+  // The capture's sidecar, not the plan: `--out` is the orchestrator's to
+  // choose, so the plan has no name the parent can predict. This one is
+  // derived from the same target the parent derives.
+  const name = `qwen-review-${planStemFor(cls)}-stop.json`;
   const found = newestArtifactSince(
     REVIEW_TMP_DIR,
     new RegExp(`^${escapeRe(name)}$`),
@@ -211,11 +214,18 @@ function nothingToReviewFrom(
   );
   if (!found) return null;
   try {
-    const plan = JSON.parse(readFileSync(found.path, 'utf8')) as {
-      nothingToReview?: { reason?: unknown };
+    const stop = JSON.parse(readFileSync(found.path, 'utf8')) as {
+      reason?: unknown;
+      openBlockers?: unknown;
     };
-    const reason = plan.nothingToReview?.reason;
-    return typeof reason === 'string' && reason !== '' ? { reason } : null;
+    if (typeof stop.reason !== 'string' || stop.reason === '') return null;
+    return {
+      reason: stop.reason,
+      openBlockers:
+        typeof stop.openBlockers === 'number' && stop.openBlockers > 0
+          ? stop.openBlockers
+          : 0,
+    };
   } catch {
     return null; // unreadable or not JSON: no claim either way
   }
@@ -660,9 +670,19 @@ async function runReview(args: RunReviewArgs): Promise<void> {
   // a field the CLI wrote into its own plan, not a sentence the model chose.
   const stop = nothingToReviewFrom(targetClass, cutoffMs);
   const completed = composed !== null || stop !== null;
+  // A decided stop is not automatically a CLEAN one. Both of SKILL.md's stop
+  // branches open by rendering the cache's still-open findings, and the common
+  // shape is a user who committed without fixing a Critical — a permanently
+  // clean tree that stops every later round. Reported with no verdict at all,
+  // `--fail-on request-changes` returned 0 over a blocker the round itself was
+  // calling standing: the gate passed the moment the author stopped touching
+  // the tree. The capture counts what the ledger still holds open; a stop that
+  // holds blockers carries the same event a blocking review would.
+  const stopEvent =
+    stop !== null && stop.openBlockers > 0 ? 'REQUEST_CHANGES' : null;
   const result: RunReviewResult = {
     completed,
-    event: composed?.event ?? null,
+    event: composed?.event ?? stopEvent,
     verdictLine: composed?.verdictLine ?? null,
     baseEvent: composed?.baseEvent ?? null,
     cappedBy: composed?.cappedBy ?? [],
