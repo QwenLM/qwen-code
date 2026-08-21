@@ -399,6 +399,12 @@ describe('AgentTool', () => {
       expect(tool.description).toContain(
         'foreground regular agent returns its result inline',
       );
+      expect(tool.description).toContain(
+        'an explicit `run_in_background: true` request is rejected',
+      );
+      expect(tool.description).toContain(
+        'a configured background default (`background: true` in a subagent definition) is rejected at the top level and downgraded to the foreground for nested launches',
+      );
     });
 
     it('explains how to continue reusable background agents', async () => {
