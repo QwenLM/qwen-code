@@ -337,6 +337,37 @@ describe('git extension helpers', () => {
       expect(mockGit.clone).not.toHaveBeenCalled();
     });
 
+    it('accepts Git 2.37 while preserving public network pinning', async () => {
+      mockGit.version.mockResolvedValue({ major: 2, minor: 37, patch: 0 });
+      vi.spyOn(dns, 'lookup').mockResolvedValue([
+        { address: '8.8.8.8', family: 4 },
+      ] as never);
+      const source = 'https://github.com/owner/repo.git';
+      mockGit.getRemotes.mockResolvedValue([
+        { name: 'origin', refs: { fetch: source } },
+      ]);
+
+      await cloneFromGit(
+        { source, type: 'git', networkPolicy: 'public' },
+        '/dest',
+      );
+
+      expect(simpleGit).toHaveBeenLastCalledWith('/dest', {
+        config: [
+          'http.curloptResolve=github.com:443:8.8.8.8',
+          'http.followRedirects=false',
+          'http.proxy=',
+          'protocol.allow=never',
+          'protocol.https.allow=always',
+        ],
+        unsafe: {
+          allowUnsafeConfigPaths: true,
+          allowUnsafeProtocolOverride: true,
+        },
+      });
+      expect(mockGit.clone).toHaveBeenCalled();
+    });
+
     it('passes explicit credentials through scoped Git config without changing the URL', async () => {
       vi.spyOn(dns, 'lookup').mockResolvedValue([
         { address: '8.8.8.8', family: 4 },
