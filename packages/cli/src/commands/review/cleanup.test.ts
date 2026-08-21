@@ -7,8 +7,15 @@ import { join } from 'node:path';
 const mocks = vi.hoisted(() => ({
   execFileSync: vi.fn(),
   existsSync: vi.fn((_path: string): boolean => false),
+  // The parameter is declared so the path-dependent implementations the
+  // symlink and workflow tests install stay assignable to this mock's type.
   lstatSync: vi.fn(
-    (): { isSymbolicLink: () => boolean; isDirectory: () => boolean } => ({
+    (
+      _path: string,
+    ): {
+      isSymbolicLink: () => boolean;
+      isDirectory: () => boolean;
+    } => ({
       isSymbolicLink: () => false,
       isDirectory: () => true,
     }),
@@ -148,7 +155,7 @@ describe('runCleanup', () => {
     mocks.findSymlinkedReviewWorkflowPath.mockReturnValue(undefined);
     mocks.lstatSync.mockImplementation((path: string) => {
       if (path === '/repo/.qwen/workflows') {
-        return { isSymbolicLink: () => false };
+        return { isSymbolicLink: () => false, isDirectory: () => true };
       }
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
     });
@@ -213,7 +220,10 @@ describe('runCleanup', () => {
         p === '/repo/.qwen/workflows/qwen-review-pr-123-plan.js' ||
         p === '/repo/.qwen/workflows/qwen-review-pr-123-fetch.js') as never,
     );
-    mocks.lstatSync.mockReturnValue({ isSymbolicLink: () => false });
+    mocks.lstatSync.mockReturnValue({
+      isSymbolicLink: () => false,
+      isDirectory: () => false,
+    });
     // The foreign entries sit in the listing an enumeration would read, so a
     // future sweep that over-deletes past this target's exact paths turns
     // the negative assertions below red instead of seeing an empty dir.
@@ -257,7 +267,10 @@ describe('runCleanup', () => {
         path === '/repo/.qwen/workflows/qwen-review-pr-123-plan.js' ||
         path === '/repo/.qwen/workflows/qwen-review-pr-123-fetch.js'
       ) {
-        return { isSymbolicLink: () => false };
+        return {
+          isSymbolicLink: () => false,
+          isDirectory: () => path === '/repo/.qwen/workflows',
+        };
       }
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
     });
@@ -332,7 +345,10 @@ describe('runCleanup', () => {
     );
     mocks.lstatSync.mockImplementation((path: string) => {
       if (path === '/repo/.qwen/workflows' || path === planPath) {
-        return { isSymbolicLink: () => path === planPath };
+        return {
+          isSymbolicLink: () => path === planPath,
+          isDirectory: () => path === '/repo/.qwen/workflows',
+        };
       }
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
     });
@@ -388,7 +404,7 @@ describe('runCleanup', () => {
     );
     mocks.lstatSync.mockImplementation((path: string) => {
       if (path === '/repo/.qwen/workflows') {
-        return { isSymbolicLink: () => false };
+        return { isSymbolicLink: () => false, isDirectory: () => true };
       }
       if (path === planPath) {
         throw new Error('EACCES');
