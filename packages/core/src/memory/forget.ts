@@ -222,19 +222,26 @@ function matchesForgetQuery(
   return buildAutoMemoryEntrySearchText(candidate).includes(queryLower);
 }
 
+/**
+ * Shared by the prompt ranking and the heuristic. One definition, because the
+ * model prompt must rank candidates in the same order the heuristic fallback
+ * deletes in, and each site has its own test: a one-sided change updates its
+ * own test, passes CI, and leaves the sibling silently stale.
+ */
+const byMtimeMsDesc = (a: IndexedForgetCandidate, b: IndexedForgetCandidate) =>
+  b.mtimeMs - a.mtimeMs;
+
 /** Literal query matches first, then the rest, each newest first. */
 function rankScopeForPrompt(
   scopeCandidates: IndexedForgetCandidate[],
   queryLower: string,
 ): IndexedForgetCandidate[] {
-  const byRecency = (a: IndexedForgetCandidate, b: IndexedForgetCandidate) =>
-    b.mtimeMs - a.mtimeMs;
   const matched = scopeCandidates
     .filter((candidate) => matchesForgetQuery(candidate, queryLower))
-    .sort(byRecency);
+    .sort(byMtimeMsDesc);
   const rest = scopeCandidates
     .filter((candidate) => !matchesForgetQuery(candidate, queryLower))
-    .sort(byRecency);
+    .sort(byMtimeMsDesc);
   return [...matched, ...rest];
 }
 
@@ -363,6 +370,16 @@ function selectByHeuristic(
   const matched = candidates.filter((candidate) =>
     matchesForgetQuery(candidate, queryLower),
   );
+  if (matched.length > limit) {
+    // The sibling prompt bound warns when it binds; this one deletes, so
+    // staying silent leaves no record of why entries recall still injects
+    // survived a forget that reported success.
+    debugLogger.warn(
+      `Managed auto-memory forget matched ${matched.length} entries but the ` +
+        `limit is ${limit}; ${matched.length - limit} matching entries were ` +
+        `not deleted.`,
+    );
+  }
   // Same per-scope split the model path uses. `listIndexedForgetCandidates`
   // pushes every user entry before any project entry, so a plain slice hands
   // all `limit` deletion seats to user scope once matches exceed it, deleting
@@ -371,7 +388,7 @@ function selectByHeuristic(
     FORGET_SCOPES.map((scope) =>
       matched
         .filter((candidate) => candidate.storageScope === scope)
-        .sort((a, b) => b.mtimeMs - a.mtimeMs),
+        .sort(byMtimeMsDesc),
     ),
     limit,
   ).map(({ topic, summary, filePath, entryIndex }) => ({
