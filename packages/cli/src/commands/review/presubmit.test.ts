@@ -296,7 +296,6 @@ const {
   detectPlatformKindMock,
   mrPresubmitFactsMock,
   ensureAoneAuthMock,
-  aoneCurrentUserMock,
 } = vi.hoisted(() => ({
   ghMock: vi.fn(),
   ghApiMock: vi.fn(),
@@ -311,7 +310,6 @@ const {
   detectPlatformKindMock: vi.fn(),
   mrPresubmitFactsMock: vi.fn(),
   ensureAoneAuthMock: vi.fn(),
-  aoneCurrentUserMock: vi.fn(),
 }));
 
 vi.mock('./lib/gh.js', async (importOriginal) => {
@@ -341,7 +339,6 @@ vi.mock('./lib/platform/aone.js', () => ({
 }));
 vi.mock('./lib/platform/aone-client.js', () => ({
   ensureAoneAuthenticated: ensureAoneAuthMock,
-  aoneCurrentUser: aoneCurrentUserMock,
 }));
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -1777,8 +1774,8 @@ describe('presubmitCommand — Aone targets', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     detectPlatformKindMock.mockReturnValue('aone');
-    ensureAoneAuthMock.mockReturnValue(undefined);
-    aoneCurrentUserMock.mockReturnValue('wenshao');
+    // The gate doubles as the account read (#9629 review).
+    ensureAoneAuthMock.mockReturnValue('wenshao');
     // The mr-view fetch returns author + live head in one call; a live head
     // equal to aoneArgs' commit_sha means "no drift" unless a test says so.
     mrPresubmitFactsMock.mockReturnValue({
@@ -1878,7 +1875,7 @@ describe('presubmitCommand — Aone targets', () => {
     // the `author !== ''` guard the comparison computes '' === '' → true and
     // downgrades someone else's MR as a self-review. House-pinned for the
     // GitHub path's identical guard (#9212's currentUserLogin tests).
-    aoneCurrentUserMock.mockReturnValue('');
+    ensureAoneAuthMock.mockReturnValue('');
     mrPresubmitFactsMock.mockReturnValue({ author: '', headSha: 'abc123' });
     const result = await runAonePresubmit();
     expect(result.isSelfPr).toBe(false);
@@ -1899,6 +1896,10 @@ describe('presubmitCommand — Aone targets', () => {
     expect((result.downgradeReasons as string[]).join(' ')).toContain(
       'MR metadata unavailable',
     );
+    // The gate is the ONLY whoami: the fail-closed path pays no account
+    // fetch after the thrown mr view — the pre-merge second spawn delayed
+    // exactly this report by its own retry budget (#9629 review).
+    expect(ensureAoneAuthMock).toHaveBeenCalledTimes(1);
   });
 
   it('reports head drift with null compare and fail-safe anchor risk', async () => {
