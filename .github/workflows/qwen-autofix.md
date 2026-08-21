@@ -46,6 +46,12 @@ titled with the job and step it belongs to. Editing rules: keep the pointer and
 the section id in sync, put new long-form reasoning here rather than in the
 YAML, and never delete a section without deleting its pointer.
 
+This file records _why the code is the way it is_, indexed by code site. For
+task-oriented guides — what a maintainer types and what happens next — see:
+
+- [`qwen-autofix-round-seed.md`](./qwen-autofix-round-seed.md) — seeding the
+  round counter with `@qwen-code /takeover from N`.
+
 ## Contents
 
 - [1. (top level) — One workflow for the whole autonomous-fix lifecycle:](#af-001)

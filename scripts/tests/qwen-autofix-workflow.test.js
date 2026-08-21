@@ -11893,18 +11893,22 @@ exit 1
       'GHCR returned at least 1000 tags',
     );
     expect(sandboxImageResolverScript).toContain('latestSemverTag(tags)');
+    // The pull and the inspect share ONE spawn guard (#9527 review): these
+    // pin the shared helper's wiring — endpoint pin, timeout, start-failure
+    // and exit reporting — plus the pull's label, not per-callsite copies.
     expect(sandboxImageResolverScript).toContain(
-      "spawn(command, ['pull', image]",
+      "spawnDockerCapture(command, ['pull', image]",
     );
-    expect(sandboxImageResolverScript).toContain('Timed out pulling ${image}');
+    expect(sandboxImageResolverScript).toContain('env: sandboxSpawnEnv(),');
+    expect(sandboxImageResolverScript).toContain('pulling ${image}');
     expect(sandboxImageResolverScript).toContain(
-      '::error::Timed out pulling ${image}',
+      '::error::Timed out ${label} after ${timeoutMs / 1000}s.',
     );
     expect(sandboxImageResolverScript).toContain(
-      "Failed to start '${command} pull ${image}'",
+      "::error::Failed to start '${command} ${args.join(' ')}': ${error.message}",
     );
     expect(sandboxImageResolverScript).toContain(
-      "::error::'${command} pull ${image}' exited with code ${code}",
+      "::error::'${command} ${args.join(' ')}' exited with code ${code}.",
     );
     expect(sandboxImageResolverScript).toContain(
       '::warning::Falling back from ${requestedImage} to latest GHCR semver ${fallbackImage}',
