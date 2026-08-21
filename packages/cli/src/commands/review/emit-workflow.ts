@@ -46,11 +46,12 @@ import {
 import { randomUUID } from 'node:crypto';
 import { dirname, resolve } from 'node:path';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
-import { buildLaunch } from './agent-prompt.js';
+import { buildLaunch, worktreeResidueOf } from './agent-prompt.js';
 import { recordPrompt } from './lib/prompt-record.js';
 import { readPlanReport, type PlanReport } from './lib/report.js';
 import {
   findSymlinkedReviewWorkflowPath,
+  inertPath,
   reviewWorkflowScriptPath,
 } from './lib/paths.js';
 import { requiredAgents, type RosterPlan } from './lib/roster.js';
@@ -112,6 +113,43 @@ export function buildFanOutRoster(
     );
   }
 
+  // The state of the shared review worktree AT BUILD TIME, probed the same
+  // way the hand-launched path does (agent-prompt's handler) and threaded
+  // into every build below: both paths go through `buildLaunch`, and its
+  // byte-parity invariant covers the residue evidence block too. A probe
+  // only the roster ran used to leave this path's briefs silent about a
+  // dirty tree — every dispatched agent then read foreign files as the PR's
+  // code, and no gate caught it, because each path records its own prompts
+  // and coverage compares like with like.
+  const residue = worktreeResidueOf(report);
+  if (residue.unmeasured) {
+    writeStderrLine(
+      `warning: could not measure whether the review worktree is clean (git status failed: ` +
+        `${inertPath(residue.unmeasured)}). Every brief built by this call says so; an unmeasured tree is ` +
+        'not a clean one.',
+    );
+  }
+  if (residue.paths.length > 0) {
+    const unlisted = residue.total - residue.paths.length;
+    writeStderrLine(
+      `warning: the review worktree carries changes its commit does not: ${residue.paths
+        .map(inertPath)
+        .join(', ')}` +
+        (unlisted > 0
+          ? ` (and ${unlisted} more — this list is capped; \`git status --porcelain --untracked-files=all\` has the full set)`
+          : '') +
+        '. Every brief built by this call names those paths and says a defect confined to them ' +
+        'is not a finding; the code-reading ones also carry the rule that evidence comes from ' +
+        '`git show HEAD:<path>`. Restore them BEFORE dispatching the workflow — a probe left in the ' +
+        "shared tree reads to an auditor as the PR's own code, and to Agent 7's build and test " +
+        "run as the PR's own failure — and then RE-RUN this same command so the script is rebuilt: " +
+        'the suppression above is baked into the briefs it writes, so dispatching it after a ' +
+        'restore tells every agent to drop findings in a file that is by then exactly the ' +
+        "PR's code. (The prompt records are overwritten, so a rebuild is what the delivery " +
+        'check compares against.)',
+    );
+  }
+
   return requiredAgents(plan).map((req): WorkflowAgentSpec => {
     const { key, prompt } = buildLaunch(
       report,
@@ -123,6 +161,7 @@ export function buildFanOutRoster(
         ? { chunk: req.chunk }
         : { role: req.role, file: req.file },
       rules,
+      residue,
     );
     // The same guard `--roster` makes, for the same reason: the roster is
     // what coverage holds the run to, and the key is what the brief was

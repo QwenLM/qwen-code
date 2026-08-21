@@ -16,7 +16,8 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { execFileSync } from 'node:child_process';
 
 const mocks = vi.hoisted(() => ({
   writeStdoutLine: vi.fn(),
@@ -34,7 +35,9 @@ import {
   EXIT_LEGACY_ORCHESTRATION,
 } from './emit-workflow.js';
 import { buildLaunch } from './agent-prompt.js';
-import { readRecordedPrompts } from './lib/prompt-record.js';
+import { briefPath, readRecordedPrompts } from './lib/prompt-record.js';
+import { worktreeResidue } from './lib/worktree.js';
+import { isolateHostGitConfig } from './lib/test-utils.js';
 import { requiredAgents, type RosterPlan } from './lib/roster.js';
 import { reviewWorkflowScriptPath } from './lib/paths.js';
 import type { PlanReport } from './lib/report.js';
@@ -412,5 +415,120 @@ describe('emit-workflow — what it writes', () => {
     // Stable for the same plan: re-running replaces its own file rather than
     // accumulating one per invocation.
     expect(reviewWorkflowScriptPath(a)).toBe(reviewWorkflowScriptPath(a));
+  });
+});
+
+describe('emit-workflow — residue parity with the hand-launched path', () => {
+  // The live #9207 shape: a shared review worktree carrying a modified file
+  // and a probe no commit contains. A REAL linked worktree, because the
+  // probe's identity gate fails closed for anything else — a bare repo
+  // fixture could not measure the healthy path.
+  let repo: string;
+  let tree: string;
+  let dir: string;
+  let planPath: string;
+  let gitIsolation: ReturnType<typeof isolateHostGitConfig>;
+
+  beforeEach(() => {
+    gitIsolation = isolateHostGitConfig();
+    repo = mkdtempSync(join(tmpdir(), 'emit-wf-residue-'));
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+    execFileSync('git', ['config', 'user.email', 't@t.t'], { cwd: repo });
+    execFileSync('git', ['config', 'user.name', 't'], { cwd: repo });
+    writeFileSync(join(repo, 'a.ts'), 'export const x = 1;\n');
+    execFileSync('git', ['add', '-A'], { cwd: repo });
+    execFileSync('git', ['commit', '-qm', 'head'], { cwd: repo });
+    tree = join(repo, '.qwen', 'tmp', 'review-wt');
+    mkdirSync(dirname(tree), { recursive: true });
+    execFileSync('git', ['worktree', 'add', '--detach', '-q', tree, 'HEAD'], {
+      cwd: repo,
+    });
+    writeFileSync(join(tree, 'a.ts'), 'export const x = 2;\n');
+    writeFileSync(join(tree, '__probe__.test.ts'), 'it("x", () => {});');
+
+    dir = mkdtempSync(join(tmpdir(), 'emit-wf-'));
+    planPath = join(dir, 'plan.json');
+    writeFileSync(
+      planPath,
+      JSON.stringify(localPlan({ worktreePath: tree })),
+      'utf8',
+    );
+  });
+
+  afterEach(() => {
+    rmSync(repo, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+    gitIsolation.dispose();
+  });
+
+  // The hand-launched path probes the worktree and threads what it finds
+  // into every build; this command goes through the same `buildLaunch`, so
+  // a dirty tree must change both sides identically. Compared on the
+  // BRIEFS, not the launch prompts: the residue block is evidence for the
+  // agent reading the brief, and the launch prompt only points at it — a
+  // prompt-level comparison passes with the block silently dropped.
+  it('bakes the same residue evidence the hand-launched roster would', () => {
+    const plan = localPlan({ worktreePath: tree });
+    const residue = worktreeResidue(tree);
+    expect(residue.paths.length).toBeGreaterThan(0);
+
+    const agents = buildFanOutRoster(plan, planPath);
+    const workflowBriefs = new Map(
+      agents.map((a) => [
+        a.key,
+        readFileSync(briefPath(planPath, a.key), 'utf8'),
+      ]),
+    );
+
+    for (const req of requiredAgents(plan as unknown as RosterPlan)) {
+      // The rebuild the hand-launched path does: `agent-prompt`'s handler
+      // probes the tree and threads the result into every build.
+      buildLaunch(
+        plan,
+        planPath,
+        req.role === 'chunk'
+          ? { chunk: req.chunk }
+          : { role: req.role as never, file: req.file },
+        undefined,
+        residue,
+      );
+      expect(workflowBriefs.get(req.key)).toBe(
+        readFileSync(briefPath(planPath, req.key), 'utf8'),
+      );
+    }
+    // The fixture IS dirty, so the paragraph must actually be present — a
+    // clean tree would let the byte comparison pass vacuously.
+    for (const brief of workflowBriefs.values()) {
+      expect(brief).toContain(
+        'These paths differ from the commit under review',
+      );
+    }
+  });
+
+  // The orchestrator's only notice that the tree it is about to dispatch
+  // against is not the commit the plan says it is. The hand-launched path
+  // prints it; this command owes the same.
+  it('warns on stderr like the hand-launched path, naming the dirty paths', () => {
+    buildFanOutRoster(localPlan({ worktreePath: tree }), planPath);
+    expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'the review worktree carries changes its commit does not',
+      ),
+    );
+    expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('a.ts'),
+    );
+  });
+
+  it('warns that an unmeasured tree is not a clean one', () => {
+    buildFanOutRoster(
+      localPlan({ worktreePath: join(dir, 'not-a-worktree') }),
+      planPath,
+    );
+    expect(mocks.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'could not measure whether the review worktree is clean',
+      ),
+    );
   });
 });

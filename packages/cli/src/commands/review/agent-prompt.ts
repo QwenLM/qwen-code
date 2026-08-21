@@ -1317,8 +1317,12 @@ function repositoryContextBlock(context: RepositoryContext): string[] {
  * have any. Resolved against the process cwd, like every other use of
  * `worktreePath` here: the report stores it repo-relative and review commands
  * run from the project root.
+ *
+ * Exported for `emit-workflow`, which must probe the tree exactly the way this
+ * command's handler does: both paths build through `buildLaunch`, and a probe
+ * only one of them ran is a divergence in the briefs the two paths bake.
  */
-function worktreeResidueOf(report: PlanReport): WorktreeResidue {
+export function worktreeResidueOf(report: PlanReport): WorktreeResidue {
   const wt = report.worktreePath;
   if (typeof wt !== 'string' || !wt) return { paths: [], total: 0 };
   return worktreeResidue(resolve(wt));
