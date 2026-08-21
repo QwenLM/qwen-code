@@ -8016,7 +8016,7 @@ async function runQwenServeImpl(
               daemonUrl: workerDaemonUrl,
               caCertPath: workerCaCertPath,
             });
-            if (shuttingDown || runtimeStartupSettled) {
+            if (shuttingDown || runtimeStartupError !== undefined) {
               throw new Error(
                 'Daemon stopped while the channel worker TLS trust check was running.',
               );

@@ -10945,6 +10945,76 @@ describe('runQwenServe channel worker supervisor', () => {
     }
   });
 
+  it('starts a TLS channel worker after the daemon runtime is ready', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-tls-lazy-')),
+    );
+    fs.mkdirSync(path.join(tmpDir, '.qwen'));
+    fs.writeFileSync(
+      path.join(tmpDir, '.qwen', 'settings.json'),
+      JSON.stringify({ channels: { telegram: { type: 'telegram' } } }),
+    );
+    const certPath = path.join(tmpDir, 'cert.pem');
+    const keyPath = path.join(tmpDir, 'key.pem');
+    fs.writeFileSync(certPath, TEST_TLS_CERT);
+    fs.writeFileSync(keyPath, TEST_TLS_KEY);
+    let capturedDeps:
+      | Parameters<typeof serverModule.createServeApp>[2]
+      | undefined;
+    const originalCreateServeApp = serverModule.createServeApp;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+      capturedDeps = args[2];
+      return originalCreateServeApp(...args);
+    });
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    const factory = makeReadyWorkerFactory(worker);
+    const workerTlsTrustVerifier = vi.fn().mockResolvedValue(undefined);
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        tlsCert: certPath,
+        tlsKey: keyPath,
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: makePidfileDeps(),
+        workerTlsTrustVerifier,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      await expect(
+        capturedDeps!.setChannelWorkerSelection!({
+          mode: 'names',
+          names: ['telegram'],
+        }),
+      ).resolves.toMatchObject({ changed: true });
+      await expect(
+        capturedDeps!.setChannelWorkerSelection!({
+          mode: 'names',
+          names: ['telegram'],
+        }),
+      ).resolves.toMatchObject({ changed: false });
+      expect(workerTlsTrustVerifier).toHaveBeenCalledTimes(1);
+      expect(factory).toHaveBeenCalledTimes(1);
+      expect(worker.start).toHaveBeenCalledTimes(1);
+    } finally {
+      await handle.close();
+    }
+  });
+
   const issuedLeafServing = {
     cert: TEST_TLS_CERT_ISSUED_LEAF,
     key: TEST_TLS_KEY_ISSUED_LEAF,
