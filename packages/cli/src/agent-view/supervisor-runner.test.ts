@@ -365,9 +365,10 @@ describe('Agent View supervisor runner', () => {
     });
     expect(handler.shutdown).toHaveBeenCalledWith({ keepWorkers: true });
 
-    await expect(handle.shutdown(false)).rejects.toThrow(
-      'already shutting down',
-    );
+    await expect(handle.shutdown(false)).resolves.toEqual({
+      shuttingDown: true,
+    });
+    expect(handler.shutdown).toHaveBeenCalledOnce();
   });
 
   it('closes the supervisor server when shutdown is requested', async () => {

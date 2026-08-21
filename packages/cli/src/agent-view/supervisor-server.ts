@@ -69,6 +69,7 @@ export interface AgentViewSupervisorServerHandle {
 }
 
 const MAX_SUPERVISOR_REQUEST_LINE_BYTES = 1024 * 1024;
+const SUPERVISOR_OPERATION_DRAIN_TIMEOUT_MS = 30_000;
 
 export function createAgentViewSupervisorServer(
   handler: AgentViewSupervisorHandler,
@@ -238,28 +239,17 @@ interface ParsedRequest {
 class SupervisorOperationGate {
   private state: 'running' | 'draining' | 'closed' = 'running';
   private readonly active = new Set<Promise<unknown>>();
+  private shutdownPromise: Promise<unknown> | undefined;
 
   async run(
     op: AgentViewSupervisorOperation,
     action: () => Promise<unknown> | unknown,
   ): Promise<unknown> {
     if (op === 'shutdown') {
-      if (this.state !== 'running') {
-        throw new Error('Agent View supervisor is already shutting down.');
-      }
+      if (this.shutdownPromise) return this.shutdownPromise;
       this.state = 'draining';
-      await Promise.allSettled(this.active);
-      try {
-        const result = await action();
-        this.state =
-          isRecord(result) && result['shuttingDown'] === false
-            ? 'running'
-            : 'closed';
-        return result;
-      } catch (error) {
-        this.state = 'running';
-        throw error;
-      }
+      this.shutdownPromise = this.drainAndShutdown(action);
+      return this.shutdownPromise;
     }
     if (isDrainSafeOperation(op)) {
       return action();
@@ -276,8 +266,53 @@ class SupervisorOperationGate {
     }
   }
 
+  private async drainAndShutdown(
+    action: () => Promise<unknown> | unknown,
+  ): Promise<unknown> {
+    try {
+      await waitForSupervisorOperations(this.active);
+      const result = await action();
+      if (isRecord(result) && result['shuttingDown'] === false) {
+        this.state = 'running';
+        this.shutdownPromise = undefined;
+      } else {
+        this.state = 'closed';
+      }
+      return result;
+    } catch (error) {
+      this.state = 'running';
+      this.shutdownPromise = undefined;
+      throw error;
+    }
+  }
+
   canStartStream(op: 'attachStream' | 'subscribe'): boolean {
     return this.state === 'running' || op === 'subscribe';
+  }
+}
+
+async function waitForSupervisorOperations(
+  active: ReadonlySet<Promise<unknown>>,
+): Promise<void> {
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      Promise.allSettled([...active]).then(() => undefined),
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(
+          () =>
+            reject(
+              new Error(
+                'Agent View supervisor shutdown timed out while waiting for active operations.',
+              ),
+            ),
+          SUPERVISOR_OPERATION_DRAIN_TIMEOUT_MS,
+        );
+        timeout.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
   }
 }
 
