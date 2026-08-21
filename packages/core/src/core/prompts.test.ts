@@ -820,6 +820,9 @@ describe('getPlanModeSystemReminder', () => {
       'wrappers, quoting tricks, aliases, or obfuscation',
     );
     expect(result).toContain('Pivot to read-only');
+    // list_directory is opt-in (off by default) — the reminder must not steer
+    // the model toward a tool that is not registered.
+    expect(result).not.toContain('list_directory');
     expect(result).toContain('does not approve the plan');
     expect(result).toContain('exit Plan mode');
   });
