@@ -3184,6 +3184,50 @@ describe('Session', () => {
         }),
       );
     });
+
+    it('keeps the approved Todo plan revision when switching between non-plan modes', async () => {
+      enableSessionWorkflowRevisionContext();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'Ship',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'ship' } },
+          },
+        ],
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      });
+
+      // Approving via exit_plan_mode stamps the revision and leaves PLAN.
+      const bound = await runExitPlanModeApprovalPrompt();
+      expect(bound.toolCall._meta).toEqual(
+        expect.objectContaining({
+          qwenTodoApproval: { planId: 'plan-1', sourceCallId: 'todo-call-1' },
+        }),
+      );
+
+      // The approved plan keeps executing in the new mode, so a non-plan →
+      // non-plan switch (default → auto-edit) touches no approval cycle and
+      // must not disarm the revision mid-execution. (After the helper, the
+      // current mode is DEFAULT.)
+      await session.setMode({
+        sessionId: 'test-session-id',
+        modeId: 'auto-edit',
+      });
+
+      expect(mockConfig.getSessionWorkflowPlanRevision?.()).toEqual({
+        planId: 'plan-1',
+        sourceCallId: 'todo-call-1',
+        todoIds: ['ship'],
+      });
+    });
   });
 
   describe('sendCurrentModeUpdateNotification', () => {

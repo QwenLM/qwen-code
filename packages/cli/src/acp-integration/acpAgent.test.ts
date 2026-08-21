@@ -20921,6 +20921,109 @@ describe('sessionLanguage multi-session propagation', () => {
     await agentPromise;
   });
 
+  it('re-derives the Session Workflow gate when workspace reload flips it', async () => {
+    let mergedSettings: Record<string, unknown> = {
+      experimental: { sessionWorkflow: false },
+    };
+    let nextEnabled = true;
+    const settings = {
+      get merged() {
+        return mergedSettings;
+      },
+      reloadScopeFromDisk: vi.fn(() => {
+        mergedSettings = { experimental: { sessionWorkflow: nextEnabled } };
+      }),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+    const setSessionWorkflowEnabledProvider = vi.fn();
+    const cfg = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-workflow-reload'),
+      setSessionWorkflowEnabledProvider,
+    });
+    const clearActiveTodoPlanRevision = vi.fn();
+
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('s-workflow-reload'),
+          getConfig: vi.fn().mockReturnValue(cfg),
+          isIdle: vi.fn().mockReturnValue(true),
+          clearActiveTodoPlanRevision,
+          clearTodoStopGuardTrust: vi.fn(),
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          installGoalTerminalObserver: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/reload', mcpServers: [] });
+    // The override starts undefined, so session creation installs no provider;
+    // the first provider install must come from the reload below.
+    expect(setSessionWorkflowEnabledProvider).not.toHaveBeenCalled();
+
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+
+    // The gate must track the reloaded file: the provider installed on the
+    // live session now reads true, and the stale plan revision is cleared.
+    const provider = setSessionWorkflowEnabledProvider.mock.calls.at(-1)?.[0];
+    expect(provider?.()).toBe(true);
+    expect(clearActiveTodoPlanRevision).toHaveBeenCalled();
+
+    // A no-op reload (file unchanged) must not re-pin the provider.
+    setSessionWorkflowEnabledProvider.mockClear();
+    clearActiveTodoPlanRevision.mockClear();
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(setSessionWorkflowEnabledProvider).not.toHaveBeenCalled();
+    expect(clearActiveTodoPlanRevision).not.toHaveBeenCalled();
+
+    // A disk state that contradicts a UI-pinned override must also win: pin
+    // the override to true via the UI write path while the file says false.
+    nextEnabled = false;
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(setSessionWorkflowEnabledProvider.mock.calls.at(-1)?.[0]?.()).toBe(
+      false,
+    );
+    setSessionWorkflowEnabledProvider.mockClear();
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow, {
+      enabled: true,
+    });
+    expect(setSessionWorkflowEnabledProvider.mock.calls.at(-1)?.[0]?.()).toBe(
+      true,
+    );
+    setSessionWorkflowEnabledProvider.mockClear();
+    nextEnabled = false;
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    // merged↔merged is false↔false (no diff), but the file contradicts the
+    // UI-pinned true, so the override must follow the file.
+    expect(setSessionWorkflowEnabledProvider.mock.calls.at(-1)?.[0]?.()).toBe(
+      false,
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('refreshes busy skill sessions and reports per-session failures', async () => {
     const bootstrapSettings = {
       merged: {},
