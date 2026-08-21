@@ -200,6 +200,11 @@ describe('aoneWhoamiAccount', () => {
     ['{"account": ""}', 'empty account'],
     ['{"account": "  "}', 'blank account'],
     ['{"account": 5}', 'non-string account'],
+    // A literal null PARSES, so it clears the SyntaxError arm; property
+    // access on it then threw an untagged TypeError outside the shape
+    // check — every accountless answer must throw the command-tagged
+    // error, or the skip note names no command.
+    ['null', 'a literal null answer'],
   ])('throws the named error on %s (%s)', (raw) => {
     mockExecFileSync.mockReturnValue(raw);
     expect(() => aoneWhoamiAccount()).toThrow(

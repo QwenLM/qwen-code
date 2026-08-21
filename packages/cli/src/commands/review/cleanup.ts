@@ -554,9 +554,12 @@ function a1CommentList(...flags: string[]): RawAoneComment[] {
  * to `comment list` filtered by the authenticated account within the audit
  * window). Lists the MR's comments through a1 and flags every one the
  * account created — or edited — inside the window that the submit receipt
- * does not vouch for. Throws on any failure; the caller names the skip, so
- * a skipped audit is never mistaken for a clean one (same contract as the
- * gh half).
+ * does not vouch for. Coverage stops at the comment channel: `a1 repo mr
+ * approve` and `a1 repo mr edit` are banned by Step 7's write ban but
+ * invisible here — the recorded a1 surface exposes no listing an audit
+ * could query for them (disclosed residual, design doc #9617). Throws on
+ * any failure; the caller names the skip, so a skipped audit is never
+ * mistaken for a clean one (same contract as the gh half).
  */
 function auditAoneMrWrites(target: string, window: AuditWindow): void {
   // The same boundary the gh half applies, in epoch milliseconds: Aone
@@ -569,6 +572,9 @@ function auditAoneMrWrites(target: string, window: AuditWindow): void {
   // `--resolved` query returns the resolved ROOT INLINE comments — union
   // the two, dedupe by id. Resolved replies stay invisible: a1 exposes no
   // listing that includes them (disclosed residual, design doc #9617).
+  // Both queries are one UNPAGED `comment list` each: a1 documents no
+  // page-size guarantee, so if a cap exists, comments past it stay
+  // invisible too (disclosed residual, design doc #9617).
   const listed = a1CommentList(
     '--mr',
     window.prNumber,

@@ -119,9 +119,9 @@ export function a1JsonOnce<T>(...args: string[]): T | undefined {
  * indistinguishable from its all-clear state is off.
  */
 export function aoneWhoamiAccount(): string {
-  let out: { account?: unknown };
+  let out: { account?: unknown } | null;
   try {
-    out = a1Json<{ account?: unknown }>('auth', 'whoami');
+    out = a1Json<{ account?: unknown } | null>('auth', 'whoami');
   } catch (err) {
     // A parse failure names the command, mirroring a1CommentList — the
     // skip note must say WHAT failed; an exec failure rethrows untouched.
@@ -130,7 +130,14 @@ export function aoneWhoamiAccount(): string {
     }
     throw err;
   }
-  if (typeof out.account !== 'string' || out.account.trim() === '') {
+  // A literal `null` answer PARSES, so it clears the SyntaxError arm;
+  // without its own check the property access below throws an untagged
+  // TypeError and the skip note names no command.
+  if (
+    out === null ||
+    typeof out.account !== 'string' ||
+    out.account.trim() === ''
+  ) {
     throw new Error('a1 auth whoami returned no account');
   }
   return out.account;
