@@ -62,6 +62,14 @@ export class OpenTuiSlashGateway {
     return this.dispatcher !== null;
   }
 
+  /**
+   * Whether the command in `text` opted into running while a model turn
+   * streams (dispatcher passthrough; false before the dispatcher attaches).
+   */
+  canRunDuringStreaming(text: string): boolean {
+    return this.dispatcher?.canRunDuringStreaming(text) ?? false;
+  }
+
   /** True while a dispatched command is still running. */
   isBusy(): boolean {
     return this.busy;

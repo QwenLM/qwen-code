@@ -2646,7 +2646,19 @@ function App({
         if (!text) return;
         // A turn is in flight: queue instead of aborting it (original
         // useMessageQueue semantics; drained when the turn settles).
-        if (streamingRef.current || commandProcessingRef.current) {
+        // Commands that opted in (canRunDuringStreaming, e.g. /help
+        // /status /settings) still run immediately while the model streams
+        // — ink AppContainer parity. A running command keeps queueing
+        // (ink's fast path only applies to Responding, not isProcessing).
+        const streamingFastPath =
+          streamingRef.current &&
+          !commandProcessingRef.current &&
+          isSlashCommandInput(text) &&
+          gateway.canRunDuringStreaming(text);
+        if (
+          (streamingRef.current || commandProcessingRef.current) &&
+          !streamingFastPath
+        ) {
           enqueuePrompt(text);
           return;
         }

@@ -57,6 +57,7 @@ import {
   isBtwCommand,
 } from '../utils/commandUtils.js';
 import { recordAutoSkillCommandUsage } from '../../services/SkillCommandLoader.js';
+import { isPickerOnlyModelInvocation } from '../commands/modelCommand.js';
 import {
   appendUserPromptExpansionAdditionalContext,
   formatUserPromptExpansionBlockedMessage,
@@ -81,6 +82,62 @@ import {
 } from './commands-output.js';
 
 const debugLogger = createDebugLogger('OPENTUI_SLASH_DISPATCH');
+
+/**
+ * Parity of the same-named sets and helper in slashCommandProcessor.ts:
+ * commands whose bare invocation just opens a dialog (rather than
+ * performing work) keep their echo out of the transcript.
+ */
+const SLASH_COMMAND_ROOTS_HIDE_INVOCATION = new Set([
+  'auth',
+  'diff',
+  'editor',
+  'help',
+  'settings',
+  'status',
+  'stats',
+  'theme',
+]);
+const BARE_SLASH_COMMANDS_HIDE_INVOCATION = new Set([
+  'effort',
+  'model',
+  'statusline',
+]);
+
+export function shouldHideSlashCommandInvocation(
+  command: SlashCommand | undefined,
+  canonicalPath: string[],
+  args: string,
+): boolean {
+  if (command?.kind !== CommandKind.BUILT_IN) {
+    return false;
+  }
+
+  // Bare-root match only: subcommands that produce output (e.g. `/status
+  // paths`) keep their invocation like any other work-performing command.
+  if (
+    canonicalPath.length === 1 &&
+    SLASH_COMMAND_ROOTS_HIDE_INVOCATION.has(canonicalPath[0] ?? '')
+  ) {
+    // NO_COLOR prevents the theme dialog from opening, so /theme prints
+    // feedback instead and keeps its invocation like any work-performing
+    // command.
+    if (canonicalPath[0] === 'theme' && process.env['NO_COLOR']) {
+      return false;
+    }
+    return true;
+  }
+
+  const path = canonicalPath.join(' ');
+  if (BARE_SLASH_COMMANDS_HIDE_INVOCATION.has(path)) {
+    if (path === 'model') {
+      return isPickerOnlyModelInvocation(args);
+    }
+    return args.trim() === '';
+  }
+
+  return false;
+}
 
 /** Neutral outcome the OpenTUI backend applies (ink: SlashCommandProcessorResult + dialog actions). */
 export type OpenTuiDispatchOutcome =
@@ -152,6 +209,18 @@ export class OpenTuiSlashDispatcher {
   }
 
   /**
+   * Whether the command in `text` opted into running while a model turn
+   * streams (ink AppContainer's canRunDuringStreaming fast path).
+   */
+  canRunDuringStreaming(text: string): boolean {
+    const { commandToExecute } = parseSlashCommand(
+      text.trim(),
+      this.commandList,
+    );
+    return commandToExecute?.canRunDuringStreaming === true;
+  }
+
+  /**
    * Parity of `cancelSlashCommand` in slashCommandProcessor.ts: ESC while a
    * slash command runs aborts it and reports the cancellation.
    */
@@ -211,7 +280,20 @@ export class OpenTuiSlashDispatcher {
     const userMessageTimestamp = Date.now();
     let invocationItemId = options.existingInvocationItemId;
     let invocationSentToModel = false;
-    if (!isBtwCommand(trimmed) && invocationItemId === undefined) {
+    const {
+      commandToExecute,
+      args,
+      canonicalPath: resolvedCommandPath,
+    } = parseSlashCommand(trimmed, this.commandList);
+    if (
+      !isBtwCommand(trimmed) &&
+      invocationItemId === undefined &&
+      !shouldHideSlashCommandInvocation(
+        commandToExecute,
+        resolvedCommandPath,
+        args,
+      )
+    ) {
       invocationItemId = addItemWithRecording(
         { type: MessageType.USER, text: trimmed, sentToModel: false },
         userMessageTimestamp,
@@ -220,11 +302,6 @@ export class OpenTuiSlashDispatcher {
 
     let hasError = false;
     let delegatedToRecursiveInvocation = false;
-    const {
-      commandToExecute,
-      args,
-      canonicalPath: resolvedCommandPath,
-    } = parseSlashCommand(trimmed, this.commandList);
 
     const subcommand =
       resolvedCommandPath.length > 1

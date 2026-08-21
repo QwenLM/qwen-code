@@ -23,6 +23,7 @@ import type { SessionStatsState } from '../contexts/SessionContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import {
   OpenTuiSlashDispatcher,
+  shouldHideSlashCommandInvocation,
   type OpenTuiDispatchOutcome,
 } from './commands-dispatch.js';
 import type { OpenTuiCommandHost } from './commands-context.js';
@@ -247,6 +248,121 @@ describe('guards (ink handleSlashCommand parity)', () => {
 
     const { host: btwHost } = await dispatch('/btw something', commands);
     expect(btwHost.items.some((item) => item.type === 'user')).toBe(false);
+  });
+
+  it('hides the invocation echo for dialog-opening bare roots (ink parity)', async () => {
+    const dialogStub = (name: string): SlashCommand =>
+      stub({
+        name,
+        action: () => ({ type: 'message', messageType: 'info', content: name }),
+      });
+    const commands = ['help', 'settings', 'status', 'stats'].map(dialogStub);
+    const { host } = await dispatch('/help', commands);
+    expect(host.items.some((item) => item.type === 'user')).toBe(false);
+  });
+
+  it('keeps the invocation echo for work-performing subcommands', async () => {
+    const commands = [
+      stub({
+        name: 'status',
+        subCommands: [
+          stub({
+            name: 'paths',
+            action: () => ({
+              type: 'message',
+              messageType: 'info',
+              content: 'paths',
+            }),
+          }),
+        ],
+      }),
+    ];
+    const { host } = await dispatch('/status paths', commands);
+    expect(host.items[0]).toMatchObject({
+      type: 'user',
+      text: '/status paths',
+      sentToModel: false,
+    });
+  });
+});
+
+describe('shouldHideSlashCommandInvocation (slashCommandProcessor parity)', () => {
+  const cmd = (name: string, kind = CommandKind.BUILT_IN): SlashCommand =>
+    stub({ name, kind });
+
+  it.each([
+    'auth',
+    'diff',
+    'editor',
+    'help',
+    'settings',
+    'status',
+    'stats',
+    'theme',
+  ])('hides bare /%s', (root) => {
+    expect(shouldHideSlashCommandInvocation(cmd(root), [root], '')).toBe(true);
+  });
+
+  it('keeps /theme visible under NO_COLOR (it prints feedback instead)', () => {
+    const prev = process.env['NO_COLOR'];
+    process.env['NO_COLOR'] = '1';
+    try {
+      expect(
+        shouldHideSlashCommandInvocation(cmd('theme'), ['theme'], ''),
+      ).toBe(false);
+    } finally {
+      if (prev === undefined) delete process.env['NO_COLOR'];
+      else process.env['NO_COLOR'] = prev;
+    }
+  });
+
+  it.each([
+    ['effort', ''],
+    ['statusline', ''],
+    ['model', ''],
+    ['model', '--fast'],
+    ['model', '--vision --global'],
+  ])('hides bare /%s %j (picker-only)', (root, args) => {
+    expect(shouldHideSlashCommandInvocation(cmd(root), [root], args)).toBe(
+      true,
+    );
+  });
+
+  it.each([
+    ['model', 'qwen-max'],
+    ['model', '--fast qwen3-coder-flash'],
+    ['effort', 'high'],
+    ['statusline', 'show'],
+  ])('keeps /%s %j (work-performing)', (root, args) => {
+    expect(shouldHideSlashCommandInvocation(cmd(root), [root], args)).toBe(
+      false,
+    );
+  });
+
+  it('never hides non-builtin commands', () => {
+    expect(
+      shouldHideSlashCommandInvocation(
+        cmd('help', CommandKind.SKILL),
+        ['help'],
+        '',
+      ),
+    ).toBe(false);
+    expect(shouldHideSlashCommandInvocation(undefined, ['help'], '')).toBe(
+      false,
+    );
+  });
+});
+
+describe('canRunDuringStreaming (ink AppContainer fast path)', () => {
+  it('reports the command opt-in flag', () => {
+    const host = createFakeHost();
+    const dispatcher = new OpenTuiSlashDispatcher(host, services, [
+      stub({ name: 'help', canRunDuringStreaming: true }),
+      stub({ name: 'clear' }),
+    ]);
+    expect(dispatcher.canRunDuringStreaming('/help')).toBe(true);
+    expect(dispatcher.canRunDuringStreaming('/clear')).toBe(false);
+    expect(dispatcher.canRunDuringStreaming('not a command')).toBe(false);
   });
 });
 
