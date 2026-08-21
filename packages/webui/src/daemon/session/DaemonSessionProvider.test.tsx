@@ -7388,6 +7388,113 @@ describe('DaemonSessionProvider', () => {
     }
   });
 
+  it('keeps observer pane loading across silent gaps during long tool calls (#9487)', async () => {
+    vi.useFakeTimers();
+    try {
+      // An observer pane (different client submitted the turn) sees the turn
+      // start on the event stream, then a long tool call produces a >3s silent
+      // gap. The passive settle timer may finish stale streaming blocks, but
+      // must not drop pane-level loading state while the turn is still running.
+      const silentToolGap = createDeferred<void>();
+      const session = createMockSession({
+        events: async function* observedSparseTurn(
+          opts: { signal?: AbortSignal } = {},
+        ) {
+          yield {
+            id: 9,
+            v: 1,
+            type: 'session_update',
+            originatorClientId: 'client-other',
+            data: {
+              update: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'run long task' },
+              },
+            },
+          };
+          yield {
+            id: 10,
+            v: 1,
+            type: 'session_update',
+            originatorClientId: 'client-other',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'starting' },
+              },
+            },
+          };
+          await new Promise<void>((resolve) => {
+            if (opts.signal?.aborted) {
+              resolve();
+              return;
+            }
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+            void silentToolGap.promise.then(() => resolve());
+          });
+          if (opts.signal?.aborted) return;
+          yield {
+            id: 11,
+            v: 1,
+            type: 'turn_complete',
+            timestamp: '2025-01-01T00:00:00.000Z',
+            sessionId: 'session-1',
+            data: { stopReason: 'end_turn' },
+          };
+          await new Promise<void>((resolve) => {
+            if (opts.signal?.aborted) {
+              resolve();
+              return;
+            }
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+          });
+        },
+      });
+      sdkMocks.sessions.push(session);
+      let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
+      let streamingState: ReturnType<typeof useDaemonStreamingState> = 'idle';
+
+      function Harness() {
+        promptStatus = useDaemonPromptStatus();
+        streamingState = useDaemonStreamingState();
+        return null;
+      }
+
+      await renderWithProvider(<Harness />, { autoConnect: true });
+      await act(async () => {
+        await flushPromises();
+        await vi.advanceTimersByTimeAsync(20);
+        await flushPromises();
+      });
+      expect(promptStatus).not.toBe('idle');
+
+      // The observed turn goes quiet while a long tool call runs — well past
+      // the passive settle window. The loading state must survive the gap.
+      await act(async () => {
+        vi.advanceTimersByTime(10_000);
+        await flushPromises();
+      });
+
+      expect(promptStatus).not.toBe('idle');
+      expect(streamingState).not.toBe('idle');
+
+      await act(async () => {
+        silentToolGap.resolve();
+        await flushPromises();
+        await vi.advanceTimersByTimeAsync(20);
+        await flushPromises();
+      });
+      expect(promptStatus).toBe('idle');
+      expect(streamingState).toBe('idle');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('finishes replayed assistant streaming when replay completes', async () => {
     vi.useFakeTimers();
     try {
