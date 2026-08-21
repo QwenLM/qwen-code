@@ -373,6 +373,7 @@ const {
       queuedPromptHoldHistory: [] as boolean[],
       chatEditorRenderCount: 0,
       latestChatEditorProps: null as ChatEditorTestProps | null,
+      onChatEditorLayout: null as ((props: ChatEditorTestProps) => void) | null,
       latestToastHostElevated: false,
       latestStatusBarTasks: null as DaemonSessionMonitorTaskStatus[] | null,
       latestStatusBarOnOpenTasks: null as (() => void) | null,
@@ -661,6 +662,9 @@ vi.mock('./components/ChatEditor', async () => {
             ),
           );
         }, [onAttachmentsChange]);
+        React.useLayoutEffect(() => {
+          testState.onChatEditorLayout?.(props);
+        });
         React.useImperativeHandle(ref, () => ({
           clear: () => {
             testState.prompt = '';
@@ -4775,6 +4779,7 @@ beforeEach(() => {
   testState.queuedPromptHoldHistory = [];
   testState.chatEditorRenderCount = 0;
   testState.latestChatEditorProps = null;
+  testState.onChatEditorLayout = null;
   testState.latestToastHostElevated = false;
   testState.latestStatusBarTasks = null;
   testState.latestStatusBarOnOpenTasks = null;
@@ -10929,12 +10934,28 @@ describe('App session callbacks', () => {
     );
   });
 
-  it('holds a composer prompt while Goal state is still hydrating', async () => {
-    // The session load clears `loadingTranscript` before its `goal()` fetch
-    // resolves, so the composer is writable while the Goal state is unknown.
-    // The queue-hold gate already fails closed on that state; a direct submit
-    // must too, or a prompt typed in that window is sent straight into a Goal
-    // the client has not learned about yet.
+  it.each(['idle', 'responding'] as const)(
+    'does not enqueue a forwarded command while Goal state is hydrating (%s)',
+    async (streamingState) => {
+      mockConnection.goalState = undefined;
+      testState.streamingState = streamingState;
+      renderApp();
+      await flush();
+
+      let accepted: boolean | undefined;
+      await act(async () => {
+        accepted =
+          testState.latestChatEditorProps?.onSubmit('/deploy production');
+        await flush();
+      });
+
+      expect(accepted).toBe(false);
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+      expect(rawEnqueuePrompt).not.toHaveBeenCalled();
+    },
+  );
+
+  it('sends an idle composer prompt while Goal state is still hydrating', async () => {
     mockConnection.goalState = undefined;
     renderApp();
     await flush();
@@ -10947,20 +10968,79 @@ describe('App session callbacks', () => {
       await flush();
     });
 
-    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
-    expect(rawEnqueuePrompt).toHaveBeenCalledTimes(1);
-    expect(rawEnqueuePrompt.mock.calls[0]?.[0]).toBe('hello during hydration');
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      'hello during hydration',
+      expect.objectContaining({ retry: undefined }),
+    );
+    expect(rawEnqueuePrompt).not.toHaveBeenCalled();
     expect(accepted).toBe(true);
   });
 
-  it('holds queued prompts on the first render of an active Goal', async () => {
+  it('inserts a hydrating composer prompt while the session is active', async () => {
+    mockConnection.goalState = undefined;
+    testState.streamingState = 'responding';
+    renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('hello during active turn');
+      await flush();
+    });
+
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(rawEnqueuePrompt).toHaveBeenCalledTimes(1);
+    expect(rawEnqueuePrompt.mock.calls[0]?.[0]).toBe(
+      'hello during active turn',
+    );
+  });
+
+  it('inserts a prompt when the session becomes active before effects run', async () => {
+    mockConnection.goalState = undefined;
+    const { rerender } = renderApp();
+    await flush();
+
+    let submitted = false;
+    testState.onChatEditorLayout = (props) => {
+      if (!props.isRunning || submitted) return;
+      submitted = true;
+      props.onSubmit('hello during active transition');
+    };
+    testState.streamingState = 'responding';
+
+    rerender({});
+
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(rawEnqueuePrompt).toHaveBeenCalledTimes(1);
+    expect(rawEnqueuePrompt.mock.calls[0]?.[0]).toBe(
+      'hello during active transition',
+    );
+  });
+
+  it('sends an idle composer prompt when an active Goal is known', async () => {
+    mockConnection.goalState = activeGoalSnapshot();
+    renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('hello during active Goal');
+      await flush();
+    });
+
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      'hello during active Goal',
+      expect.objectContaining({ retry: undefined }),
+    );
+    expect(rawEnqueuePrompt).not.toHaveBeenCalled();
+  });
+
+  it('does not locally hold prompts for an active Goal', async () => {
     mockConnection.goalState = activeGoalSnapshot();
 
     renderApp();
     await flush();
 
     expect(testState.queuedPromptHoldHistory.length).toBeGreaterThan(0);
-    expect(testState.queuedPromptHoldHistory).not.toContain(false);
+    expect(testState.queuedPromptHoldHistory).not.toContain(true);
   });
 
   it('restores the Goal snapshot when the same session learns its workspace', async () => {
@@ -18563,7 +18643,7 @@ describe('App prompt send failure retry', () => {
       },
     ] as DaemonInputAnnotation[];
     const images = [{ data: 'aGVsbG8=', media_type: 'image/png' }];
-    renderApp();
+    const { rerender } = renderApp();
     await flush();
 
     act(() => {
@@ -18587,6 +18667,21 @@ describe('App prompt send failure retry', () => {
       document.querySelector('[data-testid="failed-prompt-retry"]')
         ?.textContent,
     ).toBe('u1');
+
+    const staleRetry = testState.latestMessageListProps?.onRetryFailedPrompt;
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender();
+    });
+    expect(
+      document.querySelector('[data-testid="failed-prompt-retry"]'),
+    ).toBeNull();
+    act(() => staleRetry?.());
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1);
+    act(() => {
+      testState.streamingState = 'idle';
+      rerender();
+    });
 
     await act(async () => {
       document
@@ -20229,10 +20324,7 @@ describe('App /goal command', () => {
 
   it('installs the allocated-session Goal before its re-sync resolves', async () => {
     // `workspaceActions.controlGoal` does not write `connection.goalState`, so
-    // without installing the create response the state stays goal-less for a
-    // whole round trip (up to the action timeout if the GET stalls): the hold
-    // gate reads false and a prompt typed in that window bypasses the Goal
-    // queue entirely.
+    // install the create response without waiting for the follow-up GET.
     const active = activeGoalSnapshot('first objective');
     mockConnection.sessionId = undefined;
     mockSessionActions.createSession.mockResolvedValueOnce({
@@ -20263,7 +20355,7 @@ describe('App /goal command', () => {
     await flush();
 
     expect(mockConnection.goalState).toBe(active);
-    expect(testState.queuedPromptHoldHistory.at(-1)).toBe(true);
+    expect(testState.queuedPromptHoldHistory.at(-1)).toBe(false);
     // The App's own snapshot drives the strip; asserting only the connection
     // state would re-read what this test's mock wrote.
     expect(
@@ -20273,14 +20365,17 @@ describe('App /goal command', () => {
 
     rawEnqueuePrompt.mockClear();
     mockSessionActions.sendPrompt.mockClear();
-    testState.prompt = 'bypass me';
+    testState.prompt = 'continue normally';
     await act(async () => {
-      testState.latestChatEditorProps?.onSubmit('bypass me');
+      testState.latestChatEditorProps?.onSubmit('continue normally');
       await flush();
     });
 
-    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
-    expect(rawEnqueuePrompt.mock.calls[0]?.[0]).toBe('bypass me');
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      'continue normally',
+      expect.objectContaining({ retry: undefined }),
+    );
+    expect(rawEnqueuePrompt).not.toHaveBeenCalled();
   });
 
   it('keeps a session-less /goal control in the composer', async () => {
