@@ -142,7 +142,7 @@ public static void runTransportOptionsExample() {
             .setIncludePartialMessages(true)
             .setTurnTimeout(new Timeout(120L, TimeUnit.SECONDS))
             .setMessageTimeout(new Timeout(90L, TimeUnit.SECONDS))
-            .setAllowedTools(Arrays.asList("read_file", "write_file", "list_directory"));
+            .setAllowedTools(Arrays.asList("read_file", "write_file", "glob"));
 
     List<String> result = QwenCodeCli.simpleQuery("who are you, what are your capabilities?", options);
     result.forEach(logger::info);

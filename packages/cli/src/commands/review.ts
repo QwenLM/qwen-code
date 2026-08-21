@@ -12,7 +12,8 @@ import type { Argv, CommandModule } from 'yargs';
 import { parseArgsCommand } from './review/parse-args.js';
 import { matchRemoteCommand } from './review/match-remote.js';
 import { composeReviewCommand } from './review/compose-review.js';
-import { findingsCommand } from './review/findings.js';
+import { findingsCommand } from '../utils/findings.js';
+import { recoverFindingsCommand } from './review/recover-findings.js';
 import { fetchPrCommand } from './review/fetch-pr.js';
 import { captureLocalCommand } from './review/capture-local.js';
 import { captureTuiCommand } from './review/capture-tui.js';
@@ -28,6 +29,7 @@ import { checkCoverageCommand } from './review/check-coverage.js';
 import { agentPromptCommand } from './review/agent-prompt.js';
 import { buildTestCommand } from './review/build-test.js';
 import { baseTreeCommand } from './review/base-tree.js';
+import { scratchTreeCommand } from './review/scratch-tree.js';
 import { testDeltaCommand } from './review/test-delta.js';
 import { driveCommand } from './review/drive.js';
 import { mockProviderCommand } from './review/mock-provider.js';
@@ -69,6 +71,7 @@ export const reviewCommand: CommandModule = {
       .command(agentPromptCommand)
       .command(buildTestCommand)
       .command(baseTreeCommand)
+      .command(scratchTreeCommand)
       .command(testDeltaCommand)
       .command(driveCommand)
       .command(mockProviderCommand)
@@ -81,6 +84,7 @@ export const reviewCommand: CommandModule = {
       .command(testEfficacyCommand)
       .command(testPlanCommand)
       .command(findingsCommand)
+      .command(recoverFindingsCommand)
       .command(publishAssetsCommand)
       .command(composeReviewCommand)
       .command(saveArtifactCommand)
@@ -88,7 +92,7 @@ export const reviewCommand: CommandModule = {
       .command(cleanupCommand)
       .demandCommand(
         1,
-        'Specify a subcommand: run, parse-args, match-remote, meta, issue-context, fetch-diff, comment-body, fetch-pr, capture-local, capture-tui, plan-diff, repo-context, pr-context, comment-status, load-rules, agent-prompt, build-test, base-tree, test-delta, drive, mock-provider, extract-step, script-lint, resolve-anchors, check-coverage, cost-ledger, presubmit, test-efficacy, test-plan, findings, publish-assets, compose-review, save-artifact, submit, or cleanup.',
+        'Specify a subcommand: run, parse-args, match-remote, meta, issue-context, fetch-diff, comment-body, fetch-pr, capture-local, capture-tui, plan-diff, repo-context, pr-context, comment-status, load-rules, agent-prompt, build-test, base-tree, scratch-tree, test-delta, drive, mock-provider, extract-step, script-lint, resolve-anchors, check-coverage, cost-ledger, presubmit, test-efficacy, test-plan, findings, recover-findings, publish-assets, compose-review, save-artifact, submit, or cleanup.',
       )
       .version(false),
   handler: () => {

@@ -1,4 +1,4 @@
-import type { ACPToolCall } from './types';
+import type { ACPToolCall } from './types.js';
 
 function getRecord(value: unknown): Record<string, unknown> | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -67,4 +67,25 @@ export function isBackgroundSubAgentToolCall(tool: ACPToolCall): boolean {
     explicitlyBackground ||
     defaultsToBackground
   );
+}
+
+const BACKGROUND_SHELL_NAMES = new Set([
+  'shell',
+  'bash',
+  'run_shell_command',
+  'exec',
+]);
+const BACKGROUND_SHELL_ID_PATTERN =
+  /^(?:Background shell|Promoted to background:)\s+(bg_[\w-]+)/i;
+
+export function backgroundShellTaskId(tool: ACPToolCall): string | undefined {
+  if (
+    tool.status === 'failed' ||
+    !BACKGROUND_SHELL_NAMES.has(tool.toolName.toLowerCase())
+  ) {
+    return undefined;
+  }
+  return typeof tool.rawOutput === 'string'
+    ? BACKGROUND_SHELL_ID_PATTERN.exec(tool.rawOutput)?.[1]
+    : undefined;
 }

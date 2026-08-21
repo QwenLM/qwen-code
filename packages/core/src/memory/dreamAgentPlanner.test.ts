@@ -149,7 +149,6 @@ describe('dreamAgentPlanner', () => {
           'read_file',
           'grep_search',
           'glob',
-          'list_directory',
           'run_shell_command',
           'write_file',
           'edit',
