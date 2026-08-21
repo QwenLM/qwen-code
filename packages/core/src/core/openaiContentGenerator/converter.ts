@@ -1112,6 +1112,7 @@ function hasThoughtPart(parts: Part[]): boolean {
 }
 
 const THINKING_TAG_PATTERN = /<\/?think(?:ing)?\s*>/i;
+const THINKING_TAG_SCAN_PATTERN = new RegExp(THINKING_TAG_PATTERN.source, 'gi');
 const CLOSING_THINKING_TAG_PATTERN = /\n[^\S\r\n]*<\/think(?:ing)?[^\S\r\n]*>/i;
 const LEADING_CLOSING_THINKING_TAG_PATTERN =
   /^[^\S\r\n]*<\/think(?:ing)?[^\S\r\n]*>/i;
@@ -1119,6 +1120,13 @@ const LEADING_THINKING_TAG_PATTERN = /^\s*<\/?think(?:ing)?\s*>/i;
 const STANDALONE_CLOSING_THINKING_TAG_PATTERN =
   /^\s*<\/(think|thinking)\s*>\s*$/i;
 const MAX_THINKING_TAG_CANDIDATE_LENGTH = 128;
+
+function startsWithOpeningThinkingTag(text: string): boolean {
+  return (
+    LEADING_THINKING_TAG_PATTERN.test(text) &&
+    !text.trimStart().startsWith('</')
+  );
+}
 
 function canBeStandaloneThinkingTagPrefix(text: string): boolean {
   const candidate = text.trimStart().toLowerCase();
@@ -1129,6 +1137,35 @@ function canBeStandaloneThinkingTagPrefix(text: string): boolean {
     if (!candidate.startsWith(tag)) return false;
     return /^\s*(?:>\s*)?$/.test(candidate.slice(tag.length));
   });
+}
+
+/**
+ * Scan `text` from `startIndex` (immediately after an opening tag) for the
+ * closing tag that balances it. Returns the end offset of the balanced block,
+ * or undefined when no closer balances; `hasNestedOpening` reports whether
+ * the scanned range contained a further opening tag (the classifier uses it
+ * to distinguish unclosed nested blocks from still-pending prefixes). Every
+ * balance walk goes through this scanner so the split and classify paths
+ * cannot disagree about whether the same block balances.
+ */
+function scanBalancedThinkingBlock(
+  text: string,
+  startIndex: number,
+): { end: number | undefined; hasNestedOpening: boolean } {
+  THINKING_TAG_SCAN_PATTERN.lastIndex = startIndex;
+  let depth = 1;
+  let hasNestedOpening = false;
+  for (;;) {
+    const match = THINKING_TAG_SCAN_PATTERN.exec(text);
+    if (!match) break;
+    const closing = match[0].startsWith('</');
+    hasNestedOpening ||= !closing;
+    depth += closing ? -1 : 1;
+    if (depth === 0) {
+      return { end: THINKING_TAG_SCAN_PATTERN.lastIndex, hasNestedOpening };
+    }
+  }
+  return { end: undefined, hasNestedOpening };
 }
 
 function classifyContentOnlyThinkingTagPrefix(
@@ -1179,19 +1216,8 @@ function classifyContentOnlyThinkingTagPrefix(
     }
   }
 
-  let depth = 1;
-  let hasNestedOpening = false;
-  for (;;) {
-    const nextTag = THINKING_TAG_PATTERN.exec(rest);
-    if (!nextTag) break;
-
-    const closing = nextTag[0].startsWith('</');
-    depth += closing ? -1 : 1;
-    if (depth === 0) return 'clean';
-    hasNestedOpening ||= !closing;
-    rest = rest.slice(nextTag.index + nextTag[0].length);
-  }
-
+  const { end, hasNestedOpening } = scanBalancedThinkingBlock(rest, 0);
+  if (end !== undefined) return 'clean';
   if (!hasNestedOpening) return 'pending';
   return streamFinished ? 'leaked' : 'suspicious';
 }
@@ -1206,23 +1232,13 @@ const TRAILING_CLOSING_THINKING_TAG_PATTERN = /<\/think(?:ing)?\s*>\s*$/i;
 function splitLeadingBalancedThinkingBlock(
   text: string,
 ): { block: string; rest: string } | undefined {
-  const openMatch = LEADING_THINKING_TAG_PATTERN.exec(text)?.[0];
-  if (!openMatch || openMatch.trimStart().startsWith('</')) return undefined;
+  if (!startsWithOpeningThinkingTag(text)) return undefined;
 
-  const tagPattern = new RegExp(THINKING_TAG_PATTERN.source, 'gi');
-  tagPattern.lastIndex = openMatch.length;
-  let depth = 1;
-  for (;;) {
-    const match = tagPattern.exec(text);
-    if (!match) return undefined;
-    depth += match[0].startsWith('</') ? -1 : 1;
-    if (depth === 0) {
-      return {
-        block: text.slice(0, tagPattern.lastIndex),
-        rest: text.slice(tagPattern.lastIndex),
-      };
-    }
-  }
+  const openMatch = LEADING_THINKING_TAG_PATTERN.exec(text)?.[0];
+  if (!openMatch) return undefined;
+  const { end } = scanBalancedThinkingBlock(text, openMatch.length);
+  if (end === undefined) return undefined;
+  return { block: text.slice(0, end), rest: text.slice(end) };
 }
 
 function stripOuterThinkingTags(block: string): string {
@@ -1236,25 +1252,36 @@ function stripOuterThinkingTags(block: string): string {
  * Extract every leading balanced thinking block from `text` (consecutive
  * blocks are all consumed). Returns the stripped inner texts plus the
  * remaining tail, or undefined when no leading block balances.
+ * Whitespace-only blocks are consumed too — they still balance — but
+ * contribute no inner text; keying the return on consumption rather than on
+ * non-empty inner text keeps `<thinking></thinking>Answer` from being
+ * mistaken for "no block balanced".
  */
 function extractLeadingBalancedThinkingBlocks(
   text: string,
 ): { innerThoughts: string[]; rest: string } | undefined {
   const innerThoughts: string[] = [];
   let rest = text;
+  let consumed = false;
   for (;;) {
     const split = splitLeadingBalancedThinkingBlock(rest);
     if (!split) break;
+    consumed = true;
     const innerThought = stripOuterThinkingTags(split.block).trim();
     if (/\S/.test(innerThought)) {
       innerThoughts.push(innerThought);
     }
     rest = split.rest;
   }
-  return innerThoughts.length > 0 ? { innerThoughts, rest } : undefined;
+  return consumed ? { innerThoughts, rest } : undefined;
 }
 
 function throwProtocolTagLeak(requestContext: RequestContext): never {
+  debugLogger.debug(
+    `thinking-tag leak rejected (held candidate length=${
+      requestContext.pendingThinkingTagCandidate?.text.length ?? 0
+    })`,
+  );
   requestContext.pendingThinkingTagCandidate = undefined;
   requestContext.pendingUntrustedResponseParts = undefined;
   throw new InvalidStreamError(
@@ -1611,13 +1638,15 @@ export function convertOpenAIChunkToGemini(
             combinedCandidateText,
             Boolean(choice.finish_reason),
           );
+    const confirmedOpeningTagCandidate = startsWithOpeningThinkingTag(
+      combinedCandidateText,
+    );
     const canStartTagCandidate =
       requestContext.hasVisibleContent !== true &&
       visibleText.length > 0 &&
       ((hasStructuredReasoning &&
         (canBeStandaloneThinkingTagPrefix(combinedCandidateText) ||
-          (LEADING_THINKING_TAG_PATTERN.test(combinedCandidateText) &&
-            !combinedCandidateText.trimStart().startsWith('</')))) ||
+          confirmedOpeningTagCandidate)) ||
         contentOnlyThinkingState !== 'clean');
 
     if (pendingTagCandidate || canStartTagCandidate) {
@@ -1642,9 +1671,6 @@ export function convertOpenAIChunkToGemini(
       // it can leak the whole block — production thinking-tag leaks are longer
       // than the cap (issue #6666). Keep those held until a closing tag arrives
       // or the finished-stream check rejects an unclosed block.
-      const confirmedOpeningTagCandidate =
-        LEADING_THINKING_TAG_PATTERN.test(combinedCandidateText) &&
-        !combinedCandidateText.trimStart().startsWith('</');
       const releaseContentOnlyCandidate =
         contentOnlyThinkingState === 'pending' &&
         !confirmedOpeningTagCandidate &&
@@ -1681,6 +1707,7 @@ export function convertOpenAIChunkToGemini(
         const balancedInlineThinkingBlocks =
           extractLeadingBalancedThinkingBlocks(combinedCandidateText);
         if (balancedInlineThinkingBlocks) {
+          requestContext.inlineThinkingBlockDemoted = true;
           parts = parts.filter((part) => !getVisibleText(part));
           for (const innerThought of balancedInlineThinkingBlocks.innerThoughts) {
             parts.push(createOpenAIReasoningThoughtPart(innerThought));
@@ -1690,18 +1717,26 @@ export function convertOpenAIChunkToGemini(
             rest,
             Boolean(choice.finish_reason),
           );
-          if (
-            restState === 'leaked' ||
-            (choice.finish_reason &&
-              LEADING_THINKING_TAG_PATTERN.test(rest) &&
-              !rest.trimStart().startsWith('</'))
-          ) {
-            throwProtocolTagLeak(requestContext);
-          }
+          debugLogger.debug(
+            `inline thinking blocks demoted (blocks=${balancedInlineThinkingBlocks.innerThoughts.length}, rest=${rest.length}b, restState=${restState})`,
+          );
           requestContext.pendingThinkingTagCandidate = undefined;
           if (!choice.finish_reason && restState !== 'clean') {
+            // The tail starts with an incomplete opener or tag prefix right
+            // after the demoted block(s); keep holding it until the closer
+            // arrives (or the finished-stream check rejects it). A complete
+            // tag embedded further inside the tail is caught by the
+            // post-demotion leaked-tag gate below.
             requestContext.pendingThinkingTagCandidate = { text: rest };
             visibleText = '';
+          } else if (
+            restState === 'leaked' ||
+            // At finish an undigested tail (e.g. a truncated '<thi' prefix)
+            // is a leak: the chunk-split twin throws via the hold path, so
+            // releasing it here would make the outcome chunking-dependent.
+            (choice.finish_reason && restState !== 'clean')
+          ) {
+            throwProtocolTagLeak(requestContext);
           } else {
             if (rest) {
               parts.push({ text: rest });
@@ -1715,6 +1750,9 @@ export function convertOpenAIChunkToGemini(
         } else {
           // Incomplete block mid-stream: keep holding it until the closing
           // tag arrives (or the finished-stream check rejects it).
+          debugLogger.debug(
+            `inline thinking block held mid-stream (candidate length=${combinedCandidateText.length})`,
+          );
           requestContext.pendingThinkingTagCandidate = {
             text: combinedCandidateText,
           };
@@ -1761,7 +1799,14 @@ export function convertOpenAIChunkToGemini(
         (requestContext.hasThinkingTagInReasoning === true &&
           (CLOSING_THINKING_TAG_PATTERN.test(visibleText) ||
             (requestContext.atVisibleLineStart === true &&
-              LEADING_CLOSING_THINKING_TAG_PATTERN.test(visibleText)))));
+              LEADING_CLOSING_THINKING_TAG_PATTERN.test(visibleText)))) ||
+        // Once a balanced inline block has been demoted, any further complete
+        // tag in visible content is embedded or stray — the candidate
+        // machinery no longer applies after visible content exists, so the
+        // chunk-split twin of an interleaved shape would otherwise emit raw
+        // tags. Literal tag references stay sanctioned before any demotion.
+        (requestContext.inlineThinkingBlockDemoted === true &&
+          THINKING_TAG_PATTERN.test(visibleText)));
 
     if (/\S/.test(visibleText)) {
       requestContext.hasVisibleContent = true;

@@ -88,6 +88,13 @@ export interface RequestContext {
   hasThinkingTagInReasoning?: boolean;
   hasVisibleContent?: boolean;
   atVisibleLineStart?: boolean;
+  /**
+   * Set once the inline thinking parser demotes a balanced content block to
+   * the thought channel (issue #9348). After a demotion any further complete
+   * thinking tag in visible content is embedded/stray and fails closed;
+   * literal tag references are only sanctioned before a demotion happens.
+   */
+  inlineThinkingBlockDemoted?: boolean;
   pendingThinkingTagCandidate?: {
     text: string;
     closingTagName?: 'think' | 'thinking';
