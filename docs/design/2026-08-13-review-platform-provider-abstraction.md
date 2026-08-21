@@ -396,13 +396,17 @@ Enterprise paragraph.
     edit and is not edit evidence; and a1 can answer a well-formed
     `a1.error/v1` error object with exit 0 (a backend auth failure or a
     client timeout), whose `message` now rides the skip note instead of a
-    bare "unexpected shape". Two disclosed residuals: resolved REPLIES
-    have no a1 listing at all, and an EDIT of a receipt-vouched
+    bare "unexpected shape". Three disclosed residuals: resolved REPLIES
+    have no a1 listing at all; an EDIT of a receipt-vouched
     (submit-posted) comment is outside the tripwire's sight — the
     `updatedAt` bump cannot be told from a resolution or other state flip,
     so detecting it would flag healthy runs, and a1 has no comment-edit
     subcommand to begin with (the GitHub twin's sanctioned channel, the
-    review, is likewise uneditable).
+    review, is likewise uneditable); and an edit of an UNVOUCHED
+    pre-window comment is invisible once its discussion is resolved — the
+    `--resolved` union lists it, but the posted arm keys on creation
+    inside the window and the edited arm skips resolved comments, so a
+    resolved comment is judged by creation only.
   - **AI-gate probe (2026-08-21, issue #9614):** Q4 was resolved by a
     controlled write probe on a scratch CR — `comment create` auto-sets
     NOTHING (both a general and an inline probe read back

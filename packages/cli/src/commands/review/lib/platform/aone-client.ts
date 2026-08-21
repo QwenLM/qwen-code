@@ -119,7 +119,17 @@ export function a1JsonOnce<T>(...args: string[]): T | undefined {
  * indistinguishable from its all-clear state is off.
  */
 export function aoneWhoamiAccount(): string {
-  const out = a1Json<{ account?: unknown }>('auth', 'whoami');
+  let out: { account?: unknown };
+  try {
+    out = a1Json<{ account?: unknown }>('auth', 'whoami');
+  } catch (err) {
+    // A parse failure names the command, mirroring a1CommentList — the
+    // skip note must say WHAT failed; an exec failure rethrows untouched.
+    if (err instanceof SyntaxError) {
+      throw new Error('a1 auth whoami returned an unexpected shape');
+    }
+    throw err;
+  }
   if (typeof out.account !== 'string' || out.account.trim() === '') {
     throw new Error('a1 auth whoami returned no account');
   }

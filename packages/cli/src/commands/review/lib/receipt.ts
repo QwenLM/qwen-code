@@ -18,9 +18,12 @@
  * The shared receipt-read contract, single home so a schema change or guard
  * fix is one edit BOTH axes inherit: JSON.parse, the object guard, and the
  * numeric filter. Malformed input yields `null`; callers decide what that
- * means.
+ * means. Exported beyond the axis parsers because a writer rewriting the
+ * file needs the WHOLE prior object to preserve the other platform's axis.
  */
-function parseReceiptObject(raw: string): Record<string, unknown> | null {
+export function parseReceiptObject(
+  raw: string,
+): Record<string, unknown> | null {
   let value: unknown;
   try {
     value = JSON.parse(raw);

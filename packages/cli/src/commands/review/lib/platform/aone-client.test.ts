@@ -201,8 +201,12 @@ describe('aoneWhoamiAccount', () => {
     );
   });
 
-  it('throws (the transport cause propagating) when the answer is unparseable', () => {
+  it('throws the command-tagged shape error when the answer is unparseable', () => {
+    // The raw SyntaxError named no command; the skip note must say WHAT
+    // failed, mirroring a1CommentList's unexpected-shape standard.
     mockExecFileSync.mockReturnValue('not json');
-    expect(() => aoneWhoamiAccount()).toThrow();
+    expect(() => aoneWhoamiAccount()).toThrow(
+      'a1 auth whoami returned an unexpected shape',
+    );
   });
 });
