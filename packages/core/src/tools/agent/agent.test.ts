@@ -6133,6 +6133,45 @@ describe('AgentTool', () => {
       expect(mockSubagentDispose).not.toHaveBeenCalled();
     });
 
+    it('clears the completed run summary in the hot continuation patch', async () => {
+      const patchMetaSpy = vi.spyOn(transcript, 'patchAgentMeta');
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      });
+
+      await invocation.execute();
+      await vi.waitFor(() => {
+        expect(mockRegistry.complete).toHaveBeenCalledTimes(1);
+      });
+
+      const resident = mockRegistry.registerResidentAgent.mock.calls[0]?.[1] as
+        | { continue: (message: string) => boolean }
+        | undefined;
+      expect(resident).toBeDefined();
+      expect(resident?.continue('Now inspect the helper')).toBe(true);
+
+      // The hot continuation patch must clear run N-1's terminal summary —
+      // mirroring the cold-resume patch — so a crash mid-continuation cannot
+      // leave discovery restoring the completed run's stats/activities as the
+      // live run's state.
+      const runningPatch = patchMetaSpy.mock.calls.find(
+        ([, update]) => update.status === 'running' && update.resumeCount === 1,
+      );
+      expect(runningPatch).toBeDefined();
+      // toMatchObject treats undefined as absent, so assert key presence.
+      expect(runningPatch?.[1]).toHaveProperty('stats', undefined);
+      expect(runningPatch?.[1]).toHaveProperty('recentActivities', undefined);
+
+      await vi.waitFor(() => {
+        expect(mockRegistry.complete).toHaveBeenCalledTimes(2);
+      });
+      patchMetaSpy.mockRestore();
+    });
+
     it('claims finishing-window input before publishing completion', async () => {
       mockRegistry.drainMessages
         .mockReturnValueOnce(['late correction'])
