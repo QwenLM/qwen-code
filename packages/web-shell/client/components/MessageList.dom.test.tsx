@@ -533,6 +533,35 @@ describe('MessageList — failed prompt retry', () => {
 });
 
 describe('MessageList — compact mode', () => {
+  it('updates a lone streaming thinking tail in place without nesting', () => {
+    const user = userMsg('u1');
+    const thinking = {
+      ...thinkingMsg('t1'),
+      content: 'first',
+      isStreaming: true,
+    };
+    const container = mount([user, thinking], undefined, {
+      compactMode: true,
+      isResponding: true,
+    });
+    const row = container.querySelector('[data-testid="msg-t1"]');
+    expect(row).not.toBeNull();
+    expect(row?.getAttribute('data-message-content')).toBe('first');
+    // A lone thought stays a standalone row — no summary nesting.
+    expect(
+      container.querySelector('[data-testid="msg-summary-t1"]'),
+    ).toBeNull();
+
+    rerenderMessages(
+      container,
+      [user, { ...thinking, content: 'first second' }],
+      { isResponding: true },
+    );
+
+    expect(container.querySelector('[data-testid="msg-t1"]')).toBe(row);
+    expect(row?.getAttribute('data-message-content')).toBe('first second');
+  });
+
   it('keeps thinking without adjacent tools visible in compact mode', () => {
     const container = mount(
       [userMsg('u1'), thinkingMsg('t1'), asstMsg('a1')],
@@ -558,6 +587,23 @@ describe('MessageList — compact mode', () => {
     expect(container.querySelector('[data-testid="msg-t2"]')).toBeNull();
     expect(container.querySelector('[data-testid="msg-u1"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="msg-a1"]')).not.toBeNull();
+  });
+
+  it('does not create a tool summary for consecutive thinking only', () => {
+    const container = mount(
+      [userMsg('u1'), thinkingMsg('t1'), thinkingMsg('t2'), asstMsg('a1')],
+      undefined,
+      {
+        compactMode: true,
+        customization: { collapseCompletedTurns: false },
+      },
+    );
+
+    expect(container.querySelector('[data-testid="msg-t1"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="msg-t2"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="msg-summary-t1"]'),
+    ).toBeNull();
   });
 
   it('merges tool groups separated by completed thinking', () => {
@@ -593,9 +639,12 @@ describe('MessageList — compact mode', () => {
         ?.getAttribute('data-tool-ids'),
     ).toBe('call-g1,call-g2');
     expect(container.querySelector('[data-testid="msg-a1"]')).not.toBeNull();
+    // The trailing lone tool has no thought or sibling to merge with, so it
+    // stays a standalone row like a single tool in non-compact mode.
+    expect(container.querySelector('[data-testid="msg-g3"]')).not.toBeNull();
     expect(
       container.querySelector('[data-testid="msg-summary-g3"]'),
-    ).not.toBeNull();
+    ).toBeNull();
   });
 
   it('keeps visible thinking and tool groups in transcript order', () => {
@@ -622,14 +671,9 @@ describe('MessageList — compact mode', () => {
     ).toEqual(['msg-u1', 'msg-g1', 'msg-t1', 'msg-g2', 'msg-a1']);
   });
 
-  it('keeps agent groups on their parallel-agent path', () => {
+  it('keeps a parallel-agent-only run on its direct path', () => {
     const container = mount(
-      [
-        userMsg('u1'),
-        agentMsg('agent-1'),
-        thinkingMsg('t1'),
-        agentMsg('agent-2'),
-      ],
+      [userMsg('u1'), agentMsg('agent-1'), agentMsg('agent-2')],
       undefined,
       {
         compactMode: true,
@@ -640,8 +684,73 @@ describe('MessageList — compact mode', () => {
     expect(parallelAgentsSummary(container)).not.toBeNull();
   });
 
+  it('folds a single agent and adjacent thinking into one summary', () => {
+    const container = mount(
+      [userMsg('u1'), thinkingMsg('t1'), agentMsg('agent-1'), asstMsg('a1')],
+      undefined,
+      {
+        compactMode: true,
+        customization: { collapseCompletedTurns: false },
+      },
+    );
+
+    expect(
+      container
+        .querySelector('[data-testid="msg-summary-t1"]')
+        ?.getAttribute('data-tool-ids'),
+    ).toBe('call-agent-1');
+    expect(container.querySelector('[data-testid="msg-t1"]')).toBeNull();
+    expect(container.querySelector('[data-testid="msg-agent-1"]')).toBeNull();
+  });
+
+  it('folds parallel agents and trailing thinking into one compact summary', () => {
+    const container = mount(
+      [
+        userMsg('u1'),
+        agentMsg('agent-1'),
+        agentMsg('agent-2'),
+        thinkingMsg('t1'),
+        asstMsg('a1'),
+      ],
+      undefined,
+      {
+        compactMode: true,
+        customization: { collapseCompletedTurns: false },
+      },
+    );
+
+    expect(parallelAgentsSummary(container)).toBeNull();
+    expect(
+      container
+        .querySelector('[data-testid="msg-summary-agent-1"]')
+        ?.getAttribute('data-tool-ids'),
+    ).toBe('call-agent-1,call-agent-2');
+    expect(container.querySelector('[data-testid="msg-t1"]')).toBeNull();
+    expect(container.querySelector('[data-testid="msg-a1"]')).not.toBeNull();
+  });
+
+  it('does not fold parallel agents with thinking outside compact mode', () => {
+    const container = mount(
+      [
+        userMsg('u1'),
+        agentMsg('agent-1'),
+        agentMsg('agent-2'),
+        thinkingMsg('t1'),
+        asstMsg('a1'),
+      ],
+      undefined,
+      { customization: { collapseCompletedTurns: false } },
+    );
+
+    expect(parallelAgentsSummary(container)).not.toBeNull();
+    expect(container.querySelector('[data-testid="msg-t1"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="msg-summary-agent-1"]'),
+    ).toBeNull();
+  });
+
   it.each(['TodoWrite', 'AskUserQuestion'])(
-    'keeps %s groups separate across hidden thinking',
+    'folds %s groups into the summary across hidden thinking',
     (toolName) => {
       const container = mount(
         [
@@ -657,11 +766,11 @@ describe('MessageList — compact mode', () => {
       );
 
       expect(
-        container.querySelector('[data-testid="msg-summary-g1"]'),
-      ).not.toBeNull();
-      expect(
-        container.querySelector('[data-testid="msg-special"]'),
-      ).not.toBeNull();
+        container
+          .querySelector('[data-testid="msg-summary-g1"]')
+          ?.getAttribute('data-tool-ids'),
+      ).toBe('call-g1,call-special');
+      expect(container.querySelector('[data-testid="msg-special"]')).toBeNull();
     },
   );
 
@@ -669,33 +778,27 @@ describe('MessageList — compact mode', () => {
     ['TodoWrite', standaloneToolMsg('special', 'TodoWrite')],
     ['AskUserQuestion', standaloneToolMsg('special', 'AskUserQuestion')],
     ['agent', agentMsg('special')],
-  ])('does not merge a leading %s group with later tools', (_name, special) => {
-    const container = mount(
-      [special, thinkingMsg('t1'), toolMsg('g2')],
-      undefined,
-      {
-        compactMode: true,
-        customization: { collapseCompletedTurns: false },
-      },
-    );
+  ])(
+    'merges a leading %s group with later thinking and tools',
+    (_name, special) => {
+      const container = mount(
+        [special, thinkingMsg('t1'), toolMsg('g2')],
+        undefined,
+        {
+          compactMode: true,
+          customization: { collapseCompletedTurns: false },
+        },
+      );
 
-    expect(
-      container.querySelector('[data-testid="msg-special"]'),
-    ).not.toBeNull();
-    // The completed thinking folds into the adjacent tool group, which keeps
-    // the tool while the standalone group stays separate.
-    expect(
-      container
-        .querySelector('[data-testid="msg-special"]')
-        ?.getAttribute('data-tool-ids'),
-    ).toBe('call-special');
-    expect(
-      container
-        .querySelector('[data-testid="msg-summary-t1"]')
-        ?.getAttribute('data-tool-ids'),
-    ).toBe('call-g2');
-    expect(container.querySelector('[data-testid="msg-g2"]')).toBeNull();
-  });
+      expect(
+        container
+          .querySelector('[data-testid="msg-summary-special"]')
+          ?.getAttribute('data-tool-ids'),
+      ).toBe('call-special,call-g2');
+      expect(container.querySelector('[data-testid="msg-special"]')).toBeNull();
+      expect(container.querySelector('[data-testid="msg-g2"]')).toBeNull();
+    },
+  );
 });
 
 describe('MessageList — turn collapse (DOM)', () => {
