@@ -28,7 +28,8 @@ ledger lives in the posted comments this subcommand would now read.
 Out of scope (tracked): comment-status/presubmit backing and cross-round
 dedup (#9613), AI-comment marking (#9614), removed-line anchors (#9615),
 self-PR detection (#9616), cleanup audit (#9617), incremental cache under
-AGit-Flow (#9618), test-plan routing / composeUrl / a1 version floor (#9619).
+AGit-Flow (#9618 — landed via #9630 and merged into this branch while it was
+in flight; see D6), test-plan routing / composeUrl / a1 version floor (#9619).
 
 ## Verified platform facts
 
@@ -200,14 +201,20 @@ meaning is "pr-context failed or was skipped", per Step 1). Consequence: an
 Aone run that read its context can now compose APPROVE, and the wired
 `a1 repo mr approve` fires for the first time.
 
-### D6 — Ledger anchors under AGit-Flow: carried, inert until #9618
+### D6 — Ledger anchors under AGit-Flow: carried, live via the no-ancestry rule
 
 A recovered own-ledger's `sha` rides into the side file and the section's
 anchor ruling as on GitHub. Under AGit-Flow the anchored head is amended
-(orphaned) on every update, so `fetch-pr --since <anchor>` fails its
-ancestry validation and falls back to full-range with the reason in the
-report — the existing gate makes the anchor inert-but-harmless until the
-D7-style incremental rule (#9618) lands. No Aone-specific handling here.
+(orphaned) on every update, so the ancestry test GitHub's incremental path
+relies on would fail for EVERY update; `fetch-pr --since` therefore
+resolves Aone anchors with the no-ancestry rule (the parent doc's D7,
+shipped by #9630 while this branch was in flight): the anchor-behind-head
+test and the merge-base clamp are both skipped, and a recovered anchor
+delta-scopes the round to the files the update touched — rebase drift
+staying within them keeps the scope, anything wider falls back to
+full-range, and no drift byte enters the published scope. The anchor is
+LIVE on Aone, not inert: the draft's "inert until #9618" text predates that
+landing and was wrong from the merge on.
 
 ### D7 — Skill and doc surface
 
