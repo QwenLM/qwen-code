@@ -12,6 +12,8 @@ import {
   AssistantMessageContent,
   ThinkMessage,
   ThinkMessageContent,
+  THINKING_ICON,
+  THINKING_ICON_PENDING,
   toggleKeyHint,
 } from './ConversationMessages.js';
 
@@ -342,6 +344,12 @@ describe('<ThinkMessage />', () => {
     expect(output).toContain('Thought for 5s');
     expect(output).toContain(`${toggleKeyHint} to collapse`);
     expect(output).not.toContain('Thinking');
+    // The icon branch: a finalized-but-pending thought shows the COMPLETED
+    // (therefore) icon, not the pending (because) one. Without this a
+    // regression flipping the ternary back to key on isPending ships green
+    // while the expanded thought shows the pending icon.
+    expect(output).toContain(THINKING_ICON.trim());
+    expect(output).not.toContain(THINKING_ICON_PENDING.trim());
     // Expanded still shows the body.
     expect(output).toContain('Analyzing the code structure');
   });

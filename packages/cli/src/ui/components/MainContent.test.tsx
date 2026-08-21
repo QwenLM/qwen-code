@@ -33,6 +33,10 @@ const scrollableListPropsSpy = vi.fn();
 // and observe MainContent's anchor restore (scrollToItem).
 const scrollableListRefMock = {
   getScrollIndex: vi.fn<() => number>(() => 0),
+  getScrollAnchor: vi.fn<() => { index: number; offset: number }>(() => ({
+    index: 0,
+    offset: 0,
+  })),
   getScrollState: vi.fn(() => ({
     scrollTop: 0,
     scrollHeight: 0,
@@ -839,19 +843,25 @@ describe('<MainContent />', () => {
 
       it('restores the anchored item after the toggle inserts merged groups', () => {
         scrollableListRefMock.scrollToItem.mockClear();
+        scrollableListPropsSpy.mockClear();
         // fullDetail off: the merged group is filtered out, so the list is
         // [banner, 1, 2, 4, 5, 6] and item 5 sits at index 4.
         const { rerender } = renderWithThoughtExpanded(anchorHistory, false, {
           useTerminalBuffer: true,
         });
-        // The user is scrolled up (not at the bottom), anchored on item 5.
-        // Once-consumed: read exactly once during the fullDetail-flip render.
+        // The user is scrolled up (not at the bottom), anchored on item 5,
+        // partway into it (a non-zero within-item offset, routine under
+        // incremental VP scrolling). Once-consumed: read exactly once during
+        // the fullDetail-flip render.
         scrollableListRefMock.getScrollState.mockReturnValueOnce({
           scrollTop: 10,
           scrollHeight: 100,
           innerHeight: 20,
         });
-        scrollableListRefMock.getScrollIndex.mockReturnValueOnce(4);
+        scrollableListRefMock.getScrollAnchor.mockReturnValueOnce({
+          index: 4,
+          offset: 7,
+        });
 
         // Ctrl+O flips fullDetail on; the merged group re-enters the list
         // ABOVE the anchor, shifting item 5 to index 5.
@@ -860,9 +870,22 @@ describe('<MainContent />', () => {
         );
 
         expect(scrollableListRefMock.scrollToItem).toHaveBeenCalledTimes(1);
-        expect(scrollableListRefMock.scrollToItem).toHaveBeenCalledWith({
-          item: expect.objectContaining({ id: 5 }),
-        });
+        const restoreArg =
+          scrollableListRefMock.scrollToItem.mock.calls[0]?.[0];
+        // The within-item pixel offset survives the flip; scrollToItem's
+        // default viewOffset of 0 would snap the item's top to the viewport
+        // top and drop the reading depth inside a tall item.
+        expect(restoreArg?.viewOffset).toBe(7);
+        // Reference identity, not structural equality: production resolves
+        // the restore via data.indexOf(item), so a clone of the anchored
+        // item would resolve to -1 and silently no-op while a deep-equal
+        // assertion still passed. Pin the exact reference...
+        expect(restoreArg?.item).toBe(anchorHistory[4]);
+        // ...and that it is the very object present in the list's new data.
+        const lastData = scrollableListPropsSpy.mock.calls.at(-1)?.[0]?.data as
+          | Array<{ id: number }>
+          | undefined;
+        expect(lastData).toContain(restoreArg?.item);
       });
 
       it('does not fight the bottom-stuck re-anchor on the toggle', () => {
@@ -876,13 +899,92 @@ describe('<MainContent />', () => {
           scrollHeight: 100,
           innerHeight: 20,
         });
-        scrollableListRefMock.getScrollIndex.mockReturnValueOnce(5);
+        scrollableListRefMock.getScrollAnchor.mockReturnValueOnce({
+          index: 5,
+          offset: 0,
+        });
 
         rerender(
           thoughtExpandedTree(anchorHistory, true, { useTerminalBuffer: true }),
         );
 
         expect(scrollableListRefMock.scrollToItem).not.toHaveBeenCalled();
+      });
+
+      it('restores the anchored item after the toggle removes merged groups (shrink)', () => {
+        scrollableListRefMock.scrollToItem.mockClear();
+        scrollableListPropsSpy.mockClear();
+        // fullDetail ON: the merged group is present, list is
+        // [banner, 1, 2, 3, 4, 5, 6] and item 5 sits at index 5.
+        const { rerender } = renderWithThoughtExpanded(anchorHistory, true, {
+          useTerminalBuffer: true,
+        });
+        // Scrolled up, anchored on item 5 (below the merged group at 3).
+        scrollableListRefMock.getScrollState.mockReturnValueOnce({
+          scrollTop: 10,
+          scrollHeight: 140,
+          innerHeight: 20,
+        });
+        scrollableListRefMock.getScrollAnchor.mockReturnValueOnce({
+          index: 5,
+          offset: 3,
+        });
+
+        // Ctrl+O flips fullDetail OFF; the merged group is filtered out
+        // ABOVE the anchor, shifting item 5 to index 4.
+        rerender(
+          thoughtExpandedTree(anchorHistory, false, {
+            useTerminalBuffer: true,
+          }),
+        );
+
+        expect(scrollableListRefMock.scrollToItem).toHaveBeenCalledTimes(1);
+        const restoreArg =
+          scrollableListRefMock.scrollToItem.mock.calls[0]?.[0];
+        expect(restoreArg?.viewOffset).toBe(3);
+        expect(restoreArg?.item).toBe(anchorHistory[4]);
+        const lastData = scrollableListPropsSpy.mock.calls.at(-1)?.[0]?.data as
+          | Array<{ id: number }>
+          | undefined;
+        expect(lastData).toContain(restoreArg?.item);
+      });
+
+      it('restores to the paired thought when the anchored item is a merged group the toggle removes', () => {
+        scrollableListRefMock.scrollToItem.mockClear();
+        // fullDetail ON: [banner, 1, 2, 3(merged group), 4, 5, 6]; the user
+        // is anchored ON the merged group at index 3.
+        const { rerender } = renderWithThoughtExpanded(anchorHistory, true, {
+          useTerminalBuffer: true,
+        });
+        scrollableListRefMock.getScrollState.mockReturnValueOnce({
+          scrollTop: 10,
+          scrollHeight: 140,
+          innerHeight: 20,
+        });
+        scrollableListRefMock.getScrollAnchor.mockReturnValueOnce({
+          index: 3,
+          offset: 2,
+        });
+
+        // Ctrl+O flips OFF and removes the merged group the user was
+        // reading. Restore must target the thought line it folded into
+        // (anchorHistory[1], committed immediately before it) — restoring
+        // to the removed group itself would no-op while the shrunken list
+        // slides the viewport onto unrelated content.
+        rerender(
+          thoughtExpandedTree(anchorHistory, false, {
+            useTerminalBuffer: true,
+          }),
+        );
+
+        expect(scrollableListRefMock.scrollToItem).toHaveBeenCalledTimes(1);
+        const restoreArg =
+          scrollableListRefMock.scrollToItem.mock.calls[0]?.[0];
+        expect(restoreArg?.item).toBe(anchorHistory[1]);
+        const lastData = scrollableListPropsSpy.mock.calls.at(-1)?.[0]?.data as
+          | Array<{ id: number }>
+          | undefined;
+        expect(lastData).toContain(restoreArg?.item);
       });
     });
   });
@@ -1258,6 +1360,43 @@ describe('<MainContent />', () => {
       );
 
       expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, 2, -1]);
+    });
+
+    it('suppresses the live pending copy of a merged batch outside full detail', () => {
+      scrollableListPropsSpy.mockClear();
+
+      // A merged batch's committed group is filtered out of the rendered
+      // list (fullDetail off), but the scheduler keeps its live display copy
+      // until onComplete's await (tool-response submission) returns. Between
+      // the merged commit and that clear, the live pending copy must be
+      // suppressed too — otherwise the user sees the merged thought line
+      // PLUS a duplicate '✓ Read /foo' group row.
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          history: [
+            { id: 1, type: 'user' as const, text: 'read /foo' },
+            {
+              id: 2,
+              type: 'gemini_thought' as const,
+              text: 'thinking',
+              durationMs: 9000,
+              toolSummary: 'Read /foo',
+            },
+            {
+              id: 3,
+              ...batched('batch-1', 'call-A'),
+              display: { mergedIntoThought: true },
+            },
+          ],
+          pendingHistoryItems: [batched('batch-1', 'call-A')],
+        }),
+      );
+
+      // Only the merged thought line (id 2) represents the batch: the
+      // committed merged group (id 3) is filtered out and the live pending
+      // copy (id -1) is suppressed by the same batchId identity.
+      expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, 1, 2]);
     });
 
     it('requests a full-height measurement only for pending plain-text confirmations', () => {

@@ -11824,20 +11824,25 @@ describe('useGeminiStream', () => {
       );
     };
 
-    // A successful read_file completion for a single 'tc1' call.
-    const successfulReadToolCall = (): TrackedToolCall =>
+    // A successful read_file completion for a single call. The completing
+    // batch's prompt_id must match the prompt id the owning submit used —
+    // completion-side ownership keys on it (callIds are not an identity).
+    const successfulReadToolCall = (
+      promptId = 'p1',
+      callId = 'tc1',
+    ): TrackedToolCall =>
       ({
         request: {
-          callId: 'tc1',
+          callId,
           name: 'read_file',
           args: { file_path: '/foo' },
           isClientInitiated: false,
-          prompt_id: 'p1',
+          prompt_id: promptId,
         },
         status: 'success',
         responseSubmittedToGemini: false,
         response: {
-          callId: 'tc1',
+          callId,
           responseParts: [{ text: 'file contents' }],
         },
         tool: { displayName: 'ReadFile' },
@@ -12340,9 +12345,7 @@ describe('useGeminiStream', () => {
     });
 
     it('should defer the thought commit until a following tool batch completes and merge a read/search batch into the thought line', async () => {
-      let capturedOnComplete:
-        | ((completedTools: TrackedToolCall[]) => Promise<void>)
-        | null = null;
+      const getOnComplete = captureSchedulerOnComplete();
 
       mockSendMessageStream.mockReturnValue(
         (async function* () {
@@ -12367,37 +12370,14 @@ describe('useGeminiStream', () => {
         })(),
       );
 
-      mockUseReactToolScheduler.mockImplementation((onComplete) => {
-        capturedOnComplete = onComplete;
-        return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
-      });
-
-      const { result } = renderHook(() =>
-        useGeminiStream(
-          new MockedGeminiClientClass(mockConfig),
-          [],
-          mockAddItem,
-          mockConfig,
-          true,
-          mockLoadedSettings,
-          mockOnDebugMessage,
-          mockHandleSlashCommand,
-          false,
-          () => 'vscode' as EditorType,
-          () => {},
-          () => Promise.resolve(),
-          false,
-          () => {},
-          () => {},
-          () => {},
-          () => {},
-          80,
-          24,
-        ),
-      );
+      const { result } = renderDeferredTestHook();
 
       await act(async () => {
-        void result.current.submitQuery('think then tool call');
+        void result.current.submitQuery(
+          'think then tool call',
+          SendMessageType.UserQuery,
+          'p1',
+        );
         await Promise.resolve();
         await Promise.resolve();
       });
@@ -12430,32 +12410,10 @@ describe('useGeminiStream', () => {
       const frozenDurationMs = deferredItem?.durationMs;
       expect(frozenDurationMs).toBeDefined();
 
-      const completedToolCalls: TrackedToolCall[] = [
-        {
-          request: {
-            callId: 'tc1',
-            name: 'read_file',
-            args: { file_path: '/foo' },
-            isClientInitiated: false,
-            prompt_id: 'p1',
-          },
-          status: 'success',
-          responseSubmittedToGemini: false,
-          response: {
-            callId: 'tc1',
-            responseParts: [{ text: 'file contents' }],
-          },
-          tool: { displayName: 'ReadFile' },
-          invocation: {
-            getDescription: () => '/foo',
-          } as unknown as AnyToolInvocation,
-        } as TrackedCompletedToolCall,
-      ];
-
       await new Promise((resolve) => setTimeout(resolve, 30));
 
       await act(async () => {
-        await capturedOnComplete?.(completedToolCalls);
+        await getOnComplete()?.([successfulReadToolCall()]);
       });
 
       expect(mockAddItem).toHaveBeenCalledWith(
@@ -12476,6 +12434,22 @@ describe('useGeminiStream', () => {
         }),
         expect.any(Number),
       );
+      // Producer invariant: the merged thought commits IMMEDIATELY BEFORE
+      // its suppressed group and adjacent to it. useHistoryManager's
+      // compaction pairs a merged group with its thought via strict
+      // prev[i-1] adjacency (no type check), and addItem is plain append —
+      // commit order is the only guarantee. A reorder (or any item landing
+      // between the two commits) would orphan the pair: compaction drops
+      // the thought while the group stays mergedIntoThought, and the batch
+      // renders nothing in the main view.
+      const thoughtIdx = mockAddItem.mock.calls.findIndex(
+        ([item]) => item.type === 'gemini_thought',
+      );
+      const groupIdx = mockAddItem.mock.calls.findIndex(
+        ([item]) => item.type === 'tool_group',
+      );
+      expect(thoughtIdx).toBeGreaterThanOrEqual(0);
+      expect(groupIdx).toBe(thoughtIdx + 1);
       // The deferred pending item must be cleared once the deferral
       // resolves — otherwise the merged line double-renders (history line
       // plus a stranded finalized pending item rendered by MainContent).
@@ -12489,9 +12463,7 @@ describe('useGeminiStream', () => {
     });
 
     it('should commit the deferred thought without merging when the batch contains a non-collapsible tool', async () => {
-      let capturedOnComplete:
-        | ((completedTools: TrackedToolCall[]) => Promise<void>)
-        | null = null;
+      const getOnComplete = captureSchedulerOnComplete();
 
       mockSendMessageStream.mockReturnValue(
         (async function* () {
@@ -12516,37 +12488,14 @@ describe('useGeminiStream', () => {
         })(),
       );
 
-      mockUseReactToolScheduler.mockImplementation((onComplete) => {
-        capturedOnComplete = onComplete;
-        return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
-      });
-
-      const { result } = renderHook(() =>
-        useGeminiStream(
-          new MockedGeminiClientClass(mockConfig),
-          [],
-          mockAddItem,
-          mockConfig,
-          true,
-          mockLoadedSettings,
-          mockOnDebugMessage,
-          mockHandleSlashCommand,
-          false,
-          () => 'vscode' as EditorType,
-          () => {},
-          () => Promise.resolve(),
-          false,
-          () => {},
-          () => {},
-          () => {},
-          () => {},
-          80,
-          24,
-        ),
-      );
+      const { result } = renderDeferredTestHook();
 
       await act(async () => {
-        void result.current.submitQuery('think then edit');
+        void result.current.submitQuery(
+          'think then edit',
+          SendMessageType.UserQuery,
+          'p1',
+        );
         await Promise.resolve();
         await Promise.resolve();
       });
@@ -12576,7 +12525,7 @@ describe('useGeminiStream', () => {
       ];
 
       await act(async () => {
-        await capturedOnComplete?.(completedToolCalls);
+        await getOnComplete()?.(completedToolCalls);
       });
 
       expect(mockAddItem).toHaveBeenCalledWith(
@@ -12610,9 +12559,7 @@ describe('useGeminiStream', () => {
     });
 
     it('should commit the deferred thought without merging when a tool in the batch was cancelled', async () => {
-      let capturedOnComplete:
-        | ((completedTools: TrackedToolCall[]) => Promise<void>)
-        | null = null;
+      const getOnComplete = captureSchedulerOnComplete();
 
       mockSendMessageStream.mockReturnValue(
         (async function* () {
@@ -12625,7 +12572,7 @@ describe('useGeminiStream', () => {
             value: {
               callId: 'tc1',
               name: 'read_file',
-              args: { file_path: '/foo' },
+              args: { path: '/foo' },
               isClientInitiated: false,
               prompt_id: 'p1',
             },
@@ -12637,37 +12584,14 @@ describe('useGeminiStream', () => {
         })(),
       );
 
-      mockUseReactToolScheduler.mockImplementation((onComplete) => {
-        capturedOnComplete = onComplete;
-        return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
-      });
-
-      const { result } = renderHook(() =>
-        useGeminiStream(
-          new MockedGeminiClientClass(mockConfig),
-          [],
-          mockAddItem,
-          mockConfig,
-          true,
-          mockLoadedSettings,
-          mockOnDebugMessage,
-          mockHandleSlashCommand,
-          false,
-          () => 'vscode' as EditorType,
-          () => {},
-          () => Promise.resolve(),
-          false,
-          () => {},
-          () => {},
-          () => {},
-          () => {},
-          80,
-          24,
-        ),
-      );
+      const { result } = renderDeferredTestHook();
 
       await act(async () => {
-        void result.current.submitQuery('think then cancelled read');
+        void result.current.submitQuery(
+          'think then cancelled read',
+          SendMessageType.UserQuery,
+          'p1',
+        );
         await Promise.resolve();
         await Promise.resolve();
       });
@@ -12710,7 +12634,7 @@ describe('useGeminiStream', () => {
       ];
 
       await act(async () => {
-        await capturedOnComplete?.(cancelledToolCalls);
+        await getOnComplete()?.(cancelledToolCalls);
       });
 
       expect(mockAddItem).toHaveBeenCalledWith(
@@ -12747,13 +12671,7 @@ describe('useGeminiStream', () => {
     });
 
     it('should commit the deferred thought on local cancel instead of stranding it', async () => {
-      let capturedOnComplete:
-        | ((completedTools: TrackedToolCall[]) => Promise<void>)
-        | null = null;
-      mockUseReactToolScheduler.mockImplementation((onComplete) => {
-        capturedOnComplete = onComplete;
-        return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
-      });
+      const getOnComplete = captureSchedulerOnComplete();
 
       let releaseStream: (() => void) | undefined;
       const holdStream = new Promise<void>((resolve) => {
@@ -12770,7 +12688,7 @@ describe('useGeminiStream', () => {
             value: {
               callId: 'tc1',
               name: 'read_file',
-              args: { file_path: '/foo' },
+              args: { path: '/foo' },
               isClientInitiated: false,
               prompt_id: 'p1',
             },
@@ -12785,29 +12703,7 @@ describe('useGeminiStream', () => {
         })(),
       );
 
-      const { result } = renderHook(() =>
-        useGeminiStream(
-          new MockedGeminiClientClass(mockConfig),
-          [],
-          mockAddItem,
-          mockConfig,
-          true,
-          mockLoadedSettings,
-          mockOnDebugMessage,
-          mockHandleSlashCommand,
-          false,
-          () => 'vscode' as EditorType,
-          () => {},
-          () => Promise.resolve(),
-          false,
-          () => {},
-          () => {},
-          () => {},
-          () => {},
-          80,
-          24,
-        ),
-      );
+      const { result } = renderDeferredTestHook();
 
       await act(async () => {
         void result.current.submitQuery('think then cancel');
@@ -12871,7 +12767,7 @@ describe('useGeminiStream', () => {
       ];
 
       await act(async () => {
-        await capturedOnComplete?.(lateCancelledToolCalls);
+        await getOnComplete()?.(lateCancelledToolCalls);
       });
 
       const thoughtCommits = calls.filter(
@@ -13079,7 +12975,11 @@ describe('useGeminiStream', () => {
       const { result } = renderDeferredTestHook();
 
       await act(async () => {
-        void result.current.submitQuery('ownership of the merge deferral');
+        void result.current.submitQuery(
+          'ownership of the merge deferral',
+          SendMessageType.UserQuery,
+          'p1',
+        );
         await Promise.resolve();
         await Promise.resolve();
       });
@@ -13201,7 +13101,11 @@ describe('useGeminiStream', () => {
       const { result } = renderDeferredTestHook();
 
       await act(async () => {
-        void result.current.submitQuery('interleaved thought re-arms');
+        void result.current.submitQuery(
+          'interleaved thought re-arms',
+          SendMessageType.UserQuery,
+          'p1',
+        );
         await Promise.resolve();
         await Promise.resolve();
       });
@@ -13336,7 +13240,11 @@ describe('useGeminiStream', () => {
       );
 
       await act(async () => {
-        void result.current.submitQuery('replay suppression');
+        void result.current.submitQuery(
+          'replay suppression',
+          SendMessageType.UserQuery,
+          'p1',
+        );
         await Promise.resolve();
         await Promise.resolve();
       });
@@ -13500,9 +13408,10 @@ describe('useGeminiStream', () => {
         ]),
       );
 
-      // The owning batch completes and folds the thought.
+      // The owning batch completes and folds the thought (its prompt_id
+      // matches the owning submit's prompt identity).
       await act(async () => {
-        await getOnComplete()?.([successfulReadToolCall()]);
+        await getOnComplete()?.([successfulReadToolCall('main-prompt')]);
       });
       const thoughtCommits = mockAddItem.mock.calls.filter(
         ([item]) => item.type === 'gemini_thought',
@@ -13516,6 +13425,680 @@ describe('useGeminiStream', () => {
           item.display?.mergedIntoThought === true,
       );
       expect(mergedGroupCommit).toBeDefined();
+
+      releaseMainEnd?.();
+    });
+
+    // Drives the arms-after-submit interleaving used by the concurrent-
+    // stream tests: the main turn's merge deferral is armed only AFTER a
+    // concurrent ?btw stream has been admitted, and the btw stream's events
+    // are held until the caller releases them. The main TCR arms with
+    // `mainCallId` (owner = the main invocation's promptId 'main-prompt');
+    // the caller completes the owning batch via the captured scheduler
+    // onComplete. Returns releasers plus the hook result.
+    const armMainDeferralWithConcurrentBtwStream = async (
+      btwEvents: Array<Record<string, unknown>>,
+      mainCallId = 'tc1',
+    ) => {
+      let releaseMainTcr: (() => void) | undefined;
+      const holdMainTcr = new Promise<void>((resolve) => {
+        releaseMainTcr = resolve;
+      });
+      let releaseMainEnd: (() => void) | undefined;
+      const holdMainEnd = new Promise<void>((resolve) => {
+        releaseMainEnd = resolve;
+      });
+      let releaseBtw: (() => void) | undefined;
+      const holdBtw = new Promise<void>((resolve) => {
+        releaseBtw = resolve;
+      });
+      let streamCallCount = 0;
+      mockSendMessageStream.mockImplementation(() => {
+        streamCallCount += 1;
+        if (streamCallCount === 1) {
+          return (async function* () {
+            yield {
+              type: ServerGeminiEventType.Thought,
+              value: { subject: '', description: 'main turn thinking' },
+            };
+            // Hold before the TCR so the deferral is still unarmed when the
+            // concurrent prompt is submitted (the arms-after-submit window).
+            await holdMainTcr;
+            yield {
+              type: ServerGeminiEventType.ToolCallRequest,
+              value: {
+                callId: mainCallId,
+                name: 'read_file',
+                args: { path: '/foo' },
+                isClientInitiated: false,
+                prompt_id: 'p1',
+              },
+            };
+            await holdMainEnd;
+            yield {
+              type: ServerGeminiEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            };
+          })();
+        }
+        return (async function* () {
+          await holdBtw;
+          for (const event of btwEvents) {
+            yield event;
+          }
+        })();
+      });
+
+      const { result } = renderDeferredTestHook();
+
+      await act(async () => {
+        void result.current.submitQuery(
+          'main query',
+          SendMessageType.UserQuery,
+          'main-prompt',
+          { submittedPrompt: 'main query' },
+        );
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitFor(() =>
+        expect(result.current.streamingState).toBe(StreamingState.Responding),
+      );
+
+      // Submit the concurrent prompt while the deferral is still unarmed;
+      // the submit-time abort is a no-op and the btw user item lands.
+      await act(async () => {
+        void result.current.submitQuery(
+          '?btw side question',
+          SendMessageType.UserQuery,
+          undefined,
+          { submittedPrompt: '?btw side question' },
+        );
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      // Arm the deferral from the main turn (owner = main invocation).
+      await act(async () => {
+        releaseMainTcr?.();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitForDeferralEstablished(result);
+
+      return {
+        result,
+        releaseBtw: () => releaseBtw?.(),
+        releaseMainEnd: () => releaseMainEnd?.(),
+      };
+    };
+
+    // The in-stream abort sites all settle the deferral through
+    // settleThoughtMergeDeferral, which resolves only the OWNING
+    // invocation's deferral. A concurrent /btw stream admitted during
+    // Responding reaches these sites while another invocation's deferral is
+    // armed; resolving it there would re-home the owner's finalized thought
+    // below the btw user item and strand the owner's batch without its fold.
+    it.each([
+      [
+        'Error',
+        [
+          {
+            type: ServerGeminiEventType.Error,
+            value: { message: 'btw failed', retryable: false },
+          },
+        ],
+      ],
+      [
+        'non-continuation Retry',
+        [{ type: ServerGeminiEventType.Retry, isContinuation: false }],
+      ],
+      [
+        'abnormal Finished',
+        [
+          {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'MAX_TOKENS', usageMetadata: undefined },
+          },
+        ],
+      ],
+    ])(
+      'should not let a concurrent stream %s resolve another invocation armed deferral',
+      async (_label, btwEvents) => {
+        const getOnComplete = captureSchedulerOnComplete();
+        const { result, releaseBtw, releaseMainEnd } =
+          await armMainDeferralWithConcurrentBtwStream(
+            btwEvents as Array<Record<string, unknown>>,
+          );
+
+        // The concurrent stream's abort must NOT resolve the armed
+        // deferral: the thought stays finalized and uncommitted.
+        await act(async () => {
+          releaseBtw();
+          await Promise.resolve();
+          await Promise.resolve();
+        });
+        expect(
+          mockAddItem.mock.calls.filter(
+            ([item]) => item.type === 'gemini_thought',
+          ),
+        ).toHaveLength(0);
+        expect(result.current.pendingHistoryItems).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: 'gemini_thought',
+              finalized: true,
+            }),
+          ]),
+        );
+
+        // The owning batch completes and folds the thought.
+        await act(async () => {
+          await getOnComplete()?.([successfulReadToolCall('main-prompt')]);
+        });
+        const thoughtCommits = mockAddItem.mock.calls.filter(
+          ([item]) => item.type === 'gemini_thought',
+        );
+        expect(thoughtCommits).toHaveLength(1);
+        expect(thoughtCommits[0][0].text).toContain('main turn thinking');
+        expect(thoughtCommits[0][0].toolSummary).toBe('Read /foo');
+        expect(
+          mockAddItem.mock.calls.find(
+            ([item]) =>
+              item.type === 'tool_group' &&
+              item.display?.mergedIntoThought === true,
+          ),
+        ).toBeDefined();
+
+        releaseMainEnd();
+      },
+    );
+
+    it('should not let a concurrent tool-first ToolCallRequest pollute the armed set', async () => {
+      const getOnComplete = captureSchedulerOnComplete();
+      // The concurrent stream is TOOL-FIRST (no description-bearing Thought),
+      // so its TCR arrives while the main deferral is armed and must not be
+      // absorbed into the armed set.
+      const { releaseBtw, releaseMainEnd } =
+        await armMainDeferralWithConcurrentBtwStream([
+          {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tc-btw',
+              name: 'read_file',
+              args: { path: '/btw' },
+              isClientInitiated: false,
+              prompt_id: 'p-btw',
+            },
+          },
+          {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          },
+        ]);
+
+      await act(async () => {
+        releaseBtw();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      // The owning batch still satisfies the subset guard (its callId was
+      // not polluted) and folds the thought.
+      await act(async () => {
+        await getOnComplete()?.([successfulReadToolCall('main-prompt')]);
+      });
+      const thoughtCommits = mockAddItem.mock.calls.filter(
+        ([item]) => item.type === 'gemini_thought',
+      );
+      expect(thoughtCommits).toHaveLength(1);
+      expect(thoughtCommits[0][0].toolSummary).toBe('Read /foo');
+      expect(
+        mockAddItem.mock.calls.find(
+          ([item]) =>
+            item.type === 'tool_group' &&
+            item.display?.mergedIntoThought === true,
+        ),
+      ).toBeDefined();
+
+      // The foreign batch completes separately: unmerged, no extra thought.
+      await act(async () => {
+        await getOnComplete()?.([
+          {
+            request: {
+              callId: 'tc-btw',
+              name: 'read_file',
+              args: { file_path: '/btw' },
+              isClientInitiated: false,
+              prompt_id: 'p-btw',
+            },
+            status: 'success',
+            responseSubmittedToGemini: false,
+            response: { callId: 'tc-btw', responseParts: [] },
+            tool: { displayName: 'ReadFile' },
+            invocation: {
+              getDescription: () => '/btw',
+            } as unknown as AnyToolInvocation,
+          } as TrackedCompletedToolCall,
+        ]);
+      });
+      expect(
+        mockAddItem.mock.calls.filter(
+          ([item]) => item.type === 'gemini_thought',
+        ),
+      ).toHaveLength(1);
+      const groups = mockAddItem.mock.calls.filter(
+        ([item]) => item.type === 'tool_group',
+      );
+      expect(groups).toHaveLength(2);
+      expect(
+        groups.filter(([item]) => item.display?.mergedIntoThought === true),
+      ).toHaveLength(1);
+
+      releaseMainEnd();
+    });
+
+    it('should not let a colliding callId from a concurrent batch consume the deferral', async () => {
+      const getOnComplete = captureSchedulerOnComplete();
+      // Native Gemini functionCall parts carry no wire id: ids are re-minted
+      // deterministically from a per-stream history snapshot, so two
+      // overlapping streams mint the SAME callId. Ownership at completion
+      // must key on the prompt identity, not the callId.
+      const { releaseBtw, releaseMainEnd } =
+        await armMainDeferralWithConcurrentBtwStream(
+          [
+            {
+              type: ServerGeminiEventType.ToolCallRequest,
+              value: {
+                callId: 'call_qwen_1',
+                name: 'read_file',
+                args: { path: '/btw-file' },
+                isClientInitiated: false,
+                prompt_id: 'p-btw',
+              },
+            },
+            {
+              type: ServerGeminiEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            },
+          ],
+          'call_qwen_1',
+        );
+
+      await act(async () => {
+        releaseBtw();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      // The FOREIGN batch (same callId, different prompt_id) completes
+      // FIRST: the subset check on callIds alone would pass, but the
+      // prompt-identity guard must reject it.
+      await act(async () => {
+        await getOnComplete()?.([
+          {
+            request: {
+              callId: 'call_qwen_1',
+              name: 'read_file',
+              args: { file_path: '/btw-file' },
+              isClientInitiated: false,
+              prompt_id: 'btw-prompt',
+            },
+            status: 'success',
+            responseSubmittedToGemini: false,
+            response: { callId: 'call_qwen_1', responseParts: [] },
+            tool: { displayName: 'ReadFile' },
+            invocation: {
+              getDescription: () => '/btw-file',
+            } as unknown as AnyToolInvocation,
+          } as TrackedCompletedToolCall,
+        ]);
+      });
+      expect(
+        mockAddItem.mock.calls.filter(
+          ([item]) => item.type === 'gemini_thought',
+        ),
+      ).toHaveLength(0);
+      const foreignGroup = mockAddItem.mock.calls.find(
+        ([item]) => item.type === 'tool_group',
+      );
+      expect(foreignGroup?.[0].display?.mergedIntoThought).toBeUndefined();
+
+      // The OWNING batch (same callId, owning prompt_id) then merges.
+      await act(async () => {
+        await getOnComplete()?.([
+          successfulReadToolCall('main-prompt', 'call_qwen_1'),
+        ]);
+      });
+      const thoughtCommits = mockAddItem.mock.calls.filter(
+        ([item]) => item.type === 'gemini_thought',
+      );
+      expect(thoughtCommits).toHaveLength(1);
+      expect(thoughtCommits[0][0].text).toContain('main turn thinking');
+      expect(thoughtCommits[0][0].toolSummary).toBe('Read /foo');
+      expect(
+        mockAddItem.mock.calls.filter(
+          ([item]) =>
+            item.type === 'tool_group' &&
+            item.display?.mergedIntoThought === true,
+        ),
+      ).toHaveLength(1);
+
+      releaseMainEnd();
+    });
+
+    it('should not arm on a foreign stream thought occupying the shared pending slot', async () => {
+      const getOnComplete = captureSchedulerOnComplete();
+      let releaseMainTcr: (() => void) | undefined;
+      const holdMainTcr = new Promise<void>((resolve) => {
+        releaseMainTcr = resolve;
+      });
+      let releaseMainEnd: (() => void) | undefined;
+      const holdMainEnd = new Promise<void>((resolve) => {
+        releaseMainEnd = resolve;
+      });
+      let releaseBtwEnd: (() => void) | undefined;
+      const holdBtwEnd = new Promise<void>((resolve) => {
+        releaseBtwEnd = resolve;
+      });
+      let streamCallCount = 0;
+      mockSendMessageStream.mockImplementation(() => {
+        streamCallCount += 1;
+        if (streamCallCount === 1) {
+          return (async function* () {
+            // Tool-first main turn: no description-bearing Thought of its
+            // own before the tool call.
+            await holdMainTcr;
+            yield {
+              type: ServerGeminiEventType.ToolCallRequest,
+              value: {
+                callId: 'tc1',
+                name: 'read_file',
+                args: { path: '/foo' },
+                isClientInitiated: false,
+                prompt_id: 'p1',
+              },
+            };
+            await holdMainEnd;
+            yield {
+              type: ServerGeminiEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            };
+          })();
+        }
+        return (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'BTW-FOREIGN-THOUGHT' },
+          };
+          // Subject-only thought flushes the buffered reasoning into the
+          // shared pending slot.
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: 'working' },
+          };
+          await holdBtwEnd;
+        })();
+      });
+
+      const { result } = renderDeferredTestHook();
+
+      await act(async () => {
+        void result.current.submitQuery(
+          'main tool-first query',
+          SendMessageType.UserQuery,
+          'main-prompt',
+          { submittedPrompt: 'main tool-first query' },
+        );
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitFor(() =>
+        expect(result.current.streamingState).toBe(StreamingState.Responding),
+      );
+
+      await act(async () => {
+        void result.current.submitQuery(
+          '?btw side question',
+          SendMessageType.UserQuery,
+          undefined,
+          { submittedPrompt: '?btw side question' },
+        );
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      // The btw thought flushes into the shared pending slot BEFORE the main
+      // turn's tool-first ToolCallRequest is processed.
+      await waitFor(() => {
+        expect(result.current.pendingHistoryItems).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: 'gemini_thought',
+              text: expect.stringContaining('BTW-FOREIGN-THOUGHT'),
+            }),
+          ]),
+        );
+      });
+
+      // Main's tool-first TCR must NOT arm on the foreign thought: it
+      // commits it as-is (preserved) and leaves the deferral unarmed, so the
+      // foreign thought is never folded under main's batch.
+      await act(async () => {
+        releaseMainTcr?.();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'gemini_thought',
+            text: expect.stringContaining('BTW-FOREIGN-THOUGHT'),
+          }),
+          expect.any(Number),
+        );
+      });
+      const foreignThoughtCommit = mockAddItem.mock.calls.find(
+        ([item]) => item.type === 'gemini_thought',
+      );
+      expect(foreignThoughtCommit?.[0].toolSummary).toBeUndefined();
+
+      // Main's batch completes with no deferral armed: the group is
+      // committed unmerged and no thought merges into it.
+      await act(async () => {
+        await getOnComplete()?.([successfulReadToolCall('main-prompt')]);
+      });
+      expect(
+        mockAddItem.mock.calls.filter(
+          ([item]) => item.type === 'gemini_thought',
+        ),
+      ).toHaveLength(1);
+      const groupCommit = mockAddItem.mock.calls.find(
+        ([item]) => item.type === 'tool_group',
+      );
+      expect(groupCommit).toBeDefined();
+      expect(groupCommit?.[0].display?.mergedIntoThought).toBeUndefined();
+
+      releaseMainEnd?.();
+      releaseBtwEnd?.();
+    });
+
+    it('should merge the armed snapshot when a concurrent stream overwrites the pending slot', async () => {
+      const getOnComplete = captureSchedulerOnComplete();
+      let releaseMainTcr: (() => void) | undefined;
+      const holdMainTcr = new Promise<void>((resolve) => {
+        releaseMainTcr = resolve;
+      });
+      let releaseMainEnd: (() => void) | undefined;
+      const holdMainEnd = new Promise<void>((resolve) => {
+        releaseMainEnd = resolve;
+      });
+      let releaseBtwThoughts: (() => void) | undefined;
+      const holdBtwThoughts = new Promise<void>((resolve) => {
+        releaseBtwThoughts = resolve;
+      });
+      let releaseBtwContent: (() => void) | undefined;
+      const holdBtwContent = new Promise<void>((resolve) => {
+        releaseBtwContent = resolve;
+      });
+      let streamCallCount = 0;
+      mockSendMessageStream.mockImplementation(() => {
+        streamCallCount += 1;
+        if (streamCallCount === 1) {
+          return (async function* () {
+            yield {
+              type: ServerGeminiEventType.Thought,
+              value: { subject: '', description: 'MAIN-THOUGHT-ALPHA' },
+            };
+            // Hold before the TCR so the deferral is still unarmed when
+            // the concurrent prompt is submitted — the arms-after-submit
+            // window. (Submitting ?btw WHILE ARMED resolves the deferral
+            // at submit time by design, so the overwrite must come from a
+            // stream admitted before the arm.)
+            await holdMainTcr;
+            yield {
+              type: ServerGeminiEventType.ToolCallRequest,
+              value: {
+                callId: 'tc1',
+                name: 'read_file',
+                args: { path: '/foo' },
+                isClientInitiated: false,
+                prompt_id: 'p1',
+              },
+            };
+            await holdMainEnd;
+            yield {
+              type: ServerGeminiEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            };
+          })();
+        }
+        return (async function* () {
+          await holdBtwThoughts;
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'BTW-ONE' },
+          };
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'BTW-TWO' },
+          };
+          // Subject-only thought flushes the buffered reasoning, overwriting
+          // the armed (snapshot-protected) pending slot in place.
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: 'working' },
+          };
+          await holdBtwContent;
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'btw answer',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })();
+      });
+
+      const { result } = renderDeferredTestHook();
+
+      await act(async () => {
+        void result.current.submitQuery(
+          'main query',
+          SendMessageType.UserQuery,
+          'main-prompt',
+          { submittedPrompt: 'main query' },
+        );
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitFor(() =>
+        expect(result.current.streamingState).toBe(StreamingState.Responding),
+      );
+
+      // Submit the concurrent prompt while the deferral is still unarmed;
+      // the submit-time abort is a no-op and the btw user item lands.
+      await act(async () => {
+        void result.current.submitQuery(
+          '?btw side question',
+          SendMessageType.UserQuery,
+          undefined,
+          { submittedPrompt: '?btw side question' },
+        );
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      // Arm the deferral from the main turn (owner = main invocation); the
+      // armed payload is snapshotted.
+      await act(async () => {
+        releaseMainTcr?.();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitForDeferralEstablished(result);
+
+      // The concurrent stream's thought chunks now overwrite the shared
+      // slot while the deferral is armed: the foreign supersede must NOT
+      // abort the owner's deferral, and the armed snapshot stays intact.
+      await act(async () => {
+        releaseBtwThoughts?.();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitFor(() => {
+        expect(result.current.pendingHistoryItems).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: 'gemini_thought',
+              text: expect.stringContaining('BTW-ONE'),
+            }),
+          ]),
+        );
+      });
+
+      // The owning batch completes: the merge must commit the ARMED
+      // SNAPSHOT (main's thought), not the foreign text now in the slot.
+      await act(async () => {
+        await getOnComplete()?.([successfulReadToolCall('main-prompt')]);
+      });
+      const thoughtCommits = mockAddItem.mock.calls.filter(
+        ([item]) => item.type === 'gemini_thought',
+      );
+      expect(thoughtCommits).toHaveLength(1);
+      expect(thoughtCommits[0][0].text).toContain('MAIN-THOUGHT-ALPHA');
+      expect(thoughtCommits[0][0].text).not.toContain('BTW');
+      expect(thoughtCommits[0][0].toolSummary).toBe('Read /foo');
+      expect(
+        mockAddItem.mock.calls.find(
+          ([item]) =>
+            item.type === 'tool_group' &&
+            item.display?.mergedIntoThought === true,
+        ),
+      ).toBeDefined();
+      // The slot held the foreign thought at resolution, so it was NOT
+      // cleared by the merge — it stays pending for its own stream.
+      expect(result.current.pendingHistoryItems).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'gemini_thought',
+            text: expect.stringContaining('BTW-ONE'),
+          }),
+        ]),
+      );
+
+      // The concurrent stream then settles its own thought via Content.
+      await act(async () => {
+        releaseBtwContent?.();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      const allThoughts = mockAddItem.mock.calls.filter(
+        ([item]) => item.type === 'gemini_thought',
+      );
+      expect(allThoughts).toHaveLength(2);
+      expect(allThoughts[1][0].text).toContain('BTW-ONE');
 
       releaseMainEnd?.();
     });
@@ -13646,9 +14229,23 @@ describe('useGeminiStream', () => {
             type: ServerGeminiEventType.Retry,
             isContinuation: false,
           };
+          // The retry attempt re-issues the tool call. This is realistic
+          // AND load-bearing for the assertion below: it leaves a scheduled
+          // batch (scheduledToolContinuation = true) so the end-of-loop
+          // anti-stranding fallback does NOT fire — which is what forces the
+          // thought commit to be attributed to the Retry-site abort itself.
+          // Without it, removing the Retry-site abort still ships green
+          // (the fallback resolves the deferral after the loop), so the
+          // regression this test exists to catch would go undetected.
           yield {
-            type: ServerGeminiEventType.Content,
-            value: 'retried response',
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tc2',
+              name: 'read_file',
+              args: { path: '/bar' },
+              isClientInitiated: false,
+              prompt_id: 'p1',
+            },
           };
           yield {
             type: ServerGeminiEventType.Finished,
@@ -13682,14 +14279,18 @@ describe('useGeminiStream', () => {
         ([item]) => item.type === 'gemini_thought',
       );
       expect(calls[thoughtIdx][0].toolSummary).toBeUndefined();
-      // The retried answer lands below the thought.
-      const geminiIdx = calls.findIndex(
-        ([item]) =>
-          (item.type === 'gemini' || item.type === 'gemini_content') &&
-          typeof item.text === 'string' &&
-          item.text.includes('retried response'),
-      );
-      expect(geminiIdx).toBeGreaterThan(thoughtIdx);
+      // The retry attempt's re-issued call is the one scheduled (Retry
+      // discards the pre-retry tc1 request); the batch never completes in
+      // this test, so a thought committed only by a later resolution site
+      // would be a second commit, and one never committed at all fails the
+      // waitFor above.
+      await waitFor(() => {
+        expect(mockScheduleToolCalls).toHaveBeenCalledWith(
+          [expect.objectContaining({ callId: 'tc2' })],
+          expect.anything(),
+          undefined,
+        );
+      });
     });
 
     it('should commit the deferred thought as-is on ModelFallback', async () => {
@@ -14150,7 +14751,11 @@ describe('useGeminiStream', () => {
       const { result } = renderDeferredTestHook();
 
       await act(async () => {
-        void result.current.submitQuery('think then image read');
+        void result.current.submitQuery(
+          'think then image read',
+          SendMessageType.UserQuery,
+          'p1',
+        );
         await Promise.resolve();
         await Promise.resolve();
       });
@@ -14222,14 +14827,23 @@ describe('useGeminiStream', () => {
       const { result } = renderDeferredTestHook();
 
       await act(async () => {
-        void result.current.submitQuery('think then overflow read');
+        void result.current.submitQuery(
+          'think then overflow read',
+          SendMessageType.UserQuery,
+          'p1',
+        );
         await Promise.resolve();
         await Promise.resolve();
       });
       await waitForDeferralEstablished(result);
 
-      // More than MAX_INLINE_IMAGES_PER_ITEM images: the overflow marker
-      // alone must block the merge.
+      // More than MAX_INLINE_IMAGES_PER_ITEM images: an overflowed batch
+      // must not merge. Note collectInlineImages fills images[] to the cap
+      // BEFORE incrementing omittedImageCount, so this fixture exercises
+      // both image clauses together; no reachable tool state has
+      // omittedImageCount > 0 with empty images, so the
+      // !tool.omittedImageCount clause is belt-and-braces and cannot be
+      // isolated by a fixture through this path.
       const overflowToolCall = {
         ...successfulReadToolCall(),
         response: {
@@ -14244,6 +14858,17 @@ describe('useGeminiStream', () => {
         await getOnComplete()?.([overflowToolCall]);
       });
 
+      // Guard existence first: without it the toolSummary-undefined check
+      // below passes vacuously when the deferred thought was never
+      // committed at all (a drop-class regression in the not-mergeable
+      // resolution branch).
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'gemini_thought',
+          text: expect.stringContaining('planning an overflow read'),
+        }),
+        expect.any(Number),
+      );
       const thoughtCommit = mockAddItem.mock.calls.find(
         ([item]) => item.type === 'gemini_thought',
       );
@@ -14288,7 +14913,11 @@ describe('useGeminiStream', () => {
       const { result } = renderDeferredTestHook();
 
       await act(async () => {
-        void result.current.submitQuery('think then memory read');
+        void result.current.submitQuery(
+          'think then memory read',
+          SendMessageType.UserQuery,
+          'p1',
+        );
         await Promise.resolve();
         await Promise.resolve();
       });

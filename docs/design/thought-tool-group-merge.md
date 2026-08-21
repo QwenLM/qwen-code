@@ -119,8 +119,10 @@ full detail. There is no separate transcript snapshot: Ctrl+O toggles
 
 Full-detail (Ctrl+O) therefore shows everything: the thought expanded plus the
 tool group rendered with forced expansion/results. Clicking the merged line
-(or Alt+T) expands the thought body in place; the merged-away tool details
-stay behind Ctrl+O, consistent with the existing philosophy that
+expands the thought body in place (per-item expansion); the global Ctrl+O /
+Alt+T toggle is one and the same full-detail switch (both keys are bound to
+`Command.TOGGLE_THINKING_EXPANDED`), so it opens full detail and re-admits the
+merged-away tool group too — consistent with the existing philosophy that
 read/search/list results are disposable (the same partition that already
 collapses them into a summary line today).
 

@@ -12,7 +12,11 @@ import {
   UI_COMPACT_CLEARED_IMAGE_MESSAGE,
 } from './useHistoryManager.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
-import type { HistoryItemWithoutId, HistoryItemToolGroup } from '../types.js';
+import type {
+  HistoryItemWithoutId,
+  HistoryItemToolGroup,
+  HistoryItemGeminiThought,
+} from '../types.js';
 import { ToolCallStatus } from '../types.js';
 
 const { debugLoggerMock } = vi.hoisted(() => ({
@@ -394,6 +398,90 @@ describe('useHistoryManager', () => {
       );
       expect(group).toBeDefined();
       expect(group?.display?.mergedIntoThought).toBe(true);
+    });
+
+    // The un-suppress predicate is droppedThoughtIds.has(pairedThoughtId),
+    // not droppedThoughtIds.size > 0: compaction that drops an UNRELATED old
+    // thought must leave a surviving merged pair suppressed. Without this
+    // test, a mutant that un-suppresses whenever ANYTHING is dropped ships
+    // green and renders both the folded summary line and its tool group.
+    it('keeps mergedIntoThought when an unrelated thought is dropped', () => {
+      const { result } = renderHook(() => useHistory());
+      const ts = Date.now();
+
+      // Oldest plain thought: becomes the drop target.
+      act(() => {
+        result.current.addItem(
+          {
+            type: 'gemini_thought',
+            text: 'oldest unrelated thought',
+            durationMs: 1000,
+          } as HistoryItemWithoutId,
+          ts,
+        );
+      });
+      // Merged pair: its thought must SURVIVE compaction.
+      act(() => {
+        result.current.addItem(
+          {
+            type: 'gemini_thought',
+            text: 'merged thought',
+            durationMs: 9000,
+            toolSummary: 'Read /foo',
+          } as HistoryItemWithoutId,
+          ts + 1,
+        );
+      });
+      act(() => {
+        result.current.addItem(
+          {
+            type: 'tool_group',
+            display: { mergedIntoThought: true },
+            tools: [
+              {
+                callId: 'merged-1',
+                name: 'read_file',
+                description: '/foo',
+                resultDisplay: 'file contents',
+                status: ToolCallStatus.Success,
+                confirmationDetails: undefined,
+              },
+            ],
+          } as unknown as HistoryItemWithoutId,
+          ts + 2,
+        );
+      });
+      // 19 more thoughts: 21 total > keep-recent-20, so exactly one drop —
+      // the oldest UNRELATED thought, not the merged pair's.
+      addThoughts(result, 19, ts + 1000);
+      expect(result.current.history).toHaveLength(22);
+
+      act(() => {
+        result.current.compactOldItems();
+      });
+
+      // The drop happened (the unrelated oldest thought is gone)...
+      expect(result.current.history).toHaveLength(21);
+      expect(
+        result.current.history.some(
+          (item) =>
+            item.type === 'gemini_thought' &&
+            item.text === 'oldest unrelated thought',
+        ),
+      ).toBe(false);
+      // ...but the surviving merged pair keeps its fold and its summary.
+      const group = result.current.history.find(
+        (item) => item.type === 'tool_group',
+      );
+      expect(group).toBeDefined();
+      expect(group?.display?.mergedIntoThought).toBe(true);
+      const mergedThought = result.current.history.find(
+        (item) =>
+          item.type === 'gemini_thought' &&
+          (item as HistoryItemGeminiThought).toolSummary !== undefined,
+      ) as HistoryItemGeminiThought | undefined;
+      expect(mergedThought).toBeDefined();
+      expect(mergedThought?.toolSummary).toBe('Read /foo');
     });
 
     it('should clear string resultDisplay on old tool_group items', () => {

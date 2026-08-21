@@ -57,6 +57,7 @@ export type VirtualizedListRef<T> = {
     viewPosition?: number;
   }) => void;
   getScrollIndex: () => number;
+  getScrollAnchor: () => { index: number; offset: number };
   hitTestScrollbar: (location: { col: number; row: number }) => boolean;
   scrollToScrollbarRow: (row: number) => void;
   getScrollState: () => {
@@ -847,6 +848,10 @@ function VirtualizedList<T>(
       hitTestScrollbar,
       scrollToScrollbarRow,
       getScrollIndex: () => scrollAnchor.index,
+      getScrollAnchor: () => ({
+        index: scrollAnchor.index,
+        offset: scrollAnchor.offset,
+      }),
       getScrollState: () => {
         const maxScroll = Math.max(0, totalHeight - scrollableContainerHeight);
         return {
