@@ -642,7 +642,11 @@ describe('isCollapsibleTool', () => {
     expect(isCollapsibleTool('ReadFolder')).toBe(true);
     // Legacy agent tool → non-collapsible
     expect(isCollapsibleTool('Task')).toBe(false);
-    // Legacy todo tool → non-collapsible
+    // TodoWrite is now categorized as 'write' (non-collapsible)
+    expect(isCollapsibleTool('TodoWrite')).toBe(false);
+  });
+
+  it('categorizes TodoWrite as a write tool (non-collapsible)', () => {
     expect(isCollapsibleTool('TodoWrite')).toBe(false);
   });
 });
