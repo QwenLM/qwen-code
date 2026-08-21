@@ -253,6 +253,8 @@ interface TodoSnapshot {
   todos: TodoItem[];
   /** Cumulative-usage baseline the agent stamped on this snapshot, if any. */
   stats?: TodoStatsSnapshot;
+  /** Per-tool boundary time; one merged group may contain several snapshots. */
+  timestamp?: number;
 }
 
 /**
@@ -290,7 +292,9 @@ export function todoStateKey(todo: TodoItem): string {
  */
 function todoSnapshotsOf(message: Message): TodoSnapshot[] {
   if (message.role === 'plan') {
-    return [{ key: message.id, todos: message.todos }];
+    return [
+      { key: message.id, todos: message.todos, timestamp: message.timestamp },
+    ];
   }
   if (message.role === 'tool_group') {
     const snapshots: TodoSnapshot[] = [];
@@ -301,6 +305,7 @@ function todoSnapshotsOf(message: Message): TodoSnapshot[] {
           key: tool.callId,
           todos,
           stats: extractTodoStats(tool),
+          timestamp: tool.endTime ?? tool.startTime ?? message.timestamp,
         });
       }
     }
@@ -662,8 +667,7 @@ export function computeTodoDetails(
   };
 
   for (const message of messages) {
-    const ts = message.timestamp;
-    for (const { todos, stats } of todoSnapshotsOf(message)) {
+    for (const { todos, stats, timestamp: ts } of todoSnapshotsOf(message)) {
       for (const todo of todos) {
         const stateKey = todoStateKey(todo);
         const prev = lastStatus.get(stateKey);
