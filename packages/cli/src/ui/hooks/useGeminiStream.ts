@@ -1310,6 +1310,48 @@ export const useGeminiStream = (
     ],
   );
 
+  // Commit the pending slot's thought on behalf of ONE specific stream, even
+  // while ANOTHER invocation's merge deferral is armed. The pending slot is
+  // shared across concurrent streams, so a non-owning stream that settles
+  // (content transition, normal Finished, stream `finally`) while a foreign
+  // deferral is armed must still commit its OWN thought — otherwise that
+  // thought strands pending and is only committed by some LATER settlement
+  // (landing out of order, inside another turn's region) or is silently
+  // dropped by a new-prompt reset.
+  //
+  // This never touches the armed deferral or its snapshot payload: it is a
+  // no-op when the slot still holds the armed payload (that thought commits
+  // with/folded into the owning batch), and it never commits a thought owned
+  // by a DIFFERENT stream (that would re-home it under this stream's
+  // timestamp). The caller must be the slot's owning stream.
+  const commitOwnPendingThought = useCallback(
+    (userMessageTimestamp: number, streamPromptId?: string) => {
+      const slot = pendingThoughtItemRef.current;
+      if (
+        thoughtMergeDeferralRef.current &&
+        slot === thoughtMergeDeferralPayloadRef.current
+      ) {
+        // The slot still holds the armed payload; the merge/abort owns it.
+        return;
+      }
+      if (pendingThoughtOwnerRef.current !== (streamPromptId ?? null)) {
+        // Not this stream's thought — leave it for its owner's settlement.
+        return;
+      }
+      if (slot) {
+        const item = { ...slot };
+        if (item.type === 'gemini_thought' && thoughtStartTimeRef.current) {
+          item.durationMs = Date.now() - thoughtStartTimeRef.current;
+        }
+        addItem(item, userMessageTimestamp);
+      }
+      setPendingThoughtItem(null);
+      pendingThoughtOwnerRef.current = null;
+      thoughtStartTimeRef.current = null;
+    },
+    [addItem, pendingThoughtItemRef, setPendingThoughtItem],
+  );
+
   // In-stream settlement of the deferral: resolve it only when this
   // invocation owns it. Every in-stream abort site (error, retry, model
   // fallback, abnormal finish, duplicate-batch drop, replay-prune empty,
@@ -1324,12 +1366,19 @@ export const useGeminiStream = (
       if (thoughtMergeDeferralRef.current) {
         if (thoughtMergeDeferralOwnerRef.current === (streamPromptId ?? null)) {
           abortThoughtMergeDeferral(userMessageTimestamp);
+        } else {
+          // A non-owning concurrent stream must not resolve the armed
+          // deferral, but it must still commit its OWN thought if the shared
+          // slot holds it (see commitOwnPendingThought) — otherwise that
+          // thought strands pending, out of order, until some later
+          // settlement or a new-prompt reset drops it.
+          commitOwnPendingThought(userMessageTimestamp, streamPromptId);
         }
         return;
       }
       commitPendingThought(userMessageTimestamp);
     },
-    [abortThoughtMergeDeferral, commitPendingThought],
+    [abortThoughtMergeDeferral, commitOwnPendingThought, commitPendingThought],
   );
 
   // Called at the ToolCallRequest boundary. A single pending
@@ -1364,11 +1413,13 @@ export const useGeminiStream = (
       // The pending slot is shared across concurrent streams: arm only when
       // the thought was produced by THIS invocation. A foreign stream's
       // thought (e.g. a ?btw reasoning chunk flushed before this tool-first
-      // turn's first ToolCallRequest) is committed as-is — preserved, but
-      // never frozen/folded under this turn's batch — and this turn simply
-      // has no thought to merge.
+      // turn's first ToolCallRequest) must NOT be committed here — that
+      // stream may still be streaming it (its local buffer rebuilds the slot
+      // on the next chunk), so committing a partial copy now would be
+      // committed AGAIN by that stream's own settlement, duplicating the
+      // reasoning. Leave it pending for its owner's settlement paths; this
+      // turn simply has no thought to merge.
       if (pendingThoughtOwnerRef.current !== owner) {
-        commitPendingThought(userMessageTimestamp);
         return;
       }
       const frozen = {
@@ -3036,7 +3087,11 @@ export const useGeminiStream = (
               ) {
                 settleThoughtMergeDeferral(userMessageTimestamp, promptId);
               } else {
-                commitPendingThought(userMessageTimestamp);
+                // Normal STOP must not abort an armed deferral (the scheduled
+                // batch still folds into the thought), but a CONCURRENT stream
+                // finishing normally must still commit its OWN thought if the
+                // shared slot holds it (owner-aware, payload-protected).
+                commitOwnPendingThought(userMessageTimestamp, promptId);
               }
               // Seal off this turn's UI state before the parent re-enters
               // sendMessageStream for a continuation (Stop-hook block at
@@ -3213,7 +3268,10 @@ export const useGeminiStream = (
         }
       } finally {
         flushBufferedStreamEvents();
-        commitPendingThought(userMessageTimestamp);
+        // Owner-aware: commit this stream's own thought if the shared slot
+        // still holds it, without resolving another invocation's armed
+        // deferral and without re-homing a concurrent stream's thought.
+        commitOwnPendingThought(userMessageTimestamp, promptId);
         discardBufferedStreamEvents();
         flushBufferedStreamEventsRef.current.delete(flushBufferedStreamEvents);
         dualOutput?.finalizeAssistantMessage();
@@ -3421,7 +3479,7 @@ export const useGeminiStream = (
       startRetryCountdown,
       clearRetryCountdown,
       setThought,
-      commitPendingThought,
+      commitOwnPendingThought,
       abortThoughtMergeDeferral,
       settleThoughtMergeDeferral,
       deferThoughtCommitForToolMerge,

@@ -13562,6 +13562,21 @@ describe('useGeminiStream', () => {
           },
         ],
       ],
+      // The fourth symmetric in-stream settlement site: an adjacent
+      // near-identical discard block calling the same
+      // settleThoughtMergeDeferral. Without the owner check a concurrent
+      // ModelFallback would consume the main turn's armed deferral.
+      [
+        'ModelFallback',
+        [
+          {
+            type: ServerGeminiEventType.ModelFallback,
+            fromModel: 'primary-model',
+            toModel: 'fallback-model',
+            fallbackIndex: 1,
+          },
+        ],
+      ],
     ])(
       'should not let a concurrent stream %s resolve another invocation armed deferral',
       async (_label, btwEvents) => {
@@ -13838,6 +13853,14 @@ describe('useGeminiStream', () => {
             value: { subject: 'working' },
           };
           await holdBtwEnd;
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'btw answer',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
         })();
       });
 
@@ -13881,11 +13904,36 @@ describe('useGeminiStream', () => {
         );
       });
 
-      // Main's tool-first TCR must NOT arm on the foreign thought: it
-      // commits it as-is (preserved) and leaves the deferral unarmed, so the
-      // foreign thought is never folded under main's batch.
+      // Main's tool-first TCR must NOT arm on the foreign thought, and must
+      // NOT commit it either: the foreign stream may still be streaming it
+      // (its local buffer rebuilds the slot on the next chunk), so committing
+      // a partial copy here would be committed AGAIN by the foreign stream's
+      // own settlement — duplicating the reasoning. Leave it pending for its
+      // owner's settlement paths; the deferral stays unarmed.
       await act(async () => {
         releaseMainTcr?.();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(
+        mockAddItem.mock.calls.filter(
+          ([item]) => item.type === 'gemini_thought',
+        ),
+      ).toHaveLength(0);
+      expect(result.current.pendingHistoryItems).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'gemini_thought',
+            text: expect.stringContaining('BTW-FOREIGN-THOUGHT'),
+          }),
+        ]),
+      );
+
+      // The foreign stream then settles (Content): its OWN settlement commits
+      // the thought exactly once — no duplicate copy from the main TCR
+      // boundary.
+      await act(async () => {
+        releaseBtwEnd?.();
         await Promise.resolve();
         await Promise.resolve();
       });
@@ -13898,10 +13946,11 @@ describe('useGeminiStream', () => {
           expect.any(Number),
         );
       });
-      const foreignThoughtCommit = mockAddItem.mock.calls.find(
+      const foreignThoughtCommits = mockAddItem.mock.calls.filter(
         ([item]) => item.type === 'gemini_thought',
       );
-      expect(foreignThoughtCommit?.[0].toolSummary).toBeUndefined();
+      expect(foreignThoughtCommits).toHaveLength(1);
+      expect(foreignThoughtCommits[0][0].toolSummary).toBeUndefined();
 
       // Main's batch completes with no deferral armed: the group is
       // committed unmerged and no thought merges into it.
@@ -13920,7 +13969,6 @@ describe('useGeminiStream', () => {
       expect(groupCommit?.[0].display?.mergedIntoThought).toBeUndefined();
 
       releaseMainEnd?.();
-      releaseBtwEnd?.();
     });
 
     it('should merge the armed snapshot when a concurrent stream overwrites the pending slot', async () => {
@@ -14099,6 +14147,324 @@ describe('useGeminiStream', () => {
       );
       expect(allThoughts).toHaveLength(2);
       expect(allThoughts[1][0].text).toContain('BTW-ONE');
+
+      releaseMainEnd?.();
+    });
+
+    // Regression (R5-1): a concurrent stream that streams its OWN thought into
+    // the shared slot and then settles while ANOTHER invocation's merge
+    // deferral is armed must still commit that thought at its own settlement.
+    // Pre-fix, every settlement site skipped the slot while armed (owner
+    // mismatch early-returned; commitPendingThought is a global no-op while
+    // armed), so the thought stranded pending — committed only by some LATER
+    // settlement (below the answer it preceded, inside the main turn's items)
+    // or silently dropped by a new-prompt reset.
+    it('should commit a concurrent stream own thought when it settles while another deferral is armed', async () => {
+      const getOnComplete = captureSchedulerOnComplete();
+      let releaseMainTcr: (() => void) | undefined;
+      const holdMainTcr = new Promise<void>((resolve) => {
+        releaseMainTcr = resolve;
+      });
+      let releaseMainEnd: (() => void) | undefined;
+      const holdMainEnd = new Promise<void>((resolve) => {
+        releaseMainEnd = resolve;
+      });
+      let releaseBtw: (() => void) | undefined;
+      const holdBtw = new Promise<void>((resolve) => {
+        releaseBtw = resolve;
+      });
+      let streamCallCount = 0;
+      mockSendMessageStream.mockImplementation(() => {
+        streamCallCount += 1;
+        if (streamCallCount === 1) {
+          return (async function* () {
+            yield {
+              type: ServerGeminiEventType.Thought,
+              value: { subject: '', description: 'MAIN-THOUGHT' },
+            };
+            await holdMainTcr;
+            yield {
+              type: ServerGeminiEventType.ToolCallRequest,
+              value: {
+                callId: 'tc1',
+                name: 'read_file',
+                args: { path: '/foo' },
+                isClientInitiated: false,
+                prompt_id: 'p1',
+              },
+            };
+            await holdMainEnd;
+            yield {
+              type: ServerGeminiEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            };
+          })();
+        }
+        return (async function* () {
+          await holdBtw;
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'BTW-THOUGHT-V2' },
+          };
+          // Subject-only thought flushes the buffered reasoning, overwriting
+          // the armed (snapshot-protected) pending slot in place.
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: 'working' },
+          };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'btw answer',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })();
+      });
+
+      const { result } = renderDeferredTestHook();
+      await act(async () => {
+        void result.current.submitQuery(
+          'main query',
+          SendMessageType.UserQuery,
+          'main-prompt',
+          { submittedPrompt: 'main query' },
+        );
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitFor(() =>
+        expect(result.current.streamingState).toBe(StreamingState.Responding),
+      );
+      await act(async () => {
+        void result.current.submitQuery(
+          '?btw side question',
+          SendMessageType.UserQuery,
+          undefined,
+          { submittedPrompt: '?btw side question' },
+        );
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      // Arm from the main turn (arms-after-submit window).
+      await act(async () => {
+        releaseMainTcr?.();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitForDeferralEstablished(result);
+
+      // The btw stream settles (Content) WHILE the main deferral is armed.
+      // Its own thought must commit now — not strand pending.
+      await act(async () => {
+        releaseBtw?.();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'gemini_thought',
+            text: expect.stringContaining('BTW-THOUGHT-V2'),
+          }),
+          expect.any(Number),
+        );
+      });
+      // Committed above the btw answer it preceded, and only once.
+      const callsAfterBtw = mockAddItem.mock.calls;
+      const btwThoughtIdx = callsAfterBtw.findIndex(
+        ([item]) =>
+          item.type === 'gemini_thought' &&
+          typeof item.text === 'string' &&
+          item.text.includes('BTW-THOUGHT-V2'),
+      );
+      const btwAnswerIdx = callsAfterBtw.findIndex(
+        ([item]) => item.type === 'gemini' && item.text === 'btw answer',
+      );
+      expect(btwThoughtIdx).toBeGreaterThanOrEqual(0);
+      expect(btwAnswerIdx).toBeGreaterThan(btwThoughtIdx);
+      // The armed main deferral is untouched: its thought has NOT committed
+      // yet (it folds into the batch at completion), and the btw settlement
+      // did not re-home or drop it.
+      expect(mockAddItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'gemini_thought',
+          text: expect.stringContaining('MAIN-THOUGHT'),
+        }),
+        expect.any(Number),
+      );
+
+      // The owning batch completes and folds the ARMED snapshot (main's
+      // thought), not the btw text.
+      await act(async () => {
+        await getOnComplete()?.([successfulReadToolCall('main-prompt')]);
+      });
+      const allThoughts = mockAddItem.mock.calls.filter(
+        ([item]) => item.type === 'gemini_thought',
+      );
+      expect(allThoughts).toHaveLength(2);
+      const btwCommits = allThoughts.filter(([item]) =>
+        (item.text as string).includes('BTW-THOUGHT-V2'),
+      );
+      expect(btwCommits).toHaveLength(1);
+      const mainCommit = allThoughts.find(([item]) =>
+        (item.text as string).includes('MAIN-THOUGHT'),
+      );
+      expect(mainCommit?.[0].toolSummary).toBe('Read /foo');
+      expect(
+        mockAddItem.mock.calls.find(
+          ([item]) =>
+            item.type === 'tool_group' &&
+            item.display?.mergedIntoThought === true,
+        ),
+      ).toBeDefined();
+
+      releaseMainEnd?.();
+    });
+
+    // Regression (R5-2): a tool-first turn's ToolCallRequest boundary must NOT
+    // commit a foreign stream's STILL-STREAMING thought. Pre-fix it committed
+    // the partial copy and cleared the shared slot; the foreign stream's local
+    // buffer was untouched, so its next chunk rebuilt the slot and its own
+    // settlement committed the full text AGAIN — the same reasoning twice.
+    it('should not duplicate a foreign thought still streaming at the TCR boundary', async () => {
+      let releaseMainTcr: (() => void) | undefined;
+      const holdMainTcr = new Promise<void>((resolve) => {
+        releaseMainTcr = resolve;
+      });
+      let releaseMainEnd: (() => void) | undefined;
+      const holdMainEnd = new Promise<void>((resolve) => {
+        releaseMainEnd = resolve;
+      });
+      let releaseBtwPart2: (() => void) | undefined;
+      const holdBtwPart2 = new Promise<void>((resolve) => {
+        releaseBtwPart2 = resolve;
+      });
+      let streamCallCount = 0;
+      mockSendMessageStream.mockImplementation(() => {
+        streamCallCount += 1;
+        if (streamCallCount === 1) {
+          return (async function* () {
+            // Tool-first main turn: no thought of its own.
+            await holdMainTcr;
+            yield {
+              type: ServerGeminiEventType.ToolCallRequest,
+              value: {
+                callId: 'tc1',
+                name: 'read_file',
+                args: { path: '/foo' },
+                isClientInitiated: false,
+                prompt_id: 'p1',
+              },
+            };
+            await holdMainEnd;
+            yield {
+              type: ServerGeminiEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            };
+          })();
+        }
+        return (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'BTW-PART-ONE' },
+          };
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: 'working' },
+          };
+          await holdBtwPart2;
+          // The foreign stream is STILL STREAMING: more reasoning follows the
+          // main turn's ToolCallRequest boundary.
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { description: 'BTW-PART-TWO' },
+          };
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: 'working-more' },
+          };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'btw answer',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })();
+      });
+
+      const { result } = renderDeferredTestHook();
+      await act(async () => {
+        void result.current.submitQuery(
+          'main tool-first query',
+          SendMessageType.UserQuery,
+          'main-prompt',
+          { submittedPrompt: 'main tool-first query' },
+        );
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitFor(() =>
+        expect(result.current.streamingState).toBe(StreamingState.Responding),
+      );
+      await act(async () => {
+        void result.current.submitQuery(
+          '?btw side question',
+          SendMessageType.UserQuery,
+          undefined,
+          { submittedPrompt: '?btw side question' },
+        );
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      // The foreign first part flushes into the slot before the main TCR.
+      await waitFor(() => {
+        expect(result.current.pendingHistoryItems).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              type: 'gemini_thought',
+              text: expect.stringContaining('BTW-PART-ONE'),
+            }),
+          ]),
+        );
+      });
+
+      // Main's tool-first TCR must leave the foreign in-flight thought
+      // pending (no commit, no clear) — committing a partial copy here is
+      // what produced the duplicate.
+      await act(async () => {
+        releaseMainTcr?.();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(
+        mockAddItem.mock.calls.filter(
+          ([item]) => item.type === 'gemini_thought',
+        ),
+      ).toHaveLength(0);
+
+      // The foreign stream continues and then settles: exactly ONE commit of
+      // the full reasoning, not a partial copy + a full copy.
+      await act(async () => {
+        releaseBtwPart2?.();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'gemini', text: 'btw answer' }),
+          expect.any(Number),
+        );
+      });
+      const thoughtCommits = mockAddItem.mock.calls.filter(
+        ([item]) => item.type === 'gemini_thought',
+      );
+      expect(thoughtCommits).toHaveLength(1);
+      expect(thoughtCommits[0][0].text).toContain('BTW-PART-ONE');
+      expect(thoughtCommits[0][0].text).toContain('BTW-PART-TWO');
 
       releaseMainEnd?.();
     });
@@ -14291,6 +14657,101 @@ describe('useGeminiStream', () => {
           undefined,
         );
       });
+    });
+
+    // Companion to the non-continuation Retry test: a CONTINUATION retry
+    // (isContinuation: true) must NOT settle an armed deferral. The settle is
+    // placed inside the `!event.isContinuation` branch while the adjacent
+    // ModelFallback case settles unconditionally; a refactor deduplicating the
+    // two discard blocks (or hoisting the settle above the branch) would make a
+    // recovery retry abort the armed deferral mid-turn — the frozen thought
+    // commits as-is and the recovering batch completes without its fold. This
+    // test flips under that hoist mutant.
+    it('should not settle an armed deferral on a continuation Retry', async () => {
+      const getOnComplete = captureSchedulerOnComplete();
+      let releaseEnd: (() => void) | undefined;
+      const holdEnd = new Promise<void>((resolve) => {
+        releaseEnd = resolve;
+      });
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'reasoning before recovery' },
+          };
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tc1',
+              name: 'read_file',
+              args: { path: '/foo' },
+              isClientInitiated: false,
+              prompt_id: 'p1',
+            },
+          };
+          yield {
+            type: ServerGeminiEventType.Retry,
+            isContinuation: true,
+          };
+          // Hold before Finished so the end-of-loop anti-stranding fallback
+          // (which settles when no batch was scheduled) cannot mask the
+          // Retry-site behavior under test.
+          await holdEnd;
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const { result } = renderDeferredTestHook();
+
+      await act(async () => {
+        void result.current.submitQuery(
+          'think then continuation retry',
+          SendMessageType.UserQuery,
+          'main-prompt',
+          { submittedPrompt: 'think then continuation retry' },
+        );
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      // The continuation retry must leave the deferral armed: the thought is
+      // still finalized and uncommitted.
+      await waitFor(() => expect(result.current.thought).toBeNull());
+      expect(mockAddItem).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'gemini_thought' }),
+        expect.any(Number),
+      );
+      expect(result.current.pendingHistoryItems).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: 'gemini_thought',
+            finalized: true,
+          }),
+        ]),
+      );
+
+      // The owning batch completes and still folds the thought.
+      await act(async () => {
+        await getOnComplete()?.([successfulReadToolCall('main-prompt')]);
+      });
+      const thoughtCommits = mockAddItem.mock.calls.filter(
+        ([item]) => item.type === 'gemini_thought',
+      );
+      expect(thoughtCommits).toHaveLength(1);
+      expect(thoughtCommits[0][0].text).toContain('reasoning before recovery');
+      expect(thoughtCommits[0][0].toolSummary).toBe('Read /foo');
+      expect(
+        mockAddItem.mock.calls.find(
+          ([item]) =>
+            item.type === 'tool_group' &&
+            item.display?.mergedIntoThought === true,
+        ),
+      ).toBeDefined();
+
+      releaseEnd?.();
     });
 
     it('should commit the deferred thought as-is on ModelFallback', async () => {
