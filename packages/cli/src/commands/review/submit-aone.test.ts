@@ -291,6 +291,18 @@ describe('submit posts an authorised Aone target through a1', () => {
     expect(stderrMock).toHaveBeenCalledWith(
       expect.stringContaining('1 inline Critical(s) block the merge'),
     );
+    // The Q4 probe outcome (issue #9614) is disclosed in the same note:
+    // a1 cannot mark a comment as AI, so the posted Criticals join the
+    // discussion gate only — the repo's ai_comment gate never sees them.
+    // One contiguous fragment from the blocking clause to the end of the
+    // disclosure pins subject-to-predicate and clause-to-call — inverted
+    // gate attribution, split calls, and a disclosure moved onto the
+    // unconditional `Posted …` line each break it.
+    expect(stderrMock).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "block the merge while their discussions stay unresolved. They are NOT marked as AI comments — `a1 repo mr comment create` cannot set the flag — so they join the generic discussion gate only; a repo's dedicated ai_comment merge gate does not track them",
+      ),
+    );
   });
 
   it('an UNAUTHORISED Aone run takes the normal auth-refusal path first', () => {
@@ -937,6 +949,16 @@ describe('submit posts an authorised Aone target through a1', () => {
     expect(req.comments).toHaveLength(1);
     expect(req.comments[0].body).not.toContain('**[Critical]**');
     expect(req.comments[0].body).toContain('<!-- qwen-review critical -->');
+    // The note counts off the MARKED pre-post payload, not the stripped
+    // bodies pinned above (severityOf is a leading-marker classifier and
+    // reads null on them): attribution-OFF still names the posted
+    // Critical and the gate disclosure.
+    expect(stderrMock).toHaveBeenCalledWith(
+      expect.stringContaining('1 inline Critical(s) block the merge'),
+    );
+    expect(stderrMock).toHaveBeenCalledWith(
+      expect.stringContaining('ai_comment merge gate does not track them'),
+    );
   });
 
   it('a receipt without webUrl falls back to the reader-backed composeUrl', () => {
@@ -999,6 +1021,11 @@ describe('submit posts an authorised Aone target through a1', () => {
     ).not.toThrow();
     expect(stderrMock).toHaveBeenCalledWith(
       expect.stringContaining('NO inline Critical discussions'),
+    );
+    // The gate disclosure fires only when inline Criticals actually
+    // posted — the zero-Critical shape discloses no gate at all.
+    expect(stderrMock).not.toHaveBeenCalledWith(
+      expect.stringContaining('does not track them'),
     );
   });
 });
