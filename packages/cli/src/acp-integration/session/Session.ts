@@ -4829,6 +4829,15 @@ export class Session implements SessionContext {
             const toolLoopState = createDaemonToolLoopState(
               channelTurn ? 'off' : this.repeatedToolFailureGuardMode,
             );
+            // Presentation-ledger rollback state (#6721): the most recent tool
+            // batch's pre-batch snapshot, cleared once its carrying message is
+            // delivered. If the carrying send throws before pushing to
+            // history, the catch below restores the ledger to this snapshot.
+            let pendingPresentationSnapshot:
+              | ReadonlyMap<string, string>
+              | undefined;
+            let presentationSendChat: GeminiChat | undefined;
+            let presentationPushCountBeforeSend = 0;
 
             // conversation_finished must fire on every terminal path of the
             // turn — the loop below has cancel/abort/no-stream early-returns
@@ -4875,6 +4884,9 @@ export class Session implements SessionContext {
                   // count and a checkpoint recording work that never ran.
                   // Re-assigning on later loop laps is harmless.
                   if (goalTurn) goalTurn.modelStarted = true;
+                  presentationSendChat = this.#getCurrentChat();
+                  presentationPushCountBeforeSend =
+                    presentationSendChat.getUserContentPushCount?.() ?? 0;
                   const sendResult =
                     await this.#sendMessageStreamWithAutoCompression(
                       promptId,
@@ -4896,6 +4908,11 @@ export class Session implements SessionContext {
                     return { stopReason: sendResult.stopReason };
                   }
                   const responseStream = sendResult.responseStream;
+                  // The carrying message was accepted by the send path, so the
+                  // batch's committed presentations are now backed by history
+                  // — drop the rollback snapshot (a later batch sets a fresh
+                  // one).
+                  pendingPresentationSnapshot = undefined;
                   nextMessage = null;
                   channelDeliveryResponseBlock =
                     beginChannelDeliveryResponseBlock(responseCapture);
@@ -5005,6 +5022,33 @@ export class Session implements SessionContext {
                       this.#getCurrentChat().addHistory(entry);
                     }
                     strippedOrphanEntries = null;
+                  }
+
+                  // If a tool batch's presentations were committed but the
+                  // carrying message never reached active history (the send
+                  // threw before the push), roll the presentation ledger back
+                  // to the pre-batch snapshot. Otherwise the marks survive and
+                  // a later model-emitted tool_call passes the #6721
+                  // fail-closed gate and executes on guessed arguments.
+                  if (
+                    pendingPresentationSnapshot &&
+                    (!presentationSendChat ||
+                      (presentationSendChat.getUserContentPushCount?.() ?? 0) <=
+                        presentationPushCountBeforeSend)
+                  ) {
+                    // Test doubles may expose a registry without the restore
+                    // API; a ledger rollback must never break the send-failure
+                    // path.
+                    try {
+                      this.config
+                        .getToolRegistry()
+                        .restoreProxySchemaPresentationSnapshot(
+                          pendingPresentationSnapshot,
+                        );
+                    } catch {
+                      // Ignore — see above.
+                    }
+                    pendingPresentationSnapshot = undefined;
                   }
 
                   // Explicit user cancellation and session disposal are
@@ -5121,6 +5165,12 @@ export class Session implements SessionContext {
                       rejectOnLoopDetected,
                     );
                   nextMessage = nextAfterTools.message;
+                  // Track the batch's pre-batch snapshot so the carrying
+                  // message's send-failure path can roll the ledger back.
+                  // (The stopped/loop-detected early returns below preserve
+                  // the tool run into history, so a discarded snapshot there
+                  // is harmless.)
+                  pendingPresentationSnapshot = toolRun.presentationSnapshot;
                   if (nextAfterTools.stoppedByRepeatedToolFailure) {
                     return {
                       stopReason: rejectOnLoopDetected
