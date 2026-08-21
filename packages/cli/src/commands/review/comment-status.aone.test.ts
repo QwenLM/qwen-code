@@ -360,6 +360,22 @@ describe('aoneCommentToStatusComment (a1 → GitHub-shaped input)', () => {
     expect(mapped.body).toBe('the comment text');
   });
 
+  it('prefers `note` over `body` when BOTH keys are present', () => {
+    // Twin of the presubmit mapper pin: an inverted `c.body ?? c.note`
+    // reads '' when a1 serializes the tolerated empty body as `body: ''`
+    // (`??` does not coalesce empty strings), blanking the recognition
+    // signals the thread classification keys on.
+    const mapped = aoneCommentToStatusComment({
+      id: 5,
+      note: '**[Critical]** both keys',
+      body: '',
+      path: 'a.ts',
+      line: 42,
+      author: { username: 'someone' },
+    });
+    expect(mapped.body).toBe('**[Critical]** both keys');
+  });
+
   it('a path-bearing, line-less, NON-outdated comment is file-level, not outdated', () => {
     // The core derives `outdated` from a null line on non-file-level
     // threads; riding `line` here would fabricate a rewrite the platform

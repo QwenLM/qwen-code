@@ -161,6 +161,15 @@ describe('classifyAoneChecks (a1 merge-gate states)', () => {
     expect(
       classifyAoneChecks([{ context: 'test', status: 'SUCCESS' }]),
     ).toMatchObject({ class: 'all_pass', totalChecks: 1 });
+    // The passing gate above never collects a NAME, so pin the `context`
+    // read on a FAILED one too — a regression that stops reading `context`
+    // otherwise degrades the operator log to check-N placeholders.
+    expect(
+      classifyAoneChecks([{ context: 'lint', state: 'failed' }]),
+    ).toMatchObject({
+      class: 'any_failure',
+      failedCheckNames: ['lint'],
+    });
     // A nameless entry still classifies — under a placeholder, never lost.
     expect(classifyAoneChecks([{ state: 'failed' }])).toMatchObject({
       class: 'any_failure',
@@ -186,6 +195,18 @@ describe('classifyAoneChecks (a1 merge-gate states)', () => {
     expect(
       classifyAoneChecks([{ name: 'test', status: 'completed' }]),
     ).toMatchObject({ class: 'all_pending' });
+  });
+
+  it('keeps scanning past an unrecognized value in an EARLIER key', () => {
+    // The scan order is conclusion, result, state, status: an unrecognized
+    // word in an EARLIER key must not shadow a recognized verdict in a
+    // LATER one — a first-PRESENT-key reading would silently degrade a
+    // gate whose only readable verdict sits in a later key to pending.
+    expect(
+      classifyAoneChecks([
+        { name: 'test', result: 'inconclusive', status: 'passed' },
+      ]),
+    ).toMatchObject({ class: 'all_pass' });
   });
 });
 
@@ -216,6 +237,50 @@ describe('aoneCommentToPresubmitComment (a1 → GitHub-shaped input)', () => {
       'sha-reviewed',
     );
     expect(live.commit_id).toBe('sha-reviewed');
+  });
+
+  it('prefers `note` over `body` when BOTH keys are present', () => {
+    // If a1 ever serializes the tolerated empty `body` as `body: ''`, an
+    // inverted `c.body ?? c.note` reads '' for every comment (`??` does
+    // not coalesce empty strings) — blanking the recognition signals and
+    // re-posting every finding already on the MR.
+    const mapped = aoneCommentToPresubmitComment(
+      {
+        id: 5,
+        note: `**[Critical]** both keys\n\n${FOOTER}`,
+        body: '',
+        path: 'a.ts',
+        line: 42,
+        author: { username: 'reviewer' },
+      },
+      'sha-reviewed',
+    );
+    expect(mapped.body).toContain('**[Critical]** both keys');
+  });
+
+  it('maps parentNoteId onto in_reply_to_id (absent stays unset)', () => {
+    // The mapping that keeps a finding-shaped own REPLY out of the dedup:
+    // without it the reply is misread as a posted finding at the location
+    // and a genuinely new finding there is silently withheld.
+    expect(
+      aoneCommentToPresubmitComment(
+        {
+          id: 4,
+          note: '**[Critical]** confirmed',
+          path: 'a.ts',
+          line: 42,
+          parentNoteId: 1,
+          author: { username: 'reviewer' },
+        },
+        'sha-reviewed',
+      ).in_reply_to_id,
+    ).toBe(1);
+    expect(
+      aoneCommentToPresubmitComment(
+        { id: 6, note: 'top-level', path: 'a.ts', line: 42 },
+        'sha-reviewed',
+      ).in_reply_to_id,
+    ).toBeUndefined();
   });
 });
 
