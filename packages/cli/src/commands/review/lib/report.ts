@@ -301,3 +301,14 @@ export interface IncrementalScope {
   /** Where the full-range diff still is, for a reader who needs all of it. */
   fullDiffPath: string | null;
 }
+
+/**
+ * Render an incremental anchor for humans: truncate only sha-shaped labels.
+ * The label space holds 40-64-hex commit shas AND the literal
+ * `content-verdicts`; a blind 12-char slice printed `content-verd` into the
+ * summary line and every brief. One copy, because its two renderers
+ * (`rescope`'s summary, `agent-prompt`'s frames) must never drift.
+ */
+export function displayAnchor(label: string): string {
+  return /^[0-9a-f]{40,64}$/i.test(label) ? label.slice(0, 12) : label;
+}
