@@ -39,6 +39,9 @@
       // (`../../packages/cli/src/...`), so those files get checked here too
       // and must resolve their own imports.
       "@qwen-code/qwen-code-core": ["../packages/core/src/index.ts"],
+      "@qwen-code/qwen-code-core/subSessionConstants": [
+        "../packages/core/src/tools/sub-session-constants.ts"
+      ],
       "@qwen-code/qwen-code-core/transcriptRecords": [
         "../packages/core/src/utils/transcript-records.ts"
       ],

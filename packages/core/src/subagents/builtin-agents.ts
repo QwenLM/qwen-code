@@ -93,7 +93,6 @@ Notes:
         ToolNames.GREP,
         ToolNames.GLOB,
         ToolNames.SHELL,
-        ToolNames.LS,
         ToolNames.WEB_FETCH,
         ToolNames.SKILL,
         ToolNames.LSP,

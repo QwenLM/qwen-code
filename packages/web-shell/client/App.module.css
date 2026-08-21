@@ -1086,6 +1086,32 @@
   opacity: 0.85;
 }
 
+.queuedPromptFile {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 120px;
+  height: 22px;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--muted);
+  color: var(--foreground);
+  cursor: pointer;
+}
+
+.queuedPromptFile:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.queuedPromptFile span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .queuedPromptState {
   display: inline-flex;
   align-items: center;

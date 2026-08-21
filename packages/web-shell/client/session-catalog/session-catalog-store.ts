@@ -184,7 +184,7 @@ export class SessionCatalogStore {
     'interactive' | 'invalidated'
   >();
   private readonly liveStateWakeHandlers = new Set<
-    (workspaceCwd: string) => void
+    (workspaceCwd: string, bypassRetry?: boolean) => void
   >();
   private liveStateActivitySequence = 0;
   private readonly liveStatePendingActivity = new Map<
@@ -254,7 +254,9 @@ export class SessionCatalogStore {
     return kind;
   }
 
-  onLiveStateWake(handler: (workspaceCwd: string) => void): () => void {
+  onLiveStateWake(
+    handler: (workspaceCwd: string, bypassRetry?: boolean) => void,
+  ): () => void {
     this.liveStateWakeHandlers.add(handler);
     return () => {
       this.liveStateWakeHandlers.delete(handler);
@@ -301,15 +303,19 @@ export class SessionCatalogStore {
   private requestLiveStateRefresh(
     workspaceCwd: string,
     kind: 'interactive' | 'invalidated',
+    bypassRetry = false,
   ): void {
     if (
+      kind !== 'interactive' &&
       this.liveStateWorkspaceRefreshRequests.get(workspaceCwd) === 'interactive'
     ) {
       return;
     }
     this.liveStateWorkspaceRefreshRequests.set(workspaceCwd, kind);
     if (kind === 'interactive') {
-      for (const handler of this.liveStateWakeHandlers) handler(workspaceCwd);
+      for (const handler of this.liveStateWakeHandlers) {
+        handler(workspaceCwd, bypassRetry);
+      }
     }
   }
 
@@ -380,8 +386,14 @@ export class SessionCatalogStore {
     };
   }
 
-  async refresh(query: SessionCatalogQuery): Promise<DaemonSessionListPage> {
-    return this.requestFresh(this.getOrCreateEntry(query));
+  async refresh(
+    query: SessionCatalogQuery,
+    options: { interactive?: boolean } = {},
+  ): Promise<DaemonSessionListPage> {
+    return this.requestFresh(
+      this.getOrCreateEntry(query),
+      options.interactive === true,
+    );
   }
 
   async loadOnce(
@@ -422,13 +434,17 @@ export class SessionCatalogStore {
 
   invalidateWorkspace(
     workspaceCwd: string,
-    options: { background?: boolean } = {},
+    options: { background?: boolean; interactive?: boolean } = {},
   ): void {
     const background = options.background === true;
     const hidden = this.isHidden();
     const liveStateEnabled = this.isWorkspaceLiveStateEnabled(workspaceCwd);
     if (liveStateEnabled) {
-      this.requestLiveStateRefresh(workspaceCwd, 'invalidated');
+      this.requestLiveStateRefresh(
+        workspaceCwd,
+        options.interactive === true ? 'interactive' : 'invalidated',
+        options.interactive === true,
+      );
     }
     for (const entry of this.entries.values()) {
       if (entry.query.workspaceCwd !== workspaceCwd) continue;
@@ -781,7 +797,10 @@ export class SessionCatalogStore {
     return entry;
   }
 
-  private requestFresh(entry: CatalogEntry): Promise<DaemonSessionListPage> {
+  private requestFresh(
+    entry: CatalogEntry,
+    bypassRetry = false,
+  ): Promise<DaemonSessionListPage> {
     entry.desiredRevision += 1;
     const revision = entry.desiredRevision;
     this.setSnapshot(entry, { ...entry.snapshot, stale: true });
@@ -790,7 +809,11 @@ export class SessionCatalogStore {
     );
     const promise = this.createWaiter(entry, revision, liveStateCoordinated);
     if (liveStateCoordinated) {
-      this.requestLiveStateRefresh(entry.query.workspaceCwd, 'interactive');
+      this.requestLiveStateRefresh(
+        entry.query.workspaceCwd,
+        'interactive',
+        bypassRetry,
+      );
       if (entry.waiters.some((waiter) => !waiter.liveStateCoordinated)) {
         this.ensureScheduled(entry, PRIORITY.interactive, false);
       }

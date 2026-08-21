@@ -6,8 +6,17 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { a1JsonMock, ensureAuthMock, gitMock, gitRawMock } = vi.hoisted(() => ({
+const {
+  a1JsonMock,
+  a1JsonOnceMock,
+  a1OnceMock,
+  ensureAuthMock,
+  gitMock,
+  gitRawMock,
+} = vi.hoisted(() => ({
   a1JsonMock: vi.fn(),
+  a1JsonOnceMock: vi.fn(),
+  a1OnceMock: vi.fn(),
   ensureAuthMock: vi.fn(),
   gitMock: vi.fn(),
   gitRawMock: vi.fn(),
@@ -15,6 +24,8 @@ const { a1JsonMock, ensureAuthMock, gitMock, gitRawMock } = vi.hoisted(() => ({
 
 vi.mock('./aone-client.js', () => ({
   a1Json: a1JsonMock,
+  a1JsonOnce: a1JsonOnceMock,
+  a1Once: a1OnceMock,
   a1: vi.fn(),
   ensureAoneAuthenticated: ensureAuthMock,
 }));
@@ -24,7 +35,12 @@ vi.mock('../git.js', () => ({
   gitRaw: gitRawMock,
 }));
 
-import { aoneReader, parseRemoteUrl } from './aone.js';
+import {
+  AonePartialPostError,
+  aoneReader,
+  parseRemoteUrl,
+  submitAoneReview,
+} from './aone.js';
 import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from '../diff-flags.js';
 
 describe('parseRemoteUrl hardening', () => {
@@ -758,5 +774,518 @@ describe('aoneReader.fetchDiff', () => {
       'origin',
       '+refs/heads/master:refs/remotes/origin/master',
     );
+  });
+});
+
+describe('submitAoneReview (the a1 write path)', () => {
+  function mrView(head: string | undefined) {
+    // a1Json serves the READ calls (mr view); a1JsonOnce the writes.
+    // `undefined` OMITS the sourceBranch key entirely — the shape
+    // AoneMrView types as optional, which `mrView('')` structurally
+    // could not express.
+    a1JsonMock.mockImplementation((...args: string[]) => {
+      if (args.includes('view')) {
+        return {
+          mergeRequest: {
+            ...(head === undefined ? {} : { sourceBranch: head }),
+            detailUrl: 'https://code.alibaba-inc.com/g/p/codereview/7',
+          },
+        };
+      }
+      throw new Error(`unexpected read call: ${args.join(' ')}`);
+    });
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mrView('sha-head');
+    a1JsonOnceMock.mockReturnValue({ id: 100 });
+  });
+
+  const req = (over: Record<string, unknown> = {}) => ({
+    prNumber: 7,
+    ownerRepo: 'g/p',
+    commitId: 'sha-head',
+    event: 'COMMENT' as const,
+    body: 'summary body',
+    comments: [
+      { path: 'a.ts', line: 3, body: '**[Critical]** one' },
+      { path: 'b.ts', line: 9, body: '**[Suggestion]** two' },
+    ],
+    ...over,
+  });
+
+  it('posts inline first, summary last — one comment create per finding', () => {
+    const result = submitAoneReview(req());
+    // Two inline creates + one summary create, in that order.
+    expect(a1JsonOnceMock).toHaveBeenCalledTimes(3);
+    const calls = a1JsonOnceMock.mock.calls.map((c) => c as string[]);
+    expect(calls[0]).toEqual([
+      'repo',
+      'mr',
+      'comment',
+      'create',
+      '--mr',
+      '7',
+      '--repo',
+      'g/p',
+      '--file',
+      'a.ts',
+      '--line',
+      '3',
+      '--message',
+      '**[Critical]** one',
+    ]);
+    // The MIDDLE create pinned exactly too — a loop regression pairing
+    // comments[i] with the wrong body, or re-posting the first body, must
+    // not pass while only the two ends are watched.
+    expect(calls[1]).toEqual([
+      'repo',
+      'mr',
+      'comment',
+      'create',
+      '--mr',
+      '7',
+      '--repo',
+      'g/p',
+      '--file',
+      'b.ts',
+      '--line',
+      '9',
+      '--message',
+      '**[Suggestion]** two',
+    ]);
+    expect(calls[2]).toEqual([
+      'repo',
+      'mr',
+      'comment',
+      'create',
+      '--mr',
+      '7',
+      '--repo',
+      'g/p',
+      '--message',
+      'summary body',
+    ]);
+    // The `repo mr view` read is the SOLE input of the head-drift gate —
+    // pin its argv exactly, or a transposed prNumber/ownerRepo anchors the
+    // gate on the wrong MR and every test above stays green.
+    expect(a1JsonMock).toHaveBeenCalledWith(
+      'repo',
+      'mr',
+      'view',
+      '7',
+      '--repo',
+      'g/p',
+    );
+    // COMMENT posts no approval.
+    expect(a1OnceMock).not.toHaveBeenCalled();
+    expect(result.postedInline).toBe(2);
+    expect(result.summaryPosted).toBe(true);
+    expect(result.approved).toBe(false);
+    expect(result.webUrl).toBe('https://code.alibaba-inc.com/g/p/codereview/7');
+    expect(ensureAuthMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('APPROVE runs the native approve AFTER the summary lands', () => {
+    a1JsonOnceMock
+      .mockReturnValueOnce({ id: 101 })
+      .mockReturnValueOnce({ id: 102 })
+      .mockReturnValueOnce({ id: 103 });
+    const result = submitAoneReview(req({ event: 'APPROVE' }));
+    expect(a1OnceMock).toHaveBeenCalledTimes(1);
+    expect(a1OnceMock).toHaveBeenCalledWith(
+      'repo',
+      'mr',
+      'approve',
+      '7',
+      '--repo',
+      'g/p',
+    );
+    // Ordering is the POINT: the approve must interleave AFTER every
+    // comment create. An approve-before-writes mutation (MR approved but
+    // carrying no review content if the summary create then fails) must
+    // not pass — invocationCallOrder is comparable across the two mocks.
+    expect(a1OnceMock.mock.invocationCallOrder[0]).toBeGreaterThan(
+      Math.max(...a1JsonOnceMock.mock.invocationCallOrder),
+    );
+    expect(result.approved).toBe(true);
+    expect(result.approveError).toBeUndefined();
+    expect(result.inlineCommentIds).toEqual([101, 102]);
+    expect(result.summaryCommentId).toBe(103);
+  });
+
+  it('REQUEST_CHANGES prefixes the blocking header (no native reject on Aone)', () => {
+    submitAoneReview(req({ event: 'REQUEST_CHANGES' }));
+    const calls = a1JsonOnceMock.mock.calls.map((c) => c as string[]);
+    const summaryMessage = calls[2][calls[2].length - 1];
+    expect(summaryMessage).toBe('**Request changes**\n\nsummary body');
+    expect(a1OnceMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses BEFORE writing when the head drifted', () => {
+    expect(() => submitAoneReview(req({ commitId: 'stale-sha' }))).toThrow(
+      /the MR head moved/,
+    );
+    expect(a1JsonOnceMock).not.toHaveBeenCalled();
+    expect(a1OnceMock).not.toHaveBeenCalled();
+  });
+
+  it('an empty sourceBranch cannot gate — the post proceeds unanchored', () => {
+    mrView('');
+    const result = submitAoneReview(req());
+    expect(result.postedInline).toBe(2);
+    expect(result.summaryPosted).toBe(true);
+  });
+
+  it('a MISSING sourceBranch key cannot gate either (the typed-optional shape)', () => {
+    // AoneMrView types sourceBranch optional; the guard defends with
+    // `(view.sourceBranch ?? '')`. A refactor to `view.sourceBranch.trim()`
+    // would crash with a raw TypeError before any write on the answer
+    // lacking the key, instead of the intended unanchored post.
+    mrView(undefined);
+    const result = submitAoneReview(req());
+    expect(result.postedInline).toBe(2);
+    expect(result.summaryPosted).toBe(true);
+  });
+
+  it('a mid-batch failure throws AonePartialPostError naming what landed', () => {
+    a1JsonOnceMock
+      .mockReturnValueOnce({ id: 101 })
+      .mockImplementationOnce(() => {
+        throw new Error('Command failed: boom');
+      });
+    let caught: unknown;
+    try {
+      submitAoneReview(req());
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(AonePartialPostError);
+    const partial = caught as AonePartialPostError;
+    expect(partial.postedInline).toBe(1);
+    expect(partial.inlineCommentIds).toEqual([101]);
+    expect(partial.summaryPosted).toBe(false);
+    expect(partial.message).toContain('1 of 2');
+    // An exec failure cannot tell "refused" from "accepted, then the
+    // transport died" — the failing write may be live on the MR though
+    // the count never saw it. Ambiguous, so submit's advisory fires.
+    expect(partial.ambiguous).toBe(true);
+    // The summary and any approve never ran.
+    expect(a1JsonOnceMock).toHaveBeenCalledTimes(2);
+    expect(a1OnceMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses WHOLE, before any write, when a message overruns the a1 argv limit', () => {
+    // Linux caps one argv element at 131072 BYTES. compose-review's cap
+    // counts CHARACTERS (65536) — a CJK char is 3 bytes in UTF-8 — so a
+    // long Chinese summary is inside the composer's cap and outside the
+    // OS limit. Without this guard the summary create would die with
+    // E2BIG only after every inline already landed.
+    const huge = '中'.repeat(50000); // 150 000 bytes of UTF-8
+    let caught: unknown;
+    try {
+      submitAoneReview(req({ body: huge }));
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toContain(
+      'over the 131072-byte single-argument limit',
+    );
+    // The remedy names the USER as the actor — Step 7 forbids the agent
+    // every hand-run `a1` write, and an actorless "post them manually"
+    // would hand the agent the exact call the rule exists to prevent.
+    expect((caught as Error).message).toContain(
+      'the USER can post them by hand',
+    );
+    // Nothing posted — neither a comment create nor an approve ran, and
+    // the failure is NOT a partial post (nothing is ambiguous either).
+    expect(caught).not.toBeInstanceOf(AonePartialPostError);
+    expect(a1JsonOnceMock).not.toHaveBeenCalled();
+    expect(a1OnceMock).not.toHaveBeenCalled();
+  });
+
+  it('guards an oversized INLINE comment too, naming it', () => {
+    const huge = 'x'.repeat(140000);
+    let caught: unknown;
+    try {
+      submitAoneReview(
+        req({ comments: [{ path: 'big.ts', line: 1, body: huge }] }),
+      );
+    } catch (err) {
+      caught = err;
+    }
+    expect((caught as Error).message).toContain('inline comment 1');
+    expect(a1JsonOnceMock).not.toHaveBeenCalled();
+  });
+
+  it('an approve failure alone does not fail the post', () => {
+    a1OnceMock.mockImplementation(() => {
+      throw Object.assign(new Error('Command failed: a1 repo mr approve'), {
+        stderr: 'approval denied\n',
+      });
+    });
+    const result = submitAoneReview(req({ event: 'APPROVE' }));
+    expect(result.approved).toBe(false);
+    expect(result.approveError).toContain('approval denied');
+    expect(result.postedInline).toBe(2);
+    expect(result.summaryPosted).toBe(true);
+  });
+
+  it('an empty-stderr failure reports EXIT FACTS, never the argv-bearing message', () => {
+    // The 120 s deadline kill / SIGKILL / OOM shape: no stderr at all.
+    // Parsing the message would quote a line of the operator's own review
+    // body (Node embeds the full argv) as the "cause".
+    a1JsonOnceMock.mockImplementationOnce(() => {
+      throw Object.assign(
+        new Error(
+          'Command failed: a1 repo mr comment create --message the body text\nmore body',
+        ),
+        { status: undefined, signal: 'SIGTERM' },
+      );
+    });
+    let caught: unknown;
+    try {
+      submitAoneReview(
+        req({ comments: [{ path: 'a.ts', line: 3, body: 'b' }] }),
+      );
+    } catch (err) {
+      caught = err;
+    }
+    const partial = caught as AonePartialPostError;
+    expect(caught).toBeInstanceOf(AonePartialPostError);
+    expect(partial.message).toContain('a1 failed without stderr');
+    expect(partial.message).toContain('signal SIGTERM');
+    expect(partial.message).not.toContain('more body');
+  });
+
+  it('an empty summary body posts no summary comment', () => {
+    const result = submitAoneReview(req({ body: '   ' }));
+    expect(result.summaryPosted).toBe(false);
+    // Two inline creates only.
+    expect(a1JsonOnceMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('reads the created id back best-effort (nested shapes tolerated)', () => {
+    a1JsonOnceMock
+      .mockReturnValueOnce({ comment: { id: 201 } })
+      .mockReturnValueOnce({ note: { id: 202 } })
+      .mockReturnValueOnce({ unrelated: true });
+    const result = submitAoneReview(req());
+    expect(result.inlineCommentIds).toEqual([201, 202]);
+    expect(result.postedInline).toBe(2);
+    expect(result.summaryCommentId).toBeUndefined();
+    // The summary's accepted-but-unreadable shape is still POSTED — the
+    // first-class "accepted, id unknown" state. summaryPosted must not be
+    // conditioned on the id reading back.
+    expect(result.summaryPosted).toBe(true);
+  });
+
+  it('reads ids from the result/data nestings too — the tolerance is PINNED, not merely alive', () => {
+    // createdCommentId tolerates {result:{id}} and {data:{id}} — but a
+    // mutation dropping those keys from the loop survived the suite
+    // (correct behavior, zero pins). This cell kills it.
+    a1JsonOnceMock
+      .mockReturnValueOnce({ result: { id: 301 } })
+      .mockReturnValueOnce({ data: { id: 302 } })
+      .mockReturnValueOnce({ result: { id: 303 } });
+    const result = submitAoneReview(req());
+    expect(result.inlineCommentIds).toEqual([301, 302]);
+    expect(result.summaryCommentId).toBe(303);
+  });
+
+  it('counts an accepted-but-unreadable answer as POSTED — no undercount, no throw', () => {
+    // a1JsonOnce yields undefined when an accepted write answers
+    // unparseably. The first inline then reads back no id — but it LANDED,
+    // so postedInline must still count it; only the id list drops it.
+    // (Undercounting here is what would re-post the comment on a retry.)
+    a1JsonOnceMock
+      .mockReturnValueOnce(undefined) // inline #1: accepted, unreadable
+      .mockReturnValueOnce({ id: 202 }) // inline #2
+      .mockReturnValueOnce({ id: 203 }); // summary
+    const result = submitAoneReview(req());
+    expect(result.postedInline).toBe(2);
+    expect(result.inlineCommentIds).toEqual([202]);
+    expect(result.summaryCommentId).toBe(203);
+    expect(result.summaryPosted).toBe(true);
+  });
+
+  it('a SUMMARY-create failure reports the inlines landed, not the summary', () => {
+    // The last write dying must not read back as "and the summary landed"
+    // (a summaryPosted-before-call mutation would) — the operator would be
+    // told a verdict summary is on the MR when it is not, or re-post it.
+    a1JsonOnceMock
+      .mockReturnValueOnce({ id: 101 })
+      .mockReturnValueOnce({ id: 102 })
+      .mockImplementationOnce(() => {
+        throw new Error('Command failed: summary died');
+      });
+    let caught: unknown;
+    try {
+      submitAoneReview(req());
+    } catch (err) {
+      caught = err;
+    }
+    const partial = caught as AonePartialPostError;
+    expect(caught).toBeInstanceOf(AonePartialPostError);
+    expect(partial.postedInline).toBe(2);
+    expect(partial.summaryPosted).toBe(false);
+    expect(partial.message).toContain('2 of 2');
+    expect(partial.message).not.toContain('and the summary');
+    // State the summary's fate explicitly: "2 of 2 landed" alone reads
+    // as a complete review, but the verdict carrier is absent from the
+    // MR — the one fact remainder-completion needs.
+    expect(partial.message).toContain('the summary did NOT land');
+    expect(partial.ambiguous).toBe(true);
+  });
+
+  it('counts an accepted-but-unreadable inline, THEN a failing write — count stays exact', () => {
+    // The ambiguous count includes undefined ids: an earlier inline
+    // accepted with an unparseable answer, then a later create dying,
+    // must report BOTH in postedInline even though the id list holds only
+    // the readable one (an ids.length mutation undercounts exactly here).
+    a1JsonOnceMock
+      .mockReturnValueOnce(undefined) // inline #1: accepted, unreadable
+      .mockImplementationOnce(() => {
+        throw new Error('Command failed: second died');
+      });
+    let caught: unknown;
+    try {
+      submitAoneReview(req());
+    } catch (err) {
+      caught = err;
+    }
+    const partial = caught as AonePartialPostError;
+    expect(caught).toBeInstanceOf(AonePartialPostError);
+    expect(partial.postedInline).toBe(1);
+    expect(partial.inlineCommentIds).toEqual([]);
+    expect(partial.message).toContain('1 of 2');
+    expect(partial.ambiguous).toBe(true);
+  });
+
+  it('the size gate pins the boundary operator — 131072 refused, 131071 posts', () => {
+    // Far-above-limit fixtures let a `>=`→`>` mutation survive: a summary
+    // of EXACTLY 131072 bytes would pass the gate and die E2BIG at exec
+    // time after every inline already landed.
+    let caught: unknown;
+    try {
+      submitAoneReview(req({ body: 'x'.repeat(131072), comments: [] }));
+    } catch (err) {
+      caught = err;
+    }
+    expect((caught as Error).message).toContain(
+      'over the 131072-byte single-argument limit',
+    );
+    expect(a1JsonOnceMock).not.toHaveBeenCalled();
+
+    a1JsonOnceMock.mockClear();
+    const result = submitAoneReview(req({ body: 'x'.repeat(131071) }));
+    expect(result.summaryPosted).toBe(true);
+  });
+
+  it('the size gate measures the RC HEADER-PREFIXED summary, not the raw body', () => {
+    // A REQUEST_CHANGES body just under the limit whose header-prefixed
+    // summaryMessage crosses it must refuse whole — measuring req.body
+    // instead would let the summary (deliberately LAST) die E2BIG after
+    // every inline already landed.
+    const header = '**Request changes**\n\n';
+    const body = 'x'.repeat(131072 - header.length + 1);
+    let caught: unknown;
+    try {
+      submitAoneReview(req({ event: 'REQUEST_CHANGES', body, comments: [] }));
+    } catch (err) {
+      caught = err;
+    }
+    expect((caught as Error).message).toContain(
+      'over the 131072-byte single-argument limit',
+    );
+    expect(a1JsonOnceMock).not.toHaveBeenCalled();
+  });
+
+  it('an empty-body REQUEST_CHANGES still posts the blocking header', () => {
+    // compose-review produces RC with an EMPTY body today (C≥1, all
+    // Criticals inline). The header is the verdict's sole carrier on
+    // Aone — the skip guard keys on the posted summaryMessage, so a
+    // header-only summary posts instead of being dropped.
+    const result = submitAoneReview(
+      req({ event: 'REQUEST_CHANGES', body: '' }),
+    );
+    expect(result.summaryPosted).toBe(true);
+    const calls = a1JsonOnceMock.mock.calls.map((c) => c as string[]);
+    expect(calls).toHaveLength(3); // 2 inlines + header-only summary
+    expect(calls[2][calls[2].length - 1]).toBe('**Request changes**\n\n');
+  });
+
+  it('reports a1 stderr as the cause, not a line of the comment body', () => {
+    // Node embeds the FULL argv — multi-line comment body included — in
+    // the "Command failed:" preamble, so parsing the message surfaces the
+    // operator's own review text. The real error rides the captured
+    // stderr property; the report must carry IT.
+    a1JsonOnceMock.mockImplementationOnce(() => {
+      const err = Object.assign(
+        new Error(
+          'Command failed: a1 repo mr comment create --message line one\nline two of the body',
+        ),
+        { stderr: 'HTTP 422: real a1 error\n' },
+      );
+      throw err;
+    });
+    let caught: unknown;
+    try {
+      submitAoneReview(
+        req({ comments: [{ path: 'a.ts', line: 3, body: 'b' }] }),
+      );
+    } catch (err) {
+      caught = err;
+    }
+    const partial = caught as AonePartialPostError;
+    expect(caught).toBeInstanceOf(AonePartialPostError);
+    expect(partial.message).toContain('HTTP 422: real a1 error');
+    expect(partial.message).not.toContain('line two of the body');
+  });
+
+  it('discloses a head that moved DURING the batch (the gate is check-then-post)', () => {
+    // The gate reads the head once, BEFORE the batch; an AGit-Flow amend
+    // pushed mid-batch slips it. The success report must disclose the
+    // orphaned pins instead of claiming they held.
+    a1JsonMock
+      .mockReturnValueOnce({
+        mergeRequest: {
+          sourceBranch: 'sha-head',
+          detailUrl: 'https://code.alibaba-inc.com/g/p/codereview/7',
+        },
+      })
+      .mockReturnValueOnce({
+        mergeRequest: {
+          sourceBranch: 'sha-amended',
+          detailUrl: 'https://code.alibaba-inc.com/g/p/codereview/7',
+        },
+      });
+    const result = submitAoneReview(req());
+    expect(result.postedInline).toBe(2);
+    expect(result.headMovedDuringPost).toBe(true);
+  });
+
+  it('a stable head through the batch reports no mid-batch drift', () => {
+    const result = submitAoneReview(req());
+    expect(result.headMovedDuringPost).toBe(false);
+  });
+
+  it('a post-batch re-read failure does not fail a successful post', () => {
+    a1JsonMock
+      .mockReturnValueOnce({
+        mergeRequest: {
+          sourceBranch: 'sha-head',
+          detailUrl: 'https://code.alibaba-inc.com/g/p/codereview/7',
+        },
+      })
+      .mockImplementationOnce(() => {
+        throw new Error('Command failed: a1 repo mr view — network gone');
+      });
+    const result = submitAoneReview(req());
+    expect(result.postedInline).toBe(2);
+    expect(result.summaryPosted).toBe(true);
+    expect(result.headMovedDuringPost).toBe(false);
   });
 });
