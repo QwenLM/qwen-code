@@ -14974,13 +14974,7 @@ exit 1
       reviewAddressReportStep.match(/^\s*HEADLINE_ZH="/gm) ?? [];
     expect(headlineAssignments.length).toBeGreaterThan(0);
     expect(headlineZhAssignments).toHaveLength(headlineAssignments.length);
-    for (const name of [
-      'CAUSE',
-      'LAST_FIX',
-      'GATE_CLAUSE',
-      'IDLE_CLAUSE',
-      'REMEDY',
-    ]) {
+    for (const name of ['CAUSE', 'LAST_FIX', 'GATE_CLAUSE', 'IDLE_CLAUSE']) {
       const en =
         reviewAddressReportStep.match(new RegExp(`^\\s*${name}=`, 'gm')) ?? [];
       const zh =
@@ -15080,8 +15074,12 @@ exit 1
         '自身本轮之前的代码需要处理',
       ],
       ['IDLE_CLAUSE', 'no budget increase can cure', '提高预算也治不了'],
-      ['REMEDY', 'split or reduce the PR', '拆分或缩减该 PR'],
-      ['REMEDY', 'investigate the sandbox image', '排查 sandbox 镜像'],
+      ['IDLE_CLAUSE', 'do NOT count toward this cap', '不计入本上限'],
+      [
+        'IDLE_CLAUSE',
+        'investigate the sandbox image and runner docker daemon separately',
+        '请另行排查 sandbox 镜像与 runner 的 docker daemon',
+      ],
     ]) {
       expect(
         reviewAddressReportStep,
@@ -15863,7 +15861,7 @@ exit 1
         'bash',
         [
           '-c',
-          `set -uo pipefail\nWORKDIR='${dir}'\nMARK_ROUND=${markRound}\nMAX_ROUNDS=100\nCONSECUTIVE_FAILURE_CAP=${cap}\nTIMEOUT_WINDOW_CAP=${timeoutCap}\nAGENT_TIMEOUT='${agentTimeout}'\nCONSEC_FAIL=0\nREPO=o/r\nPR=1\nAUTOFIX_BOT=qwen-code-dev-bot\nRETRY_COMMAND='@qwen-code /retry'\nAPI_ERROR_DETAIL='${apiErrorDetail}'\nAPI_ERROR_KIND='${apiErrorKind}'\nPREPARE_OUTCOME='${prepareOutcome}'\nSTALE_BASE_RETRY='${staleBaseRetry}'\n${window !== undefined ? `WINDOW='${window}'\n` : ''}HEADLINE=orig\n${script}\nprintf '%s|%s|%s' "$MARK_ROUND" "${'${CONSEC_FAIL}'}" "$HEADLINE"`,
+          `set -uo pipefail\nWORKDIR='${dir}'\nMARK_ROUND=${markRound}\nMAX_ROUNDS=100\nCONSECUTIVE_FAILURE_CAP=${cap}\nTIMEOUT_WINDOW_CAP=${timeoutCap}\nAGENT_TIMEOUT='${agentTimeout}'\nCONSEC_FAIL=0\nREPO=o/r\nPR=1\nAUTOFIX_BOT=qwen-code-dev-bot\nRETRY_COMMAND='@qwen-code /retry'\nAPI_ERROR_DETAIL='${apiErrorDetail}'\nAPI_ERROR_KIND='${apiErrorKind}'\nPREPARE_OUTCOME='${prepareOutcome}'\nSTALE_BASE_RETRY='${staleBaseRetry}'\n${window !== undefined ? `WINDOW='${window}'\n` : ''}HEADLINE=orig\n${script}\nprintf '\\n@@R@@%s|%s|%s' "$MARK_ROUND" "${'${CONSEC_FAIL}'}" "$HEADLINE"`,
         ],
         {
           env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
@@ -15871,7 +15869,12 @@ exit 1
         },
       );
       rmSync(dir, { recursive: true, force: true });
-      const [mark, consec, headline] = out.split('|');
+      // The block echoes ::warning:: log lines (the idle-timeout census), so
+      // read the result off its sentinel — job-log noise must never be
+      // parsed as a field.
+      const [mark, consec, headline] = out
+        .slice(out.lastIndexOf('@@R@@') + 5)
+        .split('|');
       return {
         mark,
         consec: Number(consec),
@@ -15986,49 +15989,70 @@ exit 1
     expect(interleaved.terminal).toBe(true);
     expect(interleaved.headline).toContain('time-budget exhaustions');
     expect(interleaved.headline).toContain('/retry');
-    // Idle (silent-sandbox) timeouts share the census — each burns a full
-    // budget — and when the window contains any, the breaker's advice says
-    // a budget increase cannot cure them.
+    // Idle (silent-sandbox) timeouts are EXCLUDED from this cap: the remedy
+    // it prescribes (split the PR / raise the budget) cannot cure a runner
+    // that produced no output at all, and counting them parked healthy PRs
+    // (af-073). Interleaved with pushes they must never terminate — this is
+    // the shape that stopped #8332 at 24 rounds and #8368 at 28 while both
+    // were still pushing.
     const IDLE_HEAD =
       '🤖 AutoFix ran out of time before finishing (idle-timeout (no output for 1200000ms — the sandbox likely hung at startup)) (attempt 2/100) — it will retry on the next scan.';
-    const idleMixed = run([IDLE_HEAD, PUSH, IDLE_HEAD, PUSH], {
-      agentTimeout:
-        'idle-timeout (no output for 1200000ms — the sandbox likely hung at startup)',
+    const IDLE_NOW =
+      'idle-timeout (no output for 1200000ms — the sandbox likely hung at startup)';
+    const allIdle = run([IDLE_HEAD, PUSH, IDLE_HEAD, PUSH, IDLE_HEAD, PUSH], {
+      agentTimeout: IDLE_NOW,
     });
-    expect(idleMixed.terminal).toBe(true);
-    expect(idleMixed.headline).toContain('time-budget exhaustions');
-    expect(idleMixed.headline).toContain(
-      'silent-sandbox (idle) timeouts that no budget increase can cure',
-    );
-    // An ALL-idle window swaps the closing remedy for the sandbox
-    // investigation — mirroring the round-level split — instead of
-    // prescribing the budget increase the clause above declared useless.
-    expect(idleMixed.headline).toContain(
-      'A human should investigate the sandbox image and runner docker daemon',
-    );
-    expect(idleMixed.headline).not.toContain('raise the agent time budget');
-    // A MIXED window (any real budget timeout) keeps the budget remedy.
-    const idleSome = run([TIMEOUT_HEAD, PUSH, IDLE_HEAD, PUSH], {
-      agentTimeout:
-        'idle-timeout (no output for 1200000ms — the sandbox likely hung at startup)',
+    expect(allIdle.terminal).toBe(false);
+    expect(allIdle.headline).toBe('orig');
+    // Idle rounds do not become budget timeouts by piling up: no count of
+    // them alone reaches the cap.
+    expect(
+      run(
+        Array(timeoutCap * 3)
+          .fill(IDLE_HEAD)
+          .flatMap((h) => [h, PUSH]),
+        {
+          agentTimeout: IDLE_NOW,
+        },
+      ).terminal,
+    ).toBe(false);
+    // The escape hatch that makes the exclusion safe: an idle round pushes
+    // nothing and matches no streak-reset needle, so a PERSISTENTLY wedged
+    // sandbox still terminates — at the CONSECUTIVE cap, with its own
+    // headline. Without this the exclusion would let a dead runner loop
+    // forever.
+    const idleStreak = run(Array(cap - 1).fill(IDLE_HEAD), {
+      agentTimeout: IDLE_NOW,
     });
-    expect(idleSome.terminal).toBe(true);
-    expect(idleSome.headline).toContain('2 of those were silent-sandbox');
-    expect(idleSome.headline).toContain('raise the agent time budget');
-    // The CURRENT round's idle timeout is counted by the increment, not
-    // the grep: cap-1 budget priors plus an idle current round render
-    // "1 of those were silent-sandbox". Deleting the IDLE_N increment
-    // suppresses the clause entirely (the grep sees no idle prior) and
-    // must fail here.
+    expect(idleStreak).toMatchObject({ consec: cap, terminal: true });
+    expect(idleStreak.headline).toContain(
+      'consecutive rounds that pushed nothing',
+    );
+    // A window whose BUDGET timeouts alone reach the cap still trips, and
+    // the count it reports is the budget one — not the total, which would
+    // re-inflate the number the exclusion just corrected.
+    const mixedTrips = run(
+      [TIMEOUT_HEAD, PUSH, TIMEOUT_HEAD, PUSH, IDLE_HEAD, PUSH],
+      { agentTimeout: 'timeout (3000000ms)' },
+    );
+    expect(mixedTrips.terminal).toBe(true);
+    expect(mixedTrips.headline).toContain(
+      `${timeoutCap} agent time-budget exhaustions`,
+    );
+    // ...and it names the idle rounds as excluded, so the operator still
+    // learns the runner misbehaved on a PR stopped for an unrelated reason.
+    expect(mixedTrips.headline).toContain('do NOT count toward this cap');
+    expect(mixedTrips.headline).toContain('raise the agent time budget');
+    // One idle round is enough to hold a would-be-capped window open: cap-1
+    // budget priors plus an idle current round is cap-1 budget timeouts, not
+    // cap. Deleting the IDLE_N increment (or the subtraction) terminates
+    // here and must fail.
     const idleCurrentOnly = run(Array(timeoutCap - 1).fill(TIMEOUT_HEAD), {
-      agentTimeout:
-        'idle-timeout (no output for 1200000ms — the sandbox likely hung at startup)',
+      agentTimeout: IDLE_NOW,
     });
-    expect(idleCurrentOnly.terminal).toBe(true);
-    expect(idleCurrentOnly.headline).toContain(
-      '1 of those were silent-sandbox (idle) timeouts',
-    );
-    // A window WITHOUT idle rounds keeps today's advice untouched.
+    expect(idleCurrentOnly.terminal).toBe(false);
+    expect(idleCurrentOnly.headline).toBe('orig');
+    // A window WITHOUT idle rounds says nothing about the sandbox.
     expect(interleaved.headline).not.toContain('silent-sandbox');
     // One short of the cap keeps retrying (current round not a timeout).
     expect(run([TIMEOUT_HEAD, PUSH, TIMEOUT_HEAD])).toMatchObject({
@@ -16092,8 +16116,22 @@ exit 1
     expect(reviewAddressReportStep).toContain(
       'TIMEOUT_N="$(grep -c \'AutoFix ran out of time before finishing\' <<< "${PRIOR_HEADS}" || true)"',
     );
+    // IDLE_N is SUBTRACTED from TIMEOUT_N, so its needle must be a strict
+    // extension of TIMEOUT_N's — a bare 'idle-timeout' substring could match
+    // provider error text that API_ERROR_DETAIL puts on the same first line
+    // and drive the difference negative.
     expect(reviewAddressReportStep).toContain(
-      'IDLE_N="$(grep -c \'idle-timeout\' <<< "${PRIOR_HEADS}" || true)"',
+      'IDLE_N="$(grep -c \'AutoFix ran out of time before finishing (idle-timeout\' <<< "${PRIOR_HEADS}" || true)"',
+    );
+    expect('AutoFix ran out of time before finishing (idle-timeout').toContain(
+      'AutoFix ran out of time before finishing',
+    );
+    // The cap gates on the budget-only count, never the total.
+    expect(reviewAddressReportStep).toContain(
+      'BUDGET_TIMEOUT_N=$(( TIMEOUT_N - IDLE_N ))',
+    );
+    expect(reviewAddressReportStep).toContain(
+      'if [[ "${BUDGET_TIMEOUT_N}" -ge "${TIMEOUT_WINDOW_CAP}" ]]; then',
     );
     // The reset detector keys on literal substrings; pin them to the actual
     // "Push and report" emit lines so a reword breaks this test, not silently

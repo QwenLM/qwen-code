@@ -245,7 +245,9 @@ env:
   # pushed rounds in between, so the consecutive cap never fired and the PR
   # kept walking into the same wall; #7846 the same, twice. Counted over the
   # current counting window (window-scoped like every other census), so a
-  # re-arm clears it along with the round counter.
+  # re-arm clears it along with the round counter. Counts BUDGET timeouts
+  # only: silent-sandbox (idle) timeouts are infra, not PR size, and are
+  # excluded — see qwen-autofix.md#af-073.
   TIMEOUT_WINDOW_CAP: '3'
   # Do not claim more issues when too many existing autofix PRs are still open.
   MAX_OPEN_AUTOFIX_PRS: '5'
@@ -6683,14 +6685,29 @@ jobs:
                 if [[ -n "${AGENT_TIMEOUT:-}" ]]; then
                   TIMEOUT_N=$(( TIMEOUT_N + 1 ))
                 fi
-                # Idle (silent-sandbox) timeouts share the census — they burn
-                # the same full budget — but no budget increase cures them, so
-                # when the window contains any, the breaker says so.
-                IDLE_N="$(grep -c 'idle-timeout' <<< "${PRIOR_HEADS}" || true)"
+                # Idle (silent-sandbox) timeouts are EXCLUDED from this cap:
+                # a wedged runner/docker is not this PR being too big, an idle
+                # round dies at QWEN_IDLE_TIMEOUT_MS having produced no byte
+                # (a fraction of a real round), and no budget increase cures
+                # one — so this breaker's remedy does not apply to them. A
+                # persistently wedged sandbox stays bounded by
+                # CONSECUTIVE_FAILURE_CAP, which an idle round DOES feed.
+                # Full rationale → qwen-autofix.md#af-073
+                # The needle is the emitted headline verbatim AND a prefix of
+                # TIMEOUT_N's, so IDLE_N can never exceed it and the
+                # subtraction below can never go negative.
+                IDLE_N="$(grep -c 'AutoFix ran out of time before finishing (idle-timeout' <<< "${PRIOR_HEADS}" || true)"
                 if [[ "${AGENT_TIMEOUT:-}" == 'idle-timeout'* ]]; then
                   IDLE_N=$(( IDLE_N + 1 ))
                 fi
-                if [[ "${TIMEOUT_N}" -ge "${TIMEOUT_WINDOW_CAP}" ]]; then
+                BUDGET_TIMEOUT_N=$(( TIMEOUT_N - IDLE_N ))
+                # Excluding idle from the cap must not hide it. The job log is
+                # the right surface: it reaches the operator without spending a
+                # PR comment on infra noise.
+                if [[ "${IDLE_N}" -gt 0 ]]; then
+                  echo "::warning::#${PR}: ${IDLE_N} silent-sandbox (idle) timeout(s) this counting window — excluded from the ${TIMEOUT_WINDOW_CAP}-timeout cap; check the sandbox image and the runner docker daemon"
+                fi
+                if [[ "${BUDGET_TIMEOUT_N}" -ge "${TIMEOUT_WINDOW_CAP}" ]]; then
                   MARK_ROUND="${MAX_ROUNDS}"
                   # The headline states what the census MEASURED — the
                   # window's cumulative count — not "stopped after N
@@ -6698,23 +6715,18 @@ jobs:
                   # failed differently (a gate rejection landing on a window
                   # that already carries the cap — the exact rollout state
                   # of #7929/#7846).
+                  # No all-idle branch here: the guard above only fires when
+                  # BUDGET_TIMEOUT_N alone reaches the cap, so a counted
+                  # window always holds more budget timeouts than idle ones
+                  # and the budget remedy is always the right one.
                   IDLE_CLAUSE=''
                   IDLE_CLAUSE_ZH=''
                   if [[ "${IDLE_N}" -gt 0 ]]; then
-                    IDLE_CLAUSE=" ${IDLE_N} of those were silent-sandbox (idle) timeouts that no budget increase can cure — investigate the sandbox image and runner docker daemon for those."
-                    IDLE_CLAUSE_ZH="其中 ${IDLE_N} 次是静默 sandbox（idle）超时，提高预算也治不了 —— 请针对这些排查 sandbox 镜像与 runner 的 docker daemon。"
+                    IDLE_CLAUSE=" The window also holds ${IDLE_N} silent-sandbox (idle) timeout(s), which no budget increase can cure and which do NOT count toward this cap — investigate the sandbox image and runner docker daemon separately."
+                    IDLE_CLAUSE_ZH="本窗口另有 ${IDLE_N} 次静默 sandbox（idle）超时，提高预算也治不了，且不计入本上限 —— 请另行排查 sandbox 镜像与 runner 的 docker daemon。"
                   fi
-                  # Mirror the round-level split: when EVERY counted timeout
-                  # was idle, the closing remedy must not prescribe the
-                  # budget increase the clause above just declared useless.
-                  REMEDY='split or reduce the PR (or raise the agent time budget AND its step backstop together)'
-                  REMEDY_ZH='拆分或缩减该 PR（或同时提高 agent 时间预算与其步骤兜底）'
-                  if [[ "${IDLE_N}" -ge "${TIMEOUT_N}" ]]; then
-                    REMEDY='investigate the sandbox image and runner docker daemon'
-                    REMEDY_ZH='排查 sandbox 镜像与 runner 的 docker daemon'
-                  fi
-                  HEADLINE="🤖 AutoFix stopped: this counting window now contains ${TIMEOUT_N} time-budget exhaustions (pushed rounds in between included; this round itself may have failed differently). That is ${TIMEOUT_N} full agent runs that pushed nothing.${IDLE_CLAUSE} A human should ${REMEDY}, then comment \`${RETRY_COMMAND}\` to re-arm. Until then future scans will skip this PR."
-                  HEADLINE_ZH="🤖 AutoFix 已停止：当前计数窗口内已累计 ${TIMEOUT_N} 次时间预算耗尽（含其间推送过的轮次；本轮本身可能以别的方式失败）。即 ${TIMEOUT_N} 次完整 agent 运行没有推送任何内容。${IDLE_CLAUSE_ZH}应由人工${REMEDY_ZH}，然后评论 \`${RETRY_COMMAND}\` 重新武装。在此之前，后续扫描将跳过本 PR。"
+                  HEADLINE="🤖 AutoFix stopped: this counting window now contains ${BUDGET_TIMEOUT_N} agent time-budget exhaustions (pushed rounds in between included; this round itself may have failed differently). That is ${BUDGET_TIMEOUT_N} full agent runs that pushed nothing.${IDLE_CLAUSE} A human should split or reduce the PR (or raise the agent time budget AND its step backstop together), then comment \`${RETRY_COMMAND}\` to re-arm. Until then future scans will skip this PR."
+                  HEADLINE_ZH="🤖 AutoFix 已停止：当前计数窗口内已累计 ${BUDGET_TIMEOUT_N} 次时间预算耗尽（含其间推送过的轮次；本轮本身可能以别的方式失败）。即 ${BUDGET_TIMEOUT_N} 次完整 agent 运行没有推送任何内容。${IDLE_CLAUSE_ZH}应由人工拆分或缩减该 PR（或同时提高 agent 时间预算与其步骤兜底），然后评论 \`${RETRY_COMMAND}\` 重新武装。在此之前，后续扫描将跳过本 PR。"
                 fi
               fi
             fi

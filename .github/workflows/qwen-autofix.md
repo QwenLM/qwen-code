@@ -2072,3 +2072,56 @@ publishing" and report a successful round as a failed one. An empty
 'stale' (prepare itself crashed) still finalises — that IS this job's
 round, and it is exactly the case that must not stay "working".
 ```
+
+<a id="af-073"></a>
+
+### 73. review-address · Report dry-run / failure — Idle (silent-sandbox) timeouts are EXCLUDED from the cumulative timeout cap.
+
+In `review-address` · `Report dry-run / failure`.
+
+```text
+TIMEOUT_WINDOW_CAP exists to stop a PR that is too big to finish a
+round inside the agent's time budget; its remedy says so ("split or
+reduce the PR, or raise the agent time budget AND its step backstop").
+An idle timeout is a different failure entirely: run-agent.mjs's idle
+watchdog kills the round after QWEN_IDLE_TIMEOUT_MS (20m) because the
+sandbox produced no output at all — the four observed hangs (#8663 x2,
+#8761 r3, #8763 r4) each printed their last byte at docker container
+entry and then sat silent. Nothing about the PR caused it, and the
+breaker's own headline already told the reader that "no budget increase
+can cure" it. Counting a failure whose prescribed remedy is
+inapplicable is what parked healthy PRs.
+
+Measured on 2026-08-21, over the preceding 14 days: 119 timeouts, of
+which 58 (49%) were idle. 51 windows tripped this cap, every one of
+them at exactly N=3. Of the 12 open PRs then carrying
+autofix/needs-human, 9 had been stopped here — #8332 at 24 rounds,
+#8368 at 28, #8276 at 16, all still producing pushed rounds when they
+were parked. With idle rounds counted, the fleet timeout rate was
+8.5% per round, so a window accumulated three of them in ~35 rounds by
+arithmetic alone, independent of whether the PR was stuck. Excluding
+idle drops the rate to 4.3%, which needs ~69 rounds — beyond the
+deepest window ever observed (22/100).
+
+The escape hatch that makes the exclusion safe: an idle round pushes
+nothing and matches none of CONSEC_FAIL's streak-reset needles
+("Addressed the latest review feedback", "no changes needed", "AutoFix
+could not start", "updated a stale base"), so a persistently wedged
+sandbox still terminates the PR at CONSECUTIVE_FAILURE_CAP. What no
+longer terminates it is idle rounds INTERLEAVED with real progress —
+which is the intended change: that PR is not stuck, the runner is.
+
+Two consequences inside the block. IDLE_N's needle became the full
+emitted headline prefix ('AutoFix ran out of time before finishing
+(idle-timeout') rather than a bare 'idle-timeout' substring: IDLE_N is
+now subtracted from TIMEOUT_N, so it MUST be a subset of it, and a
+loose needle could otherwise match provider error text that
+API_ERROR_DETAIL puts on the same first line and drive the difference
+negative. And the all-idle remedy branch is gone as unreachable: the
+guard now fires only when BUDGET_TIMEOUT_N alone reaches the cap, so a
+counted window always holds more budget timeouts than idle ones.
+
+Idle rounds stay visible through a job-log ::warning:: rather than a PR
+comment — the signal belongs to whoever owns the runners, and infra
+noise should not spend a comment on someone's PR.
+```
