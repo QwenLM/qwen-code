@@ -624,6 +624,13 @@ export interface ApplyTurnCollapseOptions {
    * so a lost notification cannot pin the turn expanded forever.
    */
   waitForUnmatchedAgentCompletions?: boolean;
+  /**
+   * Bound the matched-notification ordering wait (final answer already on
+   * screen before the completion landed, summary narration still expected).
+   * Pass false once the caller's grace window expires so a summary that never
+   * arrives cannot pin the turn (and its parallel-agents group) open forever.
+   */
+  waitForOrderedNarration?: boolean;
   terminalBackgroundShellTaskIds?: ReadonlySet<string>;
   automaticallyExpandedAgentKeys?: ReadonlySet<string>;
   /**
@@ -1723,6 +1730,7 @@ function turnAwaitsBackgroundSummary(
   end: number,
   agentNotificationsOnly = false,
   waitForUnmatchedAgentCompletions = true,
+  waitForOrderedNarration = true,
 ): boolean {
   const state = backgroundAgentSummaryState(
     items,
@@ -1733,7 +1741,10 @@ function turnAwaitsBackgroundSummary(
   if (!state) return false;
   // A lost completion may hold the turn only for the caller's grace window;
   // the ordering rule below is reserved for matched notifications whose
-  // summary narration is still expected.
+  // summary narration is still expected. It is bounded the same way: when the
+  // model already delivered its final answer before the notification and no
+  // narration follows within the caller's grace window, the wait releases so
+  // the turn (and its parallel-agents group) can collapse.
   if (state.sawAgentCompletion && state.unmatchedAgentCallIds.size > 0) {
     return waitForUnmatchedAgentCompletions;
   }
@@ -1744,6 +1755,7 @@ function turnAwaitsBackgroundSummary(
     }
   }
   return (
+    waitForOrderedNarration &&
     findFinalAnswerIndex(items, start, end, false) < state.lastNotificationIndex
   );
 }
@@ -1756,6 +1768,7 @@ export function applyTurnCollapse(
     activeTurnStartedAt,
     backgroundSummaryGraceActive = true,
     waitForUnmatchedAgentCompletions = true,
+    waitForOrderedNarration = true,
     terminalBackgroundShellTaskIds,
     automaticallyExpandedAgentKeys,
     pendingApprovalCallId,
@@ -1815,6 +1828,7 @@ export function applyTurnCollapse(
         end,
         false,
         waitForUnmatchedAgentCompletions,
+        waitForOrderedNarration,
       );
     const hasPendingApproval = turnOwnsCallId(
       items,
@@ -2985,6 +2999,65 @@ export const MessageList = memo(
       latestTurnStartIndex,
       isResponding,
     ]);
+    // The ordering rule (the final answer already on screen before a matched
+    // completion notification, summary narration still expected) has no
+    // natural expiry: a model that finished before its background agents
+    // reconciled would pin the turn — and its parallel-agents group — open
+    // forever. Bound it with the same grace window as unmatched completions.
+    const latestTurnHoldsOrderedSummary = useMemo(
+      () =>
+        backgroundSummaryGraceActive &&
+        !latestTurnHasActiveBackgroundAgent &&
+        !isResponding &&
+        (latestTurnBackgroundSummaryState?.sawAgentCompletion ?? false) &&
+        (latestTurnBackgroundSummaryState?.unmatchedAgentCallIds.size ?? 0) ===
+          0 &&
+        turnAwaitsBackgroundSummary(
+          displayItems,
+          latestTurnStartIndex,
+          displayItems.length - 1,
+          true,
+          true,
+          true,
+        ),
+      [
+        backgroundSummaryGraceActive,
+        displayItems,
+        isResponding,
+        latestTurnBackgroundSummaryState,
+        latestTurnHasActiveBackgroundAgent,
+        latestTurnStartIndex,
+      ],
+    );
+    const [orderedSummaryGraceExpired, setOrderedSummaryGraceExpired] =
+      useState(false);
+    // Key the grace on the latest turn's own agent-completion notification,
+    // not the global latest background notification: a monitor/shell-task
+    // banner landing mid-wait must neither restart the bound nor re-arm an
+    // expired one (the same rule the unmatched latch follows), or an active
+    // background task could pin the waiting turn open indefinitely.
+    const latestTurnOrderedNotificationId = useMemo(() => {
+      const state = latestTurnBackgroundSummaryState;
+      if (!state || state.lastNotificationIndex < 0) return '';
+      const item = displayItems[state.lastNotificationIndex];
+      return item?.type === 'message' ? item.message.id : '';
+    }, [displayItems, latestTurnBackgroundSummaryState]);
+    useEffect(() => {
+      setOrderedSummaryGraceExpired(false);
+    }, [latestTurnOrderedNotificationId, latestTurnStartIndex, isResponding]);
+    useEffect(() => {
+      if (!latestTurnHoldsOrderedSummary) return;
+      const timer = setTimeout(
+        () => setOrderedSummaryGraceExpired(true),
+        UNMATCHED_AGENT_COMPLETION_GRACE_MS,
+      );
+      return () => clearTimeout(timer);
+    }, [
+      latestTurnHoldsOrderedSummary,
+      latestTurnOrderedNotificationId,
+      latestTurnStartIndex,
+      isResponding,
+    ]);
     const latestTurnAwaitsAgentSummary = useMemo(
       () =>
         backgroundSummaryGraceActive &&
@@ -2995,12 +3068,14 @@ export const MessageList = memo(
           true,
           latestTurnHasActiveBackgroundAgent ||
             !unmatchedCompletionGraceExpired,
+          !orderedSummaryGraceExpired,
         ),
       [
         backgroundSummaryGraceActive,
         displayItems,
         latestTurnHasActiveBackgroundAgent,
         latestTurnStartIndex,
+        orderedSummaryGraceExpired,
         unmatchedCompletionGraceExpired,
       ],
     );
@@ -3014,13 +3089,8 @@ export const MessageList = memo(
     }, [displayItems, latestTurnStartIndex]);
     const backgroundSummaryAgentContext = useMemo(() => {
       if (!backgroundSummaryGraceActive) {
-        return {
-          key: null,
-          agentNotificationIsLatestBackground: false,
-          latestBackgroundNotificationInLatestTurn: false,
-        };
+        return { key: null };
       }
-      let latestBackgroundNotificationIndex = -1;
       let notificationIndex = -1;
       let callId: string | undefined;
       for (let i = displayItems.length - 1; i >= 0; i -= 1) {
@@ -3032,9 +3102,6 @@ export const MessageList = memo(
         ) {
           continue;
         }
-        if (latestBackgroundNotificationIndex < 0) {
-          latestBackgroundNotificationIndex = i;
-        }
         const completion = backgroundAgentCompletion(item);
         if (!completion) continue;
         notificationIndex = i;
@@ -3045,22 +3112,11 @@ export const MessageList = memo(
         const item = displayItems[i];
         if (item.type !== 'parallel_agents') continue;
         if (!callId || item.agents.some((agent) => agent.callId === callId)) {
-          return {
-            key: item.key,
-            agentNotificationIsLatestBackground:
-              notificationIndex === latestBackgroundNotificationIndex,
-            latestBackgroundNotificationInLatestTurn:
-              notificationIndex > latestTurnStartIndex,
-          };
+          return { key: item.key };
         }
       }
-      return {
-        key: null,
-        agentNotificationIsLatestBackground: false,
-        latestBackgroundNotificationInLatestTurn:
-          notificationIndex > latestTurnStartIndex,
-      };
-    }, [backgroundSummaryGraceActive, displayItems, latestTurnStartIndex]);
+      return { key: null };
+    }, [backgroundSummaryGraceActive, displayItems]);
     const [isSessionTimelineVisible, setIsSessionTimelineVisible] =
       useState(false);
     const [automaticallyExpandedAgentKeys, setAutomaticallyExpandedAgentKeys] =
@@ -3311,6 +3367,7 @@ export const MessageList = memo(
         backgroundSummaryGraceActive,
         latestTurnHasActiveBackgroundAgent,
         unmatchedCompletionGraceExpired,
+        orderedSummaryGraceExpired,
         collapseEnabled,
         hideFirstUserMessage,
         firstTurnMetrics,
@@ -3368,6 +3425,7 @@ export const MessageList = memo(
         waitForUnmatchedAgentCompletions:
           latestTurnHasActiveBackgroundAgent ||
           !unmatchedCompletionGraceExpired,
+        waitForOrderedNarration: !orderedSummaryGraceExpired,
         automaticallyExpandedAgentKeys,
         pendingApprovalCallId: pendingApproval?.toolCallId ?? null,
         includeSubagentToolUsageInMetrics,
@@ -3438,6 +3496,7 @@ export const MessageList = memo(
       backgroundSummaryGraceActive,
       latestTurnHasActiveBackgroundAgent,
       unmatchedCompletionGraceExpired,
+      orderedSummaryGraceExpired,
       collapseEnabled,
       hideFirstUserMessage,
       firstTurnMetrics,
@@ -4933,13 +4992,13 @@ export const MessageList = memo(
                         : undefined
                     }
                     deferAutomaticCollapse={
-                      (latestTurnParallelAgentKeys.has(displayItem.key) &&
-                        isResponding &&
-                        (!backgroundSummaryAgentContext.latestBackgroundNotificationInLatestTurn ||
-                          (backgroundSummaryAgentContext.agentNotificationIsLatestBackground &&
-                            latestTurnAwaitsAgentSummary))) ||
-                      (backgroundSummaryAgentContext.key === displayItem.key &&
-                        latestTurnAwaitsAgentSummary)
+                      // Defer only while the completion narration is still
+                      // expected after the group's last agent notification.
+                      // A group whose agents are all terminal otherwise
+                      // collapses — and returns to its chronological
+                      // position — even while the main agent keeps working.
+                      backgroundSummaryAgentContext.key === displayItem.key &&
+                      latestTurnAwaitsAgentSummary
                     }
                     expandActiveWhenLive={
                       isResponding &&
