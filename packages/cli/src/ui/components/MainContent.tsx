@@ -300,6 +300,48 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
       ? historyItemsWithSourceCopyOffsets
       : historyItemsWithSourceCopyOffsets.slice(0, replayCount);
 
+  // batchIds of committed tool_groups folded into a thought line
+  // (display.mergedIntoThought). The committed copy is filtered out of
+  // visibleHistory when fullDetail is off, but the scheduler keeps its LIVE
+  // pending display copy until onComplete's await (tool-response submission)
+  // returns. BOTH render paths must suppress that live copy by batchId
+  // identity for that window, or the user sees the merged thought line PLUS a
+  // duplicate group line. Empty when fullDetail is on: the committed copy
+  // re-renders then, and the live copy is collapsed by the #9420 dedup.
+  const mergedBatchIds = useMemo(() => {
+    const ids = new Set<string>();
+    if (fullDetail) return ids;
+    for (const item of history) {
+      if (
+        item.type === 'tool_group' &&
+        item.batchId !== undefined &&
+        item.display?.mergedIntoThought
+      ) {
+        ids.add(item.batchId);
+      }
+    }
+    return ids;
+  }, [history, fullDetail]);
+
+  // The legacy Static path renders the pending region unfiltered; suppress a
+  // merged batch's live pending copy there too (parity with the VP path's
+  // allVirtualItems), so the default (useTerminalBuffer=false) renderer does
+  // not show the merged thought line PLUS a duplicate group line.
+  const staticPendingItems = useMemo(
+    () =>
+      mergedBatchIds.size === 0
+        ? pendingHistoryItemsWithSourceCopyOffsets
+        : pendingHistoryItemsWithSourceCopyOffsets.filter(
+            ({ item }) =>
+              !(
+                item.type === 'tool_group' &&
+                item.batchId !== undefined &&
+                mergedBatchIds.has(item.batchId)
+              ),
+          ),
+    [pendingHistoryItemsWithSourceCopyOffsets, mergedBatchIds],
+  );
+
   // Combine completed history + live pending items for the virtualized list.
   // The banner sentinel is prepended so it scrolls with content (not pinned).
   // Pending items get negative IDs (-(i+1)) so renderItem can tell them apart.
@@ -350,39 +392,24 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
     }
     for (const item of committedByBatchId.values()) dropped.add(item);
     // A MERGED batch's committed copy is filtered out of visibleHistory
-    // above (fullDetail off), so the collapse loop never sees it — and the
-    // scheduler keeps its live display copy until onComplete's await
-    // (tool-response submission) returns. Without this, the user sees the
-    // merged thought line PLUS a duplicate '✓ Read /foo' group line for
-    // that window. The merged line is the batch's only main-view
-    // representation; suppress the live copy by the same batchId identity.
-    if (!fullDetail) {
-      const mergedBatchIds = new Set<string>();
-      for (const item of history) {
+    // above (fullDetail off), so the collapse loop never sees it — suppress
+    // its live pending copy by the shared mergedBatchIds identity (see the
+    // memo above; the legacy Static path applies the same filter).
+    if (mergedBatchIds.size > 0) {
+      for (const item of combined) {
         if (
+          item.id < 0 &&
           item.type === 'tool_group' &&
           item.batchId !== undefined &&
-          item.display?.mergedIntoThought
+          mergedBatchIds.has(item.batchId)
         ) {
-          mergedBatchIds.add(item.batchId);
-        }
-      }
-      if (mergedBatchIds.size > 0) {
-        for (const item of combined) {
-          if (
-            item.id < 0 &&
-            item.type === 'tool_group' &&
-            item.batchId !== undefined &&
-            mergedBatchIds.has(item.batchId)
-          ) {
-            dropped.add(item);
-          }
+          dropped.add(item);
         }
       }
     }
     if (dropped.size === 0) return combined;
     return combined.filter((item) => !dropped.has(item));
-  }, [visibleHistory, pendingHistoryItems, history, fullDetail]);
+  }, [visibleHistory, pendingHistoryItems, mergedBatchIds]);
 
   // Ctrl+O (fullDetail) inserts/removes merged tool_groups in the MIDDLE of
   // the virtual list, but VirtualizedList's scroll anchor is index-based —
@@ -443,8 +470,25 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
           // routinely non-zero under incremental VP scrolling, and
           // scrollToItem's default (viewOffset 0) snaps the item's TOP to
           // the viewport top, dropping the reading depth inside tall items.
+          // Depth preservation is only correct when the anchored item does
+          // not SHRINK across the flip. Toggle-ON grows items, so the offset
+          // stays valid. Toggle-OFF collapses thought bodies (fullDetail
+          // forces them open; ThinkBody returns null when collapsed, so a
+          // tall expanded thought becomes a 1-line label, and the
+          // merged-group → preceding-thought remap above targets that same
+          // 1-line thought); re-applying the pre-toggle offset then lands N
+          // rows PAST the top of the now-short item, scrolling it off above
+          // the viewport (and, on a short transcript, the maxScroll clamp
+          // lands the restore at the bottom). Non-thought items (answers,
+          // user rows) keep their height on toggle-OFF, so their offset is
+          // preserved. Restore to a thought's top on toggle-OFF.
           anchorRestoreOffsetRef.current =
-            anchor.offset === SCROLL_TO_ITEM_END ? 0 : anchor.offset;
+            anchor.offset === SCROLL_TO_ITEM_END ||
+            (!fullDetail &&
+              (item.type === 'gemini_thought' ||
+                item.type === 'gemini_thought_content'))
+              ? 0
+              : anchor.offset;
         }
       }
     }
@@ -733,27 +777,23 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
             }
             overflow="hidden"
           >
-            {pendingHistoryItemsWithSourceCopyOffsets.map(
-              ({ item, sourceCopyIndexOffsets }, i) => (
-                <HistoryItemDisplay
-                  key={i}
-                  availableTerminalHeight={
-                    uiState.constrainHeight
-                      ? availableTerminalHeight
-                      : undefined
-                  }
-                  terminalWidth={terminalWidth}
-                  mainAreaWidth={mainAreaWidth}
-                  item={{ ...item, id: 0 }}
-                  isPending={true}
-                  isFocused={!uiState.isEditorDialogOpen}
-                  activeShellPtyId={uiState.activePtyId}
-                  embeddedShellFocused={uiState.embeddedShellFocused}
-                  sourceCopyIndexOffsets={sourceCopyIndexOffsets}
-                  fullDetail={fullDetail}
-                />
-              ),
-            )}
+            {staticPendingItems.map(({ item, sourceCopyIndexOffsets }, i) => (
+              <HistoryItemDisplay
+                key={i}
+                availableTerminalHeight={
+                  uiState.constrainHeight ? availableTerminalHeight : undefined
+                }
+                terminalWidth={terminalWidth}
+                mainAreaWidth={mainAreaWidth}
+                item={{ ...item, id: 0 }}
+                isPending={true}
+                isFocused={!uiState.isEditorDialogOpen}
+                activeShellPtyId={uiState.activePtyId}
+                embeddedShellFocused={uiState.embeddedShellFocused}
+                sourceCopyIndexOffsets={sourceCopyIndexOffsets}
+                fullDetail={fullDetail}
+              />
+            ))}
           </Box>
           <ShowMoreLines constrainHeight={uiState.constrainHeight} />
         </Box>

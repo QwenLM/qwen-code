@@ -986,6 +986,46 @@ describe('<MainContent />', () => {
           | undefined;
         expect(lastData).toContain(restoreArg?.item);
       });
+
+      it('restores a collapsed thought to its top on toggle-OFF (no depth overshoot)', () => {
+        scrollableListRefMock.scrollToItem.mockClear();
+        scrollableListPropsSpy.mockClear();
+        // fullDetail ON: [banner, 1, 2(thought), 3(merged group), 4, 5, 6];
+        // the user is anchored partway into the tall EXPANDED thought (index
+        // 2, non-zero offset).
+        const { rerender } = renderWithThoughtExpanded(anchorHistory, true, {
+          useTerminalBuffer: true,
+        });
+        scrollableListRefMock.getScrollState.mockReturnValueOnce({
+          scrollTop: 10,
+          scrollHeight: 140,
+          innerHeight: 20,
+        });
+        scrollableListRefMock.getScrollAnchor.mockReturnValueOnce({
+          index: 2,
+          offset: 5,
+        });
+
+        // Ctrl+O flips OFF: the thought body collapses to a 1-line label.
+        // Re-applying the pre-toggle offset (5) would land 5 rows past the
+        // top of the now-1-row item, scrolling it off above the viewport —
+        // so the restore must target the thought's TOP (offset 0).
+        rerender(
+          thoughtExpandedTree(anchorHistory, false, {
+            useTerminalBuffer: true,
+          }),
+        );
+
+        expect(scrollableListRefMock.scrollToItem).toHaveBeenCalledTimes(1);
+        const restoreArg =
+          scrollableListRefMock.scrollToItem.mock.calls[0]?.[0];
+        expect(restoreArg?.viewOffset).toBe(0);
+        expect(restoreArg?.item).toBe(anchorHistory[1]);
+        const lastData = scrollableListPropsSpy.mock.calls.at(-1)?.[0]?.data as
+          | Array<{ id: number }>
+          | undefined;
+        expect(lastData).toContain(restoreArg?.item);
+      });
     });
   });
 
@@ -1397,6 +1437,119 @@ describe('<MainContent />', () => {
       // committed merged group (id 3) is filtered out and the live pending
       // copy (id -1) is suppressed by the same batchId identity.
       expect(lastVpDataIds()).toEqual([Number.MIN_SAFE_INTEGER, 1, 2]);
+    });
+
+    it('keeps the live pending copy of a merged batch in full detail', () => {
+      scrollableListPropsSpy.mockClear();
+
+      // Symmetric fullDetail=true pin for the suppression above. The
+      // committed-copy collapse (committedByBatchId → dropped) runs
+      // UNCONDITIONALLY whenever a live pending copy exists, while the
+      // merged-pending suppression is gated behind fullDetail OFF. If that
+      // guard regresses (dropped or inverted), a merged batch in the pending
+      // window is dropped TWICE under Ctrl+O — the re-admitted committed
+      // group collapses in favor of the pending copy, and the now-unguarded
+      // merged-batchId branch suppresses that copy — so the batch renders
+      // nothing in the expanded view, hiding tool results from exactly the
+      // surface the merge is supposed to keep reachable.
+      render(
+        <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
+          <UIActionsContext.Provider value={createUIActions()}>
+            <UIStateContext.Provider
+              value={createUIState({
+                useTerminalBuffer: true,
+                history: [
+                  { id: 1, type: 'user' as const, text: 'read /foo' },
+                  {
+                    id: 2,
+                    type: 'gemini_thought' as const,
+                    text: 'thinking',
+                    durationMs: 9000,
+                    toolSummary: 'Read /foo',
+                  },
+                  {
+                    id: 3,
+                    ...batched('batch-1', 'call-A'),
+                    display: { mergedIntoThought: true },
+                  },
+                ],
+                pendingHistoryItems: [batched('batch-1', 'call-A')],
+              })}
+            >
+              <OverflowProvider>
+                <ThoughtExpandedProvider
+                  value={{
+                    allExpanded: true,
+                    expandedHeadIds: new Set<number>(),
+                    toggle: () => {},
+                  }}
+                >
+                  <MainContent />
+                </ThoughtExpandedProvider>
+              </OverflowProvider>
+            </UIStateContext.Provider>
+          </UIActionsContext.Provider>
+        </AppContext.Provider>,
+      );
+
+      // Full detail re-admits the committed merged group (id 3), which then
+      // collapses in favor of the live pending copy (id -1). The batch must
+      // render exactly once — via the live pending copy — NOT zero times.
+      const ids = lastVpDataIds();
+      expect(ids).toContain(-1);
+      expect(ids).not.toContain(3);
+      expect(ids).toEqual([Number.MIN_SAFE_INTEGER, 1, 2, -1]);
+    });
+
+    it('suppresses the merged batch live pending copy on the Static path (useTerminalBuffer=false)', () => {
+      historyItemDisplayPropsSpy.mockClear();
+
+      // R4-4 parity: the VP allVirtualItems memo suppresses a merged batch's
+      // live pending copy; the legacy Static path renders its pending region
+      // separately and must apply the SAME batchId suppression, or the default
+      // (useTerminalBuffer=false) renderer shows the merged thought line PLUS
+      // a duplicate group row between the merged commit and the scheduler
+      // clearing its display copy.
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: false,
+          history: [
+            { id: 1, type: 'user' as const, text: 'read /foo' },
+            {
+              id: 2,
+              type: 'gemini_thought' as const,
+              text: 'thinking',
+              durationMs: 9000,
+              toolSummary: 'Read /foo',
+            },
+            {
+              id: 3,
+              ...batched('batch-1', 'call-A'),
+              display: { mergedIntoThought: true },
+            },
+          ],
+          pendingHistoryItems: [batched('batch-1', 'call-A')],
+        }),
+      );
+
+      // The committed merged group (id 3) is filtered from visibleHistory and
+      // the live pending copy of batch-1 must be suppressed from the pending
+      // region — so NO tool_group row for batch-1 renders as pending.
+      const rendered = historyItemDisplayPropsSpy.mock.calls.map((c) => c[0]);
+      const pendingBatchGroups = rendered.filter(
+        (p) =>
+          p.isPending &&
+          (p.item as { type?: string; batchId?: string }).type ===
+            'tool_group' &&
+          (p.item as { batchId?: string }).batchId === 'batch-1',
+      );
+      expect(pendingBatchGroups).toHaveLength(0);
+      // The merged thought line itself still renders (committed history).
+      expect(
+        rendered.some(
+          (p) => !p.isPending && (p.item as { id?: number }).id === 2,
+        ),
+      ).toBe(true);
     });
 
     it('requests a full-height measurement only for pending plain-text confirmations', () => {
