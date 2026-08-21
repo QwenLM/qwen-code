@@ -2519,34 +2519,30 @@ export class GeminiClient {
     const currentPushCount = () =>
       this.getChat().getUserContentPushCount?.() ?? 0;
 
+    // Settle a carrier exactly once. With `pushCountBefore`, acceptance
+    // compares the user-content push counter against that snapshot.
+    // Without it (`undefined`), the send provably never pushed its user
+    // content — blocked by a UserPromptSubmit hook, or any exit before
+    // `turn.run` — so restore unconditionally instead of comparing the
+    // push counter: the counter is global, and a concurrent submission
+    // admitted during the hook await pushes its own content into the
+    // same counter, which would read as "accepted" for content THIS
+    // send never pushed.
     const settleSteerInput = (
       steerInput: SteerInput | undefined,
-      pushCountBefore: number,
+      pushCountBefore?: number,
     ) => {
       if (!steerInput || this.settledSteerInputs.has(steerInput)) return;
       this.settledSteerInputs.add(steerInput);
       try {
-        if (currentPushCount() > pushCountBefore) {
+        if (
+          pushCountBefore !== undefined &&
+          currentPushCount() > pushCountBefore
+        ) {
           steerInput.accept();
         } else {
           steerInput.restore();
         }
-      } catch (error) {
-        debugLogger.warn(`Failed to settle steer input: ${error}`);
-      }
-    };
-
-    // Settle a carrier whose send provably never pushed its user content —
-    // blocked by a UserPromptSubmit hook, or any exit before `turn.run`.
-    // Restore unconditionally instead of comparing the push counter: the
-    // counter is global, and a concurrent submission admitted during the
-    // hook await pushes its own content into the same counter, which would
-    // read as "accepted" for content THIS send never pushed.
-    const restoreSteerInput = (steerInput: SteerInput | undefined) => {
-      if (!steerInput || this.settledSteerInputs.has(steerInput)) return;
-      this.settledSteerInputs.add(steerInput);
-      try {
-        steerInput.restore();
       } catch (error) {
         debugLogger.warn(`Failed to settle steer input: ${error}`);
       }
@@ -2723,7 +2719,7 @@ export class GeminiClient {
           // attached carrier by unconditional restore, never by the push
           // counter (a concurrent push inside the hook window above would
           // otherwise masquerade as this send's acceptance).
-          restoreSteerInput(attachedSteerInput);
+          settleSteerInput(attachedSteerInput);
           return new Turn(this.getChat(), prompt_id);
         }
 
@@ -2762,7 +2758,7 @@ export class GeminiClient {
       // before the settlement try/finally below, and this send provably
       // never pushed: settle the attached carrier here by unconditional
       // restore instead of leaving it to caller-side failure handling.
-      restoreSteerInput(attachedSteerInput);
+      settleSteerInput(attachedSteerInput);
       throw error;
     }
 
@@ -4239,7 +4235,7 @@ export class GeminiClient {
         // Exited before `turn.run` (cancelled during the hook await, setup
         // failure, ...): this send never pushed, so the entry-snapshot
         // counter comparison could be fooled by concurrent pushes.
-        restoreSteerInput(attachedSteerInput);
+        settleSteerInput(attachedSteerInput);
       }
       restoreStrippedRetryEntries();
       // Belt-and-suspenders: close out the MessageDisplay dispatcher on any
