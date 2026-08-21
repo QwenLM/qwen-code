@@ -997,6 +997,36 @@ describe('OpenAIContentConverter', () => {
       );
     });
 
+    it('fails closed at finish on a held closing tag tail after a demotion (issue #9348 fail-closed)', () => {
+      // Closing-tag twin of the test above: the held tail '</thinking'
+      // contains a full closing tag word truncated before '>'. It pins the
+      // closing branch (`\/?`) of the finish-time full-tag-word regex —
+      // without that branch the tail would be released as literal text.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('leading-block', {
+          content: '<thinking>a</thinking>Answer ',
+        }),
+        stream,
+      );
+      const fragment = converter.convertOpenAIChunkToGemini(
+        streamChunk('tag-fragment', { content: '</thinking' }),
+        stream,
+      );
+
+      expect(fragment.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingPostDemotionTagTail).toBe('</thinking');
+      expect(() => finishStream(stream, 'stop')).toThrowError(
+        expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
+      );
+    });
+
     it('fails closed when the demotion chunk itself ends in a tag prefix at finish (issue #9348 fail-closed)', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };

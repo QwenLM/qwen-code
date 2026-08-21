@@ -2802,6 +2802,50 @@ describe('ContentGenerationPipeline', () => {
       ]);
     });
 
+    it('rejects a held post-demotion closing tag tail at clean stream EOF', async () => {
+      // Closing-tag twin of the full-tag-word EOF backstop: pins the closing
+      // branch (`\/?`) of the backstop regex — a held '</think' must fail
+      // closed exactly like its opening-tag twin.
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'response-id',
+            choices: [{ delta: { content: '</think' }, finish_reason: null }],
+          } as OpenAI.Chat.ChatCompletionChunk;
+        },
+      };
+      const emptyResponse = new GenerateContentResponse();
+      emptyResponse.candidates = [
+        { content: { parts: [], role: 'model' }, index: 0 },
+      ];
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToGemini as Mock).mockImplementation(
+        (_chunk, context) => {
+          context.pendingPostDemotionTagTail = '</think';
+          return emptyResponse;
+        },
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        'test-prompt-id',
+      );
+
+      await expect(async () => {
+        for await (const _ of resultGenerator) {
+          // Consume until EOF validation runs.
+        }
+      }).rejects.toMatchObject({ type: 'PROTOCOL_TAG_LEAK' });
+    });
+
     it('releases a held sub-word thinking-tag candidate as literal text at clean stream EOF', async () => {
       // The EOF candidate check must agree with the finish-time checks: a
       // held candidate with no full tag word can no longer become a tag once
