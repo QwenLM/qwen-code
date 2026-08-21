@@ -186,6 +186,76 @@ export function sanitizedGitEnv(): NodeJS.ProcessEnv {
 }
 
 /**
+ * The repo-local `filter.<name>.smudge|clean` commands, when any are defined.
+ *
+ * The checkouts this pipeline runs EXECUTE these — hooks are disabled by its
+ * `core.hooksPath` override, filters are not — and the planting surface is two
+ * plain writes a probe can make into a COMMON dir the reports call shared:
+ * `git config filter.evil.smudge CMD` and one line appended to
+ * `$(git rev-parse --git-path info/attributes)`. discard and cleanup never
+ * wipe the common dir, so a filter planted while reviewing one PR fires on
+ * every later matching checkout of the user's OWN repository — persistence
+ * planted by reviewing a malicious PR, measured live. The two local config
+ * files are checked with `--file` rather than merged config because filters
+ * in the user's global config (git-lfs is the common one) are the user's own
+ * contract, exactly like any git command they run — while a probe's planting
+ * surface is the repo-local files. The state cannot be told apart from a
+ * filter the user set deliberately, and cannot be safely wiped, so a hit is a
+ * refusal upstream, not a cleanup here.
+ */
+export function localFilterCommands(worktree: string): string[] {
+  const files = spawnSync(
+    'git',
+    ['rev-parse', '--git-common-dir', '--git-dir'],
+    { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
+  );
+  if (files.error || files.status !== 0 || typeof files.stdout !== 'string') {
+    return [];
+  }
+  const [commonDir, gitDir] = files.stdout.trim().split('\n');
+  const common = resolve(worktree, commonDir);
+  const candidates = [
+    join(common, 'config'),
+    join(resolve(worktree, gitDir), 'config.worktree'),
+  ];
+  // Every OTHER worktree's per-worktree config too. The screen runs against
+  // one tree, but the checkout it authorises can run in ANOTHER — a scratch
+  // tree's own `<common>/worktrees/<label>/config.worktree` is honored once
+  // `extensions.worktreeConfig` is on, and a filter planted in the entry of a
+  // tree not yet created — the predictable name of the fetch's `worktree add`
+  // target — executes during that add. The admin directory is one `readdir`,
+  // and a filter in any of these is a plant whichever tree carries it.
+  try {
+    for (const entry of readdirSync(join(common, 'worktrees'))) {
+      candidates.push(join(common, 'worktrees', entry, 'config.worktree'));
+    }
+  } catch {
+    // No linked worktrees registered: the two candidates above are all of it.
+  }
+  const found: string[] = [];
+  for (const file of candidates) {
+    if (!existsSync(file)) continue;
+    const r = spawnSync(
+      'git',
+      [
+        'config',
+        '--file',
+        file,
+        '--get-regexp',
+        '^filter\\..*\\.(smudge|clean)$',
+      ],
+      { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
+    );
+    if (r.error || r.status !== 0 || typeof r.stdout !== 'string') continue;
+    for (const line of r.stdout.split('\n')) {
+      const key = line.split(/\s+/)[0];
+      if (key && !found.includes(key)) found.push(key);
+    }
+  }
+  return found;
+}
+
+/**
  * Free a disposable worktree's path: unregister it, then remove what is left.
  *
  * `git worktree remove --force` only clears a tree git still tracks. A directory
@@ -205,11 +275,19 @@ export function sanitizedGitEnv(): NodeJS.ProcessEnv {
  * Best-effort by design: a clean path is the normal case, so the unregister does
  * not throw on a non-zero status. `rmSync` still can (`force` suppresses ENOENT
  * but not EPERM/EBUSY) — callers decide what that means.
+ *
+ * `pinnedGitDir`, when the caller's probe verified one, is the admin entry the
+ * unregister's git calls run under. Without it they re-discover the repository
+ * through the same writable gitfile the probe exists to stop trusting, and a
+ * swap landing between the probe and these spawns aims them at whichever
+ * repository it names.
  */
 export function discardWorktree(
   cwd: string,
   tree: string,
+  pinnedGitDir?: string,
 ): SweepResult | undefined {
+  const pin = pinnedGitDir === undefined ? [] : [`--git-dir=${pinnedGitDir}`];
   // A symlink at the tree path must never reach `git worktree remove`: git
   // resolves it and force-removes whichever registered worktree it points at
   // — a victim this path never owned, measured live. A symlink is never a
@@ -230,7 +308,7 @@ export function discardWorktree(
   const ownAdminDir = adminDirOf(tree);
   let sweep: SweepResult | undefined;
   if (!symlink) {
-    sweep = spawnSync('git', ['worktree', 'remove', '--force', tree], {
+    sweep = spawnSync('git', [...pin, 'worktree', 'remove', '--force', tree], {
       cwd,
       encoding: 'utf8',
       env: sanitizedGitEnv(),
@@ -242,14 +320,14 @@ export function discardWorktree(
       // later `worktree add` at that path then fatals "missing but locked", for
       // every disposable tree of that review, until a human intervenes.
       // `unlock` + the second `--force` is what git documents for exactly this.
-      spawnSync('git', ['worktree', 'unlock', tree], {
+      spawnSync('git', [...pin, 'worktree', 'unlock', tree], {
         cwd,
         encoding: 'utf8',
         env: sanitizedGitEnv(),
       });
       sweep = spawnSync(
         'git',
-        ['worktree', 'remove', '--force', '--force', tree],
+        [...pin, 'worktree', 'remove', '--force', '--force', tree],
         { cwd, encoding: 'utf8', env: sanitizedGitEnv() },
       );
     }
@@ -299,6 +377,17 @@ export interface WorktreeResidue {
    * be read is still safe to create beside.
    */
   identityRefused?: true;
+  /**
+   * The admin entry this gate verified the gitfile to name — the identity
+   * every command after the gate must run under. A caller that CREATES from
+   * this tree's identity must run the creation against THIS entry, never
+   * re-discovering the repository through the writable gitfile: a swap
+   * landing between the passing probe and the creation commands is honored
+   * by discovery — measured: the forge's filters executed during the
+   * creation checkout while the report answered `available: true`. Absent
+   * when the identity was refused; such a caller must refuse too.
+   */
+  verifiedGitDir?: string;
 }
 
 /**
@@ -714,6 +803,7 @@ export function worktreeResidue(
   );
   let isWorktree = false;
   let pin: string[] = [];
+  let verifiedGitDir: string | undefined;
   try {
     const [toplevel, gitDir] = (top.stdout ?? '').trim().split('\n');
     isWorktree =
@@ -780,7 +870,13 @@ export function worktreeResidue(
         // the recorded number, and an in-place rewrite never moves it — this
         // check raises the bar, it does not close the class; nothing local
         // to the tree can.
-        if (anchor.devIno !== undefined) {
+        // An EMPTY devIno — the shape of a bare CLI flag — is an absent
+        // check, not a recorded identity: it can never equal a real
+        // `dev:ino`, and refusing a healthy tree with a tamper diagnosis
+        // would send an operator hunting repository tampering that is not
+        // there. Degrade to the path comparison, the documented degradation
+        // for an absent devIno.
+        if (anchor.devIno !== undefined && anchor.devIno !== '') {
           let probed: Stats;
           try {
             probed = statSync(discoveredAdminDir);
@@ -842,8 +938,9 @@ export function worktreeResidue(
       // superproject with an initialised submodule and a worktree reached
       // through a symlinked ancestor, all five commands below return
       // byte-identical output pinned and unpinned.
+      verifiedGitDir = realpathSync(gitDir);
       pin = [
-        `--git-dir=${realpathSync(gitDir)}`,
+        `--git-dir=${verifiedGitDir}`,
         `--work-tree=${realpathSync(toplevel)}`,
       ];
     }
@@ -885,7 +982,7 @@ export function worktreeResidue(
     const why = r.error
       ? ((r.error as NodeJS.ErrnoException).code ?? r.error.message)
       : `git status exited ${r.status}`;
-    return { paths: [], total: 0, unmeasured: why };
+    return { paths: [], total: 0, unmeasured: why, verifiedGitDir };
   }
   const records = r.stdout.split('\0').filter((rec) => rec.length > 0);
   const paths: string[] = [];
@@ -947,7 +1044,7 @@ export function worktreeResidue(
     const why = others.error
       ? ((others.error as NodeJS.ErrnoException).code ?? others.error.message)
       : `git ls-files exited ${others.status}`;
-    return { paths: [], total: 0, unmeasured: why };
+    return { paths: [], total: 0, unmeasured: why, verifiedGitDir };
   }
   const seen = new Set(paths);
   // The status set, snapshotted before the extras below join it: an ignore
@@ -970,6 +1067,7 @@ export function worktreeResidue(
         unmeasured:
           "the ignore rules hiding this tree's untracked files could not be " +
           'attributed, so `git status` cannot be trusted to have seen them',
+        verifiedGitDir,
       };
     }
     const fromTheCommit = trackedIgnoreSources(
@@ -1021,7 +1119,7 @@ export function worktreeResidue(
     const why = stage.error
       ? ((stage.error as NodeJS.ErrnoException).code ?? stage.error.message)
       : `git ls-files exited ${stage.status}`;
-    return { paths: [], total: 0, unmeasured: why };
+    return { paths: [], total: 0, unmeasured: why, verifiedGitDir };
   }
   const blind = stage.stdout
     .split('\0')
@@ -1051,6 +1149,7 @@ export function worktreeResidue(
       unmeasured:
         'git status cannot see inside the committed submodule path(s) ' +
         blind.join(', '),
+      verifiedGitDir,
     };
   }
   // The other way this oracle goes blind, and the one the scratch tree's reset
@@ -1079,7 +1178,12 @@ export function worktreeResidue(
     const why = bits.error
       ? ((bits.error as NodeJS.ErrnoException).code ?? bits.error.message)
       : `git ls-files exited ${bits.status}`;
-    return { paths: paths.slice(0, cap), total: paths.length, unmeasured: why };
+    return {
+      paths: paths.slice(0, cap),
+      total: paths.length,
+      unmeasured: why,
+      verifiedGitDir,
+    };
   }
   if (bits.stdout.split('\0').some((rec) => /^[a-zS]/.test(rec))) {
     return {
@@ -1088,9 +1192,10 @@ export function worktreeResidue(
       unmeasured:
         'the index carries skip-worktree or assume-unchanged bits, so `git ' +
         'status` cannot see edits to the tracked files they cover',
+      verifiedGitDir,
     };
   }
-  return { paths: paths.slice(0, cap), total: paths.length };
+  return { paths: paths.slice(0, cap), total: paths.length, verifiedGitDir };
 }
 
 /** What a dependency farm run did, and whether it found one already standing. */

@@ -2731,6 +2731,14 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     // again through the shard invocation path, silently.
     expect(p).not.toContain('--admin-dir');
     expect(p).not.toContain('--admin-dev-ino');
+    // And the NO-ANCHOR weld's terminal shape: the `--label` line ends the
+    // command block with NO continuation. An unconditional continuation
+    // hands every no-anchor round — exactly the degraded rounds where the
+    // recording failed, and legacy plans — a block whose last line dangles
+    // a backslash: copied with a following line, bash dies `unexpected
+    // EOF` and the shard's scratch tree never stands up, silently, in the
+    // rounds that are already degraded.
+    expect(p).toContain('--label verify--round-2--deadbeef1234\n```');
     expect(
       buildRoleBrief(
         {

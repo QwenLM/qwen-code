@@ -81,7 +81,16 @@ describe('worktreeResidue', () => {
   });
 
   it('is empty for the tree a review actually reads', () => {
-    expect(worktreeResidue(tree)).toEqual({ paths: [], total: 0 });
+    const got = worktreeResidue(tree);
+    expect(got.paths).toEqual([]);
+    expect(got.total).toBe(0);
+    expect(got.unmeasured).toBeUndefined();
+    // The identity the gate verified rides with a measured tree: the
+    // caller that CREATES from it runs the creation under this entry,
+    // never re-discovering through the writable gitfile.
+    expect(got.verifiedGitDir).toBe(
+      realpathSync(git('rev-parse', '--path-format=absolute', '--git-dir')),
+    );
   });
 
   it('names a modified file and an untracked probe — the live #9207 shape', () => {
@@ -99,7 +108,9 @@ describe('worktreeResidue', () => {
     mkdirSync(join(tree, 'node_modules', 'vitest'), { recursive: true });
     mkdirSync(join(tree, 'dist'), { recursive: true });
     writeFileSync(join(tree, 'dist', 'out.js'), 'built\n');
-    expect(worktreeResidue(tree)).toEqual({ paths: [], total: 0 });
+    const got = worktreeResidue(tree);
+    expect(got.paths).toEqual([]);
+    expect(got.total).toBe(0);
   });
 
   it('reports BOTH names of a rename — the restore needs the one that is gone', () => {
@@ -248,6 +259,10 @@ describe('worktreeResidue', () => {
 
     expect(got.paths).toEqual([]);
     expect(got.unmeasured).toContain('does not point back');
+    // The flag `runScratchTree` branches on: an identity refusal must not
+    // read like an ordinary unmeasured failure, or the creation it gates
+    // descends from the very identity the probe just refused.
+    expect(got.identityRefused).toBe(true);
   });
 
   it('says UNMEASURED for a forge that fabricates its own admin backpointer', () => {
@@ -305,6 +320,7 @@ describe('worktreeResidue', () => {
 
     expect(got.paths).toEqual([]);
     expect(got.unmeasured).toContain('other than the one recorded');
+    expect(got.identityRefused).toBe(true);
     // The mutant is still on disk: the refusal withholds the certificate, it
     // does not touch the tree.
     expect(readFileSync(join(tree, 'a.ts'), 'utf8')).toContain('MUTANT');
@@ -359,6 +375,7 @@ describe('worktreeResidue', () => {
 
     expect(got.paths).toEqual([]);
     expect(got.unmeasured).toContain('other than the one recorded');
+    expect(got.identityRefused).toBe(true);
     expect(readFileSync(join(tree, 'a.ts'), 'utf8')).toContain('MUTANT');
   });
 
@@ -440,6 +457,19 @@ describe('worktreeResidue', () => {
     expect(worktreeResidue(tree, { adminDir: expected }).paths).toEqual([]);
   });
 
+  it('treats an EMPTY recorded devIno as absent — degrades, never refuses', () => {
+    // A bare CLI flag hands over the empty string. It can never equal a
+    // real `dev:ino`, and refusing a healthy tree with the tamper
+    // diagnosis sends an operator hunting for repository tampering that is
+    // not there — the documented degradation for an absent devIno is the
+    // path comparison alone.
+    writeFileSync(join(tree, '__probe__.test.ts'), 'probe');
+    const own = git('rev-parse', '--path-format=absolute', '--git-dir');
+    const got = worktreeResidue(tree, { adminDir: own, devIno: '' });
+    expect(got.identityRefused).toBeUndefined();
+    expect(got.paths).toEqual(['__probe__.test.ts']);
+  });
+
   it('says UNMEASURED when the recorded admin entry does not resolve on disk', () => {
     // The anchor is a record, and records go stale — a plan surviving a
     // cleanup, a tampered one. Measuring unanchored after the anchor failed
@@ -454,6 +484,7 @@ describe('worktreeResidue', () => {
     expect(got.unmeasured).toContain(
       'the admin entry recorded for this tree does not resolve',
     );
+    expect(got.identityRefused).toBe(true);
   });
 
   // Invalid-UTF-8 filenames cannot be created on Windows; the shape pinned
@@ -489,6 +520,7 @@ printf 'gitdir: %s/.git\\n' "$bad" > '${tree}/.git'`,
         'the .git gitfile names an admin entry that does not',
       );
       expect(got.unmeasured).not.toContain('recorded for this tree');
+      expect(got.identityRefused).toBe(true);
     },
   );
 
@@ -510,6 +542,7 @@ printf 'gitdir: %s/.git\\n' "$bad" > '${tree}/.git'`,
 
     expect(got.paths).toEqual([]);
     expect(got.unmeasured).toContain('not a gitfile');
+    expect(got.identityRefused).toBe(true);
     expect(existsSync(join(tree, '__probe__.test.ts'))).toBe(true);
   });
 
@@ -579,7 +612,8 @@ printf 'gitdir: %s/.git\\n' "$bad" > '${tree}/.git'`,
 
     const got = worktreeResidue(fresh);
     expect(got.unmeasured).toBeUndefined();
-    expect(got).toEqual({ paths: [], total: 0 });
+    expect(got.paths).toEqual([]);
+    expect(got.total).toBe(0);
   });
 
   it('says UNMEASURED for a NON-ASCII gitlink path, which quotepath renders unresolvable', () => {

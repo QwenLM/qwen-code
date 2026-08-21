@@ -29,7 +29,12 @@ import { classifyHeavy } from './lib/heavy.js';
 import { DEADLINE_ENV, hasReviewDeadline } from './lib/deadline.js';
 import type { MergeBaseResult } from './lib/merge-base.js';
 import { buildRoleBrief } from './agent-prompt.js';
-import { PARSE_ARGS_REPORT, tmpFile, worktreePath } from './lib/paths.js';
+import {
+  PARSE_ARGS_REPORT,
+  reviewBranch,
+  tmpFile,
+  worktreePath,
+} from './lib/paths.js';
 import { buildDiffPlan } from './lib/diff-plan.js';
 import { buildPlanReport } from './lib/report.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
@@ -252,6 +257,10 @@ const producerMocks = vi.hoisted(() => ({
       : undefined,
   ),
   gitRaw: vi.fn((..._args: string[]): Buffer => Buffer.from('')),
+  // Default answers "no repo-local content filters"; the refusal test
+  // overrides it. The scan itself (spawn-driven config reads) belongs to
+  // scratch-tree's suite against real fixtures.
+  localFilterCommands: vi.fn((..._args: unknown[]): string[] => []),
   resolveMergeBase: vi.fn(
     (..._args: unknown[]): MergeBaseResult => ({
       sha: null,
@@ -323,6 +332,14 @@ vi.mock('./lib/gh.js', async (importOriginal) => {
     ensureAuthenticated: vi.fn(),
     gh: producerMocks.gh,
     setGhHost: vi.fn(),
+  };
+});
+
+vi.mock('./lib/worktree.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/worktree.js')>();
+  return {
+    ...actual,
+    localFilterCommands: producerMocks.localFilterCommands,
   };
 });
 
@@ -413,6 +430,9 @@ describe('fetch-pr report assembly', () => {
     );
     producerMocks.gitOpt.mockImplementation(() => null);
     producerMocks.gitRaw.mockImplementation(() => Buffer.from(''));
+    producerMocks.localFilterCommands.mockImplementation(
+      (..._args: unknown[]): string[] => [],
+    );
     producerMocks.resolveMergeBase.mockImplementation(() => ({
       sha: null,
       baseFetchFailed: false,
@@ -535,40 +555,43 @@ describe('fetch-pr report assembly', () => {
     expect(report.host).toBe('ghe.example.com');
   });
 
-  it('records the worktree admin entry — full argv, dev:ino, failure warning', async () => {
+  it('records the worktree admin entry on the CREATING side — argv, dev:ino, both failure warnings', async () => {
     // The residue probe refuses a review tree whose gitfile names any admin
     // entry other than the one recorded HERE, at creation, riding the plan
-    // (#9557). The recording spawn carries `--path-format=absolute`: without
-    // it git answers a RELATIVE dir from a top-level checkout, and nothing
-    // downstream pins the recorded value to an absolute path — a shard
-    // resolving it against its own cwd would refuse every healthy tree as
-    // unmeasured. And `-C <worktree>`, because the process cwd is the
-    // creating repository, whose own `--git-dir` is the wrong directory
-    // entirely: dropping it records `<repo>/.git`, every healthy tree's
-    // discovered entry mismatches, and every residue verdict degrades to
-    // UNMEASURED silently. Pin the WHOLE argv — both mutants measured green
-    // against a membership-only mock. Off the default mock (gitOpt answers
-    // null) both fields degrade to null and the round is TOLD it runs
-    // unanchored: a weakened review must not pass for a hardened one.
+    // (#9557). The recording derives the entry on the CREATING side — the
+    // creating repository's common dir plus the entry name `worktree add`
+    // registers for the new path — and never re-resolves it through the
+    // worktree's own gitfile: the add's checkout has just run whatever that
+    // tree carries, and a gitfile swapped during it recorded the forge as
+    // the trusted anchor (measured at the pre-fix recording). The spawn
+    // carries `--path-format=absolute`: without it git answers a RELATIVE
+    // dir from a top-level checkout, and nothing downstream pins the
+    // recorded value to an absolute path. Off the default mock (gitOpt
+    // answers null) both fields degrade to null and the round is TOLD it
+    // runs unanchored: a weakened review must not pass for a hardened one —
+    // and the warning's TAIL is pinned because the lesser referent-check
+    // degradation below shares its prefix.
     const unanchored = await reportFor({});
     expect(unanchored.worktreeAdminDir).toBeNull();
     expect(unanchored.worktreeAdminDevIno).toBeNull();
     expect(producerMocks.writeStderrLine).toHaveBeenCalledWith(
-      expect.stringContaining('could not record the worktree admin entry'),
+      expect.stringContaining('identity gate runs unanchored'),
     );
     expect(producerMocks.gitOpt).toHaveBeenCalledWith(
-      '-C',
-      worktreePath('42'),
       'rev-parse',
       '--path-format=absolute',
-      '--git-dir',
+      '--git-common-dir',
     );
 
-    producerMocks.gitOpt.mockImplementation((...args: string[]) =>
-      args.includes('--git-dir') && args.includes('--path-format=absolute')
-        ? '/repo/.git/worktrees/review-pr-42'
-        : null,
-    );
+    // The creating-side derivation holds even with the worktree's own
+    // gitfile swapped: a `-C <worktree> --git-dir` probe — the pre-fix
+    // recording — answers the forge the swap names, and the shipped anchor
+    // would be the forge's entry.
+    producerMocks.gitOpt.mockImplementation((...args: string[]) => {
+      if (args.includes('--git-common-dir')) return '/repo/.git';
+      if (args.includes('-C')) return '/repo/.git/worktrees/forge';
+      return null;
+    });
     producerMocks.statSync.mockImplementation(
       (
         path?: unknown,
@@ -577,9 +600,78 @@ describe('fetch-pr report assembly', () => {
           ? { dev: 64, ino: 4242, mtimeMs: 0 }
           : undefined,
     );
+    producerMocks.writeStderrLine.mockClear();
     const anchored = await reportFor({});
     expect(anchored.worktreeAdminDir).toBe('/repo/.git/worktrees/review-pr-42');
     expect(anchored.worktreeAdminDevIno).toBe('64:4242');
+    // Neither degradation warning fires on a healthy anchored fetch: a
+    // warning hoisted out of its guard would print on EVERY fetch, and
+    // operators learn to ignore the exact signal this gate added. Mock
+    // history accumulates across the reportFor calls above — cleared first.
+    expect(producerMocks.writeStderrLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('identity gate runs unanchored'),
+    );
+    expect(producerMocks.writeStderrLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('without its referent check'),
+    );
+
+    // The middle branch: the entry IS recorded but cannot be stat-ed. The
+    // gate keeps its path comparison, and the round is told it runs without
+    // the referent check — with a warning TAIL distinct from the
+    // fully-unanchored one above, the distinction an operator acts on.
+    producerMocks.statSync.mockImplementation(
+      (path?: unknown): { mtimeMs: number } | undefined =>
+        String(path).endsWith('-fetch.json') ||
+        String(path).endsWith('fetch-report.json')
+          ? { mtimeMs: Date.parse('2026-08-13T00:00:00.000Z') }
+          : undefined,
+    );
+    const referentless = await reportFor({});
+    expect(referentless.worktreeAdminDir).toBe(
+      '/repo/.git/worktrees/review-pr-42',
+    );
+    expect(referentless.worktreeAdminDevIno).toBeNull();
+    expect(producerMocks.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('without its referent check'),
+    );
+  });
+
+  it('refuses the fetch while repo-local config defines a content filter — the add checkout would execute it', async () => {
+    // A contaminated earlier attempt's plant persists in the shared common
+    // dir (cleanup never wipes it), and the `worktree add` checkout fires
+    // it — the same screen scratch-tree applies, run here BEFORE the
+    // checkout that would execute the plant.
+    producerMocks.localFilterCommands.mockReturnValue(['filter.evil.smudge']);
+    await expect(reportFor({})).rejects.toThrow(
+      /content filter\(s\) filter\.evil\.smudge/,
+    );
+    expect(producerMocks.localFilterCommands).toHaveBeenCalledWith(
+      process.cwd(),
+    );
+    // The refusal fires before the add: no worktree is created while the
+    // repository's checkouts execute planted commands.
+    expect(producerMocks.git).not.toHaveBeenCalledWith(
+      '-c',
+      'core.hooksPath=/dev/null/no-hooks',
+      'worktree',
+      'add',
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('runs the worktree add with hooks disabled — the checkout must not run the common dir hooks', async () => {
+    // A linked worktree's `worktree add` fires the common dir's
+    // post-checkout — the same shared surface the filter screen names.
+    await reportFor({});
+    expect(producerMocks.git).toHaveBeenCalledWith(
+      '-c',
+      'core.hooksPath=/dev/null/no-hooks',
+      'worktree',
+      'add',
+      worktreePath('42'),
+      reviewBranch('42'),
+    );
   });
 
   it('refuses a dash-leading baseRefName from the platform metadata', async () => {
@@ -1072,7 +1164,9 @@ describe('fetch-pr report assembly', () => {
 
     it('clears the lease when the worktree add fails', async () => {
       producerMocks.git.mockImplementation((...args: string[]) => {
-        if (args[0] === 'worktree') throw new Error('disk full');
+        // Membership, not position: the add carries a `-c core.hooksPath`
+        // global option ahead of the subcommand.
+        if (args.includes('worktree')) throw new Error('disk full');
         return args[0] === 'rev-parse' ? 'f00df00d' : '';
       });
 

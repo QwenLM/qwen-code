@@ -29,7 +29,7 @@ import type { CommandModule } from 'yargs';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   clearReviewWorktreeLeaseIfOwned,
@@ -38,7 +38,7 @@ import {
   reviewLeaseHeldByAnotherSession,
   reviewLeasePath,
 } from '../../services/review-worktree-lease.js';
-import { sanitizedGitEnv } from './lib/worktree.js';
+import { localFilterCommands, sanitizedGitEnv } from './lib/worktree.js';
 import { setGhHost } from './lib/gh.js';
 import { getPlatformReader } from './lib/platform/registry.js';
 import type { ReviewPlatformReader } from './lib/platform/types.js';
@@ -53,6 +53,7 @@ import {
 } from './lib/git.js';
 import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from './lib/diff-flags.js';
 import {
+  inertPath,
   REVIEW_TMP_DIR,
   reviewBranch,
   tmpFile,
@@ -1098,8 +1099,39 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
 
     // 4. Create the ephemeral worktree.
     try {
+      // The add's checkout EXECUTES repo-local content filters — and the
+      // planting surface is two plain writes into the common dir this fetch
+      // shares with every probe: `git config filter.evil.smudge CMD` plus an
+      // attributes rule selecting it. discard and cleanup never wipe the
+      // common dir, so a contaminated earlier attempt's plant persists and
+      // fires during THIS checkout — the same screen `scratch-tree` applies
+      // before its checkouts, run here before the checkout that executes it.
+      const filters = localFilterCommands(process.cwd());
+      if (filters.length > 0) {
+        throw new Error(
+          `the repository's local config defines content filter(s) ${filters
+            .map(inertPath)
+            .join(', ')} — the worktree checkout would EXECUTE them ` +
+            '(filters are config-driven), and two plain writes into the ' +
+            'common dir are enough to plant both the filter and the ' +
+            'attributes that select it. Remove the filter config — or the ' +
+            'attributes file that uses it — if it is not yours; until then ' +
+            'no review worktree is safe to create.',
+        );
+      }
       mkdirSync(dirname(wt), { recursive: true });
-      git('worktree', 'add', wt, ref);
+      // Hooks out of the checkout, the way `scratch-tree` runs its adds: a
+      // linked worktree's `worktree add` fires the common dir's
+      // `post-checkout`, and the common dir is the same shared surface the
+      // filter screen above names.
+      git(
+        '-c',
+        'core.hooksPath=/dev/null/no-hooks',
+        'worktree',
+        'add',
+        wt,
+        ref,
+      );
     } catch (err) {
       tryRemove(() =>
         execFileSync('git', ['branch', '-D', ref], {
@@ -1635,24 +1667,30 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         );
       }
     }
-    // The tree's own admin entry, resolved through the gitfile
-    // `worktree add` wrote moments ago and recorded now, before any PR
-    // content runs: the residue probe refuses a tree whose gitfile names
-    // any OTHER entry (see `worktreeResidue`'s identity gate). `-C wt`
-    // because the process cwd is the creating repository, whose own
-    // `--git-dir` is the wrong directory entirely; absolute, because a
-    // relative answer would later resolve against whichever cwd reads it.
-    // The entry's filesystem identity rides with it: both operands of the
-    // gate's path comparison resolve at probe time against a filesystem the
-    // contaminator writes, so it also refuses an entry that no longer
-    // carries this dev:ino.
-    const worktreeAdminDir = gitOpt(
-      '-C',
-      wt,
+    // The tree's own admin entry, derived on the CREATING side — the
+    // creating repository's common dir plus the entry name `worktree add`
+    // registers for the new path (its basename) — and recorded now, before
+    // any PR content runs. Never re-resolved through the worktree's own
+    // gitfile: the checkout above has just run whatever that tree carries,
+    // and a gitfile swapped during it would record whichever entry the swap
+    // names as the trusted anchor — the very forge the residue probe's
+    // identity gate exists to refuse (measured: every gate this pipeline
+    // adds then passes over the forge). A mismatch between this record and
+    // the entry the gitfile names at probe time IS the swap, and the gate
+    // fails closed on it; an entry git uniquified away from the basename
+    // resolves to nothing there and fails closed the same way. Absolute,
+    // because a relative answer would later resolve against whichever cwd
+    // reads it. The entry's filesystem identity rides with it: both operands
+    // of the gate's path comparison resolve at probe time against a
+    // filesystem the contaminator writes, so it also refuses an entry that
+    // no longer carries this dev:ino.
+    const commonDir = gitOpt(
       'rev-parse',
       '--path-format=absolute',
-      '--git-dir',
+      '--git-common-dir',
     );
+    const worktreeAdminDir =
+      commonDir === null ? null : join(commonDir, 'worktrees', basename(wt));
     let worktreeAdminDevIno: string | null = null;
     if (worktreeAdminDir !== null) {
       try {

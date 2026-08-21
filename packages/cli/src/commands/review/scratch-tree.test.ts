@@ -22,6 +22,24 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLine: vi.fn(),
 }));
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
+// The post-probe swap window is a race no fixture can stage deterministically,
+// so the probe is wrapped: measure FIRST, then retarget the gitfile — the
+// exact landing spot the creation's identity pin exists to close. Default
+// behaviour is the real probe, untouched.
+const worktreeLib = vi.hoisted(() => ({
+  realWorktreeResidue: undefined as undefined | typeof worktreeResidue,
+}));
+vi.mock('./lib/worktree.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/worktree.js')>();
+  worktreeLib.realWorktreeResidue = actual.worktreeResidue;
+  return {
+    ...actual,
+    worktreeResidue: vi.fn((...args: Parameters<typeof worktreeResidue>) =>
+      actual.worktreeResidue(...args),
+    ),
+  };
+});
+import { worktreeResidue } from './lib/worktree.js';
 import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
@@ -76,6 +94,13 @@ describe('runScratchTree', () => {
   afterEach(() => {
     rmSync(repo, { recursive: true, force: true });
     gitIsolation.dispose();
+    // The swap test queues a one-shot probe wrapper; an unconsumed one must
+    // never leak into a later test.
+    const realResidue = worktreeLib.realWorktreeResidue;
+    vi.mocked(worktreeResidue).mockReset();
+    if (realResidue !== undefined) {
+      vi.mocked(worktreeResidue).mockImplementation(realResidue);
+    }
   });
 
   it('stands up a sibling tree at the commit under review', () => {
@@ -160,6 +185,59 @@ describe('runScratchTree', () => {
     expect(r.available).toBe(true);
     expect(r.sharedTreeResidue).toEqual(['__probe__.test.ts']);
     expect(r.sharedTreeUnmeasured).toBeUndefined();
+  });
+
+  it('creates under the identity the probe VERIFIED — a post-probe swap is not honored', () => {
+    // The identity gate checks the tree's gitfile ONCE, at probe time. The
+    // creation that follows — the discard spawns and the `worktree add` —
+    // re-discovered the repository through that same writable file: a swap
+    // landing between the passing probe and the creation was honored, and
+    // the scratch tree descended from the forge — whose filters executed
+    // during the creation checkout while the report answered `available:
+    // true` (measured at the pre-fix code). The creation now runs under
+    // the verified identity, so the swap discovers nothing.
+    const genuineAdmin = git(
+      worktree,
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-dir',
+    );
+    // The forge: a clone carries the same head sha, so the pre-fix creation
+    // succeeded there; its config plants the filter the swap exists to run,
+    // and an attributes rule selects it for the creation checkout.
+    const forge = join(repo, 'forge');
+    execFileSync('git', ['clone', '-q', repo, forge]);
+    execFileSync('git', ['config', 'user.email', 't@t.t'], { cwd: forge });
+    execFileSync('git', ['config', 'user.name', 't'], { cwd: forge });
+    const pwned = join(repo, 'PWNED-smudge');
+    execFileSync('git', ['config', 'filter.evil.smudge', `tee ${pwned}`], {
+      cwd: forge,
+    });
+    writeFileSync(join(forge, '.git', 'info', 'attributes'), '* filter=evil\n');
+    writeFileSync(join(forge, 'evil.ts'), 'contamination\n');
+    execFileSync('git', ['add', '-A'], { cwd: forge });
+    execFileSync('git', ['commit', '-qm', 'contamination'], { cwd: forge });
+    // The swap lands between the probe and the creation: measure first,
+    // then retarget the gitfile at the forge.
+    const realResidue = worktreeLib.realWorktreeResidue;
+    if (realResidue === undefined) throw new Error('probe mock missing');
+    vi.mocked(worktreeResidue).mockImplementationOnce((cwd, anchor, cap) => {
+      const r = realResidue(cwd, anchor, cap);
+      writeFileSync(join(worktree, '.git'), `gitdir: ${join(forge, '.git')}\n`);
+      return r;
+    });
+
+    const r = run();
+
+    expect(r.available).toBe(true);
+    expect(r.headSha).toBe(headSha);
+    // Registered under the GENUINE common dir — the identity the probe
+    // verified — never under the forge the swap names, and the forge's
+    // filter never ran.
+    const gitfile = readFileSync(join(r.path!, '.git'), 'utf8');
+    expect(gitfile).toContain(dirname(dirname(genuineAdmin)));
+    expect(gitfile).not.toContain('forge');
+    expect(existsSync(pwned)).toBe(false);
   });
 
   it('refuses while repo-local config defines a content filter — checkouts would execute it', () => {
@@ -955,6 +1033,14 @@ describe('runScratchTree', () => {
       git(forge, 'config', 'user.name', 't');
       writeFileSync(join(forge, 'a.ts'), 'export const x = 2; // MUTANT\n');
       writeFileSync(join(forge, '__probe__.test.ts'), 'probe');
+      // The worktree checkout also carries the repo's `.gitignore`; the
+      // forge commits it too, or an UNANCHORED probe on this fixture
+      // measures residue instead of certifying clean — and the control run
+      // the comment above implies would misdiagnose the fixture.
+      writeFileSync(
+        join(forge, '.gitignore'),
+        readFileSync(join(worktree, '.gitignore')),
+      );
       git(forge, 'add', '-A');
       git(forge, 'commit', '-qm', 'the mutant, as if it were the commit');
       git(forge, 'config', 'core.worktree', worktree);
@@ -996,6 +1082,32 @@ describe('runScratchTree', () => {
         'filesystem identity changed',
       );
       expect(process.exitCode).toBeUndefined();
+    });
+
+    it('refuses --admin-dev-ino without --admin-dir — the pair is the check', async () => {
+      // A lone dev:ino anchors nothing: silently discarding it ran the
+      // probe fully unanchored while the caller believed an identity check
+      // was applied. Reject the contradictory invocation at parse time.
+      // (Async-function form: a throwing fail handler makes `parseAsync`
+      // itself throw synchronously, so there is no rejection to await.)
+      await expect(async () =>
+        yargs([
+          'scratch-tree',
+          '--worktree',
+          worktree,
+          '--label',
+          'verify--round-1--wiring',
+          '--admin-dev-ino',
+          '64:4242',
+        ])
+          .command(scratchTreeCommand)
+          .strict()
+          .exitProcess(false)
+          .fail((msg, err) => {
+            throw err ?? new Error(msg ?? 'yargs failure');
+          })
+          .parseAsync(),
+      ).rejects.toThrow(/admin-dir/);
     });
   });
 
