@@ -1363,6 +1363,28 @@ describe('submitAoneReview (the a1 write path)', () => {
     expect(partial.headMovedDuringPost).toBeUndefined();
   });
 
+  it('a mid-batch failure whose drift re-read answers WITHOUT A HEAD degrades to unknown too', () => {
+    // The FAILED re-read degrades to undefined (the test above); its
+    // sibling could-not-verify shape — a re-read that SUCCEEDS but
+    // carries no head — must not report `false` ("verified stable") for
+    // pins that were never anchored to any head.
+    mrView('');
+    a1JsonOnceMock
+      .mockReturnValueOnce({ id: 101 })
+      .mockImplementationOnce(() => {
+        throw new Error('Command failed: boom');
+      });
+    let caught: unknown;
+    try {
+      submitAoneReview(req());
+    } catch (err) {
+      caught = err;
+    }
+    const partial = caught as AonePartialPostError;
+    expect(caught).toBeInstanceOf(AonePartialPostError);
+    expect(partial.headMovedDuringPost).toBeUndefined();
+  });
+
   it('counts an accepted-but-unreadable inline, THEN a failing write — count stays exact', () => {
     // The ambiguous count includes undefined ids: an earlier inline
     // accepted with an unparseable answer, then a later create dying,
@@ -1510,6 +1532,20 @@ describe('submitAoneReview (the a1 write path)', () => {
       .mockImplementationOnce(() => {
         throw new Error('Command failed: a1 repo mr view — network gone');
       });
+    const result = submitAoneReview(req());
+    expect(result.postedInline).toBe(2);
+    expect(result.summaryPosted).toBe(true);
+    expect(result.headMovedDuringPost).toBeUndefined();
+  });
+
+  it('a post-batch re-read that answers WITHOUT A HEAD degrades to unknown, not verified-stable', () => {
+    // An empty sourceBranch passes the pre-write gate unanchored
+    // (nothing to compare against), so the post-batch re-read is the
+    // only anchor left. When it succeeds without a head, `false` would
+    // be a false all-clear for a post that never anchored to any head —
+    // "could not verify" is not "verified stable", the same degradation
+    // as the FAILED re-read above.
+    mrView('');
     const result = submitAoneReview(req());
     expect(result.postedInline).toBe(2);
     expect(result.summaryPosted).toBe(true);

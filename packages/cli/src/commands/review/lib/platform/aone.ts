@@ -809,10 +809,11 @@ function a1Cause(err: unknown): string {
 
 /** The post-batch head re-read, stated ONCE for both disclosure paths:
  *  did the MR head move away from the composed `commitId`? Undefined when
- *  the re-read itself failed — "could not verify" is not "verified
- *  stable", and a read failure degrades to unknown; it never masks the
- *  outcome it reports on (the post failure on the partial path, the post
- *  itself on the success path). */
+ *  the re-read itself failed OR came back without a head to compare —
+ *  "could not verify" is not "verified stable", and either shape
+ *  degrades to unknown; it never masks the outcome it reports on (the
+ *  post failure on the partial path, the post itself on the success
+ *  path). */
 function headMovedSinceCompose(
   prNumber: number,
   ownerRepo: string,
@@ -820,7 +821,8 @@ function headMovedSinceCompose(
 ): boolean | undefined {
   try {
     const afterHead = aoneHeadSha(mrView(prNumber, ownerRepo));
-    return afterHead !== '' && afterHead !== commitId;
+    if (afterHead === '') return undefined;
+    return afterHead !== commitId;
   } catch {
     return undefined;
   }
