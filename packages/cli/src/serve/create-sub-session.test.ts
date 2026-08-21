@@ -806,6 +806,57 @@ describe('sub-session launcher', () => {
     launcher.stop();
   });
 
+  it('sent mode: reads the reaped parent title with the case-corrected storage id', async () => {
+    // A persisted transcript written with an uppercase UUID (legacy
+    // `uuidgen` spelling) while the caller id arrives lowercase. The title
+    // record lives next to the transcript, so the read must go through the
+    // case-corrected storage id — the raw caller spelling misses the file
+    // on a case-sensitive filesystem and silently drops the manual name.
+    const findStorageId = vi
+      .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+      .mockResolvedValue('PARENT-REAPED');
+    const titleReads: string[] = [];
+    const readTitle = vi
+      .spyOn(SessionService.prototype, 'getSessionTitleInfo')
+      .mockImplementation((sessionId: string) => {
+        titleReads.push(sessionId);
+        return { title: 'Manual parent', source: 'manual' };
+      });
+    const fake = makeFakeBridge({
+      events: (pid) => [chunk('durable result'), turnComplete(pid)],
+      reapedParentSessionId: 'parent-reaped',
+    });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+      notifySentCompletion: true,
+    });
+
+    const launched = await launcher.launch({
+      prompt: 'finish after the parent goes idle',
+      completion: 'sent',
+      callerSessionId: 'parent-reaped',
+    });
+
+    await vi.waitFor(() =>
+      expect(fake.parentObserverClosures).toEqual([launched.sessionId]),
+    );
+    // The title read must use the case-corrected storage id, not the raw
+    // caller spelling.
+    expect(titleReads).toEqual(['PARENT-REAPED']);
+    expect(fake.resumes).toEqual([
+      {
+        sessionId: 'parent-reaped',
+        workspaceCwd: WS,
+        displayName: 'Manual parent',
+        titleSource: 'manual',
+      },
+    ]);
+    findStorageId.mockRestore();
+    readTitle.mockRestore();
+    launcher.stop();
+  });
+
   it('sent mode: relocates a reaped isolated parent before delivering its automatic continuation', async () => {
     const fake = makeFakeBridge({
       events: (pid) => [chunk('durable result'), turnComplete(pid)],

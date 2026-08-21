@@ -424,11 +424,27 @@ async function deliverSentCompletion(
     : undefined;
   let materializedDirectoryUnused = isolatedCwd !== undefined;
   try {
-    const titleInfo = new SessionService(boundWorkspace, {
+    const titleService = new SessionService(boundWorkspace, {
       ...(sessionRuntimeBaseDir !== undefined
         ? { runtimeBaseDir: sessionRuntimeBaseDir }
         : {}),
-    }).getSessionTitleInfo(parentSessionId);
+    });
+    // The persisted title record lives next to the transcript, so the read
+    // must use the case-corrected storage id (parity with the session/load +
+    // session/resume handlers and the REST restore handler); the raw caller
+    // spelling can miss an uppercase-written transcript on a case-sensitive
+    // filesystem and silently drop the manual name this restore is meant to
+    // keep (#8977). Lookup failures keep the caller spelling: a title read
+    // must never fail the completion delivery itself.
+    let titleStorageSessionId = parentSessionId;
+    try {
+      titleStorageSessionId =
+        (await titleService.findSessionIdIgnoringCase(parentSessionId)) ??
+        parentSessionId;
+    } catch {
+      titleStorageSessionId = parentSessionId;
+    }
+    const titleInfo = titleService.getSessionTitleInfo(titleStorageSessionId);
     restoredParent = await bridge.resumeSession({
       sessionId: parentSessionId,
       workspaceCwd: boundWorkspace,
