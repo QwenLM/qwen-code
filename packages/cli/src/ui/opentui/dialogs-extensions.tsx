@@ -7,21 +7,30 @@
  */
 
 /**
- * OpenTUI parity of the ink `/extensions` dialog shell
- * (ui/components/extensions/ExtensionsManagerDialog.tsx): the Installed /
- * Discover / Sources tab bar with its cycling rules (Tab/Shift+Tab/←/→,
- * Discover's marketplace filter clears in place on Tab instead of leaving
- * the tab), Esc to close, the exact per-tab footer hints, status message
- * coloring, and the locked-sub-view footer. Tab content rows are supplied
- * by the backend; the install/enable flows themselves are backend work.
+ * OpenTUI parity of the ink `/extensions` dialog (audit 01 G-4 / 05 G-12):
+ * the Installed / Discover / Sources tab shell with its cycling rules
+ * (Tab/Shift+Tab/←/→, Discover's marketplace filter clears in place on Tab,
+ * Esc to close, status message coloring) plus the Installed-tab management
+ * keys the footer promises — ↑↓ navigate (wrap-around), Space enable/disable,
+ * f favorite, Enter details. The detail view reproduces the ink
+ * ExtensionActionsView stack: info panel + actions list, scope select, and a
+ * y/n uninstall confirm. Discover/Sources degrade honestly (they say so —
+ * no fake loading state, no fake footer hints). Rows and mutations are
+ * backend work (dialog-data.ts); MCP servers are managed in the /mcp dialog.
  */
 
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { C } from './theme.js';
 import { t } from '../../i18n/index.js';
 import { toOriginalKey } from './key-map.js';
 import { useKeyboard } from '@opentui/react';
 import { cycleTab } from './dialogs-core.js';
+import {
+  DialogSelect,
+  useDialogSelect,
+  type DialogListItem,
+} from './dialogs-shared.js';
+import type { ExtensionUpdateCheckState } from './dialog-data.js';
 
 export const EXTENSIONS_TABS = {
   INSTALLED: 'installed',
@@ -52,19 +61,20 @@ export function extensionsTabLabel(tab: ExtensionsTab): string {
   }
 }
 
-/** Parity of footerHint in ExtensionsManagerDialog.tsx. */
+/**
+ * Footer hint for the Installed tab (the original text). Discover/Sources
+ * get an honest hint instead: their ink footers promise keys this renderer
+ * does not implement, so repeating them would be a lie.
+ */
 export function extensionsFooterHint(tab: ExtensionsTab): string {
   switch (tab) {
-    case EXTENSIONS_TABS.DISCOVER:
-      return t(
-        'Type to search · Space to toggle · Enter to view · Ctrl+R refresh · Esc to go back',
-      );
     case EXTENSIONS_TABS.INSTALLED:
       return t(
         '↑↓ navigate · Space enable/disable · f favorite · Enter details · Esc close',
       );
+    case EXTENSIONS_TABS.DISCOVER:
     case EXTENSIONS_TABS.SOURCES:
-      return t('↑↓ navigate · Enter select · d remove marketplace · Esc close');
+      return t('Tab / ←→ to switch · Esc to close');
     default:
       return '';
   }
@@ -95,7 +105,23 @@ export interface ExtensionRow {
   meta?: string;
   enabled?: boolean;
   favorite?: boolean;
+  scope?: 'user' | 'project';
+  version?: string;
+  source?: string;
+  origin?: string;
+  components?: string;
 }
+
+/** Detail-view actions (parity of PluginDetailAction). */
+export type ExtensionDetailAction =
+  | 'toggle'
+  | 'favorite'
+  | 'change-scope'
+  | 'mark-update'
+  | 'update'
+  | 'uninstall';
+
+type InstalledView = 'list' | 'detail' | 'scope-select' | 'uninstall-confirm';
 
 export interface OpenTuiExtensionsDialogProps {
   onClose: () => void;
@@ -109,6 +135,22 @@ export interface OpenTuiExtensionsDialogProps {
   discoverFilter?: string | null;
   onDiscoverFilterChange?: (filter: string | null) => void;
   rowsByTab?: Partial<Record<ExtensionsTab, readonly ExtensionRow[]>>;
+  /** Space / f on the highlighted Installed row. */
+  onRowAction?: (row: ExtensionRow, action: 'toggle' | 'favorite') => void;
+  /**
+   * Detail-view actions. `mark-update` resolves to the check state so the
+   * detail view can offer "Update Now" right away (ink checkedUpdateState).
+   */
+  onDetailAction?: (
+    row: ExtensionRow,
+    action: ExtensionDetailAction,
+    arg?: 'user' | 'project',
+  ) =>
+    | Promise<ExtensionUpdateCheckState | void>
+    | ExtensionUpdateCheckState
+    | void;
+  /** True while a mutation is in flight (mashing Space is ignored). */
+  busy?: boolean;
 }
 
 export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
@@ -121,6 +163,9 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
     discoverFilter: discoverFilterProp,
     onDiscoverFilterChange,
     rowsByTab,
+    onRowAction,
+    onDetailAction,
+    busy = false,
   } = props;
 
   const [activeTab, setActiveTab] = useState<ExtensionsTab>(
@@ -129,6 +174,14 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
   const [discoverFilter, setDiscoverFilter] = useState<string | null>(
     discoverFilterProp ?? null,
   );
+  const [view, setView] = useState<InstalledView>('list');
+  // Selected row tracked by key: rows are re-read after every mutation, so
+  // keying keeps the cursor (and any open detail view) on the SAME item even
+  // when it moves or changes state.
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [checkedUpdateState, setCheckedUpdateState] = useState<
+    ExtensionUpdateCheckState | undefined
+  >(undefined);
 
   const clearDiscoverFilter = useCallback(() => {
     setDiscoverFilter(null);
@@ -142,10 +195,174 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
     );
   }, []);
 
+  const rows: readonly ExtensionRow[] = useMemo(
+    () => rowsByTab?.[EXTENSIONS_TABS.INSTALLED] ?? [],
+    [rowsByTab],
+  );
+  const currentRow = useMemo(
+    () =>
+      selectedKey
+        ? (rows.find((row) => row.key === selectedKey) ?? null)
+        : null,
+    [rows, selectedKey],
+  );
+
+  // A reload that removed the item whose detail is open falls back to the
+  // list (ink parity) — otherwise the view stays locked with no target.
+  useEffect(() => {
+    if (view !== 'list' && !currentRow) {
+      setView('list');
+      setSelectedKey(null);
+    }
+  }, [view, currentRow]);
+
+  const listItems: Array<DialogListItem<string> & { row: ExtensionRow }> =
+    useMemo(
+      () =>
+        rows.map((row) => ({
+          key: row.key,
+          value: row.key,
+          row,
+        })),
+      [rows],
+    );
+
+  const listSelect = useDialogSelect({
+    items: listItems,
+    numbers: false,
+    focused: activeTab === EXTENSIONS_TABS.INSTALLED && view === 'list',
+    onSelect: (key) => {
+      setSelectedKey(key);
+      setCheckedUpdateState(undefined);
+      setView('detail');
+    },
+  });
+
+  const detailActions = useMemo(() => {
+    if (!currentRow) return [];
+    const enabled = currentRow.enabled !== false;
+    const items: Array<
+      DialogListItem<ExtensionDetailAction> & { label: string }
+    > = [
+      {
+        key: 'toggle',
+        value: 'toggle',
+        label: enabled ? t('Disable') : t('Enable'),
+      },
+      {
+        key: 'favorite',
+        value: 'favorite',
+        label: currentRow.favorite
+          ? t('Remove from Favorites')
+          : t('Add to Favorites'),
+      },
+      {
+        key: 'change-scope',
+        value: 'change-scope',
+        label: t('Change scope'),
+      },
+      {
+        key: 'mark-update',
+        value: 'mark-update',
+        label: t('Mark for Update'),
+      },
+    ];
+    if (checkedUpdateState === 'update-available') {
+      items.push({
+        key: 'update',
+        value: 'update',
+        label: t('Update Now'),
+      });
+    }
+    items.push({
+      key: 'uninstall',
+      value: 'uninstall',
+      label: t('Uninstall'),
+    });
+    return items;
+  }, [currentRow, checkedUpdateState]);
+
+  const detailSelect = useDialogSelect({
+    items: detailActions,
+    numbers: false,
+    focused: view === 'detail',
+    onSelect: (action) => {
+      if (!currentRow) return;
+      if (action === 'change-scope') {
+        setView('scope-select');
+        return;
+      }
+      if (action === 'uninstall') {
+        setView('uninstall-confirm');
+        return;
+      }
+      if (action === 'mark-update') {
+        void Promise.resolve(onDetailAction?.(currentRow, 'mark-update')).then(
+          (state) => {
+            if (state) setCheckedUpdateState(state);
+          },
+        );
+        return;
+      }
+      onDetailAction?.(currentRow, action);
+    },
+  });
+
+  const scopeItems = useMemo<
+    Array<DialogListItem<'user' | 'project'> & { label: string }>
+  >(
+    () => [
+      {
+        key: 'user',
+        value: 'user' as const,
+        label: t('Global (User Scope)'),
+      },
+      {
+        key: 'project',
+        value: 'project' as const,
+        label: t('Project (Workspace)'),
+      },
+    ],
+    [],
+  );
+
+  const scopeSelect = useDialogSelect({
+    items: scopeItems,
+    numbers: false,
+    // Default the cursor to the current scope so the user sees what is in
+    // effect (ink scopeItems initialIndex parity).
+    initialIndex: currentRow?.scope === 'project' ? 1 : 0,
+    focused: view === 'scope-select',
+    onSelect: (scope) => {
+      if (currentRow) onDetailAction?.(currentRow, 'change-scope', scope);
+      setView('detail');
+    },
+  });
+
   useKeyboard((key) => {
-    if (tabLocked) return;
     const original = toOriginalKey(key);
-    if (original.name === 'tab') {
+    const name = original.name;
+
+    if (view !== 'list') {
+      // Locked sub-view: Esc walks back one level; Tab/←→ stay inert.
+      if (name === 'escape') {
+        setView((current) => (current === 'detail' ? 'list' : 'detail'));
+        return;
+      }
+      if (view === 'uninstall-confirm') {
+        // y/Enter confirms (ink UninstallConfirmStep), n backs out.
+        if (original.sequence === 'y' || name === 'return') {
+          if (currentRow) onDetailAction?.(currentRow, 'uninstall');
+          setView('list');
+        } else if (original.sequence === 'n') {
+          setView('detail');
+        }
+      }
+      return;
+    }
+
+    if (tabLocked) return;
+    if (name === 'tab') {
       // On Discover with an active marketplace filter, Tab clears the
       // filter in place instead of leaving the tab — the "(Tab to clear)"
       // promise from the original.
@@ -154,21 +371,219 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
       } else {
         cycle(original.shift ? -1 : 1);
       }
-    } else if (original.name === 'right') {
+    } else if (name === 'right') {
       cycle(1);
-    } else if (original.name === 'left') {
+    } else if (name === 'left') {
       cycle(-1);
-    } else if (original.name === 'escape') {
+    } else if (name === 'escape') {
       onClose();
+    } else if (activeTab === EXTENSIONS_TABS.INSTALLED && !busy) {
+      const row = listItems[listSelect.activeIndex]?.row;
+      if (!row) return;
+      if (name === 'space' || original.sequence === ' ') {
+        onRowAction?.(row, 'toggle');
+      } else if (
+        original.sequence === 'f' &&
+        !original.ctrl &&
+        !original.meta
+      ) {
+        onRowAction?.(row, 'favorite');
+      }
     }
   });
 
-  const rows: readonly ExtensionRow[] = rowsByTab?.[activeTab] ?? [];
   const hint =
     tabFooter ??
-    (tabLocked
+    (tabLocked || view !== 'list'
       ? t('Enter to select · Esc to go back')
       : extensionsFooterHint(activeTab));
+
+  const renderInstalledContent = () => {
+    if (view === 'detail' && currentRow) {
+      const enabled = currentRow.enabled !== false;
+      return (
+        <box flexDirection="column">
+          <box flexDirection="column">
+            <box flexDirection="row">
+              <box width={10} flexShrink={0}>
+                <text fg={C.text}>{t('Name:')}</text>
+              </box>
+              <text fg={C.text}>{currentRow.label}</text>
+            </box>
+            {currentRow.version !== undefined && (
+              <box flexDirection="row">
+                <box width={10} flexShrink={0}>
+                  <text fg={C.text}>{t('Version:')}</text>
+                </box>
+                <text fg={C.text}>{currentRow.version}</text>
+              </box>
+            )}
+            <box flexDirection="row">
+              <box width={10} flexShrink={0}>
+                <text fg={C.text}>{t('Scope:')}</text>
+              </box>
+              <text fg={C.text}>
+                {currentRow.scope === 'project' ? t('Project') : t('User')}
+              </text>
+            </box>
+            <box flexDirection="row">
+              <box width={10} flexShrink={0}>
+                <text fg={C.text}>{t('Status:')}</text>
+              </box>
+              <text fg={enabled ? C.green : C.dim}>
+                {enabled ? t('active') : t('disabled')}
+              </text>
+              {currentRow.favorite ? <text fg={C.yellow}> ★</text> : null}
+            </box>
+            {currentRow.source && (
+              <box flexDirection="row">
+                <box width={10} flexShrink={0}>
+                  <text fg={C.text}>{t('Source:')}</text>
+                </box>
+                <text fg={C.text}>{currentRow.source}</text>
+              </box>
+            )}
+            {currentRow.origin && (
+              <box flexDirection="row">
+                <box width={10} flexShrink={0}>
+                  <text fg={C.text}>{t('Origin:')}</text>
+                </box>
+                <text fg={C.text}>{currentRow.origin}</text>
+              </box>
+            )}
+            <box flexDirection="row">
+              <box width={10} flexShrink={0}>
+                <text fg={C.text}>{t('Components:')}</text>
+              </box>
+              <text fg={C.text}>{currentRow.components ?? t('None')}</text>
+            </box>
+          </box>
+          <box marginTop={1} flexDirection="column">
+            <text fg={C.dim}>{t('Actions')}</text>
+            <DialogSelect
+              items={detailActions}
+              activeIndex={detailSelect.activeIndex}
+              scrollOffset={detailSelect.scrollOffset}
+              showNumbers={false}
+              showScrollArrows
+              focused={view === 'detail'}
+              onHover={detailSelect.highlightIndex}
+              onWheel={(direction) =>
+                detailSelect.highlightIndex(
+                  Math.max(
+                    0,
+                    Math.min(
+                      detailActions.length - 1,
+                      detailSelect.activeIndex +
+                        (direction === 'down' ? 1 : -1),
+                    ),
+                  ),
+                )
+              }
+              onSelectIndex={detailSelect.selectIndex}
+              renderLabel={(item, context) => (
+                <text fg={context.titleColor}>{item.label}</text>
+              )}
+            />
+          </box>
+        </box>
+      );
+    }
+
+    if (view === 'scope-select' && currentRow) {
+      return (
+        <box flexDirection="column">
+          <text fg={C.text}>
+            {t('Change scope for "{{name}}":', { name: currentRow.label })}
+          </text>
+          <DialogSelect
+            items={scopeItems}
+            activeIndex={scopeSelect.activeIndex}
+            scrollOffset={scopeSelect.scrollOffset}
+            showNumbers={false}
+            focused={view === 'scope-select'}
+            onHover={scopeSelect.highlightIndex}
+            onWheel={(direction) =>
+              scopeSelect.highlightIndex(
+                Math.max(
+                  0,
+                  Math.min(
+                    scopeItems.length - 1,
+                    scopeSelect.activeIndex + (direction === 'down' ? 1 : -1),
+                  ),
+                ),
+              )
+            }
+            onSelectIndex={scopeSelect.selectIndex}
+            renderLabel={(item, context) => (
+              <text fg={context.titleColor}>{item.label}</text>
+            )}
+          />
+        </box>
+      );
+    }
+
+    if (view === 'uninstall-confirm' && currentRow) {
+      return (
+        <box flexDirection="column">
+          <text fg={C.red}>
+            {t('Are you sure you want to uninstall extension "{{name}}"?', {
+              name: currentRow.label,
+            })}
+          </text>
+          <text fg={C.red}>
+            {t('Note: Uninstall permanently removes this extension.')}
+          </text>
+          <text fg={C.dim}>{t('y to confirm · n/Esc to go back')}</text>
+        </box>
+      );
+    }
+
+    if (rows.length === 0) {
+      return <text fg={C.dim}>{t('No extensions installed.')}</text>;
+    }
+
+    return (
+      <DialogSelect
+        items={listItems}
+        activeIndex={listSelect.activeIndex}
+        scrollOffset={listSelect.scrollOffset}
+        showNumbers={false}
+        showScrollArrows
+        focused={activeTab === EXTENSIONS_TABS.INSTALLED && view === 'list'}
+        onHover={listSelect.highlightIndex}
+        onWheel={(direction) =>
+          listSelect.highlightIndex(
+            Math.max(
+              0,
+              Math.min(
+                listItems.length - 1,
+                listSelect.activeIndex + (direction === 'down' ? 1 : -1),
+              ),
+            ),
+          )
+        }
+        onSelectIndex={listSelect.selectIndex}
+        renderLabel={(item, context) => {
+          const row = item.row;
+          const enabled = row.enabled !== false;
+          const color = context.isSelected ? C.green : enabled ? C.text : C.dim;
+          return (
+            <box flexDirection="row">
+              <box flexGrow={1}>
+                <text fg={color}>{row.label}</text>
+                {row.favorite ? <text fg={C.yellow}> ★</text> : null}
+              </box>
+              <text fg={context.isSelected ? C.green : C.dim}>
+                {row.scope === 'project' ? ` (${t('project')})` : ''}
+                {enabled ? ` (${t('active')})` : ` (${t('disabled')})`}
+              </text>
+            </box>
+          );
+        }}
+      />
+    );
+  };
 
   return (
     <box
@@ -192,7 +607,7 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
             </box>
           );
         })}
-        <text fg={tabLocked ? '#555555' : C.dim}>
+        <text fg={tabLocked || view !== 'list' ? '#555555' : C.dim}>
           {t('(Tab / ←→ to switch)')}
         </text>
       </box>
@@ -204,22 +619,23 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
             {t('(Tab to clear)')}
           </text>
         ) : null}
-        {rows.length === 0 ? (
+        {activeTab === EXTENSIONS_TABS.DISCOVER ? (
+          <box flexDirection="column">
+            <text fg={C.dim}>
+              {t('Discover is not yet available in the OpenTUI renderer.')}
+            </text>
+            <text fg={C.dim}>
+              {t('Manage installed extensions on the Installed tab.')}
+            </text>
+          </box>
+        ) : activeTab === EXTENSIONS_TABS.SOURCES ? (
           <text fg={C.dim}>
-            {activeTab === EXTENSIONS_TABS.INSTALLED
-              ? t('No extensions installed.')
-              : t('Loading…')}
+            {t(
+              'Marketplace sources are not yet available in the OpenTUI renderer.',
+            )}
           </text>
         ) : (
-          rows.map((row) => (
-            <box key={row.key} flexDirection="row">
-              <text fg={row.enabled === false ? C.dim : C.text}>
-                {row.label}
-              </text>
-              {row.meta ? <text fg={C.dim}> {row.meta}</text> : null}
-              {row.favorite ? <text fg={C.yellow}> ★</text> : null}
-            </box>
-          ))
+          renderInstalledContent()
         )}
       </box>
 

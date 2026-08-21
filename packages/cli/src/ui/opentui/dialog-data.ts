@@ -26,6 +26,8 @@ import process from 'node:process';
 import { EventEmitter } from 'node:events';
 import {
   AuthType,
+  checkForExtensionUpdate,
+  ExtensionUpdateState,
   getMCPServerStatus,
   isImageCapable,
   logModelSlashCommand,
@@ -38,14 +40,21 @@ import {
   OAUTH_AUTH_URL_EVENT,
   OAUTH_DISPLAY_MESSAGE_EVENT,
   parseVisionModelSetting,
+  redactUrlCredentials,
   removeMCPServerStatus,
+  SettingScope as CoreSettingScope,
 } from '@qwen-code/qwen-code-core';
-import type { Config, ContentGeneratorConfig } from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  ContentGeneratorConfig,
+  Extension,
+} from '@qwen-code/qwen-code-core';
 import { SettingScope } from '../../config/settings.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { loadMcpApprovals } from '../../config/mcpApprovals.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { t } from '../../i18n/index.js';
+import { getErrorMessage } from '../../utils/errors.js';
 import { themeManager, AUTO_THEME_NAME } from '../themes/theme-manager.js';
 import {
   isSelectableVoiceModel,
@@ -916,11 +925,291 @@ export async function applyMcpServerAction(
 export function buildExtensionRows(
   config: Config | null | undefined,
 ): ExtensionRow[] {
+  const manager = config?.getExtensionManager?.();
+  const favorites = new Set(manager?.getFavorites() ?? []);
+  const scopes = manager?.getExtensionScopes() ?? {};
   const extensions = config?.getExtensions?.() ?? [];
   return extensions.map((extension) => ({
     key: extension.name,
     label: extension.name,
     meta: extension.path ?? '',
     enabled: extension.isActive,
+    favorite: favorites.has(extension.name),
+    scope: scopes[extension.name] ?? 'user',
+    version: extension.version,
+    source: extension.installMetadata?.source
+      ? redactUrlCredentials(extension.installMetadata.source)
+      : undefined,
+    origin: extension.installMetadata?.originSource,
+    components: extensionComponentsSummary(extension),
   }));
+}
+
+/** Parity of componentSummary in extensions/views/PluginDetailView.tsx. */
+function extensionComponentsSummary(extension: Extension): string {
+  const parts: string[] = [];
+  const mcpCount = extension.mcpServers
+    ? Object.keys(extension.mcpServers).length
+    : 0;
+  if (mcpCount) parts.push(t('{{count}} MCP', { count: String(mcpCount) }));
+  if (extension.skills?.length)
+    parts.push(
+      t('{{count}} Skills', { count: String(extension.skills.length) }),
+    );
+  if (extension.commands?.length)
+    parts.push(
+      t('{{count}} Commands', { count: String(extension.commands.length) }),
+    );
+  if (extension.agents?.length)
+    parts.push(
+      t('{{count}} Agents', { count: String(extension.agents.length) }),
+    );
+  return parts.length ? parts.join(' · ') : t('None');
+}
+
+export interface ExtensionActionResult {
+  message: string;
+  changed: boolean;
+  level: 'info' | 'success' | 'warning' | 'error';
+}
+
+/** Update-check result feeding the "Update Now" action (detail view). */
+export type ExtensionUpdateCheckState =
+  | 'update-available'
+  | 'up-to-date'
+  | 'not-updatable'
+  | 'error';
+
+const extensionUnavailable = (): ExtensionActionResult => ({
+  message: t('Extensions are not available in this environment.'),
+  changed: false,
+  level: 'error',
+});
+
+function loadedExtension(
+  config: Config | null | undefined,
+  name: string,
+): Extension | undefined {
+  return config?.getExtensions?.().find((ext) => ext.name === name);
+}
+
+function warningsDetail(warnings: Array<{ error: string }>): string {
+  return warnings.map((warning) => warning.error).join('; ');
+}
+
+/** Space on an installed row: enable/disable via the extension manager. */
+export async function applyExtensionToggle(
+  config: Config | null | undefined,
+  name: string,
+  currentlyActive: boolean,
+): Promise<ExtensionActionResult> {
+  const manager = config?.getExtensionManager?.();
+  if (!manager) return extensionUnavailable();
+  const scope =
+    manager.getExtensionScope(name) === 'project'
+      ? CoreSettingScope.Workspace
+      : CoreSettingScope.User;
+  try {
+    const result = currentlyActive
+      ? await manager.disableExtension(name, scope)
+      : await manager.enableExtension(name, scope);
+    await manager.refreshCache();
+    const warnings = result.warnings ?? [];
+    return {
+      message:
+        warnings.length > 0
+          ? t('"{{name}}" changed with warnings: {{detail}}', {
+              name,
+              detail: warningsDetail(warnings),
+            })
+          : t('"{{name}}" {{state}}.', {
+              name,
+              state: currentlyActive ? t('disabled') : t('enabled'),
+            }),
+      changed: true,
+      level: warnings.length > 0 ? 'warning' : 'success',
+    };
+  } catch (error) {
+    return { message: getErrorMessage(error), changed: false, level: 'error' };
+  }
+}
+
+/** `f` on an installed row: toggle the favorite preference. */
+export function applyExtensionFavorite(
+  config: Config | null | undefined,
+  name: string,
+): ExtensionActionResult {
+  const manager = config?.getExtensionManager?.();
+  if (!manager) return extensionUnavailable();
+  try {
+    const nowFavorite = manager.toggleFavorite(name);
+    return {
+      message: nowFavorite
+        ? t('Added "{{name}}" to favorites.', { name })
+        : t('Removed "{{name}}" from favorites.', { name }),
+      changed: true,
+      level: 'info',
+    };
+  } catch (error) {
+    return { message: getErrorMessage(error), changed: false, level: 'error' };
+  }
+}
+
+/** Uninstall action (after the in-dialog confirm). */
+export async function applyExtensionUninstall(
+  config: Config | null | undefined,
+  name: string,
+): Promise<ExtensionActionResult> {
+  const manager = config?.getExtensionManager?.();
+  if (!manager) return extensionUnavailable();
+  try {
+    const result = await manager.uninstallExtension(name, false);
+    await manager.refreshCache();
+    const warnings = result.warnings ?? [];
+    return {
+      message:
+        warnings.length > 0
+          ? t('Uninstalled "{{name}}" with warnings: {{detail}}', {
+              name,
+              detail: warningsDetail(warnings),
+            })
+          : t('Uninstalled "{{name}}".', { name }),
+      changed: true,
+      level: warnings.length > 0 ? 'warning' : 'success',
+    };
+  } catch (error) {
+    return { message: getErrorMessage(error), changed: false, level: 'error' };
+  }
+}
+
+/** Change-scope action: user <-> project (parity of InstalledTab handleScope). */
+export async function applyExtensionScopeChange(
+  config: Config | null | undefined,
+  name: string,
+  nextScope: 'user' | 'project',
+): Promise<ExtensionActionResult> {
+  const manager = config?.getExtensionManager?.();
+  const extension = loadedExtension(config, name);
+  if (!manager || !extension) return extensionUnavailable();
+  try {
+    const result =
+      nextScope === 'project'
+        ? await manager.setExtensionActivationScope(extension.id, {
+            scope: 'workspace',
+            workspacePath: process.cwd(),
+          })
+        : await manager.setExtensionActivationScope(extension.id, {
+            scope: 'user',
+          });
+    let preferenceWarning: string | undefined;
+    try {
+      manager.setExtensionScope(name, nextScope);
+    } catch (error) {
+      preferenceWarning = getErrorMessage(error);
+    }
+    await manager.refreshCache();
+    const warnings = [
+      ...(result.warnings ?? []).map((warning) => warning.error),
+      ...(preferenceWarning ? [preferenceWarning] : []),
+    ];
+    return {
+      message:
+        warnings.length > 0
+          ? t('Set "{{name}}" scope with warnings: {{detail}}', {
+              name,
+              detail: warnings.join('; '),
+            })
+          : t('Set "{{name}}" scope to {{scope}}.', {
+              name,
+              scope: nextScope === 'user' ? t('User') : t('Project'),
+            }),
+      changed: true,
+      level: warnings.length > 0 ? 'warning' : 'success',
+    };
+  } catch (error) {
+    return { message: getErrorMessage(error), changed: false, level: 'error' };
+  }
+}
+
+/** Mark-for-Update action: check one extension for updates. */
+export async function applyExtensionUpdateCheck(
+  config: Config | null | undefined,
+  name: string,
+): Promise<{
+  message: string;
+  state: ExtensionUpdateCheckState;
+}> {
+  const manager = config?.getExtensionManager?.();
+  const extension = loadedExtension(config, name);
+  if (!manager || !extension)
+    return {
+      message: t('Extensions are not available in this environment.'),
+      state: 'error',
+    };
+  try {
+    const checked = await checkForExtensionUpdate(extension, manager);
+    switch (checked) {
+      case ExtensionUpdateState.UPDATE_AVAILABLE:
+        return {
+          message: t('Update available for "{{name}}".', { name }),
+          state: 'update-available',
+        };
+      case ExtensionUpdateState.ERROR:
+        return {
+          message: t('Failed to check "{{name}}" for updates.', { name }),
+          state: 'error',
+        };
+      case ExtensionUpdateState.NOT_UPDATABLE:
+        return {
+          message:
+            extension.installMetadata?.originSource === 'Claude'
+              ? t(
+                  '"{{name}}" cannot be update-checked (Claude marketplace plugins update by reinstalling).',
+                  { name },
+                )
+              : t('"{{name}}" does not support update checks.', { name }),
+          state: 'not-updatable',
+        };
+      default:
+        return {
+          message: t('"{{name}}" is already up to date.', { name }),
+          state: 'up-to-date',
+        };
+    }
+  } catch (error) {
+    return { message: getErrorMessage(error), state: 'error' };
+  }
+}
+
+/** Update Now action (offered after a positive update check). */
+export async function applyExtensionUpdate(
+  config: Config | null | undefined,
+  name: string,
+): Promise<ExtensionActionResult> {
+  const manager = config?.getExtensionManager?.();
+  const extension = loadedExtension(config, name);
+  if (!manager || !extension) return extensionUnavailable();
+  try {
+    const result = await manager.updateExtension(
+      extension,
+      ExtensionUpdateState.UPDATE_AVAILABLE,
+      () => {},
+    );
+    const warnings = result?.warnings ?? [];
+    return {
+      message:
+        warnings.length > 0
+          ? t('Updated "{{name}}" with warnings: {{warnings}}.', {
+              name,
+              warnings: warnings
+                .map((warning) => `${warning.code}: ${warning.error}`)
+                .join('; '),
+            })
+          : t('Updated "{{name}}".', { name }),
+      changed: true,
+      level: warnings.length > 0 ? 'warning' : 'success',
+    };
+  } catch (error) {
+    return { message: getErrorMessage(error), changed: false, level: 'error' };
+  }
 }

@@ -41,6 +41,8 @@ import { OpenTuiPermissionsDialog } from './dialogs-permissions.js';
 import {
   EXTENSIONS_TABS,
   OpenTuiExtensionsDialog,
+  type ExtensionRow,
+  type ExtensionsStatusMessage,
 } from './dialogs-extensions.js';
 import { OpenTuiMcpDialog, type McpServerInfo } from './dialogs-mcp.js';
 import {
@@ -77,6 +79,12 @@ import { OpenTuiArenaDialog } from './dialogs-arena.js';
 import { OpenTuiAuthDialog } from './dialogs-auth.js';
 import {
   addPermissionRule,
+  applyExtensionFavorite,
+  applyExtensionScopeChange,
+  applyExtensionToggle,
+  applyExtensionUninstall,
+  applyExtensionUpdate,
+  applyExtensionUpdateCheck,
   applyMcpServerAction,
   applyModelSelection,
   applyThemeSelection,
@@ -89,6 +97,7 @@ import {
   enrichMcpOAuthState,
   getMcpServerResources,
   getMcpServerTools,
+  type ExtensionActionResult,
 } from './dialog-data.js';
 
 /** The data the mounted rewind selector needs from the backend. */
@@ -412,6 +421,95 @@ function McpDialogHost(props: {
   );
 }
 
+/**
+ * Extensions host (audit 01 G-4 / 05 G-12): feeds the Installed rows and
+ * runs the management actions (Space enable/disable, f favorite, detail
+ * toggle/favorite/scope/update/uninstall) through the extension manager,
+ * reloading the rows after every mutation and surfacing the result as the
+ * in-dialog status message (ink InstalledTab parity).
+ */
+function ExtensionsDialogHost(props: { config?: Config; onClose: () => void }) {
+  const [rows, setRows] = useState<ExtensionRow[]>([]);
+  const [status, setStatus] = useState<ExtensionsStatusMessage | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [version, setVersion] = useState(0);
+
+  useEffect(() => {
+    setRows(buildExtensionRows(props.config));
+  }, [props.config, version]);
+
+  const runAction = (
+    fn: () => ExtensionActionResult | Promise<ExtensionActionResult>,
+  ) => {
+    setBusy(true);
+    void Promise.resolve(fn())
+      .then((result) => {
+        setStatus({ type: result.level, text: result.message });
+        if (result.changed) setVersion((value) => value + 1);
+      })
+      .finally(() => setBusy(false));
+  };
+
+  return (
+    <OpenTuiExtensionsDialog
+      onClose={props.onClose}
+      status={status}
+      busy={busy}
+      rowsByTab={{ [EXTENSIONS_TABS.INSTALLED]: rows }}
+      onRowAction={(row, action) => {
+        if (action === 'toggle') {
+          runAction(() =>
+            applyExtensionToggle(props.config, row.key, row.enabled !== false),
+          );
+        } else {
+          runAction(() => applyExtensionFavorite(props.config, row.key));
+        }
+      }}
+      onDetailAction={(row, action, arg) => {
+        if (action === 'mark-update') {
+          return applyExtensionUpdateCheck(props.config, row.key).then(
+            (result) => {
+              setStatus({
+                type: result.state === 'error' ? 'error' : 'info',
+                text: result.message,
+              });
+              return result.state;
+            },
+          );
+        }
+        switch (action) {
+          case 'toggle':
+            runAction(() =>
+              applyExtensionToggle(
+                props.config,
+                row.key,
+                row.enabled !== false,
+              ),
+            );
+            break;
+          case 'favorite':
+            runAction(() => applyExtensionFavorite(props.config, row.key));
+            break;
+          case 'change-scope':
+            runAction(() =>
+              applyExtensionScopeChange(props.config, row.key, arg ?? 'user'),
+            );
+            break;
+          case 'uninstall':
+            runAction(() => applyExtensionUninstall(props.config, row.key));
+            break;
+          case 'update':
+            runAction(() => applyExtensionUpdate(props.config, row.key));
+            break;
+          default:
+            break;
+        }
+        return undefined;
+      }}
+    />
+  );
+}
+
 export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
   const { dialog, config, settings, commands, onClose, onNavigate, notify } =
     props;
@@ -462,12 +560,7 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
         />
       )}
       {dialog.dialog === 'extensions_manage' && (
-        <OpenTuiExtensionsDialog
-          onClose={onClose}
-          rowsByTab={{
-            [EXTENSIONS_TABS.INSTALLED]: buildExtensionRows(config),
-          }}
-        />
+        <ExtensionsDialogHost config={config} onClose={onClose} />
       )}
       {dialog.dialog === 'mcp' && (
         <McpDialogHost

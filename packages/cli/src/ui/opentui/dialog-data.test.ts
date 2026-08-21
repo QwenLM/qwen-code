@@ -31,6 +31,11 @@ import type { LoadedSettings, Settings } from '../../config/settings.js';
 import { themeManager } from '../themes/theme-manager.js';
 import {
   addPermissionRule,
+  applyExtensionFavorite,
+  applyExtensionScopeChange,
+  applyExtensionToggle,
+  applyExtensionUninstall,
+  applyExtensionUpdateCheck,
   applyMcpServerAction,
   applyModelSelection,
   applyThemeSelection,
@@ -959,10 +964,55 @@ describe('mcp and extension feeds', () => {
         ]) as unknown as Config['getExtensions'],
       } as Partial<Config>),
     );
-    expect(rows).toEqual([
+    expect(rows).toMatchObject([
       { key: 'ext-one', label: 'ext-one', meta: '/x/ext-one', enabled: true },
       { key: 'ext-two', label: 'ext-two', meta: '/x/ext-two', enabled: false },
     ]);
+  });
+
+  it('enriches extension rows with favorites, scopes and components', () => {
+    const manager = {
+      getFavorites: () => ['fav-ext'],
+      getExtensionScopes: () => ({ 'proj-ext': 'project' }),
+    };
+    const rows = buildExtensionRows(
+      stubConfig({
+        getExtensionManager: (() =>
+          manager) as unknown as Config['getExtensionManager'],
+        getExtensions: (() => [
+          {
+            name: 'fav-ext',
+            path: '/x/fav',
+            isActive: true,
+            version: '1.2.3',
+            installMetadata: {
+              source: 'https://github.com/a/b',
+              originSource: 'GitHub',
+            },
+            mcpServers: { a: {}, b: {} },
+            skills: [{}],
+          },
+          {
+            name: 'proj-ext',
+            path: '/x/proj',
+            isActive: false,
+          },
+        ]) as unknown as Config['getExtensions'],
+      } as Partial<Config>),
+    );
+    expect(rows[0]).toMatchObject({
+      favorite: true,
+      scope: 'user',
+      version: '1.2.3',
+      source: 'https://github.com/a/b',
+      origin: 'GitHub',
+      components: '2 MCP · 1 Skills',
+    });
+    expect(rows[1]).toMatchObject({
+      favorite: false,
+      scope: 'project',
+      components: 'None',
+    });
   });
 
   it('feeds the resource list for one server', () => {
@@ -1316,5 +1366,182 @@ describe('computeModelDialogInitialKey (/model opens on the current model)', () 
         mode: 'primary',
       }),
     ).toBeUndefined();
+  });
+});
+
+describe('extension management actions (audit 01 G-4)', () => {
+  function createFakeManager(overrides: Record<string, unknown> = {}) {
+    return {
+      getExtensionScope: vi.fn(() => 'user' as const),
+      getExtensionScopes: vi.fn(() => ({})),
+      getFavorites: vi.fn(() => [] as string[]),
+      toggleFavorite: vi.fn(() => true),
+      enableExtension: vi.fn(async () => ({ warnings: [] })),
+      disableExtension: vi.fn(async () => ({ warnings: [] })),
+      refreshCache: vi.fn(async () => {}),
+      uninstallExtension: vi.fn(async () => ({ warnings: [] })),
+      setExtensionActivationScope: vi.fn(async () => ({ warnings: [] })),
+      setExtensionScope: vi.fn(() => {}),
+      updateExtension: vi.fn(async () => ({ warnings: [] })),
+      ...overrides,
+    };
+  }
+
+  function extensionConfig(
+    manager: unknown,
+    extensions: Array<Record<string, unknown>> = [
+      { name: 'ext-a', id: 'id-a', path: '/x/a', isActive: true },
+    ],
+  ): Config {
+    return stubConfig({
+      getExtensionManager: (() =>
+        manager) as unknown as Config['getExtensionManager'],
+      getExtensions: (() => extensions) as unknown as Config['getExtensions'],
+    } as Partial<Config>);
+  }
+
+  it('toggles an active extension off through disableExtension', async () => {
+    const manager = createFakeManager();
+    const result = await applyExtensionToggle(
+      extensionConfig(manager),
+      'ext-a',
+      true,
+    );
+    expect(manager.disableExtension).toHaveBeenCalledWith('ext-a', 'User');
+    expect(manager.refreshCache).toHaveBeenCalled();
+    expect(result).toEqual({
+      message: '"ext-a" disabled.',
+      changed: true,
+      level: 'success',
+    });
+  });
+
+  it('toggles a project-scoped extension on through enableExtension(Workspace)', async () => {
+    const manager = createFakeManager({
+      getExtensionScope: vi.fn(() => 'project' as const),
+    });
+    const result = await applyExtensionToggle(
+      extensionConfig(manager),
+      'ext-a',
+      false,
+    );
+    expect(manager.enableExtension).toHaveBeenCalledWith('ext-a', 'Workspace');
+    expect(result).toMatchObject({ changed: true, level: 'success' });
+    expect(result.message).toContain('enabled');
+  });
+
+  it('surfaces manager warnings and failures on toggle', async () => {
+    const warnManager = createFakeManager({
+      disableExtension: vi.fn(async () => ({
+        warnings: [{ error: 'stale cache' }],
+      })),
+    });
+    const warned = await applyExtensionToggle(
+      extensionConfig(warnManager),
+      'ext-a',
+      true,
+    );
+    expect(warned.level).toBe('warning');
+    expect(warned.message).toContain('stale cache');
+
+    const failing = createFakeManager({
+      disableExtension: vi.fn(async () => {
+        throw new Error('boom');
+      }),
+    });
+    const errored = await applyExtensionToggle(
+      extensionConfig(failing),
+      'ext-a',
+      true,
+    );
+    expect(errored).toMatchObject({ changed: false, level: 'error' });
+    expect(errored.message).toContain('boom');
+  });
+
+  it('toggles the favorite preference and reports the new state', () => {
+    const manager = createFakeManager({
+      toggleFavorite: vi.fn(() => false),
+    });
+    const result = applyExtensionFavorite(extensionConfig(manager), 'ext-a');
+    expect(manager.toggleFavorite).toHaveBeenCalledWith('ext-a');
+    expect(result).toEqual({
+      message: 'Removed "ext-a" from favorites.',
+      changed: true,
+      level: 'info',
+    });
+  });
+
+  it('uninstalls an extension and reloads the cache', async () => {
+    const manager = createFakeManager();
+    const result = await applyExtensionUninstall(
+      extensionConfig(manager),
+      'ext-a',
+    );
+    expect(manager.uninstallExtension).toHaveBeenCalledWith('ext-a', false);
+    expect(manager.refreshCache).toHaveBeenCalled();
+    expect(result).toMatchObject({ changed: true, level: 'success' });
+    expect(result.message).toContain('Uninstalled');
+  });
+
+  it('changes the scope with both activation-scope and preference writes', async () => {
+    const manager = createFakeManager();
+    const result = await applyExtensionScopeChange(
+      extensionConfig(manager),
+      'ext-a',
+      'project',
+    );
+    expect(manager.setExtensionActivationScope).toHaveBeenCalledWith('id-a', {
+      scope: 'workspace',
+      workspacePath: process.cwd(),
+    });
+    expect(manager.setExtensionScope).toHaveBeenCalledWith('ext-a', 'project');
+    expect(result).toMatchObject({ changed: true, level: 'success' });
+    expect(result.message).toContain('Project');
+  });
+
+  it('reports a preference-write failure as a scope warning', async () => {
+    const manager = createFakeManager({
+      setExtensionScope: vi.fn(() => {
+        throw new Error('pref locked');
+      }),
+    });
+    const result = await applyExtensionScopeChange(
+      extensionConfig(manager),
+      'ext-a',
+      'user',
+    );
+    expect(result.level).toBe('warning');
+    expect(result.message).toContain('pref locked');
+  });
+
+  it('maps the update check onto dialog states (not updatable path)', async () => {
+    const config = extensionConfig(createFakeManager(), [
+      {
+        name: 'ext-a',
+        id: 'id-a',
+        path: '/x/a',
+        isActive: true,
+        installMetadata: { type: 'local', source: 'upload:foo' },
+      },
+    ]);
+    const result = await applyExtensionUpdateCheck(config, 'ext-a');
+    expect(result.state).toBe('not-updatable');
+    expect(result.message).toContain('does not support update checks');
+  });
+
+  it('degrades honestly without an extension manager', async () => {
+    const config = stubConfig({} as Partial<Config>);
+    expect(await applyExtensionToggle(config, 'ext-a', true)).toMatchObject({
+      changed: false,
+      level: 'error',
+    });
+    expect(applyExtensionFavorite(config, 'ext-a')).toMatchObject({
+      changed: false,
+      level: 'error',
+    });
+    expect(await applyExtensionUninstall(config, 'ext-a')).toMatchObject({
+      changed: false,
+      level: 'error',
+    });
   });
 });
