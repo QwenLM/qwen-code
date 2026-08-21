@@ -3164,6 +3164,118 @@ describe('BackgroundAgentResumeService', () => {
     expect(registry.continueResidentAgent(agentId, 'again')).toBe(false);
   });
 
+  it("clears the previous incarnation's stats and activities when cold-reviving", async () => {
+    const sessionId = 'session-revive-clear';
+    const agentId = 'agent-revive-clear';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Finished research',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'completed',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'default',
+      resumeCount: 0,
+      sessionWorkflow: true,
+      stats: {
+        totalTokens: 42,
+        outputTokens: 17,
+        toolUses: 3,
+        durationMs: 1200,
+      },
+      recentActivities: [
+        { name: 'Read', description: 'read src/index.ts', at: 1 },
+        { name: 'Bash', description: 'npm test', at: 2 },
+      ],
+    });
+    fs.writeFileSync(
+      outputFile,
+      [
+        JSON.stringify({
+          uuid: 'u1',
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'Finished research' }] },
+        }),
+        JSON.stringify({
+          uuid: 'a1',
+          parentUuid: 'u1',
+          sessionId,
+          timestamp: '2026-04-20T00:00:01.000Z',
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: 'All done' }] },
+        }),
+      ].join('\n') + '\n',
+      'utf8',
+    );
+    registry.register({
+      agentId,
+      description: 'Finished research',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Finished research',
+      outputFile,
+      metaPath,
+    });
+    registry.complete(agentId, 'All done');
+
+    // Hold the first continuation turn open so the restarted run's
+    // intermediate meta is observable.
+    let releaseTurn: () => void = () => {};
+    const turnGate = new Promise<void>((resolve) => {
+      releaseTurn = resolve;
+    });
+    const subagent = {
+      execute: vi.fn(() => turnGate),
+      setExternalMessageProvider: vi.fn(),
+      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        outputTokens: 0,
+        totalDurationMs: 0,
+      }),
+      getTerminateMode: () => AgentTerminateMode.GOAL,
+      getFinalText: () => 'iterated',
+    };
+    const { service, subagentManager } = createService();
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const revivePromise = service.reviveCompletedBackgroundAgent(
+      agentId,
+      'continue',
+    );
+
+    // The restarted run must not carry the completed run's terminal summary:
+    // a crash in this window would otherwise let discovery restore run N-1's
+    // stats/activities as the interrupted run's live state.
+    await vi.waitFor(() => {
+      expect(readAgentMeta(metaPath)?.status).toBe('running');
+    });
+    const meta = readAgentMeta(metaPath);
+    expect(meta).not.toHaveProperty('stats');
+    expect(meta).not.toHaveProperty('recentActivities');
+
+    releaseTurn();
+    await revivePromise;
+    await vi.waitFor(() => {
+      expect(registry.get(agentId)?.status).toBe('completed');
+    });
+    registry.reset();
+  });
+
   // The resume attach recomputes the transcript path instead of reusing the
   // registered outputFile; the recomputed path must follow
   // meta.parentSessionId, not the current session (the divergence a CLI
