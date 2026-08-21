@@ -2173,7 +2173,7 @@ jobs:
     # Keep the predicate as narrow as the job's own `if:` — concurrency is
     # evaluated BEFORE it, so without the do_review conjunct a dispatch with
     # `phase: issue` + `pr_number: N` (route emits pr_number unconditionally)
-    # would park this skipped job in that PR's shared slot behind a 300-minute
+    # would park this skipped job in that PR's shared slot behind a 330-minute
     # address round, stalling the issue phase that `needs` it.
     concurrency:
       group: "qwen-pr-head-write-${{ needs.route.outputs.do_review == 'true' && needs.route.outputs.pr_number || github.run_id }}"
@@ -2776,7 +2776,7 @@ jobs:
             # The dispatch-pending marker is exempted by context: it is this
             # loop's own StatusContext busy signal (no .workflowName/.name, so
             # it passes the filters above) and its dedicated TTL check above is
-            # the authority on it — the 330-minute horizon here would keep a
+            # the authority on it — the 360-minute horizon here would keep a
             # stranded marker blocking long past its TTL.
             HAS_PENDING_CHECKS="$(jq -r --arg cut "${PENDING_CUTOFF}" \
               --argjson nonblocking "${NON_BLOCKING_CHECKS}" \
@@ -3888,7 +3888,7 @@ jobs:
               ;;
           esac
           # The label routing pins ecs-qwen, but a mis-labelled registration
-          # must not silently claim a PAT-bearing 300-minute job — assert the
+          # must not silently claim a PAT-bearing 330-minute job — assert the
           # pool by name on the self-hosted branch too.
           if [[ "${RUNNER_ENVIRONMENT}" == 'self-hosted' ]]; then
             case "${RUNNER_NAME}" in
