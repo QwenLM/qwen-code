@@ -95,17 +95,6 @@ export function findSubagentRootTool(
   return undefined;
 }
 
-export function getSubagentPrompt(
-  messages: readonly Message[],
-  rootTool: ACPToolCall,
-): string {
-  const firstUserMessage = messages.find((message) => message.role === 'user');
-  return (
-    (firstUserMessage?.role === 'user' ? firstUserMessage.content : '') ||
-    (typeof rootTool.args?.prompt === 'string' ? rootTool.args.prompt : '')
-  );
-}
-
 function statusLabel(status: string, t: ReturnType<typeof useI18n>['t']) {
   switch (status) {
     case 'completed':
@@ -162,7 +151,6 @@ function SubagentDetailContent({
     [artifactsByTurn, connection.workspaceCwd, messages],
   );
   const description = getAgentDescription(rootTool);
-  const prompt = getSubagentPrompt(messages, rootTool);
   const metrics = useMemo(
     () => getSubagentMetrics(rootTool, resolution),
     [resolution, rootTool],
@@ -237,7 +225,6 @@ function SubagentDetailContent({
           </div>
         </div>
         {stopError && <div className={styles.stopError}>{stopError}</div>}
-        {prompt && <pre className={styles.prompt}>{prompt}</pre>}
       </div>
       <div className={styles.transcript}>
         <MessageList
@@ -249,7 +236,6 @@ function SubagentDetailContent({
           activeTurnStartedAt={isRunning ? rootTool.startTime : undefined}
           workspaceCwd={connection.workspaceCwd || ''}
           hideSessionTimeline
-          hideFirstUserMessage
           firstTurnMetrics={metrics}
           includeSubagentToolUsageInMetrics={false}
           turnFileChanges={fileChangesByTurn}
