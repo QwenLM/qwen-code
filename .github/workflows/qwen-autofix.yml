@@ -431,6 +431,7 @@ jobs:
                 # '<cmd> from N' — the ONE parameterized form, and the only
                 # place this workflow reads a value out of a comment body.
                 # Full rationale → qwen-autofix.md#af-007
+                # Operator guide → qwen-autofix-round-seed.md
                 if [[ "${BODY_TRIMMED}" =~ ^(.*)\ from\ ([0-9]{1,2})$ ]]; then
                   # Two statements, not one `[[ ... && ... ]]`: BASH_REMATCH is
                   # only guaranteed populated once the =~ test has completed,
@@ -1099,8 +1100,16 @@ jobs:
           echo "has_candidates=$([[ "${COUNT}" -gt 0 ]] && echo true || echo false)" >> "${GITHUB_OUTPUT}"
 
       - name: 'Resolve sandbox image'
+        id: 'sandbox_image'
         if: |-
           ${{ steps.scan.outputs.has_candidates == 'true' }}
+        env:
+          # The export is derived from this binary's stdout, so step env
+          # pins it the way the DOCKER_HOST pins do: step env outranks an
+          # appended $GITHUB_ENV value, and the absolute path cannot be
+          # shadowed by a '${RUNNER_TEMP}/qwen-bin' or $GITHUB_PATH plant
+          # (#9527 review).
+          SANDBOX_COMMAND: '/usr/bin/docker'
         run: |-
           node .github/scripts/resolve-sandbox-image.mjs \
             "$(node -p "require('./package.json').config.sandboxImageUri")"
@@ -1137,6 +1146,15 @@ jobs:
         if: |-
           ${{ steps.scan.outputs.has_candidates == 'true' && steps.fasttrack.outputs.fast_tracked != 'true' }}
         env:
+          # Step-level env outranks $GITHUB_ENV: bind the resolver's pinned
+          # digest output, not the appendable env value it also writes.
+          QWEN_SANDBOX_IMAGE: '${{ steps.sandbox_image.outputs.image }}'
+          # Pin the daemon endpoint for the sandbox this step spawns, the
+          # same way the resolver pins its own spawns: an empty DOCKER_HOST
+          # is skipped by the docker CLI, and step env outranks both the
+          # appendable $GITHUB_ENV and the pool-shared currentContext.
+          DOCKER_HOST: ''
+          DOCKER_CONTEXT: 'default'
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.AUTOFIX_OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}'
@@ -1296,6 +1314,9 @@ jobs:
         if: |-
           ${{ steps.decision.outputs.go_issue != '' }}
         env:
+          QWEN_SANDBOX_IMAGE: '${{ steps.sandbox_image.outputs.image }}'
+          DOCKER_HOST: ''
+          DOCKER_CONTEXT: 'default'
           ISSUE: '${{ steps.decision.outputs.go_issue }}'
           OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.AUTOFIX_OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}'
@@ -3973,6 +3994,14 @@ jobs:
           qwen --version
 
       - name: 'Resolve sandbox image'
+        id: 'sandbox_image'
+        env:
+          # The export is derived from this binary's stdout, so step env
+          # pins it the way the DOCKER_HOST pins do: step env outranks an
+          # appended $GITHUB_ENV value, and the absolute path cannot be
+          # shadowed by a '${RUNNER_TEMP}/qwen-bin' or $GITHUB_PATH plant
+          # (#9527 review).
+          SANDBOX_COMMAND: '/usr/bin/docker'
         run: |-
           node .github/scripts/resolve-sandbox-image.mjs \
             "$(node -p "require('./package.json').config.sandboxImageUri")"
@@ -5040,6 +5069,9 @@ jobs:
         # Full rationale → qwen-autofix.md#af-050
         timeout-minutes: 130
         env:
+          QWEN_SANDBOX_IMAGE: '${{ steps.sandbox_image.outputs.image }}'
+          DOCKER_HOST: ''
+          DOCKER_CONTEXT: 'default'
           PR: '${{ env.PR }}'
           ISSUE: '${{ env.ISSUE }}'
           OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
@@ -5193,10 +5225,16 @@ jobs:
 
       - name: 'Repair deterministic rejection'
         id: 'repair'
+        # The outcome check fails closed: a FAILED resolver leaves the image
+        # binding below empty, and an empty QWEN_SANDBOX_IMAGE relaunches
+        # the CLI without any sandbox (#9527 review).
         if: |-
-          ${{ always() && steps.verify.outputs.retryable == 'true' }}
+          ${{ always() && steps.verify.outputs.retryable == 'true' && steps.sandbox_image.outcome == 'success' }}
         timeout-minutes: 20
         env:
+          QWEN_SANDBOX_IMAGE: '${{ steps.sandbox_image.outputs.image }}'
+          DOCKER_HOST: ''
+          DOCKER_CONTEXT: 'default'
           PR: '${{ env.PR }}'
           ISSUE: '${{ env.ISSUE }}'
           OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'

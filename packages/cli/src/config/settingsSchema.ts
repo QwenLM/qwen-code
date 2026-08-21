@@ -2604,6 +2604,28 @@ const SETTINGS_SCHEMA = {
           },
         },
       },
+      listDirectory: {
+        type: 'object',
+        label: 'List Directory',
+        category: 'Tools',
+        requiresRestart: true,
+        default: {},
+        description:
+          'Settings for the built-in list_directory tool. Opt-in: the tool is disabled by default because glob covers directory listing in most cases.',
+        showInDialog: false,
+        properties: {
+          enabled: {
+            type: 'boolean',
+            label: 'Enable ListDirectory',
+            category: 'Tools',
+            requiresRestart: true,
+            default: false,
+            description:
+              'Enable the built-in list_directory tool. Disabled by default; it is also re-enabled automatically when explicitly listed in the coreTools allowlist (--core-tools / tools.core).',
+            showInDialog: true,
+          },
+        },
+      },
       shell: {
         type: 'object',
         label: 'Shell',

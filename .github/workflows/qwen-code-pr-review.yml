@@ -2089,12 +2089,24 @@ jobs:
           startsWith(github.event.comment.body, format('@qwen-code /resolve{0}', fromJSON('"\n"'))) ||
           startsWith(github.event.comment.body, format('@qwen-code /resolve{0}', fromJSON('"\r"')))))
       )
-    # Pinned to an ephemeral hosted runner. The conflict-resolution agent step
-    # runs with `sandbox: true`, which on Linux needs docker or podman to launch
-    # the sandbox; the self-hosted ECS pool ships no container runtime, so routing
-    # this job there fails the agent before it starts (exit 44, "failed to
-    # determine command for sandbox"). Hosted runners ship docker and are
-    # ephemeral, which suits the sandboxed conflict-resolution job.
+    # Pinned to an ephemeral hosted runner, for the ephemerality: this job
+    # merges the base branch and pushes to the PR's head, and a fresh runner is
+    # the cheapest way to be sure it carries nothing from an earlier attempt.
+    #
+    # It is NOT pinned for want of a container runtime. That was the recorded
+    # reason and it is not true: qwen-autofix.yml's `review-address` runs with
+    # `sandbox: "docker"` on the `ecs-qwen` labels, gated on a `docker info`
+    # preflight that fails the job outright, and it passes there (measured on
+    # `ecs-qwen-runner-hk-*` and `ecs-qwen-runner-sg-*`; qwen-triage's container
+    # jobs prove the same pool independently). The runtime spelling is not what
+    # decides it either: `sandbox: true` probes docker first (then podman) with
+    # the same probe as `sandbox: "docker"`, so on the pool's docker-only
+    # runners both spellings resolve when the daemon answers and both exit 44
+    # when it does not — the only divergence (docker down, podman up) favours
+    # `true`. The variable is daemon state, and autofix's preflight is what
+    # checks it up front, failing the job in seconds instead of at agent
+    # startup. Anything moving a sandboxed job onto the pool should copy that
+    # preflight — see #9556.
     runs-on: 'ubuntu-latest'
     timeout-minutes: 120
     # Shared with qwen-autofix.yml's review-address job — see the rationale
