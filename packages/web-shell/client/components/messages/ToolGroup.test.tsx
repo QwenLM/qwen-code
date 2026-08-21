@@ -87,19 +87,29 @@ function renderToolGroup(
     beforeToolCallId?: string;
   }>,
   compactSummary = false,
+  onOpenSubagent?: (tool: ACPToolCall) => void,
 ): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
   act(() => {
+    const group = (
+      <ToolGroup
+        tools={tools}
+        thoughts={thoughts}
+        compactSummary={compactSummary}
+      />
+    );
     root.render(
       <I18nProvider language="en">
         <WebShellCustomizationProvider value={customization}>
-          <ToolGroup
-            tools={tools}
-            thoughts={thoughts}
-            compactSummary={compactSummary}
-          />
+          {onOpenSubagent ? (
+            <SubagentDetailsProvider onOpen={onOpenSubagent}>
+              {group}
+            </SubagentDetailsProvider>
+          ) : (
+            group
+          )}
         </WebShellCustomizationProvider>
       </I18nProvider>,
     );
@@ -1631,6 +1641,34 @@ describe('tool row rendering', () => {
 });
 
 describe('thinking rows in the compact summary', () => {
+  it('expands a single-agent compact summary before opening agent details', () => {
+    const onOpenSubagent = vi.fn();
+    const container = renderToolGroup(
+      [
+        makeTool({
+          callId: 'agent-1',
+          toolName: 'Agent',
+          args: { subagent_type: 'explore', description: 'inspect' },
+        }),
+      ],
+      {},
+      [{ content: 'main-agent thought' }],
+      true,
+      onOpenSubagent,
+    );
+    const outerSummary = container.querySelector('button')!;
+
+    act(() => outerSummary.click());
+
+    expect(onOpenSubagent).not.toHaveBeenCalled();
+    expect(outerSummary.getAttribute('aria-expanded')).toBe('true');
+    const thoughtSummary = container.querySelector<HTMLElement>(
+      '[data-testid="compact-thinking-summary"]',
+    )!;
+    act(() => thoughtSummary.click());
+    expect(container.textContent).toContain('main-agent thought');
+  });
+
   it('nests parallel-agent details behind the compact summary', () => {
     const container = renderToolGroup(
       [

@@ -1646,9 +1646,14 @@ export const ToolGroup = memo(function ToolGroup({
     hasRunningTool && hasForegroundActiveTool
       ? true
       : streamingThought !== undefined;
-  const opensSubagentDetails = Boolean(singleSubagent && subagentDetails);
+  const opensSubagentDetails = Boolean(
+    !compactSummary && singleSubagent && subagentDetails,
+  );
   const opensMonitorDetails = Boolean(
-    singleMonitor && monitorDetailsAvailable && !monitorDetailsUnavailable,
+    !compactSummary &&
+      singleMonitor &&
+      monitorDetailsAvailable &&
+      !monitorDetailsUnavailable,
   );
   const opensToolDetails = opensSubagentDetails || opensMonitorDetails;
   const summaryIconTool = hasRunningTool ? (activeTool ?? tools[0]) : tools[0];
@@ -1694,7 +1699,7 @@ export const ToolGroup = memo(function ToolGroup({
           type="button"
           className={styles.chatSummary}
           onClick={() => {
-            if (singleSubagent && subagentDetails) {
+            if (opensSubagentDetails && singleSubagent && subagentDetails) {
               subagentDetails.onOpen(singleSubagent);
               return;
             }

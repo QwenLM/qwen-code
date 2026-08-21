@@ -998,9 +998,6 @@ function appendToolCallMessage(
   //
   // Synthetic raw-shell groups (pushed by the `shell` block fallback) use the
   // bare block id without the `tg-` prefix and never absorb real tool calls.
-  // Sub-agent calls stay in their own group box: an agent renders an
-  // expandable panel, and MessageList's groupParallelAgents relies on the
-  // single-tool shape to render consecutive launches as ParallelAgentsGroup.
   // TodoWrite merges like any other tool.
   const isStandalone = (t: DaemonMessageToolCall) => isSubAgentToolCall(t);
   const last = messages[messages.length - 1];

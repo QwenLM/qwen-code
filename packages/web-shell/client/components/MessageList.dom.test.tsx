@@ -8,7 +8,7 @@ import {
   type RefObject,
 } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import type { Message } from '../adapters/types';
+import type { Message, PermissionRequest } from '../adapters/types';
 import {
   WebShellCustomizationProvider,
   type WebShellAssistantTurnFooterRenderInfo,
@@ -331,6 +331,7 @@ function mount(
     onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
     customization?: WebShellCustomization;
     compactMode?: boolean;
+    pendingApproval?: PermissionRequest | null;
     failedPromptMessageId?: string;
     onRetryFailedPrompt?: () => void;
   } = {},
@@ -349,7 +350,7 @@ function mount(
               <MessageList
                 ref={ref}
                 messages={messages}
-                pendingApproval={null}
+                pendingApproval={opts.pendingApproval ?? null}
                 hideSessionTimeline={opts.hideSessionTimeline}
                 loadingTranscript={opts.loadingTranscript}
                 catchingUp={opts.catchingUp}
@@ -701,6 +702,31 @@ describe('MessageList — compact mode', () => {
     ).toBe('call-agent-1');
     expect(container.querySelector('[data-testid="msg-t1"]')).toBeNull();
     expect(container.querySelector('[data-testid="msg-agent-1"]')).toBeNull();
+  });
+
+  it('keeps a folded single-agent summary separate from an approving agent', () => {
+    const container = mount(
+      [thinkingMsg('t1'), agentMsg('agent-1'), agentMsg('agent-2')],
+      undefined,
+      {
+        compactMode: true,
+        pendingApproval: {
+          id: 'req-1',
+          toolCallId: 'call-agent-2',
+          content: [],
+          options: [],
+        },
+        customization: { collapseCompletedTurns: false },
+      },
+    );
+
+    expect(
+      container.querySelector('[data-testid="msg-summary-t1"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="msg-agent-2"]'),
+    ).not.toBeNull();
+    expect(parallelAgentsSummary(container)).toBeNull();
   });
 
   it('folds parallel agents and trailing thinking into one compact summary', () => {

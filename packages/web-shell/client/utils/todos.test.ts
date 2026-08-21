@@ -1334,6 +1334,20 @@ describe('plan stats contract (SDK normalizer → extractTodoStats)', () => {
 });
 
 describe('todoDetailSignature', () => {
+  it('changes when a todo tool end time arrives', () => {
+    const message = todoWriteMessage('m1', [todo('1', 'in_progress')]);
+    if (message.role !== 'tool_group') throw new Error('Expected tool group');
+    const tool = message.tools[0]!;
+    const before = todoDetailSignature([
+      { ...message, tools: [{ ...tool, startTime: 1000 }] },
+    ]);
+    const after = todoDetailSignature([
+      { ...message, tools: [{ ...tool, startTime: 1000, endTime: 2000 }] },
+    ]);
+
+    expect(after).not.toBe(before);
+  });
+
   it('changes when a snapshot timestamp changes', () => {
     const a = todoDetailSignature([
       at(planMessage('p1', [todo('1', 'in_progress')]), 1000),
