@@ -1411,8 +1411,18 @@ describe('OpenAIContentConverter', () => {
     });
 
     it('strips the accepted prefix from cumulative supersets after demotion (issue #9348)', () => {
+      // The leading ' ' content delta keeps textDeltaState.emittedText from
+      // prefixing the cumulative replay, so the replay passes through
+      // normalizeStreamingTextDelta unsliced and actually reaches the
+      // converter's startsWith strip branch. Without it the normalizer
+      // enters cumulative mode and slices the prefix before the converter
+      // ever sees it, leaving the branch unexecuted.
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('pre', { content: ' ' }),
+        stream,
+      );
       converter.convertOpenAIChunkToGemini(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
