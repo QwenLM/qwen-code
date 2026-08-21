@@ -16,6 +16,7 @@
 
 import { describeHoldCause, type HeldMessage } from '@qwen-code/qwen-code-core';
 import type { SlashCommand, SlashCommandActionReturn } from './types.js';
+import { t } from '../../i18n/index.js';
 import { CommandKind } from './types.js';
 
 /** Short handle shown to the user, so nobody has to type a full UUID. */
@@ -76,8 +77,11 @@ export function resolveHeld(
 export const peersCommand: SlashCommand = {
   name: 'peers',
   kind: CommandKind.BUILT_IN,
-  description:
-    'Review messages held from other Qwen Code sessions (accept | deny)',
+  get description() {
+    return t(
+      'Review messages held from other Qwen Code sessions (accept | deny)',
+    );
+  },
   action: async (context, args): Promise<SlashCommandActionReturn> => {
     const peerMessaging = context.services.peerMessaging;
     if (!peerMessaging) {
