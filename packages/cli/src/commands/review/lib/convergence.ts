@@ -134,7 +134,9 @@ export interface PrevRound {
   /**
    * Whether it carried an incremental anchor. Read only by the
    * mechanism-health check: two consecutive withholds mean every later round
-   * re-reads the whole diff until one closes cleanly.
+   * re-reads the whole diff until a round's marker carries an anchor again —
+   * which a clean close does not guarantee, because the marker also
+   * withholds on a missing fetched sha and on a model-identity drift.
    */
   anchored?: boolean;
 }

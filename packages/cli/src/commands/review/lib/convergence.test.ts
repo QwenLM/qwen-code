@@ -772,7 +772,9 @@ describe('renderMechanismHealth — is the machinery working', () => {
     // the marker also withholds on a missing fetched sha and on a model
     // identity drift, both of which a cleanly-closed round can carry.
     expect(r.en).toContain("until a round's marker carries an anchor again");
-    expect(r.en).not.toContain('until a round closes cleanly');
+    // Broad on purpose: the superseded wording drifted into two comments
+    // as "until one closes cleanly", which an exact-string pin missed.
+    expect(r.en).not.toMatch(/until (a round|one) closes cleanly/);
     expect(r.zh).toContain('直到某一轮的标记重新带上锚点');
     // The design once prescribed a re-anchor round here; the measurements
     // did not bear out its premise, so the shape is disclosed and nothing

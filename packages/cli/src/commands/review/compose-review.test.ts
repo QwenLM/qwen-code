@@ -9834,11 +9834,17 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     });
     writeFileSync(
       join(dirname(planPath), 'qwen-review-pr-8255-prev-ledger.json'),
+      // A shape the pipeline's own writer can produce: `buildLedger` records
+      // every posted finding, so `fresh` never exceeds the work list absent
+      // `dropped`. The assertions turn on the cluster leg and the blocker
+      // count, so this changes nothing they measure — but a fixture whose
+      // own numbers prove the list incomplete must not be the one that
+      // blesses an inference conditioned on it being complete.
       JSON.stringify({
         v: 1,
         round: 4,
         posted: 9,
-        fresh: 9,
+        fresh: 1,
         findings: [{ id: 'R2-1', sev: 'S', file: 'src/a.ts', title: 'x' }],
       }),
     );
@@ -9971,7 +9977,8 @@ describe('convergence diagnosis reaches the POSTED body', () => {
 
   it('discloses an anchor chain that has stopped', () => {
     // Two consecutive withholds mean every later round re-reads the whole
-    // diff until one closes cleanly — the closed loop measured at 119
+    // diff until a round's marker carries an anchor again — the closed loop
+    // measured at 119
     // minutes on a PR whose code had not changed a line. The plan here
     // names no fetched sha and the round caps, so this round withholds too.
     sideFile({ round: 4, posted: 9, fresh: 9, findings: [] });
@@ -10262,6 +10269,53 @@ describe('convergence diagnosis reaches the POSTED body', () => {
       ],
     });
     expect(r.cappedBy).toContain('findings-unverified-at-compose');
+    expect(r.body).toContain('Convergence:');
+    expect(r.body).not.toContain('No Critical finding is open');
+    expect((r.recommendations ?? []).map((x) => x.code)).not.toContain(
+      'land-and-defer',
+    );
+  });
+
+  it.each([
+    [
+      'a whiffed dimension',
+      { unreviewedDimensions: ['security — the relaunch returned nothing'] },
+      {},
+    ],
+    ['a truncated work list', {}, { dropped: 3 }],
+    ['a pure-foreign work list', {}, { foreign: true }],
+  ])('withholds land-and-defer over %s', (_label, inputOver, sideOver) => {
+    // Each arm starts from the shape that DOES offer the ending and flips
+    // exactly one leg, so the assertion measures that leg and not a sibling
+    // that would have withheld the code anyway.
+    const planPath = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      fetchedSha: 'deadbeef00112233',
+    });
+    const side = {
+      v: 1,
+      round: 4,
+      posted: 9,
+      fresh: 1,
+      findings: [{ id: 'R2-1', sev: 'S', file: 'src/a.ts', title: 'x' }],
+      ...sideOver,
+    };
+    writeFileSync(
+      join(dirname(planPath), 'qwen-review-pr-8255-prev-ledger.json'),
+      JSON.stringify(side),
+    );
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'src/a.ts', line: 1, body: '**[Suggestion]** again' },
+      ],
+      ...inputOver,
+    });
+    // The paragraph still renders — only the ending is withheld.
     expect(r.body).toContain('Convergence:');
     expect(r.body).not.toContain('No Critical finding is open');
     expect((r.recommendations ?? []).map((x) => x.code)).not.toContain(
