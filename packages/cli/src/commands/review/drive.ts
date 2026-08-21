@@ -181,9 +181,27 @@ const CAPTURE_MAX = 200_000;
  * over the log, which they already have.
  */
 const MAX_CAPTURES = 8;
+/**
+ * Bounds the pattern's LENGTH, not its running time: a nested quantifier like
+ * `(a+)+$` — nine characters, well under this cap — backtracks exponentially
+ * on a near-matching run, and extraction happens after the poll loop exits,
+ * where `--timeout` no longer reaches. Measured growth is ~×3.5 per +2
+ * characters, so a ~40-char near-miss is hours at 100% CPU with no report
+ * ever written. Keep patterns linear; the verify brief says so where it tells
+ * agents to author their own.
+ */
 const MAX_CAPTURE_PATTERN = 200;
 /** Capture names travel into a JSON key and a report a human reads. */
 const CAPTURE_NAME_RE = /^[A-Za-z][A-Za-z0-9_-]{0,31}$/;
+/**
+ * A captured value is the one output channel here with no cap anywhere else:
+ * it comes out of the UNTRIMMED log before `trimCapture`, so one group could
+ * otherwise carry megabytes into the report — which the handler writes to
+ * BOTH stdout and the `--out` file — and the verify brief tells agents to
+ * quote captured values in the witness. Symmetric with `trimCapture`: cut at
+ * a bound, and say that it cut.
+ */
+const CAPTURE_VALUE_MAX = 4096;
 
 export interface CaptureSpec {
   name: string;
@@ -205,7 +223,13 @@ export interface CaptureSpec {
 export function parseCaptureSpecs(
   raw: readonly string[] | undefined,
 ): { specs: CaptureSpec[] } | { error: string } {
-  if (!raw || raw.length === 0) return { specs: [] };
+  if (!raw) return { specs: [] };
+  if (raw.length === 0) {
+    return {
+      error:
+        '--capture was given but holds no `name=<regex>` pair — an empty ask would run the whole drive and report identically to never having asked, and a malformed request must not be able to disguise itself.',
+    };
+  }
   if (raw.length > MAX_CAPTURES) {
     return {
       error: `--capture was given ${raw.length} patterns; the cap is ${MAX_CAPTURES}. This lifts a few run-derived facts out of the log, not a report format.`,
@@ -267,6 +291,10 @@ export function parseCaptureSpecs(
  * exists for is printed once, at startup, before anything else could have
  * echoed it. A caller who wants the most recent of several occurrences says so
  * in the pattern rather than having the rule chosen for them.
+ *
+ * A value longer than the cap is cut at it, keeping the head and naming the
+ * full length — a service that prints one huge line under a pattern spanning
+ * it must not put megabytes into the report.
  */
 export function extractCaptures(
   output: string,
@@ -275,7 +303,11 @@ export function extractCaptures(
   const out: Record<string, string | null> = {};
   for (const { name, re } of specs) {
     const m = re.exec(output);
-    out[name] = m ? (m[1] ?? m[0]) : null;
+    const v = m ? (m[1] ?? m[0]) : null;
+    out[name] =
+      v !== null && v.length > CAPTURE_VALUE_MAX
+        ? `${v.slice(0, CAPTURE_VALUE_MAX)}... [truncated, ${v.length} characters total]`
+        : v;
   }
   return out;
 }
@@ -640,7 +672,7 @@ export const driveCommand: CommandModule = {
         type: 'array',
         string: true,
         describe:
-          'name=<regex> read back out of this run\'s own output, e.g. baseUrl="listening on (http://\\S+)". Repeatable. Group 1 when the pattern has one, the whole match otherwise; null when nothing matched. Use it for anything the service CHOSE rather than was told — above all the address it actually bound.',
+          "name=<regex> read back out of this run's own output, e.g. baseUrl=listening on (https?://\\S+). Repeatable. Group 1 when the pattern has one, the whole match otherwise; null when nothing matched. Use it for anything the service CHOSE rather than was told — above all the address it actually bound.",
       })
       .option('out', {
         type: 'string',

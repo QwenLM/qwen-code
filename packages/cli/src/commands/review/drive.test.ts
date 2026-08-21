@@ -655,6 +655,24 @@ describe('--capture', () => {
     ).toHaveProperty('error');
   });
 
+  it('refuses a bare --capture — an empty ask must not pass as no ask', () => {
+    // A bare flag or an empty array expansion parses to [], and without a
+    // rejection the drive runs to its timeout and reports identically to
+    // never having asked — the one malformed shape that would escape the
+    // rejects-rather-than-skips rule.
+    expect(parseCaptureSpecs([])).toHaveProperty('error');
+    expect(parseCaptureSpecs(undefined)).toEqual({ specs: [] });
+  });
+
+  it('holds the length caps at their documented boundary', () => {
+    // "A pattern of 1 to 200 characters" existed only in prose: deleting the
+    // cap check survives the rest of this suite (mutation-verified).
+    expect('specs' in parseCaptureSpecs(['p=' + 'x'.repeat(200)])).toBe(true);
+    expect(parseCaptureSpecs(['p=' + 'x'.repeat(201)])).toHaveProperty('error');
+    expect('specs' in parseCaptureSpecs([`n${'a'.repeat(31)}=x`])).toBe(true);
+    expect(parseCaptureSpecs([`n${'a'.repeat(32)}=x`])).toHaveProperty('error');
+  });
+
   it('splits on the first = only, so a pattern may hold its own', () => {
     const parsed = parseCaptureSpecs(['port=listening=(\\d+)']);
     expect('specs' in parsed).toBe(true);
@@ -671,6 +689,45 @@ describe('--capture', () => {
     expect(extractCaptures('on 42', grouped.specs)).toEqual({ a: '42' });
     expect(extractCaptures('on 42', whole.specs)).toEqual({ a: 'on 42' });
     expect(extractCaptures('nothing', grouped.specs)).toEqual({ a: null });
+  });
+
+  it('reads the FIRST match when a log holds several', () => {
+    // The sentinel takes the LAST occurrence because its decoys come from the
+    // driven script's own text; the value this flag exists for is printed
+    // once, at startup. Two occurrences are not exotic — a wrapper echoing
+    // the startup line, or a script that restarts the service — and the
+    // last-match mutant passes the rest of this suite (mutation-verified).
+    const parsed = parseCaptureSpecs(['baseUrl=listening on (http://\\S+)']);
+    if (!('specs' in parsed)) throw new Error('unreachable');
+    expect(
+      extractCaptures(
+        'listening on http://127.0.0.1:1\nlistening on http://127.0.0.1:2\n',
+        parsed.specs,
+      ),
+    ).toEqual({ baseUrl: 'http://127.0.0.1:1' });
+  });
+
+  it("keeps an empty group-1 as '' — a printed empty value is a measurement", () => {
+    // The ?? is what distinguishes it from null: the || mutant turns an
+    // empty group-1 into the whole match and passes the rest of this suite
+    // (mutation-verified).
+    const parsed = parseCaptureSpecs(['v=value: (.*)']);
+    if (!('specs' in parsed)) throw new Error('unreachable');
+    expect(extractCaptures('value: ', parsed.specs)).toEqual({ v: '' });
+  });
+
+  it('caps each captured VALUE — the one channel no other cap covers', () => {
+    // Extraction reads the UNTRIMMED log before trimCapture, so one group
+    // could otherwise carry megabytes into the report — written to BOTH
+    // stdout and the --out file — and the brief tells agents to quote
+    // captured values in the witness.
+    const parsed = parseCaptureSpecs(['data=data=(.*)']);
+    if (!('specs' in parsed)) throw new Error('unreachable');
+    const out = extractCaptures(`data=${'d'.repeat(1_000_000)}`, parsed.specs);
+    const v = out['data'] as string;
+    expect(v.length).toBeLessThan(10_000);
+    expect(v.startsWith('d'.repeat(4096))).toBe(true);
+    expect(v).toContain('[truncated, 1000000 characters total]');
   });
 });
 
