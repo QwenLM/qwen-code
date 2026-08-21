@@ -4031,13 +4031,16 @@ export function App({
       lastReportedAgentTasksRef.current = undefined;
       return;
     }
-    const snapshot = JSON.stringify(environmentAgentTasks, (key, value) =>
-      key === 'runtimeMs' ||
-      key === 'stats' ||
-      key === 'recentActivities' ||
-      key === 'prompt'
-        ? undefined
-        : value,
+    const snapshot = JSON.stringify(
+      environmentAgentTasks.map(
+        ({
+          runtimeMs: _runtimeMs,
+          stats: _stats,
+          recentActivities: _recentActivities,
+          prompt: _prompt,
+          ...stable
+        }) => stable,
+      ),
     );
     if (snapshot === lastReportedAgentTasksRef.current) return;
     lastReportedAgentTasksRef.current = snapshot;
