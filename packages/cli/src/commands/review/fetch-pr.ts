@@ -180,15 +180,16 @@ type FetchPrResult = PlanReport & {
   host: string | null;
   worktreePath: string;
   /**
-   * The worktree's own admin entry (`<common>/worktrees/<id>`), resolved
-   * through the worktree's gitfile at fetch time — the one `worktree add`
-   * wrote moments earlier — and recorded before any PR content runs. The
-   * residue probe's identity gate compares the admin entry the tree's
-   * gitfile resolves to against THIS recorded value, so a gitfile swapped
-   * during the review is refused whether it names a foreign repository or a
-   * forge registered under the same common dir (#9557). Null when git could
-   * not answer at fetch time; the probe then falls back to the checks its
-   * own reads provide.
+   * The worktree's own admin entry (`<common>/worktrees/<id>`), derived on
+   * the CREATING side at fetch time — the creating repository's common dir
+   * plus the entry name `worktree add` registers for the new path (its
+   * basename) — and never resolved through the worktree's own gitfile —
+   * recorded before any PR content runs. The residue probe's identity gate
+   * compares the admin entry the tree's gitfile resolves to against THIS
+   * recorded value, so a gitfile swapped during the review is refused
+   * whether it names a foreign repository or a forge registered under the
+   * same common dir (#9557). Null when git could not answer at fetch time;
+   * the probe then falls back to the checks its own reads provide.
    */
   worktreeAdminDir: string | null;
   /**
@@ -948,6 +949,21 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     const needsLocalStats = platform.kind !== 'github';
 
     // 4. Create the ephemeral worktree.
+    // The creating repository's identity, recorded ONCE before the screen:
+    // the screen and the add below must resolve the SAME repository, and
+    // discovering through the writable gitfile per-spawn is the shape
+    // `scratch-tree`'s gate-first pin removes — a swap landing between an
+    // unpinned screen's discovery and the add aims the checkout at whichever
+    // repository it names (measured there). Recording first pins the screen
+    // and the add at the recorded value; the window that remains is
+    // synchronous in-process code. Null when git could not answer: both
+    // degrade to their own discovery — the pre-hardening shape — rather than
+    // refuse every fetch on one failed rev-parse.
+    const creatingGitDir = gitOpt(
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-dir',
+    );
     try {
       // The add's checkout EXECUTES repo-local content filters — and the
       // planting surface is two plain writes into the common dir this fetch
@@ -956,7 +972,17 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       // common dir, so a contaminated earlier attempt's plant persists and
       // fires during THIS checkout — the same screen `scratch-tree` applies
       // before its checkouts, run here before the checkout that executes it.
-      const filters = localFilterCommands(process.cwd());
+      const filters = localFilterCommands(
+        process.cwd(),
+        creatingGitDir ?? undefined,
+      );
+      if (filters === null) {
+        throw new Error(
+          'the content-filter screen could not measure the repository — ' +
+            'the worktree checkout cannot be authorised while its execution ' +
+            'surface is unmeasurable',
+        );
+      }
       if (filters.length > 0) {
         throw new Error(
           `the repository's local config defines content filter(s) ${filters
@@ -973,10 +999,16 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       // Hooks out of the checkout, the way `scratch-tree` runs its adds: a
       // linked worktree's `worktree add` fires the common dir's
       // `post-checkout`, and the common dir is the same shared surface the
-      // filter screen above names.
+      // filter screen above names. `core.fsmonitor` is the OTHER config-driven
+      // execution surface a checkout runs — neutralised here the way the
+      // residue probe neutralises it on its measurements (measured: the
+      // pre-fix add fired a planted monitor).
       git(
+        ...(creatingGitDir === null ? [] : [`--git-dir=${creatingGitDir}`]),
         '-c',
         'core.hooksPath=/dev/null/no-hooks',
+        '-c',
+        'core.fsmonitor=',
         'worktree',
         'add',
         wt,
@@ -994,6 +1026,65 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       );
       throw new Error(
         `Failed to create worktree at ${wt}: ${(err as Error).message}`,
+      );
+    }
+
+    // The tree's own admin entry, derived on the CREATING side — the
+    // creating repository's common dir plus the entry name `worktree add`
+    // registers for the new path (its basename) — and recorded HERE,
+    // immediately after the successful add, before the base-branch fetch and
+    // the diff capture. Never re-resolved through the worktree's own
+    // gitfile: the checkout above has just run whatever that tree carries,
+    // and a gitfile swapped during it would record whichever entry the swap
+    // names as the trusted anchor — the very forge the residue probe's
+    // identity gate exists to refuse (measured: every gate this pipeline
+    // adds then passes over the forge). A mismatch between this record and
+    // the entry the gitfile names at probe time IS the swap, and the gate
+    // fails closed on it; an entry git uniquified away from the basename
+    // resolves to nothing there and fails closed the same way. Absolute,
+    // because a relative answer would later resolve against whichever cwd
+    // reads it. The entry's filesystem identity rides with it: both operands
+    // of the gate's path comparison resolve at probe time against a
+    // filesystem the contaminator writes, so it also refuses an entry that
+    // no longer carries this dev:ino.
+    //
+    // The placement is the fix this buys: the recording used to ride the
+    // report assembly — seconds to minutes of network fetch and diff capture
+    // after the add — and a concurrent writer replacing the freshly
+    // registered entry inside that window pinned the FORGE as the trusted
+    // anchor with no degradation warning; every gate this pipeline adds then
+    // passed over it (measured end-to-end). The window is now the
+    // in-process gap between two spawns.
+    const commonDir = gitOpt(
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-common-dir',
+    );
+    const worktreeAdminDir =
+      commonDir === null ? null : join(commonDir, 'worktrees', basename(wt));
+    let worktreeAdminDevIno: string | null = null;
+    if (worktreeAdminDir !== null) {
+      try {
+        const entry = statSync(worktreeAdminDir);
+        worktreeAdminDevIno = `${entry.dev}:${entry.ino}`;
+      } catch {
+        // Resolved for git, unreadable to stat: the gate degrades to its
+        // path comparison rather than lose the anchor entirely.
+      }
+    }
+    if (worktreeAdminDir === null) {
+      // Without this the round silently runs with the forgeable gate this
+      // recording exists to arm — a weakened review indistinguishable from
+      // a hardened one. This function already warns on lesser degradations.
+      writeStderrLine(
+        'WARNING: could not record the worktree admin entry — the residue ' +
+          'identity gate runs unanchored for this review (#9557)',
+      );
+    } else if (worktreeAdminDevIno === null) {
+      writeStderrLine(
+        "WARNING: could not record the worktree admin entry's filesystem " +
+          'identity — the residue identity gate runs without its referent ' +
+          'check for this review (#9557)',
       );
     }
 
@@ -1577,55 +1668,6 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
             `the audit window starts at this fetch and may not reach an earlier abandoned attempt.`,
         );
       }
-    }
-    // The tree's own admin entry, derived on the CREATING side — the
-    // creating repository's common dir plus the entry name `worktree add`
-    // registers for the new path (its basename) — and recorded now, before
-    // any PR content runs. Never re-resolved through the worktree's own
-    // gitfile: the checkout above has just run whatever that tree carries,
-    // and a gitfile swapped during it would record whichever entry the swap
-    // names as the trusted anchor — the very forge the residue probe's
-    // identity gate exists to refuse (measured: every gate this pipeline
-    // adds then passes over the forge). A mismatch between this record and
-    // the entry the gitfile names at probe time IS the swap, and the gate
-    // fails closed on it; an entry git uniquified away from the basename
-    // resolves to nothing there and fails closed the same way. Absolute,
-    // because a relative answer would later resolve against whichever cwd
-    // reads it. The entry's filesystem identity rides with it: both operands
-    // of the gate's path comparison resolve at probe time against a
-    // filesystem the contaminator writes, so it also refuses an entry that
-    // no longer carries this dev:ino.
-    const commonDir = gitOpt(
-      'rev-parse',
-      '--path-format=absolute',
-      '--git-common-dir',
-    );
-    const worktreeAdminDir =
-      commonDir === null ? null : join(commonDir, 'worktrees', basename(wt));
-    let worktreeAdminDevIno: string | null = null;
-    if (worktreeAdminDir !== null) {
-      try {
-        const entry = statSync(worktreeAdminDir);
-        worktreeAdminDevIno = `${entry.dev}:${entry.ino}`;
-      } catch {
-        // Resolved for git, unreadable to stat: the gate degrades to its
-        // path comparison rather than lose the anchor entirely.
-      }
-    }
-    if (worktreeAdminDir === null) {
-      // Without this the round silently runs with the forgeable gate this
-      // recording exists to arm — a weakened review indistinguishable from
-      // a hardened one. This function already warns on lesser degradations.
-      writeStderrLine(
-        'WARNING: could not record the worktree admin entry — the residue ' +
-          'identity gate runs unanchored for this review (#9557)',
-      );
-    } else if (worktreeAdminDevIno === null) {
-      writeStderrLine(
-        "WARNING: could not record the worktree admin entry's filesystem " +
-          'identity — the residue identity gate runs without its referent ' +
-          'check for this review (#9557)',
-      );
     }
     const result: FetchPrResult = {
       prNumber,

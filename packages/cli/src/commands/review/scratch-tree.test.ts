@@ -29,6 +29,29 @@ import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 const worktreeLib = vi.hoisted(() => ({
   realWorktreeResidue: undefined as undefined | typeof worktreeResidue,
 }));
+// Every spawnSync argv, recorded: a pin's whole job is to put
+// `--git-dir=<verified entry>` on the record, and a refactor that drops one
+// re-opens the post-gate window while every behavioural test stays green
+// (the swap shapes that would expose it are races no fixture stages). The
+// wrapper is a pure pass-through.
+const spawnLog = vi.hoisted(() => ({ calls: [] as string[][] }));
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  const realSpawnSync = actual.spawnSync;
+  const wrapper = (...callArgs: Parameters<typeof realSpawnSync>) => {
+    const args = callArgs[1];
+    if (Array.isArray(args)) spawnLog.calls.push(args.map(String));
+    return realSpawnSync(...callArgs);
+  };
+  return {
+    ...actual,
+    // `default` is load-bearing: CJS-interop imports of the builtin resolve
+    // through it (the same shape fetch-pr.test.ts uses), and without it the
+    // transitive modules silently keep the real spawnSync.
+    default: { ...actual, spawnSync: wrapper },
+    spawnSync: wrapper,
+  };
+});
 vi.mock('./lib/worktree.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./lib/worktree.js')>();
   worktreeLib.realWorktreeResidue = actual.worktreeResidue;
@@ -74,6 +97,7 @@ describe('runScratchTree', () => {
 
   beforeEach(() => {
     gitIsolation = isolateHostGitConfig();
+    spawnLog.calls.length = 0;
     repo = mkdtempSync(join(tmpdir(), 'qwen-scratch-tree-'));
     git(repo, 'init', '-q', '-b', 'main');
     git(repo, 'config', 'user.email', 't@t.t');
@@ -240,11 +264,227 @@ describe('runScratchTree', () => {
     expect(existsSync(pwned)).toBe(false);
   });
 
+  it('keeps the screen pinned when the gitfile is swapped AFTER the gate', () => {
+    // The executed R5-2 shape: the swap is live while the screen runs. A
+    // screen that re-discovers through the writable gitfile resolves the
+    // decoy the swap names — clean — and authorises a checkout that then
+    // executes the honest repository's planted filter (measured: PWNED with
+    // `available: true`). The pinned screen resolves the entry the gate
+    // VERIFIED, finds the filter, and refuses.
+    const honestGitfile = readFileSync(join(worktree, '.git'), 'utf8');
+    const decoy = join(repo, 'decoy');
+    execFileSync('git', ['clone', '-q', repo, decoy]);
+    const pwned = join(repo, 'PWNED-screen-post-gate');
+    git(worktree, 'config', 'filter.evil.smudge', `tee ${pwned}`);
+    writeFileSync(join(repo, '.git', 'info', 'attributes'), '* filter=evil\n');
+    const realResidue = worktreeLib.realWorktreeResidue;
+    if (realResidue === undefined) throw new Error('probe mock missing');
+    // Measure first (honest), then swap — the swap is LIVE for the screen.
+    vi.mocked(worktreeResidue).mockImplementationOnce((cwd, anchor, cap) => {
+      const r = realResidue(cwd, anchor, cap);
+      writeFileSync(join(worktree, '.git'), `gitdir: ${join(decoy, '.git')}\n`);
+      return r;
+    });
+
+    const r = run();
+
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('filter.evil.smudge');
+    expect(existsSync(pwned)).toBe(false);
+    // The swap is undone for the tests that follow in this file's scope.
+    writeFileSync(join(worktree, '.git'), honestGitfile);
+  });
+
+  it('reads the head sha through the verified entry when the gitfile is swapped AFTER the gate', () => {
+    // The executed R5-4 shape with the swap live past the gate: an unpinned
+    // head read resolves the forge the swap names (its HEAD is the evil sha,
+    // objects planted in the shared store by a fetch), the anchored gate has
+    // already passed, and the pinned creation materialises the evil commit
+    // under `available: true`. Reading under the verified entry answers the
+    // honest sha instead.
+    const honestGitfile = readFileSync(join(worktree, '.git'), 'utf8');
+    const forge = join(repo, 'forge');
+    execFileSync('git', ['clone', '-q', repo, forge]);
+    execFileSync('git', ['config', 'user.email', 't@t.t'], { cwd: forge });
+    execFileSync('git', ['config', 'user.name', 't'], { cwd: forge });
+    writeFileSync(join(forge, 'malicious.ts'), 'evil\n');
+    execFileSync('git', ['add', '-A'], { cwd: forge });
+    execFileSync('git', ['commit', '-qm', 'evil'], { cwd: forge });
+    const evilSha = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: forge,
+      encoding: 'utf8',
+    }).trim();
+    expect(evilSha).not.toBe(headSha);
+    execFileSync('git', ['fetch', '-q', forge], { cwd: worktree });
+    const realResidue = worktreeLib.realWorktreeResidue;
+    if (realResidue === undefined) throw new Error('probe mock missing');
+    vi.mocked(worktreeResidue).mockImplementationOnce((cwd, anchor, cap) => {
+      const r = realResidue(cwd, anchor, cap);
+      writeFileSync(join(worktree, '.git'), `gitdir: ${join(forge, '.git')}\n`);
+      return r;
+    });
+
+    const r = run();
+
+    expect(r.available).toBe(true);
+    expect(r.headSha).toBe(headSha);
+    expect(existsSync(join(r.path!, 'malicious.ts'))).toBe(false);
+    writeFileSync(join(worktree, '.git'), honestGitfile);
+  });
+
+  it('screens through the identity the gate VERIFIED — a pre-gate decoy swap does not blind the screen', () => {
+    // The screen used to run BEFORE the identity gate and discover the
+    // repository through the same writable gitfile: aimed at a clean decoy
+    // for the duration of the scan and restored before the gate, the honest
+    // repository's planted filter stayed invisible, and the creation
+    // checkout the screen authorised executed it while the report answered
+    // `available: true` (measured). The screen now runs AFTER the gate,
+    // pinned to the identity it verified.
+    const honestGitfile = readFileSync(join(worktree, '.git'), 'utf8');
+    // The decoy: a clone, clean — no filter, no attributes.
+    const decoy = join(repo, 'decoy');
+    execFileSync('git', ['clone', '-q', repo, decoy]);
+    // Plant the filter in the HONEST repository, after the clone, so the
+    // decoy's config stays clean for the pre-gate discovery to find nothing.
+    const pwned = join(repo, 'PWNED-screen-decoy');
+    git(worktree, 'config', 'filter.evil.smudge', `tee ${pwned}`);
+    writeFileSync(join(repo, '.git', 'info', 'attributes'), '* filter=evil\n');
+    // Swap for the screen's duration; the probe wrapper restores the honest
+    // gitfile before the gate measures.
+    writeFileSync(join(worktree, '.git'), `gitdir: ${join(decoy, '.git')}\n`);
+    const realResidue = worktreeLib.realWorktreeResidue;
+    if (realResidue === undefined) throw new Error('probe mock missing');
+    vi.mocked(worktreeResidue).mockImplementationOnce((cwd, anchor, cap) => {
+      writeFileSync(join(worktree, '.git'), honestGitfile);
+      return realResidue(cwd, anchor, cap);
+    });
+
+    const r = run();
+
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('filter.evil.smudge');
+    expect(existsSync(pwned)).toBe(false);
+    expect(
+      existsSync(scratchWorktreePath(worktree, 'verify--round-1--abc123')),
+    ).toBe(false);
+  });
+
+  it('resets under the verified identity — a post-gate double swap does not reach the reuse checkout', () => {
+    // The reuse branch returned BEFORE the verified identity was extracted,
+    // so every reset spawn re-discovered through the writable gitfiles, and
+    // the reset's cross-check compared two discovery results the swapper
+    // controls: a double swap — BOTH gitfiles retargeted at one forge with
+    // forged backpointers and the filter planted, landing between the
+    // passing gate and the reset — made every check resolve self-consistently
+    // over the forge while the reset checkout executed its filter and the
+    // report answered `available: true, reused: true` (measured). The reset
+    // now compares against the common dir the gate VERIFIED, resolved under
+    // the pin, and its mutation spawns run under the entry the gate
+    // round-trip-checked.
+    const first = run();
+    expect(first.available).toBe(true);
+    const scratchPath = first.path!;
+    const genuineAdmin = git(
+      worktree,
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-dir',
+    );
+
+    // The forge: a clone (the final HEAD comparison passes against it), the
+    // filter planted, and one forged admin entry PER tree — each naming its
+    // tree back, each resolving the common dir to the forge.
+    const forge = join(repo, 'forge');
+    execFileSync('git', ['clone', '-q', repo, forge]);
+    execFileSync('git', ['config', 'user.email', 't@t.t'], { cwd: forge });
+    execFileSync('git', ['config', 'user.name', 't'], { cwd: forge });
+    const pwned = join(repo, 'PWNED-reuse-swap');
+    execFileSync('git', ['config', 'filter.evil.smudge', `tee ${pwned}`], {
+      cwd: forge,
+    });
+    writeFileSync(join(forge, '.git', 'info', 'attributes'), '* filter=evil\n');
+    const forgeEntryFor = (treePath: string, name: string): string => {
+      const entry = join(forge, '.git', 'worktrees', name);
+      mkdirSync(entry, { recursive: true });
+      writeFileSync(join(entry, 'commondir'), '../..\n');
+      writeFileSync(join(entry, 'gitdir'), `${join(treePath, '.git')}\n`);
+      writeFileSync(join(entry, 'HEAD'), `${headSha}\n`);
+      return entry;
+    };
+    const forgeWorktreeEntry = forgeEntryFor(worktree, 'forged-review');
+    const forgeScratchEntry = forgeEntryFor(scratchPath, 'forged-scratch');
+
+    // The swap lands between the gate and the reset: measure first, then
+    // retarget BOTH gitfiles at the forge.
+    const realResidue = worktreeLib.realWorktreeResidue;
+    if (realResidue === undefined) throw new Error('probe mock missing');
+    vi.mocked(worktreeResidue).mockImplementationOnce((cwd, anchor, cap) => {
+      const r = realResidue(cwd, anchor, cap);
+      writeFileSync(join(worktree, '.git'), `gitdir: ${forgeWorktreeEntry}\n`);
+      writeFileSync(
+        join(scratchPath, '.git'),
+        `gitdir: ${forgeScratchEntry}\n`,
+      );
+      return r;
+    });
+
+    const second = run();
+
+    expect(second.available).toBe(true);
+    // Rebuilt under the genuine identity, never reused over the forge.
+    expect(second.reused).toBe(false);
+    expect(existsSync(pwned)).toBe(false);
+    const gitfile = readFileSync(join(second.path!, '.git'), 'utf8');
+    expect(gitfile).toContain(dirname(dirname(genuineAdmin)));
+    expect(gitfile).not.toContain('forge');
+  });
+
+  it('reads the head sha under the verified identity — a pre-gate swap cannot taint it', () => {
+    // The head sha used to be read BEFORE the gate through unverified
+    // discovery: a swap restored before the gate tainted it while the
+    // anchored gate passed on the legit identity, and the creation
+    // materialised the forge's commit — objects planted in the SHARED store
+    // by a fetch — answering `available: true` with the evil sha checked out
+    // (measured). The read now runs under the identity the gate verified.
+    const honestGitfile = readFileSync(join(worktree, '.git'), 'utf8');
+    const forge = join(repo, 'forge');
+    execFileSync('git', ['clone', '-q', repo, forge]);
+    execFileSync('git', ['config', 'user.email', 't@t.t'], { cwd: forge });
+    execFileSync('git', ['config', 'user.name', 't'], { cwd: forge });
+    writeFileSync(join(forge, 'malicious.ts'), 'evil\n');
+    execFileSync('git', ['add', '-A'], { cwd: forge });
+    execFileSync('git', ['commit', '-qm', 'evil'], { cwd: forge });
+    const evilSha = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: forge,
+      encoding: 'utf8',
+    }).trim();
+    expect(evilSha).not.toBe(headSha);
+    // Plant the evil commit's objects in the shared store: a fetch from the
+    // review worktree, same user — the objects land where the honest add
+    // finds them.
+    execFileSync('git', ['fetch', '-q', forge], { cwd: worktree });
+    // For the pre-gate reads the worktree resolves to the forge (HEAD is the
+    // evil sha); the probe wrapper restores before the gate measures.
+    writeFileSync(join(worktree, '.git'), `gitdir: ${join(forge, '.git')}\n`);
+    const realResidue = worktreeLib.realWorktreeResidue;
+    if (realResidue === undefined) throw new Error('probe mock missing');
+    vi.mocked(worktreeResidue).mockImplementationOnce((cwd, anchor, cap) => {
+      writeFileSync(join(worktree, '.git'), honestGitfile);
+      return realResidue(cwd, anchor, cap);
+    });
+
+    const r = run();
+
+    expect(r.available).toBe(true);
+    expect(r.headSha).toBe(headSha);
+    expect(existsSync(join(r.path!, 'malicious.ts'))).toBe(false);
+  });
+
   it('refuses while repo-local config defines a content filter — checkouts would execute it', () => {
-    // NO_HOOKS covers hooks only; a checkout still runs a configured
-    // smudge/clean filter, and the common dir the planting surface lives in
-    // is never wiped — so the refusal names the surface instead of running
-    // whatever it holds.
+    // NO_HOOKS neutralises hooks and fsmonitor; a checkout still runs a
+    // configured smudge/clean/process filter, and the common dir the
+    // planting surface lives in is never wiped — so the refusal names the
+    // surface instead of running whatever it holds.
     const pwned = join(repo, 'PWNED-smudge');
     git(worktree, 'config', 'filter.evil.smudge', `touch ${pwned}`);
     writeFileSync(join(worktree, 'a.ts'), 'dirty\n');
@@ -262,6 +502,125 @@ describe('runScratchTree', () => {
     // a user's own git-lfs install carries are not this surface).
     git(worktree, 'config', '--unset', 'filter.evil.smudge');
     expect(run().available).toBe(true);
+  });
+
+  it('refuses when the discovered HEAD is not the sha the caller recorded out-of-band', () => {
+    // The refs INSIDE the verified repository are same-user-writable: one
+    // rewrite of `<common>/worktrees/<id>/HEAD` survives every identity
+    // check — the entry directory unchanged, no config write, no race — and
+    // the scratch tree materialises the attacker's commit under a passing
+    // gate (measured end-to-end). The pipeline holds the fetched sha
+    // out-of-band; handed to this command, any disagreement is a refusal.
+    const admin = git(
+      worktree,
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-dir',
+    );
+    // A second commit, then drop it from the branch: the objects stay in the
+    // shared store, reachable from a rewritten HEAD.
+    writeFileSync(join(repo, 'evil.ts'), 'evil\n');
+    git(repo, 'add', '-A');
+    git(repo, 'commit', '-qm', 'evil');
+    const evilSha = git(repo, 'rev-parse', 'HEAD');
+    git(repo, 'reset', '-q', '--hard', 'HEAD~1');
+    writeFileSync(join(admin, 'HEAD'), `${evilSha}\n`);
+
+    const r = runScratchTree({
+      worktree,
+      label: 'verify--round-1--abc123',
+      expectedHeadSha: headSha,
+    });
+
+    expect(r.available).toBe(false);
+    expect(r.path).toBeUndefined();
+    expect(r.note).toContain(evilSha.slice(0, 9));
+    expect(r.note).toContain(headSha.slice(0, 9));
+    expect(
+      existsSync(scratchWorktreePath(worktree, 'verify--round-1--abc123')),
+    ).toBe(false);
+
+    // A caller with no out-of-band record keeps the discovered value — the
+    // check exists only for the pipeline that holds the sha.
+    const unanchored = run();
+    expect(unanchored.available).toBe(true);
+    expect(unanchored.headSha).toBe(evilSha);
+  });
+
+  it('never executes core.fsmonitor — the creation and reset checkouts run the config, not it them', () => {
+    // `core.fsmonitor` is a command git EXECUTES on index-reading commands —
+    // the creation's `worktree add` and the reuse path's checkout included —
+    // and the config that names it is the contaminator's write surface. It
+    // rides the same neutralisation the residue probe applies to its
+    // measurements (measured: the pre-fix creation and reset each fired a
+    // planted monitor).
+    const marker = join(repo, 'fsmonitor-fired');
+    git(worktree, 'config', 'core.fsmonitor', `touch ${marker}`);
+
+    const first = run();
+    expect(first.available).toBe(true);
+    expect(existsSync(marker)).toBe(false);
+
+    const second = run();
+    expect(second.available).toBe(true);
+    expect(second.reused).toBe(true);
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it('puts the verified identity on the record — the reset and discard spawns run pinned', () => {
+    // A pin that is not asserted is a pin a refactor can drop: with the
+    // gitfile honest, every behavioural shape agrees pinned and unpinned, so
+    // the argv itself is the witness. The reset's mutation spawns must carry
+    // the SCRATCH entry the reuse gate round-trip-verified, and the rebuild
+    // path's discard and add must carry the REVIEW entry the residue gate
+    // verified — dropping either re-opens the post-gate window silently.
+    const first = run();
+    expect(first.available).toBe(true);
+    const genuineAdmin = git(
+      worktree,
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-dir',
+    );
+    const scratchAdmin = git(
+      first.path!,
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-dir',
+    );
+
+    // Reuse path: the reset's mutation spawns carry the scratch entry.
+    spawnLog.calls.length = 0;
+    const second = run();
+    expect(second.available).toBe(true);
+    expect(second.reused).toBe(true);
+    const checkouts = spawnLog.calls.filter((c) => c.includes('checkout'));
+    expect(checkouts.length).toBeGreaterThan(0);
+    for (const argv of checkouts) {
+      expect(argv).toContain(`--git-dir=${scratchAdmin}`);
+    }
+
+    // Rebuild path: the discard's unregister spawns and the add carry the
+    // review entry, never a re-discovery through the writable gitfile.
+    rmSync(join(first.path!, '.git'));
+    spawnLog.calls.length = 0;
+    const third = run();
+    expect(third.available).toBe(true);
+    expect(third.reused).toBe(false);
+    const removes = spawnLog.calls.filter(
+      (c) => c.includes('worktree') && c.includes('remove'),
+    );
+    expect(removes.length).toBeGreaterThan(0);
+    for (const argv of removes) {
+      expect(argv).toContain(`--git-dir=${genuineAdmin}`);
+    }
+    const adds = spawnLog.calls.filter(
+      (c) => c.includes('worktree') && c.includes('add'),
+    );
+    expect(adds.length).toBeGreaterThan(0);
+    for (const argv of adds) {
+      expect(argv).toContain(`--git-dir=${genuineAdmin}`);
+    }
   });
 
   it("screens ANOTHER worktree's per-worktree config, not just this one's", () => {
@@ -1108,6 +1467,53 @@ describe('runScratchTree', () => {
           })
           .parseAsync(),
       ).rejects.toThrow(/admin-dir/);
+    });
+
+    it('parses --expected-head-sha and refuses a rewritten worktree HEAD end-to-end', async () => {
+      // The persistent shape: one write of `<common>/worktrees/<id>/HEAD`
+      // inside the verified repository — no race, every identity check
+      // passes — and the scratch tree materialises the attacker's commit.
+      // Driven through the real builder and handler, because the flag must
+      // reach `expectedHeadSha` or every real invocation runs without the
+      // content check while this suite stays green.
+      const admin = git(
+        worktree,
+        'rev-parse',
+        '--path-format=absolute',
+        '--git-dir',
+      );
+      writeFileSync(join(repo, 'evil.ts'), 'evil\n');
+      git(repo, 'add', '-A');
+      git(repo, 'commit', '-qm', 'evil');
+      const evilSha = git(repo, 'rev-parse', 'HEAD');
+      writeFileSync(join(admin, 'HEAD'), `${evilSha}\n`);
+
+      await yargs([
+        'scratch-tree',
+        '--worktree',
+        worktree,
+        '--label',
+        'verify--round-1--wiring-sha',
+        '--expected-head-sha',
+        headSha,
+      ])
+        .command(scratchTreeCommand)
+        .strict()
+        .exitProcess(false)
+        .fail((msg, err) => {
+          throw err ?? new Error(msg ?? 'yargs failure');
+        })
+        .parseAsync();
+
+      const printed = JSON.parse(
+        String(
+          (writeStdoutLine as unknown as ReturnType<typeof vi.fn>).mock
+            .calls[0][0],
+        ),
+      );
+      expect(printed.available).toBe(false);
+      expect(printed.note).toContain(evilSha.slice(0, 9));
+      expect(process.exitCode).toBeUndefined();
     });
   });
 

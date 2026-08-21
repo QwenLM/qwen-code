@@ -273,7 +273,7 @@ const producerMocks = vi.hoisted(() => ({
   // Default answers "no repo-local content filters"; the refusal test
   // overrides it. The scan itself (spawn-driven config reads) belongs to
   // scratch-tree's suite against real fixtures.
-  localFilterCommands: vi.fn((..._args: unknown[]): string[] => []),
+  localFilterCommands: vi.fn((..._args: unknown[]): string[] | null => []),
   resolveMergeBase: vi.fn(
     (..._args: unknown[]): MergeBaseResult => ({
       sha: null,
@@ -656,6 +656,43 @@ describe('fetch-pr report assembly', () => {
     );
   });
 
+  it('records the admin entry before the base fetch and diff capture — the forge-pinning window is the in-process gap', async () => {
+    // The recording used to ride the report assembly — seconds to minutes of
+    // network fetch and diff capture after the `worktree add` — and a
+    // concurrent writer on the shared common dir replacing the freshly
+    // registered entry inside that window pinned the FORGE as the trusted
+    // anchor with no degradation warning; every gate this pipeline adds then
+    // passed over it (measured end-to-end). Recorded immediately after the
+    // add instead, the window is the in-process gap between two spawns —
+    // asserted here as call order: the recording's rev-parse lands before
+    // step 5's merge-base resolution opens the network window.
+    producerMocks.gitOpt.mockImplementation((...args: string[]) =>
+      args.includes('--git-common-dir') ? '/repo/.git' : null,
+    );
+    producerMocks.statSync.mockImplementation(
+      (
+        path?: unknown,
+      ): { dev: number; ino: number; mtimeMs: number } | undefined =>
+        String(path) === '/repo/.git/worktrees/review-pr-42'
+          ? { dev: 64, ino: 4242, mtimeMs: 0 }
+          : undefined,
+    );
+    await reportFor({});
+    const recordCall = producerMocks.gitOpt.mock.calls.findIndex((call) =>
+      call.includes('--git-common-dir'),
+    );
+    expect(recordCall).not.toBe(-1);
+    const recordOrder =
+      producerMocks.gitOpt.mock.invocationCallOrder[recordCall];
+    const mergeBaseOrder =
+      producerMocks.resolveMergeBase.mock.invocationCallOrder[0];
+    expect(recordOrder).toBeLessThan(mergeBaseOrder!);
+    const diffOrders = producerMocks.gitRaw.mock.invocationCallOrder;
+    for (const order of diffOrders) {
+      expect(recordOrder).toBeLessThan(order);
+    }
+  });
+
   it('refuses the fetch while repo-local config defines a content filter — the add checkout would execute it', async () => {
     // A contaminated earlier attempt's plant persists in the shared common
     // dir (cleanup never wipes it), and the `worktree add` checkout fires
@@ -665,14 +702,19 @@ describe('fetch-pr report assembly', () => {
     await expect(reportFor({})).rejects.toThrow(
       /content filter\(s\) filter\.evil\.smudge/,
     );
+    // The default fixture's discovery answers null, so the screen degrades
+    // to its own discovery — the unpinned second argument is explicit.
     expect(producerMocks.localFilterCommands).toHaveBeenCalledWith(
       process.cwd(),
+      undefined,
     );
     // The refusal fires before the add: no worktree is created while the
     // repository's checkouts execute planted commands.
     expect(producerMocks.git).not.toHaveBeenCalledWith(
       '-c',
       'core.hooksPath=/dev/null/no-hooks',
+      '-c',
+      'core.fsmonitor=',
       'worktree',
       'add',
       expect.anything(),
@@ -680,13 +722,55 @@ describe('fetch-pr report assembly', () => {
     );
   });
 
+  it('refuses the fetch when the content-filter screen cannot measure — unmeasurable is not clean', async () => {
+    // A screen git cannot complete — a wedge at a path it reads, a config it
+    // cannot open — leaves the add's execution surface unmeasured, and an
+    // unmeasured surface is a refusal, never a clean verdict.
+    producerMocks.localFilterCommands.mockReturnValue(null);
+    await expect(reportFor({})).rejects.toThrow(
+      /execution surface is unmeasurable/,
+    );
+  });
+
+  it('pins the screen and the add at the creating identity recorded before the screen', async () => {
+    // Screen and add must resolve the SAME repository: discovering through
+    // the writable gitfile per-spawn let a swap land between the screen's
+    // discovery and the add and aim the checkout at whichever repository it
+    // names — the shape scratch-tree's gate-first pin closes. Recording the
+    // creating identity once, before the screen, pins both at it.
+    producerMocks.gitOpt.mockImplementation((...args: string[]) =>
+      args.includes('--git-dir') ? '/repo/.git' : null,
+    );
+    await reportFor({});
+    expect(producerMocks.localFilterCommands).toHaveBeenCalledWith(
+      process.cwd(),
+      '/repo/.git',
+    );
+    expect(producerMocks.git).toHaveBeenCalledWith(
+      '--git-dir=/repo/.git',
+      '-c',
+      'core.hooksPath=/dev/null/no-hooks',
+      '-c',
+      'core.fsmonitor=',
+      'worktree',
+      'add',
+      worktreePath('42'),
+      reviewBranch('42'),
+    );
+  });
+
   it('runs the worktree add with hooks disabled — the checkout must not run the common dir hooks', async () => {
     // A linked worktree's `worktree add` fires the common dir's
     // post-checkout — the same shared surface the filter screen names.
+    // `core.fsmonitor` rides along neutralised: it is the other config-driven
+    // execution surface a checkout runs (measured: the pre-fix add fired a
+    // planted monitor).
     await reportFor({});
     expect(producerMocks.git).toHaveBeenCalledWith(
       '-c',
       'core.hooksPath=/dev/null/no-hooks',
+      '-c',
+      'core.fsmonitor=',
       'worktree',
       'add',
       worktreePath('42'),

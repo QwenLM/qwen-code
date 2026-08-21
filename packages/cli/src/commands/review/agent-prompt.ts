@@ -158,6 +158,15 @@ interface PlanReport {
   worktreeAdminDir?: unknown;
   /** The admin entry's recorded filesystem identity (`dev:ino`). */
   worktreeAdminDevIno?: unknown;
+  /**
+   * The head sha fetch-pr recorded at fetch time: welded into the
+   * scratch-tree call as its out-of-band CONTENT check. The two fields above
+   * anchor the tree's identity, but the refs inside the verified repository
+   * are same-user-writable, and a rewritten worktree HEAD survives every
+   * identity check — the scratch tree refuses a HEAD that disagrees with
+   * this record.
+   */
+  fetchedSha?: unknown;
   mergeBaseSha?: unknown;
   host?: unknown;
   repositoryContext?: unknown;
@@ -1674,6 +1683,21 @@ export function buildRoleBrief(
       // tree's name is also what keeps a metacharacter out of that command.
       const label = scratchLabel(opts.key ?? role);
       const anchor = recordedAnchorOf(report);
+      // The trailing operands, each on its own continued line: the anchor
+      // when the plan carries one, then the sha fetch-pr recorded
+      // out-of-band — the scratch tree's content check, which catches a
+      // rewritten worktree HEAD that survives every identity check.
+      const operands: string[] = [];
+      if (anchor !== undefined) {
+        operands.push(`  --admin-dir ${shellQuotePath(anchor.adminDir)}`);
+        if (anchor.devIno !== undefined) {
+          operands.push(`  --admin-dev-ino ${shellQuotePath(anchor.devIno)}`);
+        }
+      }
+      const fetchedSha = report.fetchedSha;
+      if (typeof fetchedSha === 'string' && fetchedSha !== '') {
+        operands.push(`  --expected-head-sha ${shellQuotePath(fetchedSha)}`);
+      }
       parts.push(
         '',
         '**Your scratch tree — where every probe, mutant and candidate fix goes.** ' +
@@ -1692,15 +1716,14 @@ export function buildRoleBrief(
         // a bare interpolation, and the failure would be silent — every shard's
         // scratch tree unavailable, every probe demoted to a reading.
         `"\${QWEN_CODE_CLI:-qwen}" review scratch-tree --worktree ${shellQuotePath(resolve(wt))} \\`,
-        `  --label ${label}${anchor === undefined ? '' : ' \\'}`,
-        ...(anchor === undefined
-          ? []
-          : anchor.devIno === undefined
-            ? [`  --admin-dir ${shellQuotePath(anchor.adminDir)}`]
-            : [
-                `  --admin-dir ${shellQuotePath(anchor.adminDir)} \\`,
-                `  --admin-dev-ino ${shellQuotePath(anchor.devIno)}`,
-              ]),
+        `  --label ${label}${operands.length === 0 ? '' : ' \\'}`,
+        // Every operand except the last carries the line continuation; the
+        // last ends the block. A plan recording neither anchor nor sha leaves
+        // `--label` ending the command, byte-identical to the pre-hardening
+        // weld.
+        ...operands.map((line, i) =>
+          i === operands.length - 1 ? line : `${line} \\`,
+        ),
         '```',
         '',
         'It reports `path` — work there, and leave what you leave: `cleanup` sweeps ' +

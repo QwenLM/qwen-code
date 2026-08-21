@@ -34,6 +34,10 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
+// Import cycle with `./git.js` (it imports this file's env/path helpers) is
+// safe here: `GIT_TIMEOUT_MS` is read only inside function bodies, never at
+// module-evaluation time.
+import { GIT_TIMEOUT_MS } from './git.js';
 import { readWorkspacePackages } from './workspaces.js';
 
 export type SweepResult = ReturnType<typeof spawnSync>;
@@ -186,7 +190,8 @@ export function sanitizedGitEnv(): NodeJS.ProcessEnv {
 }
 
 /**
- * The repo-local `filter.<name>.smudge|clean` commands, when any are defined.
+ * The repo-local `filter.<name>.smudge|clean|process` commands, when any are
+ * defined — or null when the screen could not measure the repository.
  *
  * The checkouts this pipeline runs EXECUTE these — hooks are disabled by its
  * `core.hooksPath` override, filters are not — and the planting surface is two
@@ -195,28 +200,78 @@ export function sanitizedGitEnv(): NodeJS.ProcessEnv {
  * `$(git rev-parse --git-path info/attributes)`. discard and cleanup never
  * wipe the common dir, so a filter planted while reviewing one PR fires on
  * every later matching checkout of the user's OWN repository — persistence
- * planted by reviewing a malicious PR, measured live. The two local config
- * files are checked with `--file` rather than merged config because filters
- * in the user's global config (git-lfs is the common one) are the user's own
+ * planted by reviewing a malicious PR, measured live. The local config files
+ * are checked with `--file` rather than merged config because filters in the
+ * user's global config (git-lfs is the common one) are the user's own
  * contract, exactly like any git command they run — while a probe's planting
  * surface is the repo-local files. The state cannot be told apart from a
  * filter the user set deliberately, and cannot be safely wiped, so a hit is a
  * refusal upstream, not a cleanup here.
+ *
+ * `smudge|clean` is not the whole surface either: `filter.<name>.process` is
+ * the modern long-running filter form and executes on the same checkouts, and
+ * an `include.path` directive in a scanned file pulls filter definitions from
+ * a file the scan never names — `--includes` is what makes `git config` honor
+ * it, measured: planted either way, the pre-fix screen answered clean while
+ * the authorised checkout executed the plant.
+ *
+ * Discovery runs through `pinnedGitDir` when the caller has one — the admin
+ * entry its identity gate just VERIFIED — instead of through the writable
+ * gitfile: a screen that discovers through that file can be aimed at a clean
+ * decoy for the duration of the scan and restored before the gate, so planted
+ * filters stay invisible while the checkout the screen authorises executes
+ * them (measured). Callers must therefore run this AFTER their identity gate
+ * and hand it the verified identity; a caller with none degrades to
+ * discovery, the pre-hardening shape.
+ *
+ * Null — the refusal — is the answer whenever the screen cannot complete: a
+ * discovery git does not answer, or a candidate read it cannot finish. The
+ * pre-fix screen `continue`-d past a dead read to a clean verdict; a FIFO
+ * planted at a scanned path wedged `git config --file` in open() with no
+ * timeout and no output, hanging every run until a human removed it
+ * (measured). An unscreened candidate is an unmeasured execution surface,
+ * which the callers refuse like any other unmeasured shape. The timeout is
+ * the same deadline every git wrapper in this pipeline carries — a hang must
+ * still end — with a parameter seam so a test does not wait it out in full.
  */
-export function localFilterCommands(worktree: string): string[] {
+export function localFilterCommands(
+  worktree: string,
+  pinnedGitDir?: string,
+  timeoutMs: number = GIT_TIMEOUT_MS,
+): string[] | null {
   const files = spawnSync(
     'git',
-    ['rev-parse', '--git-common-dir', '--git-dir'],
-    { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
+    pinnedGitDir === undefined
+      ? ['rev-parse', '--git-common-dir', '--git-dir']
+      : [
+          `--git-dir=${pinnedGitDir}`,
+          'rev-parse',
+          '--path-format=absolute',
+          '--git-common-dir',
+        ],
+    {
+      cwd: worktree,
+      encoding: 'utf8',
+      env: sanitizedGitEnv(),
+      timeout: timeoutMs,
+    },
   );
   if (files.error || files.status !== 0 || typeof files.stdout !== 'string') {
-    return [];
+    return null;
   }
-  const [commonDir, gitDir] = files.stdout.trim().split('\n');
-  const common = resolve(worktree, commonDir);
+  const lines = files.stdout.trim().split('\n');
+  // Absolute under the pin (`--path-format=absolute`); relative otherwise, as
+  // the answers resolve against `worktree`.
+  const common =
+    pinnedGitDir === undefined ? resolve(worktree, lines[0]) : lines[0];
   const candidates = [
     join(common, 'config'),
-    join(resolve(worktree, gitDir), 'config.worktree'),
+    // Unpinned discovery also names the tree's OWN per-worktree config; the
+    // pinned form gets it from the worktrees sweep below — the pinned answer
+    // is the COMMON dir, and the sweep reads every entry under it.
+    ...(pinnedGitDir === undefined && lines[1] !== undefined
+      ? [join(resolve(worktree, lines[1]), 'config.worktree')]
+      : []),
   ];
   // Every OTHER worktree's per-worktree config too. The screen runs against
   // one tree, but the checkout it authorises can run in ANOTHER — a scratch
@@ -230,7 +285,7 @@ export function localFilterCommands(worktree: string): string[] {
       candidates.push(join(common, 'worktrees', entry, 'config.worktree'));
     }
   } catch {
-    // No linked worktrees registered: the two candidates above are all of it.
+    // No linked worktrees registered: the candidates above are all of it.
   }
   const found: string[] = [];
   for (const file of candidates) {
@@ -241,12 +296,31 @@ export function localFilterCommands(worktree: string): string[] {
         'config',
         '--file',
         file,
+        '--includes',
         '--get-regexp',
-        '^filter\\..*\\.(smudge|clean)$',
+        '^filter\\..*\\.(smudge|clean|process)$',
       ],
-      { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
+      {
+        cwd: worktree,
+        encoding: 'utf8',
+        env: sanitizedGitEnv(),
+        timeout: timeoutMs,
+      },
     );
-    if (r.error || r.status !== 0 || typeof r.stdout !== 'string') continue;
+    // Exit 0 and exit 1 are both ANSWERS — 1 is "no key matches", and a
+    // clean answer is silent. Exit 1 that says something on stderr is git
+    // reporting it could not read the candidate ("warning: unable to
+    // access ... Permission denied", measured) — an unscreened candidate,
+    // not a measured-clean one. Any other status is a dead read the same
+    // way, and a spawn killed by the timeout carries its error on `error`.
+    if (
+      r.error ||
+      typeof r.stdout !== 'string' ||
+      (r.status !== 0 && r.status !== 1) ||
+      (r.status === 1 && typeof r.stderr === 'string' && r.stderr.trim() !== '')
+    ) {
+      return null;
+    }
     for (const line of r.stdout.split('\n')) {
       const key = line.split(/\s+/)[0];
       if (key && !found.includes(key)) found.push(key);
@@ -280,7 +354,9 @@ export function localFilterCommands(worktree: string): string[] {
  * unregister's git calls run under. Without it they re-discover the repository
  * through the same writable gitfile the probe exists to stop trusting, and a
  * swap landing between the probe and these spawns aims them at whichever
- * repository it names.
+ * repository it names. It also anchors the registration sweep below: under a
+ * swapped gitfile the tree's own pointer names the wrong entry, and only the
+ * pinned repository's common dir holds the one that must go.
  */
 export function discardWorktree(
   cwd: string,
@@ -343,7 +419,7 @@ export function discardWorktree(
   // concurrently against one common dir), or the user's own worktree on a
   // volume that happens to be unmounted. So the entry is found by its own
   // `gitdir` file and removed alone.
-  dropWorktreeRegistration(cwd, tree, ownAdminDir);
+  dropWorktreeRegistration(cwd, tree, ownAdminDir, pinnedGitDir);
   return sweep;
 }
 
@@ -403,7 +479,35 @@ function dropWorktreeRegistration(
   cwd: string,
   tree: string,
   adminDir: string | null,
+  pinnedGitDir?: string,
 ): void {
+  if (pinnedGitDir !== undefined) {
+    // With a pin, the authoritative registration lives in the PINNED
+    // repository, and the tree's own pointer cannot be trusted to name it:
+    // a gitfile swapped away from the pin aims `adminDirOf` at whichever
+    // entry the swap names, and `worktree remove`'s backpointer validation
+    // then refuses the genuine entry while the swapped one survives (measured
+    // — the next pinned add died "missing but already registered"). Sweep
+    // the pinned common dir for the entry whose OWN backpointer names this
+    // tree, take that, and take the pointed-at entry beside it.
+    const common = spawnSync(
+      'git',
+      [
+        `--git-dir=${pinnedGitDir}`,
+        'rev-parse',
+        '--path-format=absolute',
+        '--git-common-dir',
+      ],
+      { cwd, encoding: 'utf8', env: sanitizedGitEnv() },
+    );
+    if (
+      !common.error &&
+      common.status === 0 &&
+      typeof common.stdout === 'string'
+    ) {
+      sweepEntriesFor(join(common.stdout.trim(), 'worktrees'), tree);
+    }
+  }
   if (adminDir !== null) {
     try {
       rmSync(adminDir, { recursive: true, force: true });
@@ -413,6 +517,7 @@ function dropWorktreeRegistration(
     }
     return;
   }
+  if (pinnedGitDir !== undefined) return;
   // No usable pointer — the case this whole step exists for, since a tree whose
   // `.git` is corrupt is exactly the one `worktree remove` refuses and the next
   // `add` then calls "already registered". Fall back to the reverse scan, and
@@ -424,21 +529,32 @@ function dropWorktreeRegistration(
     { cwd, encoding: 'utf8', env: sanitizedGitEnv() },
   );
   if (common.status !== 0 || typeof common.stdout !== 'string') return;
-  const dir = join(common.stdout.trim(), 'worktrees');
+  sweepEntriesFor(join(common.stdout.trim(), 'worktrees'), tree);
+}
+
+/**
+ * Remove every entry under `worktreesDir` whose own `gitdir` backpointer
+ * names `tree` and whose tree is gone — never a live worktree's registration,
+ * whatever its `gitdir` file claims.
+ */
+function sweepEntriesFor(worktreesDir: string, tree: string): void {
   let ids: string[];
   try {
-    ids = readdirSync(dir);
+    ids = readdirSync(worktreesDir);
   } catch {
     return; // No linked worktrees at all.
   }
   const wanted = samePath(tree);
   for (const id of ids) {
     try {
-      const gitdir = readFileSync(join(dir, id, 'gitdir'), 'utf8').trim();
+      const gitdir = readFileSync(
+        join(worktreesDir, id, 'gitdir'),
+        'utf8',
+      ).trim();
       const named = dirname(gitdir);
       if (samePath(named) !== wanted) continue;
       if (existsSync(named)) continue;
-      rmSync(join(dir, id), { recursive: true, force: true });
+      rmSync(join(worktreesDir, id), { recursive: true, force: true });
     } catch {
       // Unreadable entry: leave it. The next `add` will say so.
     }
@@ -577,7 +693,21 @@ function ignoreSourcesOf(
 ): Map<string, IgnoreRule> | null {
   const r = spawnSync(
     'git',
-    [...pin, ...pipelineExcludeArgs(), 'check-ignore', '-z', '-v', '--stdin'],
+    [
+      ...pin,
+      // The same neutrality the measurement spawns above carry: git EXECUTES
+      // `core.fsmonitor` for `check-ignore` too, and the config that names it
+      // is the contaminator's write surface — measured, a probe with any
+      // residue fired the plant once per reconciliation spawn on essentially
+      // every healthy run.
+      '-c',
+      'core.fsmonitor=',
+      ...pipelineExcludeArgs(),
+      'check-ignore',
+      '-z',
+      '-v',
+      '--stdin',
+    ],
     {
       cwd,
       input: `${paths.join('\0')}\0`,
@@ -649,12 +779,26 @@ function trackedIgnoreSources(
       s.length > 0 && !isAbsolute(s) && !s.split('/').some((p) => p === '..'),
   );
   if (inside.length === 0) return new Set();
-  const r = spawnSync('git', [...pin, 'ls-files', '-z', '--', ...inside], {
-    cwd,
-    encoding: 'utf8',
-    maxBuffer: 64 * 1024 * 1024,
-    env: sanitizedGitEnv(),
-  });
+  const r = spawnSync(
+    'git',
+    [
+      ...pin,
+      // Same neutrality as the sibling spawn in `ignoreSourcesOf`: git runs
+      // `core.fsmonitor` for this `ls-files` as well.
+      '-c',
+      'core.fsmonitor=',
+      'ls-files',
+      '-z',
+      '--',
+      ...inside,
+    ],
+    {
+      cwd,
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+      env: sanitizedGitEnv(),
+    },
+  );
   if (r.error || r.status !== 0 || typeof r.stdout !== 'string') {
     return new Set();
   }

@@ -12,6 +12,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import {
   appendFileSync,
   chmodSync,
@@ -33,6 +34,7 @@ import { isolateHostGitConfig } from './test-utils.js';
 import {
   discardWorktree,
   exposeDependencies,
+  localFilterCommands,
   sanitizedGitEnv,
   worktreeCreateFailureDetail,
   worktreeResidue,
@@ -111,6 +113,33 @@ describe('worktreeResidue', () => {
     const got = worktreeResidue(tree);
     expect(got.paths).toEqual([]);
     expect(got.total).toBe(0);
+  });
+
+  it('never executes core.fsmonitor in the attribution spawns — the measurement must not become the execution', () => {
+    // The residue probe empties `core.fsmonitor` on its measurement spawns,
+    // but the two reconciliation spawns it edits — `check-ignore` and the
+    // tracked-source `ls-files` — run against the same writable config, and
+    // git executes the monitor for both commands (measured). Extras are
+    // non-empty in the ordinary case — this repo's own healthy runs carry
+    // thousands — so a probe with any residue fired the plant once per spawn
+    // on essentially every healthy run. Plant a monitor, force the
+    // attribution path with an ignored extra, and count fires.
+    const marker = join(repo, 'fsmonitor-fired');
+    gitRepo('config', 'core.fsmonitor', `touch ${marker}`);
+    // An ignored extra whose rule the tree carries as an EDIT: the
+    // `check-ignore` attribution names a RELATIVE source, which is what
+    // sends the tracked-source `ls-files` spawn — the second execution site
+    // — down the same path.
+    appendFileSync(join(tree, '.gitignore'), '*.log\n');
+    writeFileSync(join(tree, 'artifact.log'), 'build output\n');
+
+    const got = worktreeResidue(tree);
+
+    expect(existsSync(marker)).toBe(false);
+    // The verdict is unchanged by the neutrality: the extra hidden by an
+    // edited ignore rule is still reported, not silently dropped.
+    expect(got.paths).toContain('artifact.log');
+    expect(got.unmeasured).toBeUndefined();
   });
 
   it('reports BOTH names of a rename — the restore needs the one that is gone', () => {
@@ -1841,4 +1870,124 @@ describe('worktreeCreateFailureDetail', () => {
       'probe worktree could not be created: boom',
     );
   });
+});
+
+describe('localFilterCommands', () => {
+  // The screen is tested against a REAL repository: the planting shapes it
+  // exists to catch are git's own config semantics, and a mock of the spawn
+  // would be testing the test.
+  const moduleRequire = createRequire(import.meta.url);
+  let repo: string;
+  let gitIsolation: ReturnType<typeof isolateHostGitConfig>;
+
+  const gitRepo = (...args: string[]) =>
+    execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
+
+  beforeEach(() => {
+    gitIsolation = isolateHostGitConfig();
+    repo = mkdtempSync(join(tmpdir(), 'qwen-filter-screen-'));
+    gitRepo('init', '-q', '-b', 'main');
+    gitRepo('config', 'user.email', 't@t.t');
+    gitRepo('config', 'user.name', 't');
+    writeFileSync(join(repo, 'a.ts'), 'x\n');
+    gitRepo('add', '-A');
+    gitRepo('commit', '-qm', 'head');
+  });
+
+  afterEach(() => {
+    rmSync(repo, { recursive: true, force: true });
+    gitIsolation.dispose();
+  });
+
+  it('detects the long-running filter.<name>.process form — smudge|clean is not the whole surface', () => {
+    // `filter.<name>.process` is the modern long-running filter form and
+    // executes on the same checkouts; the pre-fix regex never matched it, so
+    // the screen answered clean while the authorised checkout ran the plant
+    // (measured).
+    gitRepo('config', 'filter.evil.process', 'touch /tmp/qwen-never');
+    expect(localFilterCommands(repo)).toEqual(['filter.evil.process']);
+  });
+
+  it('detects a filter planted behind include.path', () => {
+    // An `include.path` directive pulls the filter definition from a file
+    // the scan never names; without `--includes`, `git config --file` does
+    // not honor it, and the plant stayed invisible while the checkout ran it
+    // (measured).
+    const inc = join(repo, 'included-config');
+    writeFileSync(inc, '[filter "evil"]\n\tsmudge = touch /tmp/qwen-never\n');
+    gitRepo('config', 'include.path', inc);
+    expect(localFilterCommands(repo)).toEqual(['filter.evil.smudge']);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'answers unmeasurable — not clean — when a candidate read wedges',
+    () => {
+      // A FIFO planted at a scanned path blocks `git config --file` in
+      // open() waiting for a writer that never comes; the pre-fix spawn had
+      // no timeout, so one mkfifo wedged every run with no output and no
+      // refusal until a human removed it (measured). The bounded spawn ends
+      // the hang, and a read that cannot finish is a refusal upstream, never
+      // a clean verdict.
+      //
+      // The screen runs in a CHILD process under a hard deadline, because a
+      // synchronous wedge blocks the event loop — the pre-fix shape — and no
+      // in-process timer can fire while it does. The deadline turns "hangs"
+      // into "fails" on the pre-fix code and measures the bounded answer on
+      // the fixed one.
+      mkdirSync(join(repo, '.git', 'worktrees', 'evil'), { recursive: true });
+      execFileSync('mkfifo', [
+        join(repo, '.git', 'worktrees', 'evil', 'config.worktree'),
+      ]);
+      // Suites run from the package root; the module under test lives at a
+      // fixed path below it (vitest rewrites `import.meta.url`, so it is not
+      // a file URL here).
+      const modulePath = join(
+        process.cwd(),
+        'src',
+        'commands',
+        'review',
+        'lib',
+        'worktree.js',
+      );
+      const script = join(repo, 'screen-probe.mts');
+      writeFileSync(
+        script,
+        `import { localFilterCommands } from ${JSON.stringify(modulePath)};\n` +
+          'const got = localFilterCommands(process.argv[2], undefined, 500);\n' +
+          'process.stdout.write(JSON.stringify(got));\n',
+      );
+      const tsxCli = moduleRequire.resolve('tsx/cli');
+      let stdout = '';
+      try {
+        stdout = execFileSync(process.execPath, [tsxCli, script, repo], {
+          encoding: 'utf8',
+          timeout: 10_000,
+        });
+      } catch (err) {
+        // Killed at the deadline: the screen hung instead of refusing.
+        throw new Error(
+          `the filter screen wedged instead of answering unmeasurable: ${(err as Error).message}`,
+        );
+      }
+      expect(JSON.parse(stdout)).toBeNull();
+    },
+  );
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'answers unmeasurable — not clean — when a candidate read cannot complete',
+    () => {
+      // A candidate git cannot open is a candidate whose content could not be
+      // screened; the pre-fix loop `continue`-d past it to a clean verdict.
+      const entry = join(repo, '.git', 'worktrees', 'locked');
+      mkdirSync(entry, { recursive: true });
+      const cfg = join(entry, 'config.worktree');
+      writeFileSync(cfg, '[filter "evil"]\n\tsmudge = touch /tmp/qwen-never\n');
+      chmodSync(cfg, 0o000);
+      try {
+        expect(localFilterCommands(repo)).toBeNull();
+      } finally {
+        chmodSync(cfg, 0o644);
+      }
+    },
+  );
 });

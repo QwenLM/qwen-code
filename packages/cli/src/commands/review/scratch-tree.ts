@@ -133,11 +133,21 @@ export interface ScratchTreeArgs {
    * the recorded name points at passes every path check.
    */
   adminDevIno?: string;
+  /**
+   * The head sha the pipeline recorded at fetch time (`fetchedSha`), when the
+   * caller holds it: the command refuses when the worktree's HEAD resolves to
+   * any other commit. Identity is anchored out-of-band by `adminDir`; the
+   * CONTENT is what this anchors — the refs inside the verified repository
+   * are same-user-writable, and a rewritten `<common>/worktrees/<id>/HEAD`
+   * survives every identity check (measured). Absent for callers with no
+   * out-of-band record; the discovered HEAD is used as-is.
+   */
+  expectedHeadSha?: string;
   out?: string;
 }
 
 /**
- * `git`, with the user's hooks out of the way.
+ * `git`, with the execution surfaces this command does not own out of the way.
  *
  * A scratch tree is a LINKED worktree, so its hooks resolve to the common dir —
  * the user's own `.git/hooks`. `git worktree add` and `checkout` both fire
@@ -145,14 +155,25 @@ export interface ScratchTreeArgs {
  * that repository has (and whatever a probe managed to write into it) as a side
  * effect of creating or resetting a tree. Pointing `core.hooksPath` at a path
  * that holds no hooks covers the HOOKS; it does not cover content FILTERS —
- * `filter.<name>.smudge|clean` commands are config-driven, and a checkout runs
- * whichever ones an attributes file selects. `runScratchTree` detects that
- * surface in the repository's own config and refuses rather than run it (see
- * `localFilterCommands`). What a probe does with its own shell is the probe's
- * business, and the report says plainly that the common dir is shared rather
- * than isolated.
+ * `filter.<name>.smudge|clean|process` commands are config-driven, and a
+ * checkout runs whichever ones an attributes file selects. Filters cannot be
+ * neutralised by name (the names are unbounded), so `runScratchTree` screens
+ * that surface in the repository's own config and refuses rather than run it
+ * (see `localFilterCommands`). `core.fsmonitor` CAN be neutralised — it is a
+ * single key git EXECUTES on index-reading commands, checkouts included, and
+ * emptying it here is the same discipline the residue probe applies to its
+ * measurements: the creation and reset this command runs must not themselves
+ * become an execution of the tree's config (measured: every checkout this
+ * command runs fired a planted monitor). What a probe does with its own shell
+ * is the probe's business, and the report says plainly that the common dir is
+ * shared rather than isolated.
  */
-const NO_HOOKS = ['-c', 'core.hooksPath=/dev/null/no-hooks'];
+const NO_HOOKS = [
+  '-c',
+  'core.hooksPath=/dev/null/no-hooks',
+  '-c',
+  'core.fsmonitor=',
+];
 
 function gitOut(cwd: string, ...args: string[]): string {
   // `ls-files -v` prints a line per tracked file and `clean` a line per removal;
@@ -197,6 +218,7 @@ function resetScratchTree(
   tree: string,
   headSha: string,
   worktree: string,
+  verifiedGitDir: string,
 ): boolean {
   // The gate that makes the rest of this function safe to run. A LINKED
   // worktree has a `.git` file pointing at the common dir; a bare directory
@@ -213,6 +235,7 @@ function resetScratchTree(
   // naming another repository, would aim everything below at whatever it
   // resolves to. Discard-and-rebuild is the correct answer to all of it —
   // `discardWorktree`'s `rmSync` unlinks a symlink rather than following it.
+  let pin: string[] = [];
   try {
     if (!lstatSync(tree).isDirectory()) return false;
     // A genuine linked worktree carries its `.git` as a FILE naming its admin
@@ -238,7 +261,25 @@ function resetScratchTree(
       realpathSync(
         gitOut(dir, 'rev-parse', '--path-format=absolute', '--git-common-dir'),
       );
-    if (commonOf(tree) !== commonOf(worktree)) return false;
+    // The reference side of that comparison is the common dir the residue gate
+    // VERIFIED for the review worktree, resolved under the pin — never a second
+    // discovery through the writable gitfile. A double swap landing between the
+    // passing gate and this reset — BOTH gitfiles, the review worktree's and
+    // this tree's, retargeted at one forge with forged backpointers and the
+    // filter planted — made the discovery-side comparison agree with ITSELF over
+    // the forge: the reset checkout executed the forge's filter and the final
+    // HEAD comparison passed against the clone while the report answered
+    // `available: true, reused: true` (measured).
+    const trustedCommon = realpathSync(
+      gitOut(
+        worktree,
+        `--git-dir=${verifiedGitDir}`,
+        'rev-parse',
+        '--path-format=absolute',
+        '--git-common-dir',
+      ),
+    );
+    if (commonOf(tree) !== trustedCommon) return false;
     // EVERY ancestor, not just the parent. The first cut lstat'd `dirname(tree)`
     // on the stated premise that `.qwen/tmp` is the one component above the leaf
     // anything here can replace — which is false one hop higher: a link at
@@ -249,15 +290,13 @@ function resetScratchTree(
     // resolves through the same link). The walk is bounded at the repository the
     // common dir belongs to — above that is the user's own layout, and `/var` is
     // a symlink on every macOS box.
-    if (
-      redirectedAncestor(dirname(resolve(tree)), dirname(commonOf(worktree)))
-    ) {
+    if (redirectedAncestor(dirname(resolve(tree)), dirname(trustedCommon))) {
       return false;
     }
     const gitdir = realpathSync(
       gitOut(tree, 'rev-parse', '--path-format=absolute', '--git-dir'),
     );
-    if (gitdir === commonOf(worktree)) return false;
+    if (gitdir === trustedCommon) return false;
     // The admin entry must point back at THIS tree. A planted gitfile naming
     // a SIBLING worktree's admin entry passes every check above — directory,
     // gitfile, toplevel resolving to itself, common dirs comparing equal,
@@ -272,6 +311,11 @@ function resetScratchTree(
     ) {
       return false;
     }
+    // The identity this gate just round-trip-verified, pinned onto every spawn
+    // below: a gitfile swapped between the check above and the mutations would
+    // aim `checkout --force` and `clean -ffdx` at whichever repository it
+    // names — the same post-gate window the creation's pin closes.
+    pin = [`--git-dir=${gitdir}`, `--work-tree=${realpathSync(tree)}`];
   } catch {
     return false;
   }
@@ -283,7 +327,7 @@ function resetScratchTree(
     // it to one syscall, which is the same trade the hunk probe's pre-write
     // re-check makes.
     if (lstatSync(tree).isSymbolicLink()) return false;
-    git(tree, 'checkout', '--force', '--detach', headSha);
+    git(tree, ...pin, 'checkout', '--force', '--detach', headSha);
     // `-ff` because a single `-f` refuses to delete a nested git repository, so
     // a probe that cloned or `git init`-ed a fixture would survive a reset the
     // report calls pristine — and `-x` because IGNORED paths are where the rest
@@ -291,14 +335,14 @@ function resetScratchTree(
     // `.tsbuildinfo`, a `dist/` it built and then mutated. Sparing them to keep
     // the dependency farm cheap bought a second and sold the guarantee; the
     // farm is re-linked by the caller instead.
-    git(tree, 'clean', '-ffdx');
+    git(tree, ...pin, 'clean', '-ffdx');
     // `checkout --force` silently skips a file carrying the skip-worktree bit,
     // and `clean` never touches tracked files — so a probe that set the bit
     // (directly, or via `git sparse-checkout`) and then edited the file leaves
     // a mutant that survives the reset with `git status` reading empty. The
     // sha check cannot see it. Refusing here sends the caller down the
     // discard-and-rebuild path, which is guaranteed clean.
-    const hidden = gitOut(tree, 'ls-files', '-v')
+    const hidden = gitOut(tree, ...pin, 'ls-files', '-v')
       .split('\n')
       .some((line) => /^[a-zS]/.test(line));
     if (hidden) return false;
@@ -314,11 +358,11 @@ function resetScratchTree(
     // So the presence of ANY gitlink in the commit sends this tree down the
     // rebuild path: a fresh `worktree add` starts them uninitialized, and a
     // repo with submodules pays a rebuild per call rather than a wrong verdict.
-    const hasSubmodules = gitOut(tree, 'ls-files', '-s')
+    const hasSubmodules = gitOut(tree, ...pin, 'ls-files', '-s')
       .split('\n')
       .some((line) => line.startsWith('160000'));
     if (hasSubmodules) return false;
-    return gitOut(tree, 'rev-parse', 'HEAD') === headSha;
+    return gitOut(tree, ...pin, 'rev-parse', 'HEAD') === headSha;
   } catch {
     // A tree too broken to reset is not a tree to probe in. The caller
     // discards and rebuilds it rather than handing back a half-known state.
@@ -388,33 +432,18 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
     );
   }
 
-  let headSha: string;
-  try {
-    headSha = gitOut(worktree, 'rev-parse', 'HEAD');
-  } catch (err) {
-    return unavailable(
-      `cannot read HEAD in ${worktree}: ${inertPath((err as Error).message)}`,
-    );
-  }
-
-  // BEFORE any checkout runs — the reuse path's reset and the rebuild path's
-  // `worktree add` both execute configured content filters.
-  const filters = localFilterCommands(worktree);
-  if (filters.length > 0) {
-    return unavailable(
-      `the repository's local config defines content filter(s) ${filters
-        .map(inertPath)
-        .join(', ')} — ` +
-        'the checkouts this command runs would EXECUTE them (hooks are disabled, ' +
-        'filters are config-driven), and two plain writes into the common dir are ' +
-        'enough to plant both the filter and the attributes that select it. Remove ' +
-        'the filter config — or the attributes file that uses it — if it is not ' +
-        'yours; until then no scratch tree is safe to create or reset.',
-    );
-  }
-
-  // Read BEFORE the tree is created, so it describes the shared tree as this
-  // call found it and can never be confused with anything this call did.
+  // The identity gate runs FIRST, before the filter screen, the head read and
+  // any checkout: every step after it resolves the repository through the
+  // identity the gate VERIFIED, never re-discovering through the writable
+  // gitfile. Screen-before-gate was the shape the pin exists to remove — a
+  // swap aimed at a clean decoy for the screen's discovery and restored
+  // before the gate left a planted filter invisible, and the checkout the
+  // screen authorised executed it (measured). The gate is the one step that
+  // cannot run pinned: it is what produces the pin.
+  //
+  // Read BEFORE the tree is created, so the residue describes the shared tree
+  // as this call found it and can never be confused with anything this call
+  // did.
   const anchor: ResidueAnchor | undefined =
     args.adminDir === undefined
       ? undefined
@@ -423,8 +452,8 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
         : { adminDir: args.adminDir, devIno: args.adminDevIno };
   const residue = worktreeResidue(worktree, anchor);
   // An identity refusal refuses everything downstream as well: the head sha
-  // above was read through the same unverified discovery, and the `worktree
-  // add` below would materialise it — measured, a call that handed back
+  // would be read through the same unverified discovery, and the `worktree
+  // add` would materialise it — measured, a call that handed back
   // `available: true` with a scratch tree descended from the very identity
   // its own probe just refused, answering the forge's head sha.
   if (residue.identityRefused) {
@@ -445,6 +474,97 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
     };
   }
   const sharedTreeResidue = residue.paths;
+  // A refusal after THIS point carries the measured residue: the report's
+  // fields and its note must keep describing the same tree, the contract the
+  // create-failure return below already honors.
+  const measuredRefusal = (note: string): ScratchTreeReport => ({
+    available: false,
+    reused: false,
+    dependencies: null,
+    sharedTreeResidue,
+    sharedTreeResidueTotal: residue.total,
+    sharedTreeUnmeasured: residue.unmeasured,
+    note,
+  });
+  // The gate's contract is that a passing probe hands back the identity it
+  // verified; without one, nothing after this line can be pinned.
+  const verifiedGitDir = residue.verifiedGitDir;
+  if (verifiedGitDir === undefined) {
+    return measuredRefusal(
+      'the identity gate passed without a verified identity, so the screen ' +
+        'and the creation cannot be pinned to it — no scratch tree is ' +
+        'created. Do NOT fall back to probing in the review worktree — ' +
+        'other agents are reading it. A probe you cannot isolate is ' +
+        'inconclusive, and the finding keeps the reading-based verdict and ' +
+        'its low-confidence floor.',
+    );
+  }
+
+  // The content-filter screen, AFTER the gate and pinned to the identity it
+  // verified — BEFORE any checkout runs: the reuse path's reset and the
+  // rebuild path's `worktree add` both execute configured content filters.
+  const filters = localFilterCommands(worktree, verifiedGitDir);
+  if (filters === null) {
+    return measuredRefusal(
+      'the content-filter screen could not measure the repository — the ' +
+        'checkouts this command runs cannot be authorised while their ' +
+        'execution surface is unmeasurable, so no scratch tree is created.',
+    );
+  }
+  if (filters.length > 0) {
+    return measuredRefusal(
+      `the repository's local config defines content filter(s) ${filters
+        .map(inertPath)
+        .join(', ')} — ` +
+        'the checkouts this command runs would EXECUTE them (hooks are disabled, ' +
+        'filters are config-driven), and two plain writes into the common dir are ' +
+        'enough to plant both the filter and the attributes that select it. Remove ' +
+        'the filter config — or the attributes file that uses it — if it is not ' +
+        'yours; until then no scratch tree is safe to create or reset.',
+    );
+  }
+
+  let headSha: string;
+  try {
+    // Read under the verified identity. The pre-gate read resolved through
+    // the writable gitfile, and a swap restored before the gate tainted it
+    // while the anchored gate passed on the legit identity — the call
+    // answered `available: true` with the forge's head sha checked out, and
+    // every later probe measured attacker-chosen code attributed to the PR
+    // head (measured).
+    headSha = gitOut(
+      worktree,
+      `--git-dir=${verifiedGitDir}`,
+      'rev-parse',
+      'HEAD',
+    );
+  } catch (err) {
+    return measuredRefusal(
+      `cannot read HEAD in ${worktree}: ${inertPath((err as Error).message)}`,
+    );
+  }
+  // The CONTENT half of the out-of-band record. Identity rides the anchor;
+  // the sha is what fetch-pr already holds out-of-band, and the refs INSIDE
+  // the verified repository are still same-user-writable — one rewrite of
+  // `<common>/worktrees/<id>/HEAD` survives every identity check and
+  // materialises the attacker's commit under a passing gate (measured). A
+  // caller holding the recorded sha therefore gets a refusal on any
+  // disagreement; a caller without one keeps the discovered value.
+  const expectedHeadSha = args.expectedHeadSha;
+  if (
+    typeof expectedHeadSha === 'string' &&
+    expectedHeadSha !== '' &&
+    headSha !== expectedHeadSha
+  ) {
+    return measuredRefusal(
+      `the review worktree resolves to ${headSha.slice(0, 9)} but the ` +
+        `pipeline recorded ${expectedHeadSha.slice(0, 9)} at fetch time — ` +
+        'the refs inside the verified repository are same-user-writable, and ' +
+        'a tree created now would materialise whichever commit they now ' +
+        'name, so none is created. Re-run `fetch-pr` to re-record the head ' +
+        'sha if the PR genuinely moved.',
+    );
+  }
   const residueNote = residue.unmeasured
     ? ` NOTE: whether the shared review worktree is clean could not be measured (git status ` +
       `failed: ${inertPath(residue.unmeasured)}). An unmeasured tree is not a clean one — if a later read ` +
@@ -476,7 +596,10 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
       : '';
 
   const tree = scratchWorktreePath(worktree, label);
-  if (existsSync(tree) && resetScratchTree(tree, headSha, worktree)) {
+  if (
+    existsSync(tree) &&
+    resetScratchTree(tree, headSha, worktree, verifiedGitDir)
+  ) {
     // The reset clears the ignored state too, so the farm went with it: this
     // re-links it. `rebuild` rather than trusting a marker, because
     // `node_modules` is where a probe is told it may install, and anything a
@@ -510,23 +633,19 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
     };
   }
 
-  // The identity the residue gate just verified, for everything that now
-  // runs from it: the gate checked the tree's gitfile ONCE, and these spawns
-  // would otherwise re-discover the repository through that same writable
-  // file — a swap landing between the passing probe and the creation is
-  // honored by discovery, and the tree this call stands up descends from
-  // whichever repository the swap names (measured: the forge's filters
-  // executed during the creation checkout while the report answered
-  // `available: true`).
-  const verifiedGitDir = residue.verifiedGitDir;
   let sweep: SweepResult | undefined;
   try {
     // Clears both a leftover from a crashed run and a tree the reset above
     // could not rescue; either would fail `add` with `already exists`.
     sweep = discardWorktree(worktree, tree, verifiedGitDir);
+    // Pinned to the identity hoisted from the gate above: a swap landing
+    // between the passing probe and this creation is honored by discovery,
+    // and the tree this call stands up descends from whichever repository
+    // the swap names (measured: the forge's filters executed during the
+    // creation checkout while the report answered `available: true`).
     git(
       worktree,
-      ...(verifiedGitDir === undefined ? [] : [`--git-dir=${verifiedGitDir}`]),
+      `--git-dir=${verifiedGitDir}`,
       'worktree',
       'add',
       '--detach',
@@ -674,6 +793,15 @@ export const scratchTreeCommand: CommandModule = {
           "The admin entry's filesystem identity (dev:ino) recorded with " +
           '--admin-dir: the residue probe refuses an entry that no longer ' +
           'carries it',
+      })
+      .option('expected-head-sha', {
+        type: 'string',
+        describe:
+          'The head sha the pipeline recorded at fetch time: the command ' +
+          'refuses when the worktree resolves to any other commit — the ' +
+          'refs inside the verified repository are same-user-writable, and ' +
+          'this is the out-of-band content check that catches a rewritten ' +
+          'worktree HEAD',
       })
       .option('out', {
         type: 'string',

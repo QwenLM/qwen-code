@@ -2782,6 +2782,48 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
         "  --admin-dir '/repo/.git/worktrees/review-pr-6766' \\\n" +
         "  --admin-dev-ino '64:4242'",
     );
+    // The out-of-band CONTENT check: the sha fetch-pr recorded rides the
+    // plan and is welded as the scratch tree's expected head. The identity
+    // fields above anchor WHICH entry answers; this anchors WHICH COMMIT it
+    // answers — the refs inside the verified repository are
+    // same-user-writable, and a rewritten worktree HEAD survives every
+    // identity check. Full operand chain, continuation through to the sha as
+    // the block's last line.
+    expect(
+      buildRoleBrief(
+        {
+          ...PR_PLAN,
+          worktreeAdminDir: '/repo/.git/worktrees/review-pr-6766',
+          worktreeAdminDevIno: '64:4242',
+          fetchedSha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        },
+        'verify',
+        { key: 'verify--round-2--deadbeef1234' },
+      ),
+    ).toContain(
+      '--label verify--round-2--deadbeef1234 \\\n' +
+        "  --admin-dir '/repo/.git/worktrees/review-pr-6766' \\\n" +
+        "  --admin-dev-ino '64:4242' \\\n" +
+        "  --expected-head-sha 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'",
+    );
+    // The no-anchor weld carries it alone: the label's continuation lands on
+    // the sha, which ends the block.
+    expect(
+      buildRoleBrief(
+        {
+          ...PR_PLAN,
+          fetchedSha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        },
+        'verify',
+        { key: 'verify--round-2--deadbeef1234' },
+      ),
+    ).toContain(
+      '--label verify--round-2--deadbeef1234 \\\n' +
+        "  --expected-head-sha 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'",
+    );
+    // A plan with no recorded sha welds no content check — legacy and
+    // degraded plans keep the pre-hardening shape.
+    expect(p).not.toContain('--expected-head-sha');
     // No worktree, no scratch tree — a local or cross-repo review has no
     // pristine sibling to build, and HEAD is not what is under review there.
     expect(buildRoleBrief(PLAN, 'verify')).not.toContain('review scratch-tree');
