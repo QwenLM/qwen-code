@@ -6,6 +6,7 @@ import {
 } from '@qwen-code/webui/daemon-react-sdk';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall, Message } from '../../adapters/types';
+import { WEB_SHELL_MAX_TRANSCRIPT_BLOCKS } from '../../constants/sessions';
 import { useAnimationFrameTranscriptBlocks } from '../../hooks/useAnimationFrameTranscriptBlocks';
 import { useMessagesFromBlocks } from '../../hooks/useMessages';
 import { useSessionArtifacts } from '../../hooks/useSessionArtifacts';
@@ -94,17 +95,6 @@ export function findSubagentRootTool(
   return undefined;
 }
 
-export function getSubagentPrompt(
-  messages: readonly Message[],
-  rootTool: ACPToolCall,
-): string {
-  const firstUserMessage = messages.find((message) => message.role === 'user');
-  return (
-    (firstUserMessage?.role === 'user' ? firstUserMessage.content : '') ||
-    (typeof rootTool.args?.prompt === 'string' ? rootTool.args.prompt : '')
-  );
-}
-
 function statusLabel(status: string, t: ReturnType<typeof useI18n>['t']) {
   switch (status) {
     case 'completed':
@@ -161,7 +151,6 @@ function SubagentDetailContent({
     [artifactsByTurn, connection.workspaceCwd, messages],
   );
   const description = getAgentDescription(rootTool);
-  const prompt = getSubagentPrompt(messages, rootTool);
   const metrics = useMemo(
     () => getSubagentMetrics(rootTool, resolution),
     [resolution, rootTool],
@@ -236,7 +225,6 @@ function SubagentDetailContent({
           </div>
         </div>
         {stopError && <div className={styles.stopError}>{stopError}</div>}
-        {prompt && <pre className={styles.prompt}>{prompt}</pre>}
       </div>
       <div className={styles.transcript}>
         <MessageList
@@ -248,7 +236,6 @@ function SubagentDetailContent({
           activeTurnStartedAt={isRunning ? rootTool.startTime : undefined}
           workspaceCwd={connection.workspaceCwd || ''}
           hideSessionTimeline
-          hideFirstUserMessage
           firstTurnMetrics={metrics}
           includeSubagentToolUsageInMetrics={false}
           turnFileChanges={fileChangesByTurn}
@@ -365,6 +352,7 @@ export function SubagentDetail({
       workspaceCwd={workspaceCwd}
       clientId={instance.clientId}
       maxQueued={256}
+      maxBlocks={WEB_SHELL_MAX_TRANSCRIPT_BLOCKS}
       subagentTranscriptMode="full"
       suppressOwnUserEcho
     >
