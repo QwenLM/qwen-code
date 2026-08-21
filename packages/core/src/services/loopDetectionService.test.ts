@@ -1291,6 +1291,66 @@ describe('LoopDetectionService', () => {
       expect(detected).toBe(true);
     });
 
+    // Pseudo-random, internally aperiodic units (lowercase only, so no
+    // markdown-structure delta ever resets tracking) for probing unit
+    // lengths the original chant block does not cover.
+    const makeAperiodicUnit = (length: number, seed: number): string => {
+      let state = Math.imul(seed + 1, 2654435761) >>> 0 || 1;
+      let out = '';
+      while (out.length < length) {
+        state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+        out += String.fromCharCode(97 + ((state >>> 16) % 26));
+      }
+      return out.slice(0, length);
+    };
+
+    // Between the clustered rule's ~75-char bound and the span a fixed
+    // five-occurrence window can verify (~238 chars), the verified region
+    // must grow with the occurrence run — a run pinned to the last five
+    // occurrences left these units permanently undetectable.
+    it.each([100, 150, 200])(
+      'detects a %d-char repeated unit in the mid-length band',
+      (unitLength) => {
+        service.reset('');
+        const unit = makeAperiodicUnit(unitLength, unitLength);
+        expect(unit.length % DELTA).not.toBe(0);
+
+        const detected = streamAsMisalignedContentDeltas(unit.repeat(40));
+        expect(detected).toBe(true);
+        expect(service.getLastLoopType()).toBe(
+          LoopType.CHANTING_IDENTICAL_SENTENCES,
+        );
+      },
+    );
+
+    // Units of ~1 KB or more can never fit five occurrences into the
+    // retained history window; once the window saturates, the truncated-run
+    // path must admit them by verifying the whole retained region.
+    it.each([1000, 1500])(
+      'detects a %d-char repeated unit that cannot fit five occurrences in the window',
+      (unitLength) => {
+        service.reset('');
+        const unit = makeAperiodicUnit(unitLength, unitLength);
+        expect(unit.length % DELTA).not.toBe(0);
+
+        const detected = streamAsMisalignedContentDeltas(unit.repeat(30));
+        expect(detected).toBe(true);
+        expect(service.getLastLoopType()).toBe(
+          LoopType.CHANTING_IDENTICAL_SENTENCES,
+        );
+      },
+    );
+
+    it('does not accept a short occurrence run in fresh history', () => {
+      service.reset('');
+      // Three occurrences of a 1000-char unit span only 2050 chars — the
+      // history has not saturated, so the run cannot have been truncated
+      // and the short-run path must not admit it.
+      const unit = makeAperiodicUnit(1000, 7);
+      const detected = streamAsMisalignedContentDeltas(unit.repeat(3));
+      expect(detected).toBe(false);
+    });
+
     it('does not halt on a long, varied reasoning stream', () => {
       service.reset('');
       let text = '';

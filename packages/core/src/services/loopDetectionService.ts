@@ -37,7 +37,13 @@ const CONTENT_LOOP_THRESHOLD = 10;
 const CONTENT_CHUNK_SIZE = 50;
 // Kept large enough that the long-period rule below can still see
 // PERIODIC_OCCURRENCES_REQUIRED occurrences of a long (~700 char) repeated
-// unit after truncation.
+// unit after truncation. The window also bounds the detectable unit length:
+// a retained window holds at most floor((MAX_HISTORY_LENGTH -
+// CONTENT_CHUNK_SIZE) / unitLength) + 1 occurrences of any one gram, which
+// drops below PERIODIC_OCCURRENCES_REQUIRED for units of ~1 KB — the
+// truncated-run path in isPeriodicChunkRepetition admits those once the
+// history saturates. Units longer than ~MAX_HISTORY_LENGTH / 2 cannot
+// accumulate even three in-window occurrences and remain out of reach.
 const MAX_HISTORY_LENGTH = 4000;
 
 // Long-period verbatim repetition detection (issue #1775). A unit repeated
@@ -48,12 +54,19 @@ const MAX_HISTORY_LENGTH = 4000;
 // Instead, require a run of occurrences at exactly equal spacing and then
 // verify the spanned region is genuinely periodic with that stride.
 const PERIODIC_OCCURRENCES_REQUIRED = 5;
-// The verified periodic span must be substantial before halting a turn.
-// Short-period chants stay below this and are the clustered rule's domain;
-// this keeps a small number of short-period repetitions (e.g. a phrase
-// emitted a handful of times before a markdown reset) out of the long-period
-// path while still firing early for long repeated units (~5th repetition for
-// the ~300-char block in the report).
+// A run whose earlier occurrences may have been truncated away (see
+// isPeriodicChunkRepetition) must still span at least this many equally
+// spaced occurrences before the whole retained region is verified periodic
+// to compensate for the weaker occurrence evidence.
+const PERIODIC_MIN_TRUNCATED_OCCURRENCES = 3;
+// The verified periodic span must be substantial before halting a turn. The
+// verified region grows with the occurrence run (see
+// isPeriodicChunkRepetition), so mid-length units (~76-237 chars) cross the
+// floor after a handful of extra repetitions and long units cross it almost
+// immediately. The floor keeps a small number of short-period repetitions
+// (e.g. a phrase emitted a handful of times before a markdown reset) out of
+// the long-period path while still firing early for long repeated units
+// (~5th repetition for the ~300-char block in the report).
 const MIN_PERIODIC_REGION_LENGTH = 1000;
 
 // Thought tracking
@@ -774,24 +787,74 @@ export class LoopDetectionService {
    * period. Equal spacing alone could still interleave varying text between
    * occurrences, so the spanned region is additionally verified to be
    * exactly periodic with that stride before firing.
+   *
+   * The candidate run is the longest equally-spaced suffix of the recorded
+   * occurrences, not just the last PERIODIC_OCCURRENCES_REQUIRED: the
+   * verified region grows with the repetition count, which admits units
+   * between the clustered rule's ~75-char bound and the span a fixed
+   * 5-occurrence window can verify (e.g. a 150-char unit crosses
+   * MIN_PERIODIC_REGION_LENGTH at its 8th occurrence).
+   *
+   * Once the history saturates, earlier occurrences can be truncated away,
+   * so a shorter run (>= PERIODIC_MIN_TRUNCATED_OCCURRENCES) is accepted
+   * when the whole retained region — back to the start of the history — is
+   * verified periodic with the candidate stride. Without that escape valve,
+   * units of ~1 KB or more could never accumulate
+   * PERIODIC_OCCURRENCES_REQUIRED occurrences inside the window and a
+   * full-paragraph chant would spin the turn forever.
    */
   private isPeriodicChunkRepetition(indices: number[]): boolean {
-    if (indices.length < PERIODIC_OCCURRENCES_REQUIRED) {
+    if (indices.length < PERIODIC_MIN_TRUNCATED_OCCURRENCES) {
       return false;
     }
 
-    const recent = indices.slice(-PERIODIC_OCCURRENCES_REQUIRED);
-    const stride = recent[1] - recent[0];
-    for (let i = 2; i < recent.length; i++) {
-      if (recent[i] - recent[i - 1] !== stride) {
-        return false;
-      }
+    const last = indices.length - 1;
+    const stride = indices[last] - indices[last - 1];
+
+    // Extend the run backwards over the longest equally-spaced suffix so
+    // the verified region grows with the repetition count.
+    let first = last;
+    while (first > 0 && indices[first] - indices[first - 1] === stride) {
+      first--;
+    }
+    const runLength = last - first + 1;
+
+    if (runLength >= PERIODIC_OCCURRENCES_REQUIRED) {
+      return this.isRegionPeriodicWithStride(
+        indices[first],
+        indices[last] + CONTENT_CHUNK_SIZE,
+        stride,
+      );
     }
 
-    const region = this.streamContentHistory.slice(
-      recent[0],
-      recent[recent.length - 1] + CONTENT_CHUNK_SIZE,
-    );
+    // The run may have been truncated by the history window. Accept it only
+    // when the history actually saturated and the entire retained region is
+    // periodic with the candidate stride, so a short run of occurrences in
+    // fresh (untruncated) history still needs the full occurrence count.
+    if (
+      runLength >= PERIODIC_MIN_TRUNCATED_OCCURRENCES &&
+      this.streamContentHistory.length >= MAX_HISTORY_LENGTH
+    ) {
+      return this.isRegionPeriodicWithStride(
+        0,
+        indices[last] + CONTENT_CHUNK_SIZE,
+        stride,
+      );
+    }
+
+    return false;
+  }
+
+  /**
+   * Verifies that streamContentHistory[start, end) is exactly periodic with
+   * the given stride and spans at least MIN_PERIODIC_REGION_LENGTH chars.
+   */
+  private isRegionPeriodicWithStride(
+    start: number,
+    end: number,
+    stride: number,
+  ): boolean {
+    const region = this.streamContentHistory.slice(start, end);
     if (region.length < MIN_PERIODIC_REGION_LENGTH) {
       return false;
     }
