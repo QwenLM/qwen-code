@@ -326,14 +326,16 @@ export class LoopDetectionService {
           // detector. OpenAI-compatible providers stream reasoning as
           // thought parts, which getResponseText filters out of Content
           // events, so a verbatim chant in the thinking stage never reaches
-          // checkContentLoop otherwise. The Thought-only check above
+          // the chunk-hash detectors otherwise. The Thought-only check above
           // compares whole stream deltas adjacently, which misaligned
           // chunking defeats — the chunk-hash detectors accumulate the text
           // across deltas and catch the repetition regardless of chunk
-          // boundaries (issues #9656, #1775).
+          // boundaries (issues #9656, #1775). Reasoning text enters through
+          // checkReasoningContentLoop so it can never drive the
+          // markdown/code-block machinery that guards the visible channel.
           const thoughtText = this.getThoughtText(event.value);
           if (thoughtText) {
-            this.loopDetected = this.checkContentLoop(thoughtText);
+            this.loopDetected = this.checkReasoningContentLoop(thoughtText);
           }
         }
         break;
@@ -610,6 +612,25 @@ export class LoopDetectionService {
       return false;
     }
 
+    this.streamContentHistory += content;
+
+    this.truncateAndUpdate();
+    return this.analyzeContentChunksForLoop();
+  }
+
+  /**
+   * Entry point for reasoning-stream deltas into the content-repetition
+   * detector. Reasoning text is raw chain-of-thought, never rendered
+   * markdown, so it must skip checkContentLoop's structure heuristics: an
+   * odd number of code fences in a thought would flip the shared
+   * `inCodeBlock` parity — which nothing clears mid-turn — and silently
+   * disable visible-content detection for the rest of the turn, and a
+   * list-item or heading-shaped thought delta would reset the shared
+   * history, erasing already-accumulated content evidence whenever a
+   * provider interleaves thought and content parts. Reasoning deltas are
+   * appended to the shared history and analyzed only.
+   */
+  private checkReasoningContentLoop(content: string): boolean {
     this.streamContentHistory += content;
 
     this.truncateAndUpdate();

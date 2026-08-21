@@ -1342,6 +1342,44 @@ describe('LoopDetectionService', () => {
       const detected = streamAsMisalignedContentDeltas(CHANTED_UNIT.repeat(4));
       expect(detected).toBe(false);
     });
+
+    it('detects a visible-content chant after a fenced thought delta', () => {
+      service.reset('');
+      // Reasoning deltas must not drive the content channel's code-block
+      // state: an unbalanced fence in a thought used to flip the shared
+      // inCodeBlock parity, which nothing clears mid-turn, silently
+      // disabling visible-content detection for the rest of the turn.
+      service.addAndCheck(
+        createThoughtEvent('', 'Let me look at this snippet:\n```'),
+      );
+      const detected = streamAsMisalignedContentDeltas(CHANTED_UNIT.repeat(40));
+      expect(detected).toBe(true);
+      expect(service.getLastLoopType()).toBe(
+        LoopType.CHANTING_IDENTICAL_SENTENCES,
+      );
+    });
+
+    it('detects a reasoning chant whose unit contains markdown list markers', () => {
+      service.reset('');
+      // Chain-of-thought often repeats structured units (checklists,
+      // steps). Reasoning text is never rendered markdown, so
+      // list-item-shaped thought deltas must not reset the shared history —
+      // they used to wipe the accumulated evidence every cycle, making the
+      // chant undetectable at any length.
+      const unit =
+        'Review the migration plan:\n' +
+        '- check rollback safety\n' +
+        '- verify indexes\n' +
+        '- confirm the cache invalidation path\n';
+      expect(unit.length).toBeGreaterThan(CONTENT_CHUNK_SIZE * 1.5);
+      expect(unit.length % DELTA).not.toBe(0);
+
+      const detected = streamAsMisalignedThoughtDeltas(unit.repeat(60));
+      expect(detected).toBe(true);
+      expect(service.getLastLoopType()).toBe(
+        LoopType.CHANTING_IDENTICAL_SENTENCES,
+      );
+    });
   });
 
   describe('Read File Loop Detection', () => {
