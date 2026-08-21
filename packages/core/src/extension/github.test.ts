@@ -319,6 +319,24 @@ describe('git extension helpers', () => {
       );
     });
 
+    it('explains how to install public extensions when Git is too old for DNS pinning', async () => {
+      mockGit.version.mockResolvedValue({ major: 2, minor: 34, patch: 1 });
+
+      await expect(
+        cloneFromGit(
+          {
+            source: 'https://github.com/owner/repo.git',
+            type: 'git',
+            networkPolicy: 'public',
+          },
+          '/dest',
+        ),
+      ).rejects.toThrow(
+        'Public extension Git installs require Git 2.37 or newer for secure DNS pinning; found Git 2.34.1. Upgrade Git, or install the extension from a local path or archive instead.',
+      );
+      expect(mockGit.clone).not.toHaveBeenCalled();
+    });
+
     it('passes explicit credentials through scoped Git config without changing the URL', async () => {
       vi.spyOn(dns, 'lookup').mockResolvedValue([
         { address: '8.8.8.8', family: 4 },
