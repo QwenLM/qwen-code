@@ -357,6 +357,23 @@ Enterprise paragraph.
     documented for the user. Still open: dedup/self-PR backing for Aone,
     `composeUrl`, cleanup audit, AI-comment marking (Q4), the
     render-adjudication carve-out.
+- **Phase 3b — Aone `pr-context` backing (this change).** The reader gains
+  `getReviewContext` + `getCurrentUser` (D1's `getContext` + `self`,
+  synchronous). `pr-context` routes through the platform reader; the
+  normalized bundle keeps ALL rendering and security logic platform-neutral.
+  GitHub's implementation EXTRACTS pr-context's existing gh calls
+  unchanged — the existing suite passing unmodified is the no-regression
+  evidence. On Aone: metadata from `mr view` (stats degrade), one flat
+  comment list split by `path`, no verdicts, ledger carriers = the
+  thread-level comments (the posted summaries); refetch commands bake
+  `--pr` (Aone addresses every comment body per-MR) and bake only an
+  explicit `--host` (never the ambient GH_HOST). The forced
+  context-unavailable cap leaves submit (the reads are backed now), so an
+  Aone run that read its context can APPROVE and the wired
+  `a1 repo mr approve` fires. Agent 0 becomes runnable on Aone (its gate
+  is pr-context success; its welded `issue-context` command is already
+  backed). Design: `2026-08-21-review-aone-pr-context.md`. Still open: the
+  Phase-3 open items above, unchanged.
 - **Phase 4 — semantic gaps.** Incremental-cache ancestry fallback, build-test
   repo-config escape hatch, publish-assets gating polish, generic-GitLab
   (glab) evaluation.

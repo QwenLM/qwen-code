@@ -20,6 +20,8 @@ const {
   writeFileSyncMock,
   rmSyncMock,
   mkdirSyncMock,
+  getPlatformReaderMock,
+  registryDelegateRef,
 } = vi.hoisted(() => ({
   ghMock: vi.fn(),
   ghApiAllMock: vi.fn(),
@@ -29,6 +31,10 @@ const {
   writeFileSyncMock: vi.fn(),
   rmSyncMock: vi.fn(),
   mkdirSyncMock: vi.fn(),
+  getPlatformReaderMock: vi.fn(),
+  registryDelegateRef: {
+    current: undefined as ((hint?: unknown) => unknown) | undefined,
+  },
 }));
 
 vi.mock('./lib/gh.js', async (importOriginal) => {
@@ -40,6 +46,21 @@ vi.mock('./lib/gh.js', async (importOriginal) => {
     currentUser: currentUserMock,
     ensureAuthenticated: ensureAuthenticatedMock,
     setGhHost: setGhHostMock,
+  };
+});
+
+// The spy DELEGATES to the real registry by default — every GitHub-path
+// test in this file rides the true detection (which lands on githubReader,
+// whose gh calls are mocked above). Suites that pin the Aone routing
+// override it with a stub reader.
+vi.mock('./lib/platform/registry.js', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  const real = actual['getPlatformReader'] as (hint?: unknown) => unknown;
+  registryDelegateRef.current = real;
+  getPlatformReaderMock.mockImplementation((hint?: unknown) => real(hint));
+  return {
+    ...actual,
+    getPlatformReader: getPlatformReaderMock,
   };
 });
 
@@ -2866,5 +2887,203 @@ describe('runPrContext host baking (handler level)', () => {
     process.env['GH_HOST'] = 'my_ghe';
     const written = await runHandler({});
     expect(written).not.toContain('--host');
+  });
+});
+
+describe('prContextCommand handler — Aone routing', () => {
+  // The reader seam is stubbed at the registry: these tests pin what
+  // pr-context does with a normalized Aone context (the a1-side mapping
+  // has its own suite in lib/platform/aone.test.ts).
+  const LEDGER_MARKER =
+    '<!-- qwen-review-ledger {"v":1,"round":3,"findings":[{"id":"R3-1","sev":"C","file":"src/a.ts","line":5,"title":"the off-by-one"}]} -->';
+  const aoneContext = {
+    title: 'fix the loop bound',
+    body: 'the CR description',
+    authorLogin: 'author-a',
+    state: 'opened',
+    baseRefName: 'master',
+    headRefName: 'sha123',
+    headRefOid: 'sha123',
+    comments: [
+      {
+        id: 21,
+        author: 'reviewer-b',
+        body: 'a blocking gap in the guard',
+        createdAt: '2026-08-19T09:00:00Z',
+        path: 'src/a.ts',
+        line: 5,
+      },
+      {
+        id: 22,
+        author: 'author-a',
+        body: 'will fix',
+        createdAt: '2026-08-19T09:30:00Z',
+        path: 'src/a.ts',
+        line: 5,
+        parentId: 21,
+      },
+      {
+        id: 23,
+        author: 'review-bot',
+        body: `Round 3 summary.\n${LEDGER_MARKER}`,
+        createdAt: '2026-08-20T09:00:00Z',
+      },
+      {
+        id: 24,
+        author: 'someone',
+        body: 'general chatter',
+        createdAt: '2026-08-20T10:00:00Z',
+      },
+      {
+        // A long NON-blocker open root — renders as a truncated snippet,
+        // which is the only shape that emits a comment-body refetch.
+        id: 25,
+        author: 'reviewer-c',
+        body: `a long observation about the loop. ${'It keeps going. '.repeat(30)}`,
+        createdAt: '2026-08-20T11:00:00Z',
+        path: 'src/b.ts',
+        line: 9,
+      },
+    ],
+    verdicts: [],
+    ledgerCarriers: [
+      {
+        id: 23,
+        author: 'review-bot',
+        body: `Round 3 summary.\n${LEDGER_MARKER}`,
+        state: 'COMMENTED',
+        submittedAt: '2026-08-20T09:00:00Z',
+      },
+      {
+        id: 24,
+        author: 'someone',
+        body: 'general chatter',
+        state: 'COMMENTED',
+        submittedAt: '2026-08-20T10:00:00Z',
+      },
+    ],
+  };
+  const aoneStub = {
+    kind: 'aone',
+    ensureAuthenticated: vi.fn(),
+    resolveRepo: () => ({
+      host: 'gitlab.alibaba-inc.com',
+      owner: 'g',
+      repo: 'p',
+      groupPath: 'g/p',
+    }),
+    getPrMeta: () => ({ number: 7, headSha: 'sha123', webUrl: '' }),
+    getClosingIssues: () => [],
+    getIssue: () => ({
+      number: 0,
+      ownerRepo: '',
+      title: '',
+      body: '',
+      comments: [],
+    }),
+    fetchDiff: () => '',
+    getCommentBody: () => '',
+    fetchHeadRefSpec: () => 'refs/merge-requests/7/head',
+    getFetchMeta: () => ({
+      headRefOid: 'sha123',
+      baseRefName: 'master',
+      isCrossRepository: false,
+    }),
+    getReviewContext: () => structuredClone(aoneContext),
+    getCurrentUser: () => 'review-bot',
+  };
+
+  let savedGhHost: string | undefined;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    getPlatformReaderMock.mockImplementation(() => aoneStub);
+    savedGhHost = process.env['GH_HOST'];
+    delete process.env['GH_HOST'];
+  });
+
+  afterEach(() => {
+    getPlatformReaderMock.mockImplementation((hint?: unknown) =>
+      registryDelegateRef.current?.(hint),
+    );
+    if (savedGhHost === undefined) delete process.env['GH_HOST'];
+    else process.env['GH_HOST'] = savedGhHost;
+  });
+
+  async function runHandler(extra: Record<string, unknown>) {
+    await (prContextCommand.handler as (a: unknown) => Promise<void>)({
+      _: [],
+      $0: 'qwen',
+      pr_number: '7',
+      owner_repo: 'g/p',
+      out: '/tmp/ctx-aone.md',
+      ...extra,
+    });
+    // The ledger side file is written BEFORE the context file — find the
+    // context by path, not by call order.
+    const call = writeFileSyncMock.mock.calls.find((c) =>
+      String(c[0]).endsWith('ctx-aone.md'),
+    );
+    return call?.[1] as string;
+  }
+
+  it('renders the Aone context and never touches gh', async () => {
+    const written = await runHandler({
+      host: 'gitlab.alibaba-inc.com',
+    });
+    expect(ghMock).not.toHaveBeenCalled();
+    expect(ghApiAllMock).not.toHaveBeenCalled();
+    expect(written).toContain('# PR #7 — fix the loop bound');
+    expect(written).toContain('- **Author:** @author-a');
+    expect(written).toContain('- **State:** opened');
+    expect(written).toContain('`master` ← `sha123`');
+    // Aone reports no diff stats — the line degrades instead of printing
+    // zeros (an asserted empty diff).
+    expect(written).toContain('- **Diff:** not reported by the platform');
+    expect(written).toContain('the CR description');
+    // The inline blocker promotes into the re-check section.
+    expect(written).toContain('## Blockers to re-check');
+    expect(written).toContain('a blocking gap in the guard');
+    // The thread channel renders under "Already discussed".
+    expect(written).toContain('general chatter');
+  });
+
+  it('recovers the machine ledger from a posted summary comment', async () => {
+    const written = await runHandler({
+      host: 'gitlab.alibaba-inc.com',
+    });
+    expect(written).toContain('## Previous /review round (machine ledger)');
+    expect(written).toContain('Round 3');
+    expect(written).toContain('R3-1');
+    // The carrier is this account's own (getCurrentUser === author) — the
+    // section must not read it as another account's claims.
+    expect(written).not.toContain('another account');
+    // The side file carries the recovered round. writeAtomic writes a
+    // `.<pid>.tmp` first, so match the prefix, not the exact name.
+    const sideCall = writeFileSyncMock.mock.calls.find((c) =>
+      String(c[0]).includes('qwen-review-pr-7-prev-ledger.json'),
+    );
+    expect(sideCall).toBeDefined();
+    expect(String(sideCall?.[1])).toContain('"round": 3');
+  });
+
+  it('bakes --pr and --host into EVERY emitted refetch command', async () => {
+    const written = await runHandler({
+      host: 'gitlab.alibaba-inc.com',
+    });
+    const refs = [...written.matchAll(/comment-body \d+ --kind \w+[^\n)]*/g)];
+    expect(refs.length).toBeGreaterThan(0);
+    for (const ref of refs) {
+      expect(ref[0]).toContain('--pr 7');
+      expect(ref[0]).toContain('--host gitlab.alibaba-inc.com');
+    }
+  });
+
+  it('never bakes an ambient GH_HOST into Aone refetch commands', async () => {
+    process.env['GH_HOST'] = 'ghe.example.com';
+    const written = await runHandler({});
+    expect(written).not.toContain('--host ghe.example.com');
+    // The refetches still carry --pr (per-MR addressing is host-agnostic).
+    expect(written).toContain('--pr 7');
   });
 });

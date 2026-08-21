@@ -248,17 +248,6 @@ function compose(
   cliVersion: string,
   attribution: boolean,
   runtimeModelId: string | undefined,
-  /**
-   * The Aone write path FORCES context-unavailable, whatever the
-   * model-written state claims: this phase has no Aone backing for
-   * pr-context/comment-status/presubmit, so no Aone run can have read the
-   * MR's existing discussion. Letting the state's `contextUnavailable`
-   * decide would let a forged or omitted field compose an APPROVE that the
-   * a1 path then turns into a REAL platform approval — the exact forgery
-   * class this command exists to defeat. The cap lives HERE, where
-   * `aoneWrite` is a fact, not in the state.
-   */
-  aoneWrite: boolean,
 ): {
   event: string;
   body: string;
@@ -298,13 +287,15 @@ function compose(
   const r = composeReview(
     {
       ...rest,
-      // Forced for the Aone write path — see the parameter comment. For
-      // GitHub the state's own claim stands (the reads are backed there)
-      // and is handed through RAW: compose-review's boundary deliberately
-      // refuses a malformed non-boolean here, and coercing the claim to a
-      // boolean first would silently drop the context-unavailable cap a
-      // stringified "true" was asking for.
-      contextUnavailable: aoneWrite ? true : rest.contextUnavailable,
+      // The state's own claim stands on BOTH platforms and is handed
+      // through RAW: compose-review's boundary deliberately refuses a
+      // malformed non-boolean here, and coercing the claim to a boolean
+      // first would silently drop the context-unavailable cap a
+      // stringified "true" was asking for. The Aone write path forced this
+      // true while its context reads were unbacked; pr-context is backed
+      // now, so an Aone run's claim carries the same meaning as GitHub's —
+      // "I did (or did not) read the target's existing discussion" — and
+      // the same forgery posture GitHub accepts.
       criticalsInline,
       suggestionsInline,
       draftedComments: comments,
@@ -793,7 +784,6 @@ export function runSubmit(
       // forgeable posture DESIGN.md records for the cache path.
       // The identity this round runs under — see lib/round-model.ts.
       roundModelIdFrom(process.env),
-      aoneWrite,
     ));
   } catch (err) {
     throw new Error(

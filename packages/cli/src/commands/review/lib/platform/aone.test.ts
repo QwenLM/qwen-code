@@ -455,6 +455,159 @@ describe('aoneReader.getFetchMeta / fetchHeadRefSpec', () => {
   });
 });
 
+describe('aoneReader.getReviewContext / getCurrentUser', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  /** mr view answer first, comment list second — call order is fixed. */
+  function mockContext(
+    comments: Array<Record<string, unknown>>,
+    view?: Record<string, unknown>,
+  ): void {
+    a1JsonMock
+      .mockReturnValueOnce({
+        mergeRequest: {
+          sourceBranch: 'sha123',
+          targetBranch: 'master',
+          title: 'a CR',
+          description: 'the description',
+          author: { username: 'someone' },
+          state: 'opened',
+          detailUrl: 'https://code.alibaba-inc.com/g/p/codereview/7',
+          ...view,
+        },
+      })
+      .mockReturnValueOnce(comments);
+  }
+
+  it('splits one flat comment list into the inline and thread channels', () => {
+    mockContext([
+      { id: 1, note: 'inline finding', path: 'src/a.ts', line: 12 },
+      { id: 2, note: 'global note' },
+      {
+        id: 3,
+        note: 'reply',
+        path: 'src/a.ts',
+        line: 12,
+        parentNoteId: 1,
+      },
+    ]);
+    const ctx = aoneReader.getReviewContext(7, 'g/p');
+    const inline = ctx.comments.filter((c) => c.path !== undefined);
+    const thread = ctx.comments.filter((c) => c.path === undefined);
+    expect(inline.map((c) => c.id)).toEqual([1, 3]);
+    expect(inline[0]).toMatchObject({
+      id: 1,
+      body: 'inline finding',
+      path: 'src/a.ts',
+      line: 12,
+    });
+    // parentNoteId is the thread link.
+    expect(inline[1].parentId).toBe(1);
+    expect(thread.map((c) => c.id)).toEqual([2]);
+    // No review object exists on Aone.
+    expect(ctx.verdicts).toEqual([]);
+  });
+
+  it('maps the MR view onto the metadata (stats stay absent)', () => {
+    mockContext([]);
+    const ctx = aoneReader.getReviewContext(7, 'g/p');
+    expect(ctx.title).toBe('a CR');
+    expect(ctx.body).toBe('the description');
+    expect(ctx.authorLogin).toBe('someone');
+    expect(ctx.state).toBe('opened');
+    expect(ctx.baseRefName).toBe('master');
+    // Under AGit-Flow sourceBranch IS the head SHA — both fields read it.
+    expect(ctx.headRefName).toBe('sha123');
+    expect(ctx.headRefOid).toBe('sha123');
+    expect(ctx.additions).toBeUndefined();
+    expect(ctx.deletions).toBeUndefined();
+    expect(ctx.changedFiles).toBeUndefined();
+  });
+
+  it('shapes the path-LESS comments as ledger carriers, chronologically', () => {
+    mockContext([
+      { id: 1, note: 'inline', path: 'src/a.ts', line: 3 },
+      {
+        id: 2,
+        note: 'round-1 summary <!-- qwen-review-ledger {"v":1,"round":1,"findings":[]} -->',
+        createdAt: '2026-08-19T10:00:00Z',
+      },
+      { id: 3, note: 'chatter', created_at: '2026-08-20T10:00:00Z' },
+    ]);
+    const ctx = aoneReader.getReviewContext(7, 'g/p');
+    expect(ctx.ledgerCarriers.map((c) => c.id)).toEqual([2, 3]);
+    expect(ctx.ledgerCarriers[0]).toMatchObject({
+      author: '',
+      body: expect.stringContaining('qwen-review-ledger'),
+      state: 'COMMENTED',
+      submittedAt: '2026-08-19T10:00:00Z',
+    });
+    // created_at is the tolerated timestamp spelling too.
+    expect(ctx.ledgerCarriers[1].submittedAt).toBe('2026-08-20T10:00:00Z');
+    // The inline comment is NOT a carrier.
+    expect(ctx.ledgerCarriers.some((c) => c.id === 1)).toBe(false);
+  });
+
+  it('skips draft comments — an unposted note is neither discussion nor a round', () => {
+    mockContext([
+      { id: 1, note: 'posted' },
+      { id: 2, note: 'draft', isDraft: true },
+    ]);
+    const ctx = aoneReader.getReviewContext(7, 'g/p');
+    expect(ctx.comments.map((c) => c.id)).toEqual([1]);
+  });
+
+  it('reads the author across the shipped shapes, account first', () => {
+    mockContext([
+      { id: 1, note: 'a', author: { account: 'acc-1', name: '显示名' } },
+      { id: 2, note: 'b', author: { username: 'user-2' } },
+      { id: 3, note: 'c', author: 'string-author' },
+      { id: 4, note: 'd' },
+    ]);
+    const ctx = aoneReader.getReviewContext(7, 'g/p');
+    expect(ctx.comments.map((c) => c.author)).toEqual([
+      'acc-1',
+      'user-2',
+      'string-author',
+      '',
+    ]);
+  });
+
+  it('fetches the comment list sorted ascending (chronological parity)', () => {
+    mockContext([]);
+    aoneReader.getReviewContext(7, 'g/p');
+    expect(a1JsonMock).toHaveBeenNthCalledWith(
+      2,
+      'repo',
+      'mr',
+      'comment',
+      'list',
+      '--mr',
+      '7',
+      '--repo',
+      'g/p',
+      '--sort',
+      'asc',
+    );
+  });
+
+  it('throws when mr view returns no mergeRequest', () => {
+    a1JsonMock.mockReturnValueOnce({});
+    expect(() => aoneReader.getReviewContext(7, 'g/p')).toThrow(
+      /no mergeRequest for #7/,
+    );
+  });
+
+  it('getCurrentUser answers the whoami account (empty on absence)', () => {
+    a1JsonMock.mockReturnValueOnce({ account: 'acc-1' });
+    expect(aoneReader.getCurrentUser()).toBe('acc-1');
+    a1JsonMock.mockReturnValueOnce({});
+    expect(aoneReader.getCurrentUser()).toBe('');
+  });
+});
+
 describe('aoneReader.fetchDiff', () => {
   beforeEach(() => {
     vi.clearAllMocks();

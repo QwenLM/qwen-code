@@ -28,6 +28,9 @@ import type {
   LinkedIssue,
   PrMeta,
   RepoIdentity,
+  ReviewContext,
+  ReviewContextComment,
+  ReviewContextVerdict,
   ReviewPlatformReader,
 } from './types.js';
 
@@ -57,6 +60,44 @@ interface AoneWorkitemRef {
   id: number;
   subject?: string;
   link?: string;
+}
+
+/**
+ * Shape of one `a1 repo mr comment list` entry (the fields we read).
+ * `path` present marks an inline (diff-anchored) comment; its absence marks
+ * a thread-level comment on the MR itself — the channel the posted review
+ * summaries ride on, and therefore where this pipeline's ledger markers
+ * live.
+ */
+interface AoneComment {
+  id: number;
+  note?: string;
+  body?: string;
+  author?: unknown;
+  createdAt?: string;
+  created_at?: string;
+  path?: string;
+  line?: number;
+  parentNoteId?: number | null;
+  /** Draft comments are unposted — neither discussion nor a prior round. */
+  isDraft?: boolean;
+}
+
+/** The author field tolerates the shapes a1 has shipped: a bare string or
+ *  an object carrying the account under one of several keys. The first
+ *  present non-empty one wins; `account` leads because that is the spelling
+ *  `a1 auth whoami` answers in — the identity the own/foreign split
+ *  compares against. */
+function aoneCommentAuthor(author: unknown): string {
+  if (typeof author === 'string') return author;
+  if (author !== null && typeof author === 'object') {
+    const o = author as Record<string, unknown>;
+    for (const key of ['account', 'username', 'login', 'name']) {
+      const v = o[key];
+      if (typeof v === 'string' && v !== '') return v;
+    }
+  }
+  return '';
 }
 
 /** Shape of `a1 project workitem get <id>` (best-effort fields). */
@@ -596,6 +637,72 @@ export const aoneReader: ReviewPlatformReader = {
       body: view.description,
       // Aone does not report diff stats; fetch-pr computes them locally.
     };
+  },
+
+  getReviewContext(prNumber: number, ownerRepo: string): ReviewContext {
+    checkOwnerRepo(ownerRepo);
+    const view = mrView(prNumber, ownerRepo);
+    // One flat collection serves the three GitHub channels; `--sort asc`
+    // gives chronological order (the GitHub endpoints' natural order).
+    // a1 has no pagination flags — the full list arrives in one payload.
+    const raw = a1Json<AoneComment[]>(
+      'repo',
+      'mr',
+      'comment',
+      'list',
+      '--mr',
+      String(prNumber),
+      '--repo',
+      ownerRepo,
+      '--sort',
+      'asc',
+    );
+    const comments: ReviewContextComment[] = (raw ?? [])
+      .filter((c) => !c.isDraft)
+      .map((c) => ({
+        id: c.id,
+        author: aoneCommentAuthor(c.author),
+        body: c.note ?? c.body ?? '',
+        createdAt: c.createdAt ?? c.created_at ?? '',
+        ...(c.path !== undefined ? { path: c.path } : {}),
+        ...(c.line !== undefined ? { line: c.line } : {}),
+        ...(c.parentNoteId !== undefined && c.parentNoteId !== null
+          ? { parentId: c.parentNoteId }
+          : {}),
+      }));
+    // Aone has no review object: no verdicts. The ledger markers ride the
+    // posted summaries, which are thread-level (path-less) comments — those
+    // are the carriers, shaped as verdicts for the shared recovery walk.
+    const carriers: ReviewContextVerdict[] = comments
+      .filter((c) => c.path === undefined)
+      .map((c) => ({
+        id: c.id,
+        author: c.author,
+        body: c.body,
+        state: 'COMMENTED',
+        submittedAt: c.createdAt,
+      }));
+    return {
+      title: view.title ?? '',
+      body: view.description ?? '',
+      authorLogin: view.author?.username ?? '',
+      state: view.state ?? '',
+      baseRefName: view.targetBranch ?? 'master',
+      // Under AGit-Flow the head is a bare SHA and sourceBranch carries it;
+      // rendering `target ← <sha>` is truthful and informative. A
+      // non-AGit-Flow MR's real branch name renders the same way.
+      headRefName: view.sourceBranch ?? '',
+      headRefOid: view.sourceBranch ?? '',
+      // Aone reports no diff stats; the context header degrades.
+      comments,
+      verdicts: [],
+      ledgerCarriers: carriers,
+    };
+  },
+
+  getCurrentUser(): string {
+    const who = a1Json<{ account?: string }>('auth', 'whoami');
+    return who.account ?? '';
   },
 };
 
