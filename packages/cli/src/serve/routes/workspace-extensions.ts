@@ -30,13 +30,14 @@ import express, {
   type Response,
 } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
-import type { AcpSessionBridge } from '../acp-session-bridge.js';
+import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import { createFifoTaskQueue } from '../extension-operation-scheduler.js';
 import { isBlockedAuthProviderHost } from '../server/auth-provider-helpers.js';
 import type { SendBridgeError } from '../server/error-response.js';
 import type { safeBody as safeBodyType } from '../server/request-helpers.js';
 import {
   requireTrustedWorkspaceRuntime,
+  resolveTrustedWorkspaceRuntimeFromParam,
   resolveWorkspaceRuntimeFromParam,
   sendGenerationClosedError,
   sendUntrustedWorkspaceResponse,
@@ -2305,8 +2306,12 @@ export function registerWorkspaceExtensionRoutes(
       '/workspaces/:workspace/extensions/:extensionId/activation',
       mutate({ strict: true }),
       (req, res) => {
-        const runtime = resolveWorkspaceRuntimeFromParam(registry, req, res);
-        if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+        const runtime = resolveTrustedWorkspaceRuntimeFromParam(
+          registry,
+          req,
+          res,
+        );
+        if (!runtime) return;
         const extensionId = parseExtensionId(req, res);
         if (!extensionId) return;
         const state = parseActivationState(req, res);
@@ -2353,8 +2358,12 @@ export function registerWorkspaceExtensionRoutes(
       '/workspaces/:workspace/extensions/:extensionId/activation',
       mutate({ strict: true }),
       (req, res) => {
-        const runtime = resolveWorkspaceRuntimeFromParam(registry, req, res);
-        if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+        const runtime = resolveTrustedWorkspaceRuntimeFromParam(
+          registry,
+          req,
+          res,
+        );
+        if (!runtime) return;
         const extensionId = parseExtensionId(req, res);
         if (!extensionId) return;
         const manager = primaryController.createExtensionManager(
@@ -2401,8 +2410,12 @@ export function registerWorkspaceExtensionRoutes(
       '/workspaces/:workspace/extensions/refresh',
       mutate({ strict: true }),
       (req, res) => {
-        const runtime = resolveWorkspaceRuntimeFromParam(registry, req, res);
-        if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+        const runtime = resolveTrustedWorkspaceRuntimeFromParam(
+          registry,
+          req,
+          res,
+        );
+        if (!runtime) return;
         const manager = primaryController.createExtensionManager(
           runtime.workspaceCwd,
           true,

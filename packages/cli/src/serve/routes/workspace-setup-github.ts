@@ -7,7 +7,7 @@
 import { promises as fsp } from 'node:fs';
 import * as path from 'node:path';
 import type { Application, Request, RequestHandler, Response } from 'express';
-import type { AcpSessionBridge } from '../acp-session-bridge.js';
+import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import { isFsError, type WorkspaceFileSystemFactory } from '../fs/index.js';
 import {

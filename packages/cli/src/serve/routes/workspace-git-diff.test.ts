@@ -11,7 +11,7 @@ import {
   fetchGitDiff,
   fetchGitDiffHunksForFile,
 } from '@qwen-code/qwen-code-core';
-import type { AcpSessionBridge } from '../acp-session-bridge.js';
+import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import { sendBridgeError } from '../server/error-response.js';
 import {
   createWorkspaceGenerationGuard,

@@ -7,7 +7,7 @@
 import type { Application, Request, RequestHandler, Response } from 'express';
 import { GENERATION_MAX_PROMPT_BYTES } from '../acp-integration/generation.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
-import type { AcpSessionBridge } from './acp-session-bridge.js';
+import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
   formatGenerationSse,
   GENERATION_HEARTBEAT_MS,

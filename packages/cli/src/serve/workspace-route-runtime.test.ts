@@ -18,6 +18,7 @@ import {
   resolveContainedCwd,
   resolveContainedCwdOrFail,
   resolveRegisteredWorkspaceRuntimeByPathSelector,
+  resolveTrustedWorkspaceRuntimeFromParam,
   resolveWorkspaceRuntimeFromParam,
   resolveWorkspaceRuntimeWithLiveCompatibilityFromParam,
 } from './workspace-route-runtime.js';
@@ -138,12 +139,12 @@ describe('resolveContainedCwdOrFail', () => {
   });
 });
 
-function makeRuntime(): WorkspaceRuntime {
+function makeRuntime(trusted = true): WorkspaceRuntime {
   return {
     workspaceId: 'ws-primary',
     workspaceCwd: '/work/primary',
     primary: true,
-    trusted: true,
+    trusted,
     env: { mode: 'parent-process', overlayKeys: [] },
     bridge: {},
     workspaceService: {},
@@ -309,6 +310,42 @@ describe('resolveWorkspaceRuntimeWithLiveCompatibilityFromParam', () => {
       error: 'The Conversations runtime is temporarily unavailable.',
       code: 'conversation_runtime_unavailable',
       retryable: true,
+    });
+  });
+});
+
+describe('resolveTrustedWorkspaceRuntimeFromParam', () => {
+  it('returns the selected active trusted runtime', () => {
+    const runtime = makeRuntime();
+    const registry = createSingleWorkspaceRegistry(runtime);
+    const response = makeResponse();
+
+    expect(
+      resolveTrustedWorkspaceRuntimeFromParam(
+        registry,
+        { params: { workspace: runtime.workspaceId } } as unknown as Request,
+        response,
+      ),
+    ).toBe(runtime);
+    expect(response.status).not.toHaveBeenCalled();
+  });
+
+  it('rejects an active untrusted runtime after selection', () => {
+    const runtime = makeRuntime(false);
+    const registry = createSingleWorkspaceRegistry(runtime);
+    const response = makeResponse();
+
+    expect(
+      resolveTrustedWorkspaceRuntimeFromParam(
+        registry,
+        { params: { workspace: runtime.workspaceId } } as unknown as Request,
+        response,
+      ),
+    ).toBeNull();
+    expect(response.status).toHaveBeenCalledWith(403);
+    expect(response.json).toHaveBeenCalledWith({
+      error: 'Workspace is not trusted.',
+      code: 'untrusted_workspace',
     });
   });
 });

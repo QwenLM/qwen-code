@@ -4,10 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  SessionNotFoundError,
-  type AcpSessionBridge,
-} from './acp-session-bridge.js';
+import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
+import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { ClientMcpSenderRegistry } from './acp-http/client-mcp-sender-registry.js';
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
 import type { WorkspaceRuntimeProvenance } from './managed-scratch-workspace.js';

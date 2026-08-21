@@ -5,14 +5,9 @@
  */
 
 import type { Stream } from '@agentclientprotocol/sdk';
+import type { AcpChannelTransportGuard } from './transport-safety.js';
 
-export interface AcpChannelTransportGuard {
-  maxActiveHandlers: number;
-  maxActiveHandlerBytes: number;
-  reserveOutboundOperation(value: unknown): () => void;
-  reservePreparedResponse(value: unknown): void;
-  fail(error: unknown): void;
-}
+export type { AcpChannelTransportGuard } from './transport-safety.js';
 
 /**
  * One ACP NDJSON channel to a single agent. Tests inject a fake by

@@ -6,7 +6,7 @@
 
 import path from 'node:path';
 import type { SessionArchiveState } from '@qwen-code/qwen-code-core';
-import type { BridgeSessionSummary } from '../acp-session-bridge.js';
+import type { BridgeSessionSummary } from '@qwen-code/acp-bridge/bridgeTypes';
 
 export interface PersistedSessionListScope {
   runtimeBaseDir: string;

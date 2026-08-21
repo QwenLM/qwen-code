@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { SessionNotFoundError } from './acp-session-bridge.js';
+import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   createWorkspaceSessionOwnerIndex,
   createWorkspaceGenerationGuard,

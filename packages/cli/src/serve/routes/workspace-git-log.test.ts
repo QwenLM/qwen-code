@@ -8,7 +8,7 @@ import express from 'express';
 import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fetchGitLog, fetchGitCommitDetail } from '@qwen-code/qwen-code-core';
-import type { AcpSessionBridge } from '../acp-session-bridge.js';
+import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import { sendBridgeError } from '../server/error-response.js';
 import {
   createWorkspaceRegistry,

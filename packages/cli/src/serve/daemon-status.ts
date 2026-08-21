@@ -23,7 +23,7 @@ import type {
 import type {
   AcpSessionBridge,
   BridgeDaemonStatusSnapshot,
-} from './acp-session-bridge.js';
+} from '@qwen-code/acp-bridge/bridgeTypes';
 import {
   MAX_CHILD_HEAP_MB,
   MIN_CHILD_HEAP_MB,

@@ -24,10 +24,8 @@ import {
 import { loadSettings } from '../config/settings.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { isServeDebugMode } from './debug-mode.js';
-import {
-  InvalidClientIdError,
-  type AcpSessionBridge,
-} from './acp-session-bridge.js';
+import { InvalidClientIdError } from '@qwen-code/acp-bridge/bridgeErrors';
+import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import { safeLogValue } from './server/request-helpers.js';
 import {
   requireTrustedWorkspaceRuntime,
@@ -2270,5 +2268,5 @@ export function createDaemonSubagentManager(
 
 // Re-export the bridge error type used by route helpers so test files
 // can import it from a single module without reaching into
-// acp-session-bridge directly.
+// the ACP bridge implementation directly.
 export { InvalidClientIdError };

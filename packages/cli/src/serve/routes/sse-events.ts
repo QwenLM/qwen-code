@@ -15,7 +15,7 @@ import {
 import { mapDomainErrorToErrorKind } from '@qwen-code/acp-bridge';
 import type { Application } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
-import type { AcpSessionBridge } from '../acp-session-bridge.js';
+import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { DaemonLogger } from '../daemon-logger.js';
 import {
   SubscriberLimitExceededError,

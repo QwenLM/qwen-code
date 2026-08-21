@@ -6,13 +6,15 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as path from 'node:path';
-import {
-  SessionNotFoundError,
-  type AcpSessionBridge,
-  type BridgeFreshSessionAdmission,
-  type BridgeOptions,
-  type BridgeSessionSummary,
-} from './acp-session-bridge.js';
+import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
+import type {
+  AcpSessionBridge,
+  BridgeSessionSummary,
+} from '@qwen-code/acp-bridge/bridgeTypes';
+import type {
+  BridgeFreshSessionAdmission,
+  BridgeOptions,
+} from '@qwen-code/acp-bridge/bridgeOptions';
 import type { WorkspaceRegistry } from './workspace-registry.js';
 import type { WorkspaceFileSystemFactory } from './fs/workspace-file-system.js';
 import { MAX_SESSION_RESTORE_TIMEOUT_MS } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
@@ -48,7 +50,7 @@ function makeBridge(
 
 describe('createServeApp default bridge wiring', () => {
   afterEach(() => {
-    vi.doUnmock('./acp-session-bridge.js');
+    vi.doUnmock('@qwen-code/acp-bridge/bridge');
     vi.resetModules();
     vi.restoreAllMocks();
   });
@@ -58,10 +60,10 @@ describe('createServeApp default bridge wiring', () => {
     let bridgeOptions: BridgeOptions | undefined;
     const liveSessionIds = new Set<string>();
     const bridge = makeBridge(0, liveSessionIds);
-    vi.doMock('./acp-session-bridge.js', async () => {
+    vi.doMock('@qwen-code/acp-bridge/bridge', async () => {
       const actual = await vi.importActual<
-        typeof import('./acp-session-bridge.js')
-      >('./acp-session-bridge.js');
+        typeof import('@qwen-code/acp-bridge/bridge')
+      >('@qwen-code/acp-bridge/bridge');
       return {
         ...actual,
         createAcpSessionBridge: vi.fn((opts: BridgeOptions) => {
@@ -130,10 +132,10 @@ describe('createServeApp default bridge wiring', () => {
   it('keeps the same-host write route disabled for an injected filesystem factory', async () => {
     let bridgeOptions: BridgeOptions | undefined;
     const bridge = makeBridge();
-    vi.doMock('./acp-session-bridge.js', async () => {
+    vi.doMock('@qwen-code/acp-bridge/bridge', async () => {
       const actual = await vi.importActual<
-        typeof import('./acp-session-bridge.js')
-      >('./acp-session-bridge.js');
+        typeof import('@qwen-code/acp-bridge/bridge')
+      >('@qwen-code/acp-bridge/bridge');
       return {
         ...actual,
         createAcpSessionBridge: vi.fn((opts: BridgeOptions) => {
@@ -186,10 +188,10 @@ describe('createServeApp default bridge wiring', () => {
 
   it('wires total admission into the internally-created bridge', async () => {
     let freshSessionAdmission: BridgeFreshSessionAdmission | undefined;
-    vi.doMock('./acp-session-bridge.js', async () => {
+    vi.doMock('@qwen-code/acp-bridge/bridge', async () => {
       const actual = await vi.importActual<
-        typeof import('./acp-session-bridge.js')
-      >('./acp-session-bridge.js');
+        typeof import('@qwen-code/acp-bridge/bridge')
+      >('@qwen-code/acp-bridge/bridge');
       return {
         ...actual,
         createAcpSessionBridge: vi.fn((opts: BridgeOptions) => {
@@ -231,10 +233,10 @@ describe('createServeApp default bridge wiring', () => {
 
   it('wires the effective restore timeout into the direct bridge', async () => {
     const bridgeOptions: BridgeOptions[] = [];
-    vi.doMock('./acp-session-bridge.js', async () => {
+    vi.doMock('@qwen-code/acp-bridge/bridge', async () => {
       const actual = await vi.importActual<
-        typeof import('./acp-session-bridge.js')
-      >('./acp-session-bridge.js');
+        typeof import('@qwen-code/acp-bridge/bridge')
+      >('@qwen-code/acp-bridge/bridge');
       return {
         ...actual,
         createAcpSessionBridge: vi.fn((opts: BridgeOptions) => {
@@ -262,10 +264,10 @@ describe('createServeApp default bridge wiring', () => {
 
   it('does not let a short initialize timeout lower the restore budget', async () => {
     const bridgeOptions: BridgeOptions[] = [];
-    vi.doMock('./acp-session-bridge.js', async () => {
+    vi.doMock('@qwen-code/acp-bridge/bridge', async () => {
       const actual = await vi.importActual<
-        typeof import('./acp-session-bridge.js')
-      >('./acp-session-bridge.js');
+        typeof import('@qwen-code/acp-bridge/bridge')
+      >('@qwen-code/acp-bridge/bridge');
       return {
         ...actual,
         createAcpSessionBridge: vi.fn((opts: BridgeOptions) => {
@@ -330,10 +332,10 @@ describe('createServeApp default bridge wiring', () => {
         ),
       };
     });
-    vi.doMock('./acp-session-bridge.js', async () => {
+    vi.doMock('@qwen-code/acp-bridge/bridge', async () => {
       const actual = await vi.importActual<
-        typeof import('./acp-session-bridge.js')
-      >('./acp-session-bridge.js');
+        typeof import('@qwen-code/acp-bridge/bridge')
+      >('@qwen-code/acp-bridge/bridge');
       return {
         ...actual,
         createAcpSessionBridge: vi.fn(() => makeBridge()),

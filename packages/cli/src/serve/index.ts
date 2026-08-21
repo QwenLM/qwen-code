@@ -116,13 +116,9 @@ export {
 export {
   createAcpSessionBridge,
   createHttpAcpBridge,
-  defaultSpawnChannelFactory,
-  // #4297 fold-in 1 (16:32:44-round S2): export every typed error
-  // class that `sendBridgeError` matches via `instanceof`. External
-  // embeds that want to recognize these errors (parallel to how
-  // they already match `WorkspaceInitConflictError` /
-  // `SessionNotFoundError`) need them on the public barrel; without
-  // this they have to deep-import `./acp-session-bridge.js`.
+} from '@qwen-code/acp-bridge/bridge';
+export { defaultSpawnChannelFactory } from '@qwen-code/acp-bridge/spawnChannel';
+export {
   McpServerNotFoundError,
   McpServerRestartFailedError,
   SessionNotFoundError,
@@ -132,14 +128,15 @@ export {
   WorkspaceInitPathEscapeError,
   WorkspaceInitSymlinkError,
   WorkspaceInitRaceError,
-  type AcpChannel,
-  type AcpSessionBridge,
-  type BridgeOptions,
-  type BridgeSession,
-  type BridgeSpawnRequest,
-  type ChannelFactory,
-  type HttpAcpBridge,
-} from './acp-session-bridge.js';
+} from '@qwen-code/acp-bridge/bridgeErrors';
+export type { AcpChannel, ChannelFactory } from '@qwen-code/acp-bridge/channel';
+export type {
+  AcpSessionBridge,
+  BridgeSession,
+  BridgeSpawnRequest,
+  HttpAcpBridge,
+} from '@qwen-code/acp-bridge/bridgeTypes';
+export type { BridgeOptions } from '@qwen-code/acp-bridge/bridgeOptions';
 export {
   EventBus,
   EVENT_SCHEMA_VERSION,

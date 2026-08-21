@@ -9,7 +9,7 @@ import {
   SessionService,
   type SessionArchiveState,
 } from '@qwen-code/qwen-code-core';
-import { SessionNotFoundError } from '../acp-session-bridge.js';
+import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   collectSessionData,
   generateExportFilename,

@@ -5,7 +5,7 @@
  */
 
 import type { Application, RequestHandler, Response } from 'express';
-import type { AcpSessionBridge } from '../acp-session-bridge.js';
+import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { DaemonLogger } from '../daemon-logger.js';
 import {
   detectFromLoopback,

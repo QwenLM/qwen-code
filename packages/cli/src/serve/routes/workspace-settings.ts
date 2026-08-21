@@ -24,8 +24,7 @@ import {
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { parseAndValidateWorkspaceClientId } from '../server/request-helpers.js';
 import {
-  requireTrustedWorkspaceRuntime,
-  resolveWorkspaceRuntimeFromParam,
+  resolveTrustedWorkspaceRuntimeFromParam,
   sendGenerationClosedError,
 } from '../workspace-route-runtime.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
@@ -525,7 +524,7 @@ export function registerWorkspaceQualifiedSettingsRoutes(
   const allowedKeys = getAllowedKeys(false);
 
   app.get('/workspaces/:workspace/settings', (req: Request, res: Response) => {
-    const runtime = resolveWorkspaceRuntimeFromParam(
+    const runtime = resolveTrustedWorkspaceRuntimeFromParam(
       deps.workspaceRegistry,
       req,
       res,
@@ -533,7 +532,7 @@ export function registerWorkspaceQualifiedSettingsRoutes(
     // Legacy /workspace/settings remains primary-only and pre-trust for
     // compatibility; plural workspace-qualified settings intentionally follow
     // the Phase 3 core-route trust gate.
-    if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+    if (!runtime) return;
     try {
       const response = buildSettingsResponse(runtime.workspaceCwd, allowedKeys);
       res.status(200).json(response);
@@ -554,12 +553,12 @@ export function registerWorkspaceQualifiedSettingsRoutes(
     '/workspaces/:workspace/settings',
     deps.mutate({ strict: true }),
     async (req: Request, res: Response) => {
-      const runtime = resolveWorkspaceRuntimeFromParam(
+      const runtime = resolveTrustedWorkspaceRuntimeFromParam(
         deps.workspaceRegistry,
         req,
         res,
       );
-      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+      if (!runtime) return;
       const body = deps.safeBody(req);
       const scope = body['scope'];
       const key = body['key'];

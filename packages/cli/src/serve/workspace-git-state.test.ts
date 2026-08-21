@@ -11,7 +11,7 @@ import {
   watchRepoBranch,
   type GitWorkingTreeStatus,
 } from '@qwen-code/qwen-code-core';
-import type { AcpSessionBridge } from './acp-session-bridge.js';
+import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import { WorkspaceGitState } from './workspace-git-state.js';
 

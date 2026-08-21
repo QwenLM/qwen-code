@@ -12,14 +12,10 @@ import {
   type GitDiffResult,
 } from '@qwen-code/qwen-code-core';
 import type { SendBridgeError } from '../server/error-response.js';
-import type {
-  WorkspaceRegistry,
-  WorkspaceRuntime,
-} from '../workspace-registry.js';
+import type { WorkspaceRegistry } from '../workspace-registry.js';
 import {
-  requireTrustedWorkspaceRuntime,
   resolveContainedCwd,
-  resolveWorkspaceRuntimeFromParam,
+  resolveTrustedWorkspaceRuntimeFromParam,
   sendUntrustedWorkspaceResponse,
 } from '../workspace-route-runtime.js';
 import { applyReadHeaders } from './workspace-file-read.js';
@@ -200,16 +196,6 @@ export function registerWorkspaceGitDiffRoutes(
   });
 }
 
-function resolveTrustedRuntime(
-  registry: WorkspaceRegistry,
-  req: Request,
-  res: Response,
-): WorkspaceRuntime | null {
-  const runtime = resolveWorkspaceRuntimeFromParam(registry, req, res);
-  if (!runtime) return null;
-  return requireTrustedWorkspaceRuntime(runtime, res) ? runtime : null;
-}
-
 export function registerWorkspaceQualifiedGitDiffRoutes(
   app: Application,
   deps: {
@@ -218,7 +204,11 @@ export function registerWorkspaceQualifiedGitDiffRoutes(
   },
 ): void {
   app.get('/workspaces/:workspace/git/diff', (req, res) => {
-    const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
+    const runtime = resolveTrustedWorkspaceRuntimeFromParam(
+      deps.workspaceRegistry,
+      req,
+      res,
+    );
     if (!runtime) return;
     void handleDiffList(
       res,
@@ -229,7 +219,11 @@ export function registerWorkspaceQualifiedGitDiffRoutes(
     );
   });
   app.get('/workspaces/:workspace/git/diff/file', (req, res) => {
-    const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
+    const runtime = resolveTrustedWorkspaceRuntimeFromParam(
+      deps.workspaceRegistry,
+      req,
+      res,
+    );
     if (!runtime) return;
     void handleDiffFile(
       req,

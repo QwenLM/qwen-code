@@ -17,6 +17,7 @@ import type {
   PendingSessionLoad,
   SettledPrompt,
 } from './types';
+import { SessionAttachmentLifecycle } from './attachment-lifecycle';
 
 describe('getConnectionAfterSessionClear', () => {
   it('clears session fields for the session being detached', () => {
@@ -391,13 +392,12 @@ describe('createDaemonSessionActions', () => {
   it('does not restore a detached session after the session was cleared', async () => {
     const nextSession = createMockSession('session-b');
     const deferred = createDeferred<DaemonSessionClient>();
-    const manualSessionClearRef = { current: false };
     const createDetachedSession = vi.fn(() => deferred.promise);
-    const { actions, sessionRef, getConnection } = createActionsHarness({
-      connection: { status: 'connected' },
-      createDetachedSession,
-      manualSessionClearRef,
-    });
+    const { actions, sessionRef, getConnection, manualSessionClearRef } =
+      createActionsHarness({
+        connection: { status: 'connected' },
+        createDetachedSession,
+      });
 
     const createPromise = actions.createSession();
     manualSessionClearRef.current = true;
@@ -719,14 +719,13 @@ describe('createDaemonSessionActions', () => {
     vi.useFakeTimers();
     try {
       const existingSession = createMockSession('session-a');
-      const manualSessionClearRef = { current: false };
       const setRestoreSessionId = vi.fn();
-      const { actions, getConnection } = createActionsHarness({
-        connection: { status: 'connected', sessionId: 'session-a' },
-        manualSessionClearRef,
-        session: existingSession,
-        setRestoreSessionId,
-      });
+      const { actions, getConnection, manualSessionClearRef } =
+        createActionsHarness({
+          connection: { status: 'connected', sessionId: 'session-a' },
+          session: existingSession,
+          setRestoreSessionId,
+        });
 
       const loadPromise = actions.loadSession('session-b');
       expect(getConnection()).toMatchObject({
@@ -994,33 +993,28 @@ describe('createDaemonSessionActions', () => {
   it('aborts active prompts and rejects pending session loads when clearing', async () => {
     const controller = new AbortController();
     const session = createMockSession('session-a');
-    const pendingReject = vi.fn();
-    const pendingSessionLoadRef = {
-      current: {
-        id: 1,
-        sessionId: 'session-a',
-        mode: 'attach' as const,
-        timeout: setTimeout(() => undefined, 30_000),
-        resolve: vi.fn(),
-        reject: pendingReject,
-      },
-    };
+    const attachmentLifecycle = new SessionAttachmentLifecycle();
+    const pendingLoad = attachmentLifecycle.startPendingLoad({
+      sessionId: 'session-a',
+      mode: 'attach',
+      onTimeout: () => new Error('timed out'),
+    });
     const { actions } = createActionsHarness({
       activePrompts: new Map([['session-a', { controller } as ActivePrompt]]),
-      pendingSessionLoadRef,
+      attachmentLifecycle,
       session,
     });
 
     await actions.clearSession();
 
     expect(controller.signal.aborted).toBe(true);
-    expect(pendingReject).toHaveBeenCalledWith(
+    await expect(pendingLoad).rejects.toEqual(
       expect.objectContaining({
         name: 'AbortError',
         message: 'Session cleared',
       }),
     );
-    expect(pendingSessionLoadRef.current).toBeUndefined();
+    expect(attachmentLifecycle.pendingLoad).toBeUndefined();
   });
 
   it('restarts the event stream after prompt admission', async () => {
@@ -2425,11 +2419,10 @@ function createActionsHarness(
   opts: {
     activePrompts?: Map<string, ActivePrompt>;
     addNotice?: ReturnType<typeof vi.fn>;
+    attachmentLifecycle?: SessionAttachmentLifecycle;
     clearLiveJournalRepair?: ReturnType<typeof vi.fn>;
     connection?: DaemonConnectionState;
     createDetachedSession?: ReturnType<typeof vi.fn>;
-    manualSessionClearRef?: { current: boolean };
-    pendingSessionLoadRef?: { current: PendingSessionLoad | undefined };
     restartEventStream?: ReturnType<typeof vi.fn>;
     session?: ReturnType<typeof createMockSession>;
     setAttachSessionNonce?: ReturnType<typeof vi.fn>;
@@ -2450,11 +2443,29 @@ function createActionsHarness(
   const activePromptsRef = {
     current: opts.activePrompts ?? new Map<string, ActivePrompt>(),
   };
-  const pendingSessionLoadRef =
-    opts.pendingSessionLoadRef ??
-    ({ current: undefined } as {
-      current: PendingSessionLoad | undefined;
-    });
+  const attachmentLifecycle =
+    opts.attachmentLifecycle ?? new SessionAttachmentLifecycle();
+  const pendingSessionLoadRef = {
+    get current(): PendingSessionLoad | undefined {
+      return attachmentLifecycle.pendingLoad;
+    },
+    set current(value: PendingSessionLoad | undefined) {
+      if (value !== undefined) {
+        throw new Error('Tests may only release the current pending load');
+      }
+      const pendingLoad = attachmentLifecycle.pendingLoad;
+      if (pendingLoad) attachmentLifecycle.releasePendingLoad(pendingLoad);
+    },
+  };
+  const manualSessionClearRef = {
+    get current(): boolean {
+      return attachmentLifecycle.isManuallyCleared;
+    },
+    set current(value: boolean) {
+      if (value) attachmentLifecycle.markManuallyCleared();
+      else attachmentLifecycle.allowAutomaticAttachment();
+    },
+  };
   const store = {
     reset: vi.fn(),
     appendLocalUserMessage: vi.fn(),
@@ -2465,12 +2476,9 @@ function createActionsHarness(
     sessionRef,
     activePromptsRef,
     settledPromptsRef: { current: new Map<string, SettledPrompt>() },
-    pendingSessionLoadRef,
-    pendingSessionLoadIdRef: { current: 0 },
+    attachmentLifecycle,
     sessionConfigGeneration: new WeakMap(),
     heartbeatSupportedRef: { current: false },
-    manualSessionClearRef: opts.manualSessionClearRef ?? { current: false },
-    skipNextCleanupDetachSessionRef: { current: undefined },
     passiveAssistantDoneTimerRef: { current: undefined },
     getCreateSessionRequest: () => ({ workspaceCwd: '/workspace' }),
     createDetachedSession: (opts.createDetachedSession ??
@@ -2500,7 +2508,9 @@ function createActionsHarness(
   return {
     actions,
     activePromptsRef,
+    attachmentLifecycle,
     getConnection: () => connection,
+    manualSessionClearRef,
     pendingSessionLoadRef,
     replaceConnection,
     sessionRef,

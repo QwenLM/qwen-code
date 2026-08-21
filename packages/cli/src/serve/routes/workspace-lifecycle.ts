@@ -12,8 +12,7 @@ import {
 } from '../server/request-helpers.js';
 import type { DaemonWorkspaceService } from '../workspace-service/index.js';
 import {
-  requireTrustedWorkspaceRuntime,
-  resolveWorkspaceRuntimeFromParam,
+  resolveTrustedWorkspaceRuntimeFromParam,
   sendUntrustedWorkspaceResponse,
 } from '../workspace-route-runtime.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
@@ -115,12 +114,12 @@ export function registerWorkspaceQualifiedLifecycleRoutes(
     '/workspaces/:workspace/init',
     deps.mutate({ strict: true }),
     async (req, res) => {
-      const runtime = resolveWorkspaceRuntimeFromParam(
+      const runtime = resolveTrustedWorkspaceRuntimeFromParam(
         deps.workspaceRegistry,
         req,
         res,
       );
-      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+      if (!runtime) return;
       const body = deps.safeBody(req);
       const force = body['force'];
       if (force !== undefined && typeof force !== 'boolean') {
@@ -161,12 +160,12 @@ export function registerWorkspaceQualifiedLifecycleRoutes(
         .catch(() => {
           // The policy monitor reports reconciliation failures separately.
         });
-      const runtime = resolveWorkspaceRuntimeFromParam(
+      const runtime = resolveTrustedWorkspaceRuntimeFromParam(
         deps.workspaceRegistry,
         req,
         res,
       );
-      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+      if (!runtime) return;
       const clientId = parseAndValidateWorkspaceClientId(
         req,
         res,

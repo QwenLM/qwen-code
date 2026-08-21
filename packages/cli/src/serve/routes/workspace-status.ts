@@ -4,18 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Application, Request, RequestHandler, Response } from 'express';
-import type { AcpSessionBridge } from '../acp-session-bridge.js';
+import type { Application, RequestHandler } from 'express';
+import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { SendBridgeError } from '../server/error-response.js';
 import {
   createBuildWorkspaceCtx,
   MAX_SERVER_NAME_LENGTH,
 } from '../server/request-helpers.js';
 import type { DaemonWorkspaceService } from '../workspace-service/index.js';
-import {
-  requireTrustedWorkspaceRuntime,
-  resolveWorkspaceRuntimeFromParam,
-} from '../workspace-route-runtime.js';
+import { resolveTrustedWorkspaceRuntimeFromParam } from '../workspace-route-runtime.js';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
@@ -229,16 +226,6 @@ export function registerWorkspaceStatusRoutes(
   });
 }
 
-function resolveTrustedRuntime(
-  registry: WorkspaceRegistry,
-  req: Request,
-  res: Response,
-): WorkspaceRuntime | null {
-  const runtime = resolveWorkspaceRuntimeFromParam(registry, req, res);
-  if (!runtime) return null;
-  return requireTrustedWorkspaceRuntime(runtime, res) ? runtime : null;
-}
-
 export function registerWorkspaceQualifiedStatusRoutes(
   app: Application,
   deps: Pick<RegisterWorkspaceStatusRoutesDeps, 'sendBridgeError'> & {
@@ -248,7 +235,11 @@ export function registerWorkspaceQualifiedStatusRoutes(
   const { workspaceRegistry, sendBridgeError } = deps;
 
   app.get('/workspaces/:workspace/mcp', async (req, res) => {
-    const runtime = resolveTrustedRuntime(workspaceRegistry, req, res);
+    const runtime = resolveTrustedWorkspaceRuntimeFromParam(
+      workspaceRegistry,
+      req,
+      res,
+    );
     if (!runtime) return;
     const route = 'GET /workspaces/:workspace/mcp';
     const ctx = createBuildWorkspaceCtx(runtime.workspaceCwd)(route);
@@ -266,7 +257,11 @@ export function registerWorkspaceQualifiedStatusRoutes(
   });
 
   app.get('/workspaces/:workspace/mcp/:server/tools', async (req, res) => {
-    const runtime = resolveTrustedRuntime(workspaceRegistry, req, res);
+    const runtime = resolveTrustedWorkspaceRuntimeFromParam(
+      workspaceRegistry,
+      req,
+      res,
+    );
     if (!runtime) return;
     const serverName = req.params['server'];
     if (!serverName || typeof serverName !== 'string') {
@@ -298,7 +293,11 @@ export function registerWorkspaceQualifiedStatusRoutes(
   });
 
   app.get('/workspaces/:workspace/mcp/:server/resources', async (req, res) => {
-    const runtime = resolveTrustedRuntime(workspaceRegistry, req, res);
+    const runtime = resolveTrustedWorkspaceRuntimeFromParam(
+      workspaceRegistry,
+      req,
+      res,
+    );
     if (!runtime) return;
     const serverName = req.params['server'];
     if (!serverName || typeof serverName !== 'string') {
@@ -330,7 +329,11 @@ export function registerWorkspaceQualifiedStatusRoutes(
   });
 
   app.get('/workspaces/:workspace/skills', async (req, res) => {
-    const runtime = resolveTrustedRuntime(workspaceRegistry, req, res);
+    const runtime = resolveTrustedWorkspaceRuntimeFromParam(
+      workspaceRegistry,
+      req,
+      res,
+    );
     if (!runtime) return;
     const route = 'GET /workspaces/:workspace/skills';
     const ctx = createBuildWorkspaceCtx(runtime.workspaceCwd)(route);
@@ -348,7 +351,11 @@ export function registerWorkspaceQualifiedStatusRoutes(
   });
 
   app.get('/workspaces/:workspace/tools', async (req, res) => {
-    const runtime = resolveTrustedRuntime(workspaceRegistry, req, res);
+    const runtime = resolveTrustedWorkspaceRuntimeFromParam(
+      workspaceRegistry,
+      req,
+      res,
+    );
     if (!runtime) return;
     const route = 'GET /workspaces/:workspace/tools';
     try {
@@ -365,7 +372,11 @@ export function registerWorkspaceQualifiedStatusRoutes(
   });
 
   app.get('/workspaces/:workspace/providers', async (req, res) => {
-    const runtime = resolveTrustedRuntime(workspaceRegistry, req, res);
+    const runtime = resolveTrustedWorkspaceRuntimeFromParam(
+      workspaceRegistry,
+      req,
+      res,
+    );
     if (!runtime) return;
     const route = 'GET /workspaces/:workspace/providers';
     const ctx = createBuildWorkspaceCtx(runtime.workspaceCwd)(route);
@@ -458,7 +469,11 @@ export function registerWorkspaceQualifiedDiagnosticStatusRoutes(
     ['hooks', 'getWorkspaceHooksStatus'],
   ] as const) {
     app.get(`/workspaces/:workspace/${pathSuffix}`, async (req, res) => {
-      const runtime = resolveTrustedRuntime(workspaceRegistry, req, res);
+      const runtime = resolveTrustedWorkspaceRuntimeFromParam(
+        workspaceRegistry,
+        req,
+        res,
+      );
       if (!runtime) return;
       const route = `GET /workspaces/:workspace/${pathSuffix}`;
       const ctx = createBuildWorkspaceCtx(runtime.workspaceCwd)(route);

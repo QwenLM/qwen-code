@@ -16,7 +16,7 @@ import {
 import type {
   AcpSessionBridge,
   BridgeSessionSummary,
-} from '../acp-session-bridge.js';
+} from '@qwen-code/acp-bridge/bridgeTypes';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
 import {

@@ -9,10 +9,8 @@ import {
   SessionService,
 } from '@qwen-code/qwen-code-core';
 import { access } from 'node:fs/promises';
-import {
-  SessionNotFoundError,
-  type AcpSessionBridge,
-} from './acp-session-bridge.js';
+import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
+import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import { normalizeSessionIdForLookup } from '../config/session-id.js';
 import type { SessionArchiveCoordinator } from './server/session-archive.js';
 

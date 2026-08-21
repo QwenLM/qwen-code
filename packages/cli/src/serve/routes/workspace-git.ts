@@ -4,19 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Application, Request, Response } from 'express';
+import type { Application } from 'express';
 import { getGitWorkingTreeStatus } from '@qwen-code/qwen-code-core';
-import type { AcpSessionBridge } from '../acp-session-bridge.js';
+import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { SendBridgeError } from '../server/error-response.js';
 import type { WorkspaceGitState } from '../workspace-git-state.js';
-import type {
-  WorkspaceRegistry,
-  WorkspaceRuntime,
-} from '../workspace-registry.js';
+import type { WorkspaceRegistry } from '../workspace-registry.js';
 import {
-  requireTrustedWorkspaceRuntime,
   resolveContainedCwd,
-  resolveWorkspaceRuntimeFromParam,
+  resolveTrustedWorkspaceRuntimeFromParam,
   sendUntrustedWorkspaceResponse,
 } from '../workspace-route-runtime.js';
 
@@ -60,16 +56,6 @@ export function registerWorkspaceGitRoutes(
   });
 }
 
-function resolveTrustedRuntime(
-  registry: WorkspaceRegistry,
-  req: Request,
-  res: Response,
-): WorkspaceRuntime | null {
-  const runtime = resolveWorkspaceRuntimeFromParam(registry, req, res);
-  if (!runtime) return null;
-  return requireTrustedWorkspaceRuntime(runtime, res) ? runtime : null;
-}
-
 export function registerWorkspaceQualifiedGitRoutes(
   app: Application,
   deps: {
@@ -79,7 +65,11 @@ export function registerWorkspaceQualifiedGitRoutes(
   },
 ): void {
   app.get('/workspaces/:workspace/git', async (req, res) => {
-    const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
+    const runtime = resolveTrustedWorkspaceRuntimeFromParam(
+      deps.workspaceRegistry,
+      req,
+      res,
+    );
     if (!runtime) return;
     const route = 'GET /workspaces/:workspace/git';
     try {

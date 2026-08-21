@@ -23,7 +23,7 @@ import {
   createWorkspaceRegistry,
   type WorkspaceRuntime,
 } from './workspace-registry.js';
-import type { AcpSessionBridge } from './acp-session-bridge.js';
+import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
   WorkspaceSkillNotFoundError,
   type DaemonWorkspaceService,

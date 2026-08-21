@@ -11,7 +11,7 @@ import {
   type DeviceFlowProvider,
   type DeviceFlowProviderId,
 } from '../auth/device-flow.js';
-import type { AcpSessionBridge } from '../acp-session-bridge.js';
+import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
 vi.mock('../../utils/stdioHelpers.js', () => ({ writeStderrLine: vi.fn() }));

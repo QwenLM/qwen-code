@@ -21,13 +21,15 @@ import {
   InvalidRewindTargetError,
   SessionBusyError,
   SessionNotFoundError,
-  type AcpSessionBridge,
-  type BridgeClientRequestContext,
-  type BridgeDaemonStatusSnapshot,
-  type BridgeRestoreSessionRequest,
-  type BridgeSessionSummary,
-  type BridgeSpawnRequest,
-} from './acp-session-bridge.js';
+} from '@qwen-code/acp-bridge/bridgeErrors';
+import type {
+  AcpSessionBridge,
+  BridgeClientRequestContext,
+  BridgeDaemonStatusSnapshot,
+  BridgeRestoreSessionRequest,
+  BridgeSessionSummary,
+  BridgeSpawnRequest,
+} from '@qwen-code/acp-bridge/bridgeTypes';
 import { ClientMcpSenderRegistry } from './acp-http/client-mcp-sender-registry.js';
 import type { DaemonLogger } from './daemon-logger.js';
 import { createServeApp } from './server.js';
