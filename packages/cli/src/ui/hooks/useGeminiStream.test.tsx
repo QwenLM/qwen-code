@@ -4542,6 +4542,165 @@ describe('useGeminiStream', () => {
     );
   });
 
+  it('re-bridges mid-turn drained audio on retry instead of resending the marker', async () => {
+    const queuedPrompt = 'listen @/tmp/recording.wav';
+    const resolvedAudioPart: Part = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    const resolvedTextPart: Part = { text: queuedPrompt };
+    const markerPart: Part = {
+      text: '[Audio bridge could not transcribe attached audio: no voice model is configured.]',
+    };
+    // First the drain's bridge fails (no voice model); the retry re-bridge
+    // then succeeds once one is configured.
+    mockRunAudioBridge
+      .mockResolvedValueOnce({
+        status: 'failed',
+        parts: [resolvedTextPart, markerPart],
+        audioCount: 1,
+        convertedCount: 0,
+        egressCount: 0,
+        error: 'no voice model is configured',
+      })
+      .mockResolvedValueOnce({
+        status: 'ok',
+        parts: [{ text: 'recovered transcript' }],
+        audioCount: 1,
+        convertedCount: 1,
+        egressCount: 1,
+        modelId: 'qwen3-asr-flash',
+      });
+    const resolveAtCommandQuerySpy = vi
+      .spyOn(atCommandProcessor, 'resolveAtCommandQuery')
+      .mockResolvedValue({
+        processedQuery: [resolvedTextPart, resolvedAudioPart],
+        shouldProceed: true,
+      });
+    const toolCallResponseParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'call1',
+          name: 'testTool',
+          response: { result: 'ok' },
+        },
+      },
+    ];
+    const completedToolCalls: TrackedToolCall[] = [
+      {
+        request: {
+          callId: 'call1',
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-midturn-drain-retry',
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId: 'call1',
+          responseParts: toolCallResponseParts,
+          errorType: undefined,
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => 'Mock description',
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    const midTurnDrainRef = {
+      current: vi
+        .fn<() => string[]>()
+        .mockReturnValueOnce([queuedPrompt])
+        .mockReturnValue([]),
+    };
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        midTurnDrainRef,
+      ),
+    );
+
+    mockSendMessageStream
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'partial response',
+          };
+          throw new Error('stream failed');
+        })(),
+      )
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete(completedToolCalls);
+      }
+    });
+
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+    expect(resolveAtCommandQuerySpy).toHaveBeenCalled();
+    // The drain sent the marker (not the raw audio)…
+    const firstSent = JSON.stringify(mockSendMessageStream.mock.calls[0][0]);
+    expect(firstSent).toContain('could not transcribe');
+    expect(firstSent).not.toContain('inlineData');
+    expect(mockRunAudioBridge).toHaveBeenCalledTimes(1);
+
+    // …but the failed turn must be retryable: Ctrl+Y re-derives from the
+    // pristine audio rather than resending the marker forever.
+    await act(async () => {
+      await result.current.retryLastPrompt();
+    });
+
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+    });
+    // The retry re-bridged the pristine audio (second bridge call), and its
+    // input still carried the original audio bytes.
+    expect(mockRunAudioBridge).toHaveBeenCalledTimes(2);
+    expect(
+      JSON.stringify(mockRunAudioBridge.mock.calls[1]?.[0]?.parts),
+    ).toContain('audio/wav');
+    const retrySent = JSON.stringify(mockSendMessageStream.mock.calls[1][0]);
+    expect(retrySent).toContain('recovered transcript');
+    expect(retrySent).not.toContain('could not transcribe');
+  });
+
   it('rechecks earlier drained audio against a later full-turn vision route', async () => {
     const audioPrompt = 'listen @/tmp/recording.wav';
     const imagePrompt = 'inspect @/tmp/screenshot.png';
@@ -10979,6 +11138,53 @@ describe('useGeminiStream', () => {
         expect(
           mockSendMessageStream.mock.calls[0][3].modelOverride,
         ).toBeUndefined();
+      });
+
+      it('does not re-apply the exact-route marker to a media-free notification turn', async () => {
+        allowInlineModel();
+        const imagePart = {
+          inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' },
+        };
+        mockConfig.getEffectiveInputModalities = vi.fn(() => ({}));
+        mockHandleSlashCommand.mockResolvedValue({
+          type: 'submit_prompt',
+          content: [{ text: 'inspect' }, imagePart],
+          modelOverride: 'inline-model',
+        });
+
+        const { result } = renderTestHook();
+
+        // Turn 1: the inline override routes the image, so the send is an
+        // exact route (trailing NUL) and the media-routed marker is stamped
+        // onto this turn's prompt id.
+        await act(async () => {
+          await result.current.submitQuery('/model inline-model inspect');
+        });
+        await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+        expect(mockSendMessageStream.mock.calls[0][3]).toMatchObject({
+          modelOverride: 'inline-model\0',
+        });
+
+        mockSendMessageStream.mockClear();
+
+        // A background shell completes afterwards; the notification turn
+        // inherits the override (per #7114 it must not be cleared) but keeps
+        // the bare selector — the routed media belongs to turn 1, so the
+        // marker must not be re-applied to this media-free turn.
+        const callback = mockBackgroundShellRegistry.setNotificationCallback
+          .mock.calls[0][0] as (displayText: string, modelText: string) => void;
+        act(() => {
+          callback(
+            'Background shell "npm test" completed.',
+            '<task-notification>completed</task-notification>',
+          );
+        });
+
+        await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+        expect(mockSendMessageStream.mock.calls[0][3]).toMatchObject({
+          type: SendMessageType.Notification,
+          modelOverride: 'inline-model',
+        });
       });
 
       it('drops a queued running monitor event after cancellation', async () => {

@@ -178,6 +178,7 @@ function clearModelOverride(
   modelOverrideRef: { current: string | undefined },
   inlineActiveRef: { current: boolean },
   mediaRoutedRef: { current: string | undefined },
+  mediaRoutedPromptIdRef: { current: string | undefined },
 ): void {
   applyModelOverride(modelOverrideRef, inlineActiveRef, undefined, false);
   // The media-routed marker must clear atomically with the override:
@@ -185,6 +186,7 @@ function clearModelOverride(
   // skip media handling and send the trailing-NUL exact route for a
   // media-free continuation.
   mediaRoutedRef.current = undefined;
+  mediaRoutedPromptIdRef.current = undefined;
 }
 
 const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS = 10_000;
@@ -203,6 +205,15 @@ interface PendingDuplicateToolResponses {
 
 interface ResolvedSteerMessages {
   parts: Part[];
+  /**
+   * Pristine variants of `parts` where a media bridge failed: segments whose
+   * audio was replaced with a marker are stored here with the original audio
+   * intact, so Retry (Ctrl+Y) can re-bridge them instead of resending the
+   * marker forever. Undefined when no segment differs from `parts`.
+   */
+  retryParts?: Part[];
+  /** True when this drain routed raw media to the active model override. */
+  mediaRouted?: boolean;
   accept: () => void;
   restoreMessages: string[];
 }
@@ -848,6 +859,13 @@ export const useGeminiStream = (
   // pre-existing compression and model-fallback behavior. Compared by value, so
   // it stops applying as soon as the override changes.
   const mediaRoutedOverrideRef = useRef<string | undefined>(undefined);
+  // The prompt_id of the submission that established the media route above.
+  // The trailing-NUL exact-route marker only applies to sends owned by that
+  // same prompt (the routed send and its tool continuations): turns that skip
+  // the turn-start reset (Notification / Goal / concurrent /btw) run under
+  // their own prompt ids and must keep the bare selector even while they
+  // inherit the override itself.
+  const mediaRoutedPromptIdRef = useRef<string | undefined>(undefined);
   const canUseToolResultFullTurnModel = useCallback((model: string) => {
     const current = modelOverrideRef.current;
     return (
@@ -1376,11 +1394,13 @@ export const useGeminiStream = (
       shouldProceed: boolean;
       modelOverrideResolutionFailed: boolean;
       preOverrideParts?: PartListUnion;
+      mediaRouted?: boolean;
     }> => {
       let nextParts = parts;
       let modelOverrideResolutionFailed = false;
       let targetSupportsImage = false;
       let preOverrideParts: PartListUnion | undefined;
+      let mediaRouted = false;
       if (nextParts !== null && hasAudioParts(nextParts)) {
         const activeOverride = modelOverrideRef.current;
         let shouldRunBridge = activeOverride === undefined;
@@ -1414,6 +1434,7 @@ export const useGeminiStream = (
                 modelOverrideRef,
                 inlineModelOverrideActiveRef,
                 mediaRoutedOverrideRef,
+                mediaRoutedPromptIdRef,
               );
             }
             if (failClosed) {
@@ -1445,6 +1466,7 @@ export const useGeminiStream = (
             );
             if (hasAudioParts(nextParts)) {
               mediaRoutedOverrideRef.current = modelOverrideRef.current;
+              mediaRouted = true;
             }
           }
         }
@@ -1514,12 +1536,14 @@ export const useGeminiStream = (
         );
         if (hasImageParts(clampedParts)) {
           mediaRoutedOverrideRef.current = modelOverrideRef.current;
+          mediaRouted = true;
         }
         return {
           parts: clampedParts,
           shouldProceed: true,
           modelOverrideResolutionFailed,
           preOverrideParts,
+          mediaRouted,
         };
       }
       const visionResult = await applyVisionBridgeIfNeeded(
@@ -1532,6 +1556,7 @@ export const useGeminiStream = (
         ...visionResult,
         modelOverrideResolutionFailed,
         preOverrideParts,
+        mediaRouted,
       };
     },
     [addItem, applyVisionBridgeIfNeeded, config, settings],
@@ -1551,6 +1576,7 @@ export const useGeminiStream = (
       shouldProceed: boolean;
       scheduledToolCallId?: string;
       preOverrideParts?: PartListUnion;
+      mediaRouted?: boolean;
     }> => {
       if (turnCancelledRef.current && !preserveTurnOwnership) {
         return { queryToSend: null, shouldProceed: false };
@@ -1569,6 +1595,7 @@ export const useGeminiStream = (
 
       let localQueryToSendToGemini: PartListUnion | null = null;
       let preOverrideParts: PartListUnion | undefined;
+      let mediaRouted = false;
 
       if (typeof query === 'string') {
         const trimmedQuery = query.trim();
@@ -1676,6 +1703,7 @@ export const useGeminiStream = (
                 queryToSend: localQueryToSendToGemini,
                 shouldProceed: true,
                 preOverrideParts: bridgeResult.preOverrideParts,
+                mediaRouted: bridgeResult.mediaRouted,
               };
             }
             case 'handled': {
@@ -1766,6 +1794,7 @@ export const useGeminiStream = (
         }
         localQueryToSendToGemini = bridgeResult.parts;
         preOverrideParts = bridgeResult.preOverrideParts;
+        mediaRouted = bridgeResult.mediaRouted === true;
       } else {
         // It's a function response (PartListUnion that isn't a string)
         localQueryToSendToGemini = query;
@@ -1781,6 +1810,7 @@ export const useGeminiStream = (
         queryToSend: localQueryToSendToGemini,
         shouldProceed: true,
         preOverrideParts,
+        mediaRouted,
       };
     },
     [
@@ -3218,6 +3248,9 @@ export const useGeminiStream = (
       signal: AbortSignal,
     ): Promise<ResolvedSteerMessages> => {
       const resolvedSegments: Part[][] = [];
+      // Pristine (pre-marker) variant per retained segment, set only where a
+      // bridge failed and captured the original media in preOverrideParts.
+      const pristineSegments: Array<Part[] | undefined> = [];
       const resolvedForRecording: Array<{
         message: string;
         parts: Part[];
@@ -3228,6 +3261,7 @@ export const useGeminiStream = (
       // Once an active route fails closed, no later attachment in this drain
       // may reinstall a full-turn selector from that same batch.
       let modelOverrideResolutionFailed = false;
+      let drainMediaRouted = false;
 
       for (let index = 0; index < messages.length; index += 1) {
         if (signal.aborted) {
@@ -3329,6 +3363,7 @@ export const useGeminiStream = (
         );
         modelOverrideResolutionFailed ||=
           bridgeResult.modelOverrideResolutionFailed;
+        drainMediaRouted ||= bridgeResult.mediaRouted === true;
         if (!bridgeResult.shouldProceed) {
           if (signal.aborted) {
             restoreMessages.push(...messages.slice(index + 1));
@@ -3354,6 +3389,15 @@ export const useGeminiStream = (
         }
 
         resolvedSegments.push(messageParts);
+        // Keep the pristine media alongside the marker-substituted segment so
+        // Retry (Ctrl+Y) can re-bridge it once a voice model is configured —
+        // mirroring the first-turn invariant (lastPromptRef stores
+        // preOverrideParts, not the marker).
+        pristineSegments.push(
+          bridgeResult.preOverrideParts !== undefined
+            ? normalizePartList(bridgeResult.preOverrideParts)
+            : undefined,
+        );
         resolvedForRecording.push({
           message,
           parts: messageParts,
@@ -3375,26 +3419,48 @@ export const useGeminiStream = (
         );
         if (!rechecked.shouldProceed) {
           resolvedSegments.splice(index, 1);
+          pristineSegments.splice(index, 1);
           resolvedForRecording.splice(index, 1);
           index -= 1;
           continue;
         }
+        drainMediaRouted ||= rechecked.mediaRouted === true;
         const recheckedParts = normalizePartList(rechecked.parts ?? segment);
         resolvedSegments[index] = recheckedParts;
+        // A recheck that failed the bridge captured the still-pristine media;
+        // it replaces any earlier variant for this segment.
+        if (rechecked.preOverrideParts !== undefined) {
+          pristineSegments[index] = normalizePartList(
+            rechecked.preOverrideParts,
+          );
+        }
         resolvedForRecording[index].parts = recheckedParts;
       }
 
       const resolvedMessages: Part[] = [];
-      for (const segment of resolvedSegments) {
+      const retryMessages: Part[] = [];
+      let retryDiffers = false;
+      for (let index = 0; index < resolvedSegments.length; index += 1) {
+        const segment = resolvedSegments[index];
         if (segment.length === 0) continue;
         if (resolvedMessages.length > 0) {
           resolvedMessages.push({ text: '\n\n' });
+          retryMessages.push({ text: '\n\n' });
         }
         resolvedMessages.push(...segment);
+        const pristine = pristineSegments[index];
+        if (pristine) {
+          retryDiffers = true;
+          retryMessages.push(...pristine);
+        } else {
+          retryMessages.push(...segment);
+        }
       }
 
       return {
         parts: resolvedMessages,
+        retryParts: retryDiffers ? retryMessages : undefined,
+        mediaRouted: drainMediaRouted,
         restoreMessages,
         accept: () => {
           for (const { message, parts, sideEffects } of resolvedForRecording) {
@@ -3445,6 +3511,8 @@ export const useGeminiStream = (
         let settled = false;
         return {
           parts: resolved.parts,
+          retryParts: resolved.retryParts,
+          mediaRouted: resolved.mediaRouted,
           accept: () => {
             if (settled) return;
             settled = true;
@@ -3495,6 +3563,19 @@ export const useGeminiStream = (
         onAdmissionFailed?: () => void;
         onGoalClaimDeferred?: () => void;
         steerInput?: SteerInput;
+        /**
+         * The parts to store in lastPromptRef for Ctrl+Y retry instead of the
+         * sent payload. Used by the mid-turn drain when a bridge failed: the
+         * sent payload carries marker text, but retry must re-bridge the
+         * pristine media (same invariant as preOverrideParts on first turns).
+         */
+        preOverrideParts?: PartListUnion;
+        /**
+         * True when this continuation's drained steer routed raw media to the
+         * active override: stamp the media-routed marker on this prompt (the
+         * drain runs before submitQuery, so it cannot stamp it itself).
+         */
+        steerMediaRouted?: boolean;
         submittedPrompt?: string;
         goal?: QueuedGoalTurn;
         claimGoalTurn?: () => QueuedGoalTurn | undefined;
@@ -3675,6 +3756,7 @@ export const useGeminiStream = (
             modelOverrideRef,
             inlineModelOverrideActiveRef,
             mediaRoutedOverrideRef,
+            mediaRoutedPromptIdRef,
           );
         }
         // Commit any pending retry error to history (without hint) since the
@@ -3743,6 +3825,7 @@ export const useGeminiStream = (
           shouldProceed: boolean;
           scheduledToolCallId?: string;
           preOverrideParts?: PartListUnion;
+          mediaRouted?: boolean;
         };
         try {
           preparedQuery =
@@ -3769,15 +3852,23 @@ export const useGeminiStream = (
                       query,
                       userMessageTimestamp,
                       abortSignal,
-                    ).then(({ parts, shouldProceed, preOverrideParts }) => ({
-                      queryToSend: parts,
-                      shouldProceed,
-                      // Carry the fresh pre-override parts so a retry whose
-                      // re-bridge fails again stores the original audio in
-                      // lastPromptRef (not the marker text), keeping the
-                      // recording retryable instead of stranded.
-                      preOverrideParts,
-                    }))
+                    ).then(
+                      ({
+                        parts,
+                        shouldProceed,
+                        preOverrideParts,
+                        mediaRouted,
+                      }) => ({
+                        queryToSend: parts,
+                        shouldProceed,
+                        // Carry the fresh pre-override parts so a retry whose
+                        // re-bridge fails again stores the original audio in
+                        // lastPromptRef (not the marker text), keeping the
+                        // recording retryable instead of stranded.
+                        preOverrideParts,
+                        mediaRouted,
+                      }),
+                    )
                   : { queryToSend: query, shouldProceed: true }
                 : await prepareQueryForGemini(
                     query,
@@ -3801,6 +3892,17 @@ export const useGeminiStream = (
           scheduledToolCallId,
           preOverrideParts,
         } = preparedQuery;
+
+        // This submission's bridge routed raw media to the active override:
+        // stamp the owning prompt so only this prompt's sends (the routed
+        // send and its tool continuations) carry the trailing-NUL exact-route
+        // marker. Turns that skip the turn-start reset (Notification / Goal /
+        // concurrent /btw) run under different prompt ids and keep the bare
+        // selector. The drain variant is stamped via metadata because the
+        // drain resolves before this submission's prompt_id is final.
+        if (preparedQuery.mediaRouted || metadata?.steerMediaRouted) {
+          mediaRoutedPromptIdRef.current = prompt_id;
+        }
 
         if (scheduledToolCallId && foregroundAbortController) {
           keepToolContinuationAbortController = true;
@@ -3930,8 +4032,12 @@ export const useGeminiStream = (
         if (submitType !== SendMessageType.Goal) {
           // Retry drops the one-shot inline override, so remember the parts as
           // they were before that override forced the audio out: retrying the
-          // marker text would strand the recording forever.
-          lastPromptRef.current = preOverrideParts ?? finalQueryToSend;
+          // marker text would strand the recording forever. The mid-turn drain
+          // supplies the same invariant for steered attachments whose bridge
+          // failed: metadata.preOverrideParts carries the pristine media where
+          // finalQueryToSend carries the marker.
+          lastPromptRef.current =
+            preOverrideParts ?? metadata?.preOverrideParts ?? finalQueryToSend;
           lastPromptErroredRef.current = false;
         }
 
@@ -4001,6 +4107,11 @@ export const useGeminiStream = (
           }
 
           const activeModelOverride = modelOverrideRef.current;
+          // A send still carrying raw media belongs to the route that put it
+          // there even if the prompt stamp moved (concurrent sends); a
+          // media-free send must match the stamp to keep the exact route.
+          const payloadCarriesRoutedMedia =
+            hasAudioParts(finalQueryToSend) || hasImageParts(finalQueryToSend);
           const sendOptions = {
             type: submitType,
             notificationDisplayText: metadata?.notificationDisplayText,
@@ -4008,7 +4119,9 @@ export const useGeminiStream = (
             modelOverride:
               activeModelOverride !== undefined &&
               !activeModelOverride.endsWith('\0') &&
-              mediaRoutedOverrideRef.current === activeModelOverride
+              mediaRoutedOverrideRef.current === activeModelOverride &&
+              (mediaRoutedPromptIdRef.current === prompt_id ||
+                payloadCarriesRoutedMedia)
                 ? `${activeModelOverride}\0`
                 : activeModelOverride,
             steerInput: metadata?.steerInput,
@@ -5161,6 +5274,17 @@ export const useGeminiStream = (
                   : 'full-turn override active'
               }`,
             );
+          } else if (toolCall.response.modelOverride === undefined) {
+            // Route the clear through clearModelOverride so the media-routed
+            // marker state dies with the override; applyModelOverride alone
+            // would leave a stale marker that a later re-assertion of the same
+            // value re-attaches to a media-free continuation.
+            clearModelOverride(
+              modelOverrideRef,
+              inlineModelOverrideActiveRef,
+              mediaRoutedOverrideRef,
+              mediaRoutedPromptIdRef,
+            );
           } else {
             applyModelOverride(
               modelOverrideRef,
@@ -5387,6 +5511,10 @@ export const useGeminiStream = (
               Boolean(activeGoalAdmissionRef.current),
             ) ?? []);
       let drainedSteer: SteerInput | undefined;
+      // The payload Retry (Ctrl+Y) must store when the drain's bridge failed:
+      // identical to responsesToSend except the marker-substituted steer
+      // segment is replaced with the pristine media, so the retry re-bridges.
+      let steerRetryQuery: PartListUnion | undefined;
       if (drained.length > 0) {
         const midTurnAbort =
           abortControllerRef.current ?? new AbortController();
@@ -5400,6 +5528,12 @@ export const useGeminiStream = (
             midTurnAbort.signal,
           );
           if (drainedSteer) {
+            if (drainedSteer.retryParts) {
+              steerRetryQuery = [
+                ...responsesToSend,
+                ...drainedSteer.retryParts,
+              ];
+            }
             responsesToSend.push(...drainedSteer.parts);
           }
         } finally {
@@ -5433,6 +5567,8 @@ export const useGeminiStream = (
 
       await submitQuery(responsesToSend, SendMessageType.ToolResult, promptId, {
         steerInput: drainedSteer,
+        preOverrideParts: steerRetryQuery,
+        steerMediaRouted: drainedSteer?.mediaRouted,
         onDelivered: drainedSteer?.accept,
         onAdmissionFailed: () => {
           endToolInteraction(

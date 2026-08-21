@@ -228,6 +228,14 @@ export interface SendMessageOptions {
 
 export interface SteerInput {
   parts: Part[];
+  /**
+   * Pristine variants of `parts` where a media bridge failed: the CLI stores
+   * them (instead of `parts`) for Ctrl+Y retry so the retry can re-bridge the
+   * original media. Absent when every segment matches `parts`.
+   */
+  retryParts?: Part[];
+  /** True when this drain routed raw media to the active model override. */
+  mediaRouted?: boolean;
   /** Commits UI/recording side effects after the request accepts the input. */
   accept: () => void;
   /** Restores the input when the next model request never accepts it. */
