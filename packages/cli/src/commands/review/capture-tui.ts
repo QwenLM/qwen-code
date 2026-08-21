@@ -586,6 +586,9 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       return false;
     }
   };
+  // What this run's own `.ans` write left on disk, by identity — the render
+  // stage pins its staged input against it.
+  let ansWritten: Stamp = untouched;
   let ansStamp: Stamp = untouched;
   let pngStamp: Stamp = untouched;
   let manifestStamp: Stamp = untouched;
@@ -1652,6 +1655,10 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
 
   try {
     writeArtifact(ansPath, ansStamp, ansText);
+    // Identity of the bytes THIS run just wrote, for the render stage to
+    // pin against. Taken here rather than derived at stage time: by then
+    // ansPath may already be the swap.
+    ansWritten = stampOf(ansPath);
   } catch (e) {
     // The disk can fill (or the target turn hostile) during a long capture
     // window; the same principle as the mkdir guard — refusal contract, not
@@ -1817,9 +1824,17 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     let renderInputStaged = false;
     try {
       linkSync(ansPath, ansStage);
-      // lstat never follows: a cloned symlink is not a regular file.
-      if (!lstatSync(ansStage).isFile()) {
-        throw new Error('staged render input is not a regular file');
+      // lstat never follows: a cloned symlink is not a regular file. But
+      // "regular file" is the whole guard only where link() clones —
+      // darwin FOLLOWS a symlinked source (measured: the staged entry is a
+      // hard link to the victim's inode, isFile() true), so the type test
+      // alone let the same swap through on macOS and freeze rendered the
+      // victim's bytes as this capture's png. Identity is the portable
+      // question: the stage must be another name for the very inode this
+      // run's own .ans write produced.
+      const staged = lstatSync(ansStage);
+      if (!staged.isFile() || staged.ino !== ansWritten.ino) {
+        throw new Error('staged render input is not the .ans this run wrote');
       }
       renderInputStaged = true;
     } catch {
