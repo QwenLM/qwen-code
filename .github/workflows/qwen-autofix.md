@@ -967,9 +967,27 @@ same PRs and the per-PR address groups accumulate duplicates that
 later replay stale watermarks. The status filter is SERVER-side: a
 client-side filter over the N newest runs loses a long-lived
 fanned-out run once cron traffic pushes it past the window, and
-its queued PRs silently stop looking busy. Filtered this way the
-limit applies to LIVE runs only (at most a handful), and one
-jobs-view per live run stays cheap.
+its queued PRs silently stop looking busy. The union covers THREE
+statuses — in_progress, queued, AND pending: GitHub reports a run
+'pending' while its remaining jobs wait on concurrency groups
+(neither 'queued' nor 'in_progress'), and the run-level status
+trails the job-level flip by minutes, so the two-status union
+loses legs that are already running. Measured 2026-08-21 (#9596):
+a run whose four legs had been running for several minutes still
+listed 'pending', the scan re-dispatched all four, and every
+duplicate burned one build-cli (~5 min) before queueing behind
+the per-PR group it should have skipped. Pending runs cost one
+extra jobs-view each and match nothing until their matrix
+materialises. Filtered this way the limit applies to LIVE runs
+only (at most a handful), and one jobs-view per live run stays
+cheap. The enumeration calls the runs API directly, not `gh run
+list --status`: gh validates --status against a client-side
+allow-list that only accepts 'pending' from 2.65.0 onward, while
+the self-hosted ecs-qwen pool (already used by the issue-autofix,
+build-cli, and review-address sibling jobs) lags the hosted
+images — an older gh exits 1 on the flag and FAIL-CLOSED below
+then silently empties every scan. The API's status filter is
+server-side on every gh version.
 
 FAIL-CLOSED: any enumeration failure (the run list, or one run's
 jobs view) empties THIS scan's candidate set. Measured 2026-08-16
