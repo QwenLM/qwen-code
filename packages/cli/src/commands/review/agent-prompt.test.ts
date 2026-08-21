@@ -6415,10 +6415,13 @@ describe('incremental-scope briefs', () => {
     for (const bad of [
       { anchor: 42 },
       // A bad anchor with VALID lists — the only shape the anchor guard
-      // alone can reject. Every other case here degrades through the
-      // empty-lists exit as well, so deleting `typeof raw.anchor !== 'string'`
-      // left the suite green: the plan is `JSON.parse`d with an unchecked
-      // cast, and `anchor: 42` would render "since 42" into an agent's frame.
+      // alone can reject, and the reason this case exists. Every OTHER case
+      // in this list degrades through the empty-lists exit as well, so until
+      // this one was added, deleting `typeof raw.anchor !== 'string'` left the
+      // whole suite green: the plan is `JSON.parse`d with an unchecked cast,
+      // and `anchor: 42` would render "since 42" into an agent's frame. With
+      // it, that deletion is a one-test failure — any non-string anchor lands
+      // here, `{}` and `42` alike.
       {
         anchor: 42,
         deltaFiles: ['src/changed.ts'],
