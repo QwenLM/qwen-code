@@ -1081,3 +1081,23 @@ A maintainer-dogfood round-1 finding asserted head-comment leakage against the t
 ### The mirrored oracle's false positives (PR #8225)
 
 Two sweeps in the same dogfood series manufactured findings out of their own bugs: a round-2 sweep unconditionally filtered `set -e` lines and reported four leaks that were not there, and a round-7 differential oracle misread a shell continuation line as a command position and reported one miss that was not one. Both oracles were reimplementations of the logic under test — a mirror of the implementation shares its blind spots. The round-7 fix handed adjudication to bash itself, and the false red vanished; that is why a sweep's oracle must be an external authority, and why a nonzero count is spot-checked by reading one hit before it is quoted.
+
+### The inherited tool surface
+
+`AgentCore.prepareTools` has two branches. A subagent type that declares a `tools` list is built with `getFunctionDeclarationsFiltered(allowedNames)`; a type that declares none inherits everything — `getFunctionDeclarations({ includeDeferred: true })`, deferred tools included. The comment above that branch states the reasoning: subagents are one-shot, so they "don't have the same 'save tokens' lifecycle as the main chat."
+
+That premise does not hold for a review. A review names 13-14 subagents, each runs several turns, and a tool block is re-declared on every one of them. `general-purpose` — the type the skill mandated — is the only builtin that declares no `tools`; `Explore` declares seven and `statusline-setup` three.
+
+Measured with a recording endpoint, on a 6-file / 115-line diff, driving one real dimension agent (1a) end to end through its four turns — read brief, read diff page 1, read diff page 2, report. The three arms differ only in `subagent_type`; same fixture, same launch prompt, same isolated `QWEN_HOME`, and the orchestrator's own turns are identical across all three:
+
+| `subagent_type`                        | tools declared | tokens/turn | delivered |
+| -------------------------------------- | -------------- | ----------- | --------- |
+| `general-purpose` (inherit everything) | 51             | 21,178      | 139,013   |
+| deferral applied to subagents          | 10             | 7,758       | 84,537    |
+| `review-agent` (explicit list)         | 6              | 3,447       | 55,733    |
+
+Of the 51, thirty-five were `computer_use__*` desktop-automation schemas, 11,011 tokens per turn on their own. Across a 13-agent roster the difference between the first and last row is ~1.08M prompt tokens on a 115-line change.
+
+The middle row is the alternative that was measured and rejected: making the deferral that trims the orchestrator apply to subagents too. It saves less, because deferral is not designed to go below the core tool set — it holds back MCP and low-frequency built-ins and declares the ~14 core tools regardless, so a subagent would still carry `skill`, `tool_search`, `notebook_edit` and the rest. An explicit list goes under that floor. About a sixth of the remaining gap is second-order: with no `skill` tool, the per-launch skills catalogue is not injected into the agent's first user turn either (504 tokens against 3,623).
+
+It is also the smaller change. Applying deferral to subagents would alter every `tools: ['*']` config in the way that branch's comment warns about, and `revealDeferredTool` writes to the registry the parent session shares — so one subagent discovering a tool would rewrite the orchestrator's declaration list and void its prompt-cache prefix. A review-specific type touches nothing outside the review.

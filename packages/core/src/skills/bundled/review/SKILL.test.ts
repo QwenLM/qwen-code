@@ -8,6 +8,10 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import {
+  BuiltinAgentRegistry,
+  REVIEW_BUILTIN_SUBAGENT_TYPE,
+} from '../../../subagents/builtin-agents.js';
 
 const skillDir = path.dirname(fileURLToPath(import.meta.url));
 
@@ -661,5 +665,29 @@ describe('bundled review skill', () => {
     expect(body).toContain('self-PR detection and head drift are a1-backed');
     expect(body).not.toContain('self-PR detection has no Aone backing');
     expect(body).not.toContain('`pr-context`, `comment-status`, `presubmit`');
+  });
+
+  it('mandates the review-agent subagent type, never general-purpose', () => {
+    // This literal is the whole delivery mechanism for the explicit tool list.
+    // `general-purpose` declares no `tools`, so it takes prepareTools'
+    // inherit-everything branch and every agent re-declares 51 schemas on
+    // every turn — measured at ~1.08M extra prompt tokens across one
+    // 13-agent roster (DESIGN.md — The inherited tool surface). A revert to
+    // the old literal is silent: the review still runs, just six times
+    // dearer per agent.
+    const body = skillBody();
+    expect(body).toContain(
+      `set \`subagent_type: "${REVIEW_BUILTIN_SUBAGENT_TYPE}"\` and \`run_in_background: false\``,
+    );
+    // The type must exist, or every launch falls back to the default.
+    expect(
+      BuiltinAgentRegistry.getBuiltinAgent(REVIEW_BUILTIN_SUBAGENT_TYPE),
+    ).toBeDefined();
+    // No stray *directive* may survive — Step 3B named the type too, and one
+    // missed site sends a whole topology down the expensive branch. Prose that
+    // names `general-purpose` as the thing NOT to fall back to is the point of
+    // the rule, so only the two launch-shaped forms are banned.
+    expect(body).not.toContain('subagent_type: "general-purpose"');
+    expect(body).not.toContain('`general-purpose` subagent');
   });
 });

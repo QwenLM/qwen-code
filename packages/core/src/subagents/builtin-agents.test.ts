@@ -6,7 +6,11 @@
 
 import { describe, it, expect } from 'vitest';
 import { ToolNames } from '../tools/tool-names.js';
-import { BuiltinAgentRegistry } from './builtin-agents.js';
+import {
+  BuiltinAgentRegistry,
+  DEFAULT_BUILTIN_SUBAGENT_TYPE,
+  REVIEW_BUILTIN_SUBAGENT_TYPE,
+} from './builtin-agents.js';
 
 describe('BuiltinAgentRegistry', () => {
   describe('getBuiltinAgents', () => {
@@ -148,6 +152,58 @@ describe('BuiltinAgentRegistry', () => {
         expect(BuiltinAgentRegistry.isBuiltinAgent(name)).toBe(true);
         expect(BuiltinAgentRegistry.getBuiltinAgent(name)).toBeDefined();
       });
+    });
+  });
+
+  describe('review-agent', () => {
+    // The whole point of this agent type is the `tools` field. A type that
+    // declares none takes AgentCore.prepareTools' inherit-everything branch
+    // and is handed every deferred schema on every turn — measured at 21,178
+    // prompt tokens per turn against this list's 3,447 (DESIGN.md — The
+    // inherited tool surface). So these assertions are about the token bill,
+    // not about tidiness.
+    it('declares an explicit tool list', () => {
+      const agent = BuiltinAgentRegistry.getBuiltinAgent(
+        REVIEW_BUILTIN_SUBAGENT_TYPE,
+      );
+
+      expect(agent).toBeDefined();
+      expect(agent?.tools).toEqual([
+        ToolNames.READ_FILE,
+        ToolNames.GREP,
+        ToolNames.GLOB,
+        ToolNames.SHELL,
+        ToolNames.WRITE_FILE,
+        ToolNames.EDIT,
+      ]);
+    });
+
+    it('omits the tools that would re-open the inherited surface', () => {
+      const tools =
+        BuiltinAgentRegistry.getBuiltinAgent(REVIEW_BUILTIN_SUBAGENT_TYPE)
+          ?.tools ?? [];
+
+      // TOOL_SEARCH lets an agent reveal deferred tools at runtime, and
+      // revealDeferredTool writes to the registry the parent session shares —
+      // one agent's discovery would rewrite the orchestrator's declarations
+      // and void its prompt-cache prefix.
+      expect(tools).not.toContain(ToolNames.TOOL_SEARCH);
+      // SKILL is not merely unused: its presence injects the per-launch skills
+      // catalogue into the agent's first user turn, which measured 3,623
+      // tokens against 504 without it.
+      expect(tools).not.toContain(ToolNames.SKILL);
+      // A review dimension does not spawn further agents.
+      expect(tools).not.toContain(ToolNames.AGENT);
+    });
+
+    it('leaves general-purpose as the only builtin that inherits every tool', () => {
+      // general-purpose inherits everything by design; every other builtin
+      // must declare a list, or it silently inherits the same surface.
+      const inheriting = BuiltinAgentRegistry.getBuiltinAgents()
+        .filter((agent) => !agent.tools || agent.tools.length === 0)
+        .map((agent) => agent.name);
+
+      expect(inheriting).toEqual([DEFAULT_BUILTIN_SUBAGENT_TYPE]);
     });
   });
 });

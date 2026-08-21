@@ -41,6 +41,7 @@ import type { CommandModule } from 'yargs';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { REVIEW_BUILTIN_SUBAGENT_TYPE } from '@qwen-code/qwen-code-core';
 import {
   writeStdoutLine,
   writeStderrLine,
@@ -2455,7 +2456,7 @@ function runRoster(
     typeof wt === 'string' && wt
       ? `\n\n**Agent tool parameters (worktree mode):** Set ` +
         `\`working_dir: "${wt}"\` and ` +
-        `\`subagent_type: "general-purpose"\`, \`run_in_background: false\` ` +
+        `\`subagent_type: "${REVIEW_BUILTIN_SUBAGENT_TYPE}"\`, \`run_in_background: false\` ` +
         `on EVERY agent call below. Do NOT set \`isolation\` — the worktree ` +
         `already exists; \`isolation\` creates a new copy and is mutually ` +
         `exclusive with \`working_dir\`.`

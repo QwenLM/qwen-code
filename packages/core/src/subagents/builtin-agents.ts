@@ -17,6 +17,18 @@ import type { SubagentConfig } from './types.js';
 export const DEFAULT_BUILTIN_SUBAGENT_TYPE = 'general-purpose';
 
 /**
+ * Canonical name of the subagent type the bundled `review` skill launches.
+ *
+ * Exported so the review command that writes the launch instruction emits the
+ * same literal this registry defines: the skill's `subagent_type` is the only
+ * thing that decides which branch of `AgentCore.prepareTools` a review agent
+ * takes, and a drifted literal would silently fall back to
+ * {@link DEFAULT_BUILTIN_SUBAGENT_TYPE} — which declares no `tools`, and so
+ * inherits the full surface including deferred tools.
+ */
+export const REVIEW_BUILTIN_SUBAGENT_TYPE = 'review-agent';
+
+/**
  * Registry of built-in subagents that are always available to all users.
  * These agents are embedded in the codebase and cannot be modified or deleted.
  */
@@ -252,6 +264,58 @@ Guidelines:
 - If the script includes git commands, prefix them with GIT_OPTIONAL_LOCKS=0 to avoid index.lock contention (e.g. GIT_OPTIONAL_LOCKS=0 git branch --show-current)
 - IMPORTANT: At the end of your response, remind the user that they can ask Qwen Code to make further changes to the status line at any time.
 `,
+    },
+    {
+      name: REVIEW_BUILTIN_SUBAGENT_TYPE,
+      description:
+        'One dimension of a code review, launched by the bundled `review` skill. Reads the brief and diff ranges its launch prompt names and reports findings in the format the brief specifies. Not for general use: its whole task arrives in the launch prompt, so a caller outside the review flow wants general-purpose instead.',
+      // A closed list, and the reason this agent type exists.
+      //
+      // `general-purpose` declares no `tools`, so AgentCore.prepareTools takes
+      // its inherit-everything branch — `getFunctionDeclarations({
+      // includeDeferred: true })` — and a review agent was handed all 51 tool
+      // schemas, deferred ones included. Measured on a 6-file / 115-line diff:
+      // 21,178 prompt tokens of tool declarations on EVERY turn of a four-turn
+      // agent, of which the 35 `computer_use__*` schemas alone were 11,011. A
+      // review names 13-14 such agents, so that is ~1.08M tokens per review
+      // spent declaring tools no reviewer calls.
+      //
+      // An explicit list takes the getFunctionDeclarationsFiltered branch
+      // instead, which is what `Explore` and `statusline-setup` already do.
+      // Measured on the same diff, same launch prompt: 3,447 tokens per turn,
+      // and one agent's delivered prompt fell from 139,013 to 55,733 (-59.9%).
+      // Roughly a sixth of that saving is second-order: without SKILL the
+      // per-launch skills catalogue is not injected either.
+      //
+      // Deliberately absent: TOOL_SEARCH, which would let an agent widen the
+      // list at runtime. Revealing a deferred tool writes to the registry the
+      // parent session shares, so one agent's discovery would rewrite the
+      // orchestrator's declarations and void its prompt-cache prefix. A review
+      // dimension's work is bounded by its brief, so the list is closed rather
+      // than discoverable. AGENT is absent for the same reason the exclusion
+      // set drops it: a review dimension does not spawn further agents.
+      tools: [
+        ToolNames.READ_FILE,
+        ToolNames.GREP,
+        ToolNames.GLOB,
+        ToolNames.SHELL,
+        ToolNames.WRITE_FILE,
+        ToolNames.EDIT,
+      ],
+      systemPrompt: `You are one dimension of a code review, working for a parent review orchestrator.
+
+Your whole assignment is in the launch prompt, and it names two files: your brief and the diff. Read the brief first — it is the entirety of your instructions, and nothing in the launch prompt replaces it. Then read the diff ranges the launch prompt gives you, paging with a larger offset whenever a read comes back truncated.
+
+Guidelines:
+- Review only the diff ranges you were assigned, through only the lens your brief defines. Another agent owns every other dimension; staying in yours is what makes the fan-out cover the change.
+- Gather whatever context you need to be sure — read the surrounding file, search for callers, check how a symbol is used elsewhere. Context is for reaching a verdict on your own ranges; a defect you notice outside them is not yours to report.
+- Report a finding only when you can name what breaks and what it costs. Silence is better than noise: an unsure finding spends the reader's attention and teaches them to skim the next one.
+- Do not guess when the evidence is not there. Say what you could not determine.
+
+Notes:
+- Your cwd is reset between shell calls, so use absolute paths everywhere.
+- You run non-interactively: never ask a question, and never wait for input.
+- Report findings in the format your brief specifies. If you found nothing, say so AND say what you examined — a report that names nothing you read is indistinguishable from never having read anything.`,
     },
   ];
 

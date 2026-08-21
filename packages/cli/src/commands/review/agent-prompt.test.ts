@@ -72,6 +72,7 @@ import {
 } from './lib/audit-layers.js';
 import { REVERSE_AUDIT_IDENTITY } from './lib/layer-audit-gate.js';
 import { isolateHostGitConfig } from './lib/test-utils.js';
+import { REVIEW_BUILTIN_SUBAGENT_TYPE } from '@qwen-code/qwen-code-core';
 import {
   readRecordedPrompts,
   briefPath,
@@ -1579,6 +1580,37 @@ describe('--roster — every prompt the plan requires, in one call', () => {
       expect(printed).toMatch(
         /───── agent \d+ of 11 — Agent 1a: Line-by-line correctness ─────/,
       );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('names the review-agent subagent type in the worktree parameter note', () => {
+    // The roster is the last text the orchestrator reads before constructing
+    // agent calls, so this note is where a worktree-mode run learns its
+    // `subagent_type`. It must not drift from the registry constant:
+    // `general-purpose` declares no `tools`, and a review launched under it
+    // re-declares 51 tool schemas on every turn of every agent — measured at
+    // ~1.08M extra prompt tokens across one roster. The failure is silent;
+    // the review still runs, just far dearer.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-roster-wt-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(
+        plan,
+        JSON.stringify({ ...PLAN, worktreePath: '.qwen/tmp/review-pr-1' }),
+      );
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        roster: true,
+      });
+
+      const printed = (writeStdoutLine as unknown as Mock).mock
+        .calls[0][0] as string;
+      expect(printed).toContain(
+        `\`subagent_type: "${REVIEW_BUILTIN_SUBAGENT_TYPE}"\``,
+      );
+      expect(printed).not.toContain('general-purpose');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
