@@ -33,12 +33,16 @@ import { EFFORT_LEVELS, type ReviewEffort } from './parse-args.js';
 import { REVIEWS_DIR } from './lib/paths.js';
 import { isSameFile } from './lib/same-file.js';
 import { volumeOf } from './lib/ledger.js';
+import {
+  LAND_WITH_RESIDUAL_RISK,
+  type ConvergenceAssessment,
+} from './lib/convergence.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 
 interface PersistedVerdict
   extends Omit<
     ComposeReviewResult,
-    'postedInline' | 'postedFresh' | 'prevPostedInline' | 'residualRisk'
+    'postedInline' | 'postedFresh' | 'prevPostedInline'
   > {
   verdictLine: string;
   /**
@@ -53,12 +57,15 @@ interface PersistedVerdict
    * consumer into an always-undefined branch. The two-round window stays
    * recoverable from the marker chain inside `body`.
    *
-   * `residualRisk` is omitted the same way: the validator's whitelist
-   * neither carries nor shape-checks it, and the advisory it summarises
-   * rides the persisted `body` — carrying the field here would advertise a
-   * shape no artifact contains, the exact trap the `prevPostedInline`
-   * omission above closes. (`convergence` — the loop-settling paragraph —
-   * IS inherited: it is rendered text the validator already carries.)
+   * `residualRisk` is NOT omitted, and for the reason its sibling
+   * `convergence` is not: both are shed by the body-budget ladder before
+   * anything else, and the artifact is where a trimmed round's record
+   * lives. "The advisory rides the persisted body" is true of every round
+   * except the ones that most need the durable copy — a maintainer reading
+   * `.qwen/reviews` to make the `land-with-residual-risk` call would find a
+   * "did not fit" breadcrumb and no facts. The validator carries and
+   * shape-checks it below, so the type advertises nothing the artifact does
+   * not hold.
    */
   postedInline?: number;
   /**
@@ -313,6 +320,58 @@ function validateVerdict(value: unknown): PersistedVerdict {
       zh: string(c['zh'], 'Composed verdict.convergence.zh'),
     };
   }
+  // The residual-risk advisory, carried for the same reason its sibling
+  // paragraph above is: rank 2 sheds before the not-reviewed disclosures, so
+  // the rounds that fire it are exactly the long, deep-work-list rounds whose
+  // body is most likely to drop it — and the durable record is then the only
+  // place the facts survive. Shape-checked rather than passed through: the
+  // composed JSON is a file on disk between two processes, and a consumer
+  // reading `criticals` off a hand-edited artifact must not read a string.
+  // The recommendation is pinned to the ONE code this module issues; a
+  // future second recommendation widens this check deliberately rather than
+  // arriving unannounced in a durable record.
+  const rawResidualRisk = verdict['residualRisk'];
+  let residualRisk: ConvergenceAssessment | undefined;
+  if (rawResidualRisk !== undefined && rawResidualRisk !== null) {
+    const r = object(rawResidualRisk, 'Composed verdict.residualRisk');
+    const shape = string(r['shape'], 'Composed verdict.residualRisk.shape');
+    if (shape !== 'persistently-critical') {
+      throw new Error(
+        "Composed verdict.residualRisk.shape must be 'persistently-critical'.",
+      );
+    }
+    const recommendation = string(
+      r['recommendation'],
+      'Composed verdict.residualRisk.recommendation',
+    );
+    if (recommendation !== LAND_WITH_RESIDUAL_RISK) {
+      throw new Error(
+        `Composed verdict.residualRisk.recommendation must be '${LAND_WITH_RESIDUAL_RISK}'.`,
+      );
+    }
+    // Through the ledger's own volume reader, like every other count that
+    // crosses this boundary: the caps are what keep a hand-edited artifact
+    // from re-displaying a number no round could have posted.
+    const counts: Record<'criticals' | 'posted' | 'prevPosted', number> = {
+      criticals: 0,
+      posted: 0,
+      prevPosted: 0,
+    };
+    for (const key of ['criticals', 'posted', 'prevPosted'] as const) {
+      const n = volumeOf(r[key]);
+      if (n === undefined) {
+        throw new Error(
+          `Composed verdict.residualRisk.${key} must be a non-negative integer.`,
+        );
+      }
+      counts[key] = n;
+    }
+    residualRisk = {
+      shape: 'persistently-critical',
+      recommendation: LAND_WITH_RESIDUAL_RISK,
+      ...counts,
+    };
+  }
   // The fresh count reads by the same rules as the total it is part of.
   const rawFresh = verdict['postedFresh'];
   const freshAbsent = rawFresh === undefined || rawFresh === null;
@@ -374,6 +433,7 @@ function validateVerdict(value: unknown): PersistedVerdict {
     ...(postedInline === undefined ? {} : { postedInline }),
     ...(postedFresh === undefined ? {} : { postedFresh }),
     ...(convergence === undefined ? {} : { convergence }),
+    ...(residualRisk === undefined ? {} : { residualRisk }),
     lowSignal:
       lowSignal === null
         ? null

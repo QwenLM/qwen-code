@@ -1734,10 +1734,21 @@ function ledgerMarkerFor(
           // The same split the body performed: a relocated Critical is a
           // posted, counted blocker and must enter the work list.
           ...splitDeferralChannel(input.deferredSuggestions).relocated,
-          // The same gate the body ran: a gate Critical is a posted,
-          // counted blocker too — leaving it out let the next round's
-          // persistence half read "no prior Critical" over a round that
-          // posted one (#9526).
+          // The gate's Criticals, for the same reason: a gate Critical is a
+          // posted, counted blocker too — leaving it out let the next
+          // round's persistence half read "no prior Critical" over a round
+          // that posted one (#9526).
+          //
+          // A SECOND invocation, not the body composer's result — the two
+          // live in different functions and nothing passes the value across.
+          // What makes them agree is that `scriptLintGate` is pure in
+          // `planPath` and its inputs (the plan JSON, the report, the diff)
+          // are immutable for the length of one synchronous compose; it is
+          // NOT the single-origin discipline `postedInline` gets one line
+          // below. So the standing hazard is an edit, not a race: anything
+          // that filters, caps, or carves out what the BODY pushes must
+          // change this list too, or the posted body and the carried work
+          // list stop describing the same round (R4-1).
           ...scriptLintGate(input.planPath).criticals,
         ],
         carriedWorkList,

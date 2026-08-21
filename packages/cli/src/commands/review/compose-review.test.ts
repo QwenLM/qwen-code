@@ -2935,6 +2935,15 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
       expect(
         stderr().filter((l) => l.startsWith('RESIDUAL-RISK: ')),
       ).toHaveLength(0);
+      // A POSITIVE sentinel beside the absences: `prevLedgerFacts` swallows
+      // every recovery failure into round 0 with no volume, which would let
+      // three other arms produce this same silence and leave the volume arm
+      // pinned by nothing. The VOLUME line quoting the predecessor proves
+      // the ledger really was recovered, so the silence is the shrinking
+      // window and not a fixture that never loaded.
+      expect(stderr().find((l) => l.startsWith('VOLUME: '))).toContain(
+        '(previous round: 3)',
+      );
       const composed = stdoutJson();
       expect(composed.residualRisk).toBeUndefined();
       expect(composed.body ?? '').not.toContain('land-with-residual-risk');
@@ -3083,10 +3092,157 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
       expect(
         stderr().filter((l) => l.startsWith('RESIDUAL-RISK: ')),
       ).toHaveLength(0);
+      // The same positive sentinel: this silence must be the round-2 floor,
+      // not a predecessor that failed to load.
+      expect(stderr().find((l) => l.startsWith('VOLUME: '))).toContain(
+        '(previous round: 2)',
+      );
       const composed = stdoutJson();
       expect(composed.residualRisk).toBeUndefined();
       expect(composed.body ?? '').not.toContain('land-with-residual-risk');
       // The floor-futility claim must not publish before the floor ran.
+      expect(composed.body ?? '').not.toContain('The severity floor will not');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('stays silent when the previous work-list held no Critical (#9526)', async () => {
+    // Every OTHER conjunct holds — the floor is engaged (round 7 of `auto`),
+    // this round stands behind a Critical, the window is flat at 1/1 — and
+    // the predecessor's work-list carries Suggestions only. "Persistently"
+    // critical means the Critical STOOD before; a round introducing its
+    // first one is a loop that has not yet had a chance to converge, and
+    // telling its operator to land with residual risk is the false fire the
+    // module's header forbids. Pins the persistence conjunct end to end:
+    // every earlier fixture carries sev `C` in the prev ledger, so replacing
+    // the derivation with a bare `true` shipped the whole suite green.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-converge-nosev-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(planPath, JSON.stringify({ prNumber: 8255 }), 'utf8');
+    writeFileSync(
+      inputPath,
+      JSON.stringify({ modelId: MODEL, planPath, severityFloor: 'auto' }),
+      'utf8',
+    );
+    writeFileSync(
+      commentsPath,
+      JSON.stringify([
+        { path: 'a.ts', line: 1, body: '**[Critical]** first blocker' },
+      ]),
+      'utf8',
+    );
+    const stderr = () =>
+      (writeStderrLine as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
+        String(c[0]),
+      );
+    const stdoutJson = () =>
+      JSON.parse(
+        (writeStdoutLine as ReturnType<typeof vi.fn>).mock.calls
+          .map((c) => String(c[0]))
+          .join('\n'),
+      ) as { residualRisk?: unknown; body?: string };
+    try {
+      (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+      (writeStdoutLine as ReturnType<typeof vi.fn>).mockClear();
+      writeFileSync(
+        join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+        JSON.stringify({
+          v: 1,
+          round: 6,
+          findings: [{ id: 'R6-1', sev: 'S', file: 'x.ts', title: 'nit' }],
+          posted: 1,
+        }),
+        'utf8',
+      );
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+      });
+      expect(
+        stderr().filter((l) => l.startsWith('RESIDUAL-RISK: ')),
+      ).toHaveLength(0);
+      // The positive sentinel: the predecessor WAS recovered, so the silence
+      // is its Critical-free work-list and not a fixture that never loaded.
+      expect(stderr().find((l) => l.startsWith('VOLUME: '))).toContain(
+        '(previous round: 1)',
+      );
+      const composed = stdoutJson();
+      expect(composed.residualRisk).toBeUndefined();
+      expect(composed.body ?? '').not.toContain('land-with-residual-risk');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('stays silent when the floor is ABSENT rather than resolved (#9526)', async () => {
+    // The one input where the two floor readings disagree. The state names
+    // no floor at all: the REPORTING reading folds absence into `auto` (so
+    // the round would describe itself as running a resolved critical floor
+    // from round 6), while ENFORCEMENT is strict and moves nothing — and the
+    // advisory's "The severity floor will not converge it" is a claim about
+    // Suggestions having actually left the posting set. Wiring the reporting
+    // reading here publishes that claim over a round whose enforcement
+    // backstop never ran, so this fixture is what holds the two apart: every
+    // other advisory fixture passes `severityFloor: 'auto'` explicitly and
+    // the swap ships green against all of them.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-converge-nofloor-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(planPath, JSON.stringify({ prNumber: 8255 }), 'utf8');
+    // No `severityFloor` key AT ALL — genuine absence, not a spelling drift.
+    writeFileSync(
+      inputPath,
+      JSON.stringify({ modelId: MODEL, planPath }),
+      'utf8',
+    );
+    writeFileSync(
+      commentsPath,
+      JSON.stringify([
+        { path: 'a.ts', line: 1, body: '**[Critical]** standing blocker' },
+      ]),
+      'utf8',
+    );
+    const stderr = () =>
+      (writeStderrLine as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
+        String(c[0]),
+      );
+    const stdoutJson = () =>
+      JSON.parse(
+        (writeStdoutLine as ReturnType<typeof vi.fn>).mock.calls
+          .map((c) => String(c[0]))
+          .join('\n'),
+      ) as { residualRisk?: unknown; body?: string };
+    try {
+      (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+      (writeStdoutLine as ReturnType<typeof vi.fn>).mockClear();
+      writeFileSync(
+        join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+        JSON.stringify({
+          v: 1,
+          round: 6,
+          findings: [{ id: 'R6-1', sev: 'C', file: 'x.ts', title: 'blocker' }],
+          posted: 1,
+        }),
+        'utf8',
+      );
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+      });
+      expect(
+        stderr().filter((l) => l.startsWith('RESIDUAL-RISK: ')),
+      ).toHaveLength(0);
+      expect(stderr().find((l) => l.startsWith('VOLUME: '))).toContain(
+        '(previous round: 1)',
+      );
+      const composed = stdoutJson();
+      expect(composed.residualRisk).toBeUndefined();
+      expect(composed.body ?? '').not.toContain('land-with-residual-risk');
+      // And the unprovable claim itself never reaches the body.
       expect(composed.body ?? '').not.toContain('The severity floor will not');
     } finally {
       rmSync(dir, { recursive: true, force: true });
