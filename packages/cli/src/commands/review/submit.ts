@@ -67,7 +67,17 @@ import {
   recordedSeverityFloor,
   reviewWriteAuthorization,
 } from './lib/authorization.js';
-import { getPlatformReader, isAoneHost } from './lib/platform/registry.js';
+import {
+  hostsEquivalent,
+  isAoneCanonicalHost,
+  parseRemoteUrl,
+} from './lib/remote-match.js';
+import { gitOpt } from './lib/git.js';
+import {
+  AonePartialPostError,
+  submitAoneReview,
+  type AoneSubmitResult,
+} from './lib/platform/aone.js';
 import {
   CRITICAL_PREFIX,
   SUGGESTION_PREFIX,
@@ -201,6 +211,7 @@ function authorization(
   why: string;
   recordedHost?: string;
   recordedUnbound?: boolean;
+  viaSkillArgsOverride?: boolean;
 } {
   return reviewWriteAuthorization({
     userAuthorized: args.userAuthorized,
@@ -237,6 +248,17 @@ function compose(
   cliVersion: string,
   attribution: boolean,
   runtimeModelId: string | undefined,
+  /**
+   * The Aone write path FORCES context-unavailable, whatever the
+   * model-written state claims: this phase has no Aone backing for
+   * pr-context/comment-status/presubmit, so no Aone run can have read the
+   * MR's existing discussion. Letting the state's `contextUnavailable`
+   * decide would let a forged or omitted field compose an APPROVE that the
+   * a1 path then turns into a REAL platform approval — the exact forgery
+   * class this command exists to defeat. The cap lives HERE, where
+   * `aoneWrite` is a fact, not in the state.
+   */
+  aoneWrite: boolean,
 ): {
   event: string;
   body: string;
@@ -276,6 +298,13 @@ function compose(
   const r = composeReview(
     {
       ...rest,
+      // Forced for the Aone write path — see the parameter comment. For
+      // GitHub the state's own claim stands (the reads are backed there)
+      // and is handed through RAW: compose-review's boundary deliberately
+      // refuses a malformed non-boolean here, and coercing the claim to a
+      // boolean first would silently drop the context-unavailable cap a
+      // stringified "true" was asking for.
+      contextUnavailable: aoneWrite ? true : rest.contextUnavailable,
       criticalsInline,
       suggestionsInline,
       draftedComments: comments,
@@ -475,7 +504,6 @@ export function runSubmit(
   } = {},
 ): void {
   const { attribution = true, defaultComment = false } = opts;
-  setGhHost(args.host);
 
   // The repo goes straight into the API path. A malformed value does not fail
   // safely — it fails as a confusing 404 from a URL nobody meant to build.
@@ -540,64 +568,61 @@ export function runSubmit(
     return;
   }
 
-  // Posting is GitHub-only in this phase. On an Aone target the Create
-  // Review API does not exist — refuse with the SAME shape as an
-  // unauthorised refusal (stderr explanation, stdout `{"posted": false}`,
-  // exit 3): the skill's Step 7 treats that shape as a complete, correct
-  // outcome, and a throw instead would surface as a failed command an agent
-  // might retry or route around. The refusal sits BELOW the authorisation
-  // gate on purpose — an unauthorised Aone run takes the normal exit-3
-  // path above, and the command no longer dies with a throw before the gate
-  // can rule (an authorised Aone `--dry-run` lands on this same exit-3
-  // refusal: a payload that can never post has no posting-consistency to
-  // validate).
-  //
-  // The platform decision is bound in BOTH directions, because the
-  // runtime-effective host alone fails both ways:
-  //  - Recorded Aone target + non-Aone effective host (an ambient GH_HOST
-  //    export beside a bare-MR-number Aone review) must still refuse —
-  //    otherwise the read-only guarantee leaks and the review POSTs to the
-  //    wrong host's same-named repo. So a recorded Aone host always
-  //    refuses, whatever the environment resolves.
-  //  - Recorded non-Aone target (pr-url host binding) must NOT be vetoed
-  //    by the cwd probe from an Aone-origin clone — the recorded binding
-  //    is the explicit signal the registry's precedence documents.
-  //  - RECORDED but hostless (a bare-MR-number recording with no `--host`
-  //    flag — the canonical Aone invocation shape carries no URL): the
-  //    recording proves a review exists but not WHERE it lives, and the
-  //    runtime environment cannot prove it either. For a public,
-  //    irreversible write that is fail-CLOSED: refuse and name the remedy
-  //    (`--host`), instead of trusting the environment and posting the
-  //    review at github.com's same-named repo.
-  //  - No recording at all: fall back to the flag, then GH_HOST (ghEnv
-  //    inherits the operator's export when no module host is set, so an
-  //    Aone-pointing GH_HOST must hit this refusal, not an opaque gh
-  //    failure), then the cwd clone.
-  // resolveGhHost trims, so a padded `--host` cannot slip past detection.
-  // The findings are not lost: they are in the terminal output and the
-  // saved report.
+  // Which PLATFORM this write lands on. Evidence precedence mirrors the
+  // registry's documented detection order — an EXPLICIT host flag, else
+  // the recorded binding, else the cwd probe — with four write-specific
+  // disciplines:
+  //  - The predicate is the CANONICAL Aone pair, not the family wildcard:
+  //    `*.alibaba-inc.com` also names GitHub Enterprise instances (an
+  //    org's `ghe.alibaba-inc.com`), and an irreversible write must not
+  //    take the a1 path on a family resemblance.
+  //  - The ambient GH_HOST export is NEVER consulted here. It is a
+  //    GitHub-ROUTING variable; a read would never detect Aone from it
+  //    (detectPlatformKind does not read it), and a write that did could
+  //    READ from one platform and WRITE to another.
+  //  - The FAST path with no host evidence at all — a recording that
+  //    names no host (a bare-MR-number recording without `--host`), or NO
+  //    recording found (writeSkillArgs never throws, recordings are
+  //    cwd-relative — a publish invoked from another directory finds
+  //    nothing) — fails CLOSED and names the remedy (`--host`), which
+  //    this gate honours: an explicit flag on the re-run is platform
+  //    proof, so it lifts the refusal instead of meeting it again. The
+  //    cwd probe may still decide a SLOW-path publish — that path reads
+  //    the current session's own recording, so it is same-session by
+  //    construction and the cwd names the clone the review ran in. The
+  //    ONE slow-path shape that is not — a session-less caller reading a
+  //    `--skill-args` override, another cwd's record — fails closed on
+  //    its hostless form too: the probe names submit's clone there, not
+  //    the review's.
+  //  - An explicit `--host` and a recorded host are ONE evidence chain
+  //    about where the reviewed target lives: the flag FILLS the gap
+  //    when the recording names no host (the remedy above), it does not
+  //    override the recording's answer. Two hosts that are not the same
+  //    platform (through hostsEquivalent, so the Aone web/git alias
+  //    passes) name a contradiction — the review ran on one, and the
+  //    write would land on the other's same-named repo — so the gate
+  //    refuses instead of choosing. The recorded host is the user's own
+  //    keystrokes; a caller-typed flag is not entitled to retarget it.
   const recordedHost = auth.recordedHost;
-  const aoneWrite =
-    isAoneHost(recordedHost) ||
-    auth.recordedUnbound === true ||
-    (recordedHost === undefined &&
-      (isAoneHost(resolveGhHost(args.host)) ||
-        getPlatformReader({ host: args.host?.trim() || undefined }).kind ===
-          'aone'));
-  if (aoneWrite) {
+  const explicitHost = args.host?.trim() || undefined;
+  if (
+    explicitHost !== undefined &&
+    recordedHost !== undefined &&
+    !hostsEquivalent(explicitHost, recordedHost)
+  ) {
     writeStderrLine(
-      `REFUSED to post to ${args.repo}#${args.pr}: posting review comments ` +
-        `to Aone Code is not supported yet (read-only phase). The findings ` +
-        `are in the terminal output and the saved report; post them ` +
-        `manually or wait for the write phase.` +
-        (auth.recordedUnbound === true && !isAoneHost(recordedHost)
-          ? ` (the recorded target names no platform — pass \`--host\` to ` +
-            `prove it is not an Aone MR)`
-          : ''),
+      `REFUSED to post to ${args.repo}#${args.pr}: the explicit ` +
+        `\`--host ${explicitHost}\` contradicts the host the recorded ` +
+        `review names (\`${recordedHost}\`) — the two are not the same ` +
+        `platform, and a public write must not be retargeted from the ` +
+        `platform its review ran on to another platform's same-named ` +
+        `repo. Re-run without \`--host\` to post where the recorded ` +
+        `review ran, or re-run the review for ${explicitHost} first. ` +
+        `The findings are in the terminal output and the saved report.`,
     );
     writeStdoutLine(
       JSON.stringify(
-        { posted: false, reason: 'aone-read-only-phase' },
+        { posted: false, reason: 'target-platform-conflict' },
         null,
         2,
       ),
@@ -605,6 +630,67 @@ export function runSubmit(
     process.exitCode = 3;
     return;
   }
+  const overrideHostless =
+    !args.userAuthorized &&
+    auth.viaSkillArgsOverride === true &&
+    recordedHost === undefined;
+  const fastPathHostless =
+    auth.recordedUnbound === true ||
+    (args.userAuthorized && recordedHost === undefined);
+  if ((fastPathHostless || overrideHostless) && explicitHost === undefined) {
+    // Same exit-3 shape as an unauthorised refusal — Step 7 treats it as
+    // a complete, correct outcome; a throw would surface as a failed
+    // command an agent might retry or route around.
+    writeStderrLine(
+      `REFUSED to post to ${args.repo}#${args.pr}: nothing this gate ` +
+        `can read names the platform the target lives on — ` +
+        (auth.recordedUnbound === true
+          ? `the recorded review is a bare PR number with no \`--host\``
+          : overrideHostless
+            ? `the authorising recording came from the \`--skill-args\` ` +
+              `override — another cwd's record that names no host — and ` +
+              `the submission cwd's platform must not stand in for it`
+            : `no recorded review names this target at all`) +
+        ` — and a public write must not guess between GitHub and Aone ` +
+        `Code. Re-run with \`--host <host>\` naming the host the target ` +
+        `lives on. The findings are in the terminal output and the saved ` +
+        `report.`,
+    );
+    writeStdoutLine(
+      JSON.stringify(
+        { posted: false, reason: 'target-platform-unbound' },
+        null,
+        2,
+      ),
+    );
+    process.exitCode = 3;
+    return;
+  }
+  // The cwd arm probes the origin's host through the SAME canonical
+  // predicate — it must not delegate to the registry's detection, which
+  // matches the `*.alibaba-inc.com` FAMILY wildcard: safe for reads, not
+  // for writes — an origin on an org GHE family host (ghe.alibaba-inc.com)
+  // would take the a1 path with nothing proving a canonical Aone target.
+  // A family-only resemblance falls through to the gh path.
+  const cwdOriginUrl = gitOpt('remote', 'get-url', 'origin');
+  const cwdOriginHost = cwdOriginUrl
+    ? parseRemoteUrl(cwdOriginUrl)?.host
+    : undefined;
+  const aoneWrite =
+    isAoneCanonicalHost(explicitHost ?? recordedHost) ||
+    (auth.viaSkillArgsOverride !== true &&
+      explicitHost === undefined &&
+      recordedHost === undefined &&
+      isAoneCanonicalHost(cwdOriginHost));
+  // The gh write binds its routing host to the SAME evidence that selected
+  // it: an explicit flag, else the recorded binding, else the cwd origin
+  // the selection arm ran on. Without the rebind a recorded non-Aone host
+  // (e.g. a GHE instance) posted wherever the ambient env pointed —
+  // github.com's same-named repo — instead of where the review actually
+  // ran; and a cwd-selected post restored ambient env inheritance, routing
+  // the write past the very clone that chose the platform. setGhHost
+  // validates its input; a1 writes never touch the gh host state.
+  if (!aoneWrite) setGhHost(explicitHost ?? recordedHost ?? cwdOriginHost);
 
   // What the caller may not bring, checked before anything is computed from it: a
   // verdict of its own, or no state to compute one from. "Your state does not
@@ -653,7 +739,15 @@ export function runSubmit(
         : undefined,
     callerPr: args.pr,
     callerRepo: args.repo,
-    callerHost: resolveGhHost(args.host),
+    // The host axis binds to the host the WRITE actually routes at — the
+    // SAME evidence chain the routing bind uses: explicit flag, else the
+    // recorded binding, else the cwd origin the selection arm ran on,
+    // else the gh fallback. resolveGhHost alone never yields a recorded
+    // Aone host, so a flagless Aone post (routed via the recorded
+    // binding) would bind the floor to github.com/ambient and silently
+    // drop the operator's recorded floor.
+    callerHost:
+      explicitHost ?? recordedHost ?? cwdOriginHost ?? resolveGhHost(args.host),
     defaultSeverityFloor: opts.defaultSeverityFloor,
     skillArgs: args.skillArgs,
   });
@@ -699,6 +793,7 @@ export function runSubmit(
       // forgeable posture DESIGN.md records for the cache path.
       // The identity this round runs under — see lib/round-model.ts.
       roundModelIdFrom(process.env),
+      aoneWrite,
     ));
   } catch (err) {
     throw new Error(
@@ -735,42 +830,51 @@ export function runSubmit(
     );
   }
 
-  // What GitHub actually receives: the caller's findings, under the verdict this
-  // command computed. `event` and `body` were never in the object the caller wrote.
+  // What the platform receives: the caller's findings, under the verdict
+  // this command computed. `event` and `body` were never in the object the
+  // caller wrote. Both posting paths carry the SAME comments — the
+  // attribution-off rewrite below is a property of the post, not of GitHub.
+  // Attribution-off strips the severity markers from the POSTED bodies —
+  // the one place the bracket-prefix template is visible. Everything above
+  // (counting, the unmarked gate, the ledger) already ran on the marked
+  // payload, so the verdict this post carries is unchanged. The invisible
+  // comment marker goes on in the markers' place, carrying the severity
+  // the visible prefix carried: presubmit dedups on it, and pr-context
+  // re-promotes an unresolved Critical to the re-check section off it.
+  // Pre-existing marker strings are stripped first — the shape is public,
+  // and a reviewed file can quote it into a comment body; only the
+  // canonical trailing marker may survive.
+  const finalComments = attribution
+    ? (payload.comments ?? [])
+    : (payload.comments ?? []).map((c) => {
+        if (typeof c.body !== 'string') return c;
+        // The gate above refuses unmarked bodies, so the severity is
+        // always known here.
+        const sev = severityOf(c);
+        if (sev === null) return c;
+        return {
+          ...c,
+          // Exactly the body the gate above validated: a forged footer
+          // the fixpoint chain exposes at the tail survives the
+          // anywhere-strips' caps, and only the trailing strip removes
+          // it — posting the gate's view is how the two cannot drift.
+          body: `${stripReviewFooter(stripForUnattributedPost(c.body))}\n\n${commentMarker(sev)}`,
+        };
+      });
+
   const post = {
     commit_id: payload.commit_id,
     event,
     body,
-    // Attribution-off strips the severity markers from the POSTED bodies —
-    // the one place the bracket-prefix template is visible. Everything above
-    // (counting, the unmarked gate, the ledger) already ran on the marked
-    // payload, so the verdict this post carries is unchanged. The invisible
-    // comment marker goes on in the markers' place, carrying the severity
-    // the visible prefix carried: presubmit dedups on it, and pr-context
-    // re-promotes an unresolved Critical to the re-check section off it.
-    // Pre-existing marker strings are stripped first — the shape is public,
-    // and a reviewed file can quote it into a comment body; only the
-    // canonical trailing marker may survive.
-    comments: attribution
-      ? (payload.comments ?? [])
-      : (payload.comments ?? []).map((c) => {
-          if (typeof c.body !== 'string') return c;
-          // The gate above refuses unmarked bodies, so the severity is
-          // always known here.
-          const sev = severityOf(c);
-          if (sev === null) return c;
-          return {
-            ...c,
-            // Exactly the body the gate above validated: a forged footer
-            // the fixpoint chain exposes at the tail survives the
-            // anywhere-strips' caps, and only the trailing strip removes
-            // it — posting the gate's view is how the two cannot drift.
-            body: `${stripReviewFooter(stripForUnattributedPost(c.body))}\n\n${commentMarker(sev)}`,
-          };
-        }),
+    comments: finalComments,
   };
 
-  const target = `repos/${args.repo}/pulls/${args.pr}/reviews`;
+  const target = aoneWrite
+    ? `a1 repo mr comment create --mr ${args.pr} --repo ${args.repo}` +
+      ` (${finalComments.length} inline + summary` +
+      (event === 'APPROVE' ? ' + a1 repo mr approve' : '') +
+      `)`
+    : `repos/${args.repo}/pulls/${args.pr}/reviews`;
   if (args.dryRun) {
     writeStderrLine(
       `Authorised (${auth.why}) and the payload is consistent. ` +
@@ -785,6 +889,170 @@ export function runSubmit(
           event,
           cappedBy,
           floorEnforced: floorEnforced.length,
+        },
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+
+  if (aoneWrite) {
+    // The Aone posting path — one `a1 repo mr comment create` per inline
+    // finding, the summary last, `a1 repo mr approve` on an APPROVE.
+    // GitHub's Create Review is atomic; this is N+1 calls, so the failure
+    // shapes differ: the provider throws AonePartialPostError when a write
+    // fails mid-batch, and the report below names exactly what landed.
+    let result: AoneSubmitResult;
+    try {
+      result = submitAoneReview({
+        prNumber: args.pr,
+        ownerRepo: args.repo,
+        // The structural gate above refused a payload without one.
+        commitId: payload.commit_id as string,
+        event: event as 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT',
+        body,
+        // The consistency gate above refused every comment lacking these;
+        // the `??` defaults exist only for the type.
+        comments: finalComments.map((c) => ({
+          path: c.path ?? '',
+          line: c.line ?? 0,
+          body: c.body ?? '',
+        })),
+      });
+    } catch (err) {
+      const partial = err instanceof AonePartialPostError ? err : undefined;
+      if (partial === undefined) {
+        // Two shapes here. The DELIBERATE pre-write refusals (head drift,
+        // oversized message) keep the exit-3 refusal shape: deterministic,
+        // nothing landed, named in the skill's refusal-shape list.
+        // EVERYTHING else — auth expiry, a DNS blip in the mr view read,
+        // the 120 s deadline — is an ordinary command failure with
+        // provably nothing landed: RETHROW it, the same shape the gh path
+        // gives, so a recoverable blip is retryable instead of reading as
+        // "a complete, correct outcome" and losing the authorised review.
+        if (!((err as Error)?.message ?? '').startsWith('refusing to post:')) {
+          throw err;
+        }
+        writeStderrLine(
+          `REFUSED to post the review to ${args.repo}#${args.pr} on ` +
+            `Aone Code: ${(err as Error).message} Nothing was written; ` +
+            `the findings are in the terminal output and the saved report.`,
+        );
+        writeStdoutLine(
+          JSON.stringify(
+            { posted: false, reason: 'aone-post-refused' },
+            null,
+            2,
+          ),
+        );
+        process.exitCode = 3;
+        return;
+      }
+      // A mid-batch failure: part of the review IS on the MR. The JSON
+      // carries the structured counts AonePartialPostError exists for —
+      // `posted: false` alone would let a wrapper that retries on
+      // "not posted" double-post everything that landed. `partial: true`
+      // is the do-not-retry signal; the ids make "inspect the MR"
+      // concrete. `ambiguous` counts as landed: the FAILED write may have
+      // reached the server (accepted, then the transport died), so the MR
+      // can carry a comment the count never saw — and it rides the stdout
+      // JSON too: all-zero counts with a silent ambiguous flag read as a
+      // clean total failure, and a user hand-posting the "remainder"
+      // double-posts the comment the count never saw.
+      const landed =
+        partial.postedInline > 0 || partial.summaryPosted || partial.ambiguous;
+      writeStderrLine(
+        `FAILED to post the review to ${args.repo}#${args.pr} on Aone ` +
+          `Code: ${partial.message}` +
+          (landed
+            ? ` Part of the review may already be on the MR — do NOT ` +
+              `re-run submit (it would post twice); inspect the MR. ` +
+              `Posting any remainder is the USER's call to make by hand ` +
+              `— it is never an agent action.`
+            : ''),
+      );
+      writeStdoutLine(
+        JSON.stringify(
+          {
+            posted: false,
+            reason: 'aone-post-failed',
+            partial: true,
+            postedInline: partial.postedInline,
+            postedCommentIds: partial.inlineCommentIds,
+            summaryPosted: partial.summaryPosted,
+            ambiguous: partial.ambiguous,
+          },
+          null,
+          2,
+        ),
+      );
+      process.exitCode = 3;
+      return;
+    }
+    writeStderrLine(
+      `Posted ${event} to ${args.repo}#${args.pr} — ${auth.why}` +
+        (cappedBy.length ? ` (capped by ${cappedBy.join(', ')})` : '') +
+        '.' +
+        (result.webUrl ? ` ${result.webUrl}` : ''),
+    );
+    if (event === 'REQUEST_CHANGES') {
+      // D6: no native reject exists on Aone — the blocking header and any
+      // unresolved inline Critical discussions carry the semantics a GitHub
+      // REQUEST_CHANGES event carries natively. But a REQUEST_CHANGES can
+      // post with ZERO inline Criticals (they were all body-level), and
+      // then nothing mechanically blocks the merge — say which shape this
+      // was, counted off the same comments the consistency gate marked.
+      const criticalsPosted = (payload.comments ?? []).filter(
+        (c) => severityOf(c) === 'critical',
+      ).length;
+      writeStderrLine(
+        criticalsPosted > 0
+          ? `Note: Aone Code has no native request-changes state — the ` +
+              `summary comment carries the blocking header, and the ` +
+              `${criticalsPosted} inline Critical(s) block the merge ` +
+              `while their discussions stay unresolved.`
+          : `Note: Aone Code has no native request-changes state — the ` +
+              `summary comment carries the blocking header, but this ` +
+              `review posted NO inline Critical discussions, so nothing ` +
+              `mechanically blocks the merge; the header is advisory.`,
+      );
+    }
+    if (event === 'APPROVE' && !result.approved) {
+      // Inline + summary are posted; only the native approval is missing.
+      // The post stands — name the one command that completes it, and name
+      // the USER as its actor: Step 7 forbids the agent every `a1` write,
+      // and "run it by hand" without an actor would hand the agent the
+      // exact call the rule exists to prevent.
+      writeStderrLine(
+        `WARNING: the review is posted but \`a1 repo mr approve ` +
+          `${args.pr} --repo ${args.repo}\` failed` +
+          (result.approveError ? ` (${result.approveError})` : '') +
+          ` — ask the USER to run that command to complete the approval; ` +
+          `it is never an agent action.`,
+      );
+    }
+    if (result.headMovedDuringPost) {
+      // The drift gate is check-then-post; an AGit-Flow amend pushed
+      // DURING the (minutes-long) batch orphans every inline comment. The
+      // post stands — disclose that the pins may not.
+      writeStderrLine(
+        `WARNING: the MR head MOVED during posting — the inline comments ` +
+          `may reference code the author already replaced. Re-review the ` +
+          `new head before relying on the posted pins.`,
+      );
+    }
+    writeStdoutLine(
+      JSON.stringify(
+        {
+          posted: true,
+          event,
+          cappedBy,
+          inlineComments: result.postedInline,
+          floorEnforced: floorEnforced.length,
+          summaryPosted: result.summaryPosted,
+          ...(event === 'APPROVE' ? { approved: result.approved } : {}),
+          ...(result.webUrl ? { url: result.webUrl } : {}),
         },
         null,
         2,
@@ -873,7 +1141,7 @@ export function runSubmit(
 export const submitCommand: CommandModule = {
   command: 'submit',
   describe:
-    'Post the review to GitHub — the ONLY write in this skill. Refuses unless the run is authorised to publish.',
+    'Post the review to the pull request — GitHub via gh, Aone Code via a1 — the ONLY write in this skill. Refuses unless the run is authorised to publish.',
   builder: (yargs) =>
     yargs
       .option('pr', {
@@ -905,7 +1173,8 @@ export const submitCommand: CommandModule = {
       })
       .option('host', {
         type: 'string',
-        describe: 'GitHub Enterprise host (routes gh via GH_HOST)',
+        describe:
+          'The host the target lives on. SELECTS the platform the write lands on: a canonical Aone host (code./gitlab. alibaba-inc.com) routes the post at a1, anything else at gh (a GitHub Enterprise host routes gh via GH_HOST). It is also the remedy the target-platform-unbound refusal names.',
       })
       .option('dry-run', {
         type: 'boolean',
