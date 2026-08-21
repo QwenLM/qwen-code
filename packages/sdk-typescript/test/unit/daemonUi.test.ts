@@ -148,6 +148,35 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(replayed.blocks[0]?.id).toBe(first.blocks[0]?.id);
   });
 
+  it('keeps distinct source segments in distinct transcript blocks', () => {
+    const makeEvent = (segmentId: string, text: string) =>
+      normalizeDaemonEvent({
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text },
+            _meta: { qwenTranscript: { segmentId } },
+          },
+        },
+      });
+
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        ...makeEvent('record-1:0', 'first'),
+        ...makeEvent('record-2:0', 'second'),
+      ],
+      { now: 2 },
+    );
+
+    expect(state.blocks).toMatchObject([
+      { text: 'first', segmentId: 'record-1:0' },
+      { text: 'second', segmentId: 'record-2:0' },
+    ]);
+  });
+
   it('drops silent-shell heartbeat tool updates instead of rewriting the tool block', () => {
     const events = normalizeDaemonEvent({
       id: 1,

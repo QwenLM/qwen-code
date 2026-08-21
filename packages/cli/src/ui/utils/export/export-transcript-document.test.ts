@@ -919,7 +919,7 @@ describe('ExportTranscriptDocumentV1', () => {
         },
         widened: true,
       }),
-    ).toThrowError('additional_property');
+    ).toThrowError('schema_validation_failed');
 
     expect(() =>
       assertExportTranscriptDocumentV1({
@@ -977,7 +977,7 @@ describe('ExportTranscriptDocumentV1', () => {
           truncated: false,
         },
       }),
-    ).toThrowError('invalid_block');
+    ).toThrowError('schema_validation_failed');
 
     expect(() =>
       assertExportTranscriptDocumentV1({
@@ -1003,7 +1003,7 @@ describe('ExportTranscriptDocumentV1', () => {
           truncated: false,
         },
       }),
-    ).toThrowError('invalid_block');
+    ).toThrowError('schema_validation_failed');
 
     expect(() =>
       assertExportTranscriptDocumentV1({
@@ -1030,7 +1030,7 @@ describe('ExportTranscriptDocumentV1', () => {
           truncated: false,
         },
       }),
-    ).toThrowError('invalid_block');
+    ).toThrowError('schema_validation_failed');
 
     expect(() =>
       assertExportTranscriptDocumentV1({
@@ -1060,7 +1060,7 @@ describe('ExportTranscriptDocumentV1', () => {
           truncated: false,
         },
       }),
-    ).toThrowError('additional_property');
+    ).toThrowError('schema_validation_failed');
 
     expect(() =>
       assertExportTranscriptDocumentV1({
@@ -1084,7 +1084,7 @@ describe('ExportTranscriptDocumentV1', () => {
           truncated: false,
         },
       }),
-    ).toThrowError('invalid_block');
+    ).toThrowError('schema_validation_failed');
 
     expect(() =>
       assertExportTranscriptDocumentV1({
@@ -1114,7 +1114,7 @@ describe('ExportTranscriptDocumentV1', () => {
           truncated: false,
         },
       }),
-    ).toThrowError('invalid_block');
+    ).toThrowError('schema_validation_failed');
 
     expect(() =>
       assertExportTranscriptDocumentV1({
@@ -1138,7 +1138,7 @@ describe('ExportTranscriptDocumentV1', () => {
           truncated: false,
         },
       }),
-    ).toThrowError('additional_property');
+    ).toThrowError('schema_validation_failed');
 
     expect(() =>
       assertExportTranscriptDocumentV1({
@@ -1232,6 +1232,51 @@ describe('ExportTranscriptDocumentV1', () => {
     expect(() => assertExportTranscriptDocumentV1(cyclic)).toThrowError(
       expect.objectContaining({ code: 'cyclic_envelope' }),
     );
+  });
+
+  it('rejects unsafe structured URLs that JSON Schema cannot express', () => {
+    expect(() =>
+      assertExportTranscriptDocumentV1({
+        schemaVersion: 1,
+        rendererVersion: '0.21.11-test.1',
+        blocks: [
+          {
+            id: 'unsafe-fetch',
+            kind: 'tool',
+            clientReceivedAt: 0,
+            createdAt: 0,
+            updatedAt: 0,
+            toolCallId: 'fetch-1',
+            title: 'Fetch',
+            status: 'cancelled',
+            preview: {
+              kind: 'web_fetch',
+              url: 'https://alice:password@example.com/path?token=secret',
+            },
+          },
+        ],
+        diagnostics: [],
+        metadata: {
+          exportedAt: '2026-08-16T01:00:00.000Z',
+          complete: true,
+          truncated: false,
+        },
+      }),
+    ).toThrowError('invalid_block');
+  });
+
+  it('preserves semantic validation for diagnostic labels', () => {
+    const document = createExportTranscriptDocumentV1([], sessionData, {
+      rendererVersion: '0.21.11-test.1',
+      exportedAt: '2026-08-16T01:00:00.000Z',
+    });
+
+    expect(() =>
+      assertExportTranscriptDocumentV1({
+        ...document,
+        diagnostics: [{ code: 'unsafe\nlabel', severity: 'info', count: 1 }],
+      }),
+    ).toThrowError('invalid_diagnostic');
   });
 
   it('rejects object property floods before field validation', () => {

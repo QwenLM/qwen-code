@@ -44,6 +44,9 @@ export class WebViewContent {
     // Escape URI for HTML to prevent potential injection attacks
     const safeExtensionUri = escapeHtml(extensionUriForWebview.toString());
     const safeScriptUri = escapeHtml(scriptUri.toString());
+    const useWebShellTranscript = vscode.workspace
+      .getConfiguration('qwen-code')
+      .get<boolean>('experimental.webShellTranscript', false);
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -53,7 +56,7 @@ export class WebViewContent {
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} data:; script-src ${webview.cspSource}; style-src ${webview.cspSource} 'unsafe-inline';">
   <title>Qwen Code</title>
 </head>
-<body data-extension-uri="${safeExtensionUri}">
+<body data-extension-uri="${safeExtensionUri}" data-web-shell-transcript="${useWebShellTranscript ? 'enabled' : 'disabled'}">
   <div id="root"></div>
   <script src="${safeScriptUri}"></script>
 </body>

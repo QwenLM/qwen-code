@@ -1,22 +1,22 @@
 {
   "overall": "fail",
-  "selectedVscodePath": null,
+  "selectedVscodePath": "acp",
   "candidates": {
     "directDaemon": {
-      "status": "fail",
-      "stableUnderPartialPrepend": false,
-      "unstableBlockKinds": ["thought", "assistant", "tool", "permission"],
-      "missingNativeTextIdentity": ["user", "thought", "assistant"]
+      "status": "pass",
+      "stableUnderPartialPrepend": true,
+      "unstableBlockKinds": [],
+      "missingNativeTextIdentity": []
     },
     "acp": {
-      "status": "fail",
-      "stableUnderPartialPrepend": false,
-      "unstableBlockKinds": ["thought", "assistant", "tool"],
-      "missingNativeTextIdentity": ["user", "thought", "assistant"]
+      "status": "pass",
+      "stableUnderPartialPrepend": true,
+      "unstableBlockKinds": [],
+      "missingNativeTextIdentity": []
     }
   },
   "blockers": [
-    "direct-daemon uses reducer ordinal block IDs that change when history is prepended",
-    "ACP text updates do not carry a stable source identity and inherit the same ordinal block IDs"
+    "product HTML browser gate has not completed in an environment that can launch Playwright Chromium",
+    "VS Code scope/generation/reconnect, host-action parity, VSIX, and packaged artifact gates remain pending"
   ]
 }

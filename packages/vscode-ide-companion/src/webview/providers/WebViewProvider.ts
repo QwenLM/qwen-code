@@ -249,6 +249,22 @@ export class WebViewProvider {
     this.disposables.push(fileWatcherDisposable);
 
     // Setup agent callbacks
+    if (
+      vscode.workspace
+        .getConfiguration('qwen-code')
+        .get<boolean>('experimental.webShellTranscript', false)
+    ) {
+      this.agentManager.onTranscriptUpdate((notification) => {
+        this.sendMessageToWebView({
+          type: 'transcriptUpdate',
+          data: {
+            sessionId: notification.sessionId,
+            update: notification.update,
+          },
+        });
+      });
+    }
+
     this.agentManager.onMessage((message) => {
       // Do not suppress messages during checkpoint saves.
       // Checkpoint persistence now writes directly to disk and should not

@@ -22,6 +22,7 @@
     "expected-model.json": "4bbf808871c62219910127b50b3290a5c74b64b4464ec57bf25353faad79a5e5",
     "expected-render-items.json": "3ef27f09cc9b8cd2350fff269262dc0a653e0dba8435cce846a07bee8d0fbc73",
     "expected-export.json": "23521fd1203ffa6d47b0a93ac3de6481302fc9271e9150e77496ed42abdc063c",
+    "expected-gate.json": "3d8a7ccb02019dbe24a1265d2edf6ed718448473f1bfa5765cd221a1a3fc8266",
     "expected-network.json": "ee14c9469e2f80f1262a23ca8452bc41abb9ce43a625176c1b428608c503ad11"
   }
 }

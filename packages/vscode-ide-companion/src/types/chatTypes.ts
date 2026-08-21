@@ -7,6 +7,7 @@ import type {
   ModelInfo,
   AvailableCommand,
   RequestPermissionRequest,
+  SessionNotification,
 } from '@agentclientprotocol/sdk';
 import type {
   AskUserQuestionRequest,
@@ -69,6 +70,7 @@ export interface UsageStatsPayload {
 }
 
 export interface QwenAgentCallbacks {
+  onTranscriptUpdate?: (notification: SessionNotification) => void;
   onMessage?: (message: ChatMessage) => void;
   onStreamChunk?: (chunk: string) => void;
   onThoughtChunk?: (chunk: string) => void;

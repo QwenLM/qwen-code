@@ -13,8 +13,10 @@ import {
   type DaemonUiPermissionOption,
   type DaemonUserShellTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
+import { SchemaValidator } from '@qwen-code/qwen-code-core';
 import { projectChatRecordsToDaemonTranscript } from '@qwen-code/sdk/daemon/transcript';
 import type { ExportSessionData } from './types.js';
+import exportTranscriptDocumentV1Schema from './export-transcript-document-v1.schema.json' with { type: 'json' };
 
 export const EXPORT_TRANSCRIPT_LIMITS_V1 = Object.freeze({
   maxBlocks: 1_000,
@@ -283,48 +285,22 @@ export function createExportTranscriptDocumentV1(
 export function assertExportTranscriptDocumentV1(
   value: unknown,
 ): asserts value is ExportTranscriptDocumentV1 {
-  if (!isRecord(value) || value['schemaVersion'] !== 1) {
-    throw new ExportTranscriptDocumentError('unsupported_schema_version');
-  }
-  assertOnlyKeys(value, [
-    'schemaVersion',
-    'rendererVersion',
-    'blocks',
-    'diagnostics',
-    'metadata',
-  ]);
   assertDepthAndArrayBudgets(value);
   const bytes = serializedEnvelopeBytes(value);
   if (bytes > EXPORT_TRANSCRIPT_LIMITS_V1.maxEnvelopeBytes) {
     throw new ExportTranscriptDocumentError('envelope_budget_exceeded');
   }
-  if (!isSafeRendererVersion(value['rendererVersion'])) {
-    throw new ExportTranscriptDocumentError('invalid_renderer_version');
+  const schemaError = SchemaValidator.validateStrict(
+    exportTranscriptDocumentV1Schema,
+    value,
+  );
+  if (schemaError) {
+    throw new ExportTranscriptDocumentError('schema_validation_failed');
   }
-  if (!Array.isArray(value['blocks'])) {
-    throw new ExportTranscriptDocumentError('invalid_blocks');
+  if (!isRecord(value)) {
+    throw new ExportTranscriptDocumentError('schema_validation_failed');
   }
-  if (value['blocks'].length > EXPORT_TRANSCRIPT_LIMITS_V1.maxBlocks) {
-    throw new ExportTranscriptDocumentError('block_budget_exceeded');
-  }
-  for (const block of value['blocks']) assertExportBlock(block);
-  if (!Array.isArray(value['diagnostics'])) {
-    throw new ExportTranscriptDocumentError('invalid_diagnostics');
-  }
-  for (const diagnostic of value['diagnostics']) {
-    if (!isRecord(diagnostic)) {
-      throw new ExportTranscriptDocumentError('invalid_diagnostic');
-    }
-    assertOnlyKeys(diagnostic, ['code', 'severity', 'count']);
-    if (
-      !isSafeLabel(diagnostic['code'], 128) ||
-      !['info', 'warning', 'error'].includes(String(diagnostic['severity'])) ||
-      !isSafeCount(diagnostic['count'])
-    ) {
-      throw new ExportTranscriptDocumentError('invalid_diagnostic');
-    }
-  }
-  assertMetadata(value['metadata']);
+  assertSemanticSafety(value);
   assertDocumentConsistency(value);
   assertNoForbiddenFields(value);
   assertResourceBudgets(value);
@@ -1227,180 +1203,6 @@ export function classifyPermissionResolutionForExport(
   if (token === 'resolved') return { value: 'resolved', lossy: false };
   return { value: 'resolved', lossy: true };
 }
-
-function assertExportBlock(value: unknown): void {
-  if (!isRecord(value) || !isSafeLabel(value['id'], 200)) {
-    throw new ExportTranscriptDocumentError('invalid_block');
-  }
-  const kind = value['kind'];
-  const common = ['id', 'kind', 'clientReceivedAt', 'createdAt', 'updatedAt'];
-  const keysByKind: Record<string, string[]> = {
-    user: [
-      ...common,
-      'text',
-      'streaming',
-      'collapsed',
-      'parentToolCallId',
-      'images',
-    ],
-    assistant: [
-      ...common,
-      'text',
-      'streaming',
-      'collapsed',
-      'parentToolCallId',
-      'images',
-      'usage',
-    ],
-    thought: [
-      ...common,
-      'text',
-      'streaming',
-      'collapsed',
-      'parentToolCallId',
-      'images',
-    ],
-    tool: [
-      ...common,
-      'toolCallId',
-      'title',
-      'status',
-      'toolName',
-      'toolKind',
-      'preview',
-      'resultPreview',
-      'parentToolCallId',
-      'parentBlockId',
-      'subagentType',
-    ],
-    shell: [...common, 'text', 'stream'],
-    user_shell: [...common, 'text', 'command', 'cwd', 'stream'],
-    permission: [
-      ...common,
-      'requestId',
-      'title',
-      'options',
-      'preview',
-      'toolCallId',
-      'toolName',
-      'toolKind',
-      'resolved',
-    ],
-    status: [...common, 'text', 'code', 'errorKind', 'source'],
-    error: [...common, 'text', 'code', 'errorKind', 'source'],
-    prompt_cancelled: [...common, 'reason'],
-  };
-  if (typeof kind !== 'string' || !keysByKind[kind]) {
-    throw new ExportTranscriptDocumentError('unsupported_block_kind');
-  }
-  assertOnlyKeys(value, keysByKind[kind]);
-  if (
-    value['clientReceivedAt'] !== 0 ||
-    value['createdAt'] !== 0 ||
-    value['updatedAt'] !== 0
-  ) {
-    throw new ExportTranscriptDocumentError('nonzero_block_timestamp');
-  }
-  switch (kind) {
-    case 'user':
-    case 'assistant':
-    case 'thought':
-      assertText(value['text']);
-      if (value['streaming'] !== undefined && value['streaming'] !== false) {
-        invalidBlock();
-      }
-      assertOptionalBoolean(value['collapsed']);
-      assertOptionalLabel(value['parentToolCallId'], 200);
-      if (value['images'] !== undefined) {
-        if (!Array.isArray(value['images'])) invalidBlock();
-        for (const image of value['images']) assertRasterImage(image);
-      }
-      if (value['usage'] !== undefined) {
-        if (kind !== 'assistant') invalidBlock();
-        assertUsage(value['usage']);
-      }
-      return;
-    case 'tool':
-      assertLabel(value['toolCallId'], 200);
-      assertText(value['title']);
-      if (
-        !['completed', 'failed', 'cancelled', 'canceled'].includes(
-          String(value['status']),
-        )
-      ) {
-        invalidBlock();
-      }
-      assertToolPreview(value['preview']);
-      if (value['resultPreview'] !== undefined) {
-        assertToolResultPreview(value['resultPreview']);
-      }
-      if (
-        (value['status'] === 'completed' || value['status'] === 'failed') &&
-        value['resultPreview'] === undefined
-      ) {
-        invalidBlock();
-      }
-      for (const key of [
-        'toolName',
-        'toolKind',
-        'parentToolCallId',
-        'parentBlockId',
-        'subagentType',
-      ]) {
-        assertOptionalLabel(value[key], 200);
-      }
-      return;
-    case 'shell':
-      assertText(value['text']);
-      assertOptionalStream(value['stream']);
-      return;
-    case 'user_shell':
-      assertText(value['text']);
-      assertText(value['command']);
-      assertOptionalPresentationLabel(value['cwd'], 400);
-      if (value['cwd'] !== undefined && !isSafeExportPath(value['cwd'])) {
-        invalidBlock();
-      }
-      assertOptionalStream(value['stream']);
-      return;
-    case 'permission':
-      assertLabel(value['requestId'], 200);
-      assertText(value['title']);
-      if (!Array.isArray(value['options'])) invalidBlock();
-      for (const option of value['options']) assertPermissionOption(option);
-      assertToolPreview(value['preview']);
-      assertOptionalLabel(value['toolCallId'], 200);
-      assertOptionalLabel(value['toolName'], 200);
-      assertOptionalLabel(value['toolKind'], 200);
-      if (
-        value['resolved'] !== undefined &&
-        !['approved', 'rejected', 'cancelled', 'expired', 'resolved'].includes(
-          String(value['resolved']),
-        )
-      ) {
-        invalidBlock();
-      }
-      return;
-    case 'status':
-    case 'error':
-      assertText(value['text']);
-      assertOptionalLabel(value['code'], 128);
-      if (
-        value['errorKind'] !== undefined &&
-        !SAFE_EXPORT_ERROR_KINDS.has(String(value['errorKind']))
-      ) {
-        invalidBlock();
-      }
-      assertOptionalLabel(value['source'], 128);
-      return;
-    case 'prompt_cancelled':
-      if (value['reason'] !== undefined) assertText(value['reason']);
-      return;
-    default:
-      invalidBlock();
-  }
-}
-
 const SAFE_EXPORT_ERROR_KINDS = new Set<string>(DAEMON_ERROR_KINDS);
 
 function safeExportErrorKind(
@@ -1409,367 +1211,115 @@ function safeExportErrorKind(
   return value && SAFE_EXPORT_ERROR_KINDS.has(value) ? value : undefined;
 }
 
-function invalidBlock(): never {
-  throw new ExportTranscriptDocumentError('invalid_block');
-}
+const SAFE_IDENTIFIER_LENGTHS = new Map<string, number>([
+  ['id', 200],
+  ['toolCallId', 200],
+  ['requestId', 200],
+  ['optionId', 200],
+  ['parentToolCallId', 200],
+  ['parentBlockId', 200],
+  ['subagentType', 200],
+  ['source', 128],
+  ['planId', 128],
+  ['parentDelegationId', 128],
+  ['method', 16],
+  ['language', 64],
+]);
+const SAFE_PRESENTATION_IDENTIFIER_LENGTHS = new Map<string, number>([
+  ['toolName', 200],
+  ['toolKind', 200],
+  ['serverId', 128],
+  ['agentName', 128],
+  ['header', 200],
+  ['model', 200],
+]);
 
-function assertText(value: unknown): asserts value is string {
-  if (
-    typeof value !== 'string' ||
-    utf8Bytes(value) > EXPORT_TRANSCRIPT_LIMITS_V1.maxTextBytes
-  ) {
-    invalidBlock();
+function assertSemanticSafety(value: Record<string, unknown>): void {
+  const metadata = value['metadata'] as ExportMetadataPresentationV1;
+  const diagnostics = value['diagnostics'] as ExportTranscriptDiagnosticV1[];
+  if (diagnostics.some((diagnostic) => !isSafeLabel(diagnostic.code, 128))) {
+    throw new ExportTranscriptDocumentError('invalid_diagnostic');
   }
-}
-
-function assertLabel(
-  value: unknown,
-  maxLength: number,
-): asserts value is string {
-  if (!isSafeLabel(value, maxLength)) invalidBlock();
-}
-
-function assertOptionalLabel(value: unknown, maxLength: number): void {
-  if (value !== undefined) assertLabel(value, maxLength);
-}
-
-function assertPresentationLabel(value: unknown, maxLength: number): void {
-  if (!isSafePresentationLabel(value, maxLength)) invalidBlock();
-}
-
-function assertOptionalPresentationLabel(
-  value: unknown,
-  maxLength: number,
-): void {
-  if (value !== undefined) assertPresentationLabel(value, maxLength);
-}
-
-function assertOptionalBoolean(value: unknown): void {
-  if (value !== undefined && typeof value !== 'boolean') invalidBlock();
-}
-
-function assertOptionalStream(value: unknown): void {
-  if (value !== undefined && value !== 'stdout' && value !== 'stderr') {
-    invalidBlock();
-  }
-}
-
-function assertRasterImage(value: unknown): void {
-  if (!isRecord(value)) invalidBlock();
-  assertOnlyKeys(value, ['data', 'mimeType']);
-  if (
-    typeof value['data'] !== 'string' ||
-    typeof value['mimeType'] !== 'string' ||
-    !SAFE_RASTER_MIME_TYPES.has(value['mimeType']) ||
-    decodedBase64Bytes(value['data']) === undefined ||
-    (value['mimeType'] === 'image/gif' && isAnimatedGif(value['data']))
-  ) {
-    invalidBlock();
-  }
-}
-
-function assertUsage(value: unknown): void {
-  if (!isRecord(value)) invalidBlock();
-  assertOnlyKeys(value, ['inputTokens', 'outputTokens', 'cachedTokens']);
-  if (
-    !isSafeCount(value['inputTokens']) ||
-    !isSafeCount(value['outputTokens']) ||
-    (value['cachedTokens'] !== undefined && !isSafeCount(value['cachedTokens']))
-  ) {
-    invalidBlock();
-  }
-}
-
-function assertPermissionOption(value: unknown): void {
-  if (!isRecord(value)) invalidBlock();
-  assertOnlyKeys(value, ['optionId', 'label', 'description', 'raw']);
-  assertLabel(value['optionId'], 200);
-  assertText(value['label']);
-  if (value['description'] !== undefined) assertText(value['description']);
-  if (value['raw'] !== null) invalidBlock();
-}
-
-function assertToolPreview(value: unknown): void {
-  if (!isRecord(value) || typeof value['kind'] !== 'string') invalidBlock();
-  const kind = value['kind'];
-  const keysByKind: Record<string, readonly string[]> = {
-    ask_user_question: ['kind', 'questions'],
-    command: ['kind', 'command', 'cwd'],
-    file_diff: ['kind', 'path', 'oldText', 'newText', 'patch'],
-    file_read: ['kind', 'path', 'range'],
-    web_fetch: ['kind', 'url', 'method'],
-    mcp_invocation: ['kind', 'serverId', 'toolName', 'argsSummary'],
-    code_block: ['kind', 'language', 'code', 'origin'],
-    search: ['kind', 'query', 'resultCount', 'top'],
-    tabular: ['kind', 'columns', 'rows', 'totalRows'],
-    image_generation: ['kind', 'prompt', 'thumbnailUrl', 'model'],
-    subagent_delegation: ['kind', 'agentName', 'task', 'parentDelegationId'],
-    key_value: ['kind', 'rows'],
-    todo_list: ['kind', 'entries', 'truncated', 'planId', 'revision'],
-    generic: ['kind', 'summary'],
-  };
-  const keys = keysByKind[kind];
-  if (!keys) invalidBlock();
-  assertOnlyKeys(value, keys);
-  switch (kind) {
-    case 'ask_user_question':
-      if (!Array.isArray(value['questions'])) invalidBlock();
-      for (const question of value['questions']) assertQuestion(question);
-      return;
-    case 'command':
-      assertText(value['command']);
-      assertOptionalPresentationLabel(value['cwd'], 400);
-      if (value['cwd'] !== undefined && !isSafeExportPath(value['cwd'])) {
-        invalidBlock();
-      }
-      return;
-    case 'file_diff':
-      assertPresentationLabel(value['path'], 400);
-      if (!isSafeExportPath(value['path'])) invalidBlock();
-      for (const key of ['oldText', 'newText', 'patch']) {
-        if (value[key] !== undefined) assertText(value[key]);
-      }
-      return;
-    case 'file_read':
-      assertPresentationLabel(value['path'], 400);
-      if (!isSafeExportPath(value['path'])) invalidBlock();
-      if (value['range'] !== undefined) {
-        if (
-          !Array.isArray(value['range']) ||
-          value['range'].length !== 2 ||
-          !value['range'].every(isSafeCount)
-        ) {
-          invalidBlock();
-        }
-      }
-      return;
-    case 'web_fetch':
-      assertText(value['url']);
-      if (!isSafeDisplayUrl(value['url'])) invalidBlock();
-      assertOptionalLabel(value['method'], 16);
-      return;
-    case 'mcp_invocation':
-      assertPresentationLabel(value['serverId'], 128);
-      assertPresentationLabel(value['toolName'], 128);
-      if (value['argsSummary'] !== undefined) assertText(value['argsSummary']);
-      return;
-    case 'code_block':
-      assertText(value['code']);
-      assertOptionalLabel(value['language'], 64);
-      assertOptionalLabel(value['origin'], 400);
-      if (value['origin'] !== undefined && !isSafeExportPath(value['origin'])) {
-        invalidBlock();
-      }
-      return;
-    case 'search':
-      assertText(value['query']);
-      if (
-        value['resultCount'] !== undefined &&
-        !isSafeCount(value['resultCount'])
-      ) {
-        invalidBlock();
-      }
-      assertOptionalTextArray(value['top']);
-      return;
-    case 'tabular':
-      assertTextArray(value['columns']);
-      if (!Array.isArray(value['rows'])) invalidBlock();
-      for (const row of value['rows']) assertTextArray(row);
-      if (
-        value['totalRows'] !== undefined &&
-        !isSafeCount(value['totalRows'])
-      ) {
-        invalidBlock();
-      }
-      return;
-    case 'image_generation':
-      assertText(value['prompt']);
-      if (value['thumbnailUrl'] !== undefined) {
-        if (typeof value['thumbnailUrl'] !== 'string') invalidBlock();
-        const image = parseApprovedImageDataUrl(value['thumbnailUrl']);
-        const bytes = image ? decodedBase64Bytes(image.data) : undefined;
-        const canonical = image ? formatApprovedImageDataUrl(image) : undefined;
-        if (
-          bytes === undefined ||
-          bytes > EXPORT_TRANSCRIPT_LIMITS_V1.maxRasterBytes ||
-          value['thumbnailUrl'] !== canonical ||
-          (image?.mimeType === 'image/gif' && isAnimatedGif(image.data))
-        ) {
-          invalidBlock();
-        }
-      }
-      assertOptionalLabel(value['model'], 128);
-      return;
-    case 'subagent_delegation':
-      assertPresentationLabel(value['agentName'], 128);
-      assertText(value['task']);
-      assertOptionalLabel(value['parentDelegationId'], 128);
-      return;
-    case 'key_value':
-      if (!Array.isArray(value['rows'])) invalidBlock();
-      for (const row of value['rows']) {
-        if (!isRecord(row)) invalidBlock();
-        assertOnlyKeys(row, ['label', 'value']);
-        assertText(row['label']);
-        assertText(row['value']);
-      }
-      return;
-    case 'todo_list':
-      assertTodoPreview(value);
-      return;
-    case 'generic':
-      if (value['summary'] !== undefined) assertText(value['summary']);
-      return;
-    default:
-      invalidBlock();
-  }
-}
-
-function assertToolResultPreview(value: unknown): void {
-  if (!isRecord(value)) invalidBlock();
-  if (value['kind'] === 'todo_list') {
-    assertTodoPreview(value);
-    return;
-  }
-  if (value['kind'] === 'text') {
-    assertOnlyKeys(value, ['kind', 'text']);
-    assertText(value['text']);
-    return;
-  }
-  if (value['kind'] === 'generic') {
-    assertOnlyKeys(value, ['kind', 'summary']);
-    assertText(value['summary']);
-    if (value['summary'].trim().length === 0) invalidBlock();
-    return;
-  }
-  invalidBlock();
-}
-
-function assertQuestion(value: unknown): void {
-  if (!isRecord(value)) invalidBlock();
-  assertOnlyKeys(value, ['header', 'question', 'options', 'raw']);
-  assertOptionalLabel(value['header'], 200);
-  assertText(value['question']);
-  if (!Array.isArray(value['options'])) invalidBlock();
-  for (const option of value['options']) {
-    if (!isRecord(option)) invalidBlock();
-    assertOnlyKeys(option, ['label', 'description', 'raw']);
-    assertText(option['label']);
-    if (option['description'] !== undefined) assertText(option['description']);
-    if (option['raw'] !== null) invalidBlock();
-  }
-  if (value['raw'] !== null) invalidBlock();
-}
-
-function assertTodoPreview(value: Record<string, unknown>): void {
-  assertOnlyKeys(value, ['kind', 'entries', 'truncated', 'planId', 'revision']);
-  if (!Array.isArray(value['entries'])) invalidBlock();
-  for (const entry of value['entries']) {
-    if (!isRecord(entry)) invalidBlock();
-    assertOnlyKeys(entry, ['id', 'content', 'status', 'priority', 'blockedBy']);
-    assertLabel(entry['id'], 128);
-    assertText(entry['content']);
-    if (
-      !['pending', 'in_progress', 'completed'].includes(String(entry['status']))
-    ) {
-      invalidBlock();
-    }
-    if (
-      entry['priority'] !== undefined &&
-      !['high', 'medium', 'low'].includes(String(entry['priority']))
-    ) {
-      invalidBlock();
-    }
-    if (entry['blockedBy'] !== undefined) {
-      if (!Array.isArray(entry['blockedBy'])) invalidBlock();
-      for (const dependency of entry['blockedBy']) assertLabel(dependency, 128);
-    }
-  }
-  assertOptionalBoolean(value['truncated']);
-  assertOptionalLabel(value['planId'], 128);
-  if (value['revision'] !== undefined && !isSafeCount(value['revision'])) {
-    invalidBlock();
-  }
-}
-
-function assertTextArray(value: unknown): void {
-  if (!Array.isArray(value)) invalidBlock();
-  for (const item of value) assertText(item);
-}
-
-function assertOptionalTextArray(value: unknown): void {
-  if (value !== undefined) assertTextArray(value);
-}
-
-function assertMetadata(value: unknown): void {
-  if (!isRecord(value)) {
-    throw new ExportTranscriptDocumentError('invalid_metadata');
-  }
-  assertOnlyKeys(value, [
-    'title',
-    'startedAt',
-    'exportedAt',
-    'complete',
-    'truncated',
-    'projectName',
-    'repository',
-    'gitBranch',
-    'model',
-    'channel',
-    'promptCount',
-    'contextUsagePercent',
-    'contextWindowSize',
-    'totalTokens',
-    'filesWritten',
-    'linesAdded',
-    'linesRemoved',
-  ]);
-  if (
-    !isIsoDate(value['exportedAt']) ||
-    typeof value['complete'] !== 'boolean' ||
-    typeof value['truncated'] !== 'boolean'
-  ) {
-    throw new ExportTranscriptDocumentError('invalid_metadata');
-  }
-  assertOptionalLabel(value['title'], 200);
-  if (value['startedAt'] !== undefined && !isIsoDate(value['startedAt'])) {
-    throw new ExportTranscriptDocumentError('invalid_metadata');
-  }
-  assertOptionalLabel(value['projectName'], 400);
-  if (
-    value['projectName'] !== undefined &&
-    !isSafeExportPath(value['projectName'])
-  ) {
-    throw new ExportTranscriptDocumentError('invalid_metadata');
-  }
-  if (
-    value['repository'] !== undefined &&
-    !isSafeRepository(value['repository'])
-  ) {
-    throw new ExportTranscriptDocumentError('invalid_metadata');
-  }
-  assertOptionalLabel(value['gitBranch'], 200);
-  assertOptionalLabel(value['model'], 200);
-  assertOptionalLabel(value['channel'], 100);
-  for (const key of [
-    'promptCount',
-    'contextWindowSize',
-    'totalTokens',
-    'filesWritten',
-    'linesAdded',
-    'linesRemoved',
-  ]) {
-    if (value[key] !== undefined && !isSafeCount(value[key])) {
+  for (const [key, maxLength] of [
+    ['title', 200],
+    ['gitBranch', 200],
+    ['model', 200],
+    ['channel', 100],
+  ] as const) {
+    const field = metadata[key];
+    if (field !== undefined && !isSafeLabel(field, maxLength)) {
       throw new ExportTranscriptDocumentError('invalid_metadata');
     }
   }
+  if (!isIsoDate(metadata.exportedAt)) {
+    throw new ExportTranscriptDocumentError('invalid_metadata');
+  }
+  if (metadata.startedAt !== undefined && !isIsoDate(metadata.startedAt)) {
+    throw new ExportTranscriptDocumentError('invalid_metadata');
+  }
   if (
-    value['contextUsagePercent'] !== undefined &&
-    (!isSafeCount(value['contextUsagePercent']) ||
-      Number(value['contextUsagePercent']) > 100)
+    metadata.projectName !== undefined &&
+    !isSafeExportPath(metadata.projectName)
   ) {
     throw new ExportTranscriptDocumentError('invalid_metadata');
   }
+  if (
+    metadata.repository !== undefined &&
+    !isSafeRepository(metadata.repository)
+  ) {
+    throw new ExportTranscriptDocumentError('invalid_metadata');
+  }
+
+  const visit = (entry: unknown, key?: string): void => {
+    if (typeof entry === 'string') {
+      const maxLength = key ? SAFE_IDENTIFIER_LENGTHS.get(key) : undefined;
+      if (maxLength !== undefined && !isSafeLabel(entry, maxLength)) {
+        throw new ExportTranscriptDocumentError('invalid_block');
+      }
+      const presentationMaxLength = key
+        ? SAFE_PRESENTATION_IDENTIFIER_LENGTHS.get(key)
+        : undefined;
+      if (
+        presentationMaxLength !== undefined &&
+        !isSafePresentationLabel(entry, presentationMaxLength)
+      ) {
+        throw new ExportTranscriptDocumentError('invalid_block');
+      }
+      if (
+        key !== undefined &&
+        ['path', 'cwd', 'origin'].includes(key) &&
+        !isSafeExportPath(entry)
+      ) {
+        throw new ExportTranscriptDocumentError('invalid_block');
+      }
+      if (key === 'url' && !isSafeDisplayUrl(entry)) {
+        throw new ExportTranscriptDocumentError('invalid_block');
+      }
+      return;
+    }
+    if (Array.isArray(entry)) {
+      if (
+        key === 'blockedBy' &&
+        !entry.every((item) => isSafeLabel(item, 128))
+      ) {
+        throw new ExportTranscriptDocumentError('invalid_block');
+      }
+      for (const item of entry) visit(item, key);
+      return;
+    }
+    if (!isRecord(entry)) return;
+    if (
+      (entry['kind'] === 'status' || entry['kind'] === 'error') &&
+      entry['code'] !== undefined &&
+      !isSafeLabel(entry['code'], 128)
+    ) {
+      throw new ExportTranscriptDocumentError('invalid_block');
+    }
+    for (const [childKey, child] of Object.entries(entry)) {
+      visit(child, childKey);
+    }
+  };
+  visit(value['blocks']);
 }
 
 function assertDocumentConsistency(value: Record<string, unknown>): void {
@@ -2308,16 +1858,6 @@ const VISIBLE_EXPORT_TEXT_FIELDS = new Set([
   'channel',
 ]);
 
-function assertOnlyKeys(
-  value: Record<string, unknown>,
-  allowed: readonly string[],
-): void {
-  const allowedKeys = new Set(allowed);
-  if (Object.keys(value).some((key) => !allowedKeys.has(key))) {
-    throw new ExportTranscriptDocumentError('additional_property');
-  }
-}
-
 function safeDisplayUrl(
   raw: string,
   diagnostics: DiagnosticCounter,
@@ -2483,10 +2023,6 @@ function safeCount(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value)
     ? Math.max(0, Math.min(Number.MAX_SAFE_INTEGER, Math.trunc(value)))
     : 0;
-}
-
-function isSafeCount(value: unknown): boolean {
-  return Number.isSafeInteger(value) && Number(value) >= 0;
 }
 
 function isIsoDate(value: unknown): value is string {

@@ -598,6 +598,7 @@ export function transcriptBlocksToDaemonMessages(
           target &&
           target.role === 'assistant' &&
           !needsNewContentMessage &&
+          textBlock.segmentId === undefined &&
           !isTextBlockEmpty(textBlock)
         ) {
           const usage = mergeAssistantUsage(target.usage, textBlock.usage);
@@ -667,7 +668,12 @@ export function transcriptBlocksToDaemonMessages(
           currentThinkingIdx !== null
             ? messages[currentThinkingIdx]
             : undefined;
-        if (target && target.role === 'thinking' && !needsNewContentMessage) {
+        if (
+          target &&
+          target.role === 'thinking' &&
+          !needsNewContentMessage &&
+          textBlock.segmentId === undefined
+        ) {
           messages[currentThinkingIdx!] = {
             ...target,
             content: target.content + textBlock.text,

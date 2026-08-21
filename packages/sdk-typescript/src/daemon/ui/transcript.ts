@@ -794,6 +794,7 @@ function canMergeTextDelta(
     existing.promptId !== event.promptId
   )
     return false;
+  if (existing.segmentId !== event.segmentId) return false;
   if (!stringArraysEqual(existing.sourceRecordIds, event.sourceRecordIds)) {
     return false;
   }

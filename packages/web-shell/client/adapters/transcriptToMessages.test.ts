@@ -1554,6 +1554,22 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
+  it('keeps identity-tagged assistant segments as separate messages', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock('a1', 'assistant', 'first', 1, false, {
+        segmentId: 'record-1:0',
+      }),
+      textBlock('a2', 'assistant', 'second', 2, false, {
+        segmentId: 'record-2:0',
+      }),
+    ]);
+
+    expect(messages).toMatchObject([
+      { id: 'a1', role: 'assistant', content: 'first' },
+      { id: 'a2', role: 'assistant', content: 'second' },
+    ]);
+  });
+
   it('creates standalone user_shell message for user shell output', () => {
     const messages = transcriptBlocksToDaemonMessages([
       textBlock('u1', 'user', '! ls', 1),

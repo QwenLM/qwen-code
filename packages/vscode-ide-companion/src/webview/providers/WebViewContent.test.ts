@@ -7,11 +7,16 @@
 import { describe, expect, it, vi } from 'vitest';
 import { WebViewContent } from './WebViewContent.js';
 
+const configurationGet = vi.hoisted(() => vi.fn(() => false));
+
 vi.mock('vscode', () => ({
   Uri: {
     joinPath: vi.fn((_base: unknown, ...parts: string[]) => ({
       fsPath: `/ext/${parts.join('/')}`,
     })),
+  },
+  workspace: {
+    getConfiguration: vi.fn(() => ({ get: configurationGet })),
   },
 }));
 
@@ -73,5 +78,25 @@ describe('WebViewContent', () => {
     const html = WebViewContent.generate(webview as never, fakeExtensionUri);
 
     expect(html).toContain('data-extension-uri=');
+  });
+
+  it('keeps the Web Shell transcript disabled by default', () => {
+    const html = WebViewContent.generate(
+      createMockWebview() as never,
+      fakeExtensionUri,
+    );
+
+    expect(html).toContain('data-web-shell-transcript="disabled"');
+  });
+
+  it('enables the Web Shell transcript only when configured', () => {
+    configurationGet.mockReturnValueOnce(true);
+
+    const html = WebViewContent.generate(
+      createMockWebview() as never,
+      fakeExtensionUri,
+    );
+
+    expect(html).toContain('data-web-shell-transcript="enabled"');
   });
 });
