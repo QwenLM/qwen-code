@@ -5177,6 +5177,7 @@ export function WebShellSidebar({
                                       <button
                                         className={styles.workspaceHeaderAction}
                                         type="button"
+                                        title={t('sidebar.groupCreate')}
                                         aria-label={t('sidebar.groupCreate')}
                                         onClick={(event) => {
                                           event.preventDefault();

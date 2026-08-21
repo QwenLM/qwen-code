@@ -698,6 +698,15 @@ function createMrComment(
   message: string,
   inline?: { path: string; line: number },
 ): number | undefined {
+  // No AI-comment marking here, BY PLATFORM CONSTRAINT: probed 2026-08-21
+  // on a scratch CR (issue #9614) — `comment create` does NOT auto-set
+  // `isAiComment` for the posting identity (both a general and an inline
+  // probe read back false, re-checked minutes later against an async
+  // classifier), and a1 v0.1.90 exposes no flag to request it. Created
+  // comments therefore sit in the generic discussion gate, never the
+  // dedicated ai_comment merge gate; submit's REQUEST_CHANGES note
+  // discloses that. When a1 ships a marking flag, THIS call is where it
+  // gets passed.
   // a1JsonOnce is the tolerant read-back: an exec FAILURE propagates (a real
   // post failure — the partial-post path counts what landed before it), but a
   // SUCCEEDED exec whose answer does not parse is "accepted, id unknown", not
@@ -758,7 +767,8 @@ function a1Cause(err: unknown): string {
  * lands; COMMENT is the summary alone; REQUEST_CHANGES has NO native
  * equivalent — the summary carries an explicit blocking header, and the
  * unresolved inline Criticals carry the blocking semantics through the
- * discussion merge gate.
+ * discussion merge gate (NEVER the ai_comment gate: a1 cannot mark a
+ * comment as AI — see createMrComment).
  *
  * Throws BEFORE writing when the head drifted (the commit_id check
  * GitHub's API performs server-side). Throws AonePartialPostError when
