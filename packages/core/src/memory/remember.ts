@@ -198,7 +198,6 @@ export async function runManagedRememberByAgent(params: {
     tools: [
       ToolNames.READ_FILE,
       ToolNames.GREP,
-      ToolNames.LS,
       ToolNames.WRITE_FILE,
       ToolNames.EDIT,
     ],
