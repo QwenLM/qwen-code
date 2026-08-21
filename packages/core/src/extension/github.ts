@@ -394,27 +394,49 @@ export async function shouldUsePublicGitHubArchiveFallback(
   return !(await isPinnedGitSupported());
 }
 
+// A Git LFS pointer is a small text file (~130 bytes). Only files small
+// enough to plausibly be pointers are read, keeping the scan cheap.
+const GIT_LFS_POINTER_PREFIX = 'version https://git-lfs.github.com/spec/v1';
+const MAX_LFS_POINTER_SCAN_BYTES = 512;
+
 async function assertArchivePreservesGitSemantics(destination: string) {
   const pending = [destination];
   while (pending.length > 0) {
     const directory = pending.pop()!;
+    const isArchiveRoot = directory === destination;
     for (const entry of await fs.promises.readdir(directory, {
       withFileTypes: true,
     })) {
       const entryPath = path.join(directory, entry.name);
       if (entry.isDirectory()) {
         pending.push(entryPath);
-      } else if (entry.name === '.gitmodules') {
+        continue;
+      }
+      if (!entry.isFile()) {
+        continue;
+      }
+      // Git gives submodule semantics only to a root-level `.gitmodules`;
+      // a nested copy is an inert regular file.
+      if (isArchiveRoot && entry.name === '.gitmodules') {
         throw new Error(
           'Older-Git fallback does not support repositories with submodules.',
         );
-      } else if (entry.name === '.gitattributes') {
-        const attributes = await fs.promises.readFile(entryPath, 'utf8');
-        if (/(?:^|\s)filter=lfs(?:\s|$)/m.test(attributes)) {
-          throw new Error(
-            'Older-Git fallback does not support repositories using Git LFS.',
-          );
-        }
+      }
+      // Detect Git LFS by pointer-file content rather than `.gitattributes`
+      // grammar: codeload archives honor `.gitattributes` `export-ignore`,
+      // so the attributes file itself can be hidden from the extracted tree,
+      // and attribute macros or case-variant names also bypass a
+      // grammar-only check. Any LFS-tracked file arrives as a raw pointer
+      // file, so scanning for pointer content catches every variant.
+      const stats = await fs.promises.stat(entryPath);
+      if (stats.size > MAX_LFS_POINTER_SCAN_BYTES) {
+        continue;
+      }
+      const content = await fs.promises.readFile(entryPath, 'utf8');
+      if (content.startsWith(GIT_LFS_POINTER_PREFIX)) {
+        throw new Error(
+          'Older-Git fallback does not support repositories using Git LFS.',
+        );
       }
     }
   }
@@ -616,6 +638,9 @@ export async function checkForExtensionUpdate(
           false,
         );
         if (!/^[a-f0-9]{40}$/i.test(commitData.sha)) {
+          debugLogger.error(
+            `GitHub returned an invalid commit SHA for update check: ${commitData.sha}`,
+          );
           return ExtensionUpdateState.ERROR;
         }
         return commitData.sha.toLowerCase() === installMetadata.gitCommit

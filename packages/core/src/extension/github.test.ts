@@ -17,6 +17,7 @@ import {
   isSupportedArchivePath,
   isSupportedArchiveUrl,
   parseGitHubRepoForReleases,
+  shouldUsePublicGitHubArchiveFallback,
 } from './github.js';
 import { simpleGit, type SimpleGit } from 'simple-git';
 import * as os from 'node:os';
@@ -36,6 +37,7 @@ import {
   type ExtensionManager,
 } from './extensionManager.js';
 import { getErrorMessage } from '../utils/errors.js';
+import type { ExtensionInstallMetadata } from '../config/config.js';
 import { EXTENSIONS_CONFIG_FILENAME } from './variables.js';
 import { QODER_PLUGIN_MANIFEST } from './qoder-converter.js';
 import { ExtensionStorage } from './storage.js';
@@ -716,53 +718,181 @@ describe('git extension helpers', () => {
       },
     );
 
-    it.each([
-      ['.gitmodules', '[submodule "nested"]'],
-      ['.gitattributes', '*.bin filter=lfs diff=lfs merge=lfs -text'],
-    ])('rejects archives containing %s', async (unsafeFile, contents) => {
+    const fallbackSha = 'abcdef0123456789abcdef0123456789abcdef01';
+    const gitLfsPointer = [
+      'version https://git-lfs.github.com/spec/v1',
+      'oid sha256:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393',
+      'size 12345',
+      '',
+    ].join('\n');
+
+    // Builds an extension archive whose repo root contains the given files
+    // (paths relative to that root), then runs the real fallback download
+    // against it. Resolves with the pinned SHA; rejects when validation
+    // fails.
+    async function runFallbackAgainstArchive(
+      files: Record<string, string>,
+    ): Promise<string> {
       vi.spyOn(dns, 'lookup').mockResolvedValue([
         { address: '8.8.8.8', family: 4 },
       ] as never);
       const tempDir = await fs.mkdtemp(
-        path.join(os.tmpdir(), 'old-git-unsafe-test-'),
+        path.join(os.tmpdir(), 'old-git-fallback-files-test-'),
       );
       const sourceDir = path.join(tempDir, 'source');
       const destination = path.join(tempDir, 'destination');
-      await fs.mkdir(path.join(sourceDir, 'repo-archive'), { recursive: true });
+      await fs.mkdir(path.join(sourceDir, 'repo-archive'), {
+        recursive: true,
+      });
       await fs.mkdir(destination);
       await fs.writeFile(
         path.join(sourceDir, 'repo-archive', EXTENSIONS_CONFIG_FILENAME),
         JSON.stringify({ name: 'archive-extension', version: '1.0.0' }),
       );
-      await fs.writeFile(
-        path.join(sourceDir, 'repo-archive', unsafeFile),
-        contents,
-      );
+      for (const [relativePath, contents] of Object.entries(files)) {
+        const filePath = path.join(sourceDir, 'repo-archive', relativePath);
+        await fs.mkdir(path.dirname(filePath), { recursive: true });
+        await fs.writeFile(filePath, contents);
+      }
       const archivePath = path.join(tempDir, 'source.tar.gz');
       await tar.c({ gzip: true, file: archivePath, cwd: sourceDir }, [
         'repo-archive',
       ]);
       const archive = await fs.readFile(archivePath);
-      const sha = 'abcdef0123456789abcdef0123456789abcdef01';
-      mockHttpsResponses(JSON.stringify({ sha }), archive);
+      mockHttpsResponses(JSON.stringify({ sha: fallbackSha }), archive);
 
       try {
-        await expect(
-          downloadPublicGitHubArchiveFallback(
-            {
-              type: 'git',
-              source: 'https://github.com/owner/repo',
-              networkPolicy: 'public',
-            },
-            destination,
-          ),
-        ).rejects.toThrow(
-          unsafeFile === '.gitmodules' ? 'submodules' : 'Git LFS',
+        return await downloadPublicGitHubArchiveFallback(
+          {
+            type: 'git',
+            source: 'https://github.com/owner/repo',
+            networkPolicy: 'public',
+          },
+          destination,
         );
       } finally {
         await fs.rm(tempDir, { recursive: true, force: true });
       }
+    }
+
+    it.each([
+      [
+        'a root .gitmodules file',
+        {
+          '.gitmodules':
+            '[submodule "nested"]\n\tpath = nested\n\turl = https://github.com/owner/nested.git',
+        },
+        'submodules',
+      ],
+      [
+        // codeload archives honor `.gitattributes` `export-ignore`, so a
+        // repository can hide its attributes file from the archive; the raw
+        // pointer content must still be rejected (and no `.gitattributes`
+        // means no grammar-only check could have seen the LFS config).
+        'a Git LFS pointer file without any .gitattributes',
+        { 'payload.bin': gitLfsPointer },
+        'Git LFS',
+      ],
+      [
+        'a nested Git LFS pointer file',
+        { 'assets/payload.bin': gitLfsPointer },
+        'Git LFS',
+      ],
+    ])(
+      'rejects archives containing %s',
+      async (_label, files, expectedError) => {
+        await expect(runFallbackAgainstArchive(files)).rejects.toThrow(
+          expectedError,
+        );
+      },
+    );
+
+    it('accepts an archive whose only .gitmodules file is nested', async () => {
+      await expect(
+        runFallbackAgainstArchive({
+          'fixtures/.gitmodules': '[submodule "inert"]',
+        }),
+      ).resolves.toBe(fallbackSha);
     });
+
+    it('accepts an archive with commented-out LFS attributes and no pointer content', async () => {
+      await expect(
+        runFallbackAgainstArchive({
+          '.gitattributes': '# *.bin filter=lfs diff=lfs merge=lfs -text\n',
+        }),
+      ).resolves.toBe(fallbackSha);
+    });
+  });
+
+  describe('shouldUsePublicGitHubArchiveFallback', () => {
+    const gateGit = { version: vi.fn() };
+
+    beforeEach(() => {
+      vi.mocked(simpleGit).mockReturnValue(gateGit as unknown as SimpleGit);
+    });
+
+    afterEach(() => {
+      gateGit.version.mockReset();
+    });
+
+    function createMetadata(
+      overrides: Partial<ExtensionInstallMetadata> = {},
+    ): ExtensionInstallMetadata {
+      return {
+        type: 'git',
+        source: 'https://github.com/owner/repo',
+        networkPolicy: 'public',
+        ...overrides,
+      };
+    }
+
+    it('uses the fallback for old Git with an anonymous public GitHub root', async () => {
+      gateGit.version.mockResolvedValue({ major: 2, minor: 34, patch: 1 });
+      await expect(
+        shouldUsePublicGitHubArchiveFallback(createMetadata()),
+      ).resolves.toBe(true);
+    });
+
+    it('stays on pinned Git when Git is modern enough', async () => {
+      gateGit.version.mockResolvedValue({ major: 2, minor: 52, patch: 0 });
+      await expect(
+        shouldUsePublicGitHubArchiveFallback(createMetadata()),
+      ).resolves.toBe(false);
+    });
+
+    const failClosedCases: Array<[string, Partial<ExtensionInstallMetadata>]> =
+      [
+        ['stored credentials', { credentialPersistence: 'stored' }],
+        [
+          'a Claude marketplace config',
+          {
+            marketplaceConfig: {
+              name: 'marketplace',
+              owner: { name: 'owner', email: 'owner@example.com' },
+              plugins: [],
+            },
+          },
+        ],
+        ['a plugin name', { pluginName: 'sample-plugin' }],
+        ['external content', { externalContent: true }],
+        ['a missing public network policy', { networkPolicy: undefined }],
+        ['a non-git install type', { type: 'github-release' }],
+        ['a non-GitHub source', { source: 'https://gitlab.com/owner/repo' }],
+        [
+          'a nested GitHub path',
+          { source: 'https://github.com/owner/repo/nested' },
+        ],
+      ];
+
+    it.each(failClosedCases)(
+      'stays fail-closed on old Git for %s',
+      async (_label, overrides) => {
+        gateGit.version.mockResolvedValue({ major: 2, minor: 34, patch: 1 });
+        await expect(
+          shouldUsePublicGitHubArchiveFallback(createMetadata(overrides)),
+        ).resolves.toBe(false);
+      },
+    );
   });
 
   describe('checkForExtensionUpdate', () => {
@@ -873,6 +1003,28 @@ describe('git extension helpers', () => {
         expect(mockGit.listRemote).not.toHaveBeenCalled();
       },
     );
+
+    it('returns ERROR when the old-Git update check receives an invalid SHA', async () => {
+      mockGit.version.mockResolvedValue({ major: 2, minor: 34, patch: 1 });
+      vi.spyOn(dns, 'lookup').mockResolvedValue([
+        { address: '8.8.8.8', family: 4 },
+      ] as never);
+      mockHttpsResponses(JSON.stringify({ sha: 'not-a-valid-sha' }));
+      const result = await checkForExtensionUpdate(
+        createExtension({
+          installMetadata: {
+            type: 'git',
+            source: 'https://github.com/owner/repo',
+            gitCommit: '0123456789abcdef0123456789abcdef01234567',
+            networkPolicy: 'public',
+          },
+        }),
+        mockExtensionManager,
+      );
+
+      expect(result).toBe(ExtensionUpdateState.ERROR);
+      expect(mockGit.listRemote).not.toHaveBeenCalled();
+    });
 
     it('should return NOT_UPDATABLE for non-git extensions', async () => {
       const extension = createExtension({
