@@ -1,6 +1,7 @@
 import {
   useState,
   useEffect,
+  useLayoutEffect,
   useCallback,
   useMemo,
   useRef,
@@ -9,7 +10,7 @@ import {
 } from 'react';
 import type { PermissionRequest } from '../../adapters/types';
 import { useI18n } from '../../i18n';
-import { isEditableTarget } from '../../utils/dom';
+import { getShadowAwareActiveElement, isEditableTarget } from '../../utils/dom';
 import { Spinner } from '../ui/spinner';
 import { localizeToolDisplayName } from './toolFormatting';
 import styles from './AskUserQuestion.module.css';
@@ -79,6 +80,7 @@ export function AskUserQuestion({
   // Roving-tabindex refs: option buttons (one per question option) plus the
   // "Other" trigger that reveals the custom input.
   const optionRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const panelRef = useRef<HTMLDivElement | null>(null);
   const customRef = useRef<HTMLButtonElement | null>(null);
   const selectedIdxRef = useRef<number | null>(selectedIdx);
   const selectedIdxByQuestionRef = useRef<Record<number, number | null>>({});
@@ -580,7 +582,11 @@ export function AskUserQuestion({
   // ToolApproval's matching effect for the prev-flag reasoning.
   const prevKeyboardActiveRef = useRef(false);
   const prevRequestIdRef = useRef(request.id);
-  useEffect(() => {
+  // Must be a layout effect, not a passive one: the commit that mounts this
+  // overlay also hides the composer, and sibling layout effects can force a
+  // synchronous style recalculation before any passive effect runs. Layout
+  // effects still see the editable composer as the active element.
+  useLayoutEffect(() => {
     const wasActive = prevKeyboardActiveRef.current;
     const prevRequestId = prevRequestIdRef.current;
     prevKeyboardActiveRef.current = keyboardActive;
@@ -589,7 +595,13 @@ export function AskUserQuestion({
     if (requestChanged && currentIdx !== 0) return;
     if (wasActive && !requestChanged) return;
     prevRequestIdRef.current = request.id;
-    const idx = selectedIdxRef.current ?? 0;
+    // Yield to a user who is typing in the composer. Moving focus to an option
+    // could redirect Enter, Space, digits, or typed text into the question and
+    // submit an answer the user never chose.
+    if (isEditableTarget(getShadowAwareActiveElement(panelRef.current))) {
+      return;
+    }
+    const idx = requestChanged ? 0 : (selectedIdxRef.current ?? 0);
     if (idx === current.options.length) customRef.current?.focus();
     else optionRefs.current[idx]?.focus();
   }, [current, currentIdx, keyboardActive, request.id]);
@@ -644,6 +656,7 @@ export function AskUserQuestion({
 
   return (
     <div
+      ref={panelRef}
       className={`${styles.question} ${
         variant === 'floating' ? styles.floating : ''
       } ${collapsed ? styles.collapsed : ''}`}
