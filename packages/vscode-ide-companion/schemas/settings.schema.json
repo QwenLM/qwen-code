@@ -1232,6 +1232,17 @@
             }
           }
         },
+        "listDirectory": {
+          "description": "Settings for the built-in list_directory tool. Opt-in: the tool is disabled by default because glob covers directory listing in most cases.",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "description": "Enable the built-in list_directory tool. Disabled by default; it is also re-enabled automatically when explicitly listed in the coreTools allowlist (--core-tools / tools.core).",
+              "type": "boolean",
+              "default": false
+            }
+          }
+        },
         "shell": {
           "description": "Settings for shell execution.",
           "type": "object",

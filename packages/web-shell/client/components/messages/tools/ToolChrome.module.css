@@ -239,6 +239,7 @@
 .chatSummary:focus-visible .chatSummaryTextActive,
 .chatSummary[aria-expanded='true'] .chatSummaryTextActive {
   background-image: none;
+  color: inherit;
   -webkit-text-fill-color: currentColor;
 }
 

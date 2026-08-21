@@ -2174,8 +2174,10 @@ export class Session implements SessionContext {
     this.goalProcessing = true;
     this.activeGoalTurn = turn;
     const parts = buildGoalContinuationParts(turn);
+    let result: PromptResponse | undefined;
+    await this.#emitGoalStartTurn();
     try {
-      await this.prompt(
+      result = await this.prompt(
         {
           sessionId: this.sessionId,
           prompt: parts.map((part) => ({
@@ -2205,6 +2207,7 @@ export class Session implements SessionContext {
         }`,
       );
     } finally {
+      await this.#emitGoalEndTurn(result);
       if (this.activeGoalTurn === turn) this.activeGoalTurn = undefined;
       this.goalProcessing = false;
       void this.#drainCronQueue();
@@ -8649,6 +8652,40 @@ export class Session implements SessionContext {
     }
   }
 
+  /**
+   * Goal turns run inside this child via `prompt()` directly, so the daemon
+   * bridge never observes a `session/prompt` RPC boundary for them and would
+   * otherwise publish no `turn_complete` — leaving SSE clients (Web Shell,
+   * SDK) with a streaming state that never settles.
+   */
+  async #emitGoalStartTurn(): Promise<void> {
+    try {
+      await this.client.extNotification('_qwencode/start_turn', {
+        sessionId: this.sessionId,
+        source: 'goal',
+      });
+    } catch (error) {
+      debugLogger.debug(
+        `Goal start-turn extNotification dropped: ${this.#formatError(error)}`,
+      );
+    }
+  }
+
+  async #emitGoalEndTurn(result: PromptResponse | undefined): Promise<void> {
+    try {
+      await this.client.extNotification('_qwencode/end_turn', {
+        sessionId: this.sessionId,
+        reason: result?.stopReason ?? 'cancelled',
+        source: 'goal',
+        promptId: this.config.getSessionId() + '########' + String(this.turn),
+      });
+    } catch (error) {
+      debugLogger.debug(
+        `Goal end-turn extNotification dropped: ${this.#formatError(error)}`,
+      );
+    }
+  }
+
   async sendAvailableCommandsUpdate(): Promise<void> {
     try {
       await this.sendAvailableCommandsUpdateOrThrow();
@@ -9178,11 +9215,22 @@ export class Session implements SessionContext {
       } else {
         debugLogger.warn(message);
       }
-      return await finalizeRunToolResult({
+      await Promise.all(
+        dedupedFunctionCalls.map((fc) =>
+          recordSkippedToolCall(
+            fc,
+            LOOP_DETECTED_SKIP_MESSAGE,
+            false,
+            ToolErrorType.UNKNOWN,
+          ),
+        ),
+      );
+      const result = await finalizeRunToolResult({
         parts: [],
         stopAfterPermissionCancel: false,
         loopDetected: true,
       });
+      return { ...result, parts: [] };
     }
 
     const pushDuplicateBatch = (
