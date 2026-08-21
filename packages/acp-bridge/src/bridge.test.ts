@@ -26392,6 +26392,60 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('publishes a JSON-survivable null marker when the title is cleared (#8977)', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      bridge.updateSessionMetadata(session.sessionId, {
+        displayName: 'Named session',
+        titleSource: 'manual',
+      });
+
+      const events: BridgeEvent[] = [];
+      const sub = bridge.subscribeEvents(session.sessionId);
+      const drain = (async () => {
+        for await (const ev of sub) events.push(ev);
+      })();
+      await new Promise((r) => setImmediate(r));
+
+      const cleared = bridge.updateSessionMetadata(session.sessionId, {
+        displayName: '',
+      });
+      expect(cleared).toEqual({});
+
+      await new Promise((r) => setImmediate(r));
+      const clearEvent = events.find(
+        (e) => e.type === 'session_metadata_updated',
+      );
+      expect(clearEvent).toBeDefined();
+      // The wire shape is what matters: JSON drops `undefined` keys, so a
+      // cleared title must serialize as `null` for the client-side
+      // hasOwnProperty gate to open and drop the stale name + provenance.
+      const wire = JSON.parse(JSON.stringify(clearEvent?.data)) as Record<
+        string,
+        unknown
+      >;
+      expect(Object.prototype.hasOwnProperty.call(wire, 'displayName')).toBe(
+        true,
+      );
+      expect(wire['displayName']).toBeNull();
+      expect(Object.prototype.hasOwnProperty.call(wire, 'titleSource')).toBe(
+        false,
+      );
+
+      const reloaded = await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+      });
+      expect(reloaded.displayName).toBeUndefined();
+      expect(reloaded.titleSource).toBeUndefined();
+
+      await bridge.closeSession(session.sessionId);
+      await drain;
+      await bridge.shutdown();
+    });
+
     it('persists a manual source when the name matches an auto title (#8977)', async () => {
       const titleUpdates: unknown[] = [];
       const bridge = makeBridge({

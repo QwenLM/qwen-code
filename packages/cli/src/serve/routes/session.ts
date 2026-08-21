@@ -5397,27 +5397,44 @@ export function registerSessionRoutes(
               if (location === 'conflict') {
                 throw new SessionConflictError(sessionId);
               }
-              const renamed = location
-                ? await service.renameSession(
-                    sessionId,
-                    displayName,
-                    rawTitleSource ?? 'manual',
-                    location,
-                  )
-                : false;
-              assertRuntimeGenerationOpen?.();
-              if (!renamed) {
-                throw new SessionNotFoundError(sessionId);
+              // Mirror the live path's same-text downgrade guard in
+              // `bridge.updateSessionMetadata`: an `auto` re-rename whose
+              // text equals the persisted manual title must not append a
+              // downgrade record — the /clear carry gate would then drop the
+              // user's manual name (the #8977 regression itself). Skip the
+              // write and report the existing fields, as the live path does.
+              const persistedTitle = location
+                ? service.getSessionTitleInfo(sessionId, location)
+                : {};
+              if (
+                rawTitleSource === 'auto' &&
+                persistedTitle.source === 'manual' &&
+                persistedTitle.title === displayName
+              ) {
+                effective = { displayName, titleSource: 'manual' };
+              } else {
+                const renamed = location
+                  ? await service.renameSession(
+                      sessionId,
+                      displayName,
+                      rawTitleSource ?? 'manual',
+                      location,
+                    )
+                  : false;
+                assertRuntimeGenerationOpen?.();
+                if (!renamed) {
+                  throw new SessionNotFoundError(sessionId);
+                }
+                // The persisted rename appends a custom_title record the next
+                // catalog scan serves, so this fallback must advance the same
+                // catalog revision the live rename marks — otherwise
+                // version-watching clients keep the stale name.
+                runtime.bridge.markSessionCatalogChanged();
+                effective = {
+                  displayName: displayName || undefined,
+                  titleSource: rawTitleSource ?? 'manual',
+                };
               }
-              // The persisted rename appends a custom_title record the next
-              // catalog scan serves, so this fallback must advance the same
-              // catalog revision the live rename marks — otherwise
-              // version-watching clients keep the stale name.
-              runtime.bridge.markSessionCatalogChanged();
-              effective = {
-                displayName: displayName || undefined,
-                titleSource: rawTitleSource ?? 'manual',
-              };
             }
             invalidateSessionLists(runtime, ['active', 'archived']);
             res.status(200).json({ sessionId, ...effective });

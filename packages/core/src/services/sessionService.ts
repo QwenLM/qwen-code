@@ -1136,19 +1136,24 @@ export class SessionService {
    * for a given session. Used by `ChatRecordingService` on resume to
    * preserve the persisted `titleSource` rather than defaulting to manual.
    *
-   * @remarks Only checks active sessions. Use `getSessionLocation()` or
-   * `sessionExistsInAnyState()` for archive-aware lookups.
+   * @remarks Defaults to active sessions only, matching `renameSession`'s
+   * `archiveState` parameter; pass `'archived'` to read an archived
+   * transcript's title. Use `getSessionLocation()` or
+   * `sessionExistsInAnyState()` to discover the state first.
    */
-  getSessionTitleInfo(sessionId: string): {
+  getSessionTitleInfo(
+    sessionId: string,
+    archiveState: SessionArchiveState = 'active',
+  ): {
     title?: string;
     source?: TitleSource;
   } {
     if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
       return {};
     }
-    const chatsDir = this.getChatsDir();
-    const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
-    return this.readSessionTitleInfoFromFile(filePath);
+    return this.readSessionTitleInfoFromFile(
+      this.getSessionFilePath(sessionId, archiveState),
+    );
   }
 
   /**

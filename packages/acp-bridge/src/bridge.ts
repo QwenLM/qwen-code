@@ -9777,7 +9777,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               type: 'session_metadata_updated',
               data: {
                 sessionId,
-                displayName: entry.displayName,
+                // Publish a cleared title as `null`, never `undefined`: JSON
+                // serialization drops undefined keys, and clients gate the
+                // clear on the key being present (the SDK validator accepts
+                // null here). Without the marker a connection would keep the
+                // stale name AND its `manual` provenance, letting the next
+                // /clear carry resurrect the deleted title (#8977).
+                displayName: entry.displayName ?? null,
                 ...(entry.titleSource !== undefined
                   ? { titleSource: entry.titleSource }
                   : {}),
