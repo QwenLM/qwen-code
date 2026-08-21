@@ -94,7 +94,7 @@ jobs:
             fi
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-      - uses: 'dtolnay/rust-toolchain@stable'
+      - uses: 'dtolnay/rust-toolchain@1.97.1'
       - name: 'Test model payload filtering'
         working-directory: 'packages/cua-driver/rust'
         run: 'cargo test -p cua-driver-core --locked model_payload'
@@ -143,7 +143,7 @@ jobs:
             VERSION="${{ inputs.version }}"
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-      - uses: 'dtolnay/rust-toolchain@stable'
+      - uses: 'dtolnay/rust-toolchain@1.97.1'
         with:
           targets: '${{ matrix.target }}'
       - uses: 'actions/cache@v4'
@@ -222,15 +222,9 @@ jobs:
             VERSION="${{ inputs.version }}"
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-      - uses: 'dtolnay/rust-toolchain@stable'
+      - uses: 'dtolnay/rust-toolchain@1.97.1'
         with:
           targets: '${{ matrix.target }}'
-      - name: 'Verify Rust target installation'
-        shell: 'bash'
-        run: |
-          set -euo pipefail
-          rustup target add "${{ matrix.target }}"
-          rustup target list --installed | grep -Fx "${{ matrix.target }}"
       - uses: 'actions/cache@v4'
         with:
           path: |
@@ -303,15 +297,9 @@ jobs:
             VERSION="${{ inputs.version }}"
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-      - uses: 'dtolnay/rust-toolchain@stable'
+      - uses: 'dtolnay/rust-toolchain@1.97.1'
         with:
           targets: 'aarch64-apple-darwin,x86_64-apple-darwin'
-      - name: 'Verify Rust target installation'
-        run: |
-          set -euo pipefail
-          rustup target add aarch64-apple-darwin x86_64-apple-darwin
-          rustup target list --installed | grep -Fx aarch64-apple-darwin
-          rustup target list --installed | grep -Fx x86_64-apple-darwin
       - uses: 'actions/cache@v4'
         with:
           path: |
