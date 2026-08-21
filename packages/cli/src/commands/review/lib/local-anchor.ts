@@ -26,7 +26,7 @@
 import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, readlinkSync } from 'node:fs';
 import { join } from 'node:path';
-import { gitOpt, gitWithInput } from './git.js';
+import { gitOpt, gitWithInput, gitWithInputRaw } from './git.js';
 
 /**
  * Per-file identity for a path whose state CANNOT be captured: a directory
@@ -231,7 +231,18 @@ function renderingAttributes(
     // `-z` on both sides: NUL-delimited input and output, so a path holding a
     // newline or a colon cannot forge a record — the same reason every
     // listing in this file is byte-faithful.
-    raw = gitWithInput(Buffer.from(`${paths.join('\0')}\0`), [
+    //
+    // …and RAW, because the convenience wrapper is not. Its `.trim()` eats a
+    // leading whitespace byte — legal in a path on Linux and macOS — so the
+    // first record's echoed key stops matching the path that was asked
+    // about, and every record shifts onto a phantom key: the path gets a
+    // MALFORMED identity instead of an honest `UNHASHABLE`. That fails OPEN
+    // in one direction, because the stolen record is the `diff` attribute, so
+    // a `diff=<driver>` path never folds its driver's `binary` setting in and
+    // the config-side binary↔text flip this whole function exists to track
+    // goes invisible. The `\r\n` → `\n` rewrite can collide one record's key
+    // with a sibling's the same way.
+    raw = gitWithInputRaw(Buffer.from(`${paths.join('\0')}\0`), [
       '-C',
       repoRoot === '' ? '.' : repoRoot,
       'check-attr',
