@@ -17,7 +17,13 @@
 // new file reported "no changes to review".
 
 import type { CommandModule } from 'yargs';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { repoRelativeOf, REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
@@ -179,6 +185,24 @@ function anchorRefusalReason(
     return 'HEAD moved since the last local round';
   }
   return null;
+}
+
+/**
+ * The cache file `--cache` names: the path itself, or `<dir>/<target>.json`
+ * when it names a directory. Null when a directory holds no cache for this
+ * target, which every caller already treats as "no anchor".
+ */
+function resolveCachePath(given: string, target: string): string | null {
+  let isDir = false;
+  try {
+    isDir = statSync(given).isDirectory();
+  } catch {
+    // Missing is not a directory; `readLocalCache` reports it as unreadable.
+    return given;
+  }
+  if (!isDir) return given;
+  const candidate = join(given, `${target}.json`);
+  return existsSync(candidate) ? candidate : null;
 }
 
 function runCaptureLocal(args: CaptureLocalArgs): void {
@@ -350,7 +374,24 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   let plan = fullPlan;
   let incremental: IncrementalBlock | undefined;
   if (args.cache) {
-    const cache = readLocalCache(args.cache);
+    // A DIRECTORY resolves to this command's own target, because the caller
+    // cannot name the file.
+    //
+    // The cache is `<dir>/<target>.json`, and `target` exists only after the
+    // derivation above — the whole point of which is that a hand-applied
+    // recipe disagreed with it. Step 1 has to decide whether a cache exists
+    // BEFORE running this command, so it was left predicting the name: for
+    // `ln -s src srclink` then a review of `srclink/foo.ts`, the typed
+    // spelling flattens to `srclink_foo.ts` while this command canonicalises
+    // to `src_foo.ts`. The prediction misses, `--cache` is never passed, and
+    // the round silently loses both incremental scoping and the findings
+    // ledger — in exactly the spelling classes the canonicalisation exists
+    // to handle, with no refusal line printed anywhere.
+    //
+    // Passing the directory ends the guessing: one deriver, and a caller
+    // that knows only where caches live. A file path still works unchanged.
+    const cachePath = resolveCachePath(args.cache, target);
+    const cache = cachePath === null ? null : readLocalCache(cachePath);
     const refusal = anchorRefusalReason(
       cache,
       roundModelIdFrom(process.env),
@@ -610,11 +651,16 @@ export const captureLocalCommand: CommandModule = {
       .option('cache', {
         type: 'string',
         describe:
-          "The previous local round's review cache " +
-          '(`.qwen/review-cache/<target>.json`). When its anchor validates — ' +
-          'same model, same HEAD — the capture is scoped to files whose ' +
-          'content changed since that round, widened by one import hop; on ' +
-          'any refusal it degrades to the full capture and says why.',
+          "The previous local round's review cache — the file, or the " +
+          'DIRECTORY holding it (`.qwen/review-cache`), in which case this ' +
+          'command resolves `<dir>/<target>.json` from the target IT ' +
+          'derives. Prefer the directory for a file review: the target is ' +
+          "this command's to compute, and a caller that predicts the name " +
+          'gets it wrong for any non-canonical spelling. When the anchor ' +
+          'validates — same identity, same HEAD — the capture is scoped to ' +
+          'files whose content changed since that round, widened by one ' +
+          'import hop; on any refusal it degrades to the full capture and ' +
+          'says why.',
       }),
   handler: (argv) => {
     runCaptureLocal(argv as unknown as CaptureLocalArgs);

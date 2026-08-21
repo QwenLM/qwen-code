@@ -388,6 +388,49 @@ describe('capture-local — incremental local rounds', () => {
   });
 });
 
+describe('capture-local — --cache takes the DIRECTORY', () => {
+  it('resolves the cache from the target IT derived, not one the caller guessed', () => {
+    // The name is `<target>.json`, and `target` is derived inside this
+    // command — so a caller running BEFORE it has to predict, and predicting
+    // is wrong for any non-canonical spelling. Through a symlinked
+    // directory, the typed path flattens to `srclink_foo.ts` while the
+    // command canonicalises to `src_foo.ts`: the prediction misses, the
+    // cache is never passed, and the round silently loses both incremental
+    // scoping and the findings ledger.
+    seedDirtyTree();
+    write('src/foo.ts', 'export const real = 1;\n');
+    symlinkSync(join(repo, 'src'), join(repo, 'srclink'));
+
+    // Round 1 through the SYMLINKED spelling.
+    const first = capture({ file: 'srclink/foo.ts', model: 'model-a' });
+    expect(first['target']).toBe('src_foo.ts');
+    const cacheDir = join(repo, '.qwen/review-cache');
+    mkdirSync(cacheDir, { recursive: true });
+    writeFileSync(
+      join(cacheDir, 'src_foo.ts.json'),
+      readFileSync(first.cacheCandidatePath, 'utf8'),
+    );
+
+    // Round 2 hands over the DIRECTORY and never names the file.
+    write('src/foo.ts', 'export const real = 2;\n');
+    const second = capture({
+      file: 'srclink/foo.ts',
+      cache: cacheDir,
+      model: 'model-a',
+    });
+    expect(second.incremental?.scope?.deltaFiles).toEqual(['src/foo.ts']);
+  });
+
+  it('reads a directory holding no cache for this target as no anchor', () => {
+    seedDirtyTree();
+    const cacheDir = join(repo, '.qwen/review-cache');
+    mkdirSync(cacheDir, { recursive: true });
+    expect(capture({ cache: cacheDir, model: 'model-a' }).incremental).toBe(
+      undefined,
+    );
+  });
+});
+
 describe('capture-local — the cache key is the SOURCE path, not the token', () => {
   it('refuses a cache whose flattened token collides with another file', () => {
     // `safeTarget` is not injective: `src/foo.ts` and `src_foo.ts` both
