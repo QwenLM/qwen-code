@@ -159,6 +159,46 @@ export function useSessionCatalogQueries(
   return useSyncExternalStore(subscribe, getSnapshot, () => EMPTY_SNAPSHOTS);
 }
 
+export function useSessionHasActivePrompt(
+  client: DaemonClient,
+  workspaceCwd: string | undefined,
+  sessionId: string | undefined,
+): boolean {
+  const store = useMemo(() => getSessionCatalogStore(client), [client]);
+  const subscribeLiveSessions = useCallback(
+    (listener: () => void) =>
+      workspaceCwd
+        ? store.subscribeLiveSessions(workspaceCwd, listener)
+        : () => undefined,
+    [store, workspaceCwd],
+  );
+  const hasLiveSessions = useSyncExternalStore(
+    subscribeLiveSessions,
+    () => (workspaceCwd ? store.hasLiveSessions(workspaceCwd) : false),
+    () => false,
+  );
+  // The live-state response is authoritative and independent of catalog
+  // paging; only fall back to scanning a catalog page on daemons without it.
+  const catalogQuery = useMemo<SessionCatalogQuery | undefined>(() => {
+    if (hasLiveSessions || !workspaceCwd) return undefined;
+    return { routeKind: 'qualified', workspaceCwd, options: {} };
+  }, [hasLiveSessions, workspaceCwd]);
+  // autoLoad keeps the fallback page loading (and the store's error-retry
+  // timer armed) for observer panes that never trigger an invalidation.
+  const { sessions } = useSessionCatalogQuery(client, catalogQuery, {
+    autoLoad: true,
+  });
+  if (!workspaceCwd || !sessionId) return false;
+  if (hasLiveSessions) {
+    return (
+      store.getLiveSession(workspaceCwd, sessionId)?.hasActivePrompt === true
+    );
+  }
+  return sessions.some(
+    (session) => session.sessionId === sessionId && session.hasActivePrompt,
+  );
+}
+
 export function useSessionCatalogPolling(
   client: DaemonClient,
   query: SessionCatalogQuery | undefined,
@@ -235,6 +275,11 @@ export function useSessionCatalogController(client: DaemonClient) {
             store.recordSessionActivity(workspaceCwd, sessionId);
             return;
           }
+          // Mirror promptAdmitted's optimistic patch: a failed clearing
+          // refresh must not pin hasActivePrompt true forever (#9487).
+          store.patchSession(workspaceCwd, sessionId, {
+            hasActivePrompt: false,
+          });
           store.invalidateWorkspace(workspaceCwd);
           store.scheduleWorkspaceRefresh(workspaceCwd);
         });

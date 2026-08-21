@@ -84,9 +84,8 @@ import {
 import { mergeCommands } from '../hooks/daemonSessionMappers';
 import {
   useSessionCatalogController,
-  useSessionCatalogQuery,
+  useSessionHasActivePrompt,
 } from '../session-catalog/session-catalog-hooks';
-import type { SessionCatalogQuery } from '../session-catalog/session-catalog-store';
 import { MessageList } from './MessageList';
 import { StreamingStatus } from './StreamingStatus';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
@@ -263,21 +262,11 @@ export function ChatPane({
     workspace.client,
   );
 
-  const activePromptQuery = useMemo<SessionCatalogQuery | undefined>(() => {
-    const cwd = workspaceCwd ?? connection.workspaceCwd;
-    if (!cwd) return undefined;
-    return { routeKind: 'qualified', workspaceCwd: cwd, options: {} };
-  }, [workspaceCwd, connection.workspaceCwd]);
-  const { sessions: catalogSessions } = useSessionCatalogQuery(
+  const sessionHasActivePrompt = useSessionHasActivePrompt(
     workspace.client,
-    activePromptQuery,
+    workspaceCwd ?? connection.workspaceCwd,
+    connection.sessionId,
   );
-  const hasCatalogActivePrompt = useMemo(() => {
-    if (!connection.sessionId) return false;
-    return catalogSessions.some(
-      (s) => s.sessionId === connection.sessionId && s.hasActivePrompt,
-    );
-  }, [catalogSessions, connection.sessionId]);
   const blocks = useAnimationFrameTranscriptBlocks();
   const messages = useMessagesFromBlocks(t, blocks);
   const transcriptHistory = useTranscriptHistory();
@@ -1350,7 +1339,7 @@ export function ChatPane({
           <StreamingStatus
             startedAt={activeTurnStartedAt}
             showPhrase={false}
-            hasActivePrompt={hasCatalogActivePrompt}
+            hasActivePrompt={sessionHasActivePrompt}
           />
           {(queuedPrompts.length > 0 || liveGoalSnapshot?.goal) && (
             <div
@@ -1406,7 +1395,7 @@ export function ChatPane({
             ref={editorRef}
             onSubmit={handleSubmit}
             onCancel={handleCancel}
-            isRunning={isResponding}
+            isRunning={isResponding || sessionHasActivePrompt}
             commands={commands}
             queuedMessages={queuedTexts}
             onPopQueuedMessages={editLastQueuedPrompt}
@@ -1440,7 +1429,7 @@ export function ChatPane({
           {CustomComposerFooter && (
             <CustomComposerFooter
               disabled={approvalActive || admissionPayloadLocked}
-              isRunning={isResponding}
+              isRunning={isResponding || sessionHasActivePrompt}
               currentMode={connection.currentMode ?? 'default'}
               currentModel={connection.currentModel ?? ''}
               sessionName={connection.displayName}
