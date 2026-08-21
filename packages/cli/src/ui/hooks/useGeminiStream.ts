@@ -4372,6 +4372,17 @@ export const useGeminiStream = (
             `whose callId already has a functionResponse in history: ` +
             `${dedupedCallIds.join(', ')}`,
         );
+        // Issue #6721: a deduped call's real result never ships — only the
+        // synthetic placeholder (Race A) is in history. The scheduler settles
+        // this batch's pending schema presentations against ONE batch-level
+        // acceptance boolean over the whole completed array, so strip the
+        // dropped calls' carried presentations before any return; committing
+        // them would open the gate for a schema whose only trace in history
+        // is the placeholder. Mirrors the delivered-set filter the deferred
+        // flush applies below.
+        for (const tc of dedupedTools) {
+          tc.response.pendingProxySchemaPresentations = undefined;
+        }
         // Even though the wire-side submission is dropped, the tool DID
         // run locally — `toolCallCount` and `skillsModifiedInSession`
         // must reflect that. Without this, deduped skill-write tools

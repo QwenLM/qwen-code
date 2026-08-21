@@ -5583,6 +5583,174 @@ describe('useGeminiStream', () => {
     expect(mockSendMessageStream).not.toHaveBeenCalled();
   });
 
+  it('strips carried presentations from a deduped tool_search (Race A direct-path settlement)', async () => {
+    // R20-5 repro: a tool_search in flight when the inline repair pass
+    // plants a synthetic placeholder for its callId is dedup-dropped from
+    // the wire, while a sibling in the same batch is delivered and the
+    // context accepted. The scheduler settles the batch's pending schema
+    // presentations against ONE batch-level acceptance boolean over the
+    // whole completed array — so unless the dedup block strips the dropped
+    // call's carried presentations, the ledger commits a mark whose only
+    // trace in history is the placeholder, and a later guessed-argument
+    // tool_call passes the #6721 gate. (The deferred flush already filters
+    // to the delivered set; this is the direct path's equivalent.)
+    const droppedSearch = {
+      request: {
+        callId: 'call_search_race',
+        name: 'tool_search',
+        args: { query: 'cron' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-race-search',
+      },
+      status: 'success',
+      responseSubmittedToGemini: false,
+      response: {
+        callId: 'call_search_race',
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'call_search_race',
+              name: 'tool_search',
+              response: { output: '<functions>cron_create</functions>' },
+            },
+          },
+        ],
+        resultDisplay: undefined,
+        error: undefined,
+        errorType: undefined,
+        pendingProxySchemaPresentations: [
+          { name: 'cron_create', fingerprint: 'fp-search' },
+        ],
+      },
+      tool: {
+        name: 'tool_search',
+        displayName: 'ToolSearch',
+        description: 'Search tools',
+        build: vi.fn(),
+      } as any,
+      invocation: {
+        getDescription: () => 'search cron',
+      } as unknown as AnyToolInvocation,
+    } as unknown as TrackedCompletedToolCall;
+    const deliveredSibling = {
+      request: {
+        callId: 'sibling_race',
+        name: 'read_file',
+        args: { path: '/tmp/y.txt' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-race-search',
+      },
+      status: 'success',
+      responseSubmittedToGemini: false,
+      response: {
+        callId: 'sibling_race',
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'sibling_race',
+              name: 'read_file',
+              response: { output: 'sibling contents' },
+            },
+          },
+        ],
+        resultDisplay: undefined,
+        error: undefined,
+        errorType: undefined,
+        pendingProxySchemaPresentations: [
+          { name: 'other_tool', fingerprint: 'fp-sibling' },
+        ],
+      },
+      tool: {
+        name: 'read_file',
+        displayName: 'ReadFile',
+        description: 'Read a file',
+        build: vi.fn(),
+      } as any,
+      invocation: {
+        getDescription: () => 'read /tmp/y.txt',
+      } as unknown as AnyToolInvocation,
+    } as unknown as TrackedCompletedToolCall;
+
+    const client = new MockedGeminiClientClass(mockConfig);
+    // The repair pass already planted a placeholder for the tool_search
+    // callId; the sibling has no functionResponse in history and ships.
+    client.getHistoryFunctionResponseIds = vi
+      .fn()
+      .mockReturnValue(new Set(['call_search_race']));
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<boolean | void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useGeminiStream(
+        client,
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete([droppedSearch, deliveredSibling]);
+      }
+    });
+
+    await waitFor(
+      () => {
+        // Only the sibling shipped — the dropped result never reached the
+        // wire (same witness as the finding: sentIds === ['sibling_race']).
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      },
+      { timeout: 15000 },
+    );
+    const sentParts = mockSendMessageStream.mock.calls[0][0];
+    expect(
+      sentParts.some(
+        (part: Part) => part.functionResponse?.id === 'sibling_race',
+      ),
+    ).toBe(true);
+    expect(
+      sentParts.some(
+        (part: Part) => part.functionResponse?.id === 'call_search_race',
+      ),
+    ).toBe(false);
+
+    // The deduped call's carried presentations were stripped in the dedup
+    // block, so the scheduler's batch-level settlement cannot commit them.
+    // The scheduler settles the SAME objects handed to onComplete — assert
+    // on them directly.
+    expect(
+      (droppedSearch.response as { pendingProxySchemaPresentations?: unknown })
+        .pendingProxySchemaPresentations,
+    ).toBeUndefined();
+    // The delivered sibling keeps its carried presentations — the strip is
+    // scoped to deduped calls.
+    expect(deliveredSibling.response.pendingProxySchemaPresentations).toEqual([
+      { name: 'other_tool', fingerprint: 'fp-sibling' },
+    ]);
+  });
+
   it('skips recordCompletedToolCall for deduped CANCELLED tools (telemetry parity)', async () => {
     // A deduped tool with status='cancelled' never actually produced
     // model-visible output — counting it via `recordCompletedToolCall`
