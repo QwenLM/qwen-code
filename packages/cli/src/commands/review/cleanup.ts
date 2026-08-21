@@ -722,13 +722,18 @@ export function runCleanup(target: string): void {
   // stderr saying "could not reap" next to stdout's "nothing to clean" is
   // the two streams contradicting each other, and stdout is the one a
   // script reads — but never gate the target-scoped lease release, which
-  // keys on failedDestruction alone.
+  // keys on failedDestruction alone. It precedes the temp-dir refusal below
+  // for that same reason: the sockets it reaps live under tmux's own socket
+  // directory, never under REVIEW_TMP_DIR, so a redirected temp dir says
+  // nothing about them — and a refusal there must not strand an orphan for
+  // the whole of its bounded window.
   const { failed: sweepFailed } = reapOrphanedCaptureServers();
 
-  // Before anything is deleted: the whole temp dir hangs off one path, and a
-  // symlink anywhere above it redirects EVERY sweep below — the scratch family,
-  // the base-tree lock, the side files. The scratch sweep alone used to answer
-  // this, which announced the hazard and then kept deleting under it.
+  // Before anything under the temp dir is deleted: the whole of it hangs off
+  // one path, and a symlink anywhere above that path redirects EVERY sweep
+  // below — the scratch family, the base-tree lock, the side files. The
+  // scratch sweep alone used to answer this, which announced the hazard and
+  // then kept deleting under it.
   const redirected = redirectedAncestor(REVIEW_TMP_DIR);
   if (redirected !== null) {
     writeStderrLine(
@@ -1088,4 +1093,3 @@ export const cleanupCommand: CommandModule = {
     runCleanup((argv as unknown as CleanupArgs).target);
   },
 };
-
