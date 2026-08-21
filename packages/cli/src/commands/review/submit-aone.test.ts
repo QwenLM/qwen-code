@@ -19,7 +19,13 @@ import {
   it,
   vi,
 } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -188,6 +194,8 @@ interface PostedJson {
   summaryPosted?: boolean;
   approved?: boolean;
   url?: string;
+  anchorsRelocated?: number;
+  anchorsDiscarded?: number;
 }
 
 function postedJson(): PostedJson {
@@ -195,11 +203,44 @@ function postedJson(): PostedJson {
   return JSON.parse(call) as PostedJson;
 }
 
+/**
+ * The captured diff the Aone anchor gate validates against — submit reads
+ * it at the fetch-pr convention path, cwd-relative, so the suite chdirs
+ * into its temp dir. One hunk of `src/foo.ts` covering new-side lines
+ * 9-15: the standing REVIEW payload's line 12 sits inside it; anything
+ * outside is the gate's relocate/discard class.
+ */
+const CAPTURED_DIFF = [
+  'diff --git a/src/foo.ts b/src/foo.ts',
+  'index 1111111..2222222 100644',
+  '--- a/src/foo.ts',
+  '+++ b/src/foo.ts',
+  '@@ -9,7 +9,7 @@',
+  ' ctx',
+  ' ctx',
+  ' ctx',
+  '-old',
+  '+new',
+  ' ctx',
+  ' ctx',
+  ' ctx',
+  '',
+].join('\n');
+
+let savedCwd: string;
+let diffPath: string;
+
 beforeAll(() => {
   tmp = mkdtempSync(join(tmpdir(), 'submit-aone-'));
+  mkdirSync(join(tmp, '.qwen', 'tmp'), { recursive: true });
+  diffPath = join(tmp, '.qwen', 'tmp', 'qwen-review-pr-1-diff.txt');
+  writeFileSync(diffPath, CAPTURED_DIFF, 'utf8');
+  savedCwd = process.cwd();
+  process.chdir(tmp);
 });
 
 afterAll(() => {
+  process.chdir(savedCwd);
   rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -965,5 +1006,444 @@ describe('submit posts an authorised Aone target through a1', () => {
     expect(stderrMock).toHaveBeenCalledWith(
       expect.stringContaining('NO inline Critical discussions'),
     );
+  });
+});
+
+describe('the Aone anchor gate — the validation the platform does not perform', () => {
+  // Aone Code posts ANY `--line` without checking it against the diff
+  // (probed on a scratch CR): an old-side number silently becomes the
+  // same-numbered new-side line. The gate performs the check GitHub's
+  // server does — against the captured diff — and degrades the failures
+  // exactly like the GitHub 422 recovery: Critical into the body,
+  // Suggestion discarded, each disclosed. See
+  // docs/design/2026-08-21-review-aone-removed-line-anchoring.md.
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.exitCode = undefined;
+    savedGhHost = process.env['GH_HOST'];
+    delete process.env['GH_HOST'];
+    authMock.mockReturnValue({
+      ok: true,
+      why: 'the user asked for this review to be published',
+      recordedHost: 'gitlab.alibaba-inc.com',
+    });
+    getPlatformReaderMock.mockReturnValue({ kind: 'aone' });
+    gitOptMock.mockReturnValue(null);
+    submitAoneMock.mockReturnValue({ ...AONE_RESULT });
+    composeMock.mockReturnValue({
+      event: 'REQUEST_CHANGES',
+      body: 'One confirmed blocker blocks the merge.',
+      cappedBy: [],
+      floorEnforced: [],
+    });
+  });
+
+  afterEach(() => {
+    if (savedGhHost === undefined) delete process.env['GH_HOST'];
+    else process.env['GH_HOST'] = savedGhHost;
+    process.exitCode = undefined;
+  });
+
+  it('relocates an unanchorable Critical into the body and discards an unanchorable Suggestion, with disclosure', () => {
+    // The captured-diff hunk covers src/foo.ts new-side lines 9-15: line
+    // 12 anchors, line 4 and line 9999 are the silent-misanchor class.
+    const mixed = {
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 12,
+          body: '**[Suggestion]** Anchors fine — stays inline.',
+        },
+        {
+          path: 'src/foo.ts',
+          line: 4,
+          body: '**[Critical]** Old-side number — would misanchor.',
+        },
+        {
+          path: 'src/foo.ts',
+          line: 9999,
+          body: '**[Suggestion]** Beyond EOF — would misanchor.',
+        },
+      ],
+      state: { modelId: 'test-model' },
+    };
+    expect(() =>
+      runSubmit(base({ review: writeReview(mixed) }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    // Only the valid anchor reaches the write batch.
+    const req = submitAoneMock.mock.calls[0][0] as AoneSubmitRequest;
+    expect(req.comments).toEqual([
+      {
+        path: 'src/foo.ts',
+        line: 12,
+        body: expect.stringContaining('Anchors fine'),
+      },
+    ]);
+    // The verdict is composed over the CORRECTED set: the relocated
+    // Critical rides the body channel (counted toward C there), the
+    // discard counts toward S, and the inline counts reflect only what
+    // posts.
+    const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(input['bodyCriticals']).toEqual([
+      'src/foo.ts:4 — Old-side number — would misanchor.',
+    ]);
+    expect(input['suggestionsDiscarded']).toBe(1);
+    expect(input['criticalsInline']).toBe(0);
+    expect(input['suggestionsInline']).toBe(1);
+    // Every degrade is named in the terminal.
+    expect(stderrMock).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Aone anchor check: 2 inline comment(s) cannot be anchored',
+      ),
+    );
+    expect(stderrMock).toHaveBeenCalledWith(
+      expect.stringContaining('relocated into the summary body: src/foo.ts:4'),
+    );
+    expect(stderrMock).toHaveBeenCalledWith(
+      expect.stringContaining('discarded: src/foo.ts:9999'),
+    );
+    const out = postedJson();
+    expect(out.posted).toBe(true);
+    expect(out['anchorsRelocated']).toBe(1);
+    expect(out['anchorsDiscarded']).toBe(1);
+  });
+
+  it('relocates a declared LEFT-side anchor even when the number sits inside a hunk', () => {
+    // The platform cannot express the old side; a number that HAPPENS to
+    // exist on the new side would post there silently. Declared LEFT is
+    // unanchorable by construction.
+    const leftSide = {
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 12,
+          side: 'LEFT',
+          body: '**[Critical]** About the deleted old-side line.',
+        },
+      ],
+      state: { modelId: 'test-model' },
+    };
+    expect(() =>
+      runSubmit(base({ review: writeReview(leftSide) }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    const req = submitAoneMock.mock.calls[0][0] as AoneSubmitRequest;
+    expect(req.comments).toEqual([]);
+    const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(input['bodyCriticals']).toEqual([
+      'src/foo.ts:12 — About the deleted old-side line.',
+    ]);
+    expect(stderrMock).toHaveBeenCalledWith(
+      expect.stringContaining('relocated into the summary body: src/foo.ts:12'),
+    );
+  });
+
+  it('relocates a multi-line range that spills past the hunk', () => {
+    const spilled = {
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 40,
+          start_line: 12,
+          side: 'RIGHT',
+          start_side: 'RIGHT',
+          body: '**[Critical]** Range crosses out of the hunk.',
+        },
+      ],
+      state: { modelId: 'test-model' },
+    };
+    expect(() =>
+      runSubmit(base({ review: writeReview(spilled) }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    const req = submitAoneMock.mock.calls[0][0] as AoneSubmitRequest;
+    expect(req.comments).toEqual([]);
+    const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(input['bodyCriticals']).toHaveLength(1);
+  });
+
+  it('merges gate discards into an existing suggestionsDiscarded count', () => {
+    const withPrior = {
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 9999,
+          body: '**[Suggestion]** Would misanchor.',
+        },
+      ],
+      state: { modelId: 'test-model', suggestionsDiscarded: 2 },
+    };
+    expect(() =>
+      runSubmit(base({ review: writeReview(withPrior) }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(input['suggestionsDiscarded']).toBe(3);
+  });
+
+  it('leaves an UNMARKED unanchorable comment to the consistency gate, unchanged', () => {
+    // The gate disposes MARKED findings; an unmarked one is not a finding
+    // it can dispose, and the downstream refusal stays the owner of that
+    // shape — the gate must not swallow it into a silent discard.
+    const unmarked = {
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 9999,
+          body: 'No severity marker at all.',
+        },
+      ],
+      state: { modelId: 'test-model' },
+    };
+    expect(() =>
+      runSubmit(base({ review: writeReview(unmarked) }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).toThrow(/neither \*\*\[Critical\]\*\* nor \*\*\[Suggestion\]\*\*/);
+    expect(submitAoneMock).not.toHaveBeenCalled();
+  });
+
+  it('leaves a MALFORMED marked comment to the consistency gate, unchanged', () => {
+    // A marked finding with no usable line cannot be anchored, but it is
+    // also not a well-formed anchor the gate may dispose: the consistency
+    // gate owns that refusal. Relocating it instead would swallow a
+    // payload defect the operator was owed a loud refusal for.
+    const malformed = {
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          body: '**[Critical]** Marked, but the line is missing.',
+        },
+      ],
+      state: { modelId: 'test-model' },
+    };
+    expect(() =>
+      runSubmit(base({ review: writeReview(malformed) }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).toThrow(/has no usable `line`/);
+    expect(submitAoneMock).not.toHaveBeenCalled();
+  });
+
+  it('leaves a REVERSED multi-line range to the consistency gate — a shape error, not an anchor one', () => {
+    // Both numbers sit inside the hunk, but the range ends before it
+    // begins: the operator is owed the shape refusal, not a silent
+    // relocation of a malformed draft.
+    const reversed = {
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 12,
+          start_line: 15,
+          side: 'RIGHT',
+          start_side: 'RIGHT',
+          body: '**[Critical]** Range runs backwards.',
+        },
+      ],
+      state: { modelId: 'test-model' },
+    };
+    expect(() =>
+      runSubmit(base({ review: writeReview(reversed) }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).toThrow(/cannot end before it begins/);
+    expect(submitAoneMock).not.toHaveBeenCalled();
+  });
+
+  it('stands the WHOLE gate down when bodyCriticals is garbage and a relocation needs it', () => {
+    // A model-written `bodyCriticals` that is not an array is compose's
+    // to refuse with a field-naming error (pinned in compose-review's own
+    // suite). Spreading it for the relocation would shatter a string into
+    // per-character junk entries — each counted toward C — or throw a bare
+    // TypeError over a number. The stand-down leaves the payload untouched
+    // so compose dies the pinned death; nothing posts either way.
+    const garbageState = {
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 9999,
+          body: '**[Critical]** Real blocker on a bad anchor.',
+        },
+      ],
+      state: { modelId: 'test-model', bodyCriticals: 'blocker' },
+    };
+    expect(() =>
+      runSubmit(base({ review: writeReview(garbageState) }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
+    // Untouched: the garbage field and the unanchorable comment both
+    // reach compose exactly as written — no shattered merge.
+    expect(input['bodyCriticals']).toBe('blocker');
+    expect((input['draftedComments'] as unknown[]).length).toBe(1);
+    expect(stderrMock).not.toHaveBeenCalledWith(
+      expect.stringContaining('Aone anchor check'),
+    );
+    const out = postedJson();
+    expect(out['anchorsRelocated']).toBe(0);
+    expect(out['anchorsDiscarded']).toBe(0);
+  });
+
+  it('merges gate discards from zero when suggestionsDiscarded is null', () => {
+    // compose's counter reads null as absent/0, so the gate merges its
+    // discards from zero — leaving the null alone would silently drop
+    // the count and the posted review would read as zero-finding.
+    const nullCount = {
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 9999,
+          body: '**[Suggestion]** Would misanchor.',
+        },
+      ],
+      state: { modelId: 'test-model', suggestionsDiscarded: null },
+    };
+    expect(() =>
+      runSubmit(base({ review: writeReview(nullCount) }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(input['suggestionsDiscarded']).toBe(1);
+    expect(postedJson()['anchorsDiscarded']).toBe(1);
+  });
+
+  it('leaves a MARKER-ONLY unanchorable Critical to the renders-as-nothing refusal', () => {
+    // The draft carries no finding text at all — the consistency gate's
+    // renders-as-nothing refusal owns it (its projection includes the
+    // appended footer). Relocating it would post a claimless placeholder
+    // blocker instead of the refusal the operator is owed.
+    const markerOnly = {
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 9999,
+          body: '**[Critical]**',
+        },
+      ],
+      state: { modelId: 'test-model' },
+    };
+    expect(() =>
+      runSubmit(base({ review: writeReview(markerOnly) }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).toThrow(/renders as nothing/);
+    expect(submitAoneMock).not.toHaveBeenCalled();
+  });
+
+  it('discloses the anomalous shape when the captured diff parses to no files', () => {
+    // A corrupt capture validates nothing: every anchor fails as "file is
+    // not in the diff" and the degrade names the zero-file anomaly — safe,
+    // and visibly wrong, without a second refusal shape.
+    writeFileSync(diffPath, '', 'utf8');
+    try {
+      const mixed = {
+        commit_id: 'abc123',
+        comments: [
+          {
+            path: 'src/foo.ts',
+            line: 12,
+            body: '**[Critical]** Anchored against a diff that is gone.',
+          },
+        ],
+        state: { modelId: 'test-model' },
+      };
+      expect(() =>
+        runSubmit(base({ review: writeReview(mixed) }), 'unknown', {
+          defaultComment: false,
+        }),
+      ).not.toThrow();
+      const req = submitAoneMock.mock.calls[0][0] as AoneSubmitRequest;
+      expect(req.comments).toEqual([]);
+      const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
+      expect(input['bodyCriticals']).toEqual([
+        expect.stringContaining('src/foo.ts:12 —'),
+      ]);
+      expect(stderrMock).toHaveBeenCalledWith(
+        expect.stringContaining('file is not in the diff (0 file(s) changed)'),
+      );
+    } finally {
+      writeFileSync(diffPath, CAPTURED_DIFF, 'utf8');
+    }
+  });
+
+  it('refuses the WHOLE post when the captured diff is missing — no validation, no write', () => {
+    const aside = `${diffPath}.aside`;
+    renameSync(diffPath, aside);
+    try {
+      expect(() =>
+        runSubmit(base(), 'unknown', { defaultComment: false }),
+      ).not.toThrow();
+      expect(process.exitCode).toBe(3);
+      expect(submitAoneMock).not.toHaveBeenCalled();
+      expect(postedJson().reason).toBe('aone-post-refused');
+      expect(stderrMock).toHaveBeenCalledWith(
+        expect.stringContaining('validates every one against the'),
+      );
+      expect(stderrMock).toHaveBeenCalledWith(
+        expect.stringContaining('captured diff'),
+      );
+    } finally {
+      renameSync(aside, diffPath);
+    }
+  });
+
+  it('is silent and posts unchanged when every anchor validates', () => {
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    expect(stderrMock).not.toHaveBeenCalledWith(
+      expect.stringContaining('Aone anchor check'),
+    );
+    const out = postedJson();
+    expect(out.posted).toBe(true);
+    expect(out['anchorsRelocated']).toBe(0);
+    expect(out['anchorsDiscarded']).toBe(0);
+  });
+
+  it('a dry run runs the gate too and reports its counts', () => {
+    const mixed = {
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 12,
+          body: '**[Suggestion]** Valid anchor.',
+        },
+        {
+          path: 'src/foo.ts',
+          line: 4,
+          body: '**[Critical]** Would misanchor.',
+        },
+      ],
+      state: { modelId: 'test-model' },
+    };
+    expect(() =>
+      runSubmit(base({ review: writeReview(mixed), dryRun: true }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    expect(submitAoneMock).not.toHaveBeenCalled();
+    const out = postedJson();
+    expect(out.wouldPost).toBe(true);
+    expect(out['anchorsRelocated']).toBe(1);
+    expect(out['anchorsDiscarded']).toBe(0);
   });
 });

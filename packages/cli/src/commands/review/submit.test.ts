@@ -128,6 +128,35 @@ const REVIEW = {
   state: { suggestionsDiscarded: 1, modelId: 'qwen3.7-max' },
 };
 
+/**
+ * The Aone anchor gate refuses an Aone post whose captured diff is absent
+ * (the platform validates nothing, so the write path must hold the diff —
+ * docs/design/2026-08-21-review-aone-removed-line-anchoring.md). Routing
+ * tests below post through the gate, so each supplies the convention file
+ * for its target number. The content is minimal — these payloads carry no
+ * comments — but real, so the gate parses it.
+ */
+const CAPTURED_DIFF_FIXTURE = [
+  'diff --git a/src/route.ts b/src/route.ts',
+  'index 1111111..2222222 100644',
+  '--- a/src/route.ts',
+  '+++ b/src/route.ts',
+  '@@ -1,3 +1,3 @@',
+  ' a',
+  '-b',
+  '+c',
+  ' d',
+  '',
+].join('\n');
+
+function writeCapturedDiff(pr: number): string {
+  const dirPath = join('.qwen', 'tmp');
+  mkdirSync(dirPath, { recursive: true });
+  const p = join(dirPath, `qwen-review-pr-${pr}-diff.txt`);
+  writeFileSync(p, CAPTURED_DIFF_FIXTURE, 'utf8');
+  return p;
+}
+
 /** Write a file under the fixture dir and return its path. */
 function file(name: string, content: unknown): string {
   const p = join(dir, name);
@@ -663,13 +692,16 @@ describe('the user-authorized fast path binds a recorded Aone target (round-6 wi
   // at the a1 seam — the wrong-host leak class is unchanged, only the
   // platform the correct post lands on moved.
   let savedGhHost: string | undefined;
+  let capturedDiff: string | undefined;
   beforeEach(() => {
     savedGhHost = process.env['GH_HOST'];
     delete process.env['GH_HOST'];
+    capturedDiff = writeCapturedDiff(123);
   });
   afterEach(() => {
     if (savedGhHost === undefined) delete process.env['GH_HOST'];
     else process.env['GH_HOST'] = savedGhHost;
+    if (capturedDiff) rmSync(capturedDiff, { force: true });
   });
 
   it('posts a recorded Aone target through a1, never gh', () => {
@@ -703,6 +735,7 @@ describe('the user-authorized fast path binds the recorded host cross-session', 
   // exit 0, COMMENT review filed at repos/maxcompute/odps_src/pulls/42).
   const siblingDir = join('.qwen', 'tmp', 's-r11-cross-session');
   const siblingFile = join(siblingDir, 'qwen-skill-args-review.txt');
+  let capturedDiff: string | undefined;
   beforeEach(() => {
     mkdirSync(siblingDir, { recursive: true });
     writeFileSync(
@@ -710,9 +743,11 @@ describe('the user-authorized fast path binds the recorded host cross-session', 
       'https://code.alibaba-inc.com/maxcompute/odps_src/codereview/42 --comment\n',
       'utf8',
     );
+    capturedDiff = writeCapturedDiff(42);
   });
   afterEach(() => {
     rmSync(siblingDir, { recursive: true, force: true });
+    if (capturedDiff) rmSync(capturedDiff, { force: true });
   });
 
   it('routes at a1 when a SIBLING session recorded the same PR on Aone', () => {
@@ -1029,6 +1064,8 @@ describe('the user-authorized fast path binds the recorded host cross-session', 
     const newFile = join(newDir, 'qwen-skill-args-review.txt');
     mkdirSync(oldDir, { recursive: true });
     mkdirSync(newDir, { recursive: true });
+    // The reversed arm posts this target through the anchor gate.
+    const capturedDiff = writeCapturedDiff(7);
     try {
       const now = Math.floor(Date.now() / 1000);
       // OLDER session carried a host; NEWER session recorded a bare number.
@@ -1075,6 +1112,7 @@ describe('the user-authorized fast path binds the recorded host cross-session', 
     } finally {
       rmSync(oldDir, { recursive: true, force: true });
       rmSync(newDir, { recursive: true, force: true });
+      rmSync(capturedDiff, { force: true });
     }
   });
 

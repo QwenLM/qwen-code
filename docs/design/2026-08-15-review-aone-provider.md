@@ -100,6 +100,11 @@ findings), and `--comment` on an Aone target refuses cleanly.
    render Aone comments (bigger lift)? Recommendation: minimal slice.
 2. Aone comment threading (`closed`, `outdated`) vs GitHub's
    `in_reply_to_id`/`line` model — only matters if `comment-status` joins.
+   The ANCHOR half of this (how `--line` lands, what `side`/`outdated`
+   read back) is RESOLVED by the 2026-08-21 probe — see
+   `docs/design/2026-08-21-review-aone-removed-line-anchoring.md`: new-side
+   only, zero server validation, `outdated` ≈ line-beyond-EOF, and
+   file-level comments drop their path.
 3. build/test (Agent 7) on a Bazel monorepo needs a repo-config escape hatch
    (already flagged out of scope in the parent doc); confirm it degrades
    cleanly rather than attempting a full `bazel build`.

@@ -623,6 +623,89 @@ export type AnchorResult = Omit<AnchorRequest, 'line'> & {
 } & AnchorResolution;
 
 /**
+ * One inline anchor as the posting boundary must vouch for it. `side` /
+ * `startSide` are the payload's declared sides (GitHub's spelling); a
+ * missing side defaults to RIGHT, which is the only side an Aone anchor
+ * can express.
+ */
+export interface NewSideAnchorCheck {
+  path: string;
+  line: number;
+  startLine?: number;
+  side?: string;
+  startSide?: string;
+}
+
+export interface NewSideAnchorVerdict {
+  valid: boolean;
+  /** When invalid — the terminal-facing reason. */
+  reason?: string;
+}
+
+/**
+ * Validate hand-typed line anchors against a captured diff's NEW side —
+ * the check GitHub performs server-side (and answers with an
+ * all-or-nothing 422), performed client-side for the Aone write path,
+ * which the platform performs NONE of (probed 2026-08-21 on scratch MR
+ * 29427547 of base-biz/sqlt, a1 v0.2.51: any positive integer posts —
+ * an old-side number silently becomes the same-numbered new-side line,
+ * a beyond-EOF number posts `outdated`). See
+ * docs/design/2026-08-21-review-aone-removed-line-anchoring.md.
+ *
+ * The rules are the GitHub recovery's: an anchor is valid iff its line
+ * sits inside a new-side hunk of its file; a multi-line range must sit
+ * in ONE hunk. A pure-deletion hunk (`newCount === 0`) occupies no
+ * new-side line and validates nothing. A declared non-RIGHT side is
+ * unanchorable by construction — the old side does not exist on the
+ * target platform. The module's header invariant has its converse here:
+ * a snippet-resolved anchor is valid by construction; a hand-typed
+ * number must pass this to be believed.
+ */
+export function validateNewSideAnchors(
+  diffText: string,
+  checks: NewSideAnchorCheck[],
+): NewSideAnchorVerdict[] {
+  const { files } = parseDiff(diffText);
+  const byPath = new Map<string, DiffFile>(files.map((f) => [f.path, f]));
+
+  return checks.map((check) => {
+    if (
+      (check.side !== undefined && check.side !== 'RIGHT') ||
+      (check.startSide !== undefined && check.startSide !== 'RIGHT')
+    ) {
+      return {
+        valid: false,
+        reason:
+          'declares a non-RIGHT side — Aone Code anchors the new side ' +
+          'only; the old side cannot be anchored',
+      };
+    }
+    const file = byPath.get(check.path);
+    if (!file) {
+      return {
+        valid: false,
+        reason: `file is not in the diff (${files.length} file(s) changed)`,
+      };
+    }
+    const lo = check.startLine ?? check.line;
+    const hi = check.line;
+    const inside = file.hunks.some(
+      (h) => h.newCount > 0 && h.newStart <= lo && hi <= h.newEnd,
+    );
+    return inside
+      ? { valid: true }
+      : {
+          valid: false,
+          reason:
+            check.startLine !== undefined
+              ? `the range ${check.startLine}-${check.line} sits in no ` +
+                `single new-side hunk of this file`
+              : `line ${check.line} sits in no new-side hunk of this file`,
+        };
+  });
+}
+
+/**
  * Resolve a batch of anchors against a captured diff.
  *
  * A path that is not in the diff at all is `unmatched` rather than an error:

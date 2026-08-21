@@ -81,9 +81,11 @@ import {
 import {
   CRITICAL_PREFIX,
   SUGGESTION_PREFIX,
+  carriedClaimLine,
   countInlineFindings,
   severityOf,
 } from './lib/inline-counts.js';
+import { validateNewSideAnchors } from './lib/anchors.js';
 import {
   commentMarker,
   footerVersion,
@@ -121,6 +123,20 @@ function readReceiptIds(receiptPath: string): number[] {
  */
 function isDiffLine(n: unknown): n is number {
   return typeof n === 'number' && Number.isSafeInteger(n) && n > 0;
+}
+
+/**
+ * The body-Critical entry an Aone-unanchorable comment relocates as:
+ * `path:line — <claim>` — the attribution the inline anchor carried, kept.
+ * Single-line by construction (the claim is one line, the prefix has no
+ * newline), so compose-review's one-line entry ingestion carries it as-is.
+ */
+function relocatedAoneCriticalEntry(c: ReviewComment): string {
+  const claim = typeof c.body === 'string' ? carriedClaimLine(c.body) : null;
+  // The gate only relocates bodies with substance past the marker, but the
+  // claim line itself can still be empty (content on a later line) — the
+  // placeholder keeps the entry from posting as a dangling `path:line — `.
+  return `${c.path ?? '(no path)'}:${c.line} — ${claim || 'finding'}`;
 }
 
 interface SubmitArgs {
@@ -713,6 +729,173 @@ export function runSubmit(
     ),
   };
 
+  // The Aone anchor gate. GitHub validates every anchor server-side and
+  // 422s the whole review — the skill's recovery loop then relocates the
+  // failing Criticals into the body and discards the failing Suggestions.
+  // Aone Code performs NO anchor validation (probed 2026-08-21 on a
+  // scratch CR: any positive integer posts; an old-side number silently
+  // becomes the same-numbered new-side line — the silent-wrong-line class
+  // GitHub refuses), so the check and the relocate run HERE, in code,
+  // before anything posts: every MARKED comment's anchor must sit inside
+  // a new-side hunk of the captured diff, exactly the rule the GitHub
+  // recovery re-derives by hand. Unmarked comments are left alone — the
+  // consistency gate below refuses them, unchanged. The verdict is then
+  // composed over the corrected set, so `C`/`S`, the event and the body
+  // stay one computation. (docs/design/2026-08-21-review-aone-removed-line-anchoring.md)
+  let anchorsRelocated = 0;
+  let anchorsDiscarded = 0;
+  if (aoneWrite) {
+    // The captured diff is the ONLY view of the MR this boundary can
+    // validate against — the platform's own read-back cannot tell a
+    // misanchored comment from an anchored one (`outdated` stays false
+    // for every in-EOF line). Its absence therefore refuses the WHOLE
+    // post: an irreversible write the boundary cannot vouch for is the
+    // one thing it must not perform. (GitHub needs no such condition —
+    // its server holds the diff.)
+    const diffRel = tmpFile(`pr-${args.pr}`, 'diff.txt');
+    let diffText: string;
+    try {
+      diffText = readFileSync(diffRel, 'utf8');
+    } catch {
+      writeStderrLine(
+        `REFUSED to post the review to ${args.repo}#${args.pr} on ` +
+          `Aone Code: the Aone platform validates no inline anchor, so ` +
+          `this write path validates every one against the review's ` +
+          `captured diff — and ${diffRel} does not exist or cannot be ` +
+          `read. Re-run the review so the diff is captured. Nothing was ` +
+          `written; the findings are in the terminal output and the ` +
+          `saved report.`,
+      );
+      writeStdoutLine(
+        JSON.stringify({ posted: false, reason: 'aone-post-refused' }, null, 2),
+      );
+      process.exitCode = 3;
+      return;
+    }
+    // A diff that parses to no files (corrupt capture) validates nothing:
+    // every anchor then fails as "file is not in the diff" and the degrade
+    // below discloses each one — safe, and visibly anomalous, without a
+    // second refusal shape.
+    const comments = payload.comments ?? [];
+    const verdicts = validateNewSideAnchors(
+      diffText,
+      comments.map((c) => ({
+        path: c.path ?? '',
+        line: c.line ?? 0,
+        startLine: c.start_line,
+        side: c.side,
+        startSide: c.start_side,
+      })),
+    );
+    const kept: ReviewComment[] = [];
+    const relocated: string[] = [];
+    const disclosures: string[] = [];
+    comments.forEach((c, i) => {
+      const sev = severityOf(c);
+      // Unmarked comments and comments too malformed to anchor are not
+      // the gate's to dispose — the consistency gate below owns those
+      // refusals, unchanged. The gate rules only WELL-FORMED anchors.
+      // (A reversed range is a shape error, not an anchor one — but a
+      // non-RIGHT `side` is the gate's: the old side is unanchorable on
+      // Aone regardless of shape, and relocating it is the point. A
+      // body that renders as nothing — marker-only, invisible residue —
+      // is likewise the consistency gate's, under its OWN projection,
+      // which includes the footer normalize appended: relocating it
+      // would post a claimless placeholder where the draft owed a
+      // renders-as-nothing refusal.)
+      if (
+        sev === null ||
+        typeof c.path !== 'string' ||
+        c.path === '' ||
+        !isDiffLine(c.line) ||
+        (c.start_line !== undefined &&
+          (!isDiffLine(c.start_line) ||
+            (isDiffLine(c.line) && c.start_line > c.line))) ||
+        (typeof c.body === 'string' &&
+          rendersAsNothing(
+            stripReviewFooter(stripForUnattributedPost(c.body)),
+          )) ||
+        verdicts[i]?.valid === true
+      ) {
+        kept.push(c);
+        return;
+      }
+      const at = `${c.path}:${c.line}`;
+      if (sev === 'critical') {
+        relocated.push(relocatedAoneCriticalEntry(c));
+        disclosures.push(
+          `  relocated into the summary body: ${at} — ` +
+            `${verdicts[i]?.reason ?? 'unanchorable'}`,
+        );
+      } else {
+        anchorsDiscarded++;
+        disclosures.push(
+          `  discarded: ${at} — ${verdicts[i]?.reason ?? 'unanchorable'}`,
+        );
+      }
+    });
+    anchorsRelocated = relocated.length;
+    const state = payload.state ?? ({} as ComposeReviewInput);
+    const bc = state.bodyCriticals;
+    // A model-written `bodyCriticals` that is neither absent nor an array
+    // is compose's to refuse with a field-naming error. Spreading it
+    // anyway would shatter a STRING into per-character junk entries —
+    // each counted toward `C` and posted — or throw a bare TypeError over
+    // a number, preempting compose's informative one. When a relocation
+    // needs that merge, stand the WHOLE gate down: the payload reaches
+    // compose unchanged and dies the pinned death; nothing posts either
+    // way, and the findings stay in the saved report. (A discard-only
+    // gate never touches the field and proceeds.)
+    const relocateBlocked =
+      anchorsRelocated > 0 &&
+      bc !== undefined &&
+      bc !== null &&
+      !Array.isArray(bc);
+    if (relocateBlocked) {
+      anchorsRelocated = 0;
+      anchorsDiscarded = 0;
+    } else if (anchorsRelocated > 0 || anchorsDiscarded > 0) {
+      // The discard count merges into the state's own — the model may
+      // have discarded unanchorable findings upstream (resolve-anchors'
+      // unmatched dispose) and the body's sentence names the TOTAL.
+      // `null` means "absent" to compose's counter too, so it merges
+      // from zero; any other non-number non-array shape stays untouched
+      // for compose to refuse, exactly as today.
+      const sd = state.suggestionsDiscarded;
+      const mergedDiscarded =
+        anchorsDiscarded === 0
+          ? undefined
+          : Array.isArray(sd)
+            ? sd.length + anchorsDiscarded
+            : typeof sd === 'number' && Number.isSafeInteger(sd) && sd >= 0
+              ? sd + anchorsDiscarded
+              : sd === undefined || sd === null
+                ? anchorsDiscarded
+                : undefined;
+      payload = {
+        ...payload,
+        comments: kept,
+        state: {
+          ...state,
+          ...(anchorsRelocated > 0
+            ? {
+                bodyCriticals: [...(Array.isArray(bc) ? bc : []), ...relocated],
+              }
+            : {}),
+          ...(mergedDiscarded !== undefined
+            ? { suggestionsDiscarded: mergedDiscarded }
+            : {}),
+        },
+      };
+      writeStderrLine(
+        `Aone anchor check: ${anchorsRelocated + anchorsDiscarded} inline ` +
+          `comment(s) cannot be anchored to the MR's new side (Aone Code ` +
+          `performs no server-side anchor validation):\n` +
+          disclosures.join('\n'),
+      );
+    }
+  }
+
   // The operator's floor, from the CLI's verbatim record — never only the
   // state's transcription of it. The state field is a model-written copy of
   // the operator's policy, and a copy that can drift must not decide
@@ -889,6 +1072,9 @@ export function runSubmit(
           event,
           cappedBy,
           floorEnforced: floorEnforced.length,
+          // Aone-only gate counts — the GitHub server performs this
+          // validation itself; the fields exist only where the gate ran.
+          ...(aoneWrite ? { anchorsRelocated, anchorsDiscarded } : {}),
         },
         null,
         2,
@@ -1050,6 +1236,8 @@ export function runSubmit(
           cappedBy,
           inlineComments: result.postedInline,
           floorEnforced: floorEnforced.length,
+          anchorsRelocated,
+          anchorsDiscarded,
           summaryPosted: result.summaryPosted,
           ...(event === 'APPROVE' ? { approved: result.approved } : {}),
           ...(result.webUrl ? { url: result.webUrl } : {}),
