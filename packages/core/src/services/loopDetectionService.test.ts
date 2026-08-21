@@ -1351,6 +1351,49 @@ describe('LoopDetectionService', () => {
       expect(detected).toBe(false);
     });
 
+    it('detects a chant that starts after a long varied turn fills the window', () => {
+      service.reset('');
+      // The realistic #1775 shape: a long varied turn beyond the retained
+      // window, then the chant starts. Detection must survive
+      // truncateAndUpdate's index adjustment, and it must happen exactly
+      // when the fifth in-window occurrence of the unit lands. The two
+      // bounds pin the window size: a shrunken window (e.g. 2500) cannot
+      // hold five occurrences of a 700-char unit and instead fires early
+      // via the truncated-run path as soon as the filler has flushed out
+      // of the pure-chant window — before the bound below.
+      let filler = '';
+      for (let i = 0; i < 100; i++) {
+        filler += `Step ${i}: consider aspect ${i * 7 + 3} of the problem. `;
+      }
+      expect(filler.length).toBeGreaterThan(2500);
+      const unit = makeAperiodicUnit(700, 42);
+      expect(unit.length % DELTA).not.toBe(0);
+
+      expect(streamAsMisalignedContentDeltas(filler)).toBe(false);
+
+      const chant = unit.repeat(20);
+      let detectedAt = -1;
+      for (let i = 0; i < chant.length; i += DELTA) {
+        if (
+          service.addAndCheck(createContentEvent(chant.slice(i, i + DELTA)))
+        ) {
+          detectedAt = i + DELTA;
+          break;
+        }
+      }
+      expect(detectedAt).not.toBe(-1);
+      expect(service.getLastLoopType()).toBe(
+        LoopType.CHANTING_IDENTICAL_SENTENCES,
+      );
+      // Not before the fifth occurrence can exist (four full units of
+      // span), and immediately once its final chunk lands (plus a
+      // one-delta margin for the streaming boundary).
+      expect(detectedAt).toBeGreaterThan(4 * unit.length);
+      expect(detectedAt).toBeLessThanOrEqual(
+        4 * unit.length + CONTENT_CHUNK_SIZE + DELTA,
+      );
+    });
+
     it('does not halt on a long, varied reasoning stream', () => {
       service.reset('');
       let text = '';
