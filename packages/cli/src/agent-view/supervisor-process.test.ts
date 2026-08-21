@@ -3190,6 +3190,77 @@ describe('Agent View supervisor process helpers', () => {
     await fs.rm(globalDir, { recursive: true, force: true });
   });
 
+  it('does not requeue a predecessor stop during respawn healing', async () => {
+    const globalDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-agent-view-store-'),
+    );
+    const hosts: FakePtyHost[] = [];
+    const handler = createAgentViewSupervisorHandler({
+      globalDir,
+      platform: 'linux',
+      launchPtyHost: async () => {
+        const host = fakePtyHost(999_999_002 + hosts.length);
+        hosts.push(host);
+        return host;
+      },
+    });
+    const result = (await handler.dispatch?.({
+      prompt: 'write tests',
+      cwd: globalDir,
+    })) as { sessionId: string };
+    await expect(
+      handler.stop?.({ sessionId: result.sessionId }),
+    ).resolves.toEqual({ sessionId: result.sessionId, stopped: true });
+
+    let retireReached!: () => void;
+    const reached = new Promise<void>((resolve) => {
+      retireReached = resolve;
+    });
+    let releaseRetire!: () => void;
+    const retireGate = new Promise<void>((resolve) => {
+      releaseRetire = resolve;
+    });
+    const predecessor = hosts[0];
+    predecessor!.shutdown = async () => {
+      retireReached();
+      await retireGate;
+      predecessor!.shutdowns += 1;
+      predecessor!.resolveExit(0);
+    };
+
+    const respawn = handler.respawn?.({ sessionId: result.sessionId });
+    await reached;
+    const listSnapshots = supervisorStore.listAgentViewSessionSnapshots;
+    let snapshotsRead!: () => void;
+    const read = new Promise<void>((resolve) => {
+      snapshotsRead = resolve;
+    });
+    const snapshotSpy = vi
+      .spyOn(supervisorStore, 'listAgentViewSessionSnapshots')
+      .mockImplementation(async (...args) => {
+        const snapshots = await listSnapshots(...args);
+        snapshotsRead();
+        return snapshots;
+      });
+    const list = handler.list();
+    await read;
+    await Promise.resolve();
+    snapshotSpy.mockRestore();
+    releaseRetire();
+
+    await expect(respawn).resolves.toEqual({
+      sessionId: result.sessionId,
+      respawned: true,
+    });
+    await list;
+    const token = await readWorkerTokenForTest(result.sessionId, globalDir);
+    await expect(
+      handler.workerControl?.({ sessionId: result.sessionId, token }),
+    ).resolves.toMatchObject({ events: [] });
+
+    await fs.rm(globalDir, { recursive: true, force: true });
+  });
+
   it('does not queue a stop control for an unauthenticated stored worker', async () => {
     const globalDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-agent-view-store-'),

@@ -2812,12 +2812,31 @@ class WorkerRegistry {
 
   async refreshMissingWorkerState(
     state: AgentViewSessionStateFile,
-    reconnect: () => Promise<boolean> = () =>
-      this.reconnectSessionHost(state.sessionId),
+    reconnect?: () => Promise<boolean>,
   ): Promise<AgentViewSessionStateFile> {
+    // A supplied reconnect callback is used only by callers already holding
+    // the host-setup lock; lockless stopped-state healing must revalidate.
+    if (
+      !reconnect &&
+      state.sessionState === 'stopped' &&
+      state.processState === 'alive'
+    ) {
+      return this.withHostSetupLock(state.sessionId, async () => {
+        const latest = await readAgentViewSessionState(
+          state.sessionId,
+          this.store,
+        );
+        if (!latest) return state;
+        return this.refreshMissingWorkerState(latest, () =>
+          this.reconnectSessionHostLocked(state.sessionId),
+        );
+      });
+    }
+    const reconnectHost =
+      reconnect ?? (() => this.reconnectSessionHost(state.sessionId));
     if (state.sessionState === 'stopped' && state.processState === 'alive') {
       const connected =
-        this.ptyHosts.has(state.sessionId) || (await reconnect());
+        this.ptyHosts.has(state.sessionId) || (await reconnectHost());
       if (connected) {
         const host = this.ptyHosts.get(state.sessionId);
         if (host) {
@@ -2842,7 +2861,7 @@ class WorkerRegistry {
       !this.hasPendingWorkerReady(state.sessionId)
     ) {
       const connected =
-        this.ptyHosts.has(state.sessionId) || (await reconnect());
+        this.ptyHosts.has(state.sessionId) || (await reconnectHost());
       if (!connected) {
         const worker = await readAgentViewWorker(state.sessionId, this.store);
         if (isPidRunning(worker?.hostPid) || isPidRunning(worker?.workerPid)) {
@@ -2893,7 +2912,7 @@ class WorkerRegistry {
         return state;
       }
       let host = this.ptyHosts.get(state.sessionId);
-      if (!host && (await reconnect())) {
+      if (!host && (await reconnectHost())) {
         host = this.ptyHosts.get(state.sessionId);
       }
       if (host) {
@@ -2963,7 +2982,7 @@ class WorkerRegistry {
     ) {
       return state;
     }
-    if (await reconnect()) {
+    if (await reconnectHost()) {
       return state;
     }
 
