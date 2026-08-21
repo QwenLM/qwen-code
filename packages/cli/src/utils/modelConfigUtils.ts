@@ -28,10 +28,12 @@ import { sanitizeProviderBaseUrl } from './acpModelUtils.js';
  */
 const AUTH_ENV_MODEL_VARS: Record<AuthType, string[]> = {
   [AuthType.USE_OPENAI]: ['OPENAI_MODEL', 'QWEN_MODEL'],
+  [AuthType.USE_OPENAI_RESPONSES]: ['OPENAI_MODEL'],
   [AuthType.USE_GEMINI]: ['GEMINI_MODEL'],
   [AuthType.USE_VERTEX_AI]: ['GOOGLE_MODEL'],
   [AuthType.USE_ANTHROPIC]: ['ANTHROPIC_MODEL'],
   [AuthType.QWEN_OAUTH]: [],
+  [AuthType.USE_COPILOT]: [],
 };
 
 /**

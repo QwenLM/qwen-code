@@ -4,15 +4,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { render, cleanup, act } from '@testing-library/react';
+import { render, cleanup, act, renderHook } from '@testing-library/react';
 import process from 'node:process';
+import { writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ModelDialog, encodeAuxModelSelector } from './ModelDialog.js';
+import { useUiProviderTransaction } from '../hooks/use-ui-provider-transaction.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { DescriptiveRadioButtonSelect } from './shared/DescriptiveRadioButtonSelect.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import { SettingsContext } from '../contexts/SettingsContext.js';
 import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
+import {
+  UIActionsContext,
+  type UIActions,
+} from '../contexts/UIActionsContext.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { AuthType, DEFAULT_QWEN_MODEL } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -42,10 +50,21 @@ const createMockGetAvailableModelsForAuthType = () =>
   });
 const mockedSelect = vi.mocked(DescriptiveRadioButtonSelect);
 
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 const renderComponent = (
   props: Partial<React.ComponentProps<typeof ModelDialog>> = {},
   contextValue: Partial<Config> | undefined = undefined,
   settingsValue: Partial<LoadedSettings> | undefined = undefined,
+  uiActionsValue: Partial<UIActions> | undefined = undefined,
 ) => {
   const defaultProps = {
     onClose: vi.fn(),
@@ -80,6 +99,7 @@ const renderComponent = (
       getGenerationConfig: vi.fn(() => ({ baseUrl: undefined })),
     })),
     getActiveRuntimeModelSnapshot: vi.fn(() => undefined),
+    getCurrentModelRegistryBaseUrl: vi.fn(() => undefined),
     getChatRecordingService: vi.fn(() => ({ recordSlashCommand })),
 
     // --- Functions used by ClearcutLogger ---
@@ -103,17 +123,25 @@ const renderComponent = (
     addItem: vi.fn(),
   } as unknown as UIState['historyManager'];
 
-  const renderResult = render(
+  const tree = (
     <SettingsContext.Provider value={mockSettings}>
       <ConfigContext.Provider value={mockConfig}>
         <UIStateContext.Provider
           value={{ historyManager: mockHistoryManager } as unknown as UIState}
         >
-          <ModelDialog {...combinedProps} />
+          {uiActionsValue ? (
+            <UIActionsContext.Provider value={uiActionsValue as UIActions}>
+              <ModelDialog {...combinedProps} />
+            </UIActionsContext.Provider>
+          ) : (
+            <ModelDialog {...combinedProps} />
+          )}
         </UIStateContext.Provider>
       </ConfigContext.Provider>
-    </SettingsContext.Provider>,
+    </SettingsContext.Provider>
   );
+
+  const renderResult = render(tree);
 
   return {
     ...renderResult,
@@ -1557,6 +1585,271 @@ describe('<ModelDialog />', () => {
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('does not publish a stale primary selection after a newer provider transaction starts', async () => {
+    const { result: transaction } = renderHook(() =>
+      useUiProviderTransaction(),
+    );
+    const switchDeferred = createDeferred<void>();
+    const authDeferred = createDeferred<void>();
+    const authStarted = createDeferred<void>();
+    const switchModel = vi.fn(() => switchDeferred.promise);
+    const { props, mockSettings, mockHistoryManager, recordSlashCommand } =
+      renderComponent(
+        {},
+        {
+          getModel: vi.fn(() => 'old-model'),
+          getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+          switchModel,
+          getAllConfiguredModels: vi.fn(() => [
+            {
+              id: 'gpt-4',
+              label: 'GPT-4',
+              authType: AuthType.USE_OPENAI,
+            },
+          ]),
+          getContentGeneratorConfig: vi.fn(() => ({
+            authType: AuthType.USE_OPENAI,
+            model: 'gpt-4',
+          })),
+        } as unknown as Partial<Config>,
+        undefined,
+        {
+          runUiProviderTransaction: transaction.current.run,
+        } as unknown as Partial<UIActions>,
+      );
+
+    const selection = mockedSelect.mock.calls[0][0].onSelect(
+      `${AuthType.USE_OPENAI}::gpt-4`,
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(switchModel).toHaveBeenCalledTimes(1);
+
+    const authInstall = transaction.current.run(async () => {
+      authStarted.resolve();
+      await authDeferred.promise;
+    });
+
+    switchDeferred.resolve();
+    await selection;
+
+    expect(mockSettings.setValue).not.toHaveBeenCalled();
+    expect(mockHistoryManager.addItem).not.toHaveBeenCalled();
+    expect(recordSlashCommand).not.toHaveBeenCalled();
+    expect(props.onClose).not.toHaveBeenCalled();
+
+    await authStarted.promise;
+    authDeferred.resolve();
+    await authInstall;
+  });
+
+  it('rolls a stale primary selection back to the previous live runtime', async () => {
+    const { result: transaction } = renderHook(() =>
+      useUiProviderTransaction(),
+    );
+    const switchDeferred = createDeferred<void>();
+    const oldBaseUrl = 'https://old-provider.example/v1';
+    const runtimeSnapshot = {
+      id: '$runtime|anthropic|runtime-model',
+      authType: AuthType.USE_ANTHROPIC,
+      modelId: 'runtime-model',
+    };
+    const liveRuntime: {
+      authType: AuthType;
+      model: string;
+      baseUrl: string;
+      registryBaseUrl: string | undefined;
+      activeRuntimeSnapshot: typeof runtimeSnapshot | undefined;
+    } = {
+      authType: AuthType.USE_OPENAI,
+      model: 'old-model',
+      baseUrl: oldBaseUrl,
+      registryBaseUrl: oldBaseUrl,
+      activeRuntimeSnapshot: undefined,
+    };
+    const switchModel = vi.fn(
+      async (
+        selectedAuthType: AuthType,
+        modelId: string,
+        options?: { baseUrl?: string },
+      ) => {
+        if (modelId === runtimeSnapshot.id) {
+          liveRuntime.authType = selectedAuthType;
+          liveRuntime.model = runtimeSnapshot.modelId;
+          liveRuntime.baseUrl = 'https://runtime-provider.example/v1';
+          liveRuntime.registryBaseUrl = undefined;
+          liveRuntime.activeRuntimeSnapshot = runtimeSnapshot;
+          await switchDeferred.promise;
+          return;
+        }
+
+        liveRuntime.authType = selectedAuthType;
+        liveRuntime.model = modelId;
+        liveRuntime.baseUrl = options?.baseUrl ?? '';
+        liveRuntime.registryBaseUrl = options?.baseUrl;
+        liveRuntime.activeRuntimeSnapshot = undefined;
+      },
+    );
+    const getContentGeneratorConfig = vi.fn(() => ({
+      authType: liveRuntime.authType,
+      model: liveRuntime.model,
+      baseUrl: liveRuntime.baseUrl,
+    }));
+    const { mockSettings, mockHistoryManager, props, recordSlashCommand } =
+      renderComponent(
+        {},
+        {
+          getModel: vi.fn(() => liveRuntime.model),
+          getAuthType: vi.fn(() => liveRuntime.authType),
+          getActiveRuntimeModelSnapshot: vi.fn(
+            () => liveRuntime.activeRuntimeSnapshot,
+          ),
+          getCurrentModelRegistryBaseUrl: vi.fn(
+            () => liveRuntime.registryBaseUrl,
+          ),
+          getContentGeneratorConfig,
+          getAllConfiguredModels: vi.fn(() => [
+            {
+              id: runtimeSnapshot.modelId,
+              label: 'Runtime model',
+              authType: runtimeSnapshot.authType,
+              isRuntimeModel: true,
+              runtimeSnapshotId: runtimeSnapshot.id,
+            },
+            {
+              id: 'old-model',
+              label: 'Old model',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: oldBaseUrl,
+            },
+          ]),
+          switchModel,
+        } as unknown as Partial<Config>,
+        undefined,
+        {
+          runUiProviderTransaction: transaction.current.run,
+        } as unknown as Partial<UIActions>,
+      );
+
+    const selection = mockedSelect.mock.calls[0][0].onSelect(
+      runtimeSnapshot.id,
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(liveRuntime).toMatchObject({
+      authType: AuthType.USE_ANTHROPIC,
+      model: 'runtime-model',
+      baseUrl: 'https://runtime-provider.example/v1',
+      registryBaseUrl: undefined,
+      activeRuntimeSnapshot: runtimeSnapshot,
+    });
+
+    const successor = transaction.current.run(async () => ({
+      contentGenerator: getContentGeneratorConfig(),
+      registryBaseUrl: liveRuntime.registryBaseUrl,
+      activeRuntimeSnapshot: liveRuntime.activeRuntimeSnapshot,
+    }));
+    switchDeferred.resolve();
+    const [, successorRuntime] = await Promise.all([selection, successor]);
+
+    expect(successorRuntime).toEqual({
+      contentGenerator: {
+        authType: AuthType.USE_OPENAI,
+        model: 'old-model',
+        baseUrl: oldBaseUrl,
+      },
+      registryBaseUrl: oldBaseUrl,
+      activeRuntimeSnapshot: undefined,
+    });
+    expect(switchModel).toHaveBeenLastCalledWith(
+      AuthType.USE_OPENAI,
+      'old-model',
+      { baseUrl: oldBaseUrl },
+    );
+    expect(liveRuntime).toMatchObject({
+      authType: AuthType.USE_OPENAI,
+      model: 'old-model',
+      baseUrl: oldBaseUrl,
+      registryBaseUrl: oldBaseUrl,
+      activeRuntimeSnapshot: undefined,
+    });
+    expect(getContentGeneratorConfig()).toEqual({
+      authType: AuthType.USE_OPENAI,
+      model: 'old-model',
+      baseUrl: oldBaseUrl,
+    });
+    expect(mockSettings.setValue).not.toHaveBeenCalled();
+    expect(mockHistoryManager.addItem).not.toHaveBeenCalled();
+    expect(recordSlashCommand).not.toHaveBeenCalled();
+    expect(props.onClose).not.toHaveBeenCalled();
+  });
+
+  it('restores primary-model environment hydration when its transaction becomes stale', async () => {
+    const envKey = 'STALE_MODEL_DIALOG_API_KEY';
+    const previousEnvValue = process.env[envKey];
+    delete process.env[envKey];
+
+    try {
+      const { result: transaction } = renderHook(() =>
+        useUiProviderTransaction(),
+      );
+      const switchDeferred = createDeferred<void>();
+      const switchModel = vi.fn(async () => {
+        expect(process.env[envKey]).toBe('sk-from-settings');
+        await switchDeferred.promise;
+      });
+      renderComponent(
+        {},
+        {
+          getModel: vi.fn(() => 'old-model'),
+          getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+          switchModel,
+          getAllConfiguredModels: vi.fn(() => [
+            {
+              id: 'gpt-4',
+              label: 'GPT-4',
+              authType: AuthType.USE_OPENAI,
+              envKey,
+            },
+          ]),
+          getContentGeneratorConfig: vi.fn(() => ({
+            authType: AuthType.USE_OPENAI,
+            model: 'gpt-4',
+          })),
+        } as unknown as Partial<Config>,
+        {
+          merged: { env: { [envKey]: 'sk-from-settings' } },
+        } as unknown as Partial<LoadedSettings>,
+        {
+          runUiProviderTransaction: transaction.current.run,
+        } as unknown as Partial<UIActions>,
+      );
+
+      const selection = mockedSelect.mock.calls[0][0].onSelect(
+        `${AuthType.USE_OPENAI}::gpt-4`,
+      );
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(switchModel).toHaveBeenCalledTimes(1);
+      expect(process.env[envKey]).toBe('sk-from-settings');
+
+      const successor = transaction.current.run(async () => {});
+      switchDeferred.resolve();
+      await Promise.all([selection, successor]);
+
+      expect(process.env[envKey]).toBeUndefined();
+    } finally {
+      if (previousEnvValue === undefined) {
+        delete process.env[envKey];
+      } else {
+        process.env[envKey] = previousEnvValue;
+      }
+    }
+  });
+
   it('records successful model-switch feedback for resumed history', async () => {
     const recordSlashCommand = vi.fn();
     const { mockHistoryManager } = renderComponent({}, {
@@ -1859,6 +2152,158 @@ describe('<ModelDialog />', () => {
       (m) => m.id === DEFAULT_QWEN_MODEL,
     );
     expect(mockedSelect.mock.calls[1][0].initialIndex).toBe(expectedCoderIndex);
+  });
+
+  it('opens AuthDialog instead of switching when a non-Copilot user picks a Copilot model with no cached token', async () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    const openAuthDialog = vi.fn();
+
+    // Force discoverGithubToken to throw CopilotTokenNotFoundError by pointing
+    // COPILOT_GITHUB_TOKEN_PATH at a temp file with no ghu_/gho_ token, and
+    // clearing GITHUB_TOKEN so the env-var fast path doesn't fire.
+    const prevGithubToken = process.env['GITHUB_TOKEN'];
+    const prevCopilotPath = process.env['COPILOT_GITHUB_TOKEN_PATH'];
+    const tmpDir = join(tmpdir(), `copilot-no-token-${Date.now()}`);
+    mkdirSync(tmpDir, { recursive: true });
+    const tmpTokenFile = join(tmpDir, 'hosts.json');
+    writeFileSync(tmpTokenFile, JSON.stringify({}));
+    delete process.env['GITHUB_TOKEN'];
+    process.env['COPILOT_GITHUB_TOKEN_PATH'] = tmpTokenFile;
+
+    const { props, mockHistoryManager } = renderComponent(
+      {},
+      {
+        getModel: vi.fn(() => 'gpt-4'),
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        switchModel,
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'gpt-4',
+            label: 'GPT-4',
+            authType: AuthType.USE_OPENAI,
+          },
+          {
+            id: 'claude-opus-4.7',
+            label: 'Claude Opus (Copilot)',
+            authType: AuthType.USE_COPILOT,
+          },
+        ]),
+        getContentGeneratorConfig: vi.fn(() => ({
+          authType: AuthType.USE_OPENAI,
+          model: 'gpt-4',
+        })),
+      } as unknown as Partial<Config>,
+      undefined,
+      {
+        auth: { openAuthDialog } as unknown as UIActions['auth'],
+      } as unknown as Partial<UIActions>,
+    );
+
+    try {
+      const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+      await act(async () => {
+        await childOnSelect(`${AuthType.USE_COPILOT}::claude-opus-4.7`);
+      });
+
+      // No token → must NOT switch the model.
+      expect(switchModel).not.toHaveBeenCalled();
+      // Instead, request the preselected Copilot setup so the user can
+      // complete device flow without navigating the generic auth chooser.
+      expect(openAuthDialog).toHaveBeenCalledWith(AuthType.USE_COPILOT);
+      // The model dialog closes so AuthDialog is the only dialog visible.
+      expect(props.onClose).toHaveBeenCalledTimes(1);
+      // A history item explains why the dialog closed.
+      expect(mockHistoryManager.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'info',
+          text: expect.stringContaining('Copilot'),
+        }),
+        expect.any(Number),
+      );
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+      if (prevGithubToken === undefined) {
+        delete process.env['GITHUB_TOKEN'];
+      } else {
+        process.env['GITHUB_TOKEN'] = prevGithubToken;
+      }
+      if (prevCopilotPath === undefined) {
+        delete process.env['COPILOT_GITHUB_TOKEN_PATH'];
+      } else {
+        process.env['COPILOT_GITHUB_TOKEN_PATH'] = prevCopilotPath;
+      }
+    }
+  });
+
+  it('auto-switches to Copilot auth when a non-Copilot user picks a Copilot model and a GitHub token is cached', async () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    const openAuthDialog = vi.fn();
+
+    // Force discoverGithubToken to succeed via the GITHUB_TOKEN env-var fast
+    // path (ghu_ prefix is recognised as a Copilot token).
+    const prevGithubToken = process.env['GITHUB_TOKEN'];
+    const prevCopilotPath = process.env['COPILOT_GITHUB_TOKEN_PATH'];
+    process.env['GITHUB_TOKEN'] = 'ghu_test-token';
+    delete process.env['COPILOT_GITHUB_TOKEN_PATH'];
+
+    const { props } = renderComponent(
+      {},
+      {
+        getModel: vi.fn(() => 'gpt-4'),
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        switchModel,
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'gpt-4',
+            label: 'GPT-4',
+            authType: AuthType.USE_OPENAI,
+          },
+          {
+            id: 'claude-opus-4.7',
+            label: 'Claude Opus (Copilot)',
+            authType: AuthType.USE_COPILOT,
+          },
+        ]),
+        getContentGeneratorConfig: vi.fn(() => ({
+          authType: AuthType.USE_COPILOT,
+          model: 'claude-opus-4.7',
+        })),
+      } as unknown as Partial<Config>,
+      undefined,
+      {
+        auth: { openAuthDialog } as unknown as UIActions['auth'],
+      } as unknown as Partial<UIActions>,
+    );
+
+    try {
+      const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+      await act(async () => {
+        await childOnSelect(`${AuthType.USE_COPILOT}::claude-opus-4.7`);
+      });
+
+      // Token found → switchModel proceeds (it triggers refreshAuth internally,
+      // which recreates the content generator with the Copilot wrapper).
+      expect(switchModel).toHaveBeenCalledWith(
+        AuthType.USE_COPILOT,
+        'claude-opus-4.7',
+        { baseUrl: undefined },
+      );
+      // AuthDialog must NOT open — the switch succeeded.
+      expect(openAuthDialog).not.toHaveBeenCalled();
+      // Dialog closes after the successful switch.
+      expect(props.onClose).toHaveBeenCalledTimes(1);
+    } finally {
+      if (prevGithubToken === undefined) {
+        delete process.env['GITHUB_TOKEN'];
+      } else {
+        process.env['GITHUB_TOKEN'] = prevGithubToken;
+      }
+      if (prevCopilotPath === undefined) {
+        delete process.env['COPILOT_GITHUB_TOKEN_PATH'];
+      } else {
+        process.env['COPILOT_GITHUB_TOKEN_PATH'] = prevCopilotPath;
+      }
+    }
   });
 });
 

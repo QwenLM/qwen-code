@@ -27,6 +27,7 @@ import type {
   ExtensionUpdateStatus,
 } from '../state/extensions.js';
 import type { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
+import type { UiProviderTransaction } from '../hooks/use-ui-provider-transaction.js';
 
 // Grouped dependencies for clarity and easier mocking
 export interface CommandContext {
@@ -54,6 +55,8 @@ export interface CommandContext {
     settings: LoadedSettings;
     logger: Logger | null;
     extensionRefreshState?: ExtensionRefreshState;
+    /** UI-only runner injected by AppContainer for interactive provider mutations. */
+    runUiProviderTransaction?: UiProviderTransaction['run'];
   };
   // UI state and history management
   ui: {
@@ -141,6 +144,7 @@ export interface MessageActionReturn {
   type: 'message';
   messageType: 'info' | 'warning' | 'error';
   content: string;
+  suppressOutputAndTelemetry?: boolean;
 }
 
 export type GoalCommandOperation =

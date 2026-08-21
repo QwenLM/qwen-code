@@ -104,6 +104,40 @@ const renderAuthDialog = (
   );
 };
 
+const createAuthDialogSettings = (): LoadedSettings =>
+  new LoadedSettings(
+    {
+      settings: { ui: { customThemes: {} }, mcpServers: {} },
+      originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+      path: '',
+    },
+    {
+      settings: {},
+      originalSettings: {},
+      path: '',
+    },
+    {
+      settings: {
+        security: { auth: { selectedType: undefined } },
+        ui: { customThemes: {} },
+        mcpServers: {},
+      },
+      originalSettings: {
+        security: { auth: { selectedType: undefined } },
+        ui: { customThemes: {} },
+        mcpServers: {},
+      },
+      path: '',
+    },
+    {
+      settings: { ui: { customThemes: {} }, mcpServers: {} },
+      originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+      path: '',
+    },
+    true,
+    new Set(),
+  );
+
 /**
  * Type text into the terminal one character at a time.
  * Works around a Node 24.x + ink compatibility issue on Windows
@@ -252,6 +286,39 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
   afterEach(() => {
     process.env = originalEnv;
+  });
+
+  it('opens GitHub Copilot setup when Copilot auth is requested', () => {
+    const { lastFrame, unmount } = renderAuthDialog(
+      createAuthDialogSettings(),
+      { pendingAuthType: AuthType.USE_COPILOT },
+    );
+
+    try {
+      expect(lastFrame()).toContain(
+        'Set up GitHub Copilot · Step 1/3 · Model IDs',
+      );
+      expect(lastFrame()).not.toContain('Connect a Provider');
+    } finally {
+      unmount();
+    }
+  });
+
+  it('keeps a parameterless auth request on the generic provider chooser', async () => {
+    const { lastFrame, unmount } = renderAuthDialog(createAuthDialogSettings());
+
+    try {
+      await vi.waitFor(
+        () => {
+          expect(lastFrame()).toContain('Connect a Provider');
+          expect(lastFrame()).toContain('Alibaba ModelStudio');
+          expect(lastFrame()).not.toContain('Set up GitHub Copilot');
+        },
+        { timeout: WAIT_FOR_TIMEOUT },
+      );
+    } finally {
+      unmount();
+    }
   });
 
   it('should show an error if the initial auth type is invalid', () => {

@@ -1,14 +1,23 @@
 # Authentication
 
-Qwen Code's first-run `/auth` menu has three top-level options. Pick the one that matches how you want to run the CLI:
+Qwen Code's first-run `/auth` menu has four top-level options. Pick the one that matches how you want to run the CLI:
 
 - **Alibaba ModelStudio**: official recommended setup. Opens a sub-menu with **Coding Plan** (for individual developers · weekly quota included), **Token Plan** (for teams and companies · usage-based billing with a dedicated endpoint), or **Standard API Key** (connect with an existing ModelStudio API key).
 - **Third-party Providers**: choose a built-in provider and connect with an API key (DeepSeek, MiniMax, Z.AI, Idealab, ModelScope, OpenRouter, Requesty).
 - **Custom Provider**: manually connect a local server, proxy, or unsupported provider — supports OpenAI, Anthropic, Gemini, and other compatible endpoints.
+- **GitHub Copilot**: use an existing GitHub Copilot credential or complete GitHub's device authorization flow in a browser.
 
 > [!note]
 >
 > **Qwen OAuth** is no longer a selectable dialog entry — its free tier was discontinued on 2026-04-15. It remains documented below as a hard-coded, discontinued provider only.
+
+## GitHub Copilot
+
+Choose **GitHub Copilot** from `/auth` to configure the built-in Copilot provider. It does not ask you to enter a Copilot API key.
+
+Qwen Code first reuses a valid Copilot credential when it finds one in `GITHUB_TOKEN` (only `ghu_` and `gho_` tokens qualify) or in supported local GitHub Copilot and VS Code credential stores. If it cannot find one, it shows a verification URL and a device code. Open the URL in a browser, enter the code, and approve the request; Qwen Code then continues the setup flow and stores the resulting credential in `~/.config/github-copilot/hosts.json`.
+
+The setup starts from Qwen Code's static Copilot model preset and does not fetch a live model list. There is no Copilot-specific `settings.json` auth block, custom GitHub-host option, or live-model-list option to configure. Press Escape to cancel the device flow and return to `/auth` without installing the provider.
 
 ## Option 1: Qwen OAuth (Discontinued)
 
@@ -27,7 +36,7 @@ Start the CLI and follow the browser flow:
 qwen
 ```
 
-Qwen OAuth is no longer offered as a selectable entry in the `/auth` dialog; run `/auth` and choose one of the current options (Alibaba ModelStudio, Third-party Providers, or Custom Provider) instead.
+Qwen OAuth is no longer offered as a selectable entry in the `/auth` dialog; run `/auth` and choose one of the current options (Alibaba ModelStudio, Third-party Providers, Custom Provider, or GitHub Copilot) instead.
 
 > [!note]
 >

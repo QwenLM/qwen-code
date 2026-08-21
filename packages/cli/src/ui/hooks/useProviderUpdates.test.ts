@@ -19,7 +19,9 @@ import {
   computeModelListVersion,
   PROVIDER_METADATA_NS,
 } from '@qwen-code/qwen-code-core';
+import { backupSettingsFile } from '../../utils/settingsUtils.js';
 import { useProviderUpdates } from './useProviderUpdates.js';
+import { useUiProviderTransaction } from './use-ui-provider-transaction.js';
 
 vi.mock('../../utils/settingsUtils.js', async (importOriginal) => {
   const actual =
@@ -47,6 +49,16 @@ const tokenVersion = computeModelListVersion(tokenTemplate);
 const METADATA_KEY = 'coding-plan';
 const TOKEN_METADATA_KEY = 'token-plan';
 
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 describe('useProviderUpdates', () => {
   const mockSettings = {
     merged: {
@@ -56,6 +68,7 @@ describe('useProviderUpdates', () => {
     setValue: vi.fn(),
     setValues: vi.fn(),
     forScope: vi.fn(() => ({ path: '/tmp/settings.json' })),
+    recomputeMerged: vi.fn(),
     isTrusted: true,
     workspace: { settings: {} },
     user: { settings: {} },
@@ -73,7 +86,12 @@ describe('useProviderUpdates', () => {
       baseUrl: CODING_PLAN_CHINA_BASE_URL,
       apiKeyEnvKey: CODING_PLAN_ENV_KEY,
     }),
+    getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+    getActiveRuntimeModelSnapshot: vi.fn(() => undefined),
+    getCurrentModelRegistryBaseUrl: vi.fn(() => CODING_PLAN_CHINA_BASE_URL),
     getModel: vi.fn().mockReturnValue('qwen3.5-plus'),
+    switchModel: vi.fn().mockResolvedValue(undefined),
+    resetAuth: vi.fn(),
     getModelsConfig: vi.fn(() => mockModelsConfig),
   };
 
@@ -88,7 +106,14 @@ describe('useProviderUpdates', () => {
       baseUrl: CODING_PLAN_CHINA_BASE_URL,
       apiKeyEnvKey: CODING_PLAN_ENV_KEY,
     });
+    mockConfig.getAuthType.mockReturnValue(AuthType.USE_OPENAI);
+    mockConfig.getActiveRuntimeModelSnapshot.mockReturnValue(undefined);
+    mockConfig.getCurrentModelRegistryBaseUrl.mockReturnValue(
+      CODING_PLAN_CHINA_BASE_URL,
+    );
     mockConfig.getModel.mockReturnValue('qwen3.5-plus');
+    mockConfig.switchModel.mockResolvedValue(undefined);
+    mockConfig.refreshAuth.mockReset();
     mockModelsConfig.syncAfterAuthRefresh.mockReset();
     delete process.env[CODING_PLAN_ENV_KEY];
   });
@@ -180,6 +205,255 @@ describe('useProviderUpdates', () => {
     expect(entry?.providerLabel).toContain('Coding Plan');
     expect(entry?.diff).toBeDefined();
     expect(entry?.diff.currentModelAffected).toBe(false);
+  });
+
+  it('waits for an active provider transaction before taking an update backup and suppresses stale feedback', async () => {
+    const authDeferred = createDeferred<void>();
+    const authStarted = createDeferred<void>();
+    const refreshDeferred = createDeferred<void>();
+    mockConfig.refreshAuth.mockImplementation(() => refreshDeferred.promise);
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: chinaTemplate,
+    };
+
+    const { result } = renderHook(() => {
+      const transaction = useUiProviderTransaction();
+      const updates = useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+        transaction.run,
+      );
+      return { transaction, updates };
+    });
+
+    await waitFor(() => {
+      expect(result.current.updates.providerUpdateRequest).toBeDefined();
+    });
+
+    const authInstall = result.current.transaction.run(async () => {
+      authStarted.resolve();
+      await authDeferred.promise;
+    });
+    await authStarted.promise;
+
+    const update =
+      result.current.updates.providerUpdateRequest!.onConfirm('update');
+    await Promise.resolve();
+
+    expect(backupSettingsFile).not.toHaveBeenCalled();
+    expect(result.current.updates.providerUpdateRequest).toBeDefined();
+
+    authDeferred.resolve();
+    await authInstall;
+
+    await waitFor(() => {
+      expect(backupSettingsFile).toHaveBeenCalledTimes(1);
+      expect(mockConfig.refreshAuth).toHaveBeenCalledWith(
+        AuthType.USE_OPENAI,
+        undefined,
+        expect.any(Function),
+      );
+    });
+
+    const successor = result.current.transaction.run(async () => {});
+    refreshDeferred.reject(new Error('stale refresh failed'));
+
+    await update;
+    await successor;
+
+    expect(mockAddItem).not.toHaveBeenCalled();
+  });
+
+  it('restores the pre-update runtime after a cancelled provider refresh mutates it', async () => {
+    const baselineRuntime = {
+      authType: AuthType.USE_OPENAI,
+      modelId: 'baseline-model',
+      baseUrl: 'https://baseline.example/v1',
+    };
+    const runtime = { ...baselineRuntime };
+    const refreshStarted = createDeferred<void>();
+    const refreshDeferred = createDeferred<void>();
+    mockConfig.getAuthType.mockImplementation(() => runtime.authType);
+    mockConfig.getModel.mockImplementation(() => runtime.modelId);
+    mockConfig.getCurrentModelRegistryBaseUrl.mockImplementation(
+      () => runtime.baseUrl,
+    );
+    mockConfig.switchModel.mockImplementation(
+      async (authType, modelId, options) => {
+        runtime.authType = authType;
+        runtime.modelId = modelId;
+        runtime.baseUrl = options.baseUrl ?? '';
+      },
+    );
+    mockConfig.refreshAuth.mockImplementation(async () => {
+      runtime.modelId = 'updated-model';
+      runtime.baseUrl = 'https://updated.example/v1';
+      refreshStarted.resolve();
+      await refreshDeferred.promise;
+    });
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: chinaTemplate,
+    };
+
+    const { result } = renderHook(() => {
+      const transaction = useUiProviderTransaction();
+      const updates = useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+        transaction.run,
+      );
+      return { transaction, updates };
+    });
+
+    await waitFor(() => {
+      expect(result.current.updates.providerUpdateRequest).toBeDefined();
+    });
+
+    const update =
+      result.current.updates.providerUpdateRequest!.onConfirm('update');
+    await refreshStarted.promise;
+    expect(runtime).toEqual({
+      ...baselineRuntime,
+      modelId: 'updated-model',
+      baseUrl: 'https://updated.example/v1',
+    });
+
+    const successor = result.current.transaction.run(async () => {});
+    refreshDeferred.resolve();
+    await Promise.all([update, successor]);
+
+    expect(mockConfig.switchModel).toHaveBeenCalledWith(
+      baselineRuntime.authType,
+      baselineRuntime.modelId,
+      { baseUrl: baselineRuntime.baseUrl },
+    );
+    expect(runtime).toEqual(baselineRuntime);
+  });
+
+  it.each(['skip', 'later'] as const)(
+    'queues a %s confirmation until an active provider transaction settles',
+    async (choice) => {
+      const authDeferred = createDeferred<void>();
+      const authStarted = createDeferred<void>();
+      (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+        METADATA_KEY
+      ] = {
+        baseUrl: CODING_PLAN_CHINA_BASE_URL,
+        version: 'old-version-hash',
+      };
+      mockSettings.merged['modelProviders'] = {
+        [AuthType.USE_OPENAI]: chinaTemplate,
+      };
+
+      const { result } = renderHook(() => {
+        const transaction = useUiProviderTransaction();
+        const updates = useProviderUpdates(
+          mockSettings as never,
+          mockConfig as never,
+          mockAddItem,
+          transaction.run,
+        );
+        return { transaction, updates };
+      });
+
+      await waitFor(() => {
+        expect(result.current.updates.providerUpdateRequest).toBeDefined();
+      });
+
+      const authInstall = result.current.transaction.run(async () => {
+        authStarted.resolve();
+        await authDeferred.promise;
+      });
+      await authStarted.promise;
+
+      const confirmation =
+        result.current.updates.providerUpdateRequest!.onConfirm(choice);
+      await Promise.resolve();
+
+      expect(result.current.updates.providerUpdateRequest).toBeDefined();
+      expect(mockSettings.setValue).not.toHaveBeenCalled();
+      expect(mockSettings.setValues).not.toHaveBeenCalled();
+
+      authDeferred.resolve();
+      await authInstall;
+      await confirmation;
+
+      if (choice === 'skip') {
+        expect(mockSettings.setValues).toHaveBeenCalledTimes(1);
+        expect(mockSettings.setValues).toHaveBeenCalledWith([
+          {
+            scope: 'User',
+            key: `${PROVIDER_METADATA_NS}.${METADATA_KEY}.ignoredVersion`,
+            value: chinaVersion,
+          },
+        ]);
+        expect(mockSettings.setValue).not.toHaveBeenCalled();
+      } else {
+        expect(mockSettings.setValues).toHaveBeenCalledTimes(1);
+      }
+    },
+  );
+
+  it('leaves a stale queued skip confirmation visible without writes or feedback', async () => {
+    const activeDeferred = createDeferred<void>();
+    const activeStarted = createDeferred<void>();
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: chinaTemplate,
+    };
+
+    const { result } = renderHook(() => {
+      const transaction = useUiProviderTransaction();
+      const updates = useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+        transaction.run,
+      );
+      return { transaction, updates };
+    });
+
+    await waitFor(() => {
+      expect(result.current.updates.providerUpdateRequest).toBeDefined();
+    });
+
+    const active = result.current.transaction.run(async () => {
+      activeStarted.resolve();
+      await activeDeferred.promise;
+    });
+    await activeStarted.promise;
+
+    const confirmation =
+      result.current.updates.providerUpdateRequest!.onConfirm('skip');
+    await Promise.resolve();
+
+    const successor = result.current.transaction.run(async () => {});
+    activeDeferred.resolve();
+    await Promise.all([active, confirmation, successor]);
+
+    expect(result.current.updates.providerUpdateRequest).toBeDefined();
+    expect(mockSettings.setValue).not.toHaveBeenCalled();
+    expect(mockSettings.setValues).not.toHaveBeenCalled();
+    expect(mockAddItem).not.toHaveBeenCalled();
   });
 
   it('excludes user-added custom models from the diff', async () => {
@@ -342,7 +616,11 @@ describe('useProviderUpdates', () => {
     );
     expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalled();
     expect(mockModelsConfig.syncAfterAuthRefresh).not.toHaveBeenCalled();
-    expect(mockConfig.refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
+    expect(mockConfig.refreshAuth).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI,
+      undefined,
+      expect.any(Function),
+    );
     expect(mockSettings.setValue).not.toHaveBeenCalledWith(
       expect.anything(),
       'security.auth.selectedType',
@@ -1121,11 +1399,14 @@ describe('useProviderUpdates', () => {
     await waitFor(() => {
       expect(result.current.providerUpdateRequest).toBeUndefined();
     });
-    expect(mockSettings.setValue).toHaveBeenCalledWith(
-      expect.anything(),
-      `${PROVIDER_METADATA_NS}.${METADATA_KEY}.ignoredVersion`,
-      chinaVersion,
-    );
+    expect(mockSettings.setValues).toHaveBeenCalledWith([
+      {
+        scope: 'User',
+        key: `${PROVIDER_METADATA_NS}.${METADATA_KEY}.ignoredVersion`,
+        value: chinaVersion,
+      },
+    ]);
+    expect(mockSettings.setValue).not.toHaveBeenCalled();
     expect(mockConfig.reloadModelProvidersConfig).not.toHaveBeenCalled();
   });
 
@@ -1190,7 +1471,7 @@ describe('useProviderUpdates', () => {
     expect(labels).toContain('Token Plan');
   });
 
-  it('skip persists ignoredVersion for all providers in batch', async () => {
+  it('persists ignoredVersion for all providers in one atomic skip write', async () => {
     const metadataNs = mockSettings.merged[PROVIDER_METADATA_NS] as Record<
       string,
       unknown
@@ -1224,16 +1505,241 @@ describe('useProviderUpdates', () => {
     await waitFor(() => {
       expect(result.current.providerUpdateRequest).toBeUndefined();
     });
-    expect(mockSettings.setValue).toHaveBeenCalledWith(
-      expect.anything(),
-      `${PROVIDER_METADATA_NS}.${METADATA_KEY}.ignoredVersion`,
-      chinaVersion,
+    expect(mockSettings.setValues).toHaveBeenCalledTimes(1);
+    expect(mockSettings.setValues).toHaveBeenCalledWith([
+      {
+        scope: 'User',
+        key: `${PROVIDER_METADATA_NS}.${METADATA_KEY}.ignoredVersion`,
+        value: chinaVersion,
+      },
+      {
+        scope: 'User',
+        key: `${PROVIDER_METADATA_NS}.${TOKEN_METADATA_KEY}.ignoredVersion`,
+        value: tokenVersion,
+      },
+    ]);
+    expect(mockSettings.setValue).not.toHaveBeenCalled();
+  });
+
+  it('reports a failed atomic skip without committing ignored versions', async () => {
+    const baselineSettings = {
+      modelProviders: {
+        [AuthType.USE_OPENAI]: [...chinaTemplate, ...tokenTemplate],
+      },
+      [PROVIDER_METADATA_NS]: {
+        [METADATA_KEY]: {
+          baseUrl: CODING_PLAN_CHINA_BASE_URL,
+          version: 'old-version-hash',
+        },
+        [TOKEN_METADATA_KEY]: {
+          baseUrl: TOKEN_PLAN_BASE_URL,
+          version: 'old-version-hash',
+        },
+      },
+    } as const;
+    const settingsFile = {
+      path: '/tmp/atomic-skip-settings.json',
+      settings: structuredClone(baselineSettings) as Record<string, unknown>,
+      originalSettings: structuredClone(baselineSettings) as Record<
+        string,
+        unknown
+      >,
+    };
+    const mutableSettings = {
+      merged: settingsFile.settings,
+      setValue: vi.fn(),
+      setValues: vi.fn(),
+      forScope: vi.fn((_scope: unknown) => settingsFile),
+      recomputeMerged: vi.fn(),
+      isTrusted: true,
+      workspace: { settings: {} },
+      user: settingsFile,
+    };
+    const setNestedValue = (
+      target: Record<string, unknown>,
+      key: string,
+      value: unknown,
+    ) => {
+      const parts = key.split('.');
+      let current = target;
+      for (const part of parts.slice(0, -1)) {
+        const next = current[part];
+        if (!next || typeof next !== 'object' || Array.isArray(next)) {
+          current[part] = {};
+        }
+        current = current[part] as Record<string, unknown>;
+      }
+      current[parts[parts.length - 1]!] = value;
+    };
+    mutableSettings.recomputeMerged.mockImplementation(() => {
+      mutableSettings.merged = settingsFile.settings;
+    });
+    mutableSettings.setValue.mockImplementation(
+      (_scope: unknown, key: string, value: unknown) => {
+        const scopeFile = mutableSettings.forScope(_scope);
+        setNestedValue(scopeFile.settings, key, value);
+        setNestedValue(scopeFile.originalSettings, key, value);
+        mutableSettings.recomputeMerged();
+      },
     );
-    expect(mockSettings.setValue).toHaveBeenCalledWith(
-      expect.anything(),
-      `${PROVIDER_METADATA_NS}.${TOKEN_METADATA_KEY}.ignoredVersion`,
-      tokenVersion,
+    mutableSettings.setValues.mockImplementation(
+      (
+        writes: ReadonlyArray<{
+          scope: unknown;
+          key: string;
+          value: unknown;
+        }>,
+      ) => {
+        for (const write of writes) {
+          const scopeFile = mutableSettings.forScope(write.scope);
+          setNestedValue(scopeFile.settings, write.key, write.value);
+          setNestedValue(scopeFile.originalSettings, write.key, write.value);
+        }
+        mutableSettings.recomputeMerged();
+        settingsFile.settings = structuredClone(baselineSettings) as Record<
+          string,
+          unknown
+        >;
+        settingsFile.originalSettings = structuredClone(
+          baselineSettings,
+        ) as Record<string, unknown>;
+        mutableSettings.recomputeMerged();
+        throw new Error('settings file is read-only');
+      },
     );
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mutableSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+
+    await result.current.providerUpdateRequest!.onConfirm('skip');
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeUndefined();
+    });
+    const metadata = settingsFile.settings[PROVIDER_METADATA_NS] as Record<
+      string,
+      Record<string, unknown>
+    >;
+    expect(metadata[METADATA_KEY]).not.toHaveProperty('ignoredVersion');
+    expect(metadata[TOKEN_METADATA_KEY]).not.toHaveProperty('ignoredVersion');
+    expect(settingsFile.settings).toEqual(baselineSettings);
+    expect(settingsFile.originalSettings).toEqual(baselineSettings);
+    expect(mutableSettings.setValues).toHaveBeenCalledTimes(1);
+    expect(mutableSettings.setValue).not.toHaveBeenCalled();
+    expect(mockAddItem).toHaveBeenCalledTimes(1);
+    expect(mockAddItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        text: expect.stringContaining('settings file is read-only'),
+      }),
+      expect.any(Number),
+    );
+  });
+
+  it('captures the historical sequential skip partial commit when a later provider write fails', () => {
+    const baselineSettings = {
+      modelProviders: {
+        [AuthType.USE_OPENAI]: [...chinaTemplate, ...tokenTemplate],
+      },
+      [PROVIDER_METADATA_NS]: {
+        [METADATA_KEY]: {
+          baseUrl: CODING_PLAN_CHINA_BASE_URL,
+          version: 'old-version-hash',
+        },
+        [TOKEN_METADATA_KEY]: {
+          baseUrl: TOKEN_PLAN_BASE_URL,
+          version: 'old-version-hash',
+        },
+      },
+    } as const;
+    const settingsFile = {
+      path: '/tmp/sequential-skip-settings.json',
+      settings: structuredClone(baselineSettings) as Record<string, unknown>,
+      originalSettings: structuredClone(baselineSettings) as Record<
+        string,
+        unknown
+      >,
+    };
+    const mutableSettings = {
+      merged: settingsFile.settings,
+      setValue: vi.fn(),
+      setValues: vi.fn(),
+      forScope: vi.fn((_scope: unknown) => settingsFile),
+      recomputeMerged: vi.fn(),
+      isTrusted: true,
+      workspace: { settings: {} },
+      user: settingsFile,
+    };
+    const setNestedValue = (
+      target: Record<string, unknown>,
+      key: string,
+      value: unknown,
+    ) => {
+      const parts = key.split('.');
+      let current = target;
+      for (const part of parts.slice(0, -1)) {
+        const next = current[part];
+        if (!next || typeof next !== 'object' || Array.isArray(next)) {
+          current[part] = {};
+        }
+        current = current[part] as Record<string, unknown>;
+      }
+      current[parts[parts.length - 1]!] = value;
+    };
+    mutableSettings.recomputeMerged.mockImplementation(() => {
+      mutableSettings.merged = settingsFile.settings;
+    });
+    let writeCount = 0;
+    mutableSettings.setValue.mockImplementation(
+      (_scope: unknown, key: string, value: unknown) => {
+        writeCount += 1;
+        if (writeCount === 2) {
+          throw new Error('settings file is read-only');
+        }
+        const scopeFile = mutableSettings.forScope(_scope);
+        setNestedValue(scopeFile.settings, key, value);
+        setNestedValue(scopeFile.originalSettings, key, value);
+        mutableSettings.recomputeMerged();
+      },
+    );
+
+    expect(() => {
+      mutableSettings.setValue(
+        'User',
+        `${PROVIDER_METADATA_NS}.${METADATA_KEY}.ignoredVersion`,
+        chinaVersion,
+      );
+      mutableSettings.setValue(
+        'User',
+        `${PROVIDER_METADATA_NS}.${TOKEN_METADATA_KEY}.ignoredVersion`,
+        tokenVersion,
+      );
+    }).toThrow('settings file is read-only');
+
+    for (const snapshot of [
+      settingsFile.settings,
+      settingsFile.originalSettings,
+    ]) {
+      const metadata = snapshot[PROVIDER_METADATA_NS] as Record<
+        string,
+        Record<string, unknown>
+      >;
+      expect(metadata[METADATA_KEY]).toMatchObject({
+        ignoredVersion: chinaVersion,
+      });
+      expect(metadata[TOKEN_METADATA_KEY]).not.toHaveProperty('ignoredVersion');
+    }
+    expect(mutableSettings.setValue).toHaveBeenCalledTimes(2);
+    expect(mutableSettings.setValues).not.toHaveBeenCalled();
   });
 
   it('shows prompt again when a newer version supersedes ignoredVersion', async () => {
@@ -1259,5 +1765,175 @@ describe('useProviderUpdates', () => {
     await waitFor(() => {
       expect(result.current.providerUpdateRequest).toBeDefined();
     });
+  });
+
+  it('restores the entire pending batch when a later provider refresh is cancelled', async () => {
+    const baselineRuntime = {
+      authType: AuthType.USE_OPENAI,
+      modelId: 'baseline-model',
+      baseUrl: 'https://baseline.example/v1',
+    };
+    const baselineSettings = {
+      modelProviders: {
+        [AuthType.USE_OPENAI]: [],
+      },
+      [PROVIDER_METADATA_NS]: {
+        [METADATA_KEY]: {
+          baseUrl: CODING_PLAN_CHINA_BASE_URL,
+          version: 'old-version-hash',
+        },
+        [TOKEN_METADATA_KEY]: {
+          baseUrl: TOKEN_PLAN_BASE_URL,
+          version: 'old-version-hash',
+        },
+      },
+    };
+    const settingsFile = {
+      path: '/tmp/batch-settings.json',
+      settings: structuredClone(baselineSettings) as Record<string, unknown>,
+      originalSettings: structuredClone(baselineSettings) as Record<
+        string,
+        unknown
+      >,
+    };
+    const batchSettings = {
+      merged: settingsFile.settings,
+      setValue: vi.fn(),
+      setValues: vi.fn(),
+      forScope: vi.fn(() => settingsFile),
+      recomputeMerged: vi.fn(),
+      isTrusted: true,
+      workspace: { settings: {} },
+      user: { settings: { modelProviders: {} } },
+    };
+    const setNestedValue = (
+      target: Record<string, unknown>,
+      key: string,
+      value: unknown,
+    ) => {
+      const parts = key.split('.');
+      let current = target;
+      for (const part of parts.slice(0, -1)) {
+        const next = current[part];
+        if (!next || typeof next !== 'object' || Array.isArray(next)) {
+          current[part] = {};
+        }
+        current = current[part] as Record<string, unknown>;
+      }
+      current[parts[parts.length - 1]!] = value;
+    };
+    batchSettings.setValue.mockImplementation(
+      (_scope: unknown, key: string, value: unknown) => {
+        setNestedValue(settingsFile.settings, key, value);
+        setNestedValue(settingsFile.originalSettings, key, value);
+        batchSettings.merged = settingsFile.settings;
+      },
+    );
+    batchSettings.recomputeMerged.mockImplementation(() => {
+      batchSettings.merged = settingsFile.settings;
+    });
+
+    const runtime = {
+      ...baselineRuntime,
+      modelProviders: structuredClone(
+        baselineSettings.modelProviders,
+      ) as Record<string, unknown>,
+    };
+    mockConfig.getAuthType.mockImplementation(() => runtime.authType);
+    mockConfig.getModel.mockImplementation(() => runtime.modelId);
+    mockConfig.getCurrentModelRegistryBaseUrl.mockImplementation(
+      () => runtime.baseUrl,
+    );
+    mockConfig.getContentGeneratorConfig
+      .mockReturnValueOnce({
+        authType: AuthType.USE_OPENAI,
+        baseUrl: CODING_PLAN_CHINA_BASE_URL,
+        apiKeyEnvKey: CODING_PLAN_ENV_KEY,
+      })
+      .mockReturnValueOnce({
+        authType: AuthType.USE_OPENAI,
+        baseUrl: TOKEN_PLAN_BASE_URL,
+        apiKeyEnvKey: TOKEN_PLAN_ENV_KEY,
+      });
+    mockConfig.reloadModelProvidersConfig.mockImplementation(
+      (modelProviders: Record<string, unknown>) => {
+        runtime.modelProviders = structuredClone(modelProviders);
+      },
+    );
+    mockConfig.switchModel.mockImplementation(
+      async (
+        authType: AuthType,
+        modelId: string,
+        options: { baseUrl?: string },
+      ) => {
+        runtime.authType = authType;
+        runtime.modelId = modelId;
+        runtime.baseUrl = options.baseUrl ?? '';
+      },
+    );
+
+    const secondRefreshStarted = createDeferred<void>();
+    const secondRefresh = createDeferred<void>();
+    let refreshCount = 0;
+    mockConfig.refreshAuth.mockImplementation(
+      async (
+        _authType: AuthType,
+        _isInitialAuth?: boolean,
+        _canPublish?: () => boolean,
+      ) => {
+        refreshCount += 1;
+        if (refreshCount === 1) {
+          runtime.modelId = 'coding-plan-runtime';
+          runtime.baseUrl = CODING_PLAN_CHINA_BASE_URL;
+          return;
+        }
+        runtime.modelId = 'token-plan-runtime';
+        runtime.baseUrl = TOKEN_PLAN_BASE_URL;
+        secondRefreshStarted.resolve();
+        await secondRefresh.promise;
+      },
+    );
+
+    const { result } = renderHook(() => {
+      const transaction = useUiProviderTransaction();
+      const updates = useProviderUpdates(
+        batchSettings as never,
+        mockConfig as never,
+        mockAddItem,
+        transaction.run,
+      );
+      return { transaction, updates };
+    });
+
+    await waitFor(() => {
+      expect(
+        result.current.updates.providerUpdateRequest?.entries,
+      ).toHaveLength(2);
+    });
+
+    const update =
+      result.current.updates.providerUpdateRequest!.onConfirm('update');
+    await secondRefreshStarted.promise;
+    expect(refreshCount).toBe(2);
+    expect(
+      (
+        settingsFile.settings[PROVIDER_METADATA_NS] as Record<
+          string,
+          { version?: string }
+        >
+      )[METADATA_KEY]?.version,
+    ).toBe(chinaVersion);
+
+    const successor = result.current.transaction.run(async () => {});
+    secondRefresh.resolve();
+    await Promise.all([update, successor]);
+
+    expect(settingsFile.settings).toEqual(baselineSettings);
+    expect(settingsFile.originalSettings).toEqual(baselineSettings);
+    expect(runtime).toEqual({
+      ...baselineRuntime,
+      modelProviders: baselineSettings.modelProviders,
+    });
+    expect(mockAddItem).not.toHaveBeenCalled();
   });
 });

@@ -87,6 +87,18 @@ describe('SettingsSchema', () => {
       });
     });
 
+    it('should not expose inert Copilot authentication settings', () => {
+      expect(
+        getSettingsSchema().security.properties.auth.properties,
+      ).not.toHaveProperty('copilot');
+    });
+
+    it('should describe Copilot as a built-in provider protocol', () => {
+      expect(getSettingsSchema().providerProtocol.description).toContain(
+        'copilot',
+      );
+    });
+
     it('should have accessibility nested properties', () => {
       expect(
         getSettingsSchema().ui?.properties?.accessibility?.properties,

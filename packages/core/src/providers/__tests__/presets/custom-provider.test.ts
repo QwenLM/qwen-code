@@ -5,16 +5,13 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { AuthType } from '../../../core/contentGenerator.js';
+import { buildInstallPlan, shouldShowStep } from '../../provider-config.js';
 import {
-  AuthType,
-  customProvider,
   CUSTOM_API_KEY_ENV_PREFIX,
-  buildInstallPlan,
-  shouldShowStep,
-} from '@qwen-code/qwen-code-core';
-// Re-import generateCustomEnvKey from the relative source path so the new
-// hash-suffix format is exercised even before dist/ is rebuilt.
-import { generateCustomEnvKey } from '../../presets/custom-provider.js';
+  customProvider,
+  generateCustomEnvKey,
+} from '../../presets/custom-provider.js';
 
 describe('generateCustomEnvKey', () => {
   it('produces a deterministic URL-based key with a stable hash suffix', () => {
@@ -105,9 +102,24 @@ describe('customProvider', () => {
   it('offers multiple protocol options', () => {
     expect(customProvider.protocolOptions).toEqual([
       AuthType.USE_OPENAI,
+      AuthType.USE_OPENAI_RESPONSES,
       AuthType.USE_ANTHROPIC,
       AuthType.USE_GEMINI,
     ]);
+  });
+
+  it('builds an OpenAI Responses install plan', () => {
+    const plan = buildInstallPlan(customProvider, {
+      protocol: AuthType.USE_OPENAI_RESPONSES,
+      baseUrl: 'https://api.example.com',
+      apiKey: 'sk-responses',
+      modelIds: ['gpt-5'],
+    });
+
+    expect(plan.authType).toBe(AuthType.USE_OPENAI_RESPONSES);
+    expect(plan.modelProviders?.[0]?.authType).toBe(
+      AuthType.USE_OPENAI_RESPONSES,
+    );
   });
 
   it('keeps custom ownership detection but merges installs by model identity', () => {

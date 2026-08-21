@@ -109,6 +109,10 @@ function formatAuth(info: ExtendedSystemInfo): string {
     return 'Qwen OAuth';
   }
 
+  if (info.selectedAuthType === 'copilot') {
+    return 'GitHub Copilot';
+  }
+
   return `API Key - ${info.selectedAuthType}`;
 }
 
@@ -119,7 +123,8 @@ function formatBaseUrl(info: ExtendedSystemInfo): string {
 
   if (
     info.selectedAuthType.startsWith('oauth') ||
-    info.selectedAuthType === 'qwen-oauth'
+    info.selectedAuthType === 'qwen-oauth' ||
+    info.selectedAuthType === 'copilot'
   ) {
     return '';
   }

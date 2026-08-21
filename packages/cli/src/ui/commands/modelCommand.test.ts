@@ -4,9 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { renderHook } from '@testing-library/react';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { modelCommand, isPickerOnlyModelInvocation } from './modelCommand.js';
 import { type CommandContext } from './types.js';
+import { useUiProviderTransaction } from '../hooks/use-ui-provider-transaction.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import { SettingScope } from '../../config/settings.js';
 import {
@@ -33,6 +35,16 @@ function createMockSettings(setValue = vi.fn()): Partial<LoadedSettings> {
     isTrusted: false,
     setValue,
   } as unknown as Partial<LoadedSettings>;
+}
+
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 describe('modelCommand', () => {
@@ -258,6 +270,285 @@ describe('modelCommand', () => {
       content: 'Model: qwen-max',
     });
   });
+
+  it('queues an interactive direct switch until an active provider transaction settles', async () => {
+    const { result: transaction } = renderHook(() =>
+      useUiProviderTransaction(),
+    );
+    const authDeferred = createDeferred<void>();
+    const authStarted = createDeferred<void>();
+    const authInstall = transaction.current.run(async () => {
+      authStarted.resolve();
+      await authDeferred.promise;
+    });
+    await authStarted.promise;
+
+    const setValue = vi.fn();
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    mockContext = createMockCommandContext({
+      invocation: { raw: '/model qwen-max', name: 'model', args: 'qwen-max' },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.QWEN_OAUTH,
+          }),
+          getAuthType: vi.fn(() => AuthType.QWEN_OAUTH),
+          getActiveRuntimeModelSnapshot: vi.fn(() => undefined),
+          getModel: vi.fn(() => 'qwen-plus'),
+          getCurrentModelRegistryBaseUrl: vi.fn(() => undefined),
+          getAvailableModelsForAuthType: vi
+            .fn()
+            .mockReturnValue([{ id: 'qwen-max', label: 'Qwen Max' }]),
+          switchModel,
+        },
+        settings: createMockSettings(setValue),
+        runUiProviderTransaction: transaction.current.run,
+      },
+    });
+
+    const switchResult = modelCommand.action!(mockContext, 'qwen-max');
+    await Promise.resolve();
+
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(setValue).not.toHaveBeenCalled();
+
+    authDeferred.resolve();
+    await authInstall;
+
+    await expect(switchResult).resolves.toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Model: qwen-max',
+    });
+    expect(switchModel).toHaveBeenCalledTimes(1);
+  });
+
+  it('marks a stale interactive switch result to suppress slash feedback and telemetry', async () => {
+    const { result: transaction } = renderHook(() =>
+      useUiProviderTransaction(),
+    );
+    const switchDeferred = createDeferred<void>();
+    const setValue = vi.fn();
+    const switchModel = vi.fn(() => switchDeferred.promise);
+    mockContext = createMockCommandContext({
+      invocation: { raw: '/model qwen-max', name: 'model', args: 'qwen-max' },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.QWEN_OAUTH,
+          }),
+          getAuthType: vi.fn(() => AuthType.QWEN_OAUTH),
+          getActiveRuntimeModelSnapshot: vi.fn(() => undefined),
+          getModel: vi.fn(() => 'qwen-plus'),
+          getCurrentModelRegistryBaseUrl: vi.fn(() => undefined),
+          getAvailableModelsForAuthType: vi
+            .fn()
+            .mockReturnValue([{ id: 'qwen-max', label: 'Qwen Max' }]),
+          switchModel,
+        },
+        settings: createMockSettings(setValue),
+        runUiProviderTransaction: transaction.current.run,
+      },
+    });
+
+    const switchResult = modelCommand.action!(mockContext, 'qwen-max');
+    await Promise.resolve();
+    expect(switchModel).toHaveBeenCalledTimes(1);
+
+    const successor = transaction.current.run(async () => {});
+    switchDeferred.resolve();
+
+    await expect(switchResult).resolves.toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: '',
+      suppressOutputAndTelemetry: true,
+    });
+    await successor;
+    expect(setValue).not.toHaveBeenCalled();
+  });
+
+  it('rolls a stale interactive switch back to the previous runtime model', async () => {
+    const { result: transaction } = renderHook(() =>
+      useUiProviderTransaction(),
+    );
+    const switchDeferred = createDeferred<void>();
+    const runtimeSnapshot = {
+      id: '$runtime|anthropic|runtime-model',
+      authType: AuthType.USE_ANTHROPIC,
+      modelId: 'runtime-model',
+    };
+    const liveRuntime: {
+      authType: AuthType;
+      model: string;
+      baseUrl: string;
+      registryBaseUrl: string | undefined;
+      activeRuntimeSnapshot: typeof runtimeSnapshot | undefined;
+    } = {
+      authType: runtimeSnapshot.authType,
+      model: runtimeSnapshot.modelId,
+      baseUrl: 'https://runtime-provider.example/v1',
+      registryBaseUrl: undefined,
+      activeRuntimeSnapshot: runtimeSnapshot,
+    };
+    const switchModel = vi.fn(
+      async (
+        selectedAuthType: AuthType,
+        modelId: string,
+        options?: { baseUrl?: string },
+      ) => {
+        if (modelId === 'gpt-4') {
+          liveRuntime.authType = selectedAuthType;
+          liveRuntime.model = modelId;
+          liveRuntime.baseUrl = 'https://new-provider.example/v1';
+          liveRuntime.registryBaseUrl = 'https://new-provider.example/v1';
+          liveRuntime.activeRuntimeSnapshot = undefined;
+          await switchDeferred.promise;
+          return;
+        }
+
+        liveRuntime.authType = selectedAuthType;
+        liveRuntime.model = runtimeSnapshot.modelId;
+        liveRuntime.baseUrl = 'https://runtime-provider.example/v1';
+        liveRuntime.registryBaseUrl = options?.baseUrl;
+        liveRuntime.activeRuntimeSnapshot = runtimeSnapshot;
+      },
+    );
+    const setValue = vi.fn();
+    const getContentGeneratorConfig = vi.fn(() => ({
+      authType: liveRuntime.authType,
+      model: liveRuntime.model,
+      baseUrl: liveRuntime.baseUrl,
+    }));
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model gpt-4(openai)',
+        name: 'model',
+        args: 'gpt-4(openai)',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig,
+          getAuthType: vi.fn(() => liveRuntime.authType),
+          getActiveRuntimeModelSnapshot: vi.fn(
+            () => liveRuntime.activeRuntimeSnapshot,
+          ),
+          getCurrentModelRegistryBaseUrl: vi.fn(
+            () => liveRuntime.registryBaseUrl,
+          ),
+          getAvailableModelsForAuthType: vi.fn((authType: AuthType) =>
+            authType === AuthType.USE_OPENAI
+              ? [
+                  {
+                    id: 'gpt-4',
+                    label: 'GPT-4',
+                    authType,
+                  },
+                ]
+              : [],
+          ),
+          switchModel,
+        },
+        settings: createMockSettings(setValue),
+        runUiProviderTransaction: transaction.current.run,
+      },
+    });
+
+    const switchResult = modelCommand.action!(mockContext, 'gpt-4(openai)');
+    await Promise.resolve();
+    expect(liveRuntime).toMatchObject({
+      authType: AuthType.USE_OPENAI,
+      model: 'gpt-4',
+      baseUrl: 'https://new-provider.example/v1',
+      registryBaseUrl: 'https://new-provider.example/v1',
+      activeRuntimeSnapshot: undefined,
+    });
+
+    const successor = transaction.current.run(async () => ({
+      contentGenerator: getContentGeneratorConfig(),
+      registryBaseUrl: liveRuntime.registryBaseUrl,
+      activeRuntimeSnapshot: liveRuntime.activeRuntimeSnapshot,
+    }));
+    switchDeferred.resolve();
+
+    await expect(switchResult).resolves.toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: '',
+      suppressOutputAndTelemetry: true,
+    });
+    await expect(successor).resolves.toEqual({
+      contentGenerator: {
+        authType: runtimeSnapshot.authType,
+        model: runtimeSnapshot.modelId,
+        baseUrl: 'https://runtime-provider.example/v1',
+      },
+      registryBaseUrl: undefined,
+      activeRuntimeSnapshot: runtimeSnapshot,
+    });
+
+    expect(switchModel).toHaveBeenLastCalledWith(
+      runtimeSnapshot.authType,
+      runtimeSnapshot.id,
+      { baseUrl: undefined },
+    );
+    expect(liveRuntime).toMatchObject({
+      authType: runtimeSnapshot.authType,
+      model: runtimeSnapshot.modelId,
+      baseUrl: 'https://runtime-provider.example/v1',
+      registryBaseUrl: undefined,
+      activeRuntimeSnapshot: runtimeSnapshot,
+    });
+    expect(getContentGeneratorConfig()).toEqual({
+      authType: runtimeSnapshot.authType,
+      model: runtimeSnapshot.modelId,
+      baseUrl: 'https://runtime-provider.example/v1',
+    });
+    expect(setValue).not.toHaveBeenCalled();
+  });
+
+  it.each(['non_interactive', 'acp'] as const)(
+    'leaves %s direct switches outside the UI provider transaction',
+    async (executionMode) => {
+      const setValue = vi.fn();
+      const switchModel = vi.fn().mockResolvedValue(undefined);
+      const runUiProviderTransaction = vi.fn();
+      mockContext = createMockCommandContext({
+        executionMode,
+        invocation: {
+          raw: '/model qwen-max',
+          name: 'model',
+          args: 'qwen-max',
+        },
+        services: {
+          config: {
+            getContentGeneratorConfig: vi.fn().mockReturnValue({
+              model: 'qwen-plus',
+              authType: AuthType.QWEN_OAUTH,
+            }),
+            getAvailableModelsForAuthType: vi
+              .fn()
+              .mockReturnValue([{ id: 'qwen-max', label: 'Qwen Max' }]),
+            switchModel,
+          },
+          settings: createMockSettings(setValue),
+          runUiProviderTransaction,
+        },
+      });
+
+      await modelCommand.action!(mockContext, 'qwen-max');
+
+      expect(runUiProviderTransaction).not.toHaveBeenCalled();
+      expect(switchModel).toHaveBeenCalledTimes(1);
+      expect(setValue).toHaveBeenCalledWith(
+        expect.any(String),
+        'model.name',
+        'qwen-max',
+      );
+    },
+  );
 
   it('runs a trailing prompt on the given model inline without switching or persisting', async () => {
     const setValue = vi.fn();

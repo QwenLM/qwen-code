@@ -55,10 +55,12 @@ export interface ContentGenerator {
 
 export enum AuthType {
   USE_OPENAI = 'openai',
+  USE_OPENAI_RESPONSES = 'openai-responses',
   QWEN_OAUTH = 'qwen-oauth',
   USE_GEMINI = 'gemini',
   USE_VERTEX_AI = 'vertex-ai',
   USE_ANTHROPIC = 'anthropic',
+  USE_COPILOT = 'copilot',
 }
 
 export type PromptCacheSharingParameters = GenerateContentParameters & {
@@ -192,6 +194,13 @@ export type ContentGeneratorConfig = {
   // text-only tool results as strings while leaving the default spec-compliant
   // content-part shape unchanged.
   toolResultContentFormat?: 'parts' | 'string';
+  // Custom fetch override. When set, provider generators MUST use this fetch
+  // instead of the runtime-built undici fetch, so an auth wrapper (e.g.
+  // Copilot's `wrapFetchWithCopilotAuth`) can rewrite the host and inject
+  // bearer headers per-request. Read sites: the Anthropic/OpenAI Responses/
+  // OpenAI Chat generators pass it through to their SDK clients as the
+  // `fetch` runtime option. Optional — absent for all non-Copilot auth types.
+  fetch?: typeof fetch;
 };
 
 // Keep the public ContentGeneratorConfigSources API, but reuse the generic
@@ -302,6 +311,11 @@ export function validateModelConfig(
 
   // Qwen OAuth doesn't need validation - it uses dynamic tokens
   if (config.authType === AuthType.QWEN_OAUTH) {
+    return { valid: true, errors: [] };
+  }
+
+  // Copilot uses dynamic device-flow tokens resolved at request time
+  if (config.authType === AuthType.USE_COPILOT) {
     return { valid: true, errors: [] };
   }
 
@@ -516,6 +530,13 @@ export async function createContentGenerator(
         );
         return createOpenAIContentGenerator(generatorConfig, config);
       };
+    } else if (authType === AuthType.USE_OPENAI_RESPONSES) {
+      loadBaseGenerator = async () => {
+        const { createOpenAIResponsesContentGenerator } = await import(
+          './openaiResponsesContentGenerator/index.js'
+        );
+        return createOpenAIResponsesContentGenerator(generatorConfig, config);
+      };
     } else if (authType === AuthType.QWEN_OAUTH) {
       const { getQwenOAuthClient: getQwenOauthClient } = await import(
         '../qwen/qwenOAuth2.js'
@@ -555,6 +576,13 @@ export async function createContentGenerator(
         );
         return createGeminiContentGenerator(generatorConfig, config);
       };
+    } else if (authType === AuthType.USE_COPILOT) {
+      loadBaseGenerator = async () => {
+        const { createCopilotContentGenerator } = await import(
+          '../copilot/createCopilotContentGenerator.js'
+        );
+        return createCopilotContentGenerator(generatorConfig, config);
+      };
     } else {
       throw new Error(
         `Error creating contentGenerator: Unsupported authType: ${authType}`,
@@ -580,6 +608,8 @@ export async function createContentGenerator(
         throw wrapProviderLoadError(error, authType);
       }
     },
-    authType === AuthType.USE_GEMINI || authType === AuthType.USE_VERTEX_AI,
+    authType === AuthType.USE_GEMINI ||
+      authType === AuthType.USE_VERTEX_AI ||
+      authType === AuthType.USE_OPENAI_RESPONSES,
   );
 }

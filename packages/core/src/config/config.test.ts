@@ -4771,6 +4771,57 @@ describe('Server Config (config.ts)', () => {
       expect(GeminiClient).toHaveBeenCalledWith(config);
     });
 
+    it('does not publish a refresh that became stale while its generator was loading', async () => {
+      const config = new Config(baseParams);
+      const authType = AuthType.USE_GEMINI;
+      let resolveGenerator!: (generator: ContentGenerator) => void;
+      vi.mocked(createContentGenerator).mockImplementationOnce(
+        () =>
+          new Promise<ContentGenerator>((resolve) => {
+            resolveGenerator = resolve;
+          }),
+      );
+      let isCurrent = true;
+      const refresh = config.refreshAuth(authType, undefined, () => isCurrent);
+      isCurrent = false;
+      resolveGenerator({
+        generateContent: vi.fn(),
+        generateContentStream: vi.fn(),
+        countTokens: vi.fn(),
+        embedContent: vi.fn(),
+      } as unknown as ContentGenerator);
+
+      await refresh;
+
+      expect(config.getAuthType()).toBeUndefined();
+      expect(
+        (
+          config as unknown as {
+            contentGenerator: ContentGenerator | undefined;
+          }
+        ).contentGenerator,
+      ).toBeUndefined();
+    });
+
+    it('clears a first-time runtime after a cancelled authentication', async () => {
+      const config = new Config(baseParams);
+
+      await config.refreshAuth(AuthType.USE_GEMINI);
+      expect(config.getAuthType()).toBe(AuthType.USE_GEMINI);
+
+      config.resetAuth('unselected');
+
+      expect(config.getAuthType()).toBeUndefined();
+      expect(config.getModel()).toBe('unselected');
+      expect(
+        (
+          config as unknown as {
+            contentGenerator: ContentGenerator | undefined;
+          }
+        ).contentGenerator,
+      ).toBeUndefined();
+    });
+
     it('preserves the user reasoning effort across an auth refresh that wipes it', async () => {
       // Regression: the provider sync (applyResolvedModelDefaults) overwrites
       // `reasoning` with the provider preset's undefined value, dropping the

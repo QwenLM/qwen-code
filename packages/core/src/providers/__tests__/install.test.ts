@@ -36,6 +36,30 @@ function createAdapter(modelProviders: ModelProvidersConfig = {}) {
   return adapter;
 }
 
+function getNestedValue(target: Record<string, unknown>, key: string): unknown {
+  return key.split('.').reduce<unknown>((current, part) => {
+    if (typeof current !== 'object' || current === null) return undefined;
+    return (current as Record<string, unknown>)[part];
+  }, target);
+}
+
+function setNestedValue(
+  target: Record<string, unknown>,
+  key: string,
+  value: unknown,
+): void {
+  const parts = key.split('.');
+  let current = target;
+  for (const part of parts.slice(0, -1)) {
+    const next = current[part];
+    if (typeof next !== 'object' || next === null || Array.isArray(next)) {
+      current[part] = {};
+    }
+    current = current[part] as Record<string, unknown>;
+  }
+  current[parts[parts.length - 1]!] = value;
+}
+
 describe('applyProviderInstallPlan', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -74,6 +98,28 @@ describe('applyProviderInstallPlan', () => {
     );
   });
 
+  it('does not start or roll back a pre-cancelled install', async () => {
+    const adapter = createAdapter();
+    const controller = new AbortController();
+    controller.abort();
+    const plan: ProviderInstallPlan = {
+      providerId: 'copilot',
+      authType: AuthType.USE_COPILOT,
+      env: { TEST_API_KEY: 'copilot-install' },
+    };
+
+    await expect(
+      applyProviderInstallPlan(plan, {
+        settings: adapter,
+        signal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ step: 'init' });
+    expect(adapter.backup).not.toHaveBeenCalled();
+    expect(adapter.restore).not.toHaveBeenCalled();
+    expect(adapter.setValue).not.toHaveBeenCalled();
+    expect(adapter.persist).not.toHaveBeenCalled();
+  });
+
   it('matches the env denylist case-insensitively (Path)', async () => {
     const adapter = createAdapter();
     const plan: ProviderInstallPlan = {
@@ -103,7 +149,7 @@ describe('applyProviderInstallPlan', () => {
     },
   );
 
-  it('persists env, auth selection, selected model, and merged model providers', async () => {
+  it('completes a non-UI install without transaction callbacks', async () => {
     const adapter = createAdapter({
       [AuthType.USE_OPENAI]: [
         {
@@ -144,6 +190,7 @@ describe('applyProviderInstallPlan', () => {
       refreshAuth,
     });
 
+    expect(adapter.backup).toHaveBeenCalledOnce();
     expect(adapter.setValue).toHaveBeenCalledWith(
       'env.TEST_API_KEY',
       'sk-test',
@@ -165,7 +212,7 @@ describe('applyProviderInstallPlan', () => {
     // Id-only model selection must clear any stale baseUrl disambiguator
     // (empty-string tombstone overrides a lower-scope value on merge).
     expect(adapter.setValue).toHaveBeenCalledWith('model.baseUrl', '');
-    expect(adapter.persist).toHaveBeenCalled();
+    expect(adapter.persist).toHaveBeenCalledOnce();
     expect(reloadModelProviders).toHaveBeenCalledWith({
       [AuthType.USE_OPENAI]: [
         { id: 'new-model', envKey: 'TEST_API_KEY' },
@@ -182,7 +229,7 @@ describe('applyProviderInstallPlan', () => {
       undefined,
     );
     expect(refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
-    expect(adapter.cleanupBackup).toHaveBeenCalled();
+    expect(adapter.cleanupBackup).toHaveBeenCalledOnce();
   });
 
   it('can skip immediate auth refresh', async () => {
@@ -673,5 +720,224 @@ describe('applyProviderInstallPlan', () => {
     // be rolled back, and the broken rollback reload must not mask anything.
     expect(reloadModelProviders).toHaveBeenCalledTimes(2);
     expect(process.env['TEST_API_KEY']).toBe('before');
+  });
+
+  it('rolls back settings, runtime providers, and env when cancelled during refresh', async () => {
+    process.env['TEST_API_KEY'] = 'before-install';
+    const previousProviders = {
+      [AuthType.USE_OPENAI]: [{ id: 'previous', envKey: 'OLD_KEY' }],
+    };
+    const adapter = createAdapter(previousProviders);
+    let persistedSettings: Record<string, unknown> = {
+      'security.auth.selectedType': AuthType.USE_OPENAI,
+    };
+    let settingsBackup: Record<string, unknown> = {};
+    adapter.backup.mockImplementation(() => {
+      settingsBackup = structuredClone(persistedSettings);
+    });
+    adapter.setValue.mockImplementation((key: string, value: unknown) => {
+      persistedSettings[key] = value;
+    });
+    adapter.restore.mockImplementation(() => {
+      persistedSettings = settingsBackup;
+    });
+    const controller = new AbortController();
+    let resolveRefresh!: () => void;
+    let signalRefreshStarted!: () => void;
+    const refreshStarted = new Promise<void>((resolve) => {
+      signalRefreshStarted = resolve;
+    });
+    const refreshAuth = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveRefresh = resolve;
+          signalRefreshStarted();
+        }),
+    );
+    const reloadModelProviders = vi.fn();
+    const rollbackRuntime = vi.fn(async () => undefined);
+    const plan: ProviderInstallPlan = {
+      providerId: 'copilot',
+      authType: AuthType.USE_COPILOT,
+      env: { TEST_API_KEY: 'copilot-install' },
+      modelProviders: [
+        {
+          authType: AuthType.USE_OPENAI,
+          models: [{ id: 'copilot-model', envKey: 'TEST_API_KEY' }],
+          mergeStrategy: 'prepend-and-remove-owned',
+        },
+      ],
+    };
+
+    const install = applyProviderInstallPlan(plan, {
+      settings: adapter,
+      reloadModelProviders,
+      refreshAuth,
+      rollbackRuntime,
+      signal: controller.signal,
+    });
+    await refreshStarted;
+    controller.abort();
+    resolveRefresh();
+
+    await expect(install).rejects.toMatchObject({
+      step: 'refreshAuth',
+      authType: AuthType.USE_COPILOT,
+    });
+    expect(adapter.restore).toHaveBeenCalledTimes(1);
+    expect(persistedSettings).toEqual({
+      'security.auth.selectedType': AuthType.USE_OPENAI,
+    });
+    expect(process.env['TEST_API_KEY']).toBe('before-install');
+    expect(reloadModelProviders).toHaveBeenLastCalledWith(previousProviders);
+    expect(rollbackRuntime).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not let a stale cancelled transaction roll back a newer install', async () => {
+    const originalSettings = {
+      env: { TEST_API_KEY: 'before-a' },
+      security: { auth: { selectedType: AuthType.USE_OPENAI } },
+      model: { name: 'original-model', baseUrl: 'https://original.example/v1' },
+      modelProviders: {
+        [AuthType.USE_OPENAI]: [
+          { id: 'original-model', envKey: 'TEST_API_KEY' },
+        ],
+      },
+    };
+    let persistedSettings: Record<string, unknown> =
+      structuredClone(originalSettings);
+    let settingsBackup: Record<string, unknown> | undefined;
+    const adapter = createAdapter();
+    vi.mocked(adapter.getValue).mockImplementation((key: string) =>
+      getNestedValue(persistedSettings, key),
+    );
+    vi.mocked(adapter.getModelProviders).mockImplementation(
+      () =>
+        (getNestedValue(persistedSettings, 'modelProviders') ??
+          {}) as ModelProvidersConfig,
+    );
+    adapter.setValue.mockImplementation((key: string, value: unknown) => {
+      setNestedValue(persistedSettings, key, value);
+    });
+    adapter.backup.mockImplementation(() => {
+      settingsBackup = structuredClone(persistedSettings);
+    });
+    adapter.restore.mockImplementation(() => {
+      persistedSettings = structuredClone(settingsBackup!);
+    });
+    const runtime = {
+      authType: AuthType.USE_OPENAI,
+      model: 'original-model',
+      contentGenerator: 'original-generator',
+    };
+    let runtimeProviders: ModelProvidersConfig = structuredClone(
+      originalSettings.modelProviders,
+    );
+    const reloadModelProviders = vi.fn((providers: ModelProvidersConfig) => {
+      runtimeProviders = providers;
+    });
+    const syncAuthState = vi.fn((authType: AuthType, modelId: string) => {
+      runtime.authType = authType;
+      runtime.model = modelId;
+    });
+    const controllerA = new AbortController();
+    let resolveRefreshA!: () => void;
+    let signalRefreshAStarted!: () => void;
+    const refreshAStarted = new Promise<void>((resolve) => {
+      signalRefreshAStarted = resolve;
+    });
+    const refreshA = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveRefreshA = resolve;
+          signalRefreshAStarted();
+        }),
+    );
+    const rollbackRuntimeA = vi.fn(async () => {
+      runtime.authType = AuthType.USE_OPENAI;
+      runtime.model = 'original-model';
+      runtime.contentGenerator = 'original-generator';
+    });
+    const planA: ProviderInstallPlan = {
+      providerId: 'copilot-a',
+      authType: AuthType.USE_COPILOT,
+      env: { TEST_API_KEY: 'token-a' },
+      modelSelection: { modelId: 'copilot-model-a' },
+      modelProviders: [
+        {
+          authType: AuthType.USE_COPILOT,
+          models: [{ id: 'copilot-model-a', envKey: 'TEST_API_KEY' }],
+          mergeStrategy: 'prepend-and-remove-owned',
+          ownsModel: () => true,
+        },
+      ],
+    };
+    const planB: ProviderInstallPlan = {
+      providerId: 'copilot-b',
+      authType: AuthType.USE_COPILOT,
+      env: { TEST_API_KEY: 'token-b' },
+      modelSelection: { modelId: 'copilot-model-b' },
+      modelProviders: [
+        {
+          authType: AuthType.USE_COPILOT,
+          models: [{ id: 'copilot-model-b', envKey: 'TEST_API_KEY' }],
+          mergeStrategy: 'prepend-and-remove-owned',
+          ownsModel: () => true,
+        },
+      ],
+    };
+    let currentTransaction: 'a' | 'b' = 'a';
+    process.env['TEST_API_KEY'] = 'before-a';
+
+    const installA = applyProviderInstallPlan(planA, {
+      settings: adapter,
+      signal: controllerA.signal,
+      isCurrentTransaction: () => currentTransaction === 'a',
+      reloadModelProviders,
+      syncAuthState,
+      refreshAuth: refreshA,
+      rollbackRuntime: rollbackRuntimeA,
+    });
+    await refreshAStarted;
+    controllerA.abort();
+    currentTransaction = 'b';
+
+    await applyProviderInstallPlan(planB, {
+      settings: adapter,
+      isCurrentTransaction: () => currentTransaction === 'b',
+      reloadModelProviders,
+      syncAuthState,
+      refreshAuth: async () => {
+        runtime.contentGenerator = 'copilot-generator-b';
+      },
+    });
+    resolveRefreshA();
+
+    await expect(installA).rejects.toMatchObject({
+      step: 'refreshAuth',
+      authType: AuthType.USE_COPILOT,
+    });
+    expect(persistedSettings).toMatchObject({
+      env: { TEST_API_KEY: 'token-b' },
+      security: { auth: { selectedType: AuthType.USE_COPILOT } },
+      model: { name: 'copilot-model-b' },
+      modelProviders: {
+        [AuthType.USE_COPILOT]: [
+          { id: 'copilot-model-b', envKey: 'TEST_API_KEY' },
+        ],
+      },
+    });
+    expect(process.env['TEST_API_KEY']).toBe('token-b');
+    expect(runtimeProviders).toMatchObject({
+      [AuthType.USE_COPILOT]: [
+        { id: 'copilot-model-b', envKey: 'TEST_API_KEY' },
+      ],
+    });
+    expect(runtime).toEqual({
+      authType: AuthType.USE_COPILOT,
+      model: 'copilot-model-b',
+      contentGenerator: 'copilot-generator-b',
+    });
+    expect(rollbackRuntimeA).not.toHaveBeenCalled();
   });
 });

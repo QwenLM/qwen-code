@@ -638,6 +638,15 @@ export * from './utils/sideQuery.js';
 export * from './qwen/qwenOAuth2.js';
 
 // ============================================================================
+// GitHub Copilot CAPI
+// ============================================================================
+
+export * from './copilot/copilot-auth.js';
+export * from './copilot/copilot-fetch.js';
+export * from './copilot/copilot-route.js';
+export * from './copilot/createCopilotContentGenerator.js';
+
+// ============================================================================
 // Message Bus Types
 // ============================================================================
 

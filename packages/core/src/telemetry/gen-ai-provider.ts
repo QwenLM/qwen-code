@@ -8,10 +8,12 @@ export type GenAiOperationName = 'chat' | 'generate_content';
 export type GenAiOutputType = 'text' | 'json' | 'image' | 'speech';
 export type GenAiAuthType =
   | 'openai'
+  | 'openai-responses'
   | 'qwen-oauth'
   | 'gemini'
   | 'vertex-ai'
-  | 'anthropic';
+  | 'anthropic'
+  | 'copilot';
 
 interface ProviderConfig {
   authType?: GenAiAuthType;

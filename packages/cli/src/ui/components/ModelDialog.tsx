@@ -16,6 +16,8 @@ import {
   isImageCapable,
   parseVisionModelSetting,
   resolveModelId,
+  discoverGithubToken,
+  CopilotTokenNotFoundError,
   type AvailableModel as CoreAvailableModel,
   type Config,
   type ContentGeneratorConfig,
@@ -23,10 +25,12 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { SettingScope } from '../../config/settings.js';
 import { useKeypress } from '../hooks/useKeypress.js';
+import type { UiProviderTransactionContext } from '../hooks/use-ui-provider-transaction.js';
 import { theme } from '../semantic-colors.js';
 import { DescriptiveRadioButtonSelect } from './shared/DescriptiveRadioButtonSelect.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
+import { UIActionsContext } from '../contexts/UIActionsContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { t } from '../../i18n/index.js';
@@ -45,6 +49,20 @@ function formatModalities(modalities?: InputModalities): string {
   if (modalities.video) parts.push(t('video'));
   if (parts.length === 0) return t('text-only');
   return `${t('text')} · ${parts.join(' · ')}`;
+}
+
+const AUTH_TYPE_LABELS: Record<AuthType, string> = {
+  [AuthType.QWEN_OAUTH]: 'Qwen OAuth',
+  [AuthType.USE_OPENAI]: 'OpenAI',
+  [AuthType.USE_OPENAI_RESPONSES]: 'OpenAI Responses',
+  [AuthType.USE_ANTHROPIC]: 'Anthropic',
+  [AuthType.USE_COPILOT]: 'GitHub Copilot',
+  [AuthType.USE_GEMINI]: 'Gemini',
+  [AuthType.USE_VERTEX_AI]: 'Vertex AI',
+};
+
+function authTypeLabel(authType: AuthType): string {
+  return AUTH_TYPE_LABELS[authType] ?? String(authType);
 }
 
 /**
@@ -301,6 +319,7 @@ export function ModelDialog({
 }: ModelDialogProps): React.JSX.Element {
   const config = useContext(ConfigContext);
   const uiState = useContext(UIStateContext);
+  const uiActions = useContext(UIActionsContext);
   const settings = useSettings();
 
   // Local error state for displaying errors within the dialog
@@ -349,7 +368,9 @@ export function ModelDialog({
     const authTypeOrder: AuthType[] = [
       AuthType.QWEN_OAUTH,
       AuthType.USE_OPENAI,
+      AuthType.USE_OPENAI_RESPONSES,
       AuthType.USE_ANTHROPIC,
+      AuthType.USE_COPILOT,
       AuthType.USE_GEMINI,
       AuthType.USE_VERTEX_AI,
     ];
@@ -398,7 +419,7 @@ export function ModelDialog({
   const MODEL_OPTIONS = useMemo(
     () =>
       availableModelEntries.map(
-        ({ authType: t2, model, isRuntime, snapshotId }) => {
+        ({ authType: t2, model, isRuntime, snapshotId }, index) => {
           const value =
             isRuntime && snapshotId
               ? snapshotId
@@ -406,8 +427,22 @@ export function ModelDialog({
 
           const isQwenOAuth = t2 === AuthType.QWEN_OAUTH;
 
+          // Show a section divider when the authType changes between
+          // consecutive entries. The first entry always shows a divider
+          // (no previous entry). Runtime models are grouped first, then
+          // registry models grouped by authType, so each group boundary
+          // gets a divider.
+          const previousAuthType =
+            index > 0 ? availableModelEntries[index - 1].authType : undefined;
+          const showSectionDivider = previousAuthType !== t2;
+
           const title = (
             <Text>
+              {showSectionDivider && (
+                <Text color="gray">
+                  ── {authTypeLabel(t2)} ──{'\n'}
+                </Text>
+              )}
               <Text
                 bold
                 color={
@@ -669,6 +704,22 @@ export function ModelDialog({
   const closeLatchRef = useRef(false);
   const selectionInFlightRef = useRef(false);
   const selectionCommittedRef = useRef(false);
+  const runUiProviderTransaction = uiActions?.runUiProviderTransaction;
+  const runPrimaryModelSwitch = useCallback(
+    <T,>(
+      operation: (context: UiProviderTransactionContext) => Promise<T>,
+    ): Promise<T | undefined> => {
+      if (runUiProviderTransaction) {
+        return runUiProviderTransaction(operation);
+      }
+      return operation({
+        signal: new AbortController().signal,
+        canPublish: () => true,
+        ownsRollback: () => true,
+      });
+    },
+    [runUiProviderTransaction],
+  );
   const reportAuxiliaryModelSelection = useCallback(
     (feedbackItem: HistoryItemWithoutId & Record<string, unknown>) => {
       uiState?.historyManager.addItem(feedbackItem, Date.now());
@@ -798,7 +849,14 @@ export function ModelDialog({
         return;
       }
 
-      hydrateApiKeyEnvFromSettings(settings, selectedEntry?.model.envKey);
+      if (
+        isFastModelMode ||
+        isVisionModelMode ||
+        isCompactionModelMode ||
+        isImageModelMode
+      ) {
+        hydrateApiKeyEnvFromSettings(settings, selectedEntry?.model.envKey);
+      }
 
       // Fast model mode: save authType:modelId so duplicate model ids across
       // providers remain unambiguous. baseUrl is intentionally discarded.
@@ -949,109 +1007,205 @@ export function ModelDialog({
         return;
       }
 
-      let after: ContentGeneratorConfig | undefined;
-      let effectiveAuthType: AuthType | undefined;
-      let effectiveModelId = selected;
-      let isRuntime = false;
-
       if (!config) {
         onClose();
         return;
       }
 
+      selectionInFlightRef.current = true;
       try {
-        // Determine if this is a runtime model selection
-        // Runtime model format: $runtime|${authType}|${modelId}
-        isRuntime = selected.startsWith('$runtime|');
+        await runPrimaryModelSwitch(async ({ canPublish, ownsRollback }) => {
+          if (!canPublish()) return;
 
-        let selectedAuthType: AuthType;
-        let modelId: string;
+          const envKey = selectedEntry?.model.envKey;
+          const previousEnvValue = envKey ? process.env[envKey] : undefined;
+          hydrateApiKeyEnvFromSettings(settings, envKey);
+          let switchedRuntime = false;
+          let previousRuntime:
+            | {
+                authType: AuthType | undefined;
+                modelId: string;
+                baseUrl: string | null | undefined;
+              }
+            | undefined;
 
-        let selectedBaseUrl: string | undefined;
-        if (isRuntime) {
-          // For runtime models, extract authType from the snapshot ID
-          // Format: $runtime|${authType}|${modelId}
-          const parts = selected.split('|');
-          if (parts.length >= 2 && parts[0] === '$runtime') {
-            selectedAuthType = parts[1] as AuthType;
-          } else {
-            selectedAuthType = authType as AuthType;
+          try {
+            let after: ContentGeneratorConfig | undefined;
+            let effectiveAuthType: AuthType | undefined;
+            let effectiveModelId = selected;
+            let isRuntime = false;
+
+            try {
+              // Determine if this is a runtime model selection
+              // Runtime model format: $runtime|${authType}|${modelId}
+              isRuntime = selected.startsWith('$runtime|');
+
+              let selectedAuthType: AuthType;
+              let modelId: string;
+
+              let selectedBaseUrl: string | undefined;
+              if (isRuntime) {
+                // For runtime models, extract authType from the snapshot ID
+                // Format: $runtime|${authType}|${modelId}
+                const parts = selected.split('|');
+                if (parts.length >= 2 && parts[0] === '$runtime') {
+                  selectedAuthType = parts[1] as AuthType;
+                } else {
+                  selectedAuthType = authType as AuthType;
+                }
+                modelId = selected; // Pass the full snapshot ID to switchModel
+              } else {
+                const parsed = parseModelSelectionKey(selected);
+                selectedAuthType = (parsed.authType || authType) as AuthType;
+                modelId = parsed.modelId;
+                selectedBaseUrl = parsed.baseUrl;
+              }
+
+              // Auto-switch auth when a non-Copilot user picks a Copilot model.
+              // Copilot models are exempt from API-key validation, so switchModel
+              // succeeds — but the first LLM request fails with
+              // CopilotTokenNotFoundError if no GitHub token is cached. Proactively
+              // discover the token here: if found, proceed with the switch
+              // (switchModel triggers refreshAuth, which recreates the content
+              // generator with the Copilot wrapper). If not found, close the
+              // model dialog and open AuthDialog so the user can complete device
+              // flow instead of hitting a cryptic error on the next prompt.
+              if (
+                selectedAuthType === AuthType.USE_COPILOT &&
+                authType !== AuthType.USE_COPILOT
+              ) {
+                try {
+                  await discoverGithubToken();
+                  if (!canPublish()) return;
+                } catch (error) {
+                  if (!canPublish()) return;
+                  if (error instanceof CopilotTokenNotFoundError) {
+                    const feedbackItem = {
+                      type: 'info' as const,
+                      text: t(
+                        'No GitHub Copilot token found. Complete /auth to set up Copilot.',
+                      ),
+                    };
+                    uiState?.historyManager.addItem(feedbackItem, Date.now());
+                    closeLatchRef.current = true;
+                    onClose();
+                    uiActions?.auth?.openAuthDialog(AuthType.USE_COPILOT);
+                    return;
+                  }
+                  throw error;
+                }
+              }
+
+              previousRuntime = {
+                authType: config.getAuthType(),
+                modelId:
+                  config.getActiveRuntimeModelSnapshot()?.id ??
+                  config.getModel(),
+                baseUrl: config.getCurrentModelRegistryBaseUrl(),
+              };
+              await config.switchModel(selectedAuthType, modelId, {
+                ...(selectedAuthType !== authType &&
+                selectedAuthType === AuthType.QWEN_OAUTH
+                  ? { requireCachedCredentials: true }
+                  : {}),
+                baseUrl: selectedBaseUrl,
+              });
+              switchedRuntime = true;
+              if (!canPublish()) return;
+              selectionCommittedRef.current = true;
+
+              if (!isRuntime) {
+                const event = new ModelSlashCommandEvent(modelId);
+                logModelSlashCommand(config, event);
+              }
+
+              after = config.getContentGeneratorConfig?.() as
+                | ContentGeneratorConfig
+                | undefined;
+              effectiveAuthType =
+                after?.authType ?? selectedAuthType ?? authType;
+              effectiveModelId = after?.model ?? modelId;
+            } catch (error) {
+              if (!canPublish()) return;
+              const baseErrorMessage =
+                error instanceof Error ? error.message : String(error);
+              // Use parsed modelId for display to avoid showing raw selection key
+              // (which contains invisible \0 separator between modelId and baseUrl)
+              const displayModelId = isRuntime
+                ? effectiveModelId
+                : parseModelSelectionKey(selected).modelId;
+              const errorPrefix = isRuntime
+                ? 'Failed to switch to runtime model.'
+                : `Failed to switch model to '${displayModelId}'.`;
+              setErrorMessage(`${errorPrefix}\n\n${baseErrorMessage}`);
+              return;
+            }
+
+            if (!canPublish()) return;
+            try {
+              handleModelSwitchSuccess({
+                config,
+                settings,
+                uiState,
+                after,
+                effectiveAuthType,
+                effectiveModelId,
+                // Persist the selected provider's baseUrl so the right provider is
+                // restored next launch when several share the same id. Pair it with the
+                // same resolved config that effectiveModelId comes from (`after`) so the
+                // persisted (model.name, model.baseUrl) stays consistent even if
+                // switchModel transforms the id; fall back to the picker entry's
+                // baseUrl. Runtime models are keyed by snapshot id, so no disambiguator.
+                effectiveBaseUrl: isRuntime
+                  ? undefined
+                  : (after?.baseUrl ?? selectedEntry?.model.baseUrl),
+                isRuntime,
+                persistScope,
+              });
+            } catch (error) {
+              if (!canPublish()) return;
+              const errorMessage =
+                error instanceof Error ? error.message : String(error);
+              setErrorMessage(
+                `${t('Model switched, but the selection could not be saved.')}\n\n${errorMessage}`,
+              );
+              return;
+            }
+            if (!canPublish()) return;
+            closeLatchRef.current = true;
+            onClose();
+          } finally {
+            try {
+              if (
+                !canPublish() &&
+                switchedRuntime &&
+                previousRuntime &&
+                ownsRollback()
+              ) {
+                if (previousRuntime.authType === undefined) {
+                  config.resetAuth(previousRuntime.modelId);
+                } else {
+                  await config.switchModel(
+                    previousRuntime.authType,
+                    previousRuntime.modelId,
+                    { baseUrl: previousRuntime.baseUrl ?? undefined },
+                  );
+                }
+              }
+            } finally {
+              if (!canPublish() && envKey) {
+                if (previousEnvValue === undefined) {
+                  delete process.env[envKey];
+                } else {
+                  process.env[envKey] = previousEnvValue;
+                }
+              }
+            }
           }
-          modelId = selected; // Pass the full snapshot ID to switchModel
-        } else {
-          const parsed = parseModelSelectionKey(selected);
-          selectedAuthType = (parsed.authType || authType) as AuthType;
-          modelId = parsed.modelId;
-          selectedBaseUrl = parsed.baseUrl;
-        }
-
-        selectionInFlightRef.current = true;
-        try {
-          await config.switchModel(selectedAuthType, modelId, {
-            ...(selectedAuthType !== authType &&
-            selectedAuthType === AuthType.QWEN_OAUTH
-              ? { requireCachedCredentials: true }
-              : {}),
-            baseUrl: selectedBaseUrl,
-          });
-          selectionCommittedRef.current = true;
-        } finally {
-          selectionInFlightRef.current = false;
-        }
-
-        if (!isRuntime) {
-          const event = new ModelSlashCommandEvent(modelId);
-          logModelSlashCommand(config, event);
-        }
-
-        after = config.getContentGeneratorConfig?.() as
-          | ContentGeneratorConfig
-          | undefined;
-        effectiveAuthType = after?.authType ?? selectedAuthType ?? authType;
-        effectiveModelId = after?.model ?? modelId;
-      } catch (e) {
-        const baseErrorMessage = e instanceof Error ? e.message : String(e);
-        // Use parsed modelId for display to avoid showing raw selection key
-        // (which contains invisible \0 separator between modelId and baseUrl)
-        const displayModelId = isRuntime
-          ? effectiveModelId
-          : parseModelSelectionKey(selected).modelId;
-        const errorPrefix = isRuntime
-          ? 'Failed to switch to runtime model.'
-          : `Failed to switch model to '${displayModelId}'.`;
-        setErrorMessage(`${errorPrefix}\n\n${baseErrorMessage}`);
-        return;
-      }
-
-      try {
-        handleModelSwitchSuccess({
-          config,
-          settings,
-          uiState,
-          after,
-          effectiveAuthType,
-          effectiveModelId,
-          // Persist the selected provider's baseUrl so the right provider is
-          // restored next launch when several share the same id. Pair it with the
-          // same resolved config that effectiveModelId comes from (`after`) so the
-          // persisted (model.name, model.baseUrl) stays consistent even if
-          // switchModel transforms the id; fall back to the picker entry's
-          // baseUrl. Runtime models are keyed by snapshot id, so no disambiguator.
-          effectiveBaseUrl: isRuntime
-            ? undefined
-            : (after?.baseUrl ?? selectedEntry?.model.baseUrl),
-          isRuntime,
-          persistScope,
         });
-      } catch (e) {
-        const errorMessage = e instanceof Error ? e.message : String(e);
-        setErrorMessage(
-          `${t('Model switched, but the selection could not be saved.')}\n\n${errorMessage}`,
-        );
-        return;
+      } finally {
+        selectionInFlightRef.current = false;
       }
-      closeLatchRef.current = true;
-      onClose();
     },
     [
       authType,
@@ -1068,6 +1222,8 @@ export function ModelDialog({
       availableModelEntries,
       persistScope,
       reportAuxiliaryModelSelection,
+      runPrimaryModelSwitch,
+      uiActions,
     ],
   );
 
@@ -1159,18 +1315,19 @@ export function ModelDialog({
               highlightedEntry.model.contextWindowSize,
             )}
           />
-          {highlightedEntry.authType !== AuthType.QWEN_OAUTH && (
-            <>
-              <DetailRow
-                label="Base URL"
-                value={highlightedEntry.model.baseUrl ?? t('(default)')}
-              />
-              <DetailRow
-                label="API Key"
-                value={highlightedEntry.model.envKey ?? t('(not set)')}
-              />
-            </>
-          )}
+          {highlightedEntry.authType !== AuthType.QWEN_OAUTH &&
+            highlightedEntry.authType !== AuthType.USE_COPILOT && (
+              <>
+                <DetailRow
+                  label="Base URL"
+                  value={highlightedEntry.model.baseUrl ?? t('(default)')}
+                />
+                <DetailRow
+                  label="API Key"
+                  value={highlightedEntry.model.envKey ?? t('(not set)')}
+                />
+              </>
+            )}
         </Box>
       )}
 

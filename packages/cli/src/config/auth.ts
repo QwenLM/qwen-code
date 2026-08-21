@@ -20,6 +20,7 @@ import { t } from '../i18n/index.js';
  */
 const DEFAULT_ENV_KEYS: Record<string, string> = {
   [AuthType.USE_OPENAI]: 'OPENAI_API_KEY',
+  [AuthType.USE_OPENAI_RESPONSES]: 'OPENAI_API_KEY',
   [AuthType.USE_ANTHROPIC]: 'ANTHROPIC_API_KEY',
   [AuthType.USE_GEMINI]: 'GEMINI_API_KEY',
   [AuthType.USE_VERTEX_AI]: 'GOOGLE_API_KEY',
@@ -233,7 +234,10 @@ export function validateAuthMethod(
   const settings = loadSettings(process.cwd(), false);
   loadEnvironment(settings.merged);
 
-  if (authMethod === AuthType.USE_OPENAI) {
+  if (
+    authMethod === AuthType.USE_OPENAI ||
+    authMethod === AuthType.USE_OPENAI_RESPONSES
+  ) {
     const { hasKey, checkedEnvKey, isExplicitEnvKey } = hasApiKeyForAuth(
       authMethod,
       settings.merged,
@@ -265,6 +269,10 @@ export function validateAuthMethod(
     return t(
       'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch to Coding Plan, OpenRouter, Fireworks AI, or another provider.',
     );
+  }
+
+  if (authMethod === AuthType.USE_COPILOT) {
+    return null;
   }
 
   if (authMethod === AuthType.USE_ANTHROPIC) {

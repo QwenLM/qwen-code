@@ -1182,6 +1182,7 @@ export const AUTH_PREFLIGHT_ENV_KEYS: Readonly<
   Record<string, readonly string[]>
 > = {
   openai: ['OPENAI_API_KEY'],
+  'openai-responses': ['OPENAI_API_KEY'],
   anthropic: ['ANTHROPIC_API_KEY'],
   gemini: ['GEMINI_API_KEY'],
   'vertex-ai': ['GOOGLE_API_KEY'],
@@ -1194,6 +1195,7 @@ export const AUTH_PREFLIGHT_ENV_KEYS: Readonly<
  */
 export const AUTH_PREFLIGHT_WAIVED_AUTH_TYPES: ReadonlySet<string> = new Set([
   'qwen-oauth',
+  'copilot',
 ]);
 
 type QwenMemorySettings = {
@@ -13306,8 +13308,10 @@ class QwenAgent implements Agent {
         .getAllConfiguredModels()
         .filter(
           (model) =>
-            model.authType !== AuthType.QWEN_OAUTH ||
-            currentAuthType === AuthType.QWEN_OAUTH,
+            (model.authType !== AuthType.QWEN_OAUTH ||
+              currentAuthType === AuthType.QWEN_OAUTH) &&
+            (model.authType !== AuthType.USE_COPILOT ||
+              currentAuthType === AuthType.USE_COPILOT),
         ),
     );
   }

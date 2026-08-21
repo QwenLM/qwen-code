@@ -348,6 +348,9 @@ export class AnthropicContentGenerator implements ContentGenerator {
       maxRetries: contentGeneratorConfig.maxRetries,
       defaultHeaders,
       ...runtimeOptions,
+      ...(contentGeneratorConfig.fetch
+        ? { fetch: contentGeneratorConfig.fetch }
+        : {}),
     });
 
     this.converter = new AnthropicContentConverter(
@@ -787,6 +790,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
         dropUnsignedAssistantThinking,
         stripAssistantThinking,
         stripTrailingAssistantPrefill,
+        // Manual (non-adaptive) extended thinking requires an assistant
+        // turn to begin with a thinking block whenever a tool_use remains
+        // in it; adaptive thinking relaxes this. Applied to every such turn
+        // in history, not just the latest -- see
+        // ensureLeadingAssistantThinking's doc in the converter.
+        ensureLeadingAssistantThinking: thinking?.type === 'enabled',
         enableCacheControl,
         useGlobalCacheScope,
         cacheRetention,

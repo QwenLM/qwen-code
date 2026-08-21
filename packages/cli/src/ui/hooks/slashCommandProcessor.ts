@@ -79,6 +79,7 @@ import {
 import { clearScreen } from '../../utils/stdioHelpers.js';
 import { useKeypress } from './useKeypress.js';
 import { isPickerOnlyModelInvocation } from '../commands/modelCommand.js';
+import type { UiProviderTransaction } from './use-ui-provider-transaction.js';
 import {
   type ExtensionUpdateAction,
   type ExtensionUpdateStatus,
@@ -230,6 +231,7 @@ export const useSlashCommandProcessor = (
   updateItem: UseHistoryManagerReturn['updateItem'],
   setSessionName?: (name: string | null) => void,
   extensionRefreshState?: ExtensionRefreshState,
+  runUiProviderTransaction?: UiProviderTransaction['run'],
 ) => {
   const fallbackExtensionRefreshStateRef = useRef<ExtensionRefreshState | null>(
     null,
@@ -513,6 +515,7 @@ export const useSlashCommandProcessor = (
         settings,
         logger,
         extensionRefreshState: activeExtensionRefreshState,
+        runUiProviderTransaction,
       },
       ui: {
         get history() {
@@ -578,6 +581,7 @@ export const useSlashCommandProcessor = (
       extensionsUpdateState,
       isIdleRef,
       activeExtensionRefreshState,
+      runUiProviderTransaction,
     ],
   );
 
@@ -940,6 +944,7 @@ export const useSlashCommandProcessor = (
 
       let hasError = false;
       let delegatedToRecursiveInvocation = false;
+      let suppressOutputAndTelemetry = false;
 
       const subcommand =
         resolvedCommandPath.length > 1
@@ -1127,6 +1132,10 @@ export const useSlashCommandProcessor = (
                     toolArgs: result.toolArgs,
                   };
                 case 'message':
+                  if (result.suppressOutputAndTelemetry) {
+                    suppressOutputAndTelemetry = true;
+                    return { type: 'handled' };
+                  }
                   // Picker-shaped commands can still reject their arguments
                   // before opening a dialog. Keep those failures paired with
                   // the invocation in both live and reconstructed history.
@@ -1534,6 +1543,7 @@ export const useSlashCommandProcessor = (
             primaryCommand === 'advisor' &&
             commandToExecute?.kind === CommandKind.BUILT_IN;
           const shouldRecord =
+            !suppressOutputAndTelemetry &&
             !delegatedToRecursiveInvocation &&
             !isBuiltInAdvisor &&
             !SLASH_COMMANDS_SKIP_RECORDING.has(primaryCommand);
@@ -1565,7 +1575,8 @@ export const useSlashCommandProcessor = (
           config &&
           resolvedCommandPath[0] &&
           !hasError &&
-          !delegatedToRecursiveInvocation
+          !delegatedToRecursiveInvocation &&
+          !suppressOutputAndTelemetry
         ) {
           const event = makeSlashCommandEvent({
             command: resolvedCommandPath[0],

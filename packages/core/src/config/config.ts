@@ -1839,9 +1839,9 @@ export class Config {
   // announced and avoid double-announcing in the same turn's tail reminder.
   private pendingInlineAnnouncedSkillKeys = new Set<string>();
   private fileSystemService: FileSystemService;
-  private contentGeneratorConfig!: ContentGeneratorConfig;
+  private contentGeneratorConfig?: ContentGeneratorConfig;
   private contentGeneratorConfigSources: ContentGeneratorConfigSources = {};
-  private contentGenerator!: ContentGenerator;
+  private contentGenerator?: ContentGenerator;
   private readonly embeddingModel: string;
 
   private modelsConfig!: ModelsConfig;
@@ -1973,7 +1973,7 @@ export class Config {
   private activeTodoWorkChainOwners = new Map<string, string>();
   private activeTodoReminderTurns = new Map<string, number>();
   private geminiClient!: GeminiClient;
-  private baseLlmClient!: BaseLlmClient;
+  private baseLlmClient?: BaseLlmClient;
   private cronScheduler: CronScheduler | null = null;
   private readonly fileFiltering: {
     respectGitIgnore: boolean;
@@ -3712,9 +3712,8 @@ export class Config {
   }
 
   getContentGenerator(): ContentGenerator {
-    return (
-      getRuntimeContentGenerator()?.contentGenerator ?? this.contentGenerator
-    );
+    return (getRuntimeContentGenerator()?.contentGenerator ??
+      this.contentGenerator)!;
   }
 
   /**
@@ -3764,7 +3763,14 @@ export class Config {
   /**
    * Refresh authentication and rebuild ContentGenerator.
    */
-  async refreshAuth(authMethod: AuthType, isInitialAuth?: boolean) {
+  async refreshAuth(
+    authMethod: AuthType,
+    isInitialAuth?: boolean,
+    isCurrentTransaction?: () => boolean,
+  ) {
+    if (isCurrentTransaction?.() === false) {
+      return;
+    }
     // The global reasoning effort (settings.model.reasoningEffort, seeded into
     // the generation config by the CLI) is NOT a provider field, but
     // syncAfterAuthRefresh → applyResolvedModelDefaults overwrites every
@@ -3797,12 +3803,18 @@ export class Config {
       },
     );
     const newContentGeneratorConfig = config;
-    this.contentGenerator = await createContentGenerator(
+    const newContentGenerator = await createContentGenerator(
       newContentGeneratorConfig,
       this,
       requireCached ? true : isInitialAuth,
     );
+    // Generator creation is not abortable, so discard a stale result before it
+    // can replace the runtime selected by a newer authentication transaction.
+    if (isCurrentTransaction?.() === false) {
+      return;
+    }
     // Only assign to instance properties after successful initialization
+    this.contentGenerator = newContentGenerator;
     this.contentGeneratorConfig = newContentGeneratorConfig;
     this.contentGeneratorConfigSources = sources;
     // Auth flows call refreshAuth directly — no model-change notification
@@ -3815,7 +3827,7 @@ export class Config {
     }
 
     // Initialize BaseLlmClient now that the ContentGenerator is available
-    this.baseLlmClient = new BaseLlmClient(this.contentGenerator, this);
+    this.baseLlmClient = new BaseLlmClient(newContentGenerator, this);
 
     // Fire auth_success notification hook (supports both interactive & non-interactive)
     const messageBus = this.getMessageBus();
@@ -3831,6 +3843,17 @@ export class Config {
         // and notification hooks should not block the auth flow
       });
     }
+  }
+
+  /** Reset the live runtime after a cancelled first-time authentication. */
+  resetAuth(modelId?: string): void {
+    resetPreloadedContentGenerator(this.contentGenerator);
+    this.modelsConfig.resetAuth(modelId);
+    this.contentGenerator = undefined;
+    this.contentGeneratorConfig = undefined;
+    this.contentGeneratorConfigSources = {};
+    this.baseLlmClient = undefined;
+    this.publishModelEnv();
   }
 
   /**
@@ -4259,10 +4282,8 @@ export class Config {
   }
 
   getContentGeneratorConfig(): ContentGeneratorConfig {
-    return (
-      getRuntimeContentGenerator()?.contentGeneratorConfig ??
-      this.contentGeneratorConfig
-    );
+    return (getRuntimeContentGenerator()?.contentGeneratorConfig ??
+      this.contentGeneratorConfig)!;
   }
 
   getContentGeneratorConfigSources(): ContentGeneratorConfigSources {
