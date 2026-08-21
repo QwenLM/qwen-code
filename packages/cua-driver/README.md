@@ -72,7 +72,7 @@ existing-profile access now requires a trusted launch grant, bounded manifest,
 or embedding-host authorization.
 
 Python applications import `cua_driver`. TypeScript applications import the
-Qwen-owned `@qwen-code/qwen-cua-driver` package. Both use the same
+Qwen-owned `@qwen-code/cua-sdk` package. Both use the same
 in-process native runtime; MCP remains the agent-facing boundary implemented by
 `qwen-cua-driver`.
 

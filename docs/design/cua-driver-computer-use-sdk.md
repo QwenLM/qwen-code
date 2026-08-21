@@ -27,15 +27,48 @@ This stage does not:
 
 ```text
 ordinary Node.js program
-  -> JavaScript Computer Use wrapper
-  -> typed cua-driver TypeScript SDK
+  -> @qwen-code/cua-sdk/computer-use
+  -> @qwen-code/cua-sdk typed driver API
   -> cua-driver runtime
   -> AX / UIA / AT-SPI platform implementation
 ```
 
 The wrapper calls the typed SDK directly. It does not route calls through Qwen Code or a second tool protocol. It preserves cua-driver's existing runtime, permission, transport, and lifecycle behavior.
 
-The TypeScript SDK is distributed as `@qwen-code/qwen-cua-driver`, with matching Qwen-scoped native optional packages. The synchronized TryCua release is source provenance only; neither the wrapper nor a published Qwen artifact imports or resolves the upstream npm package.
+The TypeScript SDK and Computer Use wrapper are distributed together as the
+single `@qwen-code/cua-sdk` npm package. The package root exposes the generated
+typed driver API and the `/computer-use` subpath exposes the high-level wrapper.
+There is no driver npm package and there are no platform npm packages.
+
+The matching `qwen-cua-driver` GitHub Release remains the only native artifact
+channel. During npm installation, `@qwen-code/cua-sdk` downloads the exact
+same-version binary archive, verifies it against that release's
+`checksums.txt`, and caches only the SDK library plus Node runtime. An explicit
+native-directory override supports source builds and release dry-runs without
+changing the production resolution path. The synchronized TryCua release is
+source provenance only; no published Qwen artifact imports or resolves the
+upstream npm package.
+
+## Release contract
+
+One version identifies both release surfaces:
+
+1. `cua-driver-rs-v<version>` publishes the driver, SDK library, Node runtime,
+   installers, and checksums to the Qwen GitHub Release.
+2. `@qwen-code/cua-sdk@<version>` publishes the platform-neutral JavaScript,
+   generated bindings, declarations, downloader, and Computer Use wrapper.
+
+Production publication is ordered. The GitHub Release must be complete before
+the packed npm artifact is installed without overrides against the public
+release. Only after that real installation and native-load smoke test succeeds
+may npm publication run. A retry accepts an already-published npm version only
+when its registry integrity matches the packed artifact.
+
+The workflow dry-run builds every native target, verifies the release archive
+contract, packs exactly one npm tarball, installs it into a clean consumer
+project using the just-built native payload, and runs the native-load smoke
+test. It creates no tag, GitHub Release, npm version, installer-version PR, or
+machine-wide driver installation.
 
 ## Observation revision contract
 

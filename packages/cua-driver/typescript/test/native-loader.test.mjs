@@ -13,18 +13,15 @@ const libraryName =
     : process.platform === "win32"
       ? "cua_driver_sdk.dll"
       : "libcua_driver_sdk.so"
-const nodeTriple =
+const nativeKey =
   process.platform === "darwin"
-    ? `darwin-${process.arch}`
+    ? "darwin-universal"
     : process.platform === "win32"
-      ? `win32-${process.arch}-msvc`
-      : `linux-${process.arch}-${process.report.getReport().header.glibcVersionRuntime ? "gnu" : "musl"}`
-const library = path.resolve(
-  testDirectory,
-  "../node_modules/@qwen-code",
-  `qwen-cua-driver-${nodeTriple}`,
-  libraryName,
-)
+      ? `windows-${process.arch === "x64" ? "x86_64" : "arm64"}`
+      : `linux-${process.arch === "x64" ? "x86_64" : "arm64"}`
+const library = process.env.QWEN_CUA_SDK_NATIVE_DIR
+  ? path.resolve(process.env.QWEN_CUA_SDK_NATIVE_DIR, libraryName)
+  : path.resolve(testDirectory, "../.native", nativeKey, libraryName)
 
 if (process.env.CUA_DRIVER_REQUIRE_UNIFFI === "1" && !existsSync(library)) {
   throw new Error(`required staged UniFFI library is missing: ${library}`)
@@ -71,12 +68,12 @@ process.stdin.on("end", () => server.close(() => process.exit(0)));
     )
     chmodSync(binaryPath, 0o755)
 
-    const { EmbeddedCuaDriverHost } = await import("@qwen-code/qwen-cua-driver/embedded")
+    const { EmbeddedCuaDriverHost } = await import("@qwen-code/cua-sdk/embedded")
     const embedded = new EmbeddedCuaDriverHost(binaryPath, "com.example.t3")
 
     try {
       const connection = await embedded.start()
-      const sdk = await import("@qwen-code/qwen-cua-driver")
+      const sdk = await import("@qwen-code/cua-sdk")
       const driver = sdk.CuaDriver.connect(connection.socketPath)
       assert.equal(driver.socketPath(), connection.socketPath)
       assert.deepEqual(JSON.parse(await driver.listToolsJson()), {
@@ -122,7 +119,7 @@ test(
     try {
       await readyPromise
       assert.equal(existsSync(socketPath), true)
-      const sdk = await import("@qwen-code/qwen-cua-driver")
+      const sdk = await import("@qwen-code/cua-sdk")
       const {
         ActionEffect,
         ActionRoute,
@@ -137,11 +134,11 @@ test(
       } = sdk
       assert.equal("StdioMcpTransport" in sdk, false)
       await assert.rejects(
-        import("@qwen-code/qwen-cua-driver/sdk"),
+        import("@qwen-code/cua-sdk/sdk"),
         error => error?.code === "ERR_PACKAGE_PATH_NOT_EXPORTED",
       )
       await assert.rejects(
-        import("@qwen-code/qwen-cua-driver/native"),
+        import("@qwen-code/cua-sdk/native"),
         error => error?.code === "ERR_PACKAGE_PATH_NOT_EXPORTED",
       )
       const driver = CuaDriver.connect(socketPath)
@@ -235,7 +232,7 @@ test(
   "generated Node SDK can own the runtime in process",
   { skip: !existsSync(library), timeout: 10_000 },
   async () => {
-    const { CuaDriver, DriverExecutionMode } = await import("@qwen-code/qwen-cua-driver")
+    const { CuaDriver, DriverExecutionMode } = await import("@qwen-code/cua-sdk")
     const driver = CuaDriver.create(undefined)
     try {
       assert.equal(driver.executionMode(), DriverExecutionMode.Embedded)

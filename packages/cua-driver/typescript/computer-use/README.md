@@ -1,8 +1,8 @@
-# @qwen-code/computer-use
+# @qwen-code/cua-sdk/computer-use
 
-Thin Computer Use wrapper over the typed [`@qwen-code/qwen-cua-driver`](..) TypeScript
-SDK for ordinary Node.js programs. It does not depend on Qwen Code, a Node
-REPL, or a Skill.
+Thin Computer Use wrapper included in the single `@qwen-code/cua-sdk` npm
+package. It calls that package's typed driver API directly and does not depend
+on Qwen Code, a Node REPL, or a Skill.
 
 The wrapper exposes a small surface — application discovery, exact-window
 observation, opaque element-token actions, and state verification — while
@@ -24,7 +24,7 @@ behavior; observations then report `revisionSupported: false`.
 ## Usage
 
 ```js
-import { ComputerUse } from "@qwen-code/computer-use";
+import { ComputerUse } from "@qwen-code/cua-sdk/computer-use";
 
 const computer = await ComputerUse.create(); // configured in-process runtime + trusted session
 try {
