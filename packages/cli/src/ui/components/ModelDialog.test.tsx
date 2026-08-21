@@ -882,7 +882,7 @@ describe('<ModelDialog />', () => {
             baseUrl: 'https://vision.example.com/api/v1',
             envKey: 'IMAGE_API_KEY',
             visionOnly: true,
-            supportsImageGeneration: true,
+            imageOnly: true,
           },
           {
             id: 'image-without-credentials',
@@ -921,7 +921,14 @@ describe('<ModelDialog />', () => {
 
     expect(getByText('Select Image Model')).toBeDefined();
     const selectProps = mockedSelect.mock.calls[0][0];
-    expect(selectProps.items).toHaveLength(2);
+    expect(selectProps.items).toHaveLength(3);
+    expect(selectProps.items).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          value: expect.stringContaining('vision-only-model'),
+        }),
+      ]),
+    );
     await selectProps.onSelect(
       `${AuthType.USE_OPENAI}::dual-role-model\0${baseUrl}`,
     );

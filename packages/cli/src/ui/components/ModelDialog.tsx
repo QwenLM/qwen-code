@@ -332,7 +332,7 @@ export function ModelDialog({
         isSelectableImageModel &&
         (isFastModelMode || !m.fastOnly) &&
         (isVoiceModelMode || !m.voiceOnly) &&
-        (isVisionModelMode || !m.visionOnly)
+        (isVisionModelMode || isImageModelMode || !m.visionOnly)
       );
     });
 

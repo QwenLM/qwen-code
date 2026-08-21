@@ -4092,7 +4092,7 @@ describe('Server Config (config.ts)', () => {
       });
     });
 
-    it('registers image_gen when a legacy image-only model route is selected', async () => {
+    it('registers image_gen for a legacy image-and-vision-only route', async () => {
       const baseUrl = 'https://images.example.com/api/v1';
       const config = new Config({
         ...baseParams,
@@ -4103,6 +4103,7 @@ describe('Server Config (config.ts)', () => {
               baseUrl,
               envKey: 'TEST_IMAGE_GENERATION_KEY',
               imageOnly: true,
+              visionOnly: true,
             },
           ],
         },
@@ -4181,7 +4182,7 @@ describe('Server Config (config.ts)', () => {
       ).toBeUndefined();
     });
 
-    it('rejects a vision-only image generation route', () => {
+    it('resolves a vision-only image generation route with explicit capability', () => {
       const baseUrl = 'https://images.example.com/api/v1';
       const config = new Config({
         ...baseParams,
@@ -4202,7 +4203,11 @@ describe('Server Config (config.ts)', () => {
         config.resolveImageGenerationModel(
           `openai:vision-only-model\0${baseUrl}`,
         ),
-      ).toBeUndefined();
+      ).toEqual({
+        model: 'vision-only-model',
+        baseUrl,
+        apiKeyEnv: 'TEST_IMAGE_GENERATION_KEY',
+      });
     });
 
     it('rejects an image generation route without an environment key', () => {

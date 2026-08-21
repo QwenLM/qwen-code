@@ -86,7 +86,11 @@ describe('modelCommand', () => {
     );
 
     expect(mainResult).toEqual(['qwen-dual-role']);
-    expect(imageResult).toEqual(['qwen-dual-role', 'qwen-image-2.0']);
+    expect(imageResult).toEqual([
+      'qwen-dual-role',
+      'qwen-image-2.0',
+      'qwen-vision-only',
+    ]);
   });
 
   it.each(['fast', 'voice', 'vision', 'compaction'] as const)(
@@ -1454,6 +1458,11 @@ describe('modelCommand', () => {
   it.each([
     ['dual-role', { supportsImageGeneration: true }],
     ['legacy image-only', { imageOnly: true }],
+    [
+      'vision-only dual-role',
+      { visionOnly: true, supportsImageGeneration: true },
+    ],
+    ['legacy image-and-vision-only', { imageOnly: true, visionOnly: true }],
   ] as const)(
     'should set a %s image model and hot-register its tool',
     async (_kind, modelFlags) => {
@@ -1549,46 +1558,6 @@ describe('modelCommand', () => {
     });
     expect(setValue).not.toHaveBeenCalled();
     expect(setImageModel).not.toHaveBeenCalled();
-  });
-
-  it('should reject a vision-only model from /model --image', async () => {
-    const setValue = vi.fn();
-    const setImageModel = vi.fn();
-    const resolveImageGenerationModel = vi.fn();
-    const baseUrl = 'https://images.example.com/api/v1';
-    mockContext = createMockCommandContext({
-      services: {
-        config: {
-          getAllConfiguredModels: vi.fn().mockReturnValue([
-            {
-              id: 'vision-only-model',
-              authType: AuthType.USE_OPENAI,
-              baseUrl,
-              registryBaseUrl: baseUrl,
-              envKey: 'IMAGE_API_KEY',
-              visionOnly: true,
-              supportsImageGeneration: true,
-            },
-          ]),
-          resolveImageGenerationModel,
-          setImageModel,
-        },
-        settings: createMockSettings(setValue),
-      },
-    });
-
-    const result = await modelCommand.action!(
-      mockContext,
-      '--image vision-only-model',
-    );
-
-    expect(result).toMatchObject({
-      type: 'message',
-      messageType: 'error',
-    });
-    expect(setValue).not.toHaveBeenCalled();
-    expect(setImageModel).not.toHaveBeenCalled();
-    expect(resolveImageGenerationModel).not.toHaveBeenCalled();
   });
 
   it('should reject a chat model from /model --image', async () => {

@@ -7010,7 +7010,6 @@ export class Config {
         isImageGenerationCapable(model) &&
         !model.fastOnly &&
         !model.voiceOnly &&
-        !model.visionOnly &&
         model.id === selector.modelId &&
         (!selector.authType || model.authType === selector.authType) &&
         (!parsedSetting.baseUrl || model.baseUrl === parsedSetting.baseUrl),
