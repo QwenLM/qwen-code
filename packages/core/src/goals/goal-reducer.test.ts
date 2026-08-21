@@ -625,6 +625,23 @@ describe('goal reducer', () => {
     },
   );
 
+  it('parses clear snapshots with their cleared goal order', () => {
+    const value = {
+      v: 2,
+      goal: null,
+      activity: 'idle',
+      clearedGoal: { goalId: 'g-1', revision: 3, updatedAt: 42 },
+    } as const;
+
+    expect(parseGoalSnapshotV2(value)).toEqual(value);
+    expect(
+      parseGoalSnapshotV2({
+        ...value,
+        clearedGoal: { ...value.clearedGoal, revision: 0 },
+      }),
+    ).toBeUndefined();
+  });
+
   it.each(['evidence_catalog', 'checkpoint_request'] as const)(
     'round-trips a %s limitKind through a persisted snapshot',
     (limitKind) => {

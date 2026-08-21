@@ -21,6 +21,7 @@ import {
   afterEach,
   type Mock,
 } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import {
   mkdirSync,
   mkdtempSync,
@@ -70,6 +71,7 @@ import {
   SHELL_MODEL_LAYERS,
 } from './lib/audit-layers.js';
 import { REVERSE_AUDIT_IDENTITY } from './lib/layer-audit-gate.js';
+import { isolateHostGitConfig } from './lib/test-utils.js';
 import {
   readRecordedPrompts,
   briefPath,
@@ -1339,6 +1341,44 @@ describe('--round — the CLI bakes the round into the identity line and the key
     }
   });
 
+  it("welds THIS shard's record key into the scratch-tree command it is handed", () => {
+    // The plumbing is pinned at both ends — `buildRoleBrief` with an explicit
+    // key, and the record key's shape — but the middle carried nothing: drop
+    // the `key` the launch builder passes down and every shard of a round runs
+    // `scratch-tree --label verify`, sharing one tree, with the whole suite
+    // green. The concurrent-shard race this PR removes, back through a
+    // one-line regression.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-verify-label-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(
+        plan,
+        JSON.stringify({
+          ...PLAN,
+          worktreePath: dir,
+          prNumber: '9207',
+          ownerRepo: 'QwenLM/qwen-code',
+        }),
+      );
+      const findings = join(dir, 'f.md');
+      writeFileSync(findings, '- **[Critical]** x.ts:1 — y');
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        role: 'verify',
+        findings,
+        round: 2,
+      });
+      const key = [...readRecordedPrompts(plan).keys()][0];
+      expect(key).toMatch(/^verify--round-2--[0-9a-f]{12}$/);
+      // The scratch block lives in the BRIEF the launch points at.
+      expect(readFileSync(briefPath(plan, key), 'utf8')).toContain(
+        `--label ${key}`,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('verify takes --round too — a re-verification round is its own receipt', () => {
     const dir = mkdtempSync(join(tmpdir(), 'ap-round-verify-'));
     try {
@@ -1428,6 +1468,75 @@ describe('--roster — every prompt the plan requires, in one call', () => {
       .slice(1) // drop the header
       .map((b) => b.trimEnd());
   }
+
+  it('reads the worktree once and tells every brief what is dirty in it', () => {
+    // `toHaveBeenCalledWith` matches ANY accumulated call, and only
+    // writeStdoutLine is cleared by the enclosing beforeEach.
+    (writeStderrLine as unknown as Mock).mockClear();
+    // The tripwire (#9207). Every wave of agents — this roster, each verify
+    // shard, each reverse-audit round — is built by this command right before it
+    // is launched, which makes this the one place the pipeline can notice that
+    // the tree those agents are about to read is not the commit they think it
+    // is. A real git worktree, because `git status` is the oracle.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-residue-'));
+    // Ambient host git config (a global `commit.gpgsign` with no key, a
+    // `core.hooksPath` that fails) makes the fixture commit throw and reddens
+    // this test for reasons the branch never touched — the incident
+    // `isolateHostGitConfig` exists for, and what every sibling real-git suite
+    // already guards against.
+    const gitIsolation = isolateHostGitConfig();
+    try {
+      const git = (...args: string[]) =>
+        execFileSync('git', args, { cwd: dir, encoding: 'utf8' });
+      git('init', '-q', '-b', 'main');
+      git('config', 'user.email', 't@t.t');
+      git('config', 'user.name', 't');
+      writeFileSync(join(dir, 'a.ts'), 'export const x = 1;\n');
+      git('add', '-A');
+      git('commit', '-qm', 'head');
+      // The review worktree is a LINKED worktree — the production shape, and
+      // the residue probe's identity gate fails closed for anything else.
+      const wt = join(dir, '.qwen', 'tmp', 'review-pr-9207');
+      git('worktree', 'add', '--detach', '-q', wt, 'HEAD');
+      // What the live run's auditor read: a probe's mutant, and a probe file.
+      writeFileSync(join(wt, 'a.ts'), 'export const x = 2;\n');
+      writeFileSync(join(wt, '__probe__.test.ts'), 'it("x", () => {});');
+
+      const plan = join(dir, 'plan.json');
+      writeFileSync(
+        plan,
+        JSON.stringify({
+          ...PLAN,
+          worktreePath: wt,
+          prNumber: '9207',
+          ownerRepo: 'QwenLM/qwen-code',
+        }),
+      );
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        roster: true,
+      });
+
+      expect(writeStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining('__probe__.test.ts'),
+      );
+      const brief = readFileSync(briefPath(plan, '1a'), 'utf8');
+      expect(brief).toContain('And right now it is not clean');
+      expect(brief).toContain('`a.ts`');
+      // Every launch class gets the residue, not just the one role this test
+      // used to inspect: Agent 7 turns residue into pre-confirmed
+      // `[build]`/`[test]` findings, and the verifier must act on it.
+      expect(readFileSync(briefPath(plan, '7'), 'utf8')).toContain(
+        'And right now it is not clean',
+      );
+      expect(readFileSync(briefPath(plan, '1b'), 'utf8')).toContain(
+        'And right now it is not clean',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      gitIsolation.dispose();
+    }
+  });
 
   it('builds and records the whole 3A roster', () => {
     const dir = mkdtempSync(join(tmpdir(), 'ap-roster-'));
@@ -2499,9 +2608,175 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(p).toContain('write a **probe**');
     expect(p).toContain('confirm the probe **flips**');
     expect(p).toContain('Source: [probe]');
-    expect(p).toContain('Leave the tree as you found it');
+    // And it runs that probe somewhere private. "Leave the tree as you found
+    // it" was the old rule and it could not hold: the exposure is DURING the
+    // probe, while the next round's auditors read the same worktree (#9207).
+    expect(p).toContain('The review worktree is read-only to you');
+    expect(p).toContain('run it **in your scratch tree**');
+    // Read-only means no EDITS, not "touch nothing": the A/B and `drive`
+    // capabilities below run in the worktree because that is the tree with a
+    // build in it, and a verifier that read the rule as "run nothing here"
+    // would lose both.
+    expect(p).toContain('This is about EDITS, not about running');
     // The capability is the verifier's; it must not bleed into a dimension brief.
     expect(buildRoleBrief(PLAN, '1a')).not.toContain('write a **probe**');
+  });
+
+  it('hands the verifier its own scratch tree, labelled by its record key', () => {
+    // The isolation half of #9207. A probe run in the shared worktree is read by
+    // the NEXT round's auditors — launched in the same response — as the PR's own
+    // code, so the verifier gets a tree of its own with the command welded in the
+    // way Agent 7's build-test invocation is. The LABEL is the part that matters
+    // beyond one agent: shards of one round run concurrently, and two shards
+    // sharing a tree is the same race one level down.
+    const p = buildRoleBrief(PR_PLAN, 'verify', {
+      key: 'verify--round-2--deadbeef1234',
+    });
+    expect(p).toContain('"${QWEN_CODE_CLI:-qwen}" review scratch-tree');
+    // QUOTED: an ordinary macOS workspace (`~/Documents/John's Projects/…`)
+    // word-splits a bare interpolation, and the failure is silent — every
+    // shard's scratch tree unavailable, every probe demoted to a reading.
+    expect(p).toContain(`--worktree '${resolve(PR_PLAN.worktreePath)}'`);
+    expect(p).toContain('--label verify--round-2--deadbeef1234');
+    // A relative --worktree would resolve against the agent's cwd, which IS the
+    // worktree — the trap Agent 7's block already documents.
+    expect(p).not.toMatch(/--worktree \.qwen/);
+    // And the ESCAPE, not just the wrap: a plain `'…'` wrap passes this
+    // fixture and still breaks on `~/Documents/John's Projects/…`, which is
+    // the workspace shape `shellQuotePath` exists for.
+    expect(
+      buildRoleBrief(
+        { ...PR_PLAN, worktreePath: "/tmp/John's Projects/wt" },
+        'verify',
+        { key: 'verify--round-2--deadbeef1234' },
+      ),
+    ).toContain(
+      `--worktree '${resolve("/tmp/John's Projects/wt")}'`.replace(
+        "John's",
+        "John'\\''s",
+      ),
+    );
+    // Two shards of one round must not be handed one tree.
+    expect(
+      buildRoleBrief(PR_PLAN, 'verify', { key: 'verify--round-2--0badc0de' }),
+    ).toContain('--label verify--round-2--0badc0de');
+    // And an unisolated probe is not the fallback: it is the failure.
+    expect(p).toContain('`available: false` means the isolation failed');
+    // The label lands inside a shell command in the brief, so it is flattened
+    // by the same helper that names the tree — no quoting to get right, and the
+    // flag the brief shows is the label the tree will actually carry.
+    expect(
+      buildRoleBrief(PR_PLAN, 'verify', { key: 'verify; rm -rf /' }),
+    ).toContain('--label verify__rm_-rf__');
+    // No worktree, no scratch tree — a local or cross-repo review has no
+    // pristine sibling to build, and HEAD is not what is under review there.
+    expect(buildRoleBrief(PLAN, 'verify')).not.toContain('review scratch-tree');
+  });
+
+  it('tells every code-reading agent the worktree is shared, and names what is dirty', () => {
+    // The reader half of #9207: an auditor read a live probe's mutant plus a
+    // leftover probe file and came within a step of filing a Critical against
+    // them, recovering only by improvising `git show HEAD:`. Now every code
+    // reader is told that rule, and — when the tree is actually dirty at build
+    // time — which paths to distrust.
+    const clean = buildRoleBrief(PR_PLAN, '1a');
+    expect(clean).toContain(
+      'Your working directory is a SHARED review worktree',
+    );
+    expect(clean).toContain('`git show HEAD:<path>`');
+    expect(clean).not.toContain('And right now it is not clean');
+
+    const dirty = buildRoleBrief(PR_PLAN, '1a', {
+      residue: {
+        paths: ['compose-review.ts', '__probe__.test.ts'],
+        total: 2,
+      },
+    });
+    expect(dirty).toContain('And right now it is not clean');
+    expect(dirty).toContain('`compose-review.ts`, `__probe__.test.ts`');
+    expect(dirty).not.toContain('more not listed');
+
+    // "Could not measure" is a third state, and it must not render as clean:
+    // the overload case is the one where the tree is dirtiest.
+    const unknown = buildRoleBrief(PR_PLAN, '1a', {
+      residue: { paths: [], total: 0, unmeasured: 'ENOBUFS' },
+    });
+    expect(unknown).toContain('could not be measured');
+    expect(unknown).not.toContain('And right now it is not clean');
+
+    // A capped list presented as the complete one is a reader who distrusts
+    // twelve paths and trusts the thirteenth.
+    const capped = buildRoleBrief(PR_PLAN, '1a', {
+      residue: { paths: ['a.ts'], total: 9 },
+    });
+    expect(capped).toContain('8 more not listed here');
+    // The full set needs `--untracked-files=all`: the default collapses a whole
+    // probe directory to one entry, so the count the note promises would not
+    // be reachable by the command it names.
+    expect(capped).toContain('--untracked-files=all');
+
+    // A control byte in a residue path must not reach the brief (or, below, a
+    // terminal): git reports names verbatim in the `-z` format this now reads.
+    expect(
+      buildRoleBrief(PR_PLAN, '1a', {
+        residue: { paths: ['a\u001b[31m.ts'], total: 1 },
+      }),
+    ).not.toContain('\u001b');
+
+    // Agent 7 does not review code, so it gets no reader rule — but residue
+    // reaches its build and its test run, where a `[build]`/`[test]` finding is
+    // pre-confirmed and skips verification. It is told which paths are not the
+    // PR's, and that a failure confined to them is not a finding.
+    const agent7 = buildRoleBrief(PR_PLAN, '7', {
+      residue: { paths: ['__probe__.test.ts'], total: 1 },
+    });
+    expect(agent7).toContain('And right now it is not clean');
+    expect(agent7).toContain('is not a finding');
+    expect(agent7).not.toContain('Your working directory is a SHARED review');
+
+    // `git show HEAD:` cannot produce an UNTRACKED path — the prototypical
+    // residue. The rule has to say what that answer means, or it hands the
+    // reader a mandated command that exits 128 and no way to finish.
+    expect(clean).toContain("exists on disk, but not in 'HEAD'");
+
+    // The verifier reads code too, and a chunk agent reads source files straight
+    // out of the shared tree — the issue names both.
+    expect(buildRoleBrief(PR_PLAN, 'verify')).toContain(
+      'Your working directory is a SHARED review worktree',
+    );
+    expect(
+      buildChunkAgentPrompt({ ...PLAN, ...PR_PLAN }, 13, undefined, {
+        paths: ['x.ts'],
+        total: 1,
+      }),
+    ).toContain('And right now it is not clean');
+
+    // Agent 8's whole-diff block is built outside `buildLaunch` — the one
+    // launch class that reads the shared tree and used to get neither the rule
+    // nor the paths.
+    expect(
+      buildWholeDiffBlock({ ...PLAN, ...PR_PLAN }, undefined, {
+        paths: ['x.ts'],
+        total: 1,
+      }),
+    ).toContain('And right now it is not clean');
+    expect(buildWholeDiffBlock({ ...PLAN, ...PR_PLAN })).toContain(
+      'Your working directory is a SHARED review worktree',
+    );
+    expect(buildWholeDiffBlock(PLAN)).not.toContain(
+      'Your working directory is a SHARED review worktree',
+    );
+
+    // Not for a review with no worktree: there the working tree is the user's
+    // own, and its uncommitted changes may be the very thing under review.
+    expect(buildRoleBrief(PLAN, '1a')).not.toContain(
+      'Your working directory is a SHARED review worktree',
+    );
+    // The RULE is still not Agent 7's: it runs commands, it does not judge code.
+    expect(buildRoleBrief(PR_PLAN, '7')).not.toContain(
+      'Your working directory is a SHARED review worktree',
+    );
+    expect(buildRoleBrief(PR_PLAN, '7')).not.toContain('it is not clean');
   });
 
   it('carries the command-aware subprocess-injection correction into Agent 2', () => {
@@ -2590,7 +2865,7 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
         incremental: {
           since: 'a'.repeat(40),
           effective: false,
-          reason: 'hunks-outside-pr-diff',
+          reason: 'nothing-to-narrow',
           diffBase: 'de17aba5e',
         },
       },
