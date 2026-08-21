@@ -41,6 +41,7 @@ import {
 import type {
   DaemonInputAnnotation,
   DaemonSessionAgentTaskStatus,
+  DaemonSkillToggleMutation,
   DaemonTranscriptBlock,
   DaemonSessionMonitorTaskStatus,
   DaemonSessionShellTaskStatus,
@@ -512,6 +513,30 @@ function sessionSkillsReflectToggle(
     const enabled = enabledNames.has(skill.name.toLowerCase());
     return skill.enabled === enabled;
   });
+}
+
+function skillMutationsForWorkspace(
+  lastSkillMutation: DaemonSkillToggleMutation | undefined,
+  skillMutationsByCwd: Record<string, DaemonSkillToggleMutation[]> | undefined,
+  workspaceCwd?: string,
+): readonly DaemonSkillToggleMutation[] {
+  if (skillMutationsByCwd) {
+    return workspaceCwd ? (skillMutationsByCwd[workspaceCwd] ?? []) : [];
+  }
+  return lastSkillMutation ? [lastSkillMutation] : [];
+}
+
+function mergeSkillToggles(
+  current: ReadonlyArray<{ name: string; enabled: boolean }>,
+  incoming: ReadonlyArray<{ name: string; enabled: boolean }>,
+): Array<{ name: string; enabled: boolean }> {
+  const byName = new Map(
+    current.map((skill) => [skill.name.toLowerCase(), skill] as const),
+  );
+  for (const skill of incoming) {
+    byName.set(skill.name.toLowerCase(), skill);
+  }
+  return [...byName.values()];
 }
 
 const COMPACT_MODE_SETTING_KEY = 'ui.compactMode';
@@ -4621,8 +4646,10 @@ export function App({
   const workspaceEventSignals = useWorkspaceEventSignals();
   const [loadedSkills, setLoadedSkills] = useState<SkillInfo[]>([]);
   const [loadedSkillsReady, setLoadedSkillsReady] = useState(false);
-  const [loadedSkillsFallbackSessionId, setLoadedSkillsFallbackSessionId] =
-    useState<string>();
+  const [loadedSkillsFallback, setLoadedSkillsFallback] = useState<{
+    sessionId: string;
+    workspaceCwd: string | undefined;
+  }>();
   const connectionSkillSnapshotRef = useRef({
     sessionId: connection.sessionId,
     skills: connection.skills,
@@ -4662,80 +4689,78 @@ export function App({
     if (!connected) return;
     void reloadLoadedSkills(connection.workspaceCwd);
   }, [connected, connection.workspaceCwd, reloadLoadedSkills]);
-  const skillMutationHandlingRef = useRef<
-    | {
-        id: string;
-        sessionId: string | undefined;
-        workspaceCwd: string | undefined;
-        phase: 'idle' | 'processing' | 'handled';
-      }
-    | undefined
-  >(undefined);
+  const handledSkillMutationKeysRef = useRef(new Set<string>());
+  const pendingSkillTogglesByContextRef = useRef(
+    new Map<string, Array<{ name: string; enabled: boolean }>>(),
+  );
   useEffect(() => {
     if (!connected) {
-      if (skillMutationHandlingRef.current) {
-        skillMutationHandlingRef.current.phase = 'idle';
-      }
+      handledSkillMutationKeysRef.current.clear();
       return;
     }
-    const mutation = workspaceEventSignals?.lastSkillMutation;
-    if (!mutation) return;
-    let handling = skillMutationHandlingRef.current;
-    if (!handling || handling.id !== mutation.id) {
-      handling = {
-        id: mutation.id,
-        sessionId: connection.sessionId,
-        workspaceCwd: connection.workspaceCwd,
-        phase: 'idle',
-      };
-      skillMutationHandlingRef.current = handling;
-    }
-    if (handling.workspaceCwd !== connection.workspaceCwd) {
-      handling.phase = 'idle';
-      return;
-    }
-    if (
-      handling.sessionId === connection.sessionId &&
-      handling.phase !== 'idle'
-    ) {
-      return;
-    }
-    handling.sessionId = connection.sessionId;
-    handling.phase = 'processing';
     const sessionId = connection.sessionId;
+    const workspaceCwd = connection.workspaceCwd;
+    const contextKey = `${workspaceCwd ?? ''}\n${sessionId ?? ''}`;
+    const mutations = skillMutationsForWorkspace(
+      workspaceEventSignals?.lastSkillMutation,
+      workspaceEventSignals?.skillMutationsByCwd,
+      workspaceCwd,
+    );
+    const mutationKeys = mutations.map(
+      (mutation) => `${contextKey}\n${mutation.id}`,
+    );
+    const unhandled = mutations.filter(
+      (_, index) =>
+        !handledSkillMutationKeysRef.current.has(mutationKeys[index]!),
+    );
+    if (unhandled.length === 0) return;
+    const markHandled = () => {
+      for (const mutationKey of mutationKeys) {
+        handledSkillMutationKeysRef.current.add(mutationKey);
+      }
+    };
+    const priorPending =
+      pendingSkillTogglesByContextRef.current.get(contextKey) ?? [];
+    const pendingToggles = mergeSkillToggles(
+      priorPending,
+      unhandled.flatMap((mutation) => mutation.skills),
+    );
     const sessionSkills = connectionSkillSnapshotRef.current.skills;
     if (
       sessionId &&
       sessionSkills !== undefined &&
-      mutation.activation === 'applied' &&
-      mutation.sessionsFailed === 0
+      priorPending.length === 0 &&
+      unhandled.every(
+        (mutation) =>
+          mutation.activation === 'applied' && mutation.sessionsFailed === 0,
+      )
     ) {
-      handling.phase = 'handled';
-      setLoadedSkillsFallbackSessionId(undefined);
+      markHandled();
+      setLoadedSkillsFallback(undefined);
       return;
     }
+    pendingSkillTogglesByContextRef.current.set(contextKey, pendingToggles);
     let cancelled = false;
-    void reloadLoadedSkills(connection.workspaceCwd, true).then((loaded) => {
-      if (cancelled || skillMutationHandlingRef.current !== handling) return;
-      handling.phase = 'handled';
-      if (!loaded || !sessionId) return;
+    void reloadLoadedSkills(workspaceCwd, true).then((loaded) => {
+      if (cancelled || !loaded) return;
+      markHandled();
+      if (!sessionId) {
+        pendingSkillTogglesByContextRef.current.delete(contextKey);
+        return;
+      }
       const currentSnapshot = connectionSkillSnapshotRef.current;
       if (
         currentSnapshot.sessionId === sessionId &&
-        sessionSkillsReflectToggle(currentSnapshot.skills, mutation.skills)
+        sessionSkillsReflectToggle(currentSnapshot.skills, pendingToggles)
       ) {
+        pendingSkillTogglesByContextRef.current.delete(contextKey);
+        setLoadedSkillsFallback(undefined);
         return;
       }
-      setLoadedSkillsFallbackSessionId(sessionId);
+      setLoadedSkillsFallback({ sessionId, workspaceCwd });
     });
     return () => {
       cancelled = true;
-      if (
-        skillMutationHandlingRef.current === handling &&
-        handling.phase === 'processing'
-      ) {
-        handling.phase = 'idle';
-      }
     };
   }, [
     connected,
@@ -4743,26 +4768,38 @@ export function App({
     connection.workspaceCwd,
     reloadLoadedSkills,
     workspaceEventSignals?.lastSkillMutation,
-    workspaceEventSignals?.skillsVersion,
+    workspaceEventSignals?.skillMutationsByCwd,
   ]);
   useEffect(() => {
-    if (!loadedSkillsFallbackSessionId) return;
-    if (connection.sessionId !== loadedSkillsFallbackSessionId) {
-      setLoadedSkillsFallbackSessionId(undefined);
+    if (!loadedSkillsFallback) return;
+    if (
+      connection.sessionId !== loadedSkillsFallback.sessionId ||
+      connection.workspaceCwd !== loadedSkillsFallback.workspaceCwd
+    ) {
+      const previousContextKey = `${loadedSkillsFallback.workspaceCwd ?? ''}\n${loadedSkillsFallback.sessionId}`;
+      for (const mutationKey of handledSkillMutationKeysRef.current) {
+        if (mutationKey.startsWith(`${previousContextKey}\n`)) {
+          handledSkillMutationKeysRef.current.delete(mutationKey);
+        }
+      }
+      setLoadedSkillsFallback(undefined);
       return;
     }
-    const mutation = workspaceEventSignals?.lastSkillMutation;
+    const contextKey = `${connection.workspaceCwd ?? ''}\n${connection.sessionId ?? ''}`;
+    const pendingToggles =
+      pendingSkillTogglesByContextRef.current.get(contextKey) ?? [];
     if (
-      mutation &&
-      sessionSkillsReflectToggle(connection.skills, mutation.skills)
+      pendingToggles.length > 0 &&
+      sessionSkillsReflectToggle(connection.skills, pendingToggles)
     ) {
-      setLoadedSkillsFallbackSessionId(undefined);
+      pendingSkillTogglesByContextRef.current.delete(contextKey);
+      setLoadedSkillsFallback(undefined);
     }
   }, [
     connection.sessionId,
     connection.skills,
-    loadedSkillsFallbackSessionId,
-    workspaceEventSignals?.lastSkillMutation,
+    connection.workspaceCwd,
+    loadedSkillsFallback,
   ]);
 
   const [modelDialogMode, setModelDialogMode] =
@@ -11053,7 +11090,8 @@ export function App({
     loadedSkillsReady &&
     (!connection.sessionId ||
       connection.skills === undefined ||
-      loadedSkillsFallbackSessionId === connection.sessionId);
+      (loadedSkillsFallback?.sessionId === connection.sessionId &&
+        loadedSkillsFallback.workspaceCwd === connection.workspaceCwd));
   const composerSkills = useMemo(
     () =>
       useWorkspaceSkillSnapshot
