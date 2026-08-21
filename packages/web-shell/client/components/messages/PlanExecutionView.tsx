@@ -492,14 +492,24 @@ export function PlanExecutionView({
         nodeRect.left -
         viewportRect.left -
         (viewport.clientWidth - nodeRect.width) / 2;
+      // Mirror the horizontal computation vertically: on the fixed-height
+      // workflow page a tall graph overflows the viewport downwards, and
+      // scrollTo preserves scrollTop when only `left` is passed — the focused
+      // step would stay out of view.
+      const top =
+        viewport.scrollTop +
+        nodeRect.top -
+        viewportRect.top -
+        (viewport.clientHeight - nodeRect.height) / 2;
       // This runs inside a requestAnimationFrame, where a throw cannot be
       // caught by anything and takes the surrounding render down with it.
       // Centring the current step is a convenience; the plain assignment, or
       // skipping it, always beats an unhandled exception.
       if (typeof viewport.scrollTo === 'function') {
-        viewport.scrollTo({ left, behavior });
+        viewport.scrollTo({ left, top, behavior });
       } else {
         viewport.scrollLeft = left;
+        viewport.scrollTop = top;
       }
     },
     [focusTodoId],

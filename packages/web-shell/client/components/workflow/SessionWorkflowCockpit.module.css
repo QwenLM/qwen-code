@@ -346,9 +346,11 @@ button.activityRow {
   cursor: pointer;
 }
 
-/* Activity rows run edge-to-edge inside a container with overflow: hidden, so
- * the default outward focus ring would have its side segments clipped. */
-button.activityRow:focus-visible {
+/* Activity rows and attention rows run edge-to-edge inside containers with
+ * overflow: hidden, so the default outward focus ring would have its side
+ * segments clipped. */
+button.activityRow:focus-visible,
+.attentionList > button:focus-visible {
   outline-offset: -3px;
 }
 

@@ -4970,12 +4970,19 @@ export function App({
   }, [workspaceActions]);
   const openScheduledTasks = useCallback(() => {
     setActivePanel(null);
+    // Route through showChat so leaving the cockpit strips its ?view=cockpit
+    // deep link — the URL-sync removal branch only fires when the feature is
+    // disabled, and a stale deep link would reopen the cockpit on reload or
+    // Forward navigation instead of the view actually on screen.
+    showChat();
     setMainView('scheduledTasks');
-  }, []);
+  }, [showChat]);
   const openGoals = useCallback(() => {
     setActivePanel(null);
+    // See openScheduledTasks: leaving the cockpit must strip its deep link.
+    showChat();
     setMainView('goals');
-  }, []);
+  }, [showChat]);
   const openSessionDrawer = useCallback(() => {
     if (!sidebarOptions.enabled) return;
     setActivePanel(null);
@@ -4989,6 +4996,8 @@ export function App({
   const openSplitView = useCallback(
     (sessionIds?: readonly string[]) => {
       setActivePanel(null);
+      // See openScheduledTasks: leaving the cockpit must strip its deep link.
+      showChat();
       setSplitSessionIds((prev) => {
         // An explicit selection (the overview, or a `?split=` URL) replaces the
         // split with exactly those sessions.
@@ -5004,7 +5013,7 @@ export function App({
       });
       setMainView('split');
     },
-    [connection.sessionId],
+    [connection.sessionId, showChat],
   );
   const externalSplitSignature = useMemo(() => {
     const requested = Array.from(

@@ -123,7 +123,7 @@ function taskStatusKey(status: DaemonSessionAgentTaskStatus['status']) {
 
 function initials(value: string): string {
   const words = value
-    .replace(/[^A-Za-z0-9\u4e00-\u9fff ]/g, ' ')
+    .replace(/[^A-Za-z0-9\u3040-\u30ff\uac00-\ud7af\u4e00-\u9fff ]/g, ' ')
     .trim()
     .split(/\s+/)
     .filter(Boolean);
@@ -134,11 +134,12 @@ function initials(value: string): string {
       .join('')
       .toUpperCase();
   }
-  // Keep CJK in the single-word fallback too: Chinese labels carry no spaces,
-  // so stripping it here would collapse every such row to the same 'AG'.
+  // Keep CJK in the single-word fallback too: Chinese labels carry no
+  // spaces, and pure-kana/pure-hangul labels strip to nothing either way
+  // — every such row would collapse to the same 'AG'.
   return (
     value
-      .replace(/[^A-Za-z\u4e00-\u9fff]/g, '')
+      .replace(/[^A-Za-z\u3040-\u30ff\uac00-\ud7af\u4e00-\u9fff]/g, '')
       .slice(0, 3)
       .toUpperCase() || 'AG'
   );
@@ -277,20 +278,23 @@ export function SessionWorkflowCockpit({
       const status = states.get(todo.id)?.status;
       return status === 'running' || status === 'in_progress';
     });
+  // Consult execution before completion, mirroring getPlanNodeStateFromIndex:
+  // a linked agent can still be running after the model marks every todo
+  // completed, and the badge must not contradict the running plan nodes.
   const taskStatusI18nKey =
     attentionCount > 0
       ? 'workflow.task.attention'
-      : completedCount === todos.length
-        ? 'workflow.task.completed'
-        : hasActiveExecution
-          ? 'workflow.task.running'
+      : hasActiveExecution
+        ? 'workflow.task.running'
+        : completedCount === todos.length
+          ? 'workflow.task.completed'
           : 'workflow.task.waitingExecution';
   const taskStatusTone = attentionCount
     ? 'attention'
-    : completedCount === todos.length
-      ? 'completed'
-      : hasActiveExecution
-        ? 'running'
+    : hasActiveExecution
+      ? 'running'
+      : completedCount === todos.length
+        ? 'completed'
         : 'waiting';
   const attentionTodo =
     attentionTodos.find((todo) => todo.id === selectedTodoId) ??
