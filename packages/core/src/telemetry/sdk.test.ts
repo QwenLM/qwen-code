@@ -771,6 +771,20 @@ describe('Telemetry SDK', () => {
     }
   });
 
+  it('explicitly disables metrics when no HTTP metrics endpoint is configured', async () => {
+    vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('http');
+    vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue('');
+    vi.spyOn(mockConfig, 'getTelemetryOtlpTracesEndpoint').mockReturnValue(
+      'http://traces-host/v1/traces',
+    );
+
+    await initializeTelemetry(mockConfig);
+
+    expect(NodeSDK).toHaveBeenCalledWith(
+      expect.objectContaining({ metricReaders: [] }),
+    );
+  });
+
   it('should not use OTLP exporters when telemetryOutfile is set', async () => {
     vi.spyOn(mockConfig, 'getTelemetryOutfile').mockReturnValue(
       path.join(os.tmpdir(), 'test.log'),

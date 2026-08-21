@@ -636,6 +636,14 @@ export interface BridgeClientSessionEntry {
   settledMidTurnMessageIds: string[];
   /** Complete prompts waiting behind the currently running prompt. */
   pendingPromptList: PendingPromptEntry[];
+  /**
+   * True while a child-driven Goal turn is running. Set by the
+   * `_qwencode/start_turn` notification and cleared by the matching
+   * `_qwencode/end_turn`; OR-ed into `hasActivePrompt` summaries so
+   * live-state consumers (sidebar activity, daemon status) see Goal turns
+   * that never cross the bridge's `session/prompt` RPC boundary.
+   */
+  goalTurnActive?: boolean;
   /** Bridge prompt that owns the child Guard wait for this FIFO. */
   todoStopGuardAwaitingQueuedPromptOwnerPromptId?: string;
   /** True while a prompt is executing for this session. */
@@ -829,6 +837,14 @@ export class BridgeClient implements Client {
      * optional so existing direct constructors stay source-compatible.
      */
     private readonly onSessionCatalogChanged?: () => void,
+    /**
+     * Invoked after a child-driven Goal turn clears `goalTurnActive`. The
+     * bridge settles whatever the ending turn's last mid-turn drain missed —
+     * a Goal turn owns no prompt slot, so its terminal is the only signal.
+     * Trailing and optional so existing direct constructors stay
+     * source-compatible.
+     */
+    private readonly onGoalTurnEnded?: (sessionId: string) => void,
   ) {}
 
   async requestPermission(
@@ -1929,7 +1945,7 @@ export class BridgeClient implements Client {
    * `qwen/notify/session/prompt-suggestion` (followup assist),
    * `qwen/notify/session/artifact-event` (hook artifacts),
    * `qwen/notify/session/terminal-sequence`, and
-   * `_qwencode/end_turn` (background-notification turns), and
+   * `_qwencode/end_turn` (background-notification and goal turns), and
    * `qwen/notify/session/mcp-budget-event` — each translated into a
    * session-scoped SSE frame. Unknown methods are dropped silently for
    * forward-compat.
@@ -1961,21 +1977,56 @@ export class BridgeClient implements Client {
       }
       return;
     }
+    if (method === '_qwencode/start_turn') {
+      const sessionId = params['sessionId'];
+      if (
+        typeof sessionId !== 'string' ||
+        sessionId.length === 0 ||
+        params['source'] !== 'goal'
+      ) {
+        return;
+      }
+      const entry = this.resolveEntry(sessionId);
+      if (!entry || !this.ownsSession(sessionId)) return;
+      entry.goalTurnActive = true;
+      return;
+    }
     if (method === '_qwencode/end_turn') {
       const sessionId = params['sessionId'];
       const reason = params['reason'];
+      const source = params['source'];
       if (
         typeof sessionId !== 'string' ||
         sessionId.length === 0 ||
         typeof reason !== 'string' ||
         reason.length === 0 ||
         reason.length > 128 ||
-        params['source'] !== 'background_notification'
+        (source !== 'background_notification' && source !== 'goal')
       ) {
         return;
       }
       const entry = this.resolveEntry(sessionId);
       if (!entry || !this.ownsSession(sessionId)) return;
+      if (source === 'goal') {
+        entry.goalTurnActive = false;
+        // Before the promptId validation below: a malformed id costs the
+        // session its `turn_complete`, but the queue must still be settled.
+        this.onGoalTurnEnded?.(sessionId);
+        const promptId = params['promptId'];
+        if (
+          typeof promptId !== 'string' ||
+          promptId.length === 0 ||
+          promptId.length > 256
+        ) {
+          return;
+        }
+        entry.events.publish({
+          type: 'turn_complete',
+          promptId,
+          data: { sessionId, stopReason: reason, promptId },
+        });
+        return;
+      }
       entry.events.publish({
         type: 'background_notification_turn_complete',
         data: { sessionId, reason },
@@ -2301,6 +2352,13 @@ export class BridgeClient implements Client {
   ): Promise<void> {
     try {
       const result = await entry.artifacts.upsertMany(artifacts, options);
+      for (const warning of result.warnings ?? []) {
+        writeStderrLine(
+          `[artifacts] session=${entry.sessionId} action=warning reason=${JSON.stringify(
+            warning,
+          )}`,
+        );
+      }
       this.publishArtifactChanges(entry, result.changes, turn);
     } catch (error) {
       writeStderrLine(

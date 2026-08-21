@@ -275,6 +275,59 @@ test('configures qwen3.8-max reasoning from the model popover @smoke', async ({
   ).toBeVisible();
 });
 
+test('toggles reasoning without effort tiers for qwen3.7-plus @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    currentModel: 'qwen3.7-plus',
+    state: {
+      configOptions: [
+        {
+          id: 'reasoning_effort',
+          name: 'Reasoning effort',
+          type: 'select',
+          currentValue: 'default',
+          options: [
+            { value: 'none', name: 'Thinking off' },
+            { value: 'default', name: 'Thinking on' },
+          ],
+          _meta: {
+            'qwenCode/reasoning': { toggleOnly: true },
+          },
+        },
+      ],
+    },
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoSession(page, scenario, daemon);
+
+  const modelButton = page.locator('[data-web-shell-model-button]');
+  await modelButton.click();
+  const controls = page.locator('[data-web-shell-model-reasoning]');
+  const thinking = controls.locator('[data-web-shell-thinking-toggle]');
+  await expect(controls).toBeVisible();
+  await expect(thinking).toBeChecked();
+  await expect(controls.locator('[data-web-shell-effort]')).toHaveCount(0);
+  await expect(modelButton).toContainText('Thinking');
+
+  await thinking.click();
+  await expect.poll(() => daemon.configOptionRequests().length).toBe(1);
+  expect(
+    requestBodyRecord(firstRequest(daemon.configOptionRequests())),
+  ).toEqual({ configId: 'reasoning_effort', value: 'none' });
+  await expect(thinking).not.toBeChecked();
+  await expect(modelButton).toContainText('Thinking Off');
+
+  await thinking.click();
+  await expect.poll(() => daemon.configOptionRequests().length).toBe(2);
+  expect(requestBodyRecord(daemon.configOptionRequests()[1]!)).toEqual({
+    configId: 'reasoning_effort',
+    value: 'default',
+  });
+  await expect(thinking).toBeChecked();
+  await expect(modelButton).toContainText('Thinking');
+});
+
 test('uploads an Extension archive from the manager @smoke', async ({
   page,
 }, testInfo) => {

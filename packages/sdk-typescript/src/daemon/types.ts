@@ -15,6 +15,70 @@
 
 export type DaemonMode = 'http-bridge' | 'native';
 
+/** Goal v2 wire types, duplicated here to keep the SDK independent of Core. */
+export type GoalStatus =
+  | 'active'
+  | 'paused'
+  | 'blocked'
+  | 'usage_limited'
+  | 'complete';
+
+export type GoalActivity = 'idle' | 'running' | 'verifying';
+
+export interface TranscriptCursor {
+  recordId: string | null;
+}
+
+/**
+ * Why the runtime stopped a Goal at one of its enumerated bounds. Set alongside
+ * `lastReason` — that stays the human-readable half, this is the half a client
+ * may key behavior off (an evidence-limited Goal cannot be resumed).
+ */
+export type GoalLimitKind = 'evidence_catalog' | 'checkpoint_request';
+
+export interface GoalRecord {
+  goalId: string;
+  revision: number;
+  objective: string;
+  status: GoalStatus;
+  evidenceCursor: TranscriptCursor;
+  turnCount: number;
+  activeTimeMs: number;
+  createdAt: number;
+  updatedAt: number;
+  lastReason?: string;
+  limitKind?: GoalLimitKind;
+}
+
+export interface GoalSnapshotV2 {
+  v: 2;
+  goal: GoalRecord | null;
+  activity: GoalActivity;
+  clearedGoal?: {
+    goalId: string;
+    revision: number;
+    updatedAt: number;
+  };
+}
+
+export type GoalControlRequest =
+  | { action: 'create'; objective: string }
+  | {
+      action: 'replace' | 'edit';
+      objective: string;
+      expectedGoalId: string;
+      expectedRevision: number;
+    }
+  | {
+      action: 'pause' | 'resume' | 'clear';
+      expectedGoalId: string;
+      expectedRevision: number;
+    };
+
+export interface GoalStateResponse {
+  snapshot: GoalSnapshotV2;
+}
+
 export interface DaemonProtocolVersions {
   current: string;
   supported: string[];
@@ -1406,6 +1470,7 @@ export type KnownDaemonSessionArtifactKind =
   | 'audio'
   | 'pdf'
   | 'notebook'
+  | 'document'
   | 'other';
 
 export type DaemonSessionArtifactKind =

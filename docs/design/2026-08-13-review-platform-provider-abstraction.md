@@ -44,6 +44,13 @@ Everything below was confirmed by running the commands, not from docs.
 | Whoami                         | `gh api user --jq .login`                                              | `a1 auth whoami -f json` → `account`                                                                                                                                                                                  |
 | Repo identity for bare numbers | `gh repo view --json owner,name,url`                                   | remote URL path (`group/repo`) + `a1 repo view`; `a1 repo link` binding if present                                                                                                                                    |
 
+Post-publication addendum (2026-08-21): the `Inline comment (write)` row
+above creates comments that read back `isAiComment: false` — there is no
+auto-marking for the posting identity and a1 exposes no flag to request it
+(Q4, resolved by a controlled probe — see the open questions section).
+Created comments join the `discussion` gate only, never the `ai_comment`
+gate.
+
 ## Goals / non-goals
 
 **Goals**
@@ -187,9 +194,13 @@ id directly; no id↔iid mapping is needed anywhere in the pipeline.
   The merge gate already blocks on unresolved discussions, so inline Critical
   comments left unresolved carry the blocking semantics. This is a semantic
   difference from GitHub and is called out in the terminal report.
-- AI-comment marking: probe whether `comment create` sets `isAiComment`
-  automatically or needs a flag; qwen-posted comments SHOULD carry it, because
-  Aone has a dedicated `ai_comment` merge gate. (Open question Q4.)
+- AI-comment marking: **probed 2026-08-21 (Q4 resolved — see the open
+  questions section).** `comment create` does NOT auto-set `isAiComment` for
+  the posting identity, and a1 (v0.1.90) has no flag to request it, so
+  qwen-posted comments join the generic `discussion` gate only — the
+  dedicated `ai_comment` merge gate does not track them. Until a1 ships a
+  marking flag, `submit`'s REQUEST_CHANGES note discloses the gate split;
+  the marking itself is blocked on the a1 feature request.
 
 ### D7 — One-commit CRs and the incremental cache
 
@@ -272,9 +283,152 @@ Enterprise paragraph.
   exported-GH_HOST only, and "unavailable otherwise"), or gate it off
   explicitly on non-github.com runs. E2E: `--comment` against a
   scratch/test CR.
+  - **Landed (2026-08-19):** the `submit` slice. `submitAoneReview` in
+    `lib/platform/aone.ts` posts the review as N+1 calls — one
+    `a1 repo mr comment create` per inline finding, the summary comment
+    last (Q5 order), `a1 repo mr approve` on APPROVE (D6); writes ride a
+    no-retry transport (`a1Once`) so a transient retry can never
+    double-post. The commit_id gate GitHub enforces server-side lives in
+    the provider as a pre-write head-drift refusal; a mid-batch failure
+    throws `AonePartialPostError` naming exactly what landed, and
+    `submit` reports it exit-3 with do-not-re-run advice (a retry would
+    duplicate). REQUEST_CHANGES posts the blocking summary header (D6);
+    the recorded-but-hostless refusal stays fail-closed, now between two
+    WRITABLE platforms. The created-comment read-back is tolerant: an
+    exec failure still propagates, but an ACCEPTED write whose answer
+    fails to parse degrades to "landed, id unknown" — counting it as
+    unposted would re-post it on a retry. Two deliberate trade-offs to
+    revisit when the Q4-era response changes land: the head-drift gate is
+    fail-OPEN on an empty `sourceBranch` (a `mr view` shape regression
+    must not brick posting), and the id read-back parses a set of
+    tolerated shapes best-effort. Still open: `composeUrl`, cleanup
+    audit, AI-comment marking (Q4), the render-adjudication carve-out.
+  - **Hardened (2026-08-19, review round 2):** five write-safety fixes
+    from the maintainer review of #9491. (1) The `target-platform-unbound`
+    refusal now HONOURS its own remedy — an explicit `--host` on the
+    re-run is platform proof and lifts it, instead of refusing again.
+    (2) The write gate binds hosts through `hostsEquivalent`, not raw
+    equality — Aone's web/git host pair is one platform. (3) Write
+    routing keys on the CANONICAL Aone pair (`isAoneCanonicalHost`),
+    never the family wildcard (a `*.alibaba-inc.com` GHE host is not
+    Aone), never the ambient GH_HOST (reads never detect from it), and
+    an explicit `--host` outranks the recorded binding in both
+    directions. (4) A size gate refuses any message over the
+    131072-byte single-argv-element limit a1 must pass it as, BEFORE
+    any write lands (a long CJK summary is inside compose-review's
+    char cap and outside the OS byte limit). (5) An exec failure counts
+    as possibly-landed (`ambiguous`), so submit's do-not-re-run advisory
+    fires even when the count is zero — an accepted-then-died write must
+    never read back as a clean total failure.
+  - **Hardened further (2026-08-20, verify-lane review of #9491):** the
+    sandboxed-verification review surfaced the next layer. (6) The
+    fail-closed refusal now also fires when NO recording exists at all —
+    a `--user-authorized` publish invoked from another directory finds
+    nothing, and the cwd probe alone must not pick the platform of an
+    irreversible write. (7) The gh write rebinds its routing host to the
+    same evidence that selected it (`explicitHost ?? recordedHost`), so a
+    recorded non-canonical host (a GHE instance) no longer posts wherever
+    the ambient env pointed. (8) The REQUEST_CHANGES terminal note is
+    conditioned on the inline Criticals actually posted — a body-only
+    Critical posts no discussion threads, so nothing mechanically blocks
+    the merge and the note says so. (9) `a1Cause` reads the captured
+    stderr, not the execFileSync message — the message embeds the FULL
+    argv (the multi-line comment body), so parsing it surfaced the
+    operator's review text instead of a1's error. (10) The summary
+    skip-guard keys on the posted `summaryMessage`, not the raw body — an
+    empty-body REQUEST_CHANGES still posts its blocking header, the
+    verdict's sole carrier. Host comparison is normalised once
+    (`normalizeHostSpelling`: case/port/trailing-dot) and shared by
+    `hostsEquivalent` and `isAoneCanonicalHost`; the fast-path repo axis
+    binds case-insensitively; the cross-session scan is last-writer-wins
+    by mtime, and the newest same-PR recording decides (host or unbound)
+    instead of harvesting an older session's stale host.
+  - **Hardened again (2026-08-20, third review round of #9491):** the
+    next review pass found the layer under that one. (11) The cwd arm of
+    the write gate now probes the origin through the canonical predicate
+    itself instead of delegating to the registry's family-wildcard
+    detection — a `ghe.alibaba-inc.com` origin no longer takes the a1
+    path. (12) `submit` FORCES context-unavailable into the compose input
+    on the Aone path — the cap no longer rides the model-written state,
+    so an omitted field cannot buy a real platform approval; the docs now
+    say the native approve does not fire this phase. (13) A mid-batch
+    failure now emits `"partial": true` with the landed counts/ids —
+    `posted: false` alone invited a wrapper retry that double-posts; and
+    a deliberate pre-write refusal (drift, oversized) reads as
+    `aone-post-refused`, while an UNEXPECTED pre-write error rethrows
+    (gh parity — nothing landed, a re-run is safe). (14) The floor
+    recovery's host axis binds to the host the write routes at
+    (explicit ?? recorded ?? gh fallback), so a flagless Aone post no
+    longer drops the operator's recorded floor. (15) The batch re-reads
+    the head once after posting and discloses a mid-batch amend
+    (`headMovedDuringPost`) instead of claiming the pins held. The
+    approve-failure and oversized refusals name the USER as the manual
+    actor; the completion contract reads `partial`/`approved`; and the
+    repeat-round caveats (no dedup backing, no self-PR detection) are
+    documented for the user. Still open: dedup/self-PR backing for Aone,
+    `composeUrl`, cleanup audit, AI-comment marking (Q4), the
+    render-adjudication carve-out.
+  - **AI-gate probe (2026-08-21, issue #9614):** Q4 was resolved by a
+    controlled write probe on a scratch CR — `comment create` auto-sets
+    NOTHING (both a general and an inline probe read back
+    `isAiComment: false`, re-checked against an async classifier), and
+    v0.1.90 exposes no marking flag — and Q3 was re-confirmed (still no
+    native reject; `mr comment resolve` and `mr cr list` are new on the
+    surface). Since the marking cannot be requested today, the write path
+    DISCLOSES the gate split instead of silently implying participation:
+    the REQUEST_CHANGES note names the posted comments as unflagged, joins
+    them to the discussion gate only, and says the repo's `ai_comment`
+    gate does not track them; SKILL.md's Aone paragraph carries the same
+    fact for the relay. Marking stays open as an a1 feature request; when
+    the flag ships it wires at `createMrComment` (the sole write seam).
+    Still open: dedup/self-PR backing for Aone, `composeUrl`, cleanup
+    audit, the ai_comment marking flag (a1-side), the render-adjudication
+    carve-out.
+  - **Self-PR backing (2026-08-21, #9616):** `presubmit` became
+    platform-aware. On an Aone target it runs the backed slice —
+    self-PR detection (`a1 auth whoami`'s `account` vs the `mr view`
+    author, one fetch, case-insensitive, fail-soft on a missing author,
+    fail-closed on a thrown `mr view`) and head drift (`sourceBranch` IS
+    the head under AGit-Flow; no compare API exists, so `compare` is
+    null and a drifted head is always anchors-at-risk) — and reports the
+    unbacked slice neutral (`no_checks` with zero checks, zero existing
+    comments: no downgrades from them, no overlap blocks). Same report
+    shape as GitHub, so Step 7's apply-the-report rules and
+    compose-review's downgrade fields are unchanged; the verdict cap
+    stays forced in `submit` (pr-context is still unbacked). SKILL.md's
+    Aone list names presubmit as reduced-backing instead of skipped, and
+    the "no self-PR detection" caveat is gone from both docs. Still
+    open: dedup backing for Aone, `composeUrl`, cleanup audit, the
+    ai_comment marking flag (a1-side), the render-adjudication
+    carve-out.
 - **Phase 4 — semantic gaps.** Incremental-cache ancestry fallback, build-test
   repo-config escape hatch, publish-assets gating polish, generic-GitLab
   (glab) evaluation.
+  - **Landed (2026-08-21): the incremental-cache ancestry fallback (D7,
+    #9618).** `resolveIncrementalAnchor` gained a `noAncestry` mode that
+    `fetch-pr` selects when the platform is Aone: an AGit-Flow update
+    AMENDS the single CR commit in place, orphaning the cached head, so
+    the anchor-behind-head test failed for EVERY update and an
+    amend-and-re-review never scoped. Both ancestry tests — the
+    anchor-behind-head test and the behind-merge-base clamp — are
+    skipped (the clamp only ever fired when the update ALSO rebased onto
+    newer master, moving the merge base past the cached head; a pure
+    amend passed it); after the fetch both heads are local, so
+    `anchor..head` IS the update's delta, and the narrowing step
+    assembles the published scope from the CR's own diff exactly as it
+    does for an ancestrally valid GitHub anchor (an amended-and-rebased
+    update's delta carries the rebase drift, but the join reads it only
+    for which files changed — no drift byte reaches the published scope
+    — and drift touching a file outside the CR's diff falls back to the
+    full range there).
+    The existence checks and the `base-untrusted` refusal stay — they
+    guard presence and the base-derived capture, not the lineage. The
+    head-drift checks Aone has were confirmed to compare the live
+    `sourceBranch` SHA against the reviewed SHA the same way D7 names —
+    submit's pre-write gate and mid-batch re-read, and fetch-pr's resume
+    probe; none consults a platform compare API or an ancestry test.
+    GitHub keeps the tests: there an ancestor-less anchor is a
+    force-push, and the tests are the detection.
 
 ## Testing strategy
 
@@ -299,12 +453,27 @@ create --file/--line` and `-f json` stability? Provider version floor TBD.
 2. **Q2 — Inline anchor semantics.** Does `--line` accept only new-side lines?
    How are removed-line (`side: left`) comments posted? Needs a controlled
    experiment on a scratch CR.
-3. **Q3 — REQUEST_CHANGES.** Confirm no native reject/unapprove API exists
-   (a1 surface + platform docs); if one exists, prefer it over the blocking
-   header.
-4. **Q4 — AI-comment marking.** Does `comment create` auto-set `isAiComment`
-   for bot/token identities, or is there a flag? Determines whether qwen
-   comments fall under the `ai_comment` merge gate or the `discussion` gate.
+3. **Q3 — REQUEST_CHANGES.** ~~Confirm no native reject/unapprove API
+   exists.~~ **Re-confirmed 2026-08-21 on a1 v0.1.90:** the `repo mr` surface
+   (approve/close/comment/cr/create/diff/edit/list/merge/remind/reopen/
+   reviewers/status/view/workitem) still has no reject/request-changes/
+   unapprove. The blocking header stands. Two surface changes observed:
+   `mr comment resolve` (inline comments only) and `mr cr list` now exist;
+   the a1 FAQ documents `mr create --enable-ai-review`, but the v0.1.90
+   binary refuses it (`unknown flag`).
+4. **Q4 — AI-comment marking.** ~~Does `comment create` auto-set
+   `isAiComment`?~~ **Resolved 2026-08-21 by a controlled probe** (scratch
+   CR on a scratch repo, posting identity a personal account): one general
+   and one inline comment posted via `a1 repo mr comment create` both read
+   back `isAiComment: false` — immediately and ~3 min later (async
+   classifier ruled out) — and v0.1.90 exposes no marking flag. Read-side
+   corroboration: across 68 recent MRs on maxcompute/odps_src (a repo whose
+   gates include `ai_comment`) zero comments carried the flag — CI-bot and
+   human-posted "AI 评审" comments alike — so it is neither identity- nor
+   content-derived; it appears to be server-side state only the platform's
+   own AI-review service sets. Qwen comments therefore fall under the
+   `discussion` gate only; the remedy is a marking flag requested from the
+   a1 CLI (feature request), wired at `createMrComment` when it ships.
 5. **Q5 — Partial failure in batched submit.** GitHub's Create Review is
    atomic; Aone is N+1 calls. Policy: post inline first, summary last (summary
    references nothing not yet posted), and on mid-batch failure report exactly

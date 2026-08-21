@@ -3817,6 +3817,11 @@ describe('goal runtime', () => {
     expect(host.preemptGoalTurn).toHaveBeenCalledOnce();
     expect(host.started).toHaveLength(2);
     expect(runtime.getSnapshot().goal).toBeNull();
+    expect(runtime.getSnapshot().clearedGoal).toEqual({
+      goalId: replaced.snapshot.goal!.goalId,
+      revision: 1,
+      updatedAt: replaced.snapshot.goal!.updatedAt,
+    });
   });
 
   it('defensively copies response, subscriber, and getter snapshots', async () => {
