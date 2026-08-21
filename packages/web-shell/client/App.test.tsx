@@ -394,6 +394,7 @@ const {
         }) => void;
         isResponding?: boolean;
         activeTurnStartedAt?: number;
+        terminalBackgroundShellTaskIds?: ReadonlySet<string>;
       } | null,
       latestBtwMessageProps: null as {
         question: string;
@@ -812,6 +813,7 @@ vi.mock('./components/MessageList', async () => {
         }) => void;
         isResponding?: boolean;
         activeTurnStartedAt?: number;
+        terminalBackgroundShellTaskIds?: ReadonlySet<string>;
         welcomeHeader?: React.ReactNode;
       },
       ref: React.ForwardedRef<{ scrollToBottom: () => void }>,
@@ -1792,6 +1794,13 @@ describe('task activity key', () => {
             args: { is_background: true },
           },
           {
+            callId: 'promoted-shell',
+            toolName: 'run_shell_command',
+            status: 'completed',
+            args: { is_background: false },
+            rawOutput: 'Promoted to background: bg_1234abcd',
+          },
+          {
             callId: 'monitor-call',
             toolName: 'monitor',
             status: 'completed',
@@ -1802,7 +1811,7 @@ describe('task activity key', () => {
     ] satisfies Message[];
 
     expect(getTaskActivityKey(messages)).toBe(
-      'shell-call:in_progress|agent-call:pending|nested-shell:completed|completed-shell:completed|monitor-call:completed',
+      'shell-call:in_progress|agent-call:pending|nested-shell:completed|completed-shell:completed|promoted-shell:completed|monitor-call:completed',
     );
   });
 
@@ -7873,6 +7882,36 @@ describe('App session callbacks', () => {
     });
 
     expect(testState.latestStatusBarTasks).toEqual([monitor]);
+  });
+
+  it('passes terminal background shell task ids to the message list', async () => {
+    const running: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'Running shell',
+      description: 'Running shell',
+      status: 'running',
+      startTime: 1_000,
+      runtimeMs: 5_000,
+      command: 'npm run dev',
+      cwd: '/tmp/project',
+    };
+    testState.backgroundTasks = [
+      running,
+      {
+        ...running,
+        id: 'shell-completed',
+        status: 'completed',
+      },
+    ];
+
+    renderApp();
+    await flush();
+
+    expect([
+      ...(testState.latestMessageListProps?.terminalBackgroundShellTaskIds ??
+        []),
+    ]).toEqual(['shell-completed']);
   });
 
   it('controls the built-in chat header actions through header items', () => {
