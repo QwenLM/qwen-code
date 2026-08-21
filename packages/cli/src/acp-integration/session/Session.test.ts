@@ -6890,6 +6890,29 @@ describe('Session', () => {
       );
     });
 
+    it('registers create_sub_session when the permission manager enables it', async () => {
+      // The PM-present path must consult the manager and then register: a
+      // gate that skips whenever a manager exists would drop the tool from
+      // every daemon session that runs with permission management on.
+      const isToolEnabled = vi.fn().mockResolvedValue(true);
+      mockConfig.getPermissionManager = vi
+        .fn()
+        .mockReturnValue({ isToolEnabled });
+      mockConfig.getSubSessionSpawner = vi
+        .fn()
+        .mockReturnValue(async () => ({ sessionId: 'sub-1' }));
+
+      await registerCreateSubSessionTool(mockConfig);
+
+      expect(isToolEnabled).toHaveBeenCalledWith('create_sub_session');
+      expect(mockToolRegistry.registerTool).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'create_sub_session' }),
+      );
+      expect(mockToolRegistry.revealDeferredTool).toHaveBeenCalledWith(
+        'create_sub_session',
+      );
+    });
+
     it('wires the sub-session spawner only on daemon-backed sessions', () => {
       // The daemon stamps every child it spawns with QWEN_CODE_SERVE=1. A
       // standalone `--acp` session (an editor companion spawning the same
