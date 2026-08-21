@@ -40,6 +40,7 @@ import {
 import { operatorReviewSettings } from './lib/review-settings.js';
 import { hasReviewDeadline } from './lib/deadline.js';
 import { gitOpt } from './lib/git.js';
+import { certifierMatchesRound, roundModelIdFrom } from './lib/round-model.js';
 import {
   changedSince,
   movedSince,
@@ -60,7 +61,6 @@ interface CaptureLocalArgs {
   untracked: boolean;
   effort?: ReviewEffort;
   cache?: string;
-  model?: string;
 }
 
 type CaptureLocalResult = PlanReport & {
@@ -108,7 +108,8 @@ function display(path: string): string {
  */
 function anchorRefusalReason(
   cache: ReturnType<typeof readLocalCache>,
-  model: string | undefined,
+  /** The identity running THIS round, provider-qualified; empty means none. */
+  model: string,
   headSha: string | null,
   target: string,
   skippedCount: number,
@@ -134,18 +135,16 @@ function anchorRefusalReason(
     return `the capture SKIPPED ${skippedCount} file(s) whose content cannot be certified`;
   }
   if (!cache) return 'the cache is missing or unreadable';
-  if (!model) {
-    // The same-model contract cannot be verified without knowing who is
-    // reviewing; an unverifiable contract is a failed one.
-    return '--cache was given without --model';
-  }
-  if (cache.lastModelId !== model) {
+  if (!certifierMatchesRound(cache.lastModelId, model)) {
     // `display()`: the model id is a string out of the model-written cache
     // file — printed raw, a crafted value forges warning lines or emits
     // terminal escapes. Capped for the same reason.
+    // The same-model contract cannot be verified when either side is
+    // missing, and an unverifiable contract is a failed one — which is what
+    // `certifierMatchesRound` answers for an empty running identity too.
     return `the previous local round was reviewed by ${display(
       (cache.lastModelId ?? 'an unrecorded model').slice(0, 64),
-    )}, not ${model}`;
+    )}, not ${display(model || 'an unrecorded model')}`;
   }
   if (cache.target !== target) {
     // A cache belonging to another target (a different file-path review)
@@ -273,6 +272,18 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     headSha,
     files: hashes,
     stateId: stateIdOf(headSha, hashes),
+    // Recorded HERE, from the identity the runtime published, rather than
+    // merged in by Step 8 from `{{model}}`. `{{model}}` interpolates the BARE
+    // model id while `roundModelIdFrom` is provider-qualified
+    // (`<model>@<digest of authType + baseUrl>`), so two provider
+    // configurations exposing one model name wrote — and compared — equal,
+    // and each passed the other's gate. That is the identity-channel class
+    // the PR flow closed by moving the comparison into the command; a local
+    // round is the same contract ("an anchor is honoured only under the model
+    // whose clean verdict certified it") and needs the same treatment. An
+    // empty string means the runtime published nothing, which the gate reads
+    // as a mismatch rather than a pass.
+    lastModelId: roundModelIdFrom(process.env),
   };
   const cacheCandidatePath = tmpFile(target, 'cache-candidate.json');
   if (treeHeldStill) {
@@ -294,7 +305,7 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     const cache = readLocalCache(args.cache);
     const refusal = anchorRefusalReason(
       cache,
-      args.model,
+      roundModelIdFrom(process.env),
       headSha,
       target,
       capture.skipped.length,
@@ -555,13 +566,6 @@ export const captureLocalCommand: CommandModule = {
           'same model, same HEAD — the capture is scoped to files whose ' +
           'content changed since that round, widened by one import hop; on ' +
           'any refusal it degrades to the full capture and says why.',
-      })
-      .option('model', {
-        type: 'string',
-        describe:
-          'The model running this review. Required for `--cache` to take ' +
-          'effect: an anchor is honoured only under the model whose clean ' +
-          'verdict certified it.',
       }),
   handler: (argv) => {
     runCaptureLocal(argv as unknown as CaptureLocalArgs);
