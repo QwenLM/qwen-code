@@ -716,6 +716,12 @@ function extractStatusChecks(
     }
   }
   for (const container of containers) {
+    // The seed IS the payload — a bare `null` answer (the shape
+    // listMrComments tolerates) must read as "no recognizable checks
+    // array", not crash the loop on a property read.
+    if (container === null || typeof container !== 'object') {
+      continue;
+    }
     const checks = (container as Record<string, unknown>)['checks'];
     if (Array.isArray(checks)) {
       return checks.filter(

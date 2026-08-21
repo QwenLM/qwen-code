@@ -505,4 +505,15 @@ describe('presubmit handler (Aone backing)', () => {
   it('rejects a non-integer MR id (caller error)', async () => {
     await expect(run({ pr_number: 'abc' })).rejects.toThrow(/positive integer/);
   });
+
+  it('rejects pr_number tokens that coerce to a DIFFERENT MR id', async () => {
+    // Number() alone accepts these, so presubmit would compute its dedup
+    // state from one MR while the report carries the caller's label — the
+    // divergence fetch-pr's /^[1-9]\d*$/ grammar refuses.
+    for (const token of ['012', '1e3', '0x1f', ' 12', '12.0']) {
+      await expect(run({ pr_number: token })).rejects.toThrow(
+        /positive integer/,
+      );
+    }
+  });
 });

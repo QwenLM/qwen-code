@@ -1433,4 +1433,13 @@ describe('comment/status reads (the a1 backing for dedup)', () => {
       { name: 'test', state: 'success' },
     ]);
   });
+
+  it('getMrStatusChecks reads a null payload as unreadable, never a crash', () => {
+    // a1 can answer a bare `null` to mr status — the same payload shape
+    // listMrComments tolerates (and pins). The caller maps that unreadable
+    // gate state to pending; a throw here would crash presubmit with no
+    // report file, stalling Step 7 of an Aone review.
+    a1JsonMock.mockReturnValue(null);
+    expect(getMrStatusChecks(123, 'g/p')).toBeUndefined();
+  });
 });
