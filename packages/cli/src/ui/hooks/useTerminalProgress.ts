@@ -24,7 +24,15 @@ import {
 const PROGRESS_CLEAR = wrapForMultiplexer(`${OSC_PREFIX}9;4;0;${BEL}`);
 const PROGRESS_INDETERMINATE = wrapForMultiplexer(`${OSC_PREFIX}9;4;3;;${BEL}`);
 
-function isProgressBarSupported(): boolean {
+/** OSC 9;4 sequences + the support probe, shared with the OpenTUI backend
+ * (its progress parity writes process.stdout directly instead of ink's
+ * useStdout). */
+export const TERMINAL_PROGRESS_SEQUENCES = {
+  clear: PROGRESS_CLEAR,
+  indeterminate: PROGRESS_INDETERMINATE,
+} as const;
+
+export function isProgressBarSupported(): boolean {
   // Don't emit escape sequences when stdout is not a TTY (CI, piped output,
   // redirected to log files, etc.)
   if (!process.stdout?.isTTY) return false;

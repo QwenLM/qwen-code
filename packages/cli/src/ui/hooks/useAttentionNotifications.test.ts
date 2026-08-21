@@ -13,7 +13,6 @@ import {
 } from './useAttentionNotifications.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import type { TerminalNotification } from './useTerminalNotification.js';
-import type { TrackedToolCall } from './useReactToolScheduler.js';
 
 vi.mock('../../services/notificationService.js', () => ({
   sendNotification: vi.fn(),
@@ -229,7 +228,7 @@ describe('useAttentionNotifications', () => {
         terminal: mockTerminal,
         pendingToolCalls: [
           { status: 'awaiting_approval', request: { name: 'Bash' } },
-        ] as unknown as TrackedToolCall[],
+        ],
       },
     });
 
@@ -253,7 +252,7 @@ describe('useAttentionNotifications', () => {
         elapsedTime: 0,
         settings: mockSettings,
         terminal: mockTerminal,
-        pendingToolCalls: [] as TrackedToolCall[],
+        pendingToolCalls: [],
       },
     });
 

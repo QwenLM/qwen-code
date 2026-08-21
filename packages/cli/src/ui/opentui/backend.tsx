@@ -157,6 +157,15 @@ import {
 import { injectCapturedInput } from './early-input.js';
 import { useGitBranchName } from '../hooks/useGitBranchName.js';
 import { buildQuitFarewellForConfig } from './quit-farewell.js';
+import { useAttentionNotifications } from '../hooks/useAttentionNotifications.js';
+import {
+  isProgressBarSupported,
+  TERMINAL_PROGRESS_SEQUENCES,
+} from '../hooks/useTerminalProgress.js';
+import { buildTerminalNotification } from '../hooks/useTerminalNotification.js';
+import { StreamingState } from '../types.js';
+import { sendNotification } from '../../services/notificationService.js';
+import { useOpenTuiFocus } from './use-opentui-focus.js';
 
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -1248,6 +1257,109 @@ function App({
     resolve: (resolution: ShellConfirmationResolution) => void;
   } | null>(null);
   const [shellConfirmSel, setShellConfirmSel] = useState(0);
+
+  // Attention notifications (ink useAttentionNotifications parity):
+  // waiting-for-approval and long-task-complete notifications fire only
+  // when the terminal is unfocused, routed through the shared
+  // sendNotification service. Focus comes from the renderer's native
+  // FOCUS/BLUR events (mode 1004 enabled by the hook); a terminal without
+  // focus reporting stays "focused" and notifications degrade to never
+  // firing — the same degradation ink's useFocus has.
+  const isFocused = useOpenTuiFocus(renderer);
+  // Raw stdout writes for OSC notification sequences (ink AppContainer
+  // parity — bypasses the render pipeline so binary sequences stay intact).
+  const terminal = useMemo(
+    () => buildTerminalNotification((data) => process.stdout.write(data)),
+    [],
+  );
+  const streamingState =
+    confirmReq || questionReq || actionConfirmReq || shellConfirmReq
+      ? StreamingState.WaitingForConfirmation
+      : streaming
+        ? StreamingState.Responding
+        : StreamingState.Idle;
+  // Bridge the waiting scheduler calls into the shared hook's minimal
+  // view. The ref is written before the confirm/question state updates, so
+  // by the re-render it already reflects the new waiting set; the dialog
+  // states are memo deps precisely to re-run on that re-render.
+  const pendingToolCalls = useMemo(
+    () => {
+      const waiting = [...pendingApprovalsRef.current.values()];
+      return waiting.length > 0
+        ? waiting.map((call) => ({
+            status: 'awaiting_approval',
+            request: { name: call.name },
+          }))
+        : undefined;
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- dialog states are the re-render triggers for the ref read above
+    [confirmReq, questionReq, actionConfirmReq, shellConfirmReq],
+  );
+  useAttentionNotifications({
+    isFocused,
+    streamingState,
+    elapsedTime: elapsed,
+    settings,
+    config,
+    terminal,
+    pendingToolCalls,
+  });
+
+  // P-notif: terminal-bell when a workflow run finishes (completed /
+  // failed), so a long run ending is noticed without watching the
+  // /workflows dialog. User-initiated cancels are intentionally not
+  // notified (the registry omits them). Ink AppContainer parity.
+  const workflowBellEnabled =
+    (settings.merged.general?.terminalBell as boolean) ?? true;
+  useEffect(() => {
+    const registry = config?.getWorkflowRunRegistry?.();
+    // Optional call: production always has `setNotificationCallback`, but
+    // partial registry mocks in tests may omit it — no-op rather than throw.
+    if (!registry?.setNotificationCallback) return;
+    registry.setNotificationCallback((entry) => {
+      const name = entry.meta?.name ?? entry.runId;
+      const verb = entry.status === 'failed' ? 'failed' : 'completed';
+      sendNotification(
+        { message: `Workflow '${name}' ${verb}`, title: 'Qwen Code' },
+        terminal,
+        workflowBellEnabled,
+      );
+    });
+    return () => registry.setNotificationCallback(undefined);
+  }, [config, terminal, workflowBellEnabled]);
+
+  // OSC 9;4 tab-progress parity (ink useTerminalProgress): an indeterminate
+  // spinner while tools execute, cleared on idle and on process exit.
+  const hasExecutingTool = items.some((it) => it.kind === 'tool' && !it.done);
+  useEffect(() => {
+    if (!isProgressBarSupported()) return;
+    const write = (seq: string) => {
+      try {
+        process.stdout.write(seq);
+      } catch {
+        // Best-effort (EPIPE during teardown).
+      }
+    };
+    if (streamingState === StreamingState.Responding && hasExecutingTool) {
+      write(TERMINAL_PROGRESS_SEQUENCES.indeterminate);
+    } else if (streamingState === StreamingState.Idle) {
+      write(TERMINAL_PROGRESS_SEQUENCES.clear);
+    }
+  }, [streamingState, hasExecutingTool]);
+  useEffect(() => {
+    if (!isProgressBarSupported()) return;
+    const clearOnExit = () => {
+      try {
+        process.stdout.write(TERMINAL_PROGRESS_SEQUENCES.clear);
+      } catch {
+        // Exit-time best effort.
+      }
+    };
+    process.on('exit', clearOnExit);
+    return () => {
+      process.removeListener('exit', clearOnExit);
+    };
+  }, []);
 
   // Disk-backed input history (ink AppContainer getPreviousUserMessages):
   // one Logger per live config, merged with the current session below.

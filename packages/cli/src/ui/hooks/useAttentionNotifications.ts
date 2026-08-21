@@ -13,10 +13,19 @@ import {
   NotificationType,
 } from '@qwen-code/qwen-code-core';
 import type { TerminalNotification } from './useTerminalNotification.js';
-import type { TrackedToolCall } from './useReactToolScheduler.js';
 import { sendNotification } from '../../services/notificationService.js';
 
 export const LONG_TASK_NOTIFICATION_THRESHOLD_SECONDS = 20;
+
+/**
+ * Minimal structural view of a tracked tool call. The full
+ * `TrackedToolCall` satisfies this, and non-ink renderers (OpenTUI backend)
+ * can pass lighter objects — the hook only reads the awaiting tool's name.
+ */
+export interface PendingToolCallView {
+  status: string;
+  request: { name: string };
+}
 
 const NOTIFICATION_TITLE = 'Qwen Code';
 
@@ -38,7 +47,7 @@ interface UseAttentionNotificationsOptions {
   settings: LoadedSettings;
   config?: Config;
   terminal: TerminalNotification;
-  pendingToolCalls?: TrackedToolCall[];
+  pendingToolCalls?: readonly PendingToolCallView[];
 }
 
 export const useAttentionNotifications = ({
