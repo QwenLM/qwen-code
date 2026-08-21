@@ -2536,8 +2536,30 @@ export class GeminiClient {
       }
     };
 
+    // Settle a carrier whose send provably never pushed its user content —
+    // blocked by a UserPromptSubmit hook, or any exit before `turn.run`.
+    // Restore unconditionally instead of comparing the push counter: the
+    // counter is global, and a concurrent submission admitted during the
+    // hook await pushes its own content into the same counter, which would
+    // read as "accepted" for content THIS send never pushed.
+    const restoreSteerInput = (steerInput: SteerInput | undefined) => {
+      if (!steerInput || this.settledSteerInputs.has(steerInput)) return;
+      this.settledSteerInputs.add(steerInput);
+      try {
+        steerInput.restore();
+      } catch (error) {
+        debugLogger.warn(`Failed to settle steer input: ${error}`);
+      }
+    };
+
     const attachedSteerInput = options?.steerInput;
-    const attachedSteerPushCount = currentPushCount();
+    // Re-snapshotted immediately before `turn.run` (after the
+    // UserPromptSubmit hook await) so pushes from concurrent submissions
+    // admitted during the hook window stay out of this send's comparison
+    // window. `pushInitiated` tracks whether the send ever reached the
+    // push point; exits before it settle by unconditional restore.
+    let attachedSteerPushCount = currentPushCount();
+    let pushInitiated = false;
 
     const restoreStrippedRetryEntries = () => {
       if (strippedRetryEntries.length === 0) {
@@ -2697,7 +2719,11 @@ export class GeminiClient {
               originalPrompt: promptText,
             },
           };
-          settleSteerInput(attachedSteerInput, attachedSteerPushCount);
+          // A blocked send never reaches the history push: settle the
+          // attached carrier by unconditional restore, never by the push
+          // counter (a concurrent push inside the hook window above would
+          // otherwise masquerade as this send's acceptance).
+          restoreSteerInput(attachedSteerInput);
           return new Turn(this.getChat(), prompt_id);
         }
 
@@ -2732,6 +2758,11 @@ export class GeminiClient {
       for (const goalEvent of await finalizeInterruptedGoalTurn()) {
         yield goalEvent;
       }
+      // A hook failure (including an abort during the hook await) exits
+      // before the settlement try/finally below, and this send provably
+      // never pushed: settle the attached carrier here by unconditional
+      // restore instead of leaving it to caller-side failure handling.
+      restoreSteerInput(attachedSteerInput);
       throw error;
     }
 
@@ -3431,6 +3462,12 @@ export class GeminiClient {
             )
           : null;
 
+      // Acceptance snapshot for the attached steer input, retaken here —
+      // after the UserPromptSubmit hook await, immediately before the push
+      // inside `turn.run` — so a concurrent submission pushing during the
+      // hook window cannot supply the observed push for THIS send.
+      attachedSteerPushCount = currentPushCount();
+      pushInitiated = true;
       agentOutput.beginResponse();
       const resultStream = turn.run(model, requestToSend, signal);
       let didUpdateIdeContextState = false;
@@ -4196,7 +4233,14 @@ export class GeminiClient {
         await releaseGoalPermitOnInterruptedExit();
       }
       closeGoalStateEvents();
-      settleSteerInput(attachedSteerInput, attachedSteerPushCount);
+      if (pushInitiated) {
+        settleSteerInput(attachedSteerInput, attachedSteerPushCount);
+      } else {
+        // Exited before `turn.run` (cancelled during the hook await, setup
+        // failure, ...): this send never pushed, so the entry-snapshot
+        // counter comparison could be fooled by concurrent pushes.
+        restoreSteerInput(attachedSteerInput);
+      }
       restoreStrippedRetryEntries();
       // Belt-and-suspenders: close out the MessageDisplay dispatcher on any
       // exit the explicit finish() sites above didn't cover (an uncaught

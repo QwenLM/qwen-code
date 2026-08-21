@@ -12645,6 +12645,150 @@ Other open files:
         });
       });
 
+      it('restores a hook-blocked steer even when a concurrent push lands during the hook await', async () => {
+        // The push counter is global to GeminiChat. While this send awaits
+        // the UserPromptSubmit hook, an admitted concurrent submission
+        // (/btw) pushes its own user content, advancing the same counter.
+        // The blocked send never pushes, so the carrier must restore even
+        // though the counter advanced inside the hook window.
+        let pushCount = 0;
+        client.getChat().getUserContentPushCount = vi.fn(() => pushCount);
+        const mockMessageBus = {
+          request: vi.fn().mockImplementation(async () => {
+            pushCount += 1; // concurrent submission pushes mid-hook-await
+            return { output: { decision: 'block', reason: 'blocked' } };
+          }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'UserPromptSubmit',
+        );
+        const accept = vi.fn();
+        const restore = vi.fn();
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'tool result plus steer' }],
+            new AbortController().signal,
+            'prompt-attached-steer-blocked-concurrent-push',
+            {
+              type: SendMessageType.ToolResult,
+              steerInput: {
+                parts: [{ text: 'steer' }],
+                accept,
+                restore,
+              },
+            },
+          ),
+        );
+
+        expect(mockTurnRunFn).not.toHaveBeenCalled();
+        expect(accept).not.toHaveBeenCalled();
+        expect(restore).toHaveBeenCalledOnce();
+      });
+
+      it('restores a steer cancelled during the hook await even if a concurrent push advanced the counter', async () => {
+        let pushCount = 0;
+        client.getChat().getUserContentPushCount = vi.fn(() => pushCount);
+        const controller = new AbortController();
+        const mockMessageBus = {
+          request: vi.fn().mockImplementation(async () => {
+            pushCount += 1; // concurrent submission pushes mid-hook-await
+            controller.abort();
+            throw new Error('cancelled during hook');
+          }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'UserPromptSubmit',
+        );
+        const accept = vi.fn();
+        const restore = vi.fn();
+
+        await expect(
+          fromAsync(
+            client.sendMessageStream(
+              [{ text: 'tool result plus steer' }],
+              controller.signal,
+              'prompt-attached-steer-cancelled-in-hook',
+              {
+                type: SendMessageType.ToolResult,
+                steerInput: {
+                  parts: [{ text: 'steer' }],
+                  accept,
+                  restore,
+                },
+              },
+            ),
+          ),
+        ).rejects.toThrow('cancelled during hook');
+
+        expect(mockTurnRunFn).not.toHaveBeenCalled();
+        expect(accept).not.toHaveBeenCalled();
+        expect(restore).toHaveBeenCalledOnce();
+      });
+
+      it('restores a steer whose push rolled back even when a concurrent push landed during the hook', async () => {
+        // The acceptance snapshot must be taken AFTER the hook await: this
+        // send's own push lands and then rolls back on a setup error, while
+        // a concurrent push advanced the counter during the hook window.
+        // Against the post-hook snapshot the final counter reads equal, so
+        // the carrier restores; an entry-time snapshot would see the
+        // concurrent push as growth and wrongly accept.
+        let pushCount = 0;
+        client.getChat().getUserContentPushCount = vi.fn(() => pushCount);
+        const mockMessageBus = {
+          request: vi.fn().mockImplementation(async () => {
+            pushCount += 1; // concurrent submission pushes mid-hook-await
+            return { output: undefined };
+          }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'UserPromptSubmit',
+        );
+        mockTurnRunFn.mockImplementationOnce(() => {
+          pushCount += 1; // this send pushes...
+          pushCount -= 1; // ...then rolls the push back on a setup error
+          throw new Error('setup failed after push rollback');
+        });
+        const accept = vi.fn();
+        const restore = vi.fn();
+
+        await expect(
+          fromAsync(
+            client.sendMessageStream(
+              [{ text: 'tool result plus steer' }],
+              new AbortController().signal,
+              'prompt-attached-steer-rollback-concurrent-push',
+              {
+                type: SendMessageType.ToolResult,
+                steerInput: {
+                  parts: [{ text: 'steer' }],
+                  accept,
+                  restore,
+                },
+              },
+            ),
+          ),
+        ).rejects.toThrow('setup failed after push rollback');
+
+        expect(accept).not.toHaveBeenCalled();
+        expect(restore).toHaveBeenCalledOnce();
+      });
+
       it('ends an attached ToolResult interaction when UserPromptSubmit throws', async () => {
         vi.spyOn(telemetryIndex, 'getActiveInteractionSpan').mockReturnValue(
           {} as never,

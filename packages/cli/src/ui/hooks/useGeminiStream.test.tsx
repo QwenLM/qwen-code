@@ -57,14 +57,6 @@ const mockSendMessageStream = vi
   .mockReturnValue((async function* () {})());
 const mockStartChat = vi.fn();
 const mockRunVisionBridge = vi.hoisted(() => vi.fn());
-// Mirrors GeminiChat's user-content push counter: production pushes the
-// submission's user content once before any model attempt and rolls the
-// push back only on setup errors, so tests that simulate an ACCEPTED
-// submission bump this (ideally inside the mocked stream generator,
-// before yielding events) while blocked/pre-send failures leave it
-// untouched. The tool-round boundary teammate settlement uses it to
-// tell "never reached the model" apart from "accepted then failed".
-const mockUserContentPushCount = { value: 0 };
 
 const MockedGeminiClientClass = vi.hoisted(() =>
   vi.fn().mockImplementation(function (this: any, _config: any) {
@@ -72,9 +64,6 @@ const MockedGeminiClientClass = vi.hoisted(() =>
     this.startChat = mockStartChat;
     this.sendMessageStream = mockSendMessageStream;
     this.addHistory = vi.fn();
-    this.getChat = vi.fn().mockReturnValue({
-      getUserContentPushCount: vi.fn(() => mockUserContentPushCount.value),
-    });
     this.consumePendingMemoryTaskPromises = vi.fn().mockReturnValue([]);
     this.recordCompletedToolCall = vi.fn();
     // Default to the fast-path accessor returning an empty Set so the
@@ -362,7 +351,6 @@ describe('useGeminiStream', () => {
     mockSendMessageStream
       .mockClear()
       .mockReturnValue((async function* () {})());
-    mockUserContentPushCount.value = 0;
     handleAtCommandSpy = vi.spyOn(atCommandProcessor, 'handleAtCommand');
     mockRunVisionBridge.mockReset();
     mockCleanupReviewWorktreeLeases.mockReset();
@@ -1609,9 +1597,19 @@ describe('useGeminiStream', () => {
 
     // Thin wrapper over the file-level `renderTestHook` harness (which
     // captures the scheduler's onComplete and can rerender with new
-    // tool calls): adds only the team-manager mock plus the
-    // `leaderCallback()` accessor used to queue teammate messages.
-    function renderBusyMultiRoundTask(initialToolCalls: TrackedToolCall[]) {
+    // tool calls): adds the team-manager mock, the `leaderCallback()`
+    // accessor used to queue teammate messages, and a client-side
+    // settlement shim for the `steerInput` carrier. The shim mirrors
+    // GeminiClient's contract in miniature: it accepts the carrier unless
+    // the stream yields UserPromptSubmitBlocked (a blocked send provably
+    // never pushed), in which case it restores. These tests therefore do
+    // NOT observe GeminiChat's push counter — acceptance semantics of the
+    // real client-side settlement (snapshot placement, concurrent pushes
+    // inside the hook window) are pinned in core's client.test.ts.
+    function renderBusyMultiRoundTask(
+      initialToolCalls: TrackedToolCall[],
+      goalQueueRef?: Parameters<typeof useGeminiStream>[24],
+    ) {
       const mockManager = { setLeaderMessageCallback: vi.fn() };
       (mockConfig.getTeamManager as unknown as Mock).mockReturnValue(
         mockManager,
@@ -1635,7 +1633,14 @@ describe('useGeminiStream', () => {
           }
         })();
       };
-      const utils = renderTestHook(initialToolCalls, client);
+      const utils = renderTestHook(
+        initialToolCalls,
+        client,
+        undefined,
+        undefined,
+        undefined,
+        goalQueueRef,
+      );
 
       const leaderCallback = () => {
         const callback = (
@@ -1820,13 +1825,11 @@ describe('useGeminiStream', () => {
         leaderCallback()(teammateModelText, teammateDisplay);
       });
 
-      // The round submission is ACCEPTED — its user content (tool
-      // responses + envelope) lands in the session history before any
-      // model attempt, which the push counter records — and only then
-      // hits a terminal API error mid-stream.
+      // The round submission is ACCEPTED — the mocked stream yields no
+      // UserPromptSubmitBlocked event, so the settlement wrapper accepts
+      // the carrier — and only then hits a terminal API error mid-stream.
       mockSendMessageStream.mockReturnValue(
         (async function* () {
-          mockUserContentPushCount.value += 1;
           yield {
             type: ServerGeminiEventType.Error,
             value: { error: { message: 'model overloaded' } },
@@ -2062,6 +2065,104 @@ describe('useGeminiStream', () => {
         expect.any(String),
         expect.objectContaining({ type: SendMessageType.Teammate }),
       );
+    });
+
+    it('defers the Idle teammate drain while a Goal owns the turn, then delivers the envelope exactly once', async () => {
+      // Goal gate state: while user messages are queued for an active
+      // Goal, `claimSystemGoalTurn` reports not-ready and the drain must
+      // not even splice the queue.
+      let queuedUserMessages = true;
+      let pendingSubmissionCount = 2;
+      const claimGoalTurn = vi.fn().mockImplementation(() => {
+        // The first claim collides with a racing user-message queue and
+        // defers; the collision clears itself before the re-armed retry.
+        queuedUserMessages = true;
+        return undefined;
+      });
+      const goalQueueRef = {
+        current: {
+          hasQueuedUserMessages: vi.fn(() => queuedUserMessages),
+          getPendingSubmissionCount: vi.fn(() => pendingSubmissionCount),
+          claimGoalTurn,
+        },
+      };
+      let snapshot: { goal: { status: string } | null; activity: string } = {
+        goal: { status: 'active' },
+        activity: 'running',
+      };
+      const runtime = {
+        getSnapshot: vi.fn(() => snapshot),
+        subscribe: vi.fn(() => vi.fn()),
+      } as unknown as ReturnType<Config['getGoalRuntime']>;
+      mockConfig.getGoalRuntime = vi.fn(() => runtime);
+
+      const { rerenderWithToolCalls, leaderCallback } =
+        renderBusyMultiRoundTask([], goalQueueRef as never);
+
+      // Phase 1: the gate reports not-ready, so the teammate message
+      // stays queued — neither submitted nor rendered as drained.
+      act(() => {
+        leaderCallback()(teammateModelText, teammateDisplay);
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+
+      // Phase 2: the user-message queue clears, so the gate admits the
+      // drain — but the goal-turn claim itself collides and defers
+      // (`onGoalClaimDeferred`). The already-spliced batch must be
+      // restored (requeued and the Idle drain re-armed), not dropped.
+      queuedUserMessages = false;
+      pendingSubmissionCount = 1;
+      rerenderWithToolCalls([]);
+      await waitFor(() => {
+        expect(claimGoalTurn).toHaveBeenCalledTimes(1);
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      // The deferral restored the batch instead of submitting it.
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+      // The restore re-armed the Idle drain: the effect re-ran and
+      // re-checked the gate without any external state change (checks:
+      // phase-1 effect, phase-2 effect, the claim closure inside
+      // submitQuery, and the re-armed re-run). Dropping the re-arm would
+      // leave the gate checked only three times.
+      expect(goalQueueRef.current.hasQueuedUserMessages).toHaveBeenCalledTimes(
+        4,
+      );
+
+      // Phase 3: the Goal completes and the gate admits the drain; the
+      // restored envelope is delivered exactly once (a double requeue in
+      // restore would arrive as a joined two-envelope payload).
+      snapshot = { goal: null, activity: 'idle' };
+      queuedUserMessages = false;
+      pendingSubmissionCount = 0;
+      rerenderWithToolCalls([]);
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledWith(
+        teammateModelText,
+        expect.any(AbortSignal),
+        expect.any(String),
+        expect.objectContaining({
+          type: SendMessageType.Teammate,
+          notificationDisplayText: teammateDisplay,
+        }),
+      );
+      // The `● …` notification renders exactly once even though the
+      // batch was drained twice (deferral drain + delivery drain).
+      const notificationRenders = mockAddItem.mock.calls.filter(
+        (args) =>
+          (args[0] as { type?: string }).type === 'notification' &&
+          (args[0] as { text?: string }).text === teammateDisplay,
+      );
+      expect(notificationRenders).toHaveLength(1);
     });
   });
 

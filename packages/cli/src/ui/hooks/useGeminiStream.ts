@@ -5277,10 +5277,13 @@ export const useGeminiStream = (
       }
       // Settle the drained batch exactly once. The settlement carrier below
       // is passed through the existing `steerInput` option so GeminiClient
-      // decides acceptance at send entry, next to the actual history push.
-      // This avoids a hook-wide/global counter snapshot spanning submitQuery's
-      // admission and UserPromptSubmit-hook awaits, where a concurrent /btw
-      // submission could otherwise supply the observed push.
+      // settles it next to the actual history push: acceptance compares the
+      // user-content push counter against a snapshot taken immediately
+      // before `turn.run` (after the UserPromptSubmit-hook await), and any
+      // exit that provably never pushed (hook block, cancel or failure
+      // before the push) restores the carrier unconditionally instead of
+      // consulting the global counter — a concurrent /btw push inside the
+      // hook window can therefore not supply the observed push.
       const settleDrainedTeammates = (accepted: boolean) => {
         if (!drainedTeammates || drainedTeammates.entries.length === 0) {
           return;
