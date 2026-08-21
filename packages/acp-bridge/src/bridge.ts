@@ -9762,6 +9762,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             { number: bound.number, url: bound.url },
           ].slice(-SESSION_PR_LIST_LIMIT);
           markSessionCatalogChanged();
+          writeStderrLine(
+            `qwen serve: updated session metadata ${JSON.stringify(sessionId)} ` +
+              `pr=${bound.number} bound (${bound.url})` +
+              (context?.clientId
+                ? ` by client ${JSON.stringify(context.clientId)}`
+                : ''),
+          );
           try {
             entry.events.publish({
               type: 'session_metadata_updated',
@@ -9787,6 +9794,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         displayName: entry.displayName,
         ...(entry.prs && entry.prs.length > 0 ? { prs: entry.prs } : {}),
       };
+    },
+
+    seedSessionPrs(sessionId, prs) {
+      const entry = byId.get(sessionId);
+      if (!entry || (entry.prs && entry.prs.length > 0)) return;
+      entry.prs = prs
+        .map(({ number, url }) => ({ number, url }))
+        .slice(-SESSION_PR_LIST_LIMIT);
     },
 
     async getSessionArtifacts(sessionId, context) {

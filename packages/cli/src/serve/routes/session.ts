@@ -26,6 +26,7 @@ import {
   writeWorktreeSessionMarker,
   writeWorktreeSession,
   readWorktreeSession,
+  readSessionPrs,
   upsertSessionPr,
   SESSION_PR_URL_MAX_LENGTH,
   type ApprovalMode,
@@ -5288,6 +5289,18 @@ export function registerSessionRoutes(
             : undefined;
         let effective: ReturnType<AcpSessionBridge['updateSessionMetadata']>;
         try {
+          const service = createWorkspaceRuntimeSessionService(runtime);
+          // Bridge entries are re-created without prs on daemon restart,
+          // close/reload, and archive/restore. Hydrate the persisted
+          // binding history before the mutation so the
+          // `session_metadata_updated` event the bridge publishes carries
+          // the full list, not just this daemon lifetime's bindings.
+          const hydratedPrs = await readSessionPrs(
+            service.getPrSessionPathForArchiveState(sessionId, 'active'),
+          );
+          if (hydratedPrs && hydratedPrs.length > 0) {
+            runtime.bridge.seedSessionPrs?.(sessionId, hydratedPrs);
+          }
           // Bridge first: it resolves session liveness, client trust, and
           // metadata content. Persisting the sidecar only after it succeeds
           // keeps a rejected request from leaving a durable binding behind.
@@ -5297,7 +5310,6 @@ export function registerSessionRoutes(
             clientId !== undefined ? { clientId } : undefined,
           );
           if (pr) {
-            const service = createWorkspaceRuntimeSessionService(runtime);
             const persistedPrs = (
               await upsertSessionPr(
                 service.getPrSessionPathForArchiveState(sessionId, 'active'),
@@ -5417,7 +5429,20 @@ export function registerSessionRoutes(
               displayName?: string;
               prs?: Array<{ number: number; url: string }>;
             };
+            const service = createWorkspaceRuntimeSessionService(runtime);
             try {
+              // Bridge entries are re-created without prs on daemon
+              // restart, close/reload, and archive/restore. Hydrate the
+              // persisted binding history before the mutation so the
+              // `session_metadata_updated` event the bridge publishes
+              // carries the full list, not just this daemon lifetime's
+              // bindings.
+              const hydratedPrs = await readSessionPrs(
+                service.getPrSessionPathForArchiveState(sessionId, 'active'),
+              );
+              if (hydratedPrs && hydratedPrs.length > 0) {
+                runtime.bridge.seedSessionPrs?.(sessionId, hydratedPrs);
+              }
               // Bridge first: it resolves client trust and metadata
               // content, and reports non-live sessions. Persisting the
               // sidecar only after it succeeds keeps a rejected request
@@ -5433,7 +5458,6 @@ export function registerSessionRoutes(
               );
               assertRuntimeGenerationOpen?.();
               if (pr) {
-                const service = createWorkspaceRuntimeSessionService(runtime);
                 const persistedPrs = (
                   await upsertSessionPr(
                     service.getPrSessionPathForArchiveState(
@@ -5448,7 +5472,6 @@ export function registerSessionRoutes(
               }
             } catch (err) {
               if (!(err instanceof SessionNotFoundError)) throw err;
-              const service = createWorkspaceRuntimeSessionService(runtime);
               const location = await service.getSessionLocation(sessionId);
               assertRuntimeGenerationOpen?.();
               if (location === 'conflict') {
@@ -5458,6 +5481,22 @@ export function registerSessionRoutes(
                 throw new SessionNotFoundError(sessionId);
               }
               effective = {};
+              // Persist the PR sidecar BEFORE the rename: the catalog bump
+              // below only runs when every write succeeds, so the write most
+              // likely to fail (the newer sidecar path) must run first — a
+              // failed sidecar write may not strand an already-persisted
+              // rename that the error response never announces.
+              if (pr) {
+                const persisted = await upsertSessionPr(
+                  service.getPrSessionPathForArchiveState(sessionId, location),
+                  pr,
+                );
+                assertRuntimeGenerationOpen?.();
+                effective.prs = persisted.map(({ number, url }) => ({
+                  number,
+                  url,
+                }));
+              }
               if (displayName !== undefined) {
                 const renamed = await service.renameSession(
                   sessionId,
@@ -5470,17 +5509,6 @@ export function registerSessionRoutes(
                   throw new SessionNotFoundError(sessionId);
                 }
                 effective.displayName = displayName;
-              }
-              if (pr) {
-                const persisted = await upsertSessionPr(
-                  service.getPrSessionPathForArchiveState(sessionId, location),
-                  pr,
-                );
-                assertRuntimeGenerationOpen?.();
-                effective.prs = persisted.map(({ number, url }) => ({
-                  number,
-                  url,
-                }));
               }
               // The persisted mutation is picked up by the next catalog
               // scan, so this fallback must advance the same catalog

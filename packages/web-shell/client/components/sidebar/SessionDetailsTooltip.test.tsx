@@ -97,6 +97,9 @@ describe('SessionDetailsTooltip', () => {
               prs: [
                 { number: 9500, url: 'https://github.com/o/r/pull/9500' },
                 { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+                // A hand-edited sidecar can carry non-openable schemes; the
+                // tooltip must filter them exactly like SessionPrBadge does.
+                { number: 9999, url: 'javascript:alert(1)' },
               ],
             }}
             label="Fix CI"
@@ -124,6 +127,9 @@ describe('SessionDetailsTooltip', () => {
     expect(links?.[0]?.getAttribute('href')).toBe(
       'https://github.com/o/r/pull/9517',
     );
+    // Non-http(s) bindings are dropped, matching the badge surface.
+    expect(details?.querySelector('a[href="javascript:alert(1)"]')).toBeNull();
+    expect(details?.textContent).not.toContain('#9999');
 
     act(() => root.unmount());
   });
