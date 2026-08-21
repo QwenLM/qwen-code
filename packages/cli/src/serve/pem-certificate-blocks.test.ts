@@ -175,16 +175,43 @@ describe('extractCertificateBlocks', () => {
   });
 
   it('lets any column-zero BEGIN prefix close an open body', () => {
-    for (const marker of ['-----BEGIN BOGUS-LABEL-----', '-----BEGIN BOGUS']) {
+    for (const marker of [
+      '-----BEGIN BOGUS-LABEL-----',
+      '-----BEGIN -----',
+      '-----BEGIN BOGUS',
+    ]) {
       const file = ROOT_PEM.replace(
         '-----END CERTIFICATE-----',
         `${marker}\n-----END CERTIFICATE-----`,
       );
       expect(extractCertificateBlocks(file)).toEqual([ROOT_PEM.trim()]);
-      expect(extractCertificateBlocks(`${marker}\n${ROOT_PEM}`)).toEqual([
+    }
+  });
+
+  it('stops at a malformed top-level BEGIN attempt, keeping the prefix', () => {
+    for (const marker of ['-----BEGIN BOGUS-LABEL-----', '-----BEGIN -----']) {
+      expect(
+        extractCertificateBlocks(`${marker}\n${ROOT_PEM}`),
+      ).toBeUndefined();
+      expect(
+        extractCertificateBlocks(`${ROOT_PEM}${marker}\n${ROOT_PEM}`),
+      ).toEqual([ROOT_PEM.trim()]);
+    }
+  });
+
+  it('walks past a paired non-certificate block with an unusual label', () => {
+    for (const label of ['BOGUS-LABEL', '']) {
+      const block = `-----BEGIN ${label}-----\nQUJD\n-----END ${label}-----\n`;
+      expect(extractCertificateBlocks(`${block}${ROOT_PEM}`)).toEqual([
         ROOT_PEM.trim(),
       ]);
     }
+  });
+
+  it('walks past a BEGIN prefix without a marker suffix', () => {
+    expect(extractCertificateBlocks(`-----BEGIN BOGUS\n${ROOT_PEM}`)).toEqual([
+      ROOT_PEM.trim(),
+    ]);
   });
 
   it('takes nothing behind the block a BEGIN marker closed', () => {

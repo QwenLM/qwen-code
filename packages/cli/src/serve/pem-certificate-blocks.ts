@@ -25,27 +25,12 @@ const CERTIFICATE_LABELS: ReadonlySet<string> = new Set([
 /** Canonical PEM wraps the body at 64 columns; so does every producer. */
 const PEM_BODY_COLUMNS = 64;
 
-/**
- * The label of a `-----BEGIN X-----`/`-----END X-----` line, or `undefined`
- * when the line is not one.
- *
- * OpenSSL's PEM reader — the parser behind `NODE_EXTRA_CA_CERTS` — matches
- * these markers at the START of a line and requires the trailing `-----`, so
- * `# see -----BEGIN CERTIFICATE----- below` is prose it walks straight past.
- * Counting markers as unanchored substrings (what this module did before) saw
- * that line as a block that failed to parse and rejected the whole file.
- *
- * A label containing `-` is never a real one: it is the fused
- * `-----END CERTIFICATE----------BEGIN CERTIFICATE-----` that `cat a.pem
- * b.pem` produces when `a.pem` has no trailing newline, and OpenSSL rejects it
- * with `bad end line`.
- */
-function pemMarkerLabel(line: string, prefix: string): string | undefined {
-  if (!line.startsWith(prefix) || !line.endsWith(MARKER_SUFFIX)) {
+/** The raw label of an END marker, or `undefined` when it is not one. */
+function endMarkerLabel(line: string): string | undefined {
+  if (!line.startsWith(END_PREFIX) || !line.endsWith(MARKER_SUFFIX)) {
     return undefined;
   }
-  const label = line.slice(prefix.length, line.length - MARKER_SUFFIX.length);
-  return label.length > 0 && !label.includes('-') ? label : undefined;
+  return line.slice(END_PREFIX.length, line.length - MARKER_SUFFIX.length);
 }
 
 /**
@@ -74,7 +59,11 @@ function normalizePemLine(line: string): string {
 }
 
 /**
- * The label of a BEGIN marker line, tolerating a single leading BOM.
+ * The raw label of a BEGIN marker line, tolerating a single leading BOM.
+ * OpenSSL anchors the marker at the start of the line and requires its suffix,
+ * but opens the block attempt before validating the label. Returning empty or
+ * hyphenated labels lets a matching non-certificate block be skipped while an
+ * unmatched attempt stops the file with the loader's prefix semantics.
  *
  * The BOM's tolerance is positional, and stripping it from every line is how
  * this module counted a block the loader takes nothing from. Measured on Node
@@ -85,7 +74,19 @@ function normalizePemLine(line: string): string {
  * blanket strip made this module return that block as an anchor.
  */
 function beginMarkerLabel(line: string): string | undefined {
-  return pemMarkerLabel(line.replace(/^\uFEFF/, ''), BEGIN_PREFIX);
+  const normalized = line.replace(/^\uFEFF/, '');
+  if (
+    !normalized.startsWith(BEGIN_PREFIX) ||
+    !normalized.endsWith(MARKER_SUFFIX)
+  ) {
+    return undefined;
+  }
+  // Keep unusual labels raw so they participate in pairing instead of acting
+  // as prose; an unmatched attempt then stops the file below.
+  return normalized.slice(
+    BEGIN_PREFIX.length,
+    normalized.length - MARKER_SUFFIX.length,
+  );
 }
 
 /**
@@ -207,7 +208,7 @@ function scanCertificateBlocks(contents: string): ScannedCertificateBlock[] {
       if (line.startsWith(END_PREFIX)) {
         // A mismatched or fused end line is `bad end line`: the loader stops
         // reading the file here and keeps only what it already has.
-        if (pemMarkerLabel(line, END_PREFIX) !== label) break scan;
+        if (endMarkerLabel(line) !== label) break scan;
         break;
       }
       if (line.replace(/^\uFEFF/, '').startsWith(BEGIN_PREFIX)) {
