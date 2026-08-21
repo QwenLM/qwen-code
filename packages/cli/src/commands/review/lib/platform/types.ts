@@ -111,7 +111,8 @@ export interface ReviewContext {
   authorLogin: string;
   state: string;
   baseRefName: string;
-  /** '' on branchless platforms (AGit-Flow heads are bare SHAs). */
+  /** Branch name on GitHub. Aone: `sourceBranch` — a bare SHA under
+   *  AGit-Flow, rendered as `base ← <sha>`. */
   headRefName: string;
   headRefOid: string;
   /** Absent where the platform reports no diff stats (Aone). */

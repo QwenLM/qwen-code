@@ -107,7 +107,7 @@ interface ReviewContext {
   authorLogin: string;
   state: string;
   baseRefName: string;
-  headRefName: string; // '' on branchless platforms (AGit-Flow)
+  headRefName: string; // branch name (GitHub); Aone: sourceBranch — a bare SHA under AGit-Flow
   headRefOid: string;
   additions?: number; // absent where the platform reports no stats
   deletions?: number;
@@ -168,7 +168,7 @@ an empty diff). pr-context does not compute them locally — the worktree
 belongs to fetch-pr, and duplicating its merge-base arithmetic here would be
 a second copy of logic that has a home.
 
-### D4 — Refetch commands bake `--pr` on Aone
+### D4 — Refetch commands bake `--pr` on Aone; only an explicit `--host` bakes
 
 pr-context's truncation notes emit `comment-body` commands. On GitHub,
 inline and issue comment ids are global, so only `--kind review` carries
@@ -177,6 +177,14 @@ refuses a pr-less Aone call). The emitted command builder learns the
 platform: on Aone, every emitted refetch carries `--pr <id>`. A refetch a
 reader cannot run is a truncation nobody can complete, which the fail-closed
 "partial read is `cannot tell`" rule then turns into a stalled re-check.
+
+The host half of the contract: on Aone only an EXPLICIT `--host` flag bakes
+into the emitted refetches. An ambient `GH_HOST` never does — it is a
+different platform's host, and baking it would silently retarget every
+refetch at a GitHub host, re-opening the exact cross-platform leak the
+`--pr` rule closes. A flagless Aone run's refetches rely on the cwd clone's
+origin — the same detection the run itself used. (GitHub keeps its existing
+policy: the explicit `--host` else an operator-exported `GH_HOST` bakes.)
 
 ### D5 — The forced context-unavailable cap leaves the Aone write path
 

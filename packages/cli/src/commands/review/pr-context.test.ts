@@ -21,7 +21,8 @@ const {
   rmSyncMock,
   mkdirSyncMock,
   getPlatformReaderMock,
-  registryDelegateRef,
+  registryDefaultRef,
+  writeStdoutLineMock,
 } = vi.hoisted(() => ({
   ghMock: vi.fn(),
   ghApiAllMock: vi.fn(),
@@ -32,9 +33,10 @@ const {
   rmSyncMock: vi.fn(),
   mkdirSyncMock: vi.fn(),
   getPlatformReaderMock: vi.fn(),
-  registryDelegateRef: {
-    current: undefined as ((hint?: unknown) => unknown) | undefined,
+  registryDefaultRef: {
+    current: undefined as ((hint?: { host?: string }) => unknown) | undefined,
   },
+  writeStdoutLineMock: vi.fn(),
 }));
 
 vi.mock('./lib/gh.js', async (importOriginal) => {
@@ -49,19 +51,34 @@ vi.mock('./lib/gh.js', async (importOriginal) => {
   };
 });
 
-// The spy DELEGATES to the real registry by default — every GitHub-path
-// test in this file rides the true detection (which lands on githubReader,
-// whose gh calls are mocked above). Suites that pin the Aone routing
-// override it with a stub reader.
+// The spy pins the GitHub reader by default: the GitHub-path tests must
+// NOT ride detection's cwd-origin probe — from a clone whose origin is an
+// Aone host (an internal mirror, exactly the environment this PR family
+// targets) the probe reroutes them onto the REAL aoneReader and the suite
+// dies in ensureAoneAuthenticated instead of exercising the mocked gh
+// path. True-detection routing is pinned where it lives
+// (lib/platform/registry.test.ts). An Aone `--host` hint still delegates
+// to the real registry — it short-circuits before the cwd probe — and the
+// Aone suite below overrides the mock wholesale.
 vi.mock('./lib/platform/registry.js', async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>;
   const real = actual['getPlatformReader'] as (hint?: unknown) => unknown;
-  registryDelegateRef.current = real;
-  getPlatformReaderMock.mockImplementation((hint?: unknown) => real(hint));
+  const isAoneHost = actual['isAoneHost'] as (host?: string) => boolean;
+  const { githubReader } = await import('./lib/platform/github.js');
+  const pinnedDefault = (hint?: { host?: string }) =>
+    isAoneHost(hint?.host) ? real(hint) : githubReader;
+  registryDefaultRef.current = pinnedDefault;
+  getPlatformReaderMock.mockImplementation(pinnedDefault);
   return {
     ...actual,
     getPlatformReader: getPlatformReaderMock,
   };
+});
+
+// The handler's stdout summary (the blocker count) is asserted below.
+vi.mock('../../utils/stdioHelpers.js', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return { ...actual, writeStdoutLine: writeStdoutLineMock };
 });
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -83,6 +100,7 @@ import {
   truncatedHeadings,
   buildMarkdown,
   carriesBlockerSignal,
+  isIssueBlocker,
   extractCodeRefs,
   classifyInlineThreads,
   fullBody,
@@ -651,6 +669,63 @@ describe('buildMarkdown — a markerless maintainer blocker must not render as a
   });
 });
 
+describe('buildMarkdown — ledger carriers never self-promote (Aone summary channel)', () => {
+  const meta = {
+    title: 't',
+    body: '',
+    author: { login: 'a' },
+    baseRefName: 'master',
+    headRefName: 'sha',
+    headRefOid: 'sha',
+    state: 'opened',
+  } as PrMetadata;
+  const marker =
+    '<!-- qwen-review-ledger {"v":1,"round":1,"findings":[{"id":"R1-1","sev":"C","file":"src/a.ts","title":"the guard is wrong"}]} -->';
+
+  it('excludes a Critical-bearing carrier summary from blocker promotion', () => {
+    // On Aone the posted round summary is a path-less comment, so it rides
+    // the issue channel; its visible `**[Critical]**` line used to
+    // self-promote it beside the ledger section and the inline roots that
+    // already carry the same findings.
+    const summary: RawComment = {
+      id: 9,
+      user: { login: 'ci-bot' },
+      body: `Round 1 summary.\n\n**[Critical]** R1-1: the guard is wrong\n\n${marker}`,
+    };
+    const md = buildMarkdown('1', 'o/r', meta, [], [summary], []);
+    expect(md).not.toContain('## Blockers to re-check');
+    // The summary's visible prose still settles into "Already discussed" —
+    // on Aone the thread channel is the only place it renders at all.
+    const discussed = md.indexOf('## Already discussed');
+    expect(discussed).toBeGreaterThanOrEqual(0);
+    expect(md.indexOf('Round 1 summary.')).toBeGreaterThan(discussed);
+  });
+
+  it('strips the marker JSON out of a settled carrier snippet', () => {
+    const summary: RawComment = {
+      id: 9,
+      user: { login: 'ci-bot' },
+      body: `Round 1 summary.\n${marker}`,
+    };
+    const md = buildMarkdown('1', 'o/r', meta, [], [summary], []);
+    expect(md).toContain('Round 1 summary.');
+    // The machine JSON never renders into the context file; the parsed copy
+    // travels in the ledger section.
+    expect(md).not.toContain('qwen-review-ledger');
+  });
+
+  it('still promotes a genuine human blocker on the issue channel', () => {
+    const human: RawComment = {
+      id: 4,
+      user: { login: 'maintainer' },
+      body: 'still broken: the guard checks the wrong variable (blocker)',
+    };
+    const md = buildMarkdown('1', 'o/r', meta, [], [human], []);
+    expect(md).toContain('## Blockers to re-check');
+    expect(md).toContain('still broken: the guard checks the wrong variable');
+  });
+});
+
 describe('extractCodeRefs', () => {
   it('pulls the locations a blocker points at, with line numbers', () => {
     expect(
@@ -905,6 +980,34 @@ describe('carriesBlockerSignal', () => {
     );
     expect(carriesBlockerSignal('LGTM, nice work')).toBe(false);
     expect(carriesBlockerSignal(undefined)).toBe(false);
+  });
+});
+
+// The issue channel's one promotion gate. On Aone this pipeline's own round
+// summaries ride it (path-less comments), and their visible `**[Critical]**`
+// lines match carriesBlockerSignal — the carrier check is what keeps them
+// out of "Blockers to re-check" (their findings are already owned by the
+// ledger section and the inline roots).
+describe('isIssueBlocker', () => {
+  const marker =
+    '<!-- qwen-review-ledger {"v":1,"round":1,"findings":[{"id":"R1-1","sev":"C","file":"a.ts","title":"t"}]} -->';
+
+  it('promotes a genuine blocker on the issue channel', () => {
+    expect(isIssueBlocker('still broken: the guard misfires (blocker)')).toBe(
+      true,
+    );
+    expect(isIssueBlocker('**[Critical]** auth bypass')).toBe(true);
+  });
+
+  it("does not promote a body carrying this pipeline's ledger marker", () => {
+    expect(
+      isIssueBlocker(`Round 1 summary.\n**[Critical]** R1-1: x\n\n${marker}`),
+    ).toBe(false);
+    // The marker alone decides — a carrier with no blocker signal was never
+    // promoted anyway, and an ordinary body without one still is not.
+    expect(isIssueBlocker(`clean round\n${marker}`)).toBe(false);
+    expect(isIssueBlocker('no blockers here')).toBe(false);
+    expect(isIssueBlocker(undefined)).toBe(false);
   });
 });
 
@@ -2890,6 +2993,32 @@ describe('runPrContext host baking (handler level)', () => {
   });
 });
 
+describe('runPrContext pr_number guard (handler level)', () => {
+  // Every sibling command pins the identical guard (fetch-pr 'refuses a
+  // non-positive pr_number before any side effect', issue-context 'exits 2
+  // on a fractional pr_number'); pr-context's was untested. A future edit
+  // dropping the guard — or restoring a bare `Number()` check that admits
+  // `0x10`/`5.`/`1e3` — lets the malformed number reach the platform
+  // reader, surfacing a confusing a1/gh error instead of the usage-class
+  // refusal.
+  it.each(['0', '-3', '5.', '5.0', '0x10', '1e3'])(
+    'refuses pr_number %s before any platform call',
+    async (bad) => {
+      getPlatformReaderMock.mockClear();
+      await expect(
+        (prContextCommand.handler as (a: unknown) => Promise<void>)({
+          _: [],
+          $0: 'qwen',
+          pr_number: bad,
+          owner_repo: 'o/r',
+          out: '/tmp/ctx.md',
+        }),
+      ).rejects.toThrow(/pr_number must be a positive integer/);
+      expect(getPlatformReaderMock).not.toHaveBeenCalled();
+    },
+  );
+});
+
 describe('prContextCommand handler — Aone routing', () => {
   // The reader seam is stubbed at the registry: these tests pin what
   // pr-context does with a normalized Aone context (the a1-side mapping
@@ -2925,7 +3054,7 @@ describe('prContextCommand handler — Aone routing', () => {
       {
         id: 23,
         author: 'review-bot',
-        body: `Round 3 summary.\n${LEDGER_MARKER}`,
+        body: `Round 3 summary.\n\n**[Critical]** R3-1: the off-by-one in src/a.ts:5\n\n${LEDGER_MARKER}`,
         createdAt: '2026-08-20T09:00:00Z',
       },
       {
@@ -2944,13 +3073,22 @@ describe('prContextCommand handler — Aone routing', () => {
         path: 'src/b.ts',
         line: 9,
       },
+      {
+        // A long path-LESS issue comment — the maintainer out-of-band
+        // channel's truncation shape, and the only ISSUE-kind refetch the
+        // suite exercises: it pins the per-MR `--pr` rule's issue branch.
+        id: 26,
+        author: 'someone',
+        body: `a long general observation about the CR. ${'It keeps going. '.repeat(30)}`,
+        createdAt: '2026-08-20T12:00:00Z',
+      },
     ],
     verdicts: [],
     ledgerCarriers: [
       {
         id: 23,
         author: 'review-bot',
-        body: `Round 3 summary.\n${LEDGER_MARKER}`,
+        body: `Round 3 summary.\n\n**[Critical]** R3-1: the off-by-one in src/a.ts:5\n\n${LEDGER_MARKER}`,
         state: 'COMMENTED',
         submittedAt: '2026-08-20T09:00:00Z',
       },
@@ -2960,6 +3098,13 @@ describe('prContextCommand handler — Aone routing', () => {
         body: 'general chatter',
         state: 'COMMENTED',
         submittedAt: '2026-08-20T10:00:00Z',
+      },
+      {
+        id: 26,
+        author: 'someone',
+        body: `a long general observation about the CR. ${'It keeps going. '.repeat(30)}`,
+        state: 'COMMENTED',
+        submittedAt: '2026-08-20T12:00:00Z',
       },
     ],
   };
@@ -3003,9 +3148,7 @@ describe('prContextCommand handler — Aone routing', () => {
   });
 
   afterEach(() => {
-    getPlatformReaderMock.mockImplementation((hint?: unknown) =>
-      registryDelegateRef.current?.(hint),
-    );
+    getPlatformReaderMock.mockImplementation(registryDefaultRef.current!);
     if (savedGhHost === undefined) delete process.env['GH_HOST'];
     else process.env['GH_HOST'] = savedGhHost;
   });
@@ -3029,6 +3172,12 @@ describe('prContextCommand handler — Aone routing', () => {
 
   it('renders the Aone context and never touches gh', async () => {
     const written = await runHandler({
+      host: 'gitlab.alibaba-inc.com',
+    });
+    // The routing hint is FORWARDED, not discarded: an Aone MR reviewed from
+    // a cwd whose origin is not Aone must not fall through cwd detection to
+    // githubReader (gh would then read github.com's same-named owner/repo).
+    expect(getPlatformReaderMock).toHaveBeenCalledWith({
       host: 'gitlab.alibaba-inc.com',
     });
     expect(ghMock).not.toHaveBeenCalled();
@@ -3077,11 +3226,46 @@ describe('prContextCommand handler — Aone routing', () => {
       expect(ref[0]).toContain('--pr 7');
       expect(ref[0]).toContain('--host gitlab.alibaba-inc.com');
     }
+    // The issue-channel branch explicitly: Aone issue-comment ids are
+    // MR-scoped too, so a truncation there carries the same addressing. A
+    // mutant restoring the GitHub assumption (issue ids are global) emits
+    // this refetch without --pr and dies here.
+    expect(written).toContain(
+      'comment-body 26 --kind issue --pr 7 --repo g/p --host gitlab.alibaba-inc.com',
+    );
+  });
+
+  it("never promotes this pipeline's own Critical-bearing summary into the re-check section or the blocker count", async () => {
+    const written = await runHandler({
+      host: 'gitlab.alibaba-inc.com',
+    });
+    // The round-3 summary carries a visible `**[Critical]**` line AND the
+    // ledger marker; its findings are owned by the ledger section and the
+    // inline roots. Promoting the carrier as well would render the same
+    // Critical three times and spend BLOCKER_SECTION_BUDGET on the
+    // pipeline's own prose until a genuine human blocker degrades to a
+    // budget-spent snippet.
+    const section = written.indexOf('## Blockers to re-check');
+    expect(section).toBeGreaterThanOrEqual(0); // the inline blocker promotes
+    expect(written.indexOf('Round 3 summary')).toBeGreaterThan(
+      written.indexOf('## Description'),
+    );
+    // The marker JSON never renders into the context file.
+    expect(written).not.toContain('qwen-review-ledger');
+    // stdout counts the same walk the file renders from: one blocker (the
+    // inline root), not two.
+    const countLine = writeStdoutLineMock.mock.calls
+      .map((c) => String(c[0]))
+      .find((l) => l.includes('blocker(s) to re-check'));
+    expect(countLine).toContain('1 blocker(s) to re-check');
   });
 
   it('never bakes an ambient GH_HOST into Aone refetch commands', async () => {
     process.env['GH_HOST'] = 'ghe.example.com';
     const written = await runHandler({});
+    // A flagless run still forwards `{ host: undefined }` — the hint shape
+    // the detection keys on, distinct from a dropped argument.
+    expect(getPlatformReaderMock).toHaveBeenCalledWith({ host: undefined });
     expect(written).not.toContain('--host ghe.example.com');
     // The refetches still carry --pr (per-MR addressing is host-agnostic).
     expect(written).toContain('--pr 7');

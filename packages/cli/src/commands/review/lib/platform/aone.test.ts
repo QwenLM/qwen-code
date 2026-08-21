@@ -565,6 +565,11 @@ describe('aoneReader.getReviewContext / getCurrentUser', () => {
       { id: 2, note: 'b', author: { username: 'user-2' } },
       { id: 3, note: 'c', author: 'string-author' },
       { id: 4, note: 'd' },
+      // BOTH keys at once: the ordering is load-bearing (`account` is the
+      // spelling `a1 auth whoami` answers in — the identity the own/foreign
+      // split compares against). Without this fixture, swapping the first
+      // two keys of aoneCommentAuthor leaves the suite green.
+      { id: 5, note: 'e', author: { account: 'acc-2', username: 'user-9' } },
     ]);
     const ctx = aoneReader.getReviewContext(7, 'g/p');
     expect(ctx.comments.map((c) => c.author)).toEqual([
@@ -572,6 +577,7 @@ describe('aoneReader.getReviewContext / getCurrentUser', () => {
       'user-2',
       'string-author',
       '',
+      'acc-2',
     ]);
   });
 
