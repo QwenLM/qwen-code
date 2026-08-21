@@ -1902,6 +1902,24 @@ describe('presubmitCommand — Aone targets', () => {
     expect(ensureAoneAuthMock).toHaveBeenCalledTimes(1);
   });
 
+  it("fails with the gate's actionable error when whoami throws — no report", async () => {
+    // The gate runs BEFORE the fetch try/catch on purpose: an a1 install or
+    // login failure must fail the run with the gate's actionable error, not
+    // degrade into a plausible "MR metadata unavailable" report that sends
+    // the user to investigate MR access. Moving the gate inside the try/catch
+    // keeps every other Aone test green, so this ordering needs its own pin.
+    ensureAoneAuthMock.mockImplementation(() => {
+      throw new Error('a1 CLI not found on PATH — install the `a1` CLI first.');
+    });
+    const handler = presubmitCommand.handler;
+    if (!handler) throw new Error('presubmit handler missing');
+    await expect(
+      handler(aoneArgs as unknown as Parameters<typeof handler>[0]),
+    ).rejects.toThrow(/a1 CLI not found/);
+    expect(writeFileSyncMock).not.toHaveBeenCalled();
+    expect(mrPresubmitFactsMock).not.toHaveBeenCalled();
+  });
+
   it('reports head drift with null compare and fail-safe anchor risk', async () => {
     // Under AGit-Flow sourceBranch IS the head; Aone has no compare API, so
     // a drifted head is always anchors-at-risk (findingPaths cannot prove
