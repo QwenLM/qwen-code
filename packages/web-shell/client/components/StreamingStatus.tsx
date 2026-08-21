@@ -19,6 +19,13 @@ interface StreamingStatusProps {
    * status compact. Defaults to true (the main chat shows the phrase).
    */
   showPhrase?: boolean;
+  /**
+   * When true, the daemon reports the session has an in-flight prompt. The
+   * indicator stays visible even while streamingState is idle, so long tool
+   * calls that produce >3s silent gaps do not hide the loading state mid-turn
+   * (#9487). The session catalog live-state API is the authoritative source.
+   */
+  hasActivePrompt?: boolean;
 }
 
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -26,6 +33,7 @@ const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', 
 export function StreamingStatus({
   startedAt,
   showPhrase = true,
+  hasActivePrompt,
 }: StreamingStatusProps) {
   const streamingState = useStreamingState();
   const { estimatedOutputTokens, isReceivingContent } =
@@ -63,8 +71,7 @@ export function StreamingStatus({
   const [loadingPhrase, setLoadingPhrase] = useState(
     () => resolvePhrases(language)[0] ?? '',
   );
-
-  const isActive = streamingState !== 'idle';
+  const isActive = streamingState !== 'idle' || hasActivePrompt === true;
 
   useEffect(() => {
     if (!isActive) {
@@ -114,7 +121,7 @@ export function StreamingStatus({
     return () => clearInterval(interval);
   }, [streamingState]);
 
-  if (streamingState === 'idle') return null;
+  if (streamingState === 'idle' && !hasActivePrompt) return null;
 
   const spinnerChar = SPINNER_FRAMES[dotFrame % SPINNER_FRAMES.length];
   const arrow = isReceivingContent ? '↓' : '↑';

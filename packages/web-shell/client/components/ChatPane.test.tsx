@@ -136,6 +136,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
 
 vi.mock('../session-catalog/session-catalog-hooks', () => ({
   useSessionCatalogController: () => catalogController,
+  useSessionCatalogQuery: () => ({ sessions: [], reload: vi.fn() }),
 }));
 
 vi.mock('../hooks/useQueuedPrompts', () => ({
