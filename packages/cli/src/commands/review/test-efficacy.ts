@@ -75,6 +75,7 @@ import {
   redirectedAncestor,
   sanitizedGitEnv,
   worktreeCreateFailureDetail,
+  type LocalFilterBaseline,
   type SweepResult,
 } from './lib/worktree.js';
 import { isWorkspaceMember } from './lib/workspaces.js';
@@ -1619,7 +1620,14 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
   // `scratch-tree` refuses to reset through, screened again here because this
   // restore runs before EVERY suite run in the probe tree and a plant can
   // land between the phase's entry screen and any one of them.
-  const refusal = localFilterRefusal(probeTree, "this tree's restore");
+  const captured: { baseline: LocalFilterBaseline | null } = {
+    baseline: null,
+  };
+  const refusal = localFilterRefusal(
+    probeTree,
+    "this tree's restore",
+    captured,
+  );
   if (refusal !== null) return refusal;
   // Re-run the swap reads AFTER the screen: its spawns take real time, and
   // a root swapped in during them aims the checkout and the clean below at
@@ -1669,7 +1677,11 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
   // the checkout just EXECUTED reads back clean once the clean has removed
   // its target, the pipeline destroying the very evidence the re-read
   // exists to report.
-  const breach = localFilterBreach(probeTree, "this tree's restore");
+  const breach = localFilterBreach(
+    probeTree,
+    "this tree's restore",
+    captured.baseline,
+  );
   if (breach !== null) return breach;
   // `-ffdx`, because `-fd` honors the ignore rules — and those belong to the
   // commit under test, so a plant named to match one of them (a committed
@@ -2635,16 +2647,38 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       // forever (every rerun wedged at the phase's entry, measured live).
       // (A filter planted DURING a run is what the restore screens and the
       // revert phase's own screen below are for.)
+      const captured: { baseline: LocalFilterBaseline | null } = {
+        baseline: null,
+      };
       const refusal = localFilterRefusal(
         worktree,
         "the probe phase's checkouts — the probe tree's own creation, every " +
           "per-run restore, and the revert's checkout",
+        captured,
       );
       if (refusal !== null) {
         createDetail = refusal;
       } else {
         git(worktree, 'worktree', 'add', '--detach', probeTree, headSha);
         created = true;
+        // Paired with the screen above like every other guarded checkout:
+        // a toggler the reap did not reach can plant between the screen's
+        // read and this add's own config read, and the initial checkout
+        // executes the plant. This re-read is the ONLY read that can see
+        // such a plant when it erases itself before the first restore's
+        // screen runs — the restore would certify healthy over the
+        // executed plant — so on a breach the tree is rolled back and the
+        // phase reports it.
+        const breach = localFilterBreach(
+          worktree,
+          "the probe tree's creation",
+          captured.baseline,
+        );
+        if (breach !== null) {
+          discardWorktree(worktree, probeTree);
+          createDetail = breach;
+          created = false;
+        }
       }
     } catch (e) {
       // Could not isolate — probe nothing rather than fall back to mutating the
@@ -2986,7 +3020,14 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           // code — a filter planted mid-run was what the restore screens
           // refused, while the flow landed here, and this checkout rewrote
           // the matching files and executed the plant.
-          const refusal = localFilterRefusal(probeTree, 'the revert checkout');
+          const captured: { baseline: LocalFilterBaseline | null } = {
+            baseline: null,
+          };
+          const refusal = localFilterRefusal(
+            probeTree,
+            'the revert checkout',
+            captured,
+          );
           if (refusal !== null) throw new Error(refusal);
           // Re-run the root escape check AFTER the screen: the entry check
           // above narrowed the swap window to one syscall, and the screen's
@@ -3002,7 +3043,11 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           // Same pair as every restore: a toggler the reap did not reach can
           // plant between the screen's read and this checkout's own, so the
           // run is reported breached — not clean — when the re-read sees it.
-          const breach = localFilterBreach(probeTree, 'the revert checkout');
+          const breach = localFilterBreach(
+            probeTree,
+            'the revert checkout',
+            captured.baseline,
+          );
           if (breach !== null) throw new Error(breach);
         }
         for (const p of added) safeRmWithin(probeTree, p);

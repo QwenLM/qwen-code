@@ -65,6 +65,7 @@ import {
   worktreeCreateFailureDetail,
   worktreeResidue,
   type DependencyFarm,
+  type LocalFilterBaseline,
   type SweepResult,
 } from './lib/worktree.js';
 
@@ -268,7 +269,13 @@ function resetScratchTree(
     // post-checkout re-read below; closing the window itself takes a lock
     // shared with every suite run, which this round deliberately does not
     // add.
-    if (localFilterRefusal(worktree, 'the reset this command runs') !== null) {
+    const captured: { baseline: LocalFilterBaseline | null } = {
+      baseline: null,
+    };
+    if (
+      localFilterRefusal(worktree, 'the reset this command runs', captured) !==
+      null
+    ) {
       return { ok: false };
     }
     // Re-read the leaf immediately before the mutation, and BELOW the
@@ -284,7 +291,11 @@ function resetScratchTree(
     // the two spawns because `clean -ffdx` deletes include targets planted
     // inside the tree — a re-read after it reports clean for a plant the
     // checkout just executed.
-    const breach = localFilterBreach(worktree, 'the reset this command ran');
+    const breach = localFilterBreach(
+      worktree,
+      'the reset this command ran',
+      captured.baseline,
+    );
     if (breach !== null) return { ok: false, breach };
     // `-ff` because a single `-f` refuses to delete a nested git repository, so
     // a probe that cloned or `git init`-ed a fixture would survive a reset the
@@ -497,9 +508,13 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
     // refused on only while it still exists: the sweep just destroyed it,
     // and the add never reads it. The reset path's comment names the
     // window this placement leaves against concurrent writers.
+    const captured: { baseline: LocalFilterBaseline | null } = {
+      baseline: null,
+    };
     const refusal = localFilterRefusal(
       worktree,
       'the rebuild this command runs',
+      captured,
     );
     if (refusal !== null) {
       return {
@@ -520,7 +535,11 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
     // key that APPEARED is reported as a breach and the just-added tree
     // rolled back — never certified clean with a planted checkout behind
     // it.
-    const breach = localFilterBreach(worktree, 'the rebuild this command ran');
+    const breach = localFilterBreach(
+      worktree,
+      'the rebuild this command ran',
+      captured.baseline,
+    );
     if (breach !== null) {
       discardWorktree(worktree, tree);
       return {

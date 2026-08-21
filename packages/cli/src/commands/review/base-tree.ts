@@ -61,6 +61,7 @@ import {
   localFilterRefusal,
   sanitizedGitEnv,
   worktreeCreateFailureDetail,
+  type LocalFilterBaseline,
   type SweepResult,
 } from './lib/worktree.js';
 import { runBuildTest, type BuildTestReport } from './build-test.js';
@@ -279,9 +280,13 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
       // destroyed and the add never reads, and a screen that ran first
       // refused on it forever: every retry re-screened the doomed state and
       // wedged the repository out of every review (measured live).
+      const captured: { baseline: LocalFilterBaseline | null } = {
+        baseline: null,
+      };
       const refusal = localFilterRefusal(
         worktree,
         'the worktree add this command runs',
+        captured,
       );
       if (refusal !== null) return unavailable(refusal);
       git(worktree, 'worktree', 'add', '--detach', tree, baseSha);
@@ -290,12 +295,15 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
       // pipeline itself schedules (a sibling shard's suite, a toggler the
       // reap did not reach) can plant between the two reads — the add's
       // initial checkout executes the plant while both reads see nothing.
-      // A key that APPEARED is reported as a breach and the just-added
-      // tree rolled back: the run must be reported breached, never
-      // certified clean with a planted checkout behind it.
+      // A key that APPEARED — or a screened file that CHANGED, the trace
+      // a self-erasing plant leaves when its unset lands before this
+      // re-read — is reported as a breach and the just-added tree rolled
+      // back: the run must be reported breached, never certified clean
+      // with a planted checkout behind it.
       const breach = localFilterBreach(
         worktree,
         'the worktree add this command ran',
+        captured.baseline,
       );
       if (breach !== null) {
         discardWorktree(worktree, tree);

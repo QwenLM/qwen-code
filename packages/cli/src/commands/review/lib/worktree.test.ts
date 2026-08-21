@@ -31,11 +31,13 @@ import { isolateHostGitConfig } from './test-utils.js';
 import {
   discardWorktree,
   exposeDependencies,
+  localFilterBreach,
   localFilterCommands,
   localFilterRefusal,
   sanitizedGitEnv,
   worktreeCreateFailureDetail,
   worktreeResidue,
+  type LocalFilterBaseline,
 } from './worktree.js';
 
 describe('worktreeResidue', () => {
@@ -100,6 +102,31 @@ describe('worktreeResidue', () => {
     mkdirSync(join(tree, 'dist'), { recursive: true });
     writeFileSync(join(tree, 'dist', 'out.js'), 'built\n');
     expect(worktreeResidue(tree)).toEqual({ paths: [], total: 0 });
+  });
+
+  it('never fires a planted fsmonitor from its own ignore probes', () => {
+    // `check-ignore` and the pathspec'd `ls-files` both refresh the
+    // index, and an index refresh fires a planted `core.fsmonitor` —
+    // the measurement would become the very execution the probe exists
+    // to report. The four status-side spawns carry the `-c` override;
+    // this pins the two ignore-probe spawns that pre-dated it (probe,
+    // git 2.39: both fired the marker).
+    writeFileSync(join(repo, '.gitignore'), 'node_modules\ndist\njunk/\n');
+    gitRepo('add', '-A');
+    gitRepo('commit', '-qam', 'with-junk-ignored');
+    gitRepo('worktree', 'remove', '--force', tree);
+    gitRepo('worktree', 'add', '--detach', '-q', tree, 'HEAD');
+    // The residue shape that reaches the ignore probes at all: an
+    // untracked file a COMMITTED rule hides from status.
+    mkdirSync(join(tree, 'junk'));
+    writeFileSync(join(tree, 'junk', 'y.txt'), 'residue\n');
+    const marker = join(repo, 'FSM-FIRED');
+    gitRepo('config', 'core.fsmonitor', `touch ${marker}`);
+
+    const got = worktreeResidue(tree);
+
+    expect(existsSync(marker)).toBe(false);
+    expect(got).toEqual({ paths: [], total: 0 });
   });
 
   it('reports BOTH names of a rename — the restore needs the one that is gone', () => {
@@ -1556,23 +1583,122 @@ describe('localFilterCommands', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it('fails closed on an include target it cannot resolve', () => {
-    // An include whose directive names nothing the screen can resolve —
-    // here a `~user` home form: git expands it through getpwnam, which no
-    // portable Node call this screen can make does — cannot be vouched
-    // for, and is refused like a plant, never skipped. The user is REAL
-    // (this process's own): a nonexistent user is the same class but
-    // never reaches the screen, because git rejects the unexpandable
-    // line as bad config and every git read of the file dies.
-    gitRepo(
-      'config',
-      'include.path',
-      `~${userInfo().username}/qwen-never-resolved`,
-    );
+  // Windows-only shape skipped there: getpwnam never rejects `~user`,
+  // git-for-windows falls back to the running user, and the value this
+  // fixture pins expands to a path git reads — the refusal this test
+  // pins on POSIX never fires. What Windows gets instead is the
+  // discovery-failure refusal below answering the same plant.
+  it.skipIf(process.platform === 'win32')(
+    'fails closed on an include target it cannot resolve',
+    () => {
+      // An include whose directive names nothing the screen can resolve —
+      // here a `~user` home form: git expands it through getpwnam, which no
+      // portable Node call this screen can make does — cannot be vouched
+      // for, and is refused like a plant, never skipped. The user is REAL
+      // (this process's own): a nonexistent user is the same class but
+      // never reaches the screen, because git rejects the unexpandable
+      // line as bad config and every git read of the file dies.
+      gitRepo(
+        'config',
+        'include.path',
+        `~${userInfo().username}/qwen-never-resolved`,
+      );
+      const got = localFilterCommands(tree);
+      expect(got.keys).toEqual(['include.path']);
+      expect(got.unclearable).toHaveLength(1);
+      expect(got.unclearable[0]).toContain('include.path');
+    },
+  );
+
+  // The resolver's other unprovable shapes — each one a value the old
+  // trim+resolve mapped to a different file (or none) than the git that
+  // then ran the checkout (probe, git 2.39: every shape screened clean
+  // with the plant standing in the checkout's own config read). A
+  // benign include in one of these shapes costs a refusal — the same
+  // fail-safe trade the `~user` test above pins — never an execution.
+  it('fails closed on an include value carrying edge whitespace', () => {
+    // `git config` stores the quoted trailing space verbatim
+    // (`path = "inc "`), and git resolves include targets byte-exact —
+    // while the screen's old trim resolved `inc`, a different,
+    // nonexistent file it then skipped as clean.
+    gitRepo('config', 'include.path', 'inc ');
     const got = localFilterCommands(tree);
     expect(got.keys).toEqual(['include.path']);
     expect(got.unclearable).toHaveLength(1);
     expect(got.unclearable[0]).toContain('include.path');
+  });
+
+  it('fails closed on an include value git interpolates', () => {
+    // `%(prefix)` is git's own interpolation at read time; this screen
+    // has no prefix to evaluate it against, and a lexical pass-through
+    // resolved a path nothing reads while git read the expanded one.
+    gitRepo('config', 'include.path', '%(prefix)/etc/qwen-never');
+    const got = localFilterCommands(tree);
+    expect(got.keys).toEqual(['include.path']);
+    expect(got.unclearable).toHaveLength(1);
+  });
+
+  it('fails closed on an include value with a .. segment', () => {
+    // The kernel resolves symlinked path components BEFORE applying
+    // `..`, while `resolve()` collapses the segment lexically — with a
+    // link anywhere in the prefix the two reach different files.
+    gitRepo('config', 'include.path', '../qwen-never');
+    const got = localFilterCommands(tree);
+    expect(got.keys).toEqual(['include.path']);
+    expect(got.unclearable).toHaveLength(1);
+  });
+
+  it('fails closed on an include value carrying bytes utf8 cannot decode', () => {
+    // The screen reads config output as utf8, and a byte it cannot
+    // decode arrives as U+FFFD — no spelling of such a value resolves on
+    // disk, while git resolves the ORIGINAL bytes. The directive is
+    // written raw: no argv path can carry an invalid byte to `git
+    // config`.
+    appendFileSync(
+      join(repo, '.git', 'config'),
+      Buffer.from('[include]\n\tpath = inc\xFF\n', 'binary'),
+    );
+    const got = localFilterCommands(tree);
+    expect(got.keys).toEqual(['include.path']);
+    expect(got.unclearable).toHaveLength(1);
+  });
+
+  it('fails closed when the repository cannot be discovered', () => {
+    // Discovery that dies — a toggler swapping the screened tree's
+    // `.git` pointer between the screen's spawns and the guarded
+    // checkout, a transient spawn failure under load — used to return
+    // the empty screen, which every caller reads as "proceed": the one
+    // answer the screen's contract never gives. An undiscoverable
+    // repository is an unclearable one, refused like a plant.
+    writeFileSync(join(tree, '.git'), 'gitdir: /nonexistent-admin-dir\n');
+    const got = localFilterCommands(tree);
+    expect(got.keys).toEqual([]);
+    expect(got.unclearable).toHaveLength(1);
+    expect(localFilterRefusal(tree, 'a guarded checkout')).not.toBeNull();
+  });
+
+  it('the paired re-read catches a plant that erases itself before it runs', () => {
+    // The refusal captured the screened files' state beside a clean
+    // screen; a set+unset landing between the two reads leaves the
+    // config's CONTENT exactly as it was — the re-read's key scan sees
+    // nothing — but the file's mtime is not what the screen recorded.
+    const captured: { baseline: LocalFilterBaseline | null } = {
+      baseline: null,
+    };
+    expect(localFilterRefusal(tree, 'a guarded checkout', captured)).toBe(null);
+    gitRepo('config', 'filter.evil.smudge', 'touch /tmp/qwen-never');
+    gitRepo('config', '--unset', 'filter.evil.smudge');
+    // Without the baseline the self-erasing plant sails through: the
+    // point-in-time re-read has nothing to name.
+    expect(localFilterBreach(tree, 'the guarded checkout')).toBeNull();
+    const breach = localFilterBreach(
+      tree,
+      'the guarded checkout',
+      captured.baseline,
+    );
+    expect(breach).not.toBeNull();
+    expect(breach!).toContain('may have EXECUTED');
+    expect(breach!).toContain('changed');
   });
 
   it('refuses on includeIf directives the screening tree cannot evaluate', () => {

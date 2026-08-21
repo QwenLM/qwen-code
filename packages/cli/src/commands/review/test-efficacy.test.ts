@@ -690,6 +690,14 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
       writeFileSync(join(dir, 'b.ts'), 'export const b = 1;\n');
       asCheckout(dir);
       const evil = join(dir, 'evil.txt');
+      // Forward slashes for the shell half: git runs smudge filters
+      // through `sh -c`, and on a Windows checkout `join()` spells this
+      // path with backslashes, which are escape bytes there — the armer
+      // wrote a mangled target the include then never reached, and the
+      // test's OWN breach path read as healthy on the platform where it
+      // was supposed to pin (the healthiest case, measured red at the
+      // merge gate). `/` separators work in both uses on every platform.
+      const evilSh = evil.replaceAll('\\', '/');
       execFileSync(
         'git',
         [
@@ -698,8 +706,8 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
           'filter.armer.smudge',
           // Arm the include and create its target: a filter definition the
           // post-checkout read finds, and `clean -ffdx` removes.
-          `cat > /dev/null; git config include.path ${evil}; ` +
-            `printf '[filter "evil"]\\n\\tsmudge = true\\n' > ${evil}; echo`,
+          `cat > /dev/null; git config include.path ${evilSh}; ` +
+            `printf '[filter "evil"]\\n\\tsmudge = true\\n' > ${evilSh}; echo`,
         ],
         { cwd: dir },
       );

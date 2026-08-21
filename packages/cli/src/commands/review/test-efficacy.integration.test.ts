@@ -2100,19 +2100,77 @@ process.stdout.write(JSON.stringify({
     expect(existsSync(join(markerDir, 'fsm'))).toBe(false);
   });
 
-  it("reaps the suite's process group, so nothing it spawned outlives the run", async () => {
-    // The screen and the checkout it authorises are a check-then-use pair: a
-    // process the PR's own test code spawned can toggle the filter config
-    // between the screen's read and the checkout's read, and nothing reaped
-    // the suite's descendants on normal completion (measured: a fast atomic
-    // toggler executed the planted smudge in ~3% of trials). Running the
-    // suite in its own process group and killing the group before the next
-    // screen+checkout pair is the preventive half.
+  it("reports the phase breached when a plant fires during the probe tree's own creation", async () => {
+    // The probe tree's `worktree add` executes repo-local content
+    // filters on its initial checkout, but no re-read was ever paired
+    // with that checkout — a plant appearing between the phase's entry
+    // screen and the add's own config read fired unseen, and one that
+    // unset itself before the first restore's screen let the whole
+    // phase certify healthy over the executed checkout (the restore
+    // pairs are the only later reads, and both run AFTER the plant has
+    // had its window). The creation is now paired like every other
+    // guarded checkout: the armer below arms a repo-local filter DURING
+    // the add and leaves it armed, so the re-read names it and the
+    // phase reports the breach instead of running.
     const { wt, base } = scaffoldModifiedPr();
-    const pidFile = join(repo, 'linger.pid');
-    writeFileSync(
-      vitestScript(),
-      `#!/usr/bin/env node
+    write('.gitattributes', '*.ts filter=armer\n');
+    commitAll('attributes');
+    const head = git(repo, 'rev-parse', 'HEAD').trim();
+    git(wt, 'checkout', '-q', '--detach', head);
+    execFileSync(
+      'git',
+      [
+        'config',
+        '--global',
+        'filter.armer.smudge',
+        "git config filter.evil.smudge 'touch /tmp/qwen-never'",
+      ],
+      { cwd: repo },
+    );
+
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    expect(out.probed).toEqual([
+      expect.objectContaining({
+        file: 'packages/lib/src/f.test.ts',
+        verdict: 'inconclusive',
+      }),
+    ]);
+    expect(out.probed[0].detail).toContain('may have EXECUTED');
+    expect(out.probed[0].detail).toContain('filter.evil.smudge');
+    // The breached tree is rolled back, not left planted for the rerun.
+    expect(existsSync(probeWorktreePath(wt))).toBe(false);
+  });
+
+  // The reap is POSIX-only by construction: on Windows the group kill is
+  // a post-mortem `taskkill /pid <root> /T /F`, and `spawnSync` returns
+  // only after the suite root has EXITED — taskkill walks the tree of a
+  // live pid, so the call dies on the dead root and every descendant
+  // survives (the code comment names the Job Object / live-root walk
+  // this round does not add). The detection half — the post-checkout
+  // re-reads — covers that platform; the reap assertion itself is red
+  // there by design, so it runs everywhere else only.
+  it.skipIf(process.platform === 'win32')(
+    "reaps the suite's process group, so nothing it spawned outlives the run",
+    async () => {
+      // The screen and the checkout it authorises are a check-then-use pair: a
+      // process the PR's own test code spawned can toggle the filter config
+      // between the screen's read and the checkout's read, and nothing reaped
+      // the suite's descendants on normal completion (measured: a fast atomic
+      // toggler executed the planted smudge in ~3% of trials). Running the
+      // suite in its own process group and killing the group before the next
+      // screen+checkout pair is the preventive half.
+      const { wt, base } = scaffoldModifiedPr();
+      const pidFile = join(repo, 'linger.pid');
+      writeFileSync(
+        vitestScript(),
+        `#!/usr/bin/env node
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -2144,27 +2202,28 @@ process.stdout.write(JSON.stringify({
   testResults: results,
 }));
 `,
-    );
+      );
 
-    await runHandler({
-      report: join(repo, 'report.json'),
-      worktree: wt,
-      base,
-      out: join(repo, 'out.json'),
-    });
+      await runHandler({
+        report: join(repo, 'report.json'),
+        worktree: wt,
+        base,
+        out: join(repo, 'out.json'),
+      });
 
-    // The run itself still completed and still scored like a healthy run.
-    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
-    expect(out.probed).toEqual([
-      expect.objectContaining({
-        file: 'packages/lib/src/f.test.ts',
-        verdict: 'inert',
-      }),
-    ]);
-    // ...and the descendant the suite left running did not survive it.
-    const pid = Number(readFileSync(pidFile, 'utf8'));
-    expect(() => process.kill(pid, 0)).toThrow();
-  });
+      // The run itself still completed and still scored like a healthy run.
+      const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+      expect(out.probed).toEqual([
+        expect.objectContaining({
+          file: 'packages/lib/src/f.test.ts',
+          verdict: 'inert',
+        }),
+      ]);
+      // ...and the descendant the suite left running did not survive it.
+      const pid = Number(readFileSync(pidFile, 'utf8'));
+      expect(() => process.kill(pid, 0)).toThrow();
+    },
+  );
 
   it('sweeps a stale probe tree whose own admin config holds a plant, instead of wedging', async () => {
     // The phase's screen used to run ABOVE the stale sweep: its candidate

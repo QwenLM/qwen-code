@@ -487,7 +487,19 @@ function ignoreSourcesOf(
 ): Map<string, IgnoreRule> | null {
   const r = spawnSync(
     'git',
-    [...pipelineExcludeArgs(), 'check-ignore', '-z', '-v', '--stdin'],
+    [
+      ...pipelineExcludeArgs(),
+      // `check-ignore` refreshes the index, and an index refresh fires a
+      // planted `core.fsmonitor` — the measurement would become the very
+      // execution the residue probe exists to avoid. The four sibling
+      // residue spawns carry the same override; these two pre-date it.
+      '-c',
+      'core.fsmonitor=',
+      'check-ignore',
+      '-z',
+      '-v',
+      '--stdin',
+    ],
     {
       cwd,
       input: `${paths.join('\0')}\0`,
@@ -555,12 +567,18 @@ function trackedIgnoreSources(cwd: string, sources: Set<string>): Set<string> {
       s.length > 0 && !isAbsolute(s) && !s.split('/').some((p) => p === '..'),
   );
   if (inside.length === 0) return new Set();
-  const r = spawnSync('git', ['ls-files', '-z', '--', ...inside], {
-    cwd,
-    encoding: 'utf8',
-    maxBuffer: 64 * 1024 * 1024,
-    env: sanitizedGitEnv(),
-  });
+  const r = spawnSync(
+    'git',
+    // Same override the sibling residue spawns carry: a pathspec'd
+    // `ls-files` reads the index through fsmonitor too.
+    ['-c', 'core.fsmonitor=', 'ls-files', '-z', '--', ...inside],
+    {
+      cwd,
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+      env: sanitizedGitEnv(),
+    },
+  );
   if (r.error || r.status !== 0 || typeof r.stdout !== 'string') {
     return new Set();
   }
@@ -663,19 +681,44 @@ export interface LocalFilterScreen {
  * The file an include directive names, resolved the way git resolves it at
  * read time: `~/` expands to the home dir, a relative path is relative to
  * the DIRECTIVE'S file, an absolute path is taken as-is. Null for a value
- * this screen cannot resolve (empty, or a `~user` form it does not expand),
- * which the caller reads as unclearable, never as clean.
+ * this screen cannot resolve — empty, a `~user` form it does not expand,
+ * or any shape it cannot PROVE it handles identically to git — which the
+ * caller reads as unclearable, never as clean.
+ *
+ * The unprovable shapes are each a live-measured bypass, a value this
+ * resolver mapped to a different file (or none) than the git that then
+ * ran the checkout: edge whitespace (a quoted `"inc "` keeps the space;
+ * the trim ate it), U+FFFD (the utf8 decode lost bytes git resolves
+ * byte-exact), `%(` (git's own interpolation, `%(prefix)` and friends),
+ * a `..` segment (the kernel resolves symlinked components BEFORE
+ * applying it, while `resolve()` collapses it lexically), and on Windows
+ * a slashless drive prefix (relative to the drive's cwd). The fail-safe
+ * trade is the one this screen makes on every unresolvable target: a
+ * benign include in one of these shapes costs a refusal, never an
+ * execution.
  */
 function resolveIncludeTarget(fromFile: string, value: string): string | null {
-  let v = value.trim();
+  if (
+    value !== value.trim() ||
+    value.includes('\uFFFD') ||
+    value.includes('%(') ||
+    value.split(process.platform === 'win32' ? /[\\/]/ : /\//).includes('..') ||
+    (process.platform === 'win32' && /^[A-Za-z]:[^\\/]/.test(value))
+  ) {
+    return null;
+  }
+  const v = value;
   if (v.length === 0 || /^~[^/\\]/.test(v)) return null;
   if (v === '~') return resolve(homedir());
-  if (v.startsWith('~/')) v = join(homedir(), v.slice(2));
-  else if (!isAbsolute(v)) v = join(dirname(fromFile), v);
+  if (v.startsWith('~/')) return resolve(join(homedir(), v.slice(2)));
+  if (!isAbsolute(v)) return resolve(join(dirname(fromFile), v));
   return resolve(v);
 }
 
-export function localFilterCommands(worktree: string): LocalFilterScreen {
+export function localFilterCommands(
+  worktree: string,
+  scannedFiles?: Map<string, { mtimeMs: number; size: number }>,
+): LocalFilterScreen {
   const screen: LocalFilterScreen = { keys: [], unclearable: [] };
   // One single-flag spawn per path, not one two-flag spawn split on
   // newlines: a repository path legally carries a newline (the user's own
@@ -698,7 +741,20 @@ export function localFilterCommands(worktree: string): LocalFilterScreen {
   };
   const commonDir = discover('--git-common-dir');
   const gitDir = discover('--git-dir');
-  if (commonDir === null || gitDir === null) return screen;
+  if (commonDir === null || gitDir === null) {
+    // Fail CLOSED, the way an unreadable candidate does: a repository the
+    // screen cannot discover is one it cannot clear, and the empty screen
+    // this used to return reads as "proceed" — the one answer the
+    // screen's contract never gives. Both triggers were live-measured: a
+    // toggler swapping the screened tree's `.git` pointer between these
+    // spawns and the guarded checkout (the paired re-read is blinded the
+    // same way, since its first act is this same discovery), and a
+    // transient spawn failure under load.
+    screen.unclearable.push(
+      `${worktree}: cannot resolve the repository's common dir`,
+    );
+    return screen;
+  }
   const common = resolve(worktree, commonDir);
   const candidates = [
     join(common, 'config'),
@@ -792,6 +848,17 @@ export function localFilterCommands(worktree: string): LocalFilterScreen {
     if (at !== undefined && at <= depth) return;
     seen.set(dedupe, depth);
     if (!existsSync(file)) return;
+    if (scannedFiles !== undefined) {
+      try {
+        const st = statSync(file);
+        scannedFiles.set(file, { mtimeMs: st.mtimeMs, size: st.size });
+      } catch {
+        // Vanished between existsSync and stat — record the absence so
+        // the baseline comparison reads a reappearance as the change it
+        // is. `-1` is the sentinel; no real stat produces it.
+        scannedFiles.set(file, { mtimeMs: -1, size: -1 });
+      }
+    }
     // `-z` records are `key\nvalue\0`: subsection names legally carry
     // spaces and values legally carry newlines, so the line-oriented
     // `split(/\s+/)[0]` read mangled both — the key is the WHOLE record up
@@ -882,6 +949,7 @@ function localFilterFindingText(
   screen: LocalFilterScreen,
   context: string,
   executes: string,
+  changed: string[] = [],
 ): string {
   const parts: string[] = [];
   if (screen.keys.length > 0) {
@@ -899,6 +967,14 @@ function localFilterFindingText(
         '— a file it cannot clear is refused like a plant',
     );
   }
+  if (changed.length > 0) {
+    parts.push(
+      `${changed.length} config file(s) the screen cleared changed before ` +
+        `this re-read (${changed.map(inertPath).join('; ')}) — a plant ` +
+        `${context} ${executes} can erase itself the instant it fires, ` +
+        'and the change is what remains',
+    );
+  }
   return (
     parts.join('; additionally, ') +
     '. Two plain writes into the common dir plant both a filter and the ' +
@@ -908,6 +984,20 @@ function localFilterFindingText(
     'this refusal — it reads the filter definitions). Until then no ' +
     'checkout in this pipeline is safe to run.'
   );
+}
+
+/**
+ * The screened config files as the screen saw them — every candidate and
+ * include target it READ, with its mtime and size. Captured beside a
+ * clean screen and handed to the paired post-checkout re-read
+ * ({@link localFilterBreach}): a plant that erases itself the instant
+ * its smudge fires leaves no key for the re-read to find — the unset
+ * lands in the config before the re-read starts — but it cannot leave
+ * the file it wrote unchanged.
+ */
+export interface LocalFilterBaseline {
+  /** Each file the screen read, keyed by the path it was read at. */
+  files: Map<string, { mtimeMs: number; size: number }>;
 }
 
 /**
@@ -925,9 +1015,17 @@ function localFilterFindingText(
 export function localFilterRefusal(
   worktree: string,
   context: string,
+  capture?: { baseline: LocalFilterBaseline | null },
 ): string | null {
-  const screen = localFilterCommands(worktree);
-  if (screen.keys.length === 0 && screen.unclearable.length === 0) return null;
+  const scanned = new Map<string, { mtimeMs: number; size: number }>();
+  const screen = localFilterCommands(
+    worktree,
+    capture !== undefined ? scanned : undefined,
+  );
+  if (screen.keys.length === 0 && screen.unclearable.length === 0) {
+    if (capture !== undefined) capture.baseline = { files: scanned };
+    return null;
+  }
   return localFilterFindingText(screen, context, 'would EXECUTE');
 }
 
@@ -939,15 +1037,54 @@ export function localFilterRefusal(
  * the checkout executes the plant while both reads this function's caller
  * makes on its own saw nothing. A key that APPEARED is reported as a
  * breach: detection, not prevention — the checkout already ran, and the run
- * must be reported breached rather than clean. Null is the clean answer.
+ * must be reported breached rather than clean. Takes the baseline the
+ * paired screen captured ({@link localFilterRefusal}), when one was: a
+ * self-erasing plant leaves no key, and only the changed-file half sees
+ * it. Null is the clean answer.
  */
 export function localFilterBreach(
   worktree: string,
   context: string,
+  baseline?: LocalFilterBaseline | null,
 ): string | null {
   const screen = localFilterCommands(worktree);
-  if (screen.keys.length === 0 && screen.unclearable.length === 0) return null;
-  return localFilterFindingText(screen, context, 'may have EXECUTED');
+  const changed = changedScreenedFiles(baseline);
+  if (
+    screen.keys.length === 0 &&
+    screen.unclearable.length === 0 &&
+    changed.length === 0
+  ) {
+    return null;
+  }
+  return localFilterFindingText(screen, context, 'may have EXECUTED', changed);
+}
+
+/**
+ * Which of the files the screen read changed after it read them — the
+ * baseline half of the paired re-read. A self-erasing plant (its command
+ * unsets the key the instant the smudge fires, and the unset lands before
+ * this re-read starts) leaves no key to find, but it cannot leave the
+ * file it wrote unchanged. Absence counts as a change: the screen cleared
+ * a file that is gone.
+ */
+function changedScreenedFiles(
+  baseline: LocalFilterBaseline | null | undefined,
+): string[] {
+  if (baseline === null || baseline === undefined) return [];
+  const changed: string[] = [];
+  for (const [file, was] of baseline.files) {
+    try {
+      const st = statSync(file);
+      if (st.mtimeMs !== was.mtimeMs || st.size !== was.size) {
+        changed.push(file);
+      }
+    } catch {
+      // `-1` was the screen's own "vanished mid-scan" record; absent on
+      // BOTH sides is nothing happening.
+      if (was.mtimeMs !== -1) changed.push(file);
+    }
+  }
+  return changed;
 }
 
 /**

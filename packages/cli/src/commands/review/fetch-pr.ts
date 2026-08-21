@@ -42,6 +42,7 @@ import {
   localFilterBreach,
   localFilterRefusal,
   sanitizedGitEnv,
+  type LocalFilterBaseline,
 } from './lib/worktree.js';
 import { setGhHost } from './lib/gh.js';
 import { getPlatformReader } from './lib/platform/registry.js';
@@ -925,9 +926,13 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     //    re-review of this PR number wedged at the fetch gate, measured
     //    live). The fetch and metadata steps between the sweep and this
     //    spawn run no checkout, so nothing executes unscreened before it.
+    const captured: { baseline: LocalFilterBaseline | null } = {
+      baseline: null,
+    };
     const filterRefusal = localFilterRefusal(
       process.cwd(),
       'the review worktree add this command runs',
+      captured,
     );
     if (filterRefusal !== null) {
       // Roll back the fetched ref, the way the metadata failure above does.
@@ -965,6 +970,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     const filterBreach = localFilterBreach(
       process.cwd(),
       'the review worktree add this command ran',
+      captured.baseline,
     );
     if (filterBreach !== null) {
       // Release what the add created and roll back the fetched ref, the way

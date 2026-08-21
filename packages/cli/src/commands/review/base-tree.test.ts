@@ -362,6 +362,45 @@ describe('runBaseTree', () => {
     }
   });
 
+  it('reports the add breached when the plant ERASES ITSELF during the checkout', () => {
+    // The self-erasing shape the key re-read cannot see: the armer's
+    // smudge arms a repo-LOCAL filter AND unsets it again, per file, so
+    // the key is gone by the time the post-add re-read runs (probe, git
+    // 2.39: the re-read answered clean and the command certified a tree
+    // whose initial checkout had fired the plant). What the plant cannot
+    // erase is the change to the config file itself — the baseline the
+    // screen captured beside its clean read names it.
+    const isolation = isolateHostGitConfig();
+    try {
+      writeFileSync(join(repo, '.gitattributes'), '*.txt filter=armer\n');
+      git(repo, 'add', '-A');
+      git(repo, 'commit', '-qam', 'base-with-attributes');
+      const armedBase = git(repo, 'rev-parse', 'HEAD');
+      execFileSync(
+        'git',
+        [
+          'config',
+          '--global',
+          'filter.armer.smudge',
+          "git config filter.evil.smudge 'touch /tmp/qwen-never'; " +
+            'git config --unset filter.evil.smudge',
+        ],
+        { cwd: repo },
+      );
+
+      const r = run({ plan: { mergeBaseSha: armedBase } });
+
+      expect(r.available).toBe(false);
+      expect(r.note).toContain('may have EXECUTED');
+      // No key survived the erase — the refusal must name the changed
+      // file instead of reading as a clean point-in-time re-read.
+      expect(r.note).toContain('changed');
+      expect(existsSync(baseWorktreePath(worktree))).toBe(false);
+    } finally {
+      isolation.dispose();
+    }
+  });
+
   it('sweeps a stale tree whose own admin config holds a plant, instead of wedging on it', () => {
     // The screen's candidate set reads every `<common>/worktrees/*/
     // config.worktree`, and it used to run ABOVE the stale sweep: a plant
