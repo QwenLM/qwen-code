@@ -141,6 +141,7 @@ import {
   type RewindTurn,
 } from './session-rewind.js';
 import { OpenTuiDialogMount } from './dialog-mount.js';
+import { OpenTuiFolderTrustGate } from './folder-trust-gate.js';
 import { loadSettings, type LoadedSettings } from '../../config/settings.js';
 import type { SlashCommand } from '../commands/types.js';
 import {
@@ -979,6 +980,11 @@ function App({
   // to dispatcher.cancel() and concurrent command submission.
   const [commandProcessing, setCommandProcessing] = useState(false);
   const commandProcessingRef = useRef(false);
+
+  // Folder-trust startup gate (#56): undecided workspaces show the trust
+  // prompt before anything else (ink DialogManager priority parity). While
+  // open it suppresses the composer, like ink's dialogsVisible.
+  const [folderTrustGateOpen, setFolderTrustGateOpen] = useState(false);
 
   // The real settings stack, feeding the command services and the
   // settings/theme/permissions dialogs. The entry passes its loaded settings
@@ -3220,6 +3226,7 @@ function App({
             placeholder="Type your message or @path/to/file"
             focus={
               !dialog &&
+              !folderTrustGateOpen &&
               !questionReq &&
               !confirmReq &&
               !actionConfirmReq &&
@@ -3246,6 +3253,15 @@ function App({
           </box>
         </box>
       </scrollbox>
+
+      {/* folder-trust startup gate (#56): highest dialog priority (ink
+          DialogManager parity — ahead of MCP approvals and every command
+          dialog, since it decides whether tool confirmations can offer
+          "always allow" at all) */}
+      <OpenTuiFolderTrustGate
+        settings={settings}
+        onOpenChange={setFolderTrustGateOpen}
+      />
 
       {/* active dialog (help/theme/settings/model/permissions/…) */}
       {dialog && (
