@@ -1211,6 +1211,7 @@ async function loadServeRuntimeModules() {
     workspaceSkillsStatusModule,
     totalSessionAdmissionModule,
     workspaceRegistryModule,
+    promptLedgerModule,
   ] = await Promise.all([
     import('./server.js'),
     import('@qwen-code/acp-bridge/bridge'),
@@ -1223,6 +1224,7 @@ async function loadServeRuntimeModules() {
     import('./workspace-skills-status.js'),
     import('./total-session-admission.js'),
     import('./workspace-registry.js'),
+    import('./prompt-terminal-ledger.js'),
   ]);
   return {
     createServeApp: serverModule.createServeApp,
@@ -1252,6 +1254,7 @@ async function loadServeRuntimeModules() {
       workspaceRegistryModule.createWorkspaceSessionOwnerIndex,
     createWorkspaceGenerationGuard:
       workspaceRegistryModule.createWorkspaceGenerationGuard,
+    createPromptLedgerSink: promptLedgerModule.createPromptLedgerSink,
   };
 }
 
@@ -4384,6 +4387,12 @@ async function runQwenServeImpl(
           ? { permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs }
           : {}),
         boundWorkspace,
+        // Prompt terminal ledger: persisted beside the transcript so a
+        // restarted daemon can reconcile dangling prompts on cold load.
+        promptLedger: runtime.createPromptLedgerSink(
+          boundWorkspace,
+          primarySessionRuntimeBaseDir,
+        ),
         sessionShellCommandEnabled,
         childEnvOverrides,
         channelFactory,
@@ -4795,6 +4804,10 @@ async function runQwenServeImpl(
           ? { permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs }
           : {}),
         boundWorkspace: workspaceInput.cwd,
+        promptLedger: runtime.createPromptLedgerSink(
+          workspaceInput.cwd,
+          secondaryEnv.sessionRuntimeBaseDir,
+        ),
         sessionShellCommandEnabled,
         childEnvOverrides,
         channelFactory: secondaryChannelFactory,
@@ -5357,6 +5370,16 @@ async function runQwenServeImpl(
             ? { permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs }
             : {}),
           boundWorkspace: cwd,
+          // Live-conversation workspaces keep transcripts outside the
+          // runtime storage layout, so no ledger sink is wired there.
+          ...(provenance === 'live-conversation'
+            ? {}
+            : {
+                promptLedger: runtime.createPromptLedgerSink(
+                  cwd,
+                  wsEnv.sessionRuntimeBaseDir,
+                ),
+              }),
           sessionShellCommandEnabled,
           childEnvOverrides,
           channelFactory: wsChannelFactory,

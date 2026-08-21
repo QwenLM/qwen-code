@@ -20,6 +20,10 @@ import {
   LEDGER_MAX_BYTES,
   LEDGER_MAX_MODEL,
   LEDGER_MAX_VOLUME,
+  LEDGER_MAX_ID,
+  LEDGER_ID_SHAPE,
+  LEDGER_MAX_ROUND,
+  isLedgerFinding,
   type Ledger,
   type LedgerFinding,
 } from './ledger.js';
@@ -434,6 +438,251 @@ describe('ledger marker', () => {
   it('leaves an unterminated marker alone rather than truncating the body', () => {
     const body = 'prose <!-- qwen-review-ledger {"v":1 and the rest of it';
     expect(stripLedgerMarker(body)).toBe(body);
+  });
+});
+
+describe('a shortened work list must never read as complete', () => {
+  const f = (id: string): LedgerFinding => ({
+    id,
+    sev: 'S',
+    file: 'a.ts',
+    title: 't',
+  });
+
+  it('counts what the FILTER rejected, not only what the cap sliced', () => {
+    // `dropped` decides two things: the anchor is withheld while it is set,
+    // and it now publishes the "may be an undercount" caveat. Entries the
+    // filter rejected are findings the next round will never rule on, so a
+    // list short by them that still certifies its range retires a posted
+    // Critical silently AND scopes the next review past its code.
+    const marker =
+      '<!-- qwen-review-ledger {"v":1,"round":3,"findings":[' +
+      '{"id":"R3-1","sev":"S","file":"a.ts","title":"kept"},' +
+      '{"id":"nope","sev":"S","file":"b.ts","title":"rejected"}' +
+      '],"sha":"deadbeef00112233"} -->';
+    const parsed = parseLedger(marker)!;
+    expect(parsed.findings.map((x) => x.id)).toEqual(['R3-1']);
+    expect(parsed.dropped).toBe(1);
+    expect(parsed.sha).toBeUndefined();
+  });
+
+  it('never writes an id its own parser would refuse', () => {
+    // The id cap slices without re-validating, so an over-long id is cut
+    // mid-token and stops being the grammar. Emitted, the next round's
+    // filter drops it — the finding retires with no ruling, and the loss is
+    // invisible unless it is counted here, where `dropped` still counts it.
+    const long = `R${'1'.repeat(30)}-7`;
+    const marker = serializeLedger({
+      v: 1,
+      round: 2,
+      findings: [f('R2-1'), { ...f(long), file: 'b.ts' }],
+      sha: 'deadbeef00112233',
+    });
+    // The MARKER, not merely the parse: dropped on the write side the loss is
+    // declared in the bytes and the anchor is withheld by the writer; left in,
+    // the marker spends its budget on a token its own reader will refuse.
+    expect(marker).not.toContain('R1111');
+    expect(marker).toContain('"dropped":1');
+    const parsed = parseLedger(marker)!;
+    expect(parsed.findings.map((x) => x.id)).toEqual(['R2-1']);
+    expect(parsed.dropped).toBe(1);
+    expect(parsed.sha).toBeUndefined();
+  });
+
+  it('writes no floor beside a volume that did not survive', () => {
+    // The floor qualifies `posted`. Written whenever the rung ADMITS the
+    // group rather than whenever the volume survived it, it is bytes spent
+    // on the shed cascade that the parser then discards — on the same ladder
+    // the serializer prices at a lost anchor.
+    const marker = serializeLedger({
+      v: 1,
+      round: 2,
+      findings: [f('R2-1')],
+      posted: -3 as unknown as number,
+      floor: 'c',
+    });
+    expect(marker).not.toContain('floor');
+  });
+
+  it('refuses a round-0 id at both ends of the bound', () => {
+    // Rounds start at 1, so `R0-*` is not an id this pipeline can mint — but
+    // it passes the shape, and every reader that turns an id into a round
+    // rejects round 0 and then reads the rejection as "no carried id", i.e.
+    // as FRESH. Admitted, a re-posted `R0-1` counts as first-time work every
+    // round and the trend narrates divergence at a settled steady state.
+    expect(
+      isLedgerFinding({ id: 'R0-1', sev: 'C', file: 'x.ts', title: 't' }, 9),
+    ).toBe(false);
+    expect(
+      parseLedger(
+        '<!-- qwen-review-ledger {"v":1,"round":3,"findings":[' +
+          '{"id":"R0-1","sev":"C","file":"x.ts","title":"boom"}' +
+          ']} -->',
+      )?.findings,
+    ).toEqual([]);
+    // The write side applies the same test, so a stray id the model minted
+    // out of range never reaches a marker its own reader would refuse.
+    const marker = serializeLedger({
+      v: 1,
+      round: 3,
+      findings: [f('R3-1'), { ...f('R0-1'), file: 'b.ts' }],
+    });
+    expect(marker).not.toContain('R0-1');
+    expect(marker).toContain('"dropped":1');
+  });
+
+  it('round-trips the stand-in exception flag, and clamps a forged dropped', () => {
+    // [1] The flag has to survive serialize -> parse, not merely exist on
+    // the builder's output: it is the only thing separating a real file
+    // spelled like a stand-in from the stand-in itself, and it crosses the
+    // marker boundary on every round.
+    const marker = serializeLedger({
+      v: 1,
+      round: 3,
+      findings: [
+        { id: 'R3-1', sev: 'C', file: '(body)', title: 'a stand-in' },
+        { id: 'R3-2', sev: 'S', file: '(body)', title: 'a real file', k: 1 },
+      ],
+    });
+    const back = parseLedger(marker)!;
+    expect(back.findings[0].k).toBeUndefined();
+    expect(back.findings[1].k).toBe(1);
+    // The stand-in costs no marker bytes; only the exception is spelled.
+    expect(marker.match(/"k":1/g)).toHaveLength(1);
+  });
+
+  it('clamps a forged `dropped` instead of publishing it', () => {
+    // It renders into the model-facing PARTIAL line and publishes the
+    // undercount caveat, and unlike a forged finding it cannot be re-ruled.
+    const parsed = parseLedger(
+      '<!-- qwen-review-ledger {"v":1,"round":3,"findings":[],"dropped":1e308} -->',
+    )!;
+    // Clamped through the same reader the other counts use, so the PARTIAL
+    // line cannot render `1e+308 further finding(s)`.
+    expect(parsed.dropped).toBe(LEDGER_MAX_VOLUME);
+    // A non-count is still no count at all.
+    expect(
+      parseLedger(
+        '<!-- qwen-review-ledger {"v":1,"round":3,"findings":[],"dropped":-4} -->',
+      )?.dropped,
+    ).toBeUndefined();
+  });
+
+  it('refuses an over-long id rather than cutting it into a different one', () => {
+    // Admitted and then sliced, the entry silently changes identity between
+    // the round that posted it and the round that rules on it.
+    const long = `R2-${'9'.repeat(LEDGER_MAX_ID)}`;
+    expect(long.length).toBeGreaterThan(LEDGER_MAX_ID);
+    expect(
+      isLedgerFinding({ id: long, sev: 'S', file: 'a.ts', title: 't' }, 9),
+    ).toBe(false);
+  });
+
+  it('bounds an id round by the CAP, not only by the claimed round', () => {
+    // The side-file route's round is whatever was written to it, which the
+    // admission test's own comment says is not always clamped.
+    expect(
+      isLedgerFinding(
+        {
+          id: `R${LEDGER_MAX_ROUND + 1}-1`,
+          sev: 'S',
+          file: 'a.ts',
+          title: 't',
+        },
+        Number.MAX_SAFE_INTEGER,
+      ),
+    ).toBe(false);
+    expect(
+      isLedgerFinding(
+        { id: `R${LEDGER_MAX_ROUND}-1`, sev: 'S', file: 'a.ts', title: 't' },
+        Number.MAX_SAFE_INTEGER,
+      ),
+    ).toBe(true);
+  });
+
+  it('keeps the fresh count only beside a volume that bounds it', () => {
+    const ok = parseLedger(
+      '<!-- qwen-review-ledger {"v":1,"round":3,"findings":[],"posted":5,"fresh":2} -->',
+    )!;
+    expect(ok.fresh).toBe(2);
+    // Larger than the total it is part of: not a count of anything.
+    const over = parseLedger(
+      '<!-- qwen-review-ledger {"v":1,"round":3,"findings":[],"posted":2,"fresh":5} -->',
+    )!;
+    expect(over.fresh).toBeUndefined();
+    // No total: nothing for it to be a part of.
+    const bare = parseLedger(
+      '<!-- qwen-review-ledger {"v":1,"round":3,"findings":[],"fresh":5} -->',
+    )!;
+    expect(bare.fresh).toBeUndefined();
+  });
+
+  it('refuses an over-long id rather than emitting a cut one under it', () => {
+    // The cut can still match the grammar — `R3-` plus twenty-two nines
+    // slices to a well-formed twenty-four — so validating after the slice
+    // emitted a DIFFERENT id under the same entry: the next round's readback
+    // of the posted claim returns the full id, matches no ledger entry, and
+    // the finding retires with no ruling while the list reads as complete.
+    const cuttable = `R3-${'9'.repeat(22)}`;
+    expect(cuttable.length).toBeGreaterThan(LEDGER_MAX_ID);
+    expect(LEDGER_ID_SHAPE.test(cuttable.slice(0, LEDGER_MAX_ID))).toBe(true);
+    const marker = serializeLedger({
+      v: 1,
+      round: 3,
+      findings: [
+        { ...f('R3-1'), file: 'a.ts' },
+        { ...f(cuttable), file: 'b.ts' },
+      ],
+      sha: 'deadbeef00112233',
+    });
+    expect(marker).not.toContain(cuttable.slice(0, LEDGER_MAX_ID));
+    const parsed = parseLedger(marker)!;
+    expect(parsed.findings.map((x) => x.id)).toEqual(['R3-1']);
+    expect(parsed.dropped).toBe(1);
+    expect(parsed.sha).toBeUndefined();
+  });
+
+  it('clamps the SUMMED dropped, not only its declared term', () => {
+    // `raw.findings.length` is attacker-chosen — a body of tens of thousands
+    // of single-character invalid entries fits GitHub's limit — and the
+    // total is interpolated verbatim into the model-facing PARTIAL line.
+    const junk = Array.from({ length: 400 }, () => ({ id: 'x' }));
+    const parsed = parseLedger(
+      `<!-- qwen-review-ledger {"v":1,"round":3,"dropped":${LEDGER_MAX_VOLUME},"findings":${JSON.stringify(junk)}} -->`,
+    )!;
+    expect(parsed.dropped).toBe(LEDGER_MAX_VOLUME);
+  });
+
+  it('normalises an unrecognised clustering hint instead of dropping the finding', () => {
+    // `k` decides nothing. The marker is a cross-environment carrier by
+    // design, so a later version adding a third kind — or a hand edit, or a
+    // foreign marker — would otherwise make every older CLI drop those
+    // findings from the work list: they would owe no Step 6 ruling and
+    // retire with nobody ruling on them.
+    const marker =
+      '<!-- qwen-review-ledger {"v":1,"round":3,"findings":[' +
+      '{"id":"R3-1","sev":"C","file":"(body)","title":"t","k":"d"}' +
+      ']} -->';
+    const parsed = parseLedger(marker)!;
+    expect(parsed.findings).toEqual([
+      { id: 'R3-1', sev: 'C', file: '(body)', title: 't' },
+    ]);
+    expect(parsed.dropped).toBeUndefined();
+  });
+
+  it('bounds an id round even when the marker round does not', () => {
+    // The round is printed verbatim in a public body, and the side-file read
+    // shares this admission test with no clamp of its own.
+    expect(
+      isLedgerFinding(
+        { id: 'R99999999999999999999-1', sev: 'S', file: 'a.ts', title: 't' },
+        Number.MAX_SAFE_INTEGER,
+      ),
+    ).toBe(false);
+    // A leading space is the bypass the whole-shape test closes.
+    expect(
+      isLedgerFinding({ id: ' R9-1', sev: 'S', file: 'a.ts', title: 't' }, 99),
+    ).toBe(false);
   });
 });
 

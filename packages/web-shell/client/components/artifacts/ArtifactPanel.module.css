@@ -1102,6 +1102,31 @@ button.treeRow:hover {
   background: var(--accent);
 }
 
+.downloadRow {
+  margin-top: 16px;
+}
+
+.downloadButton {
+  appearance: none;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 12px;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.downloadButton:hover:not(:disabled) {
+  background: var(--accent);
+}
+
+.downloadButton:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 .htmlPreview {
   width: 100%;
   flex: 1 1 auto;
