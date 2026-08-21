@@ -138,7 +138,7 @@ export async function ensureNativePayload({
   const {
     cachedNativeDirectory,
     cuaSdkVersion,
-    hasNativePayload,
+    hasCompletedNativePayload,
     nativeTarget,
     resolveNativeDirectory,
   } = await import(NATIVE_ASSETS_MODULE.href)
@@ -154,7 +154,11 @@ export async function ensureNativePayload({
     env,
     platform,
   )
-  if (hasNativePayload(destination, target)) return destination
+  if (hasCompletedNativePayload(destination, target)) return destination
+  await rm(join(destination, "complete.json"), {
+    force: true,
+    recursive: true,
+  })
 
   const temporary = await mkdtemp(join(tmpdir(), "qwen-cua-sdk-"))
   try {

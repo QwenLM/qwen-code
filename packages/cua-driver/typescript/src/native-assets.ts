@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync, readFileSync, statSync } from "node:fs"
 import { homedir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -119,6 +119,18 @@ export function hasNativePayload(
   )
 }
 
+export function hasCompletedNativePayload(
+  directory: string,
+  target: CuaSdkNativeTarget = nativeTarget(),
+): boolean {
+  if (!hasNativePayload(directory, target)) return false
+  try {
+    return statSync(join(directory, "complete.json")).isFile()
+  } catch {
+    return false
+  }
+}
+
 export function resolveNativeDirectory(
   env: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
@@ -138,14 +150,11 @@ export function resolveNativeDirectory(
     return directory
   }
 
-  const candidates = [
-    join(packageRoot, ".native", target.cacheKey),
-    cachedNativeDirectory(target, version, env, platform),
-  ]
-  const found = candidates.find((directory) =>
-    hasNativePayload(directory, target),
-  )
-  if (found) return found
+  const packaged = join(packageRoot, ".native", target.cacheKey)
+  if (hasNativePayload(packaged, target)) return packaged
+
+  const cached = cachedNativeDirectory(target, version, env, platform)
+  if (hasCompletedNativePayload(cached, target)) return cached
 
   throw new Error(
     `@qwen-code/cua-sdk ${version} native payload is not installed for ` +

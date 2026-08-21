@@ -73,6 +73,14 @@ test("native installer verifies and extracts the matching release archive", asyn
   mkdirSync(source)
   const version = "9.8.7"
   const target = nativeTarget("linux", "x64", version)
+  const destination = join(cache, version, target.cacheKey)
+  mkdirSync(destination, { recursive: true })
+  writeFileSync(join(destination, target.library), "uncommitted-library")
+  writeFileSync(join(destination, target.runtime), "uncommitted-runtime")
+  const env = {
+    QWEN_CUA_SDK_CACHE_DIR: cache,
+    QWEN_CUA_SDK_RELEASE_BASE_URL: "https://release.invalid/tag",
+  }
   writeFileSync(join(source, target.library), "sdk-library")
   writeFileSync(join(source, target.runtime), "node-runtime")
   const archive = join(directory, target.archive)
@@ -91,19 +99,25 @@ test("native installer verifies and extracts the matching release archive", asyn
   }
 
   try {
+    assert.throws(
+      () => resolveNativeDirectory(env, "linux", "x64", version),
+      /native payload is not installed/u,
+    )
     const installed = await ensureNativePayload({
       arch: "x64",
-      env: {
-        QWEN_CUA_SDK_CACHE_DIR: cache,
-        QWEN_CUA_SDK_RELEASE_BASE_URL: "https://release.invalid/tag",
-      },
+      env,
       fetchImpl,
       platform: "linux",
       version,
     })
+    assert.equal(installed, destination)
     assert.equal(hasNativePayload(installed, target), true)
     assert.equal(readFileSync(join(installed, target.library), "utf8"), "sdk-library")
     assert.equal(readFileSync(join(installed, target.runtime), "utf8"), "node-runtime")
+    assert.equal(
+      JSON.parse(readFileSync(join(installed, "complete.json"), "utf8")).version,
+      version,
+    )
     assert.deepEqual(requests, [
       "https://release.invalid/tag/checksums.txt",
       `https://release.invalid/tag/${target.archive}`,
@@ -121,6 +135,10 @@ test("native installer verifies and extracts the matching release archive", asyn
       installed,
     )
     assert.deepEqual(requests, [])
+    assert.equal(
+      resolveNativeDirectory(env, "linux", "x64", version),
+      destination,
+    )
   } finally {
     rmSync(directory, { recursive: true, force: true })
   }
