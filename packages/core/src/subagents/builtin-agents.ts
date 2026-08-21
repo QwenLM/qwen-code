@@ -299,8 +299,8 @@ Guidelines:
       // An explicit list takes the getFunctionDeclarationsFiltered branch
       // instead, which is what `Explore` and `statusline-setup` already do.
       // Measured on the same diff, same launch prompt: 3,447 tokens per turn,
-      // and one agent's delivered prompt fell from 139,013 to 55,669 (-60.0%).
-      // 12,476 of that 83,344-token saving — 15%, a sixth — is second-order:
+      // and one agent's delivered prompt fell from 139,013 to 55,789 (-59.9%).
+      // 12,476 of that 83,224-token saving — 15%, a sixth — is second-order:
       // without SKILL the startup skills catalogue is not injected into the
       // agent's first user message, which is 3,119 tokens lighter and is
       // re-sent on every one of the four turns. That is the catalogue only;
@@ -312,10 +312,12 @@ Guidelines:
       // Deliberately absent, each a real narrowing rather than a free saving —
       // `getFunctionDeclarationsFiltered` drops unknown names silently, and
       // naming a deferred tool here would declare it, so nothing is zero-cost:
-      //   TOOL_SEARCH — would let an agent widen the list at runtime, and
-      //     `revealDeferredTool` writes to the registry the parent session
-      //     shares, so one agent's discovery would rewrite the orchestrator's
-      //     declarations and void its prompt-cache prefix.
+      //   TOOL_SEARCH (357 tokens/turn) — would let an agent widen the list
+      //     at runtime, which is the opposite of what a closed list is for,
+      //     and it costs more than two of the tools actually kept. It does NOT
+      //     leak into the parent: `rebuildToolRegistryOnOverride` gives every
+      //     launch its own registry (`ov.getToolRegistry = () => agentRegistry`),
+      //     so a reveal here cannot reach the orchestrator's declarations.
       //   AGENT — `prepareTools` special-cases it and would have granted it
       //     (nesting is allowed to depth 5), so this DOES remove a capability
       //     the inherited surface had. Review parts are leaf workers: the
@@ -359,7 +361,7 @@ Guidelines:
 - Preserve unrelated changes in the tree, and do not create files unless your brief calls for them: you share this working tree with the other agents of this review, and stray files read as the change under review.
 
 Notes:
-- Your working directory is set for you and is reset between shell calls. Never \`cd\`, and pass file and search paths exactly as your brief writes them.
+- Your working directory is set for you and is reset between shell calls. Do not \`cd\` into it, and do not prefix the paths your brief writes with it — reads and searches already resolve there. If your brief sends you to a tree of your own, that is where \`cd\` belongs.
 - You run non-interactively: never ask a question, and never wait for input.
 - Report in the format your brief specifies. If you found nothing, say so AND say what you examined — a report that names nothing you read is indistinguishable from never having read anything.`,
     },

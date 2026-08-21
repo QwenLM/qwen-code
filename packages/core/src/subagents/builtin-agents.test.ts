@@ -203,6 +203,15 @@ describe('BuiltinAgentRegistry', () => {
       // A question would block forever — these run with no human in the loop.
       expect(prompt).toContain('never ask a question');
 
+      // The cwd rule is SCOPED. A blanket "never `cd`" closes the Step 4
+      // verifier's only route to its scratch tree: that tree is a SIBLING of
+      // the review worktree (`<worktree>-scratch-<label>`), so
+      // `run_shell_command(directory:)` fails the workspace check and `cd` is
+      // the remaining way in. SKILL.md forbids only `cd` INTO the pinned
+      // working directory, and this must not be broader than that.
+      expect(prompt).not.toContain('Never `cd`');
+      expect(prompt).toContain('that is where `cd` belongs');
+
       // Role-NEUTRAL: this prompt is `systemInstruction` for every role the
       // review launches, including one that reads no diff (Agent 7) and two
       // that rule on a findings file. A frame bounding scope to "your diff
@@ -221,10 +230,10 @@ describe('BuiltinAgentRegistry', () => {
       expect(agent).not.toBeNull();
       const tools = agent!.tools ?? [];
 
-      // TOOL_SEARCH lets an agent reveal deferred tools at runtime, and
-      // revealDeferredTool writes to the registry the parent session shares —
-      // one agent's discovery would rewrite the orchestrator's declarations
-      // and void its prompt-cache prefix.
+      // TOOL_SEARCH lets an agent reveal deferred tools at runtime, which
+      // defeats a closed list — and at 357 tokens/turn it costs more than
+      // two of the tools kept. (It does not leak into the parent: every
+      // launch is given its own rebuilt registry.)
       expect(tools).not.toContain(ToolNames.TOOL_SEARCH);
       // SKILL is not merely unused: its presence injects the startup skills
       // catalogue into the agent's first user turn, which measured 3,623
