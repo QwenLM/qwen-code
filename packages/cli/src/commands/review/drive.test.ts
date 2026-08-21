@@ -91,6 +91,61 @@ function harness(opts: {
   };
 }
 
+/**
+ * The fake tmux lifecycle shared by every test that fakes a drive:
+ * `new-session` writes the drive log, then — unless the run must not
+ * finish — the sentinel file. The protocol (log name, sentinel path,
+ * sentinel line format) lives in ONE place, so a change to it cannot
+ * leave a copy still modelling the old shape while passing.
+ */
+function driveExec(opts: {
+  server: string;
+  logText: string;
+  finish?: boolean;
+}) {
+  const dir = mkdtempSync(join(tmpdir(), 'drv-cap-'));
+  const logPath = join(dir, 'drive.log');
+  const workDir = join(tmpdir(), `qwen-review-drive-${opts.server}`);
+  const exec = (cmd: string, args: string[]): ExecResult => {
+    if (cmd === 'tmux' && args[0] === '-V') return ok();
+    if (cmd === 'tmux' && args[2] === 'new-session') {
+      writeFileSync(logPath, opts.logText);
+      if (opts.finish !== false) {
+        mkdirSync(workDir, { recursive: true });
+        writeFileSync(join(workDir, 'drive.rc'), `${DRIVE_SENTINEL} rc=0\n`);
+      }
+      return ok();
+    }
+    return ok();
+  };
+  return { dir, logPath, workDir, exec };
+}
+
+/** A full runDrive against a faked tmux lifecycle that writes `logText`. */
+function driveWithLog(
+  logText: string,
+  opts: { server: string; capture?: string[]; finish?: boolean },
+) {
+  const { dir, logPath, workDir, exec } = driveExec({
+    server: opts.server,
+    logText,
+    finish: opts.finish,
+  });
+  const report = runDrive({
+    script: 'drive it',
+    cwd: dir,
+    readyTimeout: 1,
+    timeout: opts.finish === false ? 0 : 30,
+    server: opts.server,
+    capture: opts.capture,
+    exec,
+    logPath,
+  });
+  rmSync(dir, { recursive: true, force: true });
+  rmSync(workDir, { recursive: true, force: true });
+  return report;
+}
+
 describe('the sentinel', () => {
   it('carries the exit code on the same line it announces completion', () => {
     // Two facts read from one capture. A capture holding the marker but not the
@@ -515,41 +570,6 @@ describe('--capture', () => {
   // and looks clean. These pin the one thing that makes that detectable: the
   // value in the report came out of this run's own output.
 
-  /** A fake tmux whose `new-session` writes `logText`, then the sentinel. */
-  function driveWithLog(
-    logText: string,
-    opts: { server: string; capture?: string[]; finish?: boolean },
-  ) {
-    const dir = mkdtempSync(join(tmpdir(), 'drv-cap-'));
-    const logPath = join(dir, 'drive.log');
-    const workDir = join(tmpdir(), `qwen-review-drive-${opts.server}`);
-    const exec = (cmd: string, args: string[]): ExecResult => {
-      if (cmd === 'tmux' && args[0] === '-V') return ok();
-      if (cmd === 'tmux' && args[2] === 'new-session') {
-        writeFileSync(logPath, logText);
-        if (opts.finish !== false) {
-          mkdirSync(workDir, { recursive: true });
-          writeFileSync(join(workDir, 'drive.rc'), `${DRIVE_SENTINEL} rc=0\n`);
-        }
-        return ok();
-      }
-      return ok();
-    };
-    const report = runDrive({
-      script: 'drive it',
-      cwd: dir,
-      readyTimeout: 1,
-      timeout: opts.finish === false ? 0 : 30,
-      server: opts.server,
-      capture: opts.capture,
-      exec,
-      logPath,
-    });
-    rmSync(dir, { recursive: true, force: true });
-    rmSync(workDir, { recursive: true, force: true });
-    return report;
-  }
-
   it('reports the address the service bound, not the one it was asked for', () => {
     const r = driveWithLog(
       [
@@ -595,6 +615,22 @@ describe('--capture', () => {
     expect(r.note).toContain('"baseUrl"');
     expect(r.note).toContain('"pid"');
     expect(r.note).toContain('addressed by assumption');
+  });
+
+  it('phrases a miss neutrally when the pattern matched but its group did not', () => {
+    // "no output matched" is falsified by a declared group that did not
+    // participate: the pattern's text IS present in the log, and a reader
+    // grepping for it would blame the extraction instead of the pattern.
+    const r = driveWithLog('b\n', {
+      server: 'cap7',
+      capture: ['v=(?:a(x))?b'],
+    });
+    expect(r.captured).toEqual({ v: null });
+    expect(r.note).toContain('produced no value for "v"');
+    expect(r.note).toContain(
+      'the pattern never matched, or its group did not participate',
+    );
+    expect(r.note).not.toContain('no output matched');
   });
 
   it('captures on a drive that did NOT finish', () => {
@@ -789,34 +825,13 @@ describe('--capture and the head-trim are reconciled in the note', () => {
     // Without this the report reads as a self-contradiction: "early output is
     // missing" sits directly beside a value that came OUT of the missing head,
     // and beside a null the reader would reasonably blame the trim for.
-    const dir = mkdtempSync(join(tmpdir(), 'drv-trim-'));
-    const logPath = join(dir, 'drive.log');
-    const workDir = join(tmpdir(), 'qwen-review-drive-trim1');
-    const exec = (cmd: string, args: string[]): ExecResult => {
-      if (cmd === 'tmux' && args[0] === '-V') return ok();
-      if (cmd === 'tmux' && args[2] === 'new-session') {
-        writeFileSync(
-          logPath,
-          `listening on http://127.0.0.1:8432\n${'x'.repeat(400_000)}`,
-        );
-        mkdirSync(workDir, { recursive: true });
-        writeFileSync(join(workDir, 'drive.rc'), `${DRIVE_SENTINEL} rc=0\n`);
-        return ok();
-      }
-      return ok();
-    };
-    const r = runDrive({
-      script: 'noisy',
-      cwd: dir,
-      readyTimeout: 1,
-      timeout: 30,
-      server: 'trim1',
-      capture: ['baseUrl=listening on (\\S+)', 'pid=pid=(\\d+)'],
-      exec,
-      logPath,
-    });
-    rmSync(dir, { recursive: true, force: true });
-    rmSync(workDir, { recursive: true, force: true });
+    const r = driveWithLog(
+      `listening on http://127.0.0.1:8432\n${'x'.repeat(400_000)}`,
+      {
+        server: 'trim1',
+        capture: ['baseUrl=listening on (\\S+)', 'pid=pid=(\\d+)'],
+      },
+    );
 
     expect(r.truncated).toBe(true);
     expect(r.captured).toEqual({
@@ -833,6 +848,37 @@ describe('--capture and the head-trim are reconciled in the note', () => {
     expect(r.note.indexOf('--capture reads the untrimmed log')).toBeLessThan(
       r.note.indexOf('"pid"'),
     );
+  });
+
+  it('scopes the reconciliation to completed drives', () => {
+    // The clause points at "the head-trim above" — emitted only in the
+    // completed note — and claims "the whole run". An overflowed drive was
+    // stopped at the log cap, so extraction never saw past it and a null
+    // there is NOT a miss against the whole run; the clause must not fire.
+    const r = driveWithLog('x'.repeat(9 * 1024 * 1024), {
+      server: 'trim3',
+      capture: ['baseUrl=listening on (\\S+)'],
+      finish: false,
+    });
+    expect(r.outcome).toBe('overflowed');
+    expect(r.truncated).toBe(true);
+    expect(r.captured).toEqual({ baseUrl: null });
+    expect(r.note).not.toContain('--capture reads the untrimmed log');
+  });
+
+  it('stays silent on a timed-out drive too', () => {
+    // The run had not ended either, so the same two claims do not hold.
+    const r = driveWithLog(
+      `listening on http://127.0.0.1:9001\n${'x'.repeat(400_000)}`,
+      {
+        server: 'trim4',
+        capture: ['baseUrl=listening on (\\S+)'],
+        finish: false,
+      },
+    );
+    expect(r.outcome).toBe('timed-out');
+    expect(r.truncated).toBe(true);
+    expect(r.note).not.toContain('--capture reads the untrimmed log');
   });
 
   it('adds no reconciliation when nothing was trimmed', () => {
@@ -861,19 +907,10 @@ describe('--capture reaches runDrive through the real CLI seam', () => {
   // the handler prints.
   it('parses the flag and the captured value reaches the printed report', async () => {
     const { default: yargs } = await import('yargs');
-    const dir = mkdtempSync(join(tmpdir(), 'drv-seam-'));
-    const logPath = join(dir, 'drive.log');
-    const workDir = join(tmpdir(), 'qwen-review-drive-seam1');
-    const exec = (cmd: string, args: string[]): ExecResult => {
-      if (cmd === 'tmux' && args[0] === '-V') return ok();
-      if (cmd === 'tmux' && args[2] === 'new-session') {
-        writeFileSync(logPath, 'listening on http://127.0.0.1:8932\n');
-        mkdirSync(workDir, { recursive: true });
-        writeFileSync(join(workDir, 'drive.rc'), `${DRIVE_SENTINEL} rc=0\n`);
-        return ok();
-      }
-      return ok();
-    };
+    const { dir, logPath, workDir, exec } = driveExec({
+      server: 'seam1',
+      logText: 'listening on http://127.0.0.1:8932\n',
+    });
 
     const argv = (
       yargs([

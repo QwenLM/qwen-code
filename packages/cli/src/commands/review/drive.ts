@@ -657,7 +657,7 @@ export function runDrive(args: DriveArgs): DriveReport {
   // WHICH one before deciding whether the rest still stands.
   const captureNote =
     missed.length > 0
-      ? ` — no output matched --capture ${missed.map((n) => JSON.stringify(n)).join(', ')}, so ${missed.length === 1 ? 'that value is' : 'those values are'} null rather than measured; anything addressed by ${missed.length === 1 ? 'it' : 'them'} was addressed by assumption`
+      ? ` — --capture produced no value for ${missed.map((n) => JSON.stringify(n)).join(', ')} (the pattern never matched, or its group did not participate), so ${missed.length === 1 ? 'that value is' : 'those values are'} null rather than measured; anything addressed by ${missed.length === 1 ? 'it' : 'them'} was addressed by assumption`
       : '';
 
   // Reconciles the head-trim clause with the capture block beside it. `output`
@@ -666,8 +666,13 @@ export function runDrive(args: DriveArgs): DriveReport {
   // that came out of the missing head — and, for a miss, beside a `null` the
   // reader would reasonably blame the trim for. Both misreadings run the same
   // way: they invite doubt about a measurement that is sound.
+  //
+  // Completed only: "the head-trim above" appears only in the completed note,
+  // and only a run that reached its sentinel had a whole run to miss against —
+  // a timed-out or overflowed drive was stopped early, so a value printed
+  // after the stop never reached the extraction.
   const trimScopeNote =
-    captured && truncated
+    captured && truncated && outcome === 'completed'
       ? ' — --capture reads the untrimmed log, so the head-trim above does not reach it and a null capture is a miss against the whole run rather than against what survived the trim'
       : '';
 
@@ -726,7 +731,7 @@ export const driveCommand: CommandModule = {
         type: 'array',
         string: true,
         describe:
-          "name=<regex> read back out of this run's own output, e.g. baseUrl=listening on (https?://\\S+). Repeatable. Group 1 when the pattern has one, the whole match otherwise; null when nothing matched. Use it for anything the service CHOSE rather than was told — above all the address it actually bound.",
+          "name=<regex> read back out of this run's own output, e.g. baseUrl=listening on (https?://\\S+). Repeatable. Group 1 when the pattern declares one, the whole match otherwise; null when nothing was captured — the pattern never matched, or its declared group did not participate. Keep patterns linear — no nested quantifiers like (a+)+: extraction runs after the drive ends, where no --timeout reaches, and a backtracking pattern hangs the run with no report. Use it for anything the service CHOSE rather than was told — above all the address it actually bound.",
       })
       .option('out', {
         type: 'string',
