@@ -1617,6 +1617,48 @@ describe('--roster — every prompt the plan requires, in one call', () => {
     }
   });
 
+  it('states the launch type on the audit-round and single-block paths too', () => {
+    // `runRoster` is not the only emission path. Step 4's verify shards and
+    // Step 5's audit rounds are built by the other two, and they are both the
+    // most numerous agents a high-effort review launches and the ones
+    // furthest from SKILL.md's own statement of the rule — an omitted
+    // `subagent_type` there resolves to `general-purpose` at full cost.
+    //
+    // The single-block path states it on STDERR: its stdout is the block the
+    // orchestrator pastes verbatim, and the delivery check compares that
+    // against the record, so anything added to stdout makes every launch
+    // differ from its record.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-type-paths-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, JSON.stringify(PLAN));
+      const findings = join(dir, 'f.md');
+      writeFileSync(findings, '### Finding 1\n- **File:** a.ts\n');
+
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        role: 'verify',
+        findings,
+      });
+
+      const printed = (writeStdoutLine as unknown as Mock).mock
+        .calls[0][0] as string;
+      const recorded = readRecordedPrompts(plan);
+      // The invariant this note must not break: stdout IS the record.
+      expect([...recorded.values()]).toContain(printed);
+      expect(printed).not.toContain('subagent_type');
+
+      const onStderr = (writeStderrLineSafe as unknown as Mock).mock.calls
+        .map((c) => String(c[0]))
+        .join('\n');
+      expect(onStderr).toContain(
+        `\`subagent_type: "${REVIEW_BUILTIN_SUBAGENT_TYPE}"\``,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('names the review-agent subagent type in the worktree parameter note', () => {
     // The roster is the last text the orchestrator reads before constructing
     // agent calls, so this note is where a worktree-mode run learns its

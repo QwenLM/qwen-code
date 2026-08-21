@@ -2411,6 +2411,27 @@ function rosterLabel(req: RequiredAgent): string {
  * the list it builds is the same one `check-coverage` will hold the run to,
  * because both come from `requiredAgents(plan)`.
  */
+/**
+ * The launch parameters every review agent needs, on every emission path.
+ *
+ * It lived inside `runRoster`'s worktree-only note because that block began as
+ * a `working_dir` reminder — so three review modes were told nothing, and then
+ * so were Step 4's verify shards and Step 5's audit rounds, which are the most
+ * numerous agents a high-effort review launches and the ones furthest from
+ * SKILL.md's own statement of the rule. Omitting the type is not a no-op:
+ * `AgentTool.execute` resolves an omitted `subagent_type` to `general-purpose`,
+ * which declares no `tools` and so takes `prepareTools`' inherit-everything
+ * branch — the entire cost `review-agent` exists to remove, spent silently.
+ * Before the review had its own type, forgetting the parameter was harmless
+ * because the default WAS the right answer.
+ */
+const TYPE_NOTE =
+  `\n\n**Set \`subagent_type: "${REVIEW_BUILTIN_SUBAGENT_TYPE}"\` and ` +
+  `\`run_in_background: false\` on EVERY agent call below**, in every review ` +
+  `mode and at every step. An omitted \`subagent_type\` is not left blank — it ` +
+  `resolves to the general-purpose default, which inherits every tool in the ` +
+  `session and re-declares them on each agent's every turn.`;
+
 function runRoster(
   report: PlanReport,
   planPath: string,
@@ -2469,12 +2490,6 @@ function runRoster(
   // 13 agents × 4 turns × ~17.7k tokens of tool declarations, the entire cost
   // this type exists to remove. Before the review had its own type, forgetting
   // the parameter was harmless because the default WAS the right answer.
-  const typeNote =
-    `\n\n**Set \`subagent_type: "${REVIEW_BUILTIN_SUBAGENT_TYPE}"\` and ` +
-    `\`run_in_background: false\` on EVERY agent call below**, in every review ` +
-    `mode. An omitted \`subagent_type\` is not left blank — it resolves to the ` +
-    `general-purpose default, which inherits every tool in the session and ` +
-    `re-declares them on each agent's every turn.`;
   // The Agent tool's `description` is the task name the user watches in the
   // TUI while the agent runs, and nothing downstream reads it — the delivery
   // check compares prompts, coverage reads transcripts. So it is the one part
@@ -2501,7 +2516,7 @@ function runRoster(
         `--chunk <id>, or --role <r> (--file <path> for an invariant agent), ` +
         `plus the same --rules this call was given.` +
         descNote +
-        typeNote +
+        TYPE_NOTE +
         paramNote,
       ...blocks,
       `───── end of roster — ${roster.length} agents ─────`,
@@ -2934,7 +2949,8 @@ function runAllChunks(
         `rebuild just the missing chunks with --chunk <id>. Write each ` +
         `Agent call's \`description\` (the task ` +
         `name the user watches) in your output language, translating the ` +
-        `separator label — display only; the prompt stays the block VERBATIM.`,
+        `separator label — display only; the prompt stays the block VERBATIM.` +
+        TYPE_NOTE,
       ...blocks,
       `───── end of round — ${dueChunks.length} auditors ─────`,
       ...retirementNote,
@@ -3499,7 +3515,20 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       ? foldFindings(args.role as RoleId, findingsContent, prompt, findingsFile)
       : prompt;
   recordPrompt(args.plan, key, printed);
+  // stdout is the prompt and NOTHING else on this path: the whole output IS
+  // the block the orchestrator pastes verbatim, and the delivery check
+  // compares that against the record. Appending the launch note here made
+  // every launch differ from its record — five tests caught it. The note is
+  // still owed, though: this is where a Step 4 verify shard and a Step 5
+  // chunk rebuild are built, and neither passes through the roster header
+  // that carries it. So it goes to stderr, the channel this command already
+  // uses for the operator-facing lines (BUDGET, ROUND CAP, the residue
+  // probe) that must not become part of a prompt.
   writeStdoutLine(printed);
+  // ...Safe, not the throwing variant: #9213 pins that a broken stderr must
+  // not refuse a build. An EPIPE here would turn an informational note into
+  // a failed agent launch.
+  writeStderrLineSafe(TYPE_NOTE.trim());
   // Admitted AND built — the single-build twin of the all-chunks stamp in
   // `runAllChunks`. A `--chunk <id>` build lands here too: the first chunk
   // build of an unadmitted round writes its admission stamp, and the
