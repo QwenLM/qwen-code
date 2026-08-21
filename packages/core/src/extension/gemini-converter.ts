@@ -186,16 +186,6 @@ export async function copyDirectory(
   destination: string,
   confineRoot?: string,
 ): Promise<void> {
-  // Create destination directory if it doesn't exist
-  if (!fs.existsSync(destination)) {
-    fs.mkdirSync(destination, { recursive: true });
-  }
-
-  // Symlinks in an (untrusted) source are dereferenced and their *target*
-  // content is copied below, so a link escaping the package — e.g.
-  // `skills/leak.txt -> ~/.ssh/id_rsa` — would otherwise pull host files into
-  // the output. Pin a confinement root (the package's real path) on the first
-  // call and thread it through recursion to reject escaping symlink targets.
   let root = confineRoot;
   if (root === undefined) {
     try {
@@ -204,49 +194,85 @@ export async function copyDirectory(
       root = path.resolve(source);
     }
   }
+  // Normalize the source to its real path ONCE: every recursive sourcePath
+  // joins a resolved parent, so the cycle guard below compares resolved-vs-
+  // resolved. Without this, a copy root that itself has a symlink component
+  // (macOS os.tmpdir: /var -> /private/var; a symlinked extensions dir on
+  // Linux) defeats the guard and nests a duplicated tree level.
+  let realSource = source;
+  try {
+    realSource = fs.realpathSync(source);
+  } catch {
+    realSource = path.resolve(source);
+  }
+  await copyDirectoryRecursive(realSource, destination, root, new Set());
+}
 
-  const entries = fs.readdirSync(source, { withFileTypes: true });
-
-  for (const entry of entries) {
-    const sourcePath = path.join(source, entry.name);
-    const destPath = path.join(destination, entry.name);
-
-    if (entry.isDirectory()) {
-      await copyDirectory(sourcePath, destPath, root);
-    } else if (entry.isSymbolicLink()) {
-      // Resolve symlink and copy the target content, but only when the target
-      // stays inside the package root.
-      try {
-        const realPath = fs.realpathSync(sourcePath);
-        if (!isPathWithin(realPath, root)) {
-          debugLogger.warn(
-            `Skipping symlink that escapes the package: ${stripAnsiAndControl(sourcePath)} -> ${stripAnsiAndControl(realPath)}`,
-          );
-          continue;
-        }
-        // A symlink whose real target is the directory being copied or one
-        // of its ancestors resolves back into the copy itself — recursing
-        // would nest the tree into itself until the path length explodes.
-        if (isPathWithin(source, realPath)) {
-          debugLogger.warn(
-            `Skipping symlink that points at the copied directory or an ancestor: ${stripAnsiAndControl(sourcePath)} -> ${stripAnsiAndControl(realPath)}`,
-          );
-          continue;
-        }
-        const targetStat = fs.statSync(realPath);
-        if (targetStat.isDirectory()) {
-          await copyDirectory(realPath, destPath, root);
-        } else if (targetStat.isFile()) {
-          fs.copyFileSync(realPath, destPath);
-        }
-        // Skip sockets, FIFOs, etc.
-      } catch {
-        // Skip broken symlinks
-      }
-    } else if (entry.isFile()) {
-      fs.copyFileSync(sourcePath, destPath);
+/**
+ * Internal copy recursion. `stack` holds the real paths on the CURRENT
+ * recursion path only (deleted on exit), so a symlink whose target is the
+ * copy root, an ancestor, or a mutually-interlinked sibling is skipped
+ * instead of nesting to the OS path limit — without a global visited set
+ * silently dropping legitimate aliases already copied through another branch.
+ */
+async function copyDirectoryRecursive(
+  source: string,
+  destination: string,
+  root: string,
+  stack: Set<string>,
+): Promise<void> {
+  if (stack.has(source)) return;
+  stack.add(source);
+  try {
+    // Create destination directory if it doesn't exist
+    if (!fs.existsSync(destination)) {
+      fs.mkdirSync(destination, { recursive: true });
     }
-    // Skip sockets, FIFOs, block devices, and character devices
+
+    const entries = fs.readdirSync(source, { withFileTypes: true });
+
+    for (const entry of entries) {
+      const sourcePath = path.join(source, entry.name);
+      const destPath = path.join(destination, entry.name);
+
+      if (entry.isDirectory()) {
+        await copyDirectoryRecursive(sourcePath, destPath, root, stack);
+      } else if (entry.isSymbolicLink()) {
+        // Resolve symlink and copy the target content, but only when the target
+        // stays inside the package root.
+        try {
+          const realPath = fs.realpathSync(sourcePath);
+          if (!isPathWithin(realPath, root)) {
+            debugLogger.warn(
+              `Skipping symlink that escapes the package: ${stripAnsiAndControl(sourcePath)} -> ${stripAnsiAndControl(realPath)}`,
+            );
+            continue;
+          }
+          // A symlink whose real target is already on the CURRENT recursion path
+          // (self-link, ancestor, mutual pair) would nest the copy forever.
+          if (stack.has(realPath)) {
+            debugLogger.warn(
+              `Skipping symlink that points back into the copied tree: ${stripAnsiAndControl(sourcePath)} -> ${stripAnsiAndControl(realPath)}`,
+            );
+            continue;
+          }
+          const targetStat = fs.statSync(realPath);
+          if (targetStat.isDirectory()) {
+            await copyDirectoryRecursive(realPath, destPath, root, stack);
+          } else if (targetStat.isFile()) {
+            fs.copyFileSync(realPath, destPath);
+          }
+          // Skip sockets, FIFOs, etc.
+        } catch {
+          // Skip broken symlinks
+        }
+      } else if (entry.isFile()) {
+        fs.copyFileSync(sourcePath, destPath);
+      }
+      // Skip sockets, FIFOs, block devices, and character devices
+    }
+  } finally {
+    stack.delete(source);
   }
 }
 

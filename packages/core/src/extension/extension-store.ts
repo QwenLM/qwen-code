@@ -29,6 +29,10 @@ export interface ExtensionPolicy {
   defaultActivation: ExtensionActivation;
   workspaceOverrides: Record<string, WorkspaceActivation>;
   legacyPathRules?: string[];
+  /** Out-of-band link grant: set only by commitArtifact during a CLI link
+   *  install. The loader trusts link-mode (symlinks, `..`) only when this
+   *  field exists, never from the extension's own install metadata. */
+  linkedSource?: string;
 }
 
 export interface ExtensionStoreSnapshot {
@@ -77,6 +81,9 @@ export interface CommitExtensionArtifactInput {
   stagingDirectory?: string;
   initialActivation?: InitialExtensionActivation;
   expectedArtifactGeneration?: number;
+  /** Recorded by the installer for type:'link' installs; the loader treats
+   *  this as the only out-of-band trust signal for link-mode semantics. */
+  linkedSource?: string;
 }
 
 interface ExtensionTransactionJournal {
@@ -288,6 +295,9 @@ function parseState(
       (parsed.artifactGeneration === undefined ||
         (Number.isSafeInteger(parsed.artifactGeneration) &&
           parsed.artifactGeneration >= 0)) &&
+      (parsed.linkedSource === undefined ||
+        (typeof parsed.linkedSource === 'string' &&
+          parsed.linkedSource.length > 0)) &&
       (parsed.declarationOnly === undefined ||
         parsed.declarationOnly === true) &&
       (parsed.preserveActivationOnNextInstall === undefined ||
@@ -744,6 +754,9 @@ export class ExtensionStore {
           delete policy.artifactDirectory;
           policy.name = input.identity.name;
           policy.artifactGeneration = targetSnapshot.generation + 1;
+          if (input.linkedSource !== undefined) {
+            policy.linkedSource = input.linkedSource;
+          }
           targetSnapshot.extensions[input.identity.id] = policy;
         } else {
           const initial = input.initialActivation!;
@@ -763,6 +776,9 @@ export class ExtensionStore {
                       'enabled',
                   }
                 : {},
+            ...(input.linkedSource !== undefined
+              ? { linkedSource: input.linkedSource }
+              : {}),
             ...(rules.length > 0 ? { legacyPathRules: [...rules] } : {}),
           };
         }
@@ -784,6 +800,10 @@ export class ExtensionStore {
           .preserveActivationOnNextInstall;
         targetSnapshot.extensions[input.identity.id]!.artifactGeneration =
           targetSnapshot.generation + 1;
+        if (input.linkedSource !== undefined) {
+          targetSnapshot.extensions[input.identity.id]!.linkedSource =
+            input.linkedSource;
+        }
       }
       targetSnapshot.generation = snapshot.generation + 1;
       targetSnapshot.legacyProjectionHash = projectionHash(
@@ -875,6 +895,18 @@ export class ExtensionStore {
       if (!snapshot) return this.emptySnapshot();
       return snapshot;
     });
+  }
+
+  /**
+   * Reads the snapshot WITHOUT taking the read lock. Call only from inside a
+   * withLock/readConsistent callback (the lock is already held there; a
+   * separate readSnapshot() would self-deadlock) or from a context where the
+   * store cannot be mutating concurrently. A missing store resolves to the
+   * empty snapshot; a corrupt store throws ExtensionStoreCorruptError,
+   * exactly like readSnapshot.
+   */
+  async peekSnapshot(): Promise<ExtensionStoreSnapshot> {
+    return (await this.readSnapshotUnlocked()) ?? this.emptySnapshot();
   }
 
   getActivation(

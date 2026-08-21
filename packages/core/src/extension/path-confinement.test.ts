@@ -368,6 +368,30 @@ describe('readExtraJsonFile', () => {
     }
   });
 
+  // A symlink that stays INSIDE the package is legitimate and must be read
+  // under strict confinement too — only links escaping the package are
+  // refused. Mutating the realPathWithin gate breaks this.
+  it.runIf(process.platform !== 'win32')(
+    'reads an in-package symlink under strict confinement',
+    () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
+      try {
+        fs.writeFileSync(
+          path.join(dir, 'target.json'),
+          '{"hooks":{}}',
+          'utf-8',
+        );
+        fs.symlinkSync(
+          path.join(dir, 'target.json'),
+          path.join(dir, 'link.json'),
+        );
+        expect(readExtraJsonFile(dir, 'link.json')).toEqual({ hooks: {} });
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('reads a symlinked auxiliary file when trustSymlinks is set', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-'));
     const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-out-'));
@@ -386,7 +410,11 @@ describe('readExtraJsonFile', () => {
         readExtraJsonFile(dir, path.join(outside, 'hooks.json'), true),
       ).toEqual({ hooks: {} });
       expect(
-        readExtraJsonFile(dir, path.join('..', siblingName, 'hooks.json'), true),
+        readExtraJsonFile(
+          dir,
+          path.join('..', siblingName, 'hooks.json'),
+          true,
+        ),
       ).toEqual({ hooks: {} });
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
@@ -403,11 +431,8 @@ describe('readExtraJsonFile', () => {
       // onNull distinguishes: link-mode → 'missing', strict-mode →
       // 'confinement-threw'.
       const reasons: string[] = [];
-      readExtraJsonFile(
-        dir,
-        '../no-such-sibling/hooks.json',
-        true,
-        (reason) => reasons.push(reason),
+      readExtraJsonFile(dir, '../no-such-sibling/hooks.json', true, (reason) =>
+        reasons.push(reason),
       );
       expect(reasons).toEqual(['missing']);
     } finally {

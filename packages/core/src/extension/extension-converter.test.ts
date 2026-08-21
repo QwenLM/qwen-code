@@ -433,6 +433,26 @@ describe('convertCompatibleExtension', () => {
     });
   });
 
+  // pluginName is a hard contract at the ROUTING layer too: a defective
+  // Claude manifest propagates here, never falling through to a co-shipped
+  // Gemini manifest the user didn't ask for.
+  it('propagates an explicit pluginName detection error through convertCompatibleExtension', async () => {
+    fs.mkdirSync(path.join(root, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, '.claude-plugin', 'plugin.json'),
+      '{',
+      'utf-8',
+    );
+    fs.writeFileSync(
+      path.join(root, 'gemini-extension.json'),
+      JSON.stringify({ name: 'gemini', version: '1.0.0' }),
+      'utf-8',
+    );
+    await expect(convertCompatibleExtension(root, 'my-plugin')).rejects.toThrow(
+      /Invalid/,
+    );
+  });
+
   it('returns the directory unchanged when no manifest matches', async () => {
     await expect(convertCompatibleExtension(root)).resolves.toEqual({
       extensionDir: root,

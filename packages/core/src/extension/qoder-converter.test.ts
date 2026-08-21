@@ -15,7 +15,10 @@ import {
 } from './qoder-converter.js';
 
 // Hoist a shared mock for QODER_CONVERTER so tests can spy without
-// exporting the private logger from qoder-converter.ts.
+// exporting the private logger from qoder-converter.ts. CLAUDE_CONVERTER is
+// mocked to the same spy because convertQoderPlugin runs shared conversion
+// in buildQwenExtensionFromPlugin (claude-converter.ts), whose warnings
+// surface under that namespace and must be observable here.
 const { mockQoderDebugLogger } = vi.hoisted(() => ({
   mockQoderDebugLogger: {
     isEnabled: vi.fn().mockReturnValue(false),
@@ -31,7 +34,9 @@ vi.mock('../utils/debugLogger.js', async (importOriginal) => {
   return {
     ...actual,
     createDebugLogger: (namespace: string) =>
-      namespace === 'QODER_CONVERTER'
+      namespace === 'QODER_CONVERTER' ||
+      namespace === 'CLAUDE_CONVERTER' ||
+      namespace === 'Extension:path-confinement'
         ? mockQoderDebugLogger
         : actual.createDebugLogger(namespace),
   };
@@ -345,6 +350,11 @@ describe('convertQoderPlugin', () => {
 
     // A malformed subsidiary .mcp.json is tolerated (warned, not thrown).
     expect(result.config.mcpServers).toBeUndefined();
+    // The warn surfaces from readExtraJsonFile's parse-error branch
+    // (Extension:path-confinement namespace, mocked to the same spy).
+    expect(mockQoderDebugLogger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('Failed to parse .mcp.json'),
+    );
     fs.rmSync(result.convertedDir, { recursive: true, force: true });
   });
 
@@ -638,7 +648,11 @@ describe('convertQoderPlugin', () => {
       mcpServers: 'mcp/broken.json',
     });
     fs.mkdirSync(path.join(root, 'mcp'), { recursive: true });
-    fs.writeFileSync(path.join(root, 'mcp', 'broken.json'), '{invalid', 'utf-8');
+    fs.writeFileSync(
+      path.join(root, 'mcp', 'broken.json'),
+      '{invalid',
+      'utf-8',
+    );
 
     await expect(convertQoderPlugin(root)).rejects.toThrow(
       /Invalid Qoder MCP configuration at mcp\/broken\.json: JSON parse failed/,
@@ -651,7 +665,11 @@ describe('convertQoderPlugin', () => {
       mcpServers: 'mcp/array.json',
     });
     fs.mkdirSync(path.join(root, 'mcp'), { recursive: true });
-    fs.writeFileSync(path.join(root, 'mcp', 'array.json'), '[1, 2, 3]', 'utf-8');
+    fs.writeFileSync(
+      path.join(root, 'mcp', 'array.json'),
+      '[1, 2, 3]',
+      'utf-8',
+    );
 
     await expect(convertQoderPlugin(root)).rejects.toThrow(
       /Invalid Qoder MCP configuration at mcp\/array\.json: top-level body is not a JSON object/,

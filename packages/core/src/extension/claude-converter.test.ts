@@ -25,6 +25,7 @@ import type { MCPServerConfig } from '../config/config.js';
 import { cloneFromGit, downloadFromGitHubRelease } from './github.js';
 import { HookType } from '../hooks/types.js';
 import { performVariableReplacement } from './variables.js';
+import { copyDirectory } from './gemini-converter.js';
 import { recursivelyHydrateStrings } from './variables.js';
 import {
   AGENT_PLUGIN_MANIFEST,
@@ -218,6 +219,19 @@ describe('normalizeMcpServers', () => {
       Object.prototype.hasOwnProperty.call(hydrated.mcpServers, '__proto__'),
     ).toBe(true);
     expect(hydrated.mcpServers['__proto__']).toEqual({ command: 'echo hi' });
+  });
+
+  // The config path embedded in the per-entry throw is sanitized
+  // so a control-byte-laced origin cannot garble the diagnostic. Mutation:
+  // revert stripAnsiAndControl in normalizeMcpServers → the control byte
+  // reappears in the message.
+  it('sanitizes the config path in the invalid-entry error', () => {
+    expect(() => normalizeMcpServers({ bad: [] }, 'cfg\x1b[31m-red')).toThrow(
+      'Invalid MCP configuration at cfg-red: server entries must be JSON objects',
+    );
+    expect(() =>
+      normalizeMcpServers({ bad: [] }, 'cfg\x1b[31m-red'),
+    ).not.toThrow(/\x1b/);
   });
 });
 
@@ -1689,6 +1703,7 @@ describe('convertClaudePluginStandalone', () => {
       // to an empty config base (no name) would otherwise install an unnamed
       // extension silently.
       expect(result.config.name).toBe('p');
+      fs.rmSync(result.convertedDir, { recursive: true, force: true });
     },
   );
 
@@ -1786,7 +1801,9 @@ describe('plugin package routing and variable replacement', () => {
       }),
       'utf-8',
     );
-    await expect(convertClaudePluginPackage(extDir, 'x')).resolves.toBeDefined();
+    await expect(
+      convertClaudePluginPackage(extDir, 'x'),
+    ).resolves.toBeDefined();
   });
 
   it('throws a precise error when marketplace plugins is not an array', async () => {
@@ -1824,9 +1841,104 @@ describe('plugin package routing and variable replacement', () => {
       expect(result.convertedDir).toBeDefined();
       // copyDirectory skips a symlink whose real target is the copied
       // directory itself — otherwise the conversion never terminates.
-      expect(
-        fs.existsSync(path.join(result.convertedDir, 'self-link')),
-      ).toBe(false);
+      expect(fs.existsSync(path.join(result.convertedDir, 'self-link'))).toBe(
+        false,
+      );
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'copyDirectory truncates mutual sibling symlink cycles inside the root',
+    async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-cyc-'));
+      const a = path.join(root, 'a');
+      fs.mkdirSync(path.join(a, 'x'), { recursive: true });
+      fs.mkdirSync(path.join(a, 'b'), { recursive: true });
+      fs.writeFileSync(path.join(a, 'payload.txt'), 'a', 'utf-8');
+      fs.writeFileSync(path.join(a, 'x', 'payload.txt'), 'x', 'utf-8');
+      fs.writeFileSync(path.join(a, 'b', 'payload.txt'), 'b', 'utf-8');
+      // Mutual pair INSIDE the copy root (x/link -> ../b, b/link2 -> ../x): both
+      // targets stay in-root, so the stack-scoped guard terminates the
+      // recursion instead of nesting to PATH_MAX.
+      fs.symlinkSync(path.join(a, 'b'), path.join(a, 'x', 'link'));
+      fs.symlinkSync(path.join(a, 'x'), path.join(a, 'b', 'link2'));
+      const dest = path.join(root, 'dest');
+      try {
+        await copyDirectory(a, dest);
+        // Both real directories are present and exactly one cycle link was
+        // truncated (readdir order decides which).
+        expect(fs.readFileSync(path.join(dest, 'payload.txt'), 'utf-8')).toBe(
+          'a',
+        );
+        expect(
+          fs.readFileSync(path.join(dest, 'x', 'payload.txt'), 'utf-8'),
+        ).toBe('x');
+        expect(
+          fs.readFileSync(path.join(dest, 'b', 'payload.txt'), 'utf-8'),
+        ).toBe('b');
+        const xLink = fs.existsSync(path.join(dest, 'x', 'link'));
+        const bLink = fs.existsSync(path.join(dest, 'b', 'link2'));
+        expect(xLink).not.toBe(bLink);
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'copyDirectory copies a shared directory through multiple in-tree symlinks',
+    async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-dia-'));
+      const a = path.join(root, 'a');
+      const shared = path.join(a, 'shared');
+      fs.mkdirSync(path.join(a, 'skills', 'one'), { recursive: true });
+      fs.mkdirSync(path.join(a, 'skills', 'two'), { recursive: true });
+      fs.mkdirSync(shared, { recursive: true });
+      fs.writeFileSync(path.join(shared, 'lib.json'), '{}', 'utf-8');
+      // Diamond: two skills alias the same shared dir — a stack-scoped guard
+      // must NOT drop the second copy (a global visited set would).
+      fs.symlinkSync(shared, path.join(a, 'skills', 'one', 'lib'));
+      fs.symlinkSync(shared, path.join(a, 'skills', 'two', 'lib'));
+      const dest = path.join(root, 'dest');
+      try {
+        await copyDirectory(a, dest);
+        expect(
+          fs.existsSync(path.join(dest, 'skills', 'one', 'lib', 'lib.json')),
+        ).toBe(true);
+        expect(
+          fs.existsSync(path.join(dest, 'skills', 'two', 'lib', 'lib.json')),
+        ).toBe(true);
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'copyDirectory with a symlinked root does not duplicate tree levels',
+    async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-symroot-'));
+      const realRoot = path.join(root, 'real');
+      fs.mkdirSync(realRoot, { recursive: true });
+      fs.writeFileSync(path.join(realRoot, 'file.txt'), 'x', 'utf-8');
+      fs.symlinkSync(realRoot, path.join(realRoot, 'self-link'));
+      const linkRoot = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'claude-linkroot-'),
+      );
+      fs.rmdirSync(linkRoot);
+      fs.symlinkSync(realRoot, linkRoot);
+      const dest = path.join(root, 'dest');
+      try {
+        await copyDirectory(linkRoot, dest);
+        // The root is itself a symlink: the in-tree self-link must be
+        // caught with resolved-vs-resolved comparison; pre-fix
+        // this nested a duplicated level on macOS /var-tmpdir hosts).
+        expect(fs.readFileSync(path.join(dest, 'file.txt'), 'utf-8')).toBe('x');
+        expect(fs.existsSync(path.join(dest, 'self-link'))).toBe(false);
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+        fs.rmSync(linkRoot, { force: true });
+      }
     },
   );
 });

@@ -44,7 +44,7 @@ const debugLogger = createDebugLogger('CLAUDE_CONVERTER');
 /** Alias for `stripAnsiAndControl` so call sites read as error-context. */
 const sanitizeForError = stripAnsiAndControl;
 
-/** Re-exported from path-confinement for callers that already depend on this module. */
+/** Public-API re-export from path-confinement (historical compat; no in-core consumers). */
 export { isRegularFile };
 
 export interface ClaudePluginConfig {
@@ -391,7 +391,7 @@ export function normalizeMcpServers(
   for (const [name, raw] of Object.entries(servers)) {
     if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
       throw new Error(
-        `Invalid MCP configuration at ${configPath}: server entries must be JSON objects`,
+        `Invalid MCP configuration at ${sanitizeForError(configPath)}: server entries must be JSON objects`,
       );
     }
     normalized[name] = normalizeClaudeMcpServer(raw as MCPServerConfig);
@@ -821,16 +821,16 @@ export async function convertClaudePluginStandalone(
     }
   }
 
-  const result = await buildQwenExtensionFromPlugin(
-    extensionDir,
-    mergedConfig,
-  );
+  const result = await buildQwenExtensionFromPlugin(extensionDir, mergedConfig);
   // Remove root plugin.json if the converted tree still resolves as an
   // Agent-Plugins package — it would shadow the Claude manifest at install.
   if (getAgentPluginSchemaStatus(result.convertedDir) !== 'unrelated') {
-    await fs.promises.rm(path.join(result.convertedDir, AGENT_PLUGIN_MANIFEST), {
-      force: true,
-    });
+    await fs.promises.rm(
+      path.join(result.convertedDir, AGENT_PLUGIN_MANIFEST),
+      {
+        force: true,
+      },
+    );
   }
   return result;
 }

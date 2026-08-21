@@ -1476,6 +1476,9 @@ export class ExtensionManager {
       return null;
     }
 
+    const snapshot = await this.extensionStore.peekSnapshot();
+    const linkedSources = this.linkedSourcesByDirectory(snapshot);
+
     for (const subdir of fs.readdirSync(userExtensionsDir)) {
       const extensionDir = path.join(userExtensionsDir, subdir);
       if (!fs.statSync(extensionDir).isDirectory()) {
@@ -1484,6 +1487,9 @@ export class ExtensionManager {
       const extension = await this.loadExtension({
         extensionDir,
         workspaceDir: cwd,
+        trustedLinkSource:
+          linkedSources.get(subdir) ??
+          this.legacyLinkSource(extensionDir, snapshot, subdir),
       });
       if (
         extension &&
@@ -1515,12 +1521,21 @@ export class ExtensionManager {
       return [];
     }
 
+    // Link grants are read via peekSnapshot (no extra lock): this function
+    // runs inside refreshCache's readConsistent callback, where the store
+    // lock is already held.
+    const snapshot = await this.extensionStore.peekSnapshot();
+    const linkedSources = this.linkedSourcesByDirectory(snapshot);
+
     const extensions: Extension[] = [];
     for (const subdir of subdirs) {
       const extensionDir = path.join(extensionsDir, subdir);
       const extension = await this.loadExtension({
         extensionDir,
         workspaceDir,
+        trustedLinkSource:
+          linkedSources.get(subdir) ??
+          this.legacyLinkSource(extensionDir, snapshot, subdir),
       });
       if (extension != null) {
         extensions.push(extension);
@@ -1542,11 +1557,17 @@ export class ExtensionManager {
     let effectiveExtensionPath = extensionDir;
     // Link-mode reads the user's own dev tree; manifest/hooks may be
     // symlinks (monorepo) and `..` may point at a sibling file. Trust
-    // it: skip symlink-escape rejection and honor `..`.
-    const trustSymlinks = installMetadata?.type === 'link';
+    // it: skip symlink-escape rejection and honor `..`. Link trust is
+    // OUT-OF-BAND: only the scanning/installing flow grants it (from the
+    // store snapshot or the caller-supplied metadata) — never the
+    // extension's own .qwen-extension-install.json, which a hand-placed
+    // payload could forge.
+    const trustSymlinks =
+      installMetadata?.type === 'link' &&
+      context.trustedLinkSource !== undefined;
 
     if (
-      installMetadata?.type === 'link' &&
+      trustSymlinks &&
       typeof installMetadata.source === 'string' &&
       installMetadata.source.length > 0
     ) {
@@ -1687,6 +1708,18 @@ export class ExtensionManager {
           );
         }
 
+        // Symmetric with the user-set warning above: a directory-valued
+        // DEFAULT hooks/hooks.json would otherwise fall through silently.
+        if (
+          fs.existsSync(hooksJsonPath) &&
+          !isRegularFile(hooksJsonPath) &&
+          !(configHooksPath && isRegularFile(configHooksPath))
+        ) {
+          debugLogger.warn(
+            `Default hooks path "${stripAnsiAndControl(hooksJsonPath)}" is a directory, not a regular file; no hooks will load.`,
+          );
+        }
+
         if (
           isRegularFile(hooksJsonPath) ||
           (configHooksPath && isRegularFile(configHooksPath))
@@ -1747,6 +1780,48 @@ export class ExtensionManager {
       );
       return null;
     }
+  }
+
+  /** Maps extension-directory entries to their out-of-band link grant from
+   *  the store snapshot. Takes the snapshot as a parameter and never touches
+   *  the store — safe with the store lock held (see peekSnapshot). */
+  private linkedSourcesByDirectory(
+    snapshot: ExtensionStoreSnapshot,
+  ): Map<string, string> {
+    const grants = new Map<string, string>();
+    for (const policy of Object.values(snapshot.extensions)) {
+      if (policy.linkedSource !== undefined) {
+        grants.set(
+          policy.artifactDirectory ?? policy.name,
+          policy.linkedSource,
+        );
+      }
+    }
+    return grants;
+  }
+
+  /** One-way migration for link installs committed before the linkedSource
+   *  field existed: a directory that HAS a store policy — hand-placed dirs
+   *  can never be in the store — and carries legacy link metadata keeps its
+   *  trust without a reinstall. */
+  private legacyLinkSource(
+    extensionDir: string,
+    snapshot: ExtensionStoreSnapshot,
+    entryName: string,
+  ): string | undefined {
+    const policyExists = Object.values(snapshot.extensions).some(
+      (policy) => (policy.artifactDirectory ?? policy.name) === entryName,
+    );
+    if (!policyExists) return undefined;
+    const metadata = this.loadInstallMetadata(extensionDir);
+    if (
+      metadata?.type === 'link' &&
+      typeof metadata.source === 'string' &&
+      metadata.source.length > 0
+    ) {
+      return metadata.source;
+    }
+    return undefined;
   }
 
   loadInstallMetadata(
@@ -2392,7 +2467,16 @@ export class ExtensionManager {
         await atomicWriteFile(metadataPath, metadataString);
 
         const stagedExtension = await this.loadExtension(
-          { extensionDir: stagingPath, workspaceDir: currentDir },
+          {
+            extensionDir: stagingPath,
+            workspaceDir: currentDir,
+            // The installing flow holds the caller-supplied metadata, so it
+            // is the trust authority until the commit's linkedSource lands.
+            trustedLinkSource:
+              installMetadata.type === 'link'
+                ? installMetadata.source
+                : undefined,
+          },
           { throwOnError: true },
         );
         if (!stagedExtension) {
@@ -2461,6 +2545,14 @@ export class ExtensionManager {
           ...(expectedArtifactGeneration === undefined
             ? {}
             : { expectedArtifactGeneration }),
+          ...(installMetadata.type === 'link'
+            ? {
+                linkedSource:
+                  typeof installMetadata.source === 'string'
+                    ? installMetadata.source
+                    : undefined,
+              }
+            : {}),
         });
         preparedGitCredential?.commit();
         preparedGitCredential = undefined;
@@ -2476,6 +2568,10 @@ export class ExtensionManager {
           extension = await this.loadExtension(
             {
               extensionDir: destinationPath,
+              trustedLinkSource:
+                installMetadata.type === 'link'
+                  ? installMetadata.source
+                  : undefined,
             },
             { throwOnError: true },
           );
@@ -2681,6 +2777,10 @@ export class ExtensionManager {
           {
             extensionDir: prepared.stagingDirectory,
             workspaceDir: prepared.currentDir,
+            trustedLinkSource:
+              prepared.installMetadata?.type === 'link'
+                ? prepared.installMetadata.source
+                : undefined,
           },
           { throwOnError: true },
         );
@@ -2705,6 +2805,14 @@ export class ExtensionManager {
                 expectedArtifactGeneration:
                   prepared.expectedArtifactGeneration ?? 0,
               }),
+          ...(prepared.installMetadata?.type === 'link'
+            ? {
+                linkedSource:
+                  typeof prepared.installMetadata.source === 'string'
+                    ? prepared.installMetadata.source
+                    : undefined,
+              }
+            : {}),
         });
         prepared.commitGitCredential?.();
         prepared.gitCredentialActivated = true;
@@ -2755,6 +2863,10 @@ export class ExtensionManager {
           (await this.loadExtension(
             {
               extensionDir: prepared.destinationDirectory,
+              trustedLinkSource:
+                prepared.installMetadata?.type === 'link'
+                  ? prepared.installMetadata.source
+                  : undefined,
             },
             { throwOnError: true },
           )) ?? undefined;
