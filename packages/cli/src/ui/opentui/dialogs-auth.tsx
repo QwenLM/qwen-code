@@ -21,7 +21,9 @@
  */
 
 import { useCallback, useLayoutEffect, useMemo, useState } from 'react';
-import { useKeyboard, useRenderer } from '@opentui/react';
+import { useKeyboard, usePaste, useRenderer } from '@opentui/react';
+import type { PasteEvent } from '@opentui/core';
+import { decodePasteBytes } from '@opentui/core';
 import type {
   BaseUrlOption,
   Config,
@@ -53,6 +55,7 @@ import {
 import { normalizeModelIds } from '../auth/useAuth.js';
 import { toOriginalKey } from './key-map.js';
 import { isPrintableKeyInput } from './input-prompt-key.js';
+import { normalizePastedText } from './input-prompt-model.js';
 import { Shell } from './dialogs-misc.js';
 import { C } from './theme.js';
 
@@ -242,6 +245,17 @@ function useLineInputKeys(
     if (isPrintableKeyInput(key)) {
       onChange(value + key.sequence);
     }
+  });
+  // Bracketed pastes arrive as one PasteEvent with no keypress per character
+  // (ink parity: its keypress state machine broadcasts the buffered paste as a
+  // single `paste` key, which TextInput's buffer inserts verbatim). The main
+  // composer's editor is unfocused while a dialog owns input, so consume the
+  // paste here instead of letting it drop.
+  usePaste((event: PasteEvent) => {
+    const text = normalizePastedText(decodePasteBytes(event.bytes));
+    if (!text) return;
+    event.preventDefault();
+    onChange(value + text);
   });
 }
 
@@ -499,6 +513,15 @@ function ModelsStep({
       updateCustom(customText + key.sequence);
     }
   });
+  // Pastes land in the custom-ID input only when it owns focus; while the
+  // recommended list is focused there is no text field to receive them.
+  usePaste((event: PasteEvent) => {
+    if (focus >= 0) return;
+    const text = normalizePastedText(decodePasteBytes(event.bytes));
+    if (!text) return;
+    event.preventDefault();
+    updateCustom(customText + text);
+  });
 
   return (
     <box flexDirection="column" marginTop={1}>
@@ -592,6 +615,15 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
         flow.changeContextWindowSize(contextWindowSize + key.sequence);
       }
     }
+  });
+  // Only the context-window field accepts text; a paste while another row is
+  // focused should not move any toggle.
+  usePaste((event: PasteEvent) => {
+    if (!onCtxRow) return;
+    const text = normalizePastedText(decodePasteBytes(event.bytes));
+    if (!text) return;
+    event.preventDefault();
+    flow.changeContextWindowSize(contextWindowSize + text);
   });
   const checkmark = (v: boolean) => (v ? '◉' : '○');
   const cursor = (index: number) => (focusedConfigIndex === index ? '›' : ' ');

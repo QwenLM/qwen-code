@@ -32,6 +32,7 @@ const mocks = vi.hoisted(() => {
   const state = {
     inputHandlers: [] as Array<(sequence: string) => boolean>,
     keyboardHandlers: [] as Array<(key: unknown) => void>,
+    pasteHandlers: [] as Array<(event: unknown) => void>,
   };
   const renderer = {
     addInputHandler(handler: (sequence: string) => boolean) {
@@ -77,6 +78,9 @@ const core = vi.hoisted(() => ({
 vi.mock('@opentui/react', () => ({
   useKeyboard: (handler: (key: unknown) => void) => {
     mocks.state.keyboardHandlers.push(handler);
+  },
+  usePaste: (handler: (event: unknown) => void) => {
+    mocks.state.pasteHandlers.push(handler);
   },
   useRenderer: () => mocks.renderer,
 }));
@@ -153,6 +157,33 @@ async function pressEsc(): Promise<boolean> {
   return consumed;
 }
 
+interface FakePasteEvent {
+  type: 'paste';
+  bytes: Uint8Array;
+  preventDefault: ReturnType<typeof vi.fn>;
+  stopPropagation: ReturnType<typeof vi.fn>;
+}
+
+function makePasteEvent(text: string): FakePasteEvent {
+  return {
+    type: 'paste',
+    bytes: new TextEncoder().encode(text),
+    preventDefault: vi.fn(),
+    stopPropagation: vi.fn(),
+  };
+}
+
+/** Dispatch one bracketed paste to the most recently mounted input. */
+async function pasteText(text: string): Promise<FakePasteEvent> {
+  const handler = mocks.state.pasteHandlers.at(-1);
+  if (!handler) throw new Error('no paste handler registered');
+  const event = makePasteEvent(text);
+  await act(async () => {
+    handler(event);
+  });
+  return event;
+}
+
 function createMockConfig(authType?: AuthType): Config {
   return {
     getAuthType: vi.fn(() => authType),
@@ -212,6 +243,7 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
   beforeEach(() => {
     mocks.state.inputHandlers.length = 0;
     mocks.state.keyboardHandlers.length = 0;
+    mocks.state.pasteHandlers.length = 0;
     core.applyProviderInstallPlan.mockReset().mockResolvedValue(undefined);
     core.logAuth.mockReset();
   });
@@ -286,5 +318,79 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
       expect.anything(),
       expect.objectContaining({ status: 'error' }),
     );
+  });
+});
+
+describe('bracketed-paste into dialog inputs (#57)', () => {
+  beforeEach(() => {
+    mocks.state.inputHandlers.length = 0;
+    mocks.state.keyboardHandlers.length = 0;
+    mocks.state.pasteHandlers.length = 0;
+    core.applyProviderInstallPlan.mockReset().mockResolvedValue(undefined);
+    core.logAuth.mockReset();
+  });
+
+  /** Walk the wizard up to the API-key step (custom provider, default protocol). */
+  async function runToApiKeyStep(): Promise<void> {
+    renderDialog();
+    await press('down');
+    await press('down');
+    await press('return'); // main: CUSTOM_PROVIDER → protocol
+    await press('return'); // protocol: OpenAI-compatible → baseUrl input
+    await typeText('https://api.example.com/v1');
+    await press('return'); // baseUrl → apiKey
+  }
+
+  it('inserts a paste into the API-key input and prevents default', async () => {
+    await runToApiKeyStep();
+    const event = await pasteText('sk-pasted-key');
+    expect(event.preventDefault).toHaveBeenCalledTimes(1);
+    expect(screen.getByText('sk-pasted-key')).toBeTruthy();
+    // the pasted key is what the wizard carries forward, not a lost paste
+    await press('return'); // apiKey → models
+    expect(screen.getByText(/Enter model IDs directly/)).toBeTruthy();
+  });
+
+  it('normalizes CRLF pastes onto LF before inserting', async () => {
+    await runToApiKeyStep();
+    await pasteText('key-1\r\nkey-2');
+    // testing-library collapses whitespace in getByText, so match on the raw
+    // textContent where the \r must be gone
+    const match = screen.getByText(
+      (_, element) => element?.textContent === 'key-1\nkey-2',
+    );
+    expect(match).toBeTruthy();
+  });
+
+  it('appends a paste after typed text in the models custom-ID input', async () => {
+    await runToApiKeyStep();
+    await typeText('sk-test');
+    await press('return'); // apiKey → models (custom input focused)
+    await typeText('typed-');
+    const event = await pasteText('pasted-model');
+    expect(event.preventDefault).toHaveBeenCalledTimes(1);
+    expect(
+      screen.getByText(
+        (_, element) => element?.textContent === 'typed-pasted-model',
+      ),
+    ).toBeTruthy();
+    await press('return'); // models → advancedConfig
+    expect(
+      screen.getByText(/Optional: configure advanced generation settings/),
+    ).toBeTruthy();
+  });
+
+  it('ignores a paste while a toggle row owns the advanced-config focus', async () => {
+    await runToApiKeyStep();
+    await typeText('sk-test');
+    await press('return'); // apiKey → models (custom input focused)
+    await pasteText('debug-model'); // fill the custom-ID input via paste
+    await press('return'); // models → advancedConfig (focus on the first toggle)
+    const event = await pasteText('12345');
+    // guard bails before consuming: no preventDefault, ctx stays auto
+    expect(event.preventDefault).not.toHaveBeenCalled();
+    expect(screen.getByText('auto')).toBeTruthy();
+    await press('return'); // advancedConfig: skip → review
+    expect(screen.getByText(/Step 6\/6 · Review/)).toBeTruthy();
   });
 });

@@ -8,8 +8,12 @@
  *     drag-select + auto copy (native-terminal-like)
  *  4. flicker-free rendering (cell diff + DEC 2026, handled by the renderer)
  */
-import { MouseButton } from '@opentui/core';
-import type { MouseEvent, ScrollBoxRenderable } from '@opentui/core';
+import { MouseButton, decodePasteBytes } from '@opentui/core';
+import type {
+  MouseEvent,
+  PasteEvent,
+  ScrollBoxRenderable,
+} from '@opentui/core';
 import { findUrlAtRow, readBufferRow } from './link-click.js';
 import { MultiClickSelectionController } from './multi-click-select.js';
 import { renderDiffBody, type DiffLine } from './diff-render.js';
@@ -33,6 +37,7 @@ import { CompressionNotice, compactionView } from './session-compaction.js';
 import { OpenTuiInputPrompt } from './input-prompt.js';
 import {
   useKeyboard,
+  usePaste,
   useRenderer,
   useSelectionHandler,
   useTerminalDimensions,
@@ -73,6 +78,7 @@ import {
   type ToolCallConfirmationDetails,
 } from '@qwen-code/qwen-code-core';
 import { isPrintableKeyInput } from './input-prompt-key.js';
+import { normalizePastedText } from './input-prompt-model.js';
 import {
   MAX_DISPLAYED_QUEUED_MESSAGES,
   summarizeQueuedPrompt,
@@ -1696,6 +1702,17 @@ function App({
     }
     setExitHint(exitGuardHint(exitKey));
   };
+
+  // Bracketed pastes for the ask-user "Other" free-text field. The composer's
+  // own paste handler bails while a dialog owns input, so without this the
+  // pasted bytes reach no one (ink parity: its paste key inserts verbatim).
+  usePaste((event: PasteEvent) => {
+    if (!questionReq || !qNav.other) return;
+    const text = normalizePastedText(decodePasteBytes(event.bytes));
+    if (!text) return;
+    event.preventDefault();
+    setQNav((n) => ({ ...n, otherText: n.otherText + text }));
+  });
 
   useKeyboard((key) => {
     // Selection keys win ahead of normal bindings (opencode keymap.intercept
