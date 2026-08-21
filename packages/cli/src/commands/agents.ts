@@ -230,10 +230,18 @@ async function adoptResumeSessionFromPicker(
   cwd: string,
   supervisor: Pick<AgentViewSupervisorClientHandle, 'adopt' | 'peek'>,
 ): Promise<AgentViewPanel | undefined> {
-  const session = await showResumeSessionPickerItem(cwd, undefined, {
-    includeAgentViewSessions: false,
-    allowManagedAgentViewSelection: true,
-  });
+  const runtimeOutputDir = loadSettings(cwd, {
+    skipLoadEnvironment: true,
+  }).merged.advanced?.runtimeOutputDir;
+  const session = await Storage.runWithRuntimeBaseDir(
+    runtimeOutputDir,
+    cwd,
+    () =>
+      showResumeSessionPickerItem(cwd, undefined, {
+        includeAgentViewSessions: false,
+        allowManagedAgentViewSelection: true,
+      }),
+  );
   if (!session) {
     return undefined;
   }

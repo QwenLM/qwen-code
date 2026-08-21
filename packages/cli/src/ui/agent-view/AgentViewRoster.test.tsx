@@ -253,6 +253,9 @@ describe('AgentViewRoster', () => {
     press('\x1b[I', {});
     press('\x1b[?u', {});
     press('\x1b[10;20R', {});
+    press('[?u', {});
+    press('[10;20R', {});
+    press('[27;2;13~', {});
     expect(onPromptChange).not.toHaveBeenCalled();
 
     press('[Info] check', {});
@@ -268,7 +271,7 @@ describe('AgentViewRoster', () => {
       onPeekPromptChange,
     });
 
-    press('\x1b[?u', {});
+    press('[?u', {});
 
     expect(onPeekPromptChange).not.toHaveBeenCalled();
   });
@@ -446,6 +449,53 @@ describe('AgentViewRoster', () => {
     expect(onPromptChange).toHaveBeenNthCalledWith(2, 'ab');
   });
 
+  it('does not let repeated lagging prompt echoes overwrite newer text', async () => {
+    const onPromptChange = vi.fn();
+    const onDispatch = vi.fn(() => true);
+    const props: AgentViewRosterProps = {
+      rows: [row('alpha')],
+      prompt: '',
+      selectedIndex: 0,
+      groupMode: 'state',
+      onPromptChange,
+      onPeekPromptChange: vi.fn(),
+      onDispatch,
+      onSubmitPeekPrompt: vi.fn(() => true),
+      onAttachSession: vi.fn(),
+      onPeekSession: vi.fn(),
+      onTogglePinSession: vi.fn(),
+      onRenameSession: vi.fn(),
+      onStopOrRemoveSession: vi.fn(),
+      onToggleGroupMode: vi.fn(),
+      onShowHelp: vi.fn(),
+      onInterrupt: vi.fn(),
+      onMoveSelection: vi.fn(),
+      onCancel: vi.fn(),
+    };
+    const element = (prompt: string) => (
+      <KeypressProvider kittyProtocolEnabled={false}>
+        <AgentViewRoster {...props} prompt={prompt} />
+      </KeypressProvider>
+    );
+    const { rerender } = render(element(''));
+
+    press('h', {});
+    press('e', {});
+    press('l', {});
+    press('l', {});
+    press('', { backspace: true });
+    press('p', {});
+    const echoes = onPromptChange.mock.calls.map(([value]) => value as string);
+    expect(echoes).toEqual(['h', 'he', 'hel', 'hell', 'hel', 'help']);
+
+    for (const echo of echoes) {
+      act(() => rerender(element(echo)));
+    }
+    press('', { return: true });
+
+    expect(onDispatch).toHaveBeenCalledWith(false, 'help');
+  });
+
   it('routes arrow and tab keys to slash completion while suggestions are visible', async () => {
     const onMoveSelection = vi.fn();
     const onPromptChange = vi.fn();
@@ -466,6 +516,24 @@ describe('AgentViewRoster', () => {
 
     expect(onMoveSelection).not.toHaveBeenCalled();
     expect(onPromptChange).toHaveBeenLastCalledWith('/model ');
+  });
+
+  it('accepts the active slash suggestion on Enter', async () => {
+    const onDispatch = vi.fn(() => true);
+    const onPromptChange = vi.fn();
+    renderRoster({
+      prompt: '/qu',
+      onDispatch,
+      onPromptChange,
+      slashCommands: slashCommands([{ name: 'quit' }]),
+    });
+    await settleCompletion();
+
+    press('', { return: true });
+    await settleCompletion();
+
+    expect(onPromptChange).toHaveBeenLastCalledWith('/quit ');
+    expect(onDispatch).not.toHaveBeenCalled();
   });
 
   it('edits the peek prompt separately from the main dispatch prompt', () => {

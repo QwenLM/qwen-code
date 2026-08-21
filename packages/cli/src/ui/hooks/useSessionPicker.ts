@@ -633,12 +633,24 @@ function mergeSessionItem(
   existing: SessionListItem,
   incoming: SessionListItem,
 ): SessionListItem {
+  const manualTitleItem =
+    existing.titleSource === 'manual'
+      ? existing
+      : incoming.titleSource === 'manual'
+        ? incoming
+        : undefined;
   const merged = {
     ...existing,
     ...incoming,
     prompt: existing.prompt || incoming.prompt,
-    customTitle: existing.customTitle ?? incoming.customTitle,
-    titleSource: existing.titleSource ?? incoming.titleSource,
+    customTitle:
+      manualTitleItem?.customTitle ??
+      existing.customTitle ??
+      incoming.customTitle,
+    titleSource:
+      manualTitleItem?.titleSource ??
+      existing.titleSource ??
+      incoming.titleSource,
     gitBranch: existing.gitBranch ?? incoming.gitBranch,
     filePath: existing.filePath || incoming.filePath,
     messageCount: existing.messageCount ?? incoming.messageCount,

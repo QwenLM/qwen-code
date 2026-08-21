@@ -203,6 +203,37 @@ describe('answerAgentViewPendingToolCall', () => {
     );
   });
 
+  it('keeps multi-question confirmations waiting for structured answers', async () => {
+    const onConfirm = vi.fn(async () => {});
+    const pendingCall = {
+      status: 'awaiting_approval',
+      request: { callId: 'call-multi', name: 'AskUserQuestion' },
+      confirmationDetails: {
+        type: 'ask_user_question',
+        title: 'Choose',
+        questions: [
+          { question: 'Which path?', header: 'Path', options: [] },
+          { question: 'Which mode?', header: 'Mode', options: [] },
+        ],
+        onConfirm,
+      },
+    } as unknown as WaitingToolCall;
+
+    await expect(
+      answerAgentViewPendingToolCall(
+        {
+          type: 'answer',
+          sequence: 1,
+          text: 'src/index.ts',
+          at: '2026-07-17T00:00:00.000Z',
+        },
+        [pendingCall],
+      ),
+    ).resolves.toBe(false);
+
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
   it('maps negative text answers to cancel', async () => {
     const onConfirm = vi.fn(async () => {});
     const pendingCall = {

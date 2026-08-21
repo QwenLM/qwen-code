@@ -30,7 +30,6 @@ import {
   type AgentRosterGroupMode,
   type AgentRosterRow,
 } from './roster-model.js';
-import { FOCUS_IN, FOCUS_OUT } from '../hooks/useFocus.js';
 import {
   cleanSingleLineText,
   stripUnsafeCharacters,
@@ -170,12 +169,10 @@ export function AgentViewRoster({
     slashCommands: loadedSlashCommands,
     onPromptChange,
   });
-  const currentPrompt = promptInput.buffer.text;
-  const hasPrompt = currentPrompt.trim().length > 0;
   const promptEditedRef = useRef(false);
   useEffect(() => {
     promptEditedRef.current = false;
-  }, [currentPrompt]);
+  }, [promptVersion]);
   const peekPromptPending = Boolean(peekQueuedPrompts?.length);
   const selectedIndexRef = useRef(selectedIndex);
   selectedIndexRef.current = selectedIndex;
@@ -200,11 +197,10 @@ export function AgentViewRoster({
   }, [peekPrompt]);
 
   useInput((input, key) => {
-    // Raw useInput bypasses KeypressContext's terminal-response filters.
-    // Escape-bearing chunks are protocol/control input, never roster text.
-    if (input.includes('\x1b') || isTerminalFocusInput(input)) {
-      return;
-    }
+    const currentPrompt = promptInput.buffer.text;
+    const hasPrompt = currentPrompt.trim().length > 0;
+
+    if (isUnresolvedTerminalControlInput(input)) return;
 
     const selectedRow = rows[selectedIndexRef.current];
     const actionRow = peekPanel?.kind === 'session' ? peekRow : selectedRow;
@@ -217,6 +213,8 @@ export function AgentViewRoster({
       if (peekPanel) {
         peekPromptRef.current = '';
         onPeekPromptChange('');
+      } else {
+        promptEditedRef.current = false;
       }
       onCancel();
       return;
@@ -237,6 +235,7 @@ export function AgentViewRoster({
       !sessionPeekActive
     ) {
       const displayName = currentPrompt.trim();
+      promptEditedRef.current = false;
       promptInput.buffer.setText('');
       onRenameSession(actionRow.sessionId, displayName);
       return;
@@ -344,6 +343,7 @@ export function AgentViewRoster({
           if (
             onDispatch(Boolean(key.shift || legacyShiftEnter), submittedPrompt)
           ) {
+            promptEditedRef.current = false;
             promptInput.buffer.setText('');
           }
         } else if (rows.length > 0) {
@@ -472,22 +472,14 @@ export function AgentViewRoster({
   );
 }
 
-function isTerminalFocusInput(input: string): boolean {
-  // Only anchored whole-chunk equality: substring scans would swallow
-  // legitimate user text such as a prompt starting with "[Info] ...".
-  const stripped = input.split('\x1b').join('');
-  return (
-    input === FOCUS_IN ||
-    input === FOCUS_OUT ||
-    stripped === '[I' ||
-    stripped === '[O' ||
-    stripped === '[I[O' ||
-    stripped === '[O[I'
-  );
-}
-
 function isReturnInput(input: string, key: RosterInputKey): boolean {
   return getReturnInputPrefix(input, key) !== undefined;
+}
+
+const CSI_RESIDUE_PATTERN = /^(?:\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e])+$/;
+
+function isUnresolvedTerminalControlInput(input: string): boolean {
+  return input.includes('\x1b') || CSI_RESIDUE_PATTERN.test(input);
 }
 
 function getReturnInputPrefix(
@@ -609,21 +601,17 @@ function useAgentViewPromptInput({
   const lastPromptRef = useRef(prompt);
   const lastSeenPromptPropRef = useRef(prompt);
   const lastSeenPromptVersionRef = useRef(promptVersion);
-  // Values we emitted, so lagging prop echoes can be told apart from genuine
-  // external updates. Cleared whenever the prompt is emptied, so it cannot
-  // grow across the component's whole lifetime.
-  const emittedPromptsRef = useRef<Set<string>>(new Set());
+  // Count emitted values so repeated intermediate states can each consume one
+  // lagging prop echo without overwriting newer text.
+  const emittedPromptCountsRef = useRef<Map<string, number>>(new Map());
   const onChange = useCallback(
     (nextPrompt: string) => {
       if (nextPrompt === lastPromptRef.current) {
         return;
       }
       lastPromptRef.current = nextPrompt;
-      if (nextPrompt === '') {
-        emittedPromptsRef.current.clear();
-      } else {
-        emittedPromptsRef.current.add(nextPrompt);
-      }
+      const emittedCount = emittedPromptCountsRef.current.get(nextPrompt) ?? 0;
+      emittedPromptCountsRef.current.set(nextPrompt, emittedCount + 1);
       onPromptChange(nextPrompt);
     },
     [onPromptChange],
@@ -647,7 +635,7 @@ function useAgentViewPromptInput({
       lastSeenPromptVersionRef.current = promptVersion;
       lastSeenPromptPropRef.current = prompt;
       lastPromptRef.current = prompt;
-      emittedPromptsRef.current.clear();
+      emittedPromptCountsRef.current.clear();
       buffer.setText(prompt);
       return;
     }
@@ -657,9 +645,16 @@ function useAgentViewPromptInput({
     lastSeenPromptPropRef.current = prompt;
     if (prompt === lastPromptRef.current) {
       // In-order echo of a value we emitted; the buffer already has it.
+      emittedPromptCountsRef.current.clear();
       return;
     }
-    const isEcho = emittedPromptsRef.current.delete(prompt);
+    const emittedCount = emittedPromptCountsRef.current.get(prompt) ?? 0;
+    const isEcho = emittedCount > 0;
+    if (emittedCount <= 1) {
+      emittedPromptCountsRef.current.delete(prompt);
+    } else {
+      emittedPromptCountsRef.current.set(prompt, emittedCount - 1);
+    }
     lastPromptRef.current = prompt;
     if (prompt === buffer.text) {
       return;
@@ -700,8 +695,24 @@ function useAgentViewPromptInput({
         completion.navigateDown();
         return true;
       }
-      if (isReturnInput(_input, key)) {
-        return false;
+      if (
+        isReturnInput(_input, key) &&
+        completion.completionMode === CompletionMode.SLASH
+      ) {
+        const targetIndex =
+          completion.activeSuggestionIndex === -1
+            ? 0
+            : completion.activeSuggestionIndex;
+        const suggestion = completion.suggestions[targetIndex];
+        const query = buffer.text.trim().slice(1).split(/\s/, 1)[0] ?? '';
+        if (
+          !suggestion ||
+          !suggestion.value.toLowerCase().startsWith(query.toLowerCase()) ||
+          suggestion.value.toLowerCase() === query.toLowerCase()
+        ) {
+          return false;
+        }
+        return acceptActiveSuggestion();
       }
       if (key.tab) {
         acceptActiveSuggestion();
@@ -709,7 +720,7 @@ function useAgentViewPromptInput({
       }
       return false;
     },
-    [acceptActiveSuggestion, completion],
+    [acceptActiveSuggestion, buffer.text, completion],
   );
 
   const handleBufferKey = useCallback(

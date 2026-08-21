@@ -354,6 +354,72 @@ describe('AgentViewApp', () => {
     expect(lastFrame()).toContain('Reply was not sent: worker is gone');
   });
 
+  it('keeps a reply error visible when an older peek load finishes', async () => {
+    let resolvePeek: ((panel: AgentViewSessionPanel) => void) | undefined;
+    const peekSelected = vi.fn(
+      () =>
+        new Promise<AgentViewSessionPanel>((resolve) => {
+          resolvePeek = resolve;
+        }),
+    );
+    const sendToSession = vi.fn(async () => {
+      throw new Error('worker is gone');
+    });
+    const { stdin, lastFrame } = render(
+      <AgentViewApp
+        rows={[row('session-1')]}
+        actions={actions({ peekSelected, sendToSession })}
+        onExit={vi.fn()}
+      />,
+    );
+
+    stdin.write(' ');
+    await flushInk();
+    for (const char of 'retry') {
+      stdin.write(char);
+      await Promise.resolve();
+    }
+    stdin.write('\r');
+    await waitForFrame(lastFrame, 'worker is gone');
+
+    await act(async () => {
+      resolvePeek?.(sessionPanel('session-1', ['late activity']));
+      await flushInk();
+    });
+
+    expect(lastFrame()).toContain('worker is gone');
+    expect(lastFrame()).not.toContain('late activity');
+  });
+
+  it('shows a submitted reply while delivery is in flight', async () => {
+    const sendToSession = vi.fn(() => new Promise(() => {}));
+    const { stdin, lastFrame } = render(
+      <AgentViewApp
+        rows={[row('session-1')]}
+        actions={actions({
+          sendToSession,
+          peekSelected: async () =>
+            sessionPanel('session-1', ['Result: ready']),
+        })}
+        onExit={vi.fn()}
+      />,
+    );
+
+    stdin.write(' ');
+    await flushInk();
+    for (const char of 'continue') {
+      stdin.write(char);
+      await Promise.resolve();
+    }
+    stdin.write('\r');
+    await vi.waitFor(() => expect(sendToSession).toHaveBeenCalledOnce());
+    await waitForFrame(lastFrame, 'Waiting for response: continue');
+
+    expect(lastFrame()).toContain('Waiting for response: continue');
+    expect(lastFrame()).toContain('waiting for response');
+    expect(lastFrame()).not.toContain('enter to send');
+  });
+
   it('dispatches typed text without targeting another session from a stale error peek', async () => {
     let notify: (() => void) | undefined;
     const sendToSession = vi.fn(async () => {
@@ -790,6 +856,69 @@ describe('AgentViewApp', () => {
     expect(removeSession).toHaveBeenCalledWith('session-1');
   });
 
+  it('keeps the remove window when a successful stop refresh fails', async () => {
+    const stopSession = vi.fn(async () => ({ stopped: true }));
+    const removeSession = vi.fn(async () => ({ removed: true }));
+    const { stdin } = render(
+      <AgentViewApp
+        rows={[row('session-1')]}
+        actions={actions({
+          stopSession,
+          removeSession,
+          loadRows: vi.fn(async () => {
+            throw new Error('refresh failed');
+          }),
+        })}
+        onExit={vi.fn()}
+      />,
+    );
+
+    stdin.write('\x18');
+    await flushInk();
+    stdin.write('\x18');
+    await flushInk();
+
+    expect(stopSession).toHaveBeenCalledOnce();
+    expect(removeSession).toHaveBeenCalledWith('session-1');
+  });
+
+  it('does not report successful pin and rename actions as refresh failures', async () => {
+    const pinSession = vi.fn(async () => ({ pinned: true }));
+    const renameSession = vi.fn(async () => ({ displayName: 'Launchpad' }));
+    const dispatchPrompt = vi.fn();
+    const { stdin, lastFrame } = render(
+      <AgentViewApp
+        rows={[row('session-1')]}
+        actions={actions({
+          pinSession,
+          renameSession,
+          dispatchPrompt,
+          loadRows: vi.fn(async () => {
+            throw new Error('refresh failed');
+          }),
+        })}
+        onExit={vi.fn()}
+      />,
+    );
+
+    stdin.write('\x14');
+    await waitForFrame(lastFrame, 'Pinned.');
+    expect(lastFrame()).toContain('Pinned.');
+
+    for (const char of 'Launchpad') {
+      stdin.write(char);
+      await Promise.resolve();
+    }
+    stdin.write('\x12');
+    await waitForFrame(lastFrame, 'Renamed to Launchpad.');
+    stdin.write('\r');
+    await flushInk();
+
+    expect(renameSession).toHaveBeenCalledWith('session-1', 'Launchpad');
+    expect(dispatchPrompt).not.toHaveBeenCalled();
+    expect(lastFrame()).toContain('Renamed to Launchpad.');
+  });
+
   it('composes repeated same-tick selection moves', async () => {
     const onAttachRequested = vi.fn();
     const { stdin } = render(
@@ -1213,6 +1342,30 @@ describe('AgentViewApp', () => {
     stdin.write('\x03');
     await flushInk();
     expect(onExit).toHaveBeenCalledOnce();
+  });
+
+  it('absorbs Ctrl+C after a draft is edited back to empty', async () => {
+    const onExit = vi.fn();
+    const { stdin } = render(
+      <AgentViewApp
+        rows={[row('session-1')]}
+        actions={actions()}
+        onExit={onExit}
+      />,
+    );
+
+    stdin.write('x');
+    await flushInk();
+    stdin.write('\x03');
+    await flushInk();
+    stdin.write('a');
+    await flushInk();
+    stdin.write('\x7f');
+    await flushInk();
+    stdin.write('\x03');
+    await flushInk();
+
+    expect(onExit).not.toHaveBeenCalled();
   });
 
   it('composes same-tick Ctrl+C presses', async () => {

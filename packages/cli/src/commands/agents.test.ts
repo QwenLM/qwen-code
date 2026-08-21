@@ -751,6 +751,7 @@ describe('agents command', () => {
 
   it('adopts a picked history session when the roster requests resume', async () => {
     let renderCount = 0;
+    const runtimeOutputDir = '/tmp/custom-agent-runtime';
     const supervisor = {
       list: vi.fn(async () => []),
       subscribe: vi.fn(() => ({ dispose: vi.fn() })),
@@ -772,13 +773,21 @@ describe('agents command', () => {
       stop: vi.fn(),
       remove: vi.fn(),
     };
-    mockShowResumeSessionPickerItem.mockResolvedValueOnce({
-      sessionId: '123e4567-e89b-12d3-a456-426614174000',
-      cwd: '/tmp/history-workspace',
-      startTime: '2026-07-17T08:00:00.000Z',
-      mtime: Date.parse('2026-07-17T08:00:00.000Z'),
-      prompt: 'historical prompt',
-      filePath: '/tmp/history-workspace/.qwen/chats/session.jsonl',
+    mockLoadSettings.mockReturnValueOnce({
+      merged: {
+        advanced: { runtimeOutputDir },
+      },
+    } as unknown as LoadedSettings);
+    mockShowResumeSessionPickerItem.mockImplementationOnce(async () => {
+      expect(Storage.getRuntimeBaseDir()).toBe(runtimeOutputDir);
+      return {
+        sessionId: '123e4567-e89b-12d3-a456-426614174000',
+        cwd: '/tmp/history-workspace',
+        startTime: '2026-07-17T08:00:00.000Z',
+        mtime: Date.parse('2026-07-17T08:00:00.000Z'),
+        prompt: 'historical prompt',
+        filePath: '/tmp/history-workspace/.qwen/chats/session.jsonl',
+      };
     });
 
     await runAgentsInteractiveSession({

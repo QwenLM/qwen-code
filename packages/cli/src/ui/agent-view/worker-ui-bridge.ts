@@ -133,24 +133,32 @@ export async function answerAgentViewPendingToolCall(
   if (!toolCall?.confirmationDetails?.onConfirm) {
     return false;
   }
+  const confirmationDetails = toolCall.confirmationDetails;
 
   // Questions deliver the text as the answer payload; the negative-text
   // heuristic below must not turn a real "no" answer into a refusal.
-  const isQuestion = toolCall.confirmationDetails.type === 'ask_user_question';
+  const isQuestion = confirmationDetails.type === 'ask_user_question';
+  if (
+    isQuestion &&
+    confirmationDetails.questions.length > 1 &&
+    !isRecord(event.payload)
+  ) {
+    return false;
+  }
   const outcome = toToolConfirmationOutcome(
     event.outcome,
     event.text,
     isQuestion,
   );
   if (isQuestion) {
-    await toolCall.confirmationDetails.onConfirm(
+    await confirmationDetails.onConfirm(
       outcome,
       getAgentViewAnswerPayload(event),
     );
     return true;
   }
 
-  await toolCall.confirmationDetails.onConfirm(outcome);
+  await confirmationDetails.onConfirm(outcome);
   return true;
 }
 

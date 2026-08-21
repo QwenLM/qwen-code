@@ -157,10 +157,7 @@ export function AgentViewApp({
       return;
     }
     setPeekReplyTarget(getReplyTarget(row));
-    if (peekSubmittedPreview?.sessionId === row.sessionId && !isPending(row)) {
-      setPeekSubmittedPreview(undefined);
-    }
-  }, [currentRows, peekPanel, peekSubmittedPreview]);
+  }, [currentRows, peekPanel]);
 
   const refreshRows = useCallback(async () => {
     const rows = await actions.loadRows();
@@ -375,12 +372,14 @@ export function AgentViewApp({
           } catch {
             setPeekReplyTarget(undefined);
           }
+          setPeekSubmittedPreview(undefined);
         } catch (error) {
           // Restore the undelivered reply for retry, but never resurrect a
           // panel the user closed (or overwrite a newer one) while the send
           // was in flight.
           setPeekSubmittedPreview(undefined);
           if (peekGenerationRef.current === generation) {
+            peekGenerationRef.current += 1;
             setPeekPrompt((current) => current || submitted);
             setPeekPanel({
               kind: 'session',
@@ -471,7 +470,7 @@ export function AgentViewApp({
       void (async () => {
         try {
           await actions.pinSession(row.sessionId);
-          await refreshRows();
+          await refreshRows().catch(() => {});
           setNotice({
             lines: [row.pinned ? 'Unpinned.' : 'Pinned.'],
           });
@@ -497,7 +496,7 @@ export function AgentViewApp({
       void (async () => {
         try {
           await actions.renameSession(row.sessionId, displayName);
-          await refreshRows();
+          await refreshRows().catch(() => {});
           setNotice({
             lines: [
               displayName ? `Renamed to ${displayName}.` : 'Name cleared.',
@@ -562,7 +561,7 @@ export function AgentViewApp({
           } else {
             await actions.stopSession(row.sessionId);
           }
-          await refreshRows();
+          await refreshRows().catch(() => {});
           if (remove) {
             setNotice({ lines: ['Removed.'] });
           }
@@ -713,7 +712,7 @@ function getPeekQueuedPrompts(
 ): string[] | undefined {
   const sessionId = panel?.kind === 'session' ? panel.sessionId : undefined;
   const row = rows.find((item) => item.sessionId === sessionId);
-  if (preview && preview.sessionId === sessionId && (!row || isPending(row))) {
+  if (preview && preview.sessionId === sessionId) {
     return [preview.prompt];
   }
   if (!row || (row.queuedPromptCount ?? 0) <= 0) {
@@ -721,10 +720,6 @@ function getPeekQueuedPrompts(
   }
   const prompt = row.queuedPromptPreview?.trim();
   return prompt ? [prompt] : undefined;
-}
-
-function isPending(row: AgentRosterRow): boolean {
-  return (row.queuedPromptCount ?? 0) > 0 || row.taskState === 'running';
 }
 
 function getSelectedIndex(

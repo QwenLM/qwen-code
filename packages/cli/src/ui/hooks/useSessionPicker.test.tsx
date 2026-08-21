@@ -360,6 +360,38 @@ describe('useSessionPicker filtering', () => {
     expect(onSelect).toHaveBeenCalledWith('s2', sessions[1]);
   });
 
+  it('prefers a managed session manual title over its transcript title', () => {
+    const { result } = renderHook(
+      () =>
+        useSessionPicker({
+          sessionService: null,
+          onSelect: vi.fn(),
+          onCancel: vi.fn(),
+          maxVisibleItems: 5,
+          initialSessions: [
+            {
+              ...sessions[0],
+              customTitle: 'Generated title',
+              titleSource: 'auto',
+            },
+          ],
+          extraSessions: [
+            {
+              ...sessions[0],
+              customTitle: 'Launchpad',
+              titleSource: 'manual',
+            },
+          ],
+        }),
+      { wrapper },
+    );
+
+    expect(result.current.filteredSessions[0]).toMatchObject({
+      customTitle: 'Launchpad',
+      titleSource: 'manual',
+    });
+  });
+
   it('excludes sessions by id before search and selection', () => {
     const { result } = renderHook(
       () =>
