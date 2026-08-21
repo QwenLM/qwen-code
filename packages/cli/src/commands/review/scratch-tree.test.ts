@@ -175,9 +175,14 @@ describe('runScratchTree', () => {
 
     const r = run();
 
-    expect(r.available).toBe(false);
-    expect(r.note).toContain('filter.planted.smudge');
+    // The reset's own screen sees the plant and declines the reset; the
+    // discard-and-rebuild path then sweeps it — the plant never executes,
+    // and the state cannot wedge the command: a refusal ABOVE the sweep
+    // would refuse forever on state the sweep destroys (measured live).
+    expect(r.available).toBe(true);
+    expect(r.reused).toBe(false);
     expect(existsSync(pwned)).toBe(false);
+    expect(existsSync(scratchAdmin)).toBe(false);
   });
 
   it('creates and resets the tree with a planted hook and fsmonitor inert', () => {

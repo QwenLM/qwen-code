@@ -262,6 +262,21 @@ function resetScratchTree(
     // it to one syscall, which is the same trade the hunk probe's pre-write
     // re-check makes.
     if (lstatSync(tree).isSymbolicLink()) return false;
+    // Screen DIRECTLY beside the checkout it guards, not at the phase's
+    // entry: the screen is a point-in-time config read, and every spawn
+    // between an early read and this checkout widens the window a writer
+    // can plant in — including this tree's own stale admin
+    // `config.worktree`, which an entry screen would refuse on although
+    // the discard-and-rebuild path destroys it without ever reading it
+    // (a permanent wedge, measured live). The guarantee this buys holds
+    // only against NON-concurrent writers: a sibling shard's suite can
+    // still toggle the config between this read and the pair's own spawns
+    // (the checkout, then the clean) — the window is this pair now, and
+    // closing it takes a lock shared with every suite run, which this
+    // round deliberately does not add.
+    if (localFilterRefusal(worktree, 'the reset this command runs') !== null) {
+      return false;
+    }
     git(tree, 'checkout', '--force', '--detach', headSha);
     // `-ff` because a single `-f` refuses to delete a nested git repository, so
     // a probe that cloned or `git init`-ed a fixture would survive a reset the
@@ -376,14 +391,6 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
     );
   }
 
-  // BEFORE any checkout runs — the reuse path's reset and the rebuild
-  // path's `worktree add` both execute whatever the screen detects.
-  const refusal = localFilterRefusal(
-    worktree,
-    'the reset or the rebuild this command runs',
-  );
-  if (refusal !== null) return unavailable(refusal);
-
   // Read BEFORE the tree is created, so it describes the shared tree as this
   // call found it and can never be confused with anything this call did.
   const residue = worktreeResidue(worktree);
@@ -458,6 +465,26 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
     // Clears both a leftover from a crashed run and a tree the reset above
     // could not rescue; either would fail `add` with `already exists`.
     sweep = discardWorktree(worktree, tree);
+    // Screen DIRECTLY beside the add it guards — below the sweep, so a
+    // plant parked in the stale tree's own admin `config.worktree` is
+    // refused on only while it still exists: the sweep just destroyed it,
+    // and the add never reads it. The reset path's comment names the
+    // window this placement leaves against concurrent writers.
+    const refusal = localFilterRefusal(
+      worktree,
+      'the rebuild this command runs',
+    );
+    if (refusal !== null) {
+      return {
+        available: false,
+        reused: false,
+        dependencies: null,
+        sharedTreeResidue,
+        sharedTreeResidueTotal: residue.total,
+        sharedTreeUnmeasured: residue.unmeasured,
+        note: refusal,
+      };
+    }
     git(worktree, 'worktree', 'add', '--detach', tree, headSha);
   } catch (e) {
     // Not `unavailable()`: the residue was already measured, and a report whose

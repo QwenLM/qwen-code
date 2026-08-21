@@ -36,6 +36,7 @@ import {
   testEfficacyCommand,
 } from './test-efficacy.js';
 import { isolateHostGitConfig } from './lib/test-utils.js';
+import { probeWorktreePath } from './lib/paths.js';
 
 type Handler = (args: {
   report: string;
@@ -2141,6 +2142,94 @@ process.stdout.write(JSON.stringify({
     // ...and the descendant the suite left running did not survive it.
     const pid = Number(readFileSync(pidFile, 'utf8'));
     expect(() => process.kill(pid, 0)).toThrow();
+  });
+
+  it('sweeps a stale probe tree whose own admin config holds a plant, instead of wedging', async () => {
+    // The phase's screen used to run ABOVE the stale sweep: its candidate
+    // set reads every `<common>/worktrees/*/config.worktree`, and the stale
+    // probe tree's OWN admin dir is one of them — a plant parked there
+    // refused every rerun until manual cleanup removed state the sweep's
+    // next statement would have destroyed (measured live: every retry
+    // refused identically). The screen now runs below the sweep: the
+    // discard removes the plant with the tree, the add never reads it, and
+    // a healthy run stays healthy.
+    const { wt, base } = scaffoldModifiedPr();
+    const probeTree = probeWorktreePath(wt);
+    git(repo, 'worktree', 'add', '-q', '--detach', probeTree, 'HEAD');
+    const admin = git(
+      probeTree,
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-dir',
+    ).trim();
+    writeFileSync(
+      join(admin, 'config.worktree'),
+      '[filter "evil"]\n\tsmudge = touch /tmp/qwen-never\n',
+    );
+
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    expect(out.probed).toEqual([
+      expect.objectContaining({
+        file: 'packages/lib/src/f.test.ts',
+        verdict: 'inert',
+      }),
+    ]);
+    expect(existsSync(join(admin, 'config.worktree'))).toBe(false);
+  });
+
+  it('reports the run breached when a plant appears DURING the revert checkout', async () => {
+    // The revert pair, end to end: the screen before the checkout is a
+    // point-in-time read, and the deterministic way to plant between that
+    // read and the checkout's own uses the screen's disclosed limit — a
+    // filter in the GLOBAL config is the user's contract and never
+    // screened. Here its smudge arms a REPO-LOCAL filter, gated on the
+    // CONTENT the checkout writes: every checkout before the revert writes
+    // the head content, and only the revert's writes the base content —
+    // so every earlier checkout (probe creation, every restore) sees
+    // nothing, the revert's checkout executes the arming smudge, and the
+    // post-checkout re-read reports the run breached rather than clean.
+    const { wt, base } = scaffoldModifiedPr();
+    execFileSync(
+      'git',
+      [
+        'config',
+        '--global',
+        'filter.armer.smudge',
+        // Arm only when the content being checked out is the BASE version
+        // — the revert checkout is the only one that writes it. The smudge
+        // receives the content on stdin; nothing is emitted back, which is
+        // immaterial: the run is breached the moment the re-read sees the
+        // armed key.
+        "content=$(cat); case $content in *'f = () => 1'*) git config filter.evil.smudge true ;; esac; true",
+      ],
+      { cwd: repo },
+    );
+    const attrs = git(wt, 'rev-parse', '--git-path', 'info/attributes').trim();
+    appendFileSync(attrs, '*.ts filter=armer\n');
+
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    expect(out.probed).toEqual([
+      expect.objectContaining({
+        file: 'packages/lib/src/f.test.ts',
+        verdict: 'inconclusive',
+        detail: expect.stringContaining('filter.evil.smudge'),
+      }),
+    ]);
+    expect(out.probed[0].detail).toContain('may have EXECUTED');
   });
 });
 

@@ -25,13 +25,14 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, userInfo } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { isolateHostGitConfig } from './test-utils.js';
 import {
   discardWorktree,
   exposeDependencies,
   localFilterCommands,
+  localFilterRefusal,
   sanitizedGitEnv,
   worktreeCreateFailureDetail,
   worktreeResidue,
@@ -1434,23 +1435,62 @@ describe('localFilterCommands', () => {
   });
 
   it('is empty when no local filter is defined', () => {
-    expect(localFilterCommands(tree)).toEqual([]);
+    expect(localFilterCommands(tree)).toEqual({
+      keys: [],
+      unclearable: [],
+    });
   });
 
   it('names a filter planted directly into the common config', () => {
     gitRepo('config', 'filter.evil.smudge', 'touch /tmp/qwen-never');
-    expect(localFilterCommands(tree)).toEqual(['filter.evil.smudge']);
+    expect(localFilterCommands(tree)).toEqual({
+      keys: ['filter.evil.smudge'],
+      unclearable: [],
+    });
   });
 
-  it('refuses on an include.path DIRECTIVE — never follows it', () => {
-    // The first cut followed `include.*` with `--includes`, mirroring the
-    // merged read a checkout does. That read is exactly what is unsafe: git
-    // evaluates an `includeIf` condition against the READING tree's gitdir
-    // and branch, while the checkout the screen authorises evaluates it
-    // against its OWN — so a directive aimed at another tree or branch was
-    // invisible here and still executed. Refusing on the directive ITSELF is
-    // the fail-closed trade: a benign include is indistinguishable from the
-    // plant, same as a benign filter is.
+  it('names keys git renders with a space or a newline intact', () => {
+    // The `-z` record read: subsection names legally carry spaces and values
+    // legally carry newlines, and the line-oriented `split(/\\s+/)[0]` parse
+    // mangled both — truncating the first to a nonexistent `filter.my` and
+    // recording the second value's continuation line as a phantom key. The
+    // whole record up to the first newline is the key.
+    gitRepo('config', 'filter.my filter.smudge', 'touch /tmp/x');
+    gitRepo('config', 'filter.evil.smudge', 'first\nsecond');
+    expect(localFilterCommands(tree)).toEqual({
+      keys: ['filter.my filter.smudge', 'filter.evil.smudge'],
+      unclearable: [],
+    });
+  });
+
+  it('follows a benign include to its target and clears it', () => {
+    // Standard GitHub Actions checkouts carry ambient `includeIf.gitdir:`
+    // credential directives whose targets hold only an `http.extraheader`
+    // authorization header and no filters. Refusing on ANY directive wedged
+    // every checkout on such a runner — the exact false-positive class the
+    // screen exists to avoid — so the directive is resolved to its target
+    // and refused only when the closure defines filter keys. Conditions are
+    // never evaluated: reading every target regardless is the fail-safe
+    // reading (see the includeIf arms below).
+    const outside = join(mkdtempSync(join(tmpdir(), 'qwen-include-')), 'cfg');
+    writeFileSync(
+      outside,
+      '[http]\n\textraheader = Authorization: Basic dG9rZW4=\n',
+    );
+    gitRepo('config', 'include.path', outside);
+
+    expect(localFilterCommands(tree)).toEqual({
+      keys: [],
+      unclearable: [],
+    });
+
+    rmSync(dirname(outside), { recursive: true, force: true });
+  });
+
+  it('follows an include to a filter and names both', () => {
+    // The planted shape the outright refusal used to catch unread: the
+    // directive's target holds the filter. The refusal names the filter key
+    // the checkout would execute and the directive that reaches it.
     const outside = join(mkdtempSync(join(tmpdir(), 'qwen-include-')), 'cfg');
     writeFileSync(
       outside,
@@ -1458,9 +1498,72 @@ describe('localFilterCommands', () => {
     );
     gitRepo('config', 'include.path', outside);
 
-    expect(localFilterCommands(tree)).toEqual(['include.path']);
+    expect(localFilterCommands(tree)).toEqual({
+      keys: ['filter.evil.smudge', 'include.path'],
+      unclearable: [],
+    });
 
     rmSync(dirname(outside), { recursive: true, force: true });
+  });
+
+  it('follows includes transitively, cycle-guarded', () => {
+    // A chain: config.worktree -> A -> B holding the filter, and a cycle
+    // (A -> B -> A) that must terminate and clear because neither link
+    // reaches a filter. The ENTRY directive sits in `config.worktree` —
+    // with the extension off, git's own reads never touch that file, so
+    // the cycle cannot poison the ambient config read every git spawn in
+    // the screen performs (a cycle in the common config itself makes
+    // EVERY git command in the repository fatal — nothing runs, and the
+    // screen's empty answer is the loud failure's own).
+    writeFileSync(
+      join(repo, '.git', 'config.worktree'),
+      '[include]\n\tpath = ' + join(repo, '.git', 'include-chain-entry') + '\n',
+    );
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-include-chain-'));
+    const a = join(dir, 'a');
+    const b = join(dir, 'b');
+    writeFileSync(
+      join(repo, '.git', 'include-chain-entry'),
+      `[include]\n\tpath = ${a}\n`,
+    );
+    writeFileSync(a, `[include]\n\tpath = ${b}\n`);
+    writeFileSync(b, `[include]\n\tpath = ${a}\n`);
+
+    expect(localFilterCommands(tree)).toEqual({
+      keys: [],
+      unclearable: [],
+    });
+
+    // The same chain with the filter planted at the far end.
+    writeFileSync(
+      b,
+      `[include]\n\tpath = ${a}\n[filter "deep"]\n\tsmudge = x\n`,
+    );
+    expect(localFilterCommands(tree)).toEqual({
+      keys: ['filter.deep.smudge', 'include.path'],
+      unclearable: [],
+    });
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('fails closed on an include target it cannot resolve', () => {
+    // An include whose directive names nothing the screen can resolve —
+    // here a `~user` home form: git expands it through getpwnam, which no
+    // portable Node call this screen can make does — cannot be vouched
+    // for, and is refused like a plant, never skipped. The user is REAL
+    // (this process's own): a nonexistent user is the same class but
+    // never reaches the screen, because git rejects the unexpandable
+    // line as bad config and every git read of the file dies.
+    gitRepo(
+      'config',
+      'include.path',
+      `~${userInfo().username}/qwen-never-resolved`,
+    );
+    const got = localFilterCommands(tree);
+    expect(got.keys).toEqual(['include.path']);
+    expect(got.unclearable).toHaveLength(1);
+    expect(got.unclearable[0]).toContain('include.path');
   });
 
   it('refuses on includeIf directives the screening tree cannot evaluate', () => {
@@ -1470,8 +1573,9 @@ describe('localFilterCommands', () => {
     // initial checkout executes the planted smudge; (b) an `onbranch` arm
     // aimed at the user's own branch — every screen runs detached, so the
     // condition never matches any of them, and the plant fires later on the
-    // user's own branched checkout. Both are refused here as the directive
-    // key git normalises to `includeif.`
+    // user's own branched checkout. The screen now reads the targets
+    // unCONDITIONALLY — both arms are refused because the target holds a
+    // filter, never because the condition was judged.
     const outside = join(mkdtempSync(join(tmpdir(), 'qwen-includeif-')), 'cfg');
     writeFileSync(outside, '[filter "evil"]\n\tsmudge = touch /tmp/x\n');
 
@@ -1480,9 +1584,13 @@ describe('localFilterCommands', () => {
       `includeIf.gitdir:${join(repo, '.git', 'worktrees')}/review-*.path`,
       outside,
     );
-    expect(localFilterCommands(tree)).toEqual([
-      `includeif.gitdir:${join(repo, '.git', 'worktrees')}/review-*.path`,
-    ]);
+    expect(localFilterCommands(tree)).toEqual({
+      keys: [
+        'filter.evil.smudge',
+        `includeif.gitdir:${join(repo, '.git', 'worktrees')}/review-*.path`,
+      ],
+      unclearable: [],
+    });
     gitRepo(
       'config',
       '--unset',
@@ -1490,7 +1598,10 @@ describe('localFilterCommands', () => {
     );
 
     gitRepo('config', 'includeIf.onbranch:main.path', outside);
-    expect(localFilterCommands(tree)).toEqual(['includeif.onbranch:main.path']);
+    expect(localFilterCommands(tree)).toEqual({
+      keys: ['filter.evil.smudge', 'includeif.onbranch:main.path'],
+      unclearable: [],
+    });
 
     rmSync(dirname(outside), { recursive: true, force: true });
   });
@@ -1513,7 +1624,10 @@ describe('localFilterCommands', () => {
       '[filter "evil"]\n\tsmudge = touch /tmp/qwen-never\n',
     );
 
-    expect(localFilterCommands(tree)).toEqual(['filter.evil.smudge']);
+    expect(localFilterCommands(tree)).toEqual({
+      keys: ['filter.evil.smudge'],
+      unclearable: [],
+    });
   });
 
   it('reads submodule configs under the common dir', () => {
@@ -1597,7 +1711,10 @@ describe('localFilterCommands', () => {
         encoding: 'utf8',
       },
     );
-    expect(localFilterCommands(tree)).toEqual(['filter.evil.smudge']);
+    expect(localFilterCommands(tree)).toEqual({
+      keys: ['filter.evil.smudge'],
+      unclearable: [],
+    });
     execFileSync(
       'git',
       ['config', '--file', linkedSub, '--unset', 'filter.evil.smudge'],
@@ -1617,8 +1734,136 @@ describe('localFilterCommands', () => {
         encoding: 'utf8',
       },
     );
-    expect(localFilterCommands(tree)).toEqual(['filter.evil.clean']);
+    expect(localFilterCommands(tree)).toEqual({
+      keys: ['filter.evil.clean'],
+      unclearable: [],
+    });
 
     rmSync(subRepo, { recursive: true, force: true });
+  });
+
+  it('reads NESTED submodule configs under the common dir', () => {
+    // The depth-2 twin of the test above: superproject -> submodule A ->
+    // submodule B lands B's gitdir at `<common>/worktrees/<label>/modules/
+    // <a>/modules/<b>/`, and a checkout run with `submodule.recurse=true`
+    // recurses to that depth and executes the filters planted in B's
+    // config. One `readdirSync` level of enumeration never saw it (probe,
+    // git 2.43: the depth-2 plant screened clean through a restore-shape
+    // checkout that created the marker), so the walk descends transitively.
+    const subA = mkdtempSync(join(tmpdir(), 'qwen-suba-'));
+    const subB = mkdtempSync(join(tmpdir(), 'qwen-subb-'));
+    const ga = (...a: string[]) =>
+      execFileSync('git', a, { cwd: subA, encoding: 'utf8' }).trim();
+    const gb = (...a: string[]) =>
+      execFileSync('git', a, { cwd: subB, encoding: 'utf8' }).trim();
+    gb('init', '-q', '-b', 'main');
+    gb('config', 'user.email', 't@t.t');
+    gb('config', 'user.name', 't');
+    writeFileSync(join(subB, 'b.txt'), 'b\n');
+    gb('add', '-A');
+    gb('commit', '-qm', 'b');
+    ga('init', '-q', '-b', 'main');
+    ga('config', 'user.email', 't@t.t');
+    ga('config', 'user.name', 't');
+    writeFileSync(join(subA, 'a.txt'), 'a\n');
+    ga('add', '-A');
+    ga('commit', '-qm', 'a');
+    execFileSync(
+      'git',
+      ['-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', subB, 'b'],
+      { cwd: subA, encoding: 'utf8' },
+    );
+    ga('add', '-A');
+    ga('commit', '-qm', 'a-with-b');
+
+    writeFileSync(join(repo, '.gitignore'), '.qwen/\n');
+    execFileSync(
+      'git',
+      ['-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', subA, 'a'],
+      { cwd: repo, encoding: 'utf8' },
+    );
+    gitRepo('add', '-A');
+    gitRepo('commit', '-qm', 'with-nested-submodules');
+    execFileSync('git', ['worktree', 'remove', '--force', tree], {
+      cwd: repo,
+      encoding: 'utf8',
+    });
+    gitRepo('worktree', 'add', '--detach', '-q', tree, 'HEAD');
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'protocol.file.allow=always',
+        'submodule',
+        'update',
+        '--init',
+        '--recursive',
+        '-q',
+      ],
+      { cwd: tree, encoding: 'utf8' },
+    );
+
+    // B's gitdir: `<common>/worktrees/<label>/modules/a/modules/b/`.
+    const nestedConfig = join(
+      repo,
+      '.git',
+      'worktrees',
+      basename(tree),
+      'modules',
+      'a',
+      'modules',
+      'b',
+      'config',
+    );
+    execFileSync(
+      'git',
+      ['config', '--file', nestedConfig, 'filter.evil.smudge', 'x'],
+      { cwd: repo, encoding: 'utf8' },
+    );
+    expect(localFilterCommands(tree)).toEqual({
+      keys: ['filter.evil.smudge'],
+      unclearable: [],
+    });
+
+    rmSync(subA, { recursive: true, force: true });
+    rmSync(subB, { recursive: true, force: true });
+  });
+
+  it('fails closed when the matching output overflows the buffer', () => {
+    // The ENOBUFS half of the screen's fail-closed discipline, reproduced
+    // against the SAME 64 MiB ceiling it now passes: one armed filter
+    // beside enough junk `[filter "jN"] smudge` sections to drown the
+    // spawn's buffer. `spawnSync` kills the child at the ceiling — which a
+    // `continue` read as "this file matched nothing", screening the armed
+    // filter clean through the very checkout the screen guarded (measured
+    // live at the old 1 MiB default). The kill is a failure to CLEAR the
+    // file, never a clean answer.
+    const lines: string[] = [];
+    const value = 'x'.repeat(50);
+    for (let n = 0; n < 950_000; n++) {
+      lines.push(`[filter "j${n}"]\n\tsmudge = ${value}\n`);
+    }
+    lines.push('[filter "evil"]\n\tsmudge = touch /tmp/qwen-never\n');
+    writeFileSync(join(repo, '.git', 'config'), lines.join(''));
+
+    const got = localFilterCommands(tree);
+    expect(got.unclearable).toHaveLength(1);
+    expect(got.unclearable[0]).toContain(join(repo, '.git', 'config'));
+    expect(localFilterRefusal(tree, 'x')).not.toBeNull();
+  }, 120_000);
+
+  it('fails closed on a candidate file it cannot read', () => {
+    // A malformed candidate — here the main worktree's `config.worktree`,
+    // read unconditionally although the extension is off — is a file the
+    // screen cannot clear; git's own read of it would fail loudly, and the
+    // screen's answer is a refusal, never a `continue`.
+    writeFileSync(
+      join(repo, '.git', 'config.worktree'),
+      '[filter "evil"\n\tsmudge = x\n',
+    );
+    const got = localFilterCommands(tree);
+    expect(got.keys).toEqual([]);
+    expect(got.unclearable).toHaveLength(1);
+    expect(got.unclearable[0]).toContain('config.worktree');
   });
 });

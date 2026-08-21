@@ -322,6 +322,34 @@ describe('runBaseTree', () => {
     expect(existsSync(baseWorktreePath(worktree))).toBe(false);
   });
 
+  it('sweeps a stale tree whose own admin config holds a plant, instead of wedging on it', () => {
+    // The screen's candidate set reads every `<common>/worktrees/*/
+    // config.worktree`, and it used to run ABOVE the stale sweep: a plant
+    // parked in the stale base tree's OWN admin dir refused every retry —
+    // each attempt re-screened state the sweep's next statement would have
+    // destroyed, and the refusal never moved (measured live: every retry
+    // refused identically until manual cleanup). The screen now runs below
+    // the sweep: the discard removes the plant with the tree, the add never
+    // reads it, and the base tree is built.
+    const stale = baseWorktreePath(worktree);
+    git(repo, 'worktree', 'add', '--detach', '-q', stale, baseSha);
+    const admin = git(
+      stale,
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-dir',
+    );
+    writeFileSync(
+      join(admin, 'config.worktree'),
+      '[filter "evil"]\n\tsmudge = touch /tmp/qwen-never\n',
+    );
+
+    const r = run();
+
+    expect(r.available).toBe(true);
+    expect(existsSync(join(admin, 'config.worktree'))).toBe(false);
+  });
+
   it('adds the base tree with a planted hook and fsmonitor inert', () => {
     // The add's initial checkout fires `post-checkout` and refreshes the
     // index — running `core.fsmonitor` — from the COMMON dir: one executable

@@ -835,18 +835,6 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       );
     }
 
-    // Screen BEFORE the fetch, against the main checkout's common dir. The
-    // review worktree does not exist yet, so there is nothing to screen FROM
-    // — but step 4's `worktree add` initial checkout would execute any filter
-    // planted in the shared common dir by an EARLIER review's probe, ahead of
-    // every other screen this pipeline runs. Refuse before fetching so no ref
-    // or worktree is created on a dirty common dir. Same refusal as base-tree.
-    const filterRefusal = localFilterRefusal(
-      process.cwd(),
-      'the review worktree add this command runs',
-    );
-    if (filterRefusal !== null) throw new Error(filterRefusal);
-
     // 1. Clean any stale worktree / branch from an earlier run.
     cleanStale(prNumber);
 
@@ -921,7 +909,32 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     // once it exists. Tracked so the recomputed numbers replace the zeros.
     const needsLocalStats = platform.kind !== 'github';
 
-    // 4. Create the ephemeral worktree.
+    // 4. Create the ephemeral worktree. Its initial checkout executes any
+    //    filter planted in the shared common dir by an EARLIER review's
+    //    probe, ahead of every other screen this pipeline runs — so screen
+    //    DIRECTLY beside it, against the main checkout's common dir (the
+    //    review worktree does not exist yet, so there is nothing to screen
+    //    FROM). Below `cleanStale`, not above it: the sweep releases this
+    //    PR's stale review worktree, and a plant parked in the stale tree's
+    //    own admin `config.worktree` is state the sweep removes and the add
+    //    never reads — screening first refused on it forever (every
+    //    re-review of this PR number wedged at the fetch gate, measured
+    //    live). The fetch and metadata steps between the sweep and this
+    //    spawn run no checkout, so nothing executes unscreened before it.
+    const filterRefusal = localFilterRefusal(
+      process.cwd(),
+      'the review worktree add this command runs',
+    );
+    if (filterRefusal !== null) {
+      // Roll back the fetched ref, the way the metadata failure above does.
+      tryRemove(() =>
+        execFileSync('git', ['branch', '-D', ref], {
+          stdio: 'pipe',
+          env: sanitizedGitEnv(),
+        }),
+      );
+      throw new Error(filterRefusal);
+    }
     try {
       mkdirSync(dirname(wt), { recursive: true });
       git('worktree', 'add', wt, ref);

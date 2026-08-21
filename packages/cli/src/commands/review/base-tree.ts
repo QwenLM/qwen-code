@@ -265,19 +265,24 @@ export function runBaseTree(args: BaseTreeArgs): BaseTreeReport {
 
   // The parameter re-narrows: TS narrowing does not cross function scopes.
   function buildBaseTree(baseSha: string): BaseTreeReport {
-    // BEFORE any checkout runs: the `worktree add` below executes whatever
-    // the screen detects — the same surface `scratch-tree` refuses to reset
-    // through, one directory over.
-    const refusal = localFilterRefusal(
-      worktree,
-      'the worktree add this command runs',
-    );
-    if (refusal !== null) return unavailable(refusal);
     let sweep: SweepResult | undefined;
     try {
       // Clear a stale base tree left by a crashed run — it would fail `add`. Its
       // stderr is kept, because it is usually what explains that failure.
       sweep = discardWorktree(worktree, tree);
+      // BEFORE the checkout runs, directly beside it: the `worktree add`
+      // below executes whatever the screen detects — the same surface
+      // `scratch-tree` refuses to reset through, one directory over. The
+      // screen sits BELOW the sweep, not above it — a plant parked in the
+      // stale tree's own admin `config.worktree` is state that sweep just
+      // destroyed and the add never reads, and a screen that ran first
+      // refused on it forever: every retry re-screened the doomed state and
+      // wedged the repository out of every review (measured live).
+      const refusal = localFilterRefusal(
+        worktree,
+        'the worktree add this command runs',
+      );
+      if (refusal !== null) return unavailable(refusal);
       git(worktree, 'worktree', 'add', '--detach', tree, baseSha);
     } catch (e) {
       return unavailable(

@@ -602,6 +602,57 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
     }
   });
 
+  it('reports the restore breached when a plant APPEARS during the checkout', () => {
+    // The restore's screen is a point-in-time read: it cannot see a plant
+    // that is absent at its read and present at the checkout's config read.
+    // The deterministic shape for that window uses the screen's own
+    // disclosed limit — filters in the GLOBAL config are the user's
+    // contract and never screened (the lfs case pinned above): a global
+    // smudge that arms a REPO-LOCAL filter when the restore's checkout
+    // executes it. Absent at the pre-read, present at the post-read — so
+    // the restore is reported breached rather than clean, and the mutant
+    // never scores a tree the re-read cannot vouch for.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-breach-'));
+    const isolation = isolateHostGitConfig();
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      writeFileSync(join(dir, 'b.ts'), 'export const b = 1;\n');
+      asCheckout(dir);
+      execFileSync(
+        'git',
+        [
+          'config',
+          '--global',
+          'filter.armer.smudge',
+          "git config filter.evil.smudge 'true'",
+        ],
+        { cwd: dir },
+      );
+      // The attributes line that SELECTS the global filter, and residue
+      // that makes the restore's checkout REWRITE files carrying it: only
+      // then does the smudge run and arm the repo-local plant.
+      mkdirSync(join(dir, '.git', 'info'), { recursive: true });
+      writeFileSync(
+        join(dir, '.git', 'info', 'attributes'),
+        '*.ts filter=armer\n',
+      );
+      writeFileSync(join(dir, 'a.ts'), 'prior-run residue\n');
+
+      const r = runOneMutant(
+        dir,
+        { file: 'a.ts', line: 1, statement: 'gone.clear();' },
+        ['a.test.ts'],
+      );
+
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('filter.evil.smudge');
+      expect(r.detail).toContain('may have EXECUTED');
+    } finally {
+      isolation.dispose();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('flattens control bytes a planter put into the filter key it quotes', () => {
     // A git config subsection name legally carries any byte but NUL and
     // newline: a suite that plants `filter.evil<ESC>....smudge` is correctly

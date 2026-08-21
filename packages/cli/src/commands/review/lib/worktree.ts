@@ -32,12 +32,21 @@ import {
   type Dirent,
   type Stats,
 } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { readWorkspacePackages } from './workspaces.js';
 import { inertPath } from './paths.js';
 
 export type SweepResult = ReturnType<typeof spawnSync>;
+
+/**
+ * Deadline for ONE git spawn, mirroring `GIT_TIMEOUT_MS` in `lib/git.ts`.
+ * Defined here rather than imported from that module because `lib/git.ts`
+ * imports from THIS file, and importing back would close a cycle; the
+ * screen's config reads need the same discipline so a blocking candidate
+ * (a FIFO planted at a config path) cannot hang every checkout it guards.
+ */
+const GIT_TIMEOUT_MS = 120_000;
 
 /**
  * The git environment variables that redirect repository discovery, which
@@ -560,8 +569,8 @@ function trackedIgnoreSources(cwd: string, sources: Set<string>): Set<string> {
 
 /**
  * The repo-local config keys a checkout EXECUTES, when any are defined:
- * `filter.<name>.smudge|clean|process` commands, and the `include`/
- * `includeIf` directives that reach more of them. Returns the keys, never
+ * `filter.<name>.smudge|clean|process` commands, reached through any
+ * `include`/`includeIf` directive that names them. Returns the keys, never
  * the values; a hit is a refusal upstream, not a cleanup here.
  *
  * Every checkout this pipeline runs executes these — fetch-pr's creation of
@@ -583,32 +592,98 @@ function trackedIgnoreSources(cwd: string, sources: Set<string>): Set<string> {
  * probe CAN also write `--global`; that scope is a disclosed limit of this
  * screen, not a screened surface.
  *
- * Include directives are refused as KEYS, never followed: `--includes`
- * evaluates an `includeIf` condition against the READING tree's gitdir and
- * branch, while the checkout the screen authorises evaluates it against its
- * OWN — so a directive aimed at a sibling worktree's admin dir
+ * The pattern list is a curated SAMPLE of git's command-executing config
+ * keys, and says so rather than read as complete — the space is open-ended
+ * (`submodule.<name>.update` with a `!` value, `diff.external`,
+ * `credential.helper`, `core.fsmonitor`, `core.hooksPath` execute commands
+ * too), and rounds of review each found a new entrance the list did not
+ * name. What the screen vouches for is the surface the pipeline's OWN
+ * checkouts execute — content filters — plus the includes that reach them.
+ * The other keys never fire inside the pipeline (no spawn here runs
+ * `submodule update`; diff spawns pin `--no-ext-diff`; hooks and fsmonitor
+ * are neutralised by {@link INERT_GIT_ARGS}), so what they can still do is
+ * persist in the common dir and fire on the user's OWN later git commands.
+ * That residual is disclosed here rather than screened: naming every
+ * executable key git has is a list that is wrong the day after it ships,
+ * and refusing commonplace ones (`credential.helper`) would wedge healthy
+ * repositories out of every review.
+ *
+ * Include directives are RESOLVED, not refused outright: each directive's
+ * target file is read (recursively, cycle-guarded), and the refusal names
+ * the filter keys defined anywhere in that closure. Refusing on any
+ * directive at all wedged every checkout on a standard GitHub Actions
+ * runner — the ambient `includeIf.gitdir:` credential directives there hold
+ * only an `http.extraheader` authorization header and no filters — which is
+ * the exact false-positive class this screen exists to avoid. CONDITIONS
+ * are deliberately never evaluated: `--includes` evaluates an `includeIf`
+ * condition against the READING tree's gitdir and branch, while the
+ * checkout the screen authorises evaluates it against its OWN — so a
+ * directive aimed at a sibling worktree's admin dir
  * (`includeIf.gitdir:<common>/worktrees/<label>-*`, labels are
  * attacker-knowable) or at the user's own branch (`includeIf.onbranch:main`,
  * which no detached screen ever matches) screened clean and still executed
- * — measured live, both arms. Refusing on any directive is the fail-safe
- * trade this screen makes everywhere; the benign conditional include a user
- * set deliberately is indistinguishable from the plant.
+ * — measured live, both arms. Reading every target regardless is the
+ * fail-safe reading: a benign include passes because its target holds no
+ * filter, never because its condition was judged harmless. A target that
+ * exists but cannot be read or resolved is refused like a plant — a file
+ * the screen cannot clear cannot be vouched for; a target that does not
+ * exist is nothing git would read either, and is skipped.
  *
  * Submodule configs under the common dir are candidates for the same
  * reason: a checkout run with `submodule.recurse=true` — one more key a
  * probe writes, which the filter regex never matches — recurses into every
  * initialised submodule and executes the filters THAT config defines. The
- * recurse key itself stays legal (a user may set it deliberately), so the
- * screen reads what it would execute instead.
+ * walk descends transitively (a nested submodule's gitdir lands one
+ * `modules/` level deeper per nesting), and the recurse key itself stays
+ * legal (a user may set it deliberately), so the screen reads what it would
+ * execute instead.
+ *
+ * The reads run with an explicit `maxBuffer` and fail CLOSED: `spawnSync`
+ * kills the child at the buffer ceiling (ENOBUFS), which a `continue` reads
+ * as "nothing matched" — an armed filter beside ~60,000 junk sections
+ * overflowed the default 1 MiB and screened clean through the very checkout
+ * it guards, measured live. Status 1 stays "no match"; any other failure
+ * reports the file as unclearable, and the refusal fires on that alone.
  */
-export function localFilterCommands(worktree: string): string[] {
+export interface LocalFilterScreen {
+  /**
+   * The executable keys named in the refusal: filter definitions, and the
+   * include directives whose closure reached them (or could not be cleared).
+   */
+  keys: string[];
+  /**
+   * Candidate files that could not be read and cleared, each as
+   * `<path>: <reason>`. Any entry is a refusal: a file the screen cannot
+   * read cannot be vouched for.
+   */
+  unclearable: string[];
+}
+
+/**
+ * The file an include directive names, resolved the way git resolves it at
+ * read time: `~/` expands to the home dir, a relative path is relative to
+ * the DIRECTIVE'S file, an absolute path is taken as-is. Null for a value
+ * this screen cannot resolve (empty, or a `~user` form it does not expand),
+ * which the caller reads as unclearable, never as clean.
+ */
+function resolveIncludeTarget(fromFile: string, value: string): string | null {
+  let v = value.trim();
+  if (v.length === 0 || /^~[^/\\]/.test(v)) return null;
+  if (v === '~') return resolve(homedir());
+  if (v.startsWith('~/')) v = join(homedir(), v.slice(2));
+  else if (!isAbsolute(v)) v = join(dirname(fromFile), v);
+  return resolve(v);
+}
+
+export function localFilterCommands(worktree: string): LocalFilterScreen {
+  const screen: LocalFilterScreen = { keys: [], unclearable: [] };
   const files = spawnSync(
     'git',
     ['rev-parse', '--git-common-dir', '--git-dir'],
     { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
   );
   if (files.error || files.status !== 0 || typeof files.stdout !== 'string') {
-    return [];
+    return screen;
   }
   const [commonDir, gitDir] = files.stdout.trim().split('\n');
   const common = resolve(worktree, commonDir);
@@ -636,54 +711,164 @@ export function localFilterCommands(worktree: string): string[] {
   // `submodule update --init` run inside a linked tree lands the submodule's
   // gitdir at `<common>/worktrees/<label>/modules/<name>/`, and the filters
   // planted in its config were never candidates.
-  const submoduleConfigs = (modulesDir: string): void => {
+  const submoduleConfigs = (modulesDir: string, depth: number): void => {
+    // Bounds a planted symlink cycle (`modules/a` -> the dir above it); real
+    // submodule nesting is nowhere near the cap.
+    if (depth > 16) return;
     try {
       for (const mod of readdirSync(modulesDir)) {
         candidates.push(join(modulesDir, mod, 'config'));
         candidates.push(join(modulesDir, mod, 'config.worktree'));
+        // A NESTED submodule's gitdir lands one level deeper under the same
+        // common dir (`modules/<a>/modules/<b>/`), and a `submodule.recurse`
+        // checkout executes the filters planted there too.
+        submoduleConfigs(join(modulesDir, mod, 'modules'), depth + 1);
       }
     } catch {
-      // No submodules registered here.
+      // No (further) submodules registered here.
     }
   };
   try {
     for (const entry of readdirSync(join(common, 'worktrees'))) {
       const admin = join(common, 'worktrees', entry);
       candidates.push(join(admin, 'config.worktree'));
-      submoduleConfigs(join(admin, 'modules'));
+      submoduleConfigs(join(admin, 'modules'), 0);
     }
   } catch {
     // No linked worktrees registered: the candidates above are all of it.
   }
-  submoduleConfigs(join(common, 'modules'));
-  const found: string[] = [];
-  for (const file of candidates) {
-    if (!existsSync(file)) continue;
-    for (const pattern of [
-      // `process` beside the pair: it is the third executable key (a
-      // long-running filter git speaks a protocol to), and enumerating two
-      // of three is how the first cut of this screen read as complete.
-      '^filter\\..*\\.(smudge|clean|process)$',
-      // The directives themselves, NOT `--includes`: the filter read no
-      // longer follows them, because the conditional ones evaluate against
-      // the wrong tree's context (docstring above) and the unconditional
-      // ones are refused by this pattern anyway. Section names normalise to
-      // lowercase in git's output (`includeIf` reads as `includeif`).
-      '^(include\\.path|includeif\\..*\\.path)$',
-    ]) {
-      const r = spawnSync(
-        'git',
-        ['config', '--file', file, '--get-regexp', pattern],
-        { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
+  submoduleConfigs(join(common, 'modules'), 0);
+  const includeKey = /^(include\.path|includeif\..*\.path)$/;
+  const seen = new Set<string>();
+  const scan = (file: string, depth: number): void => {
+    // git's own include limit is depth 10; a chain beyond it never executes,
+    // so it clears the screen rather than feeding an unbounded walk.
+    if (depth > 10) return;
+    let dedupe = file;
+    try {
+      dedupe = realpathSync(file);
+    } catch {
+      // Unresolvable: the literal path still dedupes the plain cycle.
+    }
+    if (seen.has(dedupe)) return;
+    seen.add(dedupe);
+    if (!existsSync(file)) return;
+    // `-z` records are `key\nvalue\0`: subsection names legally carry
+    // spaces and values legally carry newlines, so the line-oriented
+    // `split(/\s+/)[0]` read mangled both — the key is the WHOLE record up
+    // to the first newline.
+    const r = spawnSync(
+      'git',
+      [
+        'config',
+        '--file',
+        file,
+        '-z',
+        '--get-regexp',
+        '^(filter\\..*\\.(smudge|clean|process)|include\\.path|includeif\\..*\\.path)$',
+      ],
+      {
+        cwd: worktree,
+        encoding: 'utf8',
+        // The default 1 MiB buffer kills the child (ENOBUFS) on a plant
+        // padded with junk matches — which the old `continue` read as "no
+        // match": an armed filter screening clean. Match the 64 MiB ceiling
+        // the sibling spawns use; the fail-closed branch below is the half
+        // that covers any fixed buffer being overflowed again.
+        maxBuffer: 64 * 1024 * 1024,
+        // Same deadline discipline lib/git.ts applies: a blocking candidate
+        // (a FIFO at any of these paths) hangs the screen — and every
+        // checkout it guards — indefinitely without it.
+        timeout: GIT_TIMEOUT_MS,
+        env: sanitizedGitEnv(),
+      },
+    );
+    // 1 is git's "nothing matched" — the clean answer for THIS file. Every
+    // other shape (an ENOBUFS or timeout kill, a spawn failure, a fatal)
+    // means the file could not be CLEARED, which the screen reads like a
+    // plant: status 1 alone is clean, everything else is a refusal.
+    if (r.status === 1 && !r.error) return;
+    if (r.error || r.status !== 0 || typeof r.stdout !== 'string') {
+      const why = r.error
+        ? ((r.error as NodeJS.ErrnoException).code ?? r.error.message)
+        : r.signal
+          ? `killed by ${r.signal}`
+          : `git config exited ${r.status}`;
+      screen.unclearable.push(`${file}: ${why}`);
+      return;
+    }
+    for (const record of r.stdout.split('\0')) {
+      if (record.length === 0) continue;
+      const nl = record.indexOf('\n');
+      const key = nl === -1 ? record : record.slice(0, nl);
+      if (!includeKey.test(key)) {
+        if (!screen.keys.includes(key)) screen.keys.push(key);
+        continue;
+      }
+      const target = resolveIncludeTarget(
+        file,
+        nl === -1 ? '' : record.slice(nl + 1),
       );
-      if (r.error || r.status !== 0 || typeof r.stdout !== 'string') continue;
-      for (const line of r.stdout.split('\n')) {
-        const key = line.split(/\s+/)[0];
-        if (key && !found.includes(key)) found.push(key);
+      if (target === null) {
+        if (!screen.keys.includes(key)) screen.keys.push(key);
+        screen.unclearable.push(
+          `${file}: include ${key} names a path this screen cannot resolve`,
+        );
+        continue;
+      }
+      // Name the directive beside whatever its closure yields — but only
+      // when it yields something: a target holding no filter keys (the
+      // runner credential shape) clears the directive with it.
+      const keysBefore = screen.keys.length;
+      const unclearableBefore = screen.unclearable.length;
+      scan(target, depth + 1);
+      if (
+        screen.keys.length > keysBefore ||
+        screen.unclearable.length > unclearableBefore
+      ) {
+        if (!screen.keys.includes(key)) screen.keys.push(key);
       }
     }
+  };
+  for (const file of candidates) scan(file, 0);
+  return screen;
+}
+
+/**
+ * The shared body of the filter-screen findings, in the tense the caller's
+ * position demands: `would EXECUTE` for the guard BEFORE a checkout,
+ * `may have EXECUTED` for the re-read after one.
+ */
+function localFilterFindingText(
+  screen: LocalFilterScreen,
+  context: string,
+  executes: string,
+): string {
+  const parts: string[] = [];
+  if (screen.keys.length > 0) {
+    parts.push(
+      `the repository's local config defines ` +
+        `${screen.keys.map(inertPath).join(', ')} — content filter ` +
+        `command(s), or include directives that reach them, which ` +
+        `${context} ${executes}`,
+    );
   }
-  return found;
+  if (screen.unclearable.length > 0) {
+    parts.push(
+      `${screen.unclearable.length} config file(s) the screen reads could ` +
+        `not be read and cleared (${screen.unclearable.map(inertPath).join('; ')}) ` +
+        '— a file it cannot clear is refused like a plant',
+    );
+  }
+  return (
+    parts.join('; additionally, ') +
+    '. Two plain writes into the common dir plant both a filter and the ' +
+    'attributes that select it, and the state cannot be told apart from one ' +
+    'you set deliberately, so remove those config entries if they are not ' +
+    'yours (removing only the attributes that select them does not clear ' +
+    'this refusal — it reads the filter definitions). Until then no ' +
+    'checkout in this pipeline is safe to run.'
+  );
 }
 
 /**
@@ -702,18 +887,28 @@ export function localFilterRefusal(
   worktree: string,
   context: string,
 ): string | null {
-  const keys = localFilterCommands(worktree);
-  if (keys.length === 0) return null;
-  return (
-    `the repository's local config defines ${keys.map(inertPath).join(', ')} — ` +
-    `content filter command(s), or include directives that reach them, which ` +
-    `${context} would EXECUTE. Two plain writes into the common dir plant ` +
-    'both a filter and the attributes that select it, and the state cannot be ' +
-    'told apart from one you set deliberately, so remove those config entries ' +
-    'if they are not yours (removing only the attributes that select them ' +
-    'does not clear this refusal — it reads the filter definitions). Until ' +
-    'then no checkout in this pipeline is safe to run.'
-  );
+  const screen = localFilterCommands(worktree);
+  if (screen.keys.length === 0 && screen.unclearable.length === 0) return null;
+  return localFilterFindingText(screen, context, 'would EXECUTE');
+}
+
+/**
+ * The detection half re-read AFTER an authorised checkout ran — the answer
+ * to the window a point-in-time screen cannot close: a toggling process the
+ * reap did not reach (a setsid'd descendant, a concurrent shard's suite)
+ * can plant between the screen's read and the checkout's config read, and
+ * the checkout executes the plant while both reads this function's caller
+ * makes on its own saw nothing. A key that APPEARED is reported as a
+ * breach: detection, not prevention — the checkout already ran, and the run
+ * must be reported breached rather than clean. Null is the clean answer.
+ */
+export function localFilterBreach(
+  worktree: string,
+  context: string,
+): string | null {
+  const screen = localFilterCommands(worktree);
+  if (screen.keys.length === 0 && screen.unclearable.length === 0) return null;
+  return localFilterFindingText(screen, context, 'may have EXECUTED');
 }
 
 /**
@@ -729,8 +924,10 @@ export function localFilterRefusal(
  * core.fsmonitor CMD`) is command execution on every index refresh — no
  * attributes line needed — and nothing the pipeline runs unsets it. `-c` is
  * command-line scope: it overrides whatever the config holds for THIS spawn
- * without touching the config — the plant persists, and the screen stays
- * the half that detects and refuses it.
+ * without touching the config — the plant persists. For these two shapes
+ * the override is the ONLY half the pipeline has: the screen reads the
+ * filter/include surface, not `core.fsmonitor` or hook keys (a disclosed
+ * limit named in its docstring), so it neither detects nor refuses them.
  */
 export const INERT_GIT_ARGS = [
   '-c',

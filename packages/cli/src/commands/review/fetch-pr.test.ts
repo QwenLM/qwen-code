@@ -397,9 +397,22 @@ vi.mock('./lib/diff-plan.js', async (importOriginal) => {
 
 describe('fetch-pr report assembly', () => {
   const savedEnv: { sessionId?: string; promptId?: string } = {};
+  // The handler's pre-checkout screen reads the repo-local config of
+  // `process.cwd()`, and `spawnSync` stays REAL in this suite (the
+  // child_process mock replaces only execFileSync). Run every test with the
+  // cwd inside a throwaway fixture repo: reading the machine's real
+  // checkout here turned the suite into a host-config probe — a standard
+  // GitHub Actions checkout's ambient `includeIf.gitdir:` credential
+  // directives failed all of these tests on the runner, and only there.
+  let fixtureRepo: string;
+  let prevCwd: string;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    fixtureRepo = mkdtempSync(join(tmpdir(), 'qwen-fetch-pr-fixture-'));
+    spawnSync('git', ['init', '-q', '-b', 'main'], { cwd: fixtureRepo });
+    prevCwd = process.cwd();
+    process.chdir(fixtureRepo);
     // clearAllMocks resets call history but NOT implementations, so a
     // mockReturnValue a prior test set would leak into a test that relies on
     // the default. Re-assert the defaults (no prior report → ENOENT, no
@@ -453,6 +466,8 @@ describe('fetch-pr report assembly', () => {
   });
 
   afterEach(() => {
+    process.chdir(prevCwd);
+    rmSync(fixtureRepo, { recursive: true, force: true });
     if (savedEnv.sessionId === undefined) {
       delete process.env['QWEN_CODE_SESSION_ID'];
     } else {
@@ -533,38 +548,99 @@ describe('fetch-pr report assembly', () => {
     expect(report.host).toBe('ghe.example.com');
   });
 
-  it('refuses BEFORE the fetch when repo-local config defines a content filter', async () => {
+  it('refuses the worktree add when repo-local config defines a content filter', async () => {
     // Step 4's `worktree add` is the pipeline's FIRST checkout, and its
     // initial checkout executes repo-local content filters: a plant an
     // earlier review's probe left in the shared common dir fires there,
     // ahead of every other screen, and persists for the user's own later
-    // checkouts. The fetch is refused before any ref or worktree exists.
-    // `spawnSync` stays real in this suite (the child_process mock replaces
-    // only execFileSync), so the screen reads a fixture repo the test
-    // chdirs into.
-    const dir = mkdtempSync(join(tmpdir(), 'qwen-fetch-screen-'));
-    const g = (...args: string[]) =>
-      spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
-    g('init', '-q', '-b', 'main');
-    g('config', 'filter.evil.smudge', 'touch /tmp/qwen-never');
-    const prev = process.cwd();
-    process.chdir(dir);
-    try {
-      await expect(reportFor({})).rejects.toThrow('filter.evil.smudge');
-      // The worktree add — the firing checkout — never ran, and nothing was
-      // fetched into a ref.
-      expect(
-        producerMocks.git.mock.calls.some(
-          ([a, b]: unknown[]) => a === 'worktree' && b === 'add',
-        ),
-      ).toBe(false);
-      expect(
-        producerMocks.git.mock.calls.some(([a]: unknown[]) => a === 'fetch'),
-      ).toBe(false);
-    } finally {
-      process.chdir(prev);
-      rmSync(dir, { recursive: true, force: true });
-    }
+    // checkouts. The screen runs directly beside that add (the fetch and
+    // metadata steps before it run no checkout), so the fetch itself has
+    // already happened when the refusal fires — but no worktree is created
+    // and the fetched ref is rolled back.
+    spawnSync(
+      'git',
+      ['config', 'filter.evil.smudge', 'touch /tmp/qwen-never'],
+      {
+        cwd: fixtureRepo,
+      },
+    );
+
+    await expect(reportFor({})).rejects.toThrow('filter.evil.smudge');
+    expect(
+      producerMocks.git.mock.calls.some(
+        ([a, b]: unknown[]) => a === 'worktree' && b === 'add',
+      ),
+    ).toBe(false);
+    expect(
+      producerMocks.git.mock.calls.some(([a]: unknown[]) => a === 'fetch'),
+    ).toBe(true);
+    // The fetched ref is rolled back the way the metadata failure does.
+    expect(
+      producerMocks.execFileSync.mock.calls.some(
+        ([cmd, args]: unknown[]) =>
+          cmd === 'git' &&
+          Array.isArray(args) &&
+          args[0] === 'branch' &&
+          args[1] === '-D',
+      ),
+    ).toBe(true);
+  });
+
+  it('screens BELOW cleanStale — a plant in the stale tree admin dir does not wedge the fetch gate', async () => {
+    // The screen's candidate set reads every `<common>/worktrees/*/
+    // config.worktree`, and it used to run ABOVE `cleanStale`'s release of
+    // this PR's stale review worktree: a plant parked in the stale tree's
+    // OWN admin dir refused every re-review of the PR number, until manual
+    // cleanup removed state the very next statement would have deleted
+    // (measured live: every retry refused identically). The screen now runs
+    // below the sweep — in production the sweep deletes the plant and the
+    // refusal clears; this suite's `releaseWorktree` is mocked and leaves
+    // the plant standing, so the ORDER is the observable: the sweep and the
+    // fetch both ran before the refusal fired.
+    spawnSync(
+      'git',
+      [
+        '-c',
+        'user.email=t@t.t',
+        '-c',
+        'user.name=t',
+        'commit',
+        '-q',
+        '--allow-empty',
+        '-m',
+        'fixture',
+      ],
+      { cwd: fixtureRepo },
+    );
+    spawnSync(
+      'git',
+      [
+        'worktree',
+        'add',
+        '-q',
+        '--detach',
+        join(fixtureRepo, 'stale-wt'),
+        'HEAD',
+      ],
+      { cwd: fixtureRepo },
+    );
+    spawnSync(
+      'git',
+      [
+        'config',
+        '--file',
+        join(fixtureRepo, '.git', 'worktrees', 'stale-wt', 'config.worktree'),
+        'filter.evil.smudge',
+        'touch /tmp/qwen-never',
+      ],
+      { cwd: fixtureRepo },
+    );
+
+    await expect(reportFor({})).rejects.toThrow('filter.evil.smudge');
+    expect(producerMocks.releaseWorktree).toHaveBeenCalled();
+    expect(
+      producerMocks.git.mock.calls.some(([a]: unknown[]) => a === 'fetch'),
+    ).toBe(true);
   });
 
   it('refuses a dash-leading baseRefName from the platform metadata', async () => {

@@ -70,6 +70,7 @@ import {
   discardWorktree,
   exposeDependencies,
   INERT_GIT_ARGS,
+  localFilterBreach,
   localFilterRefusal,
   redirectedAncestor,
   sanitizedGitEnv,
@@ -1628,6 +1629,15 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
       );
     }
   }
+  // Re-read the screen the moment the checkout completes: the read above is
+  // point-in-time, and a toggler this run's reap could not reach (a setsid'd
+  // descendant, a concurrent shard's suite) can plant between that read and
+  // the checkout's own config read — the checkout then executes the plant
+  // although BOTH reads made before it saw nothing. A key that APPEARED is
+  // reported as a breach, never clean; the restore's caller must not keep
+  // scoring a tree this read cannot vouch for.
+  const breach = localFilterBreach(probeTree, "this tree's restore");
+  if (breach !== null) return breach;
   // `checkout --force` SILENTLY skips a file carrying the skip-worktree bit,
   // and `clean` never touches a tracked file — so a bit the suite set with
   // `update-index` leaves its tampered content standing through a restore that
@@ -1716,8 +1726,19 @@ function runProbeSuite(
   // a checkout, and a process the PR's own test code left running can toggle
   // the filter config between the read and the checkout — measured live at
   // ~3% of trials with a fast atomic toggler. Killing the group the moment
-  // the run completes removes every descendant that did not setsid away; the
-  // screens stay the detection half for whatever did.
+  // the run completes removes every descendant that stayed in it. A
+  // descendant that called setsid is in its OWN group and survives this
+  // reap, and against a TOGGLING escapee the point-in-time screens alone
+  // cannot help — a plant absent at the screen's read and present at the
+  // checkout's read is invisible to them — so each of those pairs re-reads
+  // the screen immediately AFTER its checkout and reports the run as
+  // breached rather than clean when a key appeared (localFilterBreach).
+  // Closing the kill scope itself (a cgroup/pidfd kill that survives
+  // setsid) is a design decision this reap deliberately does not make. One
+  // further disclosed window: `detached` puts the suite out of the review's
+  // process group, and a wrapper timeout or operator cancel landing
+  // mid-suite kills the review's group (run.ts's signal forwarding) but not
+  // the suite's — this reap runs only when the spawn returns.
   if (r.pid > 0) {
     killProcessGroup(r.pid, 'SIGKILL');
   }
@@ -2546,11 +2567,17 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
     let sweep: SweepResult | undefined;
     let createDetail = '';
     try {
-      // The phase's screen, BEFORE its first checkout: the `worktree add`
-      // below executes repo-local content filters on its initial checkout —
-      // a filter planted before the run fired there, ahead of every other
-      // screen. (One planted DURING a run is what the restore screens and
-      // the revert phase's own screen below are for.)
+      // Clear a stale probe tree left by a crashed run — it would fail `add`.
+      // Its stderr is kept to explain a subsequent `add` failure.
+      sweep = discardWorktree(worktree, probeTree);
+      // The phase's screen, directly beside the first checkout it guards and
+      // BELOW the sweep: the `worktree add` executes repo-local content
+      // filters on its initial checkout, but a plant parked in the stale
+      // tree's own admin `config.worktree` is state that sweep just
+      // destroyed and the add never reads — screening first refused on it
+      // forever (every rerun wedged at the phase's entry, measured live).
+      // (A filter planted DURING a run is what the restore screens and the
+      // revert phase's own screen below are for.)
       const refusal = localFilterRefusal(
         worktree,
         "the probe phase's checkouts — the probe tree's own creation, every " +
@@ -2559,9 +2586,6 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       if (refusal !== null) {
         createDetail = refusal;
       } else {
-        // Clear a stale probe tree left by a crashed run — it would fail `add`.
-        // Its stderr is kept to explain a subsequent `add` failure.
-        sweep = discardWorktree(worktree, probeTree);
         git(worktree, 'worktree', 'add', '--detach', probeTree, headSha);
         created = true;
       }
@@ -2908,6 +2932,11 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
           const refusal = localFilterRefusal(probeTree, 'the revert checkout');
           if (refusal !== null) throw new Error(refusal);
           git(probeTree, 'checkout', base, '--', ...modified);
+          // Same pair as every restore: a toggler the reap did not reach can
+          // plant between the screen's read and this checkout's own, so the
+          // run is reported breached — not clean — when the re-read sees it.
+          const breach = localFilterBreach(probeTree, 'the revert checkout');
+          if (breach !== null) throw new Error(breach);
         }
         for (const p of added) safeRmWithin(probeTree, p);
 
