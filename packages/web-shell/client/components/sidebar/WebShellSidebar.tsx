@@ -1396,6 +1396,12 @@ export function WebShellSidebar({
       sessionsPage,
     ],
   );
+  // Settle-time baseline for the reconciliation effect. A page swap caused by
+  // polling or live ticks while the RPC is in flight must not drop the entry
+  // the moment it settles; snapshot the pages when the RPC settles, not from
+  // the click-time closure.
+  const optimisticCatalogPagesRef = useRef(optimisticCatalogPages);
+  optimisticCatalogPagesRef.current = optimisticCatalogPages;
   const secondaryArchivedEnabled =
     archivedExpanded &&
     sessionArchiveEnabled &&
@@ -1470,108 +1476,6 @@ export function WebShellSidebar({
     () => displayedWorkspaces.filter((entry) => entry.kind !== 'live'),
     [displayedWorkspaces],
   );
-  const applyOptimisticPin = useCallback(
-    (session: DaemonSessionSummary): DaemonSessionSummary => {
-      if (optimisticPins.size === 0) return session;
-      const entry = optimisticPins.get(
-        getSessionIdentity(
-          session.sessionId,
-          session.workspaceCwd || primaryWorkspaceCwd,
-        ),
-      );
-      if (!entry || entry.pinned === (session.isPinned === true)) {
-        return session;
-      }
-      const next: DaemonSessionSummary = {
-        ...session,
-        isPinned: entry.pinned,
-      };
-      if (entry.pinned) {
-        if (entry.pinnedAt !== undefined) next.pinnedAt = entry.pinnedAt;
-      } else {
-        delete next.pinnedAt;
-      }
-      return next;
-    },
-    [optimisticPins, primaryWorkspaceCwd],
-  );
-  // Drop optimistic entries only after the RPC has settled and a catalog page
-  // changed afterwards. Before that point, an old page can contradict the
-  // toggle or omit a row while its refresh is still in flight.
-  useEffect(() => {
-    if (optimisticPins.size === 0) return;
-    const pages = optimisticCatalogPages;
-    const staleIdentities: string[] = [];
-    for (const [identity, entry] of optimisticPins) {
-      if (!entry.rpcSettled) continue;
-      const pagesChanged = pages.some(
-        (page, index) => page !== entry.catalogPages[index],
-      );
-      if (!pagesChanged) continue;
-      staleIdentities.push(identity);
-    }
-    if (staleIdentities.length === 0) return;
-    setOptimisticPins((previous) => {
-      const next = new Map(previous);
-      for (const identity of staleIdentities) next.delete(identity);
-      return next;
-    });
-  }, [
-    optimisticPins,
-    includePrimaryWorkspaceSessions,
-    primaryPinnedSessions,
-    secondaryPinnedSessions,
-    sessions,
-    primaryWorkspaceCwd,
-    optimisticCatalogPages,
-  ]);
-  const pinnedSessions = useMemo(() => {
-    const byId = new Map<string, DaemonSessionSummary>();
-    const addCandidate = (
-      session: DaemonSessionSummary,
-      options: { requirePinned: boolean },
-    ): void => {
-      if (!matchesSessionSource(session, selectedSessionSource)) return;
-      // Rows fetched through the pinned filter stay unless an optimistic
-      // unpin flips them; rows merged from other pages must be pinned.
-      if (session.isPinned === false) return;
-      if (options.requirePinned && session.isPinned !== true) return;
-      byId.set(
-        getSessionIdentity(
-          session.sessionId,
-          session.workspaceCwd || primaryWorkspaceCwd,
-        ),
-        session,
-      );
-    };
-    for (const rawSession of [
-      ...(includePrimaryWorkspaceSessions ? primaryPinnedSessions : []),
-      ...secondaryPinnedSessions,
-    ]) {
-      addCandidate(applyOptimisticPin(rawSession), { requirePinned: false });
-    }
-    // The all-sessions page carries optimistic pins before the pinned page
-    // refetch lands.
-    for (const rawSession of sessions) {
-      addCandidate(applyOptimisticPin(rawSession), { requirePinned: true });
-    }
-    // A row pinned from a workspace section that no loaded page carries yet
-    // renders from its optimistic snapshot so the pin still feels instant.
-    for (const [identity, entry] of optimisticPins) {
-      if (!entry.pinned || byId.has(identity)) continue;
-      addCandidate(applyOptimisticPin(entry.session), { requirePinned: true });
-    }
-    return [...byId.values()].sort(comparePinnedSectionSessions);
-  }, [
-    applyOptimisticPin,
-    includePrimaryWorkspaceSessions,
-    optimisticPins,
-    primaryWorkspaceCwd,
-    primaryPinnedSessions,
-    selectedSessionSource,
-    secondaryPinnedSessions,
-    sessions,
-  ]);
   const resolveSessionWorkspaceScope = useCallback(
     (session: DaemonSessionSummary): SessionWorkspaceScope => {
       const explicitCwd = session.workspaceCwd;
@@ -1649,6 +1553,89 @@ export function WebShellSidebar({
       getSessionIdentity(session.sessionId, getSessionWorkspaceCwd(session)),
     [getSessionWorkspaceCwd],
   );
+  const applyOptimisticPin = useCallback(
+    (session: DaemonSessionSummary): DaemonSessionSummary => {
+      if (optimisticPins.size === 0) return session;
+      const entry = optimisticPins.get(getIdentityForSession(session));
+      if (!entry || entry.pinned === (session.isPinned === true)) {
+        return session;
+      }
+      const next: DaemonSessionSummary = {
+        ...session,
+        isPinned: entry.pinned,
+      };
+      if (entry.pinned) {
+        if (entry.pinnedAt !== undefined) next.pinnedAt = entry.pinnedAt;
+      } else {
+        delete next.pinnedAt;
+      }
+      return next;
+    },
+    [optimisticPins, getIdentityForSession],
+  );
+  // Drop optimistic entries only after the RPC has settled and a catalog page
+  // changed afterwards. Before that point, an old page can contradict the
+  // toggle or omit a row while its refresh is still in flight.
+  useEffect(() => {
+    if (optimisticPins.size === 0) return;
+    const pages = optimisticCatalogPages;
+    const staleIdentities: string[] = [];
+    for (const [identity, entry] of optimisticPins) {
+      if (!entry.rpcSettled) continue;
+      const pagesChanged = pages.some(
+        (page, index) => page !== entry.catalogPages[index],
+      );
+      if (!pagesChanged) continue;
+      staleIdentities.push(identity);
+    }
+    if (staleIdentities.length === 0) return;
+    setOptimisticPins((previous) => {
+      const next = new Map(previous);
+      for (const identity of staleIdentities) next.delete(identity);
+      return next;
+    });
+  }, [optimisticPins, optimisticCatalogPages]);
+  const pinnedSessions = useMemo(() => {
+    const byId = new Map<string, DaemonSessionSummary>();
+    const addCandidate = (
+      session: DaemonSessionSummary,
+      options: { requirePinned: boolean },
+    ): void => {
+      if (!matchesSessionSource(session, selectedSessionSource)) return;
+      // Rows fetched through the pinned filter stay unless an optimistic
+      // unpin flips them; rows merged from other pages must be pinned.
+      if (session.isPinned === false) return;
+      if (options.requirePinned && session.isPinned !== true) return;
+      byId.set(getIdentityForSession(session), session);
+    };
+    for (const rawSession of [
+      ...(includePrimaryWorkspaceSessions ? primaryPinnedSessions : []),
+      ...secondaryPinnedSessions,
+    ]) {
+      addCandidate(applyOptimisticPin(rawSession), { requirePinned: false });
+    }
+    // The all-sessions page carries optimistic pins before the pinned page
+    // refetch lands.
+    for (const rawSession of sessions) {
+      addCandidate(applyOptimisticPin(rawSession), { requirePinned: true });
+    }
+    // A row pinned from a workspace section that no loaded page carries yet
+    // renders from its optimistic snapshot so the pin still feels instant.
+    for (const [identity, entry] of optimisticPins) {
+      if (!entry.pinned || byId.has(identity)) continue;
+      addCandidate(applyOptimisticPin(entry.session), { requirePinned: true });
+    }
+    return [...byId.values()].sort(comparePinnedSectionSessions);
+  }, [
+    applyOptimisticPin,
+    getIdentityForSession,
+    includePrimaryWorkspaceSessions,
+    optimisticPins,
+    primaryPinnedSessions,
+    selectedSessionSource,
+    secondaryPinnedSessions,
+    sessions,
+  ]);
   const isCurrentSession = useCallback(
     (session: DaemonSessionSummary) =>
       currentSessionIdentity === getIdentityForSession(session),
@@ -3134,7 +3121,7 @@ export function WebShellSidebar({
           next.set(sessionIdentity, {
             ...entry,
             rpcSettled: true,
-            catalogPages: optimisticCatalogPages,
+            catalogPages: optimisticCatalogPagesRef.current,
           });
           return next;
         });

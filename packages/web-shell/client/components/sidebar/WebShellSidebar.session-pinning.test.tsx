@@ -312,14 +312,16 @@ describe('WebShellSidebar session pinning (issue #9465)', () => {
         isPinned: true,
         pinnedAt: '2026-01-02T00:00:00.000Z',
         createdAt: '2026-01-01T00:00:00.000Z',
-        updatedAt: '2026-01-01T00:00:00.000Z',
+        // pinned LAST, but with the NEWEST activity time
+        updatedAt: '2026-01-05T00:00:00.000Z',
       }),
       makeSession('older', {
         displayName: 'Older activity',
         isPinned: true,
         pinnedAt: '2026-01-01T00:00:00.000Z',
         createdAt: '2026-01-01T00:00:00.000Z',
-        updatedAt: '2026-01-05T00:00:00.000Z',
+        // pinned FIRST, but with the OLDEST activity time
+        updatedAt: '2026-01-01T00:00:00.000Z',
       }),
     ];
     pinned.data = pinned.sessions;
@@ -328,6 +330,53 @@ describe('WebShellSidebar session pinning (issue #9465)', () => {
     await flushSidebar();
 
     expect(pinnedListTitles()).toEqual(['Older activity', 'Recent activity']);
+  });
+
+  it('orders pins without a usable pinnedAt deterministically by session ID', async () => {
+    // Current daemons cannot emit a pinned row without pinnedAt, but the
+    // comparator must still be deterministic for missing/invalid values:
+    // such rows sort before timestamped pins, by sessionId — never by
+    // activity time.
+    pinned.sessions = [
+      makeSession('b-legacy', {
+        displayName: 'Legacy B',
+        isPinned: true,
+        updatedAt: '2026-02-01T00:00:00.000Z',
+      }),
+      makeSession('c-timestamped-later', {
+        displayName: 'Timestamped later',
+        isPinned: true,
+        pinnedAt: '2026-01-03T00:00:00.000Z',
+      }),
+      makeSession('a-legacy', {
+        displayName: 'Legacy A',
+        isPinned: true,
+        updatedAt: '2026-02-01T00:00:00.000Z',
+      }),
+      makeSession('d-invalid', {
+        displayName: 'Invalid pinnedAt',
+        isPinned: true,
+        pinnedAt: 'not-a-date',
+        updatedAt: '2026-02-01T00:00:00.000Z',
+      }),
+      makeSession('e-timestamped-earlier', {
+        displayName: 'Timestamped earlier',
+        isPinned: true,
+        pinnedAt: '2026-01-02T00:00:00.000Z',
+      }),
+    ];
+    pinned.data = pinned.sessions;
+
+    renderSidebar();
+    await flushSidebar();
+
+    expect(pinnedListTitles()).toEqual([
+      'Legacy A',
+      'Legacy B',
+      'Invalid pinnedAt',
+      'Timestamped earlier',
+      'Timestamped later',
+    ]);
   });
 
   it('reflects pinning immediately without waiting for the daemon RPC', async () => {
@@ -430,6 +479,33 @@ describe('WebShellSidebar session pinning (issue #9465)', () => {
     expect(sessionTitleCount('Plain session')).toBe(1);
   });
 
+  it('rolls the optimistic unpin back when the daemon RPC fails', async () => {
+    const row = makeSession('pinned-session', {
+      displayName: 'Pinned session',
+      isPinned: true,
+      pinnedAt: '2026-01-01T00:00:00.000Z',
+    });
+    pinned.sessions = [row];
+    pinned.data = pinned.sessions;
+    active.sessions = [row];
+    active.data = active.sessions;
+    workspaceActions.updateSessionOrganization.mockRejectedValue(
+      new Error('daemon unavailable'),
+    );
+    const onError = vi.fn();
+
+    renderSidebar({ onError });
+    await flushSidebar();
+    expect(pinnedListTitles()).toEqual(['Pinned session']);
+
+    act(() => click(findSessionPinButton('Pinned session')));
+    await flushSidebar();
+
+    expect(onError).toHaveBeenCalled();
+    expect(pinnedListTitles()).toEqual(['Pinned session']);
+    expect(sessionTitleCount('Pinned session')).toBe(1);
+  });
+
   it('drops an optimistic pin when the refreshed catalog contradicts it', async () => {
     active.sessions = [makeSession('plain', { displayName: 'Plain session' })];
     active.data = active.sessions;
@@ -468,6 +544,36 @@ describe('WebShellSidebar session pinning (issue #9465)', () => {
     renderSidebar();
     await flushSidebar();
     expect(pinnedListTitles()).toEqual(['Plain session']);
+  });
+
+  it('keeps an in-flight optimistic pin when unrelated catalog pages change', async () => {
+    active.sessions = [makeSession('plain', { displayName: 'Plain session' })];
+    active.data = active.sessions;
+    workspaceActions.updateSessionOrganization.mockReturnValue(
+      new Promise(() => {}),
+    );
+
+    renderSidebar();
+    await flushSidebar();
+    act(() => click(findSessionPinButton('Plain session')));
+    await flushSidebar();
+    expect(pinnedListTitles()).toEqual(['Plain session']);
+
+    // An unrelated catalog update (polling, another client) swaps page
+    // references while the pin RPC is still pending. The entry has not
+    // settled yet, so the reconciliation must not drop it.
+    active.sessions = [
+      makeSession('plain', {
+        displayName: 'Plain session',
+        updatedAt: '2026-01-02T00:00:00.000Z',
+      }),
+    ];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    expect(pinnedListTitles()).toEqual(['Plain session']);
+    expect(sessionTitleCount('Plain session')).toBe(1);
   });
 
   it('keeps one row when the authoritative pinned page lands after an optimistic pin', async () => {
