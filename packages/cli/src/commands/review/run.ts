@@ -191,6 +191,49 @@ const escapeRe = (s: string): string =>
  * Only a per-run nonce in the child's artifact names could key these
  * apart, and the bundled skill, not this command, would have to mint it.
  */
+/**
+ * The capture's own "nothing to review" verdict for this target, if it wrote
+ * one this run.
+ *
+ * Read off the plan the CLI wrote, and fenced by the run epoch the same way
+ * every other artifact here is: a plan left by an earlier run must not make
+ * this one look decided.
+ */
+function nothingToReviewFrom(
+  cls: RunTargetClass,
+  cutoffMs: number,
+): { reason: string } | null {
+  const name = `qwen-review-${planStemFor(cls)}-plan.json`;
+  const found = newestArtifactSince(
+    REVIEW_TMP_DIR,
+    new RegExp(`^${escapeRe(name)}$`),
+    cutoffMs,
+  );
+  if (!found) return null;
+  try {
+    const plan = JSON.parse(readFileSync(found.path, 'utf8')) as {
+      nothingToReview?: { reason?: unknown };
+    };
+    const reason = plan.nothingToReview?.reason;
+    return typeof reason === 'string' && reason !== '' ? { reason } : null;
+  } catch {
+    return null; // unreadable or not JSON: no claim either way
+  }
+}
+
+/** The `<target>` slot in the plan's filename, per target class. */
+function planStemFor(cls: RunTargetClass): string {
+  switch (cls.kind) {
+    case 'pr':
+      return `pr-${cls.number}`;
+    case 'file':
+      return cls.base;
+    case 'local':
+    default:
+      return 'local';
+  }
+}
+
 export function composedNameFor(cls: RunTargetClass): string {
   switch (cls.kind) {
     case 'pr':
@@ -608,7 +651,15 @@ async function runReview(args: RunReviewArgs): Promise<void> {
     newestArtifactSince(REVIEWS_DIR, reportPatternFor(targetClass), cutoffMs)
       ?.path ?? null;
 
-  const completed = composed !== null;
+  // A round the CAPTURE decided had nothing to review is complete, even
+  // though no composed verdict exists: `compose-review` is reached only from
+  // Step 6, and both stops fire in Step 1. Polling for the verdict alone
+  // reported "Review did not complete" over a round whose own output was
+  // decided — a cached second round on an unchanged tree, or a clean tree
+  // whose earlier blocker the ledger still renders as standing. The signal is
+  // a field the CLI wrote into its own plan, not a sentence the model chose.
+  const stop = nothingToReviewFrom(targetClass, cutoffMs);
+  const completed = composed !== null || stop !== null;
   const result: RunReviewResult = {
     completed,
     event: composed?.event ?? null,

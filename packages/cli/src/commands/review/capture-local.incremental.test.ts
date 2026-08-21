@@ -388,6 +388,56 @@ describe('capture-local — incremental local rounds', () => {
   });
 });
 
+describe('capture-local — the decided stops are machine-readable', () => {
+  it('marks the unchanged-since-last-round stop in the plan', () => {
+    // `compose-review` runs only in Step 6, and this stop fires in Step 1, so
+    // no composed verdict exists — and `qwen review run` polls for exactly
+    // that, reporting "Review did not complete" over a round whose own output
+    // was decided. The signal is a field the CLI wrote, not a sentence the
+    // model chose off stderr.
+    seedDirtyTree();
+    const cachePath = promoteCandidate(
+      capture({ model: 'model-a' }),
+      'model-a',
+    );
+    const second = capture({ cache: cachePath, model: 'model-a' });
+    expect(second.chunks.length).toBe(0);
+    expect(second['nothingToReview']).toEqual({
+      reason: 'unchanged-since-last-round',
+    });
+  });
+
+  it('does NOT mark a capture that SKIPPED files — it read nothing, twice over', () => {
+    // The safety half. An empty diff beside a non-empty skip list is not a
+    // clean tree: that round could not read what it skipped, owes a "Not
+    // reviewed" section, and must never reach the parent as complete —
+    // exactly the failure this command exists to end, arriving through the
+    // front door.
+    seedDirtyTree();
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'all committed');
+    // A symlink to a DIRECTORY is skipped, not reviewed.
+    mkdirSync(join(repo, 'somedir'), { recursive: true });
+    symlinkSync(join(repo, 'somedir'), join(repo, 'dirlink'));
+
+    const plan = capture();
+    expect((plan['skippedFiles'] as unknown[]).length).toBeGreaterThan(0);
+    expect(plan['nothingToReview']).toBeUndefined();
+  });
+
+  it('marks a genuinely clean tree', () => {
+    // `seedDirtyTree` commits a base and then dirties it; committing that
+    // work leaves the tree clean, which is the shape this stop is about.
+    seedDirtyTree();
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'all committed');
+
+    const plan = capture();
+    expect(plan.chunks.length).toBe(0);
+    expect(plan['nothingToReview']).toEqual({ reason: 'clean-tree' });
+  });
+});
+
 describe('capture-local — --cache takes the DIRECTORY', () => {
   it('resolves the cache from the target IT derived, not one the caller guessed', () => {
     // The name is `<target>.json`, and `target` is derived inside this

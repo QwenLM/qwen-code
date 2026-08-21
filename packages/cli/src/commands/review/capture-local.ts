@@ -373,6 +373,18 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   let diffBytes = capture.diff;
   let plan = fullPlan;
   let incremental: IncrementalBlock | undefined;
+  /**
+   * Machine-readable: this round has nothing to review, and that is a
+   * DECIDED outcome rather than a failure.
+   *
+   * Both stops used to exist only as a stderr sentence the orchestrator
+   * matched on, so the parent (`qwen review run`) could not tell them from a
+   * round that fell over: it polls for a composed verdict, finds none, and
+   * exits 1 with "Review did not complete". A user who committed without
+   * fixing a blocker gets that on every later round, over a round whose own
+   * output rendered the blocker as still standing.
+   */
+  let nothingToReview: { reason: string } | undefined;
   if (args.cache) {
     // A DIRECTORY resolves to this command's own target, because the caller
     // cannot name the file.
@@ -495,8 +507,9 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
         // path with no diff section left is still a change, and "no
         // changes" must not be claimed over it.
         stateMoved.length === 0 && stateChanged.length === 0
-          ? `No changes since the last local review round (same model, same ` +
-              `HEAD, same content) — nothing to re-review.`
+          ? ((nothingToReview = { reason: 'unchanged-since-last-round' }),
+            `No changes since the last local review round (same model, same ` +
+              `HEAD, same content) — nothing to re-review.`)
           : stateMoved.length === 0
             ? // Nothing MOVED, but the scope is not empty: a path unhashable
               // on both sides stays in it, because "could not capture it
@@ -528,6 +541,15 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     }
   }
 
+  // Decided BEFORE the report is written, because the branch that prints the
+  // clean-tree warning runs after it. Only the genuinely clean shape counts:
+  // a capture that SKIPPED files reviewed nothing AND could not read what it
+  // skipped, so that round owes a "Not reviewed" section and must never read
+  // as complete.
+  if (plan.diffLines === 0 && !incremental && capture.skipped.length === 0) {
+    nothingToReview = { reason: 'clean-tree' };
+  }
+
   const diffPath = tmpFile(target, 'diff.txt');
   // Write the bytes, not the string: a re-encode would rewrite the content of
   // every hunk touching a file git handed us in a non-UTF-8 encoding.
@@ -552,6 +574,7 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     untrackedFiles: capture.untracked,
     skippedFiles: capture.skipped,
     ...(incremental ? { incremental } : {}),
+    ...(nothingToReview ? { nothingToReview } : {}),
     cacheCandidatePath,
     ...planEffortField(args.effort),
   };
