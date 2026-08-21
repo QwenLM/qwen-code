@@ -859,6 +859,41 @@ describe('useProviderSetupFlow model discovery', () => {
     expect(ids).toContain('my-dep');
   });
 
+  it('uses the live caret when discovery resolves after a pure cursor move', async () => {
+    let resolveLookup!: (value: ModelDiscoveryResult) => void;
+    fetchProviderModelIdsMock.mockReturnValueOnce(
+      new Promise<ModelDiscoveryResult>((resolve) => {
+        resolveLookup = resolve;
+      }),
+    );
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+    await advanceToModelStep(result);
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('loading'),
+    );
+    act(() =>
+      result.current.changeModelIds(
+        `${result.current.state.modelIds}, my-dep`,
+        {
+          customModelIds: [RETIRED_ID, 'my-dep'],
+          activeCustomModelId: RETIRED_ID,
+        },
+      ),
+    );
+    act(() => result.current.changeActiveCustomModelId('my-dep'));
+
+    await act(async () => {
+      resolveLookup(discovered(SERVED_IDS));
+    });
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
+    const ids = normalizeModelIds(result.current.state.modelIds);
+    expect(ids).not.toContain(RETIRED_ID);
+    expect(ids).toContain('my-dep');
+  });
+
   it('banks an in-flight recommendation removal without banking typed prefixes', async () => {
     let resolveLookup!: (value: ModelDiscoveryResult) => void;
     fetchProviderModelIdsMock
@@ -968,6 +1003,38 @@ describe('useProviderSetupFlow model discovery', () => {
     expect(normalizeModelIds(result.current.state.modelIds)).toContain(
       'x-preview',
     );
+  });
+
+  it('does not endorse an injected fallback passed through as a prefix', async () => {
+    fetchProviderModelIdsMock.mockResolvedValueOnce(discovered(['x-preview']));
+    fetchProviderModelIdsMock.mockResolvedValueOnce(
+      discovered(['region-b-live']),
+    );
+
+    const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+    await advanceToModelStep(result);
+    await waitFor(() =>
+      expect(result.current.state.modelIds).toBe('x-preview'),
+    );
+
+    const typed = 'x-preview-internal';
+    for (let at = 1; at <= typed.length; at += 1) {
+      const customModelId = typed.slice(0, at);
+      act(() =>
+        result.current.changeModelIds(
+          [...new Set([customModelId, 'x-preview'])].join(', '),
+          { customModelIds: [customModelId] },
+        ),
+      );
+    }
+
+    await reenterModelStep(result, 'sk-sp-second-key');
+    await waitFor(() =>
+      expect(result.current.state.discoveryStatus).toBe('success'),
+    );
+    const ids = normalizeModelIds(result.current.state.modelIds);
+    expect(ids).toContain(typed);
+    expect(ids).not.toContain('x-preview');
   });
 
   it('still records an id the user removes before leaving the step', async () => {

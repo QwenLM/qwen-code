@@ -444,9 +444,11 @@ export function remapCaretAcrossResplit(
     const occurrence = previous
       .slice(0, i + 1)
       .filter((segment) => segment.text === previous[i].text).length;
-    const match = next.filter((segment) => segment.text === previous[i].text)[
-      occurrence - 1
-    ];
+    const matches = next.filter((segment) => segment.text === previous[i].text);
+    const match =
+      i === index && occurrence > matches.length && matches.length > 0
+        ? matches[matches.length - 1]
+        : matches[occurrence - 1];
     if (!match) {
       continue;
     }
@@ -591,9 +593,15 @@ function ModelIdsStep({
     () => cpLen(customModelIdsText),
   );
   const modelIdsCaretRef = useRef(modelIdsInputCursorOffset);
-  const handleModelIdsCursorChange = useCallback((offset: number) => {
-    modelIdsCaretRef.current = offset;
-  }, []);
+  const handleModelIdsCursorChange = useCallback(
+    (offset: number) => {
+      modelIdsCaretRef.current = offset;
+      flow.changeActiveCustomModelId(
+        modelIdAtCaret(customModelIdsText, offset),
+      );
+    },
+    [customModelIdsText, flow],
+  );
   if (derivedModelsRevision !== recommendedModelsRevision) {
     setDerivedModelsRevision(recommendedModelsRevision);
     const caret =
@@ -726,6 +734,9 @@ function ModelIdsStep({
       }
 
       if (key.name === 'tab') {
+        flow.changeActiveCustomModelId(
+          modelIdAtCaret(customModelIdsText, modelIdsCaretRef.current),
+        );
         setFocusedModelIndex(MODEL_CUSTOM_INPUT_FOCUS_INDEX);
         return;
       }
@@ -782,9 +793,11 @@ function ModelIdsStep({
             onChange={handleCustomModelIdsChange}
             onSubmit={handleSubmitModelIds}
             onDown={() => {
+              flow.changeActiveCustomModelId(undefined);
               setFocusedModelIndex(MODEL_SEARCH_INPUT_FOCUS_INDEX);
             }}
             onTab={() => {
+              flow.changeActiveCustomModelId(undefined);
               setFocusedModelIndex(MODEL_SEARCH_INPUT_FOCUS_INDEX);
             }}
             placeholder="model-id"
@@ -812,7 +825,12 @@ function ModelIdsStep({
             value={modelSearchQuery}
             onChange={setModelSearchQuery}
             onSubmit={handleSubmitModelIds}
-            onUp={() => setFocusedModelIndex(MODEL_CUSTOM_INPUT_FOCUS_INDEX)}
+            onUp={() => {
+              flow.changeActiveCustomModelId(
+                modelIdAtCaret(customModelIdsText, modelIdsCaretRef.current),
+              );
+              setFocusedModelIndex(MODEL_CUSTOM_INPUT_FOCUS_INDEX);
+            }}
             onDown={() => {
               if (filteredModelOptions.length > 0) {
                 setFocusedModelIndex(0);

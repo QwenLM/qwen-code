@@ -120,6 +120,7 @@ describe('ProviderSetupSteps', () => {
       changeApiKey: noop,
       submitApiKey: noop,
       changeModelIds: noop,
+      changeActiveCustomModelId: noop,
       submitModelIds: noop,
       moveAdvancedFocusUp: vi.fn(),
       moveAdvancedFocusDown: vi.fn(),
@@ -133,10 +134,12 @@ describe('ProviderSetupSteps', () => {
   const createModelIdsFlow = ({
     modelIds = 'MiniMax-M3, MiniMax-M2.7',
     changeModelIds = vi.fn(),
+    changeActiveCustomModelId = vi.fn(),
     submitModelIds = vi.fn(),
   }: {
     modelIds?: string;
     changeModelIds?: ReturnType<typeof vi.fn>;
+    changeActiveCustomModelId?: ReturnType<typeof vi.fn>;
     submitModelIds?: ReturnType<typeof vi.fn>;
   } = {}): ProviderSetupFlow => {
     const noop = vi.fn();
@@ -194,6 +197,7 @@ describe('ProviderSetupSteps', () => {
       changeApiKey: noop,
       submitApiKey: noop,
       changeModelIds,
+      changeActiveCustomModelId,
       submitModelIds,
       moveAdvancedFocusUp: noop,
       moveAdvancedFocusDown: noop,
@@ -255,6 +259,7 @@ describe('ProviderSetupSteps', () => {
       changeApiKey: noop,
       submitApiKey: noop,
       changeModelIds: noop,
+      changeActiveCustomModelId: noop,
       submitModelIds,
       moveAdvancedFocusUp: noop,
       moveAdvancedFocusDown: noop,
@@ -1081,6 +1086,30 @@ describe('ProviderSetupSteps', () => {
     unmount();
   });
 
+  it('reports pure caret moves and leaving the custom input', async () => {
+    const changeActiveCustomModelId = vi.fn();
+    const flow = createModelIdsFlow({
+      modelIds: 'alpha,beta',
+      changeActiveCustomModelId,
+    });
+
+    const { unmount } = renderWithProviders(<ProviderSetupSteps flow={flow} />);
+    expect(changeActiveCustomModelId).toHaveBeenLastCalledWith('beta');
+
+    for (let offset = 0; offset < 6; offset += 1) {
+      await act(async () => {
+        pressLatestKey('left');
+      });
+    }
+    expect(changeActiveCustomModelId).toHaveBeenLastCalledWith('alpha');
+
+    await act(async () => {
+      pressLatestKey('down');
+    });
+    expect(changeActiveCustomModelId).toHaveBeenLastCalledWith(undefined);
+    unmount();
+  });
+
   it('does not protect a custom-input token after focus leaves the input', async () => {
     let swapFlow!: (next: ProviderSetupFlow) => void;
     function FlowHarness({ first }: { first: ProviderSetupFlow }) {
@@ -1336,6 +1365,23 @@ describe('remapCaretAcrossResplit', () => {
     expect(
       remapCaretAcrossResplit('MiniMax-M3,priv,priv', 'priv,priv', 21),
     ).toBe(9);
+  });
+
+  it('follows the surviving duplicate when an earlier copy is removed', () => {
+    expect(
+      remapCaretAcrossResplit(
+        'qwen-plus,custom,qwen-plus',
+        'custom,qwen-plus',
+        26,
+      ),
+    ).toBe(16);
+    expect(
+      remapCaretAcrossResplit(
+        'qwen-plus,custom,qwen-plus',
+        'custom,qwen-plus',
+        20,
+      ),
+    ).toBe(10);
   });
 
   it('falls in at the end of the nearest surviving segment ahead of it', () => {

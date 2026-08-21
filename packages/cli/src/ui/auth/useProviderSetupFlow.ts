@@ -185,6 +185,7 @@ export function useProviderSetupFlow(
   const liveModelIdsRef = useRef('');
   const modelIdsEditInProgressRef = useRef(false);
   const activeCustomModelIdRef = useRef<string | undefined>(undefined);
+  const customModelIdsRef = useRef<string[]>([]);
   // The id `applyDiscoveredModels` checked on the user's behalf when the prune
   // emptied the selection. It is the wizard's pick, so it is stripped back out
   // of any edit before that edit becomes the authored baseline.
@@ -195,32 +196,21 @@ export function useProviderSetupFlow(
     liveModelIdsRef.current = value;
     modelIdsEditInProgressRef.current = false;
     activeCustomModelIdRef.current = undefined;
+    customModelIdsRef.current = [];
     setModelIds(value);
   }, []);
 
   /** Move the on-screen selection without moving the authorship reference. */
   const editModelIds = useCallback(
     (value: string, context?: ModelIdsEditContext) => {
-      // R12-2: the moment the wizard's fallback pick leaves the buffer, the user
-      // has answered for it and it stops being an untouched suggestion. Holding
-      // the marker past that point makes `recordAuthoredModelIds` blind to
-      // provenance: it strips the id from BOTH halves of the next delta, so a
-      // user who unchecks it and checks it again produces an empty delta and the
-      // re-endorsed model never reaches the baseline — the next pair change
-      // silently drops it. The removal is only ever visible between keystrokes
-      // (by the next commit the id is back), so the marker has to be released
-      // here rather than at the commit.
+      // Keep the injected-id marker until an edit is committed: a longer id can
+      // pass through the injected id as a transient prefix. The custom tokens
+      // at commit distinguish that from a genuine retype. An actual removal is
+      // still decisive immediately so unchecking and rechecking can endorse it.
       const customModelIds = context?.customModelIds ?? [];
+      customModelIdsRef.current = customModelIds;
       const injected = injectedModelIdRef.current;
-      if (injected !== null && customModelIds.includes(injected)) {
-        const authored = normalizeModelIds(authoredModelIdsRef.current);
-        if (!authored.includes(injected)) authored.push(injected);
-        authoredModelIdsRef.current = authored.join(', ');
-        injectedModelIdRef.current = null;
-      } else if (
-        injected !== null &&
-        !normalizeModelIds(value).includes(injected)
-      ) {
+      if (injected !== null && !normalizeModelIds(value).includes(injected)) {
         injectedModelIdRef.current = null;
       }
       const removed = context?.removedRecommendationId;
@@ -265,8 +255,12 @@ export function useProviderSetupFlow(
   const recordAuthoredModelIds = useCallback((value?: string) => {
     const committed = value ?? liveModelIdsRef.current;
     const injected = injectedModelIdRef.current;
+    const injectedWasAuthored =
+      injected !== null && customModelIdsRef.current.includes(injected);
     const strip = (ids: string[]) =>
-      injected === null ? ids : ids.filter((id) => id !== injected);
+      injected === null || injectedWasAuthored
+        ? ids
+        : ids.filter((id) => id !== injected);
     const before = strip(normalizeModelIds(displayedModelIdsRef.current));
     const after = strip(normalizeModelIds(committed));
     const removed = new Set(before.filter((id) => !after.includes(id)));
@@ -704,6 +698,10 @@ export function useProviderSetupFlow(
     [editModelIds],
   );
 
+  const changeActiveCustomModelId = useCallback((value?: string) => {
+    activeCustomModelIdRef.current = value;
+  }, []);
+
   const submitModelIds = useCallback(
     (overrides?: Partial<ProviderSetupInputs>): boolean => {
       const normalized = overrides?.modelIds ?? normalizeModelIds(modelIds);
@@ -909,6 +907,7 @@ export function useProviderSetupFlow(
     changeApiKey,
     submitApiKey,
     changeModelIds,
+    changeActiveCustomModelId,
     submitModelIds,
     moveAdvancedFocusUp,
     moveAdvancedFocusDown,
