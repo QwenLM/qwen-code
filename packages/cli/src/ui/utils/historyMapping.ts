@@ -9,6 +9,7 @@ import type { Content } from '@google/genai';
 import {
   CompressionStatus,
   findApiHistoryPromptIndex,
+  getApiHistoryPromptId,
   getApiHistoryPromptIndexes,
   getStartupContextLength,
   isClearedMediaPlaceholder,
@@ -161,16 +162,31 @@ export function computeApiTruncationIndex(
       apiHistory,
       target.promptId,
     );
-    // Fail closed only when the API history actually carries identities.
-    // /restore installs a checkpoint round-tripped through JSON.stringify,
-    // which drops the symbol-keyed identity from clientHistory while the
-    // persisted UI items keep their string promptId — the target textually
-    // exists in API history, so the positional fallback below is still
-    // sound and must run instead of aborting the rewind with -1.
-    const historyCarriesIdentities =
-      (getApiHistoryPromptIndexes(apiHistory) ?? []).length > 0;
-    if (identifiedIndex !== -1 || historyCarriesIdentities) {
+    if (identifiedIndex !== -1) {
       return identifiedIndex;
+    }
+    // Fail closed only when EVERY user prompt the positional walk counts
+    // carries a stable identity. /restore installs a checkpoint
+    // round-tripped through JSON.stringify, which drops the symbol-keyed
+    // identity from clientHistory while the persisted UI items keep their
+    // string promptId; the next prompt then marks only the NEW entry. For a
+    // restored target the marker is lost in the round-trip, but the target
+    // textually exists in API history, so while any identity-less user
+    // prompt remains the positional fallback below is still sound and must
+    // run instead of aborting the rewind with -1. Mirrors the
+    // partial-coverage rule of the ACP session twin
+    // (#getRewindTurnProjection in acp-integration/session/Session.ts);
+    // the TUI twin's isUserTextContent already excludes placeholder-only
+    // and reminder entries from the count, so no extra exception is needed
+    // here.
+    const historyFullyIdentified =
+      (getApiHistoryPromptIndexes(apiHistory) ?? []).length > 0 &&
+      apiHistory.every(
+        (content) =>
+          !isUserTextContent(content) || !!getApiHistoryPromptId(content),
+      );
+    if (historyFullyIdentified) {
+      return -1;
     }
   }
 

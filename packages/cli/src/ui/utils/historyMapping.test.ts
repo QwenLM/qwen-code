@@ -904,6 +904,40 @@ describe('computeApiTruncationIndex', () => {
 
       expect(computeApiTruncationIndex(ui, 3, api)).toBe(2);
     });
+
+    it('keeps restored turns rewindable after a new identified prompt lands (partial coverage)', () => {
+      // /restore round-trips the checkpoint through JSON.stringify, which
+      // strips the symbol-keyed identities from clientHistory while the UI
+      // items keep their string promptId. Sending ANY new prompt afterwards
+      // marks only the new entry, leaving the history PARTIALLY identified.
+      // The gate must not treat that as fully identified: the restored
+      // targets textually exist, so positional rewind must run instead of
+      // aborting with -1 (mirrors the session twin's partial-coverage
+      // fallback).
+      const ui: HistoryItem[] = [
+        userItem(1, 'restored one', true, 'prompt-id-1'),
+        geminiItem(2),
+        userItem(3, 'restored two', true, 'prompt-id-2'),
+        geminiItem(4),
+        userItem(5, 'new prompt', true, 'prompt-id-new'),
+        geminiItem(6),
+      ];
+      const api: Content[] = [
+        userContent('restored one'),
+        modelContent('response 1'),
+        userContent('restored two'),
+        modelContent('response 2'),
+        userContent('new prompt'),
+        modelContent('response 3'),
+      ];
+      markApiHistoryPrompt(api[4]!, 'prompt-id-new');
+
+      // Rewinding to a restored (identity-less) turn resolves positionally.
+      expect(computeApiTruncationIndex(ui, 3, api)).toBe(2);
+      expect(computeApiTruncationIndex(ui, 1, api)).toBe(0);
+      // The new identified turn still resolves by identity.
+      expect(computeApiTruncationIndex(ui, 5, api)).toBe(4);
+    });
   });
 });
 
