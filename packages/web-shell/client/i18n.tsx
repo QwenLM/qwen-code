@@ -3166,6 +3166,7 @@ const ZH: Messages = {
   'toolName.update_goal': '更新目标',
   'toolName.save_memory': '保存记忆',
   'toolName.agent': 'Agent',
+  'toolName.advisor': '审查模型',
   'toolName.skill': '查看技能',
   'toolName.enter_plan_mode': '进入计划模式',
   'toolName.exit_plan_mode': '退出计划模式',
