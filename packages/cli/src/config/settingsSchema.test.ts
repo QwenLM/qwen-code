@@ -31,7 +31,11 @@ describe('SettingsSchema', () => {
           'hooks'
         ]?.items?.properties;
 
-      expect(hookProperties?.['type']?.enum).toContain('prompt');
+      expect(hookProperties?.['type']?.enum).toEqual([
+        'command',
+        'http',
+        'prompt',
+      ]);
       expect(hookProperties?.['prompt']).toMatchObject({ type: 'string' });
       expect(hookProperties?.['model']).toMatchObject({ type: 'string' });
     });
