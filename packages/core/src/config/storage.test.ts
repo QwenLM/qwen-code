@@ -755,7 +755,15 @@ describe('Storage – cleanOrphanProjectDirs', () => {
     return Storage.cleanOrphanProjectDirs('current', onBeforeRemove);
   };
 
+  // The env var beats setRuntimeBaseDir() in getRuntimeBaseDir():
+  // leaving an ambient QWEN_RUNTIME_DIR exported would aim every
+  // deletion-capable sweep at the user's real runtime tree instead of
+  // the fixture — the same isolation every other runtime-dir suite in
+  // this file applies.
+  const originalRuntimeEnv = process.env['QWEN_RUNTIME_DIR'];
+
   beforeEach(() => {
+    delete process.env['QWEN_RUNTIME_DIR'];
     // Pin the temp root: the merge-queue legs put the ambient temp root
     // outside the allowlist (POSIX exports TMPDIR=$RUNNER_TEMP; the
     // Windows runner action overrides TEMP/TMP the same way), which would
@@ -783,6 +791,11 @@ describe('Storage – cleanOrphanProjectDirs', () => {
   afterEach(() => {
     tmpdirSpy?.mockRestore();
     Storage.setRuntimeBaseDir(null);
+    if (originalRuntimeEnv !== undefined) {
+      process.env['QWEN_RUNTIME_DIR'] = originalRuntimeEnv;
+    } else {
+      delete process.env['QWEN_RUNTIME_DIR'];
+    }
     actualFs.rmSync(baseDir, { recursive: true, force: true });
     actualFs.rmSync(aliveCwd, { recursive: true, force: true });
   });
@@ -1230,6 +1243,21 @@ describe('Storage – cleanOrphanProjectDirs', () => {
         '',
       );
       expect(Storage.containsOnlySessionArtifacts(dir, 'worker-1')).toBe(false);
+    });
+
+    it('treats the sweep orphan marker as bookkeeping, not foreign content (R13-3)', () => {
+      // Another session's sweep can mark a live session's entry; the
+      // shutdown leg must still pass this guard on exit. The marker is
+      // the sweep's own intermediate state — newestFileMtimeMs and
+      // countFiles skip it, so must this walker.
+      const dir = actualFs.mkdtempSync(path.join(projectsDir, 'marked-'));
+      actualFs.mkdirSync(path.join(dir, 'chats'));
+      actualFs.writeFileSync(path.join(dir, 'chats', 'sess-1.jsonl'), '');
+      actualFs.writeFileSync(
+        path.join(dir, '.qwen-orphan-since'),
+        String(Date.now()),
+      );
+      expect(Storage.containsOnlySessionArtifacts(dir, 'sess-1')).toBe(true);
     });
   });
 

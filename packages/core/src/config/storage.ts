@@ -949,6 +949,11 @@ export class Storage {
       return true;
     }
     for (const entry of topEntries) {
+      // The sweep's own orphan marker is bookkeeping, not foreign
+      // content — newestFileMtimeMs and countFiles skip it too. A
+      // marked entry must still pass this guard or the shutdown leg
+      // bails on exactly the entries another session's sweep touched.
+      if (entry.name === Storage.ORPHAN_MARKER_FILE) continue;
       if (entry.name !== 'chats' || !entry.isDirectory()) return false;
     }
     let files: string[];

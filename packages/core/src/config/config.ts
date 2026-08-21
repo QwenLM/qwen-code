@@ -5493,6 +5493,19 @@ export class Config {
       // same daemon-mode leak rationale as the project dir above.
       unregisterSessionModel(this.sessionId);
 
+      // Release the runtime sidecar claimed at session establishment:
+      // this Config stopped serving the session even though the process
+      // may keep living. In multi-session processes (the `qwen serve`
+      // ACP child) the pid stays alive for the next sessions, and the
+      // sweep's windowless pid re-check would otherwise protect this
+      // closed session's entry forever. A handoff keeps the sidecar:
+      // the successor resumes from this very entry.
+      if (this.runtimeStatusEnabled && !this.sessionWriterHandoffRequested) {
+        await clearRuntimeStatus(
+          this.storage.getRuntimeStatusPath(this.sessionId),
+        );
+      }
+
       if (Object.hasOwn(this, 'goalRuntime')) {
         this.rejectGoalRestoreActivation?.(
           new GoalPersistenceUnavailableError('Goal runtime disposed'),

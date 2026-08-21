@@ -1705,6 +1705,46 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('shutdown() runtime sidecar release', () => {
+    it('clears the sidecar so a closed session stops claiming a live pid', async () => {
+      // In multi-session processes (the `qwen serve` ACP child) the pid
+      // outlives the session; a leftover sidecar would shield the closed
+      // session's entry from the sweep forever.
+      const config = new Config(baseParams);
+      config.markRuntimeStatusEnabled(); // models the successful claim
+      const clearSpy = vi
+        .spyOn(runtimeStatus, 'clearRuntimeStatus')
+        .mockResolvedValue(undefined);
+
+      await config.shutdown();
+
+      expect(clearSpy).toHaveBeenCalledWith(
+        config.storage.getRuntimeStatusPath(config.getSessionId()),
+      );
+
+      clearSpy.mockRestore();
+    });
+
+    it('keeps the sidecar when a session-writer handoff was requested', async () => {
+      // The successor resumes from this very entry; its own claim lands
+      // at its initializeOnce.
+      const config = new Config(baseParams);
+      config.markRuntimeStatusEnabled();
+      (
+        config as unknown as { sessionWriterHandoffRequested: boolean }
+      ).sessionWriterHandoffRequested = true;
+      const clearSpy = vi
+        .spyOn(runtimeStatus, 'clearRuntimeStatus')
+        .mockResolvedValue(undefined);
+
+      await config.shutdown();
+
+      expect(clearSpy).not.toHaveBeenCalled();
+
+      clearSpy.mockRestore();
+    });
+  });
+
   describe('MCP hot-reload (sub-task 3)', () => {
     const srvA: MCPServerConfig = { command: 'a' };
     const srvB: MCPServerConfig = { command: 'b' };
