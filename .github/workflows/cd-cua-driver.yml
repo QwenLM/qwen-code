@@ -17,6 +17,8 @@ name: 'CD: Qwen CUA Driver'
 #            QwenCuaDriver.app) + *-binary.tar.gz (runtime + SDK payload)
 #   Linux  : cua-driver-rs-<v>-linux-{x86_64,arm64}.tar.gz + *-binary.tar.gz
 #   Windows: cua-driver-rs-<v>-windows-{x86_64,arm64}.zip + *-binary.zip
+#   npm    : one platform-neutral @qwen-code/cua-sdk package. Its postinstall
+#            downloads and verifies the matching *-binary archive above.
 on:
   push:
     tags: ['cua-driver-rs-v*']
@@ -35,8 +37,8 @@ on:
         default: true
       dry_run:
         description:
-          'Build + package only; do NOT create/update a GitHub Release.
-          Leave on (with notarize=false) to rehearse the build pipeline.'
+          'Build all release assets and clean-install the npm package without
+          creating a GitHub Release, npm version, tag, or installer sync PR.'
         required: false
         type: 'boolean'
         default: true
@@ -46,11 +48,17 @@ jobs:
   validate-version:
     name: 'validate-release-version'
     runs-on: 'ubuntu-latest'
+    outputs:
+      version: '${{ steps.release.outputs.version }}'
     steps:
       - uses: 'actions/checkout@v4'
+        with:
+          fetch-depth: 0
       - name: 'Validate release version'
+        id: 'release'
         shell: 'bash'
         run: |
+          set -euo pipefail
           if [[ "$GITHUB_REF" == refs/tags/cua-driver-rs-v* ]]; then
             VERSION="${GITHUB_REF#refs/tags/cua-driver-rs-v}"
           else
@@ -62,6 +70,30 @@ jobs:
             echo "::error::Release version $VERSION does not match Cargo version $CARGO_VERSION"
             exit 1
           fi
+
+          SDK_NAME=$(node -p "require('./packages/cua-driver/typescript/package.json').name")
+          SDK_VERSION=$(node -p "require('./packages/cua-driver/typescript/package.json').version")
+          if [[ "$SDK_NAME" != "@qwen-code/cua-sdk" ]]; then
+            echo "::error::Expected @qwen-code/cua-sdk, found $SDK_NAME"
+            exit 1
+          fi
+          if [[ "$SDK_VERSION" != "$VERSION" ]]; then
+            echo "::error::SDK version $SDK_VERSION does not match release version $VERSION"
+            exit 1
+          fi
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.dry_run }}" != "true" && "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "::error::A production dispatch must run from protected main"
+            exit 1
+          fi
+          if [[ "$GITHUB_REF" == refs/tags/cua-driver-rs-v* ]]; then
+            git fetch origin main
+            if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+              echo "::error::Release tag must point to a commit reachable from main"
+              exit 1
+            fi
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
       - uses: 'dtolnay/rust-toolchain@stable'
       - name: 'Test model payload filtering'
         working-directory: 'packages/cua-driver/rust'
@@ -476,6 +508,72 @@ jobs:
             esac
           done
 
+  verify-sdk-package:
+    name: 'single npm package dry-run'
+    needs: ['validate-version', 'build-linux', 'verify-release-artifacts']
+    runs-on: 'ubuntu-latest'
+    permissions:
+      contents: 'read'
+    steps:
+      - uses: 'actions/checkout@v4'
+      - uses: 'actions/setup-node@v4'
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: 'packages/cua-driver/typescript/package-lock.json'
+          registry-url: 'https://registry.npmjs.org'
+          scope: '@qwen-code'
+      - name: 'Install npm 11'
+        run: 'npm install --global npm@11.19.0'
+      - uses: 'actions/download-artifact@v4'
+        with:
+          name: 'cua-driver-rs-linux-x86_64'
+          path: '${{ runner.temp }}/cua-driver-linux'
+      - name: 'Extract verified native payload'
+        id: 'native'
+        shell: 'bash'
+        run: |
+          set -euo pipefail
+          ARCHIVE=$(find "${RUNNER_TEMP}/cua-driver-linux" -type f -name '*-binary.tar.gz' -print -quit)
+          if [[ -z "$ARCHIVE" ]]; then
+            echo '::error::Linux x86_64 binary archive is missing'
+            exit 1
+          fi
+          NATIVE_DIR="${RUNNER_TEMP}/cua-sdk-native"
+          RELEASE_DIR="${RUNNER_TEMP}/cua-sdk-release-fixture"
+          mkdir -p "$NATIVE_DIR"
+          mkdir -p "$RELEASE_DIR"
+          tar -xzf "$ARCHIVE" -C "$NATIVE_DIR"
+          test -f "$NATIVE_DIR/libcua_driver_sdk.so"
+          test -f "$NATIVE_DIR/cua_driver_node_runtime.node"
+          cp "$ARCHIVE" "$RELEASE_DIR/"
+          (cd "$RELEASE_DIR" && sha256sum "$(basename "$ARCHIVE")" > checksums.txt)
+          echo "directory=$NATIVE_DIR" >> "$GITHUB_OUTPUT"
+          echo "release_directory=$RELEASE_DIR" >> "$GITHUB_OUTPUT"
+      - name: 'Install SDK dependencies'
+        working-directory: 'packages/cua-driver/typescript'
+        run: 'npm ci --ignore-scripts --no-audit --no-fund'
+      - name: 'Test SDK and native loader'
+        working-directory: 'packages/cua-driver/typescript'
+        env:
+          CUA_DRIVER_REQUIRE_UNIFFI: '1'
+          QWEN_CUA_SDK_NATIVE_DIR: '${{ steps.native.outputs.directory }}'
+        run: 'npm test'
+      - name: 'Pack, publish-dry-run, and clean-install one SDK tarball'
+        env:
+          QWEN_CUA_SDK_NATIVE_DIR: '${{ steps.native.outputs.directory }}'
+        run: |
+          node packages/cua-driver/scripts/verify-cua-sdk-package.mjs \
+            --native-dir "${QWEN_CUA_SDK_NATIVE_DIR}" \
+            --release-dir "${{ steps.native.outputs.release_directory }}" \
+            --output-dir "${RUNNER_TEMP}/cua-sdk-package"
+      - uses: 'actions/upload-artifact@v4'
+        with:
+          name: 'cua-sdk-npm-${{ needs.validate-version.outputs.version }}'
+          path: '${{ runner.temp }}/cua-sdk-package/*.tgz'
+          if-no-files-found: 'error'
+          retention-days: 7
+
   # ── Release ──────────────────────────────────────────────────────────────
   release:
     name: 'Create GitHub Release'
@@ -485,6 +583,7 @@ jobs:
         'build-windows',
         'build-macos',
         'verify-release-artifacts',
+        'verify-sdk-package',
       ]
     runs-on: 'ubuntu-latest'
     outputs:
@@ -497,6 +596,7 @@ jobs:
       - uses: 'actions/download-artifact@v4'
         with:
           path: 'release-upload'
+          pattern: 'cua-driver-rs-*'
           merge-multiple: true
       - name: 'Determine version + tag'
         id: 'version'
@@ -524,8 +624,54 @@ jobs:
           mkdir -p "$SKILLS_STAGE"
           cp -R packages/cua-driver/rust/Skills/cua-driver/. "$SKILLS_STAGE/"
           tar -czf "release-upload/${SKILLS_STAGE}.tar.gz" "$SKILLS_STAGE"
-          (cd release-upload && sha256sum cua-driver-rs-*.tar.gz cua-driver-rs-*.zip > checksums.txt)
+          (
+            cd release-upload
+            : > checksums.txt
+            for file in *; do
+              [[ -f "$file" && "$file" != checksums.txt ]] || continue
+              sha256sum "$file" >> checksums.txt
+            done
+          )
+      - name: 'Refuse to replace an existing release'
+        id: 'release-state'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          TAG: '${{ steps.version.outputs.tag }}'
+        shell: 'bash'
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            echo 'exists=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git fetch origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          TAG_COMMIT=$(git rev-list -n 1 "$TAG")
+          if [[ "$TAG_COMMIT" != "$GITHUB_SHA" ]]; then
+            echo "::error::Existing $TAG points to $TAG_COMMIT, not $GITHUB_SHA"
+            exit 1
+          fi
+
+          EXISTING=$(mktemp -d)
+          trap 'rm -rf "$EXISTING"' EXIT
+          gh release download "$TAG" --dir "$EXISTING"
+          find release-upload -maxdepth 1 -type f -exec basename {} \; | sort > "$EXISTING/expected-assets.txt"
+          gh release view "$TAG" --json assets --jq '.assets[].name' | sort > "$EXISTING/actual-assets.txt"
+          if ! diff -u "$EXISTING/expected-assets.txt" "$EXISTING/actual-assets.txt"; then
+            echo "::error::Existing $TAG asset set is incomplete or unexpected"
+            exit 1
+          fi
+          grep -v '^checksums.txt$' "$EXISTING/expected-assets.txt" > "$EXISTING/expected-checksums.txt"
+          sed -nE 's/^[0-9a-f]{64} [ *](.+)$/\1/p' "$EXISTING/checksums.txt" | sort > "$EXISTING/actual-checksums.txt"
+          if ! diff -u "$EXISTING/expected-checksums.txt" "$EXISTING/actual-checksums.txt"; then
+            echo "::error::Existing $TAG checksum manifest is incomplete or unexpected"
+            exit 1
+          fi
+          (cd "$EXISTING" && sha256sum --check checksums.txt)
+          echo "Existing $TAG is complete and checksum-valid; reusing it without replacement"
+          echo 'exists=true' >> "$GITHUB_OUTPUT"
       - name: 'Create GitHub Release'
+        if: "steps.release-state.outputs.exists != 'true'"
         uses: 'softprops/action-gh-release@v2'
         with:
           tag_name: '${{ steps.version.outputs.tag }}'
@@ -541,6 +687,9 @@ jobs:
             - **macOS**: codesigned + notarized universal binary + `QwenCuaDriver.app`
             - **Linux**: unsigned (x86_64 + arm64, glibc 2.31 floor)
             - **Windows**: unsigned (x86_64 + arm64)
+            - **Node.js**: the same workflow publishes the single
+              `@qwen-code/cua-sdk` npm package after a clean install against
+              these release assets
 
             Enable relative coordinates: `CUA_DRIVER_RS_COORDINATE_SPACE=1`
             (default `0` = off; optional `CUA_DRIVER_RS_COORDINATE_SCALE=1000`).
@@ -548,9 +697,129 @@ jobs:
             Enable textual MCP payload filtering for affected model API routes:
             `MCP_MODEL_PAYLOAD_FILTER=1` (default off).
 
+  publish-sdk:
+    name: 'Publish @qwen-code/cua-sdk'
+    needs: ['validate-version', 'verify-sdk-package', 'release']
+    if:
+      "startsWith(github.ref, 'refs/tags/cua-driver-rs-v') || (github.event_name
+      == 'workflow_dispatch' && inputs.dry_run == false)"
+    runs-on: 'ubuntu-latest'
+    environment:
+      name: 'production-release'
+      url: 'https://www.npmjs.com/package/@qwen-code/cua-sdk/v/${{ needs.validate-version.outputs.version }}'
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+    steps:
+      - uses: 'actions/setup-node@v4'
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+          scope: '@qwen-code'
+      - name: 'Install npm 11'
+        run: 'npm install --global npm@11.19.0'
+      - uses: 'actions/download-artifact@v4'
+        with:
+          name: 'cua-sdk-npm-${{ needs.validate-version.outputs.version }}'
+          path: '${{ runner.temp }}/cua-sdk-package'
+      - name: 'Require npm publishing token'
+        env:
+          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
+        run: |
+          if [[ -z "$NODE_AUTH_TOKEN" ]]; then
+            echo '::error::production-release NPM_TOKEN is required for the first @qwen-code/cua-sdk publication'
+            exit 1
+          fi
+      - name: 'Clean-install against the published GitHub Release'
+        env:
+          QWEN_CUA_SDK_CACHE_DIR: '${{ runner.temp }}/public-release-cache'
+          VERSION: '${{ needs.validate-version.outputs.version }}'
+        run: |
+          set -euo pipefail
+          TARBALL=$(find "${RUNNER_TEMP}/cua-sdk-package" -type f -name '*.tgz' -print -quit)
+          if [[ -z "$TARBALL" ]]; then
+            echo '::error::Packed @qwen-code/cua-sdk tarball is missing'
+            exit 1
+          fi
+          CHECKSUMS_URL="https://github.com/QwenLM/qwen-code/releases/download/cua-driver-rs-v${VERSION}/checksums.txt"
+          for attempt in {1..12}; do
+            if curl -fsSL --connect-timeout 15 --max-time 60 "$CHECKSUMS_URL" -o "${RUNNER_TEMP}/checksums.txt"; then
+              break
+            fi
+            if [[ "$attempt" == 12 ]]; then
+              echo '::error::Published release checksums did not become available'
+              exit 1
+            fi
+            sleep 10
+          done
+          CONSUMER=$(mktemp -d)
+          trap 'rm -rf "$CONSUMER"' EXIT
+          cd "$CONSUMER"
+          npm init --yes >/dev/null
+          npm install "$TARBALL" --no-audit --no-fund
+          node --input-type=module --eval '
+            import { CuaDriver } from "@qwen-code/cua-sdk";
+            import { ComputerUse } from "@qwen-code/cua-sdk/computer-use";
+            const driver = CuaDriver.create(undefined);
+            try {
+              const listing = JSON.parse(await driver.listToolsJson());
+              if (!Array.isArray(listing.tools) || listing.tools.length === 0) {
+                throw new Error("native SDK returned no tools");
+              }
+              if (typeof ComputerUse.create !== "function") {
+                throw new Error("ComputerUse entrypoint is unavailable");
+              }
+              console.log(JSON.stringify({ toolCount: listing.tools.length }));
+            } finally {
+              await driver.shutdown();
+              driver.uniffiDestroy();
+            }
+          '
+      - name: 'Publish immutable SDK tarball'
+        env:
+          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
+          VERSION: '${{ needs.validate-version.outputs.version }}'
+        run: |
+          set -euo pipefail
+          TARBALL=$(find "${RUNNER_TEMP}/cua-sdk-package" -type f -name '*.tgz' -print -quit)
+          LOCAL_INTEGRITY="sha512-$(openssl dgst -sha512 -binary "$TARBALL" | openssl base64 -A)"
+          REMOTE_INTEGRITY=$(npm view "@qwen-code/cua-sdk@${VERSION}" dist.integrity 2>/dev/null || true)
+          if [[ -n "$REMOTE_INTEGRITY" ]]; then
+            if [[ "$REMOTE_INTEGRITY" != "$LOCAL_INTEGRITY" ]]; then
+              echo "::error::@qwen-code/cua-sdk@${VERSION} already exists with different integrity"
+              exit 1
+            fi
+            echo "@qwen-code/cua-sdk@${VERSION} already contains this exact tarball"
+            exit 0
+          fi
+          NPM_TAG=latest
+          [[ "$VERSION" == *-* ]] && NPM_TAG=next
+          npm publish "$TARBALL" --provenance --access public --tag "$NPM_TAG"
+      - name: 'Verify npm registry integrity'
+        env:
+          VERSION: '${{ needs.validate-version.outputs.version }}'
+        run: |
+          set -euo pipefail
+          TARBALL=$(find "${RUNNER_TEMP}/cua-sdk-package" -type f -name '*.tgz' -print -quit)
+          LOCAL_INTEGRITY="sha512-$(openssl dgst -sha512 -binary "$TARBALL" | openssl base64 -A)"
+          for attempt in {1..20}; do
+            REMOTE_INTEGRITY=$(npm view "@qwen-code/cua-sdk@${VERSION}" dist.integrity 2>/dev/null || true)
+            if [[ "$REMOTE_INTEGRITY" == "$LOCAL_INTEGRITY" ]]; then
+              echo "Verified npm registry integrity on attempt $attempt"
+              exit 0
+            fi
+            if [[ -n "$REMOTE_INTEGRITY" ]]; then
+              echo '::error::Published npm artifact integrity does not match the verified tarball'
+              exit 1
+            fi
+            sleep 10
+          done
+          echo '::error::Published npm version did not become visible'
+          exit 1
+
   sync-installer-version:
     name: 'Sync installer version to main'
-    needs: ['release']
+    needs: ['release', 'publish-sdk']
     runs-on: 'ubuntu-latest'
     permissions:
       contents: 'write'

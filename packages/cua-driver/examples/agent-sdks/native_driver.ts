@@ -8,7 +8,7 @@ import {
   GetDesktopStateInput,
   PressKeyInput,
   TypeTextInput,
-} from '@qwen-code/qwen-cua-driver';
+} from '@qwen-code/cua-sdk';
 
 const fixture = process.env.CUA_FIXTURE_URL ?? 'http://127.0.0.1:8765';
 const timeoutMs = 10_000;
