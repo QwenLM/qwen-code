@@ -74,6 +74,15 @@ describe('Core System Prompt (prompts.ts)', () => {
     );
   });
 
+  it('identifies UserPromptSubmit hook context as distinct from user input', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    const prompt = getCoreSystemPrompt();
+
+    expect(prompt).toContain(
+      'Text inside a `<qwen:user-prompt-submit-context>` tag is model context added by a configured `UserPromptSubmit` hook, not user input.',
+    );
+  });
+
   it.each([
     [
       'interactive',
@@ -811,6 +820,9 @@ describe('getPlanModeSystemReminder', () => {
       'wrappers, quoting tricks, aliases, or obfuscation',
     );
     expect(result).toContain('Pivot to read-only');
+    // list_directory is opt-in (off by default) — the reminder must not steer
+    // the model toward a tool that is not registered.
+    expect(result).not.toContain('list_directory');
     expect(result).toContain('does not approve the plan');
     expect(result).toContain('exit Plan mode');
   });

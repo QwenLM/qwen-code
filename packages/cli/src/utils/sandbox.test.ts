@@ -97,6 +97,51 @@ describe('start_sandbox', () => {
     child.emit('close', 0);
     await expect(result).resolves.toBe(0);
   });
+
+  it('checks image presence with an offline inspect that sees digest references', async () => {
+    vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
+    vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+    vi.spyOn(fs, 'realpathSync').mockImplementation((filePath) =>
+      String(filePath),
+    );
+    execSyncMock.mockReturnValue(Buffer.from(''));
+
+    const digestImage =
+      'ghcr.io/qwenlm/qwen-code@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+
+    const imageCheck = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+    });
+    const child = new EventEmitter();
+    spawnMock
+      .mockImplementationOnce(() => {
+        queueMicrotask(() => {
+          imageCheck.stdout.emit('data', Buffer.from('sha256:local'));
+          imageCheck.emit('close', 0);
+        });
+        return imageCheck;
+      })
+      .mockReturnValueOnce(child);
+
+    const result = start_sandbox({ command: 'docker', image: digestImage }, []);
+
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
+    // Digest references never appear in a `docker images -q <image>` listing
+    // even when the content is local, which forced a needless network pull
+    // (and a FatalSandboxError whenever the registry was unreachable) at
+    // every consumer startup; the presence check must be the offline
+    // `image inspect` (#9527 review).
+    expect(spawnMock.mock.calls[0]).toEqual([
+      'docker',
+      ['image', 'inspect', '--format', '{{.Id}}', digestImage],
+    ]);
+    // Content found locally: no pull is attempted — the next spawn is the
+    // sandbox run itself.
+    expect((spawnMock.mock.calls[1]?.[1] as string[])[0]).toBe('run');
+
+    child.emit('close', 0);
+    await expect(result).resolves.toBe(0);
+  });
 });
 
 describe('resolveSeatbeltProfileFile', () => {
@@ -194,6 +239,8 @@ describe('getSandboxPassthroughEnvArgs', () => {
         QWEN_CODE_SKIP_UPDATE_CHECK_ONCE: 'true',
         QWEN_CODE_CUSTOM_SANDBOX_IMAGE: 'example.com/qwen:1.0.0',
         QWEN_CODE_HOST_UPDATE_RELAUNCH: 'false',
+        QWEN_CODE_SERVE: '1',
+        QWEN_CODE_DESKTOP: '1',
       }),
     ).toEqual([
       '--env',
@@ -202,6 +249,10 @@ describe('getSandboxPassthroughEnvArgs', () => {
       'QWEN_CODE_CUSTOM_SANDBOX_IMAGE=example.com/qwen:1.0.0',
       '--env',
       'QWEN_CODE_HOST_UPDATE_RELAUNCH=false',
+      '--env',
+      'QWEN_CODE_SERVE=1',
+      '--env',
+      'QWEN_CODE_DESKTOP=1',
     ]);
   });
 });

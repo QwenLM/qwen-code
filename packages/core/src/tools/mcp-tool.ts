@@ -853,17 +853,25 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
    * keeping every other field (including the shared underlying
    * `CallableTool` / MCP transport) identical.
    *
-   * pool path: a single shared pool entry produces one
-   * `DiscoveredMCPTool` snapshot; each `SessionMcpView` clones with
-   * its own per-session trust before registering into its session's
-   * `ToolRegistry`. Without this clone, mutating `trust` on the shared
-   * instance would cross-contaminate sessions.
-   *
-   * Trust is the only field that legitimately varies per session;
-   * everything else (transport, schema, name) is transport-level.
+   * Kept as the trust-only convenience used by non-pool callers. Pooled
+   * session views use `withSessionConfig` because eager loading can differ
+   * between sessions too.
    */
   withTrust(trust: boolean | undefined): DiscoveredMCPTool {
-    if (trust === this.trust) return this;
+    return this.withSessionConfig(trust, this.alwaysLoad);
+  }
+
+  /**
+   * Return a per-session projection of metadata that does not belong to the
+   * shared MCP transport snapshot. Pool entries can be shared by sessions
+   * whose trust and eager-loading settings differ, so neither field may be
+   * mutated on the canonical tool instance.
+   */
+  withSessionConfig(
+    trust: boolean | undefined,
+    alwaysLoad: boolean,
+  ): DiscoveredMCPTool {
+    if (trust === this.trust && alwaysLoad === this.alwaysLoad) return this;
     return new DiscoveredMCPTool(
       this.mcpTool,
       this.serverName,
@@ -881,7 +889,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.mcpTimeout,
       this.mcpToolIdleTimeoutMs,
       this.annotations,
-      this.alwaysLoad,
+      alwaysLoad,
       this.allowInvocationContext,
     );
   }

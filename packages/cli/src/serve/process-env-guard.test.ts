@@ -146,7 +146,7 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     'packages/cli/src/serve/run-qwen-serve.ts',
     {
       reason:
-        'The serve entry point owns daemon bootstrap, feature flags, and child-process defaults.',
+        'The serve entry point owns daemon bootstrap, feature flags, child-process defaults, and the launch-env loader scrub.',
       accesses: {
         'computed:EXTERNAL_TOOL_GUARD_TOKEN_ENV': 1,
         'computed:QWEN_SERVER_TOKEN_ENV': 1,
@@ -155,11 +155,12 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'computed:QWEN_SERVE_PROMPT_DEADLINE_MS_ENV': 1,
         'computed:QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV': 1,
         'computed:RUNTIME_STARTUP_TIMEOUT_ENV': 1,
+        'key:DEV': 1,
         'key:QWEN_CODE_IDE_WORKSPACE_PATH': 1,
         'key:QWEN_SERVE_NO_MCP_POOL': 1,
         'key:QWEN_SERVE_NO_PERSISTENT_REGISTRATION': 1,
         'key:VITEST_WORKER_ID': 1,
-        whole: 4,
+        whole: 5,
       },
     },
   ],
@@ -167,8 +168,9 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     'packages/cli/src/serve/server/fs-factory.ts',
     {
       reason:
-        'Embedded server construction keeps a process-environment compatibility fallback.',
-      accesses: { 'computed:IDE_WORKSPACE_PATH_ENV_VAR': 1 },
+        'Embedded server construction keeps a process-environment compatibility fallback, ' +
+        'and the new-file-mode policy parser defaults to the daemon process environment.',
+      accesses: { 'computed:IDE_WORKSPACE_PATH_ENV_VAR': 1, whole: 1 },
     },
   ],
   [

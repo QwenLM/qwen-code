@@ -36,6 +36,7 @@ import { SessionService } from './sessionService.js';
 import {
   getSessionWriterLockPath,
   SessionTranscriptChangedError,
+  SessionTranscriptIdentityUnavailableError,
   SessionWriterConflictError,
   SessionWriterLease,
   SessionWriterLostError,
@@ -51,6 +52,10 @@ const lstatFault = vi.hoisted(() => ({
   path: undefined as string | undefined,
   remainingFailures: 0,
   calls: 0,
+}));
+
+const zeroInodeFault = vi.hoisted(() => ({
+  underRoot: undefined as string | undefined,
 }));
 
 const fsOpenTestHook = vi.hoisted(() => ({
@@ -113,6 +118,22 @@ vi.mock('node:fs/promises', async (importOriginal) => {
         }
       }
       return actual.lstat(filePath);
+    },
+    stat: async (
+      filePath: Parameters<typeof actual.stat>[0],
+      ...rest: unknown[]
+    ) => {
+      const result = await (
+        actual.stat as (...args: unknown[]) => ReturnType<typeof actual.stat>
+      )(filePath, ...rest);
+      if (
+        zeroInodeFault.underRoot !== undefined &&
+        typeof filePath === 'string' &&
+        filePath.startsWith(zeroInodeFault.underRoot)
+      ) {
+        Object.defineProperty(result, 'ino', { value: 0 });
+      }
+      return result;
     },
     open: async (filePath: PathLike, flags: string | number, mode?: Mode) => {
       await fsOpenTestHook.beforeOpen?.(filePath, flags);
@@ -376,6 +397,7 @@ afterEach(async () => {
   lstatFault.path = undefined;
   lstatFault.remainingFailures = 0;
   lstatFault.calls = 0;
+  zeroInodeFault.underRoot = undefined;
   fsOpenTestHook.beforeOpen = undefined;
   transitionFault.renameFrom = undefined;
   transitionFault.renameTo = undefined;
@@ -1371,6 +1393,58 @@ describe('SessionWriterLease', () => {
       SessionTranscriptChangedError,
     );
     await lease.release();
+  });
+
+  it('rejects a new session up front when the filesystem cannot number inodes', async () => {
+    const fixture = await createFixture();
+    // Brand-new session: the transcript file does not exist yet, so the
+    // probe stands in for it with the nearest existing ancestor directory.
+    await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+    zeroInodeFault.underRoot = fixture.runtimeBaseDir;
+
+    await expect(
+      SessionWriterLease.acquire(fixture.options),
+    ).rejects.toBeInstanceOf(SessionTranscriptIdentityUnavailableError);
+    await expect(fs.access(fixture.transcriptPath)).rejects.toMatchObject({
+      code: 'ENOENT',
+    });
+  });
+
+  it('acquires normally when the transcript directory does not exist yet', async () => {
+    const fixture = await createFixture();
+
+    const lease = await SessionWriterLease.acquire(fixture.options);
+    await lease.appendJsonLine({ hello: 'world' });
+    await lease.release();
+
+    await expect(fs.readFile(fixture.transcriptPath, 'utf8')).resolves.toBe(
+      '{"hello":"world"}\n',
+    );
+  });
+
+  it('rejects a transcript with an unverifiable inode before writing', async () => {
+    const fixture = await createFixture();
+    await fs.mkdir(path.dirname(fixture.transcriptPath), { recursive: true });
+    const seed = '{"seed":true}\n';
+    await fs.writeFile(fixture.transcriptPath, seed);
+    const originalStat = nativeFileHandleStat;
+    const stat = vi
+      .spyOn(fileHandlePrototype, 'stat')
+      .mockImplementation(async function (this: fs.FileHandle, ...args) {
+        const result = await originalStat.apply(this, args);
+        return Object.defineProperty(result, 'ino', { value: 0 });
+      });
+
+    try {
+      await expect(
+        SessionWriterLease.acquire(fixture.options),
+      ).rejects.toBeInstanceOf(SessionTranscriptIdentityUnavailableError);
+      await expect(fs.readFile(fixture.transcriptPath, 'utf8')).resolves.toBe(
+        seed,
+      );
+    } finally {
+      stat.mockRestore();
+    }
   });
 
   it('detects a size change between handle and path stat', async () => {

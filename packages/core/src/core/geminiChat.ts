@@ -55,7 +55,7 @@ import {
   parsePositiveIntegerEnvValue,
 } from './tokenLimits.js';
 import { hasCycleInSchema } from '../tools/tools.js';
-import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
+import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
 import * as fs from 'node:fs';
 import { PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES } from '../tools/exitPlanMode.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
@@ -77,6 +77,7 @@ import {
 } from '../services/chatCompressionService.js';
 import { acquireSleepInhibitor } from '../services/sleepInhibitor.js';
 import {
+  getFunctionResponseParts,
   resolveCompactionTuning,
   resolveSlimmingConfig,
   slimCompactionInput,
@@ -117,6 +118,7 @@ import {
 import { RETRYABLE_STREAM_TRANSPORT_CODES } from './stream-transport-retry.js';
 import {
   collectToolCallIdsFromHistory,
+  getFunctionCallFingerprint,
   normalizeModelToolCallIds,
   reserveModelToolCallId,
 } from './toolCallIdUtils.js';
@@ -197,14 +199,13 @@ function syncFunctionCallsField(
 }
 
 /**
- * Local mirror of the scheduler's `canonicalToolName` (kept here to avoid a
- * geminiChat -> coreToolScheduler import cycle): resolves legacy tool-name
- * aliases so the load-side plan redaction keeps matching sessions recorded
- * under a pre-migration name, in lockstep with the write-side scheduler.
+ * Resolves legacy tool-name aliases via the shared `canonicalToolName` so
+ * the load-side plan redaction keeps matching sessions recorded under a
+ * pre-migration name, in lockstep with the write-side scheduler.
  */
 function canonicalPlanToolName(toolName: string | undefined): string {
   if (!toolName) return '';
-  return (ToolNamesMigration as Record<string, string>)[toolName] ?? toolName;
+  return canonicalToolName(toolName);
 }
 
 /**
@@ -444,6 +445,11 @@ export type StreamEvent =
   | { type: StreamEventType.COMPRESSED; info: ChatCompressionInfo }
   | { type: StreamEventType.MODEL_FALLBACK; info: ModelFallbackInfo };
 
+export interface GeminiChatSendOptions {
+  /** Skip only the configured model fallback chain for this request. */
+  disableModelFallbacks?: boolean;
+}
+
 interface TryCompressOptions {
   originalTokenCountOverride?: number;
   trigger?: CompactTrigger;
@@ -504,16 +510,20 @@ const TRANSPORT_STREAM_RETRY_CONFIG = {
 };
 
 /**
- * Pad added to the first-send prompt estimate when sizing the output clamp
- * (`lastPromptTokenCount === 0` — fresh session, --continue restore, or
- * subagent inheritance). The char/4 history walk misses the system prompt,
- * tool definitions, and skill content — estimatePromptTokens documents this
- * as "typically ~15-20K of under-estimate" — and an under-counted prompt is
- * the one way `prompt + max_tokens` can overflow the window (issue #5950).
- * Sized to the documented worst case; costs nothing on large windows (the
- * output ceiling binds long before the pad matters).
+ * Pad added when sizing the output clamp from an estimate-derived prompt
+ * count. This includes a fresh session (`lastPromptTokenCount === 0`) and
+ * counts propagated through compression or resume before provider usage is
+ * available. A history-derived count can miss the system prompt, tool
+ * definitions, and skill content — estimatePromptTokens documents this as
+ * "typically ~15-20K of under-estimate" — so pad conservatively until
+ * provider usage arrives. Counts derived from an API baseline may already
+ * preserve some non-visible overhead; double-counting it is accepted because
+ * the error direction is safe and provider usage self-corrects it. An
+ * under-counted prompt is the one way `prompt + max_tokens` can overflow the
+ * window (issue #5950). Sized to the documented worst case; costs nothing on
+ * large windows (the output ceiling binds long before the pad matters).
  */
-const FIRST_SEND_CLAMP_OVERHEAD_PAD = 20_000;
+const ESTIMATE_CLAMP_OVERHEAD_PAD = 20_000;
 
 /**
  * Max recovery attempts when the escalated response is also truncated.
@@ -832,6 +842,27 @@ function getRecoveryContinuationSuffix(
   return continuationText;
 }
 
+/**
+ * Join already-delivered text to the continuation that resumes it, dropping
+ * any tail the model replayed.
+ *
+ * The single definition of "merged turn text" for the transport-continuation
+ * path. Both the durable JSONL record and in-memory history are built from one
+ * call to this (see `processStreamResponse`), so the two storage layers cannot
+ * drift apart if the dedup rule ever changes — the same reason the
+ * `willPersistToHistory` gate is a shared binding rather than two copies of
+ * one expression.
+ */
+function mergeDeliveredPrefix(
+  deliveredText: string,
+  continuationText: string,
+): string {
+  return (
+    deliveredText +
+    getRecoveryContinuationSuffix(deliveredText, continuationText)
+  );
+}
+
 function isPlainTextPart(part: Part | undefined): part is Part & {
   text: string;
 } {
@@ -1132,6 +1163,86 @@ function isValidContentPart(part: Part): boolean {
   return !isInvalid;
 }
 
+const UPSTREAM_DEGRADED_PLACEHOLDER = '(request timeout)';
+
+function degradedPlaceholderError(): InvalidStreamError {
+  return new InvalidStreamError(
+    'Model response is an upstream fail-fast placeholder.',
+    'UPSTREAM_DEGRADED_RESPONSE',
+  );
+}
+
+function isDegradedPlaceholderTurn(content: Content): boolean {
+  const parts = content.parts ?? [];
+  return (
+    parts.length > 0 &&
+    parts.every(
+      (part) =>
+        part.functionCall === undefined &&
+        (part.thought || part.text !== undefined),
+    ) &&
+    parts
+      .filter((part) => !part.thought)
+      .map((part) => part.text ?? '')
+      .join('')
+      .trim() === UPSTREAM_DEGRADED_PLACEHOLDER
+  );
+}
+
+async function* rejectDegradedPlaceholderResponse(
+  stream: AsyncGenerator<GenerateContentResponse>,
+): AsyncGenerator<GenerateContentResponse> {
+  const pending: GenerateContentResponse[] = [];
+  let text = '';
+  let passthrough = false;
+
+  for await (const chunk of stream) {
+    if (passthrough) {
+      yield chunk;
+      continue;
+    }
+
+    const parts = chunk.candidates?.[0]?.content?.parts ?? [];
+    if (
+      parts.some(
+        (part) =>
+          part.functionCall !== undefined ||
+          (!part.thought && part.text === undefined),
+      )
+    ) {
+      yield* pending;
+      pending.length = 0;
+      yield chunk;
+      passthrough = true;
+      continue;
+    }
+
+    const chunkText = parts
+      .filter((part) => !part.thought)
+      .map((part) => part.text ?? '')
+      .join('');
+    if (pending.length === 0 && chunkText === '') {
+      yield chunk;
+      continue;
+    }
+
+    pending.push(chunk);
+    text += chunkText;
+    const trimmed = text.trim();
+    if (trimmed && !UPSTREAM_DEGRADED_PLACEHOLDER.startsWith(trimmed)) {
+      yield* pending;
+      pending.length = 0;
+      passthrough = true;
+    }
+  }
+
+  if (passthrough) return;
+  if (text.trim() === UPSTREAM_DEGRADED_PLACEHOLDER) {
+    throw degradedPlaceholderError();
+  }
+  yield* pending;
+}
+
 /**
  * Validates the history contains the correct roles.
  *
@@ -1176,7 +1287,9 @@ function extractCuratedHistory(comprehensiveHistory: Content[]): Content[] {
         i++;
       }
       if (isValid) {
-        curatedHistory.push(...modelOutput);
+        curatedHistory.push(
+          ...modelOutput.filter((turn) => !isDegradedPlaceholderTurn(turn)),
+        );
       }
     }
   }
@@ -1204,7 +1317,19 @@ function appendCuratedContent(
 function copyContentContainer(content: Content): Content {
   return {
     ...content,
-    ...(content.parts ? { parts: [...content.parts] } : {}),
+    ...(content.parts ? { parts: content.parts.map(copyPartContainer) } : {}),
+  };
+}
+
+function copyPartContainer(part: Part): Part {
+  const nested = getFunctionResponseParts(part);
+  if (!nested) return { ...part };
+  return {
+    ...part,
+    functionResponse: {
+      ...part.functionResponse,
+      parts: nested.map((inner) => ({ ...inner })),
+    },
   };
 }
 
@@ -1446,12 +1571,14 @@ interface ScanResult {
   expected: Map<string, string>;
   matched: Map<string, FrLocation[]>;
   scanEnd: number;
+  adjacentIdx: number;
 }
 
 /** Decision-phase output: exact mutations the next phase will apply. */
 interface RepairPlan {
   modelIdx: number;
   scanEnd: number;
+  adjacentIdx: number;
   synthesizeIds: Array<[string, string]>;
   hoistedParts: Part[];
   removalTargets: Array<{ turnIdx: number; partIdx: number }>;
@@ -1473,6 +1600,14 @@ function scanModelTurn(history: Content[], modelIdx: number): ScanResult {
 
   const matched = new Map<string, FrLocation[]>();
   let scanIdx = modelIdx + 1;
+  while (
+    scanIdx < history.length &&
+    history[scanIdx]?.role === 'model' &&
+    isDegradedPlaceholderTurn(history[scanIdx])
+  ) {
+    scanIdx++;
+  }
+  const adjacentIdx = scanIdx;
   while (scanIdx < history.length && history[scanIdx]?.role === 'user') {
     const parts = history[scanIdx].parts ?? [];
     for (let pIdx = 0; pIdx < parts.length; pIdx++) {
@@ -1487,7 +1622,7 @@ function scanModelTurn(history: Content[], modelIdx: number): ScanResult {
     scanIdx++;
   }
 
-  return { modelIdx, expected, matched, scanEnd: scanIdx };
+  return { modelIdx, expected, matched, scanEnd: scanIdx, adjacentIdx };
 }
 
 /**
@@ -1501,7 +1636,7 @@ function planRepair(scan: ScanResult): RepairPlan {
   const removalTargets: Array<{ turnIdx: number; partIdx: number }> = [];
   const droppedDuplicates: Array<{ callId: string; name: string }> = [];
 
-  const adjacentIdx = scan.modelIdx + 1;
+  const adjacentIdx = scan.adjacentIdx;
   for (const [id, name] of scan.expected) {
     const locations = scan.matched.get(id);
     if (!locations || locations.length === 0) {
@@ -1531,6 +1666,7 @@ function planRepair(scan: ScanResult): RepairPlan {
   return {
     modelIdx: scan.modelIdx,
     scanEnd: scan.scanEnd,
+    adjacentIdx: scan.adjacentIdx,
     synthesizeIds,
     hoistedParts,
     removalTargets,
@@ -1540,12 +1676,12 @@ function planRepair(scan: ScanResult): RepairPlan {
 
 /**
  * MUTATION — apply the plan to `history` in place. Returns the count
- * of new user turns inserted ahead of `modelIdx + 1` (0 or 1) so the
- * outer loop can advance its cursor.
+ * of new user turns inserted (0 or 1) so the outer loop can advance its
+ * cursor.
  *
  * Order: (1) splice removal targets desc-by-desc, (2) drop empty user
- * turns in `[modelIdx + 2, scanEnd)`, (3) HEAD-insert at the adjacent
- * user turn OR splice a new user turn between. The HEAD insert is
+ * turns after the resolved adjacent turn, (3) HEAD-insert at that user
+ * turn OR splice a new user turn there. The HEAD insert is
  * load-bearing (mirrors upstream `hoistToolResults`) — see the
  * canonical note for why tail-append re-triggers the wedge.
  */
@@ -1573,19 +1709,20 @@ function applyRepair(
     if (turnParts) turnParts.splice(loc.partIdx, 1);
   }
 
-  // (2) Drop now-empty user turns within [modelIdx + 2, scanEnd).
+  // (2) Drop now-empty user turns after the resolved adjacent turn.
   // Preserve the adjacent turn even if empty — we'll rewrite it
   // below.
-  const adjacentIdx = plan.modelIdx + 1;
+  const adjacentIdx = plan.adjacentIdx;
   for (let j = plan.scanEnd - 1; j > adjacentIdx; j--) {
     if (history[j]?.role === 'user' && (history[j].parts?.length ?? 0) === 0) {
       history.splice(j, 1);
     }
   }
 
+  if (partsToInject.length === 0) return { insertedBefore: 0 };
+
   // (3) Place new parts at the head of the adjacent user turn, OR
-  // insert a fresh user turn between this model turn and whatever
-  // follows.
+  // insert a fresh user turn at the resolved adjacency.
   const next = history[adjacentIdx];
   if (next?.role === 'user') {
     const existing = next.parts ?? [];
@@ -1698,6 +1835,7 @@ export class GeminiChat {
    * still make compaction decisions based on their *own* context size.
    */
   private lastPromptTokenCount = 0;
+  private lastPromptTokenCountIsEstimated = false;
 
   /**
    * Per-chat output-token count from the previous model response. The
@@ -1846,6 +1984,7 @@ export class GeminiChat {
     const { maxRecentImages, imagePayloadThreshold } = resolveCompactionTuning(
       this.config.getChatCompression(),
     );
+    let replaced: ReturnType<typeof replaceImagePayloadsInPlace> = [];
     if (countAllInlineImages(curatedHistory) >= imagePayloadThreshold) {
       const skipEntry = currentUserContent
         ? curatedHistory.find(
@@ -1855,24 +1994,28 @@ export class GeminiChat {
                 currentUserContent.parts?.some((p) => c.parts?.includes(p))),
           )
         : undefined;
-      const replaced = replaceImagePayloadsInPlace(
+      replaced = replaceImagePayloadsInPlace(
         curatedHistory,
         this.imagePayloadStore,
         skipEntry,
       );
-      const requestHistory = curatedHistory.map(copyContentContainer);
-      const reattachParts = buildReattachParts(replaced, maxRecentImages);
-      if (reattachParts.length > 0) {
-        const last = requestHistory.at(-1);
-        if (last?.role === 'user') {
-          last.parts = [...(last.parts ?? []), ...reattachParts];
-        } else {
-          requestHistory.push({ role: 'user', parts: reattachParts });
-        }
-      }
-      return requestHistory;
     }
-    return curatedHistory.map(copyContentContainer);
+    const requestHistory = curatedHistory.map(copyContentContainer);
+    const reattachParts = buildReattachParts(
+      replaced,
+      maxRecentImages,
+      requestHistory,
+      this.imagePayloadStore,
+    );
+    if (reattachParts.length > 0) {
+      const last = requestHistory.at(-1);
+      if (last?.role === 'user') {
+        last.parts = [...(last.parts ?? []), ...reattachParts];
+      } else {
+        requestHistory.push({ role: 'user', parts: reattachParts });
+      }
+    }
+    return requestHistory;
   }
 
   private getRequestHistoryForRoute(
@@ -1895,24 +2038,37 @@ export class GeminiChat {
    * comes from a different chat instance and should not inherit this chat's
    * last response size.
    */
-  setLastPromptTokenCount(count: number): void {
+  setLastPromptTokenCount(count: number, isEstimated = false): void {
     this.lastPromptTokenCount = count;
+    this.lastPromptTokenCountIsEstimated = isEstimated;
     this.lastOutputTokenCount = 0;
+  }
+
+  isLastPromptTokenCountEstimated(): boolean {
+    return this.lastPromptTokenCountIsEstimated;
+  }
+
+  private promptCountIsEstimateDerived(): boolean {
+    return (
+      this.lastPromptTokenCount === 0 || this.lastPromptTokenCountIsEstimated
+    );
   }
 
   /**
    * Seed the restored prompt and previous-response output token counts in one
-   * step. Resume restores chat history plus both counters from the same
-   * assistant usage record, so callers must avoid the normal
+   * step. Resume restores chat history plus both counters and their provenance
+   * from the same checkpoint, so callers must avoid the normal
    * setLastPromptTokenCount() clearing behavior.
    */
   seedResumeTokenCounts(
     promptTokenCount: number,
     outputTokenCount: number,
+    isEstimated = false,
   ): void {
     this.lastPromptTokenCount = Number.isFinite(promptTokenCount)
       ? Math.max(0, promptTokenCount)
       : 0;
+    this.lastPromptTokenCountIsEstimated = isEstimated;
     this.lastOutputTokenCount = Number.isFinite(outputTokenCount)
       ? Math.max(0, outputTokenCount)
       : 0;
@@ -1935,14 +2091,31 @@ export class GeminiChat {
     signal?: AbortSignal,
     options?: TryCompressOptions,
   ): Promise<ChatCompressionInfo> {
+    const originalTokenCountIsEstimated =
+      options?.originalTokenCountOverride === undefined &&
+      this.promptCountIsEstimateDerived();
+    const originalTokenCount = originalTokenCountIsEstimated
+      ? (options?.precomputedEffectiveTokens ??
+        estimateContentTokens(
+          options?.pendingUserMessage
+            ? [...this.getHistoryShallow(true), options.pendingUserMessage]
+            : this.getHistoryShallow(true),
+          resolveSlimmingConfig(this.config.getChatCompression())
+            .imageTokenEstimate,
+        ))
+      : (options?.originalTokenCountOverride ?? this.lastPromptTokenCount);
+    debugLogger.debug(
+      `[compaction] token-count provenance: prompt_id=${promptId}, ` +
+        `originalTokenCount=${originalTokenCount}, ` +
+        `estimated=${originalTokenCountIsEstimated}`,
+    );
     const service = new ChatCompressionService();
     const { newHistory, info } = await service.compress(this, {
       promptId,
       force,
       config: this.config,
       consecutiveFailures: this.consecutiveFailures,
-      originalTokenCount:
-        options?.originalTokenCountOverride ?? this.lastPromptTokenCount,
+      originalTokenCount,
       pendingUserMessage: options?.pendingUserMessage,
       precomputedEffectiveTokens: options?.precomputedEffectiveTokens,
       requestGenerationConfig: options?.requestGenerationConfig,
@@ -1952,6 +2125,10 @@ export class GeminiChat {
     });
 
     if (info.compressionStatus === CompressionStatus.COMPRESSED && newHistory) {
+      // ChatCompressionService owns provenance. Keep a conservative fallback
+      // for older/custom implementations that omit the field, but preserve an
+      // explicit authoritative `false`.
+      info.newTokenCountIsEstimated ??= true;
       if (!options?.deferChatCompressionRecord) {
         this.chatRecordingService?.recordChatCompression({
           info,
@@ -1961,8 +2138,10 @@ export class GeminiChat {
       this.setHistory(newHistory);
       debugLogger.debug('[FILE_READ_CACHE] clear after auto tryCompress');
       this.config.getFileReadCache().clear();
-      this.lastPromptTokenCount = info.newTokenCount;
-      this.lastOutputTokenCount = 0;
+      this.setLastPromptTokenCount(
+        info.newTokenCount,
+        info.newTokenCountIsEstimated,
+      );
       this.telemetryService?.setLastPromptTokenCount(info.newTokenCount);
       // Reset the consecutive-failure counter on success so a forced /compress
       // (or any successful compaction) recovers a chat whose breaker had
@@ -2036,11 +2215,18 @@ export class GeminiChat {
 
     const reduction = beforeEstimate - afterEstimate;
     const apiBaseline = this.lastPromptTokenCount || beforeEstimate;
+    const baselineIsEstimated = this.promptCountIsEstimateDerived();
     const adjustedTokenCount = Math.max(0, apiBaseline - reduction);
+
+    debugLogger.debug(
+      `[compaction] fast token-count provenance: ` +
+        `originalTokenCount=${apiBaseline}, estimated=${baselineIsEstimated}`,
+    );
 
     const info: ChatCompressionInfo = {
       originalTokenCount: apiBaseline,
       newTokenCount: adjustedTokenCount,
+      newTokenCountIsEstimated: true,
       compressionStatus: CompressionStatus.COMPRESSED,
       triggerReason: 'manual',
     };
@@ -2058,6 +2244,7 @@ export class GeminiChat {
     );
     this.setHistory(newHistory);
     this.lastPromptTokenCount = adjustedTokenCount;
+    this.lastPromptTokenCountIsEstimated = true;
     this.telemetryService?.setLastPromptTokenCount(adjustedTokenCount);
     this.consecutiveFailures = 0;
 
@@ -2125,6 +2312,7 @@ export class GeminiChat {
     params: SendMessageParameters,
     prompt_id: string,
     goalContext?: GoalTurnPermit,
+    options?: GeminiChatSendOptions,
   ): Promise<AsyncGenerator<StreamEvent>> {
     const turnGoalContext = goalContext ? { ...goalContext } : undefined;
     const fullTurnRoute = model.endsWith('\0');
@@ -2284,6 +2472,8 @@ export class GeminiChat {
         ? this.getHistoryShallow()
         : undefined;
       const lastPromptTokenCountBeforeHardRescue = this.lastPromptTokenCount;
+      const lastPromptTokenCountWasEstimatedBeforeHardRescue =
+        this.lastPromptTokenCountIsEstimated;
       const hardRescueFailureCountBeforeHardRescue =
         this.hardRescueFailureCount;
       if (shouldForceFromHard) {
@@ -2358,6 +2548,8 @@ export class GeminiChat {
           // written because the send is about to be rejected.
           this.setHistory(historyBeforeHardRescue);
           this.lastPromptTokenCount = lastPromptTokenCountBeforeHardRescue;
+          this.lastPromptTokenCountIsEstimated =
+            lastPromptTokenCountWasEstimatedBeforeHardRescue;
           this.telemetryService?.setLastPromptTokenCount(
             lastPromptTokenCountBeforeHardRescue,
           );
@@ -2455,17 +2647,17 @@ export class GeminiChat {
       // on every main-turn request (issue #5950).
       //
       // When lastPromptTokenCount > 0 (steady state, or refreshed to
-      // newTokenCount by a compression), re-estimate from the counts — cheap,
-      // no history walk. When it is still 0 (first send, compression NOOPed),
-      // reuse the pre-push gate estimate: userContent is already in history
-      // here, so a fresh history walk would double-count it. That fallback
-      // estimate misses the system prompt, tool definitions, and skill
-      // content (see estimatePromptTokens — "typically ~15-20K of
-      // under-estimate"), and an under-count is the ONE way
-      // `prompt + max_tokens` can still overflow the window, so pad it by
-      // the documented worst case. The pad only trims output on the very
-      // first send of small-window sessions; from the second send on the
-      // API-authoritative count takes over.
+      // newTokenCount by compression/resume), re-estimate from the counts —
+      // cheap, no history walk. When it is still 0, reuse the pre-push gate
+      // estimate: userContent is already in history here, so a fresh history
+      // walk would double-count it. Estimate-derived counts can omit the
+      // system prompt, tool definitions, and skill content (see
+      // estimatePromptTokens — "typically ~15-20K of under-estimate"). Some
+      // counts based on prior API usage already preserve part of that
+      // overhead, but conservatively double-counting it is safe and
+      // self-corrects when provider usage arrives. An under-count is the ONE
+      // way `prompt + max_tokens` can still overflow the window, so keep the
+      // pad until provider usage replaces the estimate.
       promptTokensForClamp =
         this.lastPromptTokenCount > 0
           ? estimatePromptTokens(
@@ -2476,7 +2668,16 @@ export class GeminiChat {
               imageTokenEstimate,
               /* conservative= */ true,
             )
-          : effectiveTokens + FIRST_SEND_CLAMP_OVERHEAD_PAD;
+          : effectiveTokens;
+      if (this.promptCountIsEstimateDerived()) {
+        promptTokensForClamp += ESTIMATE_CLAMP_OVERHEAD_PAD;
+        debugLogger.debug(
+          `[clamp] estimate-derived prompt count; padded by ` +
+            `${ESTIMATE_CLAMP_OVERHEAD_PAD}: ` +
+            `promptTokensForClamp=${promptTokensForClamp}, ` +
+            `count=${this.lastPromptTokenCount}`,
+        );
+      }
       const clampedMaxOutputTokens = clampOutputTokensToWindow(
         outputCeiling,
         contextWindowForClamp,
@@ -2700,6 +2901,12 @@ export class GeminiChat {
               prompt_id,
               requestOverrides,
               turnGoalContext,
+              // Captured by value, so the attempt records exactly the prefix
+              // `buildAttemptContents()` just asked the model to resume from,
+              // even if a later branch resets the continuation.
+              transportContinuationPrefix.length > 0
+                ? transportContinuationPrefix
+                : undefined,
             );
 
             lastFinishReason = undefined;
@@ -2728,10 +2935,13 @@ export class GeminiChat {
             }
 
             lastError = null;
-            if (transportContinuationPrefix.length > 0) {
-              self.prependTextToLastModelTurn(transportContinuationPrefix);
-              transportContinuationPrefix = '';
-            }
+            // The merge itself now happens inside `processStreamResponse`,
+            // which folds the prefix into the parts before it writes either
+            // the JSONL record or the history turn (issue #8094). Merging
+            // again here would risk double-applying it: the dedup helper only
+            // strips a replayed prefix that clears its significance floor, so
+            // a short prefix would survive the second pass and be doubled.
+            transportContinuationPrefix = '';
             break;
           } catch (error) {
             lastError = error;
@@ -3417,7 +3627,7 @@ export class GeminiChat {
               estimateContentTokens(
                 recoveryContents,
                 recoveryImageTokenEstimate,
-              ) + FIRST_SEND_CLAMP_OVERHEAD_PAD;
+              ) + ESTIMATE_CLAMP_OVERHEAD_PAD;
             const recoveryPromptEstimate = Math.max(
               countBasedRecoveryEstimate,
               walkRecoveryEstimate,
@@ -3526,9 +3736,10 @@ export class GeminiChat {
           // - Maximum 3 fallback transitions (capped by config normalization).
           // - Fallback is only for capacity/availability errors (429/503/529),
           //   not for auth/billing/client errors.
-          const fallbackModels = exactRoute
-            ? []
-            : self.config.getModelFallbacks();
+          const fallbackModels =
+            exactRoute || options?.disableModelFallbacks
+              ? []
+              : self.config.getModelFallbacks();
 
           if (
             fallbackModels.length > 0 &&
@@ -3795,6 +4006,7 @@ export class GeminiChat {
       retryErrorCodes?: readonly number[];
     },
     goalContext?: GoalTurnPermit,
+    transportContinuationPrefix?: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const generator =
       overrides?.contentGenerator ?? this.config.getContentGenerator();
@@ -3871,7 +4083,12 @@ export class GeminiChat {
       },
     });
 
-    return this.processStreamResponse(model, streamResponse, goalContext);
+    return this.processStreamResponse(
+      model,
+      rejectDegradedPlaceholderResponse(streamResponse),
+      goalContext,
+      transportContinuationPrefix,
+    );
   }
 
   private async *makeFallbackStream(
@@ -3943,9 +4160,9 @@ export class GeminiChat {
   }
 
   /**
-   * Returns a shallow copy of the history and each entry's parts array without
-   * cloning large part payloads. Use only for read-only consumers or consumers
-   * that replace touched entries before mutating them.
+   * Copies history containers, Part objects, and nested functionResponse parts
+   * without cloning large leaf payloads. Consumers must not mutate leaf
+   * payload objects.
    */
   getHistoryShallow(curated: boolean = false): Content[] {
     const history = curated
@@ -4044,6 +4261,42 @@ export class GeminiChat {
       }
     }
     return ids;
+  }
+
+  /**
+   * Map of handled tool-call id → (name, args) fingerprint for duplicate
+   * provider-id replay detection: model-turn `functionCall`s whose id has a
+   * matching user-turn `functionResponse`. Walk-only, no clone, same
+   * rationale as {@link getHistoryFunctionResponseIds}; fingerprints of
+   * large args are cached per part object (see getFunctionCallFingerprint).
+   */
+  getHistoryToolCallFingerprints(): Map<string, string> {
+    const fingerprintsById = new Map<string, string>();
+    const respondedIds = new Set<string>();
+    for (const entry of this.history) {
+      if (entry.role === 'user') {
+        for (const part of entry.parts ?? []) {
+          const id = part.functionResponse?.id;
+          if (id) respondedIds.add(id);
+        }
+        continue;
+      }
+      for (const part of entry.parts ?? []) {
+        const functionCall = part.functionCall;
+        if (functionCall?.id && !fingerprintsById.has(functionCall.id)) {
+          fingerprintsById.set(
+            functionCall.id,
+            getFunctionCallFingerprint(functionCall),
+          );
+        }
+      }
+    }
+    const handled = new Map<string, string>();
+    for (const id of respondedIds) {
+      const fingerprint = fingerprintsById.get(id);
+      if (fingerprint !== undefined) handled.set(id, fingerprint);
+    }
+    return handled;
   }
 
   /**
@@ -4333,10 +4586,19 @@ export class GeminiChat {
     }
   }
 
+  /**
+   * @param transportContinuationPrefix - Text a previous attempt already
+   *   delivered before a socket cut, which this attempt was asked to resume
+   *   from (issue #7832). On success it is folded into the response parts
+   *   before either durable write, so the JSONL transcript and in-memory
+   *   history carry the same merged turn (issue #8094). Undefined on every
+   *   non-continuation send.
+   */
   private async *processStreamResponse(
     model: string,
     streamResponse: AsyncGenerator<GenerateContentResponse>,
     goalContext?: GoalTurnPermit,
+    transportContinuationPrefix?: string,
   ): AsyncGenerator<GenerateContentResponse> {
     // Collect ALL parts from the model response (including thoughts for recording)
     const allModelParts: Part[] = [];
@@ -4542,6 +4804,7 @@ export class GeminiChat {
             // Always update the per-chat counter so this chat (including
             // subagents) can make its own compaction decisions.
             this.lastPromptTokenCount = lastPromptTokenCount;
+            this.lastPromptTokenCountIsEstimated = false;
             this.lastOutputTokenCount = hasUsablePromptTokenCount
               ? getUsageOutputTokenCountForPromptEstimate({
                   promptTokenCount,
@@ -4786,6 +5049,62 @@ export class GeminiChat {
       streamError === null ||
       (hasToolCall &&
         (thoughtContentPart || consolidatedHistoryParts.length > 0));
+    // Transport-continuation merge (issue #8094). `allModelParts` is
+    // per-attempt, so a continuation's parts carry the resumed remainder only.
+    // Fold the already-delivered prefix back in HERE — into the parts
+    // themselves, before either durable write — so the JSONL record below and
+    // the `this.history.push` further down are derived from the same data and
+    // cannot disagree. Otherwise `--resume` rehydrates a turn that starts
+    // mid-sentence while the live session shows a coherent answer.
+    //
+    // Merging in one place is load-bearing, not tidiness:
+    //   - Computing the record's text and history's text from separate
+    //     expressions lets them drift. They already would: `contentText` is
+    //     trimmed (see its definition above) while the pushed parts are raw,
+    //     so deduping the record against the trimmed text fuses words when the
+    //     remainder opens with whitespace ("The result is" + " 42." →
+    //     "The result is42.").
+    //   - Writing them at different times opens a window. The record is
+    //     appended below, the history push happens after it, and a
+    //     `deferredFinishReason` chunk is yielded after that — a suspension
+    //     point. A consumer abandoning iteration there (an abort inside
+    //     `Turn.run`) would strand a merged record against a remainder-only
+    //     history, and the JSONL is append-only so nothing reconciles it.
+    //
+    // Placed after the stream-validation throws above so an empty continuation
+    // still fails validation on its own merits rather than being masked by the
+    // prefix.
+    //
+    // Success only. On `streamError !== null` the parts must keep matching the
+    // remainder-only partial that survives in history (the
+    // `pendingPartialAssistantRecord` path below) — the prefix belongs to an
+    // attempt that did not survive, and a fresh-restart retry discards it via
+    // `resetTransportContinuation`.
+    if (streamError === null && transportContinuationPrefix) {
+      const textIndex = consolidatedHistoryParts.findIndex(isPlainTextPart);
+      if (textIndex < 0) {
+        // Continuation returned no text of its own (e.g. only a functionCall).
+        // `thoughtContentPart` is prepended separately at the push below, so
+        // index 0 here is already "after any leading thought part".
+        consolidatedHistoryParts.unshift({ text: transportContinuationPrefix });
+      } else {
+        const remainderPart = consolidatedHistoryParts[textIndex] as Part & {
+          text: string;
+        };
+        consolidatedHistoryParts[textIndex] = {
+          ...remainderPart,
+          text: mergeDeliveredPrefix(
+            transportContinuationPrefix,
+            remainderPart.text,
+          ),
+        };
+      }
+      contentText = consolidatedHistoryParts
+        .filter((part) => part.text)
+        .map((part) => part.text)
+        .join('')
+        .trim();
+    }
     if (
       willPersistToHistory &&
       (thoughtContentPart || contentText || hasToolCall || usageMetadata)
@@ -4906,53 +5225,6 @@ export class GeminiChat {
         usageMetadata,
       } as GenerateContentResponse;
     }
-  }
-
-  /**
-   * Prepend already-delivered text to the trailing model turn.
-   *
-   * Used by the transport-continuation path (issue #7832): after a socket cut
-   * mid-response, the caller has seen text that `processStreamResponse`
-   * deliberately did not persist, and the continuation attempt's own turn
-   * carries only the resumed remainder. Without this, durable history would
-   * hold an answer that starts mid-sentence — visibly wrong on `/compress`,
-   * `--resume`, and every later turn's context.
-   *
-   * The delivered text is merged into the turn's first plain-text part (kept
-   * after any leading thought part, matching the
-   * `[thoughtPart?, ...text]` shape `processStreamResponse` produces), or
-   * inserted as a new part when the continuation returned no text of its own.
-   * Overlap is deduped by the same helper the output-recovery merge uses, so a
-   * model that replays part of its previous tail does not double it.
-   */
-  private prependTextToLastModelTurn(deliveredText: string): void {
-    if (deliveredText.length === 0) return;
-    const lastEntry = this.history.at(-1);
-    if (lastEntry?.role !== 'model') {
-      debugLogger.warn(
-        '[TRANSPORT_CONTINUATION] Trailing entry is not a model turn; ' +
-          'dropping the delivered-text merge.',
-        { role: lastEntry?.role ?? 'undefined' },
-      );
-      return;
-    }
-    const parts = [...(lastEntry.parts ?? [])];
-    const textIndex = parts.findIndex(isPlainTextPart);
-    if (textIndex < 0) {
-      const insertAt = parts.findIndex((part) => !part.thought);
-      parts.splice(insertAt < 0 ? parts.length : insertAt, 0, {
-        text: deliveredText,
-      });
-    } else {
-      const continuationPart = parts[textIndex] as Part & { text: string };
-      parts[textIndex] = {
-        ...continuationPart,
-        text:
-          deliveredText +
-          getRecoveryContinuationSuffix(deliveredText, continuationPart.text),
-      };
-    }
-    lastEntry.parts = parts;
   }
 
   /**

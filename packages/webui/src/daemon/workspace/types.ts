@@ -17,6 +17,7 @@ import type {
   DaemonChannelPairingApprovalResult,
   DaemonChannelPairingApprovalsSnapshot,
   DaemonChannelPairingRequestsSnapshot,
+  DaemonChannelPairingRevocationRequest,
   DaemonChannelPairingRevocationResult,
   DaemonChannelsSnapshot,
   DaemonChannelStartupRequest,
@@ -36,8 +37,12 @@ import type {
   ExtensionRefreshResponse,
   ExtensionScopeRequest,
   ExtensionInstallRequest,
+  ExtensionArchiveInstallRequest,
   ExtensionInstallResponse,
   ExtensionUpdateCheckResponse,
+  GoalControlRequest,
+  GoalSnapshotV2,
+  GoalStateResponse,
   DaemonInitWorkspaceResult,
   DaemonMcpRestartResult,
   DaemonMcpManageAction,
@@ -206,7 +211,7 @@ export interface DaemonChannelPairingActions {
   approvals(name: string): Promise<DaemonChannelPairingApprovalsSnapshot>;
   revoke(
     name: string,
-    senderId: string,
+    request: DaemonChannelPairingRevocationRequest,
   ): Promise<DaemonChannelPairingRevocationResult>;
 }
 
@@ -312,6 +317,8 @@ export interface DaemonGoal {
    * the loop working, but a manual prompt in the same session sets it too.
    */
   hasActivePrompt: boolean;
+  /** Canonical lifecycle state; UI controls must use its goalId/revision. */
+  snapshot: GoalSnapshotV2;
 }
 
 /** The `GET /goals` payload. */
@@ -536,8 +543,12 @@ export interface DaemonWorkspaceActions {
   ): Promise<DaemonScheduledTask>;
   deleteScheduledTask(id: string, workspaceId?: string): Promise<void>;
 
-  // Goals (session-scoped Stop hooks, listed workspace-wide)
+  // Goals (session-scoped runtimes, listed workspace-wide)
   listGoals(): Promise<DaemonGoalList>;
+  controlGoal(
+    sessionId: string,
+    request: GoalControlRequest,
+  ): Promise<GoalStateResponse>;
   /** Drop a session's goal hook. No-op when that session has no active goal. */
   clearGoal(sessionId: string): Promise<{ cleared: boolean }>;
 
@@ -559,6 +570,10 @@ export interface DaemonWorkspaceActions {
   // Extensions
   installExtension(
     params: ExtensionInstallRequest,
+    clientId?: string,
+  ): Promise<ExtensionInstallResponse>;
+  installExtensionArchive(
+    params: ExtensionArchiveInstallRequest,
     clientId?: string,
   ): Promise<ExtensionInstallResponse>;
   extensionOperationStatus(

@@ -8,11 +8,16 @@
   min-height: 0;
 }
 
-.panelDrawer {
+.panelDrawer,
+.panelFullscreen {
   border-left: 0;
   flex: 1 1 auto;
   min-width: 0;
   width: 100%;
+}
+
+.panelFullscreen {
+  --chat-content-width: 100%;
 }
 
 .header {
@@ -185,6 +190,10 @@
   border-color: transparent;
 }
 
+.fullscreenButton {
+  border-color: transparent;
+}
+
 .panelToggleButton {
   width: 30px;
   height: 30px;
@@ -210,6 +219,7 @@
 }
 
 .body {
+  position: relative;
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
@@ -219,6 +229,82 @@
 .bodySideTask {
   overflow: hidden;
   padding: 0;
+}
+
+.attachmentPreviewButton {
+  position: sticky;
+  float: right;
+  top: 8px;
+  margin: -4px -4px -28px 8px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+
+.body:hover .attachmentPreviewButton,
+.attachmentPreviewButton:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.attachmentPreviewButton:hover {
+  background: var(--accent);
+  color: var(--foreground);
+}
+
+.attachmentPreviewButton svg {
+  width: 14px;
+  height: 14px;
+}
+
+@media (hover: none) {
+  .attachmentPreviewButton {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+.pdfAttachmentPreview {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: var(--background);
+}
+
+.unsupportedAttachmentPreview {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px;
+  color: var(--muted-foreground);
+  text-align: center;
+}
+
+.unsupportedAttachmentPreview > svg {
+  width: 36px;
+  height: 36px;
+  opacity: 0.65;
+}
+
+.unsupportedAttachmentMeta {
+  font-size: 12px;
+  opacity: 0.75;
 }
 
 .empty {
@@ -410,6 +496,31 @@
 
 .link:hover {
   text-decoration: underline;
+}
+
+.locationRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.openButton {
+  flex: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--link-color, #2563eb);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  padding: 5px 10px;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.openButton:hover {
+  background: color-mix(in srgb, var(--link-color, #2563eb) 12%, transparent);
 }
 
 .review {
@@ -991,6 +1102,31 @@ button.treeRow:hover {
   background: var(--accent);
 }
 
+.downloadRow {
+  margin-top: 16px;
+}
+
+.downloadButton {
+  appearance: none;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 12px;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.downloadButton:hover:not(:disabled) {
+  background: var(--accent);
+}
+
+.downloadButton:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 .htmlPreview {
   width: 100%;
   flex: 1 1 auto;
@@ -1037,7 +1173,7 @@ button.treeRow:hover {
 }
 
 @media (max-width: 900px) {
-  .panel:not(.panelDrawer) {
+  .panel:not(.panelDrawer):not(.panelFullscreen) {
     position: fixed;
     inset: env(safe-area-inset-top) 0 env(safe-area-inset-bottom) auto;
     z-index: 60;

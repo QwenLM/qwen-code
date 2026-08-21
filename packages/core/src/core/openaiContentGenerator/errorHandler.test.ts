@@ -8,6 +8,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { GenerateContentParameters } from '@google/genai';
 import { EnhancedErrorHandler } from './errorHandler.js';
 import type { RequestContext } from './types.js';
+import { classifyRetryError } from '../../utils/retryErrorClassification.js';
+import { APIConnectionTimeoutError } from 'openai';
 
 const debugLoggerSpy = vi.hoisted(() => ({
   error: vi.fn(),
@@ -162,6 +164,103 @@ describe('EnhancedErrorHandler', () => {
       expect(() => {
         errorHandler.handle(timeoutError, mockContext, mockRequest);
       }).toThrow(/Request timeout after 5s.*Troubleshooting tips:/s);
+    });
+
+    it('preserves transport metadata when enhancing timeout errors', () => {
+      const timeoutError = Object.assign(
+        new Error('socket timed out via token@proxy.local:8080'),
+        { code: 'ETIMEDOUT' },
+      );
+      let thrown: unknown;
+
+      try {
+        errorHandler.handle(timeoutError, mockContext, mockRequest);
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toBeInstanceOf(Error);
+      expect((thrown as Error).message).toMatch(
+        /Request timeout after 5s.*Troubleshooting tips:/s,
+      );
+      expect((thrown as Error).cause).toBe(timeoutError);
+      expect((thrown as Error).cause).toMatchObject({
+        code: 'ETIMEDOUT',
+        message: 'socket timed out via <redacted>@proxy.local:8080',
+      });
+      expect(classifyRetryError(thrown)).toMatchObject({
+        kind: 'transport',
+        diagnosis: 'retryable',
+        transportCode: 'ETIMEDOUT',
+      });
+    });
+
+    it('keeps an HTTP client status authoritative on enhanced timeouts', () => {
+      const timeoutError = Object.assign(new Error('socket timed out'), {
+        code: 'ETIMEDOUT',
+        status: 400,
+      });
+      let thrown: unknown;
+
+      try {
+        errorHandler.handle(timeoutError, mockContext, mockRequest);
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(classifyRetryError(thrown)).toMatchObject({
+        kind: 'http',
+        diagnosis: 'fail-fast',
+        reason: 'client-error',
+        statusCode: 400,
+      });
+    });
+
+    it('marks the SDK bare connection timeout as retryable transport', () => {
+      // The OpenAI SDK throws APIConnectionTimeoutError bare — no code,
+      // status, or cause — once its internal retries are exhausted.
+      const bareTimeout = new APIConnectionTimeoutError();
+      let thrown: unknown;
+
+      try {
+        errorHandler.handle(bareTimeout, mockContext, mockRequest);
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toBeInstanceOf(Error);
+      expect((thrown as Error).message).toMatch(
+        /Request timeout after 5s.*Troubleshooting tips:/s,
+      );
+      expect((thrown as Error).cause).toBe(bareTimeout);
+      expect(classifyRetryError(thrown)).toMatchObject({
+        kind: 'transport',
+        diagnosis: 'retryable',
+        transportCode: 'ETIMEDOUT',
+      });
+    });
+
+    it('attaches the redacted clone, not the raw original, when redaction clones', () => {
+      const original = Object.freeze(
+        Object.assign(
+          new Error('socket timed out via token@proxy.local:8080'),
+          {
+            code: 'ETIMEDOUT',
+          },
+        ),
+      );
+      let thrown: unknown;
+
+      try {
+        errorHandler.handle(original, mockContext, mockRequest);
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect((thrown as Error).cause).not.toBe(original);
+      expect(((thrown as Error).cause as Error).message).toContain(
+        '<redacted>@proxy.local:8080',
+      );
     });
 
     it('should use custom suppression function', () => {

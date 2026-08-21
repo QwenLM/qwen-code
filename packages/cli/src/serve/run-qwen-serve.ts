@@ -6,7 +6,7 @@
 
 import { X509Certificate, createHash, timingSafeEqual } from 'node:crypto';
 import * as fs from 'node:fs';
-import type { Server } from 'node:http';
+import { createServer, type Server } from 'node:http';
 import * as https from 'node:https';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -21,17 +21,28 @@ import express, {
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import { isWithinRoot } from '../config/path-comparison.js';
 import {
+  acquireInheritedLoaderEnvScrub,
+  clearLoaderKeyRejectionReporterIfCurrent,
+  scrubInheritedLoaderEnv,
+  setLoaderKeyRejectionReporter,
+  type LoaderKeyRejectionReporter,
+} from '../config/shared-env-keys.js';
+import {
   DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
   DEFAULT_MAX_JOURNAL_BYTES,
   DEFAULT_MAX_JOURNAL_EVENTS,
+  JOURNAL_GROWTH_HARD_CAP_BYTES,
   normalizeCompactedReplayMaxBytes,
   normalizeMaxJournalBytes,
   normalizeMaxJournalEvents,
+  type JournalGrowthSessionLimit,
 } from '@qwen-code/acp-bridge/replayWindowLimits';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
+import { resolveSessionRestoreTimeoutMs } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 import type { NdJsonMessageObservation } from '@qwen-code/acp-bridge/ndJsonStream';
 import { getDeviceFlowRegistry } from './auth/device-flow.js';
 import {
+  consumeServeFastPathRejectedLoaderKeys,
   loadServeFastPathSettings,
   preResolveServeFastPathHomeEnvOverrides,
   type ServeFastPathSettings,
@@ -44,7 +55,12 @@ import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
   formatMemoryBudgetStderr,
   resolveDaemonMemoryBudget,
+  serveJournalGrowthPoolMb,
 } from '@qwen-code/acp-bridge/daemonMemoryBudget';
+import {
+  createChildHeapPolicy,
+  type ChildHeapPolicy,
+} from '@qwen-code/acp-bridge/childHeapPolicy';
 import {
   canonicalizeWorkspace,
   translateAndCheckAbsoluteWorkspacePath,
@@ -72,6 +88,7 @@ import {
   hostAllowlist,
   parseAllowOriginPatterns,
 } from './auth.js';
+import type { LocalControlService } from './local-control/index.js';
 import {
   createPermissionAuditPublisher,
   PermissionAuditRing,
@@ -88,9 +105,11 @@ import {
   SERVE_CAPABILITY_REGISTRY,
 } from './capabilities.js';
 import {
+  EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE,
   EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
   EXTERNAL_TOOL_GUARD_TOKEN_ENV,
   PRIVATE_EXTERNAL_TOOL_GUARD_ENV,
+  PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV,
 } from '@qwen-code/acp-bridge/externalToolGuard';
 import {
   CAPABILITIES_SCHEMA_VERSION,
@@ -117,8 +136,10 @@ import {
   type ManagedScratchRoot,
   type WorkspaceRuntimeProvenance,
 } from './managed-scratch-workspace.js';
-import { LiveConversationWorkspace } from './live/conversation-workspace.js';
+import { ConversationRuntimeOwnershipError } from './conversations/conversation-runtime-errors.js';
+import { ConversationWorkspace } from './conversations/conversation-workspace.js';
 import { LIVE_HOST_PROTOCOL_VERSION } from './live/types.js';
+import { ServeAppLifecycleController } from './serve-app-lifecycle.js';
 import {
   workspaceRegistrationId,
   type WorkspaceRegistrationStore,
@@ -389,6 +410,8 @@ type RunQwenServeOptions = Omit<ServeOptions, 'token' | 'workspace'> & {
 };
 type WorkspaceSettingsWrite =
   import('./workspace-service/types.js').WorkspaceSettingsWrite;
+type PersistDisabledSkillsBatchResult =
+  import('./workspace-service/types.js').PersistDisabledSkillsBatchResult;
 type ChannelWebhookConfigRuntime = {
   loadChannelsConfig: typeof import('../commands/channel/runtime.js').loadChannelsConfig;
   parseChannelWebhookConfig: typeof import('../commands/channel/config-utils.js').parseChannelWebhookConfig;
@@ -787,11 +810,29 @@ export interface RunHandle {
   resolvedToken?: string;
   /** Resolves when the full REST/Web/ACP runtime has been mounted. */
   runtimeReady: Promise<void>;
+  /**
+   * The Local Control service, once the runtime app exists.
+   *
+   * A getter rather than a field because the runtime app is mounted after the
+   * listener is up: at the moment this handle is constructed there is nothing
+   * to hand back. Callers await `runtimeReady` first — before that it is
+   * undefined, which is also what an API-only daemon returns forever.
+   */
+  getLocalControl(): LocalControlService | undefined;
   /** Resolves when the listener has fully closed and the bridge is drained. */
   close(): Promise<void>;
 }
 
 const retryableChannelWorkerShutdownErrors = new WeakSet<Error>();
+
+function hasRetryableChannelWorkerShutdownError(error: unknown): boolean {
+  if (error instanceof AggregateError) {
+    return error.errors.some(hasRetryableChannelWorkerShutdownError);
+  }
+  return (
+    error instanceof Error && retryableChannelWorkerShutdownErrors.has(error)
+  );
+}
 
 type CoreRuntime = typeof import('./core-runtime.js');
 type LiveDiscoveryRuntime = typeof import('./live/discovery.js');
@@ -956,6 +997,8 @@ function buildProviderSetupInputs(
 export interface RunQwenServeDeps {
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
   bridge?: AcpSessionBridge;
+  /** Test/embed override for the plain HTTP server constructor. */
+  httpServerFactory?: (app: Application) => Server;
   /**
    * Whether to start the real ACP child eagerly after listen. Production
    * keeps this on; tests can disable it so boot-path assertions do not wait
@@ -1022,7 +1065,7 @@ export interface RunQwenServeDeps {
   channelServicePidfile?: ChannelServicePidfile;
   workspaceRegistrationStore?: WorkspaceRegistrationStore;
   /** Test/embed override; production uses the private user Conversations root. */
-  liveConversationWorkspace?: LiveConversationWorkspace;
+  liveConversationWorkspace?: ConversationWorkspace;
   /** Test/embed override; production uses ~/.qwen for the Live Host locator. */
   liveDiscoveryStableBaseDir?: string;
   /** Test/embed override for stable Live locator ownership handoff. */
@@ -1135,6 +1178,7 @@ async function loadServeRuntimeModules() {
     workspaceSkillsStatusModule,
     totalSessionAdmissionModule,
     workspaceRegistryModule,
+    promptLedgerModule,
   ] = await Promise.all([
     import('./server.js'),
     import('@qwen-code/acp-bridge/bridge'),
@@ -1147,6 +1191,7 @@ async function loadServeRuntimeModules() {
     import('./workspace-skills-status.js'),
     import('./total-session-admission.js'),
     import('./workspace-registry.js'),
+    import('./prompt-terminal-ledger.js'),
   ]);
   return {
     createServeApp: serverModule.createServeApp,
@@ -1156,6 +1201,7 @@ async function loadServeRuntimeModules() {
     resolveBridgeFsFactory: serverModule.resolveBridgeFsFactory,
     createAcpSessionBridge: bridgeModule.createAcpSessionBridge,
     createSpawnChannelFactory: spawnChannelModule.createSpawnChannelFactory,
+    daemonAcpNdJsonLimits: spawnChannelModule.DAEMON_ACP_NDJSON_LIMITS,
     ProcessRegistry: processRegistryModule.ProcessRegistry,
     createDaemonWorkspaceService: workspaceModule.createDaemonWorkspaceService,
     WorkspaceSettingsPartialPersistError:
@@ -1175,6 +1221,7 @@ async function loadServeRuntimeModules() {
       workspaceRegistryModule.createWorkspaceSessionOwnerIndex,
     createWorkspaceGenerationGuard:
       workspaceRegistryModule.createWorkspaceGenerationGuard,
+    createPromptLedgerSink: promptLedgerModule.createPromptLedgerSink,
   };
 }
 
@@ -1272,6 +1319,7 @@ function createBootstrapCapabilities(input: {
       maxPendingPromptsPerSession: advertisedMaxPendingPromptsPerSession(
         input.opts.maxPendingPromptsPerSession,
       ),
+      sessionRestoreTimeoutMs: resolveSessionRestoreTimeoutMs(input.opts),
     },
   };
 }
@@ -1430,6 +1478,21 @@ const BOOTSTRAP_SERVE_PATHS = new Set([
   BOOTSTRAP_DAEMON_STATUS_PATH,
 ]);
 
+const RUNTIME_STARTUP_FAILED_ENVELOPE = {
+  error: 'Daemon runtime failed to start',
+  code: 'daemon_runtime_failed',
+} as const;
+const RUNTIME_STARTUP_STARTING_ENVELOPE = {
+  error: 'Daemon runtime is still starting',
+  code: 'daemon_runtime_starting',
+} as const;
+
+function runtimeStartupEnvelope(runtimeError: string | undefined) {
+  return runtimeError
+    ? RUNTIME_STARTUP_FAILED_ENVELOPE
+    : RUNTIME_STARTUP_STARTING_ENVELOPE;
+}
+
 function createBootstrapServeApp(input: {
   opts: ServeOptions;
   getPort: () => number;
@@ -1512,14 +1575,7 @@ function createBootstrapServeApp(input: {
       if (runtimeError === undefined) {
         res.setHeader('Retry-After', '1');
       }
-      res.status(503).json({
-        error: runtimeError
-          ? 'Daemon runtime failed to start'
-          : 'Daemon runtime is still starting',
-        code: runtimeError
-          ? 'daemon_runtime_failed'
-          : 'daemon_runtime_starting',
-      });
+      res.status(503).json(runtimeStartupEnvelope(runtimeError));
       return;
     }
     res.status(200).json(
@@ -1545,6 +1601,17 @@ function createBootstrapServeApp(input: {
       return;
     }
     const runtimeError = getRuntimeError();
+    // Same gate the runtime applies (see runQwenServeImpl): pinned journal
+    // flags or a budget with no usable pool disable growth, so the
+    // bootstrap response matches what the runtime will wire.
+    const bootstrapJournalGrowthPoolMb =
+      opts.daemonMemoryBudget !== undefined
+        ? serveJournalGrowthPoolMb({
+            budget: opts.daemonMemoryBudget,
+            maxJournalEvents: opts.maxJournalEvents,
+            maxJournalBytes: opts.maxJournalBytes,
+          })
+        : 0;
     const channelWorker = getChannelWorkerSnapshot();
     const channelWorkers = getChannelWorkerSnapshots();
     const runtimeFailed = runtimeError !== undefined;
@@ -1628,7 +1695,28 @@ function createBootstrapServeApp(input: {
         channelIdleTimeoutMs: channelIdleTimeoutMs(opts.channelIdleTimeoutMs),
         sessionIdleTimeoutMs: sessionIdleTimeoutMs(opts.sessionIdleTimeoutMs),
         acpConnectionCap: null,
-        memory: toDaemonStatusMemoryLimits(opts.daemonMemoryBudget),
+        acpPreAttachMaxFramesPerStream: null,
+        acpPreAttachMaxFramesPerConnection: null,
+        acpPreAttachMaxFramesGlobal: null,
+        acpPreAttachMaxPayloadBytesPerConnection: null,
+        acpPreAttachMaxPayloadBytesGlobal: null,
+        // No child-heap policy during bootstrap: it is built with the
+        // runtime, so `enforced` is correctly false and `childHeap` null in
+        // this window even when the flag says `enforce`.
+        memory: toDaemonStatusMemoryLimits(
+          opts.daemonMemoryBudget,
+          undefined,
+          bootstrapJournalGrowthPoolMb > 0
+            ? {
+                poolBytes: bootstrapJournalGrowthPoolMb * 1024 * 1024,
+                hardCapBytes: JOURNAL_GROWTH_HARD_CAP_BYTES,
+                baselineMaxEvents:
+                  opts.maxJournalEvents ?? DEFAULT_MAX_JOURNAL_EVENTS,
+                baselineMaxBytes:
+                  opts.maxJournalBytes ?? DEFAULT_MAX_JOURNAL_BYTES,
+              }
+            : null,
+        ),
       },
       capabilities: {
         protocolVersions: getServeProtocolVersions(),
@@ -1660,6 +1748,16 @@ function createBootstrapServeApp(input: {
             sseStreams: 0,
             wsStreams: 0,
             pendingClientRequests: 0,
+            preAttach: {
+              bufferedConnectionFrames: 0,
+              bufferedSessionFrames: 0,
+              pendingDeliveryFrames: 0,
+              usedFrames: 0,
+              usedBytes: 0,
+              highWaterFrames: 0,
+              highWaterBytes: 0,
+              guardFailures: 0,
+            },
           },
         },
         rateLimit: {
@@ -1683,6 +1781,7 @@ function createBootstrapServeApp(input: {
         ? {
             full: {
               sessions: [],
+              acpMounts: [],
               acpConnections: [],
               workspace: {},
               auth: {
@@ -1698,13 +1797,7 @@ function createBootstrapServeApp(input: {
   });
 
   app.use((_req: Request, res: Response): void => {
-    const runtimeError = getRuntimeError();
-    res.status(503).json({
-      error: runtimeError
-        ? 'Daemon runtime failed to start'
-        : 'Daemon runtime is still starting',
-      code: runtimeError ? 'daemon_runtime_failed' : 'daemon_runtime_starting',
-    });
+    res.status(503).json(runtimeStartupEnvelope(getRuntimeError()));
   });
 
   return app;
@@ -1719,6 +1812,7 @@ function createDelegatingServeApp(
     runtimeReady?: Promise<void>;
     authenticateDeferredRuntimeRequest?: RequestHandler;
     authenticateDeferredChannelWebhookRequest?: RequestHandler;
+    isPreAuthRequest?: (req: Request) => boolean | Promise<boolean>;
   } = {},
 ): Application {
   const app = express();
@@ -1743,7 +1837,14 @@ function createDelegatingServeApp(
           ? (options.authenticateDeferredChannelWebhookRequest ??
             options.authenticateDeferredRuntimeRequest)
           : options.authenticateDeferredRuntimeRequest;
-        if (authGate) {
+        // A rejecting predicate must not 500 every deferred request —
+        // fail closed to the bearer gate instead.
+        const preAuthExempted =
+          authGate !== undefined &&
+          (await Promise.resolve(options.isPreAuthRequest?.(req)).catch(
+            () => false,
+          )) === true;
+        if (authGate && !preAuthExempted) {
           if (!runSynchronousRequestGate(authGate, req, res, next)) {
             return;
           }
@@ -1755,6 +1856,13 @@ function createDelegatingServeApp(
         try {
           await options.runtimeReady;
         } catch {
+          if (preAuthExempted) {
+            // The bootstrap app serves the failure envelope only behind its
+            // bearer gate, which a pre-auth navigation cannot pass — answer
+            // here so the browser sees the startup failure, not a 401.
+            res.status(503).json(RUNTIME_STARTUP_FAILED_ENVELOPE);
+            return;
+          }
           // Fall through to the bootstrap app so it can report the startup error.
         } finally {
           timing.waitMs =
@@ -1927,6 +2035,15 @@ interface DaemonLoggerLifecycleCallbacks {
   initialized(logger: DaemonLogger): void;
   published(): void;
   signalOwned(): void;
+  // Called once the startup scrub has mutated the host process.env, with
+  // the restore close() would run. runQwenServe's catch invokes it when
+  // startup fails after the scrub — the close() path is unreachable then,
+  // and an embedded caller must not keep a permanently scrubbed env.
+  scrubApplied(restoreScrubbedLoaderEnv: () => void): void;
+  // Called with the loader-key rejection reporter this run installed, so the
+  // startup-failure catch can clear it only when it is still the active one —
+  // a co-resident daemon that installed after us must keep its own reporter.
+  reporterInstalled(reporter: LoaderKeyRejectionReporter): void;
 }
 
 /**
@@ -1989,6 +2106,8 @@ export async function runQwenServe(
 ): Promise<RunHandle> {
   let daemonLog: DaemonLogger | undefined;
   let owner: 'startup' | 'handle' | 'signal' = 'startup';
+  let restoreScrubbedLoaderEnv: (() => void) | undefined;
+  let installedLoaderRejectionReporter: LoaderKeyRejectionReporter | undefined;
   try {
     return await runQwenServeImpl(optsIn, deps, {
       initialized: (logger) => {
@@ -2000,8 +2119,22 @@ export async function runQwenServe(
       signalOwned: () => {
         if (owner === 'startup') owner = 'signal';
       },
+      scrubApplied: (restore) => {
+        restoreScrubbedLoaderEnv = restore;
+      },
+      reporterInstalled: (reporter) => {
+        installedLoaderRejectionReporter = reporter;
+      },
     });
   } catch (error) {
+    // Startup failed after the scrub and (when the logger was up) the
+    // reporter install; the close() path that reverts both is unreachable.
+    // Clear only our own reporter so a co-resident daemon keeps its own.
+    if (installedLoaderRejectionReporter) {
+      clearLoaderKeyRejectionReporterIfCurrent(
+        installedLoaderRejectionReporter,
+      );
+    }
     if (daemonLog && owner === 'startup') {
       const startupLog = daemonLog;
       writeDaemonLifecycleBestEffort(() =>
@@ -2012,6 +2145,7 @@ export async function runQwenServe(
       );
       await startupLog.close();
     }
+    restoreScrubbedLoaderEnv?.();
     throw error;
   }
 }
@@ -2053,14 +2187,57 @@ async function runQwenServeImpl(
     );
   }
   preResolveServeFastPathHomeEnvOverrides();
-  const daemonRuntimeBaseEnv: Readonly<NodeJS.ProcessEnv> = Object.freeze({
-    ...process.env,
-    ...(optsIn.memoryProjectScope !== undefined
-      ? {
-          QWEN_CODE_MEMORY_PROJECT_SCOPE: optsIn.memoryProjectScope,
-        }
-      : {}),
-  });
+  const baseEnv: NodeJS.ProcessEnv = { ...process.env };
+  const launchMemoryProjectScopeValue =
+    baseEnv['QWEN_CODE_MEMORY_PROJECT_SCOPE'];
+  const launchMemoryProjectScope = launchMemoryProjectScopeValue?.trim()
+    ? launchMemoryProjectScopeValue
+    : undefined;
+  const memoryProjectScopeValue =
+    optsIn.memoryProjectScope ?? launchMemoryProjectScope ?? 'workspace';
+  const memoryProjectScopeSource =
+    optsIn.memoryProjectScope !== undefined
+      ? 'option'
+      : launchMemoryProjectScope !== undefined
+        ? 'environment'
+        : 'default';
+  const resolvedMemoryProjectScope =
+    memoryProjectScopeValue.trim().toLowerCase() === 'workspace'
+      ? 'workspace'
+      : 'git-root';
+  baseEnv['QWEN_CODE_MEMORY_PROJECT_SCOPE'] = memoryProjectScopeValue;
+  // The dev harness (scripts/dev.js) stamps DEV=true into the same env that
+  // carries the tsx loader's NODE_OPTIONS, so only then does the base env
+  // keep loader vars — dev-mode ACP children and channel workers need the
+  // loader to boot their .ts entries. DEV is hardcoded-excluded from
+  // project .env/settings.env (shared-env-keys.ts), so this consults the
+  // launch environment only. Every other launch scrubs them here, before
+  // the freeze: the base env is what session-hosting children (the ACP
+  // child, channel daemon workers) spawn with, and a loader var that
+  // reaches them runs during Node bootstrap — before the child's own
+  // post-boot scrub could ever remove it.
+  if (process.env['DEV'] !== 'true') {
+    scrubInheritedLoaderEnv(baseEnv);
+  }
+  const daemonRuntimeBaseEnv: Readonly<NodeJS.ProcessEnv> =
+    Object.freeze(baseEnv);
+  // The daemon process itself is done with loader vars either way:
+  // session-shell subprocesses run here with process.env while their cwd is
+  // another workspace. The scrub is reference-counted (see
+  // acquireInheritedLoaderEnvScrub) so overlapping embedded daemons in one
+  // process do not restore each other's loader vars mid-flight, and reverted
+  // on close() so an embedded caller reusing the host process gets its launch
+  // environment back.
+  const loaderEnvScrub = acquireInheritedLoaderEnvScrub(
+    process.env,
+    'qwen serve',
+    'daemon',
+  );
+  const scrubbedLoaderEnvKeys = loaderEnvScrub.removedKeys;
+  const restoreScrubbedLoaderEnv = (): void => {
+    loaderEnvScrub.release();
+  };
+  loggerLifecycle.scrubApplied(restoreScrubbedLoaderEnv);
 
   // Trim both sources. Common gotcha: `export QWEN_SERVER_TOKEN=$(cat
   // token.txt)` keeps the file's trailing `\n` in the env value, so the
@@ -2356,8 +2533,9 @@ async function runQwenServeImpl(
       `qwen serve: --allow-origin: ${opts.allowOrigins.join(', ')}` +
         (parsed.allowAny
           ? ' (WARNING: `*` admits any cross-origin browser — bearer ' +
-            'token gates API routes; /health and /demo remain pre-auth ' +
-            'on loopback unless --require-auth is set)'
+            'token gates API routes; the Web Shell static assets stay ' +
+            'pre-auth in every mode unless --no-web, and /health stays ' +
+            'pre-auth on loopback unless --require-auth is set)'
           : ''),
     );
   }
@@ -2375,6 +2553,34 @@ async function runQwenServeImpl(
   // Resolve the bound workspace list. The first explicit workspace remains the
   // primary workspace for legacy APIs; later workspaces are isolated secondary
   // runtimes.
+  const liveConversationWorkspace =
+    deps.liveConversationWorkspace ?? new ConversationWorkspace();
+  const isReservedConversationWorkspace = (candidate: string): boolean => {
+    const resolvedCandidate = path.resolve(candidate);
+    const resolvedRoot = path.resolve(liveConversationWorkspace.rootPath);
+    let canonicalRoot = resolvedRoot;
+    try {
+      canonicalRoot = fs.realpathSync.native(resolvedRoot);
+    } catch {
+      // The reserved root is intentionally not materialized during startup.
+    }
+    return (
+      resolvedCandidate === resolvedRoot ||
+      isWithinRoot(resolvedCandidate, resolvedRoot) ||
+      resolvedCandidate === canonicalRoot ||
+      isWithinRoot(resolvedCandidate, canonicalRoot)
+    );
+  };
+  const reservedRawWorkspace = rawWorkspaces.find((workspace) =>
+    isReservedConversationWorkspace(workspace),
+  );
+  if (reservedRawWorkspace) {
+    throw new Error(
+      `Workspace ${JSON.stringify(
+        reservedRawWorkspace,
+      )} is reserved for Conversations.`,
+    );
+  }
   const workspaceInputs = rawWorkspaces.map((workspace) => ({
     raw: workspace,
     cwd: validateAndCanonicalizeWorkspace(workspace),
@@ -2430,11 +2636,11 @@ async function runQwenServeImpl(
       `At most ${MAX_REGISTERED_WORKSPACES} --workspace values may be registered.`,
     );
   }
-  // Resolve the daemon's memory figures once, for reporting only. Nothing
-  // downstream consumes them to size a child: dividing a pool by a workspace
-  // count is unsound while registration does not spawn a child, and bounding
-  // the aggregate needs admission at spawn time keyed on live children. This
-  // establishes the denominator that work will be designed against.
+  // Resolve the daemon's memory figures once. Nothing downstream consumes
+  // them to size a child: dividing a pool by a workspace count is unsound
+  // while registration does not spawn a child, and bounding the aggregate
+  // needs admission at spawn time keyed on live children. The one consumer
+  // today is the adaptive live-journal growth pool below.
   opts.daemonMemoryBudget = resolveDaemonMemoryBudget({
     budgetMb: opts.memoryBudgetMb,
   });
@@ -2443,6 +2649,58 @@ async function runQwenServeImpl(
     opts.daemonMemoryBudget.insufficientMemory
   ) {
     writeStderrLine(formatMemoryBudgetStderr(opts.daemonMemoryBudget));
+  }
+  // Adaptive live-journal growth: sessions whose in-flight turn outgrows
+  // the journal caps can grow into a daemon-wide pool (derived once from
+  // the memory budget and shared by every bridge), instead of silently
+  // truncating the live replay window (the canonical case: one turn fanning
+  // out many concurrent subagents). An operator-pinned journal flag
+  // disables growth — explicit config wins — as does a budget with no
+  // usable pool (insufficient host, no headroom after the root reserve).
+  const journalGrowthPoolMbValue =
+    opts.daemonMemoryBudget !== undefined
+      ? serveJournalGrowthPoolMb({
+          budget: opts.daemonMemoryBudget,
+          maxJournalEvents: opts.maxJournalEvents,
+          maxJournalBytes: opts.maxJournalBytes,
+        })
+      : 0;
+  const journalGrowthPoolBytes =
+    journalGrowthPoolMbValue > 0
+      ? journalGrowthPoolMbValue * 1024 * 1024
+      : undefined;
+  // ONE aggregate pool for the whole daemon: every bridge registers its
+  // live-session cap enumerator here and receives the aggregator, so each
+  // bridge's growth advisor accounts every sharing session — across all
+  // workspaces — against the same pool instead of holding its own copy.
+  const journalGrowthSessionLimitProviders = new Set<
+    () => readonly JournalGrowthSessionLimit[]
+  >();
+  const journalGrowthSessionLimits =
+    (): readonly JournalGrowthSessionLimit[] => {
+      const limits: JournalGrowthSessionLimit[] = [];
+      for (const provider of journalGrowthSessionLimitProviders) {
+        limits.push(...provider());
+      }
+      return limits;
+    };
+  const registerJournalGrowthSessionLimits = (
+    provider: () => readonly JournalGrowthSessionLimit[],
+  ): (() => void) => {
+    journalGrowthSessionLimitProviders.add(provider);
+    return () => {
+      journalGrowthSessionLimitProviders.delete(provider);
+    };
+  };
+  const reservedStartupWorkspace = workspaceInputs.find((workspace) =>
+    isReservedConversationWorkspace(workspace.cwd),
+  );
+  if (reservedStartupWorkspace) {
+    throw new Error(
+      `Workspace ${JSON.stringify(
+        reservedStartupWorkspace.raw,
+      )} is reserved for Conversations.`,
+    );
   }
   let workspaceRegistrationStore = deps.workspaceRegistrationStore;
   if (
@@ -2460,6 +2718,14 @@ async function runQwenServeImpl(
       for (const storedWorkspace of stored.workspaces) {
         const registrationId = workspaceRegistrationId(storedWorkspace);
         const displayName = stored.displayNames?.[registrationId];
+        if (isReservedConversationWorkspace(storedWorkspace)) {
+          writeStderrLine(
+            `qwen serve: skipping persisted workspace registration ${JSON.stringify(
+              storedWorkspace,
+            )}: path is reserved for Conversations`,
+          );
+          continue;
+        }
         let cwd: string;
         try {
           cwd = validateAndCanonicalizeWorkspace(storedWorkspace);
@@ -2468,6 +2734,14 @@ async function runQwenServeImpl(
             `qwen serve: skipping persisted workspace registration ${JSON.stringify(
               storedWorkspace,
             )}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          continue;
+        }
+        if (isReservedConversationWorkspace(cwd)) {
+          writeStderrLine(
+            `qwen serve: skipping persisted workspace registration ${JSON.stringify(
+              storedWorkspace,
+            )}: path is reserved for Conversations`,
           );
           continue;
         }
@@ -2577,6 +2851,48 @@ async function runQwenServeImpl(
     baseDir: daemonLogBaseDir,
   });
   loggerLifecycle.initialized(daemonLog);
+  daemonLog.info('project memory scope resolved', {
+    projectMemoryScope: resolvedMemoryProjectScope,
+    projectMemoryScopeSource: memoryProjectScopeSource,
+    projectMemoryScopeRaw: memoryProjectScopeValue,
+  });
+  // Per-workspace .env loads keep running after boot (skill status, voice
+  // capability checks, settings reloads); boot stderr is long gone by then,
+  // so fresh loader-key rejections must land in the durable daemon log or
+  // they vanish without a diagnostic.
+  const loaderRejectionReporter: LoaderKeyRejectionReporter = (
+    source,
+    freshKeys,
+  ) => {
+    daemonLog.warn(
+      'rejected loader-affecting env keys; they were not applied',
+      {
+        source,
+        rejectedKeys: freshKeys,
+      },
+    );
+  };
+  setLoaderKeyRejectionReporter(loaderRejectionReporter);
+  loggerLifecycle.reporterInstalled(loaderRejectionReporter);
+  // Boot stderr rarely survives desktop/systemd daemon launches, so persist
+  // the scrub decision in the durable daemon log as well.
+  if (scrubbedLoaderEnvKeys.length > 0) {
+    daemonLog.info(
+      'scrubbed inherited loader env vars from the daemon process; ' +
+        'session subprocesses will not inherit them',
+      { removedKeys: scrubbedLoaderEnvKeys },
+    );
+  }
+  // The serve fast path rejects loader keys before this logger exists, and
+  // its stderr warnings rarely survive desktop/systemd launches either.
+  const fastPathRejectedLoaderKeys = consumeServeFastPathRejectedLoaderKeys();
+  if (fastPathRejectedLoaderKeys.length > 0) {
+    daemonLog.info(
+      'rejected loader-affecting env keys during serve fast-path boot; ' +
+        'they were not applied to the daemon process',
+      { rejectedKeys: fastPathRejectedLoaderKeys },
+    );
+  }
   let loggerPublished = false;
   let loggerSignalOwned = false;
   writeStderrLine(
@@ -2703,6 +3019,8 @@ async function runQwenServeImpl(
     }
     assertTimerDelayInRange('initializeTimeoutMs', opts.initializeTimeoutMs);
   }
+  const sessionRestoreTimeoutMs = resolveSessionRestoreTimeoutMs(opts);
+  opts.sessionRestoreTimeoutMs = sessionRestoreTimeoutMs;
   // Validate here (not just in the yargs handler) so embedded callers of
   // `runQwenServe({ permissionResponseTimeoutMs })` also fail loud: the
   // bridge treats a non-finite / negative value as the "disabled"
@@ -2773,6 +3091,13 @@ async function runQwenServeImpl(
       'qwen serve: required external tool guard handshake succeeded.',
     );
   }
+  // Keep the guard's core helper imports out of the serve fast-path bundle.
+  const { createDaemonToolGuard } = await import(
+    './daemon-git-worktree-guard.js'
+  );
+  const daemonToolGuardHandler = createDaemonToolGuard(
+    externalToolGuardHandler,
+  );
   const childEnvOverrides: Record<string, string | undefined> = {
     QWEN_SERVE_MCP_CLIENT_BUDGET:
       opts.mcpClientBudget !== undefined
@@ -2780,8 +3105,9 @@ async function runQwenServeImpl(
         : undefined,
     QWEN_SERVE_MCP_BUDGET_MODE: opts.mcpBudgetMode,
     QWEN_SERVE_CDP_TUNNEL_OVER_WS: opts.cdpTunnelOverWs ? '1' : undefined,
-    [PRIVATE_EXTERNAL_TOOL_GUARD_ENV]: externalToolGuardHandler
-      ? EXTERNAL_TOOL_GUARD_REQUIRED_VALUE
+    [PRIVATE_EXTERNAL_TOOL_GUARD_ENV]: EXTERNAL_TOOL_GUARD_REQUIRED_VALUE,
+    [PRIVATE_EXTERNAL_TOOL_GUARD_PROVIDER_ENV]: externalToolGuardHandler
+      ? EXTERNAL_TOOL_GUARD_PROVIDER_ATTACHED_VALUE
       : undefined,
   };
 
@@ -2834,6 +3160,28 @@ async function runQwenServeImpl(
   // webShellDir is already undefined whenever serveWebShell === false, so this
   // collapses to "did we resolve real assets".
   const webShellMounted = !!webShellDir;
+  const serveAppLifecycle = new ServeAppLifecycleController();
+  const liveDiscoveryStableBaseDir = path.resolve(
+    deps.liveDiscoveryStableBaseDir ?? path.join(os.homedir(), '.qwen'),
+  );
+  let resolveServeAppStartup!: () => void;
+  let rejectServeAppStartup!: (error: Error) => void;
+  let serveAppStartupSettled = false;
+  const serveAppStartupReady = new Promise<void>((resolve, reject) => {
+    resolveServeAppStartup = resolve;
+    rejectServeAppStartup = reject;
+  });
+  void serveAppStartupReady.catch(() => undefined);
+  const markServeAppStartupReady = (): void => {
+    if (serveAppStartupSettled) return;
+    serveAppStartupSettled = true;
+    resolveServeAppStartup();
+  };
+  const markServeAppStartupFailed = (error: Error): void => {
+    if (serveAppStartupSettled) return;
+    serveAppStartupSettled = true;
+    rejectServeAppStartup(error);
+  };
   let runtimeApp: Application | undefined;
   let runtimeAppForCleanup: Application | undefined;
   let bridgeRef: AcpSessionBridge | undefined = deps.bridge;
@@ -2843,6 +3191,9 @@ async function runQwenServeImpl(
         killAllSync(): void;
       }
     | undefined;
+  // Held for daemon status: `observe` mode's whole product is the would-be
+  // refusal count, which is useless unless it can be read back out.
+  let managedChildHeapPolicy: ChildHeapPolicy | undefined;
   const internalRuntimeBridgesForCleanup: AcpSessionBridge[] = [];
   let daemonEventLoopMonitor:
     | ReturnType<CoreRuntime['startEventLoopLagMonitor']>
@@ -2935,7 +3286,6 @@ async function runQwenServeImpl(
     };
   };
   let closeServerAfterChannelWorkerStartupFailure = false;
-  let runtimeFailureListenerClose: Promise<void> | undefined;
   const getChannelWorkerSnapshot = (): ChannelWorkerSnapshot =>
     channelWorkerManager?.primarySnapshot() ?? {
       enabled: false,
@@ -3138,6 +3488,23 @@ async function runQwenServeImpl(
       }
     }
 
+    // Queue Local Control teardown before disposing the ACP handle. The
+    // serialized disable runs on the next microtask and wins before further IO;
+    // ACP disposal below also removes the upgrade listeners while the daemon
+    // mount is being torn down.
+    const localControlService = app.locals?.['localControlService'] as
+      | LocalControlService
+      | undefined;
+    if (localControlService) {
+      void localControlService.dispose().catch((err: unknown) => {
+        daemonLog.warn(
+          `Local Control dispose error: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      });
+    }
+
     const acpHandle = app.locals?.['acpHandle'] as AcpHttpHandle | undefined;
     if (acpHandle?.dispose) {
       try {
@@ -3222,8 +3589,6 @@ async function runQwenServeImpl(
         }`,
       );
     }
-    const liveConversationWorkspace =
-      deps.liveConversationWorkspace ?? new LiveConversationWorkspace();
     let runtimeBootSettings:
       | ReturnType<SettingsRuntime['loadSettings']>
       | undefined;
@@ -3330,6 +3695,14 @@ async function runQwenServeImpl(
       runtimeBootSettings,
       runtimeEnvSnapshot.effectiveEnv,
     );
+    const sessionAttachmentsRoot = (
+      workspace: string,
+      runtimeBaseDir: string,
+    ): string =>
+      path.join(
+        new core.Storage(workspace, runtimeBaseDir).getProjectTempDir(),
+        'attachments',
+      );
     const runtimeEffectiveEnv: NodeJS.ProcessEnv = {
       ...runtimeEnvSnapshot.effectiveEnv,
       QWEN_RUNTIME_DIR: primarySessionRuntimeBaseDir,
@@ -3555,6 +3928,21 @@ async function runQwenServeImpl(
       workspaceTrustOperationGate.runExclusive('runtime-topology', operation);
     const processRegistry = new runtime.ProcessRegistry();
     managedProcessRegistry = processRegistry;
+    // One policy for the whole daemon, beside the one registry it reads. Both
+    // must be shared: a per-factory registry would report a concurrent count
+    // of 1 on every spawn and hand each child the entire pool.
+    // Not built for an injected bridge: `deps.bridge` brings its own channel
+    // and never goes through the factory this policy rides on, so a policy
+    // here would size nothing while `limits.memory.enforced` claimed
+    // otherwise — a status field asserting enforcement that is not happening.
+    const childHeapPolicy: ChildHeapPolicy | undefined =
+      opts.daemonMemoryBudget && !deps.bridge
+        ? createChildHeapPolicy({
+            budget: opts.daemonMemoryBudget,
+            mode: opts.childHeapMode ?? 'observe',
+          })
+        : undefined;
+    managedChildHeapPolicy = childHeapPolicy;
     const fsFactory = runtime.resolveBridgeFsFactory({
       // Secondary roots share a write-capable factory only after their own
       // folder trust check passes; untrusted secondary roots stay outside.
@@ -3578,6 +3966,8 @@ async function runQwenServeImpl(
     });
     const channelFactory = runtime.createSpawnChannelFactory({
       processRegistry,
+      childHeapPolicy,
+      pipeLimits: runtime.daemonAcpNdJsonLimits,
       sourceEnv: runtimeEffectiveEnv,
       onDiagnosticLine: diagnosticSink,
       pipeHooks: {
@@ -3746,6 +4136,90 @@ async function runQwenServeImpl(
           settingsChanges,
         };
       });
+    const persistDisabledSkillsBatchFn = (
+      workspace: string,
+      skillNames: readonly string[],
+      enabled: boolean,
+      assertGenerationOpen?: () => void,
+    ): Promise<PersistDisabledSkillsBatchResult> =>
+      withSettingsLock(workspace, async () => {
+        assertGenerationOpen?.();
+        const {
+          resolveSkillSettings,
+          skillSettingStrings,
+          updateWorkspaceSkillSettingLists,
+        } = await import('../config/skill-settings.js');
+        const fresh = loadSettingsForPersistence(workspace);
+        const resolved = resolveSkillSettings(fresh);
+        const initialDisabled = skillSettingStrings(
+          fresh,
+          WORKSPACE_SETTING_SCOPE,
+          'disabled',
+        );
+        const initialEnabled = skillSettingStrings(
+          fresh,
+          WORKSPACE_SETTING_SCOPE,
+          'enabled',
+        );
+        let next = { disabled: initialDisabled, enabled: initialEnabled };
+        const outcomes: PersistDisabledSkillsBatchResult['outcomes'] = [];
+
+        for (const skillName of skillNames) {
+          const normalizedName = skillName.trim().toLowerCase();
+          const disablement = resolved.disablements.get(normalizedName);
+          if (disablement?.reason === 'hard' && disablement.lockedScope) {
+            outcomes.push({
+              skillName,
+              error: new runtime.WorkspaceSkillNotToggleableError(
+                skillName,
+                'locked',
+                disablement.lockedScope,
+              ),
+            });
+            continue;
+          }
+          const updated = updateWorkspaceSkillSettingLists(
+            next,
+            skillName,
+            enabled,
+            resolved.defaultDisabledNames.has(normalizedName) &&
+              !resolved.enabledNames.has(normalizedName),
+          );
+          const changed =
+            JSON.stringify(updated.disabled) !==
+              JSON.stringify(next.disabled) ||
+            JSON.stringify(updated.enabled) !== JSON.stringify(next.enabled);
+          next = updated;
+          outcomes.push({ skillName, changed });
+        }
+
+        const settingsChanges: PersistDisabledSkillsBatchResult['settingsChanges'] =
+          [];
+        if (JSON.stringify(next.disabled) !== JSON.stringify(initialDisabled)) {
+          settingsChanges.push({
+            key: 'skills.disabled',
+            value: next.disabled.length > 0 ? next.disabled : undefined,
+          });
+        }
+        if (JSON.stringify(next.enabled) !== JSON.stringify(initialEnabled)) {
+          settingsChanges.push({
+            key: 'skills.enabled',
+            value: next.enabled.length > 0 ? next.enabled : undefined,
+          });
+        }
+        if (settingsChanges.length > 0) {
+          assertGenerationOpen?.();
+          fresh.setValues(
+            settingsChanges.map((change) => ({
+              scope: WORKSPACE_SETTING_SCOPE,
+              ...change,
+            })),
+            undefined,
+            assertGenerationOpen,
+          );
+        }
+        return { outcomes, settingsChanges };
+      });
     const persistSettingFn = (
       workspace: string,
       scope: import('../config/settings.js').SettingScope,
@@ -3827,6 +4301,10 @@ async function runQwenServeImpl(
     const bridge =
       deps.bridge ??
       runtime.createAcpSessionBridge({
+        sessionAttachmentsRoot: sessionAttachmentsRoot(
+          boundWorkspace,
+          primarySessionRuntimeBaseDir,
+        ),
         // Reverse tool channel: let `BridgeClient.extMethod` reach the WS
         // connection that hosts a named client MCP server (#5626).
         clientMcpSender: clientMcpSenderRegistry.lookup,
@@ -3861,12 +4339,20 @@ async function runQwenServeImpl(
         ...(opts.maxJournalBytes !== undefined
           ? { maxJournalBytes: opts.maxJournalBytes }
           : {}),
+        ...(journalGrowthPoolBytes !== undefined
+          ? {
+              journalGrowthPoolBytes,
+              journalGrowthSessionLimits,
+              registerJournalGrowthSessionLimits,
+            }
+          : {}),
         ...(opts.channelIdleTimeoutMs !== undefined
           ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }
           : {}),
         ...(opts.initializeTimeoutMs !== undefined
           ? { initializeTimeoutMs: opts.initializeTimeoutMs }
           : {}),
+        sessionRestoreTimeoutMs,
         ...(opts.sessionReapIntervalMs !== undefined
           ? { sessionReapIntervalMs: opts.sessionReapIntervalMs }
           : {}),
@@ -3877,12 +4363,16 @@ async function runQwenServeImpl(
           ? { permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs }
           : {}),
         boundWorkspace,
+        // Prompt terminal ledger: persisted beside the transcript so a
+        // restarted daemon can reconcile dangling prompts on cold load.
+        promptLedger: runtime.createPromptLedgerSink(
+          boundWorkspace,
+          primarySessionRuntimeBaseDir,
+        ),
         sessionShellCommandEnabled,
         childEnvOverrides,
         channelFactory,
-        ...(externalToolGuardHandler
-          ? { externalToolGuard: externalToolGuardHandler }
-          : {}),
+        externalToolGuard: daemonToolGuardHandler,
         onDiagnosticLine: diagnosticSink,
         telemetry: daemonTelemetry,
         ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
@@ -3891,7 +4381,10 @@ async function runQwenServeImpl(
           : {}),
         permissionAudit: permissionAuditPublisher,
         statusProvider,
-        fileSystem: createBridgeFileSystemAdapter(fsFactory),
+        delegateReadTextFileToClient: false,
+        fileSystem: createBridgeFileSystemAdapter(fsFactory, {
+          allowSameHostToolWritesOutsideWorkspace: deps.fsFactory === undefined,
+        }),
         persistApprovalMode: (workspace, mode) =>
           withSettingsLock(workspace, async () => {
             primaryGenerationGuard.assertOpen();
@@ -3932,6 +4425,7 @@ async function runQwenServeImpl(
       isChannelLive: () => bridge.isChannelLive(),
       persistDisabledTools: persistDisabledToolsFn,
       persistDisabledSkills: persistDisabledSkillsFn,
+      persistDisabledSkillsBatch: persistDisabledSkillsBatchFn,
       persistSetting: persistSettingFn,
       persistSettings: persistSettingsFn,
       preheatAcpChild: () => bridge.preheat(),
@@ -4194,6 +4688,8 @@ async function runQwenServeImpl(
       });
       const secondaryChannelFactory = runtime.createSpawnChannelFactory({
         processRegistry,
+        childHeapPolicy,
+        pipeLimits: runtime.daemonAcpNdJsonLimits,
         sourceEnv: secondaryEnv.effectiveEnv,
         onDiagnosticLine: diagnosticSink,
         pipeHooks: {
@@ -4226,6 +4722,10 @@ async function runQwenServeImpl(
         ),
       });
       const secondaryBridge = runtime.createAcpSessionBridge({
+        sessionAttachmentsRoot: sessionAttachmentsRoot(
+          workspaceInput.cwd,
+          secondaryEnv.sessionRuntimeBaseDir,
+        ),
         clientMcpSender: secondaryClientMcpSenderRegistry.lookup,
         onCreateSubSession: secondarySubSessionLauncher.launch,
         onChannelDelivery: createBoundChannelDeliveryHandler(
@@ -4258,12 +4758,20 @@ async function runQwenServeImpl(
         ...(opts.maxJournalBytes !== undefined
           ? { maxJournalBytes: opts.maxJournalBytes }
           : {}),
+        ...(journalGrowthPoolBytes !== undefined
+          ? {
+              journalGrowthPoolBytes,
+              journalGrowthSessionLimits,
+              registerJournalGrowthSessionLimits,
+            }
+          : {}),
         ...(opts.channelIdleTimeoutMs !== undefined
           ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }
           : {}),
         ...(opts.initializeTimeoutMs !== undefined
           ? { initializeTimeoutMs: opts.initializeTimeoutMs }
           : {}),
+        sessionRestoreTimeoutMs,
         ...(opts.sessionReapIntervalMs !== undefined
           ? { sessionReapIntervalMs: opts.sessionReapIntervalMs }
           : {}),
@@ -4274,12 +4782,14 @@ async function runQwenServeImpl(
           ? { permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs }
           : {}),
         boundWorkspace: workspaceInput.cwd,
+        promptLedger: runtime.createPromptLedgerSink(
+          workspaceInput.cwd,
+          secondaryEnv.sessionRuntimeBaseDir,
+        ),
         sessionShellCommandEnabled,
         childEnvOverrides,
         channelFactory: secondaryChannelFactory,
-        ...(externalToolGuardHandler
-          ? { externalToolGuard: externalToolGuardHandler }
-          : {}),
+        externalToolGuard: daemonToolGuardHandler,
         onDiagnosticLine: diagnosticSink,
         telemetry: createRuntimeBridgeTelemetry(secondaryWorkspaceHash),
         ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
@@ -4290,7 +4800,10 @@ async function runQwenServeImpl(
           : {}),
         permissionAudit: permissionAuditPublisher,
         statusProvider: secondaryStatusProvider,
-        fileSystem: createBridgeFileSystemAdapter(secondaryBridgeFsFactory),
+        delegateReadTextFileToClient: false,
+        fileSystem: createBridgeFileSystemAdapter(secondaryBridgeFsFactory, {
+          allowSameHostToolWritesOutsideWorkspace: true,
+        }),
         persistApprovalMode: (workspace, mode) =>
           withSettingsLock(workspace, async () => {
             secondaryGenerationGuard.assertOpen();
@@ -4338,6 +4851,7 @@ async function runQwenServeImpl(
         preheatAcpChild: () => secondaryBridge.preheat(),
         persistDisabledTools: persistDisabledToolsFn,
         persistDisabledSkills: persistDisabledSkillsFn,
+        persistDisabledSkillsBatch: persistDisabledSkillsBatchFn,
         persistSetting: persistSettingFn,
         persistSettings: persistSettingsFn,
         reloadDaemonEnv: (workspace, assertGenerationOpen) =>
@@ -4444,7 +4958,7 @@ async function runQwenServeImpl(
     core.registerDaemonGaugeCallbacks({
       sessionCount: () =>
         workspaceRegistry
-          .list()
+          .listAll()
           .reduce((sum, item) => sum + item.bridge.sessionCount, 0),
       sseCount: () => runtime.getActiveSseCount(),
       heapUsed: () => process.memoryUsage().heapUsed,
@@ -4520,35 +5034,60 @@ async function runQwenServeImpl(
           primaryEntry.state === 'active'
             ? primaryEntry.current?.runtime.bridge
             : undefined;
+        // The ring's `childRssBytes` gauge stays the PRIMARY child's reading —
+        // its published meaning is "ACP child process RSS", singular. The
+        // aggregate across every workspace is reported separately, under
+        // `runtime.memory.children` in daemon status.
         const child = primaryRuntimeBridge?.getChildResourceSnapshot?.();
         // Only poll the child's resources when someone is watching: the
         // staleness guard already drops the reading to 0 when idle, so gating
         // avoids a 5s RPC round-trip (pipe + child CPU) for a chart nobody has
         // open.
         if (runtime.getActiveSseCount() > 0 || (acp?.wsStreams ?? 0) > 0) {
-          void primaryRuntimeBridge?.refreshChildResource?.().catch((err) => {
-            daemonLog.warn(
-              `ACP child resource refresh failed: ${
-                err instanceof Error ? err.message : String(err)
-              }`,
-            );
-          });
+          // Refresh EVERY managed workspace, not just the primary: the caches
+          // this warms are what `runtime.memory.children` sums, and a child
+          // nobody refreshed reads as unmeasured there. No `isChannelLive`
+          // filter is needed — `refreshChildResource` already no-ops without a
+          // live channel — and no concurrency limit is added, because the call
+          // is single-flight per bridge and the number of bridges is capped by
+          // MAX_DAEMON_WORKSPACES.
+          for (const managed of workspaceRegistry.listManaged()) {
+            // The shipped bridge's `refreshChildResource` never rejects: it
+            // catches the RPC failure itself, keeps the last good cache, and
+            // tees the reason to the serve debug log — which is why this
+            // handler has never fired and why the fan-out cannot turn it into
+            // 25 warnings a tick. It stays as a backstop rather than being
+            // deleted, because the method is an optional interface member and
+            // an `async` one, so any other implementation throwing before its
+            // own try block would surface here as an unhandled rejection and
+            // take the daemon down.
+            //
+            // Carrying the workspace matters for exactly that case: an
+            // unattributable warning repeated across a 25-workspace fan-out is
+            // the shape that is impossible to act on.
+            void managed.bridge.refreshChildResource?.().catch((err) => {
+              daemonLog.warn('ACP child resource refresh failed', {
+                workspaceId: managed.workspaceId,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            });
+          }
         }
         metricsRing.sample(nowMs, {
           cpuPercent,
           rssBytes: mem.rss,
           heapUsedBytes: mem.heapUsed,
           activeSessions: workspaceRegistry
-            .list()
+            .listAll()
             .reduce((sum, item) => sum + item.bridge.sessionCount, 0),
           activePrompts: workspaceRegistry
-            .list()
+            .listAll()
             .reduce(
               (sum, item) => sum + (item.bridge.activePromptCount ?? 0),
               0,
             ),
           queuedPrompts: workspaceRegistry
-            .list()
+            .listAll()
             .reduce(
               (sum, item) => sum + (item.bridge.pendingPromptTotal ?? 0),
               0,
@@ -4704,6 +5243,8 @@ async function runQwenServeImpl(
           : wsFsFactory;
       const wsChannelFactory = runtime.createSpawnChannelFactory({
         processRegistry,
+        childHeapPolicy,
+        pipeLimits: runtime.daemonAcpNdJsonLimits,
         sourceEnv: wsEnv.effectiveEnv,
         onDiagnosticLine: diagnosticSink,
         pipeHooks: {
@@ -4750,6 +5291,10 @@ async function runQwenServeImpl(
       let wsBridge: ReturnType<typeof runtime.createAcpSessionBridge>;
       try {
         wsBridge = runtime.createAcpSessionBridge({
+          sessionAttachmentsRoot: sessionAttachmentsRoot(
+            cwd,
+            wsEnv.sessionRuntimeBaseDir,
+          ),
           clientMcpSender: wsClientMcpRegistry.lookup,
           onCreateSubSession: wsSubSessionLauncher.launch,
           onChannelDelivery: createBoundChannelDeliveryHandler(
@@ -4780,12 +5325,20 @@ async function runQwenServeImpl(
           ...(opts.maxJournalBytes !== undefined
             ? { maxJournalBytes: opts.maxJournalBytes }
             : {}),
+          ...(journalGrowthPoolBytes !== undefined
+            ? {
+                journalGrowthPoolBytes,
+                journalGrowthSessionLimits,
+                registerJournalGrowthSessionLimits,
+              }
+            : {}),
           ...(opts.channelIdleTimeoutMs !== undefined
             ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }
             : {}),
           ...(opts.initializeTimeoutMs !== undefined
             ? { initializeTimeoutMs: opts.initializeTimeoutMs }
             : {}),
+          sessionRestoreTimeoutMs,
           ...(opts.sessionReapIntervalMs !== undefined
             ? { sessionReapIntervalMs: opts.sessionReapIntervalMs }
             : {}),
@@ -4796,12 +5349,20 @@ async function runQwenServeImpl(
             ? { permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs }
             : {}),
           boundWorkspace: cwd,
+          // Live-conversation workspaces keep transcripts outside the
+          // runtime storage layout, so no ledger sink is wired there.
+          ...(provenance === 'live-conversation'
+            ? {}
+            : {
+                promptLedger: runtime.createPromptLedgerSink(
+                  cwd,
+                  wsEnv.sessionRuntimeBaseDir,
+                ),
+              }),
           sessionShellCommandEnabled,
           childEnvOverrides,
           channelFactory: wsChannelFactory,
-          ...(externalToolGuardHandler
-            ? { externalToolGuard: externalToolGuardHandler }
-            : {}),
+          externalToolGuard: daemonToolGuardHandler,
           onDiagnosticLine: diagnosticSink,
           telemetry: createRuntimeBridgeTelemetry(wsHash),
           ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
@@ -4814,7 +5375,10 @@ async function runQwenServeImpl(
           statusProvider: runtime.createDaemonStatusProvider({
             env: wsEnv.effectiveEnv,
           }),
-          fileSystem: createBridgeFileSystemAdapter(wsFsFactory),
+          delegateReadTextFileToClient: false,
+          fileSystem: createBridgeFileSystemAdapter(wsFsFactory, {
+            allowSameHostToolWritesOutsideWorkspace: true,
+          }),
           persistApprovalMode: (workspace, mode) =>
             withSettingsLock(workspace, async () => {
               generationGuard.assertOpen();
@@ -4869,6 +5433,7 @@ async function runQwenServeImpl(
           preheatAcpChild: () => wsBridge.preheat(),
           persistDisabledTools: persistDisabledToolsFn,
           persistDisabledSkills: persistDisabledSkillsFn,
+          persistDisabledSkillsBatch: persistDisabledSkillsBatchFn,
           persistSetting: persistSettingFn,
           persistSettings: persistSettingsFn,
           reloadDaemonEnv: (workspace, assertGenerationOpen) =>
@@ -5395,7 +5960,10 @@ async function runQwenServeImpl(
     };
 
     const app = runtime.createServeApp(opts, () => actualPort, {
+      serveAppLifecycle,
+      liveDiscoveryStableBaseDir,
       workspaceRegistry,
+      getSessionBridges: () => runtimeBridges,
       createWorkspaceRuntime: createDynamicWorkspaceRuntime,
       ...(workspaceTrustHotReloadAvailable
         ? {
@@ -5480,6 +6048,7 @@ async function runQwenServeImpl(
       }),
       getMetricsSeries: () => metricsRing.snapshot(),
       getTotalSessionAdmissionSnapshot: totalSessionAdmission.snapshot,
+      getChildHeapPolicySnapshot: () => managedChildHeapPolicy?.snapshot(),
       recordDaemonRequest: (durationMs, statusCode) =>
         metricsRing.recordRequest(durationMs, statusCode),
       workspace: workspaceService,
@@ -5488,6 +6057,7 @@ async function runQwenServeImpl(
       clientMcpSenderRegistry,
       persistDisabledTools: persistDisabledToolsFn,
       persistDisabledSkills: persistDisabledSkillsFn,
+      persistDisabledSkillsBatch: persistDisabledSkillsBatchFn,
       persistSetting: persistSettingFn,
       persistSettings: persistSettingsFn,
       sessionArtifactsPersistenceAvailable:
@@ -5809,6 +6379,17 @@ async function runQwenServeImpl(
       runtimeReady,
       authenticateDeferredRuntimeRequest: bearerAuth(opts.token),
       authenticateDeferredChannelWebhookRequest: deferredChannelWebhookAuth,
+      // The runtime app serves these before bearerAuth; a browser navigation
+      // cannot attach the bearer header, so the cold gate must let them
+      // through (and start the runtime) exactly like the warm app would.
+      // Dynamic import keeps web-shell-static out of the serve fast-path
+      // static closure (see the import-boundary guards in fast-path.test.ts).
+      isPreAuthRequest: webShellMounted
+        ? (req) =>
+            import('./web-shell-static.js').then((webShellStatic) =>
+              webShellStatic.isPreAuthWebShellRequest(req),
+            )
+        : undefined,
     });
 
   // Node's `app.listen()` wants the unbracketed IPv6 literal (`::1`) but
@@ -5995,8 +6576,9 @@ async function runQwenServeImpl(
     // When TLS is configured, wrap the Express app in an HTTPS listener
     // (`https.Server extends http.Server`, so everything downstream —
     // `server.maxConnections`, `server.address()`, `attachServer(server)`,
-    // graceful close — is unchanged). Otherwise `app.listen()` keeps the
-    // existing plain-HTTP path bit-for-bit.
+    // graceful close — is unchanged). Plain HTTP uses the same explicitly
+    // lifecycle-bound server shape.
+    let closeHost: (() => Promise<void>) | undefined;
     const onListening = (error?: Error) => {
       // Error handling (retry/reject) is owned by tryListen's
       // server.once('error') handler.
@@ -6010,10 +6592,9 @@ async function runQwenServeImpl(
       profileCheckpoint('serve_listener_ready');
       finalizeStartupProfile(`serve-${process.pid}`);
 
-      // Listener-level connection cap, set inside the listen callback
-      // because Node only exposes the underlying `Server` after
-      // `app.listen()` returns. Each session's `EventBus` already
-      // refuses to admit more than `DEFAULT_MAX_SUBSCRIBERS` (64), but
+      // Listener-level connection cap, set inside the listen callback after
+      // Node has opened the underlying `Server`. Each session's `EventBus`
+      // already refuses to admit more than `DEFAULT_MAX_SUBSCRIBERS` (64), but
       // an attacker can still open *connections* that never finish
       // their headers, never reach the bus, and just sit consuming
       // socket descriptors. The default of 256 leaves room for many
@@ -6045,15 +6626,34 @@ async function runQwenServeImpl(
         instanceNonce: string;
         pid: number;
       }> = [];
+      const rememberLiveDiscoveryOwner = (owner: {
+        runtimeBaseDir: string;
+        instanceNonce: string;
+        pid: number;
+      }): void => {
+        if (
+          liveDiscoveryOwners.some(
+            (candidate) =>
+              candidate.runtimeBaseDir === owner.runtimeBaseDir &&
+              candidate.instanceNonce === owner.instanceNonce &&
+              candidate.pid === owner.pid,
+          )
+        ) {
+          return;
+        }
+        liveDiscoveryOwners.push(owner);
+      };
       let liveDiscoveryPublish: Promise<void> | undefined;
       let liveDiscoveryRetryTimer: NodeJS.Timeout | undefined;
       let liveDiscoveryRetryTask: Promise<void> | undefined;
+      let liveDiscoveryBootRetryApp: Application | undefined;
       let liveDiscoveryEnabled = false;
       let liveDiscoveryShuttingDown = false;
       let liveDiscoveryToggle: Promise<void> = Promise.resolve();
       let attemptPendingLiveDiscovery: (() => Promise<void>) | undefined;
       const pendingLiveDiscoveryBaseDirs = new Set<string>();
       const warnedLiveDiscoveryOwners = new Set<string>();
+      let warnedLiveDiscoveryBootFailure = false;
       const liveDiscoveryRetryDelayMs =
         deps.liveDiscoveryRetryDelayMs !== undefined &&
         Number.isFinite(deps.liveDiscoveryRetryDelayMs) &&
@@ -6066,21 +6666,24 @@ async function runQwenServeImpl(
           !liveDiscoveryEnabled ||
           liveDiscoveryRetryTimer ||
           liveDiscoveryRetryTask ||
-          pendingLiveDiscoveryBaseDirs.size === 0 ||
-          !attemptPendingLiveDiscovery
+          (!liveDiscoveryBootRetryApp &&
+            (pendingLiveDiscoveryBaseDirs.size === 0 ||
+              !attemptPendingLiveDiscovery))
         ) {
           return;
         }
         liveDiscoveryRetryTimer = setTimeout(() => {
           liveDiscoveryRetryTimer = undefined;
-          if (
-            liveDiscoveryShuttingDown ||
-            !liveDiscoveryEnabled ||
-            !attemptPendingLiveDiscovery
-          ) {
+          if (liveDiscoveryShuttingDown || !liveDiscoveryEnabled) {
             return;
           }
-          const retry = attemptPendingLiveDiscovery().finally(() => {
+          const retryApp = liveDiscoveryBootRetryApp;
+          liveDiscoveryBootRetryApp = undefined;
+          const retryOperation = retryApp
+            ? publishLiveDiscovery(retryApp)
+            : attemptPendingLiveDiscovery?.();
+          if (!retryOperation) return;
+          const retry = retryOperation.finally(() => {
             if (liveDiscoveryRetryTask === retry) {
               liveDiscoveryRetryTask = undefined;
             }
@@ -6109,18 +6712,23 @@ async function runQwenServeImpl(
           | undefined;
         const instanceNonce = coordinator?.daemonInstanceNonce;
         if (typeof instanceNonce !== 'string') return Promise.resolve();
-        liveDiscoveryPublish = loadLiveDiscoveryRuntime()
+        let publicationFailed = false;
+        let publicationRetryable = false;
+        const publication = serveAppLifecycle
+          .startBoot()
+          .then(() => loadLiveDiscoveryRuntime())
           .then(
             async ({
-              getStableLiveDiscoveryBaseDir,
+              handoffLiveDiscoveryOwner,
               LiveDiscoveryOwnerActiveError,
+              LiveDiscoveryPublicationError,
+              removeLiveDiscoveryFile,
               writeLiveDiscoveryFile,
             }) => {
               if (liveDiscoveryShuttingDown || !liveDiscoveryEnabled) return;
-              const stableBaseDir = path.resolve(
-                deps.liveDiscoveryStableBaseDir ??
-                  getStableLiveDiscoveryBaseDir(),
-              );
+              liveDiscoveryBootRetryApp = undefined;
+              warnedLiveDiscoveryBootFailure = false;
+              const stableBaseDir = liveDiscoveryStableBaseDir;
               const runtimeBaseDir = path.resolve(liveRuntimeBaseDir);
               const targetBaseDirs = new Set<string>();
               if (runtimeBaseDir !== stableBaseDir) {
@@ -6138,21 +6746,62 @@ async function runQwenServeImpl(
                 instanceNonce,
               };
               attemptPendingLiveDiscovery = async () => {
-                for (const runtimeBaseDir of [
-                  ...pendingLiveDiscoveryBaseDirs,
-                ]) {
-                  if (liveDiscoveryShuttingDown || !liveDiscoveryEnabled)
+                const targets = [...pendingLiveDiscoveryBaseDirs];
+                const published: Array<{
+                  runtimeBaseDir: string;
+                  instanceNonce: string;
+                  pid: number;
+                }> = [];
+                const rollbackPublished = async (): Promise<void> => {
+                  for (const owner of published.splice(0)) {
+                    try {
+                      await removeLiveDiscoveryFile(
+                        owner.runtimeBaseDir,
+                        owner,
+                      );
+                    } catch (cleanupError) {
+                      rememberLiveDiscoveryOwner(owner);
+                      daemonLog.warn(
+                        `failed to roll back Live Host discovery at ${owner.runtimeBaseDir}: ${
+                          cleanupError instanceof Error
+                            ? cleanupError.message
+                            : String(cleanupError)
+                        }`,
+                      );
+                    }
+                  }
+                };
+                for (const runtimeBaseDir of targets) {
+                  if (liveDiscoveryShuttingDown || !liveDiscoveryEnabled) {
+                    await rollbackPublished();
                     return;
+                  }
                   try {
+                    if (runtimeBaseDir !== stableBaseDir) {
+                      await handoffLiveDiscoveryOwner(
+                        runtimeBaseDir,
+                        record,
+                        async () => undefined,
+                      );
+                    }
                     await writeLiveDiscoveryFile(runtimeBaseDir, record);
-                    pendingLiveDiscoveryBaseDirs.delete(runtimeBaseDir);
-                    warnedLiveDiscoveryOwners.delete(runtimeBaseDir);
-                    liveDiscoveryOwners.push({
+                    published.push({
                       runtimeBaseDir,
                       instanceNonce,
                       pid: process.pid,
                     });
                   } catch (err) {
+                    if (
+                      err instanceof LiveDiscoveryPublicationError &&
+                      err.published
+                    ) {
+                      published.push({
+                        runtimeBaseDir,
+                        instanceNonce,
+                        pid: process.pid,
+                      });
+                    }
+                    await rollbackPublished();
                     if (err instanceof LiveDiscoveryOwnerActiveError) {
                       if (!warnedLiveDiscoveryOwners.has(runtimeBaseDir)) {
                         warnedLiveDiscoveryOwners.add(runtimeBaseDir);
@@ -6160,15 +6809,20 @@ async function runQwenServeImpl(
                           `failed to publish Live Host discovery at ${runtimeBaseDir}: ${err.message}`,
                         );
                       }
-                      continue;
+                      return;
                     }
-                    pendingLiveDiscoveryBaseDirs.delete(runtimeBaseDir);
                     daemonLog.warn(
                       `failed to publish Live Host discovery at ${runtimeBaseDir}: ${
                         err instanceof Error ? err.message : String(err)
                       }`,
                     );
+                    return;
                   }
+                }
+                for (const owner of published) {
+                  pendingLiveDiscoveryBaseDirs.delete(owner.runtimeBaseDir);
+                  warnedLiveDiscoveryOwners.delete(owner.runtimeBaseDir);
+                  rememberLiveDiscoveryOwner(owner);
                 }
               };
               await attemptPendingLiveDiscovery();
@@ -6176,42 +6830,69 @@ async function runQwenServeImpl(
             },
           )
           .catch((err) => {
-            daemonLog.warn(
-              `failed to publish Live Host discovery: ${
-                err instanceof Error ? err.message : String(err)
-              }`,
-            );
+            publicationFailed = true;
+            publicationRetryable =
+              err instanceof ConversationRuntimeOwnershipError && err.retryable;
+            if (!publicationRetryable || !warnedLiveDiscoveryBootFailure) {
+              warnedLiveDiscoveryBootFailure = publicationRetryable;
+              daemonLog.warn(
+                `failed to publish Live Host discovery: ${
+                  err instanceof Error ? err.message : String(err)
+                }`,
+              );
+            }
           });
+        const trackedPublication = publication.finally(() => {
+          if (
+            publicationFailed &&
+            liveDiscoveryPublish === trackedPublication
+          ) {
+            liveDiscoveryPublish = undefined;
+            if (
+              publicationRetryable &&
+              !liveDiscoveryShuttingDown &&
+              liveDiscoveryEnabled
+            ) {
+              liveDiscoveryBootRetryApp = candidateApp;
+              scheduleLiveDiscoveryRetry();
+            }
+          }
+        });
+        liveDiscoveryPublish = trackedPublication;
         return liveDiscoveryPublish;
       };
       const removeLiveDiscoveryOwners = async (): Promise<void> => {
-        const owners = liveDiscoveryOwners.splice(0);
+        const owners = [...liveDiscoveryOwners];
         if (owners.length === 0) return;
         let removeLiveDiscoveryFile: LiveDiscoveryRuntime['removeLiveDiscoveryFile'];
         try {
           ({ removeLiveDiscoveryFile } = await loadLiveDiscoveryRuntime());
         } catch (err) {
-          daemonLog.warn(
-            `failed to load Live discovery runtime for cleanup: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          );
-          return;
+          throw new Error('Failed to load Live discovery cleanup support.', {
+            cause: err,
+          });
         }
+        const errors: unknown[] = [];
         for (const owner of owners) {
           try {
             await removeLiveDiscoveryFile(owner.runtimeBaseDir, owner);
+            const index = liveDiscoveryOwners.indexOf(owner);
+            if (index >= 0) liveDiscoveryOwners.splice(index, 1);
           } catch (err) {
-            daemonLog.warn(
-              `failed to remove Live Host discovery at ${owner.runtimeBaseDir}: ${
-                err instanceof Error ? err.message : String(err)
-              }`,
-            );
+            errors.push(err);
           }
+        }
+        if (errors.length > 0) {
+          throw new AggregateError(
+            errors,
+            'Live Host discovery cleanup is incomplete.',
+          );
         }
       };
       const unpublishLiveDiscovery = async (): Promise<void> => {
         liveDiscoveryEnabled = false;
+        liveDiscoveryBootRetryApp = undefined;
+        warnedLiveDiscoveryBootFailure = false;
         cancelLiveDiscoveryRetry();
         pendingLiveDiscoveryBaseDirs.clear();
         attemptPendingLiveDiscovery = undefined;
@@ -6225,6 +6906,7 @@ async function runQwenServeImpl(
         (
           candidateApp.locals as {
             setLiveDiscoveryEnabled?: (enabled: boolean) => Promise<void>;
+            onConversationRuntimeReady?: () => void;
           }
         ).setLiveDiscoveryEnabled = (enabled) => {
           const operation = liveDiscoveryToggle.then(() =>
@@ -6235,6 +6917,13 @@ async function runQwenServeImpl(
           liveDiscoveryToggle = operation.catch(() => undefined);
           return operation;
         };
+        (
+          candidateApp.locals as {
+            onConversationRuntimeReady?: () => void;
+          }
+        ).onConversationRuntimeReady = () => {
+          void publishLiveDiscovery(candidateApp);
+        };
       };
       const cleanupLiveDiscovery = async (): Promise<void> => {
         liveDiscoveryShuttingDown = true;
@@ -6242,81 +6931,6 @@ async function runQwenServeImpl(
         await liveDiscoveryToggle;
         await unpublishLiveDiscovery();
       };
-      try {
-        channelWorkspaceGroups = resolveChannelWorkspaceGroupsAtListen();
-      } catch (err) {
-        removeCurrentServePidfile();
-        const error = err instanceof Error ? err : new Error(String(err));
-        server.close((closeErr) => {
-          if (closeErr) {
-            daemonLog.error(
-              'server close after channel worker validation error failed',
-              closeErr,
-            );
-          }
-          reject(error);
-        });
-        return;
-      }
-      if (channelWorkspaceGroups) {
-        for (const group of channelWorkspaceGroups) {
-          daemonLog.info('channel worker group assigned', {
-            workspace: group.workspaceCwd,
-            channels:
-              group.selection.mode === 'all' ? ['all'] : group.selection.names,
-          });
-        }
-        if (opts.channelSelection?.mode === 'all') {
-          writeStderrLine(
-            'qwen serve: --channel all is primary-workspace only; non-primary workspace channels are not hosted.',
-          );
-        }
-      }
-      writeStdoutLine(
-        `qwen serve listening on ${url} (mode=${opts.mode}, ` +
-          `workspace=${boundWorkspace})`,
-      );
-      // Operator log on stderr too (systemd/docker/k8s default
-      // captures only stderr for service diagnostics, and the
-      // workspace= breadcrumb is the single piece of information
-      // operators need most when triaging migration issues —
-      // "did the daemon bind to the right workspace?"). The stdout
-      // line above stays put so integration tests + scripts that
-      // parse stdout for the listening URL keep working;
-      // `JSON.stringify(boundWorkspace)` quotes the value
-      // symmetrically with the workspace_mismatch log (defends
-      // against control-char log injection if `boundWorkspace`
-      // somehow contained one — operator-controlled today, but
-      // cheap defense-in-depth).
-      writeStderrLine(
-        `qwen serve: bound to workspace ${JSON.stringify(boundWorkspace)}`,
-      );
-      writeStderrLine(
-        `qwen serve: startup timing: processToListenMs=${startup.processToListenMs} ` +
-          `runQwenServeToListenMs=${startup.runQwenServeToListenMs}`,
-      );
-      if (!token) {
-        writeStderrLine(
-          `qwen serve: bearer auth disabled (loopback default). Set ${QWEN_SERVER_TOKEN_ENV} to enable.`,
-        );
-        if (opts.clientMcpOverWs === true) {
-          writeStderrLine(
-            `qwen serve: client-hosted MCP tools are accepted over the WebSocket without auth. ` +
-              `Set ${QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV}=0 to disable.`,
-          );
-        }
-      } else if (opts.requireAuth) {
-        // The boot check above guarantees `token` is set whenever
-        // `--require-auth` is on, so this branch only fires alongside
-        // a successfully-authenticated daemon. The log line lets
-        // operators confirm the hardening is active without parsing
-        // `/capabilities` (and is a useful breadcrumb when triaging
-        // "why is loopback returning 401" tickets).
-        writeStderrLine(
-          'qwen serve: --require-auth enabled (bearer token mandatory ' +
-            'on every route, including loopback /health).',
-        );
-      }
       let shuttingDown = false;
       let closePromise: Promise<void> | undefined;
       let runtimeStartupTimer: NodeJS.Timeout | undefined;
@@ -6393,6 +7007,7 @@ async function runQwenServeImpl(
         bridgeForCleanup?: AcpSessionBridge,
       ): Promise<void> => {
         const error = err instanceof Error ? err : new Error(String(err));
+        markServeAppStartupFailed(error);
         if (runtimeStartupSettled) {
           disposeRuntimeAppResources(runtimeApp ?? runtimeAppForCleanup);
           await shutdownBridgeAfterFailedStartup(bridgeForCleanup);
@@ -6415,16 +7030,13 @@ async function runQwenServeImpl(
         daemonLog.error('runtime startup failed', error);
         markRuntimeFailed(error);
         if (closeServerAfterChannelWorkerStartupFailure && server.listening) {
-          runtimeFailureListenerClose = new Promise((resolve) => {
-            server.close((closeErr) => {
-              if (closeErr) {
-                daemonLog.error(
-                  'server close after runtime startup error failed',
-                  closeErr,
-                );
-              }
-              resolve();
-            });
+          server.close((closeErr) => {
+            if (closeErr) {
+              daemonLog.error(
+                'server close after runtime startup error failed',
+                closeErr,
+              );
+            }
           });
           server.closeAllConnections();
         }
@@ -6651,6 +7263,7 @@ async function runQwenServeImpl(
           if (runtimeStartupSettled) return;
         }
         if (runtimeStartupSettled) return;
+        markServeAppStartupReady();
         await publishLiveDiscovery(candidateApp);
         runtimeStartupSettled = true;
         clearRuntimeStartupTimer();
@@ -6785,10 +7398,7 @@ async function runQwenServeImpl(
           process.exit(runtimeStartupError === undefined ? 0 : 1);
         } catch (err) {
           daemonLog.error('shutdown error', err instanceof Error ? err : null);
-          if (
-            err instanceof Error &&
-            retryableChannelWorkerShutdownErrors.has(err)
-          ) {
+          if (hasRetryableChannelWorkerShutdownError(err)) {
             daemonLog.error(
               'refusing to exit while a channel worker or service lease remains; signal again to retry after the child exits (another signal during that retry forces exit)',
             );
@@ -6817,6 +7427,10 @@ async function runQwenServeImpl(
         webShellMounted,
         resolvedToken: token,
         runtimeReady,
+        getLocalControl: () =>
+          (runtimeApp ?? runtimeAppForCleanup)?.locals?.[
+            'localControlService'
+          ] as LocalControlService | undefined,
         close: () => {
           // Idempotent: cache the in-flight (or settled) close promise so
           // overlapping calls (e.g. test harness + signal handler firing
@@ -6837,6 +7451,10 @@ async function runQwenServeImpl(
               ?.locals?.['sessionArchiveCoordinator'] as
               | { sealMaintenanceAndWait?: () => Promise<void> }
               | undefined;
+            const initiallyMountedConversationActivity = initiallyMountedApp
+              ?.locals?.['conversationRuntimeActivity'] as
+              | { sealAndWait?: () => Promise<void> }
+              | undefined;
             // Calling an async function runs through its first await
             // synchronously. Seal an already-mounted runtime before close()
             // yields so no management request can enter the shutdown window.
@@ -6849,6 +7467,8 @@ async function runQwenServeImpl(
               initiallyMountedLive?.sealAndWaitLiveCoordinator?.();
             const initialSessionMaintenanceWait =
               initiallyMountedSessionMaintenance?.sealMaintenanceAndWait?.();
+            const initialConversationActivityWait =
+              initiallyMountedConversationActivity?.sealAndWait?.();
             let processRegistryShutdown: Promise<Error | undefined> | undefined;
             const startProcessRegistryShutdown = () => {
               processRegistryShutdown ??= managedProcessRegistry
@@ -6869,24 +7489,9 @@ async function runQwenServeImpl(
             // behavior in charge and could orphan agent children. We detach
             // AFTER drain completes (`finish` below).
 
-            // Two-phase shutdown:
-            //   1. The shared process registry starts every agent child's
-            //      5s TERM/KILL and 10s raw-exit timeline before slower worker
-            //      or bridge cleanup. `bridge.shutdown()` then drains its
-            //      in-flight state against those same terminal promises.
-            //   2. `server.close()` — drains in-flight HTTP connections
-            //      (long-lived SSE subscribers especially). This is
-            //      what `SHUTDOWN_FORCE_CLOSE_MS` actually protects:
-            //      a single hung SSE consumer would otherwise pin
-            //      the listener open forever.
-            //
-            // Crucially, the force timer is armed AFTER bridge.shutdown
-            // resolves, not at the start of the whole sequence. An
-            // earlier version raced both phases against the same 5s
-            // timer; if the bridge took 5–10s to kill its children
-            // (e.g. SIGTERM grace period), the timer fired first,
-            // resolved this promise, and `process.exit(0)` ran while
-            // the bridge was still tearing children down.
+            // The shared lifecycle closes the listener in parallel with this
+            // host drain, then releases Conversations ownership only after both
+            // the listener callback and every child/bridge drain are proven.
             let settled = false;
             // Track bridge.shutdown failures so close()
             // doesn't silently report success when the bridge
@@ -6934,7 +7539,7 @@ async function runQwenServeImpl(
                   // Server.close error takes precedence (operator-visible
                   // listener problem); fall back to the bridge error
                   // captured during shutdown if any.
-                  const finalErr =
+                  let finalErr =
                     err ?? bridgeShutdownError ?? channelWorkerShutdownError;
                   const retryableChannelClose =
                     channelWorkerShutdownError !== undefined &&
@@ -6952,7 +7557,23 @@ async function runQwenServeImpl(
                     rej(retryableError);
                     return;
                   }
-                  await cleanupLiveDiscovery();
+                  try {
+                    await cleanupLiveDiscovery();
+                  } catch (cleanupError) {
+                    const normalizedCleanupError =
+                      cleanupError instanceof Error
+                        ? cleanupError
+                        : new Error(String(cleanupError));
+                    if (finalErr) {
+                      writeDaemonLifecycleBestEffort(() => {
+                        daemonLog.error(
+                          'Live Host discovery cleanup failed during shutdown',
+                          normalizedCleanupError,
+                        );
+                      });
+                    }
+                    finalErr ??= normalizedCleanupError;
+                  }
                   if (loggerPublished || loggerSignalOwned) {
                     writeDaemonLifecycleBestEffort(() => {
                       if (finalErr) {
@@ -6961,8 +7582,12 @@ async function runQwenServeImpl(
                         daemonLog.info('daemon stopped');
                       }
                     });
+                    clearLoaderKeyRejectionReporterIfCurrent(
+                      loaderRejectionReporter,
+                    );
                     await daemonLog.close();
                   }
+                  restoreScrubbedLoaderEnv();
                   if (finalErr) rej(finalErr);
                   else res();
                 });
@@ -6997,6 +7622,9 @@ async function runQwenServeImpl(
                 ] as
                   | { sealMaintenanceAndWait?: () => Promise<void> }
                   | undefined;
+                const conversationActivity = appForCleanup?.locals?.[
+                  'conversationRuntimeActivity'
+                ] as { sealAndWait?: () => Promise<void> } | undefined;
                 await initialManagementWait;
                 if (workspaceManagementHandle !== initiallyMountedManagement) {
                   await workspaceManagementHandle?.sealAndWait?.();
@@ -7011,6 +7639,12 @@ async function runQwenServeImpl(
                 await initialSessionMaintenanceWait;
                 if (sessionMaintenance !== initiallyMountedSessionMaintenance) {
                   await sessionMaintenance?.sealMaintenanceAndWait?.();
+                }
+                await initialConversationActivityWait;
+                if (
+                  conversationActivity !== initiallyMountedConversationActivity
+                ) {
+                  await conversationActivity?.sealAndWait?.();
                 }
                 stopTrustPolicyMonitor(appForCleanup);
                 const waitForTrustPolicyIdle = appForCleanup?.locals?.[
@@ -7094,72 +7728,103 @@ async function runQwenServeImpl(
                   bridgeShutdownError ??= processRegistryError;
                 }
               })
-              .finally(() => {
-                if (!server.listening) {
-                  void (runtimeFailureListenerClose ?? Promise.resolve()).then(
-                    () => finish(),
-                  );
-                  return;
-                }
-                // Phase 2: arm the force timer NOW so it only races
-                // server.close, not the bridge tear-down above.
-                // `RunHandle.close()` contract says "fully
-                // closed and bridge drained" — the previous code
-                // resolved on a 100ms shortcut AFTER
-                // `closeAllConnections()` without waiting for
-                // `server.close`'s callback, so embedders/tests
-                // could observe a "closed" handle while the server
-                // was still finalizing. Now: force-close just
-                // accelerates `server.close` by killing the
-                // sockets, but we still wait for `server.close`'s
-                // callback to fire. A secondary deadline catches
-                // the pathological case where `server.close` never
-                // resolves at all (kernel-stuck socket etc.) so
-                // shutdown is still bounded.
-                const SECONDARY_DEADLINE_MS = 2_000;
-                let secondaryTimer: NodeJS.Timeout | undefined;
-                const forceTimer = setTimeout(() => {
-                  daemonLog.warn(
-                    `${SHUTDOWN_FORCE_CLOSE_MS}ms listener-drain timeout reached; force-closing remaining connections`,
-                  );
-                  server.closeAllConnections();
-                  // After force-close, server.close's callback
-                  // SHOULD fire promptly. Give it `SECONDARY_DEADLINE_MS`
-                  // before we resolve anyway with a warning — much
-                  // longer than the previous 100ms shortcut, and
-                  // logged so the operator knows the contract was
-                  // bent.
-                  secondaryTimer = setTimeout(() => {
-                    daemonLog.warn(
-                      `server.close did not fire ${SECONDARY_DEADLINE_MS}ms after force-close; resolving anyway`,
-                    );
-                    finish();
-                  }, SECONDARY_DEADLINE_MS);
-                  secondaryTimer.unref();
-                }, SHUTDOWN_FORCE_CLOSE_MS);
-                forceTimer.unref();
-                server.close((err) => {
-                  clearTimeout(forceTimer);
-                  if (secondaryTimer) clearTimeout(secondaryTimer);
-                  finish(err);
-                });
-              });
+              .then(
+                () => finish(),
+                (error: unknown) =>
+                  finish(
+                    error instanceof Error ? error : new Error(String(error)),
+                  ),
+              );
           });
           return closePromise;
         },
       };
+      closeHost = handle.close;
+      handle.close = () => serveAppLifecycle.close();
+
+      try {
+        channelWorkspaceGroups = resolveChannelWorkspaceGroupsAtListen();
+      } catch (err) {
+        removeCurrentServePidfile();
+        const error = err instanceof Error ? err : new Error(String(err));
+        markServeAppStartupFailed(error);
+        void serveAppLifecycle.close().then(
+          () => reject(error),
+          (closeError: unknown) =>
+            reject(
+              closeError instanceof Error
+                ? new AggregateError([error, closeError], error.message)
+                : error,
+            ),
+        );
+        return;
+      }
+      if (channelWorkspaceGroups) {
+        for (const group of channelWorkspaceGroups) {
+          daemonLog.info('channel worker group assigned', {
+            workspace: group.workspaceCwd,
+            channels:
+              group.selection.mode === 'all' ? ['all'] : group.selection.names,
+          });
+        }
+        if (opts.channelSelection?.mode === 'all') {
+          writeStderrLine(
+            'qwen serve: --channel all is primary-workspace only; non-primary workspace channels are not hosted.',
+          );
+        }
+      }
+      writeStdoutLine(
+        `qwen serve listening on ${url} (mode=${opts.mode}, ` +
+          `workspace=${boundWorkspace})`,
+      );
+      // Operator log on stderr too (systemd/docker/k8s default
+      // captures only stderr for service diagnostics, and the
+      // workspace= breadcrumb is the single piece of information
+      // operators need most when triaging migration issues —
+      // "did the daemon bind to the right workspace?"). The stdout
+      // line above stays put so integration tests + scripts that
+      // parse stdout for the listening URL keep working;
+      // `JSON.stringify(boundWorkspace)` quotes the value
+      // symmetrically with the workspace_mismatch log (defends
+      // against control-char log injection if `boundWorkspace`
+      // somehow contained one — operator-controlled today, but
+      // cheap defense-in-depth).
+      writeStderrLine(
+        `qwen serve: bound to workspace ${JSON.stringify(boundWorkspace)}`,
+      );
+      writeStderrLine(
+        `qwen serve: startup timing: processToListenMs=${startup.processToListenMs} ` +
+          `runQwenServeToListenMs=${startup.runQwenServeToListenMs}`,
+      );
+      if (!token) {
+        writeStderrLine(
+          `qwen serve: bearer auth disabled (loopback default). Set ${QWEN_SERVER_TOKEN_ENV} to enable.`,
+        );
+        if (opts.clientMcpOverWs === true) {
+          writeStderrLine(
+            `qwen serve: client-hosted MCP tools are accepted over the WebSocket without auth. ` +
+              `Set ${QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV}=0 to disable.`,
+          );
+        }
+      } else if (opts.requireAuth) {
+        // The boot check above guarantees `token` is set whenever
+        // `--require-auth` is on, so this branch only fires alongside
+        // a successfully-authenticated daemon. The log line lets
+        // operators confirm the hardening is active without parsing
+        // `/capabilities` (and is a useful breadcrumb when triaging
+        // "why is loopback returning 401" tickets).
+        writeStderrLine(
+          'qwen serve: --require-auth enabled (bearer token mandatory ' +
+            'on every route, including loopback /health).',
+        );
+      }
 
       process.on('SIGINT', onSignal);
       process.on('SIGTERM', onSignal);
       process.on('uncaughtExceptionMonitor', onUncaughtExceptionMonitor);
 
-      // Swap the boot-error listener for a runtime-error one
-      // before resolving. `tryListen`'s `server.once('error', ...)`
-      // only catches errors BEFORE listening; post-listen errors
-      // (EMFILE after FD exhaustion, runtime errors on the listener)
-      // would be unhandled and crash the daemon. Use a persistent
-      // listener that logs to stderr instead.
-      server.removeAllListeners('error');
+      // The per-attempt boot-error listener was removed by handleListening.
+      // Keep the lifecycle listener and add persistent runtime diagnostics.
       server.on('error', (err) => {
         daemonLog.error('server error', err instanceof Error ? err : null);
       });
@@ -7179,6 +7844,7 @@ async function runQwenServeImpl(
             | AcpHttpHandle
             | undefined;
           acpHandle?.attachServer?.(server);
+          markServeAppStartupReady();
           void publishLiveDiscovery(preparedRuntimeApp);
         }
       } else if (deferRuntimeUntilFirstHealth) {
@@ -7213,10 +7879,7 @@ async function runQwenServeImpl(
                     closeErr instanceof Error ? closeErr : null,
                   ),
                 );
-                if (
-                  closeErr instanceof Error &&
-                  retryableChannelWorkerShutdownErrors.has(closeErr)
-                ) {
+                if (hasRetryableChannelWorkerShutdownError(closeErr)) {
                   writeDaemonLifecycleBestEffort(() =>
                     daemonLog.error(
                       'runtime startup failed, but qwen serve remains alive to retain the channel service lease until worker exit is confirmed',
@@ -7232,10 +7895,9 @@ async function runQwenServeImpl(
       }
     };
     let server: Server;
-    let httpsServer: https.Server | undefined;
     if (tlsOptions) {
       try {
-        httpsServer = https.createServer(tlsOptions, app);
+        server = https.createServer(tlsOptions, app);
       } catch (err) {
         // createSecureContext throws a raw OpenSSL string (e.g.
         // "error:0B080074:...key values mismatch") when cert/key don't pair.
@@ -7250,30 +7912,30 @@ async function runQwenServeImpl(
         );
         return;
       }
+    } else {
+      server = deps.httpServerFactory?.(app) ?? createServer(app);
     }
+    serveAppLifecycle.bindServer(server, {
+      startupReady: serveAppStartupReady,
+      drainHost: () => {
+        if (closeHost) return closeHost();
+        if (!server.listening) return Promise.resolve();
+        return new Promise<void>((resolve, rejectClose) => {
+          server.close((error) => {
+            if (error) rejectClose(error);
+            else resolve();
+          });
+        });
+      },
+    });
 
     const tryListen = (attemptPort: number, attempt: number): void => {
-      try {
-        if (httpsServer) {
-          // server.listen(port, host, cb) registers `cb` as a one-time
-          // `listening` listener. On failed attempts (EADDRINUSE),
-          // `listening` never fires so the listener accumulates. Clear
-          // stale listeners before each retry.
-          httpsServer.removeAllListeners('listening');
-          server = httpsServer.listen(attemptPort, listenHostname, onListening);
-        } else {
-          server = app.listen(attemptPort, listenHostname, onListening);
-        }
-      } catch (err) {
-        // Synchronous listen failure (e.g. invalid address) — not
-        // recoverable via port bump.
-        removeCurrentServePidfile();
-        reject(err instanceof Error ? err : new Error(String(err)));
-        return;
-      }
-
-      server.once('error', (err: NodeJS.ErrnoException) => {
-        server.close();
+      const handleListening = (): void => {
+        server.removeListener('error', handleError);
+        onListening();
+      };
+      const handleError = (err: NodeJS.ErrnoException): void => {
+        server.removeListener('listening', handleListening);
         const nextPort = attemptPort + 1;
         if (
           err.code === 'EADDRINUSE' &&
@@ -7285,16 +7947,48 @@ async function runQwenServeImpl(
             `qwen serve: port ${attemptPort} is in use, trying ${nextPort}...`,
           );
           tryListen(nextPort, attempt + 1);
-        } else {
-          if (err.code === 'EADDRINUSE' && attempt > 0) {
-            writeStderrLine(
-              `qwen serve: all ports ${opts.port}–${attemptPort} are in use`,
-            );
-          }
-          removeCurrentServePidfile();
-          reject(err);
+          return;
         }
-      });
+        if (err.code === 'EADDRINUSE' && attempt > 0) {
+          writeStderrLine(
+            `qwen serve: all ports ${opts.port}–${attemptPort} are in use`,
+          );
+        }
+        removeCurrentServePidfile();
+        markServeAppStartupFailed(err);
+        void serveAppLifecycle.close().then(
+          () => reject(err),
+          (closeError: unknown) =>
+            reject(
+              closeError instanceof Error
+                ? new AggregateError([err, closeError], err.message)
+                : err,
+            ),
+        );
+      };
+      try {
+        server.once('listening', handleListening);
+        server.once('error', handleError);
+        server.listen(attemptPort, listenHostname);
+      } catch (err) {
+        // Synchronous listen failure (e.g. invalid address) — not
+        // recoverable via port bump.
+        removeCurrentServePidfile();
+        server.removeListener('listening', handleListening);
+        server.removeListener('error', handleError);
+        const error = err instanceof Error ? err : new Error(String(err));
+        markServeAppStartupFailed(error);
+        void serveAppLifecycle.close().then(
+          () => reject(error),
+          (closeError: unknown) =>
+            reject(
+              closeError instanceof Error
+                ? new AggregateError([error, closeError], error.message)
+                : error,
+            ),
+        );
+        return;
+      }
     };
 
     tryListen(opts.port, 0);

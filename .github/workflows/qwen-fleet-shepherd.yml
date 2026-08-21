@@ -11,10 +11,29 @@ name: 'Fleet Shepherd'
 #                        propagates workflow/skill fixes; self-limiting since
 #                        behind_by resets to 0 after the sync)
 #   • scan liveness    → if no autofix full scan (schedule/dispatch) ran
-#                        recently, dispatch one (GitHub cron is unreliable)
+#                        recently, dispatch one (GitHub cron is unreliable).
+#                        A run wedged in `queued` past ZOMBIE_QUEUED_MINUTES
+#                        never counts as in-flight: GitHub never started it,
+#                        so deferring to it starves the watchdog forever
+#                        (2026-08-19, an oversized workflow file)
 #
 # It also maintains a single "Fleet Shepherd Dashboard" issue (edited in
-# place, never comment spam) so fleet state is observable at a glance.
+# place, never comment spam) so fleet state is observable at a glance. The
+# dashboard additionally lists the TAKEOVER pool (open PRs carrying
+# autofix/takeover, forks included) — the autofix loop manages those, but
+# without a row here a paused takeover PR was invisible until someone opened
+# the PR page.
+#
+# One lever exists for the takeover pool: AUTO-RELEASE. A PR carrying both
+# autofix/takeover and autofix/needs-human whose cap pause went unanswered
+# for AUTO_RELEASE_DAYS days gets one bilingual summary comment (merge /
+# close / split + re-takeover) and then its takeover label removed. The
+# needs-human label stays as the filterable TODO. Idempotency: the summary
+# is dedup'd by its `<!-- fleet-shepherd auto-release -->` marker (scoped to
+# the current pause cycle), so a failed label removal retries only the
+# DELETE, and the scope condition (both labels) turns false once the release
+# lands. Every other takeover state — conflicts, red CI, new feedback —
+# remains the autofix scan's job; the shepherd only reports it.
 #
 # NON-GOAL: rerunning flaky-failed CI. That is owned by the CI Failure Patrol
 # (.github/workflows/qwen-ci-flaky-rerun.yml), which has its own markers,
@@ -22,15 +41,16 @@ name: 'Fleet Shepherd'
 # rerun owner here raced it (observed live as rerun-vs-rerun cancellation
 # storms), so the shepherd only REPORTS red CI on the dashboard.
 #
-# Safety rails: bot-authored main-targeting in-repo PRs only; per-action
-# markers make every write idempotent; per-tick action caps bound blast
-# radius; every remote read fails CLOSED (an unreadable snapshot skips the
-# levers it feeds — it never masquerades as empty state); DRY-RUN via
-# dispatch input; global kill switch via the FLEET_SHEPHERD_DISABLED
-# repository variable. Dispatches use the workflow's own token
-# (actions: write); comments, update-branch, and the dashboard use
-# CI_DEV_BOT_PAT so synced branches still trigger CI and all writes carry
-# the bot identity.
+# Safety rails: the conflict/sync levers touch bot-authored main-targeting
+# in-repo PRs only (the takeover pool gets visibility plus the label-only
+# auto-release); per-action markers make every write idempotent; per-tick
+# action caps bound blast radius; every remote read fails CLOSED (an
+# unreadable snapshot skips the levers it feeds — it never masquerades as
+# empty state); DRY-RUN via dispatch input; global kill switch via the
+# FLEET_SHEPHERD_DISABLED repository variable. Dispatches use the workflow's
+# own token (actions: write); comments, label edits, update-branch, and the
+# dashboard use CI_DEV_BOT_PAT so synced branches still trigger CI and all
+# writes carry the bot identity.
 on:
   schedule:
     - cron: '*/15 * * * *'
@@ -54,12 +74,45 @@ env:
   AUTOFIX_BOT: "${{ vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot' }}"
   BEHIND_SYNC_THRESHOLD: '25'
   SCAN_LIVENESS_MINUTES: '60'
+  # A dispatched or scheduled run claims a runner within seconds; one still
+  # 'queued' this long was never STARTED by GitHub at all. That run is wedged,
+  # not in flight, and counting it as in-flight starves every lever that
+  # defers to a live run — permanently, since nothing will ever complete it.
+  # 2026-08-19: a workflow file over GitHub's 500 KB limit produced exactly
+  # this (runs created, zero jobs, uncancellable through the API) and the
+  # liveness watchdog sat at in-flight=1 for 18 hours while the loop was dark.
+  # Generous by design: it must never fire on an ordinary runner queue.
+  ZOMBIE_QUEUED_MINUTES: "${{ vars.QWEN_SHEPHERD_ZOMBIE_QUEUED_MINUTES || '30' }}"
   MAX_SYNCS_PER_TICK: '3'
   MAX_CONFLICT_DISPATCHES_PER_TICK: '2'
   DASHBOARD_TITLE: 'Fleet Shepherd Dashboard'
   # Maintainer opt-out label, honored at every engagement path (mirrors
   # qwen-autofix.yml's SKIP_LABEL).
   SKIP_LABEL: 'autofix/skip'
+  # The takeover pool these two labels define (both mirror qwen-autofix.yml):
+  # TAKEOVER opts a PR into the loop; NEEDS_HUMAN marks a PR the loop STOPPED
+  # on (round cap or a breaker) until a human re-arms, splits, merges, or
+  # closes it.
+  TAKEOVER_LABEL: 'autofix/takeover'
+  NEEDS_HUMAN_LABEL: 'autofix/needs-human'
+  # The two re-arm commands the route listens for — mirrored from
+  # qwen-autofix.yml (TAKEOVER_COMMAND/RETRY_COMMAND) so the resume-evidence
+  # matcher can never drift from the command syntax the route actually
+  # accepts (R7-2).
+  TAKEOVER_COMMAND: '@qwen-code /takeover'
+  RETRY_COMMAND: '@qwen-code /retry'
+  # Days a takeover PR may sit paused (both labels present, no re-arm since
+  # the cap notice) before the shepherd releases the takeover label. Tunable
+  # without a deploy via the repository variable.
+  AUTO_RELEASE_DAYS: "${{ vars.QWEN_SHEPHERD_AUTO_RELEASE_DAYS || '3' }}"
+  MAX_RELEASES_PER_TICK: '3'
+  # How long an unacked re-arm command comment counts as resume evidence.
+  # An accepted command is acked within minutes (the ack carries the resume
+  # marker); a route-ignored command gets no reply at all, so without this
+  # bound it would veto the release forever.
+  RESUME_COMMAND_GRACE_SEC: '7200'
+  # Stale needs-human cleanups (manual UI releases on fork PRs) per tick.
+  MAX_CLEANUPS_PER_TICK: '5'
 
 jobs:
   shepherd:
@@ -178,6 +231,36 @@ jobs:
             SCAN_RUNS_OK=false
             echo "::warning::autofix run-list read failed; liveness lever and conflict dispatches skipped this tick"
           fi
+          # The variable is operator-tunable, so it is also operator-
+          # breakable: a non-numeric value makes every jq consumer carrying
+          # $zmin exit 5 into its benign fallback — in-flight reads 0 on top
+          # of live runs and the census reads 0, re-hiding exactly the wedge
+          # this lever exists to surface. Fall back to the default, mirroring
+          # AUTO_RELEASE_DAYS. The digit-only regex still admits values large
+          # enough to wedge every queued run at once — re-creating the
+          # starvation — so bound by string LENGTH too, and reject zero: it
+          # wedges every queued run at birth, the exact opposite of the
+          # generous-by-design invariant the env block declares.
+          if [[ ! "${ZOMBIE_QUEUED_MINUTES}" =~ ^[0-9]+$ ]] || [[ ${#ZOMBIE_QUEUED_MINUTES} -gt 3 ]] || [[ "${ZOMBIE_QUEUED_MINUTES}" =~ ^0+$ ]]; then
+            echo "::warning::ZOMBIE_QUEUED_MINUTES '${ZOMBIE_QUEUED_MINUTES}' is not a positive integer or is too large; using 30"
+            ZOMBIE_QUEUED_MINUTES=30
+          fi
+          # One definition of "wedged", shared by every reader of the run
+          # snapshot below, so the in-flight count, the census, and the
+          # liveness re-dispatch guard can never disagree about what counts
+          # as a live run. A missing createdAt reads as brand new (never
+          # wedged): unknown age must not license a duplicate dispatch.
+          ZOMBIE_JQ='def wedged($now; $mins): .status == "queued" and (((.createdAt // "") | if . == "" then 9999999999 else fromdateiso8601 end) <= (($now | tonumber) - ($mins | tonumber) * 60));'
+          SCAN_ZOMBIES="$(jq -r --arg now "${NOW_EPOCH}" --arg zmin "${ZOMBIE_QUEUED_MINUTES}" "${ZOMBIE_JQ}"'
+            [ .[] | select(wedged($now; $zmin)) ] | length' /tmp/scan-runs.json 2> /dev/null || echo 0)"
+          SCAN_ZOMBIE_OLDEST="$(jq -r --arg now "${NOW_EPOCH}" --arg zmin "${ZOMBIE_QUEUED_MINUTES}" "${ZOMBIE_JQ}"'
+            [ .[] | select(wedged($now; $zmin)) | .createdAt ] | sort | first // ""' /tmp/scan-runs.json 2> /dev/null || echo '')"
+          # Loud, because invisibility is what made this expensive: the loop
+          # looked half-alive for a day (PR-event runs kept succeeding) while
+          # every dispatch queued forever.
+          if [[ "${SCAN_ZOMBIES}" -gt 0 ]]; then
+            echo "::warning::${SCAN_ZOMBIES} autofix run(s) stuck 'queued' for over ${ZOMBIE_QUEUED_MINUTES}m (oldest ${SCAN_ZOMBIE_OLDEST:-unknown}) — GitHub is not starting them; a workflow file over the 500 KB limit does exactly this. They are excluded from the in-flight count so the liveness lever keeps working."
+          fi
           LAST_SCHEDULE="$(jq -r '[.[] | select(.event == "schedule")] | first | .createdAt // ""' /tmp/scan-runs.json 2> /dev/null || echo '')"
           # In-flight counts SCHEDULE runs plus OUR OWN liveness dispatch,
           # attributed by recorded run id — never by timestamp proximity: a
@@ -188,13 +271,29 @@ jobs:
           # marker): the dispatch is simply not counted, so the failure mode
           # is one absorbed duplicate scan — never starvation. Same for the
           # first tick: no watermark, nothing attributed.
-          SCAN_INFLIGHT="$(jq -r --arg lvrun "${PREV_LIVENESS_RUN}" '
+          SCAN_INFLIGHT="$(jq -r --arg lvrun "${PREV_LIVENESS_RUN}" --arg now "${NOW_EPOCH}" --arg zmin "${ZOMBIE_QUEUED_MINUTES}" "${ZOMBIE_JQ}"'
             [ .[] | select(.status != "completed")
+              | select(wedged($now; $zmin) | not)
               | select(
                   (.event == "schedule")
                   or (.event == "workflow_dispatch" and $lvrun != ""
                       and ((.databaseId | tostring) == $lvrun)) ) ]
             | length' /tmp/scan-runs.json 2> /dev/null || echo 0)"
+          # During a PERSISTENT wedge the watermark cycle would reopen this
+          # gate every 60 minutes and plant a fresh uncancellable queued
+          # dispatch per hour, each refreshing the very liveness watermark
+          # whose growing age exposed the incident. If the run recorded from
+          # the last dispatch is ITSELF still wedged in the snapshot, another
+          # dispatch would wedge too — keep the gate closed. This lengthens
+          # the interval, it does not block hard: once that run starts,
+          # completes, or leaves the snapshot window, the gate reopens on its
+          # own, so the residual stays the documented single absorbed
+          # duplicate scan instead of one corpse per hour. When attribution
+          # falls back to run=none the guard cannot see the dispatch — no id
+          # was recorded — and the watermark-cycle corpse planting resumes;
+          # the wedge banner remains the exposure signal for that path.
+          PREV_LIVENESS_WEDGED="$(jq -r --arg lvrun "${PREV_LIVENESS_RUN}" --arg now "${NOW_EPOCH}" --arg zmin "${ZOMBIE_QUEUED_MINUTES}" "${ZOMBIE_JQ}"'
+            [ .[] | select($lvrun != "" and ((.databaseId | tostring) == $lvrun) and wedged($now; $zmin)) ] | length' /tmp/scan-runs.json 2> /dev/null || echo 0)"
           LAST_SIGNAL="${LAST_SCHEDULE}"
           if [[ -n "${PREV_LIVENESS}" && "${PREV_LIVENESS}" > "${LAST_SIGNAL}" ]]; then
             LAST_SIGNAL="${PREV_LIVENESS}"
@@ -205,8 +304,8 @@ jobs:
           fi
           LIVENESS_OUT="${PREV_LIVENESS}"
           LIVENESS_RUN_OUT="${PREV_LIVENESS_RUN}"
-          echo "🫀 last scan signal: ${LAST_SIGNAL:-never} (${SCAN_AGE_MIN}m ago), liveness-relevant in-flight: ${SCAN_INFLIGHT}, snapshot ok: ${SCAN_RUNS_OK}, watermark state known: ${DASH_LOOKUP_OK}"
-          if [[ "${DASH_LOOKUP_OK}" == "true" && "${SCAN_RUNS_OK}" == "true" && "${SCAN_AGE_MIN}" -ge "${SCAN_LIVENESS_MINUTES}" && "${SCAN_INFLIGHT}" == "0" ]]; then
+          echo "🫀 last scan signal: ${LAST_SIGNAL:-never} (${SCAN_AGE_MIN}m ago), liveness-relevant in-flight: ${SCAN_INFLIGHT}, wedged-queued: ${SCAN_ZOMBIES}, prev-liveness wedged: ${PREV_LIVENESS_WEDGED}, snapshot ok: ${SCAN_RUNS_OK}, watermark state known: ${DASH_LOOKUP_OK}"
+          if [[ "${DASH_LOOKUP_OK}" == "true" && "${SCAN_RUNS_OK}" == "true" && "${SCAN_AGE_MIN}" -ge "${SCAN_LIVENESS_MINUTES}" && "${SCAN_INFLIGHT}" == "0" && "${PREV_LIVENESS_WEDGED}" == "0" ]]; then
             DISPATCH_T0="$(date -u -d '5 seconds ago' +%Y-%m-%dT%H:%M:%SZ)"
             if act "scan liveness: dispatch unforced review scan" \
               env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh workflow run qwen-autofix.yml --repo "${REPO}" -f phase=review; then
@@ -215,17 +314,42 @@ jobs:
               # Identify OUR run by id for next tick's in-flight attribution.
               # Safe correlation window: nothing else in this tick has
               # dispatched yet (conflict dispatches happen later in the
-              # walk), so the newest dispatch created since T0 is ours. If it
-              # never appears, run=none is recorded and the failure mode is a
-              # duplicate scan, not starvation.
+              # walk), so a dispatch created since T0 is ours — provided it
+              # is the ONLY one. The fork-review bridge also dispatches
+              # autonomously at arbitrary times, and GitHub may expose a
+              # foreign dispatch before our own run appears in the list.
+              # So: ANY poll seeing two or more candidates records run=none
+              # (the window is ambiguous — never attribute a guess), and a
+              # single candidate is accepted only as the sole candidate
+              # across two consecutive polls — the FIRST singleton might be
+              # the foreign one, and our run arriving at the next poll flips
+              # the window to ambiguous instead of being attributed on top
+              # of it. Either fallback is the documented one: a duplicate
+              # scan, never starvation.
               if [[ "${DRY_RUN}" != "true" ]]; then
                 for _ in 1 2 3 4 5; do
                   sleep 2
-                  LIVENESS_RUN_OUT="$(env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh run list --repo "${REPO}" --workflow qwen-autofix.yml \
+                  CANDIDATES="$(env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh run list --repo "${REPO}" --workflow qwen-autofix.yml \
                     --event workflow_dispatch --limit 5 --json databaseId,createdAt 2> /dev/null \
-                    | jq -r --arg t0 "${DISPATCH_T0}" '[ .[] | select(.createdAt >= $t0) ] | first | .databaseId // "" | tostring' 2> /dev/null || true)"
-                  if [[ -n "${LIVENESS_RUN_OUT}" && "${LIVENESS_RUN_OUT}" != "null" ]]; then break; fi
+                    | jq -c --arg t0 "${DISPATCH_T0}" '[ .[] | select(.createdAt >= $t0) ]' 2> /dev/null || true)"
+                  COUNT="$(jq 'length' <<< "${CANDIDATES}" 2> /dev/null || echo 0)"
+                  if [[ "${COUNT}" =~ ^[0-9]+$ ]] && [[ "${COUNT}" -gt 1 ]]; then
+                    echo "🫀 ${COUNT} dispatches since ${DISPATCH_T0} — attribution ambiguous (fork bridge?), recording run=none"
+                    ATTRIBUTED=''
+                    break
+                  fi
+                  SEEN_ID=''
+                  if [[ "${COUNT}" == "1" ]]; then
+                    SEEN_ID="$(jq -r '.[0].databaseId // "" | tostring' <<< "${CANDIDATES}")"
+                  fi
+                  if [[ -n "${SEEN_ID}" && "${SEEN_ID}" == "${PREV_SEEN:-}" ]]; then
+                    ATTRIBUTED="${SEEN_ID}"
+                  else
+                    ATTRIBUTED=''
+                  fi
+                  PREV_SEEN="${SEEN_ID}"
                 done
+                LIVENESS_RUN_OUT="${ATTRIBUTED:-}"
               fi
             fi
           fi
@@ -240,6 +364,11 @@ jobs:
           # enumeration is not a busy-set, it is unknown busy-state, and
           # BUSY_OK=false defers every conflict dispatch below (it inherits
           # SCAN_RUNS_OK so a failed run-list read defers the same way).
+          # Wedged runs are NOT skipped here (unlike the in-flight count):
+          # age alone proves jobless only for the wedge class that defined
+          # the threshold — when the runner pool is offline, queued runs hold
+          # live review-address jobs indefinitely, and dropping them by age
+          # would silently re-dispatch their PRs. The jobs read settles it.
           SHEP_BUSY=' '
           BUSY_OK="${SCAN_RUNS_OK}"
           while IFS= read -r LIVE_RUN; do
@@ -262,19 +391,23 @@ jobs:
           # maintainer adding autofix/skip mid-tick must still win before a
           # dispatch or branch sync. Fail closed: an unreadable label state
           # counts as skipped.
+          # The fetched payload is exported as LIVE_LABELS_JSON so a caller
+          # with follow-up label checks (the auto-release scope condition)
+          # rides the SAME read instead of spending a second one.
           # Returns 0 when the mutation must NOT proceed, with the reason in
           # LIVE_SKIP_REASON: 'label' (consent withdrawn) vs 'unreadable'
           # (fail closed on an API failure) — callers word their notes
           # accordingly so an outage is never reported as a maintainer
           # decision.
           live_skip() {
-            local pr="$1" labels
+            local pr="$1"
             LIVE_SKIP_REASON=''
-            if ! labels="$(gh pr view "${pr}" --repo "${REPO}" --json labels 2> /dev/null)"; then
+            LIVE_LABELS_JSON=''
+            if ! LIVE_LABELS_JSON="$(gh pr view "${pr}" --repo "${REPO}" --json labels 2> /dev/null)"; then
               LIVE_SKIP_REASON='unreadable'
               return 0
             fi
-            if [[ "$(jq -r --arg t "${SKIP_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${labels}")" == "true" ]]; then
+            if [[ "$(jq -r --arg t "${SKIP_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${LIVE_LABELS_JSON}")" == "true" ]]; then
               LIVE_SKIP_REASON='label'
               return 0
             fi
@@ -288,6 +421,142 @@ jobs:
             fi
           }
 
+          # RFC3339 timestamp → whole days ago (both dashboards show ages).
+          days_since() {
+            echo "$(( (NOW_EPOCH - $(date -u -d "$1" +%s)) / 86400 ))"
+          }
+
+          # Is this needs-human PR genuinely PAUSED (so the scan would refuse
+          # a conflict dispatch)? The label alone is only a proxy: an ARMED
+          # PR that kept a stale label (a resume-side removal failed) is NOT
+          # paused and the scan would accept the dispatch. Check marker truth
+          # — a re-arm/engage marker newer than the last cap notice means
+          # re-armed, not paused (R4-6). Fail closed toward "paused": an
+          # unreadable history suppresses the dispatch rather than waste it.
+          conflict_paused() {
+            local pr="$1"
+            if ! gh api "repos/${REPO}/issues/${pr}/comments" --paginate 2> /dev/null | jq -s 'add // []' > /tmp/cf-ic.json; then
+              return 0
+            fi
+            local term resume
+            term="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+              [ .[] | select((.user.login // "") == $ab)
+                | select((.body // "") | contains("<!-- takeover-cap-reached -->"))
+                | .created_at ] | max // ""' /tmp/cf-ic.json)"
+            resume="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+              [ .[] | select((.user.login // "") == $ab)
+                | select(((.body // "") | contains("<!-- autofix-rearm -->"))
+                         or ((.body // "") | contains("<!-- takeover-ack engaged -->")))
+                | .created_at ] | max // ""' /tmp/cf-ic.json)"
+            # Only marker-confirmed re-arm clears "paused" — and only against
+            # a REAL cap notice. The state "label present but no notice" is
+            # reachable (the cap path applies the label before posting the
+            # notice and tolerates a lost notice; a human can delete it too):
+            # every takeover PR carries an older engage ack, so `term` empty
+            # + `resume` non-empty must NOT read as "re-armed" — that fails
+            # OPEN onto a genuinely paused PR (R5-3).
+            if [[ -n "${resume}" && -n "${term}" && "${resume}" > "${term}" ]]; then
+              return 1
+            fi
+            return 0
+          }
+
+          # Latest resume evidence (bot re-arm/engage markers, a trusted
+          # human's fresh command comment, or a fresh takeover labeled
+          # event) as an RFC3339 timestamp, or '' when none. A command counts
+          # only while FRESH (grace window), UNSUPERSEDED by a refusal ack,
+          # and from a write/maintain/admin author — scanned newest-first,
+          # deduped BY AUTHOR so a stranger posting two commands can't burn
+          # the 2-permission-read budget and shadow a maintainer's command
+          # (R5-5/R6-3). Sets PERM_READ_FAILED when a command's permission
+          # check could not be evaluated — the caller fails CLOSED on that
+          # (defer; never trust-on-error, R5-4). Results are returned via the
+          # RESUME_OUT global — NOT stdout — because a `$(...)` call site
+          # would run the function in a subshell and silently drop
+          # PERM_READ_FAILED (the R5-4 defer was dead code that way).
+          compute_resume_ts() {
+            local ic="$1" ev="$2"
+            RESUME_OUT=''
+            PERM_READ_FAILED=''
+            local resume refusal
+            resume="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+              [ .[] | select((.user.login // "") == $ab)
+                | select(((.body // "") | contains("<!-- autofix-rearm -->"))
+                         or ((.body // "") | contains("<!-- takeover-ack engaged -->")))
+                | .created_at ] | max // ""' "${ic}")"
+            refusal="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+              [ .[] | select((.user.login // "") == $ab)
+                | select((.body // "") | test("<!-- takeover-ack (fork-refused|base-refused|skip-blocked) -->"))
+                | .created_at ] | max // ""' "${ic}")"
+            # Fresh command candidates, newest-first, ONE row per author:
+            # group_by(.login) + max_by(.ts) keeps each author's newest command,
+            # then re-sort by ts desc restores recency order (unique_by would
+            # emit authors in LOGIN order, walking alphabetically and letting
+            # two read-only strangers shadow a maintainer's newer command,
+            # R6-3).
+            local cands cts cauthor cage cperm reads=0
+            cands="$(jq -r --arg tc "${TAKEOVER_COMMAND}" --arg rc "${RETRY_COMMAND}" '
+              [ .[] | select(((.body // "") | gsub("^\\s+|\\s+$"; "")) == $tc
+                             or ((.body // "") | gsub("^\\s+|\\s+$"; "")) == $rc)
+                | {ts: (.created_at // ""), login: (.user.login // "")} ]
+              | group_by(.login) | map(max_by(.ts)) | sort_by(.ts) | reverse | .[] | "\(.ts)\t\(.login)"' "${ic}")"
+            while IFS=$'\t' read -r cts cauthor; do
+              [[ -z "${cts}" || -z "${cauthor}" ]] && continue
+              [[ "${cts}" > "${resume}" ]] || continue
+              [[ -z "${refusal}" || "${cts}" > "${refusal}" ]] || continue
+              cage=$(( NOW_EPOCH - $(date -u -d "${cts}" +%s) ))
+              [[ "${cage}" -lt "${RESUME_COMMAND_GRACE_SEC}" ]] || continue
+              # Budget exhausted with candidates still unexamined: the caller
+              # must not read this as "all candidates were read-only/none
+              # trusted" — that fails OPEN. Flag it so the release defers.
+              [[ "${reads}" -ge 2 ]] && { PERM_READ_FAILED=true; break; }
+              reads=$(( reads + 1 ))
+              if ! cperm="$(gh api "repos/${REPO}/collaborators/${cauthor}/permission" --jq '.permission // ""' 2> /tmp/cperm-err)"; then
+                # An exact "HTTP 404" is GitHub's decisive "not a
+                # collaborator" answer — classify read-only instead of
+                # deferring: a defer here is renewable by any stranger's
+                # exact command each grace window, and it would pose a
+                # classification as an outage. Match the token, not the
+                # bare number: a transport failure embeds the request URL,
+                # which carries the commenter login, so a login containing
+                # "404" would classify an outage as read-only — the same
+                # exact token every label DELETE tolerates (R10-1).
+                grep -q 'HTTP 404' /tmp/cperm-err && continue
+                PERM_READ_FAILED=true
+                continue
+              fi
+              if [[ "${cperm}" == 'write' || "${cperm}" == 'maintain' || "${cperm}" == 'admin' ]]; then
+                resume="${cts}"
+                break
+              fi
+            done <<< "${cands}"
+            local evt
+            evt="$(jq -r --arg tl "${TAKEOVER_LABEL}" '
+              [ .[] | select((.event // "") == "labeled")
+                | select((.label.name // "") == $tl)
+                | .created_at ] | max // ""' "${ev}")"
+            # A tie (same-second) resolves toward the RESUME side: suppressing
+            # a release is always the safer direction (R5-9).
+            if [[ -n "${evt}" && ! "${resume}" > "${evt}" ]]; then
+              resume="${evt}"
+            fi
+            RESUME_OUT="${resume}"
+          }
+
+          # CI-status classifiers shared by BOTH dashboard loops, so a
+          # check-naming or status-set change lands in one place and the two
+          # tables can never classify the same PR differently.
+          # WAITING and REQUESTED are also not-yet-final check states.
+          pending_checks() {
+            jq -r '[.statusCheckRollup[]? | select((.status // "") | IN("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED"))] | length' <<< "$1"
+          }
+          # Platform-blind on purpose: the dashboard is a health VIEW, and a
+          # Windows- or macOS-only regression is just as red as an Ubuntu one
+          # (reruns stay with the Patrol either way).
+          failed_test_url() {
+            jq -r '[.statusCheckRollup[]? | select(.conclusion == "FAILURE") | select(.name | startswith("Test (")) | .detailsUrl][0] // ""' <<< "$1"
+          }
+
           # ---- walk the bot fleet (one list call carries all per-PR meta) --
           # autofix/skip is the maintainer opt-out honored at every
           # engagement path — a skip-labeled PR gets no shepherd levers and
@@ -296,16 +565,22 @@ jobs:
           if ! gh pr list --repo "${REPO}" --state open --author "${AUTOFIX_BOT}" --base main \
             --limit 50 --json number,headRefName,headRefOid,mergeable,isCrossRepository,statusCheckRollup,labels \
             > /tmp/fleet-raw.json 2> /dev/null; then
-            # A failed fleet fetch must not masquerade as an empty fleet: the
-            # walk is skipped AND the dashboard keeps its previous body rather
-            # than being overwritten with a misleading empty table.
-            echo "::warning::fleet enumeration failed; skipping this tick's walk and dashboard update"
-            exit 0
+            # A failed fleet fetch must not masquerade as an empty fleet —
+            # but it also must not exit (B5): the takeover/needs-human
+            # processing below is fed by its OWN enumerations, so it keeps
+            # running, and the dashboard write still happens (carrying the
+            # liveness watermark). Degrade to a loud error row instead.
+            FLEET_OK=false
+            echo "::warning::fleet enumeration failed; the bot-fleet table shows an error row this tick"
+            DASH_ROWS='| — | — | ⚠️ fleet enumeration unreadable this tick | fail closed — fleet levers skipped |\n'
+          else
+            FLEET_OK=true
+            jq --arg skip "${SKIP_LABEL}" \
+              '[.[] | select(.isCrossRepository == false) | select([.labels[]?.name] | index($skip) | not)]' \
+              /tmp/fleet-raw.json > /tmp/fleet.json
           fi
-          jq --arg skip "${SKIP_LABEL}" \
-            '[.[] | select(.isCrossRepository == false) | select([.labels[]?.name] | index($skip) | not)]' \
-            /tmp/fleet-raw.json > /tmp/fleet.json
 
+          if [[ "${FLEET_OK}" == "true" ]]; then
           while IFS= read -r ROW; do
             [[ -z "${ROW}" ]] && continue
             PR="$(jq -r '.number' <<< "${ROW}")"
@@ -317,16 +592,19 @@ jobs:
               DASH_ROWS="${DASH_ROWS}| #${PR} | ? | incomplete metadata | — |\n"
               continue
             fi
-            # WAITING and REQUESTED are also not-yet-final check states.
-            PENDING="$(jq -r '[.statusCheckRollup[]? | select((.status // "") | IN("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED"))] | length' <<< "${ROW}")"
-            # Platform-blind on purpose: the dashboard is a health VIEW, and
-            # a Windows- or macOS-only regression is just as red as an Ubuntu
-            # one (reruns stay with the Patrol either way).
-            FAILED_TEST_URL="$(jq -r '[.statusCheckRollup[]? | select(.conclusion == "FAILURE") | select(.name | startswith("Test (")) | .detailsUrl][0] // ""' <<< "${ROW}")"
+            PENDING="$(pending_checks "${ROW}")"
+            FAILED_TEST_URL="$(failed_test_url "${ROW}")"
             BEHIND="$(gh api "repos/${REPO}/compare/main...${HEAD}" --jq '.behind_by // 0' 2> /dev/null || echo 0)"
 
             STATUS_NOTE='idle'
             ACTION_NOTE='—'
+            # A bot PR the loop stopped on (round cap or a breaker) carries
+            # the escalation label — prefix its state so the pause is visible
+            # on the dashboard instead of only on the PR page.
+            NH_PREFIX=''
+            if [[ "$(jq -r --arg l "${NEEDS_HUMAN_LABEL}" '[.labels[]?.name] | index($l) != null' <<< "${ROW}")" == "true" ]]; then
+              NH_PREFIX='🛑 '
+            fi
 
             # 1) conflict → dispatch the loop for this PR, once per head SHA.
             # The dedup marker is posted ONLY when the dispatch succeeded — a
@@ -370,6 +648,13 @@ jobs:
                 # Budget first: once it is exhausted no mutation is possible,
                 # so the PAT-backed live label read would be pure waste.
                 ACTION_NOTE="$(skip_note dispatch)"
+              elif [[ "$(jq -r --arg l "${NEEDS_HUMAN_LABEL}" '[.labels[]?.name] | index($l) != null' <<< "${LIVE_LABELS_JSON}")" == "true" ]] && conflict_paused "${PR}"; then
+                # needs-human from the LIVE payload (a label applied after
+                # enumeration is caught) AND marker-confirmed genuinely
+                # paused — an armed PR with a stale label falls through to
+                # the dispatch below (R4-6). The conflict stays unhandled
+                # until a human re-arms.
+                ACTION_NOTE='paused (needs-human) — conflict stays unhandled until re-arm'
               else
                 if act "#${PR}: dispatch autofix for conflict resolution" \
                   env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh workflow run qwen-autofix.yml --repo "${REPO}" -f pr_number="${PR}"; then
@@ -427,18 +712,519 @@ jobs:
             fi
 
             echo "🐑 #${PR} [${STATUS_NOTE}] → ${ACTION_NOTE}"
-            DASH_ROWS="${DASH_ROWS}| #${PR} | \`${HEAD:0:9}\` | ${STATUS_NOTE} | ${ACTION_NOTE} |\n"
+            DASH_ROWS="${DASH_ROWS}| #${PR} | \`${HEAD:0:9}\` | ${NH_PREFIX}${STATUS_NOTE} | ${ACTION_NOTE} |\n"
           done < <(jq -c '.[]' /tmp/fleet.json)
+          fi # FLEET_OK
+
+          # ---- takeover pool: dashboard rows + the auto-release lever -----
+          # These PRs are managed by the autofix loop, not the shepherd —
+          # the only mutating lever here releases a takeover whose pause
+          # went unanswered. Enumeration failures degrade to a loud error
+          # row instead of exiting: the dashboard write must still happen,
+          # because it carries the liveness watermark the next tick's
+          # duplicate-dispatch guard reads.
+          RELEASES=0
+          CLEANUPS=0
+          TAKEOVER_ROWS=''
+          HUMAN_ROWS=''
+          # The variable is operator-tunable, so it is also operator-
+          # breakable: a non-numeric value would fail the -ge comparison
+          # under set -e mid-tick. Fall back to the default instead. The
+          # digit-only regex still admits values above Bash's signed-int
+          # range (e.g. 9223372036854775808 wraps negative, so EVERY pause
+          # age would pass the -ge check) — bound by string LENGTH before any
+          # arithmetic, so a huge value can never reach the comparison.
+          if [[ ! "${AUTO_RELEASE_DAYS}" =~ ^[0-9]+$ ]] || [[ ${#AUTO_RELEASE_DAYS} -gt 2 ]]; then
+            echo "::warning::AUTO_RELEASE_DAYS '${AUTO_RELEASE_DAYS}' is not numeric or is too large; using 3"
+            AUTO_RELEASE_DAYS=3
+          fi
+          # Leading zeros pass the regex but bash reads 08/09 as bad octal at
+          # the -ge comparison — normalize to base 10 so a zero-padded
+          # variable cannot silently kill the lever.
+          AUTO_RELEASE_DAYS=$((10#${AUTO_RELEASE_DAYS}))
+          # sort:updated-asc keeps the stalest PRs in view when a pool
+          # outgrows the window; the saturation warning keeps the residual
+          # truncation loud. The LEVER's population deliberately comes from
+          # its OWN paused enumeration (always small), never from this
+          # display window — see the paused enumeration below.
+          TK_OK=true
+          if ! gh pr list --repo "${REPO}" --state open --label "${TAKEOVER_LABEL}" \
+            --search 'sort:updated-asc' \
+            --limit 100 --json number,author,updatedAt,mergeable,statusCheckRollup,labels \
+            > /tmp/takeover-raw.json 2> /dev/null; then
+            TK_OK=false
+            echo "::warning::takeover enumeration failed; the takeover table shows an error row this tick"
+            # The error-row wording is finalized AFTER the paused
+            # enumeration (R4-13): the release lever is fed by THAT
+            # enumeration, and both reads share one PAT, so a correlated
+            # mid-tick outage can fail both — the row must not claim
+            # evaluation proceeds when the feed is unreadable too.
+          else
+            if [[ "$(jq length /tmp/takeover-raw.json)" -ge 100 ]]; then
+              echo "::warning::takeover pool at the 100-PR enumeration limit — recently-active PRs (paused-but-discussed ones included) may be missing from this table"
+            fi
+            jq --arg skip "${SKIP_LABEL}" \
+              '[.[] | select([.labels[]?.name] | index($skip) | not)]' \
+              /tmp/takeover-raw.json > /tmp/takeover.json
+          fi
+          # The needs-human enumeration drives the "awaiting human" DISPLAY
+          # table (loop 3). It is a long-lived population — every released PR
+          # keeps the label — so it can exceed its 100-window.
+          HM_OK=true
+          if ! gh pr list --repo "${REPO}" --state open --label "${NEEDS_HUMAN_LABEL}" \
+            --search 'sort:updated-asc' \
+            --limit 100 --json number,author,updatedAt,mergeable,labels \
+            > /tmp/human-raw.json 2> /dev/null; then
+            HM_OK=false
+            echo "::warning::needs-human enumeration failed; the awaiting-human table shows an error row this tick"
+            HUMAN_ROWS='| — | — | — | ⚠️ enumeration unreadable this tick — previous entries may be stale |\n'
+          else
+            if [[ "$(jq length /tmp/human-raw.json)" -ge 100 ]]; then
+              echo "::warning::needs-human pool at the 100-PR enumeration limit — the freshest awaiting-human entries may be missing from the table"
+            fi
+            jq --arg skip "${SKIP_LABEL}" \
+              '[.[] | select([.labels[]?.name] | index($skip) | not)]' \
+              /tmp/human-raw.json > /tmp/human.json
+          fi
+          # The RELEASE LEVER gets its OWN enumeration of the paused
+          # population (both labels), sorted stale-first (R5-7): released
+          # awaiting PRs age back into the needs-human window, so feeding the
+          # lever from that display window would truncate exactly the fresh
+          # pauses that become release-eligible, starving the lever and
+          # making the zombie state permanent and self-feeding. The paused
+          # population is small (only currently-paused takeover PRs).
+          PAUSED_OK=true
+          if ! gh pr list --repo "${REPO}" --state open --label "${TAKEOVER_LABEL}" --label "${NEEDS_HUMAN_LABEL}" \
+            --search 'sort:updated-asc' \
+            --limit 100 --json number,author,updatedAt,mergeable,labels \
+            > /tmp/paused-raw.json 2> /dev/null; then
+            PAUSED_OK=false
+            echo "::warning::paused-takeover enumeration failed; the release lever is skipped this tick"
+          else
+            if [[ "$(jq length /tmp/paused-raw.json)" -ge 100 ]]; then
+              echo "::warning::paused-takeover pool at the 100-PR enumeration limit — the freshest paused entries may miss release evaluation"
+            fi
+            jq --arg skip "${SKIP_LABEL}" \
+              '[.[] | select([.labels[]?.name] | index($skip) | not)]' \
+              /tmp/paused-raw.json > /tmp/paused.json
+          fi
+
+          # Membership set of the paused enumeration (R4-9): loop 1 must
+          # only defer a paused PR to loop 2 when loop 2 will actually see
+          # it — a PR truncated out of the window must still render here.
+          HUMAN_IDS=''
+          if [[ "${PAUSED_OK}" == "true" ]]; then
+            HUMAN_IDS=",$(jq -r '[.[].number | tostring] | join(",")' /tmp/paused.json),"
+          fi
+          # Finalize the takeover-enum error row now that PAUSED_OK is known
+          # (the release lever is fed by the paused enumeration, not the
+          # needs-human display window).
+          if [[ "${TK_OK}" == "false" ]]; then
+            if [[ "${PAUSED_OK}" == "true" ]]; then
+              TAKEOVER_ROWS='| — | — | — | ⚠️ takeover pool unreadable this tick | paused rows below still evaluated (paused pool fed) |\n'
+            else
+              TAKEOVER_ROWS='| — | — | — | ⚠️ takeover pool unreadable this tick | paused rows NOT evaluated — paused enumeration also failed |\n'
+            fi
+          fi
+
+          # Loop 1: managed takeover PRs that are NOT paused — cheap payload
+          # states only. Paused ones are rendered by loop 2, which owns the
+          # pause evaluation. (If the paused enumeration failed or dropped
+          # them, render them here so they never vanish silently.)
+          if [[ "${TK_OK}" == "true" ]]; then
+            while IFS= read -r ROW; do
+              [[ -z "${ROW}" ]] && continue
+              PR="$(jq -r '.number' <<< "${ROW}")"
+              AUTHOR="$(jq -r '.author.login // "?"' <<< "${ROW}")"
+              UPDATED="$(jq -r '.updatedAt // ""' <<< "${ROW}")"
+              MERGEABLE="$(jq -r '.mergeable // "UNKNOWN"' <<< "${ROW}")"
+              PENDING="$(pending_checks "${ROW}")"
+              FAILED_TEST_URL="$(failed_test_url "${ROW}")"
+              HAS_NH="$(jq -r --arg l "${NEEDS_HUMAN_LABEL}" '[.labels[]?.name] | index($l) != null' <<< "${ROW}")"
+              UPD_AGO='?'
+              [[ -n "${UPDATED}" ]] && UPD_AGO="$(days_since "${UPDATED}")d"
+
+              STATE='managed · idle'
+              NOTE='—'
+              # Defer by paused-enumeration MEMBERSHIP, not by this
+              # snapshot's label state: a needs-human label landing between
+              # the two enumerations must not render the PR in both loops —
+              # loop 2 owns every paused member.
+              if [[ "${HUMAN_IDS}" == *",${PR},"* ]]; then
+                continue # loop 2 renders this paused PR
+              fi
+              if [[ "${HAS_NH}" == "true" ]]; then
+                STATE='🛑 needs-human'
+                NOTE='pause evaluation unavailable this tick (truncated or unreadable paused enumeration)'
+              elif [[ "${MERGEABLE}" == "CONFLICTING" ]]; then
+                STATE='conflicting'
+                NOTE='resolution owned by the autofix scan'
+              elif [[ -n "${FAILED_TEST_URL}" && "${PENDING}" == "0" ]]; then
+                STATE="[ci red](${FAILED_TEST_URL})"
+                NOTE='reruns owned by CI Failure Patrol'
+              elif [[ "${PENDING}" != "0" ]]; then
+                STATE="checks in flight (${PENDING})"
+              fi
+
+              echo "🐑 #${PR} [takeover: ${STATE}] → ${NOTE}"
+              # STATE can carry the ci-red detailsUrl (check-run creator
+              # controlled) and NOTE the stop-reason headline — escape
+              # backslashes before printf '%b' and pipes before the table
+              # (R4-10).
+              SAFE_STATE="${STATE//\\/\\\\}"
+              SAFE_NOTE="${NOTE//\\/\\\\}"
+              TAKEOVER_ROWS="${TAKEOVER_ROWS}| #${PR} | ${AUTHOR} | ${UPD_AGO} ago | ${SAFE_STATE//|/\\|} | ${SAFE_NOTE//|/\\|} |\n"
+            done < <(jq -c '.[]' /tmp/takeover.json)
+          fi
+
+          # Loop 2: paused takeover PRs (both labels) — the release lever
+          # and the takeover-table paused rows. Fed by the dedicated paused
+          # enumeration (R5-7), sorted stale-first, so the lever never
+          # starves behind the long-lived awaiting display population. The
+          # paginated comment/event reads live in this loop only (paused PRs
+          # are few). Fail closed everywhere: an unreadable history defers
+          # the lever instead of acting on partial state.
+          if [[ "${PAUSED_OK}" == "true" ]]; then
+            while IFS= read -r ROW; do
+              [[ -z "${ROW}" ]] && continue
+              PR="$(jq -r '.number' <<< "${ROW}")"
+              AUTHOR="$(jq -r '.author.login // "?"' <<< "${ROW}")"
+              UPDATED="$(jq -r '.updatedAt // ""' <<< "${ROW}")"
+              MERGEABLE="$(jq -r '.mergeable // "UNKNOWN"' <<< "${ROW}")"
+              UPD_AGO='?'
+              [[ -n "${UPDATED}" ]] && UPD_AGO="$(days_since "${UPDATED}")d"
+              # Row routing follows POST-ACTION label state, not the
+              # pre-mutation snapshot: a successful release moves the PR to
+              # Awaiting human.
+              ROUTE='takeover'
+
+              STATE='🛑 needs-human'
+              NOTE='—'
+              if ! gh api "repos/${REPO}/issues/${PR}/events" --paginate 2> /dev/null | jq -s 'add // []' > /tmp/tk-ev.json; then
+                NOTE='event read failed — evaluation deferred this tick (fail closed)'
+              elif ! gh api "repos/${REPO}/issues/${PR}/comments" --paginate 2> /dev/null | jq -s 'add // []' > /tmp/tk-ic.json; then
+                NOTE='comment read failed — release deferred this tick'
+              else
+                # The pause clock starts at the LATEST cap notice.
+                TERM_TS="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+                  [ .[] | select((.user.login // "") == $ab)
+                    | select((.body // "") | contains("<!-- takeover-cap-reached -->"))
+                    | .created_at ] | max // ""' /tmp/tk-ic.json)"
+                # Resume evidence — anything at-or-newer than TERM_TS means
+                # a human already acted and the release must never fire;
+                # ties resolve toward resume (the safe direction, R5-9):
+                #   1. the bot's resume markers (re-arm / engage ack);
+                #   2. a fresh re-arm COMMAND from a write/maintain/admin
+                #      commenter, scanned newest-first so a stranger's echo
+                #      can't shadow a maintainer's (R4-14/R5-5), superseded
+                #      by a refusal ack; a route-ignored command simply
+                #      expires at the grace window;
+                #   3. a fresh `labeled` event — a UI re-apply is
+                #      timestamped immediately, while its ack rides the
+                #      queue (or, on a lost event, the scan's idle-backoff
+                #      pickup — an hours-wide window).
+                # The marker variant is derived below for the cleanup
+                # anchor; the full evidence is evaluated only at release
+                # time, from a FRESH fetch (R5-6), where its permission
+                # read fails CLOSED: PERM_READ_FAILED defers the release
+                # instead of trusting on error (R5-4). Direct call, NOT
+                # $(...) — the function returns its result in the
+                # RESUME_OUT/PERM_READ_FAILED globals, and a subshell
+                # would drop them.
+                # The stop reason comes from the terminal round's headline —
+                # the scan-side notice always says "round cap" even when a
+                # breaker (consecutive failures, time budget) fired first.
+                # Only TERMINAL headlines match: the transient "could not
+                # start — a setup step failed" variant retries next scan and
+                # says nothing about why the loop stopped. The terminal set
+                # is cross-pinned against qwen-autofix.yml's HEADLINE= sites
+                # by the shepherd test — drift fails CI, not the dashboard.
+                REASON="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+                  [ .[] | select((.user.login // "") == $ab)
+                    | select((.body // "") | test("🤖 AutoFix (stopped|could not start (evaluation|— reached the round cap))|— this was the last automatic attempt"))
+                    | (.body | gsub("\r"; "") | split("\n")[0]) ] | last // ""' /tmp/tk-ic.json)"
+                [[ -z "${REASON}" ]] && REASON='round cap reached'
+                REASON="${REASON:0:120}"
+                # Re-armed detection for the stale-label cleanup is anchored
+                # to the CURRENT pause boundary (latest needs-human apply,
+                # same shape as the heal's NH_APPLY_TS) and is MARKER-
+                # confirmed only (bot re-arm/engage marker) — not the
+                # command-grace or labeled-event evidence the release veto
+                # carries. The cap path applies needs-human BEFORE the
+                # dedup'd notice and tolerates a lost notice, so keying the
+                # cleanup on TERM_TS (latest notice) would read a re-paused
+                # PR whose cycle-2 notice was lost as "re-armed" on stale
+                # cycle-1 evidence and DELETE its fresh label (R7-1).
+                # Command/label evidence still vetoes the RELEASE below via
+                # the pre-write RESUME_NOW recompute — it just never
+                # triggers this cleanup.
+                MARKER_RESUME="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+                  [ .[] | select((.user.login // "") == $ab)
+                    | select(((.body // "") | contains("<!-- autofix-rearm -->"))
+                             or ((.body // "") | contains("<!-- takeover-ack engaged -->")))
+                    | .created_at ] | max // ""' /tmp/tk-ic.json)"
+                PAUSE_APPLY_TS="$(jq -r --arg nl "${NEEDS_HUMAN_LABEL}" '
+                  [ .[] | select((.event // "") == "labeled")
+                    | select((.label.name // "") == $nl)
+                    | .created_at ] | max // ""' /tmp/tk-ev.json)"
+                # The re-armed cleanup runs FIRST so it stays reachable
+                # when the cap notice was lost (TERM_TS empty) — exactly
+                # the label-without-notice state this branch exists for
+                # (R8-1). A cap notice NEWER than the marker means the PR
+                # re-paused after the re-arm: the fresh pause wins and the
+                # cleanup must not fire — including the case where the
+                # re-cap's label POST no-op'd (label already present → no
+                # new labeled event) and only the notice marks the new
+                # cycle (R8-10).
+                if [[ -n "${PAUSE_APPLY_TS}" && -n "${MARKER_RESUME}" && ! "${PAUSE_APPLY_TS}" > "${MARKER_RESUME}" && ! "${TERM_TS}" > "${MARKER_RESUME}" ]]; then
+                  STATE='managed (re-armed)'
+                  # The PR is re-armed but still carries needs-human — a
+                  # resume-side removal failed. Clear the stale label here
+                  # (bounded, skip-vetoed) or the PR stays pinned in the
+                  # paused population forever.
+                  if [[ "${CLEANUPS}" -ge "${MAX_CLEANUPS_PER_TICK}" ]]; then
+                    NOTE='resumed; stale-label cleanup budget reached this tick'
+                  elif live_skip "${PR}"; then
+                    NOTE="$(skip_note cleanup)"
+                  else
+                    # Count ATTEMPTS like the release arm: a success-only
+                    # counter never trips during a DELETE outage.
+                    CLEANUPS=$(( CLEANUPS + 1 ))
+                    if act "#${PR}: clear stale ${NEEDS_HUMAN_LABEL} (re-armed)" \
+                      gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${NEEDS_HUMAN_LABEL}" '$l|@uri')"; then
+                      NOTE='resumed — cleared stale escalation label'
+                    else
+                      NOTE='stale-label cleanup failed — will retry next tick'
+                    fi
+                  fi
+                elif [[ -z "${TERM_TS}" ]]; then
+                  NOTE='pause timestamp unreadable — release deferred (fail closed)'
+                else
+                  PAUSE_D="$(days_since "${TERM_TS}")"
+                  STATE="🛑 needs-human ${PAUSE_D}d"
+                  NOTE="${REASON}"
+                  if [[ "${MERGEABLE}" == "CONFLICTING" ]]; then
+                    NOTE="paused AND conflicting — ${REASON}"
+                  fi
+                  if [[ "${PAUSE_D}" -ge "${AUTO_RELEASE_DAYS}" ]]; then
+                    # Budget first (an exhausted tick stops spending API
+                    # calls), then ONE live label read (inside live_skip)
+                    # carries every veto: fail closed when unreadable, skip
+                    # wins, and the scope condition (both labels) must still
+                    # hold — a re-arm or release since the snapshot ends the
+                    # pause.
+                    if [[ "${RELEASES}" -ge "${MAX_RELEASES_PER_TICK}" ]]; then
+                      NOTE='release budget reached this tick'
+                    elif live_skip "${PR}"; then
+                      NOTE="$(skip_note release)"
+                    elif [[ "$(jq -r --arg a "${TAKEOVER_LABEL}" --arg b "${NEEDS_HUMAN_LABEL}" '([.labels[]?.name] | index($a) != null) and ([.labels[]?.name] | index($b) != null)' <<< "${LIVE_LABELS_JSON}")" != "true" ]]; then
+                      NOTE='labels changed since the snapshot — deferring release'
+                    elif ! gh api "repos/${REPO}/issues/${PR}/comments" --paginate 2> /dev/null | jq -s 'add // []' > /tmp/tk-ic2.json \
+                      || ! gh api "repos/${REPO}/issues/${PR}/events" --paginate 2> /dev/null | jq -s 'add // []' > /tmp/tk-ev2.json; then
+                      NOTE='evidence re-check unreadable — release deferred (fail closed)'
+                    elif compute_resume_ts /tmp/tk-ic2.json /tmp/tk-ev2.json; RESUME_NOW="${RESUME_OUT}"; [[ -n "${RESUME_NOW}" && ! "${TERM_TS}" > "${RESUME_NOW}" ]]; then
+                      # R5-6: the resume evidence above was read at loop
+                      # entry — a re-arm landing since must veto NOW. The
+                      # re-fetch + recompute runs immediately before the
+                      # first write, bounded by the per-tick budget.
+                      NOTE='resume evidence appeared during evaluation — release cancelled'
+                    elif [[ "${PERM_READ_FAILED}" == "true" ]]; then
+                      NOTE='command-permission read failed — release deferred this tick (fail closed)'
+                    else
+                      # Consume the budget BEFORE the first external write:
+                      # a release ATTEMPT is what is bounded. Counting only
+                      # successful DELETEs would let a DELETE outage mutate
+                      # many PRs in one tick while RELEASES stayed 0.
+                      RELEASES=$(( RELEASES + 1 ))
+                      # Summary FIRST (dedup'd by its own marker — the
+                      # comment stream is already loaded), THEN the label
+                      # removal: a failed summary leaves both labels in
+                      # place so the whole release retries next tick, and a
+                      # failed removal finds the marker and only retries the
+                      # DELETE. Neither half can strand the other.
+                      SUMMARY_POSTED="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg term "${TERM_TS}" '
+                        [ .[] | select((.user.login // "") == $ab)
+                          | select((.body // "") | contains("<!-- fleet-shepherd auto-release -->"))
+                          | select((.created_at // "") > $term)
+                        ] | length' /tmp/tk-ic.json)"
+                      if [[ "${SUMMARY_POSTED}" == "0" ]]; then
+                        if act "#${PR}: post auto-release summary" \
+                          gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🔓 Takeover auto-released: the autofix loop paused on this PR %s day(s) ago (%s) and no re-arm followed, so the `%s` label is removed to keep the managed pool honest. `%s` stays as the reminder that this PR needs a human decision: merge it, close it, or split/reduce it and comment `%s` to re-engage with a fresh round window.\n\n<details>\n<summary>中文说明</summary>\n\n🔓 已自动释放接管：autofix 循环在 %s 天前暂停于此 PR（%s），此后无人重新武装，现移除 `%s` 标签以保持托管池真实可用。保留 `%s` 作为待办提醒 —— 本 PR 需要人工决策：合并、关闭，或拆分/缩小后评论 `%s` 以全新轮次窗口重新接管。\n\n</details>\n\n<!-- fleet-shepherd auto-release -->' "${PAUSE_D}" "${REASON}" "${TAKEOVER_LABEL}" "${NEEDS_HUMAN_LABEL}" "${TAKEOVER_COMMAND}" "${PAUSE_D}" "${REASON}" "${TAKEOVER_LABEL}" "${NEEDS_HUMAN_LABEL}" "${TAKEOVER_COMMAND}")"; then
+                          SUMMARY_POSTED=1
+                        else
+                          NOTE='summary post failed — release deferred to next tick'
+                        fi
+                      fi
+                      if [[ "${SUMMARY_POSTED}" != "0" ]]; then
+                        # R2-3: a re-arm can land BETWEEN the summary post
+                        # and this DELETE — its label re-apply is a no-op
+                        # while the label still rides the PR, so no live
+                        # label read can catch it; only fresh marker/event
+                        # evidence can. Re-fetch and veto immediately
+                        # before the removal (fail closed on unreadable).
+                        if ! gh api "repos/${REPO}/issues/${PR}/comments" --paginate 2> /dev/null | jq -s 'add // []' > /tmp/tk-ic3.json \
+                          || ! gh api "repos/${REPO}/issues/${PR}/events" --paginate 2> /dev/null | jq -s 'add // []' > /tmp/tk-ev3.json; then
+                          NOTE='evidence re-check unreadable — release deferred (fail closed)'
+                        elif compute_resume_ts /tmp/tk-ic3.json /tmp/tk-ev3.json; RESUME_NOW="${RESUME_OUT}"; [[ -n "${RESUME_NOW}" && ! "${TERM_TS}" > "${RESUME_NOW}" ]]; then
+                          NOTE='re-arm landed during the release — takeover kept'
+                        elif [[ "${PERM_READ_FAILED}" == "true" ]]; then
+                          NOTE='command-permission read failed — release deferred this tick (fail closed)'
+                        elif act "#${PR}: auto-release takeover (paused ${PAUSE_D}d)" \
+                          gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${TAKEOVER_LABEL}" '$l|@uri')"; then
+                          # Released — only needs-human remains, so the PR
+                          # belongs in Awaiting human NOW, not the takeover
+                          # pool (route from post-action state, not the
+                          # pre-mutation snapshot).
+                          ROUTE='awaiting'
+                          NOTE="auto-released after ${PAUSE_D}d paused"
+                        else
+                          NOTE='takeover label removal failed — will retry next tick'
+                        fi
+                      fi
+                    fi
+                  fi
+                fi
+              fi
+              # The row is appended OUTSIDE the evaluation arms: a fail-closed
+              # deferral must still render, or the PR would vanish from the
+              # dashboard for exactly the tick something went wrong.
+              echo "🐑 #${PR} [takeover: ${STATE}] → ${NOTE}"
+              SAFE_NOTE="${NOTE//\\/\\\\}"
+              if [[ "${ROUTE}" == 'takeover' ]]; then
+                TAKEOVER_ROWS="${TAKEOVER_ROWS}| #${PR} | ${AUTHOR} | ${UPD_AGO} ago | ${STATE} | ${SAFE_NOTE//|/\\|} |\n"
+              elif [[ "${ROUTE}" == 'awaiting' ]]; then
+                HUMAN_ROWS="${HUMAN_ROWS}| #${PR} | ${AUTHOR} | ${UPD_AGO} ago | ${SAFE_NOTE//|/\\|} |\n"
+              fi
+            done < <(jq -c '.[]' /tmp/paused.json)
+          fi
+
+          # Loop 3: needs-human-ONLY PRs — the awaiting-human display rows
+          # and the manual-release heal. Needs-human is a long-lived label
+          # (released PRs keep it), so this is the display-only population;
+          # the release lever is loop 2's. Both-label PRs were already
+          # rendered by loop 2 and are skipped here when loop 2 ran.
+          if [[ "${HM_OK}" == "true" ]]; then
+            while IFS= read -r ROW; do
+              [[ -z "${ROW}" ]] && continue
+              PR="$(jq -r '.number' <<< "${ROW}")"
+              HAS_TK="$(jq -r --arg l "${TAKEOVER_LABEL}" '[.labels[]?.name] | index($l) != null' <<< "${ROW}")"
+              # Both-label PRs render elsewhere: loop 2 owns the paused
+              # members, and loop 1 owns the rest while its enumeration ran
+              # (its note names the pause-evaluation gap — the accurate
+              # render on a paused-enumeration outage). Loop 3 is the render
+              # of LAST RESORT — both owners blind — so a both-label PR
+              # never renders twice nor vanishes (the heal's live takeover
+              # check vetoes any mutation, R5-8).
+              if [[ "${HAS_TK}" == "true" ]]; then
+                [[ "${HUMAN_IDS}" == *",${PR},"* || "${TK_OK}" == "true" ]] && continue
+              fi
+              AUTHOR="$(jq -r '.author.login // "?"' <<< "${ROW}")"
+              UPDATED="$(jq -r '.updatedAt // ""' <<< "${ROW}")"
+              UPD_AGO='?'
+              [[ -n "${UPDATED}" ]] && UPD_AGO="$(days_since "${UPDATED}")d"
+              ROUTE='awaiting'
+              STATE='🛑 needs-human'
+              # No takeover label: the loop stopped and management was
+              # released (or never took over). Keep the PR visible — and
+              # when a HUMAN removed the takeover label by hand (fork PRs
+              # get no release ack from the route, so nothing else clears
+              # the escalation label there), clear the stale label. The
+              # shepherd's own auto-release authenticates as the bot and
+              # is NOT a heal trigger.
+              # Anchor to the CURRENT pause boundary: the latest
+              # needs-human label-apply EVENT (the cap branch applies the
+              # label at pause time). A human takeover-unlabel counts only
+              # when NEWER than that — anything older belongs to an earlier
+              # cycle (R5-10) — and an absent anchor (e.g. past the ~90-day
+              # events lookback) means "cannot correlate" → skip the
+              # cleanup rather than admit everything (fail closed).
+              NOTE='loop stopped — needs a human decision (merge / close / split / re-engage)'
+              if ! gh api "repos/${REPO}/issues/${PR}/events" --paginate 2> /dev/null | jq -s 'add // []' > /tmp/tk-ev.json; then
+                NOTE='event read failed — heal deferred this tick (fail closed)'
+              else
+                NH_APPLY_TS="$(jq -r --arg nl "${NEEDS_HUMAN_LABEL}" '
+                  [ .[] | select((.event // "") == "labeled")
+                    | select((.label.name // "") == $nl)
+                    | .created_at ] | max // ""' /tmp/tk-ev.json)"
+                UNLABEL_ACTOR=''
+                if [[ -n "${NH_APPLY_TS}" ]]; then
+                  UNLABEL_ACTOR="$(jq -r --arg tl "${TAKEOVER_LABEL}" --arg ab "${AUTOFIX_BOT}" --arg ll "${NH_APPLY_TS}" '
+                    [ .[] | select((.event // "") == "unlabeled")
+                      | select((.label.name // "") == $tl)
+                      | select((.actor.login // "") != $ab)
+                      | select((.created_at // "") > $ll)
+                      | .actor.login ] | last // ""' /tmp/tk-ev.json)"
+                fi
+                if [[ -n "${UNLABEL_ACTOR}" ]]; then
+                  if [[ "${CLEANUPS}" -ge "${MAX_CLEANUPS_PER_TICK}" ]]; then
+                    NOTE='cleanup budget reached this tick'
+                  elif live_skip "${PR}"; then
+                    NOTE="$(skip_note cleanup)"
+                  elif [[ "$(jq -r --arg t "${TAKEOVER_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${LIVE_LABELS_JSON}")" == "true" ]]; then
+                    # R5-8: takeover was re-applied between the tick-start
+                    # snapshot and now — the PR is managed again, so nothing
+                    # here is stale.
+                    NOTE='takeover label re-applied since the snapshot — cleanup cancelled'
+                  else
+                    # Count ATTEMPTS, mirroring the release arm (twin above).
+                    CLEANUPS=$(( CLEANUPS + 1 ))
+                    if act "#${PR}: clear stale ${NEEDS_HUMAN_LABEL} (manual release by @${UNLABEL_ACTOR})" \
+                      gh api -X DELETE "repos/${REPO}/issues/${PR}/labels/$(jq -rn --arg l "${NEEDS_HUMAN_LABEL}" '$l|@uri')"; then
+                      # Both labels are gone now — the PR is fully released and
+                      # must drop out of the dashboard entirely.
+                      ROUTE='none'
+                      NOTE="cleared stale escalation label (released by @${UNLABEL_ACTOR})"
+                    else
+                      NOTE='stale-label cleanup failed — will retry next tick'
+                    fi
+                  fi
+                fi
+              fi
+              echo "🐑 #${PR} [awaiting: ${STATE}] → ${NOTE}"
+              SAFE_NOTE="${NOTE//\\/\\\\}"
+              if [[ "${ROUTE}" != 'none' ]]; then
+                HUMAN_ROWS="${HUMAN_ROWS}| #${PR} | ${AUTHOR} | ${UPD_AGO} ago | ${SAFE_NOTE//|/\\|} |\n"
+              fi
+            done < <(jq -c '.[]' /tmp/human.json)
+          fi
 
           # ---- dashboard: one issue, edited in place ----------------------
           {
             echo "Auto-maintained by the Fleet Shepherd workflow — do not edit by hand."
             echo
-            echo "Last tick: $(date -u +%Y-%m-%dT%H:%M:%SZ) · scan-signal age: ${SCAN_AGE_MIN}m · syncs: ${SYNCS} · dispatches: ${DISPATCHES}"
+            echo "Last tick: $(date -u +%Y-%m-%dT%H:%M:%SZ) · scan-signal age: ${SCAN_AGE_MIN}m · syncs: ${SYNCS} · dispatches: ${DISPATCHES} · releases: ${RELEASES} · cleanups: ${CLEANUPS}"
+            echo
+            # Surfaced on the dashboard, not just in a log nobody opens: a
+            # wedged queue is the shape of a dead loop that still reports
+            # green from PR-event runs.
+            if [[ "${SCAN_ZOMBIES}" -gt 0 ]]; then
+              echo "> ⚠️ **${SCAN_ZOMBIES} autofix run(s) wedged in \`queued\`** (oldest ${SCAN_ZOMBIE_OLDEST:-unknown}) — excluded from the in-flight count. The list is status+age only and cannot see jobs: a workflow file over GitHub's 500 KB limit wedges zero-job runs, and an offline runner pool keeps live jobs queued just as long. Check \`gh run view <id> --json jobs\` before deleting any of them."
+              if [[ "${PREV_LIVENESS_WEDGED}" -gt 0 ]]; then
+                echo "> 🚧 The shepherd's liveness re-dispatch stays paused while the recorded liveness run (id ${PREV_LIVENESS_RUN}) is among them — a fresh dispatch would only wedge again. Deleting THAT run (\`gh run delete ${PREV_LIVENESS_RUN}\`) reopens it immediately; it also reopens once it leaves the 50-run snapshot window. When several runs are listed, check \`gh run view <id> --json jobs\` before deleting — an offline runner pool keeps live jobs queued."
+              fi
+              echo
+            fi
+            echo '## Bot fleet'
             echo
             echo '| PR | Head | State | Action this tick |'
             echo '| --- | --- | --- | --- |'
             printf '%b' "${DASH_ROWS}"
+            echo
+            echo '## Takeover pool'
+            echo
+            echo 'Managed by the autofix loop; the shepherd only reports, and auto-releases a takeover whose pause went unanswered.'
+            echo
+            echo '| PR | Author | Updated | State | Note |'
+            echo '| --- | --- | --- | --- | --- |'
+            printf '%b' "${TAKEOVER_ROWS}"
+            echo
+            echo '## Awaiting human'
+            echo
+            echo 'The loop stopped on these PRs and no takeover is active; a human needs to decide (merge / close / split / re-engage).'
+            echo
+            echo '| PR | Author | Updated | Note |'
+            echo '| --- | --- | --- | --- |'
+            printf '%b' "${HUMAN_ROWS}"
             if [[ -n "${LIVENESS_OUT}" ]]; then
               echo
               echo "<!-- fleet-shepherd liveness-dispatched: ${LIVENESS_OUT} run=${LIVENESS_RUN_OUT:-none} -->"
@@ -460,4 +1246,4 @@ jobs:
               echo "::warning::dashboard update failed; will retry next tick"
             fi
           fi
-          echo "✅ tick complete (syncs=${SYNCS} dispatches=${DISPATCHES})"
+          echo "✅ tick complete (syncs=${SYNCS} dispatches=${DISPATCHES} releases=${RELEASES} cleanups=${CLEANUPS})"

@@ -11,6 +11,7 @@ import type {
   AnyDeclarativeTool,
   ChatRecordingService,
   Config,
+  FileDiff,
   ToolCallConfirmationDetails,
   ToolCallRequestInfo,
   ToolConfirmationPayload,
@@ -92,6 +93,7 @@ import {
   promptIdContext,
   todoWorkChainContext,
 } from '../utils/promptIdContext.js';
+import type { ToolResultBoundaryObservation } from '../utils/tool-result-boundary-diagnostics.js';
 
 type ToolSpanRecord = {
   name: string;
@@ -138,6 +140,22 @@ const { mockAcquireSleepInhibitor, mockSleepInhibitorRelease } = vi.hoisted(
 );
 
 const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
+const boundaryObserveMock = vi.hoisted(() =>
+  vi.fn((_observation: ToolResultBoundaryObservation) => false),
+);
+const boundaryDiagnosticsEnabled = vi.hoisted(() => ({ value: false }));
+
+vi.mock(
+  '../utils/tool-result-boundary-diagnostics.js',
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import('../utils/tool-result-boundary-diagnostics.js')
+    >()),
+    isToolResultBoundaryDiagnosticsEnabled: () =>
+      boundaryDiagnosticsEnabled.value,
+    observeToolResultBoundary: boundaryObserveMock,
+  }),
+);
 const debugLoggerInfoSpy = vi.hoisted(() => vi.fn());
 const runSideQueryMock = vi.hoisted(() => vi.fn());
 const mockTelemetrySdkState = vi.hoisted(() => ({ initialized: false }));
@@ -265,11 +283,12 @@ vi.mock('../telemetry/session-tracing.js', () => ({
     ) => {
       if (metadata) {
         span.endMetadata = metadata;
-        const status =
-          metadata.success !== false
-            ? { code: 1 }
-            : { code: 2, message: metadata.error ?? 'tool error' };
-        span.statusCalls.push(status);
+        if (metadata.success === false) {
+          span.statusCalls.push({
+            code: 2,
+            message: metadata.error ?? 'tool error',
+          });
+        }
       }
       span.ended = true;
     },
@@ -623,6 +642,8 @@ async function waitForStatus(
 describe('CoreToolScheduler', () => {
   beforeEach(() => {
     debugLoggerInfoSpy.mockClear();
+    boundaryObserveMock.mockClear();
+    boundaryDiagnosticsEnabled.value = false;
     runSideQueryMock.mockReset();
     modifyWithEditorOverride.value = undefined;
   });
@@ -1136,6 +1157,132 @@ describe('CoreToolScheduler', () => {
       ).runtimeContentGeneratorViews.size,
     ).toBe(0);
   });
+
+  it('does not leak the path-unescape rewrite into the caller-owned request args', async () => {
+    const readExecute = vi.fn().mockResolvedValue({
+      llmContent: 'read',
+      returnDisplay: 'read',
+    });
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([
+          [
+            ToolNames.READ_FILE,
+            new MockTool({ name: ToolNames.READ_FILE, execute: readExecute }),
+          ],
+        ]),
+      });
+    // Callers pass args that may alias the model-emitted functionCall part
+    // stored in chat history; the scheduler's in-place PATH_ARG_KEYS
+    // unescape must land on its own cloned copy, or the rewrite leaks into
+    // history and skews the duplicate-replay fingerprints derived from it.
+    const callerArgs = { file_path: '/tmp/my\\ docs/a.txt' };
+    const callerRequest = {
+      callId: 'escaped-path-call',
+      name: ToolNames.READ_FILE,
+      args: callerArgs,
+      isClientInitiated: false,
+      prompt_id: 'prompt-escaped-path',
+    };
+
+    await scheduler.schedule([callerRequest], new AbortController().signal);
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
+    });
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as CompletedToolCall[];
+    expect(completedCalls[0].request.args['file_path']).toBe(
+      '/tmp/my docs/a.txt',
+    );
+    expect(callerArgs.file_path).toBe('/tmp/my\\ docs/a.txt');
+  });
+
+  it('marks the budget-exempt plan reminder unchanged in the scheduler pass', async () => {
+    boundaryDiagnosticsEnabled.value = true;
+    const reminder = getPlanModeSystemReminder(false);
+    const enterTool = new MockTool({
+      name: ToolNames.ENTER_PLAN_MODE,
+      maxOutputChars: Number.POSITIVE_INFINITY,
+      execute: vi.fn().mockResolvedValue({
+        llmContent: reminder,
+        returnDisplay: 'Entered plan mode.',
+      }),
+    });
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([[ToolNames.ENTER_PLAN_MODE, enterTool]]),
+        toolOutputBatchBudget: 1,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'enter-plan-only',
+          name: ToolNames.ENTER_PLAN_MODE,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-plan-only',
+        },
+      ],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+
+    expect(
+      boundaryObserveMock.mock.calls
+        .map(([observation]) => observation)
+        .filter((observation) => observation.stage.startsWith('finalizer_'))
+        .map((observation) => [observation.stage, observation.mutated]),
+    ).toEqual([
+      ['finalizer_input', false],
+      ['finalizer_output', false],
+    ]);
+  });
+
+  it.each([200_000, Number.POSITIVE_INFINITY])(
+    'observes oversized output that remains within the batch budget (%s)',
+    async (toolOutputBatchBudget) => {
+      boundaryDiagnosticsEnabled.value = true;
+      const largeOutput = 'a'.repeat(70_000);
+      const tool = new MockTool({
+        name: 'largeWithinBudget',
+        execute: vi.fn().mockResolvedValue({
+          llmContent: largeOutput,
+          returnDisplay: 'large output',
+        }),
+      });
+      const { scheduler, onAllToolCallsComplete } =
+        createSchedulerForLegacyToolTests({
+          toolsByName: new Map([['largeWithinBudget', tool]]),
+          toolOutputBatchBudget,
+        });
+
+      await scheduler.schedule(
+        [
+          {
+            callId: 'large-within-budget',
+            name: 'largeWithinBudget',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'prompt-large-within-budget',
+          },
+        ],
+        new AbortController().signal,
+      );
+      await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+
+      expect(
+        boundaryObserveMock.mock.calls
+          .map(([observation]) => observation)
+          .filter((observation) => observation.stage.startsWith('finalizer_'))
+          .map((observation) => [observation.stage, observation.mutated]),
+      ).toEqual([
+        ['finalizer_input', false],
+        ['finalizer_output', false],
+      ]);
+    },
+  );
 
   it('keeps siblings suppressed when enter_plan_mode itself fails', async () => {
     const enterExecute = vi.fn().mockResolvedValue({
@@ -2535,6 +2682,17 @@ describe('CoreToolScheduler', () => {
       ]);
       expect(completedCall.response.resultDisplay).toBe('completed');
     }
+    const producerObservations = boundaryObserveMock.mock.calls
+      .map(([observation]) => observation)
+      .filter((observation) => observation.stage.startsWith('producer_'));
+    expect(producerObservations).toHaveLength(2);
+    const inputValues = producerObservations[0].values;
+    expect(
+      typeof inputValues === 'function' ? inputValues() : inputValues,
+    ).toEqual([
+      { representation: 'model_text', value: '' },
+      { representation: 'display', value: 'completed' },
+    ]);
   });
 
   it('applies the per-tool budget for a tool invoked via a legacy alias', async () => {
@@ -2714,6 +2872,7 @@ describe('CoreToolScheduler', () => {
   });
 
   it('deterministically bounds tool outputs when a batch exceeds the budget', async () => {
+    boundaryDiagnosticsEnabled.value = true;
     // Both outputs are individually under the single-result threshold (25k),
     // so PR-A truncation leaves them alone; only their SUM (12k) exceeds the
     // per-message batch budget (10k). The small result fits intact and the
@@ -2799,6 +2958,22 @@ describe('CoreToolScheduler', () => {
         ([, result]) => result.executionStatus === 'success',
       ),
     ).toBe(true);
+    const finalizerObservations = boundaryObserveMock.mock.calls
+      .map(([observation]) => observation)
+      .filter((observation) => observation.stage.startsWith('finalizer_'));
+    expect(finalizerObservations).toHaveLength(4);
+    expect(
+      finalizerObservations.map((observation) => [
+        observation.toolCallId,
+        observation.stage,
+        observation.mutated,
+      ]),
+    ).toEqual([
+      ['big', 'finalizer_input', true],
+      ['small', 'finalizer_input', false],
+      ['big', 'finalizer_output', true],
+      ['small', 'finalizer_output', false],
+    ]);
   });
 
   it('hard-caps a batch whose producer outputs already carry truncation markers', async () => {
@@ -4531,6 +4706,17 @@ describe('CoreToolScheduler', () => {
       String(functionResponse?.response?.['output']).length,
     );
     expect(completed.response.visionBridgeNotice).toContain('qwen3-vl-plus');
+    const producerObservations = boundaryObserveMock.mock.calls
+      .map(([observation]) => observation)
+      .filter((observation) => observation.stage.startsWith('producer_'));
+    expect(producerObservations).toHaveLength(2);
+    for (const observation of producerObservations) {
+      expect(
+        typeof observation.mutated === 'function'
+          ? observation.mutated()
+          : observation.mutated,
+      ).toBe(true);
+    }
     expect(functionResponse).not.toHaveProperty('parts');
     expect(runSideQueryMock).toHaveBeenCalledWith(
       expect.anything(),
@@ -6215,6 +6401,136 @@ describe('CoreToolScheduler', () => {
       expect(nonSkillMessage).toContain('not found in registry');
       expect(nonSkillMessage).toContain('Did you mean');
       expect(nonSkillMessage).not.toContain('is a skill name');
+    });
+
+    it('should explain how to enable list_directory when it is not registered', async () => {
+      const mockToolRegistry = {
+        getAllToolNames: () => ['glob', 'read_file'],
+        getTool: () => undefined,
+        ensureTool: async () => undefined,
+      } as unknown as ToolRegistry;
+
+      const mockConfig = {
+        getToolRegistry: () => mockToolRegistry,
+        getUseModelRouter: () => false,
+        getGeminiClient: () => null,
+        getPermissionsDeny: () => undefined,
+        isInteractive: () => true,
+        getMessageBus: vi.fn().mockReturnValue(undefined),
+        getDisableAllHooks: vi.fn().mockReturnValue(true),
+        getDisabledTools: vi.fn().mockReturnValue(new Set<string>()),
+      } as unknown as Config;
+
+      const scheduler = new CoreToolScheduler({
+        config: mockConfig,
+        getPreferredEditor: () => 'vscode',
+        onEditorClose: vi.fn(),
+      });
+
+      const message =
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (scheduler as any).getToolNotFoundMessage('list_directory');
+      expect(message).toContain('disabled by default');
+      expect(message).toContain('tools.listDirectory.enabled');
+      // The coreTools allowlist advice is deliberately absent: setting
+      // tools.core to ["list_directory"] alone would exclude every other tool.
+      expect(message).not.toContain('coreTools');
+      // The generic Levenshtein path would suggest unrelated tools instead.
+      expect(message).not.toContain('Did you mean');
+
+      // Alias forms resolve to the same explanation instead of falling
+      // through to the Levenshtein path.
+      for (const alias of ['ListFiles', 'ReadFolder']) {
+        const aliasMessage =
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          await (scheduler as any).getToolNotFoundMessage(alias);
+        expect(aliasMessage).toContain('disabled by default');
+        expect(aliasMessage).toContain('tools.listDirectory.enabled');
+        expect(aliasMessage).not.toContain('Did you mean');
+      }
+    });
+
+    it('should attribute a missing list_directory to the workspace tools toggle when it is disabled there', async () => {
+      const mockToolRegistry = {
+        getAllToolNames: () => ['glob', 'read_file'],
+        getTool: () => undefined,
+        ensureTool: async () => undefined,
+      } as unknown as ToolRegistry;
+
+      const mockConfig = {
+        getToolRegistry: () => mockToolRegistry,
+        getUseModelRouter: () => false,
+        getGeminiClient: () => null,
+        getPermissionsDeny: () => undefined,
+        isInteractive: () => true,
+        getMessageBus: vi.fn().mockReturnValue(undefined),
+        getDisableAllHooks: vi.fn().mockReturnValue(true),
+        getDisabledTools: vi
+          .fn()
+          .mockReturnValue(new Set<string>(['list_directory'])),
+      } as unknown as Config;
+
+      const scheduler = new CoreToolScheduler({
+        config: mockConfig,
+        getPreferredEditor: () => 'vscode',
+        onEditorClose: vi.fn(),
+      });
+
+      const message =
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (scheduler as any).getToolNotFoundMessage('list_directory');
+      expect(message).toContain('disabled for this workspace');
+      expect(message).not.toContain('disabled by default');
+
+      // The toggle lookup must use the canonical name, so an aliased call in a
+      // workspace that turned the tool off gets the toggle message too — the
+      // enablement setting cannot lift a workspace disable.
+      const aliasMessage =
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (scheduler as any).getToolNotFoundMessage('ListFiles');
+      expect(aliasMessage).toContain('disabled for this workspace');
+      expect(aliasMessage).not.toContain('disabled by default');
+    });
+
+    it('should not claim list_directory is disabled when an alias is used for a registered tool', async () => {
+      const lsTool = {
+        name: 'list_directory',
+      } as unknown as AnyDeclarativeTool;
+      const mockToolRegistry = {
+        getAllToolNames: () => ['glob', 'read_file', 'list_directory'],
+        getTool: (name: string) =>
+          name === 'list_directory' ? lsTool : undefined,
+        ensureTool: async (name: string) =>
+          name === 'list_directory' ? lsTool : undefined,
+      } as unknown as ToolRegistry;
+
+      const mockConfig = {
+        getToolRegistry: () => mockToolRegistry,
+        getUseModelRouter: () => false,
+        getGeminiClient: () => null,
+        getPermissionsDeny: () => undefined,
+        isInteractive: () => true,
+        getMessageBus: vi.fn().mockReturnValue(undefined),
+        getDisableAllHooks: vi.fn().mockReturnValue(true),
+        getDisabledTools: vi.fn().mockReturnValue(new Set<string>()),
+      } as unknown as Config;
+
+      const scheduler = new CoreToolScheduler({
+        config: mockConfig,
+        getPreferredEditor: () => 'vscode',
+        onEditorClose: vi.fn(),
+      });
+
+      // The registry lookup is keyed by canonical name, so an alias call misses
+      // even though the tool is enabled. It must fall through to the generic
+      // path, which names the tool, rather than telling the user to switch on a
+      // setting that is already on.
+      const message =
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (scheduler as any).getToolNotFoundMessage('ListFiles');
+      expect(message).not.toContain('disabled by default');
+      expect(message).toContain('list_directory');
+      expect(message).toContain('Did you mean');
     });
   });
 
@@ -9130,6 +9446,9 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
       expect(responseJson).toContain('"error"');
       expect(responseJson).toContain('Tool blocked by plan mode');
       expect(responseJson).toContain('write_file');
+      // list_directory is opt-in (off by default) — the block error must not
+      // steer the model toward a tool that is not registered.
+      expect(responseJson).not.toContain('list_directory');
       // Plan-required teammates get pivot-to-read-only then exit_plan_mode hint
       expect(responseJson).toContain('Do NOT retry');
       expect(responseJson).toContain('Pivot to read-only');
@@ -9912,6 +10231,8 @@ describe('CoreToolScheduler Plan shell routing', () => {
       toolName: ToolNames.SHELL,
       args: { command: 'git status', directory: '/workspace' },
       signal: expect.any(AbortSignal),
+      sessionId: 'plan-shell-session',
+      cwd: '/workspace',
     });
     expect(execute).not.toHaveBeenCalled();
     const completed = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
@@ -9948,6 +10269,8 @@ describe('CoreToolScheduler Plan shell routing', () => {
       toolName: ToolNames.SHELL,
       args: { command: 'git status', directory: '/workspace' },
       signal: expect.any(AbortSignal),
+      sessionId: 'plan-shell-session',
+      cwd: '/workspace',
     });
     expect(execute).toHaveBeenCalledOnce();
     const completed = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
@@ -10528,6 +10851,10 @@ describe('CoreToolScheduler Plan shell routing', () => {
 });
 
 describe('CoreToolScheduler telemetry spans', () => {
+  beforeEach(() => {
+    boundaryObserveMock.mockClear();
+  });
+
   afterEach(() => {
     shouldThrowToolSpanSetAttribute.value = false;
     shouldThrowToolSpanSetStatus.value = false;
@@ -10562,6 +10889,7 @@ describe('CoreToolScheduler telemetry spans', () => {
     includeSensitiveSpanAttributes?: boolean;
     sensitiveSpanAttributeMaxLength?: number;
     onToolCallsUpdate?: ReturnType<typeof vi.fn>;
+    shouldObserveProducer?: (callId: string) => boolean;
   }): {
     scheduler: CoreToolScheduler;
     onAllToolCallsComplete: ReturnType<typeof vi.fn>;
@@ -10643,6 +10971,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       config: mockConfig,
       onAllToolCallsComplete,
       onToolCallsUpdate,
+      shouldObserveProducer: options.shouldObserveProducer,
       getPreferredEditor: () => 'vscode',
       onEditorClose: vi.fn(),
     });
@@ -10672,6 +11001,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       providerCallId?: string;
       tools?: AnyDeclarativeTool[];
       toolName?: string;
+      shouldObserveProducer?: (callId: string) => boolean;
     } = {},
   ): Promise<{
     spanRecord: ToolSpanRecord;
@@ -10714,6 +11044,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       { code: SpanStatusCode.ERROR, message },
     ]);
     expect(spanRecord.spanAttributes['tool.failure_kind']).toBe(failureKind);
+    expect(spanRecord.spanAttributes['error.type']).toBe(failureKind);
     expect(JSON.stringify(spanRecord.statusCalls)).not.toContain('/secret');
     expect(JSON.stringify(spanRecord.statusCalls)).not.toContain('sensitive');
     expect(spanRecord.ended).toBe(true);
@@ -11240,6 +11571,7 @@ describe('CoreToolScheduler telemetry spans', () => {
             hookSpecificOutput: {
               artifacts: [
                 {
+                  kind: 'link',
                   title: 'Hook report',
                   workspacePath: 'reports/hook.html',
                 },
@@ -11257,6 +11589,7 @@ describe('CoreToolScheduler telemetry spans', () => {
         returnDisplay: 'ok',
         artifacts: [
           {
+            kind: 'file',
             title: 'Tool report',
             workspacePath: 'reports/tool.html',
           },
@@ -11269,14 +11602,27 @@ describe('CoreToolScheduler telemetry spans', () => {
     if (completedCall.status === 'success') {
       expect(completedCall.response.artifacts).toEqual([
         {
+          kind: 'file',
           title: 'Tool report',
           workspacePath: 'reports/tool.html',
         },
         {
+          kind: 'link',
           title: 'Hook report',
           workspacePath: 'reports/hook.html',
         },
       ]);
+    }
+    const producerObservations = boundaryObserveMock.mock.calls
+      .map(([observation]) => observation)
+      .filter((observation) => observation.stage.startsWith('producer_'));
+    expect(producerObservations).toHaveLength(2);
+    for (const observation of producerObservations) {
+      expect(
+        typeof observation.mutated === 'function'
+          ? observation.mutated()
+          : observation.mutated,
+      ).toBe(true);
     }
   });
 
@@ -11407,6 +11753,214 @@ describe('CoreToolScheduler telemetry spans', () => {
       'Tool execution failed with exception',
       'tool_exception',
     );
+    const producerObservations = boundaryObserveMock.mock.calls
+      .map(([observation]) => observation)
+      .filter((observation) => observation.stage === 'producer');
+    expect(producerObservations).toHaveLength(1);
+    expect(producerObservations[0].artifacts).toEqual([
+      { state: 'none', kinds: [] },
+    ]);
+  });
+
+  it('lets an outer owner suppress a scheduler producer observation', async () => {
+    await runSingleTool({
+      execute: vi.fn().mockRejectedValue(new Error('externally owned')),
+      shouldObserveProducer: () => false,
+    });
+
+    expect(
+      boundaryObserveMock.mock.calls.filter(
+        ([observation]) => observation.stage === 'producer',
+      ),
+    ).toHaveLength(0);
+  });
+
+  it('preserves a successful result when the producer owner predicate throws', async () => {
+    const { completedCalls } = await runSingleTool({
+      shouldObserveProducer: () => {
+        throw new Error('owner predicate failed');
+      },
+    });
+
+    expect(completedCalls[0].status).toBe('success');
+    expect(
+      boundaryObserveMock.mock.calls.filter(
+        ([observation]) => observation.stage === 'producer',
+      ),
+    ).toHaveLength(0);
+  });
+
+  it('preserves an execution error when the producer owner predicate throws', async () => {
+    const { completedCalls } = await runSingleTool({
+      execute: vi.fn().mockRejectedValue(new Error('tool failed')),
+      shouldObserveProducer: () => {
+        throw new Error('owner predicate failed');
+      },
+    });
+
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(completedCall.response.error?.message).toBe('tool failed');
+    }
+    expect(
+      boundaryObserveMock.mock.calls.filter(
+        ([observation]) => observation.stage === 'producer',
+      ),
+    ).toHaveLength(0);
+  });
+
+  it('observes a settled producer when post-processing throws', async () => {
+    const resultFilePaths: string[] = [];
+    Object.defineProperty(resultFilePaths, Symbol.iterator, {
+      value: () => {
+        throw new Error('post-processing failed');
+      },
+    });
+    const readTool = new MockTool({
+      name: ToolNames.READ_FILE,
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'settled result',
+        returnDisplay: 'settled result',
+        resultFilePaths,
+      }),
+    });
+
+    const { completedCalls } = await runSingleTool({
+      tools: [readTool],
+      toolName: ToolNames.READ_FILE,
+    });
+
+    expect(completedCalls[0].status).toBe('error');
+    expect(
+      boundaryObserveMock.mock.calls
+        .map(([observation]) => observation.stage)
+        .filter((stage) => stage.startsWith('producer_')),
+    ).toEqual(['producer_input', 'producer_output']);
+  });
+
+  it('does not treat routine multi-part response wrapping as a producer mutation', async () => {
+    await runSingleTool({
+      execute: vi.fn().mockResolvedValue({
+        llmContent: [{ text: 'alpha' }, { text: 'beta' }],
+      }),
+    });
+
+    const observations = boundaryObserveMock.mock.calls
+      .map(([observation]) => observation)
+      .filter((observation) => observation.stage.startsWith('producer_'));
+    expect(observations).toHaveLength(2);
+    for (const observation of observations) {
+      expect(
+        typeof observation.mutated === 'function'
+          ? observation.mutated()
+          : observation.mutated,
+      ).toBe(false);
+    }
+  });
+
+  it('does not treat routine media response wrapping as a producer mutation', async () => {
+    await runSingleTool({
+      execute: vi.fn().mockResolvedValue({
+        llmContent: [
+          {
+            inlineData: { mimeType: 'image/png', data: 'aGVsbG8=' },
+          },
+        ],
+      }),
+    });
+
+    const observations = boundaryObserveMock.mock.calls
+      .map(([observation]) => observation)
+      .filter((observation) => observation.stage.startsWith('producer_'));
+    expect(observations).toHaveLength(2);
+    for (const observation of observations) {
+      expect(
+        typeof observation.mutated === 'function'
+          ? observation.mutated()
+          : observation.mutated,
+      ).toBe(false);
+    }
+  });
+
+  it('does not treat a supported function response as a producer mutation', async () => {
+    await runSingleTool({
+      execute: vi.fn().mockResolvedValue({
+        llmContent: [
+          {
+            functionResponse: {
+              id: 'span-call',
+              name: 'mockTool',
+              response: { output: 'complete' },
+            },
+          },
+        ],
+      }),
+    });
+
+    const observations = boundaryObserveMock.mock.calls
+      .map(([observation]) => observation)
+      .filter((observation) => observation.stage.startsWith('producer_'));
+    expect(observations).toHaveLength(2);
+    for (const observation of observations) {
+      expect(
+        typeof observation.mutated === 'function'
+          ? observation.mutated()
+          : observation.mutated,
+      ).toBe(false);
+    }
+  });
+
+  it('treats dropped structured parts as a producer mutation', async () => {
+    await runSingleTool({
+      execute: vi.fn().mockResolvedValue({
+        llmContent: [
+          {
+            functionCall: { name: 'nested_call', args: { value: 1 } },
+          },
+        ],
+      }),
+    });
+
+    const observations = boundaryObserveMock.mock.calls
+      .map(([observation]) => observation)
+      .filter((observation) => observation.stage.startsWith('producer_'));
+    expect(observations).toHaveLength(2);
+    for (const observation of observations) {
+      expect(
+        typeof observation.mutated === 'function'
+          ? observation.mutated()
+          : observation.mutated,
+      ).toBe(true);
+    }
+  });
+
+  it('treats structured display compaction as a producer mutation', async () => {
+    const oversized = 'x'.repeat(MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS + 100);
+    const returnDisplay: FileDiff = {
+      fileName: 'large.txt',
+      fileDiff: oversized,
+      originalContent: oversized,
+      newContent: oversized,
+    };
+    await runSingleTool({
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'updated',
+        returnDisplay,
+      }),
+    });
+
+    const observations = boundaryObserveMock.mock.calls
+      .map(([observation]) => observation)
+      .filter((observation) => observation.stage.startsWith('producer_'));
+    expect(observations).toHaveLength(2);
+    for (const observation of observations) {
+      expect(
+        typeof observation.mutated === 'function'
+          ? observation.mutated()
+          : observation.mutated,
+      ).toBe(true);
+    }
   });
 
   it('preserves original tool exceptions when the failure hook rejects', async () => {
@@ -11535,11 +12089,11 @@ describe('CoreToolScheduler telemetry spans', () => {
     ).toBeUndefined();
   });
 
-  it('marks successful tool calls with OK status via endToolSpan', async () => {
+  it('leaves successful tool calls with UNSET status via endToolSpan', async () => {
     const { spanRecord, completedCalls } = await runSingleTool();
 
     expect(completedCalls[0].status).toBe('success');
-    expect(spanRecord.statusCalls).toEqual([{ code: SpanStatusCode.OK }]);
+    expect(spanRecord.statusCalls).toHaveLength(0);
     expect(spanRecord.spanAttributes).not.toHaveProperty('tool.failure_kind');
     expect(spanRecord.ended).toBe(true);
   });
@@ -12044,6 +12598,13 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(
       (waiting.confirmationDetails as { prompt: string }).prompt,
     ).toContain('confirm deploy 38111');
+    expect(
+      (
+        waiting.confirmationDetails as {
+          renderPromptAsPlainText?: boolean;
+        }
+      ).renderPromptAsPlainText,
+    ).toBe(true);
     // One open blocked_on_user span; the tool span stays open across the
     // bounce (it is NOT finalized until the confirmation resolves).
     const blocked = getBlockedSpans();

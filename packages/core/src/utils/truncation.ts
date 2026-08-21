@@ -31,6 +31,24 @@ export const TOOL_OUTPUT_TRUNCATED_PREFIX =
   'Tool output was too large and has been truncated';
 
 /**
+ * Tolerance factor applied by the scheduler's combined (second) pass:
+ * metadata appended after truncation is only re-bounded above 2x the
+ * applicable budget, so compliant retained content can legitimately
+ * measure up to twice its tool's budget. Shared with the retention
+ * diagnostics so both use the same tolerance.
+ */
+export const COMBINED_PASS_TOLERANCE_FACTOR = 2;
+
+/**
+ * Slack added to the oversized check to account for the token-aware
+ * fallback in `truncateAndSaveToFile`: when the wrapped (prefix + truncated)
+ * form is not smaller than the original, the original is returned sentinel-less.
+ * The retained original can sit up to ~prefix-length above the budget before
+ * the fallback kicks in, so the diagnostics comparison must tolerate that band.
+ */
+export const TRUNCATION_FALLBACK_ENVELOPE_SLACK = 500;
+
+/**
  * Truncates large tool output and saves the full content to a temp file.
  * Used by the shell tool to prevent excessively large outputs from being
  * sent to the LLM context.

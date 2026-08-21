@@ -36,8 +36,11 @@ import {
 } from './extensionManager.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { EXTENSIONS_CONFIG_FILENAME } from './variables.js';
+import { QODER_PLUGIN_MANIFEST } from './qoder-converter.js';
 import { ExtensionStorage } from './storage.js';
 import { assertTarArchiveHasNoLinks } from './archive-safety.js';
+import { AGENT_PLUGIN_SCHEMA } from './agent-plugins-v1/index.js';
+import { prepareStoredGitCredential } from './extension-git-credentials.js';
 
 const mockPlatform = vi.hoisted(() => vi.fn());
 const mockArch = vi.hoisted(() => vi.fn());
@@ -60,7 +63,12 @@ vi.mock('node:https', async (importOriginal) => {
 vi.mock('simple-git');
 
 describe('git extension helpers', () => {
+  beforeEach(() => {
+    vi.stubEnv('GITHUB_TOKEN', '');
+  });
+
   afterEach(() => {
+    vi.unstubAllEnvs();
     vi.restoreAllMocks();
     mockHttpsGet.mockReset();
   });
@@ -147,6 +155,7 @@ describe('git extension helpers', () => {
       getRemotes: vi.fn(),
       fetch: vi.fn(),
       checkout: vi.fn(),
+      revparse: vi.fn(),
       version: vi.fn(),
       env: vi.fn(),
     };
@@ -155,6 +164,7 @@ describe('git extension helpers', () => {
       vi.mocked(simpleGit).mockReturnValue(mockGit as unknown as SimpleGit);
       mockGit.env.mockReturnValue(mockGit);
       mockGit.version.mockResolvedValue({ major: 2, minor: 52 });
+      mockGit.revparse.mockResolvedValue('local-hash');
     });
 
     it('should clone, fetch and checkout a repo', async () => {
@@ -170,7 +180,11 @@ describe('git extension helpers', () => {
       ]);
       const controller = new AbortController();
 
-      await cloneFromGit(installMetadata, destination, controller.signal);
+      const commit = await cloneFromGit(
+        installMetadata,
+        destination,
+        controller.signal,
+      );
 
       expect(simpleGit).toHaveBeenCalledWith(destination, {
         abort: controller.signal,
@@ -187,6 +201,7 @@ describe('git extension helpers', () => {
         'my-ref',
       );
       expect(mockGit.checkout).toHaveBeenCalledWith('FETCH_HEAD');
+      expect(commit).toBe('local-hash');
     });
 
     it('should use core.symlinks=false on Windows to avoid permission errors', async () => {
@@ -301,6 +316,128 @@ describe('git extension helpers', () => {
       expect(mockGit.fetch).toHaveBeenCalledWith(
         'https://github.com/owner/repo.git',
         'HEAD',
+      );
+    });
+
+    it('explains how to install public extensions when Git is too old for DNS pinning', async () => {
+      mockGit.version.mockResolvedValue({ major: 2, minor: 34, patch: 1 });
+
+      await expect(
+        cloneFromGit(
+          {
+            source: 'https://github.com/owner/repo.git',
+            type: 'git',
+            networkPolicy: 'public',
+          },
+          '/dest',
+        ),
+      ).rejects.toThrow(
+        'Public extension Git installs require Git 2.37 or newer for secure DNS pinning; found Git 2.34.1. Upgrade Git, or install the extension from a local path or archive instead.',
+      );
+      expect(mockGit.clone).not.toHaveBeenCalled();
+    });
+
+    it('accepts Git 2.37 while preserving public network pinning', async () => {
+      mockGit.version.mockResolvedValue({ major: 2, minor: 37, patch: 0 });
+      vi.spyOn(dns, 'lookup').mockResolvedValue([
+        { address: '8.8.8.8', family: 4 },
+      ] as never);
+      const source = 'https://github.com/owner/repo.git';
+      mockGit.getRemotes.mockResolvedValue([
+        { name: 'origin', refs: { fetch: source } },
+      ]);
+
+      await cloneFromGit(
+        { source, type: 'git', networkPolicy: 'public' },
+        '/dest',
+      );
+
+      expect(simpleGit).toHaveBeenLastCalledWith('/dest', {
+        config: [
+          'http.curloptResolve=github.com:443:8.8.8.8',
+          'http.followRedirects=false',
+          'http.proxy=',
+          'protocol.allow=never',
+          'protocol.https.allow=always',
+        ],
+        unsafe: {
+          allowUnsafeConfigPaths: true,
+          allowUnsafeProtocolOverride: true,
+        },
+      });
+      expect(mockGit.clone).toHaveBeenCalled();
+    });
+
+    it('passes explicit credentials through scoped Git config without changing the URL', async () => {
+      vi.spyOn(dns, 'lookup').mockResolvedValue([
+        { address: '8.8.8.8', family: 4 },
+      ] as never);
+      const source = 'https://git.example.com/owner/repo.git';
+      mockGit.getRemotes.mockResolvedValue([
+        { name: 'origin', refs: { fetch: source } },
+      ]);
+
+      await cloneFromGit(
+        { source, type: 'git', networkPolicy: 'public' },
+        '/dest',
+        undefined,
+        { username: 'user', password: 'fine-grained-token' },
+      );
+
+      expect(mockGit.clone).toHaveBeenCalledWith(source, './', [
+        '-c',
+        'core.symlinks=true',
+        '--depth',
+        '1',
+      ]);
+      expect(mockGit.env).toHaveBeenCalledWith(
+        expect.objectContaining({
+          GIT_CONFIG_COUNT: '1',
+          GIT_CONFIG_KEY_0: `http.${source}.extraHeader`,
+          GIT_CONFIG_VALUE_0: `Authorization: Basic ${Buffer.from(
+            'user:fine-grained-token',
+          ).toString('base64')}`,
+        }),
+      );
+      const gitEnvironment = mockGit.env.mock.calls.at(-1)?.[0];
+      expect(gitEnvironment).not.toHaveProperty('GIT_CONFIG_PARAMETERS');
+      expect(gitEnvironment).not.toHaveProperty('GIT_CONFIG_SYSTEM');
+      expect(gitEnvironment).not.toHaveProperty('HOME');
+      expect(gitEnvironment).not.toHaveProperty('HTTP_PROXY');
+      expect(JSON.stringify(mockGit.clone.mock.calls)).not.toContain(
+        'fine-grained-token',
+      );
+    });
+
+    it('injects GITHUB_TOKEN without adding it to the clone URL', async () => {
+      vi.stubEnv('GITHUB_TOKEN', 'ambient-token');
+      vi.spyOn(dns, 'lookup').mockResolvedValue([
+        { address: '8.8.8.8', family: 4 },
+      ] as never);
+      const source = 'https://github.com/owner/repo.git';
+      mockGit.getRemotes.mockResolvedValue([
+        { name: 'origin', refs: { fetch: source } },
+      ]);
+
+      await cloneFromGit(
+        { source, type: 'git', networkPolicy: 'public' },
+        '/dest',
+      );
+
+      expect(mockGit.clone).toHaveBeenCalledWith(
+        source,
+        './',
+        expect.any(Array),
+      );
+      expect(mockGit.env).toHaveBeenCalledWith(
+        expect.objectContaining({
+          GIT_CONFIG_VALUE_0: `Authorization: Basic ${Buffer.from(
+            'ambient-token:',
+          ).toString('base64')}`,
+        }),
+      );
+      expect(JSON.stringify(mockGit.clone.mock.calls)).not.toContain(
+        'ambient-token',
       );
     });
 
@@ -481,6 +618,47 @@ describe('git extension helpers', () => {
   });
 
   describe('checkForExtensionUpdate', () => {
+    it.skipIf(process.platform === 'win32')(
+      'does not try to extract uploaded archive metadata sources',
+      async () => {
+        const tempDir = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'uploaded-archive-update-test-'),
+        );
+        const source = `upload:v1:${randomBytes(8).toString('hex')}:extension.zip`;
+        const previousCwd = process.cwd();
+        process.chdir(tempDir);
+        try {
+          const archive = await createZipBuffer(tempDir, [
+            {
+              name: EXTENSIONS_CONFIG_FILENAME,
+              content: JSON.stringify({ name: 'uploaded', version: '2.0.0' }),
+            },
+          ]);
+          await fs.writeFile(source, archive);
+          const extension = {
+            name: 'uploaded',
+            version: '1.0.0',
+            installMetadata: { type: 'local' as const, source },
+          } as Extension;
+          const mockManager = {
+            loadExtensionConfig: vi.fn().mockReturnValue({
+              name: 'uploaded',
+              version: '2.0.0',
+            }),
+          } as unknown as ExtensionManager;
+
+          await expect(
+            checkForExtensionUpdate(extension, mockManager),
+          ).resolves.toBe(ExtensionUpdateState.NOT_UPDATABLE);
+          expect(mockManager.loadExtensionConfig).not.toHaveBeenCalled();
+        } finally {
+          await fs.rm(source, { force: true });
+          process.chdir(previousCwd);
+          await fs.rm(tempDir, { recursive: true, force: true });
+        }
+      },
+    );
+
     const mockGit = {
       getRemotes: vi.fn(),
       listRemote: vi.fn(),
@@ -559,6 +737,227 @@ describe('git extension helpers', () => {
         mockExtensionManager,
       );
       expect(result).toBe(ExtensionUpdateState.UPDATE_AVAILABLE);
+    });
+
+    it('uses stored credentials for a clean exact-scope remote check', async () => {
+      const tempDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'stored-git-update-test-'),
+      );
+      vi.stubEnv('QWEN_HOME', path.join(tempDir, 'qwen-home'));
+      vi.stubEnv('QWEN_CODE_FORCE_FILE_STORAGE', 'true');
+      vi.spyOn(dns, 'lookup').mockResolvedValue([
+        { address: '8.8.8.8', family: 4 },
+      ] as never);
+      const source = 'https://git.example.com/owner/repo.git';
+      const extensionPath = path.join(tempDir, 'extension');
+      await fs.mkdir(extensionPath);
+      const stored = await prepareStoredGitCredential(extensionPath, {
+        username: 'user',
+        password: 'fine-grained-token',
+      });
+      stored.commit();
+      mockGit.listRemote.mockResolvedValue('remote-hash\tHEAD');
+      try {
+        const result = await checkForExtensionUpdate(
+          createExtension({
+            path: extensionPath,
+            installMetadata: {
+              type: 'git',
+              source,
+              gitCommit: 'local-hash',
+              credentialPersistence: 'stored',
+              networkPolicy: 'public',
+            },
+          }),
+          mockExtensionManager,
+        );
+
+        expect(result).toBe(ExtensionUpdateState.UPDATE_AVAILABLE);
+        expect(mockGit.listRemote).toHaveBeenCalledWith([source, 'HEAD']);
+        expect(mockGit.env).toHaveBeenLastCalledWith(
+          expect.objectContaining({
+            GIT_CONFIG_KEY_0: `http.${source}.extraHeader`,
+            GIT_CONFIG_VALUE_0: `Authorization: Basic ${Buffer.from(
+              'user:fine-grained-token',
+            ).toString('base64')}`,
+          }),
+        );
+        expect(JSON.stringify(mockGit.listRemote.mock.calls)).not.toContain(
+          'fine-grained-token',
+        );
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('fails a stored update check before Git when its selector is missing', async () => {
+      const tempDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'missing-git-credential-test-'),
+      );
+      try {
+        await expect(
+          checkForExtensionUpdate(
+            createExtension({
+              path: tempDir,
+              installMetadata: {
+                type: 'git',
+                source: 'https://git.example.com/owner/repo.git',
+                gitCommit: 'local-hash',
+                credentialPersistence: 'stored',
+                networkPolicy: 'public',
+              },
+            }),
+            mockExtensionManager,
+          ),
+        ).rejects.toMatchObject({
+          code: 'extension_credential_unavailable',
+        });
+        expect(mockGit.listRemote).not.toHaveBeenCalled();
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it.each(['Qoder', 'Claude'] as const)(
+      'checks a converted %s Git extension using its recorded commit',
+      async (originSource) => {
+        const extension = createExtension({
+          installMetadata: {
+            type: 'git',
+            source: 'https://github.com/example/sample-qoder-plugin',
+            originSource,
+            gitCommit: 'local-hash',
+          },
+        });
+        mockGit.listRemote.mockResolvedValue('remote-hash\tHEAD');
+
+        const result = await checkForExtensionUpdate(
+          extension,
+          mockExtensionManager,
+        );
+
+        expect(result).toBe(ExtensionUpdateState.UPDATE_AVAILABLE);
+        expect(mockGit.getRemotes).not.toHaveBeenCalled();
+        expect(mockGit.listRemote).toHaveBeenCalledWith([
+          'https://github.com/example/sample-qoder-plugin',
+          'HEAD',
+        ]);
+      },
+    );
+
+    it('uses the peeled commit when checking a recorded annotated tag', async () => {
+      const extension = createExtension({
+        installMetadata: {
+          type: 'git',
+          source: 'https://github.com/example/sample-qoder-plugin',
+          originSource: 'Qoder',
+          gitCommit: 'local-hash',
+          ref: 'v1.0.0',
+        },
+      });
+      mockGit.listRemote.mockResolvedValue(
+        'tag-hash\trefs/tags/v1.0.0\nlocal-hash\trefs/tags/v1.0.0^{}',
+      );
+
+      const result = await checkForExtensionUpdate(
+        extension,
+        mockExtensionManager,
+      );
+
+      expect(result).toBe(ExtensionUpdateState.UP_TO_DATE);
+      expect(mockGit.listRemote).toHaveBeenCalledWith([
+        'https://github.com/example/sample-qoder-plugin',
+        'v1.0.0',
+        'v1.0.0^{}',
+      ]);
+    });
+
+    it.each(['Qoder', 'Claude'] as const)(
+      'does not update-check legacy %s Git installs without a recorded commit',
+      async (originSource) => {
+        const extension = createExtension({
+          installMetadata: {
+            type: 'git',
+            source: 'https://github.com/example/sample-qoder-plugin',
+            originSource,
+          },
+        });
+
+        const result = await checkForExtensionUpdate(
+          extension,
+          mockExtensionManager,
+        );
+
+        expect(result).toBe(ExtensionUpdateState.NOT_UPDATABLE);
+        expect(mockGit.listRemote).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(['git', 'github-release'] as const)(
+      'does not update-check external marketplace content installed through %s',
+      async (type) => {
+        const extension = createExtension({
+          installMetadata: {
+            type,
+            source: 'https://github.com/example/sample-marketplace',
+            originSource: 'Claude',
+            releaseTag: 'v1.0.0',
+            externalContent: true,
+          },
+        });
+
+        const result = await checkForExtensionUpdate(
+          extension,
+          mockExtensionManager,
+        );
+
+        expect(result).toBe(ExtensionUpdateState.NOT_UPDATABLE);
+        expect(mockGit.getRemotes).not.toHaveBeenCalled();
+        expect(mockGit.listRemote).not.toHaveBeenCalled();
+        expect(mockHttpsGet).not.toHaveBeenCalled();
+      },
+    );
+
+    it('does not update-check legacy Claude marketplace releases without content provenance', async () => {
+      const extension = createExtension({
+        installMetadata: {
+          type: 'github-release',
+          source: 'https://github.com/example/sample-marketplace',
+          originSource: 'Claude',
+          pluginName: 'sample-plugin',
+          releaseTag: 'v1.0.0',
+        },
+      });
+
+      const result = await checkForExtensionUpdate(
+        extension,
+        mockExtensionManager,
+      );
+
+      expect(result).toBe(ExtensionUpdateState.NOT_UPDATABLE);
+      expect(mockHttpsGet).not.toHaveBeenCalled();
+    });
+
+    it('update-checks marketplace releases with confirmed repository content', async () => {
+      mockHttpsResponses(JSON.stringify({ tag_name: 'v2.0.0' }));
+      const extension = createExtension({
+        installMetadata: {
+          type: 'github-release',
+          source: 'https://github.com/example/sample-marketplace',
+          originSource: 'Claude',
+          pluginName: 'sample-plugin',
+          releaseTag: 'v1.0.0',
+          externalContent: false,
+        },
+      });
+
+      const result = await checkForExtensionUpdate(
+        extension,
+        mockExtensionManager,
+      );
+
+      expect(result).toBe(ExtensionUpdateState.UPDATE_AVAILABLE);
+      expect(mockHttpsGet).toHaveBeenCalledOnce();
     });
 
     it('pins public Git update checks and disables redirects and proxies', async () => {
@@ -700,6 +1099,78 @@ describe('git extension helpers', () => {
 
       const result = await checkForExtensionUpdate(extension, mockManager);
       expect(result).toBe(ExtensionUpdateState.UP_TO_DATE);
+    });
+
+    it('should convert a local Qoder plugin before checking for updates', async () => {
+      const tempDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'local-qoder-update-test-'),
+      );
+      try {
+        await fs.mkdir(path.join(tempDir, '.qoder-plugin'));
+        await fs.writeFile(
+          path.join(tempDir, QODER_PLUGIN_MANIFEST),
+          JSON.stringify({ name: 'sample-qoder-plugin', version: '2.0.0' }),
+        );
+        const extension = createExtension({
+          version: '1.0.0',
+          installMetadata: {
+            type: 'local',
+            source: tempDir,
+            originSource: 'Qoder',
+          },
+        });
+        const mockManager = {
+          loadExtensionConfig: vi.fn(
+            ({ extensionDir }: { extensionDir: string }) =>
+              JSON.parse(
+                fsSync.readFileSync(
+                  path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
+                  'utf-8',
+                ),
+              ),
+          ),
+        } as unknown as ExtensionManager;
+
+        const result = await checkForExtensionUpdate(extension, mockManager);
+
+        expect(result).toBe(ExtensionUpdateState.UPDATE_AVAILABLE);
+        expect(await fs.readdir(tempDir)).toEqual(['.qoder-plugin']);
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('does not convert a local marketplace checkout during update checks', async () => {
+      const tempDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'local-marketplace-update-test-'),
+      );
+      try {
+        const extension = createExtension({
+          version: '1.0.0',
+          installMetadata: {
+            type: 'local',
+            source: tempDir,
+            originSource: 'Claude',
+            pluginName: 'sample-plugin',
+          },
+        });
+        const mockManager = {
+          loadExtensionConfig: vi.fn().mockReturnValue({
+            name: 'sample-plugin',
+            version: '1.0.0',
+          }),
+        } as unknown as ExtensionManager;
+
+        const result = await checkForExtensionUpdate(extension, mockManager);
+
+        expect(result).toBe(ExtensionUpdateState.UP_TO_DATE);
+        expect(mockManager.loadExtensionConfig).toHaveBeenCalledWith({
+          extensionDir: tempDir,
+        });
+        expect(await fs.readdir(tempDir)).toEqual([]);
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
     });
 
     it('should return NOT_UPDATABLE for local extension when source cannot be loaded', async () => {
@@ -1753,6 +2224,54 @@ describe('git extension helpers', () => {
       await expect(
         fs.readFile(path.join(tempDir, EXTENSIONS_CONFIG_FILENAME), 'utf-8'),
       ).resolves.toContain('tar-wrapped-extension');
+    });
+
+    it('should extract and flatten a wrapped Qoder plugin archive', async () => {
+      const archivePath = path.join(tempDir, 'wrapped-qoder-plugin.zip');
+      const archive = await createZipBuffer(tempDir, [
+        {
+          name: `wrapped/${QODER_PLUGIN_MANIFEST}`,
+          content: JSON.stringify({ name: 'sample-qoder-plugin' }),
+        },
+        {
+          name: 'wrapped/system-prompt.md',
+          content: '# System context',
+        },
+      ]);
+      await fs.writeFile(archivePath, archive);
+
+      await extractArchiveFile(archivePath, tempDir);
+
+      await expect(
+        fs.readFile(path.join(tempDir, QODER_PLUGIN_MANIFEST), 'utf-8'),
+      ).resolves.toContain('sample-qoder-plugin');
+      await expect(
+        fs.readFile(path.join(tempDir, 'system-prompt.md'), 'utf-8'),
+      ).resolves.toBe('# System context');
+    });
+
+    it('should extract and flatten a wrapped Agent Plugin archive', async () => {
+      const archivePath = path.join(tempDir, 'wrapped-agent-plugin.zip');
+      const manifest = JSON.stringify({
+        $schema: AGENT_PLUGIN_SCHEMA,
+        name: 'portable-plugin',
+      });
+      const skill =
+        '---\nname: direct\ndescription: Direct skill\n---\nPortable instructions.';
+      const archive = await createZipBuffer(tempDir, [
+        { name: 'wrapped/plugin.json', content: manifest },
+        { name: 'wrapped/skills/direct/SKILL.md', content: skill },
+      ]);
+      await fs.writeFile(archivePath, archive);
+
+      await extractArchiveFile(archivePath, tempDir);
+
+      await expect(
+        fs.readFile(path.join(tempDir, 'plugin.json'), 'utf8'),
+      ).resolves.toBe(manifest);
+      await expect(
+        fs.readFile(path.join(tempDir, 'skills', 'direct', 'SKILL.md'), 'utf8'),
+      ).resolves.toBe(skill);
     });
 
     it('should flatten wrapped archives when the archive file is in the destination', async () => {

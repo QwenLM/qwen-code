@@ -6,10 +6,12 @@
 
 import type {
   ChatRecord,
+  GoalRecord,
   GoalSnapshotV2,
   SessionTranscriptCursorState,
   SessionTranscriptRecordPage,
 } from '@qwen-code/qwen-code-core';
+import type { SessionUpdate } from '@agentclientprotocol/sdk';
 import { Buffer } from 'node:buffer';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { projectAcpToolResultUpdate } from './acp-tool-result-text-projection.js';
@@ -22,6 +24,17 @@ import {
   createReplayCumulativeUsage,
   replayTranscriptRecordPage,
 } from './history-replay-page.js';
+
+const observeAcpProjectionMock = vi.hoisted(() => vi.fn());
+vi.mock(
+  '../../utils/tool-result-boundary-diagnostics.js',
+  async (original) => ({
+    ...(await original<
+      typeof import('../../utils/tool-result-boundary-diagnostics.js')
+    >()),
+    observeAcpToolResultProjection: observeAcpProjectionMock,
+  }),
+);
 
 const SESSION_ID = '550e8400-e29b-41d4-a716-446655440000';
 const TIMESTAMP = '2026-07-12T00:00:00.000Z';
@@ -53,6 +66,19 @@ function userRecord(): ChatRecord {
     message: {
       role: 'user',
       parts: [{ text: 'hello' }],
+    },
+  };
+}
+
+function assistantRecord(): ChatRecord {
+  return {
+    ...userRecord(),
+    uuid: 'assistant-record',
+    parentUuid: 'user-record',
+    type: 'assistant',
+    message: {
+      role: 'model',
+      parts: [{ text: 'answer' }],
     },
   };
 }
@@ -226,6 +252,7 @@ describe('history replay page', () => {
   });
 
   it('lifts record timestamps for bulk replay callers', async () => {
+    observeAcpProjectionMock.mockClear();
     const result = await collectHistoryReplayUpdates({
       sessionId: SESSION_ID,
       records: [userRecord()],
@@ -238,6 +265,103 @@ describe('history replay page', () => {
         timestamp: Date.parse(TIMESTAMP),
       }),
     ]);
+    const deliveredUpdate = result.updates[0];
+    const projectionCall = observeAcpProjectionMock.mock.calls.find(
+      ([, , sessionId]) => sessionId === SESSION_ID,
+    );
+    expect(projectionCall?.[3]).toBe(deliveredUpdate);
+  });
+
+  it('attaches the checkpoint only to the final chunk of a multi-chunk Assistant record', async () => {
+    // One assistant record replays as text/thought/text. The checkpoint
+    // marks the END of the record, so only the last visible assistant
+    // chunk may expose the branch point.
+    const multiChunk: ChatRecord = {
+      ...assistantRecord(),
+      message: {
+        role: 'model',
+        parts: [
+          { text: 'first part' },
+          { text: 'thinking', thought: true },
+          { text: 'last part' },
+        ],
+      },
+    };
+
+    const result = await replayTranscriptRecordPage({
+      sessionId: SESSION_ID,
+      page: recordPage({
+        records: [multiChunk],
+        branchPointsByAssistantUuid: {
+          'assistant-record': 'checkpoint-record',
+        },
+      }),
+      encodeCursor: vi.fn(),
+    });
+
+    const readBranchRecordId = (update: SessionUpdate): string | undefined => {
+      const meta = (update as { _meta?: Record<string, unknown> })._meta;
+      const transcript =
+        meta && typeof meta['qwenTranscript'] === 'object'
+          ? (meta['qwenTranscript'] as Record<string, unknown>)
+          : undefined;
+      const branchRecordId = transcript?.['branchRecordId'];
+      return typeof branchRecordId === 'string' ? branchRecordId : undefined;
+    };
+
+    const decorated = result.updates.filter(
+      (update) => readBranchRecordId(update) !== undefined,
+    );
+    expect(decorated).toHaveLength(1);
+    expect(decorated[0]).toMatchObject({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'last part' },
+    });
+
+    const thoughtChunk = result.updates.find(
+      (update) => update.sessionUpdate === 'agent_thought_chunk',
+    );
+    expect(thoughtChunk).toBeDefined();
+    expect(readBranchRecordId(thoughtChunk!)).toBeUndefined();
+    const firstChunk = result.updates.find(
+      (update) =>
+        update.sessionUpdate === 'agent_message_chunk' &&
+        (update as { content?: { text?: string } }).content?.text ===
+          'first part',
+    );
+    expect(firstChunk).toBeDefined();
+    expect(readBranchRecordId(firstChunk!)).toBeUndefined();
+  });
+
+  it('fails incrementally before collecting an update above the count limit', async () => {
+    await expect(
+      collectHistoryReplayUpdates({
+        sessionId: SESSION_ID,
+        records: [userRecord()],
+        cumulativeUsage: createReplayCumulativeUsage(),
+        limits: { maxBytes: Number.MAX_SAFE_INTEGER, maxUpdates: 0 },
+      }),
+    ).rejects.toMatchObject({
+      name: 'HistoryReplayLimitError',
+      reason: 'updates',
+      observed: 1,
+      limit: 0,
+    });
+  });
+
+  it('fails incrementally before retaining serialized updates above the byte limit', async () => {
+    await expect(
+      collectHistoryReplayUpdates({
+        sessionId: SESSION_ID,
+        records: [userRecord()],
+        cumulativeUsage: createReplayCumulativeUsage(),
+        limits: { maxBytes: 2, maxUpdates: 1 },
+      }),
+    ).rejects.toMatchObject({
+      name: 'HistoryReplayLimitError',
+      reason: 'bytes',
+      limit: 2,
+    });
   });
 
   it('filters malformed replay state before encoding the next cursor', async () => {
@@ -351,6 +475,7 @@ describe('history replay page', () => {
           pendingToolCalls: [],
           cumulativeUsage: createReplayCumulativeUsage(),
           goalState: GOAL_STATE,
+          goalCause: 'verifier_reject',
         },
       });
 
@@ -358,7 +483,7 @@ describe('history replay page', () => {
       sessionId: SESSION_ID,
       page: recordPage({
         direction: 'backward',
-        replay: { goalState: GOAL_STATE },
+        replay: { goalState: GOAL_STATE, goalCause: 'verifier_reject' },
       }),
       encodeCursor: vi.fn(),
     });
@@ -368,6 +493,7 @@ describe('history replay page', () => {
       finalizeDangling: true,
       gaps: [],
       goalState: GOAL_STATE,
+      goalCause: 'verifier_reject',
     });
   });
 
@@ -401,6 +527,110 @@ describe('history replay page', () => {
       finalizeDangling: true,
       gaps: [],
     });
+  });
+
+  it('drops a malformed goalCause from replay state and warns', async () => {
+    const logger = { warn: vi.fn() };
+    const replayPage = vi
+      .spyOn(HistoryReplayer.prototype, 'replayPage')
+      .mockResolvedValueOnce({
+        pendingToolCalls: [],
+        replay: {
+          v: 1,
+          pendingToolCalls: [],
+          cumulativeUsage: createReplayCumulativeUsage(),
+        },
+      });
+
+    await replayTranscriptRecordPage({
+      sessionId: SESSION_ID,
+      page: recordPage({
+        replay: { goalState: GOAL_STATE, goalCause: 'bogus' },
+      }),
+      encodeCursor: vi.fn(),
+      logger,
+    });
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      '[transcript] replay state dropped a malformed Goal cause',
+    );
+    expect(replayPage).toHaveBeenCalledWith([], {
+      pendingToolCalls: [],
+      finalizeDangling: true,
+      gaps: [],
+      goalState: GOAL_STATE,
+    });
+  });
+
+  it('keeps checkpoint bookkeeping suppressed across a page boundary', async () => {
+    // Regression: the replay state carried across a page handoff must include
+    // the last goal_state cause, or the next page's machine cannot tell a
+    // shape-equal bookkeeping re-commit from a genuine rejection card.
+    const goal = GOAL_STATE.goal as GoalRecord;
+    const rejectedGoal = { ...goal, lastReason: 'More work remains' };
+    const goalRecord = (
+      uuid: string,
+      cause: string,
+      snapshotGoal: GoalRecord,
+    ): ChatRecord =>
+      ({
+        uuid,
+        parentUuid: null,
+        sessionId: SESSION_ID,
+        timestamp: TIMESTAMP,
+        type: 'system',
+        subtype: 'goal_state',
+        systemPayload: {
+          v: 2,
+          cause,
+          snapshot: { v: 2, activity: 'idle', goal: snapshotGoal },
+        },
+      }) as unknown as ChatRecord;
+
+    let nextReplay: unknown;
+    const firstPage = await replayTranscriptRecordPage({
+      sessionId: SESSION_ID,
+      page: recordPage({
+        hasMore: true,
+        nextCursorState: cursorState(),
+        records: [
+          goalRecord('goal-create', 'create', goal),
+          goalRecord('goal-reject', 'verifier_reject', rejectedGoal),
+        ],
+      }),
+      encodeCursor: (state) => {
+        nextReplay = state.replay;
+        return 'next-cursor';
+      },
+    });
+    expect(firstPage.updates).toHaveLength(3);
+    expect(firstPage.updates[0]).toMatchObject({
+      sessionUpdate: 'user_message_chunk',
+      content: { type: 'text', text: `/goal ${goal.objective}` },
+    });
+    expect(nextReplay).toMatchObject({ goalCause: 'verifier_reject' });
+
+    const recommittedGoal = {
+      ...rejectedGoal,
+      activeTimeMs: goal.activeTimeMs + 100,
+      updatedAt: goal.updatedAt + 1,
+    };
+    const secondPage = await replayTranscriptRecordPage({
+      sessionId: SESSION_ID,
+      page: recordPage({
+        records: [
+          goalRecord(
+            'goal-reject-checkpoint',
+            'verifier_reject',
+            recommittedGoal,
+          ),
+        ],
+        replay: nextReplay,
+      }),
+      encodeCursor: vi.fn(),
+    });
+
+    expect(secondPage.updates).toEqual([]);
   });
 
   it('seeds backward replay so a cleared Goal keeps its prior condition', async () => {

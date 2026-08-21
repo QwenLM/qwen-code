@@ -11,7 +11,7 @@ Use anonymized identifiers in all captured evidence. Do not commit real group, u
 ## Verification
 
 1. Send `@Bot please review this @Member` in a test group.
-2. Confirm the inbound model text starts with `[Mentioned 1 other group member]` followed by `please review this`.
+2. Confirm the inbound model text starts with `[Mentioned 1 other group member: <member-staffId>]` (staffId preferred, dingtalkId fallback) on its own line, followed by the sender-attributed body (`[<sender>] please review this`). The marker is injected after prompt sanitization, so its brackets are preserved regardless of the identifier list length.
 3. Confirm the bot's own `atUsers` entry is excluded and duplicate member entries are counted once.
 4. Send `@Bot hello` and confirm no additional mention context is added.
 5. Enable `QWEN_CHANNEL_DEBUG_PAYLOAD` for the test channel and confirm `atUsers[].dingtalkId` and `atUsers[].staffId` appear as `[redacted]` while routing fields needed for diagnostics remain visible.

@@ -397,13 +397,17 @@ export class AcpHttpTransport implements DaemonTransport {
         headers['X-Qwen-Event-Epoch'] = opts.epoch;
       }
     }
-    // NOTE: `opts.maxQueued` does NOT apply to this transport. The REST
+    // NOTE: `opts.maxQueued` and the SSE lifecycle fields (`clientId`,
+    // `sseConnectReason`, `previousSseStreamId`, `onSseStreamAccepted`) do NOT
+    // apply to this transport. The REST
     // `/session/:id/events` surface accepted it as a per-subscription queue
     // bound, but the `/acp` session stream is backed by the daemon's
     // server-controlled EventBus ring (a fixed `DEFAULT_RING_SIZE`), so there
     // is no client-tunable queue to forward it to. It's intentionally ignored
     // here rather than silently mis-applied; the field stays on the shared
-    // `DaemonTransportSubscribeOptions` for the REST transport.
+    // `DaemonTransportSubscribeOptions` for the REST transport. In particular,
+    // ACP's accepted `/acp` stream must not be reported as an accepted REST
+    // stream or joined into the REST predecessor lineage.
 
     // Connect-phase timeout.
     const connectCtrl = new AbortController();

@@ -25,6 +25,12 @@ const runNonInteractiveMock = vi.fn();
 // Mock dependencies
 vi.mock('../nonInteractiveCli.js', () => ({
   runNonInteractive: (...args: unknown[]) => runNonInteractiveMock(...args),
+  TurnInterruptedError: class TurnInterruptedError extends Error {
+    constructor() {
+      super('Operation cancelled.');
+      this.name = 'TurnInterruptedError';
+    }
+  },
 }));
 
 vi.mock('./io/StreamJsonInputReader.js', () => ({
@@ -262,6 +268,8 @@ describe('runNonInteractiveStreamJson', () => {
   type CapturedControlContext = {
     onContinueLastTurn?: () => Promise<Record<string, unknown>>;
     onInterrupt?: () => void;
+    abortSignal?: AbortSignal;
+    getActiveTurnAbortSignal?: () => AbortSignal | undefined;
   };
 
   function installContinueDispatch(): {
@@ -487,7 +495,7 @@ describe('runNonInteractiveStreamJson', () => {
     );
   });
 
-  it('rejects continue_last_turn after the session has been interrupted', async () => {
+  it('keeps continue_last_turn available after an interrupt with no active turn', async () => {
     const { continueResults, getControlContext } = installContinueDispatch();
     createInitializedGeminiClient([
       { role: 'user', parts: [{ text: 'resume me' }] },
@@ -506,9 +514,65 @@ describe('runNonInteractiveStreamJson', () => {
     await runNonInteractiveStreamJson(config, '');
 
     expect(continueResults).toEqual([
-      { accepted: false, interruption: 'none' },
+      { accepted: true, interruption: 'interrupted_prompt' },
     ]);
-    expect(runNonInteractiveMock).not.toHaveBeenCalled();
+    expect(runNonInteractiveMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('interrupts only the active turn and accepts a later prompt', async () => {
+    let controlContext: CapturedControlContext | undefined;
+    (ControlContext as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      (options: CapturedControlContext) => {
+        controlContext = options;
+        return {};
+      },
+    );
+
+    const turnControllers: AbortController[] = [];
+    runNonInteractiveMock.mockImplementation(
+      (
+        _config: Config,
+        _settings: unknown,
+        _input: string,
+        _promptId: string,
+        options: { abortController: AbortController },
+      ) => {
+        const turnController = options.abortController;
+        turnControllers.push(turnController);
+        if (turnControllers.length > 1) {
+          return Promise.resolve();
+        }
+        return new Promise<void>((resolve) => {
+          turnController.signal.addEventListener('abort', () => resolve(), {
+            once: true,
+          });
+        });
+      },
+    );
+
+    mockInputReader.read = async function* () {
+      yield createControlRequest('initialize');
+      yield createUserMessage('first prompt');
+      await vi.waitFor(() => {
+        expect(turnControllers).toHaveLength(1);
+        expect(controlContext).toBeDefined();
+      });
+
+      expect(controlContext?.getActiveTurnAbortSignal?.()).toBe(
+        turnControllers[0]?.signal,
+      );
+      controlContext?.onInterrupt?.();
+      expect(turnControllers[0]?.signal.aborted).toBe(true);
+      expect(controlContext?.abortSignal?.aborted).toBe(false);
+
+      yield createUserMessage('second prompt');
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    expect(runNonInteractiveMock).toHaveBeenCalledTimes(2);
+    expect(turnControllers[1]).not.toBe(turnControllers[0]);
+    expect(turnControllers[1]?.signal.aborted).toBe(false);
   });
 
   it('emits a terminal error result when an accepted continuation is abandoned by shutdown', async () => {
@@ -541,9 +605,9 @@ describe('runNonInteractiveStreamJson', () => {
       // pending yet, so pendingContinueTurn becomes true. ensureProcessingStarted
       // is a no-op because the user-message work loop is already running.
       continueResults.push(await getControlContext()?.onContinueLastTurn?.());
-      // Begin shutdown before the continuation can run, then let the work loop
-      // unwind. Its abort guard skips the still-pending continuation.
-      getControlContext()?.onInterrupt?.();
+      // Begin a real session shutdown before the continuation can run, then
+      // let the work loop unwind. Its abort guard skips the pending work.
+      process.emit('SIGTERM', 'SIGTERM');
       releaseFirstTurn();
     };
 
@@ -1431,6 +1495,15 @@ describe('runNonInteractiveStreamJson', () => {
     let releaseProcessing: (() => void) | undefined;
     const callOrder: string[] = [];
     const streamError = new Error('Stream error');
+    let sessionSignal: AbortSignal | undefined;
+    let turnSignal: AbortSignal | undefined;
+
+    (ControlContext as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      (options: { abortSignal: AbortSignal }) => {
+        sessionSignal = options.abortSignal;
+        return {};
+      },
+    );
 
     mockMonitorRegistry.abortAll.mockImplementation(() => {
       callOrder.push('monitor:abortAll');
@@ -1443,8 +1516,15 @@ describe('runNonInteractiveStreamJson', () => {
     });
 
     runNonInteractiveMock.mockImplementationOnce(
-      () =>
+      (
+        _config: Config,
+        _settings: unknown,
+        _input: string,
+        _promptId: string,
+        options: { abortController: AbortController },
+      ) =>
         new Promise<void>((resolve) => {
+          turnSignal = options.abortController.signal;
           callOrder.push('run:start');
           releaseProcessing = () => {
             callOrder.push('run:end');
@@ -1462,6 +1542,8 @@ describe('runNonInteractiveStreamJson', () => {
     const sessionPromise = runNonInteractiveStreamJson(config, '');
     await vi.waitFor(() => {
       expect(releaseProcessing).toBeDefined();
+      expect(sessionSignal?.aborted).toBe(true);
+      expect(turnSignal?.aborted).toBe(true);
     });
 
     expect(mockMonitorRegistry.abortAll).toHaveBeenCalledTimes(1);

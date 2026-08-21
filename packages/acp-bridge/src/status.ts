@@ -21,6 +21,7 @@ export const SERVE_ERROR_KINDS = [
   'blocked_egress',
   'auth_env_error',
   'init_timeout',
+  'restore_timeout',
   'protocol_error',
   'missing_file',
   'parse_error',
@@ -53,6 +54,18 @@ export class BridgeTimeoutError extends Error {
     this.name = 'BridgeTimeoutError';
     this.label = label;
     this.timeoutMs = timeoutMs;
+  }
+}
+
+export class SessionRestoreTimeoutError extends BridgeTimeoutError {
+  readonly sessionId: string;
+  readonly action: 'load' | 'resume';
+
+  constructor(sessionId: string, action: 'load' | 'resume', timeoutMs: number) {
+    super(`session/${action}`, timeoutMs);
+    this.name = 'SessionRestoreTimeoutError';
+    this.sessionId = sessionId;
+    this.action = action;
   }
 }
 
@@ -162,6 +175,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
   workspaceMemoryDream: 'qwen/control/workspace/memory/dream',
   // Runtime MCP server mutation ext-methods
   sessionTaskCancel: 'qwen/control/session/task/cancel',
+  sessionGoalControl: 'qwen/control/session/goal/control',
   sessionGoalClear: 'qwen/control/session/goal/clear',
   /**
    * Read a live session's `/goal` state. The active goal lives only in the
@@ -172,6 +186,8 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionGoalGet: 'qwen/control/session/goal/get',
   sessionMcpRuntimeAdd: 'qwen/control/session/mcp/runtime-add',
   sessionMcpRuntimeRemove: 'qwen/control/session/mcp/runtime-remove',
+  /** Read a bounded settled `turn_result` from the active transcript. */
+  sessionTurnStatus: 'qwen/control/session/turn_status',
   workspaceMcpRuntimeAdd: 'qwen/control/workspace/mcp/runtime-add',
   workspaceMcpRuntimeRemove: 'qwen/control/workspace/mcp/runtime-remove',
   workspaceReload: 'qwen/control/workspace/reload',
@@ -1063,9 +1079,15 @@ export type ServeExtensionInstallType =
   | 'link'
   | 'github-release'
   | 'npm'
-  | 'archive-url';
+  | 'archive-url'
+  | 'snapshot';
 
-export type ServeExtensionOriginSource = 'QwenCode' | 'Claude' | 'Gemini';
+export type ServeExtensionOriginSource =
+  | 'QwenCode'
+  | 'Claude'
+  | 'Gemini'
+  | 'Qoder'
+  | 'AgentPlugins';
 
 export interface ServeExtensionCapabilities {
   mcpServerCount: number;
@@ -1113,6 +1135,7 @@ export interface ServeExtensionEntry {
   originSource?: ServeExtensionOriginSource;
   ref?: string;
   autoUpdate?: boolean;
+  credentialPersistence?: 'stored' | 'one_time';
   updateState?: ServeExtensionUpdateState;
   capabilities: ServeExtensionCapabilities;
   details?: ServeExtensionDetails;
@@ -1411,6 +1434,7 @@ const MODEL_CONFIG_ERROR_NAMES: ReadonlySet<string> = new Set([
 export function mapDomainErrorToErrorKind(
   err: unknown,
 ): ServeErrorKind | undefined {
+  if (err instanceof SessionRestoreTimeoutError) return 'restore_timeout';
   if (err instanceof BridgeTimeoutError) return 'init_timeout';
   if (err instanceof BridgeChannelClosedError) return 'protocol_error';
   if (err instanceof MissingCliEntryError) return 'missing_binary';

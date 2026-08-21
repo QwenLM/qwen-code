@@ -370,6 +370,15 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
       `Warning: security.allowPrivateNetworkHooks in workspace settings (${workspaceFile.path}) is ignored. This setting is only honored from User, System, or SystemDefaults scope settings.`,
     );
   }
+  if (
+    workspaceFile.rawJson !== undefined &&
+    workspaceFile.originalSettings.security?.allowedInsecureVoiceBaseUrls !==
+      undefined
+  ) {
+    warningSet.add(
+      `Warning: security.allowedInsecureVoiceBaseUrls in workspace settings (${workspaceFile.path}) is ignored. This setting is only honored from User, System, or SystemDefaults scope settings.`,
+    );
+  }
 
   return [...warningSet];
 }
@@ -399,18 +408,23 @@ function tagMcpServerScope(
 }
 
 /**
- * `security.allowPrivateNetworkHooks` relaxes SSRF protection for HTTP hooks,
- * so it must never be honored from Workspace scope — otherwise a malicious
- * repository could self-grant the bypass and point hooks at link-local or
- * private infrastructure. Strip it from workspace settings before merging.
+ * Network security bypasses must never be honored from Workspace scope —
+ * otherwise a malicious repository could self-grant access to private
+ * infrastructure. Strip them from workspace settings before merging.
  * Returns a shallow copy — never mutates input.
  */
-function stripWorkspacePrivateNetworkHooks(settings: Settings): Settings {
-  if (settings.security?.allowPrivateNetworkHooks === undefined) {
+function stripWorkspaceSecurityBypasses(settings: Settings): Settings {
+  if (
+    settings.security?.allowPrivateNetworkHooks === undefined &&
+    settings.security?.allowedInsecureVoiceBaseUrls === undefined
+  ) {
     return settings;
   }
-  const { allowPrivateNetworkHooks: _stripped, ...restSecurity } =
-    settings.security;
+  const {
+    allowPrivateNetworkHooks: _privateHooks,
+    allowedInsecureVoiceBaseUrls: _insecureVoice,
+    ...restSecurity
+  } = settings.security;
   return { ...settings, security: restSecurity };
 }
 
@@ -422,10 +436,7 @@ function mergeSettings(
   isTrusted: boolean,
 ): Settings {
   const safeWorkspace = isTrusted
-    ? tagMcpServerScope(
-        stripWorkspacePrivateNetworkHooks(workspace),
-        'workspace',
-      )
+    ? tagMcpServerScope(stripWorkspaceSecurityBypasses(workspace), 'workspace')
     : ({} as Settings);
 
   // Settings are merged with the following precedence (last one wins for
@@ -518,6 +529,7 @@ export class LoadedSettings {
     key: string,
     value: unknown,
     assertCanCommit?: () => void,
+    opts: { throwOnWriteFailure?: boolean } = {},
   ): void {
     // Never persist a runtime snapshot ID to model.name (it re-wraps on restart).
     if (key === 'model.name' && typeof value === 'string') {
@@ -525,11 +537,23 @@ export class LoadedSettings {
     }
     assertCanCommit?.();
     const settingsFile = this.forScope(scope);
+    const replacePath = key === 'mcpServers' ? key.split('.') : [];
+    if (opts.throwOnWriteFailure) {
+      saveSettings(
+        settingsFile,
+        createSettingsUpdate(key, value),
+        replacePath,
+        {
+          throwOnWriteFailure: true,
+        },
+      );
+    }
     setNestedPropertySafe(settingsFile.settings, key, value);
     setNestedPropertySafe(settingsFile.originalSettings, key, value);
     this._merged = this.computeMergedSettings();
-    const replacePath = key === 'mcpServers' ? key.split('.') : [];
-    saveSettings(settingsFile, createSettingsUpdate(key, value), replacePath);
+    if (!opts.throwOnWriteFailure) {
+      saveSettings(settingsFile, createSettingsUpdate(key, value), replacePath);
+    }
   }
 
   setValues(

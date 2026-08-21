@@ -37,6 +37,7 @@
 // the whole story.
 
 import type { CommandModule } from 'yargs';
+import { bundleStalenessNotices } from './lib/stale-bundle.js';
 import { spawnSync } from 'node:child_process';
 import {
   mkdirSync,
@@ -48,7 +49,11 @@ import {
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  writeStdoutLine,
+  writeStderrLine,
+  writeStderrLineSafe,
+} from '../../utils/stdioHelpers.js';
 
 /** Why a drive stopped. Every value is a fact about the run, not a verdict. */
 export type DriveOutcome =
@@ -468,9 +473,17 @@ export const driveCommand: CommandModule = {
         describe: 'Write the JSON report here',
       }),
   handler: (argv) => {
-    // Caught like `base-tree` and `test-plan`: the messages above are written
-    // for the caller, and a stack trace re-frames every one of them as a crash.
+    // Caught like `base-tree` and `test-plan`: the messages this handler
+    // writes are for the caller, and a stack trace re-frames every one of
+    // them as a crash.
     try {
+      // The verifier brief sends agents straight here, so this can run without
+      // `parse-args` ever running first — and it is where the long work
+      // starts, which makes a stale bundle costliest here. The one-line form:
+      // a fresh review already heard the full paragraph at `parse-args`, and
+      // a repeated paragraph becomes wallpaper.
+      const bundleNotice = bundleStalenessNotices(process.argv[1], true);
+      if (bundleNotice) writeStderrLineSafe(bundleNotice);
       const args = argv as unknown as DriveArgs & { readyTimeout: number };
       const report = runDrive(args);
       if (args.out) {

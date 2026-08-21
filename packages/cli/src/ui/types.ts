@@ -54,6 +54,11 @@ export enum ToolCallStatus {
   Error = 'Error',
 }
 
+export interface InlineImageData {
+  data: string;
+  mimeType: string;
+}
+
 export interface ToolCallEvent {
   type: 'tool_call';
   status: ToolCallStatus;
@@ -79,6 +84,10 @@ export interface IndividualToolCallDisplay {
    * is only a count. Undefined → fall back to the summary.
    */
   detailedDisplay?: string;
+  /** Inline images carried by this tool's persisted response parts. */
+  images?: InlineImageData[];
+  /** Images hidden after the per-row rendering limit. */
+  omittedImageCount?: number;
   status: ToolCallStatus;
   confirmationDetails: ToolCallConfirmationDetails | undefined;
   renderOutputAsMarkdown?: boolean;
@@ -93,6 +102,14 @@ export interface CompressionProps {
   originalTokenCount: number | null;
   newTokenCount: number | null;
   compressionStatus: CompressionStatus | null;
+  /**
+   * Which compression path produced this item. 'summarize' replaces the
+   * pre-marker history with a synthetic summary prefix; 'fast' (rule-based,
+   * no LLM summary) removes no user prompts from the API history, so its
+   * marker must not be treated as a rewind boundary. Absent on items from
+   * older sessions, which are treated as 'summarize'.
+   */
+  compressionKind?: 'summarize' | 'fast';
 }
 
 export interface SummaryProps {
@@ -138,12 +155,16 @@ export type HistoryItemUser = HistoryItemBase & {
 export type HistoryItemGemini = HistoryItemBase & {
   type: 'gemini';
   text: string;
+  images?: InlineImageData[];
+  omittedImageCount?: number;
   timestamp?: number;
 };
 
 export type HistoryItemGeminiContent = HistoryItemBase & {
   type: 'gemini_content';
   text: string;
+  images?: InlineImageData[];
+  omittedImageCount?: number;
 };
 
 export type HistoryItemGeminiThought = HistoryItemBase & {
@@ -298,6 +319,16 @@ export type HistoryItemToolGroup = HistoryItemBase & {
   /** Count of tool calls that read from managed-auto-memory files. Pre-computed for badge rendering. */
   memoryReadCount?: number;
   isUserInitiated?: boolean;
+  /**
+   * Identity of the scheduler batch that produced this group (#9420).
+   * Minted when the batch is scheduled and stamped on both the live
+   * pending copy and the committed copy, so the transient double render
+   * of one batch collapses by identity — never by callIds, which collide
+   * across unrelated batches. Unique per mount, so ids persisted in
+   * checkpoints can never match newly minted ones; adapter-built groups
+   * carry no id. Neither is ever collapsed.
+   */
+  batchId?: string;
 };
 
 /**
@@ -462,7 +493,7 @@ export type HistoryItemContextUsage = HistoryItemBase & {
   mcpTools: ContextToolDetail[];
   memoryFiles: ContextMemoryDetail[];
   skills: ContextSkillDetail[];
-  /** True when totalTokens is estimated (no API call yet) rather than from API response */
+  /** True when totalTokens is absent or derived from a local estimate rather than provider usage. */
   isEstimated?: boolean;
   /** When true, show per-item detail sections (tools, memory, skills). Default: false (compact). */
   showDetails?: boolean;
@@ -519,6 +550,20 @@ export interface BtwProps {
 export type HistoryItemBtw = HistoryItemBase & {
   type: 'btw';
   btw: BtwProps;
+};
+
+/**
+ * Independent second-opinion review rendered by `/advisor`. `text` is the
+ * reviewer's markdown; `model` is the resolved model id that produced it,
+ * shown in the header. An unknown `advisorModel` is passed to the provider
+ * as-is and surfaces as an error if rejected; only unresolvable alias
+ * selectors fall back to the main model. Configured model fallbacks are not
+ * used for advisor requests.
+ */
+export type HistoryItemAdvisor = HistoryItemBase & {
+  type: 'advisor';
+  text: string;
+  model: string;
 };
 
 /**
@@ -677,6 +722,7 @@ export type HistoryItemWithoutId =
   | HistoryItemArenaSessionComplete
   | HistoryItemInsightProgress
   | HistoryItemBtw
+  | HistoryItemAdvisor
   | HistoryItemMemorySaved
   | HistoryItemAwayRecap
   | HistoryItemUserPromptSubmitBlocked
@@ -727,6 +773,7 @@ export enum MessageType {
   ARENA_SESSION_COMPLETE = 'arena_session_complete',
   INSIGHT_PROGRESS = 'insight_progress',
   BTW = 'btw',
+  ADVISOR = 'advisor',
   NOTIFICATION = 'notification',
   DIFF_STATS = 'diff_stats',
   GOAL_STATUS = 'goal_status',
@@ -838,6 +885,8 @@ export interface SubmitPromptResult {
   content: PartListUnion;
   /** Optional callback invoked after the agent turn completes successfully. */
   onComplete?: () => Promise<void>;
+  /** Refresh context-file-backed instructions after this prompt writes them. */
+  refreshContextFilesOnWrite?: boolean;
   /**
    * Optional per-turn model id. Applies to this submitted prompt (and its
    * tool-call continuations) only — no session change, no persistence.

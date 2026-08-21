@@ -430,6 +430,30 @@ describe('WeComChannel', () => {
     rmSync(join(tmpdir(), 'channel-files'), { recursive: true, force: true });
   });
 
+  it('shares attachment routing across senders in chat_thread scope', () => {
+    const channel = new WeComChannel(
+      'bot',
+      makeConfig({ sessionScope: 'chat_thread' }),
+      makeBridge(),
+    );
+    const routeKey = (
+      channel as unknown as {
+        attachmentRouteKey(
+          senderId: string,
+          chatId: string,
+          threadId?: string,
+        ): string;
+      }
+    ).attachmentRouteKey.bind(channel);
+
+    expect(routeKey('alice', 'chat-1', 'topic-1')).toBe(
+      routeKey('bob', 'chat-1', 'topic-1'),
+    );
+    expect(routeKey('alice', 'chat-1', 'topic-1')).not.toBe(
+      routeKey('alice', 'chat-2', 'topic-1'),
+    );
+  });
+
   it('requires botId and secret', () => {
     expect(
       () => new WeComChannel('bot', makeConfig({ botId: '' }), makeBridge()),

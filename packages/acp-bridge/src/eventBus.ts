@@ -34,6 +34,8 @@ export interface SessionReplaySnapshot {
   degraded?: true;
 }
 
+export type LiveReplayMode = 'full' | 'summary';
+
 export interface CompactionEngine {
   /**
    * `byteLength` is the serialized size the bus already computed for the
@@ -43,8 +45,20 @@ export interface CompactionEngine {
    */
   ingest(event: BridgeEvent, byteLength?: number): void;
   seedReplayEvents(events: BridgeEvent[]): void;
-  snapshot(): SessionReplaySnapshot;
+  snapshot(liveReplayMode?: LiveReplayMode): SessionReplaySnapshot;
+  /**
+   * In-flight journal only — events ingested since the last turn
+   * boundary — without flattening the compacted replay window. Optional:
+   * consumers fall back to `snapshot()` semantics when absent.
+   */
+  liveJournalSnapshot?(liveReplayMode?: LiveReplayMode): BridgeEvent[];
   close(): void;
+  /**
+   * Current live-journal caps — may exceed the configured baseline when
+   * adaptive growth raised them mid-turn. Optional: engines without a
+   * journal concept simply omit it.
+   */
+  journalLimits?(): { maxEvents: number; maxBytes: number };
 }
 
 export const EVENT_SCHEMA_VERSION = 1 as const;
@@ -102,7 +116,48 @@ export interface SubscribeOptions {
    * with a final `client_evicted` event. Defaults to 256.
    */
   maxQueued?: number;
+  /**
+   * Receives low-frequency, per-subscriber queue diagnostics. Return `true`
+   * after emitting the human-facing diagnostic; `false` (or a throw) keeps the
+   * EventBus legacy stderr fallback.
+   */
+  onSubscriberDiagnostic?: (
+    diagnostic: EventBusSubscriberDiagnostic,
+  ) => boolean;
 }
+
+export interface EventBusSlowClientWarningData {
+  queueSize: number;
+  maxQueued: number;
+  lastEventId: number;
+  queuedBytes: number;
+  maxQueuedBytes: number;
+  threshold: QueueWarningThreshold;
+  triggerEventType: string;
+  triggerEventBytes: number;
+}
+
+export interface EventBusClientEvictedData {
+  reason: 'queue_overflow' | 'queue_bytes_overflow';
+  droppedAfter: number;
+  queueSize: number;
+  maxQueued: number;
+  queuedBytes: number;
+  maxQueuedBytes: number;
+  eventBytes?: number;
+  triggerEventType: string;
+  triggerEventBytes: number;
+}
+
+export type EventBusSubscriberDiagnostic =
+  | {
+      type: 'slow_client_warning';
+      data: EventBusSlowClientWarningData;
+    }
+  | {
+      type: 'client_evicted';
+      data: EventBusClientEvictedData;
+    };
 
 export interface EventBusOptions {
   maxQueuedBytes?: number;
@@ -227,7 +282,7 @@ function logSubscriberEvicted(data: Record<string, unknown>): void {
   }
 }
 
-type QueueWarningThreshold = 'frames' | 'bytes' | 'frames_and_bytes';
+export type QueueWarningThreshold = 'frames' | 'bytes' | 'frames_and_bytes';
 
 function logSlowClientWarning(data: Record<string, unknown>): void {
   try {
@@ -268,6 +323,9 @@ interface InternalSub {
    * that recovers and then lags again gets a fresh warning.
    */
   warned: boolean;
+  onSubscriberDiagnostic?: (
+    diagnostic: EventBusSubscriberDiagnostic,
+  ) => boolean;
   /**
    * Note: cleanup hook for the eviction path (overflow → close queue
    * → remove from `subs`). Without this, the abort listener registered
@@ -279,6 +337,17 @@ interface InternalSub {
    * The eviction path calls this to break that retention.
    */
   dispose: () => void;
+}
+
+function subscriberDiagnosticHandled(
+  sub: InternalSub,
+  diagnostic: EventBusSubscriberDiagnostic,
+): boolean {
+  try {
+    return sub.onSubscriberDiagnostic?.(diagnostic) === true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -333,12 +402,41 @@ export class EventBus {
     this.onCompactionError = opts.onCompactionError;
   }
 
-  snapshotReplay(): SessionReplaySnapshot | undefined {
-    const snapshot = this.compactionEngine?.snapshot();
+  snapshotReplay(
+    liveReplayMode: LiveReplayMode = 'full',
+  ): SessionReplaySnapshot | undefined {
+    const snapshot = this.compactionEngine?.snapshot(liveReplayMode);
     if (snapshot && this.compactionDegraded) {
       return { ...snapshot, degraded: true };
     }
     return snapshot;
+  }
+
+  /**
+   * Events ingested since the last turn boundary (the boundary itself is
+   * folded into the replay window), without flattening that window.
+   * Undefined when no compaction engine is wired or it exposes no journal
+   * snapshot.
+   */
+  liveJournalSnapshot(
+    liveReplayMode: LiveReplayMode = 'full',
+  ): BridgeEvent[] | undefined {
+    return this.compactionEngine?.liveJournalSnapshot?.(liveReplayMode);
+  }
+
+  /**
+   * The engine's current live-journal caps — may have grown past the
+   * configured baseline under adaptive growth. Read by the bridge's
+   * growth policy to account granted headroom across its live sessions
+   * and by daemon status for the per-session effective limits.
+   */
+  journalLimits(): { maxEvents: number; maxBytes: number } | undefined {
+    return this.compactionEngine?.journalLimits?.();
+  }
+
+  /** The byte half of `journalLimits()`; the growth-policy hot path. */
+  journalLimitBytes(): number | undefined {
+    return this.journalLimits()?.maxBytes;
   }
 
   private markCompactionDegraded(err: unknown): void {
@@ -491,7 +589,7 @@ export class EventBus {
         // `id` is absent.
         const evictionData = {
           reason: pushResult.reason,
-          droppedAfter: event.id,
+          droppedAfter: event.id as number,
           queueSize: pushResult.liveSize,
           maxQueued: sub.maxQueued,
           queuedBytes: pushResult.liveBytes,
@@ -500,7 +598,17 @@ export class EventBus {
             ? { eventBytes: pushResult.eventBytes }
             : {}),
         };
-        logSubscriberEvicted(evictionData);
+        const evictionDiagnostic: EventBusSubscriberDiagnostic = {
+          type: 'client_evicted',
+          data: {
+            ...evictionData,
+            triggerEventType: event.type,
+            triggerEventBytes: eventBytes,
+          },
+        };
+        if (!subscriberDiagnosticHandled(sub, evictionDiagnostic)) {
+          logSubscriberEvicted(evictionData);
+        }
         const evictionFrame: BridgeEvent = {
           v: EVENT_SCHEMA_VERSION,
           type: 'client_evicted',
@@ -580,7 +688,17 @@ export class EventBus {
           maxQueuedBytes: sub.maxQueuedBytes,
           threshold,
         };
-        logSlowClientWarning(warningData);
+        const warningDiagnostic: EventBusSubscriberDiagnostic = {
+          type: 'slow_client_warning',
+          data: {
+            ...warningData,
+            triggerEventType: event.type,
+            triggerEventBytes: eventBytes,
+          },
+        };
+        if (!subscriberDiagnosticHandled(sub, warningDiagnostic)) {
+          logSlowClientWarning(warningData);
+        }
         const warningFrame: BridgeEvent = {
           v: EVENT_SCHEMA_VERSION,
           type: 'slow_client_warning',
@@ -641,6 +759,7 @@ export class EventBus {
       warnBytesThreshold: WARN_THRESHOLD_RATIO * this.maxQueuedBytes,
       warnBytesResetThreshold: WARN_RESET_RATIO * this.maxQueuedBytes,
       warned: false,
+      onSubscriberDiagnostic: opts.onSubscriberDiagnostic,
       dispose: () => {},
     };
     this.subs.add(sub);

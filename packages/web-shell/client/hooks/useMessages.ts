@@ -1,5 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import type { DaemonTranscriptBlock } from '@qwen-code/sdk/daemon';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import {
+  DaemonHttpError,
+  isSessionLevelNotFound,
+  isSubagentSessionNotFound,
+  type DaemonTranscriptBlock,
+} from '@qwen-code/sdk/daemon';
 import {
   useConnection,
   useTranscriptBlocks,
@@ -17,9 +22,32 @@ type Translator = (
   vars?: Record<string, string | number>,
 ) => string;
 
+const BACKGROUND_AGENT_RECONCILIATION_RETRY_BASE_MS = 3_000;
+const BACKGROUND_AGENT_RECONCILIATION_RETRY_MAX_MS = 60_000;
+// Cap on consecutive transient-error rounds for one pending agent. An agent
+// whose own error count reaches the cap is marked failed so the UI unblocks,
+// while healthy siblings keep polling. Healthy non-terminal responses back
+// off on the same delay ladder but do not consume this budget, so a
+// long-running agent's completion query keeps its retry tolerance.
+const BACKGROUND_AGENT_RECONCILIATION_MAX_ATTEMPTS = 8;
+// The daemon registers a launched background task shortly after the tool
+// call appears in the transcript, so a first `session_not_found` can race
+// registration. Require repeated misses before treating the agent as gone.
+const MISSING_BACKGROUND_AGENT_GRACE_MISSES = 2;
+// Insight JSON can split one growing text block into multiple projected
+// messages, so prefix identity reuse is unsafe once its marker appears.
+const INSIGHT_CONTENT_MARKER = '"insight_';
+
 export interface BackgroundAgentResolution {
   status: string;
   durationMs?: number;
+}
+
+interface ReconciliationRound {
+  resolutions: Map<string, BackgroundAgentResolution>;
+  errors: ReadonlyArray<{ callId: string; error: unknown }>;
+  notFounds: ReadonlyArray<string>;
+  succeeded: ReadonlyArray<string>;
 }
 
 export function transcriptBlocksToLocalizedMessages(
@@ -30,10 +58,83 @@ export function transcriptBlocksToLocalizedMessages(
     labels: {
       promptCancelled: t('request.cancelled'),
       branchSuccess: (name) => t('branch.success', { name }),
-      midTurnInserted: (message) => t('midTurn.inserted', { message }),
       modelStreamInterrupted: t('error.modelStreamInterrupted'),
+      loopDetected: t('error.loopDetected'),
     },
   });
+}
+
+function reuseUnchangedProjectedPrefix(
+  previous:
+    | {
+        blocks: readonly DaemonTranscriptBlock[];
+        messages: Message[];
+        t: Translator;
+      }
+    | undefined,
+  blocks: readonly DaemonTranscriptBlock[],
+  messages: Message[],
+  t: Translator,
+): Message[] {
+  if (
+    !previous ||
+    previous.t !== t ||
+    previous.blocks.length !== blocks.length ||
+    previous.messages.length !== messages.length ||
+    messages.length === 0 ||
+    blocks.length === 0
+  ) {
+    return messages;
+  }
+  for (let i = 0; i < blocks.length - 1; i += 1) {
+    if (previous.blocks[i] !== blocks[i]) return messages;
+  }
+  const before = previous.blocks[blocks.length - 1];
+  const after = blocks[blocks.length - 1];
+  if (
+    (before.kind !== 'assistant' && before.kind !== 'thought') ||
+    after.kind !== before.kind ||
+    before.id !== after.id ||
+    before.streaming !== true ||
+    after.streaming !== true ||
+    before.parentToolCallId !== undefined ||
+    after.parentToolCallId !== undefined ||
+    before.meta !== after.meta ||
+    before.usage !== after.usage ||
+    before.branchRecordId !== after.branchRecordId ||
+    before.clientReceivedAt !== after.clientReceivedAt ||
+    typeof before.text !== 'string' ||
+    typeof after.text !== 'string' ||
+    !after.text.startsWith(before.text) ||
+    after.text.includes(INSIGHT_CONTENT_MARKER)
+  ) {
+    return messages;
+  }
+  for (let i = 0; i < messages.length - 1; i += 1) {
+    const previousMessage = previous.messages[i];
+    const message = messages[i];
+    if (
+      previousMessage.id !== message.id ||
+      previousMessage.role !== message.role
+    ) {
+      return messages;
+    }
+  }
+  const previousTail = previous.messages[previous.messages.length - 1];
+  const tail = messages[messages.length - 1];
+  if (
+    previousTail.id !== tail.id ||
+    previousTail.role !== tail.role ||
+    (tail.role !== 'assistant' && tail.role !== 'thinking') ||
+    tail.isStreaming !== true
+  ) {
+    return messages;
+  }
+  const result = messages.slice();
+  for (let i = 0; i < result.length - 1; i += 1) {
+    result[i] = previous.messages[i];
+  }
+  return result;
 }
 
 function isTerminalBackgroundAgentStatus(status: string): boolean {
@@ -49,6 +150,16 @@ function getRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : undefined;
+}
+
+function describeReconciliationError(error: unknown): string {
+  if (error instanceof DaemonHttpError) {
+    const code = getRecord(error.body)?.['code'];
+    return typeof code === 'string'
+      ? `HTTP ${error.status} ${code}`
+      : `HTTP ${error.status}`;
+  }
+  return error instanceof Error ? error.message : String(error);
 }
 
 export function getBackgroundAgentNotificationKey(
@@ -88,6 +199,36 @@ export function getPendingBackgroundAgentKey(
     }
   }
   return callIds.join('|');
+}
+
+type DaemonPermissionTranscriptBlock = Extract<
+  DaemonTranscriptBlock,
+  { kind: 'permission' }
+>;
+
+/**
+ * CallIds whose permission request is still unanswered. Such an agent has not
+ * spawned yet, so its subagent session legitimately does not exist and the
+ * reconciliation 404 probe must not count toward the missing-agent grace.
+ */
+function getPendingPermissionCallIds(
+  blocks: readonly DaemonTranscriptBlock[],
+): Set<string> {
+  const ids = new Set<string>();
+  for (const block of blocks) {
+    if (block.kind !== 'permission') continue;
+    const perm = block as DaemonPermissionTranscriptBlock;
+    if (perm.resolved) continue;
+    const toolCall = getRecord(perm.toolCall);
+    const callId =
+      typeof toolCall?.['toolCallId'] === 'string'
+        ? toolCall['toolCallId']
+        : typeof toolCall?.['id'] === 'string'
+          ? toolCall['id']
+          : undefined;
+    if (callId) ids.add(callId);
+  }
+  return ids;
 }
 
 export function reconcileBackgroundAgentResolutions(
@@ -148,31 +289,107 @@ export function useMessagesFromBlocks(
 ): Message[] {
   const workspace = useWorkspace();
   const connection = useConnection();
+  const previousProjectionRef = useRef<
+    | {
+        blocks: readonly DaemonTranscriptBlock[];
+        messages: Message[];
+        t: Translator;
+      }
+    | undefined
+  >(undefined);
   const messages = useMemo(
-    () => transcriptBlocksToLocalizedMessages(blocks, t),
+    () =>
+      reuseUnchangedProjectedPrefix(
+        previousProjectionRef.current,
+        blocks,
+        transcriptBlocksToLocalizedMessages(blocks, t),
+        t,
+      ),
     [blocks, t],
   );
+  useLayoutEffect(() => {
+    previousProjectionRef.current = { blocks, messages, t };
+  }, [blocks, messages, t]);
+  const [resolutionSnapshot, setResolutionSnapshot] = useState<{
+    sessionId: string;
+    resolutions: ReadonlyMap<string, BackgroundAgentResolution>;
+  }>();
+  const reconciledMessages = useMemo(() => {
+    if (
+      !resolutionSnapshot ||
+      resolutionSnapshot.sessionId !== connection.sessionId
+    ) {
+      return messages;
+    }
+    return reconcileBackgroundAgentResolutions(
+      messages,
+      resolutionSnapshot.resolutions,
+    );
+  }, [connection.sessionId, messages, resolutionSnapshot]);
   const pendingBackgroundAgentKey = useMemo(
-    () => getPendingBackgroundAgentKey(messages),
-    [messages],
+    () => getPendingBackgroundAgentKey(reconciledMessages),
+    [reconciledMessages],
+  );
+  // A stable primitive key for the effect dependency: the Set's identity
+  // changes on every transcript delta, which would re-run the reconciliation
+  // effect on each streamed update and defeat the retry backoff.
+  const pendingPermissionKey = useMemo(
+    () => [...getPendingPermissionCallIds(blocks)].sort().join('|'),
+    [blocks],
   );
   const backgroundAgentNotificationKey = useMemo(
     () => getBackgroundAgentNotificationKey(blocks),
     [blocks],
   );
-  const [resolutionSnapshot, setResolutionSnapshot] = useState<{
-    sessionId: string;
-    resolutions: ReadonlyMap<string, BackgroundAgentResolution>;
-  }>();
+  const [reconciliationAttempt, setReconciliationAttempt] = useState(0);
   const reconciliationRequestRef = useRef<
     | {
         key: string;
-        request: Promise<ReadonlyMap<string, BackgroundAgentResolution>>;
+        request: Promise<ReconciliationRound>;
+        processed: boolean;
       }
     | undefined
   >(undefined);
+  // Keyed by session + pending-agent set (not the notification key) so other
+  // agents' notifications cannot reset the backoff and keep the retry delay
+  // pinned at its base. `attempts` drives the backoff delay; `errorAttempts`
+  // tracks consecutive transient-error rounds per callId toward the budget.
+  const retryBackoffRef = useRef<{
+    key: string;
+    attempts: number;
+    errorAttempts: ReadonlyMap<string, number>;
+  }>({
+    key: '',
+    attempts: 0,
+    errorAttempts: new Map(),
+  });
+  const missingAgentMissesRef = useRef(new Map<string, number>());
+  // Last 404 timestamp per callId. The grace ladder is wall-clock paced: a
+  // miss only counts toward the grace once the base backoff has elapsed since
+  // the previous miss, so a re-probe triggered by an unrelated transcript
+  // change (for example another permission appearing) cannot collapse the
+  // retry ladder into two immediate misses.
+  const missTimestampsRef = useRef(new Map<string, number>());
+  const errorTimestampsRef = useRef(new Map<string, number>());
+  const lastConnectionKeyRef = useRef<string | undefined>(undefined);
 
   useEffect(() => {
+    // Miss counts and the retry budget may not span connection transitions:
+    // a post-reconnect 404 is a fresh race with registration, and a restarted
+    // daemon deserves a fresh retry ladder rather than the pre-disconnect
+    // attempt count.
+    const connectionKey = `${connection.sessionId}:${connection.status}`;
+    if (lastConnectionKeyRef.current !== connectionKey) {
+      lastConnectionKeyRef.current = connectionKey;
+      missingAgentMissesRef.current.clear();
+      missTimestampsRef.current.clear();
+      errorTimestampsRef.current.clear();
+      retryBackoffRef.current = {
+        key: '',
+        attempts: 0,
+        errorAttempts: new Map(),
+      };
+    }
     const sessionId = connection.sessionId;
     if (
       !sessionId ||
@@ -192,44 +409,219 @@ export function useMessagesFromBlocks(
       return;
     }
     const requestKey = `${sessionId}:${pendingBackgroundAgentKey}:${backgroundAgentNotificationKey}`;
-    const existingRequest = reconciliationRequestRef.current;
-    const callIds = pendingBackgroundAgentKey.split('|');
-    const request =
-      existingRequest?.key === requestKey
-        ? existingRequest.request
-        : Promise.allSettled(
-            callIds.map(async (callId) => {
+    const retryScopeKey = `${sessionId}:${pendingBackgroundAgentKey}`;
+    const cachedRound = reconciliationRequestRef.current;
+    // Agents still under approval have not spawned their subagent session
+    // yet: exclude them so the 404 probe cannot accumulate missing-agent
+    // misses and paint a failure while the dialog is unanswered. Rebuild the
+    // membership from the stable key — the effect depends on the key, not the
+    // Set, so a transcript delta with unchanged permission content does not
+    // re-run this effect.
+    const pendingPermissionCallIds = new Set(
+      pendingPermissionKey ? pendingPermissionKey.split('|') : [],
+    );
+    const callIds = pendingBackgroundAgentKey
+      .split('|')
+      .filter((callId) => !pendingPermissionCallIds.has(callId));
+    for (const callId of [...missingAgentMissesRef.current.keys()]) {
+      if (!callIds.includes(callId)) {
+        missingAgentMissesRef.current.delete(callId);
+        missTimestampsRef.current.delete(callId);
+      }
+    }
+    for (const callId of [...errorTimestampsRef.current.keys()]) {
+      if (!callIds.includes(callId)) errorTimestampsRef.current.delete(callId);
+    }
+    const roundErrors: Array<{ callId: string; error: unknown }> = [];
+    const roundNotFounds: string[] = [];
+    // A settled round that was already processed must not be reused: a
+    // re-run (for example a client identity swap) would attach a second
+    // handler and count the same round against the retry budget twice.
+    const roundIsReusable =
+      !!cachedRound && cachedRound.key === requestKey && !cachedRound.processed;
+    const request = roundIsReusable
+      ? cachedRound.request
+      : Promise.allSettled(
+          callIds.map(async (callId) => {
+            try {
               const resolution = await workspace.client.resolveSubagentSession(
                 sessionId,
                 callId,
               );
               return [callId, resolution] as const;
-            }),
-          ).then((results) => {
-            const resolutions = new Map<string, BackgroundAgentResolution>();
-            results.forEach((result) => {
+            } catch (error) {
               if (
-                result.status === 'fulfilled' &&
-                isTerminalBackgroundAgentStatus(result.value[1].status)
+                isSubagentSessionNotFound(error, callId) ||
+                isSessionLevelNotFound(error)
               ) {
-                resolutions.set(...result.value);
+                // Both 404 shapes also occur while the daemon is racing
+                // registration or the owning workspace runtime is
+                // transiently inactive, so the active round's handler alone
+                // counts them against the missing-agent grace.
+                roundNotFounds.push(callId);
+              } else if (
+                error instanceof DaemonHttpError &&
+                error.status >= 400 &&
+                error.status < 500 &&
+                error.status !== 404 &&
+                error.status !== 429
+              ) {
+                // Permanent client errors never recover on retry; make the
+                // card terminal so it can stop gating the UI. A 429 is the
+                // daemon's rate-limit signal and unrecognized 404 shapes
+                // stay transient, so neither may fail the agent.
+                return [callId, { status: 'failed' }] as const;
               }
-            });
-            return resolutions;
+              roundErrors.push({ callId, error });
+              throw error;
+            }
+          }),
+        ).then((results) => {
+          const resolutions = new Map<string, BackgroundAgentResolution>();
+          const succeeded: string[] = [];
+          results.forEach((result) => {
+            if (result.status !== 'fulfilled') return;
+            succeeded.push(result.value[0]);
+            if (isTerminalBackgroundAgentStatus(result.value[1].status)) {
+              resolutions.set(result.value[0], result.value[1]);
+            }
           });
-    reconciliationRequestRef.current = { key: requestKey, request };
+          return {
+            resolutions,
+            errors: roundErrors,
+            notFounds: roundNotFounds,
+            succeeded,
+          };
+        });
+    const round = roundIsReusable
+      ? cachedRound
+      : { key: requestKey, request, processed: false };
+    reconciliationRequestRef.current = round;
     let active = true;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
     request
-      .then((resolutions) => {
-        if (active) {
-          setResolutionSnapshot((current) => ({
-            sessionId,
-            resolutions: new Map([
-              ...(current?.sessionId === sessionId ? current.resolutions : []),
-              ...resolutions,
-            ]),
-          }));
+      .then(({ resolutions, errors, notFounds, succeeded }) => {
+        if (!active) return;
+        round.processed = true;
+        // Grace-miss accounting lives in the active handler, not the per-call
+        // closure: a superseded round's late 404 must not consume grace that
+        // belongs to the live round. The handler also re-checks the current
+        // probe set: a round that straddles a permission transition settles
+        // with misses for an agent that is now excluded, and those must not
+        // be counted (or re-added after the exclusion cleanup ran).
+        for (const callId of succeeded) {
+          missingAgentMissesRef.current.delete(callId);
+          missTimestampsRef.current.delete(callId);
+          errorTimestampsRef.current.delete(callId);
         }
+        for (const callId of [...resolutions.keys()]) {
+          if (!callIds.includes(callId)) resolutions.delete(callId);
+        }
+        for (const callId of notFounds) {
+          if (!callIds.includes(callId)) continue;
+          const now = Date.now();
+          const lastMiss = missTimestampsRef.current.get(callId) ?? 0;
+          if (now - lastMiss < BACKGROUND_AGENT_RECONCILIATION_RETRY_BASE_MS) {
+            continue;
+          }
+          missTimestampsRef.current.set(callId, now);
+          const misses = (missingAgentMissesRef.current.get(callId) ?? 0) + 1;
+          missingAgentMissesRef.current.set(callId, misses);
+          if (misses >= MISSING_BACKGROUND_AGENT_GRACE_MISSES) {
+            resolutions.set(callId, { status: 'failed' });
+          }
+        }
+        let unresolved = resolutions.size < callIds.length;
+        const failedCallIds: string[] = [];
+        let retryDelayMs = BACKGROUND_AGENT_RECONCILIATION_RETRY_BASE_MS;
+        if (unresolved) {
+          const previous =
+            retryBackoffRef.current.key === retryScopeKey
+              ? retryBackoffRef.current
+              : {
+                  key: retryScopeKey,
+                  attempts: 0,
+                  errorAttempts: new Map<string, number>(),
+                };
+          const attempts = previous.attempts + 1;
+          // Consecutive error rounds are tracked per callId so one agent's
+          // persistent errors cannot exhaust a shared budget and fail a
+          // healthy sibling; a callId absent from this round's errors
+          // resets implicitly. Healthy non-terminal responses back off but
+          // never consume the budget.
+          const errorAttempts = new Map<string, number>();
+          for (const entry of errors) {
+            if (!callIds.includes(entry.callId)) continue;
+            const now = Date.now();
+            const lastError = errorTimestampsRef.current.get(entry.callId);
+            const previousCount = previous.errorAttempts.get(entry.callId) ?? 0;
+            const count =
+              lastError !== undefined &&
+              now - lastError < BACKGROUND_AGENT_RECONCILIATION_RETRY_BASE_MS
+                ? previousCount
+                : previousCount + 1;
+            if (count !== previousCount) {
+              errorTimestampsRef.current.set(entry.callId, now);
+            }
+            errorAttempts.set(entry.callId, count);
+            if (count >= BACKGROUND_AGENT_RECONCILIATION_MAX_ATTEMPTS) {
+              failedCallIds.push(entry.callId);
+              resolutions.set(entry.callId, { status: 'failed' });
+            }
+          }
+          unresolved = resolutions.size < callIds.length;
+          retryDelayMs = Math.min(
+            BACKGROUND_AGENT_RECONCILIATION_RETRY_BASE_MS * 2 ** (attempts - 1),
+            BACKGROUND_AGENT_RECONCILIATION_RETRY_MAX_MS,
+          );
+          retryBackoffRef.current = unresolved
+            ? { key: retryScopeKey, attempts, errorAttempts }
+            : { key: retryScopeKey, attempts: 0, errorAttempts: new Map() };
+        } else {
+          retryBackoffRef.current = {
+            key: retryScopeKey,
+            attempts: 0,
+            errorAttempts: new Map(),
+          };
+        }
+        if (failedCallIds.length > 0) {
+          console.warn(
+            '[web-shell] background agent reconciliation retry budget exhausted; marking agents failed',
+            {
+              sessionId,
+              callIds: failedCallIds,
+              errors: errors.map((entry) =>
+                describeReconciliationError(entry.error),
+              ),
+            },
+          );
+        }
+        setResolutionSnapshot((current) => ({
+          sessionId,
+          resolutions: new Map([
+            ...(current?.sessionId === sessionId ? current.resolutions : []),
+            ...resolutions,
+          ]),
+        }));
+        if (!unresolved) return;
+        if (errors.length > 0) {
+          console.warn(
+            '[web-shell] background agent reconciliation retry scheduled',
+            {
+              sessionId,
+              callIds: errors.map((entry) => entry.callId),
+              errors: errors.map((entry) =>
+                describeReconciliationError(entry.error),
+              ),
+            },
+          );
+        }
+        retryTimer = setTimeout(() => {
+          if (reconciliationRequestRef.current?.request === request) {
+            reconciliationRequestRef.current = undefined;
+          }
+          setReconciliationAttempt((attempt) => attempt + 1);
+        }, retryDelayMs);
       })
       .catch(() => {
         if (reconciliationRequestRef.current?.request === request) {
@@ -238,6 +630,7 @@ export function useMessagesFromBlocks(
       });
     return () => {
       active = false;
+      clearTimeout(retryTimer);
     };
   }, [
     backgroundAgentNotificationKey,
@@ -246,21 +639,12 @@ export function useMessagesFromBlocks(
     connection.sessionId,
     connection.status,
     pendingBackgroundAgentKey,
+    pendingPermissionKey,
+    reconciliationAttempt,
     workspace.client,
   ]);
 
-  return useMemo(() => {
-    if (
-      !resolutionSnapshot ||
-      resolutionSnapshot.sessionId !== connection.sessionId
-    ) {
-      return messages;
-    }
-    return reconcileBackgroundAgentResolutions(
-      messages,
-      resolutionSnapshot.resolutions,
-    );
-  }, [connection.sessionId, messages, resolutionSnapshot]);
+  return reconciledMessages;
 }
 
 export function useMessages(t: Translator): Message[] {

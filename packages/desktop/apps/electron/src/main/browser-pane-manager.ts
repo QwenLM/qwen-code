@@ -752,11 +752,21 @@ export class BrowserPaneManager implements IBrowserPaneManager {
     const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(normalizedUrl)
     const isAbout = normalizedUrl.startsWith('about:')
     if (!hasScheme && !isAbout) {
-      const looksLikeHost = /^(localhost|\d{1,3}(?:\.\d{1,3}){3}|[\w-]+(?:\.[\w-]+)+)(?::\d+)?(?:\/|$)/i.test(normalizedUrl)
+      const looksLikeHost = /^(localhost|\d{1,3}(?:\.\d{1,3}){3}|[\w-]+(?:\.[\w-]+)+)(?::\d+)?(?:[/?#]|$)/i.test(normalizedUrl)
       if (looksLikeHost) {
-        normalizedUrl = `https://${normalizedUrl}`
+        const candidate = `https://${normalizedUrl}`
+        try {
+          new URL(candidate)
+          normalizedUrl = candidate
+        } catch {
+          // The host pattern admits octets above 255 and ports above 65535,
+          // which Chromium rejects; search only the host part so path or
+          // query data is never sent to the search provider.
+          const host = normalizedUrl.split(/[/?#]/, 1)[0]
+          normalizedUrl = `https://duckduckgo.com/?q=${encodeURIComponent(host)}`
+        }
       } else {
-        normalizedUrl = `https://duckduckgo.com/?q=${encodeURIComponent(normalizedUrl)}`
+        normalizedUrl = `https://duckduckgo.com/?q=${encodeURIComponent(normalizedUrl.toWellFormed())}`
       }
     }
 

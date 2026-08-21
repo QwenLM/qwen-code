@@ -20,6 +20,7 @@ import type {
   ChannelUserQuestion,
   DispatchMode,
   Envelope,
+  ObservedChannelContactGraph,
   ObservedChannelContactObservation,
   SanitizedToolCallEvent,
   SessionTarget,
@@ -37,6 +38,7 @@ import { GroupHistoryStore } from './group-history-store.js';
 import type { GroupHistoryEntry } from './group-history-store.js';
 import { SenderGate } from './SenderGate.js';
 import { PairingStore } from './PairingStore.js';
+import type { CreatePairingRequestResult } from './PairingStore.js';
 import { SessionRouter } from './SessionRouter.js';
 import { getGlobalQwenDir } from './paths.js';
 import {
@@ -45,6 +47,7 @@ import {
   sanitizePromptText,
   sanitizePromptPath,
   sanitizeLogText,
+  sanitizeDisplayText,
   truncateCodePoints,
   PROMPT_UNSAFE_INVISIBLES,
 } from './sanitize.js';
@@ -61,6 +64,7 @@ import type {
 import type { ChannelLoop, ChannelLoopInput } from './ChannelLoopStore.js';
 import { ChannelLoopSkippedError } from './ChannelLoopScheduler.js';
 import {
+  buildChannelWebhookDisplayText,
   buildChannelWebhookPrompt,
   resolveChannelWebhookTarget,
 } from './ChannelWebhookTask.js';
@@ -229,6 +233,8 @@ export interface ChannelBaseOptions {
       channelName: string,
       observation: ObservedChannelContactObservation,
     ): void | Promise<void>;
+    /** Read persisted observations so adapters can hydrate label caches. */
+    list?(): ObservedChannelContactGraph;
   };
 }
 
@@ -269,7 +275,11 @@ type PendingPermissionLookup =
   | { kind: 'found'; pending: PendingPermission }
   | { kind: 'none'; explicit: boolean }
   | { kind: 'ambiguous'; requestIds: string[] };
-type CollectBufferEntry = { text: string; envelope: Envelope };
+type CollectBufferEntry = {
+  text: string;
+  displayText: string;
+  envelope: Envelope;
+};
 type ActivePrompt = {
   runId: string;
   owner?: ChannelPromptOwner;
@@ -322,6 +332,7 @@ const COMMAND_TOKEN_RE = new RegExp(`^[${COMMAND_TOKEN_CHARS}]+(?:@\\S+)?$`);
 const LOOP_ADD_RE = /^"([^"]+)"\s+(.+)$/su;
 const MAX_LOOP_JOBS_PER_TARGET = 10;
 const MAX_LOOP_PROMPT_CHARS = 4000;
+const MAX_DISPLAY_PROJECTION_CHARS = 8000;
 
 /**
  * The command-providing surface of a bridge. AcpBridge runs a single agent and
@@ -375,6 +386,11 @@ export abstract class ChannelBase {
     observation: ChannelMemoryRecallObservation,
   ) => void;
   private groupHistory: GroupHistoryStore;
+  // Tracks the pairing code already announced per group so repeated triggers
+  // of the same pending request (extra mentions, parallel notification lanes)
+  // post the public notification once. In-memory by design: a restart can
+  // re-post once per still-pending request, but never per trigger.
+  private readonly groupPairingNotified = new Map<string, string>();
   private readonly loopController?: ChannelLoopController;
   private readonly observedContacts?: ChannelBaseOptions['observedContacts'];
   private readonly observedContactEnvelopes = new WeakSet<Envelope>();
@@ -818,15 +834,18 @@ export abstract class ChannelBase {
     this.observedContacts = options?.observedContacts;
     this.bridgeRecovery = options?.bridgeRecovery;
 
-    this.groupGate = new GroupGate(config.groupPolicy, config.groups);
-    this.dmGate = new DmGate(config.dmPolicy);
-
     // Scoped by the channel's workspace cwd: two workspaces reusing the same
     // channel name must not share pairing/allowlist state (#7017).
     const pairingStore =
-      config.senderPolicy === 'pairing'
+      config.senderPolicy === 'pairing' || config.groupPolicy === 'pairing'
         ? new PairingStore(name, config.cwd)
         : undefined;
+    this.groupGate = new GroupGate(
+      config.groupPolicy,
+      config.groups,
+      pairingStore,
+    );
+    this.dmGate = new DmGate(config.dmPolicy);
     this.gate = new SenderGate(
       config.senderPolicy,
       config.allowedUsers,
@@ -1408,13 +1427,16 @@ export abstract class ChannelBase {
     this.collectBuffers.delete(sessionId);
     const lost = buffer.length;
     const coalesced = buffer.map((b) => b.text).join('\n\n');
+    const coalescedDisplayText = buffer.map((b) => b.displayText).join('\n\n');
     const lastEnvelope = buffer[buffer.length - 1]!.envelope;
     this.notifyPromptBufferDrained(lastEnvelope.chatId, sessionId, buffer);
     const syntheticEnvelope: Envelope = {
       ...lastEnvelope,
       text: coalesced,
+      displayText: coalescedDisplayText,
       alreadyPrefixed: true,
       referencedText: undefined,
+      mentionedMemberIds: undefined,
       attachments: undefined,
       metadata: undefined,
       imageBase64: undefined,
@@ -1635,6 +1657,7 @@ export abstract class ChannelBase {
           promptBridge,
           sessionId,
           promptToSend,
+          job.prompt,
           promptState,
           job.id,
           options.timeoutMs,
@@ -1806,6 +1829,7 @@ export abstract class ChannelBase {
       },
     );
     const promptText = buildChannelWebhookPrompt(task, target);
+    const displayText = buildChannelWebhookDisplayText(task);
     const taskId = `webhook:${task.source}:${task.eventType}`;
     const safeTaskId = sanitizeLogText(taskId, 64);
     const safeChannel = sanitizeLogText(this.name, 64);
@@ -1931,6 +1955,7 @@ export abstract class ChannelBase {
           promptBridge,
           sessionId,
           promptToSend,
+          displayText,
           promptState,
           taskId,
           options.timeoutMs,
@@ -2035,11 +2060,12 @@ export abstract class ChannelBase {
     promptBridge: ChannelAgentBridge,
     sessionId: string,
     promptText: string,
+    displayText: string,
     promptState: ActivePrompt,
     jobId: string,
     timeoutMs: number | undefined,
   ): Promise<string> {
-    const prompt = promptBridge.prompt(sessionId, promptText, {});
+    const prompt = promptBridge.prompt(sessionId, promptText, { displayText });
     prompt.catch(() => {});
     if (timeoutMs === undefined) {
       return prompt;
@@ -3604,9 +3630,11 @@ export abstract class ChannelBase {
       isReplyToBot: true,
     };
     return (
-      this.groupGate.check(envelope).allowed &&
+      this.groupGate.check(envelope, { createPairingRequest: false }).allowed &&
       this.dmGate.check(envelope).allowed &&
-      this.gate.isAllowed(normalizedTarget.senderId) &&
+      (normalizedTarget.isGroup && this.config.groupPolicy === 'pairing'
+        ? true
+        : this.gate.isAllowed(normalizedTarget.senderId)) &&
       this.isAuthorizedForSharedSession(envelope)
     );
   }
@@ -4714,7 +4742,10 @@ export abstract class ChannelBase {
       return;
     }
     const senderId = truncateGroupHistoryField(envelope.senderId);
-    if (!this.gate.isAllowed(senderId)) {
+    if (
+      this.config.groupPolicy !== 'pairing' &&
+      !this.gate.isAllowed(senderId)
+    ) {
       return;
     }
 
@@ -4743,7 +4774,17 @@ export abstract class ChannelBase {
       return [];
     }
     try {
-      return this.groupHistory.drain(this.groupHistoryKey(envelope), limit);
+      const entries = this.groupHistory.drain(
+        this.groupHistoryKey(envelope),
+        limit,
+      );
+      if (
+        this.config.groupPolicy === 'pairing' &&
+        !this.groupGate.isGroupApproved(envelope.chatId)
+      ) {
+        return [];
+      }
+      return entries;
     } catch (err) {
       process.stderr.write(
         `[${this.name}] failed to drain group history for chat ${sanitizeLogText(envelope.chatId, 64)}: ${err instanceof Error ? err.message : err}\n`,
@@ -4777,9 +4818,10 @@ export abstract class ChannelBase {
       return promptText;
     }
 
-    const lines = entries.filter((entry) =>
-      this.gate.isAllowed(entry.senderId),
-    );
+    const lines =
+      this.config.groupPolicy === 'pairing'
+        ? entries
+        : entries.filter((entry) => this.gate.isAllowed(entry.senderId));
     if (lines.length === 0) {
       return promptText;
     }
@@ -4799,9 +4841,29 @@ export abstract class ChannelBase {
   protected preflightInbound(envelope: Envelope): boolean | Promise<boolean> {
     const groupResult = this.groupGate.check(envelope);
     if (!groupResult.allowed) {
+      if (groupResult.pairing !== undefined) {
+        this.logPreflightRejected('group_pairing_required');
+        return this.onGroupPairingRequired(
+          envelope.chatId,
+          groupResult.pairing,
+          envelope.threadId,
+        )
+          .then(() => false)
+          .catch((err: unknown) => {
+            process.stderr.write(
+              `[Channel:${this.name}] group pairing notification failed: ${sanitizeLogText(
+                err instanceof Error ? err.message : String(err),
+                200,
+              )}\n`,
+            );
+            return false;
+          });
+      }
       if (groupResult.reason === 'mention_required') {
         // This is the expected high-frequency drop path for group bots.
         this.recordPendingGroupHistory(envelope);
+      } else if (groupResult.reason === 'pairing_trigger_required') {
+        return false;
       } else {
         this.logPreflightRejected(`group_${groupResult.reason ?? 'denied'}`);
       }
@@ -4814,13 +4876,18 @@ export abstract class ChannelBase {
       return false;
     }
 
+    if (envelope.isGroup && this.config.groupPolicy === 'pairing') {
+      this.markPreflighted(envelope);
+      return true;
+    }
+
     const result = this.gate.check(envelope.senderId, envelope.senderName);
     if (!result.allowed) {
-      if (result.pairingCode !== undefined) {
+      if (result.pairing !== undefined) {
         this.logPreflightRejected('sender_pairing_required');
         return this.onPairingRequired(
           envelope.chatId,
-          result.pairingCode,
+          result.pairing,
           envelope.threadId,
         )
           .then(() => false)
@@ -4876,7 +4943,7 @@ export abstract class ChannelBase {
     await this.processInbound(envelope);
   }
 
-  private async recordObservedContact(envelope: Envelope): Promise<void> {
+  protected async recordObservedContact(envelope: Envelope): Promise<void> {
     if (!this.observedContacts) return;
     const sanitizedSenderName = envelope.senderName
       ? sanitizeSenderName(envelope.senderName)
@@ -4917,6 +4984,29 @@ export abstract class ChannelBase {
     }
   }
 
+  protected onObservedContact(_envelope: Envelope): void {}
+
+  /**
+   * Observations persisted for this channel, when a read path is configured.
+   * Adapters hydrate label caches from it after a restart so known labels are
+   * not reverted to raw IDs by the next initial write.
+   */
+  protected persistedObservedContacts():
+    | ObservedChannelContactGraph
+    | undefined {
+    const list = this.observedContacts?.list;
+    if (!list) return undefined;
+    try {
+      const graph = list();
+      return {
+        users: graph.users.filter((user) => user.channelName === this.name),
+        groups: graph.groups.filter((group) => group.channelName === this.name),
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
   protected markPreflighted(envelope: Envelope): void {
     this.preflightedEnvelopes.add(envelope);
   }
@@ -4949,7 +5039,16 @@ export abstract class ChannelBase {
     if (this.observedContacts && !this.observedContactEnvelopes.has(envelope)) {
       this.observedContactEnvelopes.add(envelope);
       await this.recordObservedContact(envelope);
+      this.onObservedContact(envelope);
     }
+    // Adapters that never set `displayText` fall back to the raw message
+    // text; sanitize at this boundary so attacker-controlled bidi/zero-width/
+    // control chars cannot reach the session-bus echo, recorded transcript,
+    // or session previews.
+    const displayText = sanitizeDisplayText(
+      envelope.displayText ?? envelope.text,
+      MAX_DISPLAY_PROJECTION_CHARS,
+    );
 
     let memoryIntent: ResolvedChannelMemoryIntent | null =
       parseChannelMemoryIntent(envelope.text);
@@ -5119,6 +5218,24 @@ export abstract class ChannelBase {
         envelope.senderName || envelope.senderId || 'unknown',
       );
       promptText = `[${who}] ${sanitizePromptText(promptText)}`;
+      // Render the non-bot mention marker AFTER sanitization (like the
+      // [Replying to:] wrapper below). Inside `text` it would pass through
+      // sanitizePromptText, which strips brackets only on content <=64 chars
+      // and folds its newline — so with IDs included, the delivered format
+      // would depend on the ID list's length. IDs are platform-controlled, so
+      // neutralize them like quoted text before they bypass the sanitizer here.
+      if (envelope.mentionedMemberIds?.length) {
+        const ids = envelope.mentionedMemberIds
+          .map((id) => sanitizeQuotedText(id, 64).trim())
+          // A junk-only ID over the cap truncates to a bare '…' (not
+          // whitespace), which would advertise a phantom member — drop it
+          // like an empty ID.
+          .filter((id) => id.length > 0 && id !== '…');
+        if (ids.length > 0) {
+          const memberLabel = ids.length === 1 ? 'member' : 'members';
+          promptText = `[Mentioned ${ids.length} other group ${memberLabel}: ${ids.join(', ')}]\n\n${promptText}`;
+        }
+      }
     }
 
     if (envelope.referencedText) {
@@ -5197,7 +5314,17 @@ export abstract class ChannelBase {
             buffer = [];
             this.collectBuffers.set(sessionId, buffer);
           }
-          buffer.push({ text: promptText, envelope });
+          const bufferedDisplayText =
+            (envelope.isGroup || this.config.sessionScope === 'single') &&
+            !envelope.alreadyPrefixed &&
+            !recognizedSlashCommand
+              ? `[${sanitizeSenderName(envelope.senderName || envelope.senderId || 'unknown')}] ${sanitizePromptText(displayText)}`
+              : displayText;
+          buffer.push({
+            text: promptText,
+            displayText: bufferedDisplayText,
+            envelope,
+          });
           try {
             this.onPromptBuffered(
               envelope.chatId,
@@ -5530,6 +5657,7 @@ export abstract class ChannelBase {
         const response = await promptBridge.prompt(sessionId, promptToSend, {
           imageBase64,
           imageMimeType,
+          displayText,
         });
 
         await this.settleCancelRequested(promptState);
@@ -5680,6 +5808,9 @@ export abstract class ChannelBase {
           this.collectBuffers.delete(sessionId);
           const lost = buffer.length;
           const coalesced = buffer.map((b) => b.text).join('\n\n');
+          const coalescedDisplayText = buffer
+            .map((b) => b.displayText)
+            .join('\n\n');
           const lastEnvelope = buffer[buffer.length - 1]!.envelope;
           this.notifyPromptBufferDrained(
             lastEnvelope.chatId,
@@ -5690,10 +5821,12 @@ export abstract class ChannelBase {
           const syntheticEnvelope: Envelope = {
             ...lastEnvelope,
             text: coalesced,
+            displayText: coalescedDisplayText,
             // Coalesced text already carries each message's [sender] prefix.
             alreadyPrefixed: true,
             // Clear attachments/references — already resolved in original text
             referencedText: undefined,
+            mentionedMemberIds: undefined,
             attachments: undefined,
             metadata: undefined,
             imageBase64: undefined,
@@ -5719,22 +5852,64 @@ export abstract class ChannelBase {
     await current;
   }
 
+  private pairingRejectionMessage(
+    rejected: 'sender_pending' | 'cap_reached',
+  ): string {
+    return rejected === 'sender_pending'
+      ? 'You already have a pending pairing request. It must be approved or expire before another can be created.'
+      : 'Too many pending pairing requests. Please try again later.';
+  }
+
+  private groupPairingRejectionMessage(
+    rejected: 'sender_pending' | 'cap_reached',
+  ): string {
+    // Group variant: the DM wording would publicly attribute the mentioning
+    // member's unrelated pending request to the whole group.
+    return rejected === 'sender_pending'
+      ? 'A pairing request cannot be created right now. Another member can mention the bot to start group approval, or try again later.'
+      : 'Too many pending pairing requests. Please try again later.';
+  }
+
   protected async onPairingRequired(
     chatId: string,
-    code: string | null,
+    result: CreatePairingRequestResult,
     threadId?: string,
   ): Promise<void> {
-    if (code) {
+    if ('code' in result) {
       await this.sendThreadMessage(
         chatId,
         threadId,
-        `Your pairing code is: ${code}\n\nAsk the bot operator to approve you with:\n  qwen channel pairing approve ${this.name} ${code}`,
+        `Your pairing code is: ${result.code}\n\nAsk the bot operator to approve you with:\n  qwen channel pairing approve ${this.name} ${result.code}`,
       );
     } else {
       await this.sendThreadMessage(
         chatId,
         threadId,
-        'Too many pending pairing requests. Please try again later.',
+        this.pairingRejectionMessage(result.rejected),
+      );
+    }
+  }
+
+  protected async onGroupPairingRequired(
+    chatId: string,
+    result: CreatePairingRequestResult,
+    threadId?: string,
+  ): Promise<void> {
+    if ('code' in result) {
+      if (this.groupPairingNotified.get(chatId) === result.code) {
+        return;
+      }
+      await this.sendThreadMessage(
+        chatId,
+        threadId,
+        `This group requires approval. Its pairing code is: ${result.code}\n\nAsk the bot operator to approve the group with:\n  qwen channel pairing approve ${this.name} ${result.code}`,
+      );
+      this.groupPairingNotified.set(chatId, result.code);
+    } else {
+      await this.sendThreadMessage(
+        chatId,
+        threadId,
+        this.groupPairingRejectionMessage(result.rejected),
       );
     }
   }
