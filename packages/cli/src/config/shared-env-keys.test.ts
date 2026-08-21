@@ -22,6 +22,10 @@ import {
   scrubInheritedLoaderEnv,
   setLoaderKeyRejectionReporter,
 } from './shared-env-keys.js';
+import {
+  PTY_HOST_AUTH_TOKEN_ENV,
+  PTY_HOST_ID_ENV,
+} from '../agent-view/pty-host-env.js';
 import { AGENT_VIEW_WORKER_ENV_KEYS } from '../agent-view/worker-sideband.js';
 
 describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
@@ -71,6 +75,8 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
     for (const key of [
       ...AGENT_VIEW_WORKER_ENV_KEYS,
       'QWEN_AGENT_VIEW_SUPERVISOR',
+      PTY_HOST_AUTH_TOKEN_ENV,
+      PTY_HOST_ID_ENV,
     ]) {
       expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(key);
     }

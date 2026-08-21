@@ -11,6 +11,9 @@ import { routeManagedAgentViewResume } from './agent-view-resume.js';
 import { isAgentViewWorkerResumeCommandBlocked } from './agent-view-resume-guard.js';
 
 const mockReadAgentViewSessionState = vi.hoisted(() => vi.fn());
+const mockRequireValidWorkerToken = vi.hoisted(() =>
+  vi.fn().mockResolvedValue(undefined),
+);
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockAttach = vi.hoisted(() => vi.fn());
 const mockEnsureAgentViewSupervisor = vi.hoisted(() =>
@@ -30,10 +33,15 @@ vi.mock('../agent-view/supervisor-runner.js', () => ({
   ensureAgentViewSupervisor: mockEnsureAgentViewSupervisor,
 }));
 
+vi.mock('../agent-view/supervisor-process.js', () => ({
+  requireValidWorkerToken: mockRequireValidWorkerToken,
+}));
+
 describe('routeManagedAgentViewResume', () => {
   beforeEach(() => {
     process.exitCode = undefined;
     mockReadAgentViewSessionState.mockReset();
+    mockRequireValidWorkerToken.mockReset().mockResolvedValue(undefined);
     mockWriteStderrLine.mockReset();
     mockAttach.mockReset();
     mockEnsureAgentViewSupervisor.mockClear();
@@ -140,6 +148,11 @@ describe('routeManagedAgentViewResume', () => {
       ),
     ).resolves.toBe(false);
 
+    expect(mockRequireValidWorkerToken).toHaveBeenCalledWith(
+      'session-1',
+      { token: 'token-1' },
+      {},
+    );
     expect(mockReadAgentViewSessionState).not.toHaveBeenCalled();
     expect(mockWriteStderrLine).not.toHaveBeenCalled();
   });
