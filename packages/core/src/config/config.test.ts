@@ -1665,6 +1665,46 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('initialize() runtime sidecar claim', () => {
+    it('writes the runtime sidecar at session establishment for every process kind', async () => {
+      const config = new Config({ ...baseParams, chatRecording: true });
+      const sessionId = config.getSessionId();
+      const writeSpy = vi
+        .spyOn(runtimeStatus, 'writeRuntimeStatus')
+        .mockResolvedValue('');
+
+      await config.initialize();
+
+      // The orphan sweep's pid-liveness gate reads only these sidecars;
+      // without this claim a headless/ACP/SDK/serve session has no
+      // liveness proof and is judged dead from file age alone.
+      expect(writeSpy).toHaveBeenCalledWith(
+        config.storage.getRuntimeStatusPath(sessionId),
+        expect.objectContaining({
+          sessionId,
+          workDir: config.getTargetDir(),
+        }),
+      );
+
+      writeSpy.mockRestore();
+    });
+
+    it('skips the sidecar claim when chat recording is disabled', async () => {
+      // No transcript entry is created, so no sidecar should exist for
+      // it either — e.g. ACP bootstrap and workspace-discovery configs.
+      const config = new Config({ ...baseParams, chatRecording: false });
+      const writeSpy = vi
+        .spyOn(runtimeStatus, 'writeRuntimeStatus')
+        .mockResolvedValue('');
+
+      await config.initialize();
+
+      expect(writeSpy).not.toHaveBeenCalled();
+
+      writeSpy.mockRestore();
+    });
+  });
+
   describe('MCP hot-reload (sub-task 3)', () => {
     const srvA: MCPServerConfig = { command: 'a' };
     const srvB: MCPServerConfig = { command: 'b' };

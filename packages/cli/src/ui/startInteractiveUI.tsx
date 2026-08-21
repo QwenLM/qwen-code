@@ -13,7 +13,6 @@ import {
   isDebugLogFileEnabled,
   registerSession,
   type Config,
-  writeRuntimeStatus,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
 import { isValidSessionId } from '../config/config.js';
@@ -79,26 +78,6 @@ export async function startInteractiveUI(
 ) {
   const version = await getCliVersion();
   setWindowTitle(settings, basename(workspaceRoot));
-
-  // Write a small runtime.json sidecar next to the chat log so external
-  // tools (terminal multiplexers, IDE integrations, status daemons) can
-  // map the running PID back to its session id and work directory.
-  // Best-effort: a read-only filesystem must not prevent the UI from
-  // starting up. Marking the runtime status as enabled is what arms the
-  // session-swap refresh in `Config.refreshSessionId()` — without this
-  // call, the sidecar would never update on `/clear` or `/resume`.
-  try {
-    const sessionId = config.getSessionId();
-    const runtimeStatusPath = config.storage.getRuntimeStatusPath(sessionId);
-    await writeRuntimeStatus(runtimeStatusPath, {
-      sessionId,
-      workDir: config.getTargetDir(),
-      qwenVersion: version,
-    });
-    config.markRuntimeStatusEnabled();
-  } catch {
-    // ignored: best-effort, never block UI startup.
-  }
 
   const restoreTerminalRedrawOptimizer =
     process.stdout.isTTY && !config.getScreenReader()

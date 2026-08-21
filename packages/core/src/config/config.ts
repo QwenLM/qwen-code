@@ -2681,6 +2681,32 @@ export class Config {
       }
       registerSessionProjectDir(this.sessionId, this.storage.getProjectDir());
       this.sessionProjectDirRegistered = true;
+      // Every process kind that records chat history claims its runtime
+      // sidecar here, at the single session-establishment choke point:
+      // the orphan sweep's pid-liveness gate reads only these sidecars,
+      // so a session that never writes one (headless/ACP/SDK/serve)
+      // has no liveness proof and would be judged dead from file age
+      // alone. Best-effort like the rest of runtime status: a read-only
+      // filesystem degrades to the sweep's freshness gates, it must not
+      // block session startup.
+      if (this.chatRecordingEnabled) {
+        try {
+          await writeRuntimeStatus(
+            this.storage.getRuntimeStatusPath(this.sessionId),
+            {
+              sessionId: this.sessionId,
+              workDir: this.getTargetDir(),
+              qwenVersion: this.cliVersion ?? null,
+            },
+          );
+          // Arm the session-swap refresh for every kind, not just the
+          // interactive UI: /clear, /resume and ACP session switches
+          // must keep the sidecar on the session this pid now serves.
+          this.markRuntimeStatusEnabled();
+        } catch {
+          // ignored: best-effort, never block session startup.
+        }
+      }
       await this.initializeInternal(options);
     } catch (error) {
       this.clearSessionRestoreProjection();
@@ -4109,9 +4135,9 @@ export class Config {
     // transition. Best-effort: must never block /clear or /resume.
     //
     // Only refresh when THIS process established its own sidecar at
-    // startup (interactive UI). A non-interactive `/clear` (e.g.
-    // qwen --prompt-interactive) must not delete a sibling shell's
-    // sidecar that happens to share the outgoing session id
+    // startup (Config.initializeOnce). A process whose initial sidecar
+    // write failed (e.g. read-only filesystem) must not delete a
+    // sibling's sidecar that happens to share the outgoing session id
     // mirrors the kimi-cli "write only when a session is
     // established for this process" rule.
     if (isSessionTransition) {
@@ -4159,12 +4185,12 @@ export class Config {
 
   /**
    * Marks this Config as the owner of a runtime.json sidecar for the
-   * current PID. Call once after the initial sidecar write succeeds
-   * (typically from the interactive UI bootstrap). When set, subsequent
-   * startNewSession() calls will refresh the sidecar on session swap;
-   * when unset, startNewSession() leaves sibling sidecars alone so a
-   * short-lived non-interactive process can't trample a concurrent
-   * shell's sidecar that happens to share the outgoing session id.
+   * current PID. Called once from `initializeOnce` after the initial
+   * sidecar write succeeds. When set, subsequent startNewSession()
+   * calls will refresh the sidecar on session swap; when unset (the
+   * initial write failed), startNewSession() leaves sibling sidecars
+   * alone so this process can't trample a sidecar that happens to
+   * share the outgoing session id.
    */
   markRuntimeStatusEnabled(): void {
     this.runtimeStatusEnabled = true;
