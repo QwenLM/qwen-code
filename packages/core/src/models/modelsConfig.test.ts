@@ -83,6 +83,21 @@ describe('ModelsConfig', () => {
     expect(modelsConfig.getModel()).toBe('previous-model');
   });
 
+  it('allows a dual-role model during auth refresh', () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_ANTHROPIC,
+      modelProvidersConfig: {
+        openai: [{ id: 'dual-role-model', supportsImageGeneration: true }],
+      },
+      generationConfig: { model: 'previous-model' },
+    });
+
+    modelsConfig.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'dual-role-model');
+
+    expect(modelsConfig.getCurrentAuthType()).toBe(AuthType.USE_OPENAI);
+    expect(modelsConfig.getModel()).toBe('dual-role-model');
+  });
+
   it('does not choose an image-only model as the auth default', () => {
     const modelsConfig = new ModelsConfig({
       modelProvidersConfig: {
