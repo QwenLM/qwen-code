@@ -29,10 +29,10 @@
     "commander": "14.0.0",
     "express": "5.1.0",
     "fast-xml-parser": "5.8.0",
+    "mobilewright": "^0.0.53",
     "qs": "^6.15.0",
     "zod": "^4.1.13",
-    "zod-to-json-schema": "3.25.0",
-    "mobilewright": "0.0.45"
+    "zod-to-json-schema": "3.25.0"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3.2.0",

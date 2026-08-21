@@ -1584,9 +1584,13 @@ function anchorRuling(
       `(\`${code(running)}\`) — the same-model contract HOLDS, ruled here ` +
       `rather than left for you to compare. So: when Step 1's ` +
       `recovered-anchor check rules a re-run admissible, pass it as ` +
-      `\`--since <sha>\` on a \`fetch-pr\` re-run, which validates it ` +
-      `against the fetched history and scopes the diff and plan; never run ` +
-      `git against an anchor yourself.`
+      `\`--since <sha> --since-model <model>\` — replacing any ` +
+      `\`--since\` and any \`--since-model\` the command already carries — ` +
+      `on a \`fetch-pr\` re-run, which validates it against the fetched ` +
+      `history and scopes the diff and plan; a re-run carrying only ` +
+      `\`--since\` is refused as \`cross-model-anchor\` (a missing ` +
+      `certifier is a mismatch, not a pass), so the pair travels together; ` +
+      `never run git against an anchor yourself.`
     );
   }
   const certifier = ledger.model?.trim()

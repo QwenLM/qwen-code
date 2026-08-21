@@ -2240,7 +2240,12 @@ describe('renderLedgerSection', () => {
     // to the pre-`--since` wording would render "hand-validate the anchor"
     // into every ledger-carrying context file — the skippable hand check
     // the CLI now owns — with no other test red.
-    expect(anchored).toContain('pass it as `--since <sha>`');
+    // BOTH flags: a re-run carrying only `--since` can never pass the
+    // command's same-model gate — a missing certifier is a mismatch, not a
+    // pass — so the recovery is dead on every flow without the model.
+    expect(anchored).toContain(
+      'pass it as `--since <sha> --since-model <model>`',
+    );
     expect(anchored).toContain('never run git against an anchor yourself');
     // The tail's other two load-bearing fragments, each deletable while this
     // file stayed green: the antecedent that says WHAT to pass, and the

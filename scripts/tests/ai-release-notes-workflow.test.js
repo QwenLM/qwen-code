@@ -62,12 +62,19 @@ describe('stable release notes workflow', () => {
 
   it('finalizes stable releases asynchronously', () => {
     const validate = getStep(finalizeWorkflow, 'Validate stable release tag');
+    const checkout = getStep(finalizeWorkflow, 'Checkout release branch');
+    const install = getStep(finalizeWorkflow, 'Install Dependencies');
     const generate = getStep(
       finalizeWorkflow,
       'Generate AI-assisted release notes',
     );
     const update = getStep(finalizeWorkflow, 'Update GitHub Release notes');
     const changelog = getStep(finalizeWorkflow, 'Regenerate CHANGELOG.md');
+
+    expect(
+      finalizeWorkflow.slice(0, finalizeWorkflow.indexOf('jobs:')),
+    ).not.toContain('CI_BOT_PAT');
+    expect(install).not.toContain('CI_BOT_PAT');
 
     expect(finalizeWorkflow).toContain("types: ['published']");
     expect(finalizeWorkflow).toContain(
@@ -79,6 +86,13 @@ describe('stable release notes workflow', () => {
     );
     expect(validate).toContain('is not a stable release tag');
     expect(validate).toContain('exit 1');
+    expect(checkout).toContain('persist-credentials: false');
+    expect(install).toContain(
+      'npm ci --ignore-scripts --no-audit --progress=false',
+    );
+    expect(install).toContain('npm run postinstall');
+    expect(install).toContain('npm run generate');
+    expect(install).not.toContain('QWEN_SKIP_PREPARE');
     expect(generate).toContain('timeout-minutes: 35');
     expect(generate).toContain('continue-on-error: true');
 
@@ -101,6 +115,11 @@ describe('stable release notes workflow', () => {
       'gh release edit "${RELEASE_TAG}" --notes-file "${RELEASE_NOTES_FILE}"',
     );
     expect(changelog).not.toContain('continue-on-error: true');
+    expect(changelog).toContain("GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'");
+    expect(changelog).toContain('gh auth setup-git');
+    expect(changelog.indexOf('gh auth setup-git')).toBeLessThan(
+      changelog.indexOf('git push origin "${BRANCH_NAME}"'),
+    );
   });
 
   it('updates the changelog before opening the release PR', () => {
