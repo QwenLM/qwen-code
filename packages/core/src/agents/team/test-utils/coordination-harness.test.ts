@@ -6,7 +6,7 @@
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { AgentEventType } from '../../runtime/agent-events.js';
 import { AgentStatus } from '../../runtime/agent-types.js';
 import { TeamCoordinationHarness } from './coordination-harness.js';
@@ -20,10 +20,20 @@ import { TaskUpdateTool } from '../../../tools/task-update.js';
 import type { TaskUpdateParams } from '../../../tools/task-update.js';
 import type { Config } from '../../../config/config.js';
 
-const { mockSendStructuredMessage, mockWriteMessage } = vi.hoisted(() => ({
-  mockSendStructuredMessage: vi.fn(),
-  mockWriteMessage: vi.fn(),
-}));
+const { mockSendStructuredMessage, mockWriteMessage, realMailbox } = vi.hoisted(
+  () => ({
+    mockSendStructuredMessage: vi.fn(),
+    mockWriteMessage: vi.fn(),
+    realMailbox: {
+      sendStructuredMessage: undefined as
+        | typeof import('../mailbox.js').sendStructuredMessage
+        | undefined,
+      writeMessage: undefined as
+        | typeof import('../mailbox.js').writeMessage
+        | undefined,
+    },
+  }),
+);
 
 // Mock Storage so all file I/O uses the harness's temp dir.
 vi.mock('../../../config/storage.js', async (importOriginal) => {
@@ -44,6 +54,8 @@ vi.mock('../../../config/storage.js', async (importOriginal) => {
 
 vi.mock('../mailbox.js', async (importOriginal) => {
   const original = await importOriginal<typeof import('../mailbox.js')>();
+  realMailbox.sendStructuredMessage = original.sendStructuredMessage;
+  realMailbox.writeMessage = original.writeMessage;
   mockSendStructuredMessage.mockImplementation(original.sendStructuredMessage);
   mockWriteMessage.mockImplementation(original.writeMessage);
   return {
@@ -61,6 +73,39 @@ function setMockDir(dir: string): void {
       __setMockGlobalDir: (d: string) => void;
     }
   ).__setMockGlobalDir(dir);
+}
+
+function gateNextMailboxWrite<TArgs extends unknown[]>(
+  mailboxWrite: {
+    mockImplementationOnce(
+      implementation: (...args: TArgs) => Promise<void>,
+    ): unknown;
+  },
+  options: {
+    delegate?: (...args: TArgs) => Promise<void>;
+    rejectWith?: Error;
+  } = {},
+): {
+  started: Promise<void>;
+  release: () => void;
+} {
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    markStarted = resolve;
+  });
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  mailboxWrite.mockImplementationOnce(async (...args: TArgs) => {
+    markStarted();
+    await gate;
+    if (options.rejectWith) {
+      throw options.rejectWith;
+    }
+    await options.delegate?.(...args);
+  });
+  return { started, release };
 }
 
 // ─── Helpers ──────────────────────────────────────────────────
@@ -88,6 +133,15 @@ function expectTeamMessage(
 
 describe('TeamCoordinationHarness', () => {
   let harness: TeamCoordinationHarness | undefined;
+
+  beforeEach(() => {
+    mockSendStructuredMessage.mockReset();
+    mockWriteMessage.mockReset();
+    mockSendStructuredMessage.mockImplementation(
+      realMailbox.sendStructuredMessage!,
+    );
+    mockWriteMessage.mockImplementation(realMailbox.writeMessage!);
+  });
 
   afterEach(async () => {
     if (harness) {
@@ -934,6 +988,54 @@ describe('TeamCoordinationHarness', () => {
       await h.waitForStatus('worker', AgentStatus.COMPLETED);
     });
 
+    it('delivers every shutdown consumed by one idle flush exactly once', async () => {
+      const h = await createHarness();
+      const target = await h.spawnTeammate('target', {
+        onMessage: () => 'stay_running',
+      });
+      await h.teamManager.sendMessage('target', 'stay busy', 'leader');
+      await h.waitForMessages('target', 1);
+
+      await h.teamManager.requestShutdown('target');
+      await h.teamManager.requestShutdown('target');
+      expect(h.teamManager.validateTaskOwner('target')).toEqual(
+        expect.stringContaining('shutdown is already pending'),
+      );
+
+      target.goIdle();
+      await h.waitForMessages('target', 2);
+      await h.teamManager.sendMessage(
+        'leader',
+        'shutdown_rejected: first request',
+        'target',
+      );
+      expect(h.teamManager.validateTaskOwner('target')).toEqual(
+        expect.stringContaining('shutdown is already pending'),
+      );
+
+      target.goIdle();
+      await vi.waitFor(
+        () => {
+          expect(target.getReceivedMessages()).toHaveLength(3);
+        },
+        { timeout: 250 },
+      );
+      await h.teamManager.sendMessage(
+        'leader',
+        'shutdown_rejected: second request',
+        'target',
+      );
+      expect(h.teamManager.validateTaskOwner('target')).toBeUndefined();
+
+      target.goIdle();
+      await (
+        h.teamManager as unknown as {
+          flushNextMessage(agentId: string, agentName: string): Promise<void>;
+        }
+      ).flushNextMessage(target.agentId, target.agentName);
+      expect(target.getReceivedMessages()).toHaveLength(3);
+    });
+
     it('does not gate a teammate when the shutdown mailbox write fails', async () => {
       const h = await createHarness();
       const target = await h.spawnTeammate('target', {
@@ -974,6 +1076,23 @@ describe('TeamCoordinationHarness', () => {
       );
     });
 
+    it('keeps markShutdownRequested idempotent until one response settles', async () => {
+      const h = await createHarness();
+      await h.spawnTeammate('target', {
+        onMessage: () => {},
+      });
+
+      h.teamManager.markShutdownRequested('target');
+      h.teamManager.markShutdownRequested('target');
+      await h.teamManager.sendMessage(
+        'leader',
+        'shutdown_rejected: marker resolved',
+        'target',
+      );
+
+      expect(h.teamManager.validateTaskOwner('target')).toBeUndefined();
+    });
+
     it('does not restore a marker after a failed shutdown request is rejected', async () => {
       const h = await createHarness();
       await h.spawnTeammate('target', {
@@ -981,31 +1100,21 @@ describe('TeamCoordinationHarness', () => {
       });
       h.teamManager.markShutdownRequested('target');
 
-      let markWriteStarted!: () => void;
-      const writeStarted = new Promise<void>((resolve) => {
-        markWriteStarted = resolve;
-      });
-      let releaseWrite!: () => void;
-      const writeGate = new Promise<void>((resolve) => {
-        releaseWrite = resolve;
-      });
       const mailboxError = new Error('EIO: mailbox write failed');
-      mockSendStructuredMessage.mockImplementationOnce(async () => {
-        markWriteStarted();
-        await writeGate;
-        throw mailboxError;
+      const write = gateNextMailboxWrite(mockSendStructuredMessage, {
+        rejectWith: mailboxError,
       });
 
       const shutdown = h.teamManager.requestShutdown('target');
       const shutdownRejection = shutdown.catch((error: unknown) => error);
-      await writeStarted;
+      await write.started;
       await h.teamManager.sendMessage(
         'leader',
         'shutdown_rejected: still working',
         'target',
       );
 
-      releaseWrite();
+      write.release();
       expect(await shutdownRejection).toBe(mailboxError);
       expect(h.teamManager.validateTaskOwner('target')).toBeUndefined();
     });
@@ -1017,69 +1126,34 @@ describe('TeamCoordinationHarness', () => {
       });
       await h.teamManager.requestShutdown('target');
 
-      let markRetryStarted!: () => void;
-      const retryStarted = new Promise<void>((resolve) => {
-        markRetryStarted = resolve;
-      });
-      let releaseRetry!: () => void;
-      const retryGate = new Promise<void>((resolve) => {
-        releaseRetry = resolve;
-      });
-      let markNextRequestStarted!: () => void;
-      const nextRequestStarted = new Promise<void>((resolve) => {
-        markNextRequestStarted = resolve;
-      });
-      let releaseNextRequest!: () => void;
-      const nextRequestGate = new Promise<void>((resolve) => {
-        releaseNextRequest = resolve;
-      });
       const nextRequestError = new Error('EIO: next mailbox write failed');
-      const writeShutdown = mockSendStructuredMessage.getMockImplementation();
-      mockSendStructuredMessage
-        .mockImplementationOnce(
-          async (...args: Parameters<typeof sendStructuredMessage>) => {
-            markRetryStarted();
-            await retryGate;
-            await writeShutdown!(...args);
-          },
-        )
-        .mockImplementationOnce(async () => {
-          markNextRequestStarted();
-          await nextRequestGate;
-          throw nextRequestError;
-        });
+      const retryWrite = gateNextMailboxWrite(mockSendStructuredMessage, {
+        delegate: realMailbox.sendStructuredMessage!,
+      });
+      const nextRequestWrite = gateNextMailboxWrite(mockSendStructuredMessage, {
+        rejectWith: nextRequestError,
+      });
 
       const retry = h.teamManager.requestShutdown('target');
-      await retryStarted;
+      await retryWrite.started;
 
-      let markRejectionStarted!: () => void;
-      const rejectionStarted = new Promise<void>((resolve) => {
-        markRejectionStarted = resolve;
-      });
-      let releaseRejection!: () => void;
-      const rejectionGate = new Promise<void>((resolve) => {
-        releaseRejection = resolve;
-      });
-      mockWriteMessage.mockImplementationOnce(async () => {
-        markRejectionStarted();
-        await rejectionGate;
-      });
+      const rejectionWrite = gateNextMailboxWrite(mockWriteMessage);
       const rejection = h.teamManager.sendMessage(
         'leader',
         'shutdown_rejected: retry later',
         'target',
       );
-      await rejectionStarted;
+      await rejectionWrite.started;
 
       const nextRequest = h.teamManager.requestShutdown('target');
       const nextRequestRejection = nextRequest.catch((error: unknown) => error);
-      await nextRequestStarted;
+      await nextRequestWrite.started;
 
-      releaseRetry();
+      retryWrite.release();
       await retry;
-      releaseNextRequest();
+      nextRequestWrite.release();
       expect(await nextRequestRejection).toBe(nextRequestError);
-      releaseRejection();
+      rejectionWrite.release();
       await rejection;
 
       expect(h.teamManager.validateTaskOwner('target')).toEqual(
@@ -1100,46 +1174,25 @@ describe('TeamCoordinationHarness', () => {
       });
       h.teamManager.markShutdownRequested('target');
 
-      let markResponseStarted!: () => void;
-      const responseStarted = new Promise<void>((resolve) => {
-        markResponseStarted = resolve;
-      });
-      let releaseResponse!: () => void;
-      const responseGate = new Promise<void>((resolve) => {
-        releaseResponse = resolve;
-      });
-      mockWriteMessage.mockImplementationOnce(async () => {
-        markResponseStarted();
-        await responseGate;
-      });
+      const responseWrite = gateNextMailboxWrite(mockWriteMessage);
       const markerResponse = h.teamManager.sendMessage(
         'leader',
         'shutdown_rejected: keep working',
         'target',
       );
-      await responseStarted;
+      await responseWrite.started;
 
-      let markRequestStarted!: () => void;
-      const requestStarted = new Promise<void>((resolve) => {
-        markRequestStarted = resolve;
-      });
-      let releaseRequest!: () => void;
-      const requestGate = new Promise<void>((resolve) => {
-        releaseRequest = resolve;
-      });
       const requestError = new Error('EIO: real mailbox write failed');
-      mockSendStructuredMessage.mockImplementationOnce(async () => {
-        markRequestStarted();
-        await requestGate;
-        throw requestError;
+      const requestWrite = gateNextMailboxWrite(mockSendStructuredMessage, {
+        rejectWith: requestError,
       });
       const request = h.teamManager.requestShutdown('target');
       const requestRejection = request.catch((error: unknown) => error);
-      await requestStarted;
+      await requestWrite.started;
 
-      releaseResponse();
+      responseWrite.release();
       await markerResponse;
-      releaseRequest();
+      requestWrite.release();
       expect(await requestRejection).toBe(requestError);
 
       expect(h.teamManager.validateTaskOwner('target')).toBeUndefined();
@@ -1180,39 +1233,13 @@ describe('TeamCoordinationHarness', () => {
       });
       await h.teamManager.requestShutdown('target');
 
-      let markFirstResponseStarted!: () => void;
-      const firstResponseStarted = new Promise<void>((resolve) => {
-        markFirstResponseStarted = resolve;
-      });
-      let releaseFirstResponse!: () => void;
-      const firstResponseGate = new Promise<void>((resolve) => {
-        releaseFirstResponse = resolve;
-      });
-      let markBackupResponseStarted!: () => void;
-      const backupResponseStarted = new Promise<void>((resolve) => {
-        markBackupResponseStarted = resolve;
-      });
-      let releaseBackupResponse!: () => void;
-      const backupResponseGate = new Promise<void>((resolve) => {
-        releaseBackupResponse = resolve;
-      });
       const firstResponseError = new Error('EIO: first response write failed');
-      const writeLeaderMessage = mockWriteMessage.getMockImplementation();
-      mockWriteMessage
-        .mockImplementationOnce(async () => {
-          markFirstResponseStarted();
-          await firstResponseGate;
-          throw firstResponseError;
-        })
-        .mockImplementationOnce(
-          async (
-            ...args: Parameters<NonNullable<typeof writeLeaderMessage>>
-          ) => {
-            markBackupResponseStarted();
-            await backupResponseGate;
-            await writeLeaderMessage!(...args);
-          },
-        );
+      const firstWrite = gateNextMailboxWrite(mockWriteMessage, {
+        rejectWith: firstResponseError,
+      });
+      const backupWrite = gateNextMailboxWrite(mockWriteMessage, {
+        delegate: realMailbox.writeMessage!,
+      });
 
       const firstResponse = h.teamManager.sendMessage(
         'leader',
@@ -1222,20 +1249,20 @@ describe('TeamCoordinationHarness', () => {
       const firstResponseRejection = firstResponse.catch(
         (error: unknown) => error,
       );
-      await firstResponseStarted;
+      await firstWrite.started;
 
       const backupResponse = h.teamManager.sendMessage(
         'leader',
         'shutdown_approved',
         'target',
       );
-      await backupResponseStarted;
+      await backupWrite.started;
 
-      releaseFirstResponse();
+      firstWrite.release();
       expect(await firstResponseRejection).toBe(firstResponseError);
       expect(target.getStatus()).not.toBe(AgentStatus.CANCELLED);
 
-      releaseBackupResponse();
+      backupWrite.release();
       await backupResponse;
       expect(target.getStatus()).toBe(AgentStatus.CANCELLED);
     });
@@ -1247,29 +1274,16 @@ describe('TeamCoordinationHarness', () => {
       });
       await h.teamManager.requestShutdown('target');
 
-      let markFirstResponseStarted!: () => void;
-      const firstResponseStarted = new Promise<void>((resolve) => {
-        markFirstResponseStarted = resolve;
+      const firstWrite = gateNextMailboxWrite(mockWriteMessage, {
+        delegate: realMailbox.writeMessage!,
       });
-      let releaseFirstResponse!: () => void;
-      const firstResponseGate = new Promise<void>((resolve) => {
-        releaseFirstResponse = resolve;
-      });
-      const writeLeaderMessage = mockWriteMessage.getMockImplementation();
-      mockWriteMessage.mockImplementationOnce(
-        async (...args: Parameters<NonNullable<typeof writeLeaderMessage>>) => {
-          markFirstResponseStarted();
-          await firstResponseGate;
-          await writeLeaderMessage!(...args);
-        },
-      );
 
       const firstResponse = h.teamManager.sendMessage(
         'leader',
         'shutdown_rejected: first response',
         'target',
       );
-      await firstResponseStarted;
+      await firstWrite.started;
       await h.teamManager.sendMessage(
         'leader',
         'shutdown_rejected: backup response',
@@ -1277,7 +1291,7 @@ describe('TeamCoordinationHarness', () => {
       );
       await h.teamManager.requestShutdown('target');
 
-      releaseFirstResponse();
+      firstWrite.release();
       await firstResponse;
 
       const responses = (await readInbox(h.teamName, 'leader')).filter(
@@ -1301,6 +1315,37 @@ describe('TeamCoordinationHarness', () => {
       expect(h.teamManager.validateTaskOwner('target')).toBeUndefined();
     });
 
+    it('stays gated between duplicate response settlements', async () => {
+      const h = await createHarness();
+      await h.spawnTeammate('target', {
+        onMessage: () => {},
+      });
+      await h.teamManager.requestShutdown('target');
+
+      const firstWrite = gateNextMailboxWrite(mockWriteMessage, {
+        delegate: realMailbox.writeMessage!,
+      });
+      const firstResponse = h.teamManager.sendMessage(
+        'leader',
+        'shutdown_rejected: first response',
+        'target',
+      );
+      await firstWrite.started;
+
+      await h.teamManager.sendMessage(
+        'leader',
+        'shutdown_rejected: duplicate response',
+        'target',
+      );
+      expect(h.teamManager.validateTaskOwner('target')).toEqual(
+        expect.stringContaining('shutdown is already pending'),
+      );
+
+      firstWrite.release();
+      await firstResponse;
+      expect(h.teamManager.validateTaskOwner('target')).toBeUndefined();
+    });
+
     it('reserves separate tokens for two concurrent responses when available', async () => {
       const h = await createHarness();
       await h.spawnTeammate('target', {
@@ -1309,52 +1354,29 @@ describe('TeamCoordinationHarness', () => {
       await h.teamManager.requestShutdown('target');
       await h.teamManager.requestShutdown('target');
 
-      let markFirstResponseStarted!: () => void;
-      const firstResponseStarted = new Promise<void>((resolve) => {
-        markFirstResponseStarted = resolve;
-      });
-      let releaseFirstResponse!: () => void;
-      const firstResponseGate = new Promise<void>((resolve) => {
-        releaseFirstResponse = resolve;
-      });
-      let markSecondResponseStarted!: () => void;
-      const secondResponseStarted = new Promise<void>((resolve) => {
-        markSecondResponseStarted = resolve;
-      });
-      let releaseSecondResponse!: () => void;
-      const secondResponseGate = new Promise<void>((resolve) => {
-        releaseSecondResponse = resolve;
-      });
-      mockWriteMessage
-        .mockImplementationOnce(async () => {
-          markFirstResponseStarted();
-          await firstResponseGate;
-        })
-        .mockImplementationOnce(async () => {
-          markSecondResponseStarted();
-          await secondResponseGate;
-        });
+      const firstWrite = gateNextMailboxWrite(mockWriteMessage);
+      const secondWrite = gateNextMailboxWrite(mockWriteMessage);
 
       const firstResponse = h.teamManager.sendMessage(
         'leader',
         'shutdown_rejected: first token',
         'target',
       );
-      await firstResponseStarted;
+      await firstWrite.started;
       const secondResponse = h.teamManager.sendMessage(
         'leader',
         'shutdown_rejected: second token',
         'target',
       );
-      await secondResponseStarted;
+      await secondWrite.started;
 
-      releaseSecondResponse();
+      secondWrite.release();
       await secondResponse;
       expect(h.teamManager.validateTaskOwner('target')).toEqual(
         expect.stringContaining('shutdown is already pending'),
       );
 
-      releaseFirstResponse();
+      firstWrite.release();
       await firstResponse;
       expect(h.teamManager.validateTaskOwner('target')).toBeUndefined();
     });
@@ -1380,33 +1402,40 @@ describe('TeamCoordinationHarness', () => {
       expect(h.teamManager.validateTaskOwner('target')).toBeUndefined();
     });
 
+    it('aborts an approved teammate when the message listener throws', async () => {
+      const h = await createHarness();
+      const target = await h.spawnTeammate('target', {
+        onMessage: () => {},
+      });
+      await h.teamManager.requestShutdown('target');
+      const eventError = new Error('message listener failed');
+      h.teamManager.getEventEmitter().on(TeamEventType.MESSAGE_SENT, () => {
+        throw eventError;
+      });
+
+      await expect(
+        h.teamManager.sendMessage('leader', 'shutdown_approved', 'target'),
+      ).rejects.toBe(eventError);
+      expect(target.getStatus()).toBe(AgentStatus.CANCELLED);
+    });
+
     it('does not classify a response while only a request write is in flight', async () => {
       const h = await createHarness();
       const target = await h.spawnTeammate('target', {
         onMessage: () => {},
       });
-      let markRequestStarted!: () => void;
-      const requestStarted = new Promise<void>((resolve) => {
-        markRequestStarted = resolve;
-      });
-      let releaseRequest!: () => void;
-      const requestGate = new Promise<void>((resolve) => {
-        releaseRequest = resolve;
-      });
       const requestError = new Error('EIO: request was not delivered');
-      mockSendStructuredMessage.mockImplementationOnce(async () => {
-        markRequestStarted();
-        await requestGate;
-        throw requestError;
+      const requestWrite = gateNextMailboxWrite(mockSendStructuredMessage, {
+        rejectWith: requestError,
       });
 
       const request = h.teamManager.requestShutdown('target');
       const requestRejection = request.catch((error: unknown) => error);
-      await requestStarted;
+      await requestWrite.started;
       await h.teamManager.sendMessage('leader', 'shutdown_approved', 'target');
       expect(target.getStatus()).not.toBe(AgentStatus.CANCELLED);
 
-      releaseRequest();
+      requestWrite.release();
       expect(await requestRejection).toBe(requestError);
       expect(h.teamManager.validateTaskOwner('target')).toBeUndefined();
     });
@@ -1434,25 +1463,13 @@ describe('TeamCoordinationHarness', () => {
       await h.spawnTeammate('target', {
         onMessage: () => {},
       });
-      let releaseFirstWrite!: () => void;
-      const firstWriteGate = new Promise<void>((resolve) => {
-        releaseFirstWrite = resolve;
-      });
-      let markFirstWriteStarted!: () => void;
-      const firstWriteStarted = new Promise<void>((resolve) => {
-        markFirstWriteStarted = resolve;
-      });
-      mockSendStructuredMessage
-        .mockImplementationOnce(async () => {
-          markFirstWriteStarted();
-          await firstWriteGate;
-        })
-        .mockRejectedValueOnce(
-          new Error('EIO: concurrent mailbox write failed'),
-        );
+      const firstWrite = gateNextMailboxWrite(mockSendStructuredMessage);
+      mockSendStructuredMessage.mockRejectedValueOnce(
+        new Error('EIO: concurrent mailbox write failed'),
+      );
 
       const firstShutdown = h.teamManager.requestShutdown('target');
-      await firstWriteStarted;
+      await firstWrite.started;
       await expect(h.teamManager.requestShutdown('target')).rejects.toThrow(
         'EIO: concurrent mailbox write failed',
       );
@@ -1460,7 +1477,7 @@ describe('TeamCoordinationHarness', () => {
         expect.stringContaining('shutdown is already pending'),
       );
 
-      releaseFirstWrite();
+      firstWrite.release();
       await firstShutdown;
       expect(h.teamManager.validateTaskOwner('target')).toEqual(
         expect.stringContaining('shutdown is already pending'),
@@ -1475,28 +1492,17 @@ describe('TeamCoordinationHarness', () => {
 
       await h.teamManager.requestShutdown('target');
 
-      let markWriteStarted!: () => void;
-      const writeStarted = new Promise<void>((resolve) => {
-        markWriteStarted = resolve;
-      });
-      let releaseWrite!: () => void;
-      const writeGate = new Promise<void>((resolve) => {
-        releaseWrite = resolve;
-      });
-      mockSendStructuredMessage.mockImplementationOnce(async () => {
-        markWriteStarted();
-        await writeGate;
-      });
+      const write = gateNextMailboxWrite(mockSendStructuredMessage);
 
       const concurrentShutdown = h.teamManager.requestShutdown('target');
-      await writeStarted;
+      await write.started;
       await h.teamManager.sendMessage(
         'leader',
         'shutdown_rejected: still working',
         'target',
       );
 
-      releaseWrite();
+      write.release();
       await concurrentShutdown;
 
       expect(h.teamManager.validateTaskOwner('target')).toEqual(
@@ -1512,21 +1518,10 @@ describe('TeamCoordinationHarness', () => {
 
       await h.teamManager.requestShutdown('target');
 
-      let markOldWriteStarted!: () => void;
-      const oldWriteStarted = new Promise<void>((resolve) => {
-        markOldWriteStarted = resolve;
-      });
-      let releaseOldWrite!: () => void;
-      const oldWriteGate = new Promise<void>((resolve) => {
-        releaseOldWrite = resolve;
-      });
-      mockSendStructuredMessage.mockImplementationOnce(async () => {
-        markOldWriteStarted();
-        await oldWriteGate;
-      });
+      const oldWrite = gateNextMailboxWrite(mockSendStructuredMessage);
 
       const oldShutdown = h.teamManager.requestShutdown('target');
-      await oldWriteStarted;
+      await oldWrite.started;
       await h.teamManager.sendMessage(
         'leader',
         'shutdown_rejected: still working',
@@ -1534,7 +1529,7 @@ describe('TeamCoordinationHarness', () => {
       );
 
       await h.teamManager.requestShutdown('target');
-      releaseOldWrite();
+      oldWrite.release();
       await oldShutdown;
 
       expect(h.teamManager.validateTaskOwner('target')).toEqual(
@@ -1550,24 +1545,14 @@ describe('TeamCoordinationHarness', () => {
 
       await h.teamManager.requestShutdown('target');
 
-      let markOldWriteStarted!: () => void;
-      const oldWriteStarted = new Promise<void>((resolve) => {
-        markOldWriteStarted = resolve;
-      });
-      let releaseOldWrite!: () => void;
-      const oldWriteGate = new Promise<void>((resolve) => {
-        releaseOldWrite = resolve;
-      });
       const oldWriteError = new Error('EIO: old mailbox write failed');
-      mockSendStructuredMessage.mockImplementationOnce(async () => {
-        markOldWriteStarted();
-        await oldWriteGate;
-        throw oldWriteError;
+      const oldWrite = gateNextMailboxWrite(mockSendStructuredMessage, {
+        rejectWith: oldWriteError,
       });
 
       const oldShutdown = h.teamManager.requestShutdown('target');
       const oldShutdownRejection = oldShutdown.catch((error: unknown) => error);
-      await oldWriteStarted;
+      await oldWrite.started;
       await h.teamManager.sendMessage(
         'leader',
         'shutdown_rejected: still working',
@@ -1580,7 +1565,7 @@ describe('TeamCoordinationHarness', () => {
         newWriteError,
       );
 
-      releaseOldWrite();
+      oldWrite.release();
       expect(await oldShutdownRejection).toBe(oldWriteError);
 
       expect(h.teamManager.validateTaskOwner('target')).toBeUndefined();
@@ -1596,25 +1581,12 @@ describe('TeamCoordinationHarness', () => {
 
       await h.teamManager.requestShutdown('target');
 
-      let markRetryStarted!: () => void;
-      const retryStarted = new Promise<void>((resolve) => {
-        markRetryStarted = resolve;
+      const retryWrite = gateNextMailboxWrite(mockSendStructuredMessage, {
+        delegate: realMailbox.sendStructuredMessage!,
       });
-      let releaseRetry!: () => void;
-      const retryGate = new Promise<void>((resolve) => {
-        releaseRetry = resolve;
-      });
-      const writeShutdown = mockSendStructuredMessage.getMockImplementation();
-      mockSendStructuredMessage.mockImplementationOnce(
-        async (...args: Parameters<typeof sendStructuredMessage>) => {
-          markRetryStarted();
-          await retryGate;
-          await writeShutdown!(...args);
-        },
-      );
 
       const retry = h.teamManager.requestShutdown('target');
-      await retryStarted;
+      await retryWrite.started;
       await h.teamManager.sendMessage(
         'leader',
         'shutdown_rejected: still working',
@@ -1627,7 +1599,7 @@ describe('TeamCoordinationHarness', () => {
         newWriteError,
       );
 
-      releaseRetry();
+      retryWrite.release();
       await retry;
 
       expect(
@@ -1652,21 +1624,10 @@ describe('TeamCoordinationHarness', () => {
 
         await h.teamManager.requestShutdown('target');
 
-        let markRetryStarted!: () => void;
-        const retryStarted = new Promise<void>((resolve) => {
-          markRetryStarted = resolve;
-        });
-        let releaseRetry!: () => void;
-        const retryGate = new Promise<void>((resolve) => {
-          releaseRetry = resolve;
-        });
-        mockSendStructuredMessage.mockImplementationOnce(async () => {
-          markRetryStarted();
-          await retryGate;
-        });
+        const retryWrite = gateNextMailboxWrite(mockSendStructuredMessage);
 
         const retry = h.teamManager.requestShutdown('target');
-        await retryStarted;
+        await retryWrite.started;
         await h.teamManager.sendMessage(
           'leader',
           'shutdown_rejected: still working',
@@ -1679,28 +1640,17 @@ describe('TeamCoordinationHarness', () => {
           h.teamManager.markShutdownRequested('target');
         }
 
-        let markResponseStarted!: () => void;
-        const responseStarted = new Promise<void>((resolve) => {
-          markResponseStarted = resolve;
-        });
-        let releaseResponse!: () => void;
-        const responseGate = new Promise<void>((resolve) => {
-          releaseResponse = resolve;
-        });
-        mockWriteMessage.mockImplementationOnce(async () => {
-          markResponseStarted();
-          await responseGate;
-        });
+        const responseWrite = gateNextMailboxWrite(mockWriteMessage);
 
         const approval = h.teamManager.sendMessage(
           'leader',
           'shutdown_approved',
           'target',
         );
-        await responseStarted;
-        releaseRetry();
+        await responseWrite.started;
+        retryWrite.release();
         await retry;
-        releaseResponse();
+        responseWrite.release();
         await approval;
 
         expect(target.getStatus()).toBe(AgentStatus.CANCELLED);
@@ -1715,28 +1665,17 @@ describe('TeamCoordinationHarness', () => {
 
       await h.teamManager.requestShutdown('target');
 
-      let markRetryStarted!: () => void;
-      const retryStarted = new Promise<void>((resolve) => {
-        markRetryStarted = resolve;
-      });
-      let releaseRetry!: () => void;
-      const retryGate = new Promise<void>((resolve) => {
-        releaseRetry = resolve;
-      });
-      mockSendStructuredMessage.mockImplementationOnce(async () => {
-        markRetryStarted();
-        await retryGate;
-      });
+      const retryWrite = gateNextMailboxWrite(mockSendStructuredMessage);
 
       const retry = h.teamManager.requestShutdown('target');
-      await retryStarted;
+      await retryWrite.started;
       await h.teamManager.sendMessage(
         'leader',
         'shutdown_rejected: still working',
         'target',
       );
 
-      releaseRetry();
+      retryWrite.release();
       await retry;
       await h.teamManager.sendMessage('leader', 'shutdown_approved', 'target');
 
@@ -1751,25 +1690,14 @@ describe('TeamCoordinationHarness', () => {
 
       await h.teamManager.requestShutdown('target');
 
-      let markOldResponseStarted!: () => void;
-      const oldResponseStarted = new Promise<void>((resolve) => {
-        markOldResponseStarted = resolve;
-      });
-      let releaseOldResponse!: () => void;
-      const oldResponseGate = new Promise<void>((resolve) => {
-        releaseOldResponse = resolve;
-      });
-      mockWriteMessage.mockImplementationOnce(async () => {
-        markOldResponseStarted();
-        await oldResponseGate;
-      });
+      const oldResponseWrite = gateNextMailboxWrite(mockWriteMessage);
 
       const oldApproval = h.teamManager.sendMessage(
         'leader',
         'shutdown_approved',
         'target',
       );
-      await oldResponseStarted;
+      await oldResponseWrite.started;
       await h.teamManager.sendMessage(
         'leader',
         'shutdown_rejected: continue working',
@@ -1777,7 +1705,7 @@ describe('TeamCoordinationHarness', () => {
       );
       await h.teamManager.requestShutdown('target');
 
-      releaseOldResponse();
+      oldResponseWrite.release();
       await oldApproval;
 
       expect(target.getStatus()).not.toBe(AgentStatus.CANCELLED);
@@ -1794,25 +1722,14 @@ describe('TeamCoordinationHarness', () => {
 
       await h.teamManager.requestShutdown('target');
 
-      let markOldResponseStarted!: () => void;
-      const oldResponseStarted = new Promise<void>((resolve) => {
-        markOldResponseStarted = resolve;
-      });
-      let releaseOldResponse!: () => void;
-      const oldResponseGate = new Promise<void>((resolve) => {
-        releaseOldResponse = resolve;
-      });
-      mockWriteMessage.mockImplementationOnce(async () => {
-        markOldResponseStarted();
-        await oldResponseGate;
-      });
+      const oldResponseWrite = gateNextMailboxWrite(mockWriteMessage);
 
       const oldRejection = h.teamManager.sendMessage(
         'leader',
         'shutdown_rejected: old request',
         'target',
       );
-      await oldResponseStarted;
+      await oldResponseWrite.started;
       await h.teamManager.sendMessage(
         'leader',
         'shutdown_rejected: resolve old request',
@@ -1820,7 +1737,7 @@ describe('TeamCoordinationHarness', () => {
       );
       await h.teamManager.requestShutdown('target');
 
-      releaseOldResponse();
+      oldResponseWrite.release();
       await oldRejection;
 
       expect(h.teamManager.validateTaskOwner('target')).toEqual(
@@ -1837,28 +1754,17 @@ describe('TeamCoordinationHarness', () => {
         });
         await h.teamManager.requestShutdown('target');
 
-        let markOldResponseStarted!: () => void;
-        const oldResponseStarted = new Promise<void>((resolve) => {
-          markOldResponseStarted = resolve;
-        });
-        let releaseOldResponse!: () => void;
-        const oldResponseGate = new Promise<void>((resolve) => {
-          releaseOldResponse = resolve;
-        });
-        mockWriteMessage.mockImplementationOnce(async () => {
-          markOldResponseStarted();
-          await oldResponseGate;
-        });
+        const oldResponseWrite = gateNextMailboxWrite(mockWriteMessage);
 
         const staleResponse = h.teamManager.sendMessage(
           'leader',
           oldResponse,
           'target',
         );
-        await oldResponseStarted;
+        await oldResponseWrite.started;
         h.teamManager.markShutdownRequested('target');
 
-        releaseOldResponse();
+        oldResponseWrite.release();
         await staleResponse;
 
         if (oldResponse === 'shutdown_approved') {
@@ -1881,28 +1787,17 @@ describe('TeamCoordinationHarness', () => {
         });
         h.teamManager.markShutdownRequested('target');
 
-        let markOldResponseStarted!: () => void;
-        const oldResponseStarted = new Promise<void>((resolve) => {
-          markOldResponseStarted = resolve;
-        });
-        let releaseOldResponse!: () => void;
-        const oldResponseGate = new Promise<void>((resolve) => {
-          releaseOldResponse = resolve;
-        });
-        mockWriteMessage.mockImplementationOnce(async () => {
-          markOldResponseStarted();
-          await oldResponseGate;
-        });
+        const oldResponseWrite = gateNextMailboxWrite(mockWriteMessage);
 
         const staleResponse = h.teamManager.sendMessage(
           'leader',
           oldResponse,
           'target',
         );
-        await oldResponseStarted;
+        await oldResponseWrite.started;
         await h.teamManager.requestShutdown('target');
 
-        releaseOldResponse();
+        oldResponseWrite.release();
         await staleResponse;
 
         if (oldResponse === 'shutdown_approved') {
@@ -1925,25 +1820,14 @@ describe('TeamCoordinationHarness', () => {
         });
         h.teamManager.markShutdownRequested('target');
 
-        let markOldResponseStarted!: () => void;
-        const oldResponseStarted = new Promise<void>((resolve) => {
-          markOldResponseStarted = resolve;
-        });
-        let releaseOldResponse!: () => void;
-        const oldResponseGate = new Promise<void>((resolve) => {
-          releaseOldResponse = resolve;
-        });
-        mockWriteMessage.mockImplementationOnce(async () => {
-          markOldResponseStarted();
-          await oldResponseGate;
-        });
+        const oldResponseWrite = gateNextMailboxWrite(mockWriteMessage);
 
         const staleResponse = h.teamManager.sendMessage(
           'leader',
           oldResponse,
           'target',
         );
-        await oldResponseStarted;
+        await oldResponseWrite.started;
         await h.teamManager.sendMessage(
           'leader',
           'shutdown_rejected: clear old marker',
@@ -1951,7 +1835,7 @@ describe('TeamCoordinationHarness', () => {
         );
         h.teamManager.markShutdownRequested('target');
 
-        releaseOldResponse();
+        oldResponseWrite.release();
         await staleResponse;
 
         expect(h.teamManager.validateTaskOwner('target')).toEqual(
@@ -1966,21 +1850,10 @@ describe('TeamCoordinationHarness', () => {
       const target = await h.spawnTeammate('target', {
         onMessage: () => {},
       });
-      let markWriteStarted!: () => void;
-      const writeStarted = new Promise<void>((resolve) => {
-        markWriteStarted = resolve;
-      });
-      let releaseWrite!: () => void;
-      const writeGate = new Promise<void>((resolve) => {
-        releaseWrite = resolve;
-      });
-      mockSendStructuredMessage.mockImplementationOnce(async () => {
-        markWriteStarted();
-        await writeGate;
-      });
+      const write = gateNextMailboxWrite(mockSendStructuredMessage);
 
       const shutdown = h.teamManager.requestShutdown('target');
-      await writeStarted;
+      await write.started;
       const task = await createTask(h.teamName, {
         subject: 'During pending shutdown',
         description: 'Must remain unassigned',
@@ -1996,7 +1869,7 @@ describe('TeamCoordinationHarness', () => {
       expect(pending?.owner).toBeUndefined();
       expect(target.getReceivedMessages()).toHaveLength(0);
 
-      releaseWrite();
+      write.release();
       await shutdown;
     });
 

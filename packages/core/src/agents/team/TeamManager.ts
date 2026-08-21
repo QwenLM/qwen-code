@@ -237,7 +237,16 @@ export class TeamManager {
     | ((message: string, display: string) => void)
     | null = null;
 
-  /** Outstanding shutdown tokens and their response reservations. */
+  /**
+   * Shutdown state is isolated per teammate, so one teammate's writes or
+   * responses cannot gate assignments or consume requests for another.
+   * Each successful request write adds exactly one delivered token, while
+   * repeated test markers share at most one marker token. A response reserves
+   * a specific token before its mailbox write; the reservation keeps the gate
+   * closed until settlement, a successful settlement consumes that token at
+   * most once, and a failed settlement leaves it available. A ledger is
+   * removed only after all writes, tokens, and response reservations settle.
+   */
   private readonly shutdownLedgers = new Map<string, ShutdownLedger>();
 
   /** Per-agent last activity timestamp (updated on events). */
@@ -1775,7 +1784,9 @@ export class TeamManager {
         'shutdown_request',
       );
       if (shutdowns.length > 0) {
-        this.enqueueWithIdentity(agentId, agent, shutdowns[0]!.text);
+        for (const shutdown of shutdowns) {
+          this.enqueueWithIdentity(agentId, agent, shutdown.text);
+        }
         return;
       }
     }
