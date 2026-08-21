@@ -378,6 +378,13 @@ export enum CompressionStatus {
    * splitter). (R5.2)
    */
   COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+
+  /**
+   * The compression side-query failed before producing a summary. Kept
+   * distinct from empty summaries so callers can tell API/provider failures
+   * apart from model output quality failures.
+   */
+  COMPRESSION_FAILED_API_ERROR,
 }
 
 /**

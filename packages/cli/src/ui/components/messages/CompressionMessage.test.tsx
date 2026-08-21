@@ -194,5 +194,20 @@ describe('<CompressionMessage />', () => {
         expect(output).not.toContain('Compression was not beneficial');
       });
     });
+
+    it('shows API error message when compression side-query fails', () => {
+      const props = createCompressionProps({
+        isPending: false,
+        originalTokenCount: 100000,
+        newTokenCount: 100000,
+        compressionStatus: CompressionStatus.COMPRESSION_FAILED_API_ERROR,
+      });
+      const { lastFrame } = render(<CompressionMessage {...props} />);
+      const output = lastFrame();
+
+      expect(output).toContain(
+        'Could not compress chat history due to an API error.',
+      );
+    });
   });
 });

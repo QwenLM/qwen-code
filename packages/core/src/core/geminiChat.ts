@@ -331,7 +331,8 @@ function isCompressionFailureStatus(status: CompressionStatus): boolean {
     status === CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT ||
     status === CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY ||
     status === CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR ||
-    status === CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED
+    status === CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED ||
+    status === CompressionStatus.COMPRESSION_FAILED_API_ERROR
   );
 }
 
