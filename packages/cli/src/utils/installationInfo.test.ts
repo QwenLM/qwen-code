@@ -7,6 +7,7 @@
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   formatUpdateInstructions,
+  getHomebrewLatestVersion,
   getInstallationInfo,
   getNpmCliPath,
   PackageManager,
@@ -799,5 +800,69 @@ describe('getNpmCliPath', () => {
       'C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js',
     );
     expect(mockedRealPathSync).not.toHaveBeenCalled();
+  });
+});
+
+describe('getHomebrewLatestVersion', () => {
+  const brewInfoOutput = (stable: unknown) =>
+    JSON.stringify({
+      formulae: [{ name: 'qwen-code', versions: { stable } }],
+      casks: [],
+    });
+
+  it('returns the stable version from brew info --json=v2', async () => {
+    const run = vi.fn().mockResolvedValue({
+      stdout: brewInfoOutput('0.21.13'),
+      stderr: '',
+    });
+
+    await expect(getHomebrewLatestVersion(undefined, run)).resolves.toBe(
+      '0.21.13',
+    );
+    expect(run).toHaveBeenCalledWith(
+      'brew',
+      ['info', '--json=v2', '--formula', 'qwen-code'],
+      expect.objectContaining({ timeout: expect.any(Number) }),
+    );
+  });
+
+  it('returns null when brew fails (missing brew, timeout, non-zero exit)', async () => {
+    const run = vi.fn().mockRejectedValue(new Error('command not found'));
+
+    await expect(
+      getHomebrewLatestVersion('qwen-code', run),
+    ).resolves.toBeNull();
+  });
+
+  it('returns null when the output is not valid JSON', async () => {
+    const run = vi.fn().mockResolvedValue({ stdout: 'not json', stderr: '' });
+
+    await expect(
+      getHomebrewLatestVersion('qwen-code', run),
+    ).resolves.toBeNull();
+  });
+
+  it('returns null when the formula is not in the output', async () => {
+    const run = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({ formulae: [], casks: [] }),
+      stderr: '',
+    });
+
+    await expect(
+      getHomebrewLatestVersion('qwen-code', run),
+    ).resolves.toBeNull();
+  });
+
+  it('returns null when stable is not a non-empty string', async () => {
+    for (const stable of [undefined, null, 42, '']) {
+      const run = vi.fn().mockResolvedValue({
+        stdout: brewInfoOutput(stable),
+        stderr: '',
+      });
+
+      await expect(
+        getHomebrewLatestVersion('qwen-code', run),
+      ).resolves.toBeNull();
+    }
   });
 });

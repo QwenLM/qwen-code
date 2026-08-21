@@ -20,7 +20,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import yargs from 'yargs';
 import type { Argv } from 'yargs';
-import { buildReport, type Finding } from './findings.js';
+import { buildReport, type Finding } from '../../utils/findings.js';
 import { saveArtifactCommand, saveReviewArtifact } from './save-artifact.js';
 
 // On a case-sensitive filesystem the alias below never exists, so that test
@@ -69,9 +69,17 @@ const verdict = {
   deferredCount: 2,
   // Non-empty for the same reason — absent defaults to [].
   floorEnforced: [1],
-  // Non-zero for the same reason — absent defaults to 0.
+  // Non-zero on purpose too, but for the OPPOSITE reason to its siblings:
+  // this field's absence is preserved, not defaulted, so the fixture value
+  // proves passthrough against a validator that would otherwise omit the
+  // field entirely.
   postedInline: 3,
-  // Also non-default on purpose, for the same reason.
+  // Also non-default on purpose — and on the DEFAULTING side, with
+  // `deferredCount` and `floorEnforced`: an absent `bodyTrim` reads as an
+  // untrimmed one and the field is always emitted. Spelled out rather than
+  // said as "the same reason", which would now resolve against the
+  // preserved-absence block above it and teach the opposite of what
+  // `save-artifact.ts` does.
   bodyTrim: { sections: 2, deferralList: true, fold: true, truncated: true },
   lowSignal: { agents: 4, srcDiffLines: 120 },
   verdictLine: 'Verdict: Comment — Request changes was downgraded',
@@ -439,6 +447,40 @@ describe('saveReviewArtifact', () => {
     expect(
       JSON.parse(readFileSync(paths.out, 'utf8')).verdict.postedInline,
     ).toBe(0);
+  });
+
+  it('carries the fresh count and the convergence paragraph into the artifact', () => {
+    // Both are new surfaces on the composed result, and the allow-list is
+    // where a new field silently stops existing. The paragraph matters most:
+    // it is the FIRST clause the overflow ladder sheds, so on the rounds it
+    // fires the artifact may be the only durable copy.
+    const paths = fixture();
+    writeJson(paths.composed, {
+      ...verdict,
+      postedFresh: 2,
+      convergence: { en: 'Convergence: …', zh: '收敛情况：…' },
+    });
+    saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+    const saved = JSON.parse(readFileSync(paths.out, 'utf8'));
+    expect(saved.verdict.postedFresh).toBe(2);
+    expect(saved.verdict.convergence.en).toBe('Convergence: …');
+    expect(saved.verdict.convergence.zh).toBe('收敛情况：…');
+  });
+
+  it('PRESERVES an absent postedFresh and refuses a present one of the wrong shape', () => {
+    // Same distinction as its sibling: a round that recorded no fresh count
+    // is not a round that produced none.
+    const paths = fixture();
+    saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+    expect(
+      'postedFresh' in JSON.parse(readFileSync(paths.out, 'utf8')).verdict,
+    ).toBe(false);
+    rmSync(paths.out, { force: true });
+
+    writeJson(paths.composed, { ...verdict, postedFresh: -1 });
+    expect(() =>
+      saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' }),
+    ).toThrow(/postedFresh/);
   });
 
   it('reads an absent or null floorEnforced as empty — a pre-enforcement composed file must still save', () => {

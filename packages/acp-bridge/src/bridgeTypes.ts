@@ -6,7 +6,9 @@
 
 import type {
   ApprovalMode,
+  GoalControlRequest,
   GoalSnapshotV2,
+  GoalStateResponse,
   SessionGroupPresetColor,
   TurnResultCode,
   TurnResultErrorPayload,
@@ -37,7 +39,7 @@ import type {
   SessionArtifactMutationResult,
   SessionArtifactsEnvelope,
 } from './sessionArtifacts.js';
-import type { SessionMediaReference } from './sessionMedia.js';
+import type { SessionAttachmentReference } from './sessionAttachments.js';
 import type {
   ServeSessionContextStatus,
   ServeSessionHooksStatus,
@@ -99,7 +101,9 @@ export interface ChildHeapReport {
   unclassifiedSpaceNames: string[];
 }
 
-export type BridgePromptContentBlock = ContentBlock | SessionMediaReference;
+export type BridgePromptContentBlock =
+  | ContentBlock
+  | SessionAttachmentReference;
 
 export type BridgePromptRequest = Omit<PromptRequest, 'prompt'> & {
   prompt: BridgePromptContentBlock[];
@@ -816,7 +820,8 @@ export interface BridgeClientRequestContext {
 }
 
 export const DAEMON_MODEL_PROMPT_META_KEY = 'qwen.daemon.modelPrompt';
-export const DAEMON_MEDIA_REFERENCES_META_KEY = 'qwen.daemon.mediaReferences';
+export const DAEMON_ATTACHMENT_REFERENCES_META_KEY =
+  'qwen.daemon.attachmentReferences';
 export const MAX_TRUSTED_MODEL_PROMPT_CHARS = 64 * 1024;
 
 export function isValidTrustedModelPrompt(value: unknown): value is string {
@@ -1658,6 +1663,13 @@ export interface AcpSessionBridge {
     sessionId: string,
   ): Promise<{ cleared: boolean; condition?: string }>;
 
+  /** Atomically apply a typed Goal lifecycle control in a live session. */
+  controlSessionGoal(
+    sessionId: string,
+    request: GoalControlRequest,
+    context?: BridgeClientRequestContext,
+  ): Promise<GoalStateResponse>;
+
   /**
    * Read a live session's Goal state. Throws `SessionNotFoundError` when the
    * session is not resident because this route addresses the selected runtime.
@@ -1846,9 +1858,12 @@ export interface AcpSessionBridge {
    * authorized against the session like `/prompt` and `/btw` — throws
    * `InvalidClientIdError` when the id is not bound to the session, and
    * `SessionNotFoundError` for unknown ids. Ownership is session-wide.
-   * With `options.queueOnly` an idle session rejects instead of promoting. If
-   * a busy session settles before draining the message,
-   * `onSettledWithoutDrain` lets the caller drive the next turn itself.
+   * With `options.rejectIfIdle` an idle session rejects instead of taking
+   * ownership. A message accepted while busy keeps the ordinary public queue
+   * semantics: it is echoed when drained and promoted if the turn settles
+   * first. `options.queueOnly` is reserved for internal live steering; if a
+   * busy session settles before draining one of those messages,
+   * `onSettledWithoutDrain` lets that internal caller drive the next turn.
    * `options.content` carries image blocks with the message;
    * an empty `message` is admitted when media blocks are present.
    */
@@ -1858,30 +1873,35 @@ export interface AcpSessionBridge {
     context?: BridgeClientRequestContext,
     messageId?: string,
     options?: {
+      rejectIfIdle?: boolean;
       queueOnly?: boolean;
       onSettledWithoutDrain?: () => void;
       content?: readonly BridgePromptContentBlock[];
     },
   ): { accepted: boolean; messageId?: string };
 
-  storeSessionMedia(
+  storeSessionAttachment(
     sessionId: string,
     data: Uint8Array,
     mimeType: string,
     context?: BridgeClientRequestContext,
-  ): Promise<SessionMediaReference>;
+    name?: string,
+  ): Promise<SessionAttachmentReference>;
 
-  readSessionMedia(
+  readSessionAttachment(
     sessionId: string,
-    mediaId: string,
+    attachmentId: string,
     context?: BridgeClientRequestContext,
   ): Promise<{ data: Buffer; mimeType: string } | undefined>;
 
-  removeSessionMedia(
+  removeSessionAttachment(
     sessionId: string,
-    mediaId: string,
+    attachmentId: string,
     context?: BridgeClientRequestContext,
   ): Promise<boolean>;
+
+  /** Delete all persisted attachments after the session itself is deleted. */
+  deleteSessionAttachments(sessionId: string): Promise<void>;
 
   /** Remove a queued or promoted mid-turn message. */
   removeMidTurnMessage(

@@ -111,6 +111,7 @@ import {
   createDenialState,
   resetDenialState,
 } from '../permissions/denialTracking.js';
+import { parseRule } from '../permissions/rule-parser.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
@@ -699,7 +700,16 @@ export type ExtensionNetworkPolicy = 'public';
 
 export interface ExtensionInstallMetadata {
   source: string;
-  type: 'git' | 'local' | 'link' | 'github-release' | 'npm' | 'archive-url';
+  type:
+    | 'git'
+    | 'local'
+    | 'link'
+    | 'github-release'
+    | 'npm'
+    | 'archive-url'
+    | 'snapshot';
+  installId?: string;
+  credentialPersistence?: 'stored';
   originSource?: ExtensionOriginSource;
   releaseTag?: string; // Only present for github-release and npm installs.
   gitCommit?: string; // Commit recorded when the installation source was cloned.
@@ -1135,6 +1145,12 @@ export interface ConfigParameters {
    * expiry. Unset or invalid falls back to the 7-day default.
    */
   cronRecurringMaxAgeDays?: number;
+  /**
+   * Opt-in flag for the built-in `list_directory` tool, which is disabled
+   * by default (glob covers directory listing in most cases). Explicitly
+   * listing the tool in the `coreTools` allowlist also re-enables it.
+   */
+  lsToolEnabled?: boolean;
   agentTeamEnabled?: boolean;
   workflowsEnabled?: boolean;
   artifactEnabled?: boolean;
@@ -1938,6 +1954,7 @@ export class Config {
   private autoMemoryPrompt = '';
   private sdkMode: boolean;
   private geminiMdFileCount: number;
+  private loadedContextFilePaths: string[] = [];
   private conditionalRulesRegistry: ConditionalRulesRegistry | undefined;
   private readonly contextRuleExcludes: string[];
   private approvalMode: ApprovalMode;
@@ -2029,6 +2046,7 @@ export class Config {
   /** Recurring cron max age in days, resolved once at construction
    * (the setting declares `requiresRestart`); `Infinity` = no expiry. */
   private readonly cronRecurringMaxAgeDays: number;
+  private readonly lsToolEnabled: boolean = false;
   private readonly agentTeamEnabled: boolean = false;
   private readonly artifactEnabled: boolean = true;
   private readonly artifactAutoOpen: boolean = true;
@@ -2314,6 +2332,7 @@ export class Config {
     this.cronRecurringMaxAgeDays = resolveCronRecurringMaxAgeDays(
       params.cronRecurringMaxAgeDays,
     );
+    this.lsToolEnabled = params.lsToolEnabled ?? false;
     this.agentTeamEnabled = params.agentTeamEnabled ?? false;
     this.artifactEnabled = params.artifactEnabled ?? true;
     this.artifactAutoOpen = params.artifactAutoOpen ?? true;
@@ -3465,29 +3484,35 @@ export class Config {
       this.setUserMemory('');
       this.autoMemoryPrompt = '';
       this.setGeminiMdFileCount(0);
+      this.setContextFilePaths([]);
       this.conditionalRulesRegistry = new ConditionalRulesRegistry(
         [],
         this.getWorkingDir(),
       );
       return;
     }
-    const { memoryContent, fileCount, conditionalRules, projectRoot } =
-      await loadServerHierarchicalMemory(
-        this.getWorkingDir(),
-        this.getMemoryDiscoveryDirectories(),
-        this.getFileService(),
-        this.getExtensionContextFilePaths(),
-        this.isTrustedFolder(),
-        this.getImportFormat(),
-        this.contextRuleExcludes,
-        {
-          explicitOnly: this.getBareMode(),
-          loadReason,
-          onInstructionsLoaded: createInstructionsLoadedCallback(
-            () => this.hookSystem,
-          ),
-        },
-      );
+    const {
+      memoryContent,
+      fileCount,
+      contextFilePaths,
+      conditionalRules,
+      projectRoot,
+    } = await loadServerHierarchicalMemory(
+      this.getWorkingDir(),
+      this.getMemoryDiscoveryDirectories(),
+      this.getFileService(),
+      this.getExtensionContextFilePaths(),
+      this.isTrustedFolder(),
+      this.getImportFormat(),
+      this.contextRuleExcludes,
+      {
+        explicitOnly: this.getBareMode(),
+        loadReason,
+        onInstructionsLoaded: createInstructionsLoadedCallback(
+          () => this.hookSystem,
+        ),
+      },
+    );
     if (this.isManagedMemoryAvailable()) {
       // User-level read is best-effort — an EACCES on
       // `~/.qwen/memories/MEMORY.md` must not strip the whole managed-memory
@@ -3616,6 +3641,7 @@ export class Config {
       this.autoMemoryPrompt = '';
     }
     this.setGeminiMdFileCount(fileCount);
+    this.setContextFilePaths(contextFilePaths);
     this.conditionalRulesRegistry = new ConditionalRulesRegistry(
       conditionalRules,
       projectRoot,
@@ -6221,6 +6247,15 @@ export class Config {
     this.geminiMdFileCount = count;
   }
 
+  /** Display paths of the currently loaded context (memory) files. */
+  getContextFilePaths(): string[] {
+    return this.loadedContextFilePaths;
+  }
+
+  setContextFilePaths(paths: string[]): void {
+    this.loadedContextFilePaths = paths;
+  }
+
   getArenaManager(): ArenaManager | null {
     return this.arenaManager;
   }
@@ -6925,6 +6960,23 @@ export class Config {
   isCronEnabled(): boolean {
     if (process.env['QWEN_CODE_DISABLE_CRON'] === '1') return false;
     return this.cronEnabled;
+  }
+
+  /**
+   * Whether the built-in `list_directory` tool is enabled. Opt-in: the tool
+   * is disabled by default and turns on either through the
+   * `tools.listDirectory.enabled` setting or by being explicitly listed in
+   * the `coreTools` allowlist. Entries are normalised with `parseRule` — the
+   * same parser `PermissionManager` uses to build its allowlist — so alias
+   * forms (`ListFiles`) and specifier forms (`list_directory(/src)`) match.
+   */
+  isLsToolEnabled(): boolean {
+    if (this.lsToolEnabled) return true;
+    return (
+      this.getCoreTools()?.some(
+        (name) => parseRule(name).toolName === ToolNames.LS,
+      ) ?? false
+    );
   }
 
   isAgentTeamEnabled(): boolean {
@@ -8530,10 +8582,15 @@ export class Config {
       const { SkillTool } = await import('../tools/skill.js');
       return new SkillTool(this);
     });
-    await registerLazy(ToolNames.LS, async () => {
-      const { LSTool } = await import('../tools/ls.js');
-      return new LSTool(this);
-    });
+    // list_directory is opt-in (disabled by default): glob covers directory
+    // listing in most cases, so the tool only registers when explicitly
+    // enabled via `tools.listDirectory.enabled` or the coreTools allowlist.
+    if (this.isLsToolEnabled()) {
+      await registerLazy(ToolNames.LS, async () => {
+        const { LSTool } = await import('../tools/ls.js');
+        return new LSTool(this);
+      });
+    }
     await registerLazy(ToolNames.READ_FILE, async () => {
       const { ReadFileTool } = await import('../tools/read-file.js');
       return new ReadFileTool(this);

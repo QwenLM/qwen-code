@@ -28,7 +28,7 @@ import {
   buildReport,
   type FindingsReport,
   validateFindings,
-} from './findings.js';
+} from '../../utils/findings.js';
 import { EFFORT_LEVELS, type ReviewEffort } from './parse-args.js';
 import { REVIEWS_DIR } from './lib/paths.js';
 import { isSameFile } from './lib/same-file.js';
@@ -36,7 +36,10 @@ import { volumeOf } from './lib/ledger.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 
 interface PersistedVerdict
-  extends Omit<ComposeReviewResult, 'postedInline' | 'prevPostedInline'> {
+  extends Omit<
+    ComposeReviewResult,
+    'postedInline' | 'postedFresh' | 'prevPostedInline'
+  > {
   verdictLine: string;
   /**
    * Optional HERE, required on the composed result it is otherwise a copy
@@ -51,6 +54,13 @@ interface PersistedVerdict
    * recoverable from the marker chain inside `body`.
    */
   postedInline?: number;
+  /**
+   * Optional for the same reason as its sibling, and for one more: an
+   * artifact written before the convergence trend measured NEW findings
+   * carries only the total. Absence is preserved rather than defaulted —
+   * a round that recorded no fresh count is not a round that produced none.
+   */
+  postedFresh?: number;
 }
 
 export interface ReviewArtifactV1 {
@@ -282,6 +292,29 @@ function validateVerdict(value: unknown): PersistedVerdict {
       'Composed verdict.postedInline must be a non-negative integer.',
     );
   }
+  // The fresh count reads by the same rules as the total it is part of.
+  // The convergence paragraph is the ONE clause the overflow ladder sheds
+  // first, and the artifact is where a trimmed round's record lives. Dropped
+  // by this allow-list, the durable record of a round whose body shed it
+  // held neither copy.
+  const rawConvergence = verdict['convergence'];
+  let convergence: { en: string; zh: string } | undefined;
+  if (rawConvergence !== undefined && rawConvergence !== null) {
+    const c = object(rawConvergence, 'Composed verdict.convergence');
+    convergence = {
+      en: string(c['en'], 'Composed verdict.convergence.en'),
+      zh: string(c['zh'], 'Composed verdict.convergence.zh'),
+    };
+  }
+  // The fresh count reads by the same rules as the total it is part of.
+  const rawFresh = verdict['postedFresh'];
+  const freshAbsent = rawFresh === undefined || rawFresh === null;
+  const postedFresh = freshAbsent ? undefined : volumeOf(rawFresh);
+  if (!freshAbsent && postedFresh === undefined) {
+    throw new Error(
+      'Composed verdict.postedFresh must be a non-negative integer.',
+    );
+  }
   // Absent reads as "no trim", the same absence semantics the sibling count
   // gets: a composed file written before the body budget shipped carries no
   // `bodyTrim`, and a mid-upgrade save must not fail over a record of
@@ -332,6 +365,8 @@ function validateVerdict(value: unknown): PersistedVerdict {
     deferredCount,
     floorEnforced: floorEnforced as number[],
     ...(postedInline === undefined ? {} : { postedInline }),
+    ...(postedFresh === undefined ? {} : { postedFresh }),
+    ...(convergence === undefined ? {} : { convergence }),
     lowSignal:
       lowSignal === null
         ? null
