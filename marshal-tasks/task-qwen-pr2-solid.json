@@ -1,0 +1,80 @@
+{
+  "apiVersion": "marshal.dev/v1alpha1",
+  "kind": "Task",
+  "metadata": {
+    "id": "QWEN-PR2-SOLID-SKEL",
+    "title": "PR2 qwen3：solid TUI 骨架"
+  },
+  "repository": {
+    "path": "/Users/gawain/Documents/codebase/fork/qwen-code",
+    "baseRef": "feat/opentui-solid",
+    "remote": "origin"
+  },
+  "scope": {
+    "allowPaths": ["packages/cli/src/ui/opentui-solid/**"],
+    "allowSubmodules": false,
+    "denyPaths": [
+      ".marshal/**",
+      "packages/cli/src/ui/components/**",
+      "packages/cli/src/ui/opentui/**"
+    ],
+    "maxChangedFiles": 25,
+    "maxDiffBytes": 300000
+  },
+  "work": {
+    "objective": "PR2 qwen3：@opentui/solid TUI 骨架（会话渲染+鼠标+滚轮，erase-free）",
+    "constraints": [
+      "只建 opentui-solid/** 新文件；不删改 ink/PR1；不安装依赖；不提交；勿向工作区外写文件；permission 拒绝不得重试。"
+    ],
+    "context": [
+      "【PR2（qwen3，solid 线）验收标准（同 PR1）】“必须原样完整实现，一项都不准差；与原版 qwen-code 完全一模一样；开发完用 tmux 前后对比；全测试通过。”\n本 Run = PR2 骨架：在 feat/opentui-solid 分支用 @opentui/solid 建 qwen3 TUI 骨架（SolidJS），渲染会话（流式 markdown/工具/思考）+ 鼠标选区复制/点击/滚轮，erase-free。\n参照 opencode packages/tui（solid 生产实现）与 PR1 中性 model（packages/cli/src/ui/model/streamingModel）。\n只改 packages/cli/src/ui/opentui-solid/**；不删改 ink/PR1；不安装依赖；不提交；勿向工作区外写文件；permission 拒绝不得重试。\n自测：npx tsc --build packages/cli 通过；补 vitest 单测。\n"
+    ],
+    "nonGoals": ["不做全量 parity（骨架先行）", "不改 ink/PR1"]
+  },
+  "acceptance": {
+    "allowNoChange": false,
+    "commands": [
+      {
+        "id": "tsc",
+        "argv": ["npx", "tsc", "--build", "packages/cli"],
+        "cwd": ".",
+        "timeoutSeconds": 300,
+        "maxLogBytes": 20000,
+        "required": true,
+        "baselinePolicy": "none"
+      }
+    ]
+  },
+  "budgets": {
+    "attemptTimeoutSeconds": 5400,
+    "runTimeoutSeconds": 9000,
+    "maxAttempts": 4,
+    "maxOperationalRetries": 1,
+    "maxReworkRounds": 2,
+    "maxOutputBytes": 32000000
+  },
+  "deliverables": [
+    {
+      "id": "skel",
+      "kind": "code",
+      "pathGlob": "packages/cli/src/ui/opentui-solid/**",
+      "minimumCount": 1,
+      "required": true
+    }
+  ],
+  "worker": {
+    "preferredAdapter": "opencode",
+    "fallbackAdapters": [],
+    "sessionPolicy": "ephemeral",
+    "executionProfile": "workspace-write"
+  },
+  "publication": {
+    "required": false,
+    "provider": "none",
+    "mode": "none",
+    "remote": "origin",
+    "baseBranch": "feat/opentui-solid",
+    "mergePolicy": "never",
+    "requiredChecks": []
+  }
+}

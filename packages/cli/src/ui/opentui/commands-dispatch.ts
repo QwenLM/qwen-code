@@ -1,0 +1,711 @@
+/**
+ * @license
+ * Copyright 2026 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * Full-parity slash-command dispatch for the OpenTUI renderer (PR1 slice 5).
+ *
+ * `OpenTuiSlashDispatcher.handle` reproduces the ink
+ * `useSlashCommandProcessor.handleSlashCommand` pipeline end to end against
+ * the OpenTUI backend (`OpenTuiCommandHost`):
+ *
+ *  - the same guards ('/' or '?' prefix, no path-like input)
+ *  - the same invocation echo item (skipped for /btw)
+ *  - stacked skill handling (`/a /b prompt` merged into one submit)
+ *  - ESC cancellation via an AbortController raced against the action
+ *  - identical result mapping for every `SlashCommandActionReturn` kind:
+ *    messages, all dialogs (routed by commands-registry.ts), quit, tool
+ *    scheduling, load_history, submit_prompt (with user-prompt-expansion
+ *    hooks), goal_control render rules, and both confirmation flows with
+ *    their recursive re-invocation
+ *  - identical telemetry (logSlashCommand) and chat-recording behavior,
+ *    including the skip list and the recording-aware addItem wrapper
+ *
+ * The result is a neutral `OpenTuiDispatchOutcome` the OpenTUI backend
+ * applies, where ink returned `SlashCommandProcessorResult` to AppContainer.
+ */
+
+import type { PartListUnion } from '@google/genai';
+import {
+  createDebugLogger,
+  logSlashCommand,
+  makeSlashCommandEvent,
+  recordSkillInvocation,
+  SlashCommandStatus,
+  ToolConfirmationOutcome,
+} from '@qwen-code/qwen-code-core';
+import {
+  MessageType,
+  type HistoryItem,
+  type HistoryItemWithoutId,
+  type Message,
+} from '../types.js';
+import {
+  CommandKind,
+  type CommandContext,
+  type SlashCommand,
+} from '../commands/types.js';
+import {
+  MAX_STACKED_SKILLS,
+  parseSlashCommand,
+  parseStackedSlashCommands,
+} from '../../utils/commands.js';
+import {
+  hasSlashCommandPathSeparator,
+  isBtwCommand,
+} from '../utils/commandUtils.js';
+import { recordAutoSkillCommandUsage } from '../../services/SkillCommandLoader.js';
+import {
+  appendUserPromptExpansionAdditionalContext,
+  formatUserPromptExpansionBlockedMessage,
+  serializeUserPromptExpansionPrompt,
+} from '../../utils/userPromptExpansionHook.js';
+import type { RecentSlashCommand } from '../hooks/useSlashCompletion.js';
+import { loadInteractiveCommands } from './slash-dispatch.js';
+import {
+  createOpenTuiCommandContext,
+  type OpenTuiCommandHost,
+  type OpenTuiCommandServices,
+} from './commands-context.js';
+import {
+  routeDialogToOpenTui,
+  type OpenTuiDialogRequest,
+} from './commands-registry.js';
+import {
+  commandMessageItem,
+  messageToHistoryItem,
+  serializeHistoryItemForRecording,
+  SLASH_COMMANDS_SKIP_RECORDING,
+} from './commands-output.js';
+
+const debugLogger = createDebugLogger('OPENTUI_SLASH_DISPATCH');
+
+/** Neutral outcome the OpenTUI backend applies (ink: SlashCommandProcessorResult + dialog actions). */
+export type OpenTuiDispatchOutcome =
+  | { kind: 'handled' }
+  | {
+      kind: 'schedule_tool';
+      toolName: string;
+      toolArgs: Record<string, unknown>;
+    }
+  | {
+      kind: 'submit_prompt';
+      content: PartListUnion;
+      onComplete?: () => Promise<void>;
+      modelOverride?: string;
+    }
+  | { kind: 'quit'; messages: HistoryItem[] }
+  | { kind: 'open_dialog'; request: OpenTuiDialogRequest };
+
+interface RunOptions {
+  oneTimeShellAllowlist?: Set<string>;
+  overwriteConfirmed?: boolean;
+  existingInvocationItemId?: number;
+}
+
+/**
+ * Parity of `hasUserPromptExpansionHooks` in slashCommandProcessor.ts.
+ */
+function hasUserPromptExpansionHooks(
+  services: OpenTuiCommandServices,
+): boolean {
+  const config = services.config;
+  return (
+    !!config &&
+    !config.getDisableAllHooks?.() &&
+    (config.hasHooksForEvent?.('UserPromptExpansion') ?? false)
+  );
+}
+
+export class OpenTuiSlashDispatcher {
+  private activeAbortController: AbortController | null = null;
+  private recentCommands = new Map<string, RecentSlashCommand>();
+
+  constructor(
+    private readonly host: OpenTuiCommandHost,
+    private readonly services: OpenTuiCommandServices,
+    private commandList: readonly SlashCommand[],
+  ) {}
+
+  get commands(): readonly SlashCommand[] {
+    return this.commandList;
+  }
+
+  /** Parity of the processor's `reloadCommands` result swap. */
+  setCommands(commands: readonly SlashCommand[]): void {
+    this.commandList = commands;
+  }
+
+  /** Rebuilds the registry through the original loader stack. */
+  async loadCommands(signal?: AbortSignal): Promise<void> {
+    this.commandList = await loadInteractiveCommands(
+      this.services.config,
+      signal,
+    );
+  }
+
+  /** Parity of `recentSlashCommands` (hidden commands are not tracked). */
+  get recentCommandList(): ReadonlyMap<string, RecentSlashCommand> {
+    return this.recentCommands;
+  }
+
+  /**
+   * Parity of `cancelSlashCommand` in slashCommandProcessor.ts: ESC while a
+   * slash command runs aborts it and reports the cancellation.
+   */
+  cancel(): void {
+    this.host.cancelBtw();
+    if (!this.activeAbortController) {
+      return;
+    }
+    this.activeAbortController.abort();
+    this.host.addItem(
+      { type: MessageType.INFO, text: 'Command cancelled.' },
+      Date.now(),
+    );
+    this.host.setPendingItem(null);
+    this.host.setIsProcessing(false);
+  }
+
+  /**
+   * Entry point — parity of the top of `handleSlashCommand`: returns `false`
+   * when the input is not a slash command at all.
+   */
+  async handle(rawQuery: string): Promise<OpenTuiDispatchOutcome | false> {
+    const trimmed = rawQuery.trim();
+    if (!trimmed.startsWith('/') && !trimmed.startsWith('?')) {
+      return false;
+    }
+    if (trimmed.startsWith('/') && hasSlashCommandPathSeparator(trimmed)) {
+      return false;
+    }
+    return this.run(trimmed, {});
+  }
+
+  private addMessage(message: Message): void {
+    this.host.addItem(
+      messageToHistoryItem(message),
+      message.timestamp.getTime(),
+    );
+  }
+
+  private async run(
+    trimmed: string,
+    options: RunOptions,
+  ): Promise<OpenTuiDispatchOutcome> {
+    const recordedItems: HistoryItemWithoutId[] = [];
+    const addItemWithRecording = (
+      item: HistoryItemWithoutId,
+      timestamp: number,
+    ): number => {
+      recordedItems.push(item);
+      return this.host.addItem(item, timestamp);
+    };
+
+    this.host.setIsProcessing(true);
+    const abortController = new AbortController();
+    this.activeAbortController = abortController;
+
+    const userMessageTimestamp = Date.now();
+    let invocationItemId = options.existingInvocationItemId;
+    let invocationSentToModel = false;
+    if (!isBtwCommand(trimmed) && invocationItemId === undefined) {
+      invocationItemId = addItemWithRecording(
+        { type: MessageType.USER, text: trimmed, sentToModel: false },
+        userMessageTimestamp,
+      );
+    }
+
+    let hasError = false;
+    let delegatedToRecursiveInvocation = false;
+    const {
+      commandToExecute,
+      args,
+      canonicalPath: resolvedCommandPath,
+    } = parseSlashCommand(trimmed, this.commandList);
+
+    const subcommand =
+      resolvedCommandPath.length > 1
+        ? resolvedCommandPath.slice(1).join(' ')
+        : undefined;
+    const isSkillCommand = commandToExecute?.kind === CommandKind.SKILL;
+    let skillInvocationRecorded = false;
+    const recordSkillCommandInvocation = (success: boolean) => {
+      const config = this.services.config;
+      if (
+        !config ||
+        !commandToExecute ||
+        !isSkillCommand ||
+        skillInvocationRecorded
+      ) {
+        return;
+      }
+      recordSkillInvocation(config, {
+        skillName: commandToExecute.skillDetail?.name ?? commandToExecute.name,
+        success,
+      });
+      skillInvocationRecorded = true;
+    };
+
+    try {
+      const stackedResult = parseStackedSlashCommands(
+        trimmed,
+        this.commandList,
+      );
+      if (stackedResult.skills.length >= 2) {
+        const combinedContent: PartListUnion[] = [];
+        let firstModelOverride: string | undefined;
+        const onCompleteCallbacks: Array<() => Promise<void>> = [];
+
+        for (const skill of stackedResult.skills) {
+          if (!skill.action) continue;
+          const skillContext: CommandContext = {
+            invocation: {
+              raw: `/${skill.name}`,
+              name: skill.name,
+              args: '',
+            },
+            services: {
+              config: this.services.config,
+              settings: this.services.settings,
+              logger: null,
+            },
+          } as unknown as CommandContext;
+
+          const skillResult = await skill.action(skillContext, '');
+          if (skillResult?.type === 'submit_prompt') {
+            combinedContent.push(skillResult.content);
+            firstModelOverride ??= skillResult.modelOverride;
+            if (skillResult.onComplete) {
+              onCompleteCallbacks.push(skillResult.onComplete);
+            }
+          } else if (
+            skillResult?.type === 'message' &&
+            skillResult.messageType === 'error'
+          ) {
+            this.addMessage({
+              type: MessageType.ERROR,
+              content: `Skill "/${skill.name}" error: ${skillResult.content}`,
+              timestamp: new Date(),
+            });
+          }
+
+          if (this.services.config) {
+            const succeeded = skillResult?.type === 'submit_prompt';
+            recordSkillInvocation(this.services.config, {
+              skillName: skill.skillDetail?.name ?? skill.name,
+              success: succeeded,
+            });
+            if (succeeded) {
+              void recordAutoSkillCommandUsage(this.services.config, skill);
+            }
+          }
+        }
+
+        if (stackedResult.remainingText) {
+          combinedContent.push([{ text: stackedResult.remainingText }]);
+        }
+
+        if (stackedResult.exceededMax) {
+          this.addMessage({
+            type: MessageType.WARNING,
+            content: `Only the first ${MAX_STACKED_SKILLS} skills were loaded. Additional /skill tokens were treated as prompt text.`,
+            timestamp: new Date(),
+          });
+        }
+
+        invocationSentToModel = true;
+        if (invocationItemId !== undefined) {
+          this.host.updateItem(invocationItemId, { sentToModel: true });
+        }
+
+        const mergedContent: PartListUnion = combinedContent.flat();
+        return {
+          kind: 'submit_prompt',
+          content: mergedContent,
+          ...(firstModelOverride ? { modelOverride: firstModelOverride } : {}),
+          ...(onCompleteCallbacks.length
+            ? {
+                onComplete: async () => {
+                  for (const cb of onCompleteCallbacks) await cb();
+                },
+              }
+            : {}),
+        };
+      }
+
+      if (commandToExecute) {
+        if (!commandToExecute.hidden) {
+          const existing = this.recentCommands.get(commandToExecute.name);
+          this.recentCommands.set(commandToExecute.name, {
+            name: commandToExecute.name,
+            usedAt: Date.now(),
+            count: (existing?.count ?? 0) + 1,
+          });
+        }
+
+        if (commandToExecute.action) {
+          const baseContext = createOpenTuiCommandContext(
+            this.host,
+            this.services,
+          );
+          const fullCommandContext: CommandContext = {
+            ...baseContext,
+            ui: {
+              ...baseContext.ui,
+              addItem: (item, timestamp) =>
+                addItemWithRecording(item, timestamp),
+            },
+            invocation: {
+              raw: trimmed,
+              name: commandToExecute.name,
+              args,
+            },
+            overwriteConfirmed: options.overwriteConfirmed,
+            abortSignal: abortController.signal,
+          };
+
+          // Parity: a "Proceed" confirmation temporarily augments the session
+          // allowlist for this single execution only.
+          const sessionShellAllowlist =
+            options.oneTimeShellAllowlist &&
+            options.oneTimeShellAllowlist.size > 0
+              ? new Set([
+                  ...fullCommandContext.session.sessionShellAllowlist,
+                  ...options.oneTimeShellAllowlist,
+                ])
+              : fullCommandContext.session.sessionShellAllowlist;
+          fullCommandContext.session = {
+            ...fullCommandContext.session,
+            sessionShellAllowlist,
+          };
+
+          const abortPromise = new Promise<undefined>((resolve) => {
+            abortController.signal.addEventListener(
+              'abort',
+              () => resolve(undefined),
+              { once: true },
+            );
+          });
+          const result = await Promise.race([
+            commandToExecute.action(fullCommandContext, args),
+            abortPromise,
+          ]);
+
+          if (abortController.signal.aborted) {
+            return { kind: 'handled' };
+          }
+
+          if (result) {
+            switch (result.type) {
+              case 'tool':
+                return {
+                  kind: 'schedule_tool',
+                  toolName: result.toolName,
+                  toolArgs: result.toolArgs,
+                };
+              case 'message': {
+                let messageContent = result.content;
+                // The OpenTUI renderer has no vim key mode; the toggle host
+                // reports the real (off) state, and the ink command would
+                // render that as "Exited Vim mode." — actively misleading.
+                // Replace it with the faithful notice (audit 01 G-11b).
+                if (commandToExecute.name === 'vim') {
+                  messageContent =
+                    'Vim mode is not yet available in the OpenTUI renderer.';
+                }
+                if (result.messageType === 'info') {
+                  this.addMessage({
+                    type: MessageType.INFO,
+                    content: messageContent,
+                    timestamp: new Date(),
+                  });
+                } else if (result.messageType === 'warning') {
+                  this.addMessage({
+                    type: MessageType.WARNING,
+                    content: result.content,
+                    timestamp: new Date(),
+                  });
+                } else {
+                  this.addMessage({
+                    type: MessageType.ERROR,
+                    content: result.content,
+                    timestamp: new Date(),
+                  });
+                }
+                return { kind: 'handled' };
+              }
+              case 'goal_control': {
+                const rendersHere =
+                  result.cause === undefined || this.host.isIdle();
+                if (rendersHere) {
+                  const snapshot = result.response.snapshot;
+                  if (snapshot.goal || result.cause === 'clear') {
+                    this.host.addItem(
+                      {
+                        type: MessageType.GOAL_STATE,
+                        snapshot,
+                        ...(result.cause ? { cause: result.cause } : {}),
+                      },
+                      Date.now(),
+                    );
+                  } else {
+                    this.addMessage({
+                      type: MessageType.INFO,
+                      content: 'No Goal set.',
+                      timestamp: new Date(),
+                    });
+                  }
+                }
+                return { kind: 'handled' };
+              }
+              case 'dialog': {
+                if (result.dialog === 'resume') {
+                  if (result.sessionId) {
+                    await this.host.handleResume(result.sessionId);
+                    return { kind: 'handled' };
+                  }
+                }
+                if (result.dialog === 'branch') {
+                  await this.host.handleBranch(result.name);
+                  return { kind: 'handled' };
+                }
+                return {
+                  kind: 'open_dialog',
+                  request: routeDialogToOpenTui(result),
+                };
+              }
+              case 'load_history': {
+                this.services.config
+                  ?.getGeminiClient()
+                  ?.setHistory(result.clientHistory);
+                fullCommandContext.ui.clear();
+                result.history.forEach((item, index) => {
+                  fullCommandContext.ui.addItem(item, index);
+                });
+                return { kind: 'handled' };
+              }
+              case 'quit':
+                return { kind: 'quit', messages: result.messages };
+              case 'submit_prompt': {
+                const invocation = fullCommandContext.invocation;
+                let content = result.content;
+                const output = hasUserPromptExpansionHooks(this.services)
+                  ? await this.services.config
+                      ?.getHookSystem()
+                      ?.fireUserPromptExpansionEvent(
+                        invocation?.name ?? '',
+                        invocation?.args ?? '',
+                        serializeUserPromptExpansionPrompt(content),
+                        abortController.signal,
+                      )
+                  : undefined;
+                if (abortController.signal.aborted) {
+                  hasError = true;
+                  return { kind: 'handled' };
+                }
+                if (output) {
+                  const blockingError = output.getBlockingError();
+                  if (blockingError.blocked || output.shouldStopExecution()) {
+                    hasError = true;
+                    recordSkillCommandInvocation(false);
+                    this.addMessage({
+                      type: MessageType.ERROR,
+                      content: formatUserPromptExpansionBlockedMessage(
+                        blockingError.reason || output.getEffectiveReason(),
+                      ),
+                      timestamp: new Date(),
+                    });
+                    return { kind: 'handled' };
+                  }
+                  content = appendUserPromptExpansionAdditionalContext(
+                    content,
+                    output.getAdditionalContext(),
+                  );
+                }
+                if (invocationItemId !== undefined) {
+                  invocationSentToModel = true;
+                  this.host.updateItem(invocationItemId, { sentToModel: true });
+                }
+                recordSkillCommandInvocation(true);
+                void recordAutoSkillCommandUsage(
+                  this.services.config,
+                  commandToExecute,
+                );
+                return {
+                  kind: 'submit_prompt',
+                  content,
+                  ...(result.onComplete
+                    ? { onComplete: result.onComplete }
+                    : {}),
+                  ...(result.modelOverride
+                    ? { modelOverride: result.modelOverride }
+                    : {}),
+                };
+              }
+              case 'confirm_shell_commands': {
+                const { outcome, approvedCommands } =
+                  await this.host.presentShellConfirmation(
+                    result.commandsToConfirm,
+                  );
+
+                if (
+                  outcome === ToolConfirmationOutcome.Cancel ||
+                  !approvedCommands ||
+                  approvedCommands.length === 0
+                ) {
+                  return { kind: 'handled' };
+                }
+
+                if (outcome === ToolConfirmationOutcome.ProceedAlways) {
+                  this.host.addSessionShellAllowlist(approvedCommands);
+                }
+
+                delegatedToRecursiveInvocation = true;
+                return await this.run(result.originalInvocation.raw, {
+                  // Approved commands are a one-time grant for this execution.
+                  oneTimeShellAllowlist: new Set(approvedCommands),
+                  existingInvocationItemId: invocationItemId,
+                });
+              }
+              case 'confirm_action': {
+                const confirmed = await this.host.presentActionConfirmation(
+                  result.prompt,
+                );
+
+                if (!confirmed) {
+                  addItemWithRecording(
+                    commandMessageItem('info', 'Operation cancelled.'),
+                    Date.now(),
+                  );
+                  return { kind: 'handled' };
+                }
+
+                delegatedToRecursiveInvocation = true;
+                return await this.run(result.originalInvocation.raw, {
+                  overwriteConfirmed: true,
+                  existingInvocationItemId: invocationItemId,
+                });
+              }
+              case 'stream_messages': {
+                // stream_messages is only used in ACP/Zed integration mode
+                // and should not be returned in interactive UI mode
+                throw new Error(
+                  'stream_messages result type is not supported in interactive mode',
+                );
+              }
+              default: {
+                const unhandled: never = result;
+                throw new Error(`Unhandled slash command result: ${unhandled}`);
+              }
+            }
+          }
+
+          return { kind: 'handled' };
+        } else if (commandToExecute.subCommands) {
+          const helpText = `Command '/${commandToExecute.name}' requires a subcommand. Available:\n${commandToExecute.subCommands
+            .map((sc) => `  - ${sc.name}: ${sc.description || ''}`)
+            .join('\n')}`;
+          this.addMessage({
+            type: MessageType.INFO,
+            content: helpText,
+            timestamp: new Date(),
+          });
+          return { kind: 'handled' };
+        }
+      }
+
+      this.addMessage({
+        type: MessageType.ERROR,
+        content: `Unknown command: ${trimmed}`,
+        timestamp: new Date(),
+      });
+
+      return { kind: 'handled' };
+    } catch (e: unknown) {
+      // If cancelled via ESC, `cancel` already handled cleanup
+      if (abortController.signal.aborted) {
+        return { kind: 'handled' };
+      }
+      hasError = true;
+      recordSkillCommandInvocation(false);
+      if (this.services.config) {
+        const event = makeSlashCommandEvent({
+          command: resolvedCommandPath[0],
+          subcommand,
+          status: SlashCommandStatus.ERROR,
+        });
+        logSlashCommand(this.services.config, event);
+      }
+      addItemWithRecording(
+        {
+          type: MessageType.ERROR,
+          text: e instanceof Error ? e.message : String(e),
+        },
+        Date.now(),
+      );
+      return { kind: 'handled' };
+    } finally {
+      const chatRecordingService =
+        this.services.config?.getChatRecordingService?.();
+      const primaryCommand =
+        resolvedCommandPath[0] ||
+        trimmed.replace(/^[/?]/, '').split(/\s+/u)[0] ||
+        trimmed;
+      const shouldRecord =
+        !delegatedToRecursiveInvocation &&
+        !SLASH_COMMANDS_SKIP_RECORDING.has(primaryCommand);
+      try {
+        if (shouldRecord) {
+          chatRecordingService?.recordSlashCommand({
+            phase: 'invocation',
+            rawCommand: trimmed,
+            sentToModel: invocationSentToModel,
+          });
+          const outputItems = recordedItems
+            .filter((item) => item.type !== 'user')
+            .map(serializeHistoryItemForRecording);
+          chatRecordingService?.recordSlashCommand({
+            phase: 'result',
+            rawCommand: trimmed,
+            outputHistoryItems: outputItems,
+          });
+        }
+      } catch (recordError) {
+        debugLogger.error(
+          '[slashCommand] Failed to record slash command:',
+          recordError,
+        );
+      }
+      if (
+        this.services.config &&
+        resolvedCommandPath[0] &&
+        !hasError &&
+        !delegatedToRecursiveInvocation
+      ) {
+        const event = makeSlashCommandEvent({
+          command: resolvedCommandPath[0],
+          subcommand,
+          status: SlashCommandStatus.SUCCESS,
+        });
+        logSlashCommand(this.services.config, event);
+      }
+      this.host.setIsProcessing(false);
+    }
+  }
+}
+
+/**
+ * Convenience: loads the interactive registry through the original loader
+ * stack (same as the ink processor) and returns a ready dispatcher.
+ */
+export async function createOpenTuiSlashDispatcher(
+  host: OpenTuiCommandHost,
+  services: OpenTuiCommandServices,
+  signal?: AbortSignal,
+): Promise<OpenTuiSlashDispatcher> {
+  const commands = await loadInteractiveCommands(services.config, signal);
+  return new OpenTuiSlashDispatcher(host, services, commands);
+}

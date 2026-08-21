@@ -77,6 +77,48 @@ export async function startInteractiveUI(
   initializationResult: InitializationResult,
   options: StartInteractiveUIOptions = {},
 ) {
+  // Dual-renderer dispatch: `QWEN_TUI_RENDERER=opentui` boots the experimental
+  // OpenTUI backend; the default ink path never imports @opentui (dynamic import).
+  const { pickRenderer, isExperimentalRenderer, rendererExplicitlyRequested } =
+    await import('./render/dispatch.js');
+  if (isExperimentalRenderer(pickRenderer())) {
+    const { probeOpenTuiRuntime, ensureOpenTuiRuntimeSupported } = await import(
+      './render/runtime-gate.js'
+    );
+    if (probeOpenTuiRuntime().supported) {
+      // Remote input (--input-file) is wired through to the opentui backend;
+      // the watcher is shut down when the interactive session exits.
+      const { startOpenTuiUI } = await import('./render/opentui-entry.js');
+      const inputFile = config.getInputFile?.();
+      const remoteInputWatcher = inputFile
+        ? new RemoteInputWatcher(inputFile)
+        : null;
+      try {
+        await startOpenTuiUI({
+          config,
+          settings,
+          remoteInputWatcher,
+          postRender: {
+            connectIde: options.postRenderConnectIde ?? false,
+            initializeTelemetry:
+              options.postRenderInitializeTelemetry ??
+              config.isTelemetryInitializationDeferred(),
+          },
+        });
+      } finally {
+        remoteInputWatcher?.shutdown();
+      }
+      return;
+    }
+    // An explicit `QWEN_TUI_RENDERER=opentui` on an unsupported runtime must
+    // fail loudly; a default launch falls back to ink so node-based startups
+    // without FFI never break.
+    if (rendererExplicitlyRequested()) {
+      ensureOpenTuiRuntimeSupported();
+    }
+    // fall through to ink
+  }
+
   const version = await getCliVersion();
   setWindowTitle(settings, basename(workspaceRoot));
 

@@ -1,0 +1,110 @@
+{
+  "apiVersion": "marshal.dev/v1alpha1",
+  "kind": "Task",
+  "metadata": {
+    "id": "QWEN-OTUI-EVIDENCE-HARDEN-R3",
+    "title": "Close adversarial PTY harness evidence gaps"
+  },
+  "repository": {
+    "path": "/Users/gawain/Documents/codebase/fork/qwen-code",
+    "baseRef": "feat/opentui-migrate",
+    "remote": "origin"
+  },
+  "scope": {
+    "allowPaths": ["scripts/tui-parity/**"],
+    "allowSubmodules": false,
+    "denyPaths": [
+      ".marshal/**",
+      "packages/**",
+      "package.json",
+      "package-lock.json"
+    ],
+    "maxChangedFiles": 8,
+    "maxDiffBytes": 100000
+  },
+  "work": {
+    "objective": "Close three adversarial correctness gaps in the accepted PTY harness snapshot: event-to-sync coverage, stubborn descendant cleanup, and final override parameter binding.",
+    "constraints": [
+      "Use repository-relative paths for every read, edit, search and command.",
+      "Only modify scripts/tui-parity/**; do not modify product code, dependencies, lockfiles, Marshal state, commit, push, publish, use network access or start subagents.",
+      "If an operation is denied, do not retry that path; use an allowed equivalent or report blocked.",
+      "All three adversarial counterexamples must become regression tests; passing existing tests is insufficient."
+    ],
+    "context": [
+      "Successor to qwen-otui-evidence-recovery-r2-20260811. A delayed independent review found three P1 blockers after that Run was prematurely accepted; this Run must produce new snapshot and verification evidence before the harness can be trusted.",
+      "DEC2026_EVENT_COVERAGE: runner.mjs currently compares dec2026.begin >= events.unique plus balance, without associating events to active sync intervals. Three empty begin/end pairs followed by three unwrapped OSC697 events passes. Parse or derive actual per-event synchronized coverage; unwrapped events and empty sync pairs cannot prove coverage. Tests must place markers inside/outside intervals accurately and README claims must match measured semantics.",
+      "TIMEOUT_STUBBORN_DESCENDANT: capture.mjs schedules SIGKILL, but finish/settle clears all timers when the main child closes, cancelling escalation. A descendant that ignores SIGTERM and detaches stdio survives. Keep escalation alive or explicitly await/confirm process-group cleanup. Add a bounded fixture, and native PTY coverage where reliable, with a descendant that ignores SIGTERM and does not hold capture stdio.",
+      "OVERRIDE_PARAM_BINDING: scenario validation checks scenario commands before runner.mjs replaces them with --base/--fixed overrides. Divergent final argv can execute while the report says compareParams were validated. Validate the final resolved argv and terminal dimensions after overrides, or bind a stable checked fingerprint. Add CLI override mismatch tests.",
+      "Preserve already verified native PTY allocation, TTY/rows/columns evidence, scripted input, refusal, handshake, normal timeout and artifact behavior."
+    ],
+    "nonGoals": [
+      "Do not run real models.",
+      "Do not modify OpenTUI/Ink product code.",
+      "Do not work on Solid."
+    ]
+  },
+  "acceptance": {
+    "allowNoChange": false,
+    "commands": [
+      {
+        "id": "harness-tests",
+        "argv": ["node", "--test", "scripts/tui-parity/test"],
+        "cwd": ".",
+        "timeoutSeconds": 180,
+        "maxLogBytes": 50000,
+        "required": true,
+        "baselinePolicy": "none"
+      },
+      {
+        "id": "harness-self-test",
+        "argv": ["node", "scripts/tui-parity/self-test.mjs"],
+        "cwd": ".",
+        "timeoutSeconds": 180,
+        "maxLogBytes": 50000,
+        "required": true,
+        "baselinePolicy": "none"
+      },
+      {
+        "id": "diff-check",
+        "argv": ["git", "diff", "--check"],
+        "cwd": ".",
+        "timeoutSeconds": 30,
+        "maxLogBytes": 10000,
+        "required": true,
+        "baselinePolicy": "none"
+      }
+    ]
+  },
+  "budgets": {
+    "attemptTimeoutSeconds": 3600,
+    "runTimeoutSeconds": 5400,
+    "maxAttempts": 3,
+    "maxOperationalRetries": 1,
+    "maxReworkRounds": 1,
+    "maxOutputBytes": 16000000
+  },
+  "deliverables": [
+    {
+      "id": "hardened-parity-harness",
+      "kind": "code",
+      "pathGlob": "scripts/tui-parity/**",
+      "minimumCount": 3,
+      "required": true
+    }
+  ],
+  "worker": {
+    "preferredAdapter": "opencode",
+    "fallbackAdapters": [],
+    "sessionPolicy": "ephemeral",
+    "executionProfile": "workspace-write"
+  },
+  "publication": {
+    "provider": "none",
+    "mode": "none",
+    "remote": "origin",
+    "baseBranch": "feat/opentui-migrate",
+    "required": false,
+    "requiredChecks": [],
+    "mergePolicy": "never"
+  }
+}

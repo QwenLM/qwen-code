@@ -1,0 +1,35 @@
+{
+  "apiVersion": "marshal.dev/v1alpha1",
+  "kind": "PolicySnapshot",
+  "taskId": "QWEN-OTUI-BACKSPACE-R7",
+  "runId": "qwen-otui-backspace-r7-20260811",
+  "sources": [
+    {
+      "scope": "builtin",
+      "digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "required": true
+    }
+  ],
+  "effective": {
+    "minimumExecutionProfile": "workspace-write",
+    "requireEnforcedNetworkPolicy": false,
+    "networkPolicy": "unenforced",
+    "allowFallbackWorkers": false,
+    "allowWorkerSubagents": false,
+    "allowPublication": false,
+    "allowMerge": false,
+    "allowGateWaivers": false,
+    "allowedAdapters": ["opencode"],
+    "environmentAllowlist": ["PATH", "HOME", "LANG", "LC_ALL", "TMPDIR"],
+    "retentionDays": 30
+  },
+  "control": {
+    "autonomyProfile": "balanced",
+    "requiredApprovals": ["plan", "publish"],
+    "allowMediatedSteering": true,
+    "directPtyPolicy": "record-and-reverify",
+    "maxSteeringRounds": 2
+  },
+  "policyDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "generatedAt": "2026-08-11T20:29:29Z"
+}

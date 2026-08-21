@@ -1,0 +1,164 @@
+{
+  "apiVersion": "marshal.dev/v1alpha1",
+  "kind": "Task",
+  "metadata": {
+    "id": "QWEN-OTUI-BACKSPACE-R3",
+    "title": "OpenTUI Backspace clean successor with verifier-owned PTY proof"
+  },
+  "repository": {
+    "path": "/Users/gawain/Documents/codebase/fork/qwen-code",
+    "baseRef": "feat/opentui-migrate",
+    "remote": "origin"
+  },
+  "scope": {
+    "allowPaths": [
+      "packages/cli/src/ui/opentui/input-prompt.tsx",
+      "packages/cli/src/ui/opentui/input-prompt-key.ts",
+      "packages/cli/src/ui/opentui/input-prompt-key.test.ts"
+    ],
+    "allowSubmodules": false,
+    "denyPaths": [
+      ".marshal/**",
+      "packages/cli/src/ui/components/**",
+      "packages/cli/src/ui/render/**",
+      "packages/cli/src/ui/startInteractiveUI.tsx",
+      "package.json",
+      "package-lock.json"
+    ],
+    "maxChangedFiles": 3,
+    "maxDiffBytes": 35000
+  },
+  "work": {
+    "objective": "Independently fix the Bun/OpenTUI composer so Backspace deletes typed text and Tab/editing keys reach the native textarea, including option-modifier handling; leave the real Bun PTY proof exclusively to the independent verifier.",
+    "constraints": [
+      "Use repository-relative paths for every read, search, edit and command.",
+      "Only modify the three allowlisted input-prompt files; do not modify Ink, renderer dispatch, dependencies, lockfiles, Marshal state, commit, push, publish, use network access or start subagents.",
+      "Do not read, search, list, compare, import or copy any R1/R2 worktree, patch, transcript, WorkerResult, ReviewPacket or Marshal run artifact; implement independently from the frozen base branch requirements.",
+      "Do not manually slice JavaScript strings to implement deletion; route control/editing keys to TextareaRenderable native bindings.",
+      "The printable fallback must reject ctrl, meta, option, super and hyper modifiers, all C0/C1/DEL bytes, escape sequences and named editing/navigation keys while preserving ASCII, CJK and emoji input.",
+      "Worker development checks are limited to the unit/OpenTUI vitest commands, CLI typecheck/build and git diff --check; do not launch Bun, expect, PTY diagnostics or background processes because the independent verifier owns native proof.",
+      "If an operation is denied, do not retry that path; use an allowed equivalent or report blocked."
+    ],
+    "context": [
+      "The user reproduced Backspace not deleting under QWEN_TUI_RENDERER=opentui bun packages/cli/dist/index.js.",
+      "Root cause to address: the global useKeyboard printable fallback may treat Backspace DEL (0x7f) and Tab as printable, insert them and preventDefault, so the focused textarea never receives native editing bindings.",
+      "Prior runs are blocked and must not be integrated or inspected. This successor starts independently from origin/feat/opentui-migrate.",
+      "The independent verifier waits for ready, types ZXQ, observes it, sends DEL then Enter, and requires the user-history line to contain ZX rather than ZXQ."
+    ],
+    "nonGoals": [
+      "No visual redesign",
+      "No help dialog changes",
+      "No runtime gate changes",
+      "No completion/history semantic redesign"
+    ]
+  },
+  "acceptance": {
+    "allowNoChange": false,
+    "commands": [
+      {
+        "id": "backspace-unit",
+        "argv": [
+          "npm",
+          "exec",
+          "--",
+          "vitest",
+          "run",
+          "packages/cli/src/ui/opentui/input-prompt-key.test.ts"
+        ],
+        "cwd": ".",
+        "timeoutSeconds": 120,
+        "maxLogBytes": 30000,
+        "required": true,
+        "baselinePolicy": "none"
+      },
+      {
+        "id": "opentui-tests",
+        "argv": [
+          "npm",
+          "exec",
+          "--",
+          "vitest",
+          "run",
+          "packages/cli/src/ui/opentui"
+        ],
+        "cwd": ".",
+        "timeoutSeconds": 240,
+        "maxLogBytes": 50000,
+        "required": true,
+        "baselinePolicy": "none"
+      },
+      {
+        "id": "cli-typecheck",
+        "argv": ["npm", "run", "typecheck", "--workspace", "packages/cli"],
+        "cwd": ".",
+        "timeoutSeconds": 180,
+        "maxLogBytes": 30000,
+        "required": true,
+        "baselinePolicy": "none"
+      },
+      {
+        "id": "cli-build",
+        "argv": ["npm", "run", "build", "--workspace", "packages/cli"],
+        "cwd": ".",
+        "timeoutSeconds": 240,
+        "maxLogBytes": 40000,
+        "required": true,
+        "baselinePolicy": "none"
+      },
+      {
+        "id": "bun-backspace-native-pty",
+        "argv": [
+          "/usr/bin/expect",
+          "-c",
+          "set timeout 90\nspawn env QWEN_TUI_RENDERER=opentui QWEN_CODE_SKIP_UPDATE_CHECK_ONCE=true bun packages/cli/dist/index.js\nexpect { -re {ready} {} -re {unexpected critical error|Error:} { exit 1 } timeout { exit 2 } }\nsend -- \"ZXQ\"\nexpect { -re {ZXQ} {} timeout { exit 3 } }\nsend -- \"\\177\\r\"\nexpect { -re {❯.*ZX} {} -re {unexpected critical error|Error:} { exit 4 } timeout { exit 5 } }\nsend -- \"\\003\"\nexpect { eof {} timeout { exit 6 } }"
+        ],
+        "cwd": ".",
+        "timeoutSeconds": 180,
+        "maxLogBytes": 40000,
+        "required": true,
+        "baselinePolicy": "none"
+      },
+      {
+        "id": "diff-check",
+        "argv": ["git", "diff", "--check"],
+        "cwd": ".",
+        "timeoutSeconds": 30,
+        "maxLogBytes": 10000,
+        "required": true,
+        "baselinePolicy": "none"
+      }
+    ]
+  },
+  "budgets": {
+    "attemptTimeoutSeconds": 2400,
+    "runTimeoutSeconds": 5400,
+    "maxAttempts": 3,
+    "maxOperationalRetries": 1,
+    "maxReworkRounds": 1,
+    "maxOutputBytes": 16000000
+  },
+  "deliverables": [
+    {
+      "id": "backspace-fix",
+      "kind": "code",
+      "pathGlob": "packages/cli/src/ui/opentui/input-prompt*",
+      "minimumCount": 2,
+      "required": true
+    }
+  ],
+  "worker": {
+    "preferredAdapter": "opencode",
+    "fallbackAdapters": [],
+    "sessionPolicy": "ephemeral",
+    "executionProfile": "workspace-write"
+  },
+  "publication": {
+    "provider": "none",
+    "mode": "none",
+    "remote": "origin",
+    "baseBranch": "feat/opentui-migrate",
+    "required": false,
+    "requiredChecks": [],
+    "mergePolicy": "never"
+  }
+}

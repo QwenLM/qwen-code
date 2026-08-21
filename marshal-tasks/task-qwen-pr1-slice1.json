@@ -1,0 +1,91 @@
+{
+  "apiVersion": "marshal.dev/v1alpha1",
+  "kind": "Task",
+  "metadata": {
+    "id": "QWEN-PR1-SLICE1",
+    "title": "PR1 parity 切片1：输入+键盘+斜杠命令+help"
+  },
+  "repository": {
+    "path": "/Users/gawain/Documents/codebase/fork/qwen-code",
+    "baseRef": "feat/opentui-migrate",
+    "remote": "origin"
+  },
+  "scope": {
+    "allowPaths": [
+      "packages/cli/src/ui/opentui/**",
+      "packages/cli/src/ui/render/**",
+      "packages/cli/src/ui/opentui/**/*.test.ts"
+    ],
+    "allowSubmodules": false,
+    "denyPaths": [".marshal/**", "packages/cli/src/ui/components/**"],
+    "maxChangedFiles": 20,
+    "maxDiffBytes": 300000
+  },
+  "work": {
+    "objective": "PR1 parity 切片1：opentui TUI 输入/键盘/斜杠命令/help 与原版对齐",
+    "constraints": [
+      "严格按【用户验收标准】与【切片】执行；逐项对照原版行为。",
+      "只改允许路径；不删改 ink TUI；不安装依赖；不提交。",
+      "若 permission 拒绝不得重试，改用允许路径等价输入。"
+    ],
+    "context": [
+      "【用户验收标准（原文，必须满足）】“PR1 完全 parity + 全 E2E + 与原版完全一模一样；对照原版 qwen-code 将功能项拆碎逐项对比 check 直至完全一模一样；开发完自己通过 tmux 进行前后对比测试；这一项彻底完成校验没问题后再开 PR2；PR2 和 PR1 一样禁止偷懒，必须原样完整实现，一项都不准差。”\n对照清单见 tui-research reports/pr1-parity-checklist.md（131 斜杠命令/35 对话框/键盘/鼠标/显示/会话/a11y/E2E）。\n【本 Run = PR1 parity 切片 1：输入 + 键盘体系 + 斜杠命令分派 + help 对齐】\n在 packages/cli/src/ui/opentui/ 的 OpenTUI TUI 中实现：\n1. 输入框与提交（Enter/换行/历史 ↑↓）对齐原版 InputPrompt 行为；\n2. 键盘体系：读取原版 keyBindings/defaultKeys，在 opentui TUI 注册等价键位（Ctrl+O 展开、Ctrl+T、Ctrl+S、Esc、/ 聚焦等），行为一致；\n3. 斜杠命令分派：'/' 前缀输入解析并分派到原版命令注册表（ui/commands），help 命令输出与原版一致；\n4. 保持框架中性 model 与现有渲染（erase-free）不变；不破坏已通过的 arch/dep 测试。\n纪律：只改 packages/cli/src/ui/opentui/** 与 ui/render/**；不删/不改 ink TUI；不安装依赖；不提交。\n自测：node scripts/check-tui-dep-direction.mjs 通过；新增单测覆盖命令分派与键位映射；并尽量用 scripts/tmux-compare.sh 做前后对比（无凭据时用 qwen2-demo）。\n"
+    ],
+    "nonGoals": ["不实现全部131命令的UI(切片1只做分派+help)", "不改 ink TUI"]
+  },
+  "acceptance": {
+    "allowNoChange": false,
+    "commands": [
+      {
+        "id": "arch",
+        "argv": ["node", "scripts/check-tui-dep-direction.mjs"],
+        "cwd": ".",
+        "timeoutSeconds": 60,
+        "maxLogBytes": 20000,
+        "required": true,
+        "baselinePolicy": "none"
+      },
+      {
+        "id": "tsc",
+        "argv": ["npx", "tsc", "--build", "packages/cli"],
+        "cwd": ".",
+        "timeoutSeconds": 300,
+        "maxLogBytes": 20000,
+        "required": true,
+        "baselinePolicy": "none"
+      }
+    ]
+  },
+  "budgets": {
+    "attemptTimeoutSeconds": 5400,
+    "runTimeoutSeconds": 9000,
+    "maxAttempts": 4,
+    "maxOperationalRetries": 1,
+    "maxReworkRounds": 2,
+    "maxOutputBytes": 32000000
+  },
+  "deliverables": [
+    {
+      "id": "slice1",
+      "kind": "code",
+      "pathGlob": "packages/cli/src/ui/opentui/**",
+      "minimumCount": 1,
+      "required": true
+    }
+  ],
+  "worker": {
+    "preferredAdapter": "opencode",
+    "fallbackAdapters": [],
+    "sessionPolicy": "ephemeral",
+    "executionProfile": "workspace-write"
+  },
+  "publication": {
+    "required": false,
+    "provider": "none",
+    "mode": "none",
+    "remote": "origin",
+    "baseBranch": "feat/opentui-migrate",
+    "mergePolicy": "never",
+    "requiredChecks": []
+  }
+}

@@ -1,0 +1,137 @@
+{
+  "apiVersion": "marshal.dev/v1alpha1",
+  "kind": "Task",
+  "metadata": {
+    "id": "QWEN-OTUI-HELP-NATIVE-R1",
+    "title": "Fix native Bun PTY /help renderer crash"
+  },
+  "repository": {
+    "path": "/Users/gawain/Documents/codebase/fork/qwen-code",
+    "baseRef": "feat/opentui-migrate",
+    "remote": "origin"
+  },
+  "scope": {
+    "allowPaths": ["packages/cli/src/ui/opentui/**"],
+    "allowSubmodules": false,
+    "denyPaths": [
+      ".marshal/**",
+      "packages/cli/src/ui/render/**",
+      "packages/cli/src/ui/startInteractiveUI.tsx",
+      "package.json",
+      "package-lock.json"
+    ],
+    "maxChangedFiles": 6,
+    "maxDiffBytes": 70000
+  },
+  "work": {
+    "objective": "Fix the real OpenTUI/Bun renderer crash triggered by /help and make the dialog open, close, and process Ctrl+C correctly in a native PTY.",
+    "constraints": [
+      "Use repository-relative paths for every read, search, edit and command.",
+      "Only modify packages/cli/src/ui/opentui/**; do not modify Ink, renderer dispatch, dependencies, lockfiles, Marshal state, commit, push, publish, use network access or start subagents.",
+      "If an operation is denied, do not retry that path; use an allowed relative-path equivalent or report blocked.",
+      "Do not satisfy this task with mocked renderer tests alone; preserve the real Bun PTY reproduction."
+    ],
+    "context": [
+      "Real reproduction on commit fac22d00f: QWEN_TUI_RENDERER=opentui bun packages/cli/dist/index.js renders the initial UI. Sending /help then Enter crashes the React renderer with: TextNodeRenderable only accepts strings, TextNodeRenderable instances, or StyledText instances, from @opentui/core TextNode.ts appendInitialChild.",
+      "After the render error, the first Ctrl+C did not exit; the process required external termination. Both the dialog render and clean exit behavior are blocking.",
+      "Inspect help-overlay.tsx for children invalid under @opentui/react's real reconciler, especially nested text elements or mixed child types. Compare with supported OpenTUI React text/span composition rather than assuming React DOM semantics.",
+      "The initial banner/input/status screen already works under Bun. Preserve it and all existing command/dialog wiring.",
+      "Add focused regression coverage and ensure /help opens in the built CLI under a real PTY, shows its help footer, Esc closes it, and Ctrl+C exits without a native error."
+    ],
+    "nonGoals": [
+      "Do not fix the Node 24 native FFI runtime guard in this run.",
+      "Do not port additional dialogs or commands.",
+      "Do not work on the parity harness or Solid."
+    ]
+  },
+  "acceptance": {
+    "allowNoChange": false,
+    "commands": [
+      {
+        "id": "opentui-tests",
+        "argv": [
+          "./node_modules/.bin/vitest",
+          "run",
+          "packages/cli/src/ui/opentui"
+        ],
+        "cwd": ".",
+        "timeoutSeconds": 180,
+        "maxLogBytes": 40000,
+        "required": true,
+        "baselinePolicy": "none"
+      },
+      {
+        "id": "cli-typecheck",
+        "argv": ["npm", "run", "typecheck", "--workspace", "packages/cli"],
+        "cwd": ".",
+        "timeoutSeconds": 180,
+        "maxLogBytes": 30000,
+        "required": true,
+        "baselinePolicy": "none"
+      },
+      {
+        "id": "cli-build",
+        "argv": ["npm", "run", "build", "--workspace", "packages/cli"],
+        "cwd": ".",
+        "timeoutSeconds": 240,
+        "maxLogBytes": 40000,
+        "required": true,
+        "baselinePolicy": "none"
+      },
+      {
+        "id": "bun-help-native-pty",
+        "argv": [
+          "/usr/bin/expect",
+          "-c",
+          "set timeout 20\nspawn env QWEN_TUI_RENDERER=opentui bun packages/cli/dist/index.js\nafter 3000\nsend -- \"/help\\r\"\nexpect {\n  -re {TextNodeRenderable only accepts|unexpected critical error|Error:} { exit 1 }\n  -re {For more help:} {}\n  timeout { exit 2 }\n}\nsend -- \"\\033\"\nafter 500\nsend -- \"\\003\"\nexpect { eof {} timeout { exit 3 } }"
+        ],
+        "cwd": ".",
+        "timeoutSeconds": 40,
+        "maxLogBytes": 30000,
+        "required": true,
+        "baselinePolicy": "none"
+      },
+      {
+        "id": "diff-check",
+        "argv": ["git", "diff", "--check"],
+        "cwd": ".",
+        "timeoutSeconds": 30,
+        "maxLogBytes": 10000,
+        "required": true,
+        "baselinePolicy": "none"
+      }
+    ]
+  },
+  "budgets": {
+    "attemptTimeoutSeconds": 3000,
+    "runTimeoutSeconds": 4800,
+    "maxAttempts": 3,
+    "maxOperationalRetries": 1,
+    "maxReworkRounds": 1,
+    "maxOutputBytes": 16000000
+  },
+  "deliverables": [
+    {
+      "id": "native-help-fix",
+      "kind": "code",
+      "pathGlob": "packages/cli/src/ui/opentui/**",
+      "minimumCount": 1,
+      "required": true
+    }
+  ],
+  "worker": {
+    "preferredAdapter": "opencode",
+    "fallbackAdapters": [],
+    "sessionPolicy": "ephemeral",
+    "executionProfile": "workspace-write"
+  },
+  "publication": {
+    "provider": "none",
+    "mode": "none",
+    "remote": "origin",
+    "baseBranch": "feat/opentui-migrate",
+    "required": false,
+    "requiredChecks": [],
+    "mergePolicy": "never"
+  }
+}

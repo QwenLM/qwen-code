@@ -1,0 +1,165 @@
+{
+  "apiVersion": "marshal.dev/v1alpha1",
+  "kind": "Task",
+  "metadata": {
+    "id": "QWEN-OTUI-VISUAL-HEADER-R1",
+    "title": "OpenTUI React Ink-parity Header and Tips leaf slice"
+  },
+  "repository": {
+    "path": "/Users/gawain/Documents/codebase/fork/qwen-code",
+    "baseRef": "feat/opentui-migrate",
+    "remote": "origin"
+  },
+  "scope": {
+    "allowPaths": [
+      "packages/cli/src/ui/opentui/header.tsx",
+      "packages/cli/src/ui/opentui/header.test.tsx"
+    ],
+    "allowSubmodules": false,
+    "denyPaths": [
+      ".marshal/**",
+      "packages/cli/src/ui/opentui/backend.tsx",
+      "packages/cli/src/ui/startInteractiveUI.tsx",
+      "packages/cli/src/ui/render/**",
+      "packages/cli/src/ui/components/**",
+      "package.json",
+      "package-lock.json"
+    ],
+    "maxChangedFiles": 2,
+    "maxDiffBytes": 50000
+  },
+  "work": {
+    "objective": "Implement an independent OpenTUI/React Header plus startup Tips leaf component whose visible structure and conditional behavior match the authoritative Ink AppHeader, Header and Tips at 80- and 120-column widths, using caller-supplied real version, model and working-directory values rather than demo placeholders.",
+    "constraints": [
+      "Use repository-relative paths for every read, search, edit and command.",
+      "Only add or modify the two allowlisted OpenTUI header files; do not modify backend.tsx, startInteractiveUI.tsx, Ink components, renderer selection, dependencies, lockfiles, Marshal state, Git index, commits, pushes, publication, network state or subagents.",
+      "Treat packages/cli/src/ui/components/AppHeader.tsx, Header.tsx, Tips.tsx and their tests as the authoritative behavioral and visual reference; inspect them directly and preserve their information hierarchy, spacing, labels, responsive decisions and semantic theme roles using supported @opentui/react primitives.",
+      "Expose typed props for the real CLI version, model display name, working directory and any auth label needed for Ink parity. Do not hardcode the screenshot version, model, cwd, repository name or a fixed startup tip.",
+      "Match Ink visibility semantics exactly: banner is visible only when screenReader is false and hideBanner is not true; tips are visible only when screenReader is false and hideTips is not true; hideBanner must not hide tips and hideTips must not hide the banner.",
+      "In screen-reader mode emit neither decorative banner/logo nor startup tip content. Keep the exported visibility/layout model deterministic and testable without relying on terminal color support.",
+      "At 120 columns preserve the Ink desktop hierarchy: optional logo column when it fits, bordered information panel, version, auth/model line with width-gated model hint, shortened cwd line, then startup Tips. At 80 columns use the same Ink width calculations and fallback ordering so content fits without clipping or accidental horizontal overflow.",
+      "Use the existing semantic theme colors, path helpers, ASCII art, width helpers, i18n and tips service where applicable; do not introduce a second theme, fake data source or OpenTUI-only wording.",
+      "Startup-tip selection must follow the Ink Tips behavior: select once for the component lifetime, record the selected tip once, translate the Tips label/content, and retain the Ink fallback when the registry yields no tip. Tests must mock history/selection so they are deterministic and do not write user state.",
+      "Add deterministic tests for 80 and 120 columns; real version/model/cwd propagation and path shortening; hideBanner and hideTips independently and together; screenReader suppression; semantic text/labels; and stable one-time tip selection/recording. Include a regression assertion that no current POC strings such as the fixed model/cwd/status guidance from the screenshot are introduced.",
+      "This is a leaf slice only: export the component and any pure layout/visibility helper needed by a later mount slice, but do not wire it into backend.tsx in this task.",
+      "If an operation is denied by policy, do not retry that path; use an allowed equivalent or report the task blocked."
+    ],
+    "context": [
+      "The current OpenTUI screen has already been verified not to flicker and to support mouse interaction, but its compact hardcoded header differs substantially from the Ink product UI.",
+      "The Ink source computes showBanner as !screenReader && !hideBanner and showTips as !screenReader && !hideTips; these independent controls are acceptance-critical.",
+      "Ink Header derives a semver-aware version label, auth/model text, an optional model hint, tildeified/shortened cwd, and a width-aware logo/info-panel layout. The OpenTUI leaf must use the same user-visible values and responsive intent at 80 and 120 columns.",
+      "Because backend/entry writes are excluded, tests are the binding evidence for this leaf. A separate non-overlapping mount slice will consume the exported component after acceptance."
+    ],
+    "nonGoals": [
+      "No backend or entry-point mounting",
+      "No messages, Thought, Composer, LoadingIndicator or Footer redesign",
+      "No dialog, command, input, mouse, renderer-gate or runtime changes",
+      "No custom-banner feature expansion beyond parity supported cleanly inside the leaf",
+      "No Solid migration",
+      "No release, commit, push or publication"
+    ]
+  },
+  "acceptance": {
+    "allowNoChange": false,
+    "commands": [
+      {
+        "id": "header-tests",
+        "argv": [
+          "npm",
+          "exec",
+          "--",
+          "vitest",
+          "run",
+          "packages/cli/src/ui/opentui/header.test.tsx"
+        ],
+        "cwd": ".",
+        "timeoutSeconds": 180,
+        "maxLogBytes": 50000,
+        "required": true,
+        "baselinePolicy": "none"
+      },
+      {
+        "id": "opentui-tests",
+        "argv": [
+          "npm",
+          "exec",
+          "--",
+          "vitest",
+          "run",
+          "packages/cli/src/ui/opentui"
+        ],
+        "cwd": ".",
+        "timeoutSeconds": 300,
+        "maxLogBytes": 80000,
+        "required": true,
+        "baselinePolicy": "none"
+      },
+      {
+        "id": "cli-typecheck",
+        "argv": ["npm", "run", "typecheck", "--workspace", "packages/cli"],
+        "cwd": ".",
+        "timeoutSeconds": 240,
+        "maxLogBytes": 40000,
+        "required": true,
+        "baselinePolicy": "none"
+      },
+      {
+        "id": "cli-build",
+        "argv": ["npm", "run", "build", "--workspace", "packages/cli"],
+        "cwd": ".",
+        "timeoutSeconds": 300,
+        "maxLogBytes": 50000,
+        "required": true,
+        "baselinePolicy": "none"
+      },
+      {
+        "id": "diff-check",
+        "argv": ["git", "diff", "--check"],
+        "cwd": ".",
+        "timeoutSeconds": 30,
+        "maxLogBytes": 10000,
+        "required": true,
+        "baselinePolicy": "none"
+      }
+    ]
+  },
+  "budgets": {
+    "attemptTimeoutSeconds": 1800,
+    "runTimeoutSeconds": 4200,
+    "maxAttempts": 3,
+    "maxOperationalRetries": 1,
+    "maxReworkRounds": 1,
+    "maxOutputBytes": 12000000
+  },
+  "deliverables": [
+    {
+      "id": "opentui-header-leaf",
+      "kind": "code",
+      "pathGlob": "packages/cli/src/ui/opentui/header.tsx",
+      "minimumCount": 1,
+      "required": true
+    },
+    {
+      "id": "opentui-header-tests",
+      "kind": "test",
+      "pathGlob": "packages/cli/src/ui/opentui/header.test.tsx",
+      "minimumCount": 1,
+      "required": true
+    }
+  ],
+  "worker": {
+    "preferredAdapter": "opencode",
+    "fallbackAdapters": [],
+    "sessionPolicy": "ephemeral",
+    "executionProfile": "workspace-write"
+  },
+  "publication": {
+    "provider": "none",
+    "mode": "none",
+    "remote": "origin",
+    "baseBranch": "feat/opentui-migrate",
+    "required": false,
+    "requiredChecks": [],
+    "mergePolicy": "never"
+  }
+}

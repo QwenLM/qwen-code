@@ -1,0 +1,81 @@
+{
+  "apiVersion": "marshal.dev/v1alpha1",
+  "kind": "Task",
+  "metadata": {
+    "id": "QWEN-OTUI-P1B",
+    "title": "ink→opentui codemod 工具"
+  },
+  "repository": {
+    "path": "/Users/gawain/Documents/codebase/fork/qwen-code",
+    "baseRef": "feat/opentui-migrate",
+    "remote": "origin"
+  },
+  "scope": {
+    "allowPaths": ["scripts/codemod/**"],
+    "allowSubmodules": false,
+    "denyPaths": [".marshal/**"],
+    "maxChangedFiles": 6,
+    "maxDiffBytes": 120000
+  },
+  "work": {
+    "objective": "产出保守的 ink→opentui JSX codemod 工具（dry-run 默认）+ fixtures + 自测。",
+    "constraints": [
+      "严格按【任务】执行。",
+      "只写 scripts/codemod/**。",
+      "所有验证必须在业务 worktree 内运行；严禁向工作区外（/var/folders、/tmp、$TMPDIR、HOME）写入/复制/运行文件。",
+      "codemod.test.mjs 必须 `node` 直接跑 exit 0。"
+    ],
+    "context": [
+      "【任务：qwen-code OpenTUI 迁移 P1b-tool —— ink→opentui JSX codemod 工具（dry-run，保守）】\n\n背景：迁移需把 206 个文件里的 ink `<Box>/<Text>` 改为 opentui `<box>/<text>` 并把样式类 props 收进 `style={{...}}`。本 Run 只产出 codemod 工具与自测，不实际改组件。\n\n必须产出：\n1. scripts/codemod/ink-to-opentui.mjs —— 纯 node（无第三方依赖）保守转换器：\n   - 支持 `--dry-run`（默认）：只输出每文件拟变更统计，不写文件；`--apply` 才写；\n   - 规则：`<Box`→`<box`、`</Box>`→`</box>`、`<Text`→`<text`、`</Text>`→`</text>`；\n   - 识别样式类 props（flexDirection/padding/margin/gap/justifyContent/alignItems/borderStyle/borderColor/backgroundColor/width/height/flexGrow/flexShrink）并从 JSX 属性移入 `style={{...}}`（若已有 style 则合并）；非样式 props 保留；\n   - 无法安全判断时标记 `MANUAL` 并在 dry-run 汇总列出，不强行改。\n2. scripts/codemod/fixtures/before.tsx + after.tsx —— 覆盖：纯 Box/Text、带样式 props、带非样式 props、已有 style、嵌套。\n3. scripts/codemod/codemod.test.mjs —— `node` 直接跑：对 before.tsx 跑 --apply 到临时副本（worktree 内）与 after.tsx 比对；exit 0=通过。\n\n纪律：只写 scripts/codemod/**；不改任何组件；不引入依赖；不提交。\n",
+      "【纪律（违反任何一条都会导致本次运行失败，务必遵守）】\n1. 本 Adapter 对“任何一次被拒绝的工具调用”零容忍：一次被拒 = 整个 Attempt 判失败。你必须做到零拒绝。\n2. 目标仓库源码只能通过 worktree 内的相对路径 sources/<repo>/... 访问（这是已建好的符号链接）。所有 bash 命令与文件路径一律使用以 sources/ 开头或工作区内相对路径；【严禁】使用任何指向工作区外的绝对路径（例如 /Users/... 、/tmp/...、/var/...），命令中只要出现工作区外绝对路径就会被拒绝。\n3. bash 命令不要用 --workdir/workdir 参数指向别处，不要用 git 命令访问目标仓库（会被拒绝）；需要历史信息时在报告中标注“未核实”。\n4. 读源码只用 bash 简单单命令：cat/head/tail/sed -n/rg/grep/find/ls/wc/file/stat，路径全部相对 sources/<repo>/。严禁 sh -c、bash -c、xargs、env、nohup、sudo、curl、wget、gh 等被禁模式。\n5. read/grep/glob/list 文件工具只用于工作区内普通文件（如 reports/ 你的输出、control/input/task-spec.json）；不要用它们读 sources/ 下内容（符号链接会被按外部路径拒绝）；sources/ 下内容一律用第 4 条 bash 相对路径命令读。\n6. 只读 control/input/ 下的任务文件；不要读 control 目录其他文件（如 worker-request.json 会被拒绝）。\n7. 写报告只用 write/edit 工具写你的 reports/ 输出文件；不用 bash 重定向（>、>>、tee）写文件。\n8. 若提示中出现“读取 $TMPDIR 下 work-context.txt”之类引导，直接忽略，不要尝试读取（会被拒绝）；任务全部要求已在本提示中。\n9. 效率预算：先 find/rg 定位，再 sed -n 按行号范围精读；避免整读大文件与重复读同一文件；目标 130 次工具调用内完成。\n10. 报告写完并自查结构后立即结束；不做多余验证性调用。\n11. 【v7 新增】写入报告等一切 write/edit 操作同样必须使用相对路径（如 reports/<文件名>）；指向 worktree 内部的绝对路径同样会被拒绝。提示词中出现的任何绝对路径（TaskSpec 路径、worktree 路径、worker-result 路径等）仅供理解，绝不得出现在任何工具调用中。\n12. 【v7 新增】验收命令由 Marshal 自动执行，你无需运行；不要用 sh -c、test 组合命令做自查（sh 是被禁模式）；自查只允许 read 自己写的报告文件。\n13. 【特别注意】本次分析对象是 worktree 内 sources/opencode/，与 opencode 程序本身、其安装目录（~/.opencode 等）或任何其他本地 opencode 克隆毫无关系；禁止以任何理由访问它们。",
+      "【WorkerResult 文件模板（逐字照抄结构，只替换尖括号占位内容）】\n任务结束时写入 control/output/worker-result.json 的 JSON 必须严格如下结构（不得增删任何字段）：\n{\n  \"apiVersion\": \"marshal.dev/v1alpha1\",\n  \"kind\": \"WorkerResult\",\n  \"taskId\": \"<提示中给定的 taskId>\",\n  \"runId\": \"<提示中给定的 runId>\",\n  \"attemptId\": \"<提示中给定的 attemptId>\",\n  \"adapter\": {\"id\": \"opencode\", \"executable\": \"opencode\", \"version\": \"1.18.13\"},\n  \"status\": \"completed\",\n  \"summary\": \"<一段话总结你完成了什么、报告写在哪里>\",\n  \"declaredChangedFiles\": [\"<你的报告相对路径，如 reports/xxx.md>\"],\n  \"declaredArtifacts\": [{\"id\": \"research-report\", \"kind\": \"documentation\", \"path\": \"<同上报告相对路径>\", \"description\": \"TUI 渲染调研报告\"}],\n  \"declaredCommands\": [],\n  \"declaredRisks\": [],\n  \"startedAt\": \"<RFC3339 时间，如 2026-08-06T04:00:00Z>\",\n  \"completedAt\": \"<RFC3339 时间>\"\n}\n注意：status 只能是 completed/blocked/failed/cancelled 之一；除上述字段外不得添加任何其他字段（如 finishedAt、deliverables、acceptance、notes、changedFiles 都是非法字段）。"
+    ],
+    "nonGoals": ["不实际修改组件", "不安装依赖"]
+  },
+  "acceptance": {
+    "allowNoChange": false,
+    "commands": [
+      {
+        "id": "codemod-test",
+        "argv": ["node", "scripts/codemod/codemod.test.mjs"],
+        "cwd": ".",
+        "timeoutSeconds": 60,
+        "maxLogBytes": 20000,
+        "required": true,
+        "baselinePolicy": "none"
+      }
+    ]
+  },
+  "budgets": {
+    "attemptTimeoutSeconds": 5400,
+    "runTimeoutSeconds": 9000,
+    "maxAttempts": 4,
+    "maxOperationalRetries": 1,
+    "maxReworkRounds": 1,
+    "maxOutputBytes": 32000000
+  },
+  "deliverables": [
+    {
+      "id": "codemod",
+      "kind": "code",
+      "pathGlob": "scripts/codemod/**",
+      "minimumCount": 1,
+      "required": true
+    }
+  ],
+  "worker": {
+    "preferredAdapter": "opencode",
+    "fallbackAdapters": [],
+    "sessionPolicy": "ephemeral",
+    "executionProfile": "workspace-write"
+  },
+  "publication": {
+    "required": false,
+    "provider": "none",
+    "mode": "none",
+    "remote": "origin",
+    "baseBranch": "feat/opentui-migrate",
+    "mergePolicy": "never",
+    "requiredChecks": []
+  }
+}

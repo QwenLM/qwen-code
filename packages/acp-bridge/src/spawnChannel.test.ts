@@ -56,6 +56,7 @@ import {
   createStderrForwarder,
   getAcpMemoryArgs,
   scrubChildEnv,
+  _resetAcpMemoryArgsCacheForTest,
 } from './spawnChannel.js';
 
 function createFakeChildProcess(): ChildProcess {
@@ -860,6 +861,29 @@ describe('getAcpMemoryArgs', () => {
     if (heapArg) {
       const sizeMB = Number(heapArg.split('=')[1]);
       expect(sizeMB).toBeLessThanOrEqual(16_384);
+    }
+  });
+
+  it('skips the no-op --max-old-space-size under Bun but keeps --expose-gc', () => {
+    const original = Object.getOwnPropertyDescriptor(process.versions, 'bun');
+    Object.defineProperty(process.versions, 'bun', {
+      value: '1.3.14',
+      configurable: true,
+    });
+    _resetAcpMemoryArgsCacheForTest();
+    try {
+      const args = getAcpMemoryArgs();
+      expect(args).toEqual(['--expose-gc']);
+      expect(args.some((a) => a.startsWith('--max-old-space-size='))).toBe(
+        false,
+      );
+    } finally {
+      _resetAcpMemoryArgsCacheForTest();
+      if (original) {
+        Object.defineProperty(process.versions, 'bun', original);
+      } else {
+        delete (process.versions as { bun?: string }).bun;
+      }
     }
   });
 });

@@ -94,7 +94,9 @@
     "yaml": "^2.8.1",
     "yargs": "^17.7.2",
     "yauzl": "^2.10.0",
-    "zod": "^3.23.8"
+    "zod": "^3.23.8",
+    "@opentui/core": "0.5.1",
+    "@opentui/react": "0.5.1"
   },
   "devDependencies": {
     "@babel/runtime": "^7.27.6",

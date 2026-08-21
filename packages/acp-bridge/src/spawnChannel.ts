@@ -316,6 +316,14 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 
 export function getAcpMemoryArgs(): string[] {
   if (cachedMemoryArgs) return cachedMemoryArgs;
+  // Bun accepts --max-old-space-size but it is a no-op (the heap limit adapts
+  // dynamically), so spawning every ACP child with the flag only adds noise.
+  // Keep --expose-gc, which Bun honours (globalThis.gc is used by the memory
+  // pressure monitor's critical tier).
+  if ('bun' in process.versions) {
+    cachedMemoryArgs = ['--expose-gc'];
+    return cachedMemoryArgs;
+  }
   const constrainedMemory = (process as { constrainedMemory?: () => number })
     .constrainedMemory;
   const constrained =
@@ -332,6 +340,11 @@ export function getAcpMemoryArgs(): string[] {
     '--expose-gc',
   ];
   return cachedMemoryArgs;
+}
+
+/** TEST ONLY: clear the cached memory args so runtime branches can be re-run. */
+export function _resetAcpMemoryArgsCacheForTest(): void {
+  cachedMemoryArgs = undefined;
 }
 
 // ──────────────────────────────────────────────────────────────────────

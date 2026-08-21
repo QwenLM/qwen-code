@@ -1,0 +1,76 @@
+{
+  "apiVersion": "marshal.dev/v1alpha1",
+  "kind": "Task",
+  "metadata": {
+    "id": "QWEN-PR1-A11Y",
+    "title": "PR1 切片6：a11y/读屏器+主题 parity"
+  },
+  "repository": {
+    "path": "/Users/gawain/Documents/codebase/fork/qwen-code",
+    "baseRef": "feat/opentui-migrate",
+    "remote": "origin"
+  },
+  "scope": {
+    "allowPaths": ["packages/cli/src/ui/opentui/**"],
+    "allowSubmodules": false,
+    "denyPaths": [".marshal/**", "packages/cli/src/ui/components/**"],
+    "maxChangedFiles": 25,
+    "maxDiffBytes": 300000
+  },
+  "work": {
+    "objective": "PR1 切片6：a11y/读屏器+主题 parity",
+    "constraints": [
+      "只创建本切片新文件（a11y-*.ts* theme-*.ts*），不改/不删既有文件与 ink TUI；不安装依赖；不提交；勿向工作区外写文件；permission 拒绝不得重试。"
+    ],
+    "context": [
+      "【用户验收标准（原文）】“PR1 完全 parity + 全 E2E + 与原版完全一模一样；对照原版拆碎逐项 check 直至完全一样；开发完用 tmux 前后对比自测；一项不准差。” 对照清单：tui-research reports/pr1-parity-checklist.md。\n只新建 a11y-*/theme-* 文件。对照原版：① 屏幕阅读器模式（ui.screenReader：纯文本/禁 VP/禁鼠标/append-only）在 opentui 的等价实现或保留 ink 通道方案；② 16 内置主题+OSC 10/11 终端主题自适应+semantic-tokens 映射到 opentui SyntaxStyle/theme；补 vitest 单测。\n"
+    ],
+    "nonGoals": ["不改 ink TUI", "不做其他切片"]
+  },
+  "acceptance": {
+    "allowNoChange": false,
+    "commands": [
+      {
+        "id": "tsc",
+        "argv": ["npx", "tsc", "--build", "packages/cli"],
+        "cwd": ".",
+        "timeoutSeconds": 300,
+        "maxLogBytes": 20000,
+        "required": true,
+        "baselinePolicy": "none"
+      }
+    ]
+  },
+  "budgets": {
+    "attemptTimeoutSeconds": 5400,
+    "runTimeoutSeconds": 9000,
+    "maxAttempts": 4,
+    "maxOperationalRetries": 1,
+    "maxReworkRounds": 2,
+    "maxOutputBytes": 32000000
+  },
+  "deliverables": [
+    {
+      "id": "d",
+      "kind": "code",
+      "pathGlob": "packages/cli/src/ui/opentui/**",
+      "minimumCount": 1,
+      "required": true
+    }
+  ],
+  "worker": {
+    "preferredAdapter": "opencode",
+    "fallbackAdapters": [],
+    "sessionPolicy": "ephemeral",
+    "executionProfile": "workspace-write"
+  },
+  "publication": {
+    "required": false,
+    "provider": "none",
+    "mode": "none",
+    "remote": "origin",
+    "baseBranch": "feat/opentui-migrate",
+    "mergePolicy": "never",
+    "requiredChecks": []
+  }
+}
