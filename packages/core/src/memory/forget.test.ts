@@ -394,6 +394,48 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
     expect(prompt).not.toContain('id: user:user/doc-0.md');
   });
 
+  it("scales the per-scope split to a small limit and takes each scope's newest", async () => {
+    // The deletion path with /forget's default-sized limit. Pins two things the
+    // 400-limit cases cannot: that the split is derived from the budget rather
+    // than a fixed 200 quota, and the direction of selectByHeuristic's own
+    // recency comparator (the model path never runs here).
+    const matching = (scope: 'user' | 'project', dir: string) =>
+      Array.from({ length: 300 }, (_, index) => ({
+        type: (scope === 'user' ? 'user' : 'reference') as 'user' | 'reference',
+        filePath: `${dir}/doc-${index}.md`,
+        relativePath: `${scope === 'user' ? 'user' : 'reference'}/doc-${index}.md`,
+        filename: `doc-${index}.md`,
+        title: `Doc ${index}`,
+        description: 'Matching',
+        body: 'the saved codeword is overflow-zephyr-7040',
+        mtimeMs: 1_000 + index,
+      }));
+    vi.mocked(scanAllUserAutoMemoryTopicDocuments).mockResolvedValue(
+      matching('user', '/tmp/user/memories/user'),
+    );
+    vi.mocked(scanAllAutoMemoryTopicDocuments).mockResolvedValue(
+      matching('project', '/tmp/project/memory/reference'),
+    );
+    vi.mocked(runSideQuery).mockRejectedValue(new Error('side query failed'));
+
+    const result = await selectManagedAutoMemoryForgetCandidates(
+      '/tmp/project',
+      'overflow-zephyr-7040',
+      { config: mockConfig, limit: 5 },
+    );
+
+    expect(result.strategy).toBe('heuristic');
+    // 5 seats over 2 scopes: 2 each, then the odd seat to the first scope.
+    expect(result.matches).toHaveLength(5);
+    const paths = result.matches.map((match) => match.filePath);
+    expect(paths.filter((p) => p.startsWith('/tmp/user/'))).toHaveLength(3);
+    expect(paths.filter((p) => p.startsWith('/tmp/project/'))).toHaveLength(2);
+    // Newest of each scope, not oldest.
+    expect(paths).toContain('/tmp/user/memories/user/doc-299.md');
+    expect(paths).toContain('/tmp/project/memory/reference/doc-299.md');
+    expect(paths).not.toContain('/tmp/user/memories/user/doc-0.md');
+  });
+
   it('gives the heuristic fallback the full list, not the bounded one', async () => {
     // 450 literal matches with a limit above that: handing the fallback the
     // 400-candidate prompt budget instead of the full list would silently
