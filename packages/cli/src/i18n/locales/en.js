@@ -2530,6 +2530,8 @@ export default {
     'Ask a quick side question without affecting the main conversation',
   'Get a second opinion on the current conversation from a reviewer model':
     'Get a second opinion on the current conversation from a reviewer model',
+  'Configure the native Advisor model, or run /advisor review for a manual second opinion':
+    'Configure the native Advisor model, or run /advisor review for a manual second opinion',
   'Consulting advisor...': 'Consulting advisor...',
   'Advisor review failed: {{error}}': 'Advisor review failed: {{error}}',
   'No conversation context available for /advisor':
