@@ -123,10 +123,6 @@ impl DesktopRuntime {
         &self.base_url
     }
 
-    pub fn token(&self) -> &str {
-        &self.token
-    }
-
     pub fn authenticated_web_url(&self) -> Url {
         let mut url = self.base_url.clone();
         url.set_fragment(Some(&format!("token={}", self.token)));

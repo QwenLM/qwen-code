@@ -33,6 +33,7 @@ import type {
   Content,
   GenerateContentConfig,
   GenerateContentResponseUsageMetadata,
+  Part,
 } from '@google/genai';
 import {
   runWithRuntimeContentGenerator,
@@ -61,6 +62,7 @@ import {
   type ResolvedModelId,
 } from './modelId.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { getFunctionResponseParts } from '../services/compactionInputSlimming.js';
 import { runWithChatRecordingSuppressed } from './chat-recording-suppression-context.js';
 
 const debugLogger = createDebugLogger('FORKED_AGENT');
@@ -78,24 +80,45 @@ export interface CacheSafeParams {
   /** Full generation config including systemInstruction and tools */
   generationConfig: GenerateContentConfig;
   /**
-   * Curated conversation history with copied Content and parts containers.
-   * Part objects are shared by reference; consumers must not mutate them.
+   * Curated conversation history with copied Content, parts arrays, and Part
+   * objects. Nested functionResponse parts are copied too; leaf payloads remain
+   * shared and must not be mutated.
    */
   history: Content[];
   /** Model identifier */
   model: string;
   /** Version number — increments when systemInstruction or tools change */
   version: number;
+  /**
+   * The session that saved these params. The slot is a process-global, so
+   * in a multi-session daemon it can hold another session's params; readers
+   * must match this against their own session id before trusting it, or a
+   * forked query could be built from a different session's transcript
+   * (cross-session content leak) (#9233).
+   */
+  sessionId?: string;
 }
 
 // Module-level slot written after each successful main turn.
 let currentCacheSafeParams: CacheSafeParams | null = null;
 let currentVersion = 0;
 
+function clonePart(part: Part): Part {
+  const nested = getFunctionResponseParts(part);
+  if (!nested) return { ...part };
+  return {
+    ...part,
+    functionResponse: {
+      ...part.functionResponse,
+      parts: nested.map((inner) => ({ ...inner })),
+    },
+  };
+}
+
 function copyHistoryContainers(history: Content[]): Content[] {
   return history.map((content) => ({
     ...content,
-    ...(content.parts ? { parts: [...content.parts] } : {}),
+    ...(content.parts ? { parts: content.parts.map(clonePart) } : {}),
   }));
 }
 
@@ -107,6 +130,7 @@ export function saveCacheSafeParams(
   generationConfig: GenerateContentConfig,
   history: Content[],
   model: string,
+  sessionId?: string,
 ): void {
   const prevConfig = currentCacheSafeParams?.generationConfig;
   const sysChanged =
@@ -126,6 +150,7 @@ export function saveCacheSafeParams(
     history: copyHistoryContainers(history),
     model,
     version: currentVersion,
+    sessionId,
   };
 }
 
@@ -139,7 +164,12 @@ export function getCacheSafeParams(): CacheSafeParams | null {
     history: copyHistoryContainers(currentCacheSafeParams.history),
     model: currentCacheSafeParams.model,
     version: currentCacheSafeParams.version,
+    sessionId: currentCacheSafeParams.sessionId,
   };
+}
+
+export function getCacheSafeParamsSessionId(): string | undefined {
+  return currentCacheSafeParams?.sessionId;
 }
 
 /**
@@ -293,6 +323,8 @@ export interface ForkedQueryResult {
     outputTokens: number;
     cacheHitTokens: number;
   };
+  /** Resolved model id used for the query (after selector/alias resolution). */
+  model: string;
 }
 
 function extractQueryUsage(
@@ -332,6 +364,8 @@ export interface CachePathParams {
   model?: string;
   /** External cancellation signal. */
   abortSignal?: AbortSignal;
+  /** Do not route the query through configured model fallbacks. */
+  disableModelFallbacks?: boolean;
   /**
    * When true, keep the parent's tools in the per-request config so the
    * Anthropic prompt-cache key (system + tools) matches the main agent's.
@@ -464,6 +498,7 @@ export async function runForkedAgent(
       jsonSchema,
       abortSignal,
       preserveTools,
+      disableModelFallbacks,
     } = params;
     const modelSelector = params.model ?? cacheSafeParams.model;
     const modelRuntime = await buildForkedModelRuntime(
@@ -484,11 +519,19 @@ export async function runForkedAgent(
         requestConfig.responseJsonSchema = jsonSchema;
       }
 
-      const stream = await chat.sendMessageStream(
-        model,
-        { message: [{ text: userMessage }], config: requestConfig },
-        'forked_query',
-      );
+      const sendParams = {
+        message: [{ text: userMessage }],
+        config: requestConfig,
+      };
+      const stream = disableModelFallbacks
+        ? await chat.sendMessageStream(
+            model,
+            sendParams,
+            'forked_query',
+            undefined,
+            { disableModelFallbacks: true },
+          )
+        : await chat.sendMessageStream(model, sendParams, 'forked_query');
 
       let fullText = '';
       let usage: ForkedQueryResult['usage'] = {
@@ -533,7 +576,7 @@ export async function runForkedAgent(
         }
       }
 
-      return { text: trimmed, jsonResult, usage };
+      return { text: trimmed, jsonResult, usage, model };
     });
   }
 

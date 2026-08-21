@@ -16,20 +16,28 @@ import type { CommandModule } from 'yargs';
 import { execFileSync } from 'node:child_process';
 import {
   existsSync,
+  lstatSync,
   readFileSync,
   readdirSync,
   realpathSync,
   rmSync,
   statSync,
 } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   CAPTURE_SERVER_PREFIX,
   isNothingToKill,
   isSocketDirUnusable,
 } from './lib/tui-capture.js';
-import { clearReviewWorktreeLease } from '../../services/review-worktree-lease.js';
+import {
+  clearReviewWorktreeLease,
+  isReviewLeaseFile,
+  readReviewWorktreeLease,
+  reviewLeaseHeldByAnotherSession,
+  reviewLeasePath,
+} from '../../services/review-worktree-lease.js';
+import { redirectedAncestor, sanitizedGitEnv } from './lib/worktree.js';
 import { currentUser, getGhHost, ghApiAll, setGhHost } from './lib/gh.js';
 import { parseReceiptIds } from './lib/receipt.js';
 import { refExists, releaseWorktree } from './lib/git.js';
@@ -39,6 +47,7 @@ import {
   worktreePath,
   probeWorktreePath,
   baseWorktreePath,
+  scratchWorktreePrefix,
   reviewBranch,
   REVIEW_TMP_DIR,
   tmpFile,
@@ -559,7 +568,93 @@ function reapOrphanedCaptureServers(): { reaped: boolean; failed: boolean } {
   return { reaped: reapedAny, failed: failedAny };
 }
 
+/**
+ * Every scratch worktree standing beside `worktree`, in name order.
+ *
+ * A verifier's scratch tree is named for the shard that owns it, so the sweeper
+ * cannot reconstruct the names — it recognises the family instead. Reading the
+ * directory rather than trusting a pattern is deliberate: these are paths this
+ * function is about to delete, and a real directory entry that starts with the
+ * review's own `<worktree>-scratch-` prefix is a much narrower thing than any
+ * string that matches a glob.
+ */
+function scratchWorktreesOf(worktree: string): {
+  paths: string[];
+  failed: boolean;
+} {
+  const prefix = scratchWorktreePrefix(worktree);
+  const parent = dirname(resolve(worktree));
+  let entries: string[];
+  try {
+    entries = readdirSync(parent);
+  } catch (err) {
+    // ENOENT is the ordinary case: a review whose worktree was never created,
+    // or one already cleaned. Anything else means the sweep did not happen —
+    // and a silent skip leaks a full checkout per shard while stdout goes on to
+    // announce "Nothing to clean", so it is disclosed the way the side-file
+    // sweep below discloses its own read failures.
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      writeStderrLine(
+        `Failed to read ${parent} for scratch worktrees: ${(err as Error).message}`,
+      );
+      // Not merely disclosed: the caller must not go on to announce "Nothing to
+      // clean" and clear the lease while N full checkouts stand unswept.
+      return { paths: [], failed: true };
+    }
+    return { paths: [], failed: false };
+  }
+  // The LEAF checks below cannot see an ancestor: a symlink at `.qwen/tmp`
+  // resolves for every path built under it, so the whole sweep — the `existsSync`
+  // probes, `git worktree remove`, `releaseWorktree`'s recursive `rmSync` —
+  // would run inside wherever that link points. Refusing the whole family is the
+  // only answer that scopes: one entry cannot be trusted more than its parent.
+  if (redirectedAncestor(parent) !== null) {
+    return { paths: [], failed: true };
+  }
+  return {
+    paths: entries
+      .map((name) => join(parent, name))
+      .filter((path) => path.startsWith(prefix))
+      .sort(),
+    failed: false,
+  };
+}
+
+/**
+ * Clear registrations whose worktree directory is gone. A no-op when none are.
+ *
+ * `releaseWorktree` runs this after its own unlink and says why: a
+ * registration whose tree once stood at a path wedges the next
+ * `git worktree add` there with `already exists`, and holds its branch checked
+ * out against `branch -D`. Best-effort like every other step on the cleanup
+ * path — a prune that fails must not mask the error that got us here.
+ */
+function pruneWorktrees(): void {
+  try {
+    execFileSync('git', ['worktree', 'prune'], {
+      stdio: 'pipe',
+      env: sanitizedGitEnv(),
+    });
+  } catch {
+    // Reported by the next `worktree add` if it mattered.
+  }
+}
+
 export function runCleanup(target: string): void {
+  // Before anything is deleted: the whole temp dir hangs off one path, and a
+  // symlink anywhere above it redirects EVERY sweep below — the scratch family,
+  // the base-tree lock, the side files. The scratch sweep alone used to answer
+  // this, which announced the hazard and then kept deleting under it.
+  const redirected = redirectedAncestor(REVIEW_TMP_DIR);
+  if (redirected !== null) {
+    writeStderrLine(
+      `Refusing to clean: ${redirected} is a symlink, so every delete under ` +
+        `${REVIEW_TMP_DIR} would land wherever it points. Remove the link by ` +
+        'hand, then re-run.',
+    );
+    process.exitCode = 1;
+    return;
+  }
   let removedAny = false;
   // Tracked separately from `removedAny`, because a failure is neither. Without
   // it, a run that could not delete something goes on to announce "Nothing to
@@ -567,21 +662,117 @@ export function runCleanup(target: string): void {
   // much still there — the two streams contradicting each other, and the stdout
   // half being the one a script reads.
   let failedAny = false;
+  // The lease guards the worktree and branch, so it releases once THOSE steps
+  // are done: a side file that will not delete (EACCES on a read-only entry,
+  // a Windows file handle) must not keep the lock held — a leftover lease
+  // refuses every later fetch-pr of this PR and skips every later cleanup,
+  // and nothing sweeps a finished session's lease automatically.
+  let failedDestruction = false;
 
   // --- Worktree + branch (only for PR targets) -------------------------
   const prMatch = /^pr-(\d+)$/.exec(target);
   if (prMatch) {
     const prNumber = prMatch[1];
 
+    // The lease is also a lock (#9205). The worktree path, the side files,
+    // and the fetch report carrying the audit window are all fixed per PR
+    // number, so cleaning while ANOTHER session reviews the same PR deletes
+    // its worktree, diff, and plan mid-run — and audits ITS window against
+    // receipts it never wrote. Skip the whole target: worktree, siblings,
+    // branch, side files, audit, and the lease itself all belong to the
+    // holder until its own cleanup releases them.
+    const holder = readReviewWorktreeLease(process.cwd(), target);
+    if (reviewLeaseHeldByAnotherSession(holder)) {
+      writeStdoutLine(
+        `note: skipped cleanup for "${target}" — another review session ` +
+          `(session ${holder.sessionId}) still holds the worktree lease at ` +
+          `${reviewLeasePath(process.cwd(), target)}. Its own cleanup ` +
+          `releases the lease when it finishes; if that session is gone, ` +
+          `delete the lease file and re-run to force cleanup.`,
+      );
+      return;
+    }
+
     // Before the sweep below deletes the fetch report (the audit window's
     // carrier), check the PR for writes that bypassed `qwen review submit`.
     auditPrWrites(target, prNumber);
+
+    // The audit is network-bound (seconds) — and the ancestor gate at the top
+    // of this function ran BEFORE it. A link that appears at any component of
+    // the temp path during that window redirects every delete below it, so the
+    // same refusal is re-taken here rather than assumed to still hold.
+    const redirectedAfterAudit = redirectedAncestor(REVIEW_TMP_DIR);
+    if (redirectedAfterAudit !== null) {
+      writeStderrLine(
+        `Refusing to clean: ${redirectedAfterAudit} became a symlink during ` +
+          `the write audit, so every delete under ${REVIEW_TMP_DIR} would ` +
+          'land wherever it points. Remove the link by hand, then re-run.',
+      );
+      process.exitCode = 1;
+      return;
+    }
+
+    // A lease can appear during the same window (a review that started after
+    // the gate above read none). Re-check before destroying anything and take
+    // the same skip path (#9205).
+    const holderAfterAudit = readReviewWorktreeLease(process.cwd(), target);
+    if (reviewLeaseHeldByAnotherSession(holderAfterAudit)) {
+      writeStdoutLine(
+        `note: skipped cleanup for "${target}" — a review session ` +
+          `(session ${holderAfterAudit.sessionId}) acquired the lease ` +
+          `during the audit; its own cleanup releases it.`,
+      );
+      return;
+    }
 
     // Report what actually happened, in both directions. Announcing "Removed …"
     // off a path that is still on disk is a lie; saying nothing at all when we
     // could not remove it leaves a leftover that will wedge the next run's
     // `git worktree add` with nobody told why. Both have been shipped here.
     const report = (label: string, path: string) => {
+      // A symlink at ANY family path must never reach `releaseWorktree`: its
+      // `existsSync` follows a LIVE link, and `git worktree remove --force`
+      // resolves it — together they delete whichever registered worktree the
+      // link points at (the user's own, another review's live tree) while
+      // reporting this path as swept, measured against the real function. A
+      // DANGLING link is invisible to it for the opposite reason (`existsSync`
+      // reports "never existed"), survives, and wedges the next review's
+      // `worktree add` with `already exists`. `lstatSync` sees the link
+      // itself, and `rmSync` unlinks it rather than following it — the same
+      // reasoning `discardWorktree` documents for its own leftovers.
+      let symlink = false;
+      try {
+        symlink = lstatSync(path).isSymbolicLink();
+      } catch {
+        // Absent, or gone between the two calls: `releaseWorktree` answers
+        // both.
+      }
+      if (symlink) {
+        try {
+          rmSync(path, { force: true });
+          // The registration outlives the link. `releaseWorktree` prunes after
+          // its own unlink for this exact reason — "a registration whose tree
+          // once stood at this path must not wedge the next `worktree add` or
+          // hold the branch checked out" — and this branch returns before ever
+          // reaching it, so the family paths were unlinked and reported swept
+          // while their admin entries stayed behind. It is the only prune in
+          // this function, and a no-op when nothing is stale.
+          pruneWorktrees();
+          writeStdoutLine(`Removed ${label} link: ${path}`);
+          removedAny = true;
+        } catch (err) {
+          // `force` suppresses ENOENT, not EACCES/EBUSY — and a link left at a
+          // family path still wedges the next review's `worktree add`, which is
+          // the same "something that should be gone is still there" the three
+          // sibling branches hold the lease for.
+          failedDestruction = true;
+          writeStderrLine(
+            `Failed to remove ${label} link ${path}: ${(err as Error).message}`,
+          );
+          failedAny = true;
+        }
+        return;
+      }
       const { existed, freed, reason } = releaseWorktree(path);
       if (freed) {
         writeStdoutLine(`Removed ${label}: ${path}`);
@@ -589,6 +780,7 @@ export function runCleanup(target: string): void {
       } else if (existed) {
         writeStderrLine(`Failed to remove ${label} ${path}: ${reason}`);
         failedAny = true;
+        failedDestruction = true;
       }
     };
 
@@ -609,6 +801,25 @@ export function runCleanup(target: string): void {
     // its only removal — not just a crash sweep. Same shared path helper, same
     // reason: the suffix must not drift between creator and sweeper.
     report('base worktree', baseWorktreePath(wt));
+
+    // The Step 4 verifiers' scratch trees (#9207). One per verifier shard, and
+    // the count is not knowable here — the label half is the shard's record key
+    // — so this is the one sibling family swept by PREFIX rather than by name.
+    // Listing the parent directory is what makes that safe: a glob over
+    // `<wt>-scratch-*` is matched against real entries, never expanded into a
+    // path that does not exist, and nothing outside the review's own temp dir
+    // can match the prefix.
+    const scratch = scratchWorktreesOf(wt);
+    if (scratch.failed) {
+      failedAny = true;
+      // A family that could not even be LISTED means whole checkouts may still
+      // stand, registered — the same class as a worktree that would not free,
+      // so the lease stays held rather than releasing over an unswept review.
+      failedDestruction = true;
+    }
+    for (const path of scratch.paths) {
+      report('scratch worktree', path);
+    }
     // The base-tree build lock is a plain directory (`mkdirSync` test-and-set),
     // not a git worktree, so `releaseWorktree` above does not touch it. A builder
     // killed mid-build leaves it behind (its `finally` rmSync never runs), and every
@@ -627,7 +838,13 @@ export function runCleanup(target: string): void {
     const branch = reviewBranch(prNumber);
     if (refExists(branch)) {
       try {
-        execFileSync('git', ['branch', '-D', branch], { stdio: 'pipe' });
+        execFileSync('git', ['branch', '-D', branch], {
+          stdio: 'pipe',
+          // The CHECK that gates this delete resolves the real repository
+          // (`refExists` goes through the sanitized helpers); an exported
+          // `GIT_DIR` here would verify one repo and delete in another.
+          env: sanitizedGitEnv(),
+        });
         writeStdoutLine(`Deleted ref: ${branch}`);
         removedAny = true;
       } catch (err) {
@@ -635,6 +852,7 @@ export function runCleanup(target: string): void {
           `Failed to delete branch ${branch}: ${(err as Error).message}`,
         );
         failedAny = true;
+        failedDestruction = true;
       }
     }
   }
@@ -697,6 +915,14 @@ export function runCleanup(target: string): void {
   }
 
   for (const file of tmpEntries) {
+    // The lease doubles as the review's lock (#9205), so live PR leases must
+    // not be swept. Skip only the real lease shape (…-pr-<n>.json), not the
+    // bare prefix: a file-review target named "lease" flattens to this same
+    // prefix, and its OWN side files still need removal — nothing else removes
+    // them. Lease removal itself belongs to clearReviewWorktreeLease below.
+    if (isReviewLeaseFile(file)) {
+      continue;
+    }
     if (!file.startsWith(prefix)) continue;
     const full = join(REVIEW_TMP_DIR, file);
     if (preserved.has(file)) {
@@ -739,7 +965,7 @@ export function runCleanup(target: string): void {
     sweepFailed = sweep.failed;
   }
 
-  if (!failedAny) {
+  if (!failedDestruction) {
     clearReviewWorktreeLease(process.cwd(), target);
   }
 

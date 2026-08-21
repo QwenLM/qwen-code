@@ -170,6 +170,7 @@ describe('commentBodyCommand handler', () => {
         repo: 'QwenLM/qwen-code',
       });
       expect(stdoutSpy).toHaveBeenCalledWith('the body');
+      expect(setGhHostMock).toHaveBeenCalledWith(undefined);
       // And never the newline-appending line writer for the body.
       expect(writeStdoutLineMock).not.toHaveBeenCalledWith('the body');
       expect(process.exitCode).toBeUndefined();
@@ -196,6 +197,10 @@ describe('commentBodyCommand handler', () => {
     // status`), so the ordering must hold against it too, not just the
     // data call.
     expect(hostOrder).toBeLessThan(Math.min(authOrder, ghOrder));
+    // The other half of the invariant (#9194): the data fetch must not
+    // precede authentication — a gh call that beats `gh auth status` races
+    // the very credential it depends on.
+    expect(authOrder).toBeLessThan(ghOrder);
   });
 
   it('exits 2 for --kind review without --pr', () => {
@@ -248,6 +253,32 @@ describe('commentBodyCommand handler', () => {
       kind: 'review',
       repo: 'QwenLM/qwen-code',
       pr: -3,
+    });
+    expect(process.exitCode).toBe(2);
+    expect(ghApiMock).not.toHaveBeenCalled();
+    expect(ensureAuthenticatedMock).not.toHaveBeenCalled();
+  });
+
+  it('exits 2 on a fractional id or --pr — the isInteger half of the guard (#9194)', () => {
+    // The non-positive cases above exercise `<= 0`; the `Number.isInteger`
+    // half used to be untested, so a guard that only checked positivity
+    // would ship green and let `1.5` reach the gh call.
+    (commentBodyCommand.handler as (a: unknown) => void)({
+      _: [],
+      $0: 'qwen',
+      id: 1.5,
+      kind: 'inline',
+      repo: 'QwenLM/qwen-code',
+    });
+    expect(process.exitCode).toBe(2);
+    process.exitCode = undefined;
+    (commentBodyCommand.handler as (a: unknown) => void)({
+      _: [],
+      $0: 'qwen',
+      id: 5,
+      kind: 'review',
+      repo: 'QwenLM/qwen-code',
+      pr: 9073.25,
     });
     expect(process.exitCode).toBe(2);
     expect(ghApiMock).not.toHaveBeenCalled();

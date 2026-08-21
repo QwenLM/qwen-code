@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/web-shell",
-  "version": "0.21.11",
+  "version": "0.21.14",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
@@ -26,6 +26,7 @@
     "test:ci": "vitest run --config vitest.config.ts --coverage",
     "test:coverage": "vitest run --config vitest.config.ts --coverage",
     "test:e2e:smoke": "playwright test --config playwright.config.ts --grep @smoke",
+    "test:e2e:perf": "cross-env WEB_SHELL_PERF=1 playwright test --config playwright.config.ts --grep @perf --project=chromium",
     "test:e2e": "playwright test --config playwright.config.ts",
     "test:e2e:visuals": "playwright test --config playwright.visuals.config.ts",
     "test:e2e:report": "playwright show-report client/e2e/playwright-report",

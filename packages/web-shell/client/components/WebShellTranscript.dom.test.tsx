@@ -370,15 +370,11 @@ describe('WebShellTranscript DOM integration', () => {
     expect(container.textContent).toContain('Hidden reasoning');
   });
 
-  it('suppresses session and goal events while preserving their text', () => {
+  it('suppresses session events while preserving their text', () => {
     const sessionEvents: unknown[] = [];
-    const goalEvents: unknown[] = [];
     const onSession = (event: Event) =>
       sessionEvents.push((event as CustomEvent).detail);
-    const onGoal = (event: Event) =>
-      goalEvents.push((event as CustomEvent).detail);
     window.addEventListener('qwen:open-session', onSession);
-    window.addEventListener('web-shell-goal-status-active', onGoal);
     const { container } = render(
       <WebShellTranscript
         blocks={[
@@ -413,9 +409,7 @@ describe('WebShellTranscript DOM integration', () => {
     expect(container.querySelector('a[role="button"]')).toBeNull();
     expect(container.textContent).toContain('All checks pass');
     expect(sessionEvents).toEqual([]);
-    expect(goalEvents).toEqual([]);
     window.removeEventListener('qwen:open-session', onSession);
-    window.removeEventListener('web-shell-goal-status-active', onGoal);
   });
 
   it('mounts a themed scoped portal root and removes it on unmount', () => {
