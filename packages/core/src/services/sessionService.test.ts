@@ -3095,6 +3095,73 @@ describe('SessionService', () => {
       ).resolves.toBe(legacySessionId);
     });
 
+    it('rechecks the other state when a readable candidate moves mid-resolution', async () => {
+      const legacySessionId = sessionIdA.toUpperCase();
+      const mixedSessionId = sessionIdA.replace('e29b', 'E29b');
+      readdirSpy
+        .mockResolvedValueOnce([
+          `${mixedSessionId}.jsonl`,
+          `${legacySessionId}.jsonl`,
+        ] as never)
+        .mockResolvedValueOnce([`${mixedSessionId}.jsonl`] as never);
+      vi.spyOn(sessionService, 'getSessionLocation').mockImplementation(
+        async (id) => {
+          if (id === mixedSessionId) return 'conflict';
+          return id === legacySessionId ? 'active' : undefined;
+        },
+      );
+      let mixedStateReads = 0;
+      statSyncSpy.mockImplementation((filePath: fs.PathLike) => {
+        if (String(filePath).includes(`${mixedSessionId}.jsonl`)) {
+          mixedStateReads += 1;
+          if (mixedStateReads === 1) {
+            throw Object.assign(new Error('moved'), { code: 'ENOENT' });
+          }
+          return { dev: 1, ino: 8, isFile: () => true } as fs.Stats;
+        }
+        return { dev: 1, ino: 7, isFile: () => true } as fs.Stats;
+      });
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).rejects.toMatchObject({
+        name: 'SessionIdCaseConflictError',
+        sessionId: sessionIdA,
+      });
+    });
+
+    it('checks a state created after candidate enumeration', async () => {
+      const legacySessionId = sessionIdA.toUpperCase();
+      const mixedSessionId = sessionIdA.replace('e29b', 'E29b');
+      readdirSpy
+        .mockResolvedValueOnce([
+          `${mixedSessionId}.jsonl`,
+          `${legacySessionId}.jsonl`,
+        ] as never)
+        .mockResolvedValueOnce([] as never);
+      vi.spyOn(sessionService, 'getSessionLocation').mockImplementation(
+        async (id) => (id === sessionIdA ? undefined : 'active'),
+      );
+      let mixedStateReads = 0;
+      statSyncSpy.mockImplementation((filePath: fs.PathLike) => {
+        if (String(filePath).includes(`${mixedSessionId}.jsonl`)) {
+          mixedStateReads += 1;
+          if (mixedStateReads === 1) {
+            throw Object.assign(new Error('moved'), { code: 'ENOENT' });
+          }
+          return { dev: 1, ino: 8, isFile: () => true } as fs.Stats;
+        }
+        return { dev: 1, ino: 7, isFile: () => true } as fs.Stats;
+      });
+
+      await expect(
+        sessionService.findSessionIdIgnoringCase(sessionIdA),
+      ).rejects.toMatchObject({
+        name: 'SessionIdCaseConflictError',
+        sessionId: sessionIdA,
+      });
+    });
+
     it('resolves absent when every readable candidate vanishes mid-resolution', async () => {
       const legacySessionId = sessionIdA.toUpperCase();
       const mixedSessionId = sessionIdA.replace('e29b', 'E29b');

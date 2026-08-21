@@ -941,16 +941,28 @@ export class SessionService {
     const identities = new Set<string>();
     const owners: string[] = [];
     for (const { candidateSessionId, state } of readable) {
-      let stats: fs.Stats;
-      try {
-        stats = fs.statSync(this.getSessionFilePath(candidateSessionId, state));
-      } catch (error) {
-        // A transcript that raced away is no longer a competing spelling; any
-        // other failure says nothing about aliasing and must not be laundered
-        // into a permanent-looking conflict.
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
-        throw error;
+      const enumeratedStates = candidates.get(candidateSessionId);
+      const states = [
+        state,
+        state === 'active' ? ('archived' as const) : ('active' as const),
+      ];
+      let stats: fs.Stats | undefined;
+      let owner = false;
+      for (const candidateState of states) {
+        try {
+          stats = fs.statSync(
+            this.getSessionFilePath(candidateSessionId, candidateState),
+          );
+          owner = enumeratedStates?.has(candidateState) ?? false;
+          break;
+        } catch (error) {
+          // A missing copy may have moved to the other state after enumeration.
+          // Any other failure says nothing about aliasing and must not be
+          // laundered into a permanent-looking conflict.
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        }
       }
+      if (!stats) continue;
       // Filesystems that do not expose inodes report 0 for every file, so
       // `dev:ino` would collapse genuinely distinct transcripts onto one
       // identity. Without that proof, report a conflict rather than pick one.
@@ -959,7 +971,7 @@ export class SessionService {
       if (identities.size > 1) return { kind: 'conflict' };
       // The readable state was reached through a case-folded path unless this
       // spelling is itself a directory entry of that state.
-      if (candidates.get(candidateSessionId)?.has(state)) {
+      if (owner) {
         owners.push(candidateSessionId);
       }
     }
