@@ -199,12 +199,9 @@ export default tseslint.config(
     },
   },
   {
+    // The rule itself exempts tests, __tests__, and fixtures; repeating that
+    // here would give the exemption two sources of truth.
     files: ['packages/core/src/**/*.{ts,tsx}'],
-    ignores: [
-      'packages/core/src/**/*.test.{ts,tsx}',
-      'packages/core/src/**/__tests__/**',
-      'packages/core/src/**/fixtures/**',
-    ],
     plugins: {
       architecture: {
         rules: { 'no-core-root-barrel-import': noCoreRootBarrelImport },

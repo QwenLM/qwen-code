@@ -25,6 +25,15 @@ describe('no-core-root-barrel-import', () => {
     ['packages/core/src/core/client.ts', '../../index.js'],
     // .ts spelling of the src barrel
     ['packages/core/src/core/client.ts', '../index.ts'],
+    // exports-map subpaths that reach the same root barrel
+    [
+      'packages/core/src/core/client.ts',
+      '@qwen-code/qwen-code-core/src/index.js',
+    ],
+    [
+      'packages/core/src/core/client.ts',
+      '@qwen-code/qwen-code-core/dist/index.js',
+    ],
   ])('rejects root barrel imports from %s', (filename, importedPath) => {
     expect(
       runRule(`import value from '${importedPath}';`, filename),
@@ -88,6 +97,13 @@ describe('no-core-root-barrel-import', () => {
       runRule(
         "import value from '@qwen-code/qwen-code-core';",
         'packages/cli/src/index.ts',
+      ),
+    ).toHaveLength(0);
+    // non-barrel package subpaths stay allowed even inside core production
+    expect(
+      runRule(
+        "import { memoryScopes } from '@qwen-code/qwen-code-core/memoryScopes';",
+        'packages/core/src/core/client.ts',
       ),
     ).toHaveLength(0);
   });

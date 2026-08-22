@@ -28,9 +28,17 @@ function isCoreProductionFile(filename) {
 }
 
 const CORE_PACKAGE_SPECIFIER = '@qwen-code/qwen-code-core';
+// The package exports map ("./src/*", "./dist/*") also exposes the root
+// barrel through these self-reference subpaths.
+const CORE_BARREL_SPECIFIERS = new Set([
+  CORE_PACKAGE_SPECIFIER,
+  `${CORE_PACKAGE_SPECIFIER}/src/index.js`,
+  `${CORE_PACKAGE_SPECIFIER}/src/index.ts`,
+  `${CORE_PACKAGE_SPECIFIER}/dist/index.js`,
+]);
 
 function resolvesToCoreRootBarrel(filename, importedPath) {
-  if (importedPath === CORE_PACKAGE_SPECIFIER) return true;
+  if (CORE_BARREL_SPECIFIERS.has(importedPath)) return true;
   if (!importedPath.startsWith('.')) return false;
   const normalized = path.normalize(filename).replaceAll('\\', '/');
   const sourceRoot = path.resolve(
@@ -101,11 +109,26 @@ export default {
       }
     }
 
+    // Inline type imports (`type X = import('../index.js').X;`) parse as
+    // TSImportType under typescript-eslint, not as ImportDeclaration.
+    function checkTSImportType(node) {
+      const argument = node.argument;
+      if (
+        argument &&
+        argument.type === 'TSLiteralType' &&
+        argument.literal &&
+        typeof argument.literal.value === 'string'
+      ) {
+        reportIfBarrel(argument.literal, argument.literal.value);
+      }
+    }
+
     return {
       ImportDeclaration: checkSource,
       ExportNamedDeclaration: checkSource,
       ExportAllDeclaration: checkSource,
       ImportExpression: checkDynamicImport,
+      TSImportType: checkTSImportType,
     };
   },
 };
