@@ -26396,6 +26396,357 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('stores a pr binding, exposes it in summaries, and publishes an event', async () => {
+      const handles: Array<{ killed: boolean }> = [];
+      const factory: ChannelFactory = async () => {
+        const h = makeChannel();
+        handles.push(h);
+        return h.channel;
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const events: BridgeEvent[] = [];
+      const sub = bridge.subscribeEvents(session.sessionId);
+      const drain = (async () => {
+        for await (const ev of sub) events.push(ev);
+      })();
+      await new Promise((r) => setImmediate(r));
+
+      const pr = { number: 9517, url: 'https://github.com/o/r/pull/9517' };
+      const effective = bridge.updateSessionMetadata(session.sessionId, {
+        pr,
+      });
+
+      expect(effective.prs).toEqual([pr]);
+      expect(bridge.getSessionSummary(session.sessionId).prs).toEqual([pr]);
+      await new Promise((r) => setImmediate(r));
+      const metaEvent = events.find(
+        (e) =>
+          e.type === 'session_metadata_updated' &&
+          (e.data as { prs?: unknown }).prs !== undefined,
+      );
+      expect(metaEvent).toBeDefined();
+      expect((metaEvent?.data as { prs: Array<typeof pr> }).prs).toEqual([pr]);
+
+      await bridge.closeSession(session.sessionId);
+      await drain;
+      await bridge.shutdown();
+    });
+
+    it('publishes the full seeded binding history in the reply and event after an entry re-creation', async () => {
+      // Daemon restart / close / archive-restore re-creates the entry with
+      // an empty in-memory pr list; the serve layer re-hydrates it from the
+      // persisted sidecar before binding, and both the reply and the
+      // `session_metadata_updated` event must carry the full history, not
+      // just the fresh binding.
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const events: BridgeEvent[] = [];
+      const sub = bridge.subscribeEvents(session.sessionId);
+      const drain = (async () => {
+        for await (const ev of sub) events.push(ev);
+      })();
+      await new Promise((r) => setImmediate(r));
+
+      const persisted = {
+        number: 9500,
+        url: 'https://github.com/o/r/pull/9500',
+      };
+      bridge.seedSessionPrs?.(session.sessionId, [persisted]);
+
+      const fresh = { number: 9517, url: 'https://github.com/o/r/pull/9517' };
+      const effective = bridge.updateSessionMetadata(session.sessionId, {
+        pr: fresh,
+      });
+
+      expect(effective.prs).toEqual([persisted, fresh]);
+      expect(bridge.getSessionSummary(session.sessionId).prs).toEqual([
+        persisted,
+        fresh,
+      ]);
+      await new Promise((r) => setImmediate(r));
+      const metaEvent = events.find(
+        (e) =>
+          e.type === 'session_metadata_updated' &&
+          (e.data as { prs?: unknown }).prs !== undefined,
+      );
+      expect(metaEvent).toBeDefined();
+      expect((metaEvent?.data as { prs: Array<typeof fresh> }).prs).toEqual([
+        persisted,
+        fresh,
+      ]);
+
+      await bridge.closeSession(session.sessionId);
+      await drain;
+      await bridge.shutdown();
+    });
+
+    it('keeps this-daemon-lifetime bindings over a late seed', async () => {
+      // Seeding is recovery for re-created entries only; once the entry
+      // holds bindings from this daemon lifetime they are authoritative.
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const bound = { number: 9517, url: 'https://github.com/o/r/pull/9517' };
+      bridge.updateSessionMetadata(session.sessionId, { pr: bound });
+      bridge.seedSessionPrs?.(session.sessionId, [
+        { number: 1, url: 'https://github.com/o/r/pull/1' },
+      ]);
+
+      expect(bridge.getSessionSummary(session.sessionId).prs).toEqual([bound]);
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
+    it('logs a stderr audit record when a pr binding is added', async () => {
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        const bridge = makeBridge({
+          channelFactory: async () => makeChannel().channel,
+        });
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+        bridge.updateSessionMetadata(session.sessionId, {
+          pr: { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+        });
+
+        expect(stderrSpy).toHaveBeenCalledWith(
+          expect.stringContaining('updated session metadata'),
+        );
+        expect(stderrSpy).toHaveBeenCalledWith(
+          expect.stringContaining(session.sessionId),
+        );
+        expect(stderrSpy).toHaveBeenCalledWith(
+          expect.stringContaining('pr=9517'),
+        );
+
+        await bridge.shutdown();
+      } finally {
+        stderrSpy.mockRestore();
+      }
+    });
+
+    it('accumulates multiple bindings and re-binding moves a number to latest', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const prA = { number: 9500, url: 'https://github.com/o/r/pull/9500' };
+      const prB = { number: 9517, url: 'https://github.com/o/r/pull/9517' };
+      bridge.updateSessionMetadata(session.sessionId, { pr: prA });
+      const effective = bridge.updateSessionMetadata(session.sessionId, {
+        pr: prB,
+      });
+      expect(effective.prs).toEqual([prA, prB]);
+
+      const prA2 = {
+        number: 9500,
+        url: 'https://github.com/o/r/pull/9500?v=2',
+      };
+      const rebound = bridge.updateSessionMetadata(session.sessionId, {
+        pr: prA2,
+      });
+      expect(rebound.prs).toEqual([prB, prA2]);
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
+    it('does not republish when the same pr is bound again', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const events: BridgeEvent[] = [];
+      const sub = bridge.subscribeEvents(session.sessionId);
+      const drain = (async () => {
+        for await (const ev of sub) events.push(ev);
+      })();
+      await new Promise((r) => setImmediate(r));
+
+      const pr = { number: 9517, url: 'https://github.com/o/r/pull/9517' };
+      bridge.updateSessionMetadata(session.sessionId, { pr });
+      bridge.updateSessionMetadata(session.sessionId, { pr });
+
+      await new Promise((r) => setImmediate(r));
+      const prEvents = events.filter(
+        (e) =>
+          e.type === 'session_metadata_updated' &&
+          (e.data as { prs?: unknown }).prs !== undefined,
+      );
+      expect(prEvents).toHaveLength(1);
+
+      await bridge.closeSession(session.sessionId);
+      await drain;
+      await bridge.shutdown();
+    });
+
+    it('bumps the catalog revision when a pr is bound', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const before = bridge.getSessionCatalogVersion().revision;
+
+      bridge.updateSessionMetadata(session.sessionId, {
+        pr: { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+      });
+
+      expect(bridge.getSessionCatalogVersion().revision).toBe(before + 1);
+      // Repeating the same binding must not bump again.
+      bridge.updateSessionMetadata(session.sessionId, {
+        pr: { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+      });
+      expect(bridge.getSessionCatalogVersion().revision).toBe(before + 1);
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
+    it('echoes the current displayName on the pr metadata event', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      bridge.updateSessionMetadata(session.sessionId, {
+        displayName: 'My Session',
+      });
+
+      const events: BridgeEvent[] = [];
+      const sub = bridge.subscribeEvents(session.sessionId);
+      const drain = (async () => {
+        for await (const ev of sub) events.push(ev);
+      })();
+      await new Promise((r) => setImmediate(r));
+
+      bridge.updateSessionMetadata(session.sessionId, {
+        pr: { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+      });
+
+      await new Promise((r) => setImmediate(r));
+      const prEvent = events.find(
+        (e) =>
+          e.type === 'session_metadata_updated' &&
+          (e.data as { prs?: unknown }).prs !== undefined,
+      );
+      // SDK folds treat an absent displayName as "cleared", so the pr event
+      // must echo the current name instead of blanking the title.
+      expect((prEvent?.data as { displayName?: string }).displayName).toBe(
+        'My Session',
+      );
+
+      await bridge.closeSession(session.sessionId);
+      await drain;
+      await bridge.shutdown();
+    });
+
+    it('caps the binding list at MAX_SESSION_PRS, dropping the oldest', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      for (let i = 1; i <= 12; i++) {
+        bridge.updateSessionMetadata(session.sessionId, {
+          pr: { number: i, url: `https://github.com/o/r/pull/${i}` },
+        });
+      }
+
+      const prs = bridge.getSessionSummary(session.sessionId).prs;
+      expect(prs).toHaveLength(10);
+      expect(prs?.[0]?.number).toBe(3);
+      expect(prs?.[9]?.number).toBe(12);
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
+    it('does not apply displayName when the combined pr is invalid', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      expect(() =>
+        bridge.updateSessionMetadata(session.sessionId, {
+          displayName: 'should-not-apply',
+          pr: { number: -1, url: 'https://github.com/o/r/pull/1' },
+        }),
+      ).toThrow(InvalidSessionMetadataError);
+      expect(
+        bridge.getSessionSummary(session.sessionId).displayName,
+      ).toBeUndefined();
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
+    it('does not apply the pr binding when the combined displayName is invalid', async () => {
+      // Mirror of the invalid-pr case: the validate-everything-first rule
+      // must protect both directions — a reorder regression would persist,
+      // publish, and catalog-bump a binding for a rejected request.
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      expect(() =>
+        bridge.updateSessionMetadata(session.sessionId, {
+          displayName: 'bad\nname',
+          pr: { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+        }),
+      ).toThrow(InvalidSessionMetadataError);
+      expect(bridge.getSessionSummary(session.sessionId).prs).toBeUndefined();
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
+    it.each([
+      [
+        'non-integer number',
+        { number: 1.5, url: 'https://github.com/o/r/pull/1' },
+      ],
+      ['missing url', { number: 1 }],
+      ['empty url', { number: 1, url: '' }],
+      ['non-http url', { number: 1, url: 'javascript:alert(1)' }],
+      [
+        'url with a control character',
+        // \n in the url would forge a second line in the stderr audit log.
+        { number: 1, url: 'https://github.com/o/r/pull/1\nforged' },
+      ],
+      [
+        'url over 2048 characters',
+        { number: 1, url: `https://github.com/${'a'.repeat(2048)}` },
+      ],
+      ['null', null],
+    ])('rejects an invalid pr: %s', async (_label, pr) => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      expect(() =>
+        bridge.updateSessionMetadata(session.sessionId, {
+          pr: pr as { number: number; url: string },
+        }),
+      ).toThrow(InvalidSessionMetadataError);
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
     it('throws SessionNotFoundError for unknown session', () => {
       const bridge = makeBridge();
       expect(() =>

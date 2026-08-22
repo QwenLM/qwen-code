@@ -82,7 +82,10 @@ import {
   skillDescriptionKey,
 } from '../constants/localCommands';
 import { mergeCommands } from '../hooks/daemonSessionMappers';
-import { useSessionCatalogController } from '../session-catalog/session-catalog-hooks';
+import {
+  useSessionCatalogController,
+  useSessionHasActivePrompt,
+} from '../session-catalog/session-catalog-hooks';
 import { MessageList } from './MessageList';
 import { StreamingStatus } from './StreamingStatus';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
@@ -257,6 +260,12 @@ export function ChatPane({
   );
   const sessionCatalogController = useSessionCatalogController(
     workspace.client,
+  );
+
+  const sessionHasActivePrompt = useSessionHasActivePrompt(
+    workspace.client,
+    workspaceCwd ?? connection.workspaceCwd,
+    connection.sessionId,
   );
   const blocks = useAnimationFrameTranscriptBlocks();
   const messages = useMessagesFromBlocks(t, blocks);
@@ -1327,7 +1336,11 @@ export function ChatPane({
           {/* Panes keep the composer status compact: spinner + elapsed time +
               token count + cancel hint, but no rotating "witty" loading
               phrase. */}
-          <StreamingStatus startedAt={activeTurnStartedAt} showPhrase={false} />
+          <StreamingStatus
+            startedAt={activeTurnStartedAt}
+            showPhrase={false}
+            hasActivePrompt={sessionHasActivePrompt}
+          />
           {(queuedPrompts.length > 0 || liveGoalSnapshot?.goal) && (
             <div
               className={composerStatusStyles.root}
@@ -1382,7 +1395,7 @@ export function ChatPane({
             ref={editorRef}
             onSubmit={handleSubmit}
             onCancel={handleCancel}
-            isRunning={isResponding}
+            isRunning={isResponding || sessionHasActivePrompt}
             commands={commands}
             queuedMessages={queuedTexts}
             onPopQueuedMessages={editLastQueuedPrompt}
@@ -1416,7 +1429,7 @@ export function ChatPane({
           {CustomComposerFooter && (
             <CustomComposerFooter
               disabled={approvalActive || admissionPayloadLocked}
-              isRunning={isResponding}
+              isRunning={isResponding || sessionHasActivePrompt}
               currentMode={connection.currentMode ?? 'default'}
               currentModel={connection.currentModel ?? ''}
               sessionName={connection.displayName}
