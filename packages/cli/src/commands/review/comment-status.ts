@@ -163,6 +163,7 @@ export function buildThreadStatuses(
   }
 
   const authorLc = prAuthor.toLowerCase();
+  const meLc = me.toLowerCase();
   const threads: ThreadStatus[] = [];
   for (const root of comments) {
     if (root.in_reply_to_id !== undefined && root.in_reply_to_id !== null) {
@@ -175,12 +176,29 @@ export function buildThreadStatuses(
     const participants = [
       ...new Set([root, ...replies].map((c) => c.user?.login ?? 'unknown')),
     ];
+    // The pipeline's own review summary posts as a pathless global comment:
+    // Aone's flat comment list carries it into this index, while a GitHub
+    // review body is not an inline comment, so only the Aone path can hand
+    // one in. Compose renders its body-listed Criticals with the literal
+    // **[Critical]** prefix, which carriesBlockerSignal's ungated channel
+    // promotes — but a pathless thread never goes outdated and gives Step 6
+    // no location to re-read, so the re-check can never rule it fixed: a
+    // permanent, self-made blocker every round. Drop pathless own-account
+    // roots from blocker promotion. Path-bearing own findings stay
+    // re-checkable and keep theirs, and another account's pathless blocker
+    // keeps its promotion through the ungated channel.
+    const ownPathlessRoot =
+      meLc !== '' &&
+      (root.path ?? '') === '' &&
+      (root.user?.login ?? '').toLowerCase() === meLc;
     threads.push({
       rootId: root.id,
       path: root.path ?? '',
       author: root.user?.login ?? 'unknown',
       createdAt: root.created_at ?? '',
-      isBlocker: isBlockerBody(root.body, root.user?.login, me),
+      isBlocker: ownPathlessRoot
+        ? false
+        : isBlockerBody(root.body, root.user?.login, me),
       anchor: {
         line: root.line ?? null,
         originalLine: root.original_line ?? null,
