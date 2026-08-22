@@ -65,7 +65,7 @@ export async function handleSourceTest(
   const lines: string[] = [];
   let hasErrors = false;
   let hasWarnings = false;
-  let connectionStatus: ConnectionStatus = 'unknown';
+  let connectionStatus: ConnectionStatus = 'untested';
   let connectionError: string | undefined;
 
   // 1. Check source exists
@@ -122,19 +122,24 @@ export async function handleSourceTest(
   lines.push(...connectionResult.lines);
   if (connectionResult.hasError) {
     hasErrors = true;
-    connectionStatus = 'error';
+    connectionStatus = 'failed';
     connectionError = connectionResult.error;
   } else if (connectionResult.success) {
     connectionStatus = 'connected';
   } else {
-    connectionStatus = 'disconnected';
+    connectionStatus = 'untested';
   }
 
   // 7. Auth status
   lines.push('\n## Authentication');
   const authResult = await checkAuthStatus(ctx, source, sourceSlug);
   lines.push(...authResult.lines);
-  if (authResult.hasWarning) hasWarnings = true;
+  if (authResult.hasWarning) {
+    hasWarnings = true;
+    if (!connectionResult.hasError) {
+      connectionStatus = 'needs_auth';
+    }
+  }
 
   // 8. Auto-enable + metadata update
   // Defaults to true; pass autoEnable: false to keep pure validation behavior.
@@ -145,7 +150,7 @@ export async function handleSourceTest(
   if (ctx.saveSourceConfig) {
     const updatedSource: SourceConfig = {
       ...source,
-      lastTestedAt: new Date().toISOString(),
+      lastTestedAt: Date.now(),
       connectionStatus,
       connectionError,
       // Fold enabled flip into the same save — one write, not two.

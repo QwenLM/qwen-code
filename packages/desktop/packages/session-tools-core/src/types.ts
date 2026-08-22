@@ -299,7 +299,7 @@ export interface LocalSourceConfig {
 /**
  * Connection status for sources
  */
-export type ConnectionStatus = 'connected' | 'disconnected' | 'error' | 'unknown';
+export type ConnectionStatus = 'connected' | 'needs_auth' | 'failed' | 'untested';
 
 /**
  * Full source configuration (simplified version for core package)
@@ -315,7 +315,7 @@ export interface SourceConfig {
   api?: ApiSourceConfig;
   local?: LocalSourceConfig;
   isAuthenticated?: boolean;
-  lastTestedAt?: string; // ISO date string
+  lastTestedAt?: number; // Unix timestamp in milliseconds
   createdAt?: number;
   updatedAt?: number;
   // Display fields
