@@ -150,19 +150,23 @@ export const InputForm: FC<InputFormProps> = ({
     // Positioning context for the ModelSelector. The base form's root is
     // `absolute bottom-0 left-0 right-0` and out of flow (see
     // packages/webui/src/components/layout/InputForm.tsx), so left alone
-    // this wrapper would collapse to zero height and `bottom-full` would
-    // anchor the dropdown at the viewport bottom, behind the opaque form
-    // (issue #8617). The effect above sizes this wrapper to the form's
-    // measured height, so `bottom-full` anchors the dropdown's bottom edge
-    // to the form's top edge and the dropdown grows upward over the message
-    // list instead of being hidden behind the form. `flex-shrink-0` keeps
-    // the flex parent from shrinking this wrapper below the measured form
-    // height in short webviews — an explicit height alone does not prevent
-    // flex shrinking, and a shrunken wrapper would slide the `bottom-full`
-    // anchor back behind the opaque form (#8617-style occlusion).
+    // this wrapper would collapse to zero height and the dropdown would
+    // anchor at the viewport bottom, behind the opaque form (issue #8617).
+    // The effect above sizes this wrapper to the form's measured height so
+    // the flex layout reserves the form's space in the chat column.
+    //
+    // The wrapper is deliberately NOT flex-shrink-0: when the form grows
+    // taller than the webview (collapsed bottom panel, image previews,
+    // multi-line draft), this child must give way so the form's bottom
+    // edge stays pinned to the viewport bottom and its action row remains
+    // reachable — a rigid wrapper pushes the action row below the viewport
+    // with no scroll recovery (body overflow:hidden). The dropdown anchor
+    // below uses the measured form height directly instead of this
+    // wrapper's rendered height, so shrinking here cannot slide the anchor
+    // back behind the opaque form.
     <div
       ref={wrapperRef}
-      className="relative flex-shrink-0"
+      className="relative"
       style={formHeight > 0 ? { height: `${formHeight}px` } : undefined}
     >
       {showModelSelector && onSelectModel && onCloseModelSelector && (
@@ -171,8 +175,16 @@ export const InputForm: FC<InputFormProps> = ({
         // overlays (PermissionDrawer / AskUserQuestionDialog /
         // AccountInfoDialog) rendered by App.tsx; App closes the selector
         // when an overlay takes over and never opens it underneath one.
+        //
+        // The anchor is the measured form height, not bottom-full (== this
+        // wrapper's rendered height): the form's bottom edge is pinned to
+        // this wrapper's bottom edge, so `formHeight` above the wrapper
+        // bottom is always the form's top edge — even when the wrapper
+        // shrinks in a short webview (issue #8617, both directions).
+        // bottom-full stays as the pre-measurement fallback.
         <div
           ref={dropdownRef}
+          style={formHeight > 0 ? { bottom: `${formHeight}px` } : undefined}
           className="absolute bottom-full left-4 right-4 mb-2 z-0 max-w-[600px] mx-auto"
         >
           <ModelSelector

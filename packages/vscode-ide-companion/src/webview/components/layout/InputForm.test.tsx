@@ -303,6 +303,15 @@ describe('InputForm model selector positioning (issue #8617)', () => {
       });
 
       expect((sharedWrapper as HTMLElement).style.height).toBe('120px');
+
+      // The dropdown anchor must be the MEASURED form height (inline
+      // bottom), not the wrapper's rendered height (bottom-full): when the
+      // wrapper shrinks in a short webview, bottom-full would slide the
+      // anchor back behind the opaque form (issue #8617, both directions).
+      const positionedWrapper = collectAncestors(menu as HTMLElement).find(
+        (el) => /(^|\s)(absolute|fixed)(\s|$)/.test(el.className),
+      );
+      expect((positionedWrapper as HTMLElement).style.bottom).toBe('120px');
     } finally {
       // jsdom ships without ResizeObserver; restore the original value
       // (undefined there), keeping the property writable for other stubs.
@@ -314,7 +323,7 @@ describe('InputForm model selector positioning (issue #8617)', () => {
     }
   });
 
-  it('marks the positioning context flex-shrink-0 so short webviews cannot shrink it behind the form', () => {
+  it('lets the positioning context shrink so a tall form cannot push its action row off-screen', () => {
     const rendered = renderInputForm({
       showModelSelector: true,
       availableModels: models,
@@ -332,11 +341,16 @@ describe('InputForm model selector positioning (issue #8617)', () => {
       /(^|\s)relative(\s|$)/.test(el.className),
     );
     expect(sharedWrapper).toBeDefined();
-    // An explicit height alone does not stop the flex parent from shrinking
-    // this wrapper below the measured form height; a shrunken wrapper would
-    // slide the bottom-full anchor back into the form's footprint
-    // (#8617-style occlusion at low viewport heights).
-    expect(sharedWrapper?.className).toMatch(/(^|\s)flex-shrink-0(\s|$)/);
+    // The wrapper must NOT be flex-shrink-0: when the form grows taller
+    // than the webview (collapsed bottom panel, image previews, multi-line
+    // draft), this flex child has to give way so the form's bottom edge —
+    // and therefore its send/cancel/approval/model action row — stays
+    // pinned to the viewport bottom instead of overflowing below it with
+    // no scroll recovery (body overflow:hidden). The dropdown anchor is
+    // the measured form height (asserted above), not the wrapper's
+    // rendered height, so shrinking here cannot slide the anchor behind
+    // the opaque form.
+    expect(sharedWrapper?.className).not.toMatch(/(^|\s)flex-shrink-0(\s|$)/);
   });
 
   it('does not render the selector when showModelSelector is false', () => {
