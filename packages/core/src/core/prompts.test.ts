@@ -582,6 +582,7 @@ describe('Core System Prompt (prompts.ts)', () => {
 
   describe('outputStyle parameter', () => {
     const concise = getBuiltInOutputStyle('Concise')!;
+    const learning = getBuiltInOutputStyle('Learning')!;
 
     it('leaves the prompt untouched when no style is active', () => {
       const prompt = getCoreSystemPrompt();
@@ -685,6 +686,21 @@ describe('Core System Prompt (prompts.ts)', () => {
         concise,
       );
       expect(prompt).toContain('## Software Engineering Tasks');
+    });
+
+    it('omits Learning from headless prompts that cannot receive a reply', () => {
+      const prompt = getCoreSystemPrompt(
+        undefined,
+        undefined,
+        undefined,
+        'headless',
+        learning,
+      );
+
+      expect(prompt).toContain('This is a non-interactive, single-turn run');
+      expect(prompt).not.toContain('# Output Style: Learning');
+      expect(prompt).not.toContain('TODO(human)');
+      expect(prompt).not.toContain('until the user has written their piece');
     });
 
     it('keeps the style section under a QWEN_SYSTEM_IDENTITY_MD override', () => {

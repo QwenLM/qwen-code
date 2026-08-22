@@ -459,6 +459,11 @@ export function getCoreSystemPrompt(
   interactionMode: SystemPromptInteractionMode = 'interactive',
   outputStyle?: OutputStyleDefinition | null,
 ): string {
+  // Learning requires a reply to its handoff, which a headless run cannot receive.
+  const effectiveOutputStyle =
+    interactionMode === 'headless' && outputStyle?.name === 'Learning'
+      ? undefined
+      : outputStyle;
   // if QWEN_SYSTEM_MD is set (and not 0|false), override system prompt from file
   // default path is .qwen/system.md (project-level), can be overridden via QWEN_SYSTEM_MD
   let systemMdEnabled = false;
@@ -494,7 +499,7 @@ export function getCoreSystemPrompt(
   // effect (including empty-file clear).
   const basePrompt = systemMdEnabled
     ? fs.readFileSync(systemMdPath, 'utf8')
-    : buildDefaultBasePrompt(interaction, model, outputStyle);
+    : buildDefaultBasePrompt(interaction, model, effectiveOutputStyle);
 
   // if QWEN_WRITE_SYSTEM_MD is set (and not 0|false), write base system prompt to file
   const writeSystemMdResolution = resolvePathFromEnv(
@@ -523,7 +528,7 @@ export function getCoreSystemPrompt(
   return assembleSystemPrompt({
     base: systemMdEnabled
       ? basePrompt
-      : applyOutputStyle(basePrompt, outputStyle),
+      : applyOutputStyle(basePrompt, effectiveOutputStyle),
     contextFiles: userMemory,
     appendPrompt: appendInstruction,
   });

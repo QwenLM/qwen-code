@@ -55,6 +55,7 @@ function makeMockConfig(contextWindowSize = 32_000): Config {
     }),
     getVisibleTools: vi.fn().mockReturnValue(new Set()),
     getUserMemory: vi.fn().mockReturnValue(''),
+    getSystemPrompt: vi.fn().mockReturnValue(undefined),
     getOutputStyle: vi.fn().mockReturnValue(undefined),
     getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
     getSkillManager: vi.fn().mockReturnValue({
@@ -89,6 +90,7 @@ describe('collectContextData (contextCommand)', () => {
       }),
       getVisibleTools: vi.fn().mockReturnValue(new Set()),
       getUserMemory: vi.fn().mockReturnValue(''),
+      getSystemPrompt: vi.fn().mockReturnValue(undefined),
       getOutputStyle: vi.fn().mockReturnValue(undefined),
       getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getSkillManager: vi.fn().mockReturnValue({
@@ -214,6 +216,7 @@ describe('collectContextData (contextCommand)', () => {
       }),
       getVisibleTools: vi.fn().mockReturnValue(new Set()),
       getUserMemory: vi.fn().mockReturnValue(''),
+      getSystemPrompt: vi.fn().mockReturnValue(undefined),
       getOutputStyle: vi.fn().mockReturnValue(undefined),
       getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getSkillManager: vi.fn().mockReturnValue({
@@ -262,6 +265,7 @@ describe('collectContextData (contextCommand)', () => {
       }),
       getVisibleTools: vi.fn().mockReturnValue(new Set(['web_fetch'])),
       getUserMemory: vi.fn().mockReturnValue(''),
+      getSystemPrompt: vi.fn().mockReturnValue(undefined),
       getOutputStyle: vi.fn().mockReturnValue(undefined),
       getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getSkillManager: vi.fn().mockReturnValue({
@@ -485,6 +489,18 @@ describe('/context shows three-tier thresholds', () => {
         .length;
     expect(tokenDelta).toBeGreaterThan(charDelta / 4 - 5);
     expect(tokenDelta).toBeLessThan(charDelta / 4 + 5);
+  });
+
+  it('estimates the custom system prompt used by the live client', async () => {
+    const config = {
+      ...makeMockConfig(200_000),
+      getSystemPrompt: vi.fn().mockReturnValue('CUSTOM'),
+      getOutputStyle: vi.fn().mockReturnValue(getBuiltInOutputStyle('Concise')),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, false);
+
+    expect(data.breakdown.systemPrompt).toBe(2);
   });
 
   it('propagates custom autoCompactThreshold through to /context thresholds', async () => {
