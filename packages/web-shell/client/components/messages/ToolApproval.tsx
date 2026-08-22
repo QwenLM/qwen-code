@@ -309,10 +309,18 @@ export function ToolApproval({
     (optionId: string) => {
       if (submittedRef.current) return;
       submittedRef.current = true;
-      const submission = onConfirm(requestRef.current.id, optionId);
+      const requestId = requestRef.current.id;
+      const submission = onConfirm(requestId, optionId);
       if (submission) {
         void submission.catch(() => {
-          submittedRef.current = false;
+          // Re-arm only if the rejected submission still belongs to the
+          // current request. This instance is reused across successive
+          // requests (no key at the mount sites), and a submission can
+          // reject late (up to the action timeout); a stale rejection would
+          // otherwise disarm the successor's double-submit guard mid-flight.
+          if (requestRef.current.id === requestId) {
+            submittedRef.current = false;
+          }
         });
       }
     },

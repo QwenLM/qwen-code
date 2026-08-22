@@ -666,6 +666,41 @@ describe('ToolApproval accessibility', () => {
     expect(onConfirm).toHaveBeenCalledTimes(2);
   });
 
+  it('does not re-arm the submit guard on a stale rejection from a previous request', async () => {
+    let rejectStale: ((err: Error) => void) | undefined;
+    const staleSubmission = new Promise<void>((_resolve, reject) => {
+      rejectStale = reject;
+    });
+    const successorSubmission = new Promise<void>(() => {});
+    onConfirm
+      .mockReturnValueOnce(staleSubmission)
+      .mockReturnValueOnce(successorSubmission);
+    render(undefined);
+
+    // Confirm request A; its submission stays in flight.
+    act(() => optionButtons()[1]!.click());
+    expect(onConfirm).toHaveBeenCalledWith('req-1', 'proceed');
+
+    // The daemon replaces A with request B (this instance is reused — no key
+    // at the mount sites); the id-keyed reset effect re-arms the guard, and
+    // confirming B arms it again while B's submission is in flight.
+    rerender(undefined, { ...request, id: 'req-2' });
+    act(() => optionButtons()[1]!.click());
+    expect(onConfirm).toHaveBeenCalledTimes(2);
+    expect(onConfirm).toHaveBeenLastCalledWith('req-2', 'proceed');
+
+    // A's stale submission rejects late (the daemon answers duplicates with
+    // "No pending permission request"). It must not disarm B's guard.
+    await act(async () => {
+      rejectStale?.(new Error('No pending permission request'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    act(() => optionButtons()[0]!.click());
+
+    expect(onConfirm).toHaveBeenCalledTimes(2);
+  });
+
   it('does not re-arm the submit guard when the same request changes options', () => {
     render(undefined, {
       id: 'same-id',
