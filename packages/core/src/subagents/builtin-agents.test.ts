@@ -171,14 +171,23 @@ describe('BuiltinAgentRegistry', () => {
       // `toBeDefined()` accepts `null` — so this must be `not.toBeNull()` or a
       // renamed/removed entry sails through.
       expect(agent).not.toBeNull();
-      expect(agent?.tools).toEqual([
-        ToolNames.READ_FILE,
-        ToolNames.GREP,
-        ToolNames.GLOB,
-        ToolNames.SHELL,
-        ToolNames.WRITE_FILE,
-        ToolNames.EDIT,
-      ]);
+      // A SET plus a length, not an ordered array: declaration order carries
+      // no semantics — `getFunctionDeclarationsFiltered` maps names to schemas
+      // in whatever order it is handed — so alphabetising the list, or
+      // grouping reads before writes, would turn the suite red while changing
+      // nothing. Every tooth survives: adding `tool_search`, dropping `edit`,
+      // or declaring `['*']` still fails.
+      expect(new Set(agent!.tools)).toEqual(
+        new Set([
+          ToolNames.READ_FILE,
+          ToolNames.GREP,
+          ToolNames.GLOB,
+          ToolNames.SHELL,
+          ToolNames.WRITE_FILE,
+          ToolNames.EDIT,
+        ]),
+      );
+      expect(agent!.tools).toHaveLength(6);
     });
 
     it('pins the contract lines of its system prompt', () => {

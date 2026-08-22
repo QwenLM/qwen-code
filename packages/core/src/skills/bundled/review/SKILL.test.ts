@@ -721,8 +721,16 @@ describe('bundled review skill', () => {
       BuiltinAgentRegistry.getBuiltinAgent(REVIEW_BUILTIN_SUBAGENT_TYPE)
         ?.tools ?? [];
     expect(declared.length).toBeGreaterThan(0);
-    for (const tool of declared) {
-      expect(body).toContain(`\`${tool}\``);
-    }
+    // BOTH directions, against the sentence itself rather than the whole
+    // document. A registry-⊆-body pin cannot see SKILL.md advertising a tool
+    // the registry no longer declares: shrinking the list would leave the
+    // skill promising a capability the agent lacks, and the very next
+    // sentence asks the orchestrator to judge against what is advertised.
+    const carries = body.match(/`review-agent` carries ([^.]+)\./);
+    expect(carries).not.toBeNull();
+    const advertised = [...carries![1].matchAll(/`([a-z_]+)`/g)].map(
+      (m) => m[1],
+    );
+    expect(new Set(advertised)).toEqual(new Set(declared));
   });
 });

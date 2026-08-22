@@ -323,6 +323,14 @@ Guidelines:
       //     the inherited surface had. Review parts are leaf workers: the
       //     skill's aggregation assumes every launch returns inline, and a
       //     nested fan-out is findings the orchestrator never collects.
+      //   MONITOR (468 tokens/turn) — the one the agent is actively pointed
+      //     at: `shell.ts` answers a blocked foreground sleep with "For
+      //     streaming events (watching logs, polling APIs), use the Monitor
+      //     tool", and it is not in the subagent exclusion set, so a
+      //     `general-purpose` review agent had it. Following that guidance now
+      //     costs a turn on `Tool "monitor" not found`. (Not observed in the
+      //     A/B review: neither arm hit a blocked foreground sleep, so the
+      //     guidance never fired — the hazard is real but unexercised there.)
       //   WEB_FETCH (652 tokens/turn) and any discovered MCP tool — the
       //     verifier brief's "corroborate via the vendor's own tracker" and a
       //     project rule naming an MCP server both lose their direct route and

@@ -1606,6 +1606,7 @@ describe('--roster — every prompt the plan requires, in one call', () => {
       expect(printed).toContain(
         `\`subagent_type: "${REVIEW_BUILTIN_SUBAGENT_TYPE}"\``,
       );
+      expect(printed).toContain('`run_in_background: false`');
       // The directive form only. The note names `general-purpose` on purpose,
       // as the default an omission resolves to — banning the word would ban
       // the warning.
@@ -1635,6 +1636,12 @@ describe('--roster — every prompt the plan requires, in one call', () => {
       const findings = join(dir, 'f.md');
       writeFileSync(findings, '### Finding 1\n- **File:** a.ts\n');
 
+      // The enclosing beforeEach clears only writeStdoutLine, and earlier
+      // tests in file order walk this same single-block path — so a joined
+      // read of every accumulated stderr call would pass whether or not THIS
+      // invocation emitted anything. Clear it first.
+      (writeStderrLineSafe as unknown as Mock).mockClear();
+
       (agentPromptCommand.handler as (a: unknown) => void)({
         plan,
         role: 'verify',
@@ -1654,6 +1661,29 @@ describe('--roster — every prompt the plan requires, in one call', () => {
       expect(onStderr).toContain(
         `\`subagent_type: "${REVIEW_BUILTIN_SUBAGENT_TYPE}"\``,
       );
+      // The other half of the note. Dropping it would default every review
+      // agent to a background launch, whose findings never return inline —
+      // the review stalls in Step 4 with nothing to aggregate.
+      expect(onStderr).toContain('`run_in_background: false`');
+
+      // …and the THIRD emission path: the reverse-audit round header. Its
+      // agents are the most numerous a high-effort review launches, and no
+      // test reached it — dropping the append there shipped green.
+      (writeStdoutLine as unknown as Mock).mockClear();
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        role: 'reverse-audit',
+        'all-chunks': true,
+        allChunks: true,
+        findings,
+        round: 1,
+      });
+      const roundHeader = (writeStdoutLine as unknown as Mock).mock
+        .calls[0][0] as string;
+      expect(roundHeader).toContain(
+        `\`subagent_type: "${REVIEW_BUILTIN_SUBAGENT_TYPE}"\``,
+      );
+      expect(roundHeader).toContain('`run_in_background: false`');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
