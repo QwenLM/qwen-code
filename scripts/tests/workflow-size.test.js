@@ -130,7 +130,15 @@ describe('workflow size growth ratchet', () => {
   });
 });
 
-describe.skipIf(process.platform === 'win32')(
+// The gate script's `declare -A baseline=()` needs bash 4+. The merge-queue
+// macOS lane ships bash 3.2, where the assoc-array errors leave the ratchet
+// failing open, so probe the capability rather than the platform: that lane
+// must skip instead of reporting red on a script it cannot execute.
+const bashSupportsAssocArrays =
+  spawnSync('bash', ['-c', 'declare -A t=()'], { stdio: 'ignore' }).status ===
+  0;
+
+describe.skipIf(process.platform === 'win32' || !bashSupportsAssocArrays)(
   'check-workflow-size.sh execution',
   () => {
     // The block above re-implements the gate's arithmetic in JS; only running
@@ -166,6 +174,33 @@ describe.skipIf(process.platform === 'win32')(
       });
       expect(result.status).toBe(0);
       expect(result.stdout).toContain('✅');
+    });
+
+    it('passes a workflow grown within its allowance', () => {
+      const result = runGate({
+        files: { 'small.yml': 4000 },
+        baseline: '100 small.yml\n',
+      });
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain('✅');
+    });
+
+    it('passes a workflow at exactly baseline plus allowance', () => {
+      const result = runGate({
+        files: { 'small.yml': 4196 },
+        baseline: '100 small.yml\n',
+      });
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain('✅');
+    });
+
+    it('fails a workflow one byte past baseline plus allowance', () => {
+      const result = runGate({
+        files: { 'small.yml': 4197 },
+        baseline: '100 small.yml\n',
+      });
+      expect(result.status).toBe(1);
+      expect(result.stdout).toContain('grew to 4197 bytes');
     });
 
     it('fails a workflow grown past its baseline plus allowance', () => {
@@ -232,6 +267,27 @@ describe.skipIf(process.platform === 'win32')(
       expect(result.status).toBe(0);
       expect(result.stdout).toContain('::warning');
       expect(result.stdout).toContain('under its recorded 30000');
+    });
+
+    // SLACK_BYTES is 20000 in the gate script; these two fixtures pin the
+    // boundary itself, not just the warning branch.
+    it('warns when a file sits more than the slack under its baseline', () => {
+      const result = runGate({
+        files: { 'small.yml': 100 },
+        baseline: '20101 small.yml\n',
+      });
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain('::warning');
+      expect(result.stdout).toContain('under its recorded 20101');
+    });
+
+    it('does not warn at exactly the slack under its baseline', () => {
+      const result = runGate({
+        files: { 'small.yml': 100 },
+        baseline: '20100 small.yml\n',
+      });
+      expect(result.status).toBe(0);
+      expect(result.stdout).not.toContain('::warning');
     });
 
     it('fails a file past the absolute gate', () => {
