@@ -144,13 +144,27 @@ function getGitHubCredential(source: string): GitCredential | undefined {
   return undefined;
 }
 
-async function getLocalGitVersion(): Promise<{
+type LocalGitVersion = {
   major: number;
   minor: number;
   patch?: number | string;
-}> {
-  const { simpleGit } = await loadSimpleGit();
-  return await simpleGit().version();
+};
+
+// The local Git version cannot change within a process lifetime, so probe it
+// once instead of spawning a `git version` subprocess from both the fallback
+// gate and the pinned-Git assert for every extension.
+let localGitVersionPromise: Promise<LocalGitVersion> | undefined;
+
+function getLocalGitVersion(): Promise<LocalGitVersion> {
+  localGitVersionPromise ??= (async () => {
+    const { simpleGit } = await loadSimpleGit();
+    return await simpleGit().version();
+  })();
+  return localGitVersionPromise;
+}
+
+export function resetLocalGitVersionCacheForTesting(): void {
+  localGitVersionPromise = undefined;
 }
 
 function isPinnedGitVersionSupported(version: {

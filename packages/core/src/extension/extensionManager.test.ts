@@ -38,6 +38,7 @@ import {
   EXTENSION_GIT_CREDENTIAL_SELECTOR_FILENAME,
   resolveStoredGitCredential,
 } from './extension-git-credentials.js';
+import { resetLocalGitVersionCacheForTesting } from './github.js';
 import { FileTokenStorage } from '../mcp/token-storage/file-token-storage.js';
 
 const mockGit = {
@@ -223,6 +224,7 @@ describe('extension tests', () => {
 
     mockHomedir.mockReturnValue(tempHomeDir);
     vi.spyOn(process, 'cwd').mockReturnValue(tempWorkspaceDir);
+    resetLocalGitVersionCacheForTesting();
     Object.values(mockGit).forEach((fn) => fn.mockReset());
     mockDownloadFromArchiveUrl.mockReset();
     mockDownloadPublicGitHubArchiveFallback.mockReset();

@@ -17,6 +17,7 @@ import {
   isSupportedArchivePath,
   isSupportedArchiveUrl,
   parseGitHubRepoForReleases,
+  resetLocalGitVersionCacheForTesting,
   shouldUsePublicGitHubArchiveFallback,
 } from './github.js';
 import { simpleGit, type SimpleGit } from 'simple-git';
@@ -68,6 +69,7 @@ vi.mock('simple-git');
 describe('git extension helpers', () => {
   beforeEach(() => {
     vi.stubEnv('GITHUB_TOKEN', '');
+    resetLocalGitVersionCacheForTesting();
   });
 
   afterEach(() => {
