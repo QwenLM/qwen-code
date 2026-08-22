@@ -369,19 +369,27 @@ export type McpVersionNegotiation =
   | { mode: 'auto'; probe: { timeoutMs: number } };
 
 /**
- * Stdio clients auto-negotiate, but the `server/discover` probe must
- * leave initialize headroom inside `discoveryTimeoutFor`. Remotes stay
- * on `legacy` because SDK v2 has no HTTP probe → initialize fallback.
+ * External stdio clients auto-negotiate unless explicitly pinned to legacy.
+ * Internal and remote transports stay on legacy because SDK v2 has no
+ * non-stdio probe → initialize timeout fallback.
  */
 export function mcpVersionNegotiationFor(
   cfg: MCPServerConfig,
 ): McpVersionNegotiation {
-  if (cfg.httpUrl || cfg.url || cfg.tcp) {
+  if (
+    cfg.versionNegotiation === 'legacy' ||
+    isSdkMcpServerConfig(cfg) ||
+    !cfg.command ||
+    cfg.httpUrl ||
+    cfg.url ||
+    cfg.tcp
+  ) {
     return { mode: 'legacy' };
   }
+  const discoveryTimeoutMs = discoveryTimeoutFor(cfg);
   const probeTimeoutMs = Math.min(
     MCP_VERSION_NEGOTIATION_PROBE_TIMEOUT_MS,
-    discoveryTimeoutFor(cfg) - MCP_VERSION_NEGOTIATION_FALLBACK_HEADROOM_MS,
+    discoveryTimeoutMs - MCP_VERSION_NEGOTIATION_FALLBACK_HEADROOM_MS,
   );
   if (probeTimeoutMs <= 0) {
     return { mode: 'legacy' };
@@ -435,7 +443,7 @@ export function isMcpToolVisibleToModel(tool: {
     return true;
   }
   const visibility = (ui as Record<string, unknown>)['visibility'];
-  if (visibility === undefined) {
+  if (visibility === undefined || visibility === null) {
     return true;
   }
   return Array.isArray(visibility) && visibility.includes('model');

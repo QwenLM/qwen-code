@@ -47,6 +47,12 @@ modern evidence selects the stateless `2026-07-28` protocol; legacy evidence —
 including a silent stdio server that never answers the probe — falls back to
 the unchanged `initialize` flow.
 
+The SDK performs stdio auto-negotiation on a disposable sibling process before
+starting the session process, so the configured command runs twice per
+connection. Servers with non-idempotent startup side effects or single-owner
+resources such as lockfiles can set `versionNegotiation: "legacy"` to skip the
+probe and retain the single-process initialize flow.
+
 Remote HTTP / SSE / TCP clients use `versionNegotiation.mode = 'legacy'` and
 never send `server/discover`.
 
@@ -86,6 +92,8 @@ not advertise privileged App capabilities.
 ## Compatibility and safety
 
 - No configured server is pinned to the modern protocol.
+- Configured stdio servers can opt out of the extra negotiation process with
+  `versionNegotiation: "legacy"`.
 - Legacy fallback remains the SDK's byte-compatible v1 sequence.
 - Authorization and Qwen Code's MCP permission boundary are unchanged.
 - The modern cache is private per client instance; no result is shared across

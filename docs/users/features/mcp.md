@@ -261,6 +261,26 @@ The existing `timeout` field is **tool-call** timeout (used for each
 `discoveryTimeoutMs` — a long-running tool invocation is not a startup
 pathology.
 
+### Legacy stdio negotiation
+
+Stdio servers negotiate the MCP protocol automatically. The negotiation probe
+uses a short-lived copy of the configured server process before Qwen Code starts
+the session process. If a server has non-idempotent startup side effects, uses a
+single-owner lock or PID file, or needs its entire discovery timeout for a slow
+legacy initialize handshake, disable the probe for that server:
+
+```jsonc
+{
+  "mcpServers": {
+    "legacy-server": {
+      "command": "node",
+      "args": ["./server.js"],
+      "versionNegotiation": "legacy",
+    },
+  },
+}
+```
+
 ### Rolling back progressive MCP
 
 If you need the old synchronous behavior (cli waits for every MCP server
@@ -461,6 +481,7 @@ Optional:
 | `env`                  | object                       | Environment variables for the server process. Values can reference environment variables using `$VAR_NAME` or `${VAR_NAME}` syntax                                                                                                                                |
 | `cwd`                  | string                       | Working directory for Stdio transport                                                                                                                                                                                                                             |
 | `timeout`              | number<br>(default: 600,000) | Request timeout in milliseconds (default: 600,000ms = 10 minutes)                                                                                                                                                                                                 |
+| `versionNegotiation`   | `"legacy"`                   | For Stdio servers, skips automatic protocol negotiation and starts only the legacy session process. Use for servers with non-idempotent startup side effects or single-owner resources.                                                                           |
 | `trust`                | boolean<br>(default: false)  | When `true`, bypasses tool call confirmations for this server in a trusted workspace (default: `false`)                                                                                                                                                           |
 | `includeTools`         | array                        | List of tool names to include from this MCP server. When specified, only the tools listed here will be available from this server (allowlist behavior). If not specified, all tools from the server are enabled by default.                                       |
 | `excludeTools`         | array                        | List of tool names to exclude from this MCP server. Tools listed here will not be available to the model, even if they are exposed by the server.<br>Note: `excludeTools` takes precedence over `includeTools` - if a tool is in both lists, it will be excluded. |

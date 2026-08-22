@@ -11,6 +11,23 @@ describe('QueryOptionsSchema', () => {
     expect(result.success).toBe(true);
   });
 
+  it('accepts only the legacy MCP negotiation opt-out', () => {
+    expect(
+      QueryOptionsSchema.safeParse({
+        mcpServers: {
+          legacy: { command: 'node', versionNegotiation: 'legacy' },
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      QueryOptionsSchema.safeParse({
+        mcpServers: {
+          invalid: { command: 'node', versionNegotiation: 'auto' },
+        },
+      }).success,
+    ).toBe(false);
+  });
+
   it('accepts fallbackModel with up to 3 models', () => {
     const result = QueryOptionsSchema.safeParse({
       fallbackModel: ['a', 'b', 'c'],

@@ -226,6 +226,37 @@ describe('SystemController', () => {
     });
   });
 
+  describe('initialize MCP configuration', () => {
+    it('preserves explicit legacy version negotiation', async () => {
+      const context = createContext();
+      const controller = new SystemController(
+        context,
+        createRegistry(),
+        'SystemController',
+      );
+
+      await controller.handleRequest(
+        {
+          subtype: 'initialize',
+          mcpServers: {
+            legacy: {
+              command: 'node',
+              versionNegotiation: 'legacy',
+            },
+          },
+        },
+        'mcp-1',
+      );
+
+      expect(context.config.addMcpServers).toHaveBeenCalledWith({
+        legacy: expect.objectContaining({
+          command: 'node',
+          versionNegotiation: 'legacy',
+        }),
+      });
+    });
+  });
+
   describe('continue_last_turn', () => {
     it('delegates to the session callback and merges its payload', async () => {
       const onContinueLastTurn = vi.fn().mockResolvedValue({

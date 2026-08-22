@@ -112,6 +112,16 @@ describe('mcp-pool-key', () => {
       const fp = fingerprint(new MCPServerConfig('node'));
       expect(fp).toMatch(/^[0-9a-f]{16}$/);
     });
+
+    it('separates explicit legacy negotiation from the default auto mode', () => {
+      const base = { command: 'node' } as MCPServerConfig;
+      const legacy = {
+        ...base,
+        versionNegotiation: 'legacy',
+      } as MCPServerConfig;
+
+      expect(fingerprint(base)).not.toBe(fingerprint(legacy));
+    });
   });
 
   describe('canonicalOAuth (V21-9)', () => {

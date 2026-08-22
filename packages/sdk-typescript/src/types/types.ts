@@ -142,6 +142,7 @@ export interface CLIMcpServerConfig {
   tcp?: string;
   // Common
   timeout?: number;
+  versionNegotiation?: 'legacy';
   trust?: boolean;
   // Metadata
   description?: string;

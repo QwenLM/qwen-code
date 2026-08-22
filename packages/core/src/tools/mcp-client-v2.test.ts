@@ -18,6 +18,7 @@ import {
   getMcpAppResourceUri,
   isMcpToolVisibleToModel,
   connectToMcpServer,
+  createMcpClient,
   discoverTools,
   invokeMcpPrompt,
   listMcpPrompts,
@@ -31,6 +32,10 @@ import {
   discoveryTimeoutFor,
   runWithTimeout,
 } from './mcp-discovery-timeout.js';
+import {
+  SdkControlClientTransport,
+  type SendMcpMessageCallback,
+} from './sdk-control-client-transport.js';
 
 type RequestMessage = JSONRPCRequest;
 
@@ -48,6 +53,19 @@ function workspaceContext(): WorkspaceContext {
   } as unknown as WorkspaceContext;
 }
 
+async function connectNegotiatingControl(
+  serverName: string,
+  sendMcpMessage: SendMcpMessageCallback,
+) {
+  const client = createMcpClient('qwen-code-mcp-client', {
+    command: 'test-control',
+  } as MCPServerConfig);
+  await client.connect(
+    new SdkControlClientTransport({ serverName, sendMcpMessage }),
+  );
+  return client;
+}
+
 describe('configured MCP SDK v2 negotiation', () => {
   it('bounds the auto-negotiation probe below the inherited request timeout', () => {
     expect(MCP_VERSION_NEGOTIATION_PROBE_TIMEOUT_MS).toBe(5_000);
@@ -56,10 +74,19 @@ describe('configured MCP SDK v2 negotiation', () => {
     );
   });
 
-  it('keeps remotes on legacy and reserves a stdio fallback window', () => {
+  it('keeps non-stdio and explicit opt-outs on legacy', () => {
     expect(
       mcpVersionNegotiationFor({
         httpUrl: 'https://example.com/mcp',
+      } as MCPServerConfig),
+    ).toEqual({ mode: 'legacy' });
+    expect(
+      mcpVersionNegotiationFor({ type: 'sdk' } as MCPServerConfig),
+    ).toEqual({ mode: 'legacy' });
+    expect(
+      mcpVersionNegotiationFor({
+        command: 'node',
+        versionNegotiation: 'legacy',
       } as MCPServerConfig),
     ).toEqual({ mode: 'legacy' });
     expect(
@@ -191,13 +218,7 @@ describe('configured MCP SDK v2 negotiation', () => {
       }
     });
 
-    const client = await connectToMcpServer(
-      'modern-only',
-      { type: 'sdk' } as MCPServerConfig,
-      false,
-      workspaceContext(),
-      send,
-    );
+    const client = await connectNegotiatingControl('modern-only', send);
 
     try {
       expect(client.getProtocolEra()).toBe('modern');
@@ -306,13 +327,7 @@ describe('configured MCP SDK v2 negotiation', () => {
       }
     });
 
-    const client = await connectToMcpServer(
-      'paged',
-      { type: 'sdk' } as MCPServerConfig,
-      false,
-      workspaceContext(),
-      send,
-    );
+    const client = await connectNegotiatingControl('paged', send);
 
     try {
       const listed = await client.listTools();
@@ -488,13 +503,7 @@ describe('configured MCP SDK v2 negotiation', () => {
       }
     });
 
-    const client = await connectToMcpServer(
-      'legacy',
-      { type: 'sdk' } as MCPServerConfig,
-      false,
-      workspaceContext(),
-      send,
-    );
+    const client = await connectNegotiatingControl('legacy', send);
 
     try {
       expect(client.getProtocolEra()).toBe('legacy');
@@ -550,6 +559,42 @@ describe('configured MCP SDK v2 negotiation', () => {
     }
   });
 
+  it('connects SDK control-plane servers without probing them', async () => {
+    const methods: string[] = [];
+    const send = vi.fn(async (_serverName: string, message: JSONRPCMessage) => {
+      if (!('method' in message)) {
+        throw new Error('Unexpected MCP response');
+      }
+      methods.push(message.method);
+      if (!('id' in message)) {
+        return { jsonrpc: '2.0', id: 0, result: {} } as JSONRPCMessage;
+      }
+      if (message.method !== 'initialize') {
+        throw new Error(`Unexpected SDK MCP method: ${message.method}`);
+      }
+      return response(message, {
+        protocolVersion: '2025-06-18',
+        capabilities: {},
+        serverInfo: { name: 'sdk-legacy', version: '1.0.0' },
+      });
+    });
+
+    const client = await connectToMcpServer(
+      'sdk-legacy',
+      { type: 'sdk' } as MCPServerConfig,
+      false,
+      workspaceContext(),
+      send,
+    );
+
+    try {
+      expect(client.getProtocolEra()).toBe('legacy');
+      expect(methods).toEqual(['initialize', 'notifications/initialized']);
+    } finally {
+      await client.close();
+    }
+  });
+
   it('accepts nested and legacy MCP Apps tool metadata', () => {
     expect(
       getMcpAppResourceUri({
@@ -585,5 +630,10 @@ describe('configured MCP SDK v2 negotiation', () => {
         _meta: { ui: { visibility: ['app'] } },
       }),
     ).toBe(false);
+    expect(
+      isMcpToolVisibleToModel({
+        _meta: { ui: { visibility: null } },
+      }),
+    ).toBe(true);
   });
 });

@@ -354,6 +354,7 @@ export interface CLIMcpServerConfig {
   headers?: Record<string, string>;
   tcp?: string;
   timeout?: number;
+  versionNegotiation?: 'legacy';
   trust?: boolean;
   description?: string;
   includeTools?: string[];
