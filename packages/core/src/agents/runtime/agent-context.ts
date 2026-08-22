@@ -43,6 +43,20 @@ interface AgentContext {
    * {@link getCurrentAgentDepth} for telemetry (#3731 Phase 3).
    */
   readonly depth?: number;
+  /**
+   * Tool names declared for this agent frame's model context. Mutable on
+   * purpose even though the rest of the frame is `readonly`: `prepareTools()`
+   * records the list AFTER the frame is already running (via
+   * {@link recordCurrentAgentDeclaredToolNames}), so it must patch the live
+   * store object in place. A replacement via `enterWith` would only be seen
+   * by continuations created after the call inside `prepareTools` — NOT by
+   * the frame's own code resuming after `await prepareTools()` (the
+   * reasoning loop, nested tool bodies), which keep reading the original
+   * store object. In-place mutation keeps the whole frame consistent across
+   * awaits. Nested `runWithAgentContext` frames shallow-copy the store, so a
+   * child's recording never leaks into its parent.
+   */
+  declaredToolNames?: ReadonlySet<string>;
 }
 
 const storage = new AsyncLocalStorage<AgentContext>();
@@ -73,6 +87,39 @@ export function runWithRuntimeContentGenerator<T>(
 
 export function getCurrentAgentId(): string | null {
   return storage.getStore()?.agentId ?? null;
+}
+
+/**
+ * Records the tool names `AgentCore.prepareTools()` declared for the
+ * current agent frame (see `AgentContext.declaredToolNames`). Patches the
+ * live frame store in place so the WHOLE frame — including the code that
+ * resumes after `await prepareTools()` (the reasoning loop and every tool
+ * body it runs, e.g. tool_search) — observes the recorded set. An
+ * `enterWith` replacement would only reach continuations spawned inside
+ * `prepareTools` itself, leaving the post-await frame reading the stale
+ * store. Nested frames shallow-copy the store in `runWithAgentContext`, so
+ * a later child `prepareTools()` records on its own copy without leaking
+ * into this frame. No-op outside an agent frame (the top-level session
+ * never prepares an agent tool surface).
+ */
+export function recordCurrentAgentDeclaredToolNames(
+  names: ReadonlySet<string>,
+): void {
+  const current = storage.getStore();
+  if (!current) return;
+  current.declaredToolNames = names;
+}
+
+/**
+ * Tool names declared for the current agent frame's model context, or
+ * `undefined` when no frame exists or `prepareTools()` has not recorded a
+ * list in it. Callers must treat `undefined` as "unknown — fail closed",
+ * never as "declared".
+ */
+export function getCurrentAgentDeclaredToolNames():
+  | ReadonlySet<string>
+  | undefined {
+  return storage.getStore()?.declaredToolNames;
 }
 
 /**

@@ -16,6 +16,7 @@ import {
 } from './agent-core.js';
 import { attachJsonlTranscriptWriter } from '../agent-transcript.js';
 import {
+  getCurrentAgentDeclaredToolNames,
   getCurrentAgentDepth,
   getCurrentAgentId,
   getRuntimeContentGenerator,
@@ -524,6 +525,51 @@ describe('AgentCore.prepareTools', () => {
       includeDeferred: true,
     });
     expect(tools.map((t) => t.name)).toEqual(['lsp']);
+  });
+
+  it('records the prepared declaration names on the agent context frame (R24-3)', async () => {
+    // tool_search's `select:` consults the recorded set to tell whether a
+    // registry-hidden deferred tool is nonetheless declared — and directly
+    // callable — for the current subagent. Wildcard agents declare the
+    // deferred tools, so the recorded set must include them.
+    const fnDecls: FunctionDeclaration[] = [
+      { name: 'core_tool', description: 'core' } as FunctionDeclaration,
+      {
+        name: 'mcp__github__create_issue',
+        description: 'mcp deferred',
+      } as FunctionDeclaration,
+    ];
+    const { core } = buildAgentForTools({ tools: ['*'] }, fnDecls);
+
+    await runWithAgentContext('agent-record', async () => {
+      expect(getCurrentAgentDeclaredToolNames()).toBeUndefined();
+      await core.prepareTools();
+      expect(getCurrentAgentDeclaredToolNames()).toEqual(
+        new Set(['core_tool', 'mcp__github__create_issue']),
+      );
+    });
+    // The recording must not leak past the frame.
+    expect(getCurrentAgentDeclaredToolNames()).toBeUndefined();
+  });
+
+  it('records only the listed names for explicit-tool-list subagents (R24-3)', async () => {
+    const fnDecls: FunctionDeclaration[] = [
+      { name: 'read_file', description: 'read' } as FunctionDeclaration,
+      {
+        name: 'mcp__github__create_issue',
+        description: 'mcp deferred',
+      } as FunctionDeclaration,
+    ];
+    const { core } = buildAgentForTools({ tools: ['read_file'] }, fnDecls);
+
+    await runWithAgentContext('agent-record', async () => {
+      await core.prepareTools();
+      // The explicit list omits the deferred tool, so the recorded set
+      // must NOT contain it — select: stays fail-closed for it.
+      expect(getCurrentAgentDeclaredToolNames()).toEqual(
+        new Set(['read_file']),
+      );
+    });
   });
 
   it('explicit tools list does NOT use the wildcard inherit path', async () => {

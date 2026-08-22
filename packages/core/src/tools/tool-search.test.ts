@@ -23,7 +23,10 @@ import { ToolNames } from './tool-names.js';
 import { ToolErrorType } from './tool-error.js';
 import { normalizeDeferredToolCallRequest } from '../core/deferred-tool-call-normalization.js';
 import type { ToolCallRequestInfo } from '../core/turn.js';
-import { runWithAgentContext } from '../agents/runtime/agent-context.js';
+import {
+  recordCurrentAgentDeclaredToolNames,
+  runWithAgentContext,
+} from '../agents/runtime/agent-context.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
 
 const baseConfigParams: ConfigParameters = {
@@ -814,9 +817,13 @@ describe('ToolSearchTool', () => {
   });
 
   it('select: reports hidden deferred tools as unavailable inside subagent context', async () => {
-    // Forks and explicit-tool-list subagents have no tool_call proxy and
-    // never declare hidden deferred tools, so serving the bare schema would
-    // only invite an unknown-function call.
+    // Forks inherit the parent's declarations and explicit-tool-list
+    // subagents declare only the names they list — neither declares hidden
+    // deferred tools (and no subagent-like context has the tool_call
+    // proxy), so serving the bare schema would only invite an
+    // unknown-function call. No prepared declaration list is recorded in
+    // this frame (prepareTools never ran here), so the gate fails closed
+    // and reports the tool unavailable.
     registry.registerTool(
       new MockTool({
         name: 'probeDeferredTool',
@@ -835,9 +842,46 @@ describe('ToolSearchTool', () => {
       '"name":"probeDeferredTool"',
     );
     expect(String(result.llmContent)).toContain(
-      'probeDeferredTool is not available in this subagent',
+      'probeDeferredTool is not available in this session',
     );
+    // The refusal must not advertise a tool_call route: subagent-like
+    // contexts have no tool_call at all (R24-3).
+    expect(String(result.llmContent)).not.toContain('via tool_call');
     expect(String(result.returnDisplay)).toContain('1 unavailable');
+  });
+
+  it('select: returns the schema of a registry-hidden deferred tool that is declared for the current subagent (R24-3)', async () => {
+    // Wildcard/no-tool-config subagents and teammates DO declare hidden
+    // deferred tools directly (agent-core prepareTools uses
+    // includeDeferred: true), and prepareTools records the declared names
+    // on the agent frame. A registry-hidden-but-context-declared tool is
+    // directly callable in this session, so select: must re-inspect it
+    // like any other declared tool instead of claiming it is unavailable.
+    registry.registerTool(
+      new MockTool({
+        name: 'probeDeferredTool',
+        shouldDefer: true,
+      }),
+    );
+
+    const tool = new ToolSearchTool(config);
+    const result = await runWithAgentContext('agent-1', () => {
+      recordCurrentAgentDeclaredToolNames(
+        new Set([ToolNames.TOOL_SEARCH, 'probeDeferredTool']),
+      );
+      return tool
+        .build({ query: 'select:probeDeferredTool' })
+        .execute(new AbortController().signal);
+    });
+
+    expect(String(result.llmContent)).toContain('"name":"probeDeferredTool"');
+    expect(String(result.llmContent)).not.toContain('Unavailable');
+    expect(result.error).toBeUndefined();
+    expect(String(result.returnDisplay)).toBe('Loaded 1 tool(s)');
+    // Subagent contexts have no tool_call proxy: the schema ships without
+    // the proxy-usage footer and commits no proxy presentations.
+    expect(String(result.llmContent)).not.toContain('tool_call');
+    expect(result.proxySchemaPresentations).toBeUndefined();
   });
 
   it('omits hidden deferred tools from the catalog in subagent context', async () => {
