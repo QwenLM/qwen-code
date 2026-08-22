@@ -1537,6 +1537,25 @@ describe('AgentTool', () => {
 
       expect(result.llmContent).toBe('Subagent "non-existent" not found');
     });
+
+    it('marks the not-found result as a failed tool call (#9509)', async () => {
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(null);
+
+      const invocation = agentTool.build({
+        description: 'Use missing agent',
+        prompt: 'Do work',
+        subagent_type: 'non-existent',
+      });
+      const result = await invocation.execute(new AbortController().signal);
+
+      // The scheduler records a failure only when `error` is set. A launch
+      // that never ran must not count as a successful agent call, and the
+      // error message (not `llmContent`) is what the failure path forwards
+      // to the model — so it must carry the full guidance text (#9509).
+      expect(result.error?.message).toBe(
+        'Subagent "non-existent" not found. Available subagents: file-search, code-review',
+      );
+    });
   });
 
   describe('team routing', () => {
@@ -2320,6 +2339,36 @@ describe('AgentTool', () => {
 
       expect(partToString(result.llmContent)).toBe(
         '(subagent produced no model-visible output)',
+      );
+    });
+
+    it('marks a worktree provisioning failure as a failed tool call (#9509)', async () => {
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
+        mockSubagents[0],
+      );
+      // The nested-isolation guard fires before any git probe, so no real
+      // repository is needed — a cwd inside `.qwen/worktrees/` is enough to
+      // make failWorktreeProvisioning() return.
+      vi.mocked(config.getTargetDir).mockReturnValue(
+        '/test/project/.qwen/worktrees/agent-outer',
+      );
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Nested isolation',
+        prompt: 'Do work',
+        subagent_type: 'file-search',
+        isolation: 'worktree',
+      });
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(partToString(result.llmContent)).toMatch(/Nested isolation/);
+      expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
+      // The scheduler records a failure only when `error` is set. A launch
+      // that never ran must not count as a successful agent call (#9509).
+      expect(result.error?.message).toMatch(
+        /Nested isolation worktrees are not supported/,
       );
     });
 
