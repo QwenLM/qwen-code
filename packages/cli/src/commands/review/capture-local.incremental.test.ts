@@ -403,6 +403,25 @@ describe('capture-local — round-2 regressions from the stop work', () => {
     expect(plan['nothingToReview']).toBeUndefined();
   });
 
+  it('does not tell a FILE review of an unchanged file that the tree is clean', () => {
+    // The field gate excludes file reviews; the prose channel beside it did
+    // not, so stderr still said "the working tree is clean … do not run the
+    // review agents" over a capture that was pathspec-scoped — 0 chunks says
+    // nothing about the tree (the bystanders here are dirty), and an
+    // orchestrator that stops on prose left the user-named file unread. The
+    // no-diff branch owes this shape a whole-file review.
+    seedDirtyTree();
+    git('add', CHANGED);
+    git('commit', '-q', '--no-verify', '-m', 'commit only the reviewed file');
+
+    stderrLines.length = 0;
+    const plan = capture({ file: CHANGED });
+    expect(plan['nothingToReview']).toBeUndefined();
+    const err = stderrLines.join('\n');
+    expect(err).not.toContain('the working tree is clean');
+    expect(err).toContain('whole-file review');
+  });
+
   it('stamps the stop sidecar with the run that asked for it', () => {
     // The sidecar decides `completed` and can carry a REQUEST_CHANGES event,
     // while its NAME is the flattened target token — which is not injective,

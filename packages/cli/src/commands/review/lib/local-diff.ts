@@ -236,14 +236,23 @@ export function isBinarySection(section: Buffer): boolean {
 }
 
 /** Repo-root-relative paths of untracked, non-ignored files. */
-function listUntracked(repoRoot: string, pathspec?: string): string[] {
+function listUntracked(
+  repoRoot: string,
+  pathspec?: string,
+  excludeStandard = true,
+): string[] {
   const args = [
     '-C',
     repoRoot,
     LITERAL_PATHSPECS,
     'ls-files',
     '--others',
-    '--exclude-standard',
+    // Deliberately named plumbing wins over ignore rules — repos ordinarily
+    // ignore `.qwen/` (this repo's own `.gitignore` does), and exclusion
+    // applies to an explicitly pathspec-NAMED file too, so with the flag the
+    // named file never reached the filter at all and the round reported
+    // clean over the one file it was asked about.
+    ...(excludeStandard ? ['--exclude-standard'] : []),
     '--full-name',
     '-z',
   ];
@@ -320,11 +329,30 @@ function isReviewPlumbing(repoRelPath: string): boolean {
  * changes". Exactly the pathology the untracked filter beside this exists to
  * prevent, on the half it could not reach.
  *
- * An explicit `--file` has already pathspec-limited the capture to one path,
- * so whatever came back is what the user asked for; nothing is dropped then.
+ * The exemption is a NAMED plumbing pathspec, file- or directory-shaped:
+ * `/review .qwen/reviews/saved.md` is a deliberate request for exactly the
+ * section this drop exists to remove, so whatever came back stays. A
+ * NON-plumbing pathspec still drops: a directory target carries every
+ * tracked section beneath it, and "whatever came back is what the user
+ * asked for" is only true of file-shaped names — a repo that committed its
+ * own plumbing would otherwise review its ledger JSON as user content under
+ * a `sub/` target, and its every-round churn would keep `changedSince` from
+ * ever emptying. This matches the untracked filter beside this, which drops
+ * plumbing descendants of a directory target the same way.
  */
 function dropPlumbingSections(diff: Buffer, pathspec?: string): Buffer {
-  if (pathspec !== undefined || diff.length === 0) return diff;
+  if (diff.length === 0) return diff;
+  if (pathspec !== undefined && isReviewPlumbing(pathspec)) return diff;
+  // The cap gate runs BEFORE any decode: an over-cap tracked diff is
+  // rejected by the caller whole, never inlined, so parsing it first made
+  // the pathological case this gate exists for pay the cost it avoids —
+  // and near `gitRaw`'s 512 MiB ceiling an all-ASCII diff decodes past
+  // Node's maximum string length, so the decode throws instead of
+  // producing the caller's graceful skip record. The one semantic delta,
+  // accepted: a diff whose plumbing DROP would have shrunk it under the
+  // cap is rejected whole rather than rescued — an 11 MB diff is the cap's
+  // pathology whatever it is made of, and the skip record says so.
+  if (diff.length > MAX_UNTRACKED_TOTAL_BYTES) return diff;
   const files = parseDiff(diff.toString('utf8')).files;
   if (!files.some((f) => isReviewPlumbing(f.path))) return diff;
   return sliceDiffByLines(
@@ -357,6 +385,12 @@ export function captureLocalDiff(opts: {
   // The user typed `--file` relative to *their* directory; every git call here
   // runs with `-C <repoRoot>`. Re-base it, and strip it of pathspec magic.
   const pathspec = file ? toRepoPathspec(repoRoot, file) : undefined;
+  // The user NAMED a plumbing path — a file or a directory under
+  // `.qwen/tmp|review-cache|reviews` — when reviewing it is the point. Both
+  // halves of the capture key on this one predicate so they cannot disagree:
+  // the tracked drop keeps its sections, and the untracked filter lists its
+  // files even when ignore rules cover them.
+  const namedPlumbing = pathspec !== undefined && isReviewPlumbing(pathspec);
 
   // `git diff HEAD` is what covers the whole tracked scope: a bare `git diff`
   // omits staged changes.
@@ -406,15 +440,17 @@ export function captureLocalDiff(opts: {
     // never again report "no changes". None of it is ever the change under
     // review; drop it.
     //
-    // …unless the user NAMED one. An explicit `--file` under `.qwen/reviews`
-    // is a deliberate request to review that file — round notes, a saved
-    // report — and dropping it here left the round claiming "the working tree
-    // is clean, 0 chunks" over the one file it was asked about, with no
-    // `Not reviewed` record: mute, which this module's `SkippedFile` contract
-    // forbids. Only the explicitly named path is exempt; its siblings are
-    // still plumbing.
-    const candidates = listUntracked(repoRoot, pathspec).filter(
-      (p) => p === pathspec || !isReviewPlumbing(p),
+    // …unless the user NAMED plumbing. An explicit `--file` under
+    // `.qwen/reviews` is a deliberate request to review it — round notes, a
+    // saved report — and dropping it here left the round claiming "the
+    // working tree is clean, 0 chunks" over the one file it was asked about,
+    // with no `Not reviewed` record: mute, which this module's `SkippedFile`
+    // contract forbids. A NAMED plumbing path exempts itself and — for a
+    // directory-shaped target — its children; everything else under the
+    // plumbing directories is still dropped, exactly as the tracked half
+    // drops plumbing sections under a non-plumbing directory target.
+    const candidates = listUntracked(repoRoot, pathspec, !namedPlumbing).filter(
+      (p) => namedPlumbing || !isReviewPlumbing(p),
     );
 
     if (candidates.length > MAX_UNTRACKED_FILES) {

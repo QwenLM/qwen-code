@@ -264,11 +264,21 @@ function renderingAttributes(
   }
   // Records are `<path> NUL <attr> NUL <value> NUL`, repeated.
   const drivers = new Set<string>();
+  // Structured path → driver, recorded while the records are parsed, because
+  // the comma-joined serialization cannot be re-parsed on the way back: a
+  // driver NAME may contain a comma (`*.bin diff=a,b` is a legal gitattributes
+  // line), and a `split(',')` match can never equal such a value — the fold
+  // below would silently drop its `binary` flag from the identity, leaving
+  // the identity still across a flip that changes the rendering.
+  const diffDriverByPath = Object.create(null) as Record<string, string>;
   const f = raw.split('\0');
   for (let i = 0; i + 2 < f.length; i += 3) {
     const [path, attr, value] = [f[i], f[i + 1], f[i + 2]];
     if (path === undefined || attr === undefined || value === undefined) break;
-    if (attr === 'diff' && !ATTR_STATES.has(value)) drivers.add(value);
+    if (attr === 'diff' && !ATTR_STATES.has(value)) {
+      drivers.add(value);
+      diffDriverByPath[path] = value;
+    }
     out[path] =
       out[path] === undefined
         ? `${attr}=${value}`
@@ -291,7 +301,7 @@ function renderingAttributes(
     );
     if (binary === null) continue;
     for (const [path, attrs] of Object.entries(out)) {
-      if (attrs.split(',').includes(`diff=${driver}`)) {
+      if (diffDriverByPath[path] === driver) {
         out[path] = `${attrs},${driver}.binary=${binary}`;
       }
     }

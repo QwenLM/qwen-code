@@ -794,19 +794,31 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
             `${capture.skipped.length} untracked file(s) were SKIPPED (above). ` +
             `This is not a clean tree: report them under "Not reviewed" and do ` +
             `not certify the working tree as reviewed.`
-        : treeHeldStill
-          ? 'WARNING: the working tree is clean — 0 chunks. There is nothing ' +
-            'to review; do not run the review agents.'
-          : // …and NOT when the guard just proved the tree moved. The
-            // machine-readable stop is gated on `treeHeldStill`; this
-            // sentence was not, so the round printed "the working tree
-            // changed while the capture was being hashed" and "the working
-            // tree is clean" back to back and the orchestrator — which reads
-            // prose here — stopped on the second. The same contradiction the
-            // field-level gate closed, one layer up.
-            'WARNING: 0 chunks, but the working tree changed while the ' +
-            'capture was being hashed (above): this is NOT a clean tree. ' +
-            'Re-run the review rather than reporting nothing to review.',
+        : file !== undefined
+          ? // The same exclusion the field gate above applies: an empty diff
+            // is not a decided round for a FILE target. The capture was
+            // pathspec-scoped, so 0 chunks says nothing about the tree — and
+            // SKILL's no-diff branch owes a whole-file review for exactly
+            // this shape. The field channel got the exclusion; this prose
+            // channel — which the orchestrator also reads — did not, and a
+            // round that stopped on it left the user-named file unread.
+            '0 chunks — no diff was captured for the file the review named. ' +
+            'This is NOT a decided stop: the no-diff branch owes it a ' +
+            'whole-file review — read the file and review its current ' +
+            'state; do not report nothing-to-review.'
+          : treeHeldStill
+            ? 'WARNING: the working tree is clean — 0 chunks. There is nothing ' +
+              'to review; do not run the review agents.'
+            : // …and NOT when the guard just proved the tree moved. The
+              // machine-readable stop is gated on `treeHeldStill`; this
+              // sentence was not, so the round printed "the working tree
+              // changed while the capture was being hashed" and "the working
+              // tree is clean" back to back and the orchestrator — which reads
+              // prose here — stopped on the second. The same contradiction the
+              // field-level gate closed, one layer up.
+              'WARNING: 0 chunks, but the working tree changed while the ' +
+              'capture was being hashed (above): this is NOT a clean tree. ' +
+              'Re-run the review rather than reporting nothing to review.',
     );
   }
   writeStderrLine(

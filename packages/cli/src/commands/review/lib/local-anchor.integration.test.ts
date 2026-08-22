@@ -121,4 +121,26 @@ describe('hashWorktreeFiles — the attributes probe is byte-faithful', () => {
     expect(out['book.md']).toContain('diff=mdbook');
     expect(out['book.md']).not.toContain('md.binary');
   });
+
+  it('folds a driver whose NAME CONTAINS A COMMA — matched as a value, never re-parsed', () => {
+    // `*.bin diff=a,b` is a legal gitattributes line, and the fold used to
+    // re-parse the comma-joined attribute serialization — `split(',')` can
+    // never match a value containing a comma. The flag was silently dropped
+    // from the identity, so flipping it changed how `git diff` rendered the
+    // same bytes while the identity stood still: the next round's gate
+    // compared equal and sliced the file out of scope, carrying the previous
+    // verdict forward against a different rendering. `.gitattributes` is
+    // worktree content of the reviewed PR, so the driver name is plantable.
+    writeFileSync(join(repo, 'data.bin'), 'x\n');
+    writeFileSync(join(repo, '.gitattributes'), 'data.bin diff=a,b\n');
+    git('config', 'diff.a,b.binary', 'true');
+
+    const on = hashWorktreeFiles(repo, ['data.bin']);
+    expect(on['data.bin']).toContain('a,b.binary=true');
+
+    git('config', 'diff.a,b.binary', 'false');
+    const off = hashWorktreeFiles(repo, ['data.bin']);
+    expect(off['data.bin']).toContain('a,b.binary=false');
+    expect(off['data.bin']).not.toBe(on['data.bin']);
+  });
 });
