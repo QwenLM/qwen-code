@@ -31,6 +31,7 @@ import type { PlatformKind } from './lib/platform/types.js';
 import {
   LEDGER_MAX_FINDINGS,
   parseLedger,
+  streakOf,
   stripLedgerMarker,
   type Ledger,
 } from './lib/ledger.js';
@@ -796,6 +797,30 @@ export interface RecoveredLedger {
    * round declared unread.
    */
   reviewId: number;
+  /**
+   * An own marker was READ this walk — `bestOwn` found and parsed.
+   *
+   * Absence of churn state means two different things, and this is what
+   * parts them. When an own marker was read, its churn state is
+   * AUTHORITATIVE in both directions: present, the union restores it;
+   * absent, this account measured a below-bar round and reset, and the reset
+   * must reach the side file. When no own marker was read — none posted,
+   * one posted but its body no longer parses, a paginated walk that came
+   * back short — nothing authoritative said "reset", so the side file's own
+   * streak is still the last thing this account certified and the write must
+   * not silently drop it.
+   *
+   * Distinct from `sawOwnReview`, which says an own review EXISTS: a review
+   * whose marker will not parse sets that flag and leaves this one false,
+   * and that is exactly the shape where the two readings diverge.
+   *
+   * Optional, and its ABSENCE is read as `true` — "assume authoritative
+   * knowledge exists, do not carry". A caller that does not set it (a test
+   * literal, an older call site) then gets the fail-safe direction for a
+   * finding that BLOCKS: the streak restarts and the blocker files late,
+   * never early.
+   */
+  ownMarkerRead?: boolean;
 }
 
 /**
@@ -970,7 +995,8 @@ export function recoverLedger(
   }
   if (!best) return { recovered: null, sawOwnReview };
   // The anchor never crosses accounts. Dropped here, at the recovery seam, so
-  // no consumer downstream has to remember the rule.
+  // no consumer downstream has to remember the rule. The churn state is the
+  // same class of claim and crosses with it — see `stripChurnState`.
   // The anchor is stripped whenever the winner is foreign, INCLUDING the
   // anonymous case: without a `me` every marker walks as foreign, and a
   // drive-by anchor must not decide which lines this pipeline stops looking
@@ -979,7 +1005,9 @@ export function recoverLedger(
   // could not ask who". Stripping on that reading let one blip in
   // `gh api user` break this account's own trend chain for two rounds — and
   // record its own marker as a stranger's.
-  let ledger = best.foreign ? stripAnchor(best.ledger) : best.ledger;
+  let ledger = best.foreign
+    ? stripChurnState(stripAnchor(best.ledger))
+    : best.ledger;
   if (me && best.foreign) ledger = stripForeignVolume(ledger);
   // A FOREIGN winner never DISPLACES this account's own findings — it is
   // merged over them. Round-first selection alone handed a drive-by poster a
@@ -1018,12 +1046,24 @@ export function recoverLedger(
     // cluster citing round N, which plainly did post. A round the counts do
     // not describe is worse than no counts: absence already reads as "not
     // recorded".
-    if (bestOwn.ledger.round === ledger.round) {
-      ledger = {
-        ...ledger,
-        ...pickVolume(bestOwn.ledger as unknown as Record<string, unknown>),
-      };
-    }
+    // The streak is NOT gated. It is a CUMULATIVE counter, not a per-round
+    // count: the carry contract says a round this account never ran —
+    // including a strictly NEWER foreign winner — carries the count rather
+    // than zeroes it. Skipping the restore on the round gap let one
+    // interleaved foreign marker silently wipe a standing streak, and on a
+    // PR two accounts alternate on neither side ever reaches the filing
+    // bar, disarming the mechanism wholesale. Nothing foreign enters: the
+    // winner's own streak was stripped above, so the restore spreads only
+    // this account's own certified state. Nothing arms early either: filing
+    // still needs THIS round's own above-bar census, and the read clamp
+    // bounds the streak at the file's round anyway.
+    ledger = {
+      ...ledger,
+      ...pickChurnState(bestOwn.ledger),
+      ...(bestOwn.ledger.round === ledger.round
+        ? pickVolume(bestOwn.ledger as unknown as Record<string, unknown>)
+        : {}),
+    };
   }
   if (best.foreign && bestOwn && bestOwn.ledger.findings.length > 0) {
     mergedOverOwn = true;
@@ -1051,6 +1091,7 @@ export function recoverLedger(
       foreign: best.foreign,
       author: best.author,
       merged: mergedOverOwn,
+      ownMarkerRead: bestOwn !== null,
     },
     sawOwnReview,
   };
@@ -1135,8 +1176,10 @@ export function persistedAnchorSha(sideFilePath: string): string | null {
  *   readable file exists, an anonymous recovery therefore advances only the
  *   ROUND COUNTER (strictly higher rounds — a stale counter re-issues ids
  *   the PR already carries) and adopts the winner's `reviewId` for future
- *   tiebreaks; the findings stay this machine's own, and `sha`/`commitId`
- *   are dropped — an anonymous round cannot be re-vouched, and an anchor
+ *   tiebreaks; the findings stay this machine's own (and the cumulative
+ *   churn streak carries with them — an unmeasured round carries), and
+ *   `sha`/`commitId` are dropped — an anonymous round cannot be re-vouched,
+ *   and an anchor
  *   now superseded by rounds this account never certified must not scope
  *   the next review (the healthy foreign-winner path strips it at the
  *   recovery seam for the same reason). A same-round anonymous winner
@@ -1225,7 +1268,33 @@ export function persistRecoveredLedger(
         // foreign round 5 that won recovery — one fabricated point on a trend
         // whose whole value is that its points are real. Absence is already
         // the "not recorded" reading downstream, so dropping them degrades
-        // exactly as a pre-telemetry predecessor does.
+        // exactly as a pre-telemetry predecessor does. The streak goes with them,
+        // and the argument for keeping it did not survive being probed
+        // (R10-2). It ran: the streak is cumulative rather than a per-round
+        // fact, this advance is a round the account could not measure, and
+        // carrying arms nothing early because filing still needs THIS
+        // round's own above-bar census. The last step is the false one — it
+        // shows a carried streak is only USED where a measured round finds
+        // it, never that it is still TRUE there. What this branch cannot see
+        // with no `me` is that the winning marker may be this account's own
+        // measured RESET: a below-bar round stamps no `churnRounds` at all,
+        // so a reset and a stranger's marker are the same bytes here. Carry
+        // it and the reset never reaches the file; one later above-bar
+        // census then reads a stale 2, reaches 3, and files the blocker a
+        // round early — with its own body claiming three counted rounds
+        // where one has passed. Early is the direction this mechanism must
+        // never fail in.
+        //
+        // Dropping costs only the outage. The own marker keeps living on the
+        // pull request, so the next identity-KNOWN recovery reads it back
+        // and the union re-establishes the true streak — which is also why
+        // the sibling concern that motivated the carry (repeated blips
+        // keeping the blocker unreachable) is a lateness cost, not a lost
+        // claim. The identity-known path carries the file's own streak when
+        // no own marker was read at all; see `carryFileChurn` below. Between
+        // them the rule is one sentence: carry while the state is known to
+        // be ours and current, drop only where it can be neither
+        // attributed nor dated.
         const {
           sha: _droppedSha,
           // The PAIR, as everywhere else: a `model` left behind says a round
@@ -1235,9 +1304,11 @@ export function persistRecoveredLedger(
           commitId: _droppedCommitId,
           ...rest
         } = existing;
-        // Through the shared projection, not a second hand-kept list: the
-        // volume group grew twice and this branch was updated neither time.
-        const kept = withoutVolume(rest);
+        // Both groups through their shared projections, not a second
+        // hand-kept list: the volume group grew twice and this branch was
+        // updated neither time, and the churn group carries a streak that
+        // DECIDES a blocker.
+        const kept = withoutChurn(withoutVolume(rest));
         mkdirSync(dirname(sideFilePath), { recursive: true });
         writeAtomic(
           JSON.stringify(
@@ -1274,15 +1345,91 @@ export function persistRecoveredLedger(
       // account's own next marker as `prevPosted`, which later recovery
       // trusts. The counter-advance branch already sheds the group for this
       // exact reason; this seam takes the same "not recorded" degradation.
+      // R10-1. The recovered ledger carries no churn in two very different
+      // situations, and the write path could not tell them apart: this
+      // account's own marker was read and had reset (authoritative — the
+      // reset must land), or no own marker was read at all (nothing said
+      // reset — the file's streak is still the last state this account
+      // certified). Overwriting on the second reading dropped a standing
+      // streak whenever the own marker left the walk — deleted, edited until
+      // it stopped parsing, or missed by a short page — while a foreign
+      // marker at a higher round won. `prevLedgerFacts` then read 0, one
+      // above-bar census restarted at 1 < CHURN_STREAK_TO_FILE, and each
+      // recurrence re-zeroed it: the blocker stayed unreachable on exactly
+      // the churning pull requests it exists for.
+      //
+      // So carry the file's churn group ONLY on that second reading, and
+      // only when the recovery brought none of its own — an own marker that
+      // WAS read has already spoken, in whichever direction. Absent
+      // `ownMarkerRead` reads as "was read", so an unset caller keeps the
+      // fail-safe direction: the streak restarts and the blocker files late.
+      // ...and READ through the same reader the marker parser uses, then
+      // CLAMPED to the round it is being written beside, rather than copied
+      // verbatim. This is the one path where bytes from the side file
+      // survive a write instead of being replaced by it, so a hand-edited or
+      // half-written file must not put a shape into the next file that the
+      // serializer would never have emitted — and the clamp is the write
+      // side of the one `prevLedgerFacts` already applies on read, so the
+      // two cannot disagree about the same number. Without it, a planted
+      // `churnRounds: 9999` that a wholesale overwrite used to discard would
+      // now survive, reaching the bar off one honest census. Zero is not
+      // carried either: the marker omits a zero streak, so writing one back
+      // records a shape the serializer never emits.
+      //
+      // Reads the ONE decision-bearing member by name rather than the whole
+      // group. `CHURN_FIELDS` is a single field today and a test pins that,
+      // so a second member cannot be added without this site being revisited
+      // — the drift the volume group's own `floor` history warns about.
+      //
+      // No "and the recovery brought none of its own" term, because it is an
+      // INVARIANT of the strip above, not a separate condition: churn
+      // reaches `recovered.ledger` only from a non-foreign winner or from
+      // the union's restore, and both of those imply an own marker was read.
+      // An explicit term for it was unreachable code no mutation could
+      // redden. If the strip is ever loosened so a foreign streak can
+      // survive recovery, this site needs that term back.
+      const carriedStreak = streakOf(pickChurn(existing ?? {})['churnRounds']);
+      // `identityKnown` is DEFENCE IN DEPTH here, and deliberately kept
+      // although no mutation can redden its removal: an anonymous recovery
+      // over an existing file returns above (equal-or-lower round) or takes
+      // the counter-advance branch, and an anonymous recovery with no
+      // existing file has no streak to carry — so this block is unreachable
+      // with an unknown identity today. The BEHAVIOUR it backstops is pinned
+      // one level out (the anonymous-advance test asserts the streak is shed,
+      // and the anonymous whole-write test asserts none arrives), which is
+      // where it is observable. Dropping the term would leave the carry
+      // reading as identity-agnostic on the exact axis R10-2 was about — a
+      // streak surviving an identity outage and being re-dated onto a newer
+      // round — so it stays as a statement of intent for whoever next moves
+      // one of those early returns.
+      const carryFileChurn =
+        identityKnown &&
+        recovered.ownMarkerRead === false &&
+        carriedStreak !== undefined &&
+        carriedStreak > 0
+          ? { churnRounds: Math.min(carriedStreak, recovered.ledger.round) }
+          : {};
+      // The anonymous whole-write sheds BOTH groups. The volume can genuinely
+      // arrive here — recovery keeps it on an anonymous walk on purpose, since
+      // "foreign" then means only "this run could not ask who" — and the churn
+      // cannot, because recovery strips it from every marker when there is no
+      // `me`. Shedding it anyway costs nothing and makes the seam defend
+      // itself instead of depending on that upstream invariant holding
+      // forever: this is the one path where a whole foreign ledger is written
+      // to the file, so a loosened strip would land a stranger's streak here
+      // intact and arm the blocker off someone else's count.
       const recoveredOut = identityKnown
         ? recovered.ledger
-        : (withoutVolume(
-            recovered.ledger as unknown as Record<string, unknown>,
+        : (withoutChurn(
+            withoutVolume(
+              recovered.ledger as unknown as Record<string, unknown>,
+            ),
           ) as unknown as Ledger);
       writeAtomic(
         JSON.stringify(
           {
             ...recoveredOut,
+            ...carryFileChurn,
             ...(recovered.commitId ? { commitId: recovered.commitId } : {}),
             reviewId: recovered.reviewId,
             // Provenance travels WITH the list it describes. Written even
@@ -1390,6 +1537,80 @@ function stripAnchor(ledger: Ledger): Ledger {
   if (ledger.sha === undefined && ledger.model === undefined) return ledger;
   const { sha: _sha, model: _model, ...rest } = ledger;
   return rest;
+}
+
+/**
+ * The same ledger with its convergence streak and census removed.
+ *
+ * The streak is a standing claim about the pull request built round by round
+ * by the account that ran those rounds — the same class of claim as the
+ * anchor, and as little re-vouchable across accounts. Left on a foreign
+ * winner, it rides the identity-known write into the side file, and any
+ * account that can submit a review can plant one: the next honest above-bar
+ * round then files the non-convergence blocker on a pull request that never
+ * churned, past the one-round-early bound the mechanism documents for
+ * forged streaks. Dropped here, at the seam, so no write path can carry a
+ * foreign streak into the side file — the anonymous-advance branch in
+ * `persistRecoveredLedger` carries the file's OWN streak forward and can
+ * admit no foreign one, because this strip has already removed every
+ * candidate from the winner. The census goes with
+ * the streak — it describes the foreign round, and `compose-review` reads
+ * neither off a recovered ledger, only off the side file this seam feeds.
+ * The work list, the round counter and the age reference still cross: the
+ * first is re-ruled entry by entry, the second is a shared id space, and
+ * the third is API provenance about their round.
+ */
+function stripChurnState(ledger: Ledger): Ledger {
+  if (CHURN_FIELDS.every((f) => ledger[f] === undefined)) return ledger;
+  return withoutChurn(
+    ledger as unknown as Record<string, unknown>,
+  ) as unknown as Ledger;
+}
+
+/**
+ * The convergence state group PRESENT in a ledger — the restore half of the
+ * strip above, for the union branch. The streak is cumulative, so the
+ * restore is not bound to the winner's round — an interleaved foreign
+ * round is an unmeasured round, and the carry contract says it carries.
+ * The spread comes only from this account's OWN marker; the winner's
+ * streak was stripped above, so no foreign state enters through it.
+ */
+function pickChurnState(ledger: Ledger): Partial<Ledger> {
+  return pickChurn(
+    ledger as unknown as Record<string, unknown>,
+  ) as Partial<Ledger>;
+}
+
+/**
+ * The convergence state group, named ONCE.
+ *
+ * Two production seams shed or restore this group — the recovery strip
+ * above and the union's restore beside it — and the adjacent volume group
+ * already paid for the alternative: `withoutVolume`'s own note records how a
+ * hand-kept list on each seam is exactly how `floor` came to be shed at one
+ * and kept at the other. Nothing reds when a field is added and one
+ * enumeration is missed: missing the restore silently loses this account's
+ * own data on the merged recoveries the union exists to protect. Same
+ * hazard, same remedy.
+ */
+export const CHURN_FIELDS = ['churnRounds'] as const;
+
+/** Drop the whole churn group from a record, whatever shape it is in. */
+export function withoutChurn<T extends Record<string, unknown>>(record: T): T {
+  const out = { ...record };
+  for (const field of CHURN_FIELDS) delete out[field];
+  return out;
+}
+
+/** The churn group PRESENT in a record — the restore half of the same list. */
+export function pickChurn(
+  record: Record<string, unknown>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const field of CHURN_FIELDS) {
+    if (record[field] !== undefined) out[field] = record[field];
+  }
+  return out;
 }
 
 /**
@@ -1603,7 +1824,7 @@ export function renderLedgerSection(
   return [
     '## Previous /review round (machine ledger)',
     '',
-    `Round ${ledger.round}${ledger.sha ? `, reviewed at \`${code(ledger.sha)}\`${ledger.model ? ` by \`${code(ledger.model)}\`` : ''}` : ''}, recovered from ${author ? (merged ? `**@${cell(author)}**'s round-${ledger.round} marker MERGED over this account's own latest findings — entries this account certified are its own claims, the rest are @${cell(author)}'s, and no incremental anchor travelled with the foreign marker (the sha never crosses accounts; this round is full-range unless a local cache supplies one)` : `the marker **@${cell(author)}**'s last posted review carried — another account, so these are THEIR claims and no incremental anchor travelled with them (the sha never crosses accounts; this round is full-range unless a local cache supplies one)`) : `the marker this account's last posted review carried`}. **Every entry below is owed a this-round ruling** (fixed / still stands / cannot tell / superseded by <class-id>) under Step 6's previous-round rules — the ledger is a work list, not a verdict; re-assert each claim against the code before repeating or retiring it.${ledger.sha ? ` ${anchorRuling(ledger, running, code, persistedSha)}` : ''}`,
+    `Round ${ledger.round}${ledger.sha ? `, reviewed at \`${code(ledger.sha)}\`${ledger.model ? ` by \`${code(ledger.model)}\`` : ''}` : ''}, recovered from ${author ? (merged ? `**@${cell(author)}**'s round-${ledger.round} marker MERGED over this account's own latest findings — entries this account certified are its own claims, the rest are @${cell(author)}'s, and no incremental anchor travelled with the foreign marker (the sha never crosses accounts; this round is full-range unless a local cache supplies one)` : `the marker **@${cell(author)}**'s last posted review carried — another account, so these are THEIR claims and no incremental anchor travelled with them (the sha never crosses accounts; this round is full-range unless a local cache supplies one)`) : `the marker this account's last posted review carried`}. **Every entry below is owed a this-round ruling** (fixed / still stands / cannot tell / fix-induced / superseded by <class-id>) under Step 6's previous-round rules — the ledger is a work list, not a verdict; re-assert each claim against the code before repeating or retiring it.${ledger.sha ? ` ${anchorRuling(ledger, running, code, persistedSha)}` : ''}`,
     // A truncated ledger must not read like a complete one. `dropped` exists
     // to draw that line, and this is the only place a reader sees the list.
     ...(ledger.dropped
