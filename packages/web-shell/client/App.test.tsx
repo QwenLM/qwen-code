@@ -4652,13 +4652,14 @@ function emitSkillMutation(
   id: string,
   skills: Array<{ name: string; enabled: boolean }>,
   activation: 'applied' | 'deferred' | 'partial' = 'partial',
+  sessionsRefreshed = activation === 'applied' ? 1 : 0,
 ): void {
   const mutation = {
     id,
     kind: 'skill_toggle' as const,
     skills,
     activation,
-    sessionsRefreshed: activation === 'applied' ? 1 : 0,
+    sessionsRefreshed,
     sessionsFailed: activation === 'partial' ? 1 : 0,
   };
   const cwd = mockConnection.workspaceCwd;
@@ -10600,6 +10601,35 @@ describe('App session callbacks', () => {
     );
     expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(1);
     expect(mockSessionActions.reloadSession).not.toHaveBeenCalled();
+  });
+
+  it('refreshes workspace Skills when an applied toggle refreshed no sessions', async () => {
+    mockConnection.commands = [
+      skillCommandFixture('web-search', 'Search the web'),
+    ];
+    mockConnection.skills = ['web-search'];
+    const { rerender } = renderApp();
+    await flush();
+    expect(testState.latestChatEditorProps?.skills).toEqual([
+      { name: 'web-search', description: 'Search the web' },
+    ]);
+
+    emitSkillMutation(
+      'applied-web-search-without-refreshed-session',
+      [{ name: 'web-search', enabled: false }],
+      'applied',
+      0,
+    );
+    rerender();
+    await flush();
+
+    await vi.waitFor(() => {
+      expect(mockWorkspaceActions.loadSkillsStatus).toHaveBeenCalledTimes(2);
+      expect(testState.latestChatEditorProps?.skills).toEqual([]);
+    });
+    expect(testState.latestChatEditorProps?.commands).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'web-search' })]),
+    );
   });
 
   it('refreshes session-less composer Skills once for a deferred mutation', async () => {

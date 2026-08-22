@@ -4743,7 +4743,9 @@ export function App({
       priorPending.length === 0 &&
       unhandled.every(
         (mutation) =>
-          mutation.activation === 'applied' && mutation.sessionsFailed === 0,
+          mutation.activation === 'applied' &&
+          mutation.sessionsFailed === 0 &&
+          mutation.sessionsRefreshed > 0,
       )
     ) {
       markHandled();
