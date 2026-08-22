@@ -403,6 +403,20 @@ describe('aoneReader.getCommentBody', () => {
     expect(aoneReader.getCommentBody('inline', 2, 'g/p', 5)).toBe('second');
   });
 
+  it('falls back to `body` when the comment carries no `note`', () => {
+    // Pins the `?? found.body` fallback: without a fixture exercising it,
+    // a mutant dropping that arm survives (re-confirmed across two review
+    // rounds). Some a1 comment shapes carry the text under `body` only.
+    a1JsonMock.mockReturnValue([
+      { id: 1, note: 'has-note' },
+      { id: 2, body: 'body-only' },
+      { id: 3 },
+    ]);
+    expect(aoneReader.getCommentBody('inline', 2, 'g/p', 5)).toBe('body-only');
+    // Neither field present: empty string, distinct from the missing-id throw.
+    expect(aoneReader.getCommentBody('inline', 3, 'g/p', 5)).toBe('');
+  });
+
   it('throws on a missing id — not an empty string', () => {
     a1JsonMock.mockReturnValue([{ id: 1, note: 'first' }]);
     expect(() => aoneReader.getCommentBody('inline', 99, 'g/p', 5)).toThrow(
