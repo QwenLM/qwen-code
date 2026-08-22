@@ -2649,6 +2649,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 // (which exclude `name`) stay consistent with core dispatch.
                 this.params.name === undefined)));
       const shouldRunInBackground = backgroundRequested && isTopLevelSession();
+      const backgroundOwnerId = getCurrentAgentId();
       if (this.params.working_dir !== undefined && shouldRunInBackground) {
         // A caller-owned worktree has no lifecycle coupling to a backgrounded
         // agent — the caller could reap the worktree while the detached agent
@@ -2695,8 +2696,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             }
           : undefined;
         const registry = this.config.getBackgroundTaskRegistry();
-        backgroundSlotReservation =
-          registry.tryReserveBackgroundSlot(subagentModelId);
+        backgroundSlotReservation = registry.tryReserveBackgroundSlot(
+          subagentModelId,
+          backgroundOwnerId,
+        );
         if (!backgroundSlotReservation) {
           const queuedCount = registry.getQueuedCount();
           const queueText =
@@ -2715,6 +2718,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           backgroundSlotReservation = await registry.waitForBackgroundSlot(
             signal,
             subagentModelId,
+            backgroundOwnerId,
           );
         }
         this.updateDisplay(
@@ -3160,7 +3164,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               metaPath,
               // Nested-agent lineage (mirrors the meta sidecar); register()
               // resolves the parent's display name from parentAgentId.
-              parentAgentId: getCurrentAgentId(),
+              parentAgentId: backgroundOwnerId,
               depth: launchDepth,
             },
             registerOptions,
@@ -3236,7 +3240,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           // Populated when a subagent (whose reasoning loop is wrapped in
           // runWithAgentContext below) launches a nested agent. Null at
           // top-level launches from the user session.
-          parentAgentId: getCurrentAgentId(),
+          parentAgentId: backgroundOwnerId,
           createdAt: new Date().toISOString(),
           status: 'running',
           isBackgrounded: true,
