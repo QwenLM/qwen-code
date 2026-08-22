@@ -37,16 +37,18 @@ const STANDALONE_CHILD_OF_LIVE_ID = '550e8400-e29b-41d4-a716-446655440012';
 const STANDALONE_CYCLE_A_ID = '550e8400-e29b-41d4-a716-446655440013';
 const STANDALONE_CYCLE_B_ID = '550e8400-e29b-41d4-a716-446655440014';
 const STANDALONE_CHILD_OF_LEGACY_ID = '550e8400-e29b-41d4-a716-446655440015';
+const NIL_PARENT_STANDALONE_ID = '550e8400-e29b-41d4-a716-446655440016';
+const V7_PARENT_ID = '01890a5d-ac96-774b-bcce-b302099a8057';
+const V7_CHILD_ID = '550e8400-e29b-41d4-a716-446655440017';
+const AGENT_PARENT_ID = `${LIVE_ID}-agent-worker`;
+const AGENT_CHILD_ID = '550e8400-e29b-41d4-a716-446655440018';
 
 function createStore(
   records: ReadonlyMap<string, LiveSessionCreationMetadata>,
 ): ConversationSessionMetadataStore {
   return {
-    async getSessionLocation(sessionId) {
-      return records.has(sessionId) ? 'active' : undefined;
-    },
-    async readCreationMetadataIfReadable(sessionId) {
-      return records.get(sessionId) ?? {};
+    async readCreationMetadataIfReadable(sessionId, state) {
+      return state === 'active' ? records.get(sessionId) : undefined;
     },
   };
 }
@@ -81,8 +83,8 @@ describe('conversation session source classification', () => {
       SELF_STANDALONE_ID,
       { sourceType: 'standalone', parentSessionId: SELF_STANDALONE_ID },
     ],
-    // Without the `!isValidSessionId` conjunct the explicit-standalone
-    // shortcut below the parent guard would accept this record.
+    // A parent spelling the store cannot resolve leaves an explicit
+    // standalone child self-describing, like a deleted parent would.
     [
       MALFORMED_PARENT_STANDALONE_ID,
       { sourceType: 'standalone', parentSessionId: 'not-a-session-id' },
@@ -115,6 +117,22 @@ describe('conversation session source classification', () => {
       STANDALONE_CHILD_OF_LEGACY_ID,
       { sourceType: 'standalone', parentSessionId: LEGACY_ID },
     ],
+    // Parents older builds could persist: nil, v7, and agent-suffixed ids are
+    // not RFC-4122 v1-v5, but the store resolves them, so lineage must too.
+    [
+      NIL_PARENT_STANDALONE_ID,
+      {
+        sourceType: 'standalone',
+        parentSessionId: '00000000-0000-0000-0000-000000000000',
+      },
+    ],
+    [V7_PARENT_ID, { sourceType: 'default' }],
+    [V7_CHILD_ID, { parentSessionId: V7_PARENT_ID }],
+    [
+      AGENT_PARENT_ID,
+      { sourceType: 'default', sourceId: 'realtime_voice:call-agent' },
+    ],
+    [AGENT_CHILD_ID, { parentSessionId: AGENT_PARENT_ID }],
   ]);
   const store = createStore(records);
 
@@ -157,6 +175,10 @@ describe('conversation session source classification', () => {
     [EXPLICIT_CHILD_ID, 'standalone', 'explicit'],
     [LEGACY_CHILD_OF_EXPLICIT_ID, 'standalone', 'legacy'],
     [STANDALONE_CHILD_OF_LEGACY_ID, 'standalone', 'explicit'],
+    [MALFORMED_PARENT_STANDALONE_ID, 'standalone', 'explicit'],
+    [NIL_PARENT_STANDALONE_ID, 'standalone', 'explicit'],
+    [V7_CHILD_ID, 'standalone', 'legacy'],
+    [AGENT_CHILD_ID, 'live', 'legacy'],
   ] as const)(
     'classifies %s as %s %s',
     async (sessionId, kind, persistence) => {
@@ -178,6 +200,8 @@ describe('conversation session source classification', () => {
       STANDALONE_CHILD_OF_LEGACY_ID,
       { kind: 'standalone', persistence: 'legacy' },
     ],
+    [V7_CHILD_ID, { kind: 'standalone', persistence: 'legacy' }],
+    [AGENT_CHILD_ID, { kind: 'live', persistence: 'explicit' }],
   ] as const)(
     'reports the proven parent lineage for %s',
     async (sessionId, lineage) => {
@@ -187,17 +211,21 @@ describe('conversation session source classification', () => {
     },
   );
 
-  it.each([EXPLICIT_ID, LEGACY_ID, LIVE_ID, EXPLICIT_CHILD_ID])(
-    'leaves the parent lineage unproven for %s',
-    async (sessionId) => {
-      // Top-level sessions have no parent, and an explicit standalone child
-      // whose parent was archived away or deleted cannot produce one. Callers
-      // that need proven lineage must reject on this rather than on `kind`.
-      const result = await readLoadableConversationSession(sessionId, store);
-      expect(result).toBeDefined();
-      expect(result?.parentSource).toBeUndefined();
-    },
-  );
+  it.each([
+    EXPLICIT_ID,
+    LEGACY_ID,
+    LIVE_ID,
+    EXPLICIT_CHILD_ID,
+    MALFORMED_PARENT_STANDALONE_ID,
+    NIL_PARENT_STANDALONE_ID,
+  ])('leaves the parent lineage unproven for %s', async (sessionId) => {
+    // Top-level sessions have no parent, and an explicit standalone child
+    // whose parent was archived away or deleted cannot produce one. Callers
+    // that need proven lineage must reject on this rather than on `kind`.
+    const result = await readLoadableConversationSession(sessionId, store);
+    expect(result).toBeDefined();
+    expect(result?.parentSource).toBeUndefined();
+  });
 
   it.each([
     ORPHAN_ID,
@@ -206,7 +234,6 @@ describe('conversation session source classification', () => {
     MALFORMED_LIVE_ID,
     SELF_ID,
     SELF_STANDALONE_ID,
-    MALFORMED_PARENT_STANDALONE_ID,
     ATTRIBUTED_STANDALONE_CHILD_ID,
     CYCLE_A_ID,
     // Readable parent contradicting depth-1 standalone lineage.
@@ -240,12 +267,23 @@ describe('conversation session source classification', () => {
     ).resolves.toBeUndefined();
   });
 
-  it('rejects missing and conflicting transcripts without reading metadata', async () => {
-    let reads = 0;
-    const unavailableStore: ConversationSessionMetadataStore = {
-      async getSessionLocation(sessionId) {
-        return sessionId === LEGACY_ID ? 'conflict' : undefined;
+  it('resolves a conflicted transcript from its active copy', async () => {
+    // Both state copies exist (a crash inside archiveSessions leaves that
+    // behind): reads use the active copy, matching the CLI resume path.
+    const conflictedStore: ConversationSessionMetadataStore = {
+      async readCreationMetadataIfReadable(_sessionId, state) {
+        return state === 'active' ? { sourceType: 'default' } : {};
       },
+    };
+
+    await expect(
+      readLoadableConversationSession(LEGACY_ID, conflictedStore),
+    ).resolves.toMatchObject({ kind: 'standalone', persistence: 'legacy' });
+  });
+
+  it('refuses path-unsafe ids without touching the store', async () => {
+    let reads = 0;
+    const store: ConversationSessionMetadataStore = {
       async readCreationMetadataIfReadable() {
         reads++;
         return {};
@@ -253,37 +291,45 @@ describe('conversation session source classification', () => {
     };
 
     await expect(
-      readLoadableConversationSession(LEGACY_ID, unavailableStore),
-    ).resolves.toBeUndefined();
-    await expect(
-      readLoadableConversationSession(EXPLICIT_ID, unavailableStore),
+      readLoadableConversationSession('../escape', store),
     ).resolves.toBeUndefined();
     expect(reads).toBe(0);
   });
 
-  it('rejects a transcript that disappears while its metadata is read', async () => {
-    let locationReads = 0;
-    const disappearingStore: ConversationSessionMetadataStore = {
-      async getSessionLocation() {
-        locationReads++;
-        return locationReads === 1 ? 'active' : undefined;
-      },
-      async readCreationMetadataIfReadable() {
-        return {};
+  it.each(['CON', 'nul', 'AUX.txt', 'PRN.', 'COM1', 'lpt9.jsonl'])(
+    'refuses Windows device transcript name %s without touching the store',
+    async (sessionId) => {
+      let reads = 0;
+      const deviceStore: ConversationSessionMetadataStore = {
+        async readCreationMetadataIfReadable() {
+          reads++;
+          return {};
+        },
+      };
+
+      await expect(
+        readLoadableConversationSession(sessionId, deviceStore),
+      ).resolves.toBeUndefined();
+      expect(reads).toBe(0);
+    },
+  );
+
+  it('resolves a transcript that a concurrent archive moves mid-read', async () => {
+    const movingStore: ConversationSessionMetadataStore = {
+      async readCreationMetadataIfReadable(_sessionId, state) {
+        // The active copy vanished before the read; the archived copy has it.
+        return state === 'archived' ? { sourceType: 'default' } : undefined;
       },
     };
 
     await expect(
-      readLoadableConversationSession(LEGACY_ID, disappearingStore),
-    ).resolves.toBeUndefined();
+      readLoadableConversationSession(LEGACY_ID, movingStore),
+    ).resolves.toMatchObject({ kind: 'standalone', persistence: 'legacy' });
   });
 
   it('rejects a transcript whose creation metadata is unreadable', async () => {
     const states: Array<'active' | 'archived'> = [];
     const unreadableStore: ConversationSessionMetadataStore = {
-      async getSessionLocation() {
-        return 'active';
-      },
       async readCreationMetadataIfReadable(_sessionId, state) {
         states.push(state);
         return undefined;
@@ -296,24 +342,21 @@ describe('conversation session source classification', () => {
     await expect(
       readLoadableLiveConversationMetadata(LEGACY_ID, unreadableStore),
     ).resolves.toBeUndefined();
-    expect(states).toEqual(['active', 'active']);
+    expect(states).toEqual(['active', 'archived', 'active', 'archived']);
   });
 
   it('reads archived transcripts with the archived state', async () => {
     const states: Array<'active' | 'archived'> = [];
     const archivedStore: ConversationSessionMetadataStore = {
-      async getSessionLocation(sessionId) {
-        return records.has(sessionId) ? 'archived' : undefined;
-      },
       async readCreationMetadataIfReadable(sessionId, state) {
         states.push(state);
-        return records.get(sessionId);
+        return state === 'archived' ? records.get(sessionId) : undefined;
       },
     };
 
     await expect(
       readLoadableConversationSession(LEGACY_ID, archivedStore),
     ).resolves.toMatchObject({ kind: 'standalone', persistence: 'legacy' });
-    expect(states).toEqual(['archived']);
+    expect(states).toEqual(['active', 'archived']);
   });
 });

@@ -13,7 +13,6 @@ import {
   GROUP_COLOR_OPTIONS,
   GitWorktreeService,
   SessionOrganizationError,
-  SessionIdCaseConflictError,
   SESSION_TRANSCRIPT_MAX_LIMIT,
   SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES,
   SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
@@ -101,9 +100,11 @@ import {
   archiveDaemonSessions,
   assertSessionArchived,
   assertSessionLoadable,
+  assertSessionRestorable,
   deleteDaemonSessionIfOrphan,
   deleteDaemonSessions,
   logSessionArchiveWarning,
+  resolveSessionIdForRestore,
   type SessionArchiveCoordinator,
   unarchiveDaemonSessions,
 } from '../server/session-archive.js';
@@ -1164,8 +1165,11 @@ export function registerSessionRoutes(
     const service = createWorkspaceRuntimeSessionService(runtime);
     for (const sessionId of sessionIds) {
       const location = await service.getSessionLocation(sessionId);
-      if (location === 'conflict') throw new SessionConflictError(sessionId);
-      if (
+      if (location === 'conflict') {
+        if (archiveState !== 'active') {
+          throw new SessionConflictError(sessionId);
+        }
+      } else if (
         location === undefined ||
         (archiveState !== 'any' && location !== archiveState)
       ) {
@@ -1320,6 +1324,7 @@ export function registerSessionRoutes(
                 runtime.workspaceCwd,
                 sessionId,
                 runtime.sessionRuntimeBaseDir,
+                { allowActiveConflict: true },
               );
             }
             assertRuntimeGenerationOpen?.();
@@ -1648,11 +1653,13 @@ export function registerSessionRoutes(
   ): Promise<WorkspaceRuntime | undefined> => {
     const activeInRuntime = async (
       runtime: WorkspaceRuntime,
+      allowActiveConflict = false,
     ): Promise<boolean> => {
       const location = await assertSessionLoadable(
         runtime.workspaceCwd,
         sessionId,
         runtime.sessionRuntimeBaseDir,
+        { allowActiveConflict },
       );
       if (location !== 'active') return false;
       if (!isInternalWorkspaceRuntime(runtime)) return true;
@@ -1744,7 +1751,7 @@ export function registerSessionRoutes(
       const runtime = workspaceRegistry.primary;
       if (loadError === undefined) return runtime;
       try {
-        if (await activeInRuntime(runtime)) return runtime;
+        if (await activeInRuntime(runtime, true)) return runtime;
       } catch (err) {
         recordLoadError(err);
       }
@@ -1790,7 +1797,7 @@ export function registerSessionRoutes(
       }
       let active = false;
       try {
-        active = await activeInRuntime(liveOwner.runtime);
+        active = await activeInRuntime(liveOwner.runtime, true);
       } catch (err) {
         recordLoadError(err);
       }
@@ -1802,6 +1809,34 @@ export function registerSessionRoutes(
         return undefined;
       }
       if (active) {
+        if (isInternalWorkspaceRuntime(liveOwner.runtime)) {
+          const ordinaryCollisions: WorkspaceRuntime[] = [];
+          for (const ordinaryRuntime of workspaceRegistry.list()) {
+            const ordinaryService =
+              createWorkspaceRuntimeSessionService(ordinaryRuntime);
+            if (await ordinaryService.sessionExistsInAnyState(sessionId)) {
+              ordinaryCollisions.push(ordinaryRuntime);
+            }
+          }
+          if (
+            internalEntry &&
+            internalGeneration &&
+            !assertCurrentInternalGeneration(
+              internalEntry,
+              internalGeneration,
+              res,
+            )
+          ) {
+            return undefined;
+          }
+          if (ordinaryCollisions.length > 0) {
+            sendAmbiguousSessionOwner(res, route, sessionId, [
+              liveOwner.runtime,
+              ...ordinaryCollisions,
+            ]);
+            return undefined;
+          }
+        }
         setDaemonTelemetryWorkspace(res, liveOwner.runtime.workspaceCwd);
         return liveOwner.runtime;
       }
@@ -1813,7 +1848,7 @@ export function registerSessionRoutes(
       const runtime = requirePrimarySessionRuntime(workspaceRegistry, res);
       if (!runtime) return undefined;
       try {
-        if (await activeInRuntime(runtime)) {
+        if (await activeInRuntime(runtime, true)) {
           return runtime;
         }
       } catch (err) {
@@ -3161,49 +3196,24 @@ export function registerSessionRoutes(
         // The coordinator canonicalizes lock keys (every case variant of a
         // caller id contends on one key), so the request spelling alone
         // covers the raw-spelled batch delete/archive/unarchive locks.
-        const guardSessionService =
-          createWorkspaceRuntimeSessionService(runtime);
-        try {
-          await guardSessionService.findSessionIdIgnoringCase(sessionId);
-        } catch (error) {
-          if (
-            error instanceof SessionIdCaseConflictError &&
-            (await guardSessionService.getSessionLocation(
-              error.candidateSessionId ?? sessionId,
-            )) === 'conflict'
-          ) {
-            throw new SessionConflictError(sessionId);
-          }
-          throw error;
-        }
         const session = await archiveCoordinator.runSharedMany(
           [sessionId],
           async () => {
             const sessionService =
               createWorkspaceRuntimeSessionService(runtime);
-            let persistedSessionId: string | undefined;
-            try {
-              persistedSessionId =
-                await sessionService.findSessionIdIgnoringCase(sessionId);
-            } catch (error) {
-              if (
-                error instanceof SessionIdCaseConflictError &&
-                (await sessionService.getSessionLocation(
-                  error.candidateSessionId ?? sessionId,
-                )) === 'conflict'
-              ) {
-                throw new SessionConflictError(sessionId);
-              }
-              throw error;
-            }
+            const persistedSessionId = await resolveSessionIdForRestore(
+              sessionService,
+              sessionId,
+            );
             if (persistedSessionId) {
               restoredStorageSessionId = persistedSessionId;
             } else if (isInternalWorkspaceRuntime(runtime)) {
               throw new SessionNotFoundError(sessionId);
             }
-            const location = await assertSessionLoadable(
+            const location = await assertSessionRestorable(
               workspaceCwd,
               restoredStorageSessionId,
+              sessionId,
               runtime.sessionRuntimeBaseDir,
             );
             if (location === undefined && isInternalWorkspaceRuntime(runtime)) {
@@ -4034,6 +4044,7 @@ export function registerSessionRoutes(
                 runtime.workspaceCwd,
                 sessionId,
                 runtime.sessionRuntimeBaseDir,
+                { allowActiveConflict: true },
               );
             }
             const codec = getTranscriptCursorCodec(runtime);
