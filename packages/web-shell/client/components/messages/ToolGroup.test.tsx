@@ -88,6 +88,7 @@ function renderToolGroup(
   }>,
   compactSummary = false,
   onOpenSubagent?: (tool: ACPToolCall) => void,
+  onOpenMonitor?: (tool: ACPToolCall) => Promise<boolean>,
 ): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -103,7 +104,11 @@ function renderToolGroup(
     root.render(
       <I18nProvider language="en">
         <WebShellCustomizationProvider value={customization}>
-          {onOpenSubagent ? (
+          {onOpenMonitor ? (
+            <MonitorDetailsProvider onOpen={onOpenMonitor}>
+              {group}
+            </MonitorDetailsProvider>
+          ) : onOpenSubagent ? (
             <SubagentDetailsProvider onOpen={onOpenSubagent}>
               {group}
             </SubagentDetailsProvider>
@@ -1667,6 +1672,27 @@ describe('thinking rows in the compact summary', () => {
     )!;
     act(() => thoughtSummary.click());
     expect(container.textContent).toContain('main-agent thought');
+  });
+
+  it('expands a single-monitor compact summary before opening monitor details', () => {
+    const onOpenMonitor = vi.fn().mockResolvedValue(true);
+    const container = renderToolGroup(
+      [makeTool({ callId: 'monitor-1', toolName: 'Monitor' })],
+      {},
+      [{ content: 'main-agent thought' }],
+      true,
+      undefined,
+      onOpenMonitor,
+    );
+    const outerSummary = container.querySelector('button')!;
+
+    act(() => outerSummary.click());
+
+    expect(onOpenMonitor).not.toHaveBeenCalled();
+    expect(outerSummary.getAttribute('aria-expanded')).toBe('true');
+    expect(
+      container.querySelector('[data-testid="compact-thinking-summary"]'),
+    ).not.toBeNull();
   });
 
   it('nests parallel-agent details behind the compact summary', () => {

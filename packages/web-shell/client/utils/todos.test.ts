@@ -1285,6 +1285,38 @@ describe('computeTodoDetails', () => {
       toolTimeMs: 1200,
     });
   });
+
+  it('uses todo tool timestamps inside a merged tool group', () => {
+    const start = todoWriteMessage('m1', [todo('1', 'in_progress')]);
+    const end = todoWriteMessage('m2', [todo('1', 'completed')]);
+    if (start.role !== 'tool_group' || end.role !== 'tool_group') {
+      throw new Error('Expected tool groups');
+    }
+    const details = computeTodoDetails([
+      {
+        id: 'merged',
+        role: 'tool_group',
+        timestamp: 50,
+        tools: [
+          { ...start.tools[0]!, startTime: 1000, endTime: 1100 },
+          {
+            callId: 'read',
+            toolName: 'read',
+            status: 'completed',
+            startTime: 1200,
+            endTime: 1700,
+          },
+          { ...end.tools[0]!, startTime: 1900, endTime: 2000 },
+        ],
+      },
+    ]);
+
+    expect(details.get(todoStateKey(todo('1', 'pending')))).toEqual({
+      startTs: 1100,
+      endTs: 2000,
+      resources: { toolTimeMs: 500 },
+    });
+  });
 });
 
 describe('plan stats contract (SDK normalizer → extractTodoStats)', () => {
