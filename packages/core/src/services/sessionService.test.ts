@@ -114,6 +114,60 @@ describe('SessionService', () => {
     vi.mocked(jsonl.readLines).mockResolvedValue([]);
     vi.mocked(jsonl.parseLineTolerant).mockReturnValue([]);
     vi.mocked(readRuntimeStatus).mockResolvedValue(null);
+
+    type MaintenanceInternals = {
+      getSessionFilePath: (
+        sessionId: string,
+        state: 'active' | 'archived',
+      ) => string;
+      resolveMaintainableSessionSnapshot: (sessionId: string) => Promise<{
+        location: 'active' | 'archived' | 'conflict' | undefined;
+        identities: Array<{
+          state: 'active' | 'archived';
+          filePath: string;
+          dev: number;
+          ino: number;
+          size: number;
+          mtimeMs: number;
+          ctimeMs: number;
+        }>;
+      }>;
+      assertMaintainableSessionUnchanged: () => void;
+    };
+    const maintenancePrototype =
+      SessionService.prototype as unknown as MaintenanceInternals;
+    vi.spyOn(
+      maintenancePrototype,
+      'resolveMaintainableSessionSnapshot',
+    ).mockImplementation(async function (
+      this: MaintenanceInternals,
+      sessionId,
+    ) {
+      const service = this as unknown as SessionService;
+      const location = await service.getSessionLocation(sessionId);
+      const states =
+        location === 'conflict'
+          ? (['active', 'archived'] as const)
+          : location === undefined
+            ? []
+            : [location];
+      return {
+        location,
+        identities: states.map((state, index) => ({
+          state,
+          filePath: this.getSessionFilePath(sessionId, state),
+          dev: 1,
+          ino: index + 1,
+          size: 1,
+          mtimeMs: 1,
+          ctimeMs: 1,
+        })),
+      };
+    });
+    vi.spyOn(
+      maintenancePrototype,
+      'assertMaintainableSessionUnchanged',
+    ).mockImplementation(() => undefined);
   });
 
   afterEach(() => {
@@ -2178,8 +2232,8 @@ describe('SessionService', () => {
       );
     });
 
-    it('should skip location reads when archiving known active sessions', async () => {
-      const getLocationSpy = vi.spyOn(sessionService, 'getSessionLocation');
+    it('should archive known active sessions', async () => {
+      mockActiveSessionOnly();
 
       const result = await sessionService.archiveSessions([sessionIdA], {
         knownLocation: 'active',
@@ -2187,7 +2241,6 @@ describe('SessionService', () => {
 
       expect(result.archived).toEqual([sessionIdA]);
       expect(result.errors).toEqual([]);
-      expect(getLocationSpy).not.toHaveBeenCalled();
       expect(renameSyncSpy).toHaveBeenCalledWith(
         expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
         expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
@@ -2332,9 +2385,8 @@ describe('SessionService', () => {
       );
     });
 
-    it('should skip location reads when unarchiving known archived sessions', async () => {
+    it('should unarchive known archived sessions', async () => {
       mockArchivedSessionOnly();
-      const getLocationSpy = vi.spyOn(sessionService, 'getSessionLocation');
 
       const result = await sessionService.unarchiveSessions([sessionIdA], {
         knownLocation: 'archived',
@@ -2342,7 +2394,6 @@ describe('SessionService', () => {
 
       expect(result.unarchived).toEqual([sessionIdA]);
       expect(result.errors).toEqual([]);
-      expect(getLocationSpy).not.toHaveBeenCalled();
       expect(renameSyncSpy).toHaveBeenCalledWith(
         expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
         expect.stringContaining(`/chats/${sessionIdA}.jsonl`),

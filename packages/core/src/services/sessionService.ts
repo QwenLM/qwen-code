@@ -60,6 +60,8 @@ import {
 } from './session-transcript-reader.js';
 import {
   SessionWriterLease,
+  SessionTranscriptChangedError,
+  SessionTranscriptIdentityUnavailableError,
   SessionWriterUnavailableError,
   type SessionWriterProcessKind,
 } from './session-writer-lease.js';
@@ -148,6 +150,36 @@ export interface SessionListItem {
 export type SessionArchiveState = 'active' | 'archived';
 
 export type SessionLocation = SessionArchiveState | 'conflict' | undefined;
+
+interface MaintainableSessionFileIdentity {
+  state: SessionArchiveState;
+  filePath: string;
+  dev: number;
+  ino: number;
+  size: number;
+  mtimeMs: number;
+  ctimeMs: number;
+}
+
+interface MaintainableSessionSnapshot {
+  location: SessionLocation;
+  identities: MaintainableSessionFileIdentity[];
+}
+
+export class SessionStorageEntryError extends Error {
+  override readonly name = 'SessionStorageEntryError';
+
+  constructor(
+    readonly sessionId: string,
+    readonly reason: 'non_regular' | 'foreign_project',
+  ) {
+    super(
+      reason === 'non_regular'
+        ? `Session storage entry for "${sessionId}" is not a regular file.`
+        : `Session "${sessionId}" belongs to a different workspace.`,
+    );
+  }
+}
 
 export class SessionIdCaseConflictError extends Error {
   override readonly name = 'SessionIdCaseConflictError';
@@ -243,26 +275,39 @@ export interface RemoveSessionsResult {
   errors: Array<{ sessionId: string; error: Error }>;
 }
 
+export interface RemoveSessionOptions {
+  assertStorageUnchanged?: () => Promise<void>;
+  assertCanMutate?: () => void;
+}
+
 export interface ArchiveSessionsResult {
   archived: string[];
   alreadyArchived: string[];
+  resolvedConflicts: string[];
   notFound: string[];
   errors: Array<{ sessionId: string; error: Error }>;
 }
 
 export interface ArchiveSessionsOptions {
   knownLocation?: 'active';
+  resolveConflicts?: boolean;
+  assertStorageUnchanged?: () => Promise<void>;
+  assertCanMutate?: () => void;
 }
 
 export interface UnarchiveSessionsResult {
   unarchived: string[];
   alreadyActive: string[];
+  resolvedConflicts: string[];
   notFound: string[];
   errors: Array<{ sessionId: string; error: Error }>;
 }
 
 export interface UnarchiveSessionsOptions {
   knownLocation?: 'archived';
+  resolveConflicts?: boolean;
+  assertStorageUnchanged?: () => Promise<void>;
+  assertCanMutate?: () => void;
 }
 
 export interface SessionServiceOptions {
@@ -515,6 +560,7 @@ export class SessionService {
       processKind: SessionWriterProcessKind;
       qwenVersion?: string | null;
       reclaimPolicy: 'local' | 'never';
+      takeoverPolicy?: 'never' | 'certified';
     },
   ): Promise<SessionWriterLease> {
     if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
@@ -524,6 +570,25 @@ export class SessionService {
       runtimeBaseDir: this.storage.getRuntimeBaseDir(),
       sessionId,
       transcriptPath: this.getSessionFilePath(sessionId, 'active'),
+      ...options,
+    });
+  }
+
+  async acquireSessionMaintenanceLease(
+    sessionId: string,
+    options: {
+      processKind: SessionWriterProcessKind;
+      qwenVersion?: string | null;
+      reclaimPolicy: 'local' | 'never';
+    },
+  ): Promise<SessionWriterLease> {
+    if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
+      throw new SessionWriterUnavailableError();
+    }
+    return SessionWriterLease.acquire({
+      runtimeBaseDir: this.storage.getRuntimeBaseDir(),
+      sessionId,
+      transcriptPath: `${this.getSessionFilePath(sessionId, 'active')}.maintenance`,
       ...options,
     });
   }
@@ -683,6 +748,9 @@ export class SessionService {
       }
       const firstRecord = records[0];
       if (
+        typeof firstRecord.sessionId !== 'string' ||
+        typeof firstRecord.cwd !== 'string' ||
+        firstRecord.sessionId.toLowerCase() !== sessionId.toLowerCase() ||
         !(await this.sessionBelongsToCurrentProject(sessionId, firstRecord.cwd))
       ) {
         return undefined;
@@ -807,6 +875,242 @@ export class SessionService {
     if (active) return 'active';
     if (archived) return 'archived';
     return undefined;
+  }
+
+  /**
+   * Classifies exact-spelling transcript files for lifecycle maintenance.
+   * Unlike {@link getSessionLocation}, empty or damaged regular files still
+   * occupy their state. A readable head that explicitly belongs to another
+   * workspace remains unavailable to this service.
+   */
+  async getMaintainableSessionLocation(
+    sessionId: string,
+  ): Promise<SessionLocation> {
+    try {
+      return (await this.resolveMaintainableSessionSnapshot(sessionId, false))
+        .location;
+    } catch (error) {
+      if (
+        error instanceof SessionStorageEntryError &&
+        error.reason === 'foreign_project'
+      ) {
+        return undefined;
+      }
+      throw error;
+    }
+  }
+
+  private async resolveMaintainableSessionSnapshot(
+    sessionId: string,
+    captureIdentity = true,
+  ): Promise<MaintainableSessionSnapshot> {
+    if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
+      return { location: undefined, identities: [] };
+    }
+
+    const identities: MaintainableSessionFileIdentity[] = [];
+    for (const state of ['active', 'archived'] as const) {
+      const identity = await this.readMaintainableSessionIdentity(
+        sessionId,
+        state,
+        captureIdentity,
+      );
+      if (identity) identities.push(identity);
+    }
+    const active = identities.some((identity) => identity.state === 'active');
+    const archived = identities.some(
+      (identity) => identity.state === 'archived',
+    );
+    return {
+      location:
+        active && archived
+          ? 'conflict'
+          : active
+            ? 'active'
+            : archived
+              ? 'archived'
+              : undefined,
+      identities,
+    };
+  }
+
+  private async readMaintainableSessionIdentity(
+    sessionId: string,
+    state: SessionArchiveState,
+    captureIdentity: boolean,
+  ): Promise<MaintainableSessionFileIdentity | undefined> {
+    const filePath = this.getSessionFilePath(sessionId, state);
+    let fileHandle: fs.promises.FileHandle;
+    try {
+      fileHandle = await fs.promises.open(
+        filePath,
+        fs.constants.O_RDONLY |
+          (process.platform === 'win32'
+            ? 0
+            : (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0)),
+      );
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') return undefined;
+      if (code === 'ELOOP') {
+        throw new SessionStorageEntryError(sessionId, 'non_regular');
+      }
+      throw error;
+    }
+
+    try {
+      const opened = this.maintainableSessionIdentity(
+        sessionId,
+        state,
+        filePath,
+        await fileHandle.stat(),
+      );
+      const firstRecord = await this.readFirstMaintainableRecord(
+        fileHandle,
+        filePath,
+      );
+      if (
+        firstRecord &&
+        typeof firstRecord.sessionId === 'string' &&
+        typeof firstRecord.cwd === 'string' &&
+        (firstRecord.sessionId.toLowerCase() !== sessionId.toLowerCase() ||
+          !(await this.sessionBelongsToCurrentProject(
+            firstRecord.sessionId,
+            firstRecord.cwd,
+          )))
+      ) {
+        throw new SessionStorageEntryError(sessionId, 'foreign_project');
+      }
+
+      const current = this.maintainableSessionIdentity(
+        sessionId,
+        state,
+        filePath,
+        await fs.promises.lstat(filePath),
+      );
+      const stillOpened = this.maintainableSessionIdentity(
+        sessionId,
+        state,
+        filePath,
+        await fileHandle.stat(),
+      );
+      if (
+        opened.dev !== current.dev ||
+        opened.ino !== current.ino ||
+        opened.dev !== stillOpened.dev ||
+        opened.ino !== stillOpened.ino
+      ) {
+        throw new SessionTranscriptChangedError();
+      }
+      return captureIdentity ? current : opened;
+    } finally {
+      await fileHandle.close();
+    }
+  }
+
+  private async readFirstMaintainableRecord(
+    fileHandle: fs.promises.FileHandle,
+    filePath: string,
+  ): Promise<Partial<ChatRecord> | undefined> {
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    const decoder = new TextDecoder();
+    let pending = '';
+    while (true) {
+      const { bytesRead } = await fileHandle.read(buffer);
+      pending += decoder.decode(buffer.subarray(0, bytesRead), {
+        stream: bytesRead > 0,
+      });
+      let newline = pending.indexOf('\n');
+      while (newline >= 0) {
+        const line = pending.slice(0, newline).trim();
+        pending = pending.slice(newline + 1);
+        if (line) {
+          const record = jsonl.parseLineTolerant<Partial<ChatRecord>>(
+            line,
+            filePath,
+          )[0];
+          if (record) return record;
+        }
+        newline = pending.indexOf('\n');
+      }
+      if (bytesRead === 0) {
+        if (!pending.trim()) return undefined;
+        return jsonl.parseLineTolerant<Partial<ChatRecord>>(
+          pending.trim(),
+          filePath,
+        )[0];
+      }
+    }
+  }
+
+  private maintainableSessionIdentity(
+    sessionId: string,
+    state: SessionArchiveState,
+    filePath: string,
+    stats: fs.Stats,
+  ): MaintainableSessionFileIdentity {
+    if (!stats.isFile()) {
+      throw new SessionStorageEntryError(sessionId, 'non_regular');
+    }
+    if (!hasVerifiableInode(stats.ino)) {
+      throw new SessionTranscriptIdentityUnavailableError();
+    }
+    return {
+      state,
+      filePath,
+      dev: stats.dev,
+      ino: stats.ino,
+      size: stats.size,
+      mtimeMs: stats.mtimeMs,
+      ctimeMs: stats.ctimeMs,
+    };
+  }
+
+  private sameMaintainableSessionIdentity(
+    expected: MaintainableSessionFileIdentity,
+    actual: MaintainableSessionFileIdentity,
+  ): boolean {
+    return (
+      expected.state === actual.state &&
+      expected.filePath === actual.filePath &&
+      expected.dev === actual.dev &&
+      expected.ino === actual.ino &&
+      expected.size === actual.size &&
+      expected.mtimeMs === actual.mtimeMs &&
+      expected.ctimeMs === actual.ctimeMs
+    );
+  }
+
+  private assertMaintainableSessionUnchanged(
+    sessionId: string,
+    snapshot: MaintainableSessionSnapshot,
+  ): void {
+    for (const state of ['active', 'archived'] as const) {
+      const expected = snapshot.identities.find(
+        (identity) => identity.state === state,
+      );
+      const filePath = this.getSessionFilePath(sessionId, state);
+      let stats: fs.Stats;
+      try {
+        stats = fs.lstatSync(filePath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          if (!expected) continue;
+          throw new SessionTranscriptChangedError();
+        }
+        throw error;
+      }
+      if (!expected) throw new SessionTranscriptChangedError();
+      const actual = this.maintainableSessionIdentity(
+        sessionId,
+        state,
+        filePath,
+        stats,
+      );
+      if (!this.sameMaintainableSessionIdentity(expected, actual)) {
+        throw new SessionTranscriptChangedError();
+      }
+    }
   }
 
   /**
@@ -975,6 +1279,19 @@ export class SessionService {
       if (fs.existsSync(ledger)) {
         this.removeFileIfExists(ledger);
       }
+    }
+  }
+
+  private removeStateSidecars(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): void {
+    for (const filePath of [
+      this.getWorktreeSessionPathForState(sessionId, state),
+      this.getPrSessionPathForState(sessionId, state),
+      this.getPromptLedgerPathForState(sessionId, state),
+    ]) {
+      this.removeFileIfExists(filePath);
     }
   }
 
@@ -1852,8 +2169,11 @@ export class SessionService {
    * @param sessionId The session ID to remove
    * @returns true if removed, false if not found
    */
-  async removeSession(sessionId: string): Promise<boolean> {
-    const removed = await this.removeSessionFiles(sessionId);
+  async removeSession(
+    sessionId: string,
+    options: RemoveSessionOptions = {},
+  ): Promise<boolean> {
+    const removed = await this.removeSessionFiles(sessionId, options);
     if (removed) {
       await this.removeSessionOrganization(sessionId);
     }
@@ -1876,52 +2196,39 @@ export class SessionService {
     }
   }
 
-  private async removeSessionFiles(sessionId: string): Promise<boolean> {
+  private async removeSessionFiles(
+    sessionId: string,
+    options: RemoveSessionOptions = {},
+  ): Promise<boolean> {
     if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
       return false;
     }
 
     try {
-      const activePath = this.getSessionFilePath(sessionId, 'active');
-      const active = await this.readProjectSessionHead(sessionId, activePath);
-      if (active) {
-        // #7384: the usage-history rebuild reads transcripts, so salvage
-        // the session's usage summary before the file is gone. Never
-        // blocks deletion (the salvage swallows its own errors).
-        await this.salvageUsageBestEffort(activePath);
-        this.removeFileIfExists(activePath);
-        const archivedPath = this.getSessionFilePath(sessionId, 'archived');
-        if (fs.existsSync(archivedPath)) {
-          // When both copies co-exist (e.g. an interrupted archive), the
-          // active transcript may hold no telemetry while the archived one
-          // carries the session's history — salvage it too. The dedup
-          // guard inside the salvage makes this a no-op whenever the
-          // active copy already produced a record.
-          await this.salvageUsageBestEffort(archivedPath);
-          this.removeFileIfExists(archivedPath);
-        }
-        this.removeWorktreeSidecars(sessionId);
-        this.removePrSidecars(sessionId);
-        this.removePromptLedgers(sessionId);
-        this.removeFileHistoryBackups(sessionId);
-        return true;
+      const physicalSnapshot =
+        await this.resolveMaintainableSessionSnapshot(sessionId);
+      if (physicalSnapshot.location === undefined) return false;
+      for (const identity of physicalSnapshot.identities) {
+        await this.salvageUsageBestEffort(identity.filePath);
       }
-      const archivedPath = this.getSessionFilePath(sessionId, 'archived');
-      const archived = await this.readProjectSessionHead(
-        sessionId,
-        archivedPath,
-      );
-      if (!archived) {
-        return false;
+      await options.assertStorageUnchanged?.();
+      options.assertCanMutate?.();
+      this.assertMaintainableSessionUnchanged(sessionId, physicalSnapshot);
+      for (const identity of physicalSnapshot.identities) {
+        this.removeFileIfExists(identity.filePath);
       }
-      await this.salvageUsageBestEffort(archivedPath);
-      this.removeFileIfExists(archivedPath);
       this.removeWorktreeSidecars(sessionId);
       this.removePrSidecars(sessionId);
       this.removePromptLedgers(sessionId);
       this.removeFileHistoryBackups(sessionId);
       return true;
     } catch (error) {
+      if (
+        error instanceof SessionStorageEntryError &&
+        error.reason === 'foreign_project'
+      ) {
+        return false;
+      }
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         return false;
       }
@@ -1935,6 +2242,7 @@ export class SessionService {
   ): Promise<ArchiveSessionsResult> {
     const archived: string[] = [];
     const alreadyArchived: string[] = [];
+    const resolvedConflicts: string[] = [];
     const notFound: string[] = [];
     const errors: Array<{ sessionId: string; error: Error }> = [];
 
@@ -1944,27 +2252,43 @@ export class SessionService {
           notFound.push(sessionId);
           continue;
         }
-        if (options.knownLocation !== 'active') {
-          const location = await this.getSessionLocation(sessionId);
-          if (location === undefined) {
-            notFound.push(sessionId);
-            continue;
-          }
-          if (location === 'archived') {
-            alreadyArchived.push(sessionId);
-            continue;
-          }
-          if (location === 'conflict') {
+        const snapshot =
+          await this.resolveMaintainableSessionSnapshot(sessionId);
+        const location = snapshot.location;
+        if (location === undefined) {
+          notFound.push(sessionId);
+          continue;
+        }
+        if (location === 'archived') {
+          alreadyArchived.push(sessionId);
+          continue;
+        }
+        if (location === 'conflict') {
+          if (!options.resolveConflicts) {
             throw new Error(`Session archive conflict: ${sessionId}`);
           }
+          const active = snapshot.identities.find(
+            (identity) => identity.state === 'active',
+          )!;
+          await this.salvageUsageBestEffort(active.filePath);
+          await options.assertStorageUnchanged?.();
+          options.assertCanMutate?.();
+          this.assertMaintainableSessionUnchanged(sessionId, snapshot);
+          this.removeFileIfExists(active.filePath);
+          try {
+            this.removeStateSidecars(sessionId, 'active');
+          } catch (sidecarError) {
+            this.warn(
+              `archiveSessions: failed to remove active sidecars for ${sessionId}: ${sidecarError}`,
+            );
+          }
+          archived.push(sessionId);
+          resolvedConflicts.push(sessionId);
+          continue;
         }
 
         const sourcePath = this.getSessionFilePath(sessionId, 'active');
         const targetPath = this.getSessionFilePath(sessionId, 'archived');
-        if (fs.existsSync(targetPath)) {
-          throw new Error(`Session archive conflict: ${sessionId}`);
-        }
-
         fs.mkdirSync(this.getArchiveChatsDir(), { recursive: true });
         const activeSidecar = this.getWorktreeSessionPathForState(
           sessionId,
@@ -1982,6 +2306,9 @@ export class SessionService {
           sessionId,
           'archived',
         );
+        await options.assertStorageUnchanged?.();
+        options.assertCanMutate?.();
+        this.assertMaintainableSessionUnchanged(sessionId, snapshot);
         try {
           fs.renameSync(sourcePath, targetPath);
         } catch (error) {
@@ -2013,6 +2340,13 @@ export class SessionService {
         }
         archived.push(sessionId);
       } catch (error) {
+        if (
+          error instanceof SessionStorageEntryError &&
+          error.reason === 'foreign_project'
+        ) {
+          notFound.push(sessionId);
+          continue;
+        }
         errors.push({
           sessionId,
           error: error instanceof Error ? error : new Error(String(error)),
@@ -2020,7 +2354,13 @@ export class SessionService {
       }
     }
 
-    return { archived, alreadyArchived, notFound, errors };
+    return {
+      archived,
+      alreadyArchived,
+      resolvedConflicts,
+      notFound,
+      errors,
+    };
   }
 
   async unarchiveSessions(
@@ -2029,32 +2369,49 @@ export class SessionService {
   ): Promise<UnarchiveSessionsResult> {
     const unarchived: string[] = [];
     const alreadyActive: string[] = [];
+    const resolvedConflicts: string[] = [];
     const notFound: string[] = [];
     const errors: Array<{ sessionId: string; error: Error }> = [];
 
     for (const sessionId of [...new Set(sessionIds)]) {
       try {
-        if (options.knownLocation !== 'archived') {
-          const location = await this.getSessionLocation(sessionId);
-          if (location === undefined) {
-            notFound.push(sessionId);
-            continue;
-          }
-          if (location === 'active') {
-            alreadyActive.push(sessionId);
-            continue;
-          }
-          if (location === 'conflict') {
+        const snapshot =
+          await this.resolveMaintainableSessionSnapshot(sessionId);
+        const location = snapshot.location;
+        if (location === undefined) {
+          notFound.push(sessionId);
+          continue;
+        }
+        if (location === 'active') {
+          alreadyActive.push(sessionId);
+          continue;
+        }
+        if (location === 'conflict') {
+          if (!options.resolveConflicts) {
             throw new Error(`Session archive conflict: ${sessionId}`);
           }
+          const archived = snapshot.identities.find(
+            (identity) => identity.state === 'archived',
+          )!;
+          await this.salvageUsageBestEffort(archived.filePath);
+          await options.assertStorageUnchanged?.();
+          options.assertCanMutate?.();
+          this.assertMaintainableSessionUnchanged(sessionId, snapshot);
+          this.removeFileIfExists(archived.filePath);
+          try {
+            this.removeStateSidecars(sessionId, 'archived');
+          } catch (sidecarError) {
+            this.warn(
+              `unarchiveSessions: failed to remove archived sidecars for ${sessionId}: ${sidecarError}`,
+            );
+          }
+          unarchived.push(sessionId);
+          resolvedConflicts.push(sessionId);
+          continue;
         }
 
         const sourcePath = this.getSessionFilePath(sessionId, 'archived');
         const targetPath = this.getSessionFilePath(sessionId, 'active');
-        if (fs.existsSync(targetPath)) {
-          throw new Error(`Session archive conflict: ${sessionId}`);
-        }
-
         const archivedSidecar = this.getWorktreeSessionPathForState(
           sessionId,
           'archived',
@@ -2064,6 +2421,9 @@ export class SessionService {
           'active',
         );
         fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+        await options.assertStorageUnchanged?.();
+        options.assertCanMutate?.();
+        this.assertMaintainableSessionUnchanged(sessionId, snapshot);
         try {
           fs.renameSync(sourcePath, targetPath);
         } catch (error) {
@@ -2103,6 +2463,13 @@ export class SessionService {
         }
         unarchived.push(sessionId);
       } catch (error) {
+        if (
+          error instanceof SessionStorageEntryError &&
+          error.reason === 'foreign_project'
+        ) {
+          notFound.push(sessionId);
+          continue;
+        }
         errors.push({
           sessionId,
           error: error instanceof Error ? error : new Error(String(error)),
@@ -2110,7 +2477,13 @@ export class SessionService {
       }
     }
 
-    return { unarchived, alreadyActive, notFound, errors };
+    return {
+      unarchived,
+      alreadyActive,
+      resolvedConflicts,
+      notFound,
+      errors,
+    };
   }
 
   /**

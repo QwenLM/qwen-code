@@ -1450,6 +1450,7 @@ export interface DaemonWorkspaceSessionInfo {
 export interface DaemonArchiveSessionsResult {
   archived: string[];
   alreadyArchived: string[];
+  resolvedConflicts?: string[];
   notFound: string[];
   errors: Array<{ sessionId: string; error: string }>;
 }
@@ -1457,6 +1458,7 @@ export interface DaemonArchiveSessionsResult {
 export interface DaemonUnarchiveSessionsResult {
   unarchived: string[];
   alreadyActive: string[];
+  resolvedConflicts?: string[];
   notFound: string[];
   errors: Array<{ sessionId: string; error: string }>;
 }

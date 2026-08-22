@@ -244,6 +244,12 @@ only a storage-state transition; clients must call `session/load` or
 load/resume, and mutations racing an archive transition return
 `409 session_archiving`.
 
+Empty, damaged, and orphaned regular transcript files remain eligible for these
+lifecycle operations even when they cannot be loaded as conversations. When
+`session_storage_conflict_repair` is advertised, archive and unarchive accept
+`resolveConflicts: true`: archive keeps the archived copy, while unarchive keeps
+the active copy. The default conflict behavior remains unchanged.
+
 ### Context Usage (`session_context_usage` capability tag)
 
 `GET /session/:id/context-usage` returns structured context-window usage.

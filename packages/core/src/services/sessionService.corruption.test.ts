@@ -18,8 +18,18 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { SessionService } from './sessionService.js';
+import { execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
+import { SessionService, SessionStorageEntryError } from './sessionService.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import type { HistoryGap } from '../utils/conversation-chain.js';
 
@@ -317,6 +327,553 @@ describe('SessionService.readLastRecordUuid (corruption recovery)', () => {
 
     expect(svc.readLastRecordUuid(file)).toBe('boundary-final');
   });
+});
+
+describe('SessionService lifecycle maintenance', () => {
+  type Privates = {
+    getSessionFilePath: (id: string, state: 'active' | 'archived') => string;
+  };
+
+  function createHarness(content: string, state: 'active' | 'archived') {
+    const runtimeBaseDir = fs.mkdtempSync(path.join(tmpRoot, 'lifecycle-'));
+    const cwd = path.join(runtimeBaseDir, 'workspace');
+    fs.mkdirSync(cwd, { recursive: true });
+    const service = new SessionService(cwd, { runtimeBaseDir });
+    const sessionId = randomUUID();
+    const paths = {
+      active: (service as unknown as Privates).getSessionFilePath(
+        sessionId,
+        'active',
+      ),
+      archived: (service as unknown as Privates).getSessionFilePath(
+        sessionId,
+        'archived',
+      ),
+    };
+    fs.mkdirSync(path.dirname(paths[state]), { recursive: true });
+    fs.writeFileSync(paths[state], content);
+    return { service, sessionId, paths, content, cwd };
+  }
+
+  const unreadableShapes = [
+    { name: 'empty', content: '' },
+    { name: 'damaged', content: '{"uuid":"torn-head"' },
+  ];
+
+  for (const shape of unreadableShapes) {
+    it(`deletes an owned ${shape.name} transcript`, async () => {
+      const { service, sessionId, paths } = createHarness(
+        shape.content,
+        'active',
+      );
+
+      await expect(service.removeSession(sessionId)).resolves.toBe(true);
+      expect(fs.existsSync(paths.active)).toBe(false);
+    });
+
+    it(`archives an owned ${shape.name} transcript without rewriting it`, async () => {
+      const { service, sessionId, paths, content } = createHarness(
+        shape.content,
+        'active',
+      );
+
+      const result = await service.archiveSessions([sessionId]);
+
+      expect(result).toMatchObject({
+        archived: [sessionId],
+        notFound: [],
+        errors: [],
+      });
+      expect(fs.existsSync(paths.active)).toBe(false);
+      expect(fs.readFileSync(paths.archived, 'utf8')).toBe(content);
+    });
+
+    it(`unarchives an owned ${shape.name} transcript without rewriting it`, async () => {
+      const { service, sessionId, paths, content } = createHarness(
+        shape.content,
+        'archived',
+      );
+
+      const result = await service.unarchiveSessions([sessionId]);
+
+      expect(result).toMatchObject({
+        unarchived: [sessionId],
+        notFound: [],
+        errors: [],
+      });
+      expect(fs.existsSync(paths.archived)).toBe(false);
+      expect(fs.readFileSync(paths.active, 'utf8')).toBe(content);
+    });
+  }
+
+  it('maintains an owned legacy child whose parent no longer exists', async () => {
+    const orphanContent = (sessionId: string, cwd: string) =>
+      `${JSON.stringify({
+        ...recordFor('u1', 'user', null),
+        sessionId,
+        cwd,
+      })}\n${JSON.stringify({
+        ...recordFor('u2', 'assistant', 'u1'),
+        sessionId,
+        cwd,
+        type: 'system',
+        subtype: 'parent_session',
+        systemPayload: { parentSessionId: randomUUID() },
+      })}\n`;
+
+    const removal = createHarness('', 'active');
+    fs.writeFileSync(
+      removal.paths.active,
+      orphanContent(removal.sessionId, removal.cwd),
+    );
+    await expect(
+      removal.service.removeSession(removal.sessionId),
+    ).resolves.toBe(true);
+
+    const archive = createHarness('', 'active');
+    fs.writeFileSync(
+      archive.paths.active,
+      orphanContent(archive.sessionId, archive.cwd),
+    );
+    await expect(
+      archive.service.archiveSessions([archive.sessionId]),
+    ).resolves.toMatchObject({ archived: [archive.sessionId], errors: [] });
+
+    const unarchive = createHarness('', 'archived');
+    fs.writeFileSync(
+      unarchive.paths.archived,
+      orphanContent(unarchive.sessionId, unarchive.cwd),
+    );
+    await expect(
+      unarchive.service.unarchiveSessions([unarchive.sessionId]),
+    ).resolves.toMatchObject({
+      unarchived: [unarchive.sessionId],
+      errors: [],
+    });
+  });
+
+  it('preserves default archive conflicts and explicitly keeps the archived copy', async () => {
+    const { service, sessionId, paths } = createHarness('active', 'active');
+    fs.mkdirSync(path.dirname(paths.archived), { recursive: true });
+    fs.writeFileSync(paths.archived, 'archived');
+
+    const defaultResult = await service.archiveSessions([sessionId]);
+    expect(defaultResult.errors).toHaveLength(1);
+    expect(fs.readFileSync(paths.active, 'utf8')).toBe('active');
+    expect(fs.readFileSync(paths.archived, 'utf8')).toBe('archived');
+
+    const repaired = await service.archiveSessions([sessionId], {
+      resolveConflicts: true,
+    });
+    expect(repaired).toMatchObject({
+      archived: [sessionId],
+      resolvedConflicts: [sessionId],
+      errors: [],
+    });
+    expect(fs.existsSync(paths.active)).toBe(false);
+    expect(fs.readFileSync(paths.archived, 'utf8')).toBe('archived');
+  });
+
+  it('preserves default unarchive conflicts and explicitly keeps the active copy', async () => {
+    const { service, sessionId, paths } = createHarness('active', 'active');
+    fs.mkdirSync(path.dirname(paths.archived), { recursive: true });
+    fs.writeFileSync(paths.archived, 'archived');
+
+    const defaultResult = await service.unarchiveSessions([sessionId]);
+    expect(defaultResult.errors).toHaveLength(1);
+    expect(fs.readFileSync(paths.active, 'utf8')).toBe('active');
+    expect(fs.readFileSync(paths.archived, 'utf8')).toBe('archived');
+
+    const repaired = await service.unarchiveSessions([sessionId], {
+      resolveConflicts: true,
+    });
+    expect(repaired).toMatchObject({
+      unarchived: [sessionId],
+      resolvedConflicts: [sessionId],
+      errors: [],
+    });
+    expect(fs.readFileSync(paths.active, 'utf8')).toBe('active');
+    expect(fs.existsSync(paths.archived)).toBe(false);
+  });
+
+  it('does not overwrite a damaged archived copy when the active copy is readable', async () => {
+    const { service, sessionId, paths, cwd } = createHarness('', 'active');
+    fs.writeFileSync(
+      paths.active,
+      `${JSON.stringify({
+        ...recordFor('u1', 'user', null),
+        sessionId,
+        cwd,
+      })}\n`,
+    );
+    fs.mkdirSync(path.dirname(paths.archived), { recursive: true });
+    fs.writeFileSync(paths.archived, '{"uuid":"torn-archived"');
+
+    const result = await service.archiveSessions([sessionId]);
+
+    expect(result.errors).toHaveLength(1);
+    expect(fs.existsSync(paths.active)).toBe(true);
+    expect(fs.readFileSync(paths.archived, 'utf8')).toBe(
+      '{"uuid":"torn-archived"',
+    );
+  });
+
+  it('repairs an archive conflict when only the archived copy is readable', async () => {
+    const { service, sessionId, paths, cwd } = createHarness(
+      '{"uuid":"torn-active"',
+      'active',
+    );
+    const archivedContent = `${JSON.stringify({
+      ...recordFor('u1', 'user', null),
+      sessionId,
+      cwd,
+    })}\n`;
+    fs.mkdirSync(path.dirname(paths.archived), { recursive: true });
+    fs.writeFileSync(paths.archived, archivedContent);
+
+    const defaultResult = await service.archiveSessions([sessionId]);
+    expect(defaultResult.errors).toHaveLength(1);
+
+    const repaired = await service.archiveSessions([sessionId], {
+      resolveConflicts: true,
+    });
+    expect(repaired).toMatchObject({
+      archived: [sessionId],
+      resolvedConflicts: [sessionId],
+      errors: [],
+    });
+    expect(fs.existsSync(paths.active)).toBe(false);
+    expect(fs.readFileSync(paths.archived, 'utf8')).toBe(archivedContent);
+  });
+
+  it('does not overwrite a damaged active copy when the archived copy is readable', async () => {
+    const { service, sessionId, paths, cwd } = createHarness('', 'archived');
+    fs.writeFileSync(paths.active, '{"uuid":"torn-active"');
+    fs.writeFileSync(
+      paths.archived,
+      `${JSON.stringify({
+        ...recordFor('u1', 'user', null),
+        sessionId,
+        cwd,
+      })}\n`,
+    );
+
+    const result = await service.unarchiveSessions([sessionId]);
+
+    expect(result.errors).toHaveLength(1);
+    expect(fs.readFileSync(paths.active, 'utf8')).toBe('{"uuid":"torn-active"');
+    expect(fs.existsSync(paths.archived)).toBe(true);
+  });
+
+  it('repairs an unarchive conflict when only the active copy is readable', async () => {
+    const { service, sessionId, paths, cwd } = createHarness('', 'active');
+    const activeContent = `${JSON.stringify({
+      ...recordFor('u1', 'user', null),
+      sessionId,
+      cwd,
+    })}\n`;
+    fs.writeFileSync(paths.active, activeContent);
+    fs.mkdirSync(path.dirname(paths.archived), { recursive: true });
+    fs.writeFileSync(paths.archived, '{"uuid":"torn-archived"');
+
+    const defaultResult = await service.unarchiveSessions([sessionId]);
+    expect(defaultResult.errors).toHaveLength(1);
+
+    const repaired = await service.unarchiveSessions([sessionId], {
+      resolveConflicts: true,
+    });
+    expect(repaired).toMatchObject({
+      unarchived: [sessionId],
+      resolvedConflicts: [sessionId],
+      errors: [],
+    });
+    expect(fs.readFileSync(paths.active, 'utf8')).toBe(activeContent);
+    expect(fs.existsSync(paths.archived)).toBe(false);
+  });
+
+  it.each(['archive', 'unarchive'] as const)(
+    'reclassifies a conflict that appears during %s validation',
+    async (action) => {
+      const state = action === 'archive' ? 'active' : 'archived';
+      const { service, sessionId, paths, cwd } = createHarness('', state);
+      const sourcePath = paths[state];
+      const sourceContent = `${JSON.stringify({
+        ...recordFor('u1', 'user', null),
+        sessionId,
+        cwd,
+      })}\n`;
+      const targetPath = action === 'archive' ? paths.archived : paths.active;
+      const targetContent = 'late conflict';
+      fs.writeFileSync(sourcePath, sourceContent);
+
+      const internals = service as unknown as {
+        resolveMaintainableSessionSnapshot: (id: string) => Promise<unknown>;
+      };
+      const resolveSnapshot =
+        internals.resolveMaintainableSessionSnapshot.bind(service);
+      vi.spyOn(
+        internals,
+        'resolveMaintainableSessionSnapshot',
+      ).mockImplementationOnce(async (id) => {
+        fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+        fs.writeFileSync(targetPath, targetContent);
+        return resolveSnapshot(id);
+      });
+
+      const result = await service[`${action}Sessions`]([sessionId]);
+
+      expect(result.errors).toHaveLength(1);
+      expect(fs.readFileSync(sourcePath, 'utf8')).toBe(sourceContent);
+      expect(fs.readFileSync(targetPath, 'utf8')).toBe(targetContent);
+    },
+  );
+
+  it.each(['delete', 'unarchive'] as const)(
+    'does not %s a readable archived transcript replaced after validation',
+    async (action) => {
+      const { service, sessionId, paths, cwd } = createHarness('', 'archived');
+      fs.writeFileSync(
+        paths.archived,
+        `${JSON.stringify({
+          ...recordFor('u1', 'user', null),
+          sessionId,
+          cwd,
+        })}\n`,
+      );
+      const replacement = 'replacement';
+      const assertStorageUnchanged = async () => {
+        fs.renameSync(paths.archived, `${paths.archived}.original`);
+        fs.writeFileSync(paths.archived, replacement);
+      };
+
+      if (action === 'delete') {
+        await expect(
+          service.removeSession(sessionId, { assertStorageUnchanged }),
+        ).rejects.toThrow('changed outside its active writer');
+      } else {
+        const result = await service.unarchiveSessions([sessionId], {
+          assertStorageUnchanged,
+        });
+        expect(result.errors[0]?.error.message).toContain(
+          'changed outside its active writer',
+        );
+      }
+
+      expect(fs.readFileSync(paths.archived, 'utf8')).toBe(replacement);
+      expect(fs.existsSync(paths.active)).toBe(false);
+    },
+  );
+
+  it.each(['delete', 'archive', 'unarchive'] as const)(
+    'does not %s a transcript that disappears and reappears during classification',
+    async (action) => {
+      const state = action === 'archive' ? 'active' : 'archived';
+      const { service, sessionId, paths, cwd } = createHarness('', state);
+      const sourcePath = paths[state];
+      const originalContent = `${JSON.stringify({
+        ...recordFor('u1', 'user', null),
+        sessionId,
+        cwd,
+      })}\n`;
+      fs.writeFileSync(sourcePath, originalContent);
+      const replacement = 'replacement';
+
+      const internals = service as unknown as {
+        resolveMaintainableSessionSnapshot: (id: string) => Promise<unknown>;
+      };
+      const resolveSnapshot =
+        internals.resolveMaintainableSessionSnapshot.bind(service);
+      vi.spyOn(
+        internals,
+        'resolveMaintainableSessionSnapshot',
+      ).mockImplementationOnce(async (id) => {
+        fs.renameSync(sourcePath, `${sourcePath}.original`);
+        const snapshot = await resolveSnapshot(id);
+        fs.writeFileSync(sourcePath, replacement);
+        return snapshot;
+      });
+
+      if (action === 'delete') {
+        await expect(service.removeSession(sessionId)).resolves.toBe(false);
+      } else {
+        const result = await service[`${action}Sessions`]([sessionId]);
+        expect(result).toMatchObject({
+          notFound: [sessionId],
+          errors: [],
+        });
+      }
+
+      expect(fs.readFileSync(sourcePath, 'utf8')).toBe(replacement);
+      expect(fs.readFileSync(`${sourcePath}.original`, 'utf8')).toBe(
+        originalContent,
+      );
+      expect(
+        fs.existsSync(action === 'archive' ? paths.archived : paths.active),
+      ).toBe(false);
+    },
+  );
+
+  it.each(['delete', 'archive', 'unarchive'] as const)(
+    'does not %s a readable transcript whose record identifies another session',
+    async (action) => {
+      const state = action === 'unarchive' ? 'archived' : 'active';
+      const { service, sessionId, paths, cwd } = createHarness('', state);
+      const sourcePath = paths[state];
+      const content = `${JSON.stringify({
+        ...recordFor('u1', 'user', null),
+        sessionId: randomUUID(),
+        cwd,
+      })}\n`;
+      fs.writeFileSync(sourcePath, content);
+
+      if (action === 'delete') {
+        await expect(service.removeSession(sessionId)).resolves.toBe(false);
+      } else {
+        await expect(
+          service[`${action}Sessions`]([sessionId]),
+        ).resolves.toMatchObject({
+          notFound: [sessionId],
+          errors: [],
+        });
+      }
+
+      expect(fs.readFileSync(sourcePath, 'utf8')).toBe(content);
+      expect(
+        fs.existsSync(action === 'unarchive' ? paths.active : paths.archived),
+      ).toBe(false);
+    },
+  );
+
+  it.each([
+    ['missing cwd', undefined],
+    ['non-string cwd', 42],
+  ] as const)('maintains a damaged record with %s', async (_name, cwdValue) => {
+    for (const action of ['delete', 'archive', 'unarchive'] as const) {
+      const state = action === 'unarchive' ? 'archived' : 'active';
+      const { service, sessionId, paths } = createHarness('', state);
+      const sourcePath = paths[state];
+      const record = {
+        ...recordFor('u1', 'user', null),
+        sessionId,
+      } as Record<string, unknown>;
+      if (cwdValue === undefined) {
+        delete record['cwd'];
+      } else {
+        record['cwd'] = cwdValue;
+      }
+      fs.writeFileSync(sourcePath, `${JSON.stringify(record)}\n`);
+
+      if (action === 'delete') {
+        await expect(service.removeSession(sessionId)).resolves.toBe(true);
+        expect(fs.existsSync(sourcePath)).toBe(false);
+      } else {
+        const result = await service[`${action}Sessions`]([sessionId]);
+        expect(result).toMatchObject({
+          [action === 'archive' ? 'archived' : 'unarchived']: [sessionId],
+          notFound: [],
+          errors: [],
+        });
+        expect(fs.existsSync(sourcePath)).toBe(false);
+        expect(
+          fs.existsSync(action === 'archive' ? paths.archived : paths.active),
+        ).toBe(true);
+      }
+    }
+  });
+
+  it.each(['delete', 'archive', 'unarchive'] as const)(
+    'does not %s a readable transcript symlink',
+    async (action) => {
+      const state = action === 'unarchive' ? 'archived' : 'active';
+      const { service, sessionId, paths, cwd } = createHarness('', state);
+      const sourcePath = paths[state];
+      const targetPath = `${sourcePath}.target`;
+      const targetContent = `${JSON.stringify({
+        ...recordFor('u1', 'user', null),
+        sessionId,
+        cwd,
+      })}\n`;
+      fs.unlinkSync(sourcePath);
+      fs.writeFileSync(targetPath, targetContent);
+      fs.symlinkSync(targetPath, sourcePath);
+
+      if (action === 'delete') {
+        await expect(service.removeSession(sessionId)).rejects.toBeInstanceOf(
+          SessionStorageEntryError,
+        );
+      } else {
+        const result = await service[`${action}Sessions`]([sessionId]);
+        expect(result.errors[0]?.error).toBeInstanceOf(
+          SessionStorageEntryError,
+        );
+      }
+
+      expect(fs.lstatSync(sourcePath).isSymbolicLink()).toBe(true);
+      expect(fs.readFileSync(targetPath, 'utf8')).toBe(targetContent);
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'rejects a transcript FIFO without waiting for a writer',
+    async () => {
+      const { service, sessionId, paths } = createHarness('', 'active');
+      fs.unlinkSync(paths.active);
+      execFileSync('mkfifo', [paths.active]);
+      let writer: number | undefined;
+      const unblock = setTimeout(() => {
+        writer = fs.openSync(
+          paths.active,
+          fs.constants.O_WRONLY | (fs.constants.O_NONBLOCK ?? 0),
+        );
+      }, 500);
+      const startedAt = Date.now();
+
+      try {
+        await expect(
+          service.getMaintainableSessionLocation(sessionId),
+        ).rejects.toBeInstanceOf(SessionStorageEntryError);
+        expect(Date.now() - startedAt).toBeLessThan(400);
+      } finally {
+        clearTimeout(unblock);
+        if (writer !== undefined) fs.closeSync(writer);
+      }
+    },
+  );
+
+  it.each(['delete', 'archive', 'unarchive'] as const)(
+    'does not %s a damaged transcript replaced after validation',
+    async (action) => {
+      const state = action === 'unarchive' ? 'archived' : 'active';
+      const { service, sessionId, paths } = createHarness(
+        '{"uuid":"torn-head"',
+        state,
+      );
+      const sourcePath = paths[state];
+      const replacement = 'replacement';
+      const assertStorageUnchanged = async () => {
+        fs.renameSync(sourcePath, `${sourcePath}.original`);
+        fs.writeFileSync(sourcePath, replacement);
+      };
+
+      if (action === 'delete') {
+        await expect(
+          service.removeSession(sessionId, { assertStorageUnchanged }),
+        ).rejects.toThrow('changed outside its active writer');
+      } else {
+        const result = await service[`${action}Sessions`]([sessionId], {
+          assertStorageUnchanged,
+        });
+        expect(result.errors[0]?.error.message).toContain(
+          'changed outside its active writer',
+        );
+      }
+
+      expect(fs.readFileSync(sourcePath, 'utf8')).toBe(replacement);
+      expect(
+        fs.existsSync(action === 'archive' ? paths.archived : paths.active),
+      ).toBe(action !== 'archive' && state === 'active');
+    },
+  );
 });
 
 describe('SessionService.reconstructHistory (history-gap detection)', () => {
