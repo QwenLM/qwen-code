@@ -30,6 +30,7 @@ import { getGhHost, setGhHost } from './lib/gh.js';
 import { BRIEFS } from './lib/agent-briefs.js';
 import {
   LEDGER_MAX_FILE,
+  LEDGER_MAX_ID,
   LEDGER_MAX_ROUND,
   LEDGER_MAX_VOLUME,
   parseLedger,
@@ -38,6 +39,9 @@ import {
 import { countInlineFindings } from './lib/inline-counts.js';
 import {
   composeReview,
+  deferrableSuggestionsInline,
+  draftedFindingsOf,
+  floorEnforcedReroute,
   isNonDiffDimensionGap,
   buildLedger,
   repositoryContextGate,
@@ -472,6 +476,26 @@ function coveredPlan(
   if (planOpts.ownerRepo !== undefined && planOpts.prNumber !== undefined) {
     recordStep45(p, ['0']);
   }
+  return p;
+}
+
+/**
+ * `coveredPlan()` with the previous round's ledger on disk beside it. The
+ * side-file name is derived from the same `prNumber` the plan carries: the
+ * reader swallows ENOENT, so a name spelled independently at a call site
+ * can typo into an unread side file — and the test then silently measures
+ * round 1 instead of the leg its assertions claim to pin.
+ */
+function coveredWithLedger(prev: Record<string, unknown>): string {
+  const prNumber = 8255;
+  const p = coveredPlan(['verify', 'reverse-audit'], {
+    prNumber,
+    fetchedSha: 'deadbeef00112233',
+  });
+  writeFileSync(
+    join(dirname(p), `qwen-review-pr-${prNumber}-prev-ledger.json`),
+    JSON.stringify(prev),
+  );
   return p;
 }
 
@@ -2677,8 +2701,9 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
 
   it('prints the convergence paragraph the trim notice points at', async () => {
     // `noteTrimmedRanks` tells the author the shed sections "still hold —
-    // read them in the terminal report", and rank 0 is the first thing the
-    // ladder sheds. Without this line that promise names nothing.
+    // read them in the terminal report". The convergence paragraph is the
+    // LAST rank the ladder sheds, so this line is the only other copy the
+    // promise can point at. Without it that promise names nothing.
     const dir = mkdtempSync(join(tmpdir(), 'compose-convergence-'));
     const inputPath = join(dir, 'compose.json');
     const commentsPath = join(dir, 'comments.json');
@@ -2717,6 +2742,11 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
         writeStderrLine as ReturnType<typeof vi.fn>
       ).mock.calls.map((c) => String(c[0]));
       expect(lines.some((l) => l.startsWith('CONVERGENCE: Convergence:'))).toBe(
+        true,
+      );
+      // Its sibling, for the same reason: the health note is the FIRST thing
+      // the ladder sheds, and the trim notice points the reader here.
+      expect(lines.some((l) => l.startsWith('HEALTH: Mechanism health:'))).toBe(
         true,
       );
     } finally {
@@ -6451,14 +6481,7 @@ describe('composeReview — convergence-posture deferrals (typed channel; disclo
     // stays on the record and the incremental anchor still rides. And the
     // opener must not claim "No issues found" over findings the same body
     // lists two paragraphs down.
-    const planPath = coveredPlan(['verify', 'reverse-audit'], {
-      prNumber: 8255,
-      fetchedSha: 'deadbeef00112233',
-    });
-    writeFileSync(
-      join(dirname(planPath), 'qwen-review-pr-8255-prev-ledger.json'),
-      JSON.stringify({ v: 1, round: 5, findings: [] }),
-    );
+    const planPath = coveredWithLedger({ v: 1, round: 5, findings: [] });
     const r = composeReview({
       planPath,
       env: ENV,
@@ -6496,14 +6519,11 @@ describe('composeReview — convergence-posture deferrals (typed channel; disclo
     // which round this is. The sibling test above pins the marker's
     // round-trip at the cap; without THIS pin the Math.min mutation on the
     // clause side ships green.
-    const planPath = coveredPlan(['verify', 'reverse-audit'], {
-      prNumber: 8255,
-      fetchedSha: 'deadbeef00112233',
+    const planPath = coveredWithLedger({
+      v: 1,
+      round: LEDGER_MAX_ROUND,
+      findings: [],
     });
-    writeFileSync(
-      join(dirname(planPath), 'qwen-review-pr-8255-prev-ledger.json'),
-      JSON.stringify({ v: 1, round: LEDGER_MAX_ROUND, findings: [] }),
-    );
     const r = composeReview({
       planPath,
       env: ENV,
@@ -6882,14 +6902,7 @@ describe('composeReview — convergence-posture deferrals (typed channel; disclo
     // round it derives itself — this pins the legal rounds-2-5 shape end to
     // end (a round-resolved `suggestion` would have been refused as the
     // operator's override — the shipped round-5 regression).
-    const planPath = coveredPlan(['verify', 'reverse-audit'], {
-      prNumber: 8255,
-      fetchedSha: 'deadbeef00112233',
-    });
-    writeFileSync(
-      join(dirname(planPath), 'qwen-review-pr-8255-prev-ledger.json'),
-      JSON.stringify({ v: 1, round: 2, findings: [] }),
-    );
+    const planPath = coveredWithLedger({ v: 1, round: 2, findings: [] });
     const r = composeReview({
       planPath,
       env: ENV,
@@ -6908,8 +6921,9 @@ describe('composeReview — convergence-posture deferrals (typed channel; disclo
 describe("composeReview — the composed body fits GitHub's limit", () => {
   // A POST over 65,536 characters is rejected WHOLE — the review's blockers
   // included — so the body carries its own budget. What it may drop, and in
-  // what order, is the policy under test: the deferral display yields first,
-  // the not-reviewed disclosures second, the blockers and the caps never.
+  // what order, is the policy under test: the mechanism-health note yields
+  // first, then the deferral display, then the not-reviewed disclosures,
+  // then the convergence observation, and the blockers and the caps never.
   const LIMIT = 65536;
   /** An unpaired half in EITHER direction — the oracle was one-sided. */
   const LONE_SURROGATE =
@@ -9109,7 +9123,7 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     });
     expect(r.body).toContain('Convergence:');
     expect(r.body).toContain(
-      '`src/a.ts` (findings in rounds 2, 4, 2 more now)',
+      '`src/a.ts` (findings in rounds 2, 4; 2 more now)',
     );
     // An observation, not a gate: the verdict and its caps are untouched.
     expect(r.cappedBy).not.toContain('convergence');
@@ -9297,7 +9311,7 @@ describe('convergence diagnosis reaches the POSTED body', () => {
       ],
     });
     expect(r.body).toContain('Convergence:');
-    expect(r.body).toContain('findings in round 2, 1 more now');
+    expect(r.body).toContain('findings in round 2; 1 more now');
   });
 
   it('discloses a work list that was truncated or recovered from elsewhere', () => {
@@ -9346,20 +9360,13 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     // COMMENT either way. REQUEST_CHANGES — unfixed Criticals, round after
     // round — is the feature's primary audience, and its copy of the list
     // was unasserted: deleting the splice left the whole suite green.
-    const planPath = coveredPlan(['verify', 'reverse-audit'], {
-      prNumber: 8255,
-      fetchedSha: 'deadbeef00112233',
+    const planPath = coveredWithLedger({
+      v: 1,
+      round: 4,
+      posted: 9,
+      fresh: 9,
+      findings: [{ id: 'R2-1', sev: 'C', file: 'src/a.ts', title: 'x' }],
     });
-    writeFileSync(
-      join(dirname(planPath), 'qwen-review-pr-8255-prev-ledger.json'),
-      JSON.stringify({
-        v: 1,
-        round: 4,
-        posted: 9,
-        fresh: 9,
-        findings: [{ id: 'R2-1', sev: 'C', file: 'src/a.ts', title: 'x' }],
-      }),
-    );
     const r = composeReview({
       planPath,
       env: ENV,
@@ -9374,19 +9381,21 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     expect(r.body).toContain('Convergence:');
   });
 
-  it('yields the whole paragraph before any disclosure that qualifies the verdict', () => {
-    // The rounds this fires on are the high-volume rounds most likely to
-    // overflow, and the paragraph decides nothing — so it is the FIRST thing
-    // the ladder sheds. Untagged it ranked with the blockers and outlived
-    // the not-reviewed disclosures, which do qualify what was read.
+  it('outlives every disclosure the ladder can shed', () => {
+    // It was rank 0 — shed second, right after the mechanism-health note —
+    // on the reasoning that an advisory paragraph decides nothing. The
+    // arithmetic refutes that ordering: rendered bilingually the paragraph
+    // is 603 characters on a volume-only signal and 2,372 at its largest,
+    // against a 56,830-character budget. Shed early it could pay for at
+    // most 4% of an overflow, so any overflow bigger than itself spent it
+    // AND went on to spend the disclosures — and the rounds this fires on
+    // are the high-volume ones where that is the normal case. It is rank 3
+    // now: the last rank to go, because it is the cheapest to keep and the
+    // only one whose reader is the PR author alone.
     //
-    // The blocker is sized so the ladder sheds rank 0 — the convergence
-    // paragraph, which yields before every other rank — and stops. Shed
-    // everything and the body is identical whichever order the ladder used,
-    // so the order would have no guard at all, which is why this constant is
-    // tuned rather than round. To retune after a body-copy change: raise it
-    // until `Convergence:` disappears, and stop before `Not reviewed:` does.
-    // The window is as wide as the paragraph itself.
+    // The blocker is sized to land in the window where the ladder sheds
+    // rank 2 and stops. To retune after a body-copy change: raise it until
+    // `Not reviewed:` disappears, and stop before `Convergence:` does.
     sideFile({
       round: 4,
       posted: 9,
@@ -9397,7 +9406,43 @@ describe('convergence diagnosis reaches the POSTED body', () => {
       modelId: 'm',
       criticalsInline: 0,
       suggestionsInline: 1,
-      bodyCriticals: ['B'.repeat(55_850)],
+      bodyCriticals: ['B'.repeat(55_600)],
+      unreviewedDimensions: ['security'],
+      draftedComments: [
+        { path: 'src/a.ts', line: 1, body: '**[Suggestion]** again' },
+      ],
+    });
+    expect(r.body.length).toBeLessThanOrEqual(65536);
+    expect(r.body).toContain('Convergence:');
+    expect(r.body).not.toContain('Not reviewed:');
+    // And the notice names what ACTUALLY went. Every notice surface keys on
+    // the rank, so a rank that sheds the wrong section announces the wrong
+    // one too.
+    expect(r.body).toContain('the not-reviewed and non-blocking disclosures');
+    expect(r.body).not.toContain('the convergence observation');
+    expect(r.bodyTrim.deferralList).toBe(false);
+  });
+
+  it('still yields — last, and named — when shedding the rest was not enough', () => {
+    // Ranked last is not unrankable. A body that cannot hold its blockers
+    // must still drop an advisory, and being ranked is what makes the trim
+    // notice say so instead of the paragraph vanishing silently.
+    //
+    // Sized one rung past the test above: the ladder sheds rank 2, still
+    // does not fit, sheds rank 3, and stops before the hard cut. To retune:
+    // raise it until `Convergence:` disappears, and stop before `TRUNCATED`
+    // appears.
+    sideFile({
+      round: 4,
+      posted: 9,
+      findings: [{ id: 'R2-1', sev: 'S', file: 'src/a.ts', title: 'x' }],
+    });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      bodyCriticals: ['B'.repeat(56_100)],
       unreviewedDimensions: ['security'],
       draftedComments: [
         { path: 'src/a.ts', line: 1, body: '**[Suggestion]** again' },
@@ -9405,17 +9450,11 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     });
     expect(r.body.length).toBeLessThanOrEqual(65536);
     expect(r.body).not.toContain('Convergence:');
-    // A lower-ranked disclosure outlives it: the ladder reached this far and
-    // the paragraph went first.
-    expect(r.body).toContain('Not reviewed:');
-    // And the notice names what ACTUALLY went. Every notice surface keys on
-    // the rank, so sharing a rank with the deferral list made a round that
-    // shed only this paragraph announce a deferred-findings list that never
-    // existed and point the author at artifact entries that do not exist.
     expect(r.body).toContain('the convergence observation');
-    expect(r.body).not.toContain('the deferred-findings list');
-    expect(r.body).not.toContain('findings artifact');
-    expect(r.bodyTrim.deferralList).toBe(false);
+    expect(r.body).toContain('the not-reviewed and non-blocking disclosures');
+    // The rank path, not the cut: a truncated body would prove nothing
+    // about the ORDER the ranks went in.
+    expect(r.body).not.toContain('TRUNCATED');
   });
 
   it('stamps the posting floor this round ran under beside its volume', () => {
@@ -9517,9 +9556,10 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     expect(r.body).not.toContain('9999');
   });
 
-  it('leaves a terminal copy of the paragraph the ladder sheds first', () => {
-    // Rank 0 goes first, and the trim notice tells the author the trimmed
-    // sections "still hold — read them in the terminal report". Unlike the
+  it('leaves a terminal copy of the paragraph the ladder can shed', () => {
+    // The paragraph is the LAST rank the ladder sheds, and the trim notice
+    // tells the author the trimmed sections "still hold — read them in the
+    // terminal report" whichever rank went. Unlike the
     // deferral list (findings artifact) and the not-reviewed disclosures
     // (the model's own inputs), a diagnosis derived from the side file has
     // no other copy anywhere unless the composed result carries one.
@@ -9613,6 +9653,13 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     // The promise the trim notice makes is about a body that DROPPED the
     // paragraph. A test that asserts the body still contains it never
     // reaches the case the copy exists for.
+    //
+    // Sized like the two order tests above, and for the same reason: the
+    // paragraph is the last rank the ladder sheds, so reaching a body that
+    // dropped it means sizing past every other rank. The window here runs
+    // 55,825–56,350 — this constant sat at 55,850, twenty-five characters
+    // above its own floor. To retune after a body-copy change: raise it
+    // until `Convergence:` disappears, and stop before `TRUNCATED` appears.
     sideFile({
       round: 4,
       posted: 9,
@@ -9624,13 +9671,14 @@ describe('convergence diagnosis reaches the POSTED body', () => {
       modelId: 'm',
       criticalsInline: 0,
       suggestionsInline: 1,
-      bodyCriticals: ['B'.repeat(55_850)],
+      bodyCriticals: ['B'.repeat(56_100)],
       unreviewedDimensions: ['security'],
       draftedComments: [
         { path: 'src/a.ts', line: 1, body: '**[Suggestion]** again' },
       ],
     });
     expect(r.body).not.toContain('Convergence:');
+    expect(r.body).not.toContain('TRUNCATED');
     expect(r.convergence?.en).toContain('Convergence:');
   });
 
@@ -9827,6 +9875,550 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     expect(parseLedger(r.body)?.floor).toBe('o');
   });
 
+  it('carries the matched recommendations on the composed result', () => {
+    // The machine-readable half: a caller applies ITS policy to these codes
+    // without parsing prose, and without this module owning a threshold.
+    // A COVERED plan: `land-and-defer` needs an established scope as well as
+    // an established blocker count, so a round that cannot show the diff was
+    // read never offers merging as an ending.
+    // A shape the pipeline's own writer can produce: `buildLedger` records
+    // every posted finding, so `fresh` never exceeds the work list absent
+    // `dropped`. The assertions turn on the cluster leg and the blocker
+    // count, so this changes nothing they measure — but a fixture whose
+    // own numbers prove the list incomplete must not be the one that
+    // blesses an inference conditioned on it being complete.
+    const planPath = coveredWithLedger({
+      v: 1,
+      round: 4,
+      posted: 9,
+      fresh: 1,
+      findings: [{ id: 'R2-1', sev: 'S', file: 'src/a.ts', title: 'x' }],
+    });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'src/a.ts', line: 1, body: '**[Suggestion]** again' },
+      ],
+    });
+    const codes = (r.recommendations ?? []).map((x) => x.code);
+    expect(codes).toContain('root-cause-triage');
+    // No Critical posts this round, so the ending is available and named.
+    expect(codes).toContain('land-and-defer');
+    expect(r.body).toContain('No Critical finding is open on this round');
+    // Every code carries the fact it was matched from.
+    for (const rec of r.recommendations ?? []) {
+      expect(rec.basis.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('emits no recommendations on a round that produced no diagnosis', () => {
+    sideFile({ round: 4, posted: 9, fresh: 9, findings: [] });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'src/new.ts', line: 1, body: '**[Suggestion]** unrelated' },
+      ],
+    });
+    expect(r.body).not.toContain('Convergence:');
+    expect(r.recommendations).toBeUndefined();
+  });
+
+  it('discloses a posture that is engaged in name and not in effect', () => {
+    // The floor resolved to critical and Suggestion-level findings posted
+    // inline anyway — a mechanism failure, which is otherwise indis-
+    // tinguishable from a round with nothing to do.
+    // The default configuration: the state names no floor, so the reporting
+    // reading folds to `auto` and resolves critical from round 6 while the
+    // enforcement backstop — strict on purpose — fails open.
+    sideFile({ round: 5, posted: 1, fresh: 1, floor: 'c', findings: [] });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'a.ts', line: 1, body: '**[Critical]** boom' },
+        { path: 'b.ts', line: 2, body: '**[Suggestion]** nit' },
+      ],
+    });
+    expect(r.floorEnforced).toEqual([]);
+    expect(r.body).toContain('Mechanism health:');
+    expect(r.body).toContain('engaged in name and not in effect');
+
+    // The clause renders ONCE. It is spread into three body-assembly
+    // branches, and a second spread in one of them printed it twice.
+    expect(r.body.split('engaged in name and not in effect')).toHaveLength(2);
+
+    // A round that posted NO Suggestion is a round where the gap had no
+    // manifestation — and the sentence asserts one. The first two conjuncts
+    // hold on every default-config round from 6 on, so stopping there
+    // accused the posture of failing on rounds where it was not even asked
+    // to do anything.
+    const criticalsOnly = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [{ path: 'a.ts', line: 1, body: '**[Critical]** boom' }],
+    });
+    expect(criticalsOnly.body).not.toContain('engaged in name');
+
+    // Neither is a round with nothing to report at all. (Its anchor chain
+    // disclosure still stands — that check is about the machinery and does
+    // not depend on what the round found.)
+    const nothing = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      draftedComments: [],
+    });
+    expect(nothing.body).not.toContain('engaged in name');
+
+    // With the floor NAMED, both readings agree and nothing is disclosed.
+    const named = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      severityFloor: 'auto',
+      criticalsInline: 1,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'a.ts', line: 1, body: '**[Critical]** boom' },
+        { path: 'b.ts', line: 2, body: '**[Suggestion]** nit' },
+      ],
+    });
+    expect(named.body).not.toContain('engaged in name and not in effect');
+  });
+
+  it('names the merged provenance end to end, not only in the unit', () => {
+    // The wiring runs pr-context -> side file -> prevLedgerFacts -> the
+    // rendered caveat, and only the last hop had an assertion.
+    sideFile({
+      round: 4,
+      posted: 9,
+      fresh: 9,
+      foreign: true,
+      merged: true,
+      findings: [{ id: 'R2-1', sev: 'S', file: 'src/a.ts', title: 'x' }],
+    });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'src/a.ts', line: 1, body: '**[Suggestion]** again' },
+      ],
+    });
+    expect(r.body).toContain("merged over this account's own entries");
+    expect(r.body).toContain('so some of those rounds');
+  });
+
+  it('discloses an anchor chain that has stopped', () => {
+    // Two consecutive withholds mean every later round re-reads the whole
+    // diff until a round's marker carries an anchor again — the closed loop
+    // measured at 119
+    // minutes on a PR whose code had not changed a line. The plan here
+    // names no fetched sha and the round caps, so this round withholds too.
+    sideFile({ round: 4, posted: 9, fresh: 9, findings: [] });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [{ path: 'a.ts', line: 1, body: '**[Critical]** boom' }],
+    });
+    expect(parseLedger(r.body)?.sha).toBeUndefined();
+    expect(r.body).toContain('Mechanism health:');
+    expect(r.body).toContain('re-reads the whole diff');
+
+    // A predecessor that DID anchor is a chain that has not stopped.
+    sideFile({
+      round: 4,
+      posted: 9,
+      fresh: 9,
+      sha: 'deadbeef00112233',
+      findings: [],
+    });
+    const anchored = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [{ path: 'a.ts', line: 1, body: '**[Critical]** boom' }],
+    });
+    expect(anchored.body).not.toContain('re-reads the whole diff');
+  });
+
+  it('agrees with the ledger about an out-of-bounds claimed id', () => {
+    // `idFor` refuses to carry an id the serializer would reject and mints a
+    // fresh one. Read as a re-post here, the marker's own work list would
+    // gain a round-N entry that entered no fresh count — one end calling a
+    // comment carried while the other calls it new. The list is SHORTENED
+    // on purpose: over a whole one the stray-id rescue already reaches this
+    // draft, so the bound is what carries the case here.
+    const long = `R2-${'9'.repeat(24)}`;
+    sideFile({
+      round: 4,
+      posted: 9,
+      fresh: 9,
+      dropped: 3,
+      findings: [{ id: 'R2-1', sev: 'S', file: 'src/a.ts', title: 'x' }],
+    });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [
+        { path: 'src/a.ts', line: 1, body: `**[Critical]** ${long}: boom` },
+      ],
+    });
+    expect(parseLedger(r.body)?.findings.map((x) => x.id)).toEqual(['R5-1']);
+    expect(r.postedFresh).toBe(1);
+    expect(parseLedger(r.body)?.fresh).toBe(1);
+  });
+
+  it('does not accuse the posture over a finding the posture itself exempts', () => {
+    // SKILL Step 6 excludes a `[build]`/`[test]`/`[probe]` finding by source
+    // at any floor: it is pre-confirmed and stays inline whether or not the
+    // floor engaged. A fully compliant round that defers every deferrable
+    // Suggestion and posts one such finding is the posture working, not
+    // failing — and when the code-side reroute has failed open, the
+    // model-side posture is the layer carrying that same carve-out.
+    sideFile({ round: 5, posted: 1, fresh: 1, floor: 'c', findings: [] });
+    const deterministic = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'a.ts', line: 1, body: '**[Suggestion]** [test] suite is red' },
+      ],
+    });
+    expect(deterministic.body).not.toContain('engaged in name');
+
+    // A PATHLESS Suggestion is excluded for the same reason by a different
+    // route: it cannot become a deferral entry at all, so no floor could
+    // have moved it — the same structural exclusion `floorEnforcedReroute`
+    // makes.
+    const pathless = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [{ line: 1, body: '**[Suggestion]** a plain nit' }],
+    });
+    expect(pathless.body).not.toContain('engaged in name');
+
+    // A Suggestion the floor WOULD have deferred still fires it.
+    const deferrable = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'a.ts', line: 1, body: '**[Suggestion]** a plain nit' },
+      ],
+    });
+    expect(deferrable.body).toContain('engaged in name');
+  });
+
+  it('leaves a terminal copy of the health note the ladder sheds first', () => {
+    // The note has its own rank BELOW the convergence paragraph, so it is
+    // the first thing shed — and the trim notice points the reader at a
+    // terminal report that must actually hold it.
+    sideFile({ round: 4, posted: 9, fresh: 9, findings: [] });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [{ path: 'a.ts', line: 1, body: '**[Critical]** boom' }],
+    });
+    expect(r.body).toContain('Mechanism health:');
+    expect(r.health?.en).toContain('Mechanism health:');
+    expect(r.health?.zh).toContain('机制健康：');
+  });
+
+  it('names the health note in the trim notice, not the convergence one', () => {
+    // With no diagnosis firing, rank -1 holds ONLY this note. Sharing the
+    // convergence paragraph's rank made the notice name
+    // "the convergence observation" for a section that
+    // never existed in the body.
+    sideFile({ round: 4, posted: 9, fresh: 9, findings: [] });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      bodyCriticals: ['B'.repeat(56_000)],
+      unreviewedDimensions: ['security'],
+      draftedComments: [{ path: 'a.ts', line: 1, body: '**[Critical]** boom' }],
+    });
+    expect(r.body.length).toBeLessThanOrEqual(65536);
+    expect(r.body).not.toContain('Mechanism health:');
+    expect(r.body).toContain('the mechanism-health note');
+    expect(r.body).not.toContain('the convergence observation');
+    // ...and the copy the notice points at exists.
+    expect(r.health?.en).toContain('Mechanism health:');
+  });
+
+  it('keeps quiet on a round whose scope closed cleanly', () => {
+    // The chain is TWO withholds. A round that anchors clears it, however
+    // unanchored its predecessor was.
+    const planPath = coveredWithLedger({
+      v: 1,
+      round: 4,
+      findings: [],
+      posted: 0,
+      fresh: 0,
+    });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      draftedComments: [{ path: 'a.ts', line: 1, body: '**[Critical]** boom' }],
+    });
+    expect(parseLedger(r.body)?.sha).toBe('deadbeef00112233');
+    expect(r.body).not.toContain('re-reads the whole diff');
+  });
+
+  it('carries the codes on a REQUEST_CHANGES result too', () => {
+    // Three separately-maintained result constructions; only one was pinned.
+    const planPath = coveredWithLedger({
+      v: 1,
+      round: 5,
+      posted: 9,
+      fresh: 9,
+      findings: [{ id: 'R2-1', sev: 'C', file: 'src/a.ts', title: 'x' }],
+    });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 1,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'src/a.ts', line: 1, body: '**[Critical]** a new one' },
+        { path: 'src/b.ts', line: 2, body: '**[Suggestion]** a plain nit' },
+      ],
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect((r.recommendations ?? []).map((x) => x.code)).toContain(
+      'root-cause-triage',
+    );
+    // ...and this branch's own copy of the health note. It is round 6 under
+    // the default configuration, so the posture gap is real and manifested.
+    expect(r.body).toContain('engaged in name and not in effect');
+    expect(r.health?.en).toContain('Mechanism health:');
+  });
+
+  it('withholds land-and-defer while a blocker could not be ruled on', () => {
+    // A round capped `cannot-tell-existing-critical` posts zero Criticals
+    // precisely BECAUSE existing ones could not be ruled on: the entries
+    // ride their own channel, are never counted, and were never shown fixed.
+    // Passed as a confirmed zero, the body would carry "Unresolved, please
+    // confirm:" and "no Critical is open" at once, and the artifact would
+    // tell a machine consumer to merge.
+    // A COVERED plan on purpose: with an unproven scope the sibling leg
+    // would withhold the code anyway, and this assertion would not be
+    // measuring the cannot-tell leg at all.
+    const planPath = coveredWithLedger({
+      v: 1,
+      round: 5,
+      posted: 1,
+      fresh: 1,
+      findings: [],
+    });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      cannotTellCriticals: ['a.ts:12 — an existing blocker, unruled'],
+      draftedComments: [
+        { path: 'a.ts', line: 1, body: '**[Suggestion]** a plain nit' },
+      ],
+    });
+    expect(r.scopeUnproven).toBe(false);
+    expect(r.cappedBy).toContain('cannot-tell-existing-critical');
+    expect(r.body).toContain('Convergence:');
+    expect(r.body).not.toContain('No Critical finding is open');
+    expect((r.recommendations ?? []).map((x) => x.code)).not.toContain(
+      'land-and-defer',
+    );
+  });
+
+  it('withholds land-and-defer while the round cannot show the diff was read', () => {
+    // An unproven scope means prior-round Criticals sitting in the unread
+    // territory are read as fixed by the non-repost inference alone. A
+    // machine consumer keyed on the code would be told to merge over an
+    // unreviewed chunk.
+    sideFile({ round: 5, posted: 1, fresh: 1, findings: [] });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'a.ts', line: 1, body: '**[Suggestion]** a plain nit' },
+      ],
+    });
+    expect(r.scopeUnproven).toBe(true);
+    expect(r.body).toContain('Convergence:');
+    expect(r.body).not.toContain('No Critical finding is open');
+    expect((r.recommendations ?? []).map((x) => x.code)).not.toContain(
+      'land-and-defer',
+    );
+  });
+
+  it('withholds land-and-defer while a finding is still unverified', () => {
+    // The second unestablished shape the gate names, and it had no test: a
+    // cumulative findings file still carrying an `— [unverified]` tag means
+    // the verifier never ruled, so the round's zero is not a confirmed zero.
+    const planPath = coveredWithLedger({
+      v: 1,
+      round: 5,
+      posted: 1,
+      fresh: 1,
+      findings: [],
+    });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      findingsPath: findingsFile(TAGGED),
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'a.ts', line: 1, body: '**[Suggestion]** a plain nit' },
+      ],
+    });
+    expect(r.cappedBy).toContain('findings-unverified-at-compose');
+    expect(r.body).toContain('Convergence:');
+    expect(r.body).not.toContain('No Critical finding is open');
+    expect((r.recommendations ?? []).map((x) => x.code)).not.toContain(
+      'land-and-defer',
+    );
+  });
+
+  it.each([
+    [
+      'a whiffed dimension',
+      { unreviewedDimensions: ['security — the relaunch returned nothing'] },
+      {},
+    ],
+    ['a truncated work list', {}, { dropped: 3 }],
+    ['a pure-foreign work list', {}, { foreign: true }],
+  ])('withholds land-and-defer over %s', (_label, inputOver, sideOver) => {
+    // Each arm starts from the shape that DOES offer the ending and flips
+    // exactly one leg, so the assertion measures that leg and not a sibling
+    // that would have withheld the code anyway.
+    const planPath = coveredWithLedger({
+      v: 1,
+      round: 4,
+      posted: 9,
+      fresh: 1,
+      findings: [{ id: 'R2-1', sev: 'S', file: 'src/a.ts', title: 'x' }],
+      ...sideOver,
+    });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'src/a.ts', line: 1, body: '**[Suggestion]** again' },
+      ],
+      ...inputOver,
+    });
+    // The paragraph still renders — only the ending is withheld.
+    expect(r.body).toContain('Convergence:');
+    expect(r.body).not.toContain('No Critical finding is open');
+    expect((r.recommendations ?? []).map((x) => x.code)).not.toContain(
+      'land-and-defer',
+    );
+  });
+
+  it('still offers the ending when the only cap is the depth-only dimension', () => {
+    // The positive side of the gate's `!anchorFailsClosed` conjunct: the
+    // build-and-test dimension gap caps every round in this repository, and
+    // the gate passes `openCriticals` through it — tightened to
+    // `cappedBy.length === 0`, the machine-readable merge ending would never
+    // fire in production and nothing would redden.
+    const planPath = coveredWithLedger({
+      v: 1,
+      round: 4,
+      posted: 9,
+      fresh: 1,
+      findings: [{ id: 'R2-1', sev: 'S', file: 'src/a.ts', title: 'x' }],
+    });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'src/a.ts', line: 1, body: '**[Suggestion]** again' },
+      ],
+      unreviewedDimensions: [
+        'build-and-test — the integration suite never ran',
+      ],
+    });
+    expect(r.cappedBy).toEqual(['unreviewed-dimension']);
+    expect(r.dimensionGapsAreDepthOnly).toBe(true);
+    expect(parseLedger(r.body)?.sha).toBe('deadbeef00112233');
+    expect(r.body).toContain('No Critical finding is open');
+    expect((r.recommendations ?? []).map((x) => x.code)).toContain(
+      'land-and-defer',
+    );
+  });
+
+  it('still offers the ending over a foreign work list merged over this one', () => {
+    // The provenance leg withholds on a PURE-FOREIGN list — this account's
+    // entries are in no work list at all — but a MERGED foreign list
+    // protects them under their own ids. Simplified to `foreign !== true`,
+    // the ending would silently disappear from rounds whose merged list is
+    // complete and certified.
+    const planPath = coveredWithLedger({
+      v: 1,
+      round: 4,
+      posted: 9,
+      fresh: 1,
+      foreign: true,
+      merged: true,
+      findings: [{ id: 'R2-1', sev: 'S', file: 'src/a.ts', title: 'x' }],
+    });
+    const r = composeReview({
+      planPath,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      draftedComments: [
+        { path: 'src/a.ts', line: 1, body: '**[Suggestion]** again' },
+      ],
+    });
+    expect(r.body).toContain("merged over this account's own entries");
+    expect(r.body).toContain('No Critical finding is open');
+    expect((r.recommendations ?? []).map((x) => x.code)).toContain(
+      'land-and-defer',
+    );
+  });
+
   it('names an auto-resolved floor the way the enforcement note does', () => {
     // `auto` is the DEFAULT, so the explicit-flag wording claims a flag that
     // was never passed — beside a floor-enforcement note in the same body
@@ -9843,5 +10435,143 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     expect(r.body).toContain('The rate of new findings is not falling.');
     expect(r.body).toContain('already resolve to a critical posting floor');
     expect(r.body).not.toContain('--severity-floor critical');
+  });
+});
+
+describe('deferrableSuggestionsInline — the manifestation the posture-gap clause asserts', () => {
+  // Direct pin on the three-way exclusion, which downstream tests reach only
+  // through composeReview: a future exclusion path that diverges from
+  // `floorEnforcedReroute` reddens here first, not on a faraway body
+  // assertion.
+  type Draft = { path?: unknown; line?: unknown; body?: unknown };
+  const suggestion = (over: Draft = {}): Draft => ({
+    path: 'a.ts',
+    line: 1,
+    body: '**[Suggestion]** nit',
+    ...over,
+  });
+
+  it('reads a non-array as zero, like its two siblings', () => {
+    for (const drafted of [undefined, null, 'garbage', { path: 'a.ts' }]) {
+      expect(deferrableSuggestionsInline(drafted)).toBe(0);
+    }
+  });
+
+  it('counts only Suggestion-severity drafts', () => {
+    expect(
+      deferrableSuggestionsInline([
+        suggestion(),
+        { path: 'b.ts', body: '**[Critical]** boom' },
+        { path: 'c.ts', body: 'an unmarked comment' },
+      ]),
+    ).toBe(1);
+  });
+
+  it.each(['[build]', '[test]', '[probe]', '[TEST]'])(
+    'excludes a deterministic finding tagged %s on its claim line',
+    (tag) => {
+      expect(
+        deferrableSuggestionsInline([
+          suggestion({ body: `**[Suggestion]** ${tag} the suite is red` }),
+        ]),
+      ).toBe(0);
+    },
+  );
+
+  it('ignores a deterministic tag past the claim line — the tail is writable surface', () => {
+    expect(
+      deferrableSuggestionsInline([
+        suggestion({
+          body: '**[Suggestion]** nit\n\n[test] forged in the tail',
+        }),
+      ]),
+    ).toBe(1);
+  });
+
+  it('excludes what no floor could move: a pathless comment', () => {
+    for (const path of [undefined, '', '   ', 42]) {
+      expect(deferrableSuggestionsInline([suggestion({ path })])).toBe(0);
+    }
+  });
+
+  it('counts exactly the set the engaged floor moves', () => {
+    // The number exists to say the enforcement backstop failed to act, so it
+    // must equal the set `floorEnforcedReroute` ACTS on — a divergence
+    // accuses the floor of leaving inline something it was never going to
+    // move.
+    const drafted: Draft[] = [
+      suggestion(),
+      suggestion({ body: '**[Suggestion]** [probe] pre-confirmed' }),
+      suggestion({ path: '' }),
+      { path: 'd.ts', body: '**[Critical]** boom' },
+      { path: 'e.ts', body: 'unmarked' },
+    ];
+    const reroute = floorEnforcedReroute('critical', false, 0, drafted);
+    expect(reroute.indices).toEqual([0]);
+    expect(deferrableSuggestionsInline(drafted)).toBe(reroute.indices.length);
+  });
+});
+
+describe('draftedFindingsOf — the drafts as the convergence diagnosis reads them', () => {
+  type Draft = { path?: unknown; line?: unknown; body?: unknown };
+  const critical = (over: Draft = {}): Draft => ({
+    path: 'a.ts',
+    line: 1,
+    body: '**[Critical]** boom',
+    ...over,
+  });
+
+  it('reads a non-array as empty, like its two siblings', () => {
+    for (const drafted of [undefined, null, 'garbage', 42]) {
+      expect(draftedFindingsOf(drafted)).toEqual([]);
+    }
+  });
+
+  it('excludes unmarked comments — no marker, no finding, no work list', () => {
+    expect(
+      draftedFindingsOf([critical(), { path: 'b.ts', body: 'no marker' }]),
+    ).toEqual([{ file: 'a.ts' }]);
+  });
+
+  it('carries the id a claim line leads with', () => {
+    expect(
+      draftedFindingsOf([
+        critical({ body: '**[Critical]** R2-1: still open' }),
+      ]),
+    ).toEqual([{ file: 'a.ts', carriedId: 'R2-1' }]);
+  });
+
+  it('re-mints an id past the ledger cap, the way idFor does', () => {
+    // Exactly at the cap the id travels; one char over it cannot enter any
+    // work list, so the diagnosis must read the comment as fresh — the two
+    // ends of the pipeline agreeing about one comment.
+    const atCap = `R2-${'9'.repeat(LEDGER_MAX_ID - 3)}`;
+    const overCap = `R2-${'9'.repeat(LEDGER_MAX_ID - 2)}`;
+    expect(atCap).toHaveLength(LEDGER_MAX_ID);
+    expect(overCap).toHaveLength(LEDGER_MAX_ID + 1);
+    expect(
+      draftedFindingsOf([
+        critical({ body: `**[Critical]** ${atCap}: still open` }),
+        critical({ body: `**[Critical]** ${overCap}: still open` }),
+      ]),
+    ).toEqual([{ file: 'a.ts', carriedId: atCap }, { file: 'a.ts' }]);
+  });
+
+  it('dedupes a claimed id the way the ledger keeps the FIRST of them', () => {
+    expect(
+      draftedFindingsOf([
+        critical({ body: '**[Critical]** R2-1: still open' }),
+        critical({ path: 'b.ts', body: '**[Critical]** R2-1: voiced again' }),
+      ]),
+    ).toEqual([{ file: 'a.ts', carriedId: 'R2-1' }, { file: 'b.ts' }]);
+  });
+
+  it('anchors a pathless draft to the empty string, never to a stringified seam', () => {
+    expect(
+      draftedFindingsOf([
+        critical({ path: undefined }),
+        critical({ path: 42 }),
+      ]),
+    ).toEqual([{ file: '' }, { file: '' }]);
   });
 });
