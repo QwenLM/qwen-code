@@ -72,7 +72,7 @@ import type {
   TelemetryRuntimeConfig,
   TelemetrySettings,
 } from '@qwen-code/qwen-code-core';
-import { legacyEnvKeyAttribution } from '@qwen-code/qwen-code-core';
+import { legacyEnvKeyAttribution } from '@qwen-code/qwen-code-core/providerConfig';
 import { MEMORY_PROJECT_SCOPES } from '@qwen-code/qwen-code-core/memoryScopes';
 import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 // Dynamic-imported below (not at module scope) so the serve fast-path bundle
