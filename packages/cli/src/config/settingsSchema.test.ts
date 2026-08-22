@@ -205,6 +205,7 @@ describe('SettingsSchema', () => {
       expect(imageModel.default).toBe('');
       expect(imageModel.requiresRestart).toBe(false);
       expect(imageModel.showInDialog).toBe(false);
+      expect(imageModel.description).toContain('supportsImageGeneration: true');
     });
 
     it('should define the advisor model setting', () => {

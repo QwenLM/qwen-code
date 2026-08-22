@@ -300,9 +300,9 @@ The `extra_body` field allows you to add custom parameters to the request body s
 
 #### imageModel
 
-| Setting      | Type   | Description                                                                                                                                                                                                                        | Default |
-| ------------ | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| `imageModel` | string | Model used by the built-in `image_gen` tool. The selected model must have `imageOnly: true`, an HTTPS `baseUrl`, and `envKey` in `modelProviders`. Leave empty to keep the tool unavailable. Can also be set via `/model --image`. | `""`    |
+| Setting      | Type   | Description                                                                                                                                                                                                                                                                              | Default |
+| ------------ | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `imageModel` | string | Model used by the built-in `image_gen` tool. The selected route must set `supportsImageGeneration: true` (or legacy `imageOnly: true`) and declare an HTTPS `baseUrl` plus `envKey` in `modelProviders`. Leave empty to keep the tool unavailable. Can also be set via `/model --image`. | `""`    |
 
 #### visionBridgeTimeoutMs
 
