@@ -1003,6 +1003,8 @@ export interface DaemonToolTranscriptBlock extends DaemonTranscriptBlockBase {
   preview: DaemonToolPreview;
   /** Typed, redacted result data for explicit document/export projection. */
   resultPreview?: DaemonToolResultPreview;
+  /** Safe presentation signal that this tool continues as a background task. */
+  background?: boolean;
   content?: unknown;
   locations?: unknown;
   details?: string;

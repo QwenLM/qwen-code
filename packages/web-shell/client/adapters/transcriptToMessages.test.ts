@@ -175,6 +175,7 @@ function toolBlock(
     toolKind: overrides.toolKind,
     preview: overrides.preview ?? { kind: 'generic' },
     resultPreview: overrides.resultPreview,
+    background: overrides.background,
     rawInput: overrides.rawInput,
     rawOutput: overrides.rawOutput,
     content: overrides.content,
@@ -1495,6 +1496,58 @@ describe('transcriptBlocksToDaemonMessages', () => {
       role: 'assistant',
       content: 'main continues',
     });
+  });
+
+  it('preserves safe background identity without raw output', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        toolBlock('agent-background-safe', 'agent-safe', 'completed', 20, {
+          toolName: 'agent',
+          background: true,
+          rawInput: undefined,
+          rawOutput: undefined,
+          preview: {
+            kind: 'subagent_delegation',
+            agentName: 'reviewer',
+            task: 'Review safely',
+          },
+          resultPreview: {
+            kind: 'text',
+            text: 'Background agent started',
+          },
+        }),
+      ],
+      { safeToolProjection: true },
+    );
+    const tool = messages.find((message) => message.role === 'tool_group')
+      ?.tools[0];
+
+    expect(tool).toMatchObject({
+      callId: 'agent-safe',
+      status: 'pending',
+    });
+    expect(tool?.endTime).toBeUndefined();
+  });
+
+  it('does not classify non-agent background tools as subagents', () => {
+    const messages = transcriptBlocksToDaemonMessages(
+      [
+        toolBlock('shell-background-safe', 'shell-safe', 'completed', 20, {
+          toolName: 'shell',
+          background: true,
+          rawInput: undefined,
+          rawOutput: undefined,
+          preview: { kind: 'command', command: 'npm test &' },
+          resultPreview: { kind: 'text', text: 'Started in background' },
+        }),
+      ],
+      { safeToolProjection: true },
+    );
+    const tool = messages.find((message) => message.role === 'tool_group')
+      ?.tools[0];
+
+    expect(tool).toMatchObject({ callId: 'shell-safe', status: 'completed' });
+    expect(tool?.endTime).toBe(20);
   });
 
   it('keeps merged background subagent blocks from capturing main-thread text', () => {

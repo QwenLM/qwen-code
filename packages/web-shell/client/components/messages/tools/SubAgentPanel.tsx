@@ -88,7 +88,8 @@ function SubToolTime({
   timestamp?: number;
   children: ReactNode;
 }) {
-  if (timestamp === undefined) return <>{children}</>;
+  const documentMode = useTranscriptRenderMode() === 'document';
+  if (documentMode || timestamp === undefined) return <>{children}</>;
   return (
     <div className={styles.toolTimeRow}>
       {children}
@@ -322,7 +323,7 @@ export function SubAgentPanel({
     <div className={inline ? undefined : styles.panel}>
       {!hideHeader && (
         <div
-          className={styles.header}
+          className={`${styles.header}${documentMode ? ` ${styles.documentHeader}` : ''}`}
           onClick={() => {
             if (!documentMode) setExpanded(!expanded);
           }}

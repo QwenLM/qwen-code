@@ -6,7 +6,7 @@
 >
 > 当前状态：MR1 契约预验证已完成；当前分支实施 MR2 的真实 VS Code ACP 时间线消费者与 HTML Export 消费者
 >
-> 当前门禁：direct-daemon/ACP identity 已通过并选择 ACP；`overall: "fail"`，直到浏览器、scope/generation、VSIX/宿主动作和 packaging 门禁完成
+> 当前门禁：direct-daemon/ACP identity 和产品 HTML browser gate 已通过并选择 ACP；`overall: "fail"`，直到 scope/generation、VSIX/宿主动作和 packaging 门禁完成
 
 ## 0. 文档治理
 
@@ -86,9 +86,9 @@ ChatTranscriptModel
 | VS Code 时间线                                   | feature flag 下使用真实 ACP adapter；默认 legacy，缺 identity 回退    | IMPLEMENTED / rollout pending |
 | Export document schema/builder                   | canonical schema、严格结构校验和语义安全校验进入产品路径              | PASS                          |
 | document mode/HTML wiring                        | CLI、Web API、VS Code export 使用同一版本绑定产品模板                 | IMPLEMENTED                   |
-| Browser/Scope/VSIX/Packaging                     | 本地浏览器启动受 sandbox 限制；scope/reconnect、VSIX/安装产物尚未认证 | BLOCKED / DEFERRED            |
+| Browser/Scope/VSIX/Packaging                     | 产品 HTML browser gate 已通过；scope/reconnect、VSIX/安装产物尚未认证 | PARTIAL / DEFERRED            |
 
-`overall` 仍为 FAIL 不是 identity 或实现失败，而是 required 的浏览器与发布级行为证据尚未全部完成；不能因生产代码已接线就提前翻转为 PASS。
+`overall` 仍为 FAIL 不是 identity、HTML renderer 或实现失败，而是 required 的 VS Code 宿主与发布级行为证据尚未全部完成；不能因生产代码已接线就提前翻转为 PASS。
 
 ## 3. 目标与非目标
 
@@ -751,7 +751,7 @@ MR1 不以源码文本断言认证 Desktop 打包行为。Web/Tauri 的现有构
 
 Passing test 也必须反向审计：测试是否断言了正确语义、是否加载当前构建产物、是否真的覆盖真实消费者，不能用静态 source assertion 替代浏览器或 VSIX 行为验证。
 
-当前验证结果：SDK、Core、CLI、Web Shell、VS Code 聚焦测试和 direct-daemon/ACP integration identity gate 已通过；产品 HTML 已完成构建与 Node 侧安全断言，concurrent runner 也复用同一产品收集、归一化和 formatter。当前受控 macOS 环境在页面创建前拒绝 Chromium Mach port 注册，因此 browser gate 如实保持 BLOCKED，必须在允许启动 Playwright Chromium 的 CI/开发环境复跑后才能记为 PASS。
+当前验证结果：SDK、Core、CLI、Web Shell、VS Code 聚焦测试和 direct-daemon/ACP integration identity gate 已通过；产品 HTML 已完成构建、Node 侧安全断言和真实 Chromium browser gate，concurrent runner 也复用同一产品收集、归一化和 formatter。browser gate 已覆盖最大文档、真实产品入口、零网络、主动 CSP 违规、canary、搜索、复制、打印、远程资源降级和 epoch 时间戳排除；总体仍等待 VS Code scope/generation/reconnect、宿主动作、VSIX 与 packaged artifact 证据。
 
 ## 14. 门禁
 
@@ -784,7 +784,7 @@ Passing test 也必须反向审计：测试是否断言了正确语义、是否�
 
 ### 14.4 当前与最终结论
 
-MR1 的历史结论是 FAIL evidence。MR2 当前已选择 ACP 且两候选 identity 通过，但总体门禁仍因浏览器、scope/generation、VSIX/宿主动作与 packaging 未完成而保持 FAIL：
+MR1 的历史结论是 FAIL evidence。MR2 当前已选择 ACP，两候选 identity 与产品 HTML browser gate 通过，但总体门禁仍因 scope/generation、VSIX/宿主动作与 packaging 未完成而保持 FAIL：
 
 ```json
 {

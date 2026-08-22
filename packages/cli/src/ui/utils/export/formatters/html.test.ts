@@ -41,6 +41,9 @@ describe('HTML export formatter', () => {
 
   it('uses the version-bound document renderer for the product export path', () => {
     const html = toHtml(sessionData, records);
+    const secondHtml = toHtml(sessionData, records);
+    const nonce = html.match(/script-src 'nonce-([^']+)'/)?.[1];
+    const secondNonce = secondHtml.match(/script-src 'nonce-([^']+)'/)?.[1];
 
     expect(html).toContain('id="transcript-document"');
     expect(html).toContain('Hello from the document exporter.');
@@ -48,6 +51,11 @@ describe('HTML export formatter', () => {
     expect(html).not.toContain('id="chat-data"');
     expect(html).not.toContain('session-secret');
     expect(html).not.toContain('/home/alice');
+    expect(html).not.toContain('__EXPORT_NONCE__');
+    expect(nonce).toBeTruthy();
+    expect(secondNonce).toBeTruthy();
+    expect(secondNonce).not.toBe(nonce);
+    expect(html).toContain(`nonce="${nonce}"`);
   });
 
   it('fails closed when the product template loses its document slot', () => {

@@ -68,6 +68,30 @@ describe('ACP transcript adapter', () => {
     });
   });
 
+  it('uses stamped identity for shell and image-only updates', () => {
+    const result = adaptAcpTranscriptUpdates(
+      [
+        {
+          sessionUpdate: 'shell_output',
+          output: 'shell output',
+          _meta: { qwenTranscript: { segmentId: 'shell-1' } },
+        },
+        {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'image', data: 'AA==', mimeType: 'image/png' },
+          _meta: { qwenTranscript: { segmentId: 'image-1' } },
+        },
+      ],
+      scopeKey,
+    );
+
+    expect(result.compatible).toBe(true);
+    expect(result.blocks).toMatchObject([
+      { kind: 'shell', segmentId: 'shell-1' },
+      { kind: 'user', segmentId: 'image-1' },
+    ]);
+  });
+
   it('rejects a reused source identity for distinct blocks', () => {
     const result = adaptAcpTranscriptUpdates(
       [

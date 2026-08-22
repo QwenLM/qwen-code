@@ -522,16 +522,26 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       );
     }
     let ordinal = 0;
+    let activeSegmentLane: string | undefined;
+    let activeSegmentId: string | undefined;
     const emit = (update: SessionUpdate): TranscriptReplayEmission => {
       const emissionOrdinal = ordinal++;
+      const lane = transcriptSegmentLane(update);
+      if (lane && (lane !== activeSegmentLane || !activeSegmentId)) {
+        activeSegmentLane = lane;
+        activeSegmentId = `${record.uuid}:${emissionOrdinal}`;
+      } else if (!lane && isTranscriptSegmentBoundary(update)) {
+        activeSegmentLane = undefined;
+        activeSegmentId = undefined;
+      }
       return {
         sourceRecordId: record.uuid,
         ...(record.timestamp ? { sourceTimestamp: record.timestamp } : {}),
         emissionOrdinal,
-        update: withTranscriptSegmentId(
-          update,
-          `${record.uuid}:${emissionOrdinal}`,
-        ),
+        update:
+          lane && activeSegmentId
+            ? withTranscriptSegmentId(update, activeSegmentId)
+            : update,
       };
     };
     const meta = {
@@ -1188,6 +1198,52 @@ function withTranscriptSegmentId(
       },
     },
   } as unknown as SessionUpdate;
+}
+
+function transcriptSegmentLane(update: SessionUpdate): string | undefined {
+  const record = update as unknown as Record<string, unknown>;
+  const kind = record['sessionUpdate'];
+  const meta = isObjectRecord(record['_meta']) ? record['_meta'] : undefined;
+  const parentToolCallId =
+    typeof meta?.['parentToolCallId'] === 'string'
+      ? meta['parentToolCallId']
+      : 'root';
+  if (
+    kind === 'user_message_chunk' ||
+    kind === 'agent_message_chunk' ||
+    kind === 'agent_thought_chunk'
+  ) {
+    const content = isObjectRecord(record['content'])
+      ? record['content']
+      : undefined;
+    const contentType =
+      typeof content?.['type'] === 'string' ? content['type'] : undefined;
+    if (!contentType) return undefined;
+    if (
+      contentType === 'text' &&
+      (typeof content?.['text'] !== 'string' || content['text'].length === 0)
+    ) {
+      return undefined;
+    }
+    return `${String(kind)}:${contentType}:${parentToolCallId}`;
+  }
+  if (kind === 'shell_output' || kind === 'tool_output') {
+    const source = typeof meta?.['source'] === 'string' ? meta['source'] : '';
+    const stream = typeof record['stream'] === 'string' ? record['stream'] : '';
+    return `${String(kind)}:${source}:${stream}`;
+  }
+  return undefined;
+}
+
+function isTranscriptSegmentBoundary(update: SessionUpdate): boolean {
+  const record = update as unknown as Record<string, unknown>;
+  const kind = record['sessionUpdate'];
+  return (
+    typeof kind === 'string' &&
+    kind !== 'agent_message_chunk' &&
+    kind !== 'agent_thought_chunk' &&
+    kind !== 'user_message_chunk'
+  );
 }
 
 function projectGoalControlCommand(

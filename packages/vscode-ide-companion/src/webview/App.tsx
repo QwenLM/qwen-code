@@ -19,6 +19,8 @@ import { useMessageHandling } from './hooks/message/useMessageHandling.js';
 import { useToolCalls } from './hooks/useToolCalls.js';
 import { useWebViewMessages } from './hooks/useWebViewMessages.js';
 import { useAcpTranscript } from './hooks/useAcpTranscript.js';
+import { useWebShellTranscriptEnabled } from './hooks/useWebShellTranscriptEnabled.js';
+import { useWebviewTheme } from './hooks/useWebviewTheme.js';
 import {
   shouldSendMessage,
   useMessageSubmit,
@@ -295,9 +297,9 @@ function findMessageIndex(
 
 export const App: React.FC = () => {
   const vscode = useVSCode();
-  const webShellTranscriptEnabled =
-    document.body.dataset.webShellTranscript === 'enabled';
+  const webShellTranscriptEnabled = useWebShellTranscriptEnabled();
   const acpTranscript = useAcpTranscript(webShellTranscriptEnabled);
+  const webviewTheme = useWebviewTheme();
 
   // Core hooks
   const sessionManagement = useSessionManagement(vscode);
@@ -1391,9 +1393,13 @@ export const App: React.FC = () => {
       const container = messagesContainerRef.current;
       if (container && e.target instanceof Element) {
         const transcriptRow = e.target.closest('[data-message-row-key]');
-        contextMenuTranscriptTextRef.current = transcriptRow?.textContent
-          ? transcriptRow.textContent.trim()
-          : null;
+        const sourceBlockIds = transcriptRow?.getAttribute(
+          'data-source-block-ids',
+        );
+        contextMenuTranscriptTextRef.current =
+          sourceBlockIds && transcriptRow?.textContent
+            ? transcriptRow.textContent.trim()
+            : null;
         contextMenuMsgIdxRef.current = findMessageIndex(
           e.target,
           container,
@@ -1426,11 +1432,10 @@ export const App: React.FC = () => {
       const { action } = message.data as { action: string };
 
       if (action === 'copyMessage') {
-        if (
-          useWebShellTranscript &&
-          contextMenuTranscriptTextRef.current !== null
-        ) {
-          copyToClipboard(contextMenuTranscriptTextRef.current);
+        if (useWebShellTranscript) {
+          if (contextMenuTranscriptTextRef.current !== null) {
+            copyToClipboard(contextMenuTranscriptTextRef.current);
+          }
           return;
         }
         const idx = contextMenuMsgIdxRef.current;
@@ -1595,11 +1600,7 @@ export const App: React.FC = () => {
                 renderMode="readonly"
                 compactThinking
                 collapseCompletedTurns={false}
-                theme={
-                  document.body.classList.contains('vscode-light')
-                    ? 'light'
-                    : 'dark'
-                }
+                theme={webviewTheme}
               />
             ) : (
               <MessageList

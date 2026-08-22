@@ -1,16 +1,16 @@
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import type { SessionUpdate } from '@agentclientprotocol/sdk';
-import {
-  DAEMON_ERROR_KINDS,
-  type DaemonEvent,
-  type DaemonTranscriptBlock,
-} from '@qwen-code/sdk/daemon';
+import { SchemaValidator } from '@qwen-code/qwen-code-core';
+import { DAEMON_ERROR_KINDS, type DaemonEvent } from '@qwen-code/sdk/daemon';
 import { projectChatRecordsToDaemonTranscript } from '@qwen-code/sdk/daemon/transcript';
-import { createExportTranscriptDocumentV1 } from '../packages/cli/src/ui/utils/export/export-transcript-document.js';
+import {
+  createExportTranscriptDocumentV1,
+  exportDocumentToTranscriptBlocks,
+} from '../packages/cli/src/ui/utils/export/export-transcript-document.js';
 import { TranscriptUpdateIdentityProjector } from '../packages/cli/src/acp-integration/session/transcript-update-identity.js';
 import { transcriptBlocksToDaemonMessages } from '../packages/web-shell/client/adapters/transcriptToMessages.js';
 import {
@@ -32,21 +32,28 @@ interface FixtureManifest {
   readonly fixtureVersion: number;
   readonly name: string;
   readonly generatorVersion: string;
+  readonly sources: readonly string[];
   readonly capabilities: readonly string[];
   readonly consumers: readonly string[];
   readonly expectedDiagnostics: readonly string[];
   readonly normalizedFields: readonly string[];
+  readonly complete: boolean;
   readonly hashes: Readonly<Record<string, string>>;
 }
 
 interface ExpectedModel {
   readonly kinds: readonly string[];
+  readonly texts: readonly string[];
   readonly sourceRecordIds: readonly (readonly string[])[];
   readonly rawFreeToolResult: string;
 }
 
 interface ExpectedRenderItems {
   readonly roles: readonly string[];
+  readonly expectedTextContent: readonly string[];
+  readonly runtimeFields: readonly string[];
+  readonly expectedToolArgs: Readonly<Record<string, unknown>>;
+  readonly expectedToolResult: unknown;
 }
 
 interface ExpectedExport {
@@ -74,23 +81,46 @@ function sha256(path: string): string {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
 }
 
-function removeRawPresentationFields(
-  blocks: readonly DaemonTranscriptBlock[],
-): DaemonTranscriptBlock[] {
-  const forbidden = new Set([
-    'rawInput',
-    'rawOutput',
-    'content',
-    'toolCall',
-    'details',
-    'locations',
-    'meta',
-  ]);
-  return JSON.parse(
-    JSON.stringify(blocks, (key, value) =>
-      forbidden.has(key) ? undefined : value,
-    ),
-  ) as DaemonTranscriptBlock[];
+function listFixtureEvidenceFiles(directory: string): string[] {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) =>
+    entry.isFile() && entry.name !== 'manifest.json' ? [entry.name] : [],
+  );
+}
+
+function expectManifestToMatchSchema(
+  manifest: FixtureManifest,
+  schema: Record<string, unknown>,
+): void {
+  expect(SchemaValidator.validateStrict(schema, manifest)).toBeNull();
+  const properties = schema['properties'] as Record<string, unknown>;
+  const required = schema['required'] as string[];
+  expect(schema['additionalProperties']).toBe(false);
+  expect(Object.keys(manifest).every((key) => key in properties)).toBe(true);
+  for (const key of required) expect(manifest).toHaveProperty(key);
+  const hashSchema = (
+    properties['hashes'] as { additionalProperties: { pattern: string } }
+  ).additionalProperties;
+  const pattern = new RegExp(hashSchema.pattern, 'u');
+  for (const hash of Object.values(manifest.hashes))
+    expect(hash).toMatch(pattern);
+}
+
+function collectDeclaredSchemaProperties(
+  value: unknown,
+  names = new Set<string>(),
+): Set<string> {
+  if (Array.isArray(value)) {
+    for (const item of value) collectDeclaredSchemaProperties(item, names);
+    return names;
+  }
+  if (!value || typeof value !== 'object') return names;
+  for (const [key, item] of Object.entries(value)) {
+    if (key === 'properties' && item && typeof item === 'object') {
+      for (const propertyName of Object.keys(item)) names.add(propertyName);
+    }
+    collectDeclaredSchemaProperties(item, names);
+  }
+  return names;
 }
 
 function collectObjectKeys(
@@ -135,6 +165,11 @@ describe('chat transcript cross-host contract', () => {
     );
 
     expect(manifest.fixtureVersion).toBe(1);
+    expectManifestToMatchSchema(manifest, manifestSchema);
+    expect(manifest.complete).toBe(true);
+    expect(new Set(manifest.sources)).toEqual(
+      new Set(['daemon', 'acp', 'chat-records']),
+    );
     expect(manifest.name).toBe('representative');
     expect(manifest.generatorVersion).toBe('chat-transcript-prevalidation-v1');
     expect(new Set(manifest.capabilities)).toEqual(
@@ -172,6 +207,12 @@ describe('chat transcript cross-host contract', () => {
         .filter((entry) => !('$ref' in entry))
         .every((entry) => entry['additionalProperties'] === false),
     ).toBe(true);
+    for (const definition of Object.values(exportDefinitions)) {
+      const entry = definition as Record<string, unknown>;
+      if (entry['type'] === 'object') {
+        expect(entry['additionalProperties']).toBe(false);
+      }
+    }
     const permissionBlockSchema = exportDefinitions['permissionBlock'] as {
       properties: {
         resolved: { enum: string[] };
@@ -205,6 +246,15 @@ describe('chat transcript cross-host contract', () => {
     expect(toolBlock.properties).not.toHaveProperty('content');
     expect(statusBlock.properties).not.toHaveProperty('data');
     expect(errorBlock.properties).not.toHaveProperty('data');
+    const permissionOption = exportDefinitions['permissionOption'] as {
+      properties: { raw: { const: unknown } };
+    };
+    expect(permissionOption.properties.raw.const).toBeNull();
+    const declaredExportProperties =
+      collectDeclaredSchemaProperties(exportSchema);
+    for (const field of expectedExport.forbiddenFields) {
+      expect(declaredExportProperties.has(field), field).toBe(false);
+    }
     const blockSchema = exportDefinitions['block'] as {
       oneOf: Array<{ $ref: string }>;
     };
@@ -221,6 +271,9 @@ describe('chat transcript cross-host contract', () => {
       ] as Record<string, unknown>;
       expect(typeof kind['const']).toBe('string');
     }
+    expect(Object.keys(manifest.hashes).sort()).toEqual(
+      listFixtureEvidenceFiles(caseRoot).sort(),
+    );
     for (const [relativePath, expectedHash] of Object.entries(
       manifest.hashes,
     )) {
@@ -282,10 +335,7 @@ describe('chat transcript cross-host contract', () => {
       resolve(caseRoot, 'expected-export.json'),
     );
     const projection = projectChatRecordsToDaemonTranscript(records);
-    const rawFreeBlocks = removeRawPresentationFields(projection.blocks);
-    const messages = transcriptBlocksToDaemonMessages(rawFreeBlocks, {
-      safeToolProjection: true,
-    });
+    const runtimeMessages = transcriptBlocksToDaemonMessages(projection.blocks);
     const exportDocument = createExportTranscriptDocumentV1(
       records,
       { startTime: '2026-08-16T00:00:00.000Z' },
@@ -294,22 +344,56 @@ describe('chat transcript cross-host contract', () => {
         exportedAt: '2026-08-16T01:00:00.000Z',
       },
     );
+    const messages = transcriptBlocksToDaemonMessages(
+      exportDocumentToTranscriptBlocks(exportDocument),
+      { safeToolProjection: true },
+    );
     const exportedKeys = collectObjectKeys(exportDocument);
 
     expect(projection.complete).toBe(true);
+    expect(projection.diagnostics).toEqual([]);
     expect(projection.blocks.map((block) => block.kind)).toEqual(
       expected.kinds,
     );
     expect(
       projection.blocks.map((block) => block.sourceRecordIds ?? []),
     ).toEqual(expected.sourceRecordIds);
+    expect(
+      projection.blocks.flatMap((block) =>
+        'text' in block && typeof block.text === 'string' ? [block.text] : [],
+      ),
+    ).toEqual(expected.texts);
     expect(messages.map((message) => message.role)).toEqual(
       expectedRender.roles,
     );
     expect(
+      messages.flatMap((message) =>
+        'content' in message && typeof message.content === 'string'
+          ? [message.content]
+          : [],
+      ),
+    ).toEqual(expectedRender.expectedTextContent);
+    expect(
       messages.find((message) => message.role === 'tool_group')?.tools[0]
         ?.rawOutput,
     ).toBe(expected.rawFreeToolResult);
+    expect(
+      projection.blocks.find((block) => block.kind === 'tool'),
+    ).toMatchObject({
+      rawInput: expectedRender.expectedToolArgs,
+      rawOutput: expectedRender.expectedToolResult,
+    });
+    expect(
+      runtimeMessages.find((message) => message.role === 'tool_group'),
+    ).toMatchObject({
+      tools: [
+        {
+          args: expectedRender.expectedToolArgs,
+          rawOutput: expectedRender.expectedToolResult,
+        },
+      ],
+    });
+    expect(expectedRender.runtimeFields).toEqual(['rawInput', 'rawOutput']);
     expect(messages.every((message) => message.id.length > 0)).toBe(true);
     expect(exportDocument.schemaVersion).toBe(expectedExport.schemaVersion);
     expect(

@@ -94,11 +94,13 @@ function looksLikeExportJsonl(objects) {
 }
 
 function startTimeFor(records) {
-  const timestamps = records
-    .map((record) => Date.parse(record.timestamp))
-    .filter(Number.isFinite);
-  return timestamps.length > 0
-    ? new Date(Math.min(...timestamps)).toISOString()
+  let earliest = Number.POSITIVE_INFINITY;
+  for (const record of records) {
+    const timestamp = Date.parse(record.timestamp);
+    if (Number.isFinite(timestamp)) earliest = Math.min(earliest, timestamp);
+  }
+  return Number.isFinite(earliest)
+    ? new Date(earliest).toISOString()
     : new Date().toISOString();
 }
 

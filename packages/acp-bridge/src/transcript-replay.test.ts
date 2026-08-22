@@ -78,6 +78,36 @@ function goalCardRecord(
 }
 
 describe('createTranscriptReplayMachine', () => {
+  it('stamps stable segment identity across replayed text parts', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      record('assistant-1', 'assistant', {
+        message: {
+          role: 'model',
+          parts: [
+            { text: 'first' },
+            { text: 'second' },
+            { text: 'thinking', thought: true },
+          ],
+        },
+      }),
+    );
+    const segmentIds = projected.map(
+      (update) =>
+        (
+          update._meta as
+            | { qwenTranscript?: { segmentId?: string } }
+            | undefined
+        )?.qwenTranscript?.segmentId,
+    );
+
+    expect(segmentIds).toEqual([
+      'assistant-1:0',
+      'assistant-1:0',
+      'assistant-1:2',
+    ]);
+  });
+
   it('keeps raw function responses out of the safe result preview', () => {
     const update = createTranscriptToolCallResultUpdate({
       toolName: 'read',

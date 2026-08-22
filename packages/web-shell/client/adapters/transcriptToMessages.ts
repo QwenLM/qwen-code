@@ -1499,6 +1499,7 @@ function isBackgroundAgentBlock(
 ): boolean {
   const name = block.toolName?.toLowerCase();
   if (name !== 'agent' && name !== 'task') return false;
+  if (block.background === true) return true;
   const raw = getRecord(rawOutput);
   return raw?.['status'] === 'background';
 }

@@ -20,6 +20,14 @@
   opacity: 0.85;
 }
 
+.documentHeader {
+  cursor: default;
+}
+
+.documentHeader:hover {
+  opacity: 1;
+}
+
 .desc {
   font-size: 12px;
   color: var(--muted-foreground);

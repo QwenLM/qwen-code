@@ -38,6 +38,28 @@ function mountMermaid(renderMode: 'interactive' | 'readonly' | 'document') {
   return { container, render };
 }
 
+function mountManyMermaids(count: number): HTMLElement {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  mounted.push({ root, container });
+  act(() => {
+    root.render(
+      createElement(
+        TranscriptRenderModeProvider,
+        { value: 'document' },
+        ...Array.from({ length: count }, (_, index) =>
+          createElement(Markdown, {
+            key: index,
+            content: `\`\`\`mermaid\ngraph TD\nA${index} --> B${index}\n\`\`\``,
+          }),
+        ),
+      ),
+    );
+  });
+  return container;
+}
+
 async function startMermaidRender(): Promise<void> {
   await act(async () => {
     await vi.advanceTimersByTimeAsync(200);
@@ -106,15 +128,18 @@ describe('Markdown Mermaid render modes', () => {
   });
 
   it('times out only in document mode', async () => {
-    mermaidMock.render.mockReturnValue(new Promise(() => {}));
-    const view = mountMermaid('interactive');
-    await startMermaidRender();
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(10_000);
-    });
-    expect(view.container.querySelector('pre code')).toBeNull();
-
-    view.render('document');
+    let resolveInteractiveRender:
+      | ((value: { svg: string }) => void)
+      | undefined;
+    mermaidMock.render
+      .mockImplementationOnce(() => new Promise(() => {}))
+      .mockImplementationOnce(
+        () =>
+          new Promise<{ svg: string }>((resolve) => {
+            resolveInteractiveRender = resolve;
+          }),
+      );
+    const view = mountMermaid('document');
     await startMermaidRender();
     await act(async () => {
       await vi.advanceTimersByTimeAsync(10_000);
@@ -122,5 +147,37 @@ describe('Markdown Mermaid render modes', () => {
     expect(view.container.querySelector('pre code')?.textContent).toContain(
       'graph TD',
     );
+
+    view.render('interactive');
+    await startMermaidRender();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+    expect(view.container.querySelector('pre code')).toBeNull();
+
+    await act(async () => {
+      resolveInteractiveRender?.({ svg: '<svg>interactive</svg>' });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  });
+
+  it('does not charge queue wait time against document renders', async () => {
+    mermaidMock.render.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          setTimeout(() => resolve({ svg: '<svg>diagram</svg>' }), 300);
+        }),
+    );
+    const container = mountManyMermaids(40);
+    await startMermaidRender();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(13_000);
+    });
+
+    expect(mermaidMock.render).toHaveBeenCalledTimes(40);
+    expect(container.querySelectorAll('svg')).toHaveLength(40);
+    expect(container.querySelector('pre code')).toBeNull();
   });
 });

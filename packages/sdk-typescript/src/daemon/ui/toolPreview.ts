@@ -16,6 +16,7 @@ import {
   getFirstString,
   isRecord,
   isSensitiveKey,
+  redactSensitiveFields,
   stringifyJson,
   stringifyRedactedJson,
 } from './utils.js';
@@ -181,6 +182,9 @@ function detectTodoList(
     const id = rawId.length <= MAX_TODO_ID_LENGTH ? rawId : `plan-${index}`;
     if (id !== rawId) truncated = true;
     const rawStatus = getFirstString(entry, ['status']);
+    if (entry['status'] !== undefined && rawStatus === undefined) {
+      truncated = true;
+    }
     const status =
       rawStatus === 'completed' || rawStatus === 'in_progress'
         ? rawStatus
@@ -452,7 +456,7 @@ function detectMcpInvocation(
             ? '[redacted]'
             : typeof value === 'string'
               ? value
-              : stringifyRedactedJson(value);
+              : stringifyCompactRedactedJson(value);
           const trimmed = v.length > 60 ? `${v.slice(0, 60)}…` : v;
           return `${key}=${trimmed}`;
         })[0];
@@ -465,6 +469,14 @@ function detectMcpInvocation(
     toolName: toolPart,
     ...(argsSummary ? { argsSummary } : {}),
   };
+}
+
+function stringifyCompactRedactedJson(value: unknown): string {
+  try {
+    return JSON.stringify(redactSensitiveFields(value)) ?? String(value);
+  } catch {
+    return String(value);
+  }
 }
 
 function extractAskUserQuestions(input: unknown): DaemonTranscriptQuestion[] {

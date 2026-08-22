@@ -183,6 +183,8 @@ export function extractDiff(tool: ACPToolCall): string {
     }
   }
 
+  if (tool.status === 'failed') return '';
+
   const previewPatch = tool.args?.patch;
   if (typeof previewPatch === 'string' && previewPatch) return previewPatch;
   const previewNewText = tool.args?.newText;
@@ -1688,6 +1690,8 @@ export const ToolGroup = memo(function ToolGroup({
       <div className={isLocateFlashing ? flashStyles.flash : undefined}>
         <button
           type="button"
+          disabled={documentMode}
+          tabIndex={documentMode ? -1 : undefined}
           className={styles.chatSummary}
           onClick={() => {
             if (documentMode) return;
@@ -1705,7 +1709,7 @@ export const ToolGroup = memo(function ToolGroup({
             documentMode || opensToolDetails ? undefined : chatExpanded
           }
           title={
-            opensToolDetails
+            documentMode || opensToolDetails
               ? undefined
               : showGroupContent
                 ? t('tool.collapseHint')

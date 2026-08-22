@@ -19,10 +19,10 @@
     "daemon-events.jsonl": "ea25e535847aea996ee3062b7497272540520a9a213de7223ac705780ccb7ac7",
     "acp-session-updates.jsonl": "2f79f50505bd17de22979d47a63e52183cde541d416e4c44eb58cd5351e6a13a",
     "chat-records.jsonl": "b66abea928c3c65cdedc4ca1c455d86b1b0a46b90e2a6a186afefaa89e87db0e",
-    "expected-model.json": "4bbf808871c62219910127b50b3290a5c74b64b4464ec57bf25353faad79a5e5",
-    "expected-render-items.json": "3ef27f09cc9b8cd2350fff269262dc0a653e0dba8435cce846a07bee8d0fbc73",
+    "expected-model.json": "5c8469615014fadea69fbc047d791add611e077e59f398932bfa4777e4940e67",
+    "expected-render-items.json": "d51acc8a0b6282898fec49f1870c0e78c901af5136b9866da3da874722d1db7b",
     "expected-export.json": "23521fd1203ffa6d47b0a93ac3de6481302fc9271e9150e77496ed42abdc063c",
-    "expected-gate.json": "3d8a7ccb02019dbe24a1265d2edf6ed718448473f1bfa5765cd221a1a3fc8266",
+    "expected-gate.json": "c2dd63edab1c9cb0ee5b198f5f28be8a3c8e3ff8d934e26a173c7359e621927d",
     "expected-network.json": "ee14c9469e2f80f1262a23ca8452bc41abb9ce43a625176c1b428608c503ad11"
   }
 }

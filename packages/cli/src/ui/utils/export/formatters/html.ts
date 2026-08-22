@@ -5,6 +5,7 @@
  */
 
 import type { ExportSessionData } from '../types.js';
+import { randomBytes } from 'node:crypto';
 import {
   EXPORT_HTML_TEMPLATE as HTML_TEMPLATE,
   EXPORT_TRANSCRIPT_HTML_TEMPLATE,
@@ -98,10 +99,16 @@ export function renderExportTranscriptDocumentToHtml(
   if (document.rendererVersion !== EXPORT_TRANSCRIPT_RENDERER_VERSION) {
     throw new Error('Export transcript renderer version mismatch.');
   }
-  return injectDocumentIntoHtmlTemplate(
-    EXPORT_TRANSCRIPT_HTML_TEMPLATE,
-    document,
-  );
+  const nonce = randomBytes(16).toString('base64url');
+  const template = injectDocumentNonce(EXPORT_TRANSCRIPT_HTML_TEMPLATE, nonce);
+  return injectDocumentIntoHtmlTemplate(template, document);
+}
+
+function injectDocumentNonce(template: string, nonce: string): string {
+  if (!template.includes('__EXPORT_NONCE__')) {
+    throw new Error('Export HTML template is missing its CSP nonce slot.');
+  }
+  return template.replaceAll('__EXPORT_NONCE__', nonce);
 }
 
 function injectJsonScript(

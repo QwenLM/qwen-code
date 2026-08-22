@@ -1020,7 +1020,7 @@ describe('SessionMessageHandler', () => {
     });
     expect(sendToWebView).toHaveBeenCalledWith({
       type: 'conversationCleared',
-      data: {},
+      data: { sessionId: 'session-2' },
     });
   });
 

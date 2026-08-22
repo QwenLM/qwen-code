@@ -369,6 +369,8 @@ export function ParallelAgentsGroup({
     <div className={styles.wrap} ref={wrapRef}>
       <button
         type="button"
+        disabled={documentMode}
+        tabIndex={documentMode ? -1 : undefined}
         ref={summaryRef}
         className={styles.summary}
         onClick={() => {

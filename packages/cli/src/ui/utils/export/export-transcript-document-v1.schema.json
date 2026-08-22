@@ -195,6 +195,7 @@
         "status": {
           "enum": ["completed", "failed", "cancelled", "canceled"]
         },
+        "background": { "type": "boolean" },
         "toolName": { "type": "string", "minLength": 1, "maxLength": 200 },
         "toolKind": { "type": "string", "minLength": 1, "maxLength": 200 },
         "preview": { "$ref": "#/$defs/toolPreview" },

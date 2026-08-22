@@ -21,12 +21,20 @@ export function useAcpTranscript(enabled: boolean): {
   const [state, setState] = useState<ScopedTranscriptState>(initialState);
 
   useEffect(() => {
-    if (!enabled) return;
     const onMessage = (event: MessageEvent) => {
       const message = event.data as {
         type?: unknown;
-        data?: { sessionId?: unknown; update?: unknown };
+        data?: { enabled?: unknown; sessionId?: unknown; update?: unknown };
       };
+      if (message.type === 'webShellTranscriptSettingChanged') {
+        const scopeKey =
+          message.data?.enabled === true &&
+          typeof message.data.sessionId === 'string'
+            ? message.data.sessionId
+            : undefined;
+        setState({ ...initialState(), ...(scopeKey ? { scopeKey } : {}) });
+        return;
+      }
       if (
         message.type === 'conversationCleared' ||
         message.type === 'qwenSessionSwitched'
@@ -38,16 +46,17 @@ export function useAcpTranscript(enabled: boolean): {
         setState({ ...initialState(), ...(scopeKey ? { scopeKey } : {}) });
         return;
       }
-      if (message.type !== 'transcriptUpdate') return;
+      if (!enabled || message.type !== 'transcriptUpdate') return;
       const sessionId =
         typeof message.data?.sessionId === 'string'
           ? message.data.sessionId
           : undefined;
       setState((previous) => {
-        if (previous.scopeKey && sessionId && previous.scopeKey !== sessionId) {
+        if (!sessionId || !previous.scopeKey) return previous;
+        if (previous.scopeKey !== sessionId) {
           return previous;
         }
-        const scopeKey = previous.scopeKey ?? sessionId ?? 'active-session';
+        const scopeKey = previous.scopeKey;
         return {
           ...reduceAcpTranscriptUpdate(
             previous,

@@ -23,7 +23,6 @@ const documentTemplateModulePath = join(
 );
 const reactUmdVersion = '18.2.0';
 const reactDomUmdVersion = '18.2.0';
-const exportNonce = 'qwen-export-document-v1';
 const exportTranscriptMaxBlocks = 1_000;
 const exportTranscriptMaxEnvelopeBytes = 32 * 1024 * 1024;
 const { version: exportTranscriptRendererVersion } = JSON.parse(
@@ -136,6 +135,15 @@ const documentCssBundle = documentBuildResult.outputFiles.find((file) =>
 if (!documentJsBundle || !documentCssBundle) {
   throw new Error('Failed to generate document export bundles.');
 }
+const documentJs = documentJsBundle.text
+  .trim()
+  .replace(/<\/script/gi, '<\\/script')
+  .replace(/<script/gi, (match) => `\\x3c${match.slice(1)}`);
+if (/<script/i.test(documentJs)) {
+  throw new Error(
+    'Document export bundle contains a <script sequence; refusing to inline.',
+  );
+}
 
 const css = cssBundle
   ? cssBundle.text
@@ -162,10 +170,7 @@ const htmlOutput = htmlTemplate
   .replace('__FAVICON_DATA__', () => faviconData);
 const documentHtmlOutput = documentTemplate
   .replace('__DOCUMENT_INLINE_CSS__', () => documentCssBundle.text.trim())
-  .replace('__DOCUMENT_INLINE_SCRIPT__', () =>
-    documentJsBundle.text.trim().replace(/<\/script/gi, '<\\/script'),
-  )
-  .replaceAll('__EXPORT_NONCE__', exportNonce)
+  .replace('__DOCUMENT_INLINE_SCRIPT__', () => documentJs)
   .replace('__FAVICON_DATA__', () => faviconData);
 
 // A dropped or renamed .replace() above would otherwise still exit 0 and
@@ -180,7 +185,7 @@ if (residualPlaceholder) {
   );
 }
 const documentResidualPlaceholder =
-  /__(DOCUMENT_INLINE_CSS|DOCUMENT_INLINE_SCRIPT|EXPORT_NONCE|FAVICON_DATA)__/.exec(
+  /__(DOCUMENT_INLINE_CSS|DOCUMENT_INLINE_SCRIPT|FAVICON_DATA)__/.exec(
     documentHtmlOutput,
   );
 if (documentResidualPlaceholder) {

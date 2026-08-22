@@ -39,10 +39,12 @@ export const AssistantMessage = memo(function AssistantMessage({
   customFooterInfo,
 }: AssistantMessageProps) {
   const { t } = useI18n();
+  const documentMode = useTranscriptRenderMode() === 'document';
   const { renderAssistantTurnFooter } = useWebShellCustomization();
   const [copied, setCopied] = useState(false);
   const [branchPending, setBranchPending] = useState(false);
-  const showFooter = !!content && !isStreaming && showFooterActions;
+  const showFooter =
+    !!content && !isStreaming && showFooterActions && !documentMode;
   const customFooter = useMemo(
     () =>
       customFooterInfo
@@ -303,6 +305,8 @@ export const ThinkingMessage = memo(function ThinkingMessage({
             >
               <button
                 type="button"
+                disabled={documentMode}
+                tabIndex={documentMode ? -1 : undefined}
                 className={styles.thinkingSummary}
                 aria-expanded={documentMode ? undefined : thinkingExpanded}
                 title={

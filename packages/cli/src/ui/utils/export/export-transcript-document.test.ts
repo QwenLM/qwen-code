@@ -153,6 +153,9 @@ describe('ExportTranscriptDocumentV1', () => {
                   'Windows C:\\Users\\alice\\private.txt',
                   'URI file:///Users/alice/private.txt',
                   'Windows URI file:///C:/Users/alice/private.txt',
+                  'HOME=/home/alice/private.txt',
+                  '--dir=/Users/alice/private.txt',
+                  'encoded=%2Fhome%2Falice%2Fprivate.txt',
                   '![safe](data:image/png;base64,/home/AA)',
                 ].join('\n'),
               },
@@ -176,6 +179,221 @@ describe('ExportTranscriptDocumentV1', () => {
     expect(text).toContain('data:image/png;base64,/home/AA');
     expect(text).not.toContain('/Users/alice');
     expect(text).not.toContain('C:\\Users\\alice');
+    expect(text).not.toContain('/home/alice');
+    expect(text).not.toContain('%2Fhome%2Falice');
+  });
+
+  it('preserves visible turns across excluded causal system records', () => {
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('turn-1-user', null, {
+          message: { role: 'user', parts: [{ text: 'TURN1_USER' }] },
+        }),
+        record('turn-1-assistant', 'turn-1-user', {
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: 'TURN1_ASSISTANT' }] },
+        }),
+        record('turn-result', 'turn-1-assistant', {
+          type: 'system',
+          subtype: 'turn_result',
+          systemPayload: { status: 'completed' },
+        }),
+        record('turn-2-user', 'turn-result', {
+          message: { role: 'user', parts: [{ text: 'TURN2_USER' }] },
+        }),
+        record('turn-2-assistant', 'turn-2-user', {
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: 'TURN2_ASSISTANT' }] },
+        }),
+      ],
+      sessionData,
+      {
+        rendererVersion: '0.21.11-test.1',
+        exportedAt: '2026-08-16T01:00:00.000Z',
+      },
+    );
+    const text = document.blocks
+      .flatMap((block) => ('text' in block ? [block.text] : []))
+      .join('\n');
+
+    expect(text).toContain('TURN1_USER');
+    expect(text).toContain('TURN1_ASSISTANT');
+    expect(text).toContain('TURN2_USER');
+    expect(text).toContain('TURN2_ASSISTANT');
+    expect(text).not.toContain('saved history is incomplete');
+    expect(document.diagnostics).not.toContainEqual(
+      expect.objectContaining({ code: 'history_gap' }),
+    );
+  });
+
+  it('sanitizes Windows drive-root metadata instead of aborting', () => {
+    const document = createExportTranscriptDocumentV1(
+      [],
+      { ...sessionData, metadata: { ...sessionData.metadata, cwd: 'C:\\' } },
+      {
+        rendererVersion: '0.21.11-test.1',
+        exportedAt: '2026-08-16T01:00:00.000Z',
+      },
+    );
+
+    expect(document.metadata.projectName).toBe('[path]');
+  });
+
+  it('sanitizes typed preview fields before schema validation', () => {
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('preview-tools', null, {
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'ask-1',
+                  name: 'ask_user_question',
+                  args: {
+                    questions: [
+                      {
+                        header: '\u0001',
+                        question: 'Continue?',
+                        options: [],
+                      },
+                    ],
+                  },
+                },
+              },
+              {
+                functionCall: {
+                  id: 'read-1',
+                  name: 'read_file',
+                  args: { file_path: 'source.ts', lineRange: [-5, 1.5] },
+                },
+              },
+              {
+                functionCall: {
+                  id: 'code-1',
+                  name: 'exec_code',
+                  args: { code: 'print(1)', origin: '\u0001' },
+                },
+              },
+            ],
+          },
+        }),
+      ],
+      sessionData,
+      {
+        rendererVersion: '0.21.11-test.1',
+        exportedAt: '2026-08-16T01:00:00.000Z',
+      },
+    );
+    const previews = document.blocks.flatMap((block) =>
+      block.kind === 'tool' ? [block.preview] : [],
+    );
+
+    expect(previews).toContainEqual({
+      kind: 'ask_user_question',
+      questions: [{ question: 'Continue?', options: [], raw: null }],
+    });
+    expect(previews).toContainEqual({
+      kind: 'file_read',
+      path: 'source.ts',
+      range: [0, 1],
+    });
+    expect(previews).toContainEqual({ kind: 'code_block', code: 'print(1)' });
+  });
+
+  it('rejects backslash authority Markdown destinations', () => {
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('unsafe-link', null, {
+          message: {
+            role: 'user',
+            parts: [{ text: '[download](/\\evil.example/file)' }],
+          },
+        }),
+      ],
+      sessionData,
+      {
+        rendererVersion: '0.21.11-test.1',
+        exportedAt: '2026-08-16T01:00:00.000Z',
+      },
+    );
+    const text =
+      document.blocks[0]?.kind === 'user' ? document.blocks[0].text : '';
+
+    expect(text).toBe('download');
+    expect(document.metadata).toMatchObject({
+      complete: false,
+      truncated: true,
+    });
+  });
+
+  it('does not charge plain text fences as rich render tasks', () => {
+    const content = Array.from(
+      { length: EXPORT_TRANSCRIPT_LIMITS_V1.maxRichRenderTasks + 1 },
+      (_, index) => `\`\`\`text\nplain-${index}\n\`\`\``,
+    ).join('\n');
+    const document = createExportTranscriptDocumentV1(
+      [
+        record('plain-fences', null, {
+          message: { role: 'user', parts: [{ text: content }] },
+        }),
+      ],
+      sessionData,
+      {
+        rendererVersion: '0.21.11-test.1',
+        exportedAt: '2026-08-16T01:00:00.000Z',
+      },
+    );
+    const text =
+      document.blocks[0]?.kind === 'user' ? document.blocks[0].text : '';
+
+    expect(text).not.toContain('source fallback');
+    expect(document.diagnostics).not.toContainEqual(
+      expect.objectContaining({ code: 'rich_render_budget_exceeded' }),
+    );
+  });
+
+  it('degrades instead of aborting when JSON escaping exceeds the envelope', () => {
+    const raster = 'A'.repeat(
+      Math.floor(EXPORT_TRANSCRIPT_LIMITS_V1.maxRasterBytes / 3) * 4,
+    );
+    const escapeDenseText = '"'.repeat(100_000);
+    const records = Array.from({ length: 75 }, (_, index) =>
+      record(
+        `large-envelope-${index}`,
+        index === 0 ? null : `large-envelope-${index - 1}`,
+        {
+          type: index % 2 === 0 ? 'user' : 'assistant',
+          message: {
+            role: index % 2 === 0 ? 'user' : 'model',
+            parts:
+              index === 0
+                ? [
+                    { text: escapeDenseText },
+                    { inlineData: { mimeType: 'image/png', data: raster } },
+                    { inlineData: { mimeType: 'image/png', data: raster } },
+                  ]
+                : [{ text: escapeDenseText }],
+          },
+        },
+      ),
+    );
+    const document = createExportTranscriptDocumentV1(records, sessionData, {
+      rendererVersion: '0.21.11-test.1',
+      exportedAt: '2026-08-16T01:00:00.000Z',
+    });
+
+    expect(
+      new TextEncoder().encode(JSON.stringify(document)).byteLength,
+    ).toBeLessThanOrEqual(EXPORT_TRANSCRIPT_LIMITS_V1.maxEnvelopeBytes);
+    expect(document.metadata).toMatchObject({
+      complete: false,
+      truncated: true,
+    });
+    expect(document.diagnostics).toContainEqual(
+      expect.objectContaining({ code: 'envelope_budget_exceeded' }),
+    );
   });
 
   it('degrades a completed tool when its safe result preview is unavailable', () => {
@@ -638,6 +856,11 @@ describe('ExportTranscriptDocumentV1', () => {
                   '[unsafe](javascript:CHAT_TRANSCRIPT_URL_CANARY)',
                   '<https://bob:password@example.com/autolink?CHAT_TRANSCRIPT_URL_CANARY>',
                   'https://carol:password@example.com/bare?CHAT_TRANSCRIPT_URL_CANARY#fragment',
+                  '`[unequal](javascript:CHAT_TRANSCRIPT_URL_CANARY)``',
+                  '> [evil]: javascript:CHAT_TRANSCRIPT_URL_CANARY',
+                  '> [reference][evil]',
+                  '```js `not-a-fence`',
+                  '[after-invalid-fence](javascript:CHAT_TRANSCRIPT_URL_CANARY)',
                   '`https://dave:password@example.com/inline?CHAT_TRANSCRIPT_URL_CANARY`',
                   '```text',
                   'https://erin:password@example.com/fenced?CHAT_TRANSCRIPT_URL_CANARY',
@@ -674,7 +897,7 @@ describe('ExportTranscriptDocumentV1', () => {
     });
     expect(document.diagnostics).toEqual(
       expect.arrayContaining([
-        { code: 'url_rejected', severity: 'warning', count: 1 },
+        { code: 'url_rejected', severity: 'warning', count: 4 },
         { code: 'url_sanitized', severity: 'warning', count: 3 },
       ]),
     );

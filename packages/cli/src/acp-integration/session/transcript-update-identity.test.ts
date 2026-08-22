@@ -140,4 +140,43 @@ describe('TranscriptUpdateIdentityProjector', () => {
     expect(projector.project(update, undefined)).toBe(update);
     expect(segmentId(update)).toBeUndefined();
   });
+
+  it('starts a fresh segment after prompt rollover', () => {
+    const projector = new TranscriptUpdateIdentityProjector();
+    const first = projector.project(
+      textUpdate('agent_message_chunk', 'first turn'),
+      'session-a########1',
+    );
+    const second = projector.project(
+      textUpdate('agent_message_chunk', 'second turn'),
+      'session-a########2',
+    );
+
+    expect(segmentId(first)).toMatch(/^live:[0-9a-f]{32}$/);
+    expect(segmentId(second)).toMatch(/^live:[0-9a-f]{32}$/);
+    expect(segmentId(second)).not.toBe(segmentId(first));
+  });
+
+  it('stamps shell and image-only updates', () => {
+    const projector = new TranscriptUpdateIdentityProjector();
+    const promptId = 'session-a########1';
+    const shell = projector.project(
+      {
+        sessionUpdate: 'shell_output',
+        output: 'chunk',
+        _meta: { source: 'user-shell' },
+      } as unknown as SessionUpdate,
+      promptId,
+    );
+    const image = projector.project(
+      {
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'image', data: 'AA==' },
+      } as unknown as SessionUpdate,
+      promptId,
+    );
+
+    expect(segmentId(shell)).toMatch(/^live:[0-9a-f]{32}$/);
+    expect(segmentId(image)).toMatch(/^live:[0-9a-f]{32}$/);
+  });
 });

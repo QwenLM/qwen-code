@@ -286,24 +286,16 @@ function MermaidBlock({ code }: { code: string }) {
 
   useEffect(() => {
     let cancelled = false;
-    let timedOut = false;
     setSvg(null);
     setError(null);
-    const renderTimeout = documentMode
-      ? setTimeout(() => {
-          timedOut = true;
-          if (!cancelled) setError('Mermaid render timed out');
-        }, MERMAID_RENDER_TIMEOUT_MS)
-      : undefined;
     const timer = setTimeout(() => {
       import('mermaid')
         .then(async (mod) => {
-          if (cancelled || timedOut) return;
+          if (cancelled) return;
           const mermaid = mod.default;
           const configKey = `${mermaidTheme}:${documentMode ? 'document' : 'runtime'}`;
           const render = mermaidRenderQueue.then(async () => {
-            if (cancelled || timedOut)
-              throw new Error('Mermaid render skipped');
+            if (cancelled) throw new Error('Mermaid render skipped');
             if (lastMermaidConfigKey !== configKey) {
               mermaid.initialize({
                 startOnLoad: false,
@@ -324,7 +316,21 @@ function MermaidBlock({ code }: { code: string }) {
               lastMermaidConfigKey = configKey;
             }
             const id = `mermaid-${++mermaidRenderId}`;
-            return mermaid.render(id, code.trim());
+            if (!documentMode) return mermaid.render(id, code.trim());
+            let timeoutId: ReturnType<typeof setTimeout> | undefined;
+            try {
+              return await Promise.race([
+                mermaid.render(id, code.trim()),
+                new Promise<never>((_resolve, reject) => {
+                  timeoutId = setTimeout(
+                    () => reject(new Error('Mermaid render timed out')),
+                    MERMAID_RENDER_TIMEOUT_MS,
+                  );
+                }),
+              ]);
+            } finally {
+              if (timeoutId !== undefined) clearTimeout(timeoutId);
+            }
           });
           mermaidRenderQueue = render.then(
             () => undefined,
@@ -333,14 +339,10 @@ function MermaidBlock({ code }: { code: string }) {
           const { svg } = await render;
           // No additional sanitization needed: securityLevel:'strict' uses
           // DOMPurify internally to sanitize SVG output.
-          if (!cancelled && !timedOut) {
-            if (renderTimeout !== undefined) clearTimeout(renderTimeout);
-            setSvg(svg);
-          }
+          if (!cancelled) setSvg(svg);
         })
         .catch((error: unknown) => {
-          if (!cancelled && !timedOut) {
-            if (renderTimeout !== undefined) clearTimeout(renderTimeout);
+          if (!cancelled) {
             setError(
               error instanceof Error ? error.message : 'Mermaid render failed',
             );
@@ -350,7 +352,6 @@ function MermaidBlock({ code }: { code: string }) {
     return () => {
       cancelled = true;
       clearTimeout(timer);
-      if (renderTimeout !== undefined) clearTimeout(renderTimeout);
     };
   }, [code, documentMode, mermaidTheme]);
 

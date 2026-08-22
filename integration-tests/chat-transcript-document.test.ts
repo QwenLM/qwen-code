@@ -391,6 +391,28 @@ async function installNetworkAndCspProbe(
   return { requests, cspErrors };
 }
 
+async function expectConnectSrcCspEnforced(page: Page): Promise<void> {
+  const directive = await page.evaluate(
+    () =>
+      new Promise<string>((resolve, reject) => {
+        const timeout = window.setTimeout(
+          () => reject(new Error('CSP violation was not observed.')),
+          2_000,
+        );
+        window.addEventListener(
+          'securitypolicyviolation',
+          (event) => {
+            window.clearTimeout(timeout);
+            resolve(event.violatedDirective);
+          },
+          { once: true },
+        );
+        void fetch('https://qwen-csp-probe.invalid/connect').catch(() => {});
+      }),
+  );
+  expect(directive).toBe('connect-src');
+}
+
 describe('ExportTranscriptDocument browser gate', () => {
   let browser: Browser | undefined;
   let maximumDocumentEvidence: BrowserGateEvidence | undefined;
@@ -461,6 +483,12 @@ describe('ExportTranscriptDocument browser gate', () => {
       }
       if (entry['type'] === 'integer') {
         expect(entry['maximum']).toBeDefined();
+      }
+      if (entry['type'] === 'string') {
+        expect(Number(entry['maxLength'])).toBeGreaterThan(0);
+        expect(Number(entry['maxLength'])).toBeLessThanOrEqual(
+          EXPORT_TRANSCRIPT_LIMITS_V1.maxEnvelopeBytes,
+        );
       }
       for (const child of Object.values(entry)) visit(child);
     };
@@ -589,6 +617,10 @@ describe('ExportTranscriptDocument browser gate', () => {
     expect(probe.cspErrors, probe.cspErrors.join('\n')).toHaveLength(
       expectedNetwork.cspViolations,
     );
+    expect(await page.locator('body').innerText()).not.toMatch(
+      /(?:1969-12-31|1970-01-01)/,
+    );
+    await expectConnectSrcCspEnforced(page);
     expect(durationMs).toBeLessThan(MAX_DOCUMENT_DURATION_MS);
     const heapDeltaBytes = Math.max(0, heapAfter - heapBefore);
     expect(heapDeltaBytes).toBeLessThan(MAX_HEAP_DELTA_BYTES);
@@ -659,12 +691,16 @@ describe('ExportTranscriptDocument browser gate', () => {
       .poll(() => page.locator('body').getAttribute('data-render-complete'))
       .toBe('true');
     expect(await page.locator('body').innerText()).toContain(
-      '[remote image removed]',
+      '[image omitted: tracking]',
     );
     expect(probe.requests).toHaveLength(expectedNetwork.unexpectedRequests);
     expect(probe.cspErrors, probe.cspErrors.join('\n')).toHaveLength(
       expectedNetwork.cspViolations,
     );
+    expect(await page.locator('body').innerText()).not.toMatch(
+      /(?:1969-12-31|1970-01-01)/,
+    );
+    await expectConnectSrcCspEnforced(page);
     if (maximumDocumentEvidence) {
       writeGateReport(maximumDocumentEvidence);
     }

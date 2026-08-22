@@ -976,6 +976,7 @@ function upsertToolBlock(
         }
       }
       existing.rawOutput = rawOutput;
+      if (isBackgroundToolOutput(rawOutput)) existing.background = true;
     }
     const resultPreview =
       event.resultPreview ??
@@ -1054,6 +1055,7 @@ function upsertToolBlock(
       toolKind: event.toolKind,
     }),
     ...(resultPreview ? { resultPreview } : {}),
+    ...(isBackgroundToolOutput(rawOutput) ? { background: true } : {}),
     clientReceivedAt: state.now,
     createdAt: state.now,
     updatedAt: state.now,
@@ -1107,6 +1109,10 @@ function upsertToolBlock(
   // with what was actually written to the block.
   updateCurrentToolPointer(state, event.toolCallId, event.status ?? 'pending');
   clearActiveText(state, event.parentToolCallId);
+}
+
+function isBackgroundToolOutput(value: unknown): boolean {
+  return isRecord(value) && value['status'] === 'background';
 }
 
 function discardToolBlock(

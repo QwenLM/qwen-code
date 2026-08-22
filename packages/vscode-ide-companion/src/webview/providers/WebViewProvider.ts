@@ -189,6 +189,20 @@ export class WebViewProvider {
     // The isSyncingToVSCode guard prevents a loop when we programmatically populate VSCode settings.
     const configChangeDisposable = vscode.workspace.onDidChangeConfiguration(
       async (e) => {
+        if (
+          e.affectsConfiguration('qwen-code.experimental.webShellTranscript')
+        ) {
+          const enabled = vscode.workspace
+            .getConfiguration('qwen-code')
+            .get<boolean>('experimental.webShellTranscript', false);
+          this.sendMessageToWebView({
+            type: 'webShellTranscriptSettingChanged',
+            data: {
+              enabled,
+              sessionId: this.agentManager.currentSessionId ?? undefined,
+            },
+          });
+        }
         const authSettingsChanged = AUTH_RELATED_QWEN_SETTINGS.some((setting) =>
           e.affectsConfiguration(setting),
         );
@@ -249,21 +263,24 @@ export class WebViewProvider {
     this.disposables.push(fileWatcherDisposable);
 
     // Setup agent callbacks
-    if (
-      vscode.workspace
+    this.agentManager.onTranscriptUpdate((notification) => {
+      const enabled = vscode.workspace
         .getConfiguration('qwen-code')
-        .get<boolean>('experimental.webShellTranscript', false)
-    ) {
-      this.agentManager.onTranscriptUpdate((notification) => {
-        this.sendMessageToWebView({
-          type: 'transcriptUpdate',
-          data: {
-            sessionId: notification.sessionId,
-            update: notification.update,
-          },
-        });
+        .get<boolean>('experimental.webShellTranscript', false);
+      if (
+        !enabled ||
+        notification.sessionId !== this.agentManager.currentSessionId
+      ) {
+        return;
+      }
+      this.sendMessageToWebView({
+        type: 'transcriptUpdate',
+        data: {
+          sessionId: notification.sessionId,
+          update: notification.update,
+        },
       });
-    }
+    });
 
     this.agentManager.onMessage((message) => {
       // Do not suppress messages during checkpoint saves.
@@ -2535,13 +2552,15 @@ export class WebViewProvider {
       const workingDir = workspaceFolder?.uri.fsPath || process.cwd();
 
       // Create new Qwen session via agent manager
-      await this.agentManager.createNewSession(workingDir, { forceNew: true });
+      const sessionId = await this.agentManager.createNewSession(workingDir, {
+        forceNew: true,
+      });
       this.messageHandler.setCurrentConversationId(null);
 
       // Clear current conversation UI
       this.sendMessageToWebView({
         type: 'conversationCleared',
-        data: {},
+        data: { sessionId },
       });
     } catch (_error) {
       logger.error('[WebViewProvider] Failed to create new session:', _error);

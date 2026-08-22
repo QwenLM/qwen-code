@@ -640,6 +640,10 @@ describe('tool row rendering', () => {
     expect(container.textContent).toContain('second document output');
     expect(container.textContent).toContain('document thought');
     expect(container.querySelector('[aria-expanded="false"]')).toBeNull();
+    expect(
+      container.querySelector('[class*="chatSummaryContentClip"]')?.className,
+    ).not.toContain('chatSummaryContentCollapsed');
+    expect(container.querySelector('button:not([disabled])')).toBeNull();
   });
 
   it('renders the aggregate summary for a multi-tool group', () => {
@@ -1823,5 +1827,22 @@ describe('tool output logic', () => {
         }),
       ),
     ).toContain('DOCUMENT_DIFF_DETAIL');
+  });
+
+  it('does not render an attempted typed diff for a failed edit', () => {
+    expect(
+      extractDiff(
+        makeTool({
+          toolName: 'edit',
+          status: 'failed',
+          args: {
+            path: 'document.ts',
+            oldText: 'old content',
+            newText: 'ATTEMPTED NEW CONTENT',
+          },
+          rawOutput: 'Error: old_string not found',
+        }),
+      ),
+    ).toBe('');
   });
 });

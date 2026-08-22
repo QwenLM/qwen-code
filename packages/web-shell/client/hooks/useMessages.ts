@@ -57,6 +57,7 @@ export function transcriptBlocksToLocalizedMessages(
 ): Message[] {
   return transcriptBlocksToDaemonMessages(blocks, {
     safeToolProjection,
+    includeSourceIdentity: true,
     labels: {
       promptCancelled: t('request.cancelled'),
       branchSuccess: (name) => t('branch.success', { name }),

@@ -153,6 +153,7 @@ type ExportToolTranscriptBlockV1 = Pick<
   | 'parentToolCallId'
   | 'parentBlockId'
   | 'subagentType'
+  | 'background'
 > & {
   status: 'completed' | 'failed' | 'cancelled' | 'canceled';
   preview: ExportToolPreviewV1;
@@ -246,7 +247,14 @@ export function createExportTranscriptDocumentV1(
   }
   const budget = new ExportBudget(diagnostics);
   const ids = new OpaqueDocumentIds();
-  const blocks = projection.blocks.flatMap((block) => {
+  const visibleBlocks = projection.blocks.filter((block) => {
+    const sourceRecordIds = block.sourceRecordIds ?? [];
+    return (
+      sourceRecordIds.length === 0 ||
+      sourceRecordIds.some((recordId) => policy.visibleRecordIds.has(recordId))
+    );
+  });
+  const blocks = visibleBlocks.flatMap((block) => {
     const safe = sanitizeBlock(block, budget, ids, diagnostics);
     return safe ? [safe] : [];
   });
@@ -254,8 +262,6 @@ export function createExportTranscriptDocumentV1(
   const metadataPresentation = createMetadataPresentation(
     sessionData,
     options,
-    false,
-    initialTruncated,
     diagnostics,
     budget,
   );
@@ -271,15 +277,56 @@ export function createExportTranscriptDocumentV1(
     complete: !degraded,
     truncated,
   };
-  const document: ExportTranscriptDocumentV1 = {
+  let document: ExportTranscriptDocumentV1 = {
     schemaVersion: 1,
     rendererVersion: options.rendererVersion,
     blocks,
     diagnostics: diagnostics.toArray(),
     metadata,
   };
+  document = fitDocumentToEnvelope(document, diagnostics);
   assertExportTranscriptDocumentV1(document);
   return document;
+}
+
+function fitDocumentToEnvelope(
+  document: ExportTranscriptDocumentV1,
+  diagnostics: DiagnosticCounter,
+): ExportTranscriptDocumentV1 {
+  if (
+    serializedEnvelopeBytes(document) <=
+    EXPORT_TRANSCRIPT_LIMITS_V1.maxEnvelopeBytes
+  ) {
+    return document;
+  }
+  diagnostics.add('envelope_budget_exceeded', 'warning', 1, true);
+  const buildCandidate = (blockCount: number): ExportTranscriptDocumentV1 => ({
+    ...document,
+    blocks: document.blocks.slice(0, blockCount),
+    diagnostics: diagnostics.toArray(),
+    metadata: { ...document.metadata, complete: false, truncated: true },
+  });
+  let low = 0;
+  let high = document.blocks.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (
+      serializedEnvelopeBytes(buildCandidate(middle)) <=
+      EXPORT_TRANSCRIPT_LIMITS_V1.maxEnvelopeBytes
+    ) {
+      low = middle;
+    } else {
+      high = middle - 1;
+    }
+  }
+  const fitted = buildCandidate(low);
+  if (
+    serializedEnvelopeBytes(fitted) >
+    EXPORT_TRANSCRIPT_LIMITS_V1.maxEnvelopeBytes
+  ) {
+    throw new ExportTranscriptDocumentError('envelope_budget_exceeded');
+  }
+  return fitted;
 }
 
 export function assertExportTranscriptDocumentV1(
@@ -316,9 +363,13 @@ export function exportDocumentToTranscriptBlocks(
 function applyRecordExportPolicy(
   records: readonly unknown[],
   diagnostics: DiagnosticCounter,
-): { records: unknown[]; complete: boolean } {
-  const accepted: unknown[] = [];
-  const rejectedIds = new Set<string>();
+): {
+  records: unknown[];
+  visibleRecordIds: ReadonlySet<string>;
+  complete: boolean;
+} {
+  const projectionRecords: unknown[] = [];
+  const visibleRecordIds = new Set<string>();
   let complete = true;
   for (const record of records) {
     if (!isRecord(record)) {
@@ -332,34 +383,24 @@ function applyRecordExportPolicy(
       type === 'system' &&
       typeof subtype === 'string' &&
       VISIBLE_SYSTEM_RECORD_SUBTYPES.has(subtype);
-    if (
+    const visible =
       type === 'user' ||
       type === 'assistant' ||
       type === 'tool_result' ||
-      acceptedSystemSubtype
-    ) {
-      accepted.push(record);
+      acceptedSystemSubtype;
+    if (visible || type === 'system') {
+      projectionRecords.push(record);
+      const uuid = record['uuid'];
+      if (visible && typeof uuid === 'string') visibleRecordIds.add(uuid);
+      if (type === 'system' && !acceptedSystemSubtype) {
+        diagnostics.add('record_internal_excluded', 'info');
+      }
       continue;
     }
-    const uuid = record['uuid'];
-    if (typeof uuid === 'string') rejectedIds.add(uuid);
-    diagnostics.add(
-      type === 'system'
-        ? 'record_internal_excluded'
-        : 'record_unknown_excluded',
-      type === 'system' ? 'info' : 'error',
-    );
-    if (type !== 'system') complete = false;
+    diagnostics.add('record_unknown_excluded', 'error');
+    complete = false;
   }
-  for (const record of accepted) {
-    if (!isRecord(record)) continue;
-    const parentUuid = record['parentUuid'];
-    if (typeof parentUuid === 'string' && rejectedIds.has(parentUuid)) {
-      diagnostics.add('causal_record_excluded', 'error');
-      complete = false;
-    }
-  }
-  return { records: accepted, complete };
+  return { records: projectionRecords, visibleRecordIds, complete };
 }
 
 const VISIBLE_SYSTEM_RECORD_SUBTYPES = new Set([
@@ -442,6 +483,7 @@ function sanitizeBlock(
         toolCallId: ids.get('tool-call', block.toolCallId),
         title: budget.plainText(block.title),
         status,
+        ...(block.background ? { background: true } : {}),
         preview: sanitizeToolPreview(block.preview, budget, diagnostics, ids),
         ...(resultPreview ? { resultPreview } : {}),
         ...(toolName ? { toolName } : {}),
@@ -543,20 +585,21 @@ function sanitizeToolPreview(
     case 'ask_user_question':
       return {
         kind: preview.kind,
-        questions: budget.array(preview.questions).map((question) => ({
-          ...(question.header
-            ? { header: budget.label(question.header, 200) }
-            : {}),
-          question: budget.plainText(question.question),
-          options: budget.array(question.options).map((option) => ({
-            label: budget.plainText(option.label),
-            ...(option.description
-              ? { description: budget.plainText(option.description) }
-              : {}),
+        questions: budget.array(preview.questions).map((question) => {
+          const header = budget.optionalLabel(question.header, 200);
+          return {
+            ...(header ? { header } : {}),
+            question: budget.plainText(question.question),
+            options: budget.array(question.options).map((option) => ({
+              label: budget.plainText(option.label),
+              ...(option.description
+                ? { description: budget.plainText(option.description) }
+                : {}),
+              raw: null,
+            })),
             raw: null,
-          })),
-          raw: null,
-        })),
+          };
+        }),
       };
     case 'command':
       return {
@@ -580,12 +623,19 @@ function sanitizeToolPreview(
           ? { patch: budget.plainText(preview.patch) }
           : {}),
       };
-    case 'file_read':
+    case 'file_read': {
+      const range = preview.range
+        ? ([safeCount(preview.range[0]), safeCount(preview.range[1])] as [
+            number,
+            number,
+          ])
+        : undefined;
       return {
         kind: preview.kind,
         path: budget.label(safePath(preview.path), 400),
-        ...(preview.range ? { range: preview.range } : {}),
+        ...(range ? { range } : {}),
       };
+    }
     case 'web_fetch': {
       const method = budget.optionalLabel(preview.method, 16);
       return {
@@ -609,13 +659,14 @@ function sanitizeToolPreview(
       };
     case 'code_block': {
       const language = budget.optionalLabel(preview.language, 64);
+      const origin = preview.origin
+        ? budget.optionalLabel(safePath(preview.origin), 400)
+        : undefined;
       return {
         kind: preview.kind,
         code: budget.plainText(preview.code),
         ...(language ? { language } : {}),
-        ...(preview.origin
-          ? { origin: budget.label(safePath(preview.origin), 400) }
-          : {}),
+        ...(origin ? { origin } : {}),
       };
     }
     case 'search':
@@ -766,11 +817,9 @@ function terminalToolStatus(
 function createMetadataPresentation(
   sessionData: Pick<ExportSessionData, 'startTime' | 'metadata'>,
   options: CreateExportTranscriptDocumentOptions,
-  complete: boolean,
-  truncated: boolean,
   diagnostics: DiagnosticCounter,
   budget: ExportBudget,
-): ExportMetadataPresentationV1 {
+): Omit<ExportMetadataPresentationV1, 'complete' | 'truncated'> {
   const metadata = sessionData.metadata;
   const title = safeMetadataLabel(
     options.title,
@@ -818,8 +867,6 @@ function createMetadataPresentation(
       ? { startedAt: sessionData.startTime }
       : {}),
     exportedAt: options.exportedAt,
-    complete,
-    truncated,
     ...(projectName ? { projectName } : {}),
     ...(repository ? { repository } : {}),
     ...(gitBranch ? { gitBranch } : {}),
@@ -851,6 +898,8 @@ function createMetadataPresentation(
       : {}),
   };
 }
+
+const REQUIRED_TEXT_FALLBACK_RESERVE_BYTES = 64 * 1024;
 
 class ExportBudget {
   visibleTextBytes = 0;
@@ -900,7 +949,7 @@ class ExportBudget {
       if (!segment.prose) continue;
       transformMarkdownProse(segment.value, (prose) => {
         for (const match of prose.matchAll(
-          /^\s*\[([^\]]+)\]:\s*(?:<([^>]+)>|([^\s]+))(?:\s+.*)?$/gm,
+          /^(?: {0,3}> ?)*\s*\[([^\]]+)\]:\s*(?:<([^>]+)>|([^\s]+))(?:\s+.*)?$/gm,
         )) {
           const label = match[1]?.trim().toLowerCase();
           const source = match[2] ?? match[3];
@@ -973,6 +1022,9 @@ class ExportBudget {
         language: string,
         rest: string,
       ) => {
+        if (['text', 'plain', 'plaintext'].includes(language.toLowerCase())) {
+          return match;
+        }
         this.richRenderTasks += 1;
         if (
           this.richRenderTasks <= EXPORT_TRANSCRIPT_LIMITS_V1.maxRichRenderTasks
@@ -988,10 +1040,12 @@ class ExportBudget {
 
   private applyTextBudget(value: string): string {
     const bytes = utf8Bytes(value);
+    const normalTextLimit =
+      EXPORT_TRANSCRIPT_LIMITS_V1.maxVisibleTextBytes -
+      REQUIRED_TEXT_FALLBACK_RESERVE_BYTES;
     if (
       bytes > EXPORT_TRANSCRIPT_LIMITS_V1.maxTextBytes ||
-      this.visibleTextBytes + bytes >
-        EXPORT_TRANSCRIPT_LIMITS_V1.maxVisibleTextBytes
+      this.visibleTextBytes + bytes > normalTextLimit
     ) {
       this.truncated = true;
       this.diagnostics.add('text_budget_exceeded', 'warning');
@@ -1392,6 +1446,7 @@ function assertDocumentConsistency(value: Record<string, unknown>): void {
 }
 
 const TRUNCATION_DIAGNOSTIC_CODES = new Set([
+  'envelope_budget_exceeded',
   'array_budget_exceeded',
   'todo_preview_truncated',
   'markdown_image_rejected',
@@ -1650,7 +1705,11 @@ function splitMarkdownFenceSegments(
   let fence: { character: string; length: number } | undefined;
   for (const line of value.match(/[^\n]*(?:\n|$)/g) ?? []) {
     if (line === '') continue;
-    const marker = /^ {0,3}(`{3,}|~{3,})(?:[^\n]*)/.exec(line)?.[1];
+    const markerMatch = /^ {0,3}(`{3,}|~{3,})([^\n]*)/.exec(line);
+    const marker =
+      markerMatch?.[1]?.startsWith('`') && markerMatch[2]?.includes('`')
+        ? undefined
+        : markerMatch?.[1];
     const isClosing =
       fence !== undefined &&
       marker?.[0] === fence.character &&
@@ -1677,7 +1736,7 @@ function transformMarkdownProse(
 ): string {
   let result = '';
   let cursor = 0;
-  for (const match of value.matchAll(/(`+)[\s\S]*?\1/g)) {
+  for (const match of value.matchAll(/(?<!`)(`+)(?!`)[^\n]*?(?<!`)\1(?!`)/g)) {
     const index = match.index;
     result += transform(value.slice(cursor, index));
     result += match[0];
@@ -1751,7 +1810,7 @@ function sanitizeMarkdownNavigableUrls(
   );
   safe = replaceActiveMarkdownSyntax(
     safe,
-    /^(\s*\[[^\]]+\]:\s*)(?:<([^>]+)>|([^\s]+))(\s+.*)?$/gm,
+    /^((?: {0,3}> ?)*\s*\[[^\]]+\]:\s*)(?:<([^>]+)>|([^\s]+))(\s+.*)?$/gm,
     (match) => {
       const prefix = match[1] ?? '';
       const source = match[2] ?? match[3] ?? '';
@@ -1795,6 +1854,7 @@ function sanitizeMarkdownNavigableUrls(
 function normalizeNavigableUrl(value: string): string | undefined {
   if (value.startsWith('#')) return value;
   if (value.startsWith('/') && !value.startsWith('//')) {
+    if (value.includes('\\')) return undefined;
     const queryIndex = value.search(/[?#]/);
     return queryIndex === -1 ? value : value.slice(0, queryIndex);
   }
@@ -1951,7 +2011,8 @@ function isSafeRepository(value: unknown): value is string {
 
 function safePath(value: string): string {
   const normalized = value.replaceAll('\\', '/').replace(/\/+$/, '');
-  return normalized.split('/').filter(Boolean).at(-1) ?? '[path]';
+  const basename = normalized.split('/').filter(Boolean).at(-1);
+  return basename && !/^[A-Za-z]:$/.test(basename) ? basename : '[path]';
 }
 
 function isSafeExportPath(value: unknown): value is string {
@@ -1969,13 +2030,14 @@ function redactHomePaths(value: string): string {
       'file://[home]',
     )
     .replace(
-      /(?<![A-Za-z0-9+/,=])\/(?:Users|home)\/[^\s/]+(?=\/|\s|$)/g,
+      /(?<![A-Za-z0-9+/,])\/(?:Users|home)\/[^\s/]+(?=\/|\s|$)/g,
       '[home]',
     )
     .replace(
-      /(?<![A-Za-z0-9+/,=])[A-Za-z]:\\Users\\[^\s\\]+(?=\\|\s|$)/gi,
+      /(?<![A-Za-z0-9+/,])[A-Za-z]:\\Users\\[^\s\\]+(?=\\|\s|$)/gi,
       '[home]',
-    );
+    )
+    .replace(/%2F(?:Users|home)%2F[^%/?\s]+/gi, '[home]');
 }
 
 function safeLabel(value: unknown, maxLength: number): string {

@@ -644,8 +644,7 @@ describe('daemon UI normalizer and transcript reducer', () => {
       { now: 2 },
     );
 
-    expect(state.activeAssistantBlockId).toBe(state.blocks[0]?.id);
-    expect(state.activeAssistantBlockId).toMatch(/^assistant-/);
+    expect(state.activeAssistantBlockId).toBe('assistant-1');
     expect(state.blocks).toMatchObject([
       { kind: 'assistant', text: 'done', streaming: true },
     ]);
@@ -1105,7 +1104,13 @@ describe('daemon UI normalizer and transcript reducer', () => {
         data: {
           requestId: 'perm-1',
           sessionId: 'session-1',
-          toolCall: { name: 'Bash', command: 'npm test' },
+          toolCall: {
+            toolCallId: 'call-1',
+            name: 'Bash',
+            kind: 'execute',
+            command: 'npm test',
+            _meta: { toolName: 'run_shell_command' },
+          },
           options: [{ optionId: 'allow', label: 'Allow', raw: null }],
         },
       }),
@@ -1133,8 +1138,31 @@ describe('daemon UI normalizer and transcript reducer', () => {
       {
         kind: 'permission',
         requestId: 'perm-1',
+        toolCallId: 'call-1',
+        toolName: 'run_shell_command',
+        toolKind: 'execute',
         resolved: 'selected:allow',
       },
+    ]);
+  });
+
+  it('uses the permission tool name as a safe identity fallback', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      normalizeDaemonEvent({
+        v: 1,
+        type: 'permission_request',
+        data: {
+          requestId: 'perm-name',
+          toolCall: { name: 'Bash' },
+          options: [],
+        },
+      }),
+      { now: 2 },
+    );
+
+    expect(state.blocks).toMatchObject([
+      { kind: 'permission', requestId: 'perm-name', toolName: 'Bash' },
     ]);
   });
 
@@ -1187,9 +1215,8 @@ describe('daemon UI normalizer and transcript reducer', () => {
         rawOutput: 'ok',
       },
     ]);
-    const toolBlockId = state.blocks[0]?.id;
-    expect(toolBlockId).toMatch(/^tool-/);
-    expect(state.blockIndexById).toEqual({ [String(toolBlockId)]: 0 });
+    expect(state.blocks[0]?.id).toBe('tool-1');
+    expect(state.blockIndexById).toEqual({ 'tool-1': 0 });
 
     state = reduceDaemonTranscriptEvents(
       state,
@@ -5003,6 +5030,28 @@ describe('daemon UI tool preview taxonomy (PR-C)', () => {
     );
   });
 
+  it('keeps structured MCP argument summaries redacted and single-line', () => {
+    const preview = createDaemonToolPreview(
+      {
+        arguments: {
+          issue: {
+            title: 'Bug report',
+            apiKey: 'CHAT_TRANSCRIPT_TEST_SECRET_DO_NOT_EXPORT',
+          },
+        },
+      },
+      { toolName: 'mcp__github__create_issue' },
+    );
+
+    expect(preview).toMatchObject({
+      kind: 'mcp_invocation',
+      argsSummary: 'issue={"title":"Bug report","apiKey":"[redacted]"}',
+    });
+    expect((preview as { argsSummary?: string }).argsSummary).not.toContain(
+      '\n',
+    );
+  });
+
   it('redacts sensitive MCP arguments from the typed preview', () => {
     const preview = createDaemonToolPreview(
       { arguments: { apiKey: 'CHAT_TRANSCRIPT_TEST_SECRET_DO_NOT_EXPORT' } },
@@ -5066,6 +5115,32 @@ describe('daemon UI tool preview taxonomy (PR-C)', () => {
     expect(state.blocks[0]).not.toHaveProperty('resultPreview');
   });
 
+  it('normalizes trusted replay result previews within the size limit', () => {
+    const normalize = (text: string) =>
+      normalizeDaemonEvent({
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'preview-1',
+            status: 'completed',
+            _meta: { qwenTranscript: { resultPreviewText: text } },
+          },
+        },
+      });
+
+    expect(normalize('Visible')).toMatchObject([
+      {
+        type: 'tool.update',
+        resultPreview: { kind: 'text', text: 'Visible' },
+      },
+    ]);
+    expect(normalize('x'.repeat(100_001))[0]).not.toHaveProperty(
+      'resultPreview',
+    );
+  });
+
   it('drops negative todo revisions from the typed preview', () => {
     const preview = createDaemonToolPreview(
       {
@@ -5104,6 +5179,21 @@ describe('daemon UI tool preview taxonomy (PR-C)', () => {
 
     expect(daemonBlockToMarkdown(block)).toContain(String.raw`_todo\_write_`);
     expect(daemonBlockToPlainText(block)).toContain('todo_write');
+  });
+
+  it('marks an invalid todo status as a lossy preview', () => {
+    for (const status of [true, 1, ' ']) {
+      const preview = createDaemonToolPreview(
+        { entries: [{ content: 'Implement', status }] },
+        { toolName: 'todo_write' },
+      );
+
+      expect(preview).toMatchObject({
+        kind: 'todo_list',
+        entries: [{ content: 'Implement', status: 'pending' }],
+        truncated: true,
+      });
+    }
   });
 
   it('bounds cumulative todo preview text', () => {

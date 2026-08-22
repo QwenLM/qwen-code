@@ -27,6 +27,9 @@ function parseDocument(): ExportTranscriptDocument {
     throw new Error('Transcript document envelope is missing.');
   }
   const serialized = envelope.textContent ?? '';
+  if (serialized.length > __EXPORT_TRANSCRIPT_MAX_ENVELOPE_BYTES__) {
+    throw new Error('Transcript document exceeds the envelope budget.');
+  }
   if (
     new TextEncoder().encode(serialized).byteLength >
     __EXPORT_TRANSCRIPT_MAX_ENVELOPE_BYTES__

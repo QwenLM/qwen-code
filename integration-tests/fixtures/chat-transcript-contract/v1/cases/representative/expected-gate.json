@@ -16,7 +16,6 @@
     }
   },
   "blockers": [
-    "product HTML browser gate has not completed in an environment that can launch Playwright Chromium",
     "VS Code scope/generation/reconnect, host-action parity, VSIX, and packaged artifact gates remain pending"
   ]
 }

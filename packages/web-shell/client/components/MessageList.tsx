@@ -1933,6 +1933,14 @@ function displayItemMatchesLocateTarget(
   return false;
 }
 
+function displayItemSourceBlockIds(
+  item: DisplayItem | undefined,
+): string | undefined {
+  return item?.type === 'message'
+    ? item.message.sourceBlockIds?.join(',')
+    : undefined;
+}
+
 export interface MessageListHandle {
   /**
    * Scroll the transcript so the given message is visible and briefly
@@ -5091,6 +5099,9 @@ export const MessageList = memo(
                   ),
                 )}
                 data-message-row-key={String(getItemKey(virtualRow.index))}
+                data-source-block-ids={displayItemSourceBlockIds(
+                  visibleItems[virtualRow.index - headerOffset],
+                )}
                 data-web-shell-message-row
                 style={{
                   position: 'absolute',
@@ -5113,6 +5124,7 @@ export const MessageList = memo(
                 data-index={index}
                 className={getRowClassName(item)}
                 data-message-row-key={String(key)}
+                data-source-block-ids={displayItemSourceBlockIds(item)}
                 data-web-shell-message-row
               >
                 {renderVirtualItem(index)}

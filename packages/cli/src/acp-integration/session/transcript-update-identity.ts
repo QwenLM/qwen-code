@@ -74,6 +74,12 @@ function isDiscreteMessage(update: SessionUpdate): boolean {
 function readTextLane(update: SessionUpdate): string | undefined {
   const record = update as unknown as Record<string, unknown>;
   const kind = record['sessionUpdate'];
+  const meta = isRecord(record['_meta']) ? record['_meta'] : undefined;
+  if (kind === 'shell_output' || kind === 'tool_output') {
+    const source = readString(meta, 'source') ?? 'root';
+    const stream = readString(record, 'stream') ?? 'default';
+    return `${String(kind)}:${source}:${stream}`;
+  }
   if (
     kind !== 'user_message_chunk' &&
     kind !== 'agent_message_chunk' &&
@@ -82,16 +88,16 @@ function readTextLane(update: SessionUpdate): string | undefined {
     return undefined;
   }
   const content = isRecord(record['content']) ? record['content'] : undefined;
+  const contentType = readString(content, 'type');
+  if (!contentType) return undefined;
   if (
-    content?.['type'] !== 'text' ||
-    typeof content['text'] !== 'string' ||
-    content['text'].length === 0
+    contentType === 'text' &&
+    (typeof content?.['text'] !== 'string' || content['text'].length === 0)
   ) {
     return undefined;
   }
-  const meta = isRecord(record['_meta']) ? record['_meta'] : undefined;
   const parentToolCallId = readString(meta, 'parentToolCallId');
-  return `${kind}:${parentToolCallId ?? 'root'}`;
+  return `${kind}:${contentType}:${parentToolCallId ?? 'root'}`;
 }
 
 function readBoundaryId(update: SessionUpdate): string | undefined {
