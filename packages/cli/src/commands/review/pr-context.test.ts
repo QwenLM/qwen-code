@@ -1356,6 +1356,41 @@ describe('latestLedger — the split trust surface', () => {
     expect(own?.ledger).toEqual(anchored);
   });
 
+  it('drops the churn state from ANOTHER account, keeping the work list', () => {
+    // The streak is the same class of claim as the anchor: a fact ABOUT
+    // the round that posted it, certified by the account that ran it.
+    // `stripAnchor` drops the range claim at this seam; left riding,
+    // a foreign marker's `churnRounds` reaches the side file through the
+    // identity-known write path, and any account that can submit a review
+    // can plant a streak — this account's next honest above-bar round then
+    // files the non-convergence blocker on a pull request that never
+    // churned. The work list still crosses: Step 6 re-rules it entry by
+    // entry against the code at HEAD, and the round counter is a shared id
+    // space. Only the streak state cannot be re-vouched across accounts.
+    const churning: Ledger = {
+      v: 1,
+      round: 4,
+      findings: [{ id: 'R4-1', sev: 'C', file: 'a.ts', title: 't' }],
+      churnRounds: 4,
+    };
+    const foreign = latestLedger(
+      [review('ci-bot', '2026-01-01T00:00:00Z', serializeLedger(churning))],
+      'maintainer',
+    );
+    expect(foreign?.ledger.churnRounds).toBeUndefined();
+    expect(foreign?.ledger.findings).toEqual(churning.findings);
+    expect(foreign?.ledger.round).toBe(4);
+    // The OWN account's churn state round-trips through the same seam: it is
+    // this account's certified streak, the state `compose-review` must carry
+    // on. A seam that stripped wholesale would reset the count on every
+    // recovery and make the blocker unreachable on a genuinely churning PR.
+    const own = latestLedger(
+      [review('bot', '2026-01-01T00:00:00Z', serializeLedger(churning))],
+      'bot',
+    );
+    expect(own?.ledger.churnRounds).toBe(4);
+  });
+
   it("recovers the winning review's own commit_id as the age reference", () => {
     // The reference must come from the SAME review the ledger came from — a
     // recovery that took the newest ledger but another review's commit_id
@@ -1554,6 +1589,7 @@ describe('latestLedger — the split trust surface', () => {
     const own =
       'x <!-- qwen-review-ledger {"v":1,"round":9,"findings":[],' +
       '"posted":4,"prevPosted":2,"fresh":3,"floor":"c",' +
+      '"churnRounds":2,' +
       '"sha":"deadbeef00112233"} -->';
     const anonymous = latestLedger(
       [review('maintainer', '2026-01-09T00:00:00Z', own)],
@@ -1564,6 +1600,16 @@ describe('latestLedger — the split trust surface', () => {
     expect(anonymous?.ledger.fresh).toBe(3);
     expect(anonymous?.ledger.floor).toBe('c');
     expect(anonymous?.ledger.sha).toBeUndefined();
+    // ...and the churn group goes WITH the anchor, not with the volume —
+    // the asymmetry is the point of carrying both strips. A blip in
+    // `gh api user` makes every marker read foreign; the volume is kept
+    // because a number nobody can attribute is not a number a stranger
+    // chose, but the streak DECIDES the non-convergence blocker, so a
+    // foreign one riding the anonymous walk into the side file would re-date
+    // a streak across a round this account never ran and arm the blocker a
+    // round early. Unpinned, a refactor gating this strip on `me &&` —
+    // mirroring the volume strip's deliberate asymmetry — ships green.
+    expect(anonymous?.ledger.churnRounds).toBeUndefined();
   });
 
   it("restores this account's own volume when it restores its own findings", () => {
@@ -1597,6 +1643,38 @@ describe('latestLedger — the split trust surface', () => {
     expect(found?.ledger.floor).toBe('c');
     // The foreign numbers are gone, not merely outranked.
     expect(found?.ledger.prevPosted).toBeUndefined();
+  });
+
+  it("restores this account's own churn state beside its own volume", () => {
+    // The union exists so a foreign marker cannot erase own data, and the
+    // churn state is own data exactly the way the volume is: the own marker
+    // describes the SAME round the winner claims, so its streak is this
+    // account's certified count FOR that round. Restoring only the volume
+    // group dropped `churnRounds` for exactly the round it described, on
+    // the routine multi-bot event this union fires for — `prevLedgerFacts`
+    // then read 0 and the non-convergence blocker needed a full fresh
+    // streak to re-arm: a drive-by poster mirroring the round number each
+    // round suppressed it indefinitely, with no attacker involved at all.
+    const own =
+      'x <!-- qwen-review-ledger {"v":1,"round":8,"findings":[' +
+      '{"id":"R8-9","sev":"C","file":"a.ts","title":"certified"}' +
+      '],"posted":6,"churnRounds":4} -->';
+    // The foreign marker carries its OWN churn state as well: the seam
+    // strip must keep it out of the winner, and the restore must not let
+    // it outrank or keep out the own numbers.
+    const foreign =
+      'y <!-- qwen-review-ledger {"v":1,"round":8,"findings":[' +
+      '{"id":"R8-1","sev":"S","file":"b.ts","title":"theirs"}' +
+      '],"posted":99,"churnRounds":1} -->';
+    const found = latestLedger(
+      [
+        review('bot', '2026-01-01T00:00:00Z', own),
+        review('stranger', '2026-01-02T00:00:00Z', foreign),
+      ],
+      'bot',
+    );
+    expect(found?.merged).toBe(true);
+    expect(found?.ledger.churnRounds).toBe(4);
   });
 
   it('restores an own TRUE-ZERO volume even with nothing to merge', () => {
@@ -2327,6 +2405,13 @@ describe('renderLedgerSection', () => {
     expect(md).toContain('| R2-1 | Critical | `src/a.ts:7` | leak |');
     expect(md).toContain('| R2-2 | Suggestion | `src/b.ts` | gap |');
     expect(md).toContain('owed a this-round ruling');
+    // The parenthetical reads as exhaustive, so it must ENUMERATE: a round
+    // that takes it as the whole vocabulary rules a fix-induced case as
+    // `fixed` plus a fresh id — the induced census stays 0 and the churn
+    // streak never arms.
+    expect(md).toContain(
+      '(fixed / still stands / cannot tell / fix-induced / superseded by <class-id>)',
+    );
   });
 });
 

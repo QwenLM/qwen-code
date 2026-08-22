@@ -373,6 +373,7 @@ const {
       messages: [] as unknown[],
       queuedPromptHoldHistory: [] as boolean[],
       queuedPromptStreamingState: 'idle',
+      queuedPromptSessionHasActivePrompt: false,
       chatEditorRenderCount: 0,
       latestChatEditorProps: null as ChatEditorTestProps | null,
       onChatEditorLayout: null as ((props: ChatEditorTestProps) => void) | null,
@@ -605,11 +606,14 @@ vi.mock('./hooks/useQueuedPrompts', () => ({
   useQueuedPrompts: (args: {
     holdQueuedPromptsLocally?: boolean;
     streamingState: string;
+    sessionHasActivePrompt?: boolean;
   }) => {
     testState.queuedPromptHoldHistory.push(
       args.holdQueuedPromptsLocally === true,
     );
     testState.queuedPromptStreamingState = args.streamingState;
+    testState.queuedPromptSessionHasActivePrompt =
+      args.sessionHasActivePrompt === true;
     return {
       queuedPrompts: [],
       queuedTexts,
@@ -4795,6 +4799,7 @@ beforeEach(() => {
   testState.messages = [];
   testState.queuedPromptHoldHistory = [];
   testState.queuedPromptStreamingState = 'idle';
+  testState.queuedPromptSessionHasActivePrompt = false;
   testState.chatEditorRenderCount = 0;
   testState.latestChatEditorProps = null;
   testState.onChatEditorLayout = null;
@@ -10475,7 +10480,7 @@ describe('App session callbacks', () => {
       mockConnection.missingSession = true;
 
       const onSessionIdChange = vi.fn();
-      const { container } = renderApp({
+      const { container, rerender } = renderApp({
         onSessionIdChange,
       });
       await flush();
@@ -10497,6 +10502,23 @@ describe('App session callbacks', () => {
       expect(mockSessionActions.attachSession).not.toHaveBeenCalled();
       expect(onSessionIdChange).toHaveBeenCalledWith(undefined);
       expect(onSessionIdChange).toHaveBeenCalledTimes(1);
+
+      mockConnection.status = 'connected';
+      mockConnection.sessionId = undefined;
+      mockConnection.error = undefined;
+      mockConnection.errorStatus = undefined;
+      mockConnection.missingSession = false;
+      testState.sessionHasActivePrompt = false;
+      rerender();
+      await flush();
+
+      await act(async () => {
+        testState.latestChatEditorProps?.onSubmit('first message');
+        await flush();
+      });
+
+      expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1);
+      expect(rawEnqueuePrompt).not.toHaveBeenCalled();
     },
   );
 
@@ -11130,7 +11152,8 @@ describe('App session callbacks', () => {
     expect(rawEnqueuePrompt.mock.calls[0]?.[0]).toBe(
       'hello before first token',
     );
-    expect(testState.queuedPromptStreamingState).toBe('responding');
+    expect(testState.queuedPromptStreamingState).toBe('idle');
+    expect(testState.queuedPromptSessionHasActivePrompt).toBe(true);
 
     mockSessionActions.sendPrompt.mockClear();
     rawEnqueuePrompt.mockClear();
@@ -11144,6 +11167,7 @@ describe('App session callbacks', () => {
     });
 
     expect(testState.queuedPromptStreamingState).toBe('idle');
+    expect(testState.queuedPromptSessionHasActivePrompt).toBe(false);
     expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1);
     expect(rawEnqueuePrompt).not.toHaveBeenCalled();
   });

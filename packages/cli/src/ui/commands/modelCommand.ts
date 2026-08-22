@@ -27,6 +27,7 @@ import {
   isInlineModelOverrideAllowed,
   parseAcpModelOption,
 } from '../../utils/acpModelUtils.js';
+import { recordDaemonSessionModelFromConfig } from '../../acp-integration/session-model-persistence.js';
 import {
   formatUnsupportedVoiceModelMessage,
   isSelectableVoiceModel,
@@ -1133,6 +1134,9 @@ export const modelCommand: SlashCommand = {
         modelName,
         scopeOverride,
       );
+      if (context.executionMode === 'acp') {
+        await recordDaemonSessionModelFromConfig(config);
+      }
       return {
         type: 'message',
         messageType: 'info',
