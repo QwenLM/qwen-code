@@ -110,11 +110,22 @@ export interface RequestContext {
    * Full accepted content-channel sequence since the first inline thinking
    * demotion (issue #9348). Short cumulative replays can pass through
    * normalizeStreamingTextDelta verbatim, so this sequence provides exact
-   * replay evidence: an equal sequence is dropped and a prefix-extending
-   * sequence contributes only its new suffix. Individual suffix equality is
-   * deliberately insufficient because genuine adjacent deltas may repeat.
+   * replay evidence: an equal sequence is dropped, a prefix-extending
+   * sequence contributes only its new suffix, and a proper-prefix re-send
+   * (rewind replay) carrying a full tag word is dropped. Individual suffix
+   * equality is deliberately insufficient because genuine adjacent deltas
+   * may repeat.
    */
   postDemotionReplayText?: string;
+  /**
+   * Set once a chunk carrying finish_reason has been converted (issue #9348).
+   * The pipeline treats content arriving after the finish chunk as droppable
+   * (finishYielded / pendingFinishResponse merging), so the converter must
+   * not fail closed a completed turn on post-finish redelivered tag-shaped
+   * text — visible content arriving after this point is dropped instead of
+   * running through the replay and leaked-tag gates.
+   */
+  finishChunkConverted?: boolean;
   pendingThinkingTagCandidate?: {
     text: string;
     closingTagName?: 'think' | 'thinking';

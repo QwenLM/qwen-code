@@ -1643,11 +1643,37 @@ export function convertOpenAIChunkToGemini(
       part.thought !== true && typeof part.text === 'string' ? part.text : '';
     let visibleText = parts.map(getVisibleText).join('');
 
+    // Finish-state gate: once the finish chunk was converted, the pipeline
+    // treats any further content as droppable (finishYielded absorption /
+    // pendingFinishResponse merging discards it). A gateway redelivery
+    // arriving after finish can therefore never contribute to the turn —
+    // drop it here instead of running it through the replay and leaked-tag
+    // gates, which would fail closed (PROTOCOL_TAG_LEAK) a completed turn
+    // the finish response already closed.
+    if (requestContext.finishChunkConverted === true && visibleText) {
+      parts = parts.filter((part) => !getVisibleText(part));
+      visibleText = '';
+    }
+
     const pendingTagCandidate = requestContext.pendingThinkingTagCandidate;
+    const alignedRewindReplayText = visibleText.trimStart();
+    // Replay recognition keys on the accepted/emission sequence, not on
+    // per-chunk content equality alone. Pre-demotion, the held candidate is
+    // the accepted sequence: an equal re-send is an exact replay, and a
+    // proper-prefix re-send (rewind replay) is recognized too — but only
+    // when it carries a full tag word. Genuine deltas can prefix the held
+    // candidate as well (e.g. a literal '<' continuation), and dropping them
+    // silently loses content; a full tag word cannot legitimately re-arrive
+    // while the block it belongs to is still held.
     const replayedTagPrefix =
       !pendingTagCandidate?.closingTagName &&
       /\S/.test(pendingTagCandidate?.text ?? '') &&
-      pendingTagCandidate?.text === visibleText;
+      (pendingTagCandidate?.text === visibleText ||
+        (alignedRewindReplayText.length > 0 &&
+          THINKING_TAG_PATTERN.test(visibleText) &&
+          (pendingTagCandidate?.text ?? '')
+            .trimStart()
+            .startsWith(alignedRewindReplayText)));
     const replayedClosingTag =
       STANDALONE_CLOSING_THINKING_TAG_PATTERN.exec(
         visibleText,
@@ -1662,11 +1688,15 @@ export function convertOpenAIChunkToGemini(
     }
     // Short cumulative replays can pass through normalizeStreamingTextDelta
     // verbatim. Detect them only from the complete accepted post-demotion
-    // sequence: equality is an exact replay, while a prefix-extending chunk is
-    // a cumulative superset whose already-accepted prefix must be stripped.
-    // Never infer replay from suffix equality — genuine adjacent deltas can
-    // repeat the same character or tag-like fragment. Compare
-    // trimStart()-aligned in both branches: a whitespace-only content delta
+    // sequence: equality is an exact replay, a prefix-extending chunk is
+    // a cumulative superset whose already-accepted prefix must be stripped,
+    // and a proper prefix of the sequence (rewind replay) is dropped when it
+    // carries a full tag word. Never infer replay from suffix equality —
+    // genuine adjacent deltas can repeat the same character or tag-like
+    // fragment — and never drop a prefix re-send that lacks a full tag word:
+    // genuine tag-like fragments ('<thi', '<thinkpad>') can prefix the
+    // baseline too and must reach the tag-tail hold intact. Compare
+    // trimStart()-aligned in every branch: a whitespace-only content delta
     // can be emitted before any reasoning_content arrives (it cannot be held
     // — no structured reasoning yet — and /\S/ keeps it from setting
     // hasVisibleContent), so the provider's cumulative replay can carry
@@ -1694,6 +1724,18 @@ export function convertOpenAIChunkToGemini(
         );
         parts = parts.filter((part) => !getVisibleText(part));
         if (visibleText) parts.push({ text: visibleText });
+      } else if (
+        alignedRewindReplayText.length > 0 &&
+        alignedReplayText.startsWith(alignedRewindReplayText) &&
+        THINKING_TAG_PATTERN.test(visibleText)
+      ) {
+        // Rewind replay: a proper-prefix re-send of the accepted
+        // post-demotion sequence. Left unrecognized it desyncs the baseline
+        // (the re-send is appended again) and its complete tag throws
+        // PROTOCOL_TAG_LEAK mid-stream on the legitimate turn the demotion
+        // route exists to accept.
+        parts = parts.filter((part) => !getVisibleText(part));
+        visibleText = '';
       }
     }
     if (requestContext.inlineThinkingBlockDemoted === true && visibleText) {
@@ -1710,11 +1752,18 @@ export function convertOpenAIChunkToGemini(
     // block never balances, so the finish chunk would throw
     // PROTOCOL_TAG_LEAK on a legitimate turn. Strip the held candidate's
     // trimStart()-aligned prefix before concatenation, mirroring the
-    // post-demotion baseline.
+    // post-demotion baseline — but only when the candidate already carries a
+    // full tag word. A sub-word candidate ('<', '<t', '<thi') matches the
+    // startsWith condition against unrelated genuine content ('<EOF',
+    // '<<thinking>…') too, and stripping then either silently drops a
+    // genuine '<' or reassembles the remainder into a block that gets
+    // demoted into the hidden thought channel. Without the strip a sub-word
+    // candidate still recombines correctly with its genuine continuation.
     if (
       pendingTagCandidate &&
       !pendingTagCandidate.closingTagName &&
       /\S/.test(pendingTagCandidate.text) &&
+      /<\/?think(?:ing)?/i.test(pendingTagCandidate.text) &&
       visibleText
     ) {
       const alignedCandidateText = pendingTagCandidate.text.trimStart();
@@ -2048,6 +2097,15 @@ export function convertOpenAIChunkToGemini(
         'Model response contained a malformed tool call.',
         'MALFORMED_TOOL_CALL',
       );
+    }
+
+    // Record the finish state only after the finish chunk's own flushes and
+    // fail-closed checks have run: content arriving in later chunks is
+    // post-finish redelivery the pipeline treats as droppable, and the
+    // finish-state gate at the top of the guard zone drops it instead of
+    // failing the completed turn.
+    if (choice.finish_reason) {
+      requestContext.finishChunkConverted = true;
     }
 
     const shouldHoldParts =
