@@ -322,6 +322,7 @@ describe('InputPrompt', () => {
       handleAutocomplete: vi.fn(),
       activeCategory: 'all' as const,
       availableCategories: ['all'] as Array<'all'>,
+      selectCategory: vi.fn(),
       switchCategory: vi.fn(),
     };
     mockedUseCommandCompletion.mockReturnValue(mockCommandCompletion);
