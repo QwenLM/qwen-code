@@ -6713,7 +6713,6 @@ exit 1
     expect(censusSrc).toBeTruthy();
     const TIMEOUT_HEADLINE =
       '🤖 AutoFix ran out of time before finishing (timeout (3000000ms)) (attempt 2/100) — it will retry on the next scan.';
-    const IDLE_HEADLINE = `🤖 AutoFix ran out of time before finishing (${IDLE_NOW}) (attempt 2/100) — it will retry on the next scan.`;
     const PUSH_HEADLINE =
       '🤖 Addressed the latest review feedback (round 2/100). What changed…';
     const NOOP_HEADLINE =
@@ -6814,7 +6813,7 @@ exit 1
       runCensus(
         [
           mk(PUSH_HEADLINE, K, '2026-07-29T04:00:00Z'),
-          mk(IDLE_HEADLINE, K, '2026-07-29T05:00:00Z'),
+          mk(IDLE_HEAD, K, '2026-07-29T05:00:00Z'),
         ],
         K,
       ),
@@ -6823,8 +6822,8 @@ exit 1
       runCensus(
         [
           mk(PUSH_HEADLINE, K, '2026-07-29T04:00:00Z'),
-          mk(IDLE_HEADLINE, K, '2026-07-29T05:00:00Z'),
-          mk(IDLE_HEADLINE, K, '2026-07-29T06:00:00Z'),
+          mk(IDLE_HEAD, K, '2026-07-29T05:00:00Z'),
+          mk(IDLE_HEAD, K, '2026-07-29T06:00:00Z'),
         ],
         K,
       ),
@@ -6835,7 +6834,7 @@ exit 1
       runCensus(
         [
           mk(TIMEOUT_HEADLINE, K, '2026-07-29T04:00:00Z'),
-          mk(IDLE_HEADLINE, K, '2026-07-29T05:00:00Z'),
+          mk(IDLE_HEAD, K, '2026-07-29T05:00:00Z'),
           mk(TIMEOUT_HEADLINE, K, '2026-07-29T06:00:00Z'),
         ],
         K,
