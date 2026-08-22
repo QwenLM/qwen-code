@@ -621,6 +621,20 @@ export function runDrive(args: DriveArgs): DriveReport {
         ? sentinelExitCode(readFileSync(sentinelPath, 'utf8'))
         : null;
       if (exitCode !== null) {
+        // Re-read the log now that the sentinel is there, because the read
+        // above happened BEFORE it. The wrapper writes the sentinel from an
+        // EXIT trap, strictly after the script's last write to the log, so a
+        // final write landing between these two back-to-back reads is in the
+        // file and not in the snapshot — a window one `readFileSync` of a
+        // near-cap log wide, measured at ~1 in 70 such drives. It used to cost
+        // a truncated tail in `output`, which reads as a display artefact;
+        // with `captured` extracted from that same snapshot it costs a `null`
+        // for a value the run demonstrably produced, under a note asserting
+        // the pattern never matched. Every log write happens-before the
+        // sentinel write, so a read taken after it is complete. Kept to this
+        // branch: the other exits stopped the run rather than observing it
+        // finish, and have no such guarantee to lean on.
+        output = existsSync(logPath) ? readFileSync(logPath, 'utf8') : '';
         outcome = 'completed';
         break;
       }
