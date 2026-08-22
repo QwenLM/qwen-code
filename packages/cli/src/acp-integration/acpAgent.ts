@@ -100,6 +100,7 @@ import {
   addDaemonRequestAttribute,
   extractDaemonTraceContext,
   withDaemonSpan,
+  legacyEnvKeyAttribution,
   emptyGoalSnapshot,
   GoalConflictError,
   GoalInvalidTransitionError,
@@ -2650,6 +2651,17 @@ function readProviderSetupInputs(
     protocol ?? config.protocol,
     baseUrl,
   );
+  // Endpoint attribution for baseUrl-less legacy entries (R40-1): see the
+  // matching comment in serve's buildProviderSetupInputs. A key naming a
+  // sibling endpoint is left alone entirely; a floating key is adopted only
+  // by an explicit selection that requests its id.
+  const { namesSelectedEndpoint, namesSiblingEndpoint } =
+    legacyEnvKeyAttribution(config, protocol ?? config.protocol, baseUrl);
+  // Ids of baseUrl-less entries whose stored original this run replaces with
+  // a copy stamped at the selected endpoint (R39-7 collapse included).
+  // buildInstallPlan claims baseUrl-less entries by id-collision ONLY for
+  // these ids (R40-2).
+  const migratedLegacyModelIds: string[] = [];
   const preserveModels = existingModels?.flatMap((model) => {
     const preserved =
       model.baseUrl === undefined
@@ -2671,13 +2683,30 @@ function readProviderSetupInputs(
           (!hasExplicitModelIds || requestedModelIdSet.has(preserved.id)));
       return shouldPreserve ? [preserved] : [];
     }
-    // An explicit selection dedups through the generated same-id model
-    // (identity merge), so only the implicit arm needs the guard.
-    if (
-      !hasExplicitModelIds &&
-      model.baseUrl === undefined &&
-      stampedIdsAtSelectedEndpoint.has(model.id)
-    ) {
+    if (model.baseUrl === undefined) {
+      // A baseUrl-less legacy entry carries no endpoint of its own; its env
+      // key decides. A key naming a sibling endpoint keeps the entry out of
+      // this plan entirely, so a selection here neither deletes nor rewrites
+      // it (R38-3, R39-2, R40-1).
+      const owned = config.ownsModel ? config.ownsModel(model) : true;
+      const attributable = namesSelectedEndpoint(model);
+      const adoptable = owned && (attributable || !namesSiblingEndpoint(model));
+      if (!adoptable) return [];
+      if (stampedIdsAtSelectedEndpoint.has(model.id)) {
+        // A stamped twin at the selected endpoint wins (R39-7); claim the
+        // stored original so the pair collapses to the twin.
+        migratedLegacyModelIds.push(model.id);
+        return [];
+      }
+      const shouldPreserve =
+        !defaultModelIdSet.has(preserved.id) &&
+        (attributable
+          ? !hasExplicitModelIds || requestedModelIdSet.has(preserved.id)
+          : hasExplicitModelIds && requestedModelIdSet.has(preserved.id));
+      if (shouldPreserve) {
+        migratedLegacyModelIds.push(model.id);
+        return [preserved];
+      }
       return [];
     }
     const selectedByEditableFreeForm = requestedModelIdSet.has(preserved.id);
@@ -2694,6 +2723,7 @@ function readProviderSetupInputs(
     apiKey,
     modelIds: resolvedModelIds,
     ...(preserveModels && preserveModels.length > 0 ? { preserveModels } : {}),
+    ...(migratedLegacyModelIds.length > 0 ? { migratedLegacyModelIds } : {}),
     ...(advancedConfig ? { advancedConfig } : {}),
   };
 }

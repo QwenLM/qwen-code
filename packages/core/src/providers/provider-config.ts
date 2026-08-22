@@ -326,6 +326,64 @@ function resolveProviderState(
 }
 
 // ---------------------------------------------------------------------------
+// Attribution of baseUrl-less legacy entries by their stored env key
+// ---------------------------------------------------------------------------
+
+/**
+ * Classifies baseUrl-less legacy model entries (which predate baseUrl
+ * stamping and carry their endpoint only in their env key) against the
+ * endpoint (`protocol`, `baseUrl`):
+ *
+ * - `namesSelectedEndpoint` — the stored key IS the selected endpoint's own
+ *   key, in the current shape or an UNAMBIGUOUS historical shape. Such an
+ *   entry belongs to this endpoint and may be stamped/migrated/claimed here.
+ * - `namesSiblingEndpoint` — the stored key affirmatively names a DIFFERENT
+ *   endpoint of this provider. Such an entry must be left alone entirely:
+ *   a connect here must neither delete nor rewrite it (R38-3, R39-2,
+ *   R40-1).
+ * - neither — the key names no endpoint (a floating hand-written key) or
+ *   cannot be attributed; an implicit reconnect leaves it untouched, an
+ *   explicit selection may adopt it.
+ */
+export function legacyEnvKeyAttribution(
+  config: ProviderConfig,
+  protocol: AuthType,
+  baseUrl: string,
+): {
+  endpointEnvKey: string | undefined;
+  namesSelectedEndpoint: (model: { envKey?: string }) => boolean;
+  namesSiblingEndpoint: (model: { envKey?: string }) => boolean;
+} {
+  let endpointEnvKey: string | undefined;
+  try {
+    endpointEnvKey =
+      typeof config.envKey === 'function'
+        ? config.envKey(protocol, baseUrl)
+        : config.envKey;
+  } catch {
+    endpointEnvKey = undefined;
+  }
+  const envKeyFn =
+    typeof config.envKey === 'function' ? config.envKey : undefined;
+  const namesSelectedEndpoint = (model: { envKey?: string }): boolean =>
+    typeof model.envKey === 'string' &&
+    endpointEnvKey !== undefined &&
+    (model.envKey === endpointEnvKey ||
+      config.ownsEnvKeyShape?.(model.envKey, protocol, baseUrl) === true);
+  const namesSiblingEndpoint = (model: { envKey?: string }): boolean => {
+    if (typeof model.envKey !== 'string') return false;
+    const storedKey = model.envKey;
+    const namesAnEndpoint = config.envKeyNamesAnEndpoint
+      ? config.envKeyNamesAnEndpoint(storedKey, protocol)
+      : Array.isArray(config.baseUrl) &&
+        envKeyFn !== undefined &&
+        config.baseUrl.some((opt) => envKeyFn(protocol, opt.url) === storedKey);
+    return namesAnEndpoint && !namesSelectedEndpoint(model);
+  };
+  return { endpointEnvKey, namesSelectedEndpoint, namesSiblingEndpoint };
+}
+
+// ---------------------------------------------------------------------------
 // Build ProviderInstallPlan from config + inputs
 // ---------------------------------------------------------------------------
 
@@ -384,37 +442,48 @@ export function buildInstallPlan(
     : generatedModels;
   const providerOwnsModel = resolveOwnsModel(config);
   const selectedEndpoint = normalizeBaseUrlForMatching(baseUrl);
-  const migratedLegacyModelIds = new Set(
-    inputs.preserveModels
-      ?.filter(
-        (model) =>
-          model.baseUrl !== undefined &&
-          normalizeBaseUrlForMatching(model.baseUrl) === selectedEndpoint,
-      )
-      .map((model) => model.id) ?? [],
-  );
+  // Only the ids the caller migrated in THIS run may be claimed by
+  // id-collision. Deriving the set from "any preserved model stamped at the
+  // selected endpoint" is unsound: a normally-stamped entry whose id merely
+  // collides with a baseUrl-less entry at a sibling endpoint would claim and
+  // delete that sibling entry (R40-2). Callers that stamp baseUrl-less
+  // legacy entries pass those ids explicitly; callers that never stamp pass
+  // nothing, so no id-collision claim happens on their behalf.
+  const migratedLegacyModelIds = new Set(inputs.migratedLegacyModelIds ?? []);
   const freeFormProvider = config.baseUrl === undefined;
   // A baseUrl-less entry predates baseUrl stamping, so nothing on the entry
   // itself names its endpoint — except its env key, which the provider's env
   // key generation derives endpoint-uniquely. Attribute such an entry to the
   // selected endpoint only when its stored key is that endpoint's own key in
-  // any shape the provider has generated (a deselection at the entry's
-  // endpoint must remove it like any other omitted entry; otherwise the
-  // deselection silently no-ops). Claiming by anything weaker — e.g. a
-  // planned same-id model — let a connect at one endpoint delete another
-  // endpoint's legacy models whenever the ids collided (R38-3, R39-2), and a
-  // key that names no endpoint is left alone entirely: it cannot be
-  // attributed, so it survives like it did before this PR (R39-3).
+  // any UNAMBIGUOUS shape the provider has generated (a deselection at the
+  // entry's endpoint must remove it like any other omitted entry; otherwise
+  // the deselection silently no-ops), or when this very run migrated it
+  // (stamped it, or collapsed it into an existing stamped twin). Claiming by
+  // anything weaker — e.g. any planned/preserved same-id model — let a
+  // connect at one endpoint delete another endpoint's legacy models whenever
+  // the ids collided (R38-3, R39-2, R40-2), and a key that names no endpoint
+  // is left alone entirely: it cannot be attributed, so it survives like it
+  // did before this PR (R39-3).
   const ownsLegacyEnvKey = (storedKey: string | undefined): boolean =>
     typeof storedKey === 'string' &&
     (storedKey === envKey ||
       (config.ownsEnvKeyShape?.(storedKey, protocol, baseUrl) ?? false));
+  // Defense-in-depth for the id-collision clause: even an id this run
+  // migrated must never claim a baseUrl-less entry whose env key names a
+  // SIBLING endpoint — such an entry belongs there, and no migration here can
+  // legitimately own it (R40-2).
+  const { namesSiblingEndpoint } = legacyEnvKeyAttribution(
+    config,
+    protocol,
+    baseUrl,
+  );
   const ownsModel = config.mergeModelsByIdentity
     ? (Array.isArray(config.baseUrl) || freeFormProvider) && providerOwnsModel
       ? (model: ProviderModelConfig) =>
           providerOwnsModel(model) &&
           (normalizeBaseUrlForMatching(model.baseUrl) === selectedEndpoint ||
             (model.baseUrl === undefined &&
+              !namesSiblingEndpoint(model) &&
               (migratedLegacyModelIds.has(model.id) ||
                 (freeFormProvider && ownsLegacyEnvKey(model.envKey)))))
       : undefined

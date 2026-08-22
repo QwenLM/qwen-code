@@ -120,6 +120,18 @@ export interface ProviderConfig {
   ) => boolean;
 
   /**
+   * Reports whether a stored env key is a key this provider generated for
+   * SOME endpoint under `protocol` — selected or not. Used to tell a
+   * baseUrl-less legacy entry that affirmatively names a sibling endpoint
+   * (never adopt, never claim) apart from a floating hand-written key that
+   * names no endpoint (an explicit selection may adopt it). When omitted,
+   * array-baseUrl providers fall back to comparing against every endpoint's
+   * derived key, and any key that is not the selected endpoint's own is
+   * treated as floating.
+   */
+  envKeyNamesAnEndpoint?: (envKey: string, protocol: AuthType) => boolean;
+
+  /**
    * Install-time merge behavior. When true, installs replace only incoming
    * model identities (id + baseUrl) instead of every model matched by
    * ownsModel. Useful for user-defined providers where multiple endpoints and
@@ -154,6 +166,18 @@ export interface ProviderSetupInputs {
   prebuiltModels?: ProviderModelConfig[];
   /** Existing custom models that a defaults-only/headless reconnect cannot display. */
   preserveModels?: ProviderModelConfig[];
+  /**
+   * Ids of baseUrl-less legacy entries this very run migrated toward the
+   * selected endpoint — either freshly stamped into `preserveModels` or
+   * dropped from it because a stamped twin already exists there. Only these
+   * ids may be claimed by id-collision when owning baseUrl-less stored
+   * entries; every other baseUrl-less entry is owned only through its env
+   * key. Inferring this set from "any preserved model stamped at the
+   * selected endpoint" is unsound: a normally-stamped entry whose id merely
+   * collides with another endpoint's legacy entry would claim and delete it
+   * (R40-2).
+   */
+  migratedLegacyModelIds?: readonly string[];
   advancedConfig?: {
     enableThinking?: boolean;
     multimodal?: InputModalities;

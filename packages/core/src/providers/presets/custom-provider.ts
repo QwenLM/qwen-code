@@ -110,11 +110,26 @@ function customEnvKeyHash(protocol: AuthType, baseUrl: string): string {
 }
 
 /**
- * Recognizes every env-key shape this provider has ever generated for the
- * endpoint (`protocol`, `baseUrl`): the current 12-hex-suffix shape, the
- * earlier 6-hex-suffix shape (same hash, shorter slice — old keys persist in
- * settings until reconnect or clear-auth), and the original suffix-less
- * `PREFIX_PROTOCOL_URL` shape.
+ * Recognizes the env-key shapes this provider generated for the endpoint
+ * (`protocol`, `baseUrl`) that can be attributed UNAMBIGUOUSLY: the current
+ * 12-hex-suffix shape and the earlier 6-hex-suffix shape (same hash, shorter
+ * slice — old keys persist in settings until reconnect or clear-auth). Both
+ * carry (a prefix of) the SHA-256 of the canonical (protocol, baseUrl) pair,
+ * which distinguishes structurally distinct endpoints whose URLs normalize to
+ * the same readable segment (`api.example.com` vs `api-example.com`).
+ *
+ * The original suffix-less `PREFIX_PROTOCOL_URL` shape is deliberately NOT
+ * recognized (R40-3): the readable segment is lossy, so a suffix-less key
+ * cannot tell its endpoint apart from a colliding one — connecting either
+ * endpoint would "own" it and delete/rewrite the entry for the other.
+ * Attribution fails closed instead. This is safe: commit-level archaeology
+ * (#3864's predecessors included) shows every released flow that wrote a
+ * prefixed env key stamped `baseUrl` on the entry in the same write, so a
+ * suffix-less key only ever appears on a stamped entry — which the baseUrl
+ * clause of buildInstallPlan's ownsModel attributes without any shape help.
+ * A suffix-less key on a baseUrl-less entry is a hand-written artifact and
+ * survives every connect, like any key that names no endpoint (R39-3
+ * boundary).
  */
 function ownsCustomEnvKeyShape(
   envKey: string,
@@ -122,7 +137,6 @@ function ownsCustomEnvKeyShape(
   baseUrl: string,
 ): boolean {
   const readable = customEnvKeyReadable(protocol, baseUrl);
-  if (envKey === readable) return true; // original suffix-less shape
   const hash = customEnvKeyHash(protocol, baseUrl);
   return (
     envKey === `${readable}_${hash.slice(0, 6)}` || // 6-hex suffix era
@@ -130,7 +144,26 @@ function ownsCustomEnvKeyShape(
   );
 }
 
-/** The original suffix-less `PREFIX_PROTOCOL_URL` key shape (#3864 era). */
+/**
+ * A stored key names SOME endpoint of this provider under `protocol` when it
+ * carries the `PREFIX_PROTOCOL_` part followed by URL content. The
+ * prefix-only `QWEN_CUSTOM_API_KEY_<PROTOCOL>` shape (and anything shorter)
+ * names no endpoint — it is a floating hand-written key.
+ */
+function customEnvKeyNamesAnEndpoint(
+  envKey: string,
+  protocol: AuthType,
+): boolean {
+  return envKey.startsWith(
+    `${CUSTOM_API_KEY_ENV_PREFIX}${normalizeEnvSegment(protocol)}_`,
+  );
+}
+
+/**
+ * The original suffix-less `PREFIX_PROTOCOL_URL` key shape (#3864 era).
+ * Exported for test fixtures; NOT recognized by ownsCustomEnvKeyShape — see
+ * the fail-closed note there (R40-3).
+ */
 export function legacyCustomEnvKey(
   protocol: AuthType,
   baseUrl: string,
@@ -163,6 +196,7 @@ export const customProvider: ProviderConfig = {
   baseUrl: undefined,
   envKey: generateCustomEnvKey,
   ownsEnvKeyShape: ownsCustomEnvKeyShape,
+  envKeyNamesAnEndpoint: customEnvKeyNamesAnEndpoint,
   models: undefined,
   modelNamePrefix: '',
   showAdvancedConfig: true,

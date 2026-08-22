@@ -72,6 +72,7 @@ import type {
   TelemetryRuntimeConfig,
   TelemetrySettings,
 } from '@qwen-code/qwen-code-core';
+import { legacyEnvKeyAttribution } from '@qwen-code/qwen-code-core';
 import { MEMORY_PROJECT_SCOPES } from '@qwen-code/qwen-code-core/memoryScopes';
 import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 // Dynamic-imported below (not at module scope) so the serve fast-path bundle
@@ -1016,6 +1017,23 @@ export function buildProviderSetupInputs(
     typeof provider.envKey === 'function'
       ? provider.envKey(protocol, baseUrl)
       : undefined;
+  // Endpoint attribution for baseUrl-less legacy entries (R40-1). The stored
+  // env key is the only endpoint signal such an entry carries: the selected
+  // endpoint's own key (in any UNAMBIGUOUS historical shape) attributes it
+  // here, a key that affirmatively names a sibling endpoint attributes it
+  // there — such an entry must be left alone entirely, never stamped into
+  // this endpoint's preserve list, or the id-collision claim below would
+  // relocate it here and re-key it to this endpoint's credential. A key that
+  // names no endpoint is floating: an explicit selection may adopt it, but an
+  // implicit (defaults-only) reconnect must not.
+  const { namesSelectedEndpoint, namesSiblingEndpoint } =
+    legacyEnvKeyAttribution(provider, protocol, baseUrl);
+  // Ids of baseUrl-less entries whose stored original this run replaces with
+  // a copy stamped at the selected endpoint — either freshly stamped into
+  // preserveModels or dropped because a stamped twin already exists there
+  // (R39-7). buildInstallPlan claims baseUrl-less entries by id-collision
+  // ONLY for these ids (R40-2).
+  const migratedLegacyModelIds: string[] = [];
   const preserveModels = helpers.existingModels?.flatMap((model) => {
     const preserved =
       model.baseUrl === undefined
@@ -1042,19 +1060,31 @@ export function buildProviderSetupInputs(
     }
     if (model.baseUrl === undefined) {
       // A baseUrl-less legacy entry (predating baseUrl stamping) carries no
-      // endpoint of its own. Migrate it to the selected endpoint when this
-      // request makes no explicit selection (merge-only reconnects keep
-      // everything as-is) or requests its id; otherwise leave it out of the
-      // plan. buildInstallPlan then only owns it at its own endpoint's env
-      // key (in any historical shape), so a selection at a sibling endpoint
-      // neither deletes nor rewrites it (R38-3, R39-2).
-      if (!hasExplicitModelIds && stampedIdsAtSelectedEndpoint.has(model.id)) {
+      // endpoint of its own; its env key decides. Entries whose key names a
+      // sibling endpoint are left out of the plan entirely — buildInstallPlan
+      // then only owns them at their own endpoint's env key, so a selection
+      // here neither deletes nor rewrites them (R38-3, R39-2, R40-1).
+      const owned = provider.ownsModel ? provider.ownsModel(model) : true;
+      const attributable = namesSelectedEndpoint(model);
+      const adoptable = owned && (attributable || !namesSiblingEndpoint(model));
+      if (!adoptable) return [];
+      if (stampedIdsAtSelectedEndpoint.has(model.id)) {
+        // A stamped twin at the selected endpoint wins (R39-7); claim the
+        // stored original so the pair collapses to the twin instead of
+        // persisting as two permanent duplicate (id, baseUrl) entries.
+        migratedLegacyModelIds.push(model.id);
         return [];
       }
       const shouldPreserve =
         !defaultIds.has(model.id) &&
-        (!hasExplicitModelIds || requestedIds.has(model.id));
-      return shouldPreserve ? [preserved] : [];
+        (attributable
+          ? !hasExplicitModelIds || requestedIds.has(model.id)
+          : hasExplicitModelIds && requestedIds.has(model.id));
+      if (shouldPreserve) {
+        migratedLegacyModelIds.push(model.id);
+        return [preserved];
+      }
+      return [];
     }
     const selectedModel =
       helpers.normalizeBaseUrlForMatching?.(preserved.baseUrl) ===
@@ -1072,6 +1102,7 @@ export function buildProviderSetupInputs(
     apiKey: req.apiKey.trim(),
     modelIds,
     ...(preserveModels && preserveModels.length > 0 ? { preserveModels } : {}),
+    ...(migratedLegacyModelIds.length > 0 ? { migratedLegacyModelIds } : {}),
     ...(req.advancedConfig ? { advancedConfig: req.advancedConfig } : {}),
   };
 }

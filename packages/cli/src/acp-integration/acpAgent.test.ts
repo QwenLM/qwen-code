@@ -217,6 +217,12 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   emptyGoalSnapshot: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).emptyGoalSnapshot,
+  // The real helper: the provider-connect preserve builder attributes
+  // baseUrl-less legacy entries with it, and the assertions compare against
+  // its exact classification.
+  legacyEnvKeyAttribution: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).legacyEnvKeyAttribution,
   // The real class: `acpAgent` narrows on it with `instanceof`, so a stand-in
   // would make the goal get/clear fallbacks untestable.
   GoalPersistenceUnavailableError: (
@@ -13174,6 +13180,68 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect.objectContaining({ id: 'kimi' }),
       expect.objectContaining({
         preserveModels: [stampedModel],
+      }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/providers/connect leaves a sibling-attributable legacy entry out of an implicit reconnect (R40-1)', async () => {
+    // A baseUrl-less legacy entry whose env key names the coding endpoint
+    // belongs there. An implicit reconnect at the API endpoint must not stamp
+    // it into preserveModels with the API endpoint's baseUrl/envKey (that
+    // relocated and re-keyed it), nor list its id in migratedLegacyModelIds.
+    const moonshotBaseUrl = 'https://api.moonshot.ai/v1';
+    const legacyKimiCode = {
+      id: 'k3-legacy',
+      name: '[Kimi Code] k3-legacy',
+      envKey: 'KIMI_CODE_API_KEY',
+      generationConfig: { contextWindowSize: 11111 },
+    };
+    const stampedAtInternational = {
+      id: 'my-api-custom',
+      name: '[Kimi API] my-api-custom',
+      baseUrl: moonshotBaseUrl,
+      envKey: 'MOONSHOT_API_KEY',
+      generationConfig: { contextWindowSize: 22222 },
+    };
+    const baseSettings = makeSessionSettings();
+    const settings = {
+      ...baseSettings,
+      merged: {
+        ...baseSettings.merged,
+        modelProviders: { openai: [legacyKimiCode, stampedAtInternational] },
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'kimi',
+        baseUrl: moonshotBaseUrl,
+        apiKey: 'sk-test',
+      }),
+    ).resolves.toMatchObject({ success: true, providerId: 'kimi' });
+
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'kimi' }),
+      expect.objectContaining({
+        preserveModels: [stampedAtInternational],
+      }),
+    );
+    // The sibling-attributable legacy id is not claimed by id-collision.
+    expect(buildInstallPlan).not.toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'kimi' }),
+      expect.objectContaining({
+        migratedLegacyModelIds: expect.arrayContaining(['k3-legacy']),
       }),
     );
 
