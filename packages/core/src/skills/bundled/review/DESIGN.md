@@ -1124,3 +1124,26 @@ Two adjacent findings, neither introduced here and neither fixed here, both surf
 The capability that goes with the second-order saving should be named with it: dropping SKILL means a review part can no longer invoke a project skill at all — this repository ships 25 of them — so the 12,476 tokens are bought with that, not for free.
 
 One consequence of the name. `SubagentManager.loadSubagent` resolves session > project > user > extension > builtin and builtin names are not reserved (`validation.ts` reserves only `self/system/user/model/tool/config/default/main`), so a user-authored `.qwen/agents/review-agent.md` shadows this entry for every launch a review makes. If theirs declares no `tools` the whole saving is gone with no diagnostic, and — because `deleteSubagent` checks `isBuiltinAgent(name)` before it checks level — their own file can no longer be removed through `/agents`. That precedence is deliberate and is how any builtin is customised; it is recorded here because `review-agent` is a likelier name for a user to have chosen than `Explore` or `statusline-setup`.
+
+**How to re-run this measurement.** Every figure above is reproducible with commands this repository already ships — no private script, which is why none is committed. Two arms differ only in `subagent_type`; build the second by reverting the review-path sources to the merge base and bundling separately:
+
+```bash
+git checkout <merge-base> -- packages/core/src/subagents/ \
+  packages/core/src/skills/bundled/review/ \
+  packages/cli/src/commands/review/agent-prompt.ts
+npm run build:packages && npm run bundle && cp -R dist /tmp/ab/dist-base
+git reset --hard HEAD && npm run build:packages && npm run bundle && cp -R dist /tmp/ab/dist-head
+```
+
+**Per-turn token counts** (the 21,178 / 3,447 / 55,789 figures) come from pointing the product at a recording OpenAI-compatible endpoint and tokenising each captured request body with cl100k. `qwen review agent-prompt --plan <plan> --roster` builds the launch prompt; one orchestrator turn launches one dimension agent, and the endpoint answers with that agent's own scripted `read_file` calls so it walks all four turns. What matters is that the record keeps the request **whole**: `qwen review mock-provider` truncates its record at 8 KB, which is smaller than a single tool block, so its log cannot be the source for these numbers.
+
+**The environment is part of the measurement.** The 51-tool arm is the product default, not a local quirk: 35 of the 51 are `computer_use__*`, and `tools.computerUse.enabled` defaults to true. Run each arm under its own `QWEN_HOME` so a stray extension or skill cannot differ between them.
+
+**Run-level figures** (688 vs 542 calls, 59.5M vs 29.5M input, the 95%/93% cache rates) need no harness at all — they are two real reviews of one PR, read back from the product's own ledger:
+
+```bash
+QWEN_HOME=/tmp/ab/home-<arm> QWEN_CODE_CLI=/tmp/ab/dist-<arm>/cli.js \
+  qwen review run <pr> --json --approval-mode yolo
+```
+
+Give each arm a **fresh working tree and `QWEN_HOME`**. This is the step that is easy to skip and fatal to skip: `.qwen/review-cache/pr-<n>.json` makes a second run of the same PR an incremental re-review, so it would reuse the first arm's findings and the comparison would measure nothing. The cache file is also where each run records the `lastModelId` it actually used — worth reading back rather than trusting the settings that were meant to apply.
