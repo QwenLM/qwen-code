@@ -372,6 +372,7 @@ const {
       blocks: [] as unknown[],
       messages: [] as unknown[],
       queuedPromptHoldHistory: [] as boolean[],
+      queuedPromptStreamingState: 'idle',
       chatEditorRenderCount: 0,
       latestChatEditorProps: null as ChatEditorTestProps | null,
       onChatEditorLayout: null as ((props: ChatEditorTestProps) => void) | null,
@@ -600,10 +601,14 @@ vi.mock('./hooks/useAnimationFrameValue', () => ({
 }));
 
 vi.mock('./hooks/useQueuedPrompts', () => ({
-  useQueuedPrompts: (args: { holdQueuedPromptsLocally?: boolean }) => {
+  useQueuedPrompts: (args: {
+    holdQueuedPromptsLocally?: boolean;
+    streamingState: string;
+  }) => {
     testState.queuedPromptHoldHistory.push(
       args.holdQueuedPromptsLocally === true,
     );
+    testState.queuedPromptStreamingState = args.streamingState;
     return {
       queuedPrompts: [],
       queuedTexts,
@@ -4787,6 +4792,7 @@ beforeEach(() => {
   testState.blocks = [];
   testState.messages = [];
   testState.queuedPromptHoldHistory = [];
+  testState.queuedPromptStreamingState = 'idle';
   testState.chatEditorRenderCount = 0;
   testState.latestChatEditorProps = null;
   testState.onChatEditorLayout = null;
@@ -11107,6 +11113,39 @@ describe('App session callbacks', () => {
     );
   });
 
+  it('inserts a prompt before the first stream event reaches the client', async () => {
+    testState.sessionHasActivePrompt = true;
+    const { rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('hello before first token');
+      await flush();
+    });
+
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(rawEnqueuePrompt).toHaveBeenCalledTimes(1);
+    expect(rawEnqueuePrompt.mock.calls[0]?.[0]).toBe(
+      'hello before first token',
+    );
+    expect(testState.queuedPromptStreamingState).toBe('responding');
+
+    mockSessionActions.sendPrompt.mockClear();
+    rawEnqueuePrompt.mockClear();
+    testState.sessionHasActivePrompt = false;
+    rerender();
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('hello after completion');
+      await flush();
+    });
+
+    expect(testState.queuedPromptStreamingState).toBe('idle');
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1);
+    expect(rawEnqueuePrompt).not.toHaveBeenCalled();
+  });
+
   it('enqueues a forwarded command while the session is active and Goal is idle', async () => {
     testState.streamingState = 'responding';
     renderApp();
@@ -13330,6 +13369,19 @@ describe('App session callbacks', () => {
     });
 
     expect(container.querySelector('[data-testid="retry"]')).not.toBeNull();
+
+    const staleRetry = testState.latestMessageListProps?.onRetryClick;
+    act(() => {
+      testState.sessionHasActivePrompt = true;
+      rerender();
+    });
+    expect(container.querySelector('[data-testid="retry"]')).toBeNull();
+    act(() => staleRetry?.());
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    act(() => {
+      testState.sessionHasActivePrompt = false;
+      rerender();
+    });
 
     mockSessionActions.sendPrompt.mockImplementationOnce(
       () => retrySend.promise,
@@ -18831,7 +18883,7 @@ describe('App prompt send failure retry', () => {
 
     const staleRetry = testState.latestMessageListProps?.onRetryFailedPrompt;
     act(() => {
-      testState.streamingState = 'responding';
+      testState.sessionHasActivePrompt = true;
       rerender();
     });
     expect(
@@ -18840,7 +18892,7 @@ describe('App prompt send failure retry', () => {
     act(() => staleRetry?.());
     expect(mockSessionActions.sendPrompt).toHaveBeenCalledTimes(1);
     act(() => {
-      testState.streamingState = 'idle';
+      testState.sessionHasActivePrompt = false;
       rerender();
     });
 

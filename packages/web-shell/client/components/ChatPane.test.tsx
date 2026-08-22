@@ -32,6 +32,7 @@ let connectionState: any;
 let streamingStateValue: string;
 let pendingPermission: any;
 let sessionHasActivePromptValue: boolean;
+let queuedPromptStreamingState: string | undefined;
 let latestOnSubmit:
   | ((
       text: string,
@@ -141,15 +142,18 @@ vi.mock('../session-catalog/session-catalog-hooks', () => ({
 }));
 
 vi.mock('../hooks/useQueuedPrompts', () => ({
-  useQueuedPrompts: () => ({
-    queuedPrompts: queuedPromptsMock,
-    queuedTexts: queuedTextsMock,
-    enqueuePrompt,
-    removeQueuedPrompt,
-    editQueuedPrompt,
-    editLastQueuedPrompt,
-    clearQueuedPrompts,
-  }),
+  useQueuedPrompts: (args: { streamingState: string }) => {
+    queuedPromptStreamingState = args.streamingState;
+    return {
+      queuedPrompts: queuedPromptsMock,
+      queuedTexts: queuedTextsMock,
+      enqueuePrompt,
+      removeQueuedPrompt,
+      editQueuedPrompt,
+      editLastQueuedPrompt,
+      clearQueuedPrompts,
+    };
+  },
 }));
 
 let messagesState: any[];
@@ -404,6 +408,7 @@ beforeEach(() => {
   latestChatEditorProps = undefined;
   renderRealChatEditor = false;
   sessionHasActivePromptValue = false;
+  queuedPromptStreamingState = undefined;
   latestComposerCoreOptions.current = null;
   latestFollowupAccept = undefined;
   latestMonitorDetailsOnOpen = undefined;
@@ -630,6 +635,14 @@ describe('ChatPane', () => {
     expect(testid('pane-queue')?.dataset['canInsertMidTurn']).toBe('false');
 
     act(() => {
+      sessionHasActivePromptValue = true;
+      rerender();
+    });
+
+    expect(testid('pane-queue')?.dataset['canInsertMidTurn']).toBe('true');
+
+    act(() => {
+      sessionHasActivePromptValue = false;
       streamingStateValue = 'responding';
       rerender();
     });
@@ -1643,6 +1656,38 @@ describe('ChatPane', () => {
 
     expect(sendPrompt).not.toHaveBeenCalled();
     expect(enqueuePrompt).toHaveBeenCalled();
+    expect(queuedPromptStreamingState).toBe('responding');
+  });
+
+  it('inserts a prompt before the first stream event reaches the pane', () => {
+    sessionHasActivePromptValue = true;
+    render();
+
+    act(() =>
+      testid('pane-submit')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      ),
+    );
+
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(enqueuePrompt).toHaveBeenCalled();
+    expect(queuedPromptStreamingState).toBe('responding');
+
+    sendPrompt.mockClear();
+    enqueuePrompt.mockClear();
+    act(() => {
+      sessionHasActivePromptValue = false;
+      rerender();
+    });
+    act(() =>
+      testid('pane-submit')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      ),
+    );
+
+    expect(queuedPromptStreamingState).toBe('idle');
+    expect(sendPrompt).toHaveBeenCalledTimes(1);
+    expect(enqueuePrompt).not.toHaveBeenCalled();
   });
 
   it('sends an idle prompt when an active Goal is known', () => {

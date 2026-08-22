@@ -2124,6 +2124,8 @@ export function App({
     connection.workspaceCwd,
     connection.sessionId,
   );
+  const sessionHasActivePromptRef = useRef(sessionHasActivePrompt);
+  sessionHasActivePromptRef.current = sessionHasActivePrompt;
   const refreshWorkspaceCapabilities = workspace.refreshCapabilities;
   const workspaces = useMemo(() => {
     const capabilityWorkspaces = workspace.capabilities?.workspaces ?? [];
@@ -4225,6 +4227,10 @@ export function App({
   const [isStartingNewSessionSuggestion, setIsStartingNewSessionSuggestion] =
     useState(false);
   const streamingState = useStreamingState();
+  const queuedPromptStreamingState =
+    streamingState === 'idle' && sessionHasActivePrompt
+      ? 'responding'
+      : streamingState;
   const failedPromptRetryIsCurrent = Boolean(
     failedPromptRetry &&
       retryOwnerMatchesCurrent(
@@ -6141,7 +6147,8 @@ export function App({
     if (
       sessionWriteBlockedRef.current ||
       promptPreparationOwnerRef.current ||
-      streamingStateRef.current !== 'idle'
+      streamingStateRef.current !== 'idle' ||
+      sessionHasActivePromptRef.current
     ) {
       return;
     }
@@ -6308,7 +6315,7 @@ export function App({
     canQueryMidTurn,
     canInjectMidTurnMedia,
     workspaceFileActions: artifactWorkspaceActions,
-    streamingState,
+    streamingState: queuedPromptStreamingState,
     sessionActions,
     store,
     editorRef,
@@ -8931,8 +8938,10 @@ export function App({
         return false;
       }
       const goalBlocked = isGoalGateBlocked();
-      const commandBlocked =
-        streamingStateRef.current !== 'idle' || goalBlocked;
+      const sessionActive =
+        streamingStateRef.current !== 'idle' ||
+        sessionHasActivePromptRef.current;
+      const commandBlocked = sessionActive || goalBlocked;
       const enqueueBlockedCommand = (commandText: string) => {
         if (goalBlocked) return blockCommand();
         return enqueuePrompt(
@@ -9973,7 +9982,7 @@ export function App({
           });
         return !needsSession;
       } else {
-        if (streamingStateRef.current !== 'idle') {
+        if (sessionActive) {
           return enqueuePrompt(
             text,
             images,
@@ -10179,6 +10188,7 @@ export function App({
       showRetryHintRef.current &&
       connected &&
       streamingStateRef.current === 'idle' &&
+      !sessionHasActivePromptRef.current &&
       retryableTurnErrorIdRef.current &&
       retryableTurnErrorIdentityRef.current &&
       connectionRef.current.sessionId &&
@@ -10560,6 +10570,7 @@ export function App({
   const showCurrentRetryHint = Boolean(
     showRetryHint &&
       !isPreparingPrompt &&
+      !sessionHasActivePrompt &&
       retryableTurnErrorIdentity &&
       matchesTurnErrorIdentity(
         getRetryableTurnError(blocks),
@@ -12424,7 +12435,8 @@ export function App({
                                 onRetryClick={handleRetry}
                                 failedPromptMessageId={
                                   isPreparingPrompt ||
-                                  streamingState !== 'idle'
+                                  streamingState !== 'idle' ||
+                                  sessionHasActivePrompt
                                     ? undefined
                                     : visibleFailedPromptBlock?.id
                                 }
@@ -12744,7 +12756,9 @@ export function App({
                               prompts={queuedPrompts}
                               t={t}
                               canMutateMidTurn={canMutateMidTurn}
-                              canInsertMidTurn={streamingState !== 'idle'}
+                              canInsertMidTurn={
+                                queuedPromptStreamingState !== 'idle'
+                              }
                               onDelete={removeQueuedPrompt}
                               onInsert={insertQueuedPrompt}
                               onEdit={editQueuedPrompt}

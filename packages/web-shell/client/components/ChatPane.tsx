@@ -267,11 +267,17 @@ export function ChatPane({
     workspaceCwd ?? connection.workspaceCwd,
     connection.sessionId,
   );
+  const sessionHasActivePromptRef = useRef(sessionHasActivePrompt);
+  sessionHasActivePromptRef.current = sessionHasActivePrompt;
   const blocks = useAnimationFrameTranscriptBlocks();
   const messages = useMessagesFromBlocks(t, blocks);
   const transcriptHistory = useTranscriptHistory();
   const store = useTranscriptStore();
   const streamingState = useStreamingState();
+  const queuedPromptStreamingState =
+    streamingState === 'idle' && sessionHasActivePrompt
+      ? 'responding'
+      : streamingState;
   const [goalControlBusy, setGoalControlBusy] = useState(false);
   const goalControlOpSeqRef = useRef(0);
   const goalControlOwnerRef = useRef<
@@ -603,7 +609,7 @@ export function ChatPane({
     canQueryMidTurn,
     canInjectMidTurnMedia,
     workspaceFileActions: attachmentWorkspaceTarget?.actions,
-    streamingState,
+    streamingState: queuedPromptStreamingState,
     sessionActions: actions,
     store,
     editorRef,
@@ -804,7 +810,10 @@ export function ChatPane({
           goalState: connection.goalState,
         });
       if (commandBlockedByGoal) return false;
-      if (streamingStateRef.current === 'idle') {
+      if (
+        streamingStateRef.current === 'idle' &&
+        !sessionHasActivePromptRef.current
+      ) {
         const admissionOwner = admissionOwnerRef.current;
         let admissionStarted = false;
         let admitted = false;
@@ -1343,7 +1352,7 @@ export function ChatPane({
                 prompts={queuedPrompts}
                 t={t}
                 canMutateMidTurn={canMutateMidTurn}
-                canInsertMidTurn={streamingState !== 'idle'}
+                canInsertMidTurn={queuedPromptStreamingState !== 'idle'}
                 onDelete={removeQueuedPrompt}
                 onInsert={insertQueuedPrompt}
                 onEdit={editQueuedPrompt}
