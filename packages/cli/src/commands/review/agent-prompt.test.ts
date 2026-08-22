@@ -619,13 +619,23 @@ describe('agent-prompt (command boundary)', () => {
       // The verdict branch: Exclusion Criteria yes, finding format no.
       expect(briefText).toContain('What is NOT a finding');
       expect(briefText).not.toContain('**Anchor:**');
-      // The witness rule: a confirmed Critical returns its executed evidence
+      // The witness rule: a confirmed finding returns its executed evidence
       // or the one-line reason, and the sweep is a named witness form. These
-      // demands are what the orchestrator's low-confidence demotion sorts on,
-      // so a brief that drops them silently demotes every trace-only Critical.
-      expect(briefText).toContain('A confirmed Critical returns its witness.');
+      // demands are what the machine demotion (`holdUnwitnessedFindings`)
+      // sorts on, so a brief that drops them silently demotes every
+      // trace-only Critical — and, since the rule grew to the other postable
+      // severity, every trace-only Suggestion with it.
+      expect(briefText).toContain(
+        'A confirmed Critical returns its witness — and so does every confirmed Suggestion.',
+      );
       expect(briefText).toContain('witness: not run —');
       expect(briefText).toContain('sweep the real population');
+      // The incidental channel and the run-pairing capabilities the brief
+      // gained with it: dropping any of these silently reverts the verifier
+      // to a reader.
+      expect(briefText).toContain('### Incidental findings');
+      expect(briefText).toContain('review ab-drive');
+      expect(briefText).toContain('revert-hunk');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -181,7 +181,10 @@ export interface ExecResult {
  * narrow makes quoting redundant, and redundant is the point — the next person
  * to widen the charset should not also have to notice the shell line.
  */
-const SERVER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+// Exported (with the log cap and the two poll helpers below) for `ab-drive`,
+// which owns the same tmux/sentinel mechanics across two arms and must not
+// re-derive them — a second copy of a safety rule is where the two drift.
+export const SERVER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 /** Single-quote a path for `bash -lc`, closing over any embedded quote. */
 export function shellQuote(v: string): string {
@@ -385,7 +388,7 @@ export function extractCaptures(
  * a clean pass. A run this command had to stop is not a run that finished, so
  * it gets its own outcome and no exit code at all.
  */
-const LOG_MAX_BYTES = 8 * 1024 * 1024;
+export const LOG_MAX_BYTES = 8 * 1024 * 1024;
 /** How often readiness is polled. Fast enough to measure, slow enough to be cheap. */
 const POLL_MS = 250;
 
@@ -405,7 +408,7 @@ const POLL_MS = 250;
  * no platform surface at all.
  */
 /** Size of the log so far; 0 when it is not there yet. */
-function logBytes(p: string): number {
+export function logBytes(p: string): number {
   try {
     return statSync(p).size;
   } catch {
@@ -413,7 +416,7 @@ function logBytes(p: string): number {
   }
 }
 
-function waitMs(ms: number): void {
+export function waitMs(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
