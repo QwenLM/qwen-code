@@ -11,7 +11,11 @@ import {
 } from './interactive-card-client.js';
 import { DingtalkInteractionPresenter } from './interaction-presenter.js';
 import { QuestionCardController } from './question-card-controller.js';
-import { StatusCardController } from './status-card-controller.js';
+import {
+  CONTENT_LIMIT,
+  StatusCardController,
+  TRUNCATION_MARKER,
+} from './status-card-controller.js';
 
 type ExpectedCallbackResult =
   | { kind: 'accepted'; execute: () => Promise<void> }
@@ -171,6 +175,190 @@ describe('DingtalkInteractionPresenter', () => {
         }),
       );
     });
+  });
+
+  it('reports run liveness for boundary fallback decisions', () => {
+    // R7-3: `closeOutput === false` conflates "no display surface" with "the
+    // run already terminated"; the adapter's boundary fallback may only
+    // deliver in the former and needs the two told apart.
+    const { presenter } = createHarness();
+
+    expect(presenter.isRunActive('run-1')).toBe(true);
+    expect(presenter.isRunActive('run-missing')).toBe(false);
+
+    presenter.terminalizeRun('run-1', 'cancelled', 'cancel_command');
+
+    expect(presenter.isRunActive('run-1')).toBe(false);
+  });
+
+  it('gates late boundary delivery on the terminal reason', async () => {
+    // R8-4: terminality alone used to drop a boundary segment whose upload
+    // outlived the run's COMPLETION. Only cancel/fail suppress the late
+    // delivery — and the answer must survive the run's post-finalization
+    // deletion, which lands before the multi-second prepare resumes.
+    const { presenter } = createHarness();
+    presenter.registerRun('run-c', 'owner-1', target);
+    presenter.registerRun('run-f', 'owner-1', target);
+    presenter.registerRun('run-d', 'owner-1', target);
+
+    expect(presenter.acceptsLateDelivery('run-1')).toBe(true);
+    // R11-5: no record at all means nothing is known to suppress.
+    expect(presenter.acceptsLateDelivery('run-missing')).toBe(true);
+
+    presenter.terminalizeRun('run-1', 'cancelled', 'cancel_command');
+    presenter.terminalizeRun('run-c', 'completed');
+    presenter.terminalizeRun('run-f', 'failed', 'boom');
+    presenter.terminalizeRun('run-d', 'completed');
+
+    expect(presenter.acceptsLateDelivery('run-1')).toBe(false);
+    expect(presenter.acceptsLateDelivery('run-c')).toBe(true);
+    expect(presenter.acceptsLateDelivery('run-f')).toBe(false);
+
+    await vi.waitFor(() => {
+      expect(
+        (presenter as unknown as { runs: Map<string, unknown> }).runs.has(
+          'run-d',
+        ),
+      ).toBe(false);
+    });
+    expect(presenter.acceptsLateDelivery('run-d')).toBe(true);
+  });
+
+  it('delivers the fallback for a run the presenter never registered', () => {
+    // R11-5: registration needs the inbound correlation; a run whose
+    // envelope carried no msgId — or whose entry was FIFO-evicted before
+    // `started` — completes with no presenter record at all. The fallback
+    // gate then dropped the final text while files still went out. The
+    // pre-PR fallback delivered unconditionally; only a KNOWN
+    // cancelled/failed terminal may suppress.
+    const { presenter } = createHarness();
+
+    expect(presenter.acceptsLateDelivery('run-missing')).toBe(true);
+
+    // Known terminals still suppress...
+    presenter.registerRun('run-x', 'owner-1', target);
+    presenter.terminalizeRun('run-x', 'cancelled', 'cancel_command');
+    presenter.registerRun('run-y', 'owner-1', target);
+    presenter.terminalizeRun('run-y', 'failed', 'boom');
+    expect(presenter.acceptsLateDelivery('run-x')).toBe(false);
+    expect(presenter.acceptsLateDelivery('run-y')).toBe(false);
+  });
+
+  it('records the segment retained by the completed card', async () => {
+    // R10-3: completing during a boundary's multi-second prepare finalizes
+    // the continuity card retaining the ACTIVE segment's content; a boundary
+    // close still in flight must not deliver that same segment again — but
+    // only a segment the card actually retained qualifies.
+    const { presenter } = createHarness();
+    presenter.startStatusCard('run-1');
+    presenter.appendOutput(segment('segment-A'), 'boundary content');
+    presenter.appendOutput(segment('segment-B'), 'active content');
+
+    presenter.terminalizeRun('run-1', 'completed');
+
+    await vi.waitFor(() => {
+      expect(presenter.terminalCardRetained('run-1', 'segment-B')).toBe(true);
+    });
+    expect(presenter.terminalCardRetained('run-1', 'segment-A')).toBe(false);
+
+    // A cancelled terminal retains nothing for fallback suppression.
+    presenter.registerRun('run-2', 'owner-1', target);
+    presenter.appendOutput(segment('segment-C', { runId: 'run-2' }), 'content');
+    presenter.terminalizeRun('run-2', 'cancelled', 'cancel_command');
+    await vi.waitFor(() => {
+      expect(
+        (presenter as unknown as { runs: Map<string, unknown> }).runs.has(
+          'run-2',
+        ),
+      ).toBe(false);
+    });
+    expect(presenter.terminalCardRetained('run-2', 'segment-C')).toBe(false);
+
+    // Completing without any output retained nothing either.
+    presenter.registerRun('run-3', 'owner-1', target);
+    presenter.terminalizeRun('run-3', 'completed');
+    await vi.waitFor(() => {
+      expect(
+        (presenter as unknown as { runs: Map<string, unknown> }).runs.has(
+          'run-3',
+        ),
+      ).toBe(false);
+    });
+    expect(presenter.terminalCardRetained('run-3', 'segment-A')).toBe(false);
+  });
+
+  it('settles the retained-segment gate with the terminal finalization', async () => {
+    // R10-3 (round 12): `retainedSegmentId` used to be written only INSIDE
+    // the enqueued finalization — after `statusCards.complete` and the card
+    // API calls resolve — while a boundary close still in flight read the
+    // gate synchronously. A completion landing in that tail read `false`
+    // and delivered the retained segment a second time. The gate must
+    // settle together with the finalization instead of racing it.
+    const completeGate = deferred<boolean>();
+    const statusCards = {
+      ensure: vi.fn(),
+      replace: vi.fn(),
+      complete: vi.fn(() => completeGate.promise),
+    };
+    const presenter = new DingtalkInteractionPresenter({
+      statusCards: statusCards as never,
+    });
+    presenter.registerRun('run-1', 'owner-1', target);
+    presenter.appendOutput(segment('segment-B'), 'active content');
+
+    presenter.terminalizeRun('run-1', 'completed');
+
+    expect(presenter.terminalCardRetained('run-1', 'segment-B')).toBe(false);
+    let settled = false;
+    const settlement = presenter.terminalSettled('run-1').then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    completeGate.resolve(true);
+    await settlement;
+    expect(presenter.terminalCardRetained('run-1', 'segment-B')).toBe(true);
+
+    // A run the presenter never registered has no finalization to await.
+    await expect(
+      presenter.terminalSettled('run-missing'),
+    ).resolves.toBeUndefined();
+  });
+
+  it('removes stale segment presentations on a terminal close', async () => {
+    // R9-2: `closeOutput` answered false on `run.terminal` BEFORE deleting,
+    // and `terminalizeRun` deletes only the active segment — a boundary
+    // segment terminalized mid-close leaked its presentation in the uncapped
+    // `segments` map forever. Removal must be unconditional.
+    const { presenter } = createHarness();
+    presenter.appendOutput(segment('segment-A'), 'stale boundary content');
+    presenter.appendOutput(segment('segment-B'), 'active content');
+    presenter.terminalizeRun('run-1', 'cancelled', 'cancel_command');
+
+    await expect(
+      presenter.closeOutput('segment-A', '', 'cancelled'),
+    ).resolves.toBe(false);
+    expect(presenter.segmentContent('segment-A')).toBeUndefined();
+
+    // Completed twin: the boundary segment outlived a newer active segment,
+    // so the completion's terminalization deleted only the active one.
+    presenter.registerRun('run-2', 'owner-1', target);
+    presenter.appendOutput(
+      segment('segment-A2', { runId: 'run-2' }),
+      'boundary content',
+    );
+    presenter.appendOutput(
+      segment('segment-B2', { runId: 'run-2' }),
+      'active content',
+    );
+    presenter.terminalizeRun('run-2', 'completed');
+
+    await expect(
+      presenter.closeOutput('segment-A2', '', 'completed'),
+    ).resolves.toBe(false);
+    expect(presenter.segmentContent('segment-A2')).toBeUndefined();
   });
 
   it('adds the group sender only to the final model output', async () => {
@@ -696,6 +884,29 @@ describe('DingtalkInteractionPresenter', () => {
     expect(sendFallback).not.toHaveBeenCalled();
   });
 
+  it('does not orphan an image marker when a file marker is removed', async () => {
+    // The image pass used to run first and skip the unclosed `[IMAGE:` because
+    // its candidate "contained a `]`" — the `]` belonging to the FILE marker.
+    // Removing the file marker then deleted that closing context and delivered
+    // the orphaned image marker, absolute path and all, as literal text.
+    const { presenter, sendFallback } = createHarness();
+    presenter.appendOutput(
+      segment('segment-1'),
+      'x [IMAGE: /Users/ben/private/report.png [FILE: /tmp/b.txt]',
+    );
+    await presenter.closeOutput('segment-1', '', 'response_boundary');
+
+    presenter.terminalizeRun('run-1', 'failed', 'boom');
+
+    await vi.waitFor(() => {
+      expect(sendFallback).toHaveBeenCalledWith(
+        'cid-1',
+        'x [Image pending]',
+        'session-1',
+      );
+    });
+  });
+
   it('re-delivers boundary content when the run later fails', async () => {
     const { client, presenter, sendFallback } = createHarness();
     presenter.appendOutput(segment('segment-1'), 'intermediate result');
@@ -764,6 +975,109 @@ describe('DingtalkInteractionPresenter', () => {
       'photo [Image pending]',
       'session-1',
     );
+  });
+
+  it('neutralizes complete file markers in text fallbacks', async () => {
+    const sendFallback = vi.fn().mockResolvedValue(undefined);
+    const presenter = new DingtalkInteractionPresenter({ sendFallback });
+    presenter.registerRun('run-1', 'owner-1', target);
+    presenter.appendOutput(
+      segment('segment-1'),
+      'file [FILE: /Users/ben/private/report.pdf] ready',
+    );
+
+    await expect(
+      presenter.closeOutput('segment-1', '', 'response_boundary'),
+    ).resolves.toBe(true);
+
+    expect(sendFallback).toHaveBeenCalledWith(
+      'cid-1',
+      'file  ready',
+      'session-1',
+    );
+  });
+
+  // R3-2: the sequential single-pass composition was not a fixed point of the
+  // JOINT sanitization — the image pass deleted the second residue span BARE,
+  // splicing `[FIL` + `E: /etc/passwd]` into a live `[FILE: …]` marker the
+  // file pass had already finished with, and the fallback shipped it. The two
+  // passes now iterate until stable.
+  it('does not ship a FILE marker the image pass splices together', async () => {
+    const sendFallback = vi.fn().mockResolvedValue(undefined);
+    const presenter = new DingtalkInteractionPresenter({ sendFallback });
+    presenter.registerRun('run-1', 'owner-1', target);
+    presenter.appendOutput(
+      segment('segment-1'),
+      '[IMAGE: z\n[FIL[IMAGE:\na]E: /etc/passwd]',
+    );
+
+    await expect(
+      presenter.closeOutput('segment-1', '', 'response_boundary'),
+    ).resolves.toBe(true);
+
+    const fallbackText = vi.mocked(sendFallback).mock.calls[0]?.[1];
+    expect(fallbackText).not.toContain('/etc/passwd');
+    expect(fallbackText).not.toContain('[FILE:');
+  });
+
+  it.each([
+    [
+      'tilde-fenced code',
+      ['~~~text', '[FILE: /Users/ben/private/report.pdf]', '~~~'].join('\n'),
+    ],
+    ['indented code', '    [FILE: /Users/ben/private/report.pdf]'],
+  ])('preserves file-like text inside %s', async (_label, output) => {
+    const sendFallback = vi.fn().mockResolvedValue(undefined);
+    const presenter = new DingtalkInteractionPresenter({ sendFallback });
+    presenter.registerRun('run-1', 'owner-1', target);
+    presenter.appendOutput(segment('segment-1'), output);
+
+    await presenter.closeOutput('segment-1', '', 'response_boundary');
+
+    expect(sendFallback).toHaveBeenCalledWith('cid-1', output, 'session-1');
+  });
+
+  // R1-9: a one- or two-backtick span must close before the next newline, as
+  // the pre-PR masker required. This case used to pin the opposite — a marker
+  // inside a CROSS-LINE span was masked and therefore preserved verbatim —
+  // which defeats the invariant this machinery exists for: the span masked the
+  // marker from every sanitizer, so the absolute path shipped as literal text
+  // and the file was never delivered. Substituting it is the safe direction;
+  // the cost is that a code sample spanning lines in a short span loses its
+  // marker-shaped text, which is the trade the leak forces.
+  it('substitutes a marker inside a cross-line inline code span', async () => {
+    const sendFallback = vi.fn().mockResolvedValue(undefined);
+    const presenter = new DingtalkInteractionPresenter({ sendFallback });
+    presenter.registerRun('run-1', 'owner-1', target);
+    presenter.appendOutput(
+      segment('segment-1'),
+      '`example\n[FILE: /Users/ben/private/report.pdf]\ncontinued`',
+    );
+
+    await presenter.closeOutput('segment-1', '', 'response_boundary');
+
+    const fallbackText = vi.mocked(sendFallback).mock.calls[0]?.[1];
+    expect(fallbackText).not.toContain('/Users/ben/private');
+    expect(fallbackText).not.toContain('[FILE:');
+  });
+
+  it('does not expose a file path when truncation splits its marker', async () => {
+    const sendFallback = vi.fn().mockResolvedValue(undefined);
+    const presenter = new DingtalkInteractionPresenter({ sendFallback });
+    presenter.registerRun('run-1', 'owner-1', target);
+    const marker = '[FILE: /Users/ben/private/report.pdf]';
+    const splitOffset = '[FILE: '.length;
+    const prefix = 'x'.repeat(TRUNCATION_MARKER.length + 10);
+    const suffix = 'z'.repeat(
+      CONTENT_LIMIT - TRUNCATION_MARKER.length + splitOffset - marker.length,
+    );
+    presenter.appendOutput(segment('segment-1'), `${prefix}${marker}${suffix}`);
+
+    await presenter.closeOutput('segment-1', '', 'response_boundary');
+
+    const fallbackText = vi.mocked(sendFallback).mock.calls[0]?.[1];
+    expect(fallbackText).toBe(`${TRUNCATION_MARKER}${suffix}`);
+    expect(fallbackText).not.toContain('/Users/ben/private');
   });
 
   it('keeps a bare trailing bracket out of text fallbacks', async () => {

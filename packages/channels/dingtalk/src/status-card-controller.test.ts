@@ -1,7 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ChannelOutputSegmentContext } from '@qwen-code/channel-base';
 import type { DingtalkInteractiveCardClient } from './interactive-card-client.js';
-import { StatusCardController } from './status-card-controller.js';
+import {
+  CONTENT_LIMIT,
+  StatusCardController,
+  TRUNCATION_MARKER,
+} from './status-card-controller.js';
 
 type ExpectedCallbackResult =
   | { kind: 'accepted'; execute: () => Promise<void> }
@@ -168,6 +172,66 @@ describe('StatusCardController', () => {
     expect(streamContents.at(-1)).toBe('before [Image pending] after');
   });
 
+  it('hides streamed file paths in status snapshots', async () => {
+    vi.useFakeTimers();
+    const { client, controller } = createHarness();
+
+    controller.replace(
+      segment(),
+      target,
+      'before [FILE: /Users/ben/private/report.pdf] after',
+    );
+    await vi.advanceTimersByTimeAsync(500);
+
+    const streamContents = vi
+      .mocked(client.openOrUpdateStream)
+      .mock.calls.map(([request]) => request.content);
+    expect(streamContents.join('\n')).not.toContain('/Users/ben/private');
+    expect(streamContents.at(-1)).toBe('before  after');
+  });
+
+  // R3-2: the image pass's bare deletion of a later residue span spliced its
+  // surroundings into a live `[FILE: …]` marker the file pass already
+  // finished with; the card composition shipped it on every write path. The
+  // two passes iterate to a joint fixed point now.
+  it('does not ship a FILE marker the image pass splices together', async () => {
+    vi.useFakeTimers();
+    const { client, controller } = createHarness();
+
+    controller.replace(
+      segment(),
+      target,
+      '[IMAGE: z\n[FIL[IMAGE:\na]E: /etc/passwd]',
+    );
+    await vi.advanceTimersByTimeAsync(500);
+
+    const streamContents = vi
+      .mocked(client.openOrUpdateStream)
+      .mock.calls.map(([request]) => request.content);
+    expect(streamContents.join('\n')).not.toContain('/etc/passwd');
+    expect(streamContents.join('\n')).not.toContain('[FILE:');
+  });
+
+  it('does not expose a file path when truncation splits its marker', async () => {
+    const { client, controller } = createHarness();
+    const marker = '[FILE: /Users/ben/private/report.pdf]';
+    const splitOffset = '[FILE: '.length;
+    const prefix = 'x'.repeat(TRUNCATION_MARKER.length + 10);
+    const suffix = 'z'.repeat(
+      CONTENT_LIMIT - TRUNCATION_MARKER.length + splitOffset - marker.length,
+    );
+
+    controller.replace(segment(), target, `${prefix}${marker}${suffix}`);
+
+    await vi.waitFor(() =>
+      expect(client.createAndDeliver).toHaveBeenCalledOnce(),
+    );
+    const content = vi.mocked(client.createAndDeliver).mock.calls[0]?.[0]
+      .cardParamMap.content;
+    expect(content).toBe(`${TRUNCATION_MARKER}${suffix}`);
+    expect(content).not.toContain('/Users/ben/private');
+  });
+
   it('hides image paths when a streaming card is cancelled', async () => {
     const { client, controller } = createHarness();
 
@@ -196,6 +260,35 @@ describe('StatusCardController', () => {
       vi.mocked(client.updateInstance).mock.calls.at(-1)?.[0].cardParamMap,
     );
     expect(terminalPayload).not.toContain('/Users/ben/private');
+  });
+
+  it('hides file paths when a streaming card is cancelled', async () => {
+    const { client, controller } = createHarness();
+
+    controller.replace(
+      segment(),
+      target,
+      'before [FILE: /Users/ben/private/report.pdf] after',
+    );
+    await vi.waitFor(() =>
+      expect(client.createAndDeliver).toHaveBeenCalledOnce(),
+    );
+
+    controller.cancelRun('run-1', 'cancel_command');
+
+    await vi.waitFor(() =>
+      expect(client.updateInstance).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cardParamMap: expect.objectContaining({
+            content: 'before  after',
+            copy_content: 'before  after',
+          }),
+        }),
+      ),
+    );
+    expect(
+      JSON.stringify(vi.mocked(client.updateInstance).mock.calls),
+    ).not.toContain('/Users/ben/private');
   });
 
   it('shows the configured model and refreshes elapsed time while idle', async () => {
@@ -470,6 +563,73 @@ describe('StatusCardController', () => {
     controller.replace(segment(), target, 'late');
     expect(client.createAndDeliver).toHaveBeenCalledOnce();
     expect(client.openOrUpdateStream).toHaveBeenCalledTimes(2);
+  });
+
+  it('omits raw file markers from the terminal card', async () => {
+    const { client, controller } = createHarness();
+    controller.replace(
+      segment(),
+      target,
+      'before [FILE: /Users/ben/private/report.txt] after',
+    );
+
+    await expect(
+      controller.complete(
+        'segment-1',
+        'before [FILE: /Users/ben/private/report.txt] after',
+      ),
+    ).resolves.toBe(true);
+
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          blockList: '[{"type":0,"markdown":"before  after"}]',
+          content: 'before  after',
+          copy_content: 'before  after',
+        }),
+      }),
+    );
+    expect(
+      JSON.stringify(vi.mocked(client.updateInstance).mock.calls.at(-1)?.[0]),
+    ).not.toMatch(/File pending|FILE:|\/Users\/ben\/private/u);
+  });
+
+  it('keeps the delivery receipt in the terminal card', async () => {
+    const { client, controller } = createHarness();
+    controller.replace(segment(), target, 'before  after');
+
+    // The receipt the adapter substitutes for a delivered marker. It reads as
+    // prose, not as a marker, so no sanitizer may remove it — a file-only
+    // response would otherwise finalize to a completely empty card.
+    await expect(
+      controller.complete('segment-1', 'before [File sent: report.txt] after'),
+    ).resolves.toBe(true);
+
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          content: 'before [File sent: report.txt] after',
+          copy_content: 'before [File sent: report.txt] after',
+        }),
+      }),
+    );
+  });
+
+  it('keeps a file-only response from finalizing to an empty card', async () => {
+    const { client, controller } = createHarness();
+    controller.replace(segment(), target, '');
+
+    await expect(
+      controller.complete('segment-1', '[File sent: report.txt]'),
+    ).resolves.toBe(true);
+
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          content: '[File sent: report.txt]',
+        }),
+      }),
+    );
   });
 
   it('retains streamed content when completion has no response body', async () => {

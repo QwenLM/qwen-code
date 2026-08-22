@@ -8,6 +8,8 @@ import type {
   UserInputPresentationResult,
 } from '@qwen-code/channel-base';
 import { stripPartialImageMarker } from './outbound-image.js';
+import { sanitizeMediaMarkersToStable } from './outbound-file.js';
+import { truncateOutboundMediaText } from './outbound-markers.js';
 import type { QuestionCardController } from './question-card-controller.js';
 import {
   CONTENT_LIMIT,
@@ -41,6 +43,24 @@ export interface DingtalkInteractionPresenterOptions {
   sendFallback?(chatId: string, text: string, sessionId: string): Promise<void>;
 }
 
+/**
+ * Files first, images last, iterated to a JOINT fixed point (R3-2).
+ *
+ * The original order stripped partial image markers before removing file
+ * markers, which left an unclosed `[IMAGE:` untouched whenever its candidate
+ * happened to contain the `]` of a following FILE marker — the file removal
+ * then deleted that closing context and delivered the orphaned image marker,
+ * absolute path and all, as literal text. Sanitising files to a fixed point
+ * first means the image pass sees the real bracket structure, and running it
+ * last keeps its `[Image pending]` placeholder out of the file pass. One
+ * image pass after the file fixed point is still not stable — the image
+ * pass's removal splices its surroundings into a fresh `[FILE: …]` marker —
+ * so the two passes iterate together.
+ */
+function sanitizeFallbackOutput(text: string): string {
+  return sanitizeMediaMarkersToStable(text, stripPartialImageMarker);
+}
+
 export interface DingtalkCardSender {
   senderName: string;
 }
@@ -64,6 +84,20 @@ export class DingtalkInteractionPresenter {
   private readonly runs = new Map<string, RunPresentation>();
   private readonly segments = new Map<string, SegmentPresentation>();
   private readonly terminalSegmentIds = new Set<string>();
+  /**
+   * R8-4: why a run terminalized, kept past the run's post-finalization
+   * deletion — a late boundary close arriving after it still needs the
+   * reason to decide whether delivery is allowed. R10-3: for a completed
+   * run, also which segment's content the continuity card retained.
+   */
+  private readonly terminalReasons = new Map<
+    string,
+    {
+      reason: 'completed' | 'failed' | 'cancelled';
+      retainedSegmentId?: string;
+      finalization?: Promise<void>;
+    }
+  >();
 
   constructor(private readonly options: DingtalkInteractionPresenterOptions) {}
 
@@ -74,6 +108,7 @@ export class DingtalkInteractionPresenter {
     sessionId = '',
     sender?: DingtalkCardSender,
   ): void {
+    this.terminalReasons.delete(runId);
     this.runs.set(runId, {
       runId,
       ownerId,
@@ -141,6 +176,65 @@ export class DingtalkInteractionPresenter {
     });
   }
 
+  /**
+   * The content accumulated for a segment that has not been closed yet.
+   * R2-13: the adapter prepares this content (uploads, receipts) before the
+   * boundary close delivers it, so a `[FILE: …]` marker emitted before the
+   * boundary is handled instead of silently stripped.
+   */
+  segmentContent(segmentId: string): string | undefined {
+    return this.segments.get(segmentId)?.content;
+  }
+
+  /**
+   * Whether the run is still live — registered and not yet terminal. R7-3:
+   * `closeOutput` answers false for both "no display surface" and "the run
+   * is already terminal"; a boundary fallback that may only deliver in the
+   * former needs the two told apart.
+   */
+  isRunActive(runId: string): boolean {
+    const run = this.runs.get(runId);
+    return run !== undefined && !run.terminal;
+  }
+
+  /**
+   * Whether a late boundary delivery may still go out for this run. R8-4:
+   * terminality alone used to gate the fallback, so a run COMPLETING while
+   * the boundary's multi-second prepare was in flight dropped the uploaded
+   * files whole. A completed run's chat target is still valid for delivery —
+   * only cancel/fail terminals suppress it — and the answer must survive the
+   * run's post-finalization deletion. R11-5: a run the presenter never
+   * registered (its inbound correlation missing or evicted before `started`)
+   * has no record at all; the pre-PR fallback delivered it unconditionally,
+   * so only a KNOWN cancelled/failed terminal may suppress.
+   */
+  acceptsLateDelivery(runId: string): boolean {
+    if (this.isRunActive(runId)) return true;
+    const reason = this.terminalReasons.get(runId)?.reason;
+    return reason === undefined || reason === 'completed';
+  }
+
+  /**
+   * R10-3: whether this segment's content was retained on the continuity
+   * card when the run completed — a boundary fallback delivering it again
+   * would show the same content twice.
+   */
+  terminalCardRetained(runId: string, segmentId: string): boolean {
+    return this.terminalReasons.get(runId)?.retainedSegmentId === segmentId;
+  }
+
+  /**
+   * R10-3: `retainedSegmentId` settles only when the terminal finalization
+   * resolves — the card write chain plus the DingTalk finalization calls can
+   * outlast a boundary close still in flight, and a gate reading
+   * `terminalCardRetained` before then sees `false` and delivers the
+   * retained segment a second time. Await this before consulting that gate;
+   * it resolves immediately for runs with no recorded finalization.
+   */
+  terminalSettled(runId: string): Promise<void> {
+    return this.terminalReasons.get(runId)?.finalization ?? Promise.resolve();
+  }
+
   closeOutput(
     segmentId: string,
     text: string,
@@ -154,9 +248,14 @@ export class DingtalkInteractionPresenter {
     }
     if (!presentation) return Promise.resolve(false);
     const run = presentation.run;
-    if (run.terminal) return Promise.resolve(false);
+    // R9-2: remove unconditionally — a run terminalizing mid-close used to
+    // leave the presentation in `segments` forever: `terminalizeRun` deletes
+    // only the active segment, and the terminal early return below skipped
+    // the removal. The map has no cap, so each occurrence pinned up to
+    // CONTENT_LIMIT of text for the life of the daemon.
     this.segments.delete(segmentId);
     this.addTerminalSegment(segmentId);
+    if (run.terminal) return Promise.resolve(false);
     if (run.activeSegmentId === segmentId) {
       run.activeSegmentId = undefined;
     }
@@ -185,13 +284,13 @@ export class DingtalkInteractionPresenter {
           (await statusCards.flushPending(statusContext.segmentId));
         if (deliveredViaCard) {
           run.cardDelivered = {
-            text: stripPartialImageMarker(text || presentation.content),
+            text: sanitizeFallbackOutput(text || presentation.content),
             chatId: presentation.context.target.chatId,
             sessionId: presentation.context.sessionId,
           };
           return true;
         }
-        const fallbackText = stripPartialImageMarker(
+        const fallbackText = sanitizeFallbackOutput(
           text || presentation.content,
         );
         if (!fallbackText || !this.options.sendFallback) return false;
@@ -211,7 +310,7 @@ export class DingtalkInteractionPresenter {
           ));
         run.statusContext = undefined;
         if (completed) return true;
-        const fallbackText = stripPartialImageMarker(
+        const fallbackText = sanitizeFallbackOutput(
           text || presentation.content,
         );
         if (!fallbackText || !this.options.sendFallback) return false;
@@ -230,9 +329,7 @@ export class DingtalkInteractionPresenter {
           this.withSenderPrefix(run, text || presentation.content),
         ));
       if (completed) return true;
-      const fallbackText = stripPartialImageMarker(
-        text || presentation.content,
-      );
+      const fallbackText = sanitizeFallbackOutput(text || presentation.content);
       if (!fallbackText || !this.options.sendFallback) return false;
       await this.options.sendFallback(
         presentation.context.target.chatId,
@@ -268,6 +365,12 @@ export class DingtalkInteractionPresenter {
   ): void {
     const run = this.runs.get(runId);
     if (!run || run.terminal) return;
+    this.terminalReasons.set(runId, { reason: terminal });
+    while (this.terminalReasons.size > 1000) {
+      const oldest = this.terminalReasons.keys().next().value;
+      if (oldest === undefined) break;
+      this.terminalReasons.delete(oldest);
+    }
     this.options.questionCards?.cancelRun(
       runId,
       terminal === 'cancelled' &&
@@ -316,15 +419,28 @@ export class DingtalkInteractionPresenter {
         // last boundary) leaves the eagerly created card running forever.
         const statusContext = run.statusContext;
         if (statusContext) {
-          await this.options.statusCards?.complete(
+          const retained = await this.options.statusCards?.complete(
             statusContext.segmentId,
             '',
             (retained) =>
               retained ? this.withSenderPrefix(run, retained) : retained,
           );
+          // R10-3: the card kept the active segment's content — a boundary
+          // close still in flight must not deliver that segment again.
+          if (retained && activeSegmentId) {
+            const entry = this.terminalReasons.get(runId);
+            if (entry) entry.retainedSegmentId = activeSegmentId;
+          }
         }
       }
     });
+    const entry = this.terminalReasons.get(runId);
+    if (entry) {
+      entry.finalization = finalization.then(
+        () => undefined,
+        () => undefined,
+      );
+    }
     void finalization.then(
       () => {
         if (this.runs.get(runId) === run) this.runs.delete(runId);
@@ -389,12 +505,7 @@ export class DingtalkInteractionPresenter {
   }
 
   private boundContent(content: string, limit = CONTENT_LIMIT): string {
-    if (content.length <= limit) return content;
-    if (limit === 0) return '';
-    if (limit <= TRUNCATION_MARKER.length) return content.slice(-limit);
-    return `${TRUNCATION_MARKER}${content.slice(
-      content.length - (limit - TRUNCATION_MARKER.length),
-    )}`;
+    return truncateOutboundMediaText(content, limit, TRUNCATION_MARKER);
   }
 
   private withSenderPrefix(run: RunPresentation, content: string): string {
