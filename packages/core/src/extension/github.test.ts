@@ -30,6 +30,7 @@ import * as path from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { promises as dns } from 'node:dns';
+import { gzipSync } from 'node:zlib';
 import * as tar from 'tar';
 import * as archiver from 'archiver';
 import {
@@ -927,6 +928,66 @@ describe('git extension helpers', () => {
           '.gitattributes': '# *.bin filter=lfs diff=lfs merge=lfs -text\n',
         }),
       ).resolves.toBe(fallbackSha);
+    });
+
+    // Builds a ustar header for a zero-content regular file (same technique
+    // as archive-safety.test.ts): `tar.t` parses headers via `onReadEntry`
+    // without requiring entry content, so a header declaring a huge size
+    // exercises the expanded-size ceiling without gigabytes of data.
+    function createTarFileHeader(name: string, size: number): Buffer {
+      const header = Buffer.alloc(512);
+      header.write(name, 0, 100, 'utf8');
+      header.write('0000644\0', 100, 8); // mode
+      header.write('0000000\0', 108, 8); // uid
+      header.write('0000000\0', 116, 8); // gid
+      header.write(`${size.toString(8).padStart(11, '0')}\0`, 124, 12);
+      header.write('14763423360\0', 136, 12); // mtime
+      header.write('        ', 148, 8); // checksum placeholder (spaces)
+      header.write('0', 156, 1); // typeflag: regular file
+      header.write('ustar\0', 257, 6);
+      header.write('00', 263, 2);
+      let checksum = 0;
+      for (const byte of header) {
+        checksum += byte;
+      }
+      header.write(`${checksum.toString(8).padStart(6, '0')}\0 `, 148, 8);
+      return header;
+    }
+
+    it('enforces the expanded-size limit on the downloaded fallback archive', async () => {
+      vi.spyOn(dns, 'lookup').mockResolvedValue([
+        { address: '8.8.8.8', family: 4 },
+      ] as never);
+      const tempDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'old-git-fallback-size-test-'),
+      );
+      const destination = path.join(tempDir, 'destination');
+      await fs.mkdir(destination);
+      const maxExpandedBytes = 1024 * 1024 * 1024;
+      const archive = gzipSync(
+        Buffer.concat([
+          createTarFileHeader('big.bin', maxExpandedBytes + 1),
+          Buffer.alloc(1024), // tar trailer
+        ]),
+      );
+      mockHttpsResponses(JSON.stringify({ sha: fallbackSha }), archive);
+
+      try {
+        await expect(
+          downloadPublicGitHubArchiveFallback(
+            {
+              type: 'git',
+              source: 'https://github.com/owner/repo',
+              networkPolicy: 'public',
+            },
+            destination,
+          ),
+        ).rejects.toThrow(
+          `Tar archive expands beyond ${maxExpandedBytes} bytes.`,
+        );
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
     });
   });
 
@@ -2054,6 +2115,193 @@ describe('git extension helpers', () => {
           tempDir,
         ),
       ).rejects.toBeInstanceOf(SyntaxError);
+    });
+
+    // The release-metadata fetch exercises fetchJson's redirect handling
+    // (mirrors the downloadFile redirect matrix below).
+    const releaseMetadata = JSON.stringify({
+      assets: [
+        {
+          name: 'extension.zip',
+          browser_download_url:
+            'https://github.com/owner/repo/releases/download/v1.0.0/extension.zip',
+        },
+      ],
+      tag_name: 'v1.0.0',
+    });
+
+    async function createReleaseArchive(): Promise<Buffer> {
+      return createZipBuffer(tempDir, [
+        {
+          name: EXTENSIONS_CONFIG_FILENAME,
+          content: JSON.stringify({
+            name: 'redirected-metadata-extension',
+            version: '1.0.0',
+          }),
+        },
+      ]);
+    }
+
+    it('stops following GitHub API redirect loops', async () => {
+      mockHttpsGet.mockImplementation(((_url, options, callback) => {
+        callResponseCallback(
+          options,
+          callback,
+          createResponse(undefined, 302, {
+            location: 'https://api.github.com/repos/owner/repo/releases/next',
+          }),
+        );
+        return createRequestMock();
+      }) as typeof https.get);
+
+      await expect(
+        downloadFromGitHubRelease(
+          { source: 'owner/repo', type: 'github-release' },
+          tempDir,
+        ),
+      ).rejects.toThrow('Too many redirects while fetching GitHub API data');
+      // The initial request plus MAX_API_REDIRECTS follow-ups.
+      expect(mockHttpsGet).toHaveBeenCalledTimes(6);
+    });
+
+    it('rejects GitHub API redirects without a location and clears the timeout', async () => {
+      vi.useFakeTimers();
+      const response = createResponse(undefined, 302);
+      const resumeSpy = vi.spyOn(response, 'resume');
+      mockHttpsGet.mockImplementationOnce(((_url, options, callback) => {
+        callResponseCallback(options, callback, response);
+        return createRequestMock();
+      }) as typeof https.get);
+
+      try {
+        await expect(
+          downloadFromGitHubRelease(
+            { source: 'owner/repo', type: 'github-release' },
+            tempDir,
+          ),
+        ).rejects.toThrow('Redirect response missing location header');
+        expect(resumeSpy).toHaveBeenCalled();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('rejects GitHub API redirect scheme downgrades before following them', async () => {
+      vi.stubEnv('GITHUB_TOKEN', 'secret-token');
+      mockHttpsGet.mockImplementationOnce(((_url, options, callback) => {
+        callResponseCallback(
+          options,
+          callback,
+          createResponse(undefined, 302, {
+            location: 'http://api.github.com/repos/owner/repo/releases/latest',
+          }),
+        );
+        return createRequestMock();
+      }) as typeof https.get);
+
+      await expect(
+        downloadFromGitHubRelease(
+          { source: 'owner/repo', type: 'github-release' },
+          tempDir,
+        ),
+      ).rejects.toThrow('Unsupported redirect URL protocol: http:');
+
+      // The downgrade is rejected before any request to the http: URL.
+      expect(mockHttpsGet).toHaveBeenCalledTimes(1);
+      const originalOptions = mockHttpsGet.mock.calls[0][1] as
+        | https.RequestOptions
+        | undefined;
+      expect(originalOptions?.headers).toMatchObject({
+        Authorization: 'token secret-token',
+      });
+    });
+
+    it('does not forward the GitHub token to cross-host GitHub API redirects', async () => {
+      vi.stubEnv('GITHUB_TOKEN', 'secret-token');
+      const archive = await createReleaseArchive();
+      mockHttpsGet
+        .mockImplementationOnce(((_url, options, callback) => {
+          callResponseCallback(
+            options,
+            callback,
+            createResponse(undefined, 302, {
+              location: 'https://objects.githubusercontent.com/metadata',
+            }),
+          );
+          return createRequestMock();
+        }) as typeof https.get)
+        .mockImplementationOnce(((_url, options, callback) => {
+          callResponseCallback(
+            options,
+            callback,
+            createResponse(releaseMetadata),
+          );
+          return createRequestMock();
+        }) as typeof https.get)
+        .mockImplementationOnce(((_url, options, callback) => {
+          callResponseCallback(options, callback, createResponse(archive));
+          return createRequestMock();
+        }) as typeof https.get);
+
+      await downloadFromGitHubRelease(
+        { source: 'owner/repo', type: 'github-release' },
+        tempDir,
+      );
+
+      const originalOptions = mockHttpsGet.mock.calls[0][1] as
+        | https.RequestOptions
+        | undefined;
+      const redirectedOptions = mockHttpsGet.mock.calls[1][1] as
+        | https.RequestOptions
+        | undefined;
+      expect(originalOptions?.headers).toMatchObject({
+        Authorization: 'token secret-token',
+      });
+      expect(redirectedOptions?.headers).toEqual({
+        'User-Agent': 'gemini-cli',
+      });
+    });
+
+    it('keeps the GitHub token for same-host GitHub API redirects', async () => {
+      vi.stubEnv('GITHUB_TOKEN', 'secret-token');
+      const archive = await createReleaseArchive();
+      mockHttpsGet
+        .mockImplementationOnce(((_url, options, callback) => {
+          callResponseCallback(
+            options,
+            callback,
+            createResponse(undefined, 302, {
+              location:
+                'https://api.github.com/repos/owner/renamed/releases/latest',
+            }),
+          );
+          return createRequestMock();
+        }) as typeof https.get)
+        .mockImplementationOnce(((_url, options, callback) => {
+          callResponseCallback(
+            options,
+            callback,
+            createResponse(releaseMetadata),
+          );
+          return createRequestMock();
+        }) as typeof https.get)
+        .mockImplementationOnce(((_url, options, callback) => {
+          callResponseCallback(options, callback, createResponse(archive));
+          return createRequestMock();
+        }) as typeof https.get);
+
+      await downloadFromGitHubRelease(
+        { source: 'owner/repo', type: 'github-release' },
+        tempDir,
+      );
+
+      const redirectedOptions = mockHttpsGet.mock.calls[1][1] as
+        | https.RequestOptions
+        | undefined;
+      expect(redirectedOptions?.headers).toMatchObject({
+        Authorization: 'token secret-token',
+      });
     });
 
     it('should explain when a release archive is missing an extension manifest', async () => {
