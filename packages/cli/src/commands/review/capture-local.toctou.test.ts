@@ -17,6 +17,7 @@ import {
   writeFileSync,
   readFileSync,
   existsSync,
+  mkdirSync,
   realpathSync,
 } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -280,5 +281,40 @@ describe('capture-local — TOCTOU candidate withholding', () => {
       ),
     ).toBe(true);
     expect(stderrLines.join('\n')).not.toContain('candidate is withheld');
+  });
+});
+
+describe('capture-local — the withheld candidate is not announced', () => {
+  it('omits cacheCandidatePath from the plan and removes a stale file', () => {
+    // Step 8 branches on the field's presence; announcing a path to a file
+    // this run deliberately withheld sends it promoting an earlier round's
+    // candidate.
+    const stale = join(
+      repo,
+      '.qwen/tmp/qwen-review-local-cache-candidate.json',
+    );
+    // PLANT an earlier round's candidate: without it the removal assertion
+    // passes even when the removal itself is deleted.
+    mkdirSync(join(repo, '.qwen/tmp'), { recursive: true });
+    writeFileSync(
+      stale,
+      JSON.stringify({ v: 1, target: 'local', stale: true }),
+    );
+    captures.push({ diff: DIFF_A }, { diff: Buffer.from('moved mid-hash\n') });
+    run();
+    const plan = JSON.parse(
+      readFileSync(join(repo, 'plan.json'), 'utf8'),
+    ) as Record<string, unknown>;
+    expect('cacheCandidatePath' in plan).toBe(false);
+    expect(existsSync(stale)).toBe(false);
+  });
+
+  it('announces the path when the candidate IS written', () => {
+    captures.push({ diff: DIFF_A }, { diff: Buffer.from(DIFF_A) });
+    run();
+    const plan = JSON.parse(
+      readFileSync(join(repo, 'plan.json'), 'utf8'),
+    ) as Record<string, unknown>;
+    expect(plan['cacheCandidatePath']).toContain('cache-candidate.json');
   });
 });

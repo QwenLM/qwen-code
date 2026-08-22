@@ -21,13 +21,16 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
+import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
+  assertUnredirectedParent,
   repoRelativeOf,
   REVIEW_CACHE_DIR,
   REVIEW_TMP_DIR,
@@ -93,8 +96,12 @@ type CaptureLocalResult = PlanReport & {
   skippedFiles: SkippedFile[];
   /** Present only when `--cache` scoped this capture incrementally. */
   incremental?: IncrementalBlock;
-  /** Where this round's content anchor landed — Step 8 promotes it on a clean run. */
-  cacheCandidatePath: string;
+  /**
+   * Where this round's content anchor landed — Step 8 promotes it on a clean
+   * run. ABSENT when the capture withheld the candidate (a mid-capture tree
+   * change), because Step 8 branches on this field's presence.
+   */
+  cacheCandidatePath?: string;
   /**
    * Where this target's review cache lives — resolved here, not predicted.
    *
@@ -452,10 +459,54 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     // erased the first file's anchor and its open findings.
     ...(sourcePath !== undefined ? { source: sourcePath } : {}),
   };
-  const cacheCandidatePath = tmpFile(target, 'cache-candidate.json');
+  const candidatePath = tmpFile(target, 'cache-candidate.json');
+  // The field rides the plan ONLY when a candidate exists to promote: Step 8
+  // keys its cache-commit-vs-hand-write branch on the field's presence, and
+  // announcing a path to a file this run deliberately withheld would send it
+  // promoting a stale candidate from an earlier round.
+  let cacheCandidatePath: string | undefined;
   if (treeHeldStill) {
-    writeFileSync(cacheCandidatePath, JSON.stringify(candidate, null, 2));
+    // Guarded as a whole, like the PR flow's candidate write and for the
+    // reason that one states: a convenience artefact must never take the
+    // round with it. The refusal below arrives AFTER the capture, the
+    // hashing and the plan are all done; letting it escape `runCaptureLocal`
+    // — which the yargs handler does not catch — exited non-zero with no
+    // plan, no report and no diff, over a check whose whole cost is supposed
+    // to be the next round's anchor. The pre-guard code wrote here with a
+    // plain `writeFileSync` and could not fail this way at all.
+    try {
+      // The PARENT chain first: `noFollow` below guards only the final
+      // element, and `.qwen/tmp` committed as a symlink redirects the write
+      // just as well — the plan then advertises that path as
+      // `cacheCandidatePath` and `cache-commit` reads a candidate the
+      // attacker wrote. Same guard the promoted cache gets.
+      assertUnredirectedParent(
+        candidatePath,
+        'cache candidate',
+        'capture-local',
+      );
+      // noFollow: a planted symlink at this deterministic path would redirect
+      // the candidate write onto its target (see cache-commit's note).
+      atomicWriteFileSync(candidatePath, JSON.stringify(candidate, null, 2), {
+        noFollow: true,
+      });
+      cacheCandidatePath = candidatePath;
+    } catch (err) {
+      // Said out loud, and the field stays absent: Step 8 branches on its
+      // presence, so a silent drop would send it promoting an earlier
+      // round's candidate.
+      writeStderrLine(
+        `Could not write the cache candidate ` +
+          `(${(err as Error).message}); this round cannot anchor the next ` +
+          `one, but the review itself is unaffected.`,
+      );
+    }
   } else {
+    try {
+      rmSync(candidatePath, { force: true });
+    } catch {
+      // The absent field above is the load-bearing half.
+    }
     writeStderrLine(
       'The working tree changed while the capture was being hashed — the ' +
         'cache candidate is withheld, so the next round cannot anchor on ' +
@@ -761,7 +812,7 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     // `srclink/foo.ts` predicted `srclink_foo.ts.json`, found nothing, and
     // ruled on zero ledger entries over a Critical that still stood.
     cachePath: cachePathFor(target, sourcePath),
-    cacheCandidatePath,
+    ...(cacheCandidatePath ? { cacheCandidatePath } : {}),
     ...planEffortField(args.effort),
   };
 

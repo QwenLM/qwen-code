@@ -24,6 +24,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { stateIdOf } from './lib/local-anchor.js';
+import { cacheCommitCommand } from './cache-commit.js';
 import { captureLocalCommand } from './capture-local.js';
 import { buildChunkAgentPrompt } from './agent-prompt.js';
 import { isolateHostGitConfig } from './lib/test-utils.js';
@@ -443,6 +444,38 @@ describe('capture-local — round-2 regressions from the stop work', () => {
       readFileSync(join(repo, '.qwen/tmp/qwen-review-local-stop.json'), 'utf8'),
     ) as Record<string, unknown>;
     expect(sidecar['runId']).toBe('run-abc');
+  });
+});
+describe('capture-local — promotion through the REAL cache-commit', () => {
+  it("keeps a file review's anchor across the promotion", () => {
+    // The unit tests either side of this seam both passed while the seam
+    // itself was broken: `cache-commit`'s allowlist dropped `source`, and
+    // this suite's own `promoteCandidate` helper spreads the whole candidate
+    // instead of running the command — so the field survived in every test
+    // and in no real round. Drive the actual command.
+    seedDirtyTree();
+    write('src/foo.ts', 'export const real = 1;\n');
+
+    const first = capture({ file: 'src/foo.ts', model: 'model-a' });
+    const ledgerPath = join(repo, '.qwen/tmp/ledger.json');
+    writeFileSync(
+      ledgerPath,
+      JSON.stringify({ round: 1, verdict: 'Comment', findings: [] }),
+    );
+    mkdirSync(join(repo, '.qwen/review-cache'), { recursive: true });
+    (cacheCommitCommand.handler as (argv: unknown) => void)({
+      candidate: first.cacheCandidatePath,
+      ledger: ledgerPath,
+      out: first['cachePath'],
+    });
+
+    write('src/foo.ts', 'export const real = 2;\n');
+    const second = capture({
+      file: 'src/foo.ts',
+      cache: join(repo, '.qwen/review-cache'),
+      model: 'model-a',
+    });
+    expect(second.incremental?.scope?.deltaFiles).toEqual(['src/foo.ts']);
   });
 });
 
