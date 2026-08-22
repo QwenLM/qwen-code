@@ -388,6 +388,45 @@ describe('capture-local — incremental local rounds', () => {
   });
 });
 
+describe('capture-local — round-2 regressions from the stop work', () => {
+  it('does not call a tracked, unmodified FILE review a clean-tree stop', () => {
+    // An empty diff is not a decided round for a file target: SKILL.md's
+    // no-diff branch owes it a whole-file review. Marked decided, the round
+    // turned from "Review did not complete" — which it was before the stop
+    // existed — into a PASSING gate over a file nobody read.
+    seedDirtyTree();
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'all committed');
+
+    const plan = capture({ file: CHANGED });
+    expect(plan.chunks.length).toBe(0);
+    expect(plan['nothingToReview']).toBeUndefined();
+  });
+
+  it('stamps the stop sidecar with the run that asked for it', () => {
+    // The sidecar decides `completed` and can carry a REQUEST_CHANGES event,
+    // while its NAME is the flattened target token — which is not injective,
+    // so a concurrent review whose path flattens alike writes the same file
+    // and its blocker count would decide the other run's exit code. The epoch
+    // fence separates EARLIER runs, not concurrent ones; only a nonce does.
+    seedDirtyTree();
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'all committed');
+    const prev = process.env['QWEN_REVIEW_RUN_ID'];
+    process.env['QWEN_REVIEW_RUN_ID'] = 'run-abc';
+    try {
+      capture();
+    } finally {
+      if (prev === undefined) delete process.env['QWEN_REVIEW_RUN_ID'];
+      else process.env['QWEN_REVIEW_RUN_ID'] = prev;
+    }
+    const sidecar = JSON.parse(
+      readFileSync(join(repo, '.qwen/tmp/qwen-review-local-stop.json'), 'utf8'),
+    ) as Record<string, unknown>;
+    expect(sidecar['runId']).toBe('run-abc');
+  });
+});
+
 describe('capture-local — the cache namespace discriminates the subject', () => {
   it('gives a file review its own key, so colliding targets keep separate ledgers', () => {
     // The anchor gate's `source` check is the second layer, not the first: it
@@ -553,8 +592,11 @@ describe('capture-local — --cache takes the DIRECTORY', () => {
     expect(first['target']).toBe('src_foo.ts');
     const cacheDir = join(repo, '.qwen/review-cache');
     mkdirSync(cacheDir, { recursive: true });
+    // Written where the CAPTURE says this target's cache lives — the same
+    // field the orchestrator reads. A file review's cache is namespaced by
+    // source path, so a hand-spelled `<token>.json` is not it.
     writeFileSync(
-      join(cacheDir, 'src_foo.ts.json'),
+      first['cachePath'] as string,
       readFileSync(first.cacheCandidatePath, 'utf8'),
     );
 

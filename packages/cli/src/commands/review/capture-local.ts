@@ -25,7 +25,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   repoRelativeOf,
@@ -205,7 +205,11 @@ function anchorRefusalReason(
  * when it names a directory. Null when a directory holds no cache for this
  * target, which every caller already treats as "no anchor".
  */
-function resolveCachePath(given: string, target: string): string | null {
+function resolveCachePath(
+  given: string,
+  target: string,
+  source: string | undefined,
+): string | null {
   let isDir = false;
   try {
     isDir = statSync(given).isDirectory();
@@ -214,7 +218,11 @@ function resolveCachePath(given: string, target: string): string | null {
     return given;
   }
   if (!isDir) return given;
-  const candidate = join(given, `${target}.json`);
+  // The SAME spelling `cachePathFor` writes. A resolver and a writer that
+  // disagree leave the round reporting "the cache is missing or unreadable"
+  // over a cache sitting right there — and for a file review they DID, since
+  // the namespace split moved the write and left this probe on the old name.
+  const candidate = join(given, basename(cachePathFor(target, source)));
   return existsSync(candidate) ? candidate : null;
 }
 
@@ -240,7 +248,7 @@ function openBlockersInCache(
 ): number {
   const path =
     cacheArg !== undefined
-      ? resolveCachePath(cacheArg, target)
+      ? resolveCachePath(cacheArg, target, source)
       : cachePathFor(target, source);
   if (path === null) return 0;
   try {
@@ -480,7 +488,7 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     //
     // Passing the directory ends the guessing: one deriver, and a caller
     // that knows only where caches live. A file path still works unchanged.
-    const cachePath = resolveCachePath(args.cache, target);
+    const cachePath = resolveCachePath(args.cache, target, sourcePath);
     const cache = cachePath === null ? null : readLocalCache(cachePath);
     const refusal = anchorRefusalReason(
       cache,
@@ -628,6 +636,12 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     plan.diffLines === 0 &&
     !incremental &&
     capture.skipped.length === 0 &&
+    // …and NOT a file review. A tracked, unmodified file has an empty diff
+    // and is not a decided round: SKILL.md's no-diff branch owes it a
+    // whole-file review ("read the file and review its current state"). Left
+    // in, this turned that case from "Review did not complete" — which it was
+    // before the stop existed — into a PASSING gate over a file nobody read.
+    args.file === undefined &&
     // …and the guard has to agree. `treeHeldStill` false means a write landed
     // inside the capture window — the exact race the three-pass sampling
     // exists to catch — so capture 0's empty diff describes a tree that no
@@ -679,6 +693,16 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
         {
           ...nothingToReview,
           openBlockers: openBlockersInCache(args.cache, target, sourcePath),
+          // The parent's stamp, echoed back. This file decides `completed`
+          // and can carry a REQUEST_CHANGES event, while its NAME is the
+          // flattened target token — not injective, so a concurrent review
+          // whose path flattens alike writes the same path and its blocker
+          // count would decide the other run's exit code. Absent when the
+          // capture was not launched by `qwen review run`, which is exactly
+          // when no parent is reading.
+          ...(process.env['QWEN_REVIEW_RUN_ID']
+            ? { runId: process.env['QWEN_REVIEW_RUN_ID'] }
+            : {}),
         },
         null,
         2,
@@ -768,8 +792,19 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
             `${capture.skipped.length} untracked file(s) were SKIPPED (above). ` +
             `This is not a clean tree: report them under "Not reviewed" and do ` +
             `not certify the working tree as reviewed.`
-        : 'WARNING: the working tree is clean — 0 chunks. There is nothing to ' +
-            'review; do not run the review agents.',
+        : treeHeldStill
+          ? 'WARNING: the working tree is clean — 0 chunks. There is nothing ' +
+            'to review; do not run the review agents.'
+          : // …and NOT when the guard just proved the tree moved. The
+            // machine-readable stop is gated on `treeHeldStill`; this
+            // sentence was not, so the round printed "the working tree
+            // changed while the capture was being hashed" and "the working
+            // tree is clean" back to back and the orchestrator — which reads
+            // prose here — stopped on the second. The same contradiction the
+            // field-level gate closed, one layer up.
+            'WARNING: 0 chunks, but the working tree changed while the ' +
+            'capture was being hashed (above): this is NOT a clean tree. ' +
+            'Re-run the review rather than reporting nothing to review.',
     );
   }
   writeStderrLine(

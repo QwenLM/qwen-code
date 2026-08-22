@@ -28,6 +28,7 @@
 import type { CommandModule } from 'yargs';
 import { isUnusableScriptEntry } from '@qwen-code/qwen-code-core';
 import { spawn, execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, join, normalize, resolve } from 'node:path';
 import {
@@ -202,6 +203,7 @@ const escapeRe = (s: string): string =>
 function nothingToReviewFrom(
   cls: RunTargetClass,
   cutoffMs: number,
+  runId: string,
 ): { reason: string; openBlockers: number } | null {
   // The capture's sidecar, not the plan: `--out` is the orchestrator's to
   // choose, so the plan has no name the parent can predict. This one is
@@ -217,7 +219,13 @@ function nothingToReviewFrom(
     const stop = JSON.parse(readFileSync(found.path, 'utf8')) as {
       reason?: unknown;
       openBlockers?: unknown;
+      runId?: unknown;
     };
+    // Stamped by THIS run, or it is not this run's verdict. The name is a
+    // flattened target token and that token is not injective, so a concurrent
+    // review whose path flattens alike writes the same file — and its
+    // `openBlockers` would decide this run's exit code.
+    if (stop.runId !== runId) return null;
     if (typeof stop.reason !== 'string' || stop.reason === '') return null;
     return {
       reason: stop.reason,
@@ -476,8 +484,15 @@ export function killProcessGroup(pid: number, signal: NodeJS.Signals): void {
  * `isUnusableScriptEntry`, preserving the bare-`qwen` fallback instead of a
  * stamp that dies on exit 126.
  */
-function childEnv(): NodeJS.ProcessEnv {
+function childEnv(runId: string): NodeJS.ProcessEnv {
   const env = { ...process.env };
+  // Ties every artifact this run's child writes back to THIS run. The stop
+  // sidecar is verdict-bearing — it decides `completed` and can carry a
+  // REQUEST_CHANGES event — and its name is the flattened target token, which
+  // is not injective: two concurrent file reviews whose paths flatten alike
+  // share the path, and the epoch fence separates earlier runs, not
+  // concurrent ones. A nonce is what a name cannot be.
+  env['QWEN_REVIEW_RUN_ID'] = runId;
   const inherited = env['QWEN_CODE_CLI'];
   const ownEntry = process.argv[1];
   if (!ownEntry) {
@@ -511,6 +526,10 @@ async function runReview(args: RunReviewArgs): Promise<void> {
   // own verdict must not be discarded over clock granularity. Artifacts from a
   // previous review are minutes old, far outside any slack.
   const cutoffMs = startMs - 2_000;
+  // Names cannot separate concurrent runs — the stop sidecar's is a flattened
+  // target token, and that token is not injective — so this run stamps its
+  // child and accepts only artifacts stamped back.
+  const runId = randomUUID();
 
   // Re-enter THIS build's CLI, not whatever `qwen` PATH resolves to — the same
   // version-skew rule the skill's own subprocesses follow via QWEN_CODE_CLI.
@@ -530,7 +549,7 @@ async function runReview(args: RunReviewArgs): Promise<void> {
       args.approvalMode,
     ],
     {
-      env: childEnv(),
+      env: childEnv(runId),
       // stdin CLOSED, not inherited: piped input would be prepended to the
       // prompt and the leading `/` would no longer be the first character —
       // the slash command would reach the model as plain text.
@@ -668,7 +687,7 @@ async function runReview(args: RunReviewArgs): Promise<void> {
   // decided — a cached second round on an unchanged tree, or a clean tree
   // whose earlier blocker the ledger still renders as standing. The signal is
   // a field the CLI wrote into its own plan, not a sentence the model chose.
-  const stop = nothingToReviewFrom(targetClass, cutoffMs);
+  const stop = nothingToReviewFrom(targetClass, cutoffMs, runId);
   const completed = composed !== null || stop !== null;
   // A decided stop is not automatically a CLEAN one. Both of SKILL.md's stop
   // branches open by rendering the cache's still-open findings, and the common

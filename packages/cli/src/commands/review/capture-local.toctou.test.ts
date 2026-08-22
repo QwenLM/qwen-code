@@ -199,9 +199,15 @@ describe('capture-local — TOCTOU candidate withholding', () => {
       readFileSync(join(repo, 'plan.json'), 'utf8'),
     ) as Record<string, unknown>;
     expect(plan['nothingToReview']).toBeUndefined();
-    expect(stderrLines.join('\n')).toContain(
+    const err = stderrLines.join('\n');
+    expect(err).toContain(
       'working tree changed while the capture was being hashed',
     );
+    // …and the PROSE must not contradict it either. The orchestrator branches
+    // on these sentences, and the round printed "the working tree is clean"
+    // right after the line above until this was gated too.
+    expect(err).not.toContain('the working tree is clean');
+    expect(err).toContain('this is NOT a clean tree');
   });
 
   it('catches a PHASE-ALIGNED write the pairwise guard let through', () => {
