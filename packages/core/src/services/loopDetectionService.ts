@@ -231,21 +231,25 @@ export class LoopDetectionService {
   // streak (restarted when the streak breaks); `lastFingerprint` survives
   // streak breaks so a state change is still visible across interleaved
   // calls (used by the action-stagnation reset).
+  // `consecutiveIdenticalResults` is the stuck-repetition evidence for the
+  // global-duplicate detector and the adaptive cap (replacing the
+  // request-time global-duplicate counting and the cap's stuck-repetition
+  // counting for these tools): it counts results that repeat the key's
+  // IMMEDIATELY PRECEDING result (interleaved calls still accumulate) and
+  // restarts at 1 whenever a result differs from its predecessor — the same
+  // call returning changed state is productive and must not accumulate
+  // toward either halt. Counting turn-wide (key, fingerprint) totals
+  // instead would halt a board oscillating between two byte-identical
+  // states even though every result there differs from its predecessor.
   private statefulRepeatState = new Map<
     string,
     {
       resultsObserved: number;
       unchangedStreak: number;
+      consecutiveIdenticalResults: number;
       lastFingerprint: string | undefined;
     }
   >();
-
-  // Turn-wide counts of (repeat key, result fingerprint) pairs for stateful
-  // read tools, recorded post-execution. Replaces the request-time
-  // global-duplicate counting and the cap's stuck-repetition counting for
-  // these tools: the same call returning changed state is productive and
-  // must not accumulate toward either halt.
-  private statefulPairCounts = new Map<string, number>();
 
   // callId → request pairing so results can be matched to their calls when
   // the runtime only has the response (populated on ToolCallRequest events,
@@ -317,6 +321,7 @@ export class LoopDetectionService {
       state = {
         resultsObserved: 0,
         unchangedStreak: 0,
+        consecutiveIdenticalResults: 0,
         lastFingerprint: undefined,
       };
       this.statefulRepeatState.set(key, state);
@@ -344,21 +349,22 @@ export class LoopDetectionService {
       this.sameNameStreak = 1;
     }
 
-    // Turn-wide (repeat key, fingerprint) counting: replaces the
-    // request-time global-duplicate and cap stuck-repetition counting for
-    // stateful tools.
-    const pairKey = `${key}|${fingerprint}`;
-    const pairCount = (this.statefulPairCounts.get(pairKey) ?? 0) + 1;
-    this.statefulPairCounts.set(pairKey, pairCount);
-    if (pairCount > this.capMaxKeyRepeat) {
-      this.capMaxKeyRepeat = pairCount;
+    // Consecutive identical-result counting (see statefulRepeatState): a
+    // result that differs from the key's predecessor restarts the count, so
+    // an oscillating board never accumulates toward either halt.
+    const consecutiveIdentical = fingerprintChanged
+      ? 1
+      : state.consecutiveIdenticalResults + 1;
+    state.consecutiveIdenticalResults = consecutiveIdentical;
+    if (consecutiveIdentical > this.capMaxKeyRepeat) {
+      this.capMaxKeyRepeat = consecutiveIdentical;
     }
 
     // The global-duplicate detector is gated (skipLoopDetection) exactly as
     // its request-time counterpart in addAndCheckHeuristicLoops.
     if (
       !this.config.getSkipLoopDetection() &&
-      pairCount >= GLOBAL_DUPLICATE_THRESHOLD
+      consecutiveIdentical >= GLOBAL_DUPLICATE_THRESHOLD
     ) {
       this.lastLoopType = LoopType.GLOBAL_TOOL_CALL_DUPLICATE;
       logLoopDetected(
@@ -598,12 +604,12 @@ export class LoopDetectionService {
       this.capMaxKeyRepeat = 0;
       // A retry replays the failed attempt's tool calls; drop the stateful
       // result evidence too so the replayed attempt is judged on its own
-      // results (pair counts re-accumulate as results land, consistent with
-      // the capKeyCounts/globalToolCallCounts clears).
-      this.statefulPairCounts.clear();
+      // results (the consecutive counts re-accumulate as results land,
+      // consistent with the capKeyCounts/globalToolCallCounts clears).
       for (const state of this.statefulRepeatState.values()) {
         state.resultsObserved = 0;
         state.unchangedStreak = 0;
+        state.consecutiveIdenticalResults = 0;
       }
       return false;
     }
@@ -1314,7 +1320,6 @@ export class LoopDetectionService {
     this.capKeyCounts.clear();
     this.capMaxKeyRepeat = 0;
     this.statefulRepeatState.clear();
-    this.statefulPairCounts.clear();
     this.requestByCallId.clear();
   }
 

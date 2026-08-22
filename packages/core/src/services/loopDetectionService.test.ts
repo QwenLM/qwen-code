@@ -2380,6 +2380,71 @@ describe('LoopDetectionService', () => {
       );
     });
 
+    it('does not halt a board oscillating between two states (order-aware pair counts)', () => {
+      // A board flipping between two byte-identical states returns a result
+      // that differs from its predecessor on EVERY poll. Turn-wide (key,
+      // fingerprint) counting would accumulate each state to the
+      // global-duplicate threshold and halt this productive poller; the
+      // count must restart on every changed result. Run well past
+      // GLOBAL_DUPLICATE_THRESHOLD rounds so the accumulation is visible.
+      const heuristicService = new LoopDetectionService(
+        makeConfig(DEFAULT_MAX_TOOL_CALLS_PER_TURN, false, false),
+      );
+      heuristicService.reset('oscillating-board');
+
+      const interleaved = ['task_list', 'tool_b', 'tool_c'];
+      const states = ['state-a', 'state-b'];
+      let stateIndex = 0;
+      for (let round = 0; round < 2 * GLOBAL_DUPLICATE_THRESHOLD + 1; round++) {
+        for (const name of interleaved) {
+          const args = name === 'task_list' ? TASK_LIST_ARGS : { step: round };
+          expect(
+            heuristicService.addAndCheck(
+              createToolCallRequestEvent(name, args),
+            ),
+          ).toBe(false);
+          if (name === 'task_list') {
+            expect(
+              heuristicService.recordToolResult(
+                { name, args },
+                taskListResult(states[stateIndex++ % states.length]),
+              ),
+            ).toBe(false);
+          }
+        }
+      }
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
+    it('keeps the adaptive cap from arming on oscillating results', () => {
+      // CLI default: skipLoopDetection=true, so the cap's stuck signal fed
+      // by recordToolResult is the live halt path. An oscillating board
+      // must not build the stuck signal; the turn then sails past the soft
+      // cap toward the hard backstop instead of halting just above it.
+      const capService = new LoopDetectionService(makeConfig(20));
+      capService.reset('cap-oscillating');
+
+      const states = ['state-a', 'state-b'];
+      let fired = false;
+      let totalCalls = 0;
+      for (let round = 0; round < 40 && !fired; round++) {
+        fired = capService.checkAlwaysOnSafeties(taskListEvent(`tl-${round}`));
+        totalCalls++;
+        if (fired) break;
+        fired = capService.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('tool_b', { step: round }),
+        );
+        totalCalls++;
+        if (fired) break;
+        capService.recordToolResult(
+          { name: 'task_list', args: TASK_LIST_ARGS },
+          taskListResult(states[round % states.length]),
+        );
+      }
+      expect(fired).toBe(false);
+      expect(totalCalls).toBe(80);
+    });
+
     it('treats changed results as progress for action stagnation', () => {
       const heuristicService = new LoopDetectionService(
         makeConfig(DEFAULT_MAX_TOOL_CALLS_PER_TURN, false, false),
