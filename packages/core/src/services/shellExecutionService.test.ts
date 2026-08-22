@@ -13,6 +13,7 @@ import {
   afterEach,
   type Mock,
 } from 'vitest';
+import { isUtf8 } from 'node:buffer';
 import EventEmitter from 'node:events';
 import type { Readable } from 'node:stream';
 import { type ChildProcess } from 'node:child_process';
@@ -34,6 +35,9 @@ const { Terminal } = pkg;
 
 // Hoisted Mocks
 const mockGetSystemEncoding = vi.hoisted(() =>
+  vi.fn().mockReturnValue('utf-8'),
+);
+const mockGetCachedEncodingForBuffer = vi.hoisted(() =>
   vi.fn().mockReturnValue('utf-8'),
 );
 const mockPtySpawn = vi.hoisted(() => vi.fn());
@@ -115,8 +119,24 @@ vi.mock('../utils/shell-utils.js', () => ({
   getShellConfiguration: mockGetShellConfiguration,
 }));
 vi.mock('../utils/systemEncoding.js', () => ({
-  getCachedEncodingForBuffer: vi.fn().mockReturnValue('utf-8'),
+  getCachedEncodingForBuffer: mockGetCachedEncodingForBuffer,
   getSystemEncoding: mockGetSystemEncoding,
+  // Mirror the real decodeProcessOutput contracts: the Buffer.isBuffer
+  // string guard, the optional pre-detected encoding, and the try/catch
+  // utf-8 fallback for labels WHATWG TextDecoder rejects (unvalidated
+  // Unix codesets and chardet guesses). A bare `new TextDecoder(...)`
+  // here throws RangeError out of cleanup() during the 'exit' emit and
+  // leaves the execution promise unsettled.
+  decodeProcessOutput: (buffer: Buffer | string, encoding?: string) => {
+    if (!Buffer.isBuffer(buffer)) return String(buffer);
+    if (buffer.length === 0) return '';
+    const label = encoding ?? mockGetCachedEncodingForBuffer(buffer);
+    try {
+      return new TextDecoder(label).decode(buffer);
+    } catch {
+      return new TextDecoder('utf-8').decode(buffer);
+    }
+  },
 }));
 
 const mockProcessKill = vi
@@ -2411,6 +2431,87 @@ describe('ShellExecutionService child_process fallback', () => {
       expect(result.output.trim()).toBe('你好');
     });
 
+    it('should decode multi-chunk OEM output via full-buffer encoding detection', async () => {
+      // Regression: the old per-chunk decoder locked to UTF-8 on an
+      // ASCII-only first chunk, garbling subsequent OEM bytes. The fix
+      // accumulates raw buffers and decodes once in cleanup().
+      // Use mockImplementation (not mockReturnValueOnce) so the test
+      // distinguishes the buffered path from the per-chunk path: an
+      // ASCII-only first chunk returns 'utf-8' (locking a per-chunk
+      // decoder to UTF-8 and garbling later OEM bytes), while the full
+      // buffer returns 'cp866' (decoding everything correctly).
+      mockGetCachedEncodingForBuffer.mockImplementation((buf: Buffer) =>
+        isUtf8(buf) ? 'utf-8' : 'cp866',
+      );
+
+      const { result } = await simulateExecution('cmd', (cp) => {
+        cp.stdout?.emit('data', Buffer.from('Status: OK\n'));
+        // CP-866 bytes 0x80-0x83 = А Б В Г (invalid UTF-8)
+        cp.stdout?.emit('data', Buffer.from([0x80, 0x81, 0x82, 0x83]));
+        cp.emit('exit', 0, null);
+        cp.emit('close', 0, null);
+      });
+
+      expect(result.output).toContain('Status: OK');
+      expect(result.output).toContain('АБВГ');
+    });
+
+    it('detects stdout and stderr encodings independently', async () => {
+      // A child whose stdout is valid UTF-8 while stderr is OEM cp866 (modern
+      // tool on stdout, legacy native tool errors on stderr) on a non-UTF-8
+      // Windows host. Each stream's encoding must be detected from its own
+      // buffered bytes — deriving stderr from the stdout label would decode
+      // the cp866 stderr through utf-8 and mojibake "Ошибка".
+      mockGetCachedEncodingForBuffer.mockImplementation((buf: Buffer) =>
+        isUtf8(buf) ? 'utf-8' : 'cp866',
+      );
+
+      const { result } = await simulateExecution('cmd', (cp) => {
+        cp.stdout?.emit('data', Buffer.from('Привет', 'utf-8'));
+        // CP-866 bytes for "Ошибка" — invalid UTF-8.
+        cp.stderr?.emit(
+          'data',
+          Buffer.from([0x8e, 0xe8, 0xa8, 0xa1, 0xaa, 0xa0]),
+        );
+        cp.emit('exit', 0, null);
+        cp.emit('close', 0, null);
+      });
+
+      expect(result.output).toContain('Привет');
+      expect(result.output).toContain('Ошибка');
+      // stdout and stderr are each detected from their own buffer.
+      expect(mockGetCachedEncodingForBuffer).toHaveBeenCalledTimes(2);
+    });
+
+    it('decodes a child that emits only stderr (stdout stays empty)', async () => {
+      // Pins the cleanup() empty-stream guard: with no stdout chunks the
+      // stdout branch is skipped and the combined output is the stderr text
+      // alone (no stray separator or stdout contamination).
+      const { result } = await simulateExecution('cmd', (cp) => {
+        cp.stderr?.emit('data', Buffer.from('only stderr'));
+        cp.emit('exit', 0, null);
+        cp.emit('close', 0, null);
+      });
+      expect(result.output).toBe('only stderr');
+    });
+
+    it('decodes a child that emits only stdout (stderr stays empty)', async () => {
+      const { result } = await simulateExecution('cmd', (cp) => {
+        cp.stdout?.emit('data', Buffer.from('only stdout'));
+        cp.emit('exit', 0, null);
+        cp.emit('close', 0, null);
+      });
+      expect(result.output).toBe('only stdout');
+    });
+
+    it('decodes a child that emits no output as an empty string', async () => {
+      const { result } = await simulateExecution('cmd', (cp) => {
+        cp.emit('exit', 0, null);
+        cp.emit('close', 0, null);
+      });
+      expect(result.output).toBe('');
+    });
+
     it('bounds buffered child_process output before building the final string', async () => {
       const abortController = new AbortController();
       const handle = await ShellExecutionService.execute(
@@ -2938,6 +3039,49 @@ describe('ShellExecutionService child_process fallback', () => {
       expect(dataChunks).toContain('post-promote-stderr\n');
     });
 
+    it('R1-1: stderr-only child post-promote tail uses stderr-detected encoding (not utf-8 fallthrough)', async () => {
+      // Regression: the promote handoff derived the encoding from
+      // stdoutChunks only. In buffered mode a child that writes solely to
+      // stderr leaves stdoutChunks empty, so the encoding fell through to
+      // 'utf-8' and the post-promote OEM stderr tail mojibaked. The fix
+      // falls back through stderrChunks (via the label cleanup() captured).
+      mockPlatform.mockReturnValue('linux');
+      mockGetCachedEncodingForBuffer.mockReturnValueOnce('cp866');
+      const events: Array<{ type: string; chunk?: string | unknown }> = [];
+      const { result } = await simulateExecution(
+        'cmd',
+        (cp, ac) => {
+          // Pre-promote: stderr-only OEM output so cleanup() has stderr
+          // bytes to detect from (stdoutChunks stays empty).
+          cp.stderr?.emit(
+            'data',
+            Buffer.from([0x8e, 0xe8, 0xa8, 0xa1, 0xaa, 0xa0]),
+          );
+          ac.abort({
+            kind: 'background',
+            shellId: 'bg_stderr_only',
+          } satisfies ShellAbortReason);
+          // Post-promote: more stderr OEM bytes — must decode as cp866.
+          cp.stderr?.emit(
+            'data',
+            Buffer.from([0x8e, 0xe8, 0xa8, 0xa1, 0xaa, 0xa0]),
+          );
+        },
+        {
+          postPromote: {
+            onData: (event) => events.push(event),
+          },
+        },
+      );
+      expect(result.promoted).toBe(true);
+      const dataChunks = events
+        .filter((e) => e.type === 'data')
+        .map((e) => e.chunk);
+      // cp866 bytes decode to "Ошибка"; a utf-8 fallthrough would garble
+      // them into U+FFFD instead.
+      expect(dataChunks).toContain('Ошибка');
+    });
+
     it('PR-2.5 child_process: onSettle fires on `close` (NOT `exit`) so late chunks land before the registry transitions', async () => {
       // Pin the `close`-not-`exit` contract: child can emit buffered
       // data AFTER 'exit' but BEFORE 'close'. If onSettle fired on
@@ -3250,7 +3394,6 @@ describe('ShellExecutionService child_process fallback', () => {
         cp.emit('exit', 0, null),
       );
 
-      // cmd.exe commands on Windows are prefixed with chcp 65001 for UTF-8
       expect(mockCpSpawn).toHaveBeenCalledWith(
         'cmd.exe',
         ['/d', '/s', '/c', `${CHCP} 65001 >nul 2>nul & dir "foo bar"`],
@@ -3260,11 +3403,6 @@ describe('ShellExecutionService child_process fallback', () => {
           windowsVerbatimArguments: true,
         }),
       );
-      mockGetShellConfiguration.mockReturnValue({
-        executable: 'bash',
-        argsPrefix: ['-c'],
-        shell: 'bash',
-      });
     });
 
     it('should not apply UTF-8 prefix for Git Bash on Windows via child_process', async () => {

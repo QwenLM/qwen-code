@@ -6,7 +6,10 @@
 
 import type { SpawnOptions } from 'node:child_process';
 import { spawn } from 'node:child_process';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import {
+  createDebugLogger,
+  decodeProcessOutput,
+} from '@qwen-code/qwen-code-core';
 import {
   isStackedSkillCompletableCommand,
   isValidStackedSkillPrefix,
@@ -195,14 +198,25 @@ export const copyToClipboard = async (text: string): Promise<void> => {
   const run = (cmd: string, args: string[], options?: SpawnOptions) =>
     new Promise<void>((resolve, reject) => {
       const child = options ? spawn(cmd, args, options) : spawn(cmd, args);
-      let stderr = '';
+      // Accumulate raw stderr chunks and decode once on close so a chunk that
+      // splits a multi-byte sequence doesn't mojibake.
+      const stderrChunks: Buffer[] = [];
       if (child.stderr) {
-        child.stderr.on('data', (chunk) => (stderr += chunk.toString()));
+        // Normalize to Buffer: Node child streams emit Buffer, but defensive
+        // callers may emit a string (decodeProcessOutput's string guard
+        // tolerated it before).
+        child.stderr.on('data', (chunk) =>
+          stderrChunks.push(
+            Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)),
+          ),
+        );
       }
       child.on('error', reject);
       child.on('close', (code) => {
         if (code === 0) return resolve();
-        const errorMsg = stderr.trim();
+        const errorMsg = decodeProcessOutput(
+          Buffer.concat(stderrChunks),
+        ).trim();
         reject(
           new Error(
             `'${cmd}' exited with code ${code}${errorMsg ? `: ${errorMsg}` : ''}`,

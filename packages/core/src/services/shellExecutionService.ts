@@ -12,7 +12,10 @@ import { TextDecoder } from 'node:util';
 import os from 'node:os';
 import type { IPty } from '@lydell/node-pty';
 import type { Terminal } from '@xterm/headless';
-import { getCachedEncodingForBuffer } from '../utils/systemEncoding.js';
+import {
+  getCachedEncodingForBuffer,
+  decodeProcessOutput,
+} from '../utils/systemEncoding.js';
 import { isBinary } from '../utils/textUtils.js';
 import { getShellConfiguration, type ShellType } from '../utils/shell-utils.js';
 import {
@@ -261,11 +264,6 @@ function getMaxBufferedOutputBytes(config: ShellExecutionConfig): number {
   return floored > 0
     ? Math.min(floored, MAX_BUFFERED_OUTPUT_BYTES_CEILING)
     : DEFAULT_MAX_BUFFERED_OUTPUT_BYTES;
-}
-
-function decodeBufferedOutput(finalBuffer: Buffer): string {
-  const fallbackEncoding = getCachedEncodingForBuffer(finalBuffer);
-  return new TextDecoder(fallbackEncoding).decode(finalBuffer);
 }
 
 function appendOutputCaptureLimitNotice(
@@ -820,9 +818,18 @@ export class ShellExecutionService {
         let stdout = '';
         let stderr = '';
         const outputChunks: Buffer[] = [];
+        const stdoutChunks: Buffer[] = [];
+        const stderrChunks: Buffer[] = [];
         const sniffChunks: Buffer[] = [];
         let error: Error | null = null;
         let exited = false;
+
+        // Encoding labels detected when cleanup() decodes the buffered
+        // per-stream output. Captured so the background-promote handoff can
+        // reuse them instead of re-running detection (chardet is O(n)) over
+        // the same bytes cleanup() already analyzed.
+        let detectedStdoutEncoding: string | undefined;
+        let detectedStderrEncoding: string | undefined;
 
         let isStreamingRawContent = true;
         const MAX_SNIFF_SIZE = 4096;
@@ -870,17 +877,6 @@ export class ShellExecutionService {
         };
 
         const handleOutput = (data: Buffer, stream: 'stdout' | 'stderr') => {
-          if (!stdoutDecoder || !stderrDecoder) {
-            const encoding = getCachedEncodingForBuffer(data);
-            try {
-              stdoutDecoder = new TextDecoder(encoding);
-              stderrDecoder = new TextDecoder(encoding);
-            } catch {
-              stdoutDecoder = new TextDecoder('utf-8');
-              stderrDecoder = new TextDecoder('utf-8');
-            }
-          }
-
           // Binary sniff applies in both modes — even streaming consumers
           // (e.g. background shell output file) shouldn't pile up text-decoded
           // garbage when the command actually emits binary (`cat /bin/ls`,
@@ -925,27 +921,45 @@ export class ShellExecutionService {
             return;
           }
 
-          const decoder = stream === 'stdout' ? stdoutDecoder : stderrDecoder;
           if (streamStdout) {
-            // Streaming text mode: push through immediately, no string
-            // accumulation. (Up to ~4KB may already have been emitted
-            // before binary detection trips — bounded, acceptable.)
+            // Streaming text mode: per-chunk decode for real-time display.
+            // The decoder is created lazily on the first chunk, so an
+            // ASCII-only first chunk locks it to UTF-8 and later OEM bytes
+            // garble. Unlike the buffered path (which re-decodes the whole
+            // buffer at exit), streamed chunks cannot be re-decoded after
+            // the fact — they are emitted as they arrive. Note these chunks
+            // are not merely cosmetic: background-shell persists them to the
+            // shell output file and acp-bridge records them in session
+            // history, so the first-chunk lock is a known limitation of the
+            // streaming path (tracked separately) rather than a display-only
+            // concern.
+            if (!stdoutDecoder || !stderrDecoder) {
+              const encoding = getCachedEncodingForBuffer(data);
+              try {
+                stdoutDecoder = new TextDecoder(encoding);
+                stderrDecoder = new TextDecoder(encoding);
+              } catch {
+                stdoutDecoder = new TextDecoder('utf-8');
+                stderrDecoder = new TextDecoder('utf-8');
+              }
+            }
+            const decoder = stream === 'stdout' ? stdoutDecoder : stderrDecoder;
             const decodedChunk = decoder.decode(data, { stream: true });
             onOutputEvent({ type: 'data', chunk: decodedChunk });
             return;
           }
 
-          if (!capturedData) {
-            return;
-          }
-
-          const decodedChunk = decoder.decode(capturedData, { stream: true });
-
-          // Buffered text mode: accumulate for the final cleaned-blob emit.
-          if (stream === 'stdout') {
-            stdout += decodedChunk;
-          } else {
-            stderr += decodedChunk;
+          // Buffered text mode: accumulate raw buffers per-stream, decode
+          // the complete buffer in cleanup() via decodeProcessOutput().
+          // This avoids the per-chunk encoding detection bug where an
+          // ASCII-only first chunk locks the decoder to UTF-8, garbling
+          // all subsequent non-ASCII bytes in the system OEM code page.
+          if (capturedData) {
+            if (stream === 'stdout') {
+              stdoutChunks.push(capturedData);
+            } else {
+              stderrChunks.push(capturedData);
+            }
           }
         };
 
@@ -1105,15 +1119,29 @@ export class ShellExecutionService {
           // and then mojibake the post-promote tail. The foreground
           // `stdoutDecoder` / `stderrDecoder` are initialized in
           // `handleOutput` from `getCachedEncodingForBuffer(data)` on
-          // the first chunk; if they're still null at promote time
-          // (no bytes yet), fall back to `'utf-8'`. Capture the
+          // the first chunk in streaming mode; in buffered mode they stay
+          // null and the encoding is re-detected from stdoutChunks below
+          // (falling back to `'utf-8'` when no bytes have arrived). Capture the
           // detected encoding rather than the decoder instance — the
           // foreground decoder has already seen pre-promote bytes
           // (its multibyte state machine is at an arbitrary midpoint)
           // and may have accumulated continuation-byte state that the
           // post-promote stream shouldn't inherit; new instances with
           // the same `encoding` start fresh.
-          const detectedEncoding = stdoutDecoder?.encoding ?? 'utf-8';
+          //
+          // In buffered mode the foreground decoders are never created
+          // (raw chunks accumulate in stdoutChunks/stderrChunks instead),
+          // so reuse the labels cleanup() detected rather than falling
+          // straight to utf-8 — otherwise a non-UTF-8 child's post-promote
+          // tail would mojibake even though its pre-promote snapshot
+          // decoded fine. Both streams are consulted (stdout first, then
+          // stderr) so a stderr-only child is covered, and the labels are
+          // reused from cleanup() instead of re-running detection.
+          const detectedEncoding =
+            stdoutDecoder?.encoding ??
+            detectedStdoutEncoding ??
+            detectedStderrEncoding ??
+            'utf-8';
           // SEPARATE decoders for stdout and stderr. A single shared
           // decoder corrupts interleaved multibyte UTF-8 (the streaming
           // state machine assumes one byte source); independent
@@ -1423,20 +1451,85 @@ export class ShellExecutionService {
 
         child.on('exit', exitHandler);
 
+        // Strip a trailing incomplete UTF-8 sequence from a buffer so that
+        // encoding detection doesn't misclassify a genuinely UTF-8 buffer as
+        // non-UTF-8 when the last character was split by a cancel/timeout or
+        // capture limit. Walks back ≤3 continuation bytes (0x80-0xBF) plus
+        // their lead byte; if the lead byte indicates a multi-byte sequence
+        // but the continuation bytes are incomplete, strips the whole
+        // sequence. Returns the trimmed buffer (or the original if complete).
+        function stripTrailingIncompleteUtf8(buffer: Buffer): Buffer {
+          if (buffer.length === 0) return buffer;
+
+          let i = buffer.length - 1;
+
+          // Skip continuation bytes (0x80-0xBF)
+          while (i >= 0 && (buffer[i]! & 0xc0) === 0x80) {
+            i--;
+          }
+
+          if (i < 0) return buffer;
+
+          const leadByte = buffer[i]!;
+
+          // ASCII byte (0x00-0x7F) — complete, nothing to strip
+          if ((leadByte & 0x80) === 0) return buffer;
+
+          let expectedLength: number;
+          if ((leadByte & 0xe0) === 0xc0) {
+            expectedLength = 2;
+          } else if ((leadByte & 0xf0) === 0xe0) {
+            expectedLength = 3;
+          } else if ((leadByte & 0xf8) === 0xf0) {
+            expectedLength = 4;
+          } else {
+            // Invalid lead byte — strip it
+            return buffer.subarray(0, i);
+          }
+
+          const actualLength = buffer.length - i;
+          if (actualLength < expectedLength) {
+            // Incomplete sequence — strip it
+            return buffer.subarray(0, i);
+          }
+
+          return buffer;
+        }
+
         function cleanup() {
           exited = true;
           abortSignal.removeEventListener('abort', abortHandler);
-          if (stdoutDecoder) {
-            const remaining = stdoutDecoder.decode();
-            if (remaining) {
-              stdout += remaining;
-            }
+
+          // Decode complete per-stream buffers with proper encoding
+          // detection on the full output. This fixes the mojibake bug
+          // where per-chunk detection on an ASCII-only first chunk
+          // locked the decoder to UTF-8, garbling subsequent OEM bytes.
+          // Each stream is detected independently (stdout and stderr can
+          // differ) and the labels are captured for the background-promote
+          // handoff to reuse. Deliberate extra concat: decoding requires one
+          // additional full-output-sized allocation at cleanup peak
+          // (bounded, GC-eligible after return). Chardet's O(n) statistical
+          // pass runs on a capped head+tail sample (at most 2 ×
+          // CHARDET_SAMPLE_BYTES), so chardet pays only a constant cost in
+          // the 'exit' handler; isUtf8() and the replacement-ratio heuristic
+          // still scan the full buffer once.
+          if (stdoutChunks.length > 0) {
+            const concatenated = Buffer.concat(stdoutChunks);
+            // Strip trailing incomplete UTF-8 before detection — a cancel/timeout
+            // or capture limit can split a multi-byte character, causing isUtf8()
+            // to fail and the system gate to return the OEM code page for a
+            // genuinely UTF-8 buffer. Detection runs on the trimmed view; decode
+            // runs on the full buffer (TextDecoder substitutes U+FFFD for the
+            // incomplete tail).
+            const trimmedStdout = stripTrailingIncompleteUtf8(concatenated);
+            detectedStdoutEncoding = getCachedEncodingForBuffer(trimmedStdout);
+            stdout = decodeProcessOutput(concatenated, detectedStdoutEncoding);
           }
-          if (stderrDecoder) {
-            const remaining = stderrDecoder.decode();
-            if (remaining) {
-              stderr += remaining;
-            }
+          if (stderrChunks.length > 0) {
+            const concatenated = Buffer.concat(stderrChunks);
+            const trimmedStderr = stripTrailingIncompleteUtf8(concatenated);
+            detectedStderrEncoding = getCachedEncodingForBuffer(trimmedStderr);
+            stderr = decodeProcessOutput(concatenated, detectedStderrEncoding);
           }
 
           const finalBuffer = Buffer.concat(outputChunks);
@@ -1897,7 +1990,7 @@ export class ShellExecutionService {
                   }
                 } catch {
                   try {
-                    fullOutput = decodeBufferedOutput(finalBuffer);
+                    fullOutput = decodeProcessOutput(finalBuffer);
                   } catch {
                     // Ignore fallback rendering errors and resolve with empty text.
                   }
@@ -2263,7 +2356,7 @@ export class ShellExecutionService {
                 `Falling back to bounded raw buffer decode; if that also fails, output stays empty.`,
             );
             try {
-              snapshot = decodeBufferedOutput(finalBuffer);
+              snapshot = decodeProcessOutput(finalBuffer);
             } catch {
               // Both paths failed — leave snapshot empty.
             }

@@ -8,6 +8,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { decodeProcessOutput } from '@qwen-code/qwen-code-core';
 import type {
   RecordedVoiceAudio,
   VoiceRecorder,
@@ -86,17 +87,26 @@ class SoxRecorder implements VoiceRecorder {
       ...(options.silenceDetection ? SILENCE_EFFECT_ARGS : []),
     ]);
     const child = this.child;
+    // Accumulate raw stderr chunks and decode once on close, so a chunk that
+    // splits a multi-byte sequence doesn't mojibake: decodeProcessOutput's
+    // full-buffer detection is per-buffer, not per-chunk. Bound the raw
+    // accumulation (not just the decoded string on close) so a minutes-long,
+    // chatty sox session can't retain every stderr byte in memory.
+    const stderrChunks: Buffer[] = [];
+    let stderrBytes = 0;
     child.stderr?.on('data', (chunk: Buffer) => {
-      if (this.stderr.length < MAX_STDERR_LENGTH) {
-        this.stderr = (this.stderr + chunk.toString()).slice(
-          0,
-          MAX_STDERR_LENGTH,
-        );
+      if (stderrBytes < MAX_STDERR_LENGTH * 4) {
+        stderrChunks.push(chunk);
+        stderrBytes += chunk.length;
       }
     });
     this.closePromise = new Promise((resolve) => {
       child.once('close', (code, signal) => {
         this.closeResult = { code, signal };
+        this.stderr = decodeProcessOutput(Buffer.concat(stderrChunks)).slice(
+          0,
+          MAX_STDERR_LENGTH,
+        );
         // SoX exited on its own with a clean status while we were still
         // recording => the silence effect fired. Notify the hook to finalize.
         if (!this.stopRequested && code === 0 && this.onAutoStop) {

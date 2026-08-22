@@ -18,6 +18,7 @@ import type { Config, SandboxConfig } from '@qwen-code/qwen-code-core';
 import {
   FatalSandboxError,
   Storage,
+  decodeProcessOutput,
   isSubpath,
   resolveBundleDir,
 } from '@qwen-code/qwen-code-core';
@@ -351,8 +352,13 @@ export async function start_sandbox(
       process.on('SIGTERM', stopProxy);
 
       // Proxy stdout is intentionally not piped — it disrupts ink rendering.
+      // Diagnostic stderr is decoded per 'data' chunk (not accumulated): it
+      // is display-only, and a multi-byte character split across two OS
+      // reads can decode to U+FFFD rather than the full text. This is
+      // accepted here; the complete-buffer contract of decodeProcessOutput
+      // still holds for full-output consumers like imageExists below.
       proxyProcess.stderr?.on('data', (data) => {
-        writeStderrLine(data.toString());
+        writeStderrLine(decodeProcessOutput(data));
       });
       proxyProcess.on('close', (code, signal) => {
         if (sandboxProcess?.pid) {
@@ -897,8 +903,10 @@ export async function start_sandbox(
     process.on('SIGTERM', stopProxy);
 
     // Proxy stdout is intentionally not piped — it disrupts ink rendering.
+    // stderr is display-only and decoded per 'data' chunk (see the proxy
+    // stderr handler above for why per-chunk decode is accepted here).
     proxyProcess.stderr?.on('data', (data) => {
-      writeStderrLine(data.toString().trim());
+      writeStderrLine(decodeProcessOutput(data).trim());
     });
     proxyProcess.on('close', (code, signal) => {
       if (sandboxProcess?.pid) {
@@ -955,10 +963,12 @@ async function imageExists(sandbox: string, image: string): Promise<boolean> {
     const args = ['image', 'inspect', '--format', '{{.Id}}', image];
     const checkProcess = spawn(sandbox, args);
 
-    let stdoutData = '';
+    // Accumulate raw stdout chunks and decode once on close so a chunk that
+    // splits a multi-byte sequence doesn't mojibake.
+    const stdoutChunks: Buffer[] = [];
     if (checkProcess.stdout) {
       checkProcess.stdout.on('data', (data) => {
-        stdoutData += data.toString();
+        stdoutChunks.push(data);
       });
     }
 
@@ -971,8 +981,8 @@ async function imageExists(sandbox: string, image: string): Promise<boolean> {
 
     checkProcess.on('close', () => {
       // Non-zero exit code may indicate docker daemon not running, etc.
-      // The primary success indicator is non-empty stdoutData.
-      resolve(stdoutData.trim() !== '');
+      // The primary success indicator is non-empty decoded stdout.
+      resolve(decodeProcessOutput(Buffer.concat(stdoutChunks)).trim() !== '');
     });
   });
 }
@@ -983,15 +993,14 @@ async function pullImage(sandbox: string, image: string): Promise<boolean> {
     const args = ['pull', image];
     const pullProcess = spawn(sandbox, args, { stdio: 'pipe' });
 
-    let stderrData = '';
-
     const onStdoutData = (data: Buffer) => {
-      writeStderrLine(data.toString().trim()); // Show pull progress
+      // Pull progress is display-only and decoded per 'data' chunk (see the
+      // proxy stderr handler above for why per-chunk decode is accepted).
+      writeStderrLine(decodeProcessOutput(data).trim()); // Show pull progress
     };
 
     const onStderrData = (data: Buffer) => {
-      stderrData += data.toString();
-      writeStderrLine(data.toString().trim()); // Show pull errors/info from the command itself
+      writeStderrLine(decodeProcessOutput(data).trim());
     };
 
     const onError = (err: Error) => {
@@ -1011,9 +1020,6 @@ async function pullImage(sandbox: string, image: string): Promise<boolean> {
         writeStderrLine(
           `Failed to pull image ${image}. '${sandbox} pull ${image}' exited with code ${code}.`,
         );
-        if (stderrData.trim()) {
-          // Details already printed by the stderr listener above
-        }
         cleanup();
         resolve(false);
       }
