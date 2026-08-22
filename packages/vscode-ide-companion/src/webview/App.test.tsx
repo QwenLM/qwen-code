@@ -9,6 +9,7 @@
 import type React from 'react';
 import { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { flushSync } from 'react-dom';
 import { createRoot, type Root } from 'react-dom/client';
 import type { CompletionItem } from '../types/completionItemTypes.js';
 
@@ -290,7 +291,10 @@ vi.mock('@qwen-code/webui', () => ({
   WaitingMessage: () => null,
   InterruptedMessage: () => null,
   FileIcon: () => null,
-  PermissionDrawer: () => null,
+  // Renders a marker so tests can assert the overlay's presence in the DOM
+  // (e.g. that the model selector is already gone by the time the overlay
+  // commits — see the overlay-takeover timing test).
+  PermissionDrawer: () => <div data-testid="permission-drawer" />,
   AskUserQuestionDialog: () => null,
   ImageMessageRenderer: () => null,
   ImagePreview: () => null,
@@ -923,6 +927,37 @@ describe('App model selector gating', () => {
     // Selector open: the App must pass showModelSelector as the hook's
     // third argument — dropping it (or hardcoding false) fails here.
     expect(lastSuppressionArg()).toBe(true);
+  });
+
+  it('unmounts the selector inside the overlay commit, leaving no armed-keydown window', async () => {
+    await renderWithOpenSelector();
+
+    // Deliver the overlay the way production does (a raw state update) and
+    // force a synchronous commit with flushSync. A useLayoutEffect close
+    // runs inside that commit's flush; a passive useEffect close would only
+    // be SCHEDULED here, leaving one commit in which the overlay and the
+    // selector are mounted together — the selector's capture-phase document
+    // keydown listener armed beneath the visible overlay.
+    const env = globalThis as typeof globalThis & {
+      IS_REACT_ACT_ENVIRONMENT?: boolean;
+    };
+    const previousActEnvironment = env.IS_REACT_ACT_ENVIRONMENT;
+    env.IS_REACT_ACT_ENVIRONMENT = false;
+    try {
+      flushSync(() => {
+        capturedWebViewHandlers.handlePermissionRequest?.(permissionPayload);
+      });
+    } finally {
+      env.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
+    }
+
+    // The overlay is up...
+    expect(
+      container?.querySelector('[data-testid="permission-drawer"]'),
+    ).not.toBeNull();
+    // ...and the selector is already gone synchronously — no passive-effect
+    // flush has had a chance to run yet.
+    expect(container?.querySelector('.model-selector')).toBeNull();
   });
 });
 

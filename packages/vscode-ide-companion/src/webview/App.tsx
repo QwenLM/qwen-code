@@ -907,7 +907,14 @@ export const App: React.FC = () => {
   // listener, and since it paints below the overlays (z-0) those keystrokes
   // must reach the visible overlay instead. The /model open path is gated on
   // the same isOverlayActive predicate.
-  useEffect(() => {
+  //
+  // useLayoutEffect, not useEffect: the close must land inside the same
+  // commit as the overlay's arrival. A passive effect would leave one commit
+  // in which the overlay and the selector are mounted together, with the
+  // selector's capture-phase keydown listener still armed beneath the
+  // visible overlay — an Enter in that window silently switches the model
+  // instead of answering the overlay.
+  useLayoutEffect(() => {
     if (showModelSelector && isOverlayActive) {
       setShowModelSelector(false);
     }
