@@ -44,7 +44,7 @@
     "@modelcontextprotocol/sdk": "^1.30.0",
     "tree-sitter-wasms": "^0.1.13",
     "web-tree-sitter": "^0.24.7",
-    "zod": "^4.1.13"
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/node": "^22.13.10",
