@@ -172,20 +172,45 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
   }
 
   /**
+   * A host that can actually render the question form: the interactive TUI, or
+   * an ACP client (Zed integration / stream-json). `getDefaultPermission()` and
+   * `requiresUserInteraction()` both key off this one predicate so they can
+   * never disagree about whether a confirmation round is possible.
+   */
+  private canPresentQuestions(): boolean {
+    return (
+      this._config.isInteractive() ||
+      this._config.getExperimentalZedIntegration() ||
+      this._config.getInputFormat() === InputFormat.STREAM_JSON
+    );
+  }
+
+  /**
    * ask_user_question always requires user confirmation so the user can
    * provide answers. In non-interactive mode without ACP support, we skip
    * confirmation (and subsequently skip execution).
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
-    const isAcpMode =
-      this._config.getExperimentalZedIntegration() ||
-      this._config.getInputFormat() === InputFormat.STREAM_JSON;
+    // Non-interactive + no ACP: skip entirely
+    return this.canPresentQuestions() ? 'ask' : 'allow';
+  }
 
-    if (!this._config.isInteractive() && !isAcpMode) {
-      // Non-interactive + no ACP: skip entirely
-      return 'allow';
-    }
-    return 'ask';
+  /**
+   * Keeps the confirmation round from being skipped where the form *can* be
+   * shown. Without this, a PermissionManager `allow` rule resolves the call
+   * straight to `scheduled`, the form is never rendered, and `execute()` reports
+   * the generic "User declined to answer the questions." for a decision the user
+   * never made — issue #9011. `evaluatePermissionFlow` rewrites a non-deny
+   * permission to `ask` when this returns true, which is the same mechanism
+   * `exit_plan_mode` relies on.
+   *
+   * Deliberately false where no host can present the form: there the tool's own
+   * "Cannot ask user questions in non-interactive mode…" message is the useful
+   * answer, and forcing a confirmation round would replace it with the generic
+   * non-interactive permission denial.
+   */
+  override requiresUserInteraction(): boolean {
+    return this.canPresentQuestions();
   }
 
   override async getConfirmationDetails(
