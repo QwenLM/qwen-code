@@ -28,6 +28,7 @@ import {
   resetBackgroundStateForSessionSwitch,
 } from '../utils/backgroundWorkUtils.js';
 import { waitForGoalRuntime } from '../utils/goal-runtime.js';
+import { restoreTelemetryReplay } from '../utils/telemetry-rollback.js';
 
 const BACKGROUND_WORK_BRANCH_BLOCKED_MESSAGE =
   "Stop the current session's running background tasks before branching the conversation.";
@@ -300,17 +301,7 @@ export function useBranchCommand(
           // parent would still end up double-counted. Restoring afterwards
           // discards both the abandoned fork's replay and that duplicate.
           if (telemetryReplaySnapshot) {
-            try {
-              uiTelemetryService.restoreFromReplaySnapshot(
-                telemetryReplaySnapshot,
-              );
-            } catch (restoreErr) {
-              config
-                .getDebugLogger()
-                .warn(
-                  `Telemetry rollback after failed /branch init failed: ${restoreErr}`,
-                );
-            }
+            restoreTelemetryReplay(telemetryReplaySnapshot, config, '/branch');
             telemetryReplaySnapshot = undefined;
           }
         }

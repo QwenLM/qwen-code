@@ -26,6 +26,7 @@ import {
 } from '../utils/backgroundWorkUtils.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { waitForGoalRuntime } from '../utils/goal-runtime.js';
+import { restoreTelemetryReplay } from '../utils/telemetry-rollback.js';
 
 export interface UseResumeCommandOptions {
   config: Config | null;
@@ -270,17 +271,7 @@ export function useResumeCommand(
           // replay the old session, and restoring first would leave that
           // duplicate in the aggregate.
           if (telemetryReplaySnapshot) {
-            try {
-              uiTelemetryService.restoreFromReplaySnapshot(
-                telemetryReplaySnapshot,
-              );
-            } catch (restoreErr) {
-              config
-                .getDebugLogger()
-                .warn(
-                  `Telemetry rollback after failed /resume init failed: ${restoreErr}`,
-                );
-            }
+            restoreTelemetryReplay(telemetryReplaySnapshot, config, '/resume');
             telemetryReplaySnapshot = undefined;
           }
         }

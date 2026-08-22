@@ -998,6 +998,13 @@ describe('useResumeCommand', () => {
     // Without this the abandoned session's whole history stays in the
     // aggregate that persistSessionUsage writes out.
     expect(restoreFromReplaySnapshot).toHaveBeenCalledWith(snapshot);
+    // Ordering is load-bearing: the rollback's re-initialize() replays the
+    // old session's history into the aggregate again, so restoring before it
+    // would be undone and leave the old session double-counted.
+    const restoreOrder = restoreFromReplaySnapshot.mock.invocationCallOrder[0];
+    const rollbackInitOrder =
+      geminiClient.initialize.mock.invocationCallOrder.at(-1);
+    expect(restoreOrder).toBeGreaterThan(rollbackInitOrder!);
     // UI never swapped, so core rolled back too.
     expect(startNewSession).not.toHaveBeenCalled();
 
