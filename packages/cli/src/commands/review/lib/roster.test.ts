@@ -135,6 +135,14 @@ describe('requiredAgents — Step 3A', () => {
     // silently drop the counter-frame audit from exactly the lightweight PR
     // reviews the SKILL narration promises it to.
     expect(keys({ ...PR, worktreePath: undefined })).toContain('6d');
+    expect(
+      keys({
+        ...PR,
+        worktreePath: undefined,
+        srcDiffLines: 900,
+        diffLines: 4000,
+      }),
+    ).toContain('6d');
   });
 
   it('owes the prose-execution audit exactly when the diff touches an instruction file', () => {

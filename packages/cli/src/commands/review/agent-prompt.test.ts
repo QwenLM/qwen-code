@@ -2719,6 +2719,14 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
       );
     }
 
+    // prose-exec shares Agent 7's boundary (recipe-derived commands need the
+    // required configurations / verification notes to keep failures
+    // attributable), and like Agent 7 gets no reviewer checklist block.
+    const proseBrief = buildRoleBrief(contextPlan, 'prose-exec');
+    expect(proseBrief).not.toContain('Example project repository context');
+    expect(proseBrief).toContain('Repository-specific verification boundary');
+    expect(proseBrief).toContain('debug, linux-x64');
+
     const buildBrief = buildRoleBrief(contextPlan, '7');
     expect(buildBrief).not.toContain('Example project repository context');
     expect(buildBrief).not.toContain('compiler, runtime');
@@ -3348,6 +3356,12 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(pp).toContain('take the reading the author did NOT intend');
     // A prose diff with no operational instructions is a complete empty scope.
     expect(pp).toContain('No issues found — scope empty');
+    // The disposable copy is welded, not hand-rolled (PR_PLAN has a worktree,
+    // so the scratch-tree block fires), and the executed text is framed as
+    // untrusted with the three never-execute classes.
+    expect(pp).toContain('review scratch-tree');
+    expect(pp).toContain('untrusted input — the PR author wrote it');
+    expect(pp).toContain('never write THROUGH a link');
   });
 
   it('welds the PR context pointer into 6d — a mandate without a path is a guess', () => {
@@ -6261,7 +6275,7 @@ describe('the tool budget in the briefs', () => {
       ),
     );
     const exempt = roles.filter((r) => BRIEFS[r].budgetExempt).sort();
-    expect(exempt).toEqual(['0', '7', 'prose-exec', 'verify']);
+    expect(exempt).toEqual(['0', '6d', '7', 'prose-exec', 'verify']);
   });
 
   it.each([

@@ -1574,7 +1574,13 @@ export function buildRoleBrief(
     }
   }
   const repositoryContext = repositoryContextOf(report);
-  if (role === '7') {
+  // prose-exec shares Agent 7's need, not the reviewers': it runs
+  // recipe-derived commands, so the build boundary (required configurations,
+  // recommended tests, verification notes) is what keeps an execution
+  // failure attributable — launched blind to a `node22` requirement, a
+  // failed recipe run reads as a prose divergence. Code checklists stay off
+  // (`reviewsCode` is deliberately unset).
+  if (role === '7' || role === 'prose-exec') {
     if (repositoryContext) {
       parts.push('', ...repositoryBuildBoundary(repositoryContext));
     }
@@ -1701,6 +1707,44 @@ export function buildRoleBrief(
           'while the probe runs in package B will NOT be seen, however correct it is. ' +
           'That is the harness, not the finding: say so and treat the flip as ' +
           'inconclusive rather than reporting the fix as ineffective.',
+      );
+    }
+  }
+
+  // prose-exec executes PR-authored recipes, and any step that must write —
+  // a build, an install, a generated file — needs a tree of its own with the
+  // dependency farm linked in. Same command and label discipline as the
+  // verifier's weld above; without this the brief's disposable-copy mandate
+  // was a mandate without a path — the 6d context-pointer shape, one role
+  // over — and a hand-rolled copy without the farm fails builds for
+  // environment reasons the agent would misfile as prose divergence.
+  if (role === 'prose-exec') {
+    const wt = report.worktreePath;
+    if (typeof wt === 'string' && wt) {
+      const label = scratchLabel(opts.key ?? role);
+      parts.push(
+        '',
+        '**Your disposable copy — where every write-producing recipe step runs.** ' +
+          'A recipe step that must build, install, or generate runs here, never in ' +
+          'the review worktree the other agents are reading: every call puts every ' +
+          'tracked file back at the commit under review and deletes what you wrote, ' +
+          "with the review worktree's `node_modules` linked in so the repository's " +
+          'tooling starts without an install.',
+        '',
+        '```bash',
+        `"\${QWEN_CODE_CLI:-qwen}" review scratch-tree --worktree ${shellQuotePath(resolve(wt))} \\`,
+        `  --label ${label}`,
+        '```',
+        '',
+        'It reports `path` — run the writing steps there and leave what you ' +
+          'leave: `cleanup` sweeps it at the end of the review. `available: false` ' +
+          'means the isolation failed — then the writing step is reported as ' +
+          'not-executed, never run in the shared worktree. The linked ' +
+          '`node_modules` entries are symlinks into the review worktree: ' +
+          'installing INTO your copy is fine (the next call re-links it), but ' +
+          'never write THROUGH a link (`npm rebuild`, a package writing into its ' +
+          'own directory) — that lands in the shared tree every other agent is ' +
+          'reading.',
       );
     }
   }
