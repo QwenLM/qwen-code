@@ -13,13 +13,20 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '../..');
 
 const eslint = new ESLint({ cwd: root });
 
+// Static imports are reported by no-restricted-imports; dynamic import() is
+// reported by no-restricted-syntax because the former never sees it.
+const BOUNDARY_RULES = new Set([
+  'no-restricted-imports',
+  'no-restricted-syntax',
+]);
+
 async function restrictedReports(statement) {
   const filePath = join(
     root,
     'packages/cli/src/acp-integration/boundary-probe.ts',
   );
   const [result] = await eslint.lintText(`${statement}\n`, { filePath });
-  return result.messages.filter((m) => m.ruleId === 'no-restricted-imports');
+  return result.messages.filter((m) => BOUNDARY_RULES.has(m.ruleId));
 }
 
 // Bare-directory specifiers resolve to packages/cli/src/serve/index.ts, a
@@ -50,9 +57,32 @@ it('still blocks deep serve/ internals from acp-integration', async () => {
   expect(reports).toHaveLength(1);
 });
 
-it('allows neutral runtime/ contracts from acp-integration', async () => {
+it('blocks type-only imports and re-exports from serve/ from acp-integration', async () => {
+  expect(
+    await restrictedReports(`import type { ServeAppDeps } from '../serve';`),
+  ).toHaveLength(1);
+  expect(
+    await restrictedReports(`export type { ServeAppDeps } from '../serve';`),
+  ).toHaveLength(1);
+});
+
+it('blocks a dynamic import() of serve/ from acp-integration', async () => {
   const reports = await restrictedReports(
-    `import { something } from '../runtime/contracts.js';`,
+    `async function probe() { await import('../serve/index.js'); }`,
   );
-  expect(reports).toHaveLength(0);
+  expect(reports).toHaveLength(1);
+  expect(reports[0].message).toContain('acp-integration');
+});
+
+it('allows neutral runtime/ contracts from acp-integration', async () => {
+  expect(
+    await restrictedReports(
+      `import { something } from '../runtime/contracts.js';`,
+    ),
+  ).toHaveLength(0);
+  expect(
+    await restrictedReports(
+      `async function probe() { await import('../runtime/contracts.js'); }`,
+    ),
+  ).toHaveLength(0);
 });
