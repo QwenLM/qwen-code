@@ -25,6 +25,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { FatalError } from '@qwen-code/qwen-code-core';
 import { AlreadyReportedError } from './utils/errors.js';
+import { TOP_LEVEL_HELP_OPTIONS } from './config/top-level-options.js';
 import {
   MCP_COMMANDS,
   TOP_LEVEL_COMMANDS,
@@ -47,6 +48,7 @@ const mocks = vi.hoisted(() => ({
   mcpBuilder: vi.fn(),
   mcpListHandler: vi.fn(),
   mcpAddHandler: vi.fn(),
+  mcpRemoveHandler: vi.fn(),
   getCliVersion: vi.fn(),
   installManagedNpmUpdate: vi.fn(),
 }));
@@ -93,9 +95,22 @@ vi.mock('./commands/mcp.js', () => ({
           handler: mocks.mcpListHandler,
         })
         .command({
-          command: 'add <name>',
+          // Mirror the real add command's variadic tail and
+          // `unknown-options-as-args` so version-looking server args are
+          // captured into `args` exactly like production.
+          command: 'add <name> <commandOrUrl> [args...]',
           describe: 'Add a server',
+          builder: (subYargs: Argv) =>
+            subYargs.parserConfiguration({
+              'unknown-options-as-args': true,
+              'populate--': true,
+            }),
           handler: mocks.mcpAddHandler,
+        })
+        .command({
+          command: 'remove <name>',
+          describe: 'Remove a server',
+          handler: mocks.mcpRemoveHandler,
         })
         .demandCommand(1, 'You need at least one command before continuing.');
     },
@@ -132,12 +147,428 @@ describe('resolveBootstrapRoute', () => {
   it('does not treat values for global flags as positional commands or bootstrap flags', () => {
     expect(resolveBootstrapRoute(['--model', 'gpt-4', '--help'])).toBe('help');
     expect(resolveBootstrapRoute(['-p', 'hello', '--help'])).toBe('help');
+    expect(resolveBootstrapRoute(['--approval-mode', 'auto', '--help'])).toBe(
+      'help',
+    );
+    expect(resolveBootstrapRoute(['--auth-type', 'qwen-oauth', '--help'])).toBe(
+      'help',
+    );
+    expect(
+      resolveBootstrapRoute(['--append-system-prompt', 'be brief', '--help']),
+    ).toBe('help');
+    expect(resolveBootstrapRoute(['--worktree', '--help'])).toBe('help');
+    // A version token sitting in a value flag's value slot is skipped
+    // (base parity) and the argv demotes to the full parser.
     expect(resolveBootstrapRoute(['--model', '-v'])).toBe('default');
+  });
+
+  it('matches yargs value scanning for sentinels and array options', () => {
+    expect(resolveBootstrapRoute(['--worktree', '--', '--help'])).toBe(
+      'default',
+    );
+    // Array options consume at most one token (matching yargs' command-
+    // detection pass), so the second value reads as a positional and demotes
+    // these to the slow path, which prints the same top-level options plus
+    // the full parser's command/positional sections.
+    expect(
+      resolveBootstrapRoute(['--extensions', 'ext1', 'ext2', '--help']),
+    ).toBe('default');
+    expect(
+      resolveBootstrapRoute(['--include-directories', 'one', 'two', '--help']),
+    ).toBe('default');
+  });
+
+  it('does not swallow command tokens after array-option values', () => {
+    // yargs detects commands in an earlier pass where these options are
+    // unknown and consume at most one token; the scanner must match, or a
+    // command sitting after array values misfires the top-level help path.
+    expect(resolveBootstrapRoute(['--extensions=a', 'serve', '--help'])).toBe(
+      'default',
+    );
+    expect(
+      resolveBootstrapRoute(['--extensions', 'a', 'serve', '--help']),
+    ).toBe('default');
+    expect(resolveBootstrapRoute(['-e', 'a', 'serve', '--help'])).toBe(
+      'default',
+    );
+    expect(
+      resolveBootstrapRoute(['--include-directories', 'x', 'mcp', '--help']),
+    ).toBe('default');
+    expect(
+      resolveBootstrapRoute(['--fallback-model', 'm1', 'serve', '--help']),
+    ).toBe('default');
+  });
+
+  it('consumes hidden value options and =-form values before route detection', () => {
+    // Hidden options registered outside TOP_LEVEL_HELP_OPTIONS still take
+    // values the scanner must skip over.
+    expect(
+      resolveBootstrapRoute(['--sandbox-session-id', 'uuid', '--help']),
+    ).toBe('help');
+    // The `=` form carries its value inside the token and consumes nothing
+    // further, so `b` reads as a positional and demotes to the slow path;
+    // with --help present the full parser boots and prints help before the
+    // leftover tokens matter.
+    expect(resolveBootstrapRoute(['--extensions=a', 'b', 'c', '--help'])).toBe(
+      'default',
+    );
+    // Non-array `--flag=value` keeps its value inside the token: the next
+    // token must NOT be consumed (consuming it would misroute this to
+    // top-level help instead of the slow-path `serve --help`).
+    expect(resolveBootstrapRoute(['--model=gpt-4', 'serve', '--help'])).toBe(
+      'default',
+    );
+  });
+
+  it("skips version tokens sitting in a value flag's value slot (base parity)", () => {
+    // Base's hasFlag skipped the token after every value-taking flag
+    // unconditionally, so a `-v`/`--version` in the value slot was never
+    // counted: `qwen -p -v -h` printed top-level help (exit 0) and
+    // `qwen --model -v` demoted to the full parser. An unconditional
+    // version intercept flipped every VALUE_FLAGS x {-v,--version} x
+    // {-h,--help} shape from help to version; the restored skip returns
+    // them to parity.
+    expect(resolveBootstrapRoute(['-p', '-v', '-h'])).toBe('help');
+    expect(resolveBootstrapRoute(['--model', '-v', '--help'])).toBe('help');
+    expect(resolveBootstrapRoute(['--resume', '-v', '--help'])).toBe('help');
+    expect(resolveBootstrapRoute(['--model', '--version', '--help'])).toBe(
+      'help',
+    );
+    expect(resolveBootstrapRoute(['-m', '--version', '-h'])).toBe('help');
+    expect(resolveBootstrapRoute(['-r', '-v', '--help'])).toBe('help');
+    expect(resolveBootstrapRoute(['--output-format', '-v', '--help'])).toBe(
+      'help',
+    );
+    expect(resolveBootstrapRoute(['--model', '-v'])).toBe('default');
+    // Version tokens outside any value slot still win, with or without
+    // help siblings.
+    expect(resolveBootstrapRoute(['-v', '--help'])).toBe('version');
+    expect(resolveBootstrapRoute(['--version', '--help'])).toBe('version');
+    expect(resolveBootstrapRoute(['foo', '-v', '--help'])).toBe('version');
+    expect(resolveBootstrapRoute(['serve', '-v', '--help'])).toBe('version');
+    expect(resolveBootstrapRoute(['mcp', '-v', '--help'])).toBe('version');
+    // Help still wins when no exact version token exists.
+    expect(resolveBootstrapRoute(['--model', 'gpt-4', '--help'])).toBe('help');
+    expect(resolveBootstrapRoute(['-p', 'hello', '-h'])).toBe('help');
+  });
+
+  it('prints the version for exact version tokens with hidden help states (base parity)', () => {
+    // Base printed the version even when argv carries tokens that set the
+    // help flag on the full parser — probed against the base binary:
+    // `help -v`, `-v help`, `foo help -v`, `--help=true -v`, `--h -v`,
+    // `-dh -v`, `-help -v`, `-sh --version`, `-h=true -v`, and
+    // `--help=false -v` all printed the version. Demoting these shapes to
+    // the full parser is exactly what executed subcommand handlers on
+    // command-prefixed argv (`mcp remove victim -v help` deleted the
+    // server), so the intercept owns every exact version token instead.
+    expect(resolveBootstrapRoute(['help', '-v'])).toBe('version');
+    expect(resolveBootstrapRoute(['help', '--version'])).toBe('version');
+    expect(resolveBootstrapRoute(['-v', 'help'])).toBe('version');
+    expect(resolveBootstrapRoute(['foo', 'help', '-v'])).toBe('version');
+    expect(resolveBootstrapRoute(['update', 'help', '-v'])).toBe('version');
+    expect(resolveBootstrapRoute(['--help=true', '-v'])).toBe('version');
+    expect(resolveBootstrapRoute(['--help=true', '--version'])).toBe('version');
+    expect(resolveBootstrapRoute(['--h', '-v'])).toBe('version');
+    expect(resolveBootstrapRoute(['-dh', '-v'])).toBe('version');
+    expect(resolveBootstrapRoute(['-help', '-v'])).toBe('version');
+    expect(resolveBootstrapRoute(['-sh', '--version'])).toBe('version');
+    expect(resolveBootstrapRoute(['-h=true', '-v'])).toBe('version');
+    expect(resolveBootstrapRoute(['-v', '-dh'])).toBe('version');
+    expect(resolveBootstrapRoute(['--help=false', '-v'])).toBe('version');
+    // Without an exact version token the help-state shapes still demote to
+    // the slow path, which owns the final flag state.
+    expect(resolveBootstrapRoute(['--help=true'])).toBe('default');
+    expect(resolveBootstrapRoute(['--h'])).toBe('default');
+    expect(resolveBootstrapRoute(['-dh'])).toBe('default');
+  });
+
+  it('routes command-prefixed version argv to the version fast path', () => {
+    // Command builders disable version via `.version(false)` (mcp, hooks,
+    // extensions, channel, review, auth, sessions) while the root parser's
+    // version alias still consumes the token — so the full parser EXECUTES
+    // the subcommand instead of printing the version (`mcp remove` deletes
+    // the server and its OAuth creds). Base printed the version for these
+    // argv shapes, so the bootstrap intercept restores that — including the
+    // mcp add variadic tail (probed: base printed the version and persisted
+    // nothing).
+    expect(resolveBootstrapRoute(['mcp', '--version'])).toBe('version');
+    expect(resolveBootstrapRoute(['mcp', 'list', '--version'])).toBe('version');
+    expect(resolveBootstrapRoute(['mcp', '-v'])).toBe('version');
+    expect(
+      resolveBootstrapRoute(['mcp', 'add', 'my-server', 'node', '--version']),
+    ).toBe('version');
+    // Bare top-level version tokens still win; a token sitting in a value
+    // flag's value slot is skipped and demotes to the full parser
+    // (base parity).
+    expect(resolveBootstrapRoute(['-v'])).toBe('version');
+    expect(resolveBootstrapRoute(['--version'])).toBe('version');
+    expect(resolveBootstrapRoute(['--model', '-v'])).toBe('default');
+  });
+
+  it('prints the version instead of persisting version-bearing mcp add argv (base parity)', () => {
+    // Base printed the version and persisted NOTHING for every probed
+    // version-bearing `mcp add` shape — including the variadic tail
+    // (`mcp add my-server node server.js -v`), greedy-array and nargs
+    // value-flag shapes, a dash token between `mcp` and `add`, and leading
+    // help/version tokens. The previous add-tail exception hand-modeled the
+    // builder's consumption grammar fail-open and produced corrupted
+    // settings writes (`includeTools:["a","-v"]`, swallowed `-v` env
+    // values); the structural close is the intercept itself.
+    expect(
+      resolveBootstrapRoute([
+        'mcp',
+        'add',
+        'my-server',
+        'node',
+        'server.js',
+        '-v',
+      ]),
+    ).toBe('version');
+    expect(
+      resolveBootstrapRoute(['mcp', 'add', 'my-server', 'node', '--version']),
+    ).toBe('version');
+    expect(
+      resolveBootstrapRoute([
+        'mcp',
+        'add',
+        'my-server',
+        'node',
+        'server.js',
+        '--include-tools',
+        'a',
+        '-v',
+      ]),
+    ).toBe('version');
+    expect(
+      resolveBootstrapRoute([
+        'mcp',
+        'add',
+        'my-server',
+        'node',
+        'server.js',
+        '--env',
+        '-v',
+      ]),
+    ).toBe('version');
+    expect(
+      resolveBootstrapRoute([
+        'mcp',
+        '--debug',
+        'add',
+        'my-server',
+        'node',
+        'server.js',
+        '-v',
+      ]),
+    ).toBe('version');
+    expect(
+      resolveBootstrapRoute([
+        '--help',
+        'mcp',
+        'add',
+        'my-server',
+        'node',
+        'server.js',
+        '-v',
+      ]),
+    ).toBe('version');
+    expect(
+      resolveBootstrapRoute([
+        'mcp',
+        'add',
+        'my-server',
+        'node',
+        'server.js',
+        '-v',
+        'help',
+      ]),
+    ).toBe('version');
+    // Controls: only tokens AFTER `--` are positional data the mcp fast
+    // path persists verbatim.
+    expect(
+      resolveBootstrapRoute(['mcp', 'add', 'my-server', 'node', '--', '-v']),
+    ).toBe('mcp');
+    expect(resolveBootstrapRoute(['mcp', '--version'])).toBe('version');
+    expect(resolveBootstrapRoute(['mcp', 'list', '--version'])).toBe('version');
+  });
+
+  it('restores base parity for command-prefixed version argv', () => {
+    // Base printed the version for ANY exact `-v`/`--version` token. The
+    // demotion to the full parser broke that destructively: `mcp remove x
+    // -v` deleted the server (root version alias consumed the token, the
+    // non-strict command tree executed), and option-shifted add argv
+    // persisted corrupted entries. The intercept prints the version again,
+    // unconditionally — no help-state modeling, no add-tail exception.
+    expect(resolveBootstrapRoute(['mcp', 'remove', 'my-server', '-v'])).toBe(
+      'version',
+    );
+    expect(
+      resolveBootstrapRoute(['mcp', 'remove', 'my-server', '--version']),
+    ).toBe('version');
+    expect(
+      resolveBootstrapRoute(['extensions', 'uninstall', 'foo-ext', '-v']),
+    ).toBe('version');
+    expect(
+      resolveBootstrapRoute(['--debug', 'mcp', 'remove', 'victim', '-v']),
+    ).toBe('version');
+    expect(
+      resolveBootstrapRoute([
+        '--safe-mode',
+        'mcp',
+        'remove',
+        'victim',
+        '--version',
+      ]),
+    ).toBe('version');
+    // Option-shifted tokens before the two required add positionals are not
+    // the variadic tail.
+    expect(
+      resolveBootstrapRoute([
+        'mcp',
+        'add',
+        '--scope',
+        'user',
+        '-v',
+        'name',
+        'cmd',
+      ]),
+    ).toBe('version');
+    expect(
+      resolveBootstrapRoute([
+        'mcp',
+        'add',
+        '--transport',
+        'sse',
+        '-v',
+        'name',
+        'cmd',
+      ]),
+    ).toBe('version');
+    // Only one positional precedes the token: not the tail yet.
+    expect(resolveBootstrapRoute(['mcp', 'add', 'name', '-v'])).toBe('version');
+    // Two positionals precede: the variadic tail. Base STILL printed the
+    // version and persisted nothing here (probed), so the intercept fires.
+    expect(
+      resolveBootstrapRoute([
+        'mcp',
+        'add',
+        '--scope',
+        'user',
+        'my-server',
+        'node',
+        '-v',
+      ]),
+    ).toBe('version');
+    expect(
+      resolveBootstrapRoute([
+        '--debug',
+        'mcp',
+        'add',
+        'my-server',
+        'node',
+        'server.js',
+        '-v',
+      ]),
+    ).toBe('version');
+    expect(
+      resolveBootstrapRoute([
+        '--model',
+        'gpt-4',
+        'mcp',
+        'add',
+        'my-server',
+        'node',
+        '-v',
+      ]),
+    ).toBe('version');
+    // serve argv is command-prefixed too.
+    expect(resolveBootstrapRoute(['serve', '--version'])).toBe('version');
+    // Entrance-class regressions: the old help-state guard suppressed the
+    // intercept for real `--h*` options (`--host`, 14 sites) and for help
+    // tokens after/around the version token, letting the full parser
+    // EXECUTE the subcommand where base printed the version (probed:
+    // `mcp remove victim -v help` ran the remove handler).
+    expect(
+      resolveBootstrapRoute([
+        'review',
+        'fetch-pr',
+        '12345',
+        'owner/repo',
+        '--out',
+        'report.json',
+        '--host',
+        'ghe.example.com',
+        '-v',
+      ]),
+    ).toBe('version');
+    expect(
+      resolveBootstrapRoute(['mcp', 'remove', 'victim', '-v', 'help']),
+    ).toBe('version');
+    expect(
+      resolveBootstrapRoute([
+        'mcp',
+        'remove',
+        'victim',
+        '--model',
+        'help',
+        '-v',
+      ]),
+    ).toBe('version');
+  });
+
+  it('demotes unrecognized short-option clusters to the slow path', () => {
+    // Documented limitation (see skipOptionValues): clusters are matched as
+    // whole tokens, so -h/-v inside a cluster falls back to the full boot.
+    // Output stays correct via the slow path.
+    expect(resolveBootstrapRoute(['-vh'])).toBe('default');
   });
 
   it('does not treat flags after -- as bootstrap flags', () => {
     expect(resolveBootstrapRoute(['--', '--version'])).toBe('default');
     expect(resolveBootstrapRoute(['mcp', '--', '--version'])).toBe('mcp');
+  });
+
+  it('keeps out-of-grammar argv off the help fast path; exact version tokens keep base parity', () => {
+    // Structural close (not per-entrance patches): yargs' flag state is
+    // last-wins and order-dependent, which exact-token scanning cannot
+    // model. Each shape below was witnessed misfiring a fast path at some
+    // point; all of them carry tokens outside the safe grammar (`=`-forms,
+    // `--no-` negations, short clusters) and must stay off the HELP fast
+    // path. Without an exact version token they demote to the slow path,
+    // which owns the final flag state.
+    const misfires: readonly string[][] = [
+      ['--help', '--no-help'],
+      ['--version=0'],
+      ['--version=no'],
+      ['--help', '--help=false'],
+      ['-h', '-h=false'],
+      ['--v=false'],
+      ['--h=false'],
+    ];
+    for (const argv of misfires) {
+      const route = resolveBootstrapRoute(argv);
+      expect(route, `argv=${JSON.stringify(argv)}`).not.toBe('help');
+      expect(route, `argv=${JSON.stringify(argv)}`).not.toBe('version');
+    }
+    // Base parity: base printed the version for ANY argv carrying an exact
+    // `-v`/`--version` token, regardless of out-of-grammar siblings
+    // (`--no-version`, `--version=false`, `---help`); the command-prefixed
+    // intercept restores that class instead of demoting it.
+    expect(resolveBootstrapRoute(['-v', '--no-version'])).toBe('version');
+    expect(resolveBootstrapRoute(['--version', '--no-version'])).toBe(
+      'version',
+    );
+    expect(resolveBootstrapRoute(['-v', '--version=false'])).toBe('version');
+    expect(resolveBootstrapRoute(['---help', '-v'])).toBe('version');
+    expect(resolveBootstrapRoute(['-v', '---help'])).toBe('version');
+    // Controls: the plain grammar stays on the fast paths.
+    expect(resolveBootstrapRoute(['--help'])).toBe('help');
+    expect(resolveBootstrapRoute(['-h'])).toBe('help');
+    expect(resolveBootstrapRoute(['-v'])).toBe('version');
+    expect(resolveBootstrapRoute(['--version'])).toBe('version');
+    expect(resolveBootstrapRoute(['--model', 'x', '-v'])).toBe('version');
+    expect(resolveBootstrapRoute(['mcp', '--version'])).toBe('version');
+    expect(resolveBootstrapRoute([])).toBe('default');
   });
 });
 
@@ -237,6 +668,8 @@ describe('runCliEntry', () => {
 
     const helpText = stdout.join('');
     expect(helpText).toContain('Usage: qwen [options] [command]');
+    expect(helpText).toContain('\nCommands:');
+    expect(helpText).toContain('\nOptions:');
     expect(helpText).toContain('Manage Qwen Code hooks');
     expect(helpText).toContain('Manage MCP servers');
     expect(helpText).toContain('Run Qwen Code as a local HTTP daemon');
@@ -246,6 +679,13 @@ describe('runCliEntry', () => {
     expect(helpText).toContain('-s, --sandbox');
     expect(helpText).toContain('-o, --output-format');
     expect(helpText).toContain('-r, --resume');
+    for (const [name] of TOP_LEVEL_HELP_OPTIONS) {
+      expect(helpText).toContain(`--${name}`);
+    }
+    expect(helpText).toContain(
+      '"openai", "anthropic", "qwen-oauth", "gemini", "vertex-ai"',
+    );
+    expect(helpText).toContain('deprecated');
     expect(mocks.main).not.toHaveBeenCalled();
     expect(mocks.tryRunServeFastPath).not.toHaveBeenCalled();
     expect(mocks.initStartupProfiler).not.toHaveBeenCalled();
@@ -324,6 +764,50 @@ describe('runCliEntry', () => {
 
     expect(process.exitCode).toBe(1);
     expect(stderr.join('')).toContain('Not enough non-option arguments');
+    expect(mocks.mcpAddHandler).not.toHaveBeenCalled();
+    expect(mocks.main).not.toHaveBeenCalled();
+  });
+
+  it('prints the version instead of executing mcp remove on version argv', async () => {
+    await runCliEntry(['mcp', 'remove', 'victim', '-v']);
+
+    expect(stdout.join('')).toContain('9.9.9');
+    expect(mocks.mcpRemoveHandler).not.toHaveBeenCalled();
+    expect(mocks.mcpAddHandler).not.toHaveBeenCalled();
+    expect(mocks.main).not.toHaveBeenCalled();
+  });
+
+  it('prints the version for flag-prefixed mcp remove version argv', async () => {
+    await runCliEntry(['--debug', 'mcp', 'remove', 'victim', '-v']);
+
+    expect(stdout.join('')).toContain('9.9.9');
+    expect(mocks.mcpRemoveHandler).not.toHaveBeenCalled();
+    expect(mocks.mcpAddHandler).not.toHaveBeenCalled();
+    expect(mocks.main).not.toHaveBeenCalled();
+  });
+
+  it('prints the version instead of persisting an option-shifted mcp add', async () => {
+    await runCliEntry(['mcp', 'add', '--scope', 'user', '-v', 'name', 'cmd']);
+
+    expect(stdout.join('')).toContain('9.9.9');
+    expect(mocks.mcpAddHandler).not.toHaveBeenCalled();
+    expect(mocks.main).not.toHaveBeenCalled();
+  });
+
+  it('prints the version instead of persisting flag-prefixed mcp add version argv', async () => {
+    // Base printed the version and persisted nothing for this shape
+    // (probed against the base binary with a sandboxed settings file).
+    await runCliEntry([
+      '--debug',
+      'mcp',
+      'add',
+      'my-server',
+      'node',
+      'server.js',
+      '-v',
+    ]);
+
+    expect(stdout.join('')).toContain('9.9.9');
     expect(mocks.mcpAddHandler).not.toHaveBeenCalled();
     expect(mocks.main).not.toHaveBeenCalled();
   });
@@ -1256,5 +1740,19 @@ describe('bootstrap error handling', () => {
     expect(entryPoint.indexOf('stampCliEntryEnv()')).toBeLessThan(
       entryPoint.indexOf('await run()'),
     );
+  });
+});
+
+describe('shared top-level option definitions', () => {
+  it('keeps every definition typed and described so yargs renders them', () => {
+    // TOP_LEVEL_HELP_OPTIONS is the union both help builders consume, so one
+    // pass covers every definition in the global and default-command maps.
+    for (const [name, config] of TOP_LEVEL_HELP_OPTIONS) {
+      expect(config.type, `${name} is missing a type`).toBeDefined();
+      expect(
+        typeof config.description,
+        `${name} is missing a description`,
+      ).toBe('string');
+    }
   });
 });

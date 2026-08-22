@@ -189,6 +189,20 @@ describe('mcp add command', () => {
     });
   });
 
+  it('should keep a -v/--version token as a server arg in the add tail', async () => {
+    // Regression for the mcp-route version demotion: `-v` here is the server
+    // command's own flag, so it must persist in `args` rather than be consumed
+    // by the root `.version()` option (see resolveBootstrapRoute).
+    await parser.parseAsync('add my-server node server.js -v');
+
+    expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
+      'my-server': {
+        command: 'node',
+        args: ['server.js', '-v'],
+      },
+    });
+  });
+
   describe('when handling scope and directory', () => {
     const serverName = 'test-server';
     const command = 'echo';
