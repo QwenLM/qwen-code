@@ -2677,7 +2677,7 @@ Response:
 { "modelId": "qwen-staging" }
 ```
 
-On success, publishes `model_switched` to the SSE stream. On failure, publishes `model_switch_failed` (so passive subscribers see the failure, not just the caller). Races against the agent channel exit so a wedged child can't block the HTTP handler. A successful switch also appends a `session_model` record to the session JSONL so daemon load/resume restores this session's model; `settings.model.name` is still updated as the default for **new** sessions.
+On success, publishes `model_switched` to the SSE stream. On failure, publishes `model_switch_failed` (so passive subscribers see the failure, not just the caller). Races against the agent channel exit so a wedged child can't block the HTTP handler. A successful switch also records the session model in the session JSONL on a best-effort basis; when the record is written, daemon load/resume restores this session's model. `settings.model.name` is still updated as the default for **new** sessions.
 
 ### `POST /session/:id/recap`
 

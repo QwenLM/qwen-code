@@ -3394,6 +3394,20 @@ describe('Session', () => {
       });
     });
 
+    it('persists a runtime-snapshot switch with the isRuntime payload flag', async () => {
+      const snapshotId = `$runtime|${AuthType.USE_OPENAI}|custom-runtime`;
+      await session.setModel({
+        sessionId: 'test-session-id',
+        modelId: `${snapshotId}(${AuthType.USE_OPENAI})`,
+      });
+
+      expect(mockChatRecordingService.recordSessionModel).toHaveBeenCalledWith({
+        modelId: snapshotId,
+        authType: AuthType.USE_OPENAI,
+        isRuntime: true,
+      });
+    });
+
     it('emits a current_model_update extNotification after switching (A1)', async () => {
       await session.setModel({
         sessionId: 'test-session-id',
@@ -3481,6 +3495,11 @@ describe('Session', () => {
             baseUrl: 'https://two.example/v1',
           },
         },
+      });
+      expect(mockChatRecordingService.recordSessionModel).toHaveBeenCalledWith({
+        modelId: 'shared-model',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://two.example/v1',
       });
     });
 

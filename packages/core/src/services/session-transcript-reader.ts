@@ -2154,6 +2154,15 @@ export class SessionTranscriptReader {
       index,
       (entry) => entry.type === 'system' && entry.subtype === 'session_model',
     );
+    // The legacy-model fallback reads the last assistant record's `model`.
+    // Without an explicit selection it is only dispatched when it happens to
+    // land in the replay/model read sets, so on a resume whose tail is a
+    // chat_compression candidate the record is excluded and the fallback
+    // silently never fires.
+    const lastAssistantUuid = lastUuidMatching(
+      index,
+      (entry) => entry.type === 'assistant',
+    );
     const uiTelemetrySet = new Set(
       index.runtimeUuids.filter((uuid) => {
         const entry = index.byUuid.get(uuid);
@@ -2183,9 +2192,12 @@ export class SessionTranscriptReader {
     const artifactUuids = selectArtifactUuids(index);
     const artifactSet = new Set(artifactUuids);
     const metadataSet = new Set(
-      [parentSessionUuid, sessionSourceUuid, sessionModelUuid].filter(
-        (uuid): uuid is string => uuid !== undefined,
-      ),
+      [
+        parentSessionUuid,
+        sessionSourceUuid,
+        sessionModelUuid,
+        lastAssistantUuid,
+      ].filter((uuid): uuid is string => uuid !== undefined),
     );
     const apiHistory = new SessionApiHistoryAccumulator();
     const resumeTokenCounts = new ResumeTokenCountsAccumulator();
@@ -2247,7 +2259,12 @@ export class SessionTranscriptReader {
         const payload = record.systemPayload as
           | SessionModelRecordPayload
           | undefined;
-        if (payload?.modelId && payload.authType) {
+        if (
+          typeof payload?.modelId === 'string' &&
+          payload.modelId.trim() &&
+          typeof payload.authType === 'string' &&
+          payload.authType.trim()
+        ) {
           sessionModel = payload;
         }
       }

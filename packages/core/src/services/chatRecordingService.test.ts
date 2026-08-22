@@ -2668,6 +2668,111 @@ describe('ChatRecordingService', () => {
       ).resolves.toBe(true);
       expect(jsonl.writeLine).not.toHaveBeenCalled();
     });
+
+    it('writes a second record when only the isRuntime flag differs', async () => {
+      await chatRecordingService.recordSessionModel({
+        modelId: 'qwen3-coder-plus',
+        authType: 'openai',
+      });
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(
+        chatRecordingService.recordSessionModel({
+          modelId: 'qwen3-coder-plus',
+          authType: 'openai',
+          isRuntime: true,
+        }),
+      ).resolves.toBe(true);
+      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.systemPayload).toEqual({
+        modelId: 'qwen3-coder-plus',
+        authType: 'openai',
+        isRuntime: true,
+      });
+    });
+
+    it('writes a new record when only the baseUrl differs', async () => {
+      await chatRecordingService.recordSessionModel({
+        modelId: 'qwen3-coder-plus',
+        authType: 'openai',
+        baseUrl: 'https://a.example/v1',
+      });
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(
+        chatRecordingService.recordSessionModel({
+          modelId: 'qwen3-coder-plus',
+          authType: 'openai',
+          baseUrl: 'https://b.example/v1',
+        }),
+      ).resolves.toBe(true);
+      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+    });
+
+    it('skips a payload identical on the isRuntime and baseUrl dimensions', async () => {
+      await chatRecordingService.recordSessionModel({
+        modelId: 'qwen3-coder-plus',
+        authType: 'openai',
+        baseUrl: 'https://a.example/v1',
+        isRuntime: true,
+      });
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(
+        chatRecordingService.recordSessionModel({
+          modelId: 'qwen3-coder-plus',
+          authType: 'openai',
+          baseUrl: 'https://a.example/v1',
+          isRuntime: true,
+        }),
+      ).resolves.toBe(true);
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+    });
+
+    it('re-anchors the pending new binding when a rewind lands mid-write', async () => {
+      chatRecordingService.recordUserMessage([{ text: 'first' }]);
+      await chatRecordingService.recordSessionModel({
+        modelId: 'qwen3-coder-plus',
+        authType: 'openai',
+      });
+      chatRecordingService.recordUserMessage([{ text: 'second' }]);
+
+      // Hold the next session_model write at the IO layer so the rewind
+      // lands inside the pending-write window.
+      vi.mocked(jsonl.writeLine).mockClear();
+      let releaseWrite: (() => void) | undefined;
+      vi.mocked(jsonl.writeLine).mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseWrite = resolve;
+          }),
+      );
+      const pendingSwitch = chatRecordingService.recordSessionModel({
+        modelId: 'qwen3-coder-flash',
+        authType: 'openai',
+      });
+      await vi.waitFor(() => {
+        expect(vi.mocked(jsonl.writeLine).mock.calls.length).toBe(1);
+      });
+
+      chatRecordingService.rewindRecording(1, { truncatedCount: 1 });
+      releaseWrite?.();
+      await pendingSwitch;
+      await chatRecordingService.flush();
+
+      const written = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.map((call) => call[1] as ChatRecord);
+      const rewindIndex = written.findIndex(
+        (record) => record.subtype === 'rewind',
+      );
+      expect(rewindIndex).toBeGreaterThanOrEqual(0);
+      const reAppended = written[rewindIndex + 1];
+      expect(reAppended?.subtype).toBe('session_model');
+      expect(reAppended?.parentUuid).toBe(written[rewindIndex]?.uuid);
+      expect(reAppended?.systemPayload).toEqual({
+        modelId: 'qwen3-coder-flash',
+        authType: 'openai',
+      });
+    });
   });
 
   describe('legacy recorder', () => {

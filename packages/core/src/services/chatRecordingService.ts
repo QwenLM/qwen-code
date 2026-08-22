@@ -2583,7 +2583,12 @@ export class ChatRecordingService {
   async recordSessionModel(
     payload: SessionModelRecordPayload,
   ): Promise<boolean> {
-    if (!payload.modelId.trim() || !payload.authType.trim()) {
+    if (
+      typeof payload.modelId !== 'string' ||
+      !payload.modelId.trim() ||
+      typeof payload.authType !== 'string' ||
+      !payload.authType.trim()
+    ) {
       return false;
     }
     const normalized = normalizeSessionModelPayload(payload);
@@ -2600,8 +2605,13 @@ export class ChatRecordingService {
         subtype: 'session_model',
         systemPayload: normalized,
       };
-      await this.appendRecordStrict(record);
+      // Assign before the awaited write so a rewind landing in the
+      // pending-write window re-appends the new binding rather than the
+      // stale one. A failed strict write latches `writeFailure`
+      // permanently, so the optimistic state cannot cause a skipped write
+      // on a healthy recorder.
       this.currentSessionModel = normalized;
+      await this.appendRecordStrict(record);
       return true;
     } catch (error) {
       if (error !== this.writeFailure) {

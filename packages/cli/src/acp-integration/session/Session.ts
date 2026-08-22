@@ -58,6 +58,7 @@ import {
   AuthType,
   ApprovalMode,
   CompressionStatus,
+  RUNTIME_SNAPSHOT_PREFIX,
   detectLoopSentinel,
   detectAutonomousSentinel,
   LoopTickResolver,
@@ -8752,7 +8753,8 @@ export class Session implements SessionContext {
     const effectiveAuthType = after?.authType ?? selectedAuthType;
     const effectiveModelId = after?.model ?? parsed.modelId;
     const isRuntime =
-      resolvedRoute?.isRuntime ?? rawModelId.startsWith('$runtime|');
+      resolvedRoute?.isRuntime ??
+      rawModelId.startsWith(RUNTIME_SNAPSHOT_PREFIX);
     void recordDaemonSessionModel(this.config, {
       modelId: isRuntime
         ? (resolvedRoute?.modelId ?? parsed.modelId)
@@ -8825,7 +8827,8 @@ export class Session implements SessionContext {
           baseUrl: after?.baseUrl ?? '(default)',
           apiKey: maskApiKeyForDisplay(after?.apiKey),
           isRuntime:
-            resolvedRoute?.isRuntime ?? rawModelId.startsWith('$runtime|'),
+            resolvedRoute?.isRuntime ??
+            rawModelId.startsWith(RUNTIME_SNAPSHOT_PREFIX),
         },
       },
     };

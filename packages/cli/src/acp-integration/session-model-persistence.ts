@@ -7,23 +7,14 @@
 import {
   AuthType,
   createDebugLogger,
+  RUNTIME_SNAPSHOT_PREFIX,
+  stripRuntimeSnapshotPrefix,
   type Config,
   type SessionModelRecordPayload,
   type SessionRestoreProjection,
 } from '@qwen-code/qwen-code-core';
 
 const debugLogger = createDebugLogger('SESSION_MODEL');
-const RUNTIME_SNAPSHOT_PREFIX = '$runtime|';
-
-function canonicalModelId(modelId: string): string {
-  let id = modelId;
-  while (id.startsWith(RUNTIME_SNAPSHOT_PREFIX)) {
-    const stripped = id.split('|').slice(2).join('|');
-    if (!stripped) break;
-    id = stripped;
-  }
-  return id;
-}
 
 export async function recordDaemonSessionModel(
   config: Config,
@@ -100,9 +91,9 @@ export async function applyRestoredSessionModel(
   const modelId = recorded?.modelId || fallbackModel;
   if (!modelId?.trim() || !authType) return;
 
-  const currentModel = canonicalModelId(config.getModel() ?? '');
+  const currentModel = stripRuntimeSnapshotPrefix(config.getModel() ?? '');
   const currentAuth = config.getAuthType();
-  const targetModel = canonicalModelId(modelId.trim());
+  const targetModel = stripRuntimeSnapshotPrefix(modelId.trim());
   const targetBaseUrl = recorded?.baseUrl;
   const currentRegistryBaseUrl = config.getCurrentModelRegistryBaseUrl?.();
   const baseUrlMatches = recordedRouteMatches(recorded, currentRegistryBaseUrl);

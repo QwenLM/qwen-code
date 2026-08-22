@@ -210,6 +210,12 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   isTurnResultRecordPayload: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).isTurnResultRecordPayload,
+  RUNTIME_SNAPSHOT_PREFIX: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).RUNTIME_SNAPSHOT_PREFIX,
+  stripRuntimeSnapshotPrefix: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).stripRuntimeSnapshotPrefix,
   SESSION_ARTIFACT_PERSISTENCE_VERSION: 2,
   GOAL_STATE_VERSION: 2,
   // The real helper: the goal get/clear fallbacks return its exact shape and

@@ -1661,6 +1661,38 @@ describe('SessionTranscriptReader', () => {
     );
   });
 
+  it('captures lastAssistantModel on resume when a trailing compression excludes the last assistant record', async () => {
+    await writeRecords([
+      record('u1', null, 'prompt'),
+      {
+        ...record('a1', 'u1', 'answer'),
+        model: 'session-a-model',
+      },
+      {
+        ...record('compression', 'a1', ''),
+        type: 'system',
+        subtype: 'chat_compression',
+        message: undefined,
+        systemPayload: {
+          compressedHistory: [
+            { role: 'user', parts: [{ text: 'compressed prompt' }] },
+            { role: 'model', parts: [{ text: 'compressed answer' }] },
+          ],
+          info: { newTokenCount: 20, newTokenCountIsEstimated: false },
+        } as ChatRecord['systemPayload'],
+      },
+    ]);
+
+    const projection = await new SessionTranscriptReader(
+      workspaceDir,
+    ).readRestoreProjection(sessionId, { replay: { kind: 'none' } });
+
+    expect(projection?.runtime.recording.sessionModel).toBeUndefined();
+    expect(projection?.runtime.recording.lastAssistantModel).toBe(
+      'session-a-model',
+    );
+  });
+
   it('preserves malformed compression failure behavior', async () => {
     await writeRecords([
       record('u1', null, 'prompt'),
