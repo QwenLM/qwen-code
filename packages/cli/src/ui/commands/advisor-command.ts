@@ -16,7 +16,10 @@ import {
   BTW_MAX_INPUT_LENGTH,
   buildBtwCacheSafeParams,
   runForkedAgent,
+  resolveModelId,
 } from '@qwen-code/qwen-code-core';
+import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 
 const ADVISOR_SCHEMA = {
   type: 'object',
@@ -95,6 +98,84 @@ function formatAdvisorError(error: unknown): string {
   });
 }
 
+function parseScopeFlags(args: string): {
+  scopeOverride: SettingScope | undefined;
+  remaining: string;
+  hasProject: boolean;
+  hasGlobal: boolean;
+} {
+  let scopeOverride: SettingScope | undefined;
+  let remaining = args;
+  const hasProject = /(?:^|\s)--project(?:\s|$)/.test(remaining);
+  const hasGlobal = /(?:^|\s)--global(?:\s|$)/.test(remaining);
+
+  if (hasProject) {
+    scopeOverride = SettingScope.Workspace;
+    remaining = remaining.replace(/(?:^|\s)--project(?:\s|$)/, ' ').trim();
+  } else if (hasGlobal) {
+    scopeOverride = SettingScope.User;
+    remaining = remaining.replace(/(?:^|\s)--global(?:\s|$)/, ' ').trim();
+  }
+
+  return { scopeOverride, remaining, hasProject, hasGlobal };
+}
+
+function resolveScope(
+  settings: LoadedSettings,
+  scopeOverride: SettingScope | undefined,
+): SettingScope {
+  return scopeOverride ?? getPersistScopeForModelSelection(settings);
+}
+
+function persistScopeSpread(
+  scopeOverride: SettingScope | undefined,
+  // eslint-disable-next-line @typescript-eslint/no-empty-object-type
+): { persistScope: 'workspace' } | { persistScope: 'user' } | {} {
+  if (scopeOverride === SettingScope.Workspace)
+    return { persistScope: 'workspace' as const };
+  if (scopeOverride === SettingScope.User)
+    return { persistScope: 'user' as const };
+  return {};
+}
+
+function scopeSuffix(scopeOverride: SettingScope | undefined): string {
+  return scopeOverride === SettingScope.Workspace
+    ? t(' (this project)')
+    : scopeOverride === SettingScope.User
+      ? t(' (global)')
+      : '';
+}
+
+function formatAdvisorStatus(context: CommandContext): string {
+  const advisorModel =
+    context.services.config?.getAdvisorModel?.() ?? t('not set');
+  return t(
+    'Current Advisor model: {{advisorModel}}\nUse "/advisor <model-id>" to enable Advisor or "/advisor off" to disable it.',
+    { advisorModel },
+  );
+}
+
+function formatUnavailableAdvisorModelMessage(
+  modelName: string,
+  availableModelIds: string[],
+): string {
+  const availableModelsLine =
+    availableModelIds.length === 0
+      ? t('No models are configured.')
+      : t('Configured models: {{models}}.', {
+          models: availableModelIds.join(', '),
+        });
+  return (
+    t("Advisor model '{{modelName}}' is not configured.", { modelName }) +
+    '\n' +
+    availableModelsLine +
+    '\n' +
+    t(
+      'Configure models in settings.modelProviders, or run /advisor without arguments in interactive mode to choose from configured models.',
+    )
+  );
+}
+
 async function askAdvisor(
   context: CommandContext,
   focus: string,
@@ -111,8 +192,7 @@ async function askAdvisor(
     throw new Error(t('No conversation context available for /advisor'));
   }
 
-  const advisorModel =
-    context.services.settings.merged.advisorModel?.trim() || undefined;
+  const advisorModel = config.getAdvisorModel();
 
   // Tools are always stripped (NO_TOOLS), matching /btw and the "You have NO
   // tools" framing of the advisor prompt. This accepts a cache-prefix miss in
@@ -134,22 +214,158 @@ async function askAdvisor(
   };
 }
 
+async function setAdvisorModel(
+  context: CommandContext,
+  modelName: string | undefined,
+  scopeOverride: SettingScope | undefined,
+): Promise<SlashCommandActionReturn> {
+  const { config, settings } = context.services;
+  if (!config) {
+    return {
+      type: 'message',
+      messageType: 'error',
+      content: t('Config not loaded.'),
+    };
+  }
+  if (!settings) {
+    return {
+      type: 'message',
+      messageType: 'error',
+      content: t('Settings service not available.'),
+    };
+  }
+
+  const scope = resolveScope(settings, scopeOverride);
+  if (modelName === undefined) {
+    settings.setValue(scope, 'advisorModel', '');
+    await config.setAdvisorConfig({
+      model: undefined,
+      maxUses: settings.merged.advisorMaxUses,
+      modelOverride: true,
+    });
+    return {
+      type: 'message',
+      messageType: 'info',
+      content: t('Advisor disabled') + scopeSuffix(scopeOverride),
+    };
+  }
+
+  const selector = (() => {
+    try {
+      return resolveModelId(modelName);
+    } catch {
+      return undefined;
+    }
+  })();
+  if (!selector) {
+    return {
+      type: 'message',
+      messageType: 'error',
+      content: formatUnavailableAdvisorModelMessage(modelName, []),
+    };
+  }
+
+  const availableModels = (
+    selector.authType
+      ? config.getAvailableModelsForAuthType(selector.authType)
+      : config.getAllConfiguredModels()
+  ).filter(
+    (model) =>
+      !model.fastOnly &&
+      !model.voiceOnly &&
+      !model.visionOnly &&
+      !model.imageOnly,
+  );
+  if (!availableModels.some((model) => model.id === selector.modelId)) {
+    return {
+      type: 'message',
+      messageType: 'error',
+      content: formatUnavailableAdvisorModelMessage(
+        modelName,
+        Array.from(new Set(availableModels.map((model) => model.id))),
+      ),
+    };
+  }
+
+  settings.setValue(scope, 'advisorModel', modelName);
+  await config.setAdvisorConfig({
+    model: modelName,
+    maxUses: settings.merged.advisorMaxUses,
+    modelOverride: true,
+  });
+  return {
+    type: 'message',
+    messageType: 'info',
+    content: t('Advisor Model') + ': ' + modelName + scopeSuffix(scopeOverride),
+  };
+}
+
 export const advisorCommand: SlashCommand = {
   name: 'advisor',
   get description() {
     return t(
-      'Get a second opinion on the current conversation from a reviewer model',
+      'Configure the native Advisor model, or run /advisor review for a manual second opinion',
     );
   },
+  argumentHint:
+    '[--project|--global] [<model-id>|off] | status | review [focus]',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'acp'] as const,
+  completion: async (context, partialArg) => {
+    if (!partialArg) return null;
+    const fixed = [
+      {
+        value: 'off',
+        description: t('Disable the native Advisor tool'),
+      },
+      {
+        value: 'review',
+        description: t('Run a manual second-opinion review'),
+      },
+      {
+        value: 'status',
+        description: t('Show the current Advisor model'),
+      },
+      {
+        value: '--project',
+        description: t('Persist the Advisor model to project settings'),
+      },
+      {
+        value: '--global',
+        description: t('Persist the Advisor model to user settings'),
+      },
+    ].filter((item) => item.value.startsWith(partialArg));
+    if (fixed.length > 0) return fixed;
+    const prefix = partialArg
+      .replace(/(?:^|\s)--project(?:\s|$)/, ' ')
+      .replace(/(?:^|\s)--global(?:\s|$)/, ' ')
+      .trim();
+    if (!prefix || prefix === 'review') return null;
+    return context.services.config
+      ? context.services.config
+          .getAllConfiguredModels()
+          .filter(
+            (model) =>
+              !model.fastOnly &&
+              !model.voiceOnly &&
+              !model.visionOnly &&
+              !model.imageOnly,
+          )
+          .map((model) => model.id)
+          .filter((id) => id.startsWith(prefix))
+      : null;
+  },
   action: async (
     context: CommandContext,
     args: string,
   ): Promise<void | SlashCommandActionReturn> => {
-    const focus = args.trim();
+    const rawArgs = context.invocation?.args?.trim() || args.trim();
+    const [subcommand = '', ...rest] = rawArgs.split(/\s+/);
+    const isReview = subcommand === 'review';
+    const isStatus = subcommand === 'status';
+    const focus = isReview ? rest.join(' ').trim() : '';
 
-    if (focus.length > BTW_MAX_INPUT_LENGTH) {
+    if (isReview && focus.length > BTW_MAX_INPUT_LENGTH) {
       return {
         type: 'message',
         messageType: 'error',
@@ -160,7 +376,6 @@ export const advisorCommand: SlashCommand = {
     }
 
     const { config } = context.services;
-    const { ui } = context;
 
     if (!config) {
       return {
@@ -168,6 +383,67 @@ export const advisorCommand: SlashCommand = {
         messageType: 'error',
         content: t('Config not loaded.'),
       };
+    }
+
+    if (isStatus) {
+      if (rest.length > 0) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: t('Usage: /advisor status'),
+        };
+      }
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: formatAdvisorStatus(context),
+      };
+    }
+
+    if (!isReview) {
+      const { scopeOverride, remaining, hasProject, hasGlobal } =
+        parseScopeFlags(rawArgs);
+      if (hasProject && hasGlobal) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: t(
+            'Cannot use both --project and --global. Choose one scope flag.',
+          ),
+        };
+      }
+      if (
+        scopeOverride === SettingScope.Workspace &&
+        context.services.settings &&
+        !context.services.settings.isTrusted
+      ) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: t(
+            'Workspace is untrusted; run /trust first or use --global.',
+          ),
+        };
+      }
+      if (!remaining) {
+        if (context.executionMode !== 'interactive') {
+          return {
+            type: 'message',
+            messageType: 'info',
+            content: formatAdvisorStatus(context),
+          };
+        }
+        return {
+          type: 'dialog',
+          dialog: 'advisor-model',
+          ...persistScopeSpread(scopeOverride),
+        };
+      }
+      return setAdvisorModel(
+        context,
+        remaining.toLowerCase() === 'off' ? undefined : remaining,
+        scopeOverride,
+      );
     }
 
     if (!config.getModel()) {
@@ -178,6 +454,7 @@ export const advisorCommand: SlashCommand = {
       };
     }
 
+    const { ui } = context;
     const abortSignal = context.abortSignal ?? new AbortController().signal;
     const executionMode = context.executionMode ?? 'interactive';
 

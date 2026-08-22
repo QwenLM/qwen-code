@@ -1150,6 +1150,25 @@ describe('useSlashCommandProcessor', () => {
       });
     });
 
+    it('should handle "dialog: advisor-model" action', async () => {
+      const command = createTestCommand({
+        name: 'advisormodelcmd',
+        action: vi
+          .fn()
+          .mockResolvedValue({ type: 'dialog', dialog: 'advisor-model' }),
+      });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/advisormodelcmd');
+      });
+
+      expect(mockOpenModelDialog).toHaveBeenCalledWith({
+        advisorModelMode: true,
+      });
+    });
+
     it('should handle "dialog: vision-model" action', async () => {
       const command = createTestCommand({
         name: 'visionmodelcmd',

@@ -9,6 +9,7 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { MessageType } from '../types.js';
 import { formatDuration } from '../utils/formatters.js';
+import { flattenModelsBySource } from '../utils/modelsBySource.js';
 import {
   type CommandContext,
   type SlashCommand,
@@ -773,11 +774,25 @@ export const statsCommand: SlashCommand = {
           const { metrics } = context.session.stats;
           const pricing = context.services.settings.merged.modelPricing;
           const lines: string[] = [];
-          for (const [modelName, modelMetrics] of Object.entries(
-            metrics.models,
-          )) {
+          const modelEntries = flattenModelsBySource(metrics.models);
+          if (
+            modelEntries.length === 0 &&
+            Object.keys(metrics.models).length > 0
+          ) {
+            modelEntries.push(
+              ...Object.entries(metrics.models).map(
+                ([modelName, modelMetrics]) => ({
+                  key: modelName,
+                  label: modelName,
+                  metrics: modelMetrics,
+                }),
+              ),
+            );
+          }
+          for (const { key, label, metrics: modelMetrics } of modelEntries) {
+            const modelName = key.split('::')[0]!;
             lines.push(
-              `${modelName}: ${t('prompt')}=${modelMetrics.tokens.prompt}, ${t('output')}=${modelMetrics.tokens.candidates}, ${t('cached')}=${modelMetrics.tokens.cached}`,
+              `${label}: ${t('prompt')}=${modelMetrics.tokens.prompt}, ${t('output')}=${modelMetrics.tokens.candidates}, ${t('cached')}=${modelMetrics.tokens.cached}`,
             );
             const cost = calculateCost({
               inputTokens: modelMetrics.tokens.prompt,

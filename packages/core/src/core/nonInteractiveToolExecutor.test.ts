@@ -199,6 +199,27 @@ describe('executeToolCall', () => {
     expect(observedRuntime).toBe(runtimeView);
   });
 
+  it('rejects when aborted while a tool is still running', async () => {
+    const request: ToolCallRequestInfo = {
+      callId: 'abort-call',
+      name: 'testTool',
+      args: {},
+      isClientInitiated: false,
+      prompt_id: 'abort-prompt',
+    };
+    vi.mocked(mockToolRegistry.getTool).mockReturnValue(mockTool);
+    executeFn.mockReturnValue(new Promise(() => undefined));
+
+    const promise = executeToolCall(
+      mockConfig,
+      request,
+      abortController.signal,
+    );
+    abortController.abort(new Error('cancelled by test'));
+
+    await expect(promise).rejects.toThrow('cancelled by test');
+  });
+
   it('should return an error if tool is not found', async () => {
     const request: ToolCallRequestInfo = {
       callId: 'call2',

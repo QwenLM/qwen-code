@@ -215,6 +215,23 @@ describe('SettingsSchema', () => {
       expect(advisorModel.default).toBe('');
       expect(advisorModel.requiresRestart).toBe(false);
       expect(advisorModel.showInDialog).toBe(true);
+      expect(advisorModel.description).toContain(
+        'it never falls back to the main model',
+      );
+    });
+
+    it('should define the advisor max uses setting', () => {
+      const advisorMaxUses = getSettingsSchema().advisorMaxUses;
+
+      expect(advisorMaxUses.type).toBe('number');
+      expect(advisorMaxUses.category).toBe('Model');
+      expect(advisorMaxUses.default).toBeUndefined();
+      expect(advisorMaxUses.requiresRestart).toBe(false);
+      expect(advisorMaxUses.showInDialog).toBe(true);
+      expect(advisorMaxUses.jsonSchemaOverride).toEqual({
+        type: 'integer',
+        minimum: 1,
+      });
     });
 
     it('should define the built-in Explore model setting', () => {

@@ -44,6 +44,7 @@ import {
   type WebSearchSettings,
   MAX_SUBAGENT_DEPTH_LIMIT,
   addDaemonRequestAttribute,
+  resolveModelId,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
@@ -150,6 +151,7 @@ function parseApprovalModeValue(value: string): ApprovalMode {
 export interface CliArgs {
   query: string | undefined;
   model: string | undefined;
+  advisor?: string | undefined;
   fallbackModel: string[] | undefined;
   sandbox: boolean | string | undefined;
   sandboxImage: string | undefined;
@@ -665,6 +667,11 @@ export async function parseArguments(): Promise<CliArgs> {
           alias: 'm',
           type: 'string',
           description: `Model`,
+        })
+        .option('advisor', {
+          type: 'string',
+          description:
+            'Advisor model selector for this session. Use "off" to disable native Advisor for this run.',
         })
         .option('fallback-model', {
           type: 'array',
@@ -1378,6 +1385,67 @@ function resolveMaxSubagentDepth(
     return value;
   }
   return settings.model?.maxSubagentDepth;
+}
+
+function resolveAdvisorModel(
+  argv: CliArgs,
+  settings: Settings,
+): string | undefined {
+  const raw = argv.advisor !== undefined ? argv.advisor : settings.advisorModel;
+  const trimmed = raw?.trim();
+  if (!trimmed || trimmed.toLowerCase() === 'off') return undefined;
+  return trimmed;
+}
+
+function formatUnavailableAdvisorModelMessage(
+  modelName: string,
+  availableModelIds: string[],
+): string {
+  const availableModelsLine =
+    availableModelIds.length === 0
+      ? 'No models are configured.'
+      : `Configured models: ${availableModelIds.join(', ')}.`;
+  return (
+    `Advisor model '${modelName}' is not configured.\n` +
+    `${availableModelsLine}\n` +
+    'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /advisor without arguments to choose from configured models.'
+  );
+}
+
+function validateCliAdvisorModel(config: Config, rawModel: string): void {
+  const modelName = rawModel.trim();
+  if (!modelName || modelName.toLowerCase() === 'off') return;
+
+  const selector = (() => {
+    try {
+      return resolveModelId(modelName);
+    } catch {
+      return undefined;
+    }
+  })();
+  const availableModels = (
+    selector?.authType
+      ? config.getAvailableModelsForAuthType(selector.authType)
+      : config.getAllConfiguredModels()
+  ).filter(
+    (model) =>
+      !model.fastOnly &&
+      !model.voiceOnly &&
+      !model.visionOnly &&
+      !model.imageOnly,
+  );
+
+  if (
+    !selector ||
+    !availableModels.some((model) => model.id === selector.modelId)
+  ) {
+    throw new FatalConfigError(
+      formatUnavailableAdvisorModelMessage(
+        modelName,
+        Array.from(new Set(availableModels.map((model) => model.id))),
+      ),
+    );
+  }
 }
 
 export function isDebugMode(argv: CliArgs): boolean {
@@ -2418,6 +2486,9 @@ export async function loadCliConfig(
     memoryAgentTimeoutMinutes: settings.memory?.agentTimeoutMinutes,
     memoryAgentMaxTurns: settings.memory?.agentMaxTurns,
     fastModel: settings.fastModel || undefined,
+    advisorModel: resolveAdvisorModel(argv, settings),
+    advisorModelOverride: argv.advisor !== undefined,
+    advisorMaxUses: settings.advisorMaxUses,
     webSearch:
       bareMode || safeMode ? undefined : resolveWebSearchSettings(settings),
     visionModel: settings.visionModel || undefined,
@@ -2487,6 +2558,9 @@ export async function loadCliConfig(
   };
 
   const config = new Config(configParams);
+  if (argv.advisor !== undefined) {
+    validateCliAdvisorModel(config, argv.advisor);
+  }
 
   if (lspEnabled) {
     try {

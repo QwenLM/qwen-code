@@ -1239,6 +1239,23 @@ describe('ToolRegistry', () => {
       expect(result).toBe(tool);
       expect(callCount).toBe(2);
     });
+
+    it('does not cache an inflight factory result after unregisterTool', async () => {
+      let resolveFactory!: (tool: MockTool) => void;
+      const factoryPromise = new Promise<MockTool>((resolve) => {
+        resolveFactory = resolve;
+      });
+      const tool = new MockTool({ name: 'advisor' });
+
+      toolRegistry.registerFactory('advisor', () => factoryPromise);
+      const ensurePromise = toolRegistry.ensureTool('advisor');
+      toolRegistry.unregisterTool('advisor');
+      resolveFactory(tool);
+
+      await expect(ensurePromise).resolves.toBeUndefined();
+      expect(toolRegistry.getTool('advisor')).toBeUndefined();
+      expect(toolRegistry.getAllToolNames()).not.toContain('advisor');
+    });
   });
 
   describe('warmAll strict mode', () => {

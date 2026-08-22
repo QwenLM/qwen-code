@@ -1430,8 +1430,23 @@ const SETTINGS_SCHEMA = {
     requiresRestart: false,
     default: '' as string,
     description:
-      'Model used by /advisor for second-opinion reviews of the conversation. Leave empty to use the main model. A model at least as capable as the main model is recommended. Setting this sends the recent conversation transcript to that model, even when it uses another provider.',
+      'Model selector for the native Advisor tool. Leave empty or set "off" to disable Advisor; it never falls back to the main model. Enabling Advisor sends the active conversation evidence to that model, even when it uses another provider.',
     showInDialog: true,
+  },
+
+  advisorMaxUses: {
+    type: 'number',
+    label: 'Advisor Max Uses',
+    category: 'Model',
+    requiresRestart: false,
+    default: undefined as number | undefined,
+    description:
+      'Optional maximum Advisor consultations per user prompt. Leave unset for unlimited; when set, the value must be a positive integer.',
+    showInDialog: true,
+    jsonSchemaOverride: {
+      type: 'integer',
+      minimum: 1,
+    },
   },
 
   visionModel: {

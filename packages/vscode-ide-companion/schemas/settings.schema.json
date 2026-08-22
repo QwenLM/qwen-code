@@ -629,9 +629,14 @@
       "default": ""
     },
     "advisorModel": {
-      "description": "Model used by /advisor for second-opinion reviews of the conversation. Leave empty to use the main model. A model at least as capable as the main model is recommended. Setting this sends the recent conversation transcript to that model, even when it uses another provider.",
+      "description": "Model selector for the native Advisor tool. Leave empty or set \"off\" to disable Advisor; it never falls back to the main model. Enabling Advisor sends the active conversation evidence to that model, even when it uses another provider.",
       "type": "string",
       "default": ""
+    },
+    "advisorMaxUses": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Optional maximum Advisor consultations per user prompt. Leave unset for unlimited; when set, the value must be a positive integer."
     },
     "visionModel": {
       "description": "Image-capable model used as the vision bridge: when a text-only main model receives an image, it is transcribed by this model first. Set with /model --vision. Leave empty to auto-pick a same-provider vision model.",

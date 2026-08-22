@@ -1563,6 +1563,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const {
     isModelDialogOpen,
     isFastModelMode,
+    isAdvisorModelMode,
     isVoiceModelMode,
     isVisionModelMode,
     isCompactionModelMode,
@@ -4478,6 +4479,7 @@ export const AppContainer = (props: AppContainerProps) => {
       skillReviewPending,
       isModelDialogOpen,
       isFastModelMode,
+      isAdvisorModelMode,
       isVoiceModelMode,
       isVisionModelMode,
       isCompactionModelMode,
@@ -4623,6 +4625,7 @@ export const AppContainer = (props: AppContainerProps) => {
       skillReviewPending,
       isModelDialogOpen,
       isFastModelMode,
+      isAdvisorModelMode,
       isVoiceModelMode,
       isVisionModelMode,
       isCompactionModelMode,

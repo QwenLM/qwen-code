@@ -676,6 +676,10 @@ describe('loggers', () => {
         tokenUsageService,
         'recordTokenUsageFromApiResponseBestEffort',
       ).mockImplementation(() => undefined);
+      vi.spyOn(
+        tokenUsageService,
+        'recordTokenUsageFromApiErrorBestEffort',
+      ).mockImplementation(() => undefined);
     });
 
     it('should log an API response with all fields', () => {
@@ -788,6 +792,85 @@ describe('loggers', () => {
       ).not.toHaveBeenCalled();
     });
 
+    it('records token usage for Advisor internal side queries', () => {
+      const event = new ApiResponseEvent(
+        'test-response-id',
+        'advisor-model',
+        100,
+        'side-query:advisor:prompt-1:1',
+        AuthType.USE_GEMINI,
+        {
+          promptTokenCount: 1,
+          candidatesTokenCount: 2,
+        },
+        undefined,
+        'advisor',
+      );
+
+      logApiResponse(mockConfig, event);
+
+      expect(
+        tokenUsageService.recordTokenUsageFromApiResponseBestEffort,
+      ).toHaveBeenCalledWith(mockConfig, event);
+    });
+
+    it('logs Advisor parent prompt id and consultation ordinal on responses', () => {
+      const event = new ApiResponseEvent(
+        'test-response-id',
+        'advisor-model',
+        100,
+        'side-query:advisor:prompt-1:2',
+        AuthType.USE_GEMINI,
+        {
+          promptTokenCount: 1,
+          candidatesTokenCount: 2,
+        },
+        undefined,
+        'advisor',
+      );
+
+      logApiResponse(mockConfig, event);
+
+      expect(mockLogger.emit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          attributes: expect.objectContaining({
+            advisor_parent_prompt_id: 'prompt-1',
+            advisor_consultation_ordinal: 2,
+          }),
+        }),
+      );
+    });
+
+    it('does not update the executor context gauge from Advisor responses', () => {
+      vi.mocked(uiTelemetry.uiTelemetryService.addEvent).mockRestore();
+      uiTelemetry.uiTelemetryService.reset();
+      uiTelemetry.uiTelemetryService.setLastPromptTokenCount(123);
+      const event = new ApiResponseEvent(
+        'test-response-id',
+        'advisor-model',
+        100,
+        'side-query:advisor:prompt-1:1',
+        AuthType.USE_GEMINI,
+        {
+          promptTokenCount: 999,
+          candidatesTokenCount: 2,
+          totalTokenCount: 1001,
+        },
+        undefined,
+        'advisor',
+      );
+
+      logApiResponse(mockConfig, event);
+
+      expect(uiTelemetry.uiTelemetryService.getLastPromptTokenCount()).toBe(
+        123,
+      );
+      expect(
+        uiTelemetry.uiTelemetryService.getMetrics().models['advisor-model']
+          ?.bySource['advisor']?.tokens.prompt,
+      ).toBe(999);
+    });
+
     it('does not record token usage when usage statistics are disabled', () => {
       const configWithUsageStatsDisabled = {
         ...mockConfig,
@@ -814,6 +897,13 @@ describe('loggers', () => {
   });
 
   describe('logApiResponse skips chatRecordingService for internal prompt IDs', () => {
+    beforeEach(() => {
+      vi.spyOn(
+        tokenUsageService,
+        'recordTokenUsageFromApiErrorBestEffort',
+      ).mockImplementation(() => undefined);
+    });
+
     it.each([
       'prompt_suggestion',
       'forked_query',
@@ -886,6 +976,48 @@ describe('loggers', () => {
           }),
         }),
       );
+    });
+
+    it('logs Advisor parent prompt id and consultation ordinal on errors', () => {
+      const event = new ApiErrorEvent({
+        model: 'advisor-model',
+        durationMs: 100,
+        promptId: 'side-query:advisor:prompt-1:3',
+        errorMessage: 'test error',
+        statusCode: 503,
+        subagentName: 'advisor',
+      });
+
+      logApiError(makeFakeConfig({ sessionId: 'current-session-id' }), event);
+
+      expect(mockLogger.emit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          attributes: expect.objectContaining({
+            advisor_parent_prompt_id: 'prompt-1',
+            advisor_consultation_ordinal: 3,
+            advisor_error_code: 'overloaded',
+          }),
+        }),
+      );
+      expect(
+        tokenUsageService.recordTokenUsageFromApiErrorBestEffort,
+      ).toHaveBeenCalledWith(expect.any(Object), event);
+    });
+
+    it('does not record token usage for other internal API errors', () => {
+      const event = new ApiErrorEvent({
+        model: 'test-model',
+        durationMs: 100,
+        promptId: 'side-query:session-title',
+        errorMessage: 'test error',
+        subagentName: undefined,
+      });
+
+      logApiError(makeFakeConfig({ sessionId: 'current-session-id' }), event);
+
+      expect(
+        tokenUsageService.recordTokenUsageFromApiErrorBestEffort,
+      ).not.toHaveBeenCalled();
     });
 
     it('suppresses chatRecordingService writes inside hidden runs', () => {

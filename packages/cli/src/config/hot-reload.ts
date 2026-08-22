@@ -23,6 +23,12 @@ import { appEvents, AppEvent } from '../utils/events.js';
 
 const debugLogger = createDebugLogger('MCP_HOT_RELOAD');
 
+function normalizeAdvisorModel(model: string | undefined): string | undefined {
+  const trimmed = model?.trim();
+  if (!trimmed || trimmed.toLowerCase() === 'off') return undefined;
+  return trimmed;
+}
+
 /**
  * The three connection-admission lists discovery consults to decide whether a
  * given MCP server may connect. Distinct from the `mcpServers` config map:
@@ -138,6 +144,22 @@ export function registerMcpHotReload(
         .join(', ')}`,
     );
     const cwd = config.getTargetDir();
+    const keepSessionAdvisorModel = config.hasAdvisorModelOverride?.() === true;
+    const nextAdvisorModel = keepSessionAdvisorModel
+      ? config.getAdvisorModel?.()
+      : normalizeAdvisorModel(settings.merged.advisorModel);
+    const nextAdvisorMaxUses = settings.merged.advisorMaxUses;
+    if (
+      config.getAdvisorModel?.() !== nextAdvisorModel ||
+      config.getAdvisorMaxUses?.() !== nextAdvisorMaxUses
+    ) {
+      await config.setAdvisorConfig?.({
+        model: nextAdvisorModel,
+        maxUses: nextAdvisorMaxUses,
+        modelOverride: keepSessionAdvisorModel,
+      });
+    }
+
     // Rebuild exactly the way Config boot did — including top-tier
     // (CLI / session-injected) servers layered above settings + `.mcp.json`.
     // Bare/safe mode: mirror loadCliConfig's own guard (config.ts) — a live
