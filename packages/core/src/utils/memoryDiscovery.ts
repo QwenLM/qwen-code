@@ -213,6 +213,37 @@ async function getGeminiMdFilePathsInternalForEachDir(
   return finalPaths;
 }
 
+/**
+ * Deduplicates discovered context files by canonical file identity so one
+ * physical file reached through multiple lexical paths (e.g. a workspace
+ * QWEN.md that symlinks to an ancestor QWEN.md) is read, attached, and
+ * announced only once (#9597). The first-discovered lexical path is kept
+ * so ordering, display, and relative @import resolution are unchanged.
+ * Paths whose canonical identity cannot be resolved (broken symlink,
+ * unreadable file) fall back to their resolved lexical path, preserving
+ * the pre-existing behavior for those entries.
+ */
+async function dedupeByCanonicalIdentity(
+  filePaths: string[],
+): Promise<string[]> {
+  const seenIdentities = new Set<string>();
+  const dedupedPaths: string[] = [];
+  for (const filePath of filePaths) {
+    let identity = path.resolve(filePath);
+    try {
+      identity = await fs.realpath(filePath);
+    } catch {
+      // Keep the lexical identity so unreadable/unresolvable entries are
+      // still handled exactly as before downstream.
+    }
+    if (!seenIdentities.has(identity)) {
+      seenIdentities.add(identity);
+      dedupedPaths.push(filePath);
+    }
+  }
+  return dedupedPaths;
+}
+
 async function readGeminiMdFiles(
   filePaths: string[],
   importFormat: 'flat' | 'tree' = 'tree',
@@ -524,14 +555,20 @@ export async function loadServerHierarchicalMemory(
     }
   }
 
+  // One physical file may be discovered through several lexical paths
+  // (a workspace symlink aliasing an ancestor QWEN.md, an extension path
+  // that duplicates a scanned path). Dedupe by canonical identity so the
+  // file's content reaches the system prompt exactly once (#9597).
+  const dedupedFilePaths = await dedupeByCanonicalIdentity(filePaths);
+
   let combinedInstructions = '';
   let fileCount = 0;
   let contextFilePaths: string[] = [];
 
-  if (filePaths.length > 0) {
+  if (dedupedFilePaths.length > 0) {
     const loadReason = options.loadReason ?? 'session_start';
     const contentsWithPaths = await readGeminiMdFiles(
-      filePaths,
+      dedupedFilePaths,
       importFormat,
       createMemoryTypeClassifier(
         userHomePath,
@@ -594,7 +631,7 @@ export async function loadServerHierarchicalMemory(
       : rulesContent;
   }
 
-  if (!memoryContent && filePaths.length === 0 && ruleCount === 0) {
+  if (!memoryContent && dedupedFilePaths.length === 0 && ruleCount === 0) {
     logger.debug('No QWEN.md files or rules found.');
   }
 

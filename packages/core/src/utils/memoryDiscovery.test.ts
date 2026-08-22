@@ -1352,6 +1352,119 @@ describe('loadServerHierarchicalMemory', () => {
       expect(occurrences).toBe(1);
     });
   });
+
+  describe('symlink aliases of the same physical file (#9597)', () => {
+    it('loads a context file once when a workspace-level file is a symlink to an ancestor file', async () => {
+      await createTestFile(
+        path.join(projectRoot, DEFAULT_CONTEXT_FILENAME),
+        'shared symlink marker content',
+      );
+      await fsPromises.symlink(
+        path.join(projectRoot, DEFAULT_CONTEXT_FILENAME),
+        path.join(cwd, DEFAULT_CONTEXT_FILENAME),
+      );
+
+      const result = await loadServerHierarchicalMemory(
+        cwd,
+        [],
+        new FileDiscoveryService(projectRoot),
+        [],
+        DEFAULT_FOLDER_TRUST,
+      );
+
+      expect(result.fileCount).toBe(1);
+      expect(result.contextFilePaths).toHaveLength(1);
+      const occurrences = (
+        result.memoryContent.match(/shared symlink marker content/g) ?? []
+      ).length;
+      expect(occurrences).toBe(1);
+    });
+
+    it('keeps two context blocks for distinct physical files with identical content', async () => {
+      await createTestFile(
+        path.join(projectRoot, DEFAULT_CONTEXT_FILENAME),
+        'identical content in two physical files',
+      );
+      await createTestFile(
+        path.join(cwd, DEFAULT_CONTEXT_FILENAME),
+        'identical content in two physical files',
+      );
+
+      const result = await loadServerHierarchicalMemory(
+        cwd,
+        [],
+        new FileDiscoveryService(projectRoot),
+        [],
+        DEFAULT_FOLDER_TRUST,
+      );
+
+      expect(result.fileCount).toBe(2);
+      const occurrences = (
+        result.memoryContent.match(
+          /identical content in two physical files/g,
+        ) ?? []
+      ).length;
+      expect(occurrences).toBe(2);
+    });
+
+    it('still loads through a symlink when the target is outside the project-root scan boundary', async () => {
+      // A .git marker makes cwd the project root, so the upward scan stops
+      // at its parent and never reaches testRootDir. The outside file can
+      // then only be loaded through the workspace symlink.
+      await createEmptyDir(path.join(cwd, '.git'));
+      await createTestFile(
+        path.join(testRootDir, DEFAULT_CONTEXT_FILENAME),
+        'outside scan boundary marker',
+      );
+      await fsPromises.symlink(
+        path.join(testRootDir, DEFAULT_CONTEXT_FILENAME),
+        path.join(cwd, DEFAULT_CONTEXT_FILENAME),
+      );
+
+      const result = await loadServerHierarchicalMemory(
+        cwd,
+        [],
+        new FileDiscoveryService(cwd),
+        [],
+        DEFAULT_FOLDER_TRUST,
+      );
+
+      expect(result.fileCount).toBe(1);
+      expect(result.memoryContent).toContain('outside scan boundary marker');
+    });
+
+    it('does not duplicate relative @imports of a file loaded through a symlink alias', async () => {
+      // The import target resolves from both directories, so while the parent
+      // file is loaded twice (once per lexical alias) its @import content is
+      // attached twice as well.
+      await createTestFile(
+        path.join(projectRoot, 'shared.md'),
+        'imported-once marker',
+      );
+      await createTestFile(path.join(cwd, 'shared.md'), 'imported-once marker');
+      await createTestFile(
+        path.join(projectRoot, DEFAULT_CONTEXT_FILENAME),
+        '@shared.md',
+      );
+      await fsPromises.symlink(
+        path.join(projectRoot, DEFAULT_CONTEXT_FILENAME),
+        path.join(cwd, DEFAULT_CONTEXT_FILENAME),
+      );
+
+      const result = await loadServerHierarchicalMemory(
+        cwd,
+        [],
+        new FileDiscoveryService(projectRoot),
+        [],
+        DEFAULT_FOLDER_TRUST,
+      );
+
+      const occurrences = (
+        result.memoryContent.match(/imported-once marker/g) ?? []
+      ).length;
+      expect(occurrences).toBe(1);
+    });
+  });
 });
 
 describe('formatContextFileDisplayPath', () => {
