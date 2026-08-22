@@ -197,6 +197,29 @@ function buildModelConfigs(
   return applyProviderCustomHeaders(models, config);
 }
 
+function omitModelSpecModalities(
+  models: ProviderModelConfig[],
+  config: ProviderConfig,
+): ProviderModelConfig[] {
+  const catalogOwnedIds = new Set(
+    config.models
+      ?.filter((spec) => spec.modalities !== undefined)
+      .map((spec) => spec.id),
+  );
+  if (catalogOwnedIds.size === 0) return models;
+
+  return models.map((model) => {
+    if (!catalogOwnedIds.has(model.id) || !model.generationConfig?.modalities) {
+      return model;
+    }
+    const { generationConfig, ...rest } = model;
+    const { modalities: _modalities, ...remainingConfig } = generationConfig;
+    return Object.keys(remainingConfig).length > 0
+      ? { ...rest, generationConfig: remainingConfig }
+      : rest;
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Version tracking — auto-derived for providers with static model lists
 // ---------------------------------------------------------------------------
@@ -254,6 +277,12 @@ export function buildInstallPlan(
   const protocol = inputs.protocol ?? config.protocol;
   const envKey = resolveEnvKey(config, inputs);
   const models = inputs.prebuiltModels ?? buildModelConfigs(config, inputs);
+  // ModelSpec modalities remain part of the stable provider template for
+  // display consumers and version compatibility. New installs resolve those
+  // capabilities from the catalog instead of persisting another copy.
+  const persistedModels = inputs.prebuiltModels
+    ? models
+    : omitModelSpecModalities(models, config);
   const ownsModel = config.mergeModelsByIdentity
     ? undefined
     : resolveOwnsModel(config);
@@ -282,7 +311,7 @@ export function buildInstallPlan(
     modelProviders: [
       {
         authType: protocol,
-        models,
+        models: persistedModels,
         mergeStrategy: 'prepend-and-remove-owned' as const,
         ...(ownsModel ? { ownsModel } : {}),
       },

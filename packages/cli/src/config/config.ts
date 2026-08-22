@@ -43,6 +43,7 @@ import {
   type SkillLevel,
   type WebSearchSettings,
   MAX_SUBAGENT_DEPTH_LIMIT,
+  loadModelMetadataCatalog,
   addDaemonRequestAttribute,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
@@ -51,6 +52,7 @@ import { resolveAcpChannelFallback } from './acp-channel-fallback.js';
 import { normalizeDisabledToolList } from './normalizeDisabledTools.js';
 import type { LoadedSettings, Settings } from './settings.js';
 import { loadSettings, SettingScope } from './settings.js';
+import { getLaunchProcessEnv } from './environment.js';
 import {
   resolveCliGenerationConfig,
   getAuthTypeFromEnv,
@@ -1580,6 +1582,26 @@ export async function loadCliConfig(
   const bareMode = isBareMode(argv.bare);
   const safeMode =
     argv.safeMode !== undefined ? argv.safeMode : isSafeModeEnv();
+  const proxy =
+    argv.proxy ||
+    settings.proxy ||
+    process.env['HTTPS_PROXY'] ||
+    process.env['https_proxy'] ||
+    process.env['HTTP_PROXY'] ||
+    process.env['http_proxy'];
+  // Test-runner detection uses the process-launch env snapshot, not live
+  // process.env: by the time this runs, loadSettings → loadEnvironment has
+  // merged a trusted workspace's .env into process.env, and a project
+  // .env with NODE_ENV=test must not disable the catalog for the live
+  // session while the daemon status path (gated on the daemon boot env)
+  // keeps it. Mirrors the workspace-providers-status boot-env gate.
+  const launchEnv = getLaunchProcessEnv();
+  const modelMetadataCatalogPromise =
+    launchEnv['NODE_ENV'] === 'test' ||
+    launchEnv['VITEST'] !== undefined ||
+    launchEnv['VITEST_WORKER_ID'] !== undefined
+      ? Promise.resolve({})
+      : loadModelMetadataCatalog({ proxyUrl: proxy });
 
   // Surface `--insecure` as an env var so it reaches the undici dispatcher
   // layer (which controls TLS verification) without threading a flag through
@@ -2269,13 +2291,7 @@ export async function loadCliConfig(
     clearContextOnIdle: settings.context?.clearContextOnIdle,
     fileFiltering: settings.context?.fileFiltering,
     plansDirectory: settings.plansDirectory,
-    proxy:
-      argv.proxy ||
-      settings.proxy ||
-      process.env['HTTPS_PROXY'] ||
-      process.env['https_proxy'] ||
-      process.env['HTTP_PROXY'] ||
-      process.env['http_proxy'],
+    proxy,
     cwd,
     fileDiscoveryService: fileService,
     bugCommand: settings.advanced?.bugCommand,
@@ -2351,6 +2367,7 @@ export async function loadCliConfig(
     includePartialMessages,
     modelProvidersConfig,
     providerProtocolConfig,
+    modelMetadataCatalog: await modelMetadataCatalogPromise,
     generationConfigSources: resolvedCliConfig.sources,
     generationConfig: resolvedCliConfig.generationConfig,
     initialModelRegistryBaseUrl: resolvedCliConfig.registryBaseUrl,

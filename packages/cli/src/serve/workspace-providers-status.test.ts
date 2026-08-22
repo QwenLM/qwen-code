@@ -22,6 +22,7 @@ const coreMock = vi.hoisted(() => ({
     isEnabled: vi.fn(() => false),
     warn: vi.fn(),
   },
+  loadModelMetadataCatalog: vi.fn(async () => ({})),
 }));
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
@@ -38,6 +39,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   return {
     ...actual,
     createDebugLogger: () => coreMock.debugLogger,
+    loadModelMetadataCatalog: coreMock.loadModelMetadataCatalog,
     ModelsConfig: TestModelsConfig,
   };
 });
@@ -71,6 +73,7 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     coreMock.modelsConfigErrorMessage =
       'Failed loading provider https://user:secret@broken.example/v1';
     coreMock.debugLogger.warn.mockClear();
+    coreMock.loadModelMetadataCatalog.mockClear();
     resetHomeEnvBootstrapForTesting();
   });
 
@@ -129,6 +132,127 @@ describe('createWorkspaceProvidersStatusProvider', () => {
 
     const second = await provider(workspace, false);
     expect(second.current?.modelId).toBe('model-b(openai)');
+  });
+
+  it('loads the catalog with the workspace proxy outside test mode', async () => {
+    const savedTestRunnerEnv = snapshotTestRunnerEnv();
+    clearTestRunnerEnv();
+    try {
+      await writeUserSettings({ proxy: 'http://settings-proxy.example:8080' });
+      const provider = createWorkspaceProvidersStatusProvider({
+        env: { NODE_ENV: 'production' },
+      });
+
+      await provider(workspace, false);
+
+      expect(coreMock.loadModelMetadataCatalog).toHaveBeenCalledOnce();
+      expect(coreMock.loadModelMetadataCatalog).toHaveBeenCalledWith({
+        proxyUrl: 'http://settings-proxy.example:8080',
+      });
+    } finally {
+      restoreTestRunnerEnv(savedTestRunnerEnv);
+    }
+  });
+
+  it('does not load the catalog when the daemon process runs under a test runner', async () => {
+    const savedTestRunnerEnv = snapshotTestRunnerEnv();
+    clearTestRunnerEnv();
+    process.env['VITEST_WORKER_ID'] = '1';
+    try {
+      const provider = createWorkspaceProvidersStatusProvider({
+        env: { NODE_ENV: 'production' },
+      });
+
+      await provider(workspace, false);
+
+      expect(coreMock.loadModelMetadataCatalog).not.toHaveBeenCalled();
+    } finally {
+      restoreTestRunnerEnv(savedTestRunnerEnv);
+    }
+  });
+
+  it('keeps the catalog enabled when only the workspace env carries NODE_ENV=test', async () => {
+    const savedTestRunnerEnv = snapshotTestRunnerEnv();
+    clearTestRunnerEnv();
+    try {
+      const provider = createWorkspaceProvidersStatusProvider({
+        env: { NODE_ENV: 'test' },
+      });
+
+      await provider(workspace, false);
+
+      expect(coreMock.loadModelMetadataCatalog).toHaveBeenCalledOnce();
+    } finally {
+      restoreTestRunnerEnv(savedTestRunnerEnv);
+    }
+  });
+
+  it('ignores NODE_ENV=test merged into process.env after provider creation', async () => {
+    // A sibling loadSettings → loadEnvironment call for a trusted workspace
+    // whose .env sets NODE_ENV=test writes it into the daemon's shared
+    // process.env after boot; the gate stays on the boot-time snapshot, so
+    // the catalog keeps loading for every workspace.
+    const savedTestRunnerEnv = snapshotTestRunnerEnv();
+    clearTestRunnerEnv();
+    try {
+      const provider = createWorkspaceProvidersStatusProvider({
+        env: { NODE_ENV: 'production' },
+      });
+      process.env['NODE_ENV'] = 'test';
+
+      await provider(workspace, false);
+
+      expect(coreMock.loadModelMetadataCatalog).toHaveBeenCalledOnce();
+    } finally {
+      restoreTestRunnerEnv(savedTestRunnerEnv);
+    }
+  });
+
+  it('honors an injected boot-time processEnv for the test-runner gate', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({
+      env: { NODE_ENV: 'production' },
+      processEnv: { NODE_ENV: 'production' },
+    });
+
+    await provider(workspace, false);
+
+    expect(coreMock.loadModelMetadataCatalog).toHaveBeenCalledOnce();
+  });
+
+  it('reports catalog modalities for configured workspace models', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({
+      env: {},
+      modelMetadataCatalog: {
+        openrouter: {
+          api: 'https://openrouter.ai/api/v1',
+          models: {
+            'google/gemma-3-12b-it': {
+              modalities: { input: ['text', 'image'] },
+            },
+          },
+        },
+      },
+    });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'google/gemma-3-12b-it' },
+      modelProviders: {
+        openai: [
+          {
+            id: 'google/gemma-3-12b-it',
+            baseUrl: 'https://openrouter.ai/api/v1',
+            envKey: 'OPENROUTER_API_KEY',
+          },
+        ],
+      },
+    });
+
+    const result = await provider(workspace, false);
+    const model = result.providers
+      .flatMap((entry) => entry.models)
+      .find((entry) => entry.baseModelId === 'google/gemma-3-12b-it');
+
+    expect(model?.modalities).toEqual({ image: true });
   });
 
   it('returns the workspace approval mode', async () => {
@@ -576,5 +700,31 @@ function restoreEnv(key: string, value: string | undefined): void {
     delete process.env[key];
   } else {
     process.env[key] = value;
+  }
+}
+
+const TEST_RUNNER_ENV_KEYS = [
+  'NODE_ENV',
+  'VITEST',
+  'VITEST_WORKER_ID',
+] as const;
+
+function snapshotTestRunnerEnv(): Record<string, string | undefined> {
+  const saved: Record<string, string | undefined> = {};
+  for (const key of TEST_RUNNER_ENV_KEYS) {
+    saved[key] = process.env[key];
+  }
+  return saved;
+}
+
+function clearTestRunnerEnv(): void {
+  for (const key of TEST_RUNNER_ENV_KEYS) {
+    delete process.env[key];
+  }
+}
+
+function restoreTestRunnerEnv(saved: Record<string, string | undefined>): void {
+  for (const key of TEST_RUNNER_ENV_KEYS) {
+    restoreEnv(key, saved[key]);
   }
 }

@@ -288,6 +288,7 @@ import {
   type AvailableModel,
   type ResolvedModelConfig,
   type RuntimeModelSnapshot,
+  type ModelMetadataCatalog,
 } from '../models/index.js';
 import { resolveModelId } from '../utils/modelId.js';
 import type { WebSearchSettings } from '../tools/web-search.js';
@@ -1294,6 +1295,8 @@ export interface ConfigParameters {
   modelProvidersConfig?: ModelProvidersConfig;
   /** Maps custom provider ids to their SDK protocol (AuthType) */
   providerProtocolConfig?: ProviderProtocolConfig;
+  /** API-backed model metadata loaded by the CLI. */
+  modelMetadataCatalog?: ModelMetadataCatalog;
   /** Agent and multi-agent collaboration settings */
   agents?: AgentsCollabSettings;
   /** General-purpose worktree settings (Phase D-2). */
@@ -2504,6 +2507,7 @@ export class Config {
       },
       generationConfigSources: params.generationConfigSources,
       initialRegistryBaseUrl: params.initialModelRegistryBaseUrl,
+      modelMetadataCatalog: params.modelMetadataCatalog,
       onModelChange: this.handleModelChange.bind(this),
     });
 

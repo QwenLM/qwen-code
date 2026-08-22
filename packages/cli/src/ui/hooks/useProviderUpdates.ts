@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isDeepStrictEqual } from 'node:util';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
   ProviderModelConfig,
@@ -161,10 +162,10 @@ interface PendingUpdate {
   diff: ModelUpdateDiff;
 }
 
-function readInstalledOwnedIds(
+function readInstalledOwnedModels(
   settings: LoadedSettings,
   provider: ProviderConfig,
-): string[] {
+): ProviderModelConfig[] {
   const protocol = provider.protocol;
   if (!protocol) return [];
   const mergedSettings = settings.merged as Record<string, unknown>;
@@ -174,9 +175,7 @@ function readInstalledOwnedIds(
   if (!modelProviders) return [];
   const allModels: ProviderModelConfig[] = modelProviders[protocol] ?? [];
   const ownsFn = resolveOwnsModel(provider);
-  return ownsFn
-    ? allModels.filter(ownsFn).map((m) => m.id)
-    : allModels.map((m) => m.id);
+  return ownsFn ? allModels.filter(ownsFn) : allModels;
 }
 
 function getInstalledOwnedModelIds(
@@ -187,9 +186,9 @@ function getInstalledOwnedModelIds(
   // appear as "removed" in the diff since they were never part of the
   // provider's built-in list.
   const builtinIds = new Set(getDefaultModelIds(provider));
-  return readInstalledOwnedIds(settings, provider).filter((id) =>
-    builtinIds.has(id),
-  );
+  return readInstalledOwnedModels(settings, provider)
+    .map((model) => model.id)
+    .filter((id) => builtinIds.has(id));
 }
 
 function findAllPendingUpdates(
@@ -264,9 +263,10 @@ export function useProviderUpdates(
         // must be carried through so they are not deleted by the
         // prepend-and-remove-owned merge.
         const defaultIds = getDefaultModelIds(providerCfg);
-        const customIds = readInstalledOwnedIds(settings, providerCfg).filter(
-          (id) => !defaultIds.includes(id),
-        );
+        const installedModels = readInstalledOwnedModels(settings, providerCfg);
+        const customIds = installedModels
+          .map((model) => model.id)
+          .filter((id) => !defaultIds.includes(id));
         const installPlan = buildInstallPlan(providerCfg, {
           baseUrl: resolved,
           apiKey: '',
@@ -278,6 +278,32 @@ export function useProviderUpdates(
         delete installPlan.env;
         // Template updates never change the selected model.
         delete installPlan.modelSelection;
+        const installedById = new Map(
+          installedModels.map((model) => [model.id, model]),
+        );
+        const specModalitiesById = new Map(
+          providerCfg.models?.map((model) => [model.id, model.modalities]),
+        );
+        const modelPatch = installPlan.modelProviders?.[0];
+        if (modelPatch) {
+          modelPatch.models = modelPatch.models.map((model) => {
+            const modalities = installedById.get(model.id)?.generationConfig
+              ?.modalities;
+            const isTemplateResidue = isDeepStrictEqual(
+              modalities,
+              specModalitiesById.get(model.id),
+            );
+            return modalities && !isTemplateResidue
+              ? {
+                  ...model,
+                  generationConfig: {
+                    ...model.generationConfig,
+                    modalities,
+                  },
+                }
+              : model;
+          });
+        }
         const previousModel = config.getModel();
         const activeConfig = config.getContentGeneratorConfig();
         const updatesActiveProvider =

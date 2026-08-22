@@ -68,9 +68,8 @@ describe('token plan provider', () => {
       extra_body: { enable_thinking: true },
       contextWindowSize: 262144,
     });
-    // Plus/2.5 variants are genuinely multimodal and stay that way.
     expect(
-      template.find((model) => model.id === 'qwen3.6-plus')?.generationConfig
+      template.find((model) => model.id === 'qwen3.7-plus')?.generationConfig
         ?.modalities,
     ).toEqual({ image: true, video: true });
     expect(
@@ -82,28 +81,42 @@ describe('token plan provider', () => {
       modalities: { image: true, video: true },
     });
     expect(
-      template.find((model) => model.id === 'qwen3.8-max-preview')
-        ?.generationConfig?.modalities,
-    ).toEqual({ image: true, video: true });
-    expect(
-      template.find((model) => model.id === 'kimi-k2.5')?.generationConfig
-        ?.modalities,
-    ).toEqual({ image: true, video: true });
+      template
+        .filter((model) => model.generationConfig?.modalities !== undefined)
+        .map((model) => model.id),
+    ).toEqual([
+      'qwen3.7-plus',
+      'qwen3.6-plus',
+      'qwen3.8-max',
+      'qwen3.8-max-preview',
+      'kimi-k2.7-code',
+      'kimi-k2.5',
+    ]);
+    expect(version).toBe(
+      'b80906aaf8dea8cc7aa17fc015d72d313c79f104f3bbb632613e74f9e35caaa5',
+    );
     expect(plan.providerId).toBe('token-plan');
     expect(plan.authType).toBe(AuthType.USE_OPENAI);
     expect(plan.env).toEqual({ [TOKEN_PLAN_ENV_KEY]: 'sk-token' });
     expect(plan.modelSelection).toEqual({ modelId: template[0].id });
-    expect(plan.modelProviders).toEqual([
-      {
-        authType: AuthType.USE_OPENAI,
-        models: template.map((model) => ({
+    expect(plan.modelProviders?.[0]).toMatchObject({
+      authType: AuthType.USE_OPENAI,
+      mergeStrategy: 'prepend-and-remove-owned',
+      ownsModel: expect.any(Function),
+    });
+    expect(plan.modelProviders?.[0]?.models).toEqual(
+      template.map(({ generationConfig, ...model }) => {
+        const { modalities: _modalities, ...remainingConfig } =
+          generationConfig ?? {};
+        return {
           ...model,
           envKey: TOKEN_PLAN_ENV_KEY,
-        })),
-        mergeStrategy: 'prepend-and-remove-owned',
-        ownsModel: expect.any(Function),
-      },
-    ]);
+          ...(Object.keys(remainingConfig).length > 0
+            ? { generationConfig: remainingConfig }
+            : {}),
+        };
+      }),
+    );
     expect(plan.providerState).toEqual({
       'providerMetadata.token-plan': {
         baseUrl: TOKEN_PLAN_CHINA_BASE_URL,

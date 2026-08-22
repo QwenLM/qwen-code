@@ -14,6 +14,10 @@ import { tokenLimit } from '../core/tokenLimits.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
 import { RUNTIME_SNAPSHOT_PREFIX } from '../utils/runtimeModelPrefix.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  getCatalogModalities,
+  type ModelMetadataCatalog,
+} from './model-metadata-catalog.js';
 
 import { ModelRegistry } from './modelRegistry.js';
 import {
@@ -63,6 +67,8 @@ export interface ModelsConfigOptions {
   generationConfigSources?: ContentGeneratorConfigSources;
   /** Exact initial registry baseUrl; null selects an implicit route. */
   initialRegistryBaseUrl?: string | null;
+  /** API-backed model metadata loaded by the host application. */
+  modelMetadataCatalog?: ModelMetadataCatalog;
   /** Callback when model changes require refresh */
   onModelChange?: OnModelChangeCallback;
 }
@@ -80,6 +86,7 @@ export interface ModelsConfigOptions {
  */
 export class ModelsConfig {
   private readonly modelRegistry: ModelRegistry;
+  private readonly modelMetadataCatalog?: ModelMetadataCatalog;
 
   // Current selection state
   private currentAuthType: AuthType | undefined;
@@ -156,7 +163,18 @@ export class ModelsConfig {
     this.modelRegistry = new ModelRegistry(
       options.modelProvidersConfig,
       options.providerProtocolConfig,
+      options.modelMetadataCatalog,
+      options.initialAuthType &&
+      options.generationConfig?.baseUrl &&
+      (options.generationConfigSources?.['baseUrl']?.kind === 'cli' ||
+        options.generationConfigSources?.['baseUrl']?.kind === 'env')
+        ? {
+            authType: options.initialAuthType,
+            baseUrl: options.generationConfig.baseUrl,
+          }
+        : undefined,
     );
+    this.modelMetadataCatalog = options.modelMetadataCatalog;
     this.onModelChange = options.onModelChange;
 
     // Initialize generation config
@@ -182,7 +200,77 @@ export class ModelsConfig {
       if (initialModel) {
         this.currentRegistryBaseUrl = initialModel.registryBaseUrl ?? null;
       }
+      const runtimeBaseUrl = this._generationConfig.baseUrl;
+      const runtimeEnvKey = this._generationConfig.apiKeyEnvKey;
+      if (
+        initialModel &&
+        runtimeBaseUrl === undefined &&
+        runtimeEnvKey === undefined &&
+        this.modelRegistry.getModalitiesSource(initialModel) === 'catalog' &&
+        this.canApplyCatalogModalities()
+      ) {
+        this._generationConfig.modalities =
+          initialModel.generationConfig.modalities;
+        this.generationConfigSources['modalities'] = {
+          kind: 'computed',
+          detail: 'loaded from models.dev catalog',
+        };
+      } else {
+        this.applyCatalogModalities(
+          initialModelId,
+          runtimeBaseUrl ?? initialModel?.registryBaseUrl,
+          runtimeEnvKey ?? initialModel?.envKey,
+          false,
+          initialModel
+            ? this.modelRegistry.getProviderId(initialModel)
+            : undefined,
+        );
+      }
     }
+  }
+
+  private canApplyCatalogModalities(replaceModelDerivedValue = false): boolean {
+    const source = this.generationConfigSources['modalities'];
+    if (
+      source === undefined &&
+      this._generationConfig.modalities !== undefined &&
+      !replaceModelDerivedValue
+    ) {
+      return false;
+    }
+    return (
+      replaceModelDerivedValue ||
+      source === undefined ||
+      source.kind === 'computed' ||
+      source.kind === 'default' ||
+      source.kind === 'unknown'
+    );
+  }
+
+  private applyCatalogModalities(
+    modelId: string,
+    baseUrl?: string,
+    envKey?: string,
+    replaceModelDerivedValue = false,
+    providerId?: string,
+  ): boolean {
+    if (!this.canApplyCatalogModalities(replaceModelDerivedValue)) return false;
+
+    const modalities = getCatalogModalities(this.modelMetadataCatalog, {
+      providerId,
+      authType: this.currentAuthType,
+      modelId,
+      baseUrl,
+      envKey,
+    });
+    if (modalities === undefined) return false;
+
+    this._generationConfig.modalities = modalities;
+    this.generationConfigSources['modalities'] = {
+      kind: 'computed',
+      detail: 'loaded from models.dev catalog',
+    };
+    return true;
   }
 
   /**
@@ -435,11 +523,19 @@ export class ModelsConfig {
    */
   private applyRawModelDerivedDefaults(modelId: string): void {
     if (this.shouldUpdateModelDerivedDefault('modalities')) {
-      this._generationConfig.modalities = defaultModalities(modelId);
-      this.generationConfigSources['modalities'] = {
-        kind: 'computed',
-        detail: 'auto-detected from model',
-      };
+      const appliedCatalog = this.applyCatalogModalities(
+        modelId,
+        this._generationConfig.baseUrl,
+        this._generationConfig.apiKeyEnvKey,
+        true,
+      );
+      if (!appliedCatalog) {
+        this._generationConfig.modalities = defaultModalities(modelId);
+        this.generationConfigSources['modalities'] = {
+          kind: 'computed',
+          detail: 'auto-detected from model',
+        };
+      }
     }
 
     if (this.shouldUpdateModelDerivedDefault('contextWindowSize')) {
@@ -454,6 +550,12 @@ export class ModelsConfig {
   private shouldUpdateModelDerivedDefault(
     field: 'modalities' | 'contextWindowSize',
   ): boolean {
+    // Mirror hasExplicitModalities so raw setModel and registry switchModel
+    // classify modalities the same way: a value without a recorded source is
+    // caller-declared, not model-derived, and must survive both switch paths.
+    if (field === 'modalities' && this.hasExplicitModalities()) {
+      return false;
+    }
     const source = this.generationConfigSources[field];
     return (
       source === undefined ||
@@ -462,6 +564,18 @@ export class ModelsConfig {
       source.kind === 'modelProviders' ||
       source.kind === 'programmatic' ||
       source.kind === 'unknown'
+    );
+  }
+
+  private hasExplicitModalities(): boolean {
+    if (this._generationConfig.modalities === undefined) return false;
+    const source = this.generationConfigSources['modalities'];
+    return (
+      source === undefined ||
+      (source.kind !== 'computed' &&
+        source.kind !== 'default' &&
+        source.kind !== 'modelProviders' &&
+        source.kind !== 'unknown')
     );
   }
 
@@ -536,6 +650,29 @@ export class ModelsConfig {
         ? rollbackSnapshot.generationConfigSources['apiKey']
         : undefined;
 
+      // Session endpoints (cli/env/settings kinds) are not seeded into the
+      // registry default endpoint (the R10-12 boundary), so `model` above was
+      // resolved against the registry default endpoint and its catalog
+      // modalities may not match the live session endpoint. Mirror
+      // syncAfterAuthRefresh's savedBaseUrl re-apply, but only for
+      // same-provider switches: carrying a session endpoint across providers
+      // would violate the pinned "does not reuse a settings endpoint for a
+      // base-url-less registry model" boundary.
+      const previousBaseUrlSource =
+        rollbackSnapshot.generationConfigSources['baseUrl'];
+      const previousProviderId = previousModel
+        ? this.modelRegistry.getProviderId(previousModel)
+        : undefined;
+      const shouldCarrySessionEndpoint =
+        !options?.baseUrl &&
+        !!rollbackSnapshot.generationConfig.baseUrl &&
+        (previousBaseUrlSource?.kind === 'cli' ||
+          previousBaseUrlSource?.kind === 'env' ||
+          previousBaseUrlSource?.kind === 'settings') &&
+        model.registryBaseUrl === undefined &&
+        previousProviderId !== undefined &&
+        previousProviderId === this.modelRegistry.getProviderId(model);
+
       // Apply model defaults
       this.applyResolvedModelDefaults(model);
       if (!this._generationConfig.apiKey && previousApiKey) {
@@ -543,6 +680,37 @@ export class ModelsConfig {
         if (previousApiKeySource) {
           this.generationConfigSources['apiKey'] =
             ModelsConfig.deepClone(previousApiKeySource);
+        }
+      }
+
+      if (shouldCarrySessionEndpoint) {
+        const carriedBaseUrl = rollbackSnapshot.generationConfig.baseUrl;
+        this._generationConfig.baseUrl = carriedBaseUrl;
+        if (previousBaseUrlSource) {
+          this.generationConfigSources['baseUrl'] = {
+            ...previousBaseUrlSource,
+          };
+        }
+        const appliedCatalogModalities = this.applyCatalogModalities(
+          model.id,
+          carriedBaseUrl,
+          model.envKey,
+          false,
+          this.modelRegistry.getProviderId(model),
+        );
+        const resolvedCatalogMatchesSessionEndpoint =
+          this.modelRegistry.getModalitiesSource(model) === 'catalog' &&
+          model.baseUrl === carriedBaseUrl;
+        if (
+          !appliedCatalogModalities &&
+          !resolvedCatalogMatchesSessionEndpoint &&
+          this.canApplyCatalogModalities()
+        ) {
+          this._generationConfig.modalities = defaultModalities(model.id);
+          this.generationConfigSources['modalities'] = {
+            kind: 'computed',
+            detail: 'auto-detected from model',
+          };
         }
       }
 
@@ -690,7 +858,7 @@ export class ModelsConfig {
     if (credentials.apiKey || credentials.baseUrl || credentials.model) {
       this.hasManualCredentials = true;
       this.currentRegistryBaseUrl = undefined;
-      this.clearProviderSourcedConfig();
+      this.clearProviderSourcedConfig(credentials.model !== undefined);
     }
 
     if (credentials.apiKey) {
@@ -726,6 +894,9 @@ export class ModelsConfig {
     // has lower priority than programmatic overrides but should still be applied.
     if (settingsGenerationConfig) {
       this.mergeSettingsGenerationConfig(settingsGenerationConfig);
+    }
+    if (credentials.model) {
+      this.applyRawModelDerivedDefaults(credentials.model);
     }
 
     // Sync with runtime model snapshot if we have a complete configuration
@@ -794,10 +965,13 @@ export class ModelsConfig {
    * This ensures provider config atomicity when user manually sets credentials.
    * Other layers (CLI, env, settings, defaults) will participate in resolve.
    */
-  private clearProviderSourcedConfig(): void {
+  private clearProviderSourcedConfig(clearModelDerived = false): void {
     for (const field of PROVIDER_SOURCED_FIELDS) {
       const source = this.generationConfigSources[field];
-      if (source?.kind === 'modelProviders') {
+      if (
+        source?.kind === 'modelProviders' ||
+        (clearModelDerived && source?.kind === 'computed')
+      ) {
         // Clear the value - let other layers resolve it
         delete (this._generationConfig as Record<string, unknown>)[field];
         delete this.generationConfigSources[field];
@@ -909,15 +1083,32 @@ export class ModelsConfig {
 
     // Generation config: apply all fields from MODEL_GENERATION_CONFIG_FIELDS
     const gc = model.generationConfig;
+    const modalitiesSource = this.modelRegistry.getModalitiesSource(model);
     for (const field of MODEL_GENERATION_CONFIG_FIELDS) {
+      if (
+        field === 'modalities' &&
+        modalitiesSource !== 'explicit' &&
+        this.hasExplicitModalities()
+      ) {
+        continue;
+      }
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (this._generationConfig as any)[field] = gc[field];
-      this.generationConfigSources[field] = {
-        kind: 'modelProviders',
-        authType: model.authType,
-        modelId: model.id,
-        detail: `generationConfig.${field}`,
-      };
+      this.generationConfigSources[field] =
+        field === 'modalities' && modalitiesSource !== 'explicit'
+          ? {
+              kind: 'computed',
+              detail:
+                modalitiesSource === 'catalog'
+                  ? 'loaded from models.dev catalog'
+                  : 'auto-detected from model',
+            }
+          : {
+              kind: 'modelProviders',
+              authType: model.authType,
+              modelId: model.id,
+              detail: `generationConfig.${field}`,
+            };
     }
 
     // contextWindowSize fallback: auto-detect from model when not set by provider
@@ -1108,6 +1299,27 @@ export class ModelsConfig {
         this._generationConfig.baseUrl = savedBaseUrl;
         if (savedBaseUrlSource) {
           this.generationConfigSources['baseUrl'] = savedBaseUrlSource;
+        }
+        const appliedCatalogModalities = this.applyCatalogModalities(
+          resolved.id,
+          savedBaseUrl,
+          resolved.envKey,
+          false,
+          this.modelRegistry.getProviderId(resolved),
+        );
+        const resolvedCatalogMatchesSessionEndpoint =
+          this.modelRegistry.getModalitiesSource(resolved) === 'catalog' &&
+          resolved.baseUrl === savedBaseUrl;
+        if (
+          !appliedCatalogModalities &&
+          !resolvedCatalogMatchesSessionEndpoint &&
+          this.canApplyCatalogModalities()
+        ) {
+          this._generationConfig.modalities = defaultModalities(resolved.id);
+          this.generationConfigSources['modalities'] = {
+            kind: 'computed',
+            detail: 'auto-detected from model',
+          };
         }
       }
 

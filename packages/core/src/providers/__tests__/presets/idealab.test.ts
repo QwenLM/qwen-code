@@ -35,6 +35,7 @@ describe('idealabProvider', () => {
       name: '[Idealab] Qwen3.6-Plus-DogFooding',
       generationConfig: { contextWindowSize: 1000000 },
     });
+    expect(models?.[0]?.generationConfig?.modalities).toBeUndefined();
     expect(models?.[1]).toMatchObject({
       id: 'bailian/deepseek-v4-pro',
       name: '[Idealab] bailian/deepseek-v4-pro',

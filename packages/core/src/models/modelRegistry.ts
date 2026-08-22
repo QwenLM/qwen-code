@@ -18,6 +18,11 @@ import {
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { QWEN_OAUTH_MODELS } from './constants.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  getCatalogModalities,
+  type ModelModalitiesSource,
+  type ModelMetadataCatalog,
+} from './model-metadata-catalog.js';
 
 const debugLogger = createDebugLogger('MODEL_REGISTRY');
 
@@ -66,10 +71,6 @@ export function resolveProviderProtocol(
   return validateAuthTypeKey(providerId);
 }
 
-function shouldUseCanonicalModalities(modelId: string): boolean {
-  return /^minimax-m3/i.test(modelId.trim().toLowerCase());
-}
-
 /**
  * Build a composite registry key from model id and optional baseUrl.
  * Two models with the same id but different baseUrls are distinct entries.
@@ -85,11 +86,20 @@ export function modelRegistryKey(id: string, baseUrl?: string): string {
  */
 export class ModelRegistry {
   private modelsByAuthType: Map<AuthType, Map<string, ResolvedModelConfig>>;
+  private readonly modelMetadataCatalog?: ModelMetadataCatalog;
+  private readonly modalitiesSources = new WeakMap<
+    ResolvedModelConfig,
+    ModelModalitiesSource
+  >();
+  private readonly providerIds = new WeakMap<ResolvedModelConfig, string>();
+  private readonly defaultBaseUrls = new Map<AuthType, string>();
 
   /** providerId -> SDK protocol mapping; persists across reloads. */
   private providerProtocolConfig: ProviderProtocolConfig;
 
   private getDefaultBaseUrl(authType: AuthType): string {
+    const configured = this.defaultBaseUrls.get(authType);
+    if (configured !== undefined) return configured;
     switch (authType) {
       case AuthType.QWEN_OAUTH:
         return 'DYNAMIC_QWEN_OAUTH_BASE_URL';
@@ -103,9 +113,18 @@ export class ModelRegistry {
   constructor(
     modelProvidersConfig?: ModelProvidersConfig,
     providerProtocolConfig?: ProviderProtocolConfig,
+    modelMetadataCatalog?: ModelMetadataCatalog,
+    initialDefaultBaseUrl?: { authType: AuthType; baseUrl: string },
   ) {
     this.modelsByAuthType = new Map();
     this.providerProtocolConfig = providerProtocolConfig ?? {};
+    this.modelMetadataCatalog = modelMetadataCatalog;
+    if (initialDefaultBaseUrl) {
+      this.defaultBaseUrls.set(
+        initialDefaultBaseUrl.authType,
+        initialDefaultBaseUrl.baseUrl,
+      );
+    }
 
     // Always register qwen-oauth models (hard-coded, cannot be overridden)
     this.registerAuthTypeModels(AuthType.QWEN_OAUTH, QWEN_OAUTH_MODELS);
@@ -201,7 +220,7 @@ export class ModelRegistry {
         );
         continue;
       }
-      const resolved = this.resolveModelConfig(config, authType);
+      const resolved = this.resolveModelConfig(config, authType, providerId);
       modelMap.set(key, resolved);
     }
 
@@ -274,6 +293,14 @@ export class ModelRegistry {
     return undefined;
   }
 
+  getModalitiesSource(model: ResolvedModelConfig): ModelModalitiesSource {
+    return this.modalitiesSources.get(model) ?? 'heuristic';
+  }
+
+  getProviderId(model: ResolvedModelConfig): string | undefined {
+    return this.providerIds.get(model);
+  }
+
   /**
    * Check if model exists for given authType.
    * When baseUrl is provided, checks the exact endpoint or matching default.
@@ -305,30 +332,46 @@ export class ModelRegistry {
   private resolveModelConfig(
     config: ModelConfig,
     authType: AuthType,
+    providerId?: string,
   ): ResolvedModelConfig {
     this.validateModelConfig(config, authType);
 
     const generationConfig = { ...(config.generationConfig ?? {}) };
+    const resolvedBaseUrl = config.baseUrl || this.getDefaultBaseUrl(authType);
+    const lookup = {
+      providerId,
+      authType,
+      modelId: config.id,
+      baseUrl: resolvedBaseUrl,
+      envKey: config.envKey,
+    };
+    const catalogModalities = getCatalogModalities(
+      this.modelMetadataCatalog,
+      lookup,
+    );
+    let modalitiesSource: ModelModalitiesSource = 'explicit';
     // Auto-fill modalities from the model name when the provider didn't set
     // them explicitly. Without this, downstream consumers that read straight
     // from the registry (e.g. sub-agents via getResolvedModel) would inherit
     // the parent session's modalities instead of the agent's own.
-    if (
-      generationConfig.modalities === undefined ||
-      shouldUseCanonicalModalities(config.id)
-    ) {
-      generationConfig.modalities = defaultModalities(config.id);
+    if (generationConfig.modalities === undefined) {
+      generationConfig.modalities =
+        catalogModalities ?? defaultModalities(config.id);
+      modalitiesSource = catalogModalities ? 'catalog' : 'heuristic';
     }
 
-    return {
+    const resolved: ResolvedModelConfig = {
       ...config,
       authType,
       name: config.name || config.id,
-      baseUrl: config.baseUrl || this.getDefaultBaseUrl(authType),
+      baseUrl: resolvedBaseUrl,
       ...(config.baseUrl ? { registryBaseUrl: config.baseUrl } : {}),
       generationConfig,
       capabilities: config.capabilities || {},
     };
+    this.modalitiesSources.set(resolved, modalitiesSource);
+    if (providerId) this.providerIds.set(resolved, providerId);
+    return resolved;
   }
 
   /**
