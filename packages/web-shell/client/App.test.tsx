@@ -394,6 +394,7 @@ const {
           attachmentId?: string;
         }) => void;
         isResponding?: boolean;
+        transcriptReloadPaused?: boolean;
         activeTurnStartedAt?: number;
         terminalBackgroundShellTaskIds?: ReadonlySet<string>;
       } | null,
@@ -579,7 +580,7 @@ vi.mock('./hooks/useMessages', () => ({
 }));
 
 vi.mock('./hooks/useAnimationFrameTranscriptBlocks', () => ({
-  useAnimationFrameTranscriptBlocks: () => testState.blocks,
+  useAnimationFrameTranscriptSnapshot: () => ({ blocks: testState.blocks }),
 }));
 
 vi.mock('./hooks/useBackgroundTasks', () => ({
@@ -801,6 +802,7 @@ vi.mock('./components/MessageList', async () => {
           attachmentId?: string;
         }) => void;
         isResponding?: boolean;
+        transcriptReloadPaused?: boolean;
         activeTurnStartedAt?: number;
         terminalBackgroundShellTaskIds?: ReadonlySet<string>;
         welcomeHeader?: React.ReactNode;
@@ -13224,6 +13226,7 @@ describe('App session callbacks', () => {
     testState.streamingState = 'responding';
     rerender();
     expect(testState.latestMessageListProps?.isResponding).toBe(false);
+    expect(testState.latestMessageListProps?.transcriptReloadPaused).toBe(true);
     expect(
       testState.latestMessageListProps?.activeTurnStartedAt,
     ).toBeUndefined();
