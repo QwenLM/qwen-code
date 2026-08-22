@@ -22,6 +22,7 @@ import {
   reviewMode,
   isTerritoryFanOut,
   hasExecutableScript,
+  isPromptPath,
 } from './roster.js';
 
 /** A same-repo PR: a worktree to build in, a PR number to check an issue against. */
@@ -100,14 +101,53 @@ describe('requiredAgents — Step 3A', () => {
     expect(med).not.toContain('6a');
     expect(med).not.toContain('6b');
     expect(med).not.toContain('6c');
+    // The counter-frame audit is a persona-tier depth pass: same gate.
+    expect(med).not.toContain('6d');
     expect(med).toEqual(
       expect.arrayContaining(['0', '1a', '2', '3a', '3b', '3c', '4', '5', '7']),
     );
     // High, and the default (no effort recorded), still demand them.
     expect(keys({ ...PR, effort: 'high' })).toEqual(
-      expect.arrayContaining(['6a', '6b', '6c']),
+      expect.arrayContaining(['6a', '6b', '6c', '6d']),
     );
-    expect(keys(PR)).toEqual(expect.arrayContaining(['6a', '6b', '6c']));
+    expect(keys(PR)).toEqual(expect.arrayContaining(['6a', '6b', '6c', '6d']));
+    // The counter-frame audit alone survives the 3B topology switch: the
+    // author's frame spans territories, so it stays a whole-diff agent there —
+    // and a chunked PR with a strong narrative is the most frame-capturable
+    // shape. Same effort gate as in 3A.
+    const fanOut = keys({ ...PR, srcDiffLines: 900, diffLines: 4000 });
+    expect(fanOut).not.toContain('6a');
+    expect(fanOut).toContain('6d');
+    expect(
+      keys({ ...PR, srcDiffLines: 900, diffLines: 4000, effort: 'medium' }),
+    ).not.toContain('6d');
+  });
+
+  it('owes the prose-execution audit exactly when the diff touches an instruction file', () => {
+    // No prompt file in the diff: no prose to execute, no agent.
+    expect(keys(PR)).not.toContain('prose-exec');
+    const withSkill = {
+      ...PR,
+      files: [
+        ...PR.files,
+        { path: 'packages/core/src/skills/bundled/review/SKILL.md' },
+      ],
+    };
+    // A prompt file plus a tree: owed — and at medium too, unlike the
+    // personas: on a prompt-file diff it is the highest-yield agent there is.
+    expect(keys(withSkill)).toContain('prose-exec');
+    expect(keys({ ...withSkill, effort: 'medium' })).toContain('prose-exec');
+    // Both topologies: a chunked PR touching SKILL.md still owes the execution.
+    expect(
+      keys({ ...withSkill, srcDiffLines: 900, diffLines: 4000 }),
+    ).toContain('prose-exec');
+    // But never without a tree to run the repository's tooling in.
+    expect(
+      keys({
+        files: withSkill.files,
+        chunks: [],
+      }),
+    ).not.toContain('prose-exec');
   });
 
   it('skips the removed-behavior audit on a diff that removes nothing', () => {
@@ -474,5 +514,27 @@ describe('a heavy file in a Step-3A-sized diff', () => {
     // It is still a normal 3A review: the dimension agents each walk the whole diff,
     // and one that walks the whole diff already sees both ends of the file.
     expect(k).toEqual(expect.arrayContaining(['1a', '2', '6a']));
+  });
+});
+
+describe('isPromptPath — the instruction-file detector', () => {
+  it.each([
+    // Skills, agent definitions, prompt directories, and prompt/brief-named files.
+    ['packages/core/src/skills/bundled/review/SKILL.md', true],
+    ['.claude/agents/reviewer.md', true],
+    ['.qwen/agents/helper.md', true],
+    ['src/prompts/system.txt', true],
+    ['packages/cli/src/commands/review/lib/agent-briefs.ts', true],
+    ['packages/cli/src/commands/review/agent-prompt.ts', true],
+    ['docs/system-prompt.md', true],
+    // Test code ABOUT prompts pins them; it is not itself followed as one.
+    ['packages/cli/src/commands/review/agent-prompt.test.ts', false],
+    // Ordinary code and docs.
+    ['packages/cli/src/commands/review/drive.ts', false],
+    ['README.md', false],
+    // A token match, not a substring match: promptness must be a word.
+    ['src/prompter.ts', false],
+  ])('%s → %s', (path, expected) => {
+    expect(isPromptPath(path)).toBe(expected);
   });
 });

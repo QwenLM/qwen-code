@@ -1565,11 +1565,12 @@ describe('--roster — every prompt the plan requires, in one call', () => {
         '6a',
         '6b',
         '6c',
+        '6d',
       ]);
 
       const printed = (writeStdoutLine as unknown as Mock).mock
         .calls[0][0] as string;
-      expect(printed).toContain('11 agents required');
+      expect(printed).toContain('12 agents required');
       // Every recorded prompt appears in the output byte-for-byte: what the
       // orchestrator copies is what the delivery check will look for.
       for (const [, prompt] of recorded) {
@@ -1577,7 +1578,7 @@ describe('--roster — every prompt the plan requires, in one call', () => {
       }
       // Labelled for the reader, so a Task launch can be named after its block.
       expect(printed).toMatch(
-        /───── agent \d+ of 11 — Agent 1a: Line-by-line correctness ─────/,
+        /───── agent \d+ of 12 — Agent 1a: Line-by-line correctness ─────/,
       );
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -1685,6 +1686,9 @@ describe('--roster — every prompt the plan requires, in one call', () => {
           'chunk-14',
           'chunk-15',
           'test-matrix',
+          // The counter-frame audit stays whole-diff in 3B: the author's
+          // frame spans territories, so no chunk agent can escape it.
+          '6d',
           '1b',
           '1c',
           '7',
@@ -1769,10 +1773,10 @@ describe('--roster — every prompt the plan requires, in one call', () => {
       for (const l of sepLines) {
         expect(l).toMatch(/^───── (agent \d+ of \d+ — |end of roster — )/);
       }
-      // Exactly the boundaries the CLI wrote: 8 agents + the end-of-roster line.
-      // A forged boundary would be a ninth agent line — and this asserts the
+      // Exactly the boundaries the CLI wrote: 9 agents + the end-of-roster line.
+      // A forged boundary would be a tenth agent line — and this asserts the
       // count, so it cannot hide by matching the shape either.
-      expect(sepLines).toHaveLength(9);
+      expect(sepLines).toHaveLength(10);
       expect(printed).not.toMatch(/^───── agent 99 of 99/m);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -3154,6 +3158,31 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(p).toContain('scope empty');
     expect(p).toContain('motivating evidence');
     expect(p).toContain('fixes, closes, resolves, or implements');
+  });
+
+  it('pins the counter-frame and prose-execution briefs — the #9707 roster additions', () => {
+    // Lens prose lives only in agent-briefs.ts: a deletion ships green unless
+    // the load-bearing clauses are pinned literally (the enumeration-trap
+    // precedent). Both roles exist because #9655's blocking defect sat outside
+    // every existing lens; losing their operating rules silently would put it
+    // back there.
+    const p6d = buildRoleBrief(PR_PLAN, '6d');
+    // The author's frame is the exclusion list, not the reading list.
+    expect(p6d).toContain('These are your EXCLUSION list');
+    // The one mandatory question, and its severity contract.
+    expect(p6d).toContain(
+      'walk it step by step and name the step where the outcome now differs',
+    );
+    expect(p6d).toContain('Critical with the replay as its witness');
+    const pp = buildRoleBrief(PR_PLAN, 'prose-exec');
+    // The method is execution, not reading…
+    expect(pp).toContain('Execute it.');
+    // …in the agent's own scratch space, never the shared worktree…
+    expect(pp).toContain('NEVER by writing into the review worktree');
+    // …with the no-charity placeholder rule that makes an execution honest.
+    expect(pp).toContain('take the reading the author did NOT intend');
+    // A prose diff with no operational instructions is a complete empty scope.
+    expect(pp).toContain('No issues found — scope empty');
   });
 
   it('welds --host into the Agent 0 command when the plan carries an Enterprise host', () => {

@@ -3133,6 +3133,14 @@ describe('the ledger marker on the body that reaches GitHub', () => {
       [diffPath, diffPath],
     );
     build(
+      '6d',
+      'cf1',
+      `You are review agent \`6d\`.\n` +
+        `read_file(file_path="${briefPath(planPath, '6d')}")\n` +
+        `read_file(file_path="${diffPath}")`,
+      [diffPath, diffPath],
+    );
+    build(
       'verify',
       'v1',
       `You are review agent \`verify\`.\n` +

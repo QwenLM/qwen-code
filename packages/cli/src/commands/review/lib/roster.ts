@@ -149,6 +149,38 @@ export function hasExecutableScript(plan: RosterPlan): boolean {
   });
 }
 
+/**
+ * Does the diff touch a file whose CONTENT a future agent follows as
+ * instructions — a skill, an agent brief, a prompt template? Path-detected,
+ * like `hasExecutableScript`: names this ecosystem reserves for instruction
+ * prose, because only the plan's file paths are in hand here. The predicate is
+ * deliberately generous — `prompt-record.ts` (code about prompts) trips it too
+ * — because the false-positive cost is one agent returning a documented empty
+ * scope, while a prompt file nobody executed is how #9655's guidance shipped
+ * a misattribution four review rounds read as sound. A repository whose
+ * prompt files match none of these shapes requires `prose-exec` back through
+ * a manifest rule instead.
+ */
+export function isPromptPath(path: string): boolean {
+  const base = path.split('/').pop() ?? '';
+  // Test code ABOUT prompts pins them; it is not itself followed as one.
+  if (/\.(test|spec)\./.test(base)) return false;
+  if (base === 'SKILL.md') return true;
+  // Agent definitions: .claude/agents/*.md, .qwen/agents/*.md, and prompts/ dirs.
+  if (/(^|\/)\.(claude|qwen)\/agents\//.test(path)) return true;
+  if (/(^|\/)prompts\//.test(path)) return true;
+  const stem = base.replace(/\.[^.]+$/, '');
+  return stem
+    .split(/[-_.]/)
+    .some((token) => /^(prompts?|briefs?)$/.test(token));
+}
+
+/** Any changed file `isPromptPath` recognises — the prose-execution trigger. */
+export function hasPromptFiles(plan: RosterPlan): boolean {
+  const files = Array.isArray(plan.files) ? plan.files : [];
+  return files.some((f) => typeof f?.path === 'string' && isPromptPath(f.path));
+}
+
 /** Source files rewritten heavily enough that the diff is the wrong frame. */
 function heavyFiles(plan: RosterPlan): string[] {
   const files = Array.isArray(plan.files) ? plan.files : [];
@@ -207,6 +239,11 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
       }
     }
     add('test-matrix');
+    // The counter-frame audit is a whole-diff question: the author's frame
+    // spans territories, so no chunk agent can escape it from inside one —
+    // and a chunked PR with a strong narrative is the MOST frame-capturable
+    // shape there is. Same effort gate as the personas it runs beside in 3A.
+    if (plan.effort !== 'medium') add('6d');
   } else {
     // Step 3A: every dimension, each walking the whole diff.
     add('1a');
@@ -230,12 +267,25 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
       add('6a');
       add('6b');
       add('6c');
+      // The counter-frame audit joins the personas: like them it is a
+      // depth pass over the whole diff, and its whole premise — attention
+      // the author's narrative cannot steer — is the kind of coverage a
+      // balanced review deliberately trades away (issue #9707, proposal 4).
+      add('6d');
     }
   }
 
   // Both topologies. 1b owns the deleted side; 1c owns the cross-file walk and
   // needs a tree to grep.
   if (hasDeletions(plan)) add('1b');
+  // Instruction prose is executed, not read: a diff touching a file a future
+  // agent follows as instructions owes the prose-execution audit — in both
+  // topologies (a chunked PR touching SKILL.md still owes it) and at every
+  // effort, because on a prompt-file diff it is the highest-yield agent there
+  // is (issue #9707, proposal 3: #9655's two prose defects each fall out of a
+  // single execution and fell out of none of twenty-five readings). It runs
+  // the repository's own tooling, so like 1c and 7 it needs a tree.
+  if (mode !== 'diff-only' && hasPromptFiles(plan)) add('prose-exec');
   if (mode !== 'diff-only') {
     add('1c');
     add('7');
@@ -314,9 +364,16 @@ function contextRoleRunsInThisReview(
     case '6b':
     case '6c':
       return !fanOut && plan.effort !== 'medium';
+    case '6d':
+      // Whole-diff in both topologies — the frame spans territories.
+      return plan.effort !== 'medium';
     case 'test-matrix':
       return fanOut;
     case '1c':
+      return mode !== 'diff-only';
+    case 'prose-exec':
+      // Both topologies, every effort — but never without a tree to run the
+      // repository's tooling in (the same capability line 1c and 7 draw).
       return mode !== 'diff-only';
     case '1b':
       // Both topologies run the removed-behavior audit; whether it has work is

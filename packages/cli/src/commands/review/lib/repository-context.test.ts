@@ -242,6 +242,8 @@ describe('repository context validation', () => {
       '6a',
       '6b',
       '6c',
+      '6d',
+      'prose-exec',
       'test-matrix',
     ];
     expect([...REPOSITORY_CONTEXT_ROLES]).toEqual(allRoles);
