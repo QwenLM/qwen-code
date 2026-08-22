@@ -234,7 +234,7 @@ export default tseslint.config(
         ...generalRestrictedSyntaxSelectors,
         {
           // \x2f is '/' — esquery selector regexes cannot contain a literal '/'.
-          selector: "ImportExpression[source.value=/(^|\\x2f)serve(\\x2f|$)/]",
+          selector: "ImportExpression[source.value=/(^|\\x2f)serve(\\x2f|$)/i]",
           message:
             'acp-integration must not dynamically import serve/ internals. Put shared, lifecycle-free logic in packages/cli/src/runtime/ instead (#8084).',
         },

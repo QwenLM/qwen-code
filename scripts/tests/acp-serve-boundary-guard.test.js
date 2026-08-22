@@ -74,6 +74,13 @@ it('blocks a dynamic import() of serve/ from acp-integration', async () => {
   expect(reports[0].message).toContain('acp-integration');
 });
 
+it('blocks a case-variant dynamic import() of Serve/ from acp-integration', async () => {
+  const reports = await restrictedReports(
+    `async function probe() { await import('../Serve/index.js'); }`,
+  );
+  expect(reports).toHaveLength(1);
+});
+
 it('allows neutral runtime/ contracts from acp-integration', async () => {
   expect(
     await restrictedReports(
@@ -83,6 +90,14 @@ it('allows neutral runtime/ contracts from acp-integration', async () => {
   expect(
     await restrictedReports(
       `async function probe() { await import('../runtime/contracts.js'); }`,
+    ),
+  ).toHaveLength(0);
+  // A computed specifier (not a string literal) has no source.value, so the
+  // dynamic guard must not reject it — the import target is unknowable at
+  // lint time.
+  expect(
+    await restrictedReports(
+      `async function probe() { const target = '../runtime/contracts.js'; await import(target); }`,
     ),
   ).toHaveLength(0);
 });
