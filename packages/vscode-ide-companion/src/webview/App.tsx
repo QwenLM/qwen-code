@@ -1574,7 +1574,12 @@ export const App: React.FC = () => {
 
       <div
         ref={messagesContainerRef}
-        className="chat-messages messages-container flex-1 overflow-y-auto overflow-x-hidden pt-5 pr-5 pl-5 pb-[140px] flex flex-col relative min-w-0 focus:outline-none [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:rounded-sm [&>*]:flex [&>*]:gap-0 [&>*]:items-start [&>*]:text-left [&>*]:py-2 [&>*:not(:last-child)]:pb-[8px] [&>*]:flex-col [&>*]:relative [&>*]:animate-[fadeIn_0.2s_ease-in]"
+        // pb-2: the input form's wrapper is now an in-flow flex child sized
+        // to the measured form height, so the messages viewport already ends
+        // at the form's top edge. The old overlay layout floated the form
+        // over the messages and needed pb-[140px] of scroll clearance;
+        // keeping it would strand ~140px of dead space above the form.
+        className="chat-messages messages-container flex-1 overflow-y-auto overflow-x-hidden pt-5 pr-5 pl-5 pb-2 flex flex-col relative min-w-0 focus:outline-none [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:rounded-sm [&>*]:flex [&>*]:gap-0 [&>*]:items-start [&>*]:text-left [&>*]:py-2 [&>*:not(:last-child)]:pb-[8px] [&>*]:flex-col [&>*]:relative [&>*]:animate-[fadeIn_0.2s_ease-in]"
         data-vscode-context={
           hasContent ? '{"webviewSection": "chat-messages"}' : undefined
         }

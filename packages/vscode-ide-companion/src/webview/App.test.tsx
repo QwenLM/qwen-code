@@ -793,3 +793,24 @@ describe('App model selector gating', () => {
     },
   );
 });
+
+describe('App messages container bottom clearance', () => {
+  it('keeps only a small bottom padding now that the form is an in-flow sibling', async () => {
+    const rendered = renderApp();
+    root = rendered.root;
+    container = rendered.container;
+
+    await act(async () => {});
+
+    const messages = rendered.container.querySelector('.chat-messages');
+    expect(messages).not.toBeNull();
+    // The input form's wrapper is an in-flow flex child sized to the
+    // measured form height (InputForm's ResizeObserver wrapper), so the
+    // messages viewport already ends at the form's top edge. The old
+    // overlay layout floated the form over the messages and needed
+    // pb-[140px] of scroll clearance; keeping it would strand ~140px of
+    // dead space between the last message and the form (#8617 follow-up).
+    expect(messages?.className ?? '').toContain('pb-2');
+    expect(messages?.className ?? '').not.toContain('pb-[140px]');
+  });
+});
