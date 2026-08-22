@@ -20,8 +20,10 @@ import {
   vi,
 } from 'vitest';
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -2112,3 +2114,121 @@ describe('the Aone anchor gate — the validation the platform does not perform'
     expect(postedJson()['anchorsDiscarded']).toBe(0);
   });
 });
+
+// The Aone receipt is the WRITE half of cleanup's Aone bypass-audit
+// contract, the sibling of the gh receipt suite in submit.test.ts: on Aone
+// submit posts COMMENTS (Aone has no review object), so the audit's
+// sanctioned-vs-bypass ruling keys on the ids recorded here.
+describe('the Aone submit receipt (producer half of the audit contract)', () => {
+  const receiptPath = () =>
+    join(tmp, '.qwen', 'tmp', 'qwen-review-pr-1-submit-receipt.json');
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.exitCode = undefined;
+    // EVERY successful Aone post writes the receipt — the posting tests
+    // above all leave one behind in the shared per-file tmp dir. Start
+    // each receipt test from no receipt, or the accumulation assertions
+    // read a prior test's ids.
+    rmSync(join(tmp, '.qwen'), { recursive: true, force: true });
+    authMock.mockReturnValue({
+      ok: true,
+      why: 'the user asked for this review to be published',
+      recordedHost: 'gitlab.alibaba-inc.com',
+    });
+    getPlatformReaderMock.mockReturnValue({ kind: 'aone' });
+    gitOptMock.mockReturnValue(null);
+    submitAoneMock.mockReturnValue({ ...AONE_RESULT });
+    composeMock.mockReturnValue({
+      event: 'REQUEST_CHANGES',
+      body: 'One confirmed blocker blocks the merge.',
+      cappedBy: [],
+      floorEnforced: [],
+    });
+  });
+
+  afterEach(() => {
+    process.exitCode = undefined;
+  });
+
+  it('vouches for every posted comment id, including the summary', () => {
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    const receipt = JSON.parse(readFileSync(receiptPath(), 'utf8'));
+    // AONE_RESULT carries inlineCommentIds [11] with postedInline 2 — the
+    // second inline comment posted without a readable id has nothing to
+    // vouch for it (fail-safe toward over-flagging), and the summary id
+    // rides the receipt too.
+    expect(receipt.commentIds).toEqual([11, 12]);
+    expect(receipt.event).toBe('REQUEST_CHANGES');
+    expect(typeof receipt.postedAt).toBe('string');
+  });
+
+  it('accumulates ids across two submits in the same window (drift restart)', () => {
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    submitAoneMock.mockReturnValue({
+      ...AONE_RESULT,
+      inlineCommentIds: [21],
+      summaryCommentId: 22,
+    });
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    const receipt = JSON.parse(readFileSync(receiptPath(), 'utf8'));
+    expect(receipt.commentIds).toEqual([11, 12, 21, 22]);
+  });
+
+  it('vouches for the LANDED ids on a mid-batch failure — cleanup audits that window too', () => {
+    submitAoneMock.mockImplementation(() => {
+      throw new AonePartialPostError('died mid-batch', 1, [31], false, true);
+    });
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    expect(process.exitCode).toBe(3);
+    const receipt = JSON.parse(readFileSync(receiptPath(), 'utf8'));
+    expect(receipt.commentIds).toEqual([31]);
+  });
+
+  it('writes no receipt when nothing has an id to vouch for', () => {
+    // A first-write failure: zero landed ids, ambiguous or not. An empty
+    // receipt vouches for nothing anyway — writing one would only claim a
+    // submit happened where none is provable.
+    submitAoneMock.mockImplementation(() => {
+      throw new AonePartialPostError(
+        'died on the first write',
+        0,
+        [],
+        false,
+        true,
+      );
+    });
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    expect(process.exitCode).toBe(3);
+    expect(existsSync(receiptPath())).toBe(false);
+  });
+
+  it('preserves the review-id axis a gh submit vouched for the same PR number', () => {
+    // The receipt file is keyed by PR number alone but carries an axis per
+    // platform; an Aone rewrite that kept only its own axis would un-vouch
+    // a same-numbered gh submit's own reviews — the audit would then flag
+    // submit's sanctioned writes as bypasses.
+    mkdirSync(join(tmp, '.qwen', 'tmp'), { recursive: true });
+    writeFileSync(
+      receiptPath(),
+      JSON.stringify({ reviewIds: [500], event: 'COMMENT', postedAt: 'x' }),
+    );
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    const receipt = JSON.parse(readFileSync(receiptPath(), 'utf8'));
+    expect(receipt.commentIds).toEqual([11, 12]);
+    expect(receipt.reviewIds).toEqual([500]);
+  });
+});
+

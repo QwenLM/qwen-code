@@ -3376,6 +3376,23 @@ describe('submit receipt (producer half of the audit contract)', () => {
     expect(receipt.reviewIds).toEqual([7, 8]);
   });
 
+  it('preserves the comment-id axis an Aone submit vouched for the same PR number', () => {
+    // The receipt file is keyed by PR number alone but carries an axis per
+    // platform; a gh rewrite that kept only its own axis would un-vouch a
+    // same-numbered Aone submit's own comments — the audit would then flag
+    // submit's sanctioned writes as bypasses.
+    mkdirSync(join(dir, '.qwen', 'tmp'), { recursive: true });
+    writeFileSync(
+      receiptPath(),
+      JSON.stringify({ commentIds: [31], event: 'COMMENT', postedAt: 'x' }),
+    );
+    ghMock.mockImplementationOnce(() => JSON.stringify({ id: 44 }));
+    runSubmit(authorizedPost());
+    const receipt = JSON.parse(readFileSync(receiptPath(), 'utf8'));
+    expect(receipt.reviewIds).toEqual([44]);
+    expect(receipt.commentIds).toEqual([31]);
+  });
+
   it('writes atomically, leaving no .tmp sibling behind', () => {
     ghMock.mockImplementationOnce(() => JSON.stringify({ id: 42 }));
     runSubmit(authorizedPost());
