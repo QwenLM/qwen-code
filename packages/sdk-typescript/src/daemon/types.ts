@@ -1470,6 +1470,7 @@ export type KnownDaemonSessionArtifactKind =
   | 'audio'
   | 'pdf'
   | 'notebook'
+  | 'document'
   | 'other';
 
 export type DaemonSessionArtifactKind =

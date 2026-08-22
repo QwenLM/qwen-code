@@ -648,4 +648,18 @@ describe('bundled review skill', () => {
       'the URL a `pr-url` target carried, or else assemble',
     );
   });
+
+  it('runs presubmit on Aone targets — self-PR backing, not the skip list', () => {
+    // Revert guard (#9616): presubmit used to sit on the Aone skip list and
+    // the skill carried the "self-PR detection has no Aone backing" caveat —
+    // a review of the user's own MR silently got no downgrade. The command
+    // is now backed for self-PR detection and head drift; restoring either
+    // the skip or the caveat must fail here, not slip through.
+    const body = skillBody();
+    expect(body).toContain('`presubmit` **runs on Aone targets too**');
+    expect(body).toContain('the `a1 auth whoami` account vs the MR author');
+    expect(body).toContain('self-PR detection and head drift are a1-backed');
+    expect(body).not.toContain('self-PR detection has no Aone backing');
+    expect(body).not.toContain('`pr-context`, `comment-status`, `presubmit`');
+  });
 });
