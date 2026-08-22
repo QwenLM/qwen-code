@@ -4,6 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// This module must stay OUT of the serve pre-listen static closure: it
+// pulls the SessionService chain (glob et al.) via the core barrel, which
+// the fast-path bundle closure check forbids before listen. `run-qwen-serve`
+// therefore loads it through a dynamic import(); keep every import here
+// static — a dynamic import() of the barrel from inside would make the
+// barrel's full namespace live and poison the shared chunk for every
+// static barrel importer (ACP agent included).
 import {
   fetchGitHubPullRequests,
   readSessionPrs,
@@ -45,10 +52,10 @@ export interface SessionPrRefreshResult {
 
 /**
  * Refreshes the persisted `state` snapshot of one workspace's PR bindings.
- * Only non-terminal bindings (open/unknown) are resolved — merged and closed
- * never transition back, so workspaces whose bindings are all terminal cost
- * no `gh` call at all. One slim `gh pr list --state all` per workspace per
- * sweep; rewritten in place (order and createdAt preserved).
+ * Only merged is terminal (closed PRs can reopen), so workspaces whose
+ * bindings are all merged cost no `gh` call at all. One slim
+ * `gh pr list --state all` per workspace per sweep; rewritten in place
+ * (order and createdAt preserved).
  */
 export async function refreshWorkspaceSessionPrStates(
   runtime: WorkspaceRuntime,
