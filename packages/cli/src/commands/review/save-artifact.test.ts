@@ -452,8 +452,9 @@ describe('saveReviewArtifact', () => {
   it('carries the fresh count and the convergence paragraph into the artifact', () => {
     // Both are new surfaces on the composed result, and the allow-list is
     // where a new field silently stops existing. The paragraph matters most:
-    // it is the FIRST clause the overflow ladder sheds, so on the rounds it
-    // fires the artifact may be the only durable copy.
+    // the overflow ladder sheds it LAST, so a round that lost it from the
+    // body lost every other rank too, and the artifact may be the only
+    // durable copy.
     const paths = fixture();
     writeJson(paths.composed, {
       ...verdict,

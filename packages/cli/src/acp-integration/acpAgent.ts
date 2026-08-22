@@ -224,7 +224,7 @@ import {
   type PermissionRuleSet,
 } from '../config/permission-settings.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
-import { isCompatibleLiveSessionSource } from '../serve/conversations/session-source.js';
+import { isCompatibleLiveSessionSource } from '../runtime/live-session-source.js';
 import type { ApprovalModeValue } from './session/types.js';
 import { z } from 'zod';
 import type { CliArgs } from '../config/config.js';
@@ -869,6 +869,30 @@ function loadRestoreOptions(
 const RESUME_RESTORE_OPTIONS: SelectiveSessionRestoreOptions = {
   replay: { kind: 'none' },
 };
+
+async function resolvePersistedSessionIdForRestore(
+  sessionService: SessionService,
+  sessionId: string,
+): Promise<string | undefined> {
+  try {
+    return await sessionService.findSessionIdIgnoringCase(sessionId);
+  } catch (error) {
+    if (
+      error instanceof SessionIdCaseConflictError &&
+      error.reason === 'case_conflict' &&
+      error.candidateSessionId === sessionId
+    ) {
+      return sessionId;
+    }
+    if (error instanceof SessionIdCaseConflictError) {
+      throw RequestError.internalError(
+        { errorKind: 'session_conflict', sessionId },
+        error.message,
+      );
+    }
+    throw error;
+  }
+}
 
 function mapSessionRestoreRequestError(
   error: unknown,
@@ -5411,21 +5435,7 @@ class QwenAgent implements Agent {
       const persistedSessionId = await profiler.time('existence_check', () =>
         this.runWithPinnedRuntimeBaseDir(settings, params.cwd, async () => {
           const sessionService = new SessionService(params.cwd);
-          try {
-            return await sessionService.findSessionIdIgnoringCase(sessionId);
-          } catch (error) {
-            if (error instanceof SessionIdCaseConflictError) {
-              // Parity with the daemon surfaces (toRpcError / REST 409):
-              // persisted-storage conflicts use `session_conflict`;
-              // `session_id_conflict` is reserved for live-id admission
-              // occupancy.
-              throw RequestError.internalError(
-                { errorKind: 'session_conflict', sessionId },
-                error.message,
-              );
-            }
-            throw error;
-          }
+          return resolvePersistedSessionIdForRestore(sessionService, sessionId);
         }),
       );
       if (!persistedSessionId) {
@@ -5740,21 +5750,7 @@ class QwenAgent implements Agent {
       const persistedSessionId = await profiler.time('existence_check', () =>
         this.runWithPinnedRuntimeBaseDir(settings, params.cwd, async () => {
           const sessionService = new SessionService(params.cwd);
-          try {
-            return await sessionService.findSessionIdIgnoringCase(sessionId);
-          } catch (error) {
-            if (error instanceof SessionIdCaseConflictError) {
-              // Parity with the daemon surfaces (toRpcError / REST 409):
-              // persisted-storage conflicts use `session_conflict`;
-              // `session_id_conflict` is reserved for live-id admission
-              // occupancy.
-              throw RequestError.internalError(
-                { errorKind: 'session_conflict', sessionId },
-                error.message,
-              );
-            }
-            throw error;
-          }
+          return resolvePersistedSessionIdForRestore(sessionService, sessionId);
         }),
       );
       if (!persistedSessionId) {

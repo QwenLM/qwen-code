@@ -2693,8 +2693,9 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
 
   it('prints the convergence paragraph the trim notice points at', async () => {
     // `noteTrimmedRanks` tells the author the shed sections "still hold —
-    // read them in the terminal report", and rank 0 is the first thing the
-    // ladder sheds. Without this line that promise names nothing.
+    // read them in the terminal report". The convergence paragraph is the
+    // LAST rank the ladder sheds, so this line is the only other copy the
+    // promise can point at. Without it that promise names nothing.
     const dir = mkdtempSync(join(tmpdir(), 'compose-convergence-'));
     const inputPath = join(dir, 'compose.json');
     const commentsPath = join(dir, 'comments.json');
@@ -8146,8 +8147,9 @@ describe('composeReview — convergence-posture deferrals (typed channel; disclo
 describe("composeReview — the composed body fits GitHub's limit", () => {
   // A POST over 65,536 characters is rejected WHOLE — the review's blockers
   // included — so the body carries its own budget. What it may drop, and in
-  // what order, is the policy under test: the deferral display yields first,
-  // the not-reviewed disclosures second, the blockers and the caps never.
+  // what order, is the policy under test: the mechanism-health note yields
+  // first, then the deferral display, then the not-reviewed disclosures,
+  // then the convergence observation, and the blockers and the caps never.
   const LIMIT = 65536;
   /** An unpaired half in EITHER direction — the oracle was one-sided. */
   const LONE_SURROGATE =
@@ -10777,19 +10779,21 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     expect(r.body).toContain('Convergence:');
   });
 
-  it('yields the whole paragraph before any disclosure that qualifies the verdict', () => {
-    // The rounds this fires on are the high-volume rounds most likely to
-    // overflow, and the paragraph decides nothing — so it is the FIRST thing
-    // the ladder sheds. Untagged it ranked with the blockers and outlived
-    // the not-reviewed disclosures, which do qualify what was read.
+  it('outlives every disclosure the ladder can shed', () => {
+    // It was rank 0 — shed second, right after the mechanism-health note —
+    // on the reasoning that an advisory paragraph decides nothing. The
+    // arithmetic refutes that ordering: rendered bilingually the paragraph
+    // is 603 characters on a volume-only signal and 2,372 at its largest,
+    // against a 56,830-character budget. Shed early it could pay for at
+    // most 4% of an overflow, so any overflow bigger than itself spent it
+    // AND went on to spend the disclosures — and the rounds this fires on
+    // are the high-volume ones where that is the normal case. It is rank 3
+    // now: the last rank to go, because it is the cheapest to keep and the
+    // only one whose reader is the PR author alone.
     //
-    // The blocker is sized so the ladder sheds rank 0 — the convergence
-    // paragraph, which yields before every other rank — and stops. Shed
-    // everything and the body is identical whichever order the ladder used,
-    // so the order would have no guard at all, which is why this constant is
-    // tuned rather than round. To retune after a body-copy change: raise it
-    // until `Convergence:` disappears, and stop before `Not reviewed:` does.
-    // The window is as wide as the paragraph itself.
+    // The blocker is sized to land in the window where the ladder sheds
+    // rank 2 and stops. To retune after a body-copy change: raise it until
+    // `Not reviewed:` disappears, and stop before `Convergence:` does.
     sideFile({
       round: 4,
       posted: 9,
@@ -10800,7 +10804,43 @@ describe('convergence diagnosis reaches the POSTED body', () => {
       modelId: 'm',
       criticalsInline: 0,
       suggestionsInline: 1,
-      bodyCriticals: ['B'.repeat(55_850)],
+      bodyCriticals: ['B'.repeat(55_600)],
+      unreviewedDimensions: ['security'],
+      draftedComments: [
+        { path: 'src/a.ts', line: 1, body: '**[Suggestion]** again' },
+      ],
+    });
+    expect(r.body.length).toBeLessThanOrEqual(65536);
+    expect(r.body).toContain('Convergence:');
+    expect(r.body).not.toContain('Not reviewed:');
+    // And the notice names what ACTUALLY went. Every notice surface keys on
+    // the rank, so a rank that sheds the wrong section announces the wrong
+    // one too.
+    expect(r.body).toContain('the not-reviewed and non-blocking disclosures');
+    expect(r.body).not.toContain('the convergence observation');
+    expect(r.bodyTrim.deferralList).toBe(false);
+  });
+
+  it('still yields — last, and named — when shedding the rest was not enough', () => {
+    // Ranked last is not unrankable. A body that cannot hold its blockers
+    // must still drop an advisory, and being ranked is what makes the trim
+    // notice say so instead of the paragraph vanishing silently.
+    //
+    // Sized one rung past the test above: the ladder sheds rank 2, still
+    // does not fit, sheds rank 3, and stops before the hard cut. To retune:
+    // raise it until `Convergence:` disappears, and stop before `TRUNCATED`
+    // appears.
+    sideFile({
+      round: 4,
+      posted: 9,
+      findings: [{ id: 'R2-1', sev: 'S', file: 'src/a.ts', title: 'x' }],
+    });
+    const r = composeReview({
+      planPath: plan(),
+      modelId: 'm',
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      bodyCriticals: ['B'.repeat(56_100)],
       unreviewedDimensions: ['security'],
       draftedComments: [
         { path: 'src/a.ts', line: 1, body: '**[Suggestion]** again' },
@@ -10808,17 +10848,11 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     });
     expect(r.body.length).toBeLessThanOrEqual(65536);
     expect(r.body).not.toContain('Convergence:');
-    // A lower-ranked disclosure outlives it: the ladder reached this far and
-    // the paragraph went first.
-    expect(r.body).toContain('Not reviewed:');
-    // And the notice names what ACTUALLY went. Every notice surface keys on
-    // the rank, so sharing a rank with the deferral list made a round that
-    // shed only this paragraph announce a deferred-findings list that never
-    // existed and point the author at artifact entries that do not exist.
     expect(r.body).toContain('the convergence observation');
-    expect(r.body).not.toContain('the deferred-findings list');
-    expect(r.body).not.toContain('findings artifact');
-    expect(r.bodyTrim.deferralList).toBe(false);
+    expect(r.body).toContain('the not-reviewed and non-blocking disclosures');
+    // The rank path, not the cut: a truncated body would prove nothing
+    // about the ORDER the ranks went in.
+    expect(r.body).not.toContain('TRUNCATED');
   });
 
   it('stamps the posting floor this round ran under beside its volume', () => {
@@ -10920,9 +10954,10 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     expect(r.body).not.toContain('9999');
   });
 
-  it('leaves a terminal copy of the paragraph the ladder sheds first', () => {
-    // Rank 0 goes first, and the trim notice tells the author the trimmed
-    // sections "still hold — read them in the terminal report". Unlike the
+  it('leaves a terminal copy of the paragraph the ladder can shed', () => {
+    // The paragraph is the LAST rank the ladder sheds, and the trim notice
+    // tells the author the trimmed sections "still hold — read them in the
+    // terminal report" whichever rank went. Unlike the
     // deferral list (findings artifact) and the not-reviewed disclosures
     // (the model's own inputs), a diagnosis derived from the side file has
     // no other copy anywhere unless the composed result carries one.
@@ -11016,6 +11051,13 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     // The promise the trim notice makes is about a body that DROPPED the
     // paragraph. A test that asserts the body still contains it never
     // reaches the case the copy exists for.
+    //
+    // Sized like the two order tests above, and for the same reason: the
+    // paragraph is the last rank the ladder sheds, so reaching a body that
+    // dropped it means sizing past every other rank. The window here runs
+    // 55,825–56,350 — this constant sat at 55,850, twenty-five characters
+    // above its own floor. To retune after a body-copy change: raise it
+    // until `Convergence:` disappears, and stop before `TRUNCATED` appears.
     sideFile({
       round: 4,
       posted: 9,
@@ -11027,13 +11069,14 @@ describe('convergence diagnosis reaches the POSTED body', () => {
       modelId: 'm',
       criticalsInline: 0,
       suggestionsInline: 1,
-      bodyCriticals: ['B'.repeat(55_850)],
+      bodyCriticals: ['B'.repeat(56_100)],
       unreviewedDimensions: ['security'],
       draftedComments: [
         { path: 'src/a.ts', line: 1, body: '**[Suggestion]** again' },
       ],
     });
     expect(r.body).not.toContain('Convergence:');
+    expect(r.body).not.toContain('TRUNCATED');
     expect(r.convergence?.en).toContain('Convergence:');
   });
 
@@ -11504,8 +11547,9 @@ describe('convergence diagnosis reaches the POSTED body', () => {
   });
 
   it('names the health note in the trim notice, not the convergence one', () => {
-    // With no diagnosis firing, rank -1 holds ONLY this note. Sharing rank 0
-    // made the notice name "the convergence observation" for a section that
+    // With no diagnosis firing, rank -1 holds ONLY this note. Sharing the
+    // convergence paragraph's rank made the notice name
+    // "the convergence observation" for a section that
     // never existed in the body.
     sideFile({ round: 4, posted: 9, fresh: 9, findings: [] });
     const r = composeReview({
