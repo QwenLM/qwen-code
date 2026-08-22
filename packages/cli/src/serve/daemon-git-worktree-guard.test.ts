@@ -524,6 +524,54 @@ it -C ${outsideRepo} reset --hard`,
     ).resolves.toEqual({ allowed: true });
   });
 
+  // cmd.exe has no backslash escape, so a path separator followed by
+  // whitespace is a word boundary in the executed argv. These shapes only
+  // mean what they say on win32, where both the separator pre-pass and the
+  // path resolution are Windows-aware; on other platforms they would
+  // exercise a chimera of win32 tokenisation and POSIX path rules.
+  describe.runIf(process.platform === 'win32')(
+    'trailing-separator-before-flag shapes (cmd.exe argv)',
+    () => {
+      it.each([' ', '\t'])(
+        'keeps whitespace after a trailing separator as a word boundary %#',
+        async (whitespace) => {
+          // `git -C <in>\ -C <out>` splits at the whitespace and applies BOTH
+          // -C flags. Gluing the whitespace into the first value would hide
+          // the second relocation inside it — the bypass this shape pins.
+          const guard = createDaemonToolGuard();
+          await expect(
+            guard(
+              request(
+                `git -C ${effectiveCwd}\\${whitespace}-C ${outsideRepo} reset --hard`,
+              ),
+            ),
+          ).resolves.toMatchObject({
+            allowed: false,
+            reason: expect.stringContaining(outsideRepo),
+          });
+        },
+      );
+
+      it('keeps a flag parked after a trailing separator visible to the analysis', async () => {
+        const guard = createDaemonToolGuard();
+        await expect(
+          guard(
+            request(
+              `git -C ${effectiveCwd}\\ --git-dir=${path.join(outsideRepo, '.git')} reset --hard`,
+            ),
+          ),
+        ).resolves.toMatchObject({ allowed: false });
+      });
+
+      it('still allows a trailing separator that stays inside the boundary', async () => {
+        const guard = createDaemonToolGuard();
+        await expect(
+          guard(request(`git -C ${effectiveCwd}\\ reset --hard`)),
+        ).resolves.toEqual({ allowed: true });
+      });
+    },
+  );
+
   it('checks work-tree and git-dir targets independently', async () => {
     const guard = createDaemonToolGuard();
 
