@@ -28,13 +28,16 @@
 import type { CommandModule } from 'yargs';
 import { isUnusableScriptEntry } from '@qwen-code/qwen-code-core';
 import { spawn, execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, normalize, resolve } from 'node:path';
 import {
   writeStdoutLine,
   writeStderrLineSafe,
 } from '../../utils/stdioHelpers.js';
-import { REVIEW_TMP_DIR, REVIEWS_DIR } from './lib/paths.js';
+import { REVIEW_TMP_DIR, REVIEWS_DIR, repoRelativeOf } from './lib/paths.js';
+import { safeTarget } from '../../utils/paths.js';
+import { gitOpt } from './lib/git.js';
 import { EFFORT_LEVELS, parseReviewArgs } from './parse-args.js';
 
 export interface RunReviewArgs {
@@ -104,6 +107,28 @@ export type RunTargetClass =
   | { kind: 'file'; base: string }
   | { kind: 'local' };
 
+/**
+ * The repo-relative, normalised spelling of a user-typed path — the same
+ * identity `capture-local --file` derives before the child names anything.
+ *
+ * Falls back to a plain normalisation when the repo root cannot be resolved
+ * (no git, a detached invocation): the pin is then whatever the token
+ * spells, which is the pre-canonicalisation behaviour and no worse than it.
+ */
+function repoRelative(target: string): string {
+  const normalised = normalize(target).replace(/^\.\//, '');
+  const root = gitOpt('rev-parse', '--show-toplevel');
+  if (root === null) return normalised;
+  // Shared with `capture-local`'s own pathspec derivation (`repoRelativeOf`
+  // in lib/paths.ts) so the pin and the artifact it waits for cannot spell
+  // one file two ways — see that function for the two corners, a symlinked
+  // root prefix and a root-level `..foo.ts`, that a re-derivation here got
+  // wrong. A path genuinely outside the repo has no repo-relative spelling;
+  // leave it as the user typed it rather than pinning on a `..` walk.
+  const { rel, escapes } = repoRelativeOf(root, normalised);
+  return escapes ? normalised : rel;
+}
+
 export function classifyRunTarget(target?: string): RunTargetClass {
   if (!target) return { kind: 'local' };
   const { target: t } = parseReviewArgs(target);
@@ -111,14 +136,28 @@ export function classifyRunTarget(target?: string): RunTargetClass {
     return { kind: 'pr', number: String(t.number) };
   }
   if (t.type === 'file') {
-    // The skill's `{target}` token for a file review is the file's basename
-    // (`--target <filename>` in the capture step), so that is the identity
-    // the child's artifact names carry. Trailing separators are stripped
+    // The skill's `{target}` token for a file review is the file's
+    // repo-relative path put through `safeTarget` — the same normalization
+    // the CLI applies when it derives filenames — so that is the identity
+    // the child's artifact names carry. It used to be the BASENAME, and the
+    // two diverge for every file in a subdirectory: the child would write
+    // `qwen-review-src_index.ts-composed.json` while the parent polled
+    // `qwen-review-index.ts-composed.json`, never matched, and reported "no
+    // composed verdict was produced" over a review that had already run (and
+    // with `--comment`, already posted). Trailing separators are stripped
     // first: a tab-completed `src/` classifies as a file target and reviews
-    // the directory, and a bare `.pop()` would return `''` — a pin
-    // (`qwen-review--composed.json`) no child artifact can ever carry.
-    const trimmed = t.path.replace(/[\\/]+$/, '');
-    return { kind: 'file', base: trimmed.split(/[\\/]/).pop() || trimmed };
+    // the directory, and the empty remainder would pin a name no child
+    // artifact can ever carry.
+    // The token is CANONICALISED before flattening, because the child
+    // canonicalises too: `capture-local --file` resolves the path against
+    // the caller's directory and re-bases it on the repo root, and SKILL.md
+    // names the artifacts from THAT. Flattening the raw token agreed only
+    // when the user typed the canonical repo-relative spelling — an absolute
+    // path, a `src/../src/foo.ts`, or a path typed from a subdirectory each
+    // produced a pin the child never writes: the same never-matching poll
+    // this pin was just fixed to avoid, for a new input class.
+    const trimmed = t.path.replace(/[\\/]+$/, '') || t.path;
+    return { kind: 'file', base: safeTarget(repoRelative(trimmed)) };
   }
   return { kind: 'local' };
 }
@@ -153,6 +192,59 @@ const escapeRe = (s: string): string =>
  * Only a per-run nonce in the child's artifact names could key these
  * apart, and the bundled skill, not this command, would have to mint it.
  */
+/**
+ * The capture's own "nothing to review" verdict for this target, if it wrote
+ * one this run.
+ *
+ * Read off a sidecar the CLI writes beside the plan, and fenced by the run
+ * epoch the same way every other artifact here is: a stop left by an earlier
+ * run must not make this one look decided.
+ */
+function nothingToReviewFrom(
+  cls: RunTargetClass,
+  cutoffMs: number,
+  runId: string,
+): { reason: string } | null {
+  // The capture's sidecar, not the plan: `--out` is the orchestrator's to
+  // choose, so the plan has no name the parent can predict. This one is
+  // derived from the same target the parent derives.
+  const name = `qwen-review-${planStemFor(cls)}-stop.json`;
+  const found = newestArtifactSince(
+    REVIEW_TMP_DIR,
+    new RegExp(`^${escapeRe(name)}$`),
+    cutoffMs,
+  );
+  if (!found) return null;
+  try {
+    const stop = JSON.parse(readFileSync(found.path, 'utf8')) as {
+      reason?: unknown;
+      runId?: unknown;
+    };
+    // Stamped by THIS run, or it is not this run's verdict. The name is a
+    // flattened target token and that token is not injective, so a concurrent
+    // review whose path flattens alike writes the same file — and its
+    // its verdict would decide this run's exit code.
+    if (stop.runId !== runId) return null;
+    if (typeof stop.reason !== 'string' || stop.reason === '') return null;
+    return { reason: stop.reason };
+  } catch {
+    return null; // unreadable or not JSON: no claim either way
+  }
+}
+
+/** The `<target>` slot in the plan's filename, per target class. */
+function planStemFor(cls: RunTargetClass): string {
+  switch (cls.kind) {
+    case 'pr':
+      return `pr-${cls.number}`;
+    case 'file':
+      return cls.base;
+    case 'local':
+    default:
+      return 'local';
+  }
+}
+
 export function composedNameFor(cls: RunTargetClass): string {
   switch (cls.kind) {
     case 'pr':
@@ -385,8 +477,15 @@ export function killProcessGroup(pid: number, signal: NodeJS.Signals): void {
  * `isUnusableScriptEntry`, preserving the bare-`qwen` fallback instead of a
  * stamp that dies on exit 126.
  */
-function childEnv(): NodeJS.ProcessEnv {
+function childEnv(runId: string): NodeJS.ProcessEnv {
   const env = { ...process.env };
+  // Ties every artifact this run's child writes back to THIS run. The stop
+  // sidecar is verdict-bearing — it decides `completed` and can carry a
+  // REQUEST_CHANGES event — and its name is the flattened target token, which
+  // is not injective: two concurrent file reviews whose paths flatten alike
+  // share the path, and the epoch fence separates earlier runs, not
+  // concurrent ones. A nonce is what a name cannot be.
+  env['QWEN_REVIEW_RUN_ID'] = runId;
   const inherited = env['QWEN_CODE_CLI'];
   const ownEntry = process.argv[1];
   if (!ownEntry) {
@@ -420,6 +519,10 @@ async function runReview(args: RunReviewArgs): Promise<void> {
   // own verdict must not be discarded over clock granularity. Artifacts from a
   // previous review are minutes old, far outside any slack.
   const cutoffMs = startMs - 2_000;
+  // Names cannot separate concurrent runs — the stop sidecar's is a flattened
+  // target token, and that token is not injective — so this run stamps its
+  // child and accepts only artifacts stamped back.
+  const runId = randomUUID();
 
   // Re-enter THIS build's CLI, not whatever `qwen` PATH resolves to — the same
   // version-skew rule the skill's own subprocesses follow via QWEN_CODE_CLI.
@@ -439,7 +542,7 @@ async function runReview(args: RunReviewArgs): Promise<void> {
       args.approvalMode,
     ],
     {
-      env: childEnv(),
+      env: childEnv(runId),
       // stdin CLOSED, not inherited: piped input would be prepended to the
       // prompt and the leading `/` would no longer be the first character —
       // the slash command would reach the model as plain text.
@@ -570,7 +673,32 @@ async function runReview(args: RunReviewArgs): Promise<void> {
     newestArtifactSince(REVIEWS_DIR, reportPatternFor(targetClass), cutoffMs)
       ?.path ?? null;
 
-  const completed = composed !== null;
+  // A round the CAPTURE decided had nothing to review is complete, even
+  // though no composed verdict exists: `compose-review` is reached only from
+  // Step 6, and both stops fire in Step 1. Polling for the verdict alone
+  // reported "Review did not complete" over a round whose own output was
+  // decided — a cached second round on an unchanged tree, or a clean tree
+  // whose earlier blocker the ledger still renders as standing. The signal is
+  // a field the CLI wrote into its own plan, not a sentence the model chose.
+  const stop = nothingToReviewFrom(targetClass, cutoffMs, runId);
+  const completed = composed !== null || stop !== null;
+  // A stop carries NO synthesised verdict, deliberately.
+  //
+  // An earlier attempt mapped the cache's open-Critical count to
+  // REQUEST_CHANGES, reasoning that a stop round rendering standing blockers
+  // should not pass `--fail-on`. It is the wrong direction of wrong. The
+  // ledger is only rewritten by a round that writes the cache, and a stop
+  // round does not — so once a user FIXES the blocker and commits (the
+  // ordinary workflow), every later round reads the same stale `open` entry,
+  // fails the gate over code that no longer contains the defect, and nothing
+  // the user can do clears it. A false failure that no action clears is worse
+  // than a false pass beside a rendered blocker list, and the CLI cannot tell
+  // the two cases apart: both leave a clean tree and a moved HEAD.
+  //
+  // The real answer to the gate question is a composed verdict on the stop
+  // path — a verdict the model produces after re-ruling the ledger, not one
+  // this process invents from a file it cannot date against the code.
+
   const result: RunReviewResult = {
     completed,
     event: composed?.event ?? null,

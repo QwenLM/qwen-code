@@ -251,3 +251,57 @@ export function stringifyPlanReport(report: unknown): string {
       ) + '\n'
   );
 }
+
+/**
+ * The plan's `incremental` field, as both producers write it and every
+ * consumer reads it.
+ *
+ * NESTED, deliberately. The PR flow's block answers two questions — MAY this
+ * anchor scope the round (`since`/`effective`/`reason`, which only that flow
+ * has) and WHICH files it scoped to — and the second is what the brief
+ * renderer and the roster read. The local flow has no ruling to report, only
+ * a scope, so it writes the same `scope` key and nothing else. Flattening it
+ * on one side is not a shorter spelling of the same thing: the consumers key
+ * on `incremental.scope`, so a flat local block renders no incremental frame
+ * at all and every widened file is re-reviewed from scratch — the exact token
+ * burn this feature exists to prevent, and invisible, because the diff IS
+ * sliced and the round looks incremental everywhere else.
+ */
+export interface IncrementalBlock {
+  scope?: IncrementalScope;
+}
+
+/**
+ * WHICH files an incrementally-scoped round reviews, and why. It lives HERE,
+ * beside the other plan-report shapes, and not in a module of its own: a
+ * types-only module is erased by esbuild at every import site, and the
+ * bundle-staleness digest guard rightly refuses a review-source file the
+ * bundle can never contain.
+ */
+export interface IncrementalScope {
+  /**
+   * What the scope is measured FROM: a commit sha on the PR flow, a
+   * content-addressed state id on the local flow. Display-only downstream —
+   * briefs render its first 12 characters.
+   */
+  anchor: string;
+  /** Files changed since the anchor — reviewed on their hunks, in full. */
+  deltaFiles: string[];
+  /**
+   * Still-clean files pulled back in by the one-hop widening, each with the
+   * changed files it imports — the seam its brief directs the agent at.
+   */
+  interaction: Array<{ path: string; importsChanged: string[] }>;
+  /**
+   * How many still-clean files this scope leaves out. A count, not a list:
+   * nothing downstream reads the names, and on a large plan the list alone
+   * measured 23 KB against the plan's one-read budget.
+   */
+  contextFileCount: number;
+  /**
+   * Where the full-range diff still is, for a reader who needs all of it.
+   * The local flow writes it; the PR flow has no retained full-range diff to
+   * point at yet and omits the field.
+   */
+  fullDiffPath?: string | null;
+}

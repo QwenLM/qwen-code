@@ -7,6 +7,47 @@
 import { describe, expect, it } from 'vitest';
 import { safeTarget } from './paths.js';
 
+describe('safeTarget — the length cap', () => {
+  it('caps a legal-but-deep path instead of throwing ENAMETOOLONG', () => {
+    // Every component here is well under NAME_MAX; only the FLATTENED
+    // spelling is long. Uncapped it became a 268-character filename once
+    // `tmpFile` wrapped it, so `writeFileSync` threw and the capture died
+    // before it wrote the plan — every round, for that target and no other.
+    // The class is new to the repo-relative target: a basename never got
+    // near the ceiling.
+    const deep = `${'d'.repeat(230)}/x.ts`;
+    const stem = safeTarget(deep);
+    expect(stem.length).toBe(64);
+    // The wrapped filename clears NAME_MAX with room to spare.
+    expect(`qwen-review-${stem}-cache-candidate.json`.length).toBeLessThan(255);
+  });
+
+  it('keeps two deep paths with a shared head apart', () => {
+    // Ordinary in a monorepo, and a bare cut would give them one cache, one
+    // set of artifacts, and each other's anchor.
+    const head = 'a'.repeat(200);
+    expect(safeTarget(`${head}/one.ts`)).not.toBe(safeTarget(`${head}/two.ts`));
+  });
+
+  it('is deterministic, and leaves a short target byte-identical', () => {
+    // The naming is a two-sided contract — the parent polls for a name the
+    // child writes — so the cap must not move any slug that was not broken.
+    expect(safeTarget('src/foo.ts')).toBe('src_foo.ts');
+    const deep = `${'d'.repeat(230)}/x.ts`;
+    expect(safeTarget(deep)).toBe(safeTarget(deep));
+  });
+
+  it('leaves capped stems mutually prefix-free, for the cleanup sweep', () => {
+    // `cleanup` filters `startsWith(tmpPrefix(target))`. Every capped stem is
+    // exactly 64 characters, so none can be a strict prefix of another.
+    const a = safeTarget('x'.repeat(300));
+    const b = safeTarget('y'.repeat(300));
+    expect(a.length).toBe(b.length);
+    expect(a.startsWith(b)).toBe(false);
+    expect(b.startsWith(a)).toBe(false);
+  });
+});
+
 describe('safeTarget', () => {
   it('flattens separators but preserves dotted slugs', () => {
     expect(safeTarget('src/foo.ts')).toBe('src_foo.ts');

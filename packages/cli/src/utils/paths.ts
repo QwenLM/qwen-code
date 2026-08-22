@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
+
 // CLI-level shared path helpers — the home for pieces more than one command
 // family consumes, so neither imports across command groups.
 
@@ -36,5 +38,37 @@ export function safeTarget(target: string): string {
   const flat = target
     .replace(/[^A-Za-z0-9._-]/g, '_') // separators and anything odd → underscore
     .replace(/\.\.+/g, '_'); // no run of dots survives as a traversal token
-  return flat.replace(/^[._]+/, '') || 'target';
+  const stem = flat.replace(/^[._]+/, '') || 'target';
+  if (stem.length <= SAFE_TARGET_MAX) return stem;
+  // Capped, because the stem is now a whole repo-relative path rather than a
+  // basename, and it rides inside a FILENAME: `qwen-review-<stem>-<suffix>`
+  // adds 33 characters around it, so a legal path whose flattened spelling
+  // passes ~222 makes every write for that target throw ENAMETOOLONG on a
+  // NAME_MAX-255 filesystem — the capture dies before it writes the plan, on
+  // every round, for that target and no other.
+  //
+  // Suffixed with a digest of the FULL spelling, not truncated bare: two deep
+  // paths sharing a 56-character head are ordinary in a monorepo, and a bare
+  // cut would give them one cache and one set of artifacts.
+  //
+  // On the prefix sweep this was deferred for (`cleanup` filters
+  // `startsWith(tmpPrefix(target))`, review-round finding R8-7): capped stems
+  // are mutually prefix-free by construction — every one is exactly
+  // `SAFE_TARGET_MAX` long, so none can be a strict prefix of another. The
+  // short-stem hazard the sweep already had (`abc` prefixing `abc-def`) is
+  // untouched in both directions.
+  return `${stem.slice(0, SAFE_TARGET_MAX - 9)}-${createHash('sha256')
+    .update(stem)
+    .digest('hex')
+    .slice(0, 8)}`;
 }
+
+/**
+ * Longest stem `safeTarget` emits.
+ *
+ * 64 matches `scratchLabel`'s cap, which was set against the same NAME_MAX
+ * ceiling: 12 characters of `qwen-review-` prefix, the longest suffix any
+ * producer appends (21, `-cache-candidate.json`), and the stem leaves ~158
+ * characters of headroom.
+ */
+const SAFE_TARGET_MAX = 64;

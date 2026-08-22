@@ -228,12 +228,23 @@ describe('target-pinned artifact patterns', () => {
       number: '9014',
     });
     // A path that merely contains /pull/<n> is a FILE target to the parser,
-    // and the file identity is the basename (the skill's `{target}` token):
+    // and the file identity is the skill's `{target}` token: the
+    // repo-relative path put through the CLI's own `safeTarget`
+    // normalization, NOT the basename. (This suite mocks child_process, so
+    // the git-backed canonicalisation falls back to the token as typed —
+    // the canonical-spelling equivalence is pinned in
+    // `run-classify.integration.test.ts`, which uses real git.)
     expect(classifyRunTarget('docs/pull/42')).toEqual({
       kind: 'file',
-      base: '42',
+      base: 'docs_pull_42',
     });
     expect(classifyRunTarget('src/foo.ts')).toEqual({
+      kind: 'file',
+      base: 'src_foo.ts',
+    });
+    // Root-level targets are unchanged — which is why the drift went
+    // unnoticed: every fixture used one.
+    expect(classifyRunTarget('foo.ts')).toEqual({
       kind: 'file',
       base: 'foo.ts',
     });
@@ -294,6 +305,15 @@ describe('target-pinned artifact patterns', () => {
     // the local branch's PR exclusion would self-reject (`.md` not doubled).
     const prNamed = reportPatternFor({ kind: 'file', base: 'pr-1234.md' });
     expect(prNamed.test('2026-08-13-101010-pr-1234.md')).toBe(true);
+  });
+});
+
+describe('a decided stop counts as completed', () => {
+  it('exits 0 when the capture said there was nothing to review', () => {
+    // `compose-review` runs only in Step 6; both stops fire in Step 1, so no
+    // composed verdict exists. Polling for the verdict alone reported
+    // "Review did not complete" over a round whose own output was decided.
+    expect(exitCodeFor(true, null, 'none')).toBe(0);
   });
 });
 
