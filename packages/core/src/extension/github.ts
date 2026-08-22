@@ -144,7 +144,12 @@ async function assertPinnedGitSupported(): Promise<void> {
     (version.major === MINIMUM_PINNED_GIT_VERSION.major &&
       version.minor < MINIMUM_PINNED_GIT_VERSION.minor)
   ) {
-    throw new Error('Public extension Git installs require Git 2.37 or newer.');
+    const detectedVersion = [version.major, version.minor, version.patch]
+      .filter((component) => component !== undefined)
+      .join('.');
+    throw new Error(
+      `Public extension Git installs require Git 2.37 or newer for secure DNS pinning; found Git ${detectedVersion}. Upgrade Git, or install the extension from a local path or archive instead.`,
+    );
   }
 }
 

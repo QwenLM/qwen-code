@@ -67,7 +67,9 @@
 }
 
 .chatSummaryThoughtSummary:focus-visible {
-  outline: none;
+  outline: 2px solid color-mix(in srgb, var(--primary) 45%, transparent);
+  outline-offset: 2px;
+  border-radius: 4px;
 }
 
 .chatSummaryThoughtIcon {

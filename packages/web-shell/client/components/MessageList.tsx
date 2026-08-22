@@ -21,6 +21,7 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import type {
   ToolGroupMessage as DaemonToolGroupMessage,
+  ThinkingMessage as DaemonThinkingMessage,
   Message,
   ACPToolCall,
   TurnCollapseHead,
@@ -62,7 +63,7 @@ import { WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS } from '../constants/sessions';
 import type { AttachmentPreviewRequest } from '../adapters/messageTypes';
 
 const noopTurnOutputAction = () => undefined;
-const RELOAD_TRANSCRIPT_DELAY_MS = 120_000;
+const RELOAD_TRANSCRIPT_DELAY_MS = 15_000;
 const TURN_LAYOUT_ANIMATION_MS = 180;
 const AGENT_SUMMARY_COLLAPSE_DELAY_MS = 400;
 // A reconciled-terminal sibling whose completion notification is delayed (not
@@ -95,6 +96,7 @@ interface MessageListProps {
     subscribe(listener: () => void): () => void;
   };
   onReloadTranscript?: (signal: AbortSignal) => Promise<void>;
+  transcriptReloadPaused?: boolean;
   /**
    * True while the agent is still answering. The newest turn then stays
    * expanded and un-collapsible so streaming output is never hidden.
@@ -417,6 +419,36 @@ function mergeCompactToolGroups(
     i = lastRunIdx + 1;
   }
 
+  return result;
+}
+
+function updateCompactStreamingThinkingTail(
+  messages: readonly Message[],
+  tail: DaemonThinkingMessage,
+): Message[] | undefined {
+  const group = messages[messages.length - 1];
+  if (
+    group?.role !== 'tool_group' ||
+    !group.id.startsWith('summary-') ||
+    !group.thoughts?.length
+  ) {
+    return undefined;
+  }
+  const thought = group.thoughts[group.thoughts.length - 1];
+  if (thought?.isStreaming !== true) return undefined;
+
+  const thoughts = group.thoughts.slice();
+  thoughts[thoughts.length - 1] = {
+    ...thought,
+    content: tail.content,
+    isStreaming: true,
+  };
+  const result = messages.slice();
+  result[result.length - 1] = {
+    ...group,
+    thoughts,
+    ...(group.id === `summary-${tail.id}` ? { timestamp: tail.timestamp } : {}),
+  };
   return result;
 }
 
@@ -2695,6 +2727,7 @@ export const MessageList = memo(
       transcriptActivity,
       onReloadTranscript,
       isResponding = false,
+      transcriptReloadPaused = isResponding,
       activeTurnStartedAt,
       welcomeHeader,
       centerWelcomeHeader = false,
@@ -2752,22 +2785,28 @@ export const MessageList = memo(
     const mergedMessages = useMemo(() => {
       const cached = mergedMessagesCache.current;
       const tail = messages[messages.length - 1];
-      let value: Message[];
+      let value: Message[] | undefined;
       if (
         streamingTailContentOnly &&
-        tail?.role === 'assistant' &&
         cached?.sourceMessages === previousMessagesRef.current &&
         cached?.compactMode === compactMode &&
-        cached.pendingApproval === pendingApproval &&
-        cached.value[cached.value.length - 1]?.id === tail.id
+        cached.pendingApproval === pendingApproval
       ) {
-        value = cached.value.slice();
-        value[value.length - 1] = tail;
-      } else {
-        value = compactMode
-          ? mergeCompactToolGroups(messages, pendingApproval)
-          : messages;
+        if (
+          tail?.role === 'assistant' &&
+          cached.value[cached.value.length - 1]?.id === tail.id
+        ) {
+          value = cached.value.slice();
+          value[value.length - 1] = tail;
+        } else if (tail?.role === 'thinking') {
+          value = compactMode
+            ? updateCompactStreamingThinkingTail(cached.value, tail)
+            : messages;
+        }
       }
+      value ??= compactMode
+        ? mergeCompactToolGroups(messages, pendingApproval)
+        : messages;
       mergedMessagesCache.current = {
         sourceMessages: messages,
         compactMode,
@@ -2802,7 +2841,6 @@ export const MessageList = memo(
       if (
         streamingTailContentOnly &&
         isResponding &&
-        tail?.role === 'assistant' &&
         cached?.sourceMessages === previousMessagesRef.current &&
         cached?.compactMode === compactMode &&
         cached.pendingApproval === pendingApproval &&
@@ -3256,14 +3294,13 @@ export const MessageList = memo(
     const transcriptReloadBaseline = useRef<
       | {
           lastEventId?: number;
-          blockCount: number;
         }
       | undefined
     >(undefined);
     const transcriptBlockCountRef = useRef(transcriptBlockCount);
-    const isRespondingRef = useRef(isResponding);
+    const transcriptReloadPausedRef = useRef(transcriptReloadPaused);
     transcriptBlockCountRef.current = transcriptBlockCount;
-    isRespondingRef.current = isResponding;
+    transcriptReloadPausedRef.current = transcriptReloadPaused;
     const lastUnderfillAutoLoad = useRef<{
       loader: typeof onLoadOlderHistory;
       totalVirtualSize: number;
@@ -3639,25 +3676,27 @@ export const MessageList = memo(
       const baseline = transcriptReloadBaseline.current;
       if (baseline) {
         const lastEventId = transcriptActivity?.getSnapshot().lastEventId;
-        if (
-          lastEventId === baseline.lastEventId &&
-          transcriptBlockCountRef.current <= baseline.blockCount
-        ) {
-          return;
-        }
+        if (lastEventId === baseline.lastEventId) return;
         transcriptReloadBaseline.current = undefined;
       }
       if (
         !onReloadTranscript ||
         reloadTranscriptAbort.current !== undefined ||
         followPausedByUserRef.current ||
-        isRespondingRef.current ||
+        transcriptReloadPausedRef.current ||
         transcriptBlockCountRef.current <= WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS
       ) {
         return;
       }
       reloadTranscriptTimer.current = window.setTimeout(() => {
         reloadTranscriptTimer.current = undefined;
+        if (
+          transcriptReloadPausedRef.current ||
+          followPausedByUserRef.current ||
+          transcriptBlockCountRef.current <= WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS
+        ) {
+          return;
+        }
         const el = containerRef.current;
         if (!el) return;
         const distanceFromBottom =
@@ -3673,8 +3712,6 @@ export const MessageList = memo(
               ...(snapshot?.lastEventId !== undefined
                 ? { lastEventId: snapshot.lastEventId }
                 : {}),
-              blockCount:
-                snapshot?.blocks?.length ?? transcriptBlockCountRef.current,
             };
           })
           .catch((error: unknown) => {
@@ -3710,8 +3747,17 @@ export const MessageList = memo(
     }, [transcriptActivity, scheduleTranscriptReload, cancelTranscriptReload]);
 
     useEffect(() => {
+      if (transcriptReloadPaused) {
+        cancelTranscriptReload();
+        return;
+      }
       scheduleTranscriptReload();
-    }, [isResponding, scheduleTranscriptReload, transcriptBlockCount]);
+    }, [
+      cancelTranscriptReload,
+      transcriptReloadPaused,
+      scheduleTranscriptReload,
+      transcriptBlockCount,
+    ]);
 
     const scheduleFollowRecheck = useCallback(() => {
       pendingFollowRecheck.current = true;
@@ -5140,6 +5186,9 @@ export const MessageList = memo(
         item ? getChatRowClassName(item) : undefined,
       [],
     );
+    const autoScrollContentSignal = useVirtualScroll
+      ? totalVirtualSize
+      : messages;
 
     // ── Single auto-scroll driver (rules 1, 5, 6) ──────────────────────
     // Fires whenever the virtualizer's total content height changes —
@@ -5176,8 +5225,7 @@ export const MessageList = memo(
         pendingNewUserSmoothScroll.current = false;
       }
     }, [
-      totalVirtualSize,
-      messages,
+      autoScrollContentSignal,
       totalCount,
       catchingUp,
       scrollToBottom,
@@ -5186,7 +5234,7 @@ export const MessageList = memo(
 
     useLayoutEffect(() => {
       scheduleScrollOverflowReport();
-    }, [messages, scheduleScrollOverflowReport, totalCount, totalVirtualSize]);
+    }, [autoScrollContentSignal, scheduleScrollOverflowReport, totalCount]);
 
     return (
       <div
