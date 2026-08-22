@@ -17562,6 +17562,12 @@ describe('CoreToolScheduler activation wiring', () => {
     scheduler: CoreToolScheduler;
     onAllToolCallsComplete: ReturnType<typeof vi.fn>;
   } {
+    // Exposed so the gate's SECOND effect is assertable. Consuming the
+    // announcement is what starves the parent: the orchestrator's
+    // `drainSkillAndCommandReminders` consumes exactly these keys, so a
+    // restricted subagent that marks them used hides the activation from the
+    // owner that can act on it — with no reminder of its own to show for it.
+    const addInlineAnnouncedSkillKeys = vi.fn();
     const fsTool = new MockTool({
       name: ToolNames.READ_FILE,
       execute: vi.fn().mockResolvedValue(
@@ -17639,7 +17645,7 @@ describe('CoreToolScheduler activation wiring', () => {
       },
       getDisabledSkillNames: () => new Set<string>(),
       getModelInvocableCommandsProvider: () => null,
-      addInlineAnnouncedSkillKeys: vi.fn(),
+      addInlineAnnouncedSkillKeys,
     } as unknown as Config;
 
     const scheduler = new CoreToolScheduler({
@@ -17652,7 +17658,7 @@ describe('CoreToolScheduler activation wiring', () => {
         ? {}
         : { hasSkillTool: () => opts.declaredHasSkillTool! }),
     });
-    return { scheduler, onAllToolCallsComplete };
+    return { scheduler, onAllToolCallsComplete, addInlineAnnouncedSkillKeys };
   }
 
   function getResponseText(call: ToolCall): string {
@@ -17701,7 +17707,7 @@ describe('CoreToolScheduler activation wiring', () => {
     // found`, and an announcement marked consumed on the shared Config, so
     // the parent that CAN invoke it never learns the skill activated.
     const matchAndActivateByPaths = vi.fn().mockResolvedValue(['tsx-helper']);
-    const { scheduler, onAllToolCallsComplete } =
+    const { scheduler, onAllToolCallsComplete, addInlineAnnouncedSkillKeys } =
       buildSchedulerWithSkillManager({
         matchAndActivateByPaths,
         skillToolPresent: true,
@@ -17726,16 +17732,26 @@ describe('CoreToolScheduler activation wiring', () => {
     const responseText = getResponseText(completed[0]);
     expect(responseText).not.toContain('became available via the Skill tool');
     expect(responseText).not.toContain('tsx-helper');
+    // The half that starves the parent. Moving this call outside the gate
+    // while leaving the text inside passes every other assertion here: the
+    // subagent stays silent AND the orchestrator's drain finds the key
+    // already consumed, so nobody announces the activation.
+    expect(addInlineAnnouncedSkillKeys).not.toHaveBeenCalled();
   });
 
   it('announces when the owner declares SkillTool, whatever the registry holds', async () => {
     // The other direction, so the predicate is not mistaken for a second
     // "off" switch: an owner that declares the tool gets the reminder.
+    //
+    // `skillToolPresent: false` is the point. With both inputs true an
+    // implementation that AND-ed them would pass this too; with the registry
+    // saying no and the declaration saying yes, only an implementation that
+    // actually prefers the declaration survives.
     const matchAndActivateByPaths = vi.fn().mockResolvedValue(['tsx-helper']);
-    const { scheduler, onAllToolCallsComplete } =
+    const { scheduler, onAllToolCallsComplete, addInlineAnnouncedSkillKeys } =
       buildSchedulerWithSkillManager({
         matchAndActivateByPaths,
-        skillToolPresent: true,
+        skillToolPresent: false,
         declaredHasSkillTool: true,
       });
 
@@ -17756,6 +17772,10 @@ describe('CoreToolScheduler activation wiring', () => {
     expect(getResponseText(completed[0])).toContain(
       'became available via the Skill tool',
     );
+    // …and the announcement IS consumed here, so the parent does not repeat
+    // what this agent already showed. The pair is what makes the negative
+    // assertion above mean "not consumed" rather than "never consumed".
+    expect(addInlineAnnouncedSkillKeys).toHaveBeenCalled();
   });
 
   it('includes concrete result paths in skill activation candidates', async () => {

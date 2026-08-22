@@ -716,17 +716,64 @@ export class AgentCore {
     // Apply disallowedTools blocklist (supports MCP server-level patterns).
     if (this.toolConfig?.disallowedTools?.length) {
       const disallowed = this.toolConfig.disallowedTools;
-      return toolsList.filter((t) => {
-        if (!t.name) return true;
-        return !disallowed.some((pattern) =>
-          t.name!.startsWith('mcp__')
-            ? matchesMcpPattern(pattern, t.name!)
-            : pattern === t.name,
-        );
-      });
+      return this.rememberDeclared(
+        toolsList.filter((t) => {
+          if (!t.name) return true;
+          return !disallowed.some((pattern) =>
+            t.name!.startsWith('mcp__')
+              ? matchesMcpPattern(pattern, t.name!)
+              : pattern === t.name,
+          );
+        }),
+      );
     }
 
-    return toolsList;
+    return this.rememberDeclared(toolsList);
+  }
+
+  /**
+   * Names of the declarations this agent last sent to the model.
+   *
+   * Anything answering "can the model invoke tool X" reads THIS rather than
+   * re-deriving it, because every re-derivation is a copy of `prepareTools`'
+   * filters that can fall behind them — which is the shape of the defect this
+   * gate exists for. `willHaveSkillTool()` is one such copy: it reads
+   * `toolConfig.tools`, so it cannot see the `disallowedTools` blocklist, an
+   * inline-only declaration set, or a tool the permission layer kept out of
+   * the registry. It stays (the startup snapshot runs before any
+   * `prepareTools()` and has nothing better to consult) but it is an
+   * approximation, and must not be used where the exact answer exists.
+   */
+  private declaredToolNames?: ReadonlySet<string>;
+
+  /**
+   * Whether the model was DECLARED the Skill tool — the answer the
+   * skill-activation gate needs.
+   *
+   * A named method rather than an inline closure so a test can read the
+   * answer rather than the record it reads from: asserting only on
+   * `declaredToolNames` leaves the gate free to consult something else, which
+   * is precisely the revert this is guarding.
+   *
+   * Before the first `prepareTools()` there are no declarations to consult,
+   * and `willHaveSkillTool()` is the best answer available — the same one the
+   * startup snapshot uses.
+   */
+  private hasSkillToolForGate(): boolean {
+    return this.declaredToolNames
+      ? this.declaredToolNames.has(ToolNames.SKILL)
+      : this.willHaveSkillTool();
+  }
+
+  private rememberDeclared(
+    declarations: FunctionDeclaration[],
+  ): FunctionDeclaration[] {
+    this.declaredToolNames = new Set(
+      declarations
+        .map((d) => d.name)
+        .filter((n): n is string => typeof n === 'string' && n.length > 0),
+    );
+    return declarations;
   }
 
   // ─── Reasoning Loop ───────────────────────────────────────
@@ -1732,13 +1779,18 @@ export class AgentCore {
     const scheduler = new CoreToolScheduler({
       config: this.runtimeContext,
       shouldObserveProducer: (callId) => !emittedCallIds.has(callId),
-      // The same predicate that decides whether to inject the startup
-      // `<available_skills>` snapshot, so the snapshot and the per-tool-call
-      // activation reminder cannot disagree about whether this agent can
-      // invoke a skill. The scheduler's own fallback reads the registry,
-      // where `SKILL` is present for every subagent regardless of what its
-      // `tools` list declares.
-      hasSkillTool: () => this.willHaveSkillTool(),
+      // Answered from the declarations actually sent to the model, so every
+      // filter `prepareTools` applies is already accounted for: the
+      // `disallowedTools` blocklist, an inline-only declaration set, and a
+      // tool the permission layer kept out of the registry all reach this
+      // through the same list the model saw. Deriving it from `toolConfig`
+      // instead would be a second copy of those filters, and a stale copy is
+      // exactly the defect this gate exists for.
+      //
+      // The fallback covers the window before the first `prepareTools()`:
+      // `willHaveSkillTool()` is the best answer available then, and it is
+      // the one the startup snapshot already uses.
+      hasSkillTool: () => this.hasSkillToolForGate(),
       outputUpdateHandler: (callId, outputChunk) => {
         // Shell liveness heartbeats have no subagent consumer; broadcasting
         // one would overwrite the live output view kept in liveOutputs.
