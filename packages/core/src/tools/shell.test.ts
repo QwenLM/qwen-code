@@ -7311,6 +7311,41 @@ describe('ShellTool', () => {
       expect(details.type).toBe('exec');
     });
 
+    it('should exclude a vouched sub-command from confirmation details (issue #9694)', async () => {
+      const params = {
+        command: 'ib domain list && curl example.com',
+        is_background: false,
+      };
+
+      const unvouched = (await shellTool
+        .build(params)
+        .getConfirmationDetails(new AbortController().signal)) as {
+        rootCommand: string;
+        permissionRules: string[];
+      };
+      expect(unvouched.rootCommand).toContain('ib');
+
+      (
+        mockConfig.getPlanModeReadOnlyRoots as ReturnType<typeof vi.fn>
+      ).mockReturnValue(new Set(['ib']));
+
+      const details = (await shellTool
+        .build(params)
+        .getConfirmationDetails(new AbortController().signal)) as {
+        rootCommand: string;
+        permissionRules: string[];
+      };
+
+      expect(details.rootCommand).not.toContain('ib');
+      expect(details.rootCommand).toContain('curl');
+      expect(details.permissionRules).not.toContainEqual(
+        expect.stringContaining('ib'),
+      );
+      expect(details.permissionRules).toContainEqual(
+        expect.stringContaining('curl'),
+      );
+    });
+
     it('should exclude read-only sub-commands from confirmation details in compound commands', async () => {
       // "cd" is read-only, "npm run build" is not
       const params = {

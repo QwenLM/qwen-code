@@ -135,6 +135,122 @@ const READ_ONLY_ROOT_COMMANDS = new Set([
 
 const WRITE_ROOT_COMMAND =
   /^(chgrp|chmod|chown|cp|install|ln|mkdir|mkfifo|mknod|mv|rename|rm|rmdir|shred|touch|truncate|unlink)$/;
+
+/**
+ * Roots that never classify read-only, whatever a caller vouches for.
+ *
+ * Two families, both of which make the analysis below meaningless rather than
+ * merely uncertain:
+ *
+ * - Launchers — shell and language interpreters, multi-call binaries, and
+ *   wrappers whose whole job is to execute a command taken from their
+ *   arguments. Trusting one is not a statement about that binary, it is a
+ *   statement about whatever it is handed (`time rm -rf build`).
+ * - State planters — builtins that rebind how a *later* command resolves.
+ *   The classifier evaluates statements independently, so it cannot see that
+ *   `hash -p ./evil/git git && git status` turns a trusted root into an
+ *   attacker-chosen binary.
+ *
+ * The launcher family cannot be enumerated exhaustively; `vouchedRootIsSafe`
+ * below is the structural half of the defence. The state-planter family is
+ * the enumerable set of bash builtins that mutate resolution state.
+ */
+export const NEVER_READ_ONLY_ROOT_COMMANDS: ReadonlySet<string> = new Set([
+  // Shell interpreters and multi-call binaries.
+  'bash',
+  'busybox',
+  'cmd',
+  'cmd.exe',
+  'csh',
+  'dash',
+  'fish',
+  'ksh',
+  'powershell',
+  'pwsh',
+  'sh',
+  'tcsh',
+  'toybox',
+  'zsh',
+  // Privilege, namespace, scheduling, and process launchers.
+  'at',
+  'batch',
+  'caffeinate',
+  'chroot',
+  'doas',
+  'env',
+  'flock',
+  'ionice',
+  'nice',
+  'nohup',
+  'nsenter',
+  'parallel',
+  'pkexec',
+  'runuser',
+  'script',
+  'setsid',
+  'sg',
+  'stdbuf',
+  'su',
+  'sudo',
+  'time',
+  'timeout',
+  'unshare',
+  'watch',
+  'wine',
+  'wsl',
+  'wsl.exe',
+  'xargs',
+  // Builtins that execute or re-resolve another command.
+  'alias',
+  'bind',
+  'builtin',
+  'command',
+  'compgen',
+  'complete',
+  'enable',
+  'eval',
+  'exec',
+  'hash',
+  'let',
+  'set',
+  'shopt',
+  'source',
+  'trap',
+  'unalias',
+]);
+
+/** Roots with a dedicated evaluator in `evaluateCommandSafety`. */
+const SPECIAL_ROOT_COMMAND = /^(dd|kill|killall|pkill|tee)$/;
+
+/**
+ * Whether an argument names a command this file decides the safety of. A
+ * vouched root that hands one of these to something else is a launcher,
+ * whatever it happens to be called. Matched on the basename so a wrapped
+ * `/bin/rm` counts too.
+ */
+function namesAKnownCommand(argument: string): boolean {
+  const name = (argument.split(/[\\/]/).pop() ?? '').toLowerCase();
+  return (
+    READ_ONLY_ROOT_COMMANDS.has(name) ||
+    NEVER_READ_ONLY_ROOT_COMMANDS.has(name) ||
+    WRITE_ROOT_COMMAND.test(name) ||
+    SPECIAL_ROOT_COMMAND.test(name)
+  );
+}
+
+/**
+ * Whether a caller-vouched root may classify read-only for this invocation.
+ *
+ * A vouch says "this binary only reads"; it can never say "and so does
+ * whatever I pass it". Since an unrecognised binary may be a launcher we have
+ * never heard of, refuse the vouch as soon as an argument names a command
+ * this file knows — `time rm -rf build` stays unknown even with `time`
+ * vouched, and so does any future launcher wrapping a recognised command.
+ * Refusing costs a confirmation prompt; accepting wrongly costs the write.
+ */
+function vouchedRootIsSafe(args: string[]): boolean {
+  return !args.some(namesAKnownCommand);
+}
 /** Git sub-commands considered read-only. */
 const READ_ONLY_GIT_SUBCOMMANDS = new Set([
   'blame',
@@ -177,6 +293,9 @@ const UNIQ_VALUE_OPTIONS = new Set(
  * Input-only redirections (`<`, `<<`, `<<<`) are safe.
  */
 const WRITE_REDIRECT_OPERATORS = new Set(['>', '>>', '&>', '&>>', '>|']);
+
+/** A command substitution that survived the substitution-node walk. */
+const HIDDEN_SUBSTITUTION = /\$\(|`/;
 
 /**
  * Map of root command → known sub-command sets.
@@ -995,6 +1114,12 @@ function evaluateSubstitutions(
           return 'unknown';
         }
       }
+      // tree-sitter-bash parses the pattern word of `${v%%…}`, `${v%…}`,
+      // `${v##…}` and `${v#…}` as a single leaf, so a substitution inside it
+      // yields no command_substitution node even though bash runs it while
+      // expanding. Nothing was collected above, so any `$(`/backtick still
+      // present in an expansion is exactly that hidden channel.
+      if (HIDDEN_SUBSTITUTION.test(expansion.text)) return 'unknown';
     }
     return 'read-only';
   }
@@ -1056,14 +1181,19 @@ function evaluateCommandSafety(
       ))
   ) {
     result = 'unknown';
-  } else {
+  } else if (NEVER_READ_ONLY_ROOT_COMMANDS.has(root)) {
+    // Decided here rather than by filtering the caller's set, so no caller can
+    // vouch a launcher or a state planter back in.
+    result = 'unknown';
+  } else if (READ_ONLY_ROOT_COMMANDS.has(root)) {
+    result = 'read-only';
+  } else if (extra.has(root)) {
     // Terminal fallback: every root the classifier understands specially is
     // handled above, so a caller-supplied root can only ever add to the
     // built-in read-only set — never override a write classification.
-    result =
-      READ_ONLY_ROOT_COMMANDS.has(root) || extra.has(root)
-        ? 'read-only'
-        : 'unknown';
+    result = vouchedRootIsSafe(args) ? 'read-only' : 'unknown';
+  } else {
+    result = 'unknown';
   }
   if (
     result === 'read-only' &&

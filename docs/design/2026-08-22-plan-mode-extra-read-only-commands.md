@@ -87,13 +87,55 @@ drops:
 
 - anything that is not a bare command name (the classifier matches the
   lowercased root token, so a path or an argument string could never match);
-- `NON_VOUCHABLE_READ_ONLY_ROOTS` — shell interpreters, multi-call binaries,
-  and generic command launchers (`bash`, `sh`, `busybox`, `env`, `sudo`, `su`,
-  `xargs`, `watch`, `nohup`, `timeout`, `setsid`, `chroot`, `exec`, `eval`, …).
-  Each exists to run some other command, so accepting one would let a single
-  settings line bypass the AST analysis entirely (`bash -c 'rm -rf /'`). Being
-  a denylist it cannot be exhaustive; the documented whole-binary scope of a
-  vouch is the backstop for anything it misses.
+- anything that is not an array of strings — settings are merged per key with
+  no type validation, so a hand-written `"extraReadOnlyCommands": "mycli"`
+  would otherwise be iterated one character at a time and a number or object
+  would throw out of the `Config` constructor during startup.
+
+Which roots are _refusable_ is deliberately not decided here — see below.
+
+### Refusing launchers and state planters
+
+A vouch says "this binary only reads". It can never say "and so does whatever I
+pass it", so two families must never classify read-only however a caller
+vouches for them, and both are decided inside the classifier
+(`NEVER_READ_ONLY_ROOT_COMMANDS`) rather than by filtering the caller's set —
+no caller can vouch them back in:
+
+- **Launchers**: shell and language interpreters, multi-call binaries, and
+  wrappers that exec a command from their arguments. `time rm -rf build` is not
+  what the user meant by vouching `time`.
+- **State planters**: builtins that rebind how a _later_ command resolves.
+  Statements are classified independently, so nothing else models
+  `hash -p ./evil/git git && git status` turning a trusted root into an
+  attacker-chosen binary.
+
+The state-planter family is an enumerable set of bash builtins. The launcher
+family is not — review demonstrated 16 missing names across two rounds — so the
+list is only half the defence. The other half is structural: a vouched root is
+refused the moment one of its arguments names a command the classifier knows
+(`vouchedRootIsSafe`), matched on the basename. That closes the demonstrated
+shape (`<launcher> <recognised write command>`) for launchers nobody has
+enumerated, at the cost of an occasional extra prompt when a CLI's own
+sub-command shares a name with a real command. Refusing costs a prompt;
+accepting wrongly costs the write.
+
+Residual: a launcher wrapping something the classifier does not recognise
+(`time ./script.sh`) still classifies read-only if that launcher is vouched and
+absent from the list. That is the documented whole-binary scope of a vouch.
+
+### Substitutions hidden in expansion pattern words
+
+tree-sitter-bash parses the pattern word of `${v%%…}`, `${v%…}`, `${v##…}` and
+`${v#…}` as a single leaf, so a `$(…)` inside it produces no
+`command_substitution` node even though bash runs it while expanding. The
+substitution walker therefore missed it, and `echo ${HOME%%$(rm -rf build)}`
+classified read-only — a pre-existing hole for built-in roots that the vouch
+would have widened to arbitrary user-named ones. `evaluateSubstitutions` now
+treats any `$(`/backtick still present in an expansion, after the substitution
+walk collected nothing, as exactly that hidden channel.
+
+### Mode scoping
 
 `Config.getPlanModeReadOnlyRoots()` returns the normalised set only while
 `getApprovalMode() === ApprovalMode.PLAN`, and an empty set otherwise. Callers

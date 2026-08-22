@@ -10,6 +10,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
+  NEVER_READ_ONLY_ROOT_COMMANDS,
   classifyShellCommandSafety,
   initParser,
   isShellCommandReadOnlyAST,
@@ -508,6 +509,38 @@ describe('isShellCommandReadOnlyAST', () => {
 // =========================================================================
 // classifyShellCommandSafety
 // =========================================================================
+
+describe('substitution hidden in an expansion pattern word', () => {
+  // tree-sitter-bash parses the pattern word as a leaf, so the substitution
+  // never becomes a command_substitution node — but bash still runs it.
+  it.each(['%%', '%', '##', '#'])(
+    'treats ${var%so$(cmd)} as unknown',
+    async (operator) => {
+      expect(
+        await classifyShellCommandSafety(
+          `echo \${HOME${operator}$(rm -rf build)}`,
+        ),
+      ).toBe('unknown');
+      expect(
+        await classifyShellCommandSafety(
+          `echo "\${HOME${operator}$(rm -rf build)}"`,
+        ),
+      ).toBe('unknown');
+      expect(
+        await classifyShellCommandSafety(
+          `echo \${HOME${operator}\`rm -rf build\`}`,
+        ),
+      ).toBe('unknown');
+    },
+  );
+
+  it('does not flag expansions without a substitution', async () => {
+    expect(await classifyShellCommandSafety('echo ${HOME%%/*}')).toBe(
+      'read-only',
+    );
+    expect(await classifyShellCommandSafety('echo ${HOME}')).toBe('read-only');
+  });
+});
 
 describe('classifyShellCommandSafety', () => {
   it.each([
@@ -1024,6 +1057,43 @@ describe('extraReadOnlyRoots', () => {
     expect(await classifyShellCommandSafety('dd of=disk.img', vouched)).toBe(
       'write',
     );
+  });
+
+  // Every entry, driven off the exported set so a future edit to the list
+  // cannot silently leave a name untested.
+  it.each([...NEVER_READ_ONLY_ROOT_COMMANDS])(
+    'refuses to vouch %s whatever the caller supplies',
+    async (root) => {
+      const vouched = { extraReadOnlyRoots: new Set([root]) };
+      expect(
+        await classifyShellCommandSafety(`${root} --version`, vouched),
+      ).toBe('unknown');
+      expect(
+        await classifyShellCommandSafety(`${root} rm -rf build`, vouched),
+      ).toBe('unknown');
+    },
+  );
+
+  it('refuses a vouched root that wraps a command the classifier knows', async () => {
+    // The list above cannot enumerate every launcher, so an unrecognised root
+    // handing off to a recognised command must fail closed on shape alone.
+    const vouched = { extraReadOnlyRoots: new Set(['obscurelauncher']) };
+    for (const command of [
+      'obscurelauncher rm -rf build',
+      'obscurelauncher /bin/rm -rf build',
+      'obscurelauncher bash -c "rm -rf build"',
+      'obscurelauncher git push',
+    ]) {
+      expect(await classifyShellCommandSafety(command, vouched)).toBe(
+        'unknown',
+      );
+    }
+    expect(
+      await classifyShellCommandSafety(
+        'obscurelauncher --json report',
+        vouched,
+      ),
+    ).toBe('read-only');
   });
 
   it('applies inside compound statements and subshells', async () => {

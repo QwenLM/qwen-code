@@ -142,22 +142,32 @@ letting the model run unattended.
 | `ib domain list $(whoami)`  | prompts — command substitution stays unknown          |
 | `IB_TOKEN=x ib domain list` | prompts — environment-assignment prefix stays unknown |
 | `ib domain list \| badcmd`  | prompts — the pipe target is still unknown            |
+| `ib exec rm -rf build`      | prompts — see "launchers" below                       |
 
-**What is ignored.** Two kinds of entry have no effect and are dropped:
+**What has no effect.** Three kinds of entry are ignored:
 
 - Commands Qwen Code already understands keep their built-in classification.
   Listing `rm`, `git`, `sed`, or `tee` does not make `rm -rf build` or
   `git push` read-only.
-- Shell interpreters, multi-call binaries, and generic command launchers —
-  `bash`, `sh`, `zsh`, `busybox`, `env`, `sudo`, `su`, `xargs`, `watch`,
-  `nohup`, `timeout`, `setsid`, `exec`, `eval`, and similar — are rejected,
-  because each exists to run some other command and accepting one would bypass
-  the analysis entirely. That list is a denylist, so it cannot be exhaustive:
-  the rule above — only list a command you would let the model run unattended —
-  is what protects you from anything it misses.
+- **Launchers** — shell and language interpreters, multi-call binaries, and
+  wrappers whose job is to run a command taken from their arguments (`bash`,
+  `busybox`, `env`, `sudo`, `su`, `xargs`, `watch`, `nohup`, `timeout`,
+  `time`, `setsid`, `powershell`, and similar). Vouching one of these is not a
+  statement about that binary, it is a statement about whatever it is handed:
+  `time rm -rf build` would launder a write past the analysis. Qwen Code
+  cannot recognise every launcher by name, so it also refuses a vouched root
+  the moment one of its arguments names a command it does know — which is why
+  `ib exec rm -rf build` prompts even though `ib` is vouched and `ib exec` is
+  not otherwise special. The cost of that is an occasional extra prompt when a
+  CLI's own sub-command happens to share a name with a real command.
+- **Shell builtins that rebind name resolution** (`hash`, `alias`, `unalias`,
+  `bind`, `complete`, `enable`, `set`, `shopt`, and similar). One of these can
+  change what a _later_ command in the same line resolves to, so vouching
+  `hash` would quietly vouch for whatever it points `git` at.
 
 Anything that is not a bare command name (a path, a command with arguments, or
-a string containing shell metacharacters) is also dropped.
+a string containing shell metacharacters) is also ignored, and so is the whole
+setting if it is not a list of strings.
 
 **Scope.** This setting applies only in Plan Mode. In every other mode, use
 `permissions.allow` (e.g. `"Bash(ib *)"`) to auto-approve a command.

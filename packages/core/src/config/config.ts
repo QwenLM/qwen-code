@@ -465,56 +465,11 @@ export interface PlanModeSettings {
    * command substitution, environment-assignment prefixes, and pipes into
    * unknown commands keep their `unknown`/`write` classification, and roots
    * the classifier already understands (`rm`, `git`, `tee`, …) keep their
-   * built-in classification. Shell interpreters and generic command wrappers
-   * are rejected outright — see `NON_VOUCHABLE_READ_ONLY_ROOTS`.
+   * built-in classification. Launchers and state-planting builtins are refused
+   * by the classifier itself — see `NEVER_READ_ONLY_ROOT_COMMANDS`.
    */
   extraReadOnlyCommands?: string[];
 }
-
-/**
- * Roots that can never be vouched for as read-only. Each one exists to run
- * some other command, so accepting it would let a single settings entry
- * bypass the AST analysis entirely (`bash -c 'rm -rf /'`).
- *
- * Being a denylist, this cannot be exhaustive; it covers shell interpreters,
- * multi-call binaries, and generic command launchers. The backstop for
- * anything it misses is that a vouched entry is documented as covering the
- * whole binary, mutating sub-commands included.
- */
-const NON_VOUCHABLE_READ_ONLY_ROOTS = new Set([
-  'bash',
-  'busybox',
-  'chroot',
-  'command',
-  'csh',
-  'dash',
-  'doas',
-  'env',
-  'eval',
-  'exec',
-  'fish',
-  'flock',
-  'ksh',
-  'nice',
-  'nohup',
-  'nsenter',
-  'pkexec',
-  'runuser',
-  'script',
-  'setsid',
-  'sh',
-  'source',
-  'stdbuf',
-  'su',
-  'sudo',
-  'tcsh',
-  'timeout',
-  'toybox',
-  'unshare',
-  'watch',
-  'xargs',
-  'zsh',
-]);
 
 /** A bare command name: no path separators, whitespace, or shell metacharacters. */
 const BARE_COMMAND_NAME = /^[a-z0-9][a-z0-9._+-]*$/;
@@ -527,16 +482,27 @@ const EMPTY_READ_ONLY_ROOTS: ReadonlySet<string> = new Set();
  * root token and rejects any command whose raw name differs from it, so
  * anything that is not a bare lowercase command name could never match and is
  * dropped rather than silently kept.
+ *
+ * Which roots are refusable is deliberately *not* decided here. Launchers and
+ * state-planting builtins are rejected inside the classifier
+ * (`NEVER_READ_ONLY_ROOT_COMMANDS`), so listing one has no effect no matter
+ * which caller supplies the set.
+ *
+ * A non-array value is dropped whole: settings are merged per key without type
+ * validation, so a hand-written `"extraReadOnlyCommands": "mycli"` would
+ * otherwise be iterated one character at a time (vouching `m`, `y`, `c`, …)
+ * and a number or object would throw out of the `Config` constructor during
+ * CLI startup.
  */
 export function normalizePlanModeReadOnlyRoots(
   commands: readonly string[] | undefined,
 ): ReadonlySet<string> {
   const roots = new Set<string>();
-  for (const entry of commands ?? []) {
+  if (!Array.isArray(commands)) return roots;
+  for (const entry of commands) {
     if (typeof entry !== 'string') continue;
     const root = entry.trim().toLowerCase();
     if (!BARE_COMMAND_NAME.test(root)) continue;
-    if (NON_VOUCHABLE_READ_ONLY_ROOTS.has(root)) continue;
     roots.add(root);
   }
   return roots;

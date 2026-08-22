@@ -9034,41 +9034,28 @@ describe('setApprovalMode with folder trust', () => {
       ).toEqual(new Set());
     });
 
-    it('drops shell interpreters and command wrappers', () => {
-      expect(
-        normalizePlanModeReadOnlyRoots([
-          'bash',
-          'SH',
-          'zsh',
-          'env',
-          'sudo',
-          'xargs',
-          'nohup',
-          'timeout',
-          'exec',
-          'eval',
-          'ib',
-        ]),
-      ).toEqual(new Set(['ib']));
+    it('keeps launcher names but they are inert — the classifier refuses them', () => {
+      // Normalization deliberately does not filter these; the shell classifier
+      // rejects them so no caller-supplied set can vouch them back in. Their
+      // per-name behaviour is pinned in shellAstParser.test.ts.
+      expect(normalizePlanModeReadOnlyRoots(['bash', 'ib'])).toEqual(
+        new Set(['bash', 'ib']),
+      );
     });
 
-    it('drops multi-call binaries and privilege/namespace launchers', () => {
-      expect(
-        normalizePlanModeReadOnlyRoots([
-          'busybox',
-          'toybox',
-          'watch',
-          'su',
-          'runuser',
-          'pkexec',
-          'setsid',
-          'chroot',
-          'unshare',
-          'nsenter',
-          'flock',
-          'ib',
-        ]),
-      ).toEqual(new Set(['ib']));
+    it('drops a non-array value whole instead of iterating it', () => {
+      // Settings are merged per key with no type validation, so a hand-written
+      // string would otherwise be walked one character at a time and a number
+      // or object would throw out of the Config constructor during startup.
+      for (const malformed of [
+        'mycli',
+        42,
+        true,
+        { ib: true },
+        null,
+      ] as unknown as Array<readonly string[] | undefined>) {
+        expect(normalizePlanModeReadOnlyRoots(malformed)).toEqual(new Set());
+      }
     });
   });
 

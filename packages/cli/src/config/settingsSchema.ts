@@ -2511,10 +2511,12 @@ const SETTINGS_SCHEMA = {
               'substitution, environment-assignment prefixes and pipes into ' +
               'unknown commands are unaffected, commands the classifier ' +
               'already understands (git, rm, sed, …) keep their built-in ' +
-              'classification, and shell interpreters, multi-call binaries ' +
-              'or command launchers (bash, busybox, env, sudo, watch, ' +
-              'xargs, …) are ignored. Applies only in Plan Mode; use ' +
-              'permissions.allow for other modes.',
+              'classification. Launchers that run a command taken from ' +
+              'their arguments (bash, busybox, env, sudo, xargs, watch, ' +
+              'time, …) and builtins that rebind name resolution (hash, ' +
+              'alias, …) are refused, as is a vouched root whose arguments ' +
+              'name a command the classifier knows. Applies only in Plan ' +
+              'Mode; use permissions.allow for other modes.',
             showInDialog: false,
             mergeStrategy: MergeStrategy.UNION,
           },

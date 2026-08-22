@@ -21,16 +21,28 @@ cd /tmp/ib-e2e
 {
   "permissions": {
     "planMode": {
-      "extraReadOnlyCommands": ["ib"],
-    },
-  },
+      "extraReadOnlyCommands": ["ib"]
+    }
+  }
 }
 ```
 
-Baseline dry-run against the globally installed `qwen` first (expect every case
-below to prompt, since the setting does not exist there), then re-run against
-the local build (`npm run dev` from the repo root, or `npm run build && npm run
-bundle`).
+**Launch from `/tmp/ib-e2e`, not from the repo.** Workspace settings resolve
+from the process cwd with no upward search, so a CLI started in the repo root
+never loads the scratch workspace's `.qwen/settings.json` and every case below
+silently behaves as if the vouch were absent. `npm run dev` runs the CLI with
+cwd set to the package root, so it cannot be used here. Use either:
+
+```bash
+node /path/to/qwen-code/scripts/dev.js       # derives repo paths from its own location
+# or, after `npm run build && npm run bundle` in the repo:
+node /path/to/qwen-code/bundle/qwen.js
+```
+
+Dry-run the baseline against the globally installed `qwen` first — the setting
+does not exist there, so expect the unknown-read cases to prompt and the
+state-modifying cases to be blocked, exactly as they are after the change.
+Only cases 1, 5b, 7, 8, and 9 change behavior with the setting present.
 
 ## Cases
 
@@ -70,16 +82,31 @@ bundle`).
 
 ### 6. The safety net cannot be switched off from settings
 
-Add `"bash"` and `"rm"` to `extraReadOnlyCommands` and restart.
+Add `"bash"`, `"time"`, `"hash"`, and `"rm"` to `extraReadOnlyCommands` and
+restart.
 
 - Ask for `bash -c 'echo hi'`.
-  **Expect**: still prompts — shell interpreters are rejected during
-  normalization.
+  **Expect**: still prompts — the classifier refuses to let any caller vouch a
+  shell interpreter.
+- Ask for `time rm -rf tmp`.
+  **Expect**: still prompts — `time` is a launcher, so vouching it is not a
+  vouch for what it wraps.
+- Ask for `hash -p ./bin/git git && git status`.
+  **Expect**: still prompts — `hash` re-binds how the later `git` resolves.
 - Ask for `rm -rf tmp`.
   **Expect**: still blocked as state-modifying — `rm` keeps its built-in write
   classification.
 - Ask for `git push origin main` with `"git"` also listed.
   **Expect**: still blocked as state-modifying.
+
+### 6b. An unrecognised launcher fails closed too
+
+With only `"ib"` vouched, ask for `ib exec rm -rf tmp`.
+
+- **Expect**: prompts. A vouched root that is handed a command the classifier
+  recognises (`rm`) is refused on shape, without `ib` needing to be known as a
+  launcher. This is what keeps the guarantee from depending on an exhaustive
+  list of launcher names.
 
 ### 7. The vouch is scoped to Plan mode
 

@@ -303,6 +303,35 @@ describe('MonitorTool', () => {
       expect(details.permissionRules).toEqual(['Monitor(tail -f *)']);
     });
 
+    it('excludes a vouched sub-command from confirmation details (issue #9694)', async () => {
+      // The parser is mocked in this suite, so drive the filter directly:
+      // the vouched sub-command is the one the classifier reports read-only.
+      const roots = new Set(['ib']);
+      (
+        mockConfig.getPlanModeReadOnlyRoots as ReturnType<typeof vi.fn>
+      ).mockReturnValue(roots);
+      mockIsShellCommandReadOnlyAST.mockImplementation(async (sub: string) =>
+        sub.trim().startsWith('ib '),
+      );
+
+      const invocation = createInvocation({
+        command: 'ib domain list && curl example.com',
+      });
+
+      const details = (await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      )) as ToolCallConfirmationDetails & {
+        permissionRules?: string[];
+      };
+
+      expect(details.permissionRules).toEqual(['Monitor(curl example.com *)']);
+      expect(mockIsShellCommandReadOnlyAST).toHaveBeenCalledWith(
+        'ib domain list',
+        expect.any(String),
+        { extraReadOnlyRoots: roots },
+      );
+    });
+
     it('strips a trailing bare ampersand before building confirmation details', async () => {
       const invocation = createInvocation({
         command: 'tail -f /tmp/app.log &',
