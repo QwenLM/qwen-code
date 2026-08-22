@@ -38,33 +38,14 @@ function run(cmd, args, opts = {}) {
 
 function ensureRootBundle() {
   const rootDistDir = join(repoRoot, 'dist');
-  const requiredArtifacts = [
-    'cli.js',
-    'node-repl-runtime/kernel.mjs',
-    'node-repl-runtime/module-loader.mjs',
-    'node-repl-runtime/tree-sitter-javascript.wasm',
-  ];
-  if (
-    requiredArtifacts.every((artifact) =>
-      existsSync(join(rootDistDir, artifact)),
-    )
-  ) {
-    return;
-  }
+  const rootCliJs = join(rootDistDir, 'cli.js');
+  if (existsSync(rootCliJs)) return;
 
   console.log(
     '[sdk prepack] Root CLI bundle missing; running `npm run bundle`',
   );
   const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
   run(npm, ['run', 'bundle'], { cwd: repoRoot });
-  const missingArtifacts = requiredArtifacts.filter(
-    (artifact) => !existsSync(join(rootDistDir, artifact)),
-  );
-  if (missingArtifacts.length > 0) {
-    throw new Error(
-      `[sdk prepack] Root CLI bundle is incomplete: ${missingArtifacts.join(', ')}`,
-    );
-  }
 }
 
 function copyOptionalDir(source, destination, label) {
@@ -103,12 +84,6 @@ function main() {
     join(cliDistDir, 'vendor'),
     'vendor',
   );
-  cpSync(
-    join(rootDistDir, 'node-repl-runtime'),
-    join(cliDistDir, 'node-repl-runtime'),
-    { recursive: true },
-  );
-  console.log('[sdk prepack] ✓ node-repl-runtime/ copied');
   copyOptionalDir(
     join(rootDistDir, 'locales'),
     join(cliDistDir, 'locales'),

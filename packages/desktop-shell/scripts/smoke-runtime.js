@@ -127,9 +127,6 @@ function verifyRuntimeIntegrity() {
     'NOTICE',
     'node/LICENSE',
     'lib/cli-entry.js',
-    'lib/node-repl-runtime/kernel.mjs',
-    'lib/node-repl-runtime/module-loader.mjs',
-    'lib/node-repl-runtime/tree-sitter-javascript.wasm',
     'lib/web-shell/index.html',
   ];
   for (const relative of required) {

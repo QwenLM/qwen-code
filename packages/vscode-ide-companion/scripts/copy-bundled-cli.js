@@ -26,20 +26,12 @@ const extensionDistDir = path.join(extensionRoot, 'dist');
 const bundledCliDir = path.join(extensionDistDir, 'qwen-cli');
 
 async function main() {
-  const requiredArtifacts = [
-    'cli.js',
-    'vendor',
-    'node-repl-runtime/kernel.mjs',
-    'node-repl-runtime/module-loader.mjs',
-    'node-repl-runtime/tree-sitter-javascript.wasm',
-  ].map((artifact) => path.join(rootDistDir, artifact));
-  const missingArtifacts = requiredArtifacts.filter(
-    (artifact) => !existsSync(artifact),
-  );
+  const cliJs = path.join(rootDistDir, 'cli.js');
+  const vendorDir = path.join(rootDistDir, 'vendor');
 
-  if (missingArtifacts.length > 0) {
+  if (!existsSync(cliJs) || !existsSync(vendorDir)) {
     throw new Error(
-      `[copy-bundled-cli] Missing root dist artifacts. Expected:\n- ${requiredArtifacts.join('\n- ')}\n\nRun root "npm run bundle" first.`,
+      `[copy-bundled-cli] Missing root dist artifacts. Expected:\n- ${cliJs}\n- ${vendorDir}\n\nRun root "npm run bundle" first.`,
     );
   }
 

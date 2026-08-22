@@ -67,9 +67,6 @@ function verifyBundleArtifacts(rootDir, distDir) {
   const requiredPaths = [
     path.join(distDir, 'cli.js'),
     path.join(distDir, 'vendor'),
-    path.join(distDir, 'node-repl-runtime', 'kernel.mjs'),
-    path.join(distDir, 'node-repl-runtime', 'module-loader.mjs'),
-    path.join(distDir, 'node-repl-runtime', 'tree-sitter-javascript.wasm'),
     path.join(distDir, 'bundled', 'qc-helper', 'docs'),
     // The Web Shell ships with the published package ("Web Shell out of the
     // box"). Gate on it here so a build that skipped the web-shell workspace
@@ -321,7 +318,6 @@ function writeDistPackageJson(rootDir, distDir) {
       // in-thread AsyncFzf path on big workspaces in npm-installed CLIs.
       'fzfWorker.js',
       'chunks',
-      'node-repl-runtime',
       'vendor',
       '*.sb',
       'README.md',

@@ -40,6 +40,32 @@ const MAX_BINDING_NAME_CHARS = 4 * 1024 * 1024;
 const MAX_SNAPSHOT_ASSIGNMENTS = 200_000;
 const MAX_TRANSFORMED_SOURCE_CHARS = 32 * 1024 * 1024;
 
+/**
+ * The runtime surface this tool itself provides to the model. A persisted
+ * top-level binding with one of these names would shadow it for every later cell
+ * in the session — and because the tool description instructs the model to call
+ * `nodeRepl.write`, losing it silently breaks the model↔tool contract with no
+ * way to recover except a reset. Such cells are rejected up front.
+ *
+ * Keep in sync with the `intrinsicObjectDefineProperties` call in
+ * runtime/kernel.mjs.
+ *
+ * DELIBERATELY NOT LISTED: the standard JS/Web globals the context also exposes
+ * (Buffer, URL, fetch, crypto, TextEncoder, structuredClone, performance, ...).
+ * Shadowing those is ordinary JavaScript — `const Buffer = 42` makes `Buffer` a
+ * number in plain Node too — and a persistent REPL sharing one scope across
+ * cells is the documented model. Rejecting them would diverge from JS semantics
+ * and remove legitimate capability, so they are allowed to be shadowed.
+ */
+const RESERVED_GLOBAL_NAMES = new Set([
+  'nodeRepl',
+  'console',
+  'setTimeout',
+  'setInterval',
+  'clearTimeout',
+  'clearInterval',
+]);
+
 let parserInstance: Parser | null = null;
 let parserInitPromise: Promise<void> | null = null;
 let parserInitError: Error | null = null;
@@ -93,17 +119,7 @@ async function getParser(): Promise<Parser> {
             'tree-sitter-wasms/out/tree-sitter-javascript.wasm?binary' as string
           ),
         'tree-sitter-wasms/out/tree-sitter-javascript.wasm',
-        [
-          new URL('./runtime/tree-sitter-javascript.wasm', import.meta.url),
-          new URL(
-            './node-repl-runtime/tree-sitter-javascript.wasm',
-            import.meta.url,
-          ),
-          new URL(
-            '../node-repl-runtime/tree-sitter-javascript.wasm',
-            import.meta.url,
-          ),
-        ],
+        [new URL('./runtime/tree-sitter-javascript.wasm', import.meta.url)],
       );
       const language = await ParserClass.Language.load(languageWasm);
       const parser = new ParserClass();
@@ -208,23 +224,59 @@ function collectDeclarationNames(
   }
 }
 
+/**
+ * Node types that introduce a new function scope. `var` declarations inside
+ * these belong to that inner scope, not to the module, so the hoisting walk
+ * stops here.
+ */
+const FUNCTION_SCOPE_NODE_TYPES = new Set([
+  'function_declaration',
+  'function_expression',
+  'generator_function',
+  'generator_function_declaration',
+  'arrow_function',
+  'method_definition',
+  'class_static_block',
+]);
+
+/**
+ * Collects every `var` binding that hoists to module scope from a top-level
+ * statement, including ones nested in blocks, `if`/`try`/loop bodies and
+ * labelled statements. Recursion stops at function boundaries.
+ *
+ * `const`/`let` (`lexical_declaration`) are intentionally NOT collected here:
+ * they are block-scoped and only persist when declared at the top level, which
+ * `collectDeclarationNames` already handles.
+ */
 function collectTopLevelLoopVarBindings(
   node: Parser.SyntaxNode,
   bindings: Map<string, NodeReplBindingKind>,
 ): void {
+  if (FUNCTION_SCOPE_NODE_TYPES.has(node.type)) return;
+
+  if (node.type === 'variable_declaration') {
+    collectDeclarationNames(node, bindings);
+    return;
+  }
+
   if (node.type === 'for_statement') {
     const initializer = node.childForFieldName('initializer');
     if (initializer?.type === 'variable_declaration') {
       collectDeclarationNames(initializer, bindings);
     }
-    return;
+    // Fall through: the loop body may contain further hoisting `var`s.
   }
+
   if (node.type === 'for_in_statement') {
     const kind = node.childForFieldName('kind');
     const left = node.childForFieldName('left');
     if (kind?.text === 'var' && left) {
       addPatternBindings(left, 'var', bindings);
     }
+  }
+
+  for (const child of node.namedChildren) {
+    collectTopLevelLoopVarBindings(child, bindings);
   }
 }
 
@@ -297,7 +349,11 @@ function snapshotAssignments(
     }
     assignments.push(assignment);
   }
-  return assignments.length > 0 ? `\n${assignments.join('\n')}` : '';
+  // Joined without newlines: this text is injected between the user's
+  // statements, so any newline here would shift every subsequent line number in
+  // reported stack traces (and the shift would grow with the binding count).
+  // Each assignment already ends in ';'.
+  return assignments.length > 0 ? assignments.join('') : '';
 }
 
 function snapshotDeclarator(
@@ -404,6 +460,18 @@ export async function prepareNodeReplCell(
       collectDeclarationNames(item, currentBindings);
       collectTopLevelLoopVarBindings(item, currentBindings);
     }
+    // A persisted top-level binding that shadows a host-injected global would
+    // permanently break it for the rest of the session (e.g. declaring
+    // `nodeRepl` silently disables nodeRepl.write with no way back except a
+    // reset). Reject the cell with an actionable message instead.
+    const shadowedGlobal = [...currentBindings.keys()].find((name) =>
+      RESERVED_GLOBAL_NAMES.has(name),
+    );
+    if (shadowedGlobal) {
+      throw new Error(
+        `Cannot declare a top-level binding named '${shadowedGlobal}': it would shadow the node_repl runtime global for the rest of this session. Use a different name.`,
+      );
+    }
 
     const previousBindingsByName = new Map<string, NodeReplBindingKind>();
     for (const binding of options.previousBindings) {
@@ -417,7 +485,9 @@ export async function prepareNodeReplCell(
     }
     const previousBindings = [...previousBindingsByName]
       .map(([name, kind]) => ({ name, kind }))
-      .sort((left, right) => left.name.localeCompare(right.name));
+      .sort((left, right) =>
+        left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
+      );
     const exportedBindings = new Map<string, NodeReplBindingKind>();
     for (const item of sourceItems) {
       collectExportDeclarationBindings(item, exportedBindings);
@@ -437,7 +507,9 @@ export async function prepareNodeReplCell(
     }
     const allBindings = [...allBindingsByName]
       .map(([name, kind]) => ({ name, kind }))
-      .sort((left, right) => left.name.localeCompare(right.name));
+      .sort((left, right) =>
+        left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
+      );
     if (allBindings.length > MAX_CELL_BINDINGS) {
       throw new Error(
         `JavaScript cell exceeds the ${MAX_CELL_BINDINGS}-binding sanity limit`,
@@ -464,6 +536,9 @@ export async function prepareNodeReplCell(
     const snapshotName = `${prefix}_snapshot`;
     const snapshotExportName = `${prefix}_snapshot_export`;
 
+    // Joined into a SINGLE line so the user's first line is always physical
+    // line 2. The kernel compensates with lineOffset: -1 (see LINE_OFFSET) so
+    // reported stack traces match the source the model actually wrote.
     const prelude = [
       `import * as ${previousNamespace} from '@prev';`,
       `const ${snapshotName} = { __proto__: null };`,
@@ -475,10 +550,21 @@ export async function prepareNodeReplCell(
         ({ name, kind }) =>
           `${kind} ${name} = ${previousNamespace}[${JSON.stringify(name)}];`,
       ),
-    ].join('\n');
+    ].join('');
 
     const edits: Edit[] = [];
     const activeBindings = new Map(previousBindingsByName);
+    // `var` declarations hoist to the top of module scope and exist (as
+    // undefined) before their declaring statement runs. Seed them up front so a
+    // statement-boundary snapshot taken BEFORE the declaration still carries any
+    // value already assigned to them — otherwise `y = 42; throw; var y;` loses
+    // the 42 that plain Node keeps. `const`/`let` are deliberately NOT seeded:
+    // they are in TDZ until their declaration executes.
+    for (const [name, kind] of currentBindings) {
+      if (kind === 'var' && !activeBindings.has(name)) {
+        activeBindings.set(name, kind);
+      }
+    }
     let generatedCommitChars = 0;
     let commitCounter = 0;
 
@@ -499,7 +585,9 @@ export async function prepareNodeReplCell(
                 name: bindingName,
                 kind: bindingKind,
               }))
-              .sort((left, right) => left.name.localeCompare(right.name)),
+              .sort((left, right) =>
+                left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
+              ),
             MAX_TRANSFORMED_SOURCE_CHARS -
               code.length -
               prelude.length -
@@ -525,7 +613,9 @@ export async function prepareNodeReplCell(
         snapshotName,
         [...activeBindings]
           .map(([name, kind]) => ({ name, kind }))
-          .sort((left, right) => left.name.localeCompare(right.name)),
+          .sort((left, right) =>
+            left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
+          ),
         MAX_TRANSFORMED_SOURCE_CHARS -
           code.length -
           prelude.length -

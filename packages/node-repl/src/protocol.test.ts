@@ -123,3 +123,50 @@ describe('FrameDecoder', () => {
     expect(errors).toHaveLength(0);
   });
 });
+
+describe('FrameDecoder frame integrity', () => {
+  const frame = (id: string) => `${JSON.stringify({ type: 'x', id })}\n`;
+
+  it('recovers buffered frames after a frame handler throws mid-drain', () => {
+    const seen: string[] = [];
+    const decoder = new FrameDecoder(
+      (f) => {
+        const id = (f as { id: string }).id;
+        seen.push(id);
+        if (id === 'a') throw new Error('handler boom');
+      },
+      () => {},
+    );
+    // The throw unwinds push() with b/c/d still buffered.
+    expect(() =>
+      decoder.push(frame('a') + frame('b') + frame('c') + frame('d')),
+    ).toThrow(/handler boom/);
+    // The next push must rescan from the start and deliver them, not skip them.
+    decoder.push(frame('e'));
+    expect(seen).toEqual(['a', 'b', 'c', 'd', 'e']);
+  });
+
+  it('does not duplicate frames on the normal path', () => {
+    const seen: string[] = [];
+    const decoder = new FrameDecoder(
+      (f) => seen.push((f as { id: string }).id),
+      () => {},
+    );
+    decoder.push(frame('1') + frame('2'));
+    decoder.push(frame('3'));
+    expect(seen).toEqual(['1', '2', '3']);
+  });
+
+  it('keeps working after an unterminated oversize stream resets it', () => {
+    const seen: string[] = [];
+    const errors: string[] = [];
+    const decoder = new FrameDecoder(
+      (f) => seen.push((f as { id: string }).id),
+      (e) => errors.push(e.message),
+    );
+    decoder.push('x'.repeat(MAX_FRAME_BYTES + 10));
+    expect(errors.some((m) => /without a terminator/.test(m))).toBe(true);
+    decoder.push(frame('after-overflow'));
+    expect(seen).toEqual(['after-overflow']);
+  });
+});

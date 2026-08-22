@@ -61,9 +61,6 @@ const DIST_REQUIRED_PATHS = [
   'cli-entry.js',
   'chunks',
   'vendor',
-  'node-repl-runtime/kernel.mjs',
-  'node-repl-runtime/module-loader.mjs',
-  'node-repl-runtime/tree-sitter-javascript.wasm',
   'bundled/qc-helper/docs',
 ];
 const DIST_ALLOWED_ENTRIES = new Set([
@@ -76,7 +73,6 @@ const DIST_ALLOWED_ENTRIES = new Set([
   'fzfWorker.js',
   'chunks',
   'vendor',
-  'node-repl-runtime',
   'bundled',
   'package.json',
   'README.md',

@@ -60,7 +60,6 @@ const TYPED_ARRAY_BYTE_LENGTH_GETTER = Object.getOwnPropertyDescriptor(
 let config = null;
 let generation = 0;
 let untrustedContext = null;
-let trustedContext = null;
 let loader = null;
 let bindings = new Map();
 let activeExec = null;
@@ -68,6 +67,11 @@ let operationChain = Promise.resolve();
 let shuttingDown = false;
 
 const timers = new Map();
+/** Upper bound on concurrently live sandbox timers (see scheduleTimer). */
+const MAX_LIVE_TIMERS = 1024;
+/** Unhandled rejections that surfaced between cells, reported on the next one. */
+const lateRejections = [];
+const MAX_LATE_REJECTIONS = 32;
 let nextTimerId = 1;
 
 function send(frame) {
@@ -281,8 +285,12 @@ function resolveImagePayload(payload) {
     const byteOffset = Reflect.apply(TYPED_ARRAY_BYTE_OFFSET_GETTER, bytes, []);
     const byteLength = Reflect.apply(TYPED_ARRAY_BYTE_LENGTH_GETTER, bytes, []);
     buffer = Buffer.from(arrayBuffer, byteOffset, byteLength);
+    // Normalize like the data: URL branch below — MIME types are
+    // case-insensitive (RFC 6838), so `Image/PNG` must behave identically here.
     declaredMime =
-      typeof payload.mimeType === 'string' ? payload.mimeType : null;
+      typeof payload.mimeType === 'string'
+        ? payload.mimeType.toLowerCase()
+        : null;
   } else if (payload && payload.kind === 'url') {
     const value = String(payload.url);
     if (value.startsWith('data:')) {
@@ -356,6 +364,15 @@ function resolveImagePayload(payload) {
 
 function scheduleTimer(callback, delay, repeat) {
   const execId = currentExecId();
+  // Timers outlive the cell that armed them (deliberately — polling across
+  // cells is useful), so an unbounded count would let one botched loop
+  // permanently saturate this session's event loop. Cap the number of LIVE
+  // timers; cancelled/fired one-shots free their slot.
+  if (timers.size >= MAX_LIVE_TIMERS) {
+    throw new Error(
+      `node_repl allows at most ${MAX_LIVE_TIMERS} live timers; clear existing timers or call node_repl_reset`,
+    );
+  }
   const timerId = nextTimerId++;
   const numericDelay =
     typeof delay === 'number' && Number.isFinite(delay) ? delay : 0;
@@ -417,7 +434,6 @@ const intrinsicNumber = Number;
 const intrinsicObjectFreeze = Object.freeze;
 const intrinsicObjectGetOwnPropertyNames = Object.getOwnPropertyNames;
 const intrinsicObjectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
-const intrinsicObjectDefineProperty = Object.defineProperty;
 const intrinsicObjectDefineProperties = Object.defineProperties;
 const intrinsicArrayBufferIsView = ArrayBuffer.isView;
 const intrinsicJSONParse = JSON.parse;
@@ -561,25 +577,9 @@ intrinsicObjectDefineProperties(globalThis, {
   clearInterval: { value: clearTimerWrapper, enumerable: true },
 });
 
-if (trusted) {
-  const processFacade = deepFreeze({
-    pid: intrinsicNumber(metadata.pid),
-    platform: intrinsicString(metadata.platform),
-    arch: intrinsicString(metadata.arch),
-    version: intrinsicString(metadata.version),
-    versions: { node: intrinsicString(metadata.nodeVersion) },
-    env: {},
-    cwd: function cwd() { return intrinsicString(metadata.cwd); },
-  });
-  intrinsicObjectDefineProperty(globalThis, 'process', {
-    value: processFacade,
-    enumerable: true,
-  });
-}
-
 `;
 
-function createContext(name, trusted) {
+function createContext(name) {
   const context = vm.createContext(Object.create(null), {
     name,
     codeGeneration: { strings: false, wasm: false },
@@ -632,23 +632,14 @@ function createContext(name, trusted) {
   });
   const bootstrap = vm.compileFunction(
     BOOTSTRAP_SOURCE,
-    ['bridge', 'metadata', 'trusted'],
+    ['bridge', 'metadata'],
     { parsingContext: context, filename: '<node-repl-bootstrap>' },
   );
-  bootstrap(
-    bridge,
-    {
-      cwd: config.cwd,
-      homeDir: config.homeDir,
-      tmpDir: config.tmpDir,
-      pid: process.pid,
-      platform: process.platform,
-      arch: process.arch,
-      version: process.version,
-      nodeVersion: process.versions.node,
-    },
-    trusted,
-  );
+  bootstrap(bridge, {
+    cwd: config.cwd,
+    homeDir: config.homeDir,
+    tmpDir: config.tmpDir,
+  });
   return context;
 }
 
@@ -663,27 +654,14 @@ function initialize(message) {
     homeDir: String(message.homeDir),
     tmpDir: String(message.tmpDir),
     moduleRoots: [...message.moduleRoots],
-    trustedPackages: [...message.trustedPackages],
     readableRoots: [...message.readableRoots],
   };
-  untrustedContext = createContext('qwen-node-repl-untrusted', false);
-  trustedContext = createContext('qwen-node-repl-trusted', true);
+  untrustedContext = createContext('qwen-node-repl-untrusted');
   loader = createModuleLoader({
     untrustedContext,
-    trustedContext,
     cwd: config.cwd,
     moduleRoots: config.moduleRoots,
-    trustedPackages: config.trustedPackages,
     readableRoots: config.readableRoots,
-    onTrustedModuleLoad(details) {
-      send({
-        type: 'audit',
-        event: 'trustedModuleLoaded',
-        generation,
-        execId: currentExecId(),
-        ...details,
-      });
-    },
   });
   send({ type: 'ready', generation, pid: process.pid });
 }
@@ -695,7 +673,9 @@ function sortedBindingNames() {
 function sortedBindingDescriptors() {
   return [...bindings]
     .map(([name, binding]) => ({ name, kind: binding.kind }))
-    .sort((left, right) => left.name.localeCompare(right.name));
+    .sort((left, right) =>
+      left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
+    );
 }
 
 function sameBindings(left, right) {
@@ -764,6 +744,10 @@ async function handleExec(message) {
   let cellModule = null;
   try {
     await asyncContext.run({ execId: message.execId }, async () => {
+      // Surface any rejection that settled between cells before running this one.
+      while (lateRejections.length > 0) {
+        emitText('console', 'error', lateRejections.shift());
+      }
       const cell = loader.createCell(
         message.source,
         path.join(
@@ -875,32 +859,42 @@ function routeMessage(message) {
 
 let inputBuffer = '';
 let inputBufferBytes = 0;
+// Index to start scanning for the next newline. Reset to 0 if a drain is ever
+// interrupted, so complete frames left in the buffer are not skipped.
+let inputScanFrom = 0;
 protocolInput.setEncoding('utf8');
 protocolInput.on('data', (chunk) => {
-  const previousLength = inputBuffer.length;
+  const searchFrom = inputScanFrom;
   inputBuffer += chunk;
   inputBufferBytes += Buffer.byteLength(chunk, 'utf8');
-  let newline = inputBuffer.indexOf('\n', previousLength);
-  while (newline !== -1) {
-    const line = inputBuffer.slice(0, newline);
-    inputBuffer = inputBuffer.slice(newline + 1);
-    inputBufferBytes = Math.max(
-      0,
-      inputBufferBytes - Buffer.byteLength(line, 'utf8') - 1,
-    );
-    if (line.trim()) {
-      try {
-        routeMessage(JSON.parse(line));
-      } catch (error) {
-        fatal(error);
+  let drained = false;
+  try {
+    let newline = inputBuffer.indexOf('\n', searchFrom);
+    while (newline !== -1) {
+      const line = inputBuffer.slice(0, newline);
+      inputBuffer = inputBuffer.slice(newline + 1);
+      inputBufferBytes = Math.max(
+        0,
+        inputBufferBytes - Buffer.byteLength(line, 'utf8') - 1,
+      );
+      if (line.trim()) {
+        try {
+          routeMessage(JSON.parse(line));
+        } catch (error) {
+          fatal(error);
+        }
       }
+      newline = inputBuffer.indexOf('\n');
     }
-    newline = inputBuffer.indexOf('\n');
+    drained = true;
+  } finally {
+    inputScanFrom = drained ? inputBuffer.length : 0;
   }
   if (inputBufferBytes > 64 * 1024 * 1024) {
     fatal(new Error('host protocol frame exceeded 67108864 bytes'));
     inputBuffer = '';
     inputBufferBytes = 0;
+    inputScanFrom = 0;
   }
 });
 protocolInput.on('end', () => shutdown(true));
@@ -908,7 +902,20 @@ protocolInput.on('error', () => shutdown(true));
 protocolOutput.on('error', () => shutdown(true));
 
 process.on('unhandledRejection', (error) => {
-  emitText('console', 'error', describeThrown(error).message);
+  const message = `Uncaught (in promise) ${describeThrown(error).message}`;
+  // emitText is gated on the active exec, but rejections routinely settle just
+  // AFTER the cell returns (a dangling promise, a timer callback). Reporting
+  // them into the current exec when one is active, and otherwise buffering them
+  // for the next cell, keeps them visible instead of vanishing silently.
+  if (activeExec) {
+    asyncContext.run({ execId: activeExec.execId }, () => {
+      emitText('console', 'error', message);
+    });
+    return;
+  }
+  if (lateRejections.length < MAX_LATE_REJECTIONS) {
+    lateRejections.push(message);
+  }
 });
 process.on('SIGTERM', () => shutdown());
 process.on('SIGINT', () => shutdown());

@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -202,7 +201,7 @@ describe('NodeReplKernelManager', () => {
             'mutable += 1; nodeRepl.write(`${mutable}|${importedSeed}|${变量}|${typeof fromBlock}`);',
           ),
         ),
-      ).toEqual(['5|4|你好|undefined']);
+      ).toEqual(['5|4|你好|number']);
       expect((await run('var mutable = 9;')).status).toBe('ok');
       expect(texts(await run('nodeRepl.write(mutable);'))).toEqual(['9']);
       expect((await run(String.raw`const \u0061 = 1;`)).status).toBe('ok');
@@ -213,8 +212,10 @@ describe('NodeReplKernelManager', () => {
   );
 
   it(
-    'keeps control-flow var declarations local to their cell',
+    'persists control-flow var declarations across cells (hoisting)',
     async () => {
+      // `var` inside a block/loop body at the top level hoists to module scope,
+      // so it must survive into later cells just like a bare top-level `var`.
       expect(
         texts(
           await run(
@@ -223,7 +224,7 @@ describe('NodeReplKernelManager', () => {
         ),
       ).toEqual(['8']);
       expect(texts(await run('nodeRepl.write(typeof nestedVar);'))).toEqual([
-        'undefined',
+        'number',
       ]);
 
       await run('for (var loopVar = 0; loopVar < 1; loopVar++) {}');
@@ -246,9 +247,10 @@ describe('NodeReplKernelManager', () => {
         'if (true) { var nestedBeforeThrow = 1; } throw new Error("boom");',
       );
       expect(failed.status).toBe('error');
+      // The hoisted var was assigned before the throw, so partial-commit keeps it.
       expect(
         texts(await run('nodeRepl.write(typeof nestedBeforeThrow);')),
-      ).toEqual(['undefined']);
+      ).toEqual(['number']);
     },
     TEST_TIMEOUT,
   );
@@ -1143,366 +1145,6 @@ describe('NodeReplKernelManager', () => {
         'const fixture = await import("plain-fixture"); nodeRepl.write(fixture.authority);',
       );
       expect(texts(result)).toEqual(['undefined/object']);
-    },
-    TEST_TIMEOUT,
-  );
-
-  it(
-    'loads a hash-pinned package without exposing a host capability broker',
-    async () => {
-      const root = path.join(workDir, 'node_modules');
-      const source = [
-        'let calls = 0;',
-        'export const hostBridge = typeof nodeRepl.callHost;',
-        'export const runtimeFrozen = Object.isFrozen(nodeRepl);',
-        'export const processFacade = [typeof process, typeof process.cwd, Object.keys(process.env).length].join("/");',
-        'export function bump() { return ++calls; }',
-      ].join('\n');
-      const entry = createEsmPackage(root, 'trusted-fixture', source);
-      createEsmPackage(root, 'unapproved-sibling', 'export const value = 1;');
-      const digest = createHash('sha256')
-        .update(fs.readFileSync(entry))
-        .digest('hex');
-      manager.dispose();
-      manager = makeManager({
-        policy: new NodeReplSecurityPolicy([
-          {
-            root,
-            packageName: 'trusted-fixture',
-            entryPath: entry,
-            entrySha256: digest,
-          },
-        ]),
-      });
-      expect(manager.getModuleRoots()).toEqual([]);
-      expect(
-        texts(
-          await run(
-            'const sibling = await import("unapproved-sibling"); nodeRepl.write(sibling.value);',
-          ),
-        ),
-      ).toEqual(['1']);
-
-      const result = await run(
-        [
-          'const fixture = await import("trusted-fixture");',
-          'let constructorProbe;',
-          'try { fixture.bump.constructor("return process")(); } catch (error) { constructorProbe = error.name; }',
-          'nodeRepl.write(`${fixture.hostBridge}|${fixture.runtimeFrozen}|${Object.isFrozen(nodeRepl)}|${fixture.processFacade}|${typeof nodeRepl.callHost}|${constructorProbe}|${fixture.bump()}`);',
-        ].join('\n'),
-      );
-      expect(result.status).toBe('ok');
-      expect(texts(result)).toEqual([
-        'undefined|true|true|object/function/0|undefined|EvalError|1',
-      ]);
-
-      await manager.reset();
-      const resetSingleton = await run(
-        [
-          'const fixture = await import("trusted-fixture");',
-          'nodeRepl.write(`${fixture.bump()}|${fixture.hostBridge}`);',
-        ].join('\n'),
-      );
-      expect(texts(resetSingleton)).toEqual(['1|undefined']);
-    },
-    TEST_TIMEOUT,
-  );
-
-  it(
-    'loads a trusted ESM package outside ordinary readable roots',
-    async () => {
-      const trustedParent = fs.mkdtempSync(
-        path.join(os.tmpdir(), 'node-repl-trusted-package-'),
-      );
-      const root = path.join(trustedParent, 'node_modules');
-      createEsmPackage(
-        root,
-        'external-trusted-dependency',
-        'export const value = 7;',
-      );
-      const entry = createEsmPackage(
-        root,
-        'external-trusted-fixture',
-        [
-          'export const hostBridge = typeof nodeRepl.callHost;',
-          'export const dependency = async () => (await import("external-trusted-dependency")).value;',
-        ].join('\n'),
-      );
-      const digest = createHash('sha256')
-        .update(fs.readFileSync(entry))
-        .digest('hex');
-      manager.dispose();
-      manager = makeManager({
-        policy: new NodeReplSecurityPolicy([
-          {
-            root,
-            packageName: 'external-trusted-fixture',
-            entryPath: entry,
-            entrySha256: digest,
-          },
-        ]),
-      });
-
-      try {
-        const result = await run(
-          'const fixture = await import("external-trusted-fixture"); nodeRepl.write(`${fixture.hostBridge}|${await fixture.dependency()}`);',
-        );
-        expect(result.status).toBe('ok');
-        expect(texts(result)).toEqual(['undefined|7']);
-      } finally {
-        manager.dispose();
-        fs.rmSync(trustedParent, { recursive: true, force: true });
-      }
-    },
-    TEST_TIMEOUT,
-  );
-
-  it(
-    'rejects a trusted package whose entry hash changed',
-    async () => {
-      const root = path.join(workDir, 'node_modules');
-      const entry = createEsmPackage(
-        root,
-        'changed-fixture',
-        'export const value = 1;',
-      );
-      manager.dispose();
-      manager = makeManager({
-        policy: new NodeReplSecurityPolicy([
-          {
-            root,
-            packageName: 'changed-fixture',
-            entryPath: entry,
-            entrySha256: '0'.repeat(64),
-          },
-        ]),
-      });
-      const result = await run('await import("changed-fixture");');
-      expect(result.status).toBe('error');
-      expect(result.error?.message).toMatch(/sha256/);
-    },
-    TEST_TIMEOUT,
-  );
-
-  it(
-    'rejects a hash-matching trusted package whose resolved entry path changed',
-    async () => {
-      const root = path.join(workDir, 'node_modules');
-      const source = 'export const value = 1;';
-      const entry = createEsmPackage(root, 'entry-pinned-fixture', source);
-      const alternate = path.join(path.dirname(entry), 'alternate.js');
-      fs.writeFileSync(alternate, source);
-      const digest = createHash('sha256')
-        .update(fs.readFileSync(entry))
-        .digest('hex');
-      manager.dispose();
-      manager = makeManager({
-        policy: new NodeReplSecurityPolicy([
-          {
-            root,
-            packageName: 'entry-pinned-fixture',
-            entryPath: entry,
-            entrySha256: digest,
-          },
-        ]),
-      });
-      fs.writeFileSync(
-        path.join(path.dirname(entry), 'package.json'),
-        JSON.stringify({
-          name: 'entry-pinned-fixture',
-          version: '1.0.0',
-          type: 'module',
-          exports: './alternate.js',
-        }),
-      );
-
-      const result = await run('await import("entry-pinned-fixture");');
-      expect(result.status).toBe('error');
-      expect(result.error?.message).toMatch(/unapproved entry path/);
-    },
-    TEST_TIMEOUT,
-  );
-
-  it.skipIf(process.platform === 'win32')(
-    'rejects a hash-matching trusted package if its root target changes',
-    async () => {
-      const root = path.join(workDir, 'node_modules');
-      const source = 'export const value = "approved";';
-      const entry = createEsmPackage(root, 'root-pinned-fixture', source);
-      const digest = createHash('sha256')
-        .update(fs.readFileSync(entry))
-        .digest('hex');
-      manager.dispose();
-      manager = makeManager({
-        policy: new NodeReplSecurityPolicy([
-          {
-            root,
-            packageName: 'root-pinned-fixture',
-            entryPath: entry,
-            entrySha256: digest,
-          },
-        ]),
-      });
-
-      const outside = fs.mkdtempSync(
-        path.join(os.tmpdir(), 'node-repl-replaced-trust-root-'),
-      );
-      const replacementRoot = path.join(outside, 'node_modules');
-      createEsmPackage(replacementRoot, 'root-pinned-fixture', source);
-      try {
-        fs.rmSync(root, { recursive: true, force: true });
-        fs.symlinkSync(replacementRoot, root, 'dir');
-        const denied = await run('await import("root-pinned-fixture");');
-        expect(denied.status).toBe('error');
-        expect(denied.error?.message).toMatch(/trusted package root changed/);
-      } finally {
-        fs.rmSync(outside, { recursive: true, force: true });
-      }
-    },
-    TEST_TIMEOUT,
-  );
-
-  it.skipIf(process.platform === 'win32')(
-    'revokes a trusted workspace package if its symlink target changes',
-    async () => {
-      const root = path.join(workDir, 'node_modules');
-      fs.mkdirSync(root);
-      const source = 'export const value = "approved";';
-      const createWorkspaceTarget = (name: string) => {
-        const packageDir = path.join(workDir, name);
-        fs.mkdirSync(packageDir);
-        fs.writeFileSync(
-          path.join(packageDir, 'package.json'),
-          JSON.stringify({ type: 'module', exports: './index.js' }),
-        );
-        const entryPath = path.join(packageDir, 'index.js');
-        fs.writeFileSync(entryPath, source);
-        return { packageDir, entryPath };
-      };
-      const first = createWorkspaceTarget('workspace-first');
-      const second = createWorkspaceTarget('workspace-second');
-      const linkedPackage = path.join(root, 'workspace-fixture');
-      fs.symlinkSync(first.packageDir, linkedPackage, 'dir');
-      const digest = createHash('sha256')
-        .update(fs.readFileSync(first.entryPath))
-        .digest('hex');
-      manager.dispose();
-      manager = makeManager({
-        policy: new NodeReplSecurityPolicy([
-          {
-            root,
-            packageName: 'workspace-fixture',
-            entryPath: first.entryPath,
-            entrySha256: digest,
-          },
-        ]),
-      });
-
-      fs.unlinkSync(linkedPackage);
-      fs.symlinkSync(second.packageDir, linkedPackage, 'dir');
-      const denied = await run('await import("workspace-fixture");');
-      expect(denied.status).toBe('error');
-      expect(denied.error?.message).toMatch(/package directory changed/);
-    },
-    TEST_TIMEOUT,
-  );
-
-  it(
-    'denies trusted-package files that are not explicitly hash-pinned',
-    async () => {
-      const root = path.join(workDir, 'node_modules');
-      const entry = createEsmPackage(
-        root,
-        'dependent-fixture',
-        'import "./dependency.js"; export const value = 1;',
-      );
-      fs.writeFileSync(
-        path.join(path.dirname(entry), 'dependency.js'),
-        'export const dependency = true;',
-      );
-      const digest = createHash('sha256')
-        .update(fs.readFileSync(entry))
-        .digest('hex');
-      manager.dispose();
-      manager = makeManager({
-        policy: new NodeReplSecurityPolicy([
-          {
-            root,
-            packageName: 'dependent-fixture',
-            entryPath: entry,
-            entrySha256: digest,
-          },
-        ]),
-      });
-      const result = await run('await import("dependent-fixture");');
-      expect(result.status).toBe('error');
-      expect(result.error?.message).toMatch(/unapproved file/);
-    },
-    TEST_TIMEOUT,
-  );
-
-  it(
-    'loads hash-pinned trusted files with package dependencies and builtins',
-    async () => {
-      const root = path.join(workDir, 'node_modules');
-      createEsmPackage(root, 'unlisted-dependency', 'export const value = 1;');
-      const entry = createEsmPackage(
-        root,
-        'trusted-multifile',
-        [
-          'import { helper } from "./helper.js";',
-          'export const value = helper;',
-          'export const loadUnlisted = async () => (await import("unlisted-dependency")).value;',
-          'export const loadBuiltin = async () => (await import("node:path")).basename("/a/b");',
-        ].join('\n'),
-      );
-      const helperPath = path.join(path.dirname(entry), 'helper.js');
-      fs.writeFileSync(helperPath, 'export const helper = 2;');
-      const digest = (filePath: string) =>
-        createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
-      manager.dispose();
-      manager = makeManager({
-        policy: new NodeReplSecurityPolicy([
-          {
-            root,
-            packageName: 'trusted-multifile',
-            entryPath: entry,
-            entrySha256: digest(entry),
-            additionalFiles: [{ path: helperPath, sha256: digest(helperPath) }],
-          },
-        ]),
-      });
-
-      const result = await run(
-        'const fixture = await import("trusted-multifile"); nodeRepl.write(fixture.value);',
-      );
-      expect(result.status).toBe('ok');
-      expect(texts(result)).toEqual(['2']);
-
-      await manager.addModuleRoot(root);
-      const directTrustedFile = await run(
-        `await import(${JSON.stringify(pathToFileURL(helperPath).href)});`,
-      );
-      expect(directTrustedFile.status).toBe('error');
-      expect(directTrustedFile.error?.message).toMatch(
-        /require an approved package import/,
-      );
-
-      const dependencies = await run(
-        [
-          'const unlisted = await fixture.loadUnlisted();',
-          'const builtin = await fixture.loadBuiltin();',
-          'nodeRepl.write(`${unlisted}|${builtin}`);',
-        ].join('\n'),
-      );
-      expect(dependencies.status).toBe('ok');
-      expect(texts(dependencies)).toEqual(['1|b']);
-
-      await manager.reset();
-      fs.writeFileSync(helperPath, 'export const helper = 3;');
-      const changed = await run('await import("trusted-multifile");');
-      expect(changed.status).toBe('error');
-      expect(changed.error?.message).toMatch(/sha256 verification/);
     },
     TEST_TIMEOUT,
   );

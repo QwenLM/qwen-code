@@ -86,11 +86,6 @@ function main() {
     'vendor',
   );
   copyOptionalDir(
-    join(cliDistDir, 'node-repl-runtime'),
-    join(sdkCliDistDir, 'node-repl-runtime'),
-    'node-repl-runtime',
-  );
-  copyOptionalDir(
     join(cliDistDir, 'locales'),
     join(sdkCliDistDir, 'locales'),
     'locales',

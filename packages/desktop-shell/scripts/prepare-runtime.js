@@ -29,12 +29,17 @@ if (refreshChecksums !== -1) {
 }
 fs.mkdirSync(runtimeDir, { recursive: true });
 recoverInterruptedRuntime();
+const stagingRoot = fs.mkdtempSync(path.join(runtimeDir, '.prepare-'));
+const packageRoot = path.join(stagingRoot, 'qwen-code');
+const libDir = path.join(packageRoot, 'lib');
+const nodeDir = path.join(packageRoot, 'node');
 const qwenCodeVersion = JSON.parse(
   fs.readFileSync(path.join(sourceRoot, 'package.json'), 'utf8'),
 ).version;
 const desktopVersion = JSON.parse(
   fs.readFileSync(path.join(packageDir, 'package.json'), 'utf8'),
 ).version;
+const binDir = path.join(packageRoot, 'bin');
 
 const target = desktopTarget();
 const skipBuild = process.env.QWEN_DESKTOP_SKIP_BUILD === '1';
@@ -77,9 +82,6 @@ const distDir = path.join(sourceRoot, 'dist');
 for (const required of [
   'cli.js',
   'cli-entry.js',
-  'node-repl-runtime/kernel.mjs',
-  'node-repl-runtime/module-loader.mjs',
-  'node-repl-runtime/tree-sitter-javascript.wasm',
   'web-shell/index.html',
   'web-shell/assets',
 ]) {
@@ -88,12 +90,6 @@ for (const required of [
     throw new Error(`Missing bundled runtime asset: ${candidate}`);
   }
 }
-
-const stagingRoot = fs.mkdtempSync(path.join(runtimeDir, '.prepare-'));
-const packageRoot = path.join(stagingRoot, 'qwen-code');
-const libDir = path.join(packageRoot, 'lib');
-const nodeDir = path.join(packageRoot, 'node');
-const binDir = path.join(packageRoot, 'bin');
 
 try {
   fs.mkdirSync(libDir, { recursive: true });

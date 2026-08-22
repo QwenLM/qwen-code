@@ -11,8 +11,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
-import { createDebugLogger } from '../../utils/debugLogger.js';
-import { normalizePathEnvForWindows } from '../../utils/windowsPath.js';
+import { createDebugLogger } from './debug-log.js';
+import { normalizePathEnvForWindows } from './win-path.js';
 import { prepareNodeReplCell } from './cell-transform.js';
 import {
   encodeFrame,
@@ -117,6 +117,8 @@ interface KernelHandle {
   pid: number;
   generation: number;
   toKernel: NodeJS.WritableStream;
+  stdoutDecoder: StringDecoder;
+  stderrDecoder: StringDecoder;
 }
 
 interface PendingReady {
@@ -126,20 +128,14 @@ interface PendingReady {
 }
 
 function resolveKernelPath(): string {
-  const candidates = [
-    new URL('./runtime/kernel.mjs', import.meta.url),
-    new URL('./node-repl-runtime/kernel.mjs', import.meta.url),
-    new URL('../node-repl-runtime/kernel.mjs', import.meta.url),
-  ];
-  for (const candidate of candidates) {
-    try {
-      const filePath = fileURLToPath(candidate);
-      if (fs.existsSync(filePath)) return filePath;
-    } catch {
-      // Try the next build layout.
-    }
-  }
-  throw new Error('node_repl kernel runtime asset was not found');
+  // Both dev (src/runtime) and built (dist/runtime) layouts put the kernel
+  // beside this module; build.mjs is responsible for the dist copy.
+  const candidate = new URL('./runtime/kernel.mjs', import.meta.url);
+  const filePath = fileURLToPath(candidate);
+  if (fs.existsSync(filePath)) return filePath;
+  throw new Error(
+    `node_repl kernel runtime asset was not found at ${filePath}`,
+  );
 }
 
 function safeErrorMessage(error: unknown): string {
@@ -152,21 +148,6 @@ function safeErrorMessage(error: unknown): string {
   } catch {
     return '[unreadable error]';
   }
-}
-
-function hasControlCharacters(value: string): boolean {
-  for (let index = 0; index < value.length; index++) {
-    const code = value.charCodeAt(index);
-    if (
-      code <= 0x1f ||
-      (code >= 0x7f && code <= 0x9f) ||
-      code === 0x2028 ||
-      code === 0x2029
-    ) {
-      return true;
-    }
-  }
-  return false;
 }
 
 function createKernelEnv(): NodeJS.ProcessEnv {
@@ -240,21 +221,14 @@ export class NodeReplKernelManager {
 
   async addModuleRoot(
     rawPath: string,
-    approvedCanonicalPath?: string,
   ): Promise<{ path: string; added: boolean }> {
     this.assertNotDisposed();
     const canonical = this.options.policy.validateModuleRoot(rawPath);
     const root = { path: path.resolve(rawPath), canonicalPath: canonical };
-    if (
-      approvedCanonicalPath !== undefined &&
-      canonical !== approvedCanonicalPath
-    ) {
-      throw new Error(
-        'module root canonical target changed after permission was granted',
-      );
-    }
     const run = this.operationChain.then(async () => {
       this.assertNotDisposed();
+      // Re-validate inside the serialized chain: the canonical target may have
+      // been swapped while earlier queued work drained (TOCTOU).
       const current = this.options.policy.validateModuleRoot(rawPath);
       if (current !== canonical) {
         throw new Error(
@@ -321,7 +295,9 @@ export class NodeReplKernelManager {
       prepared = await prepareNodeReplCell(request.code, {
         previousBindings: [...this.bindingKinds]
           .map(([name, kind]) => ({ name, kind }))
-          .sort((left, right) => left.name.localeCompare(right.name)),
+          .sort((left, right) =>
+            left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
+          ),
         cellId: execId,
       });
     } catch (error) {
@@ -384,7 +360,9 @@ export class NodeReplKernelManager {
         source: prepared.source,
         previousBindings: [...this.bindingKinds]
           .map(([name, kind]) => ({ name, kind }))
-          .sort((left, right) => left.name.localeCompare(right.name)),
+          .sort((left, right) =>
+            left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
+          ),
         bindingExports: prepared.bindingExports,
         snapshotExportName: prepared.snapshotExportName,
       });
@@ -412,9 +390,13 @@ export class NodeReplKernelManager {
     const stop = (status: 'timeout' | 'cancelled', message: string) => {
       if (stopStarted || inflight.settled) return;
       stopStarted = true;
-      void this.invalidateKernel(status).then(() => {
-        inflight.settle({ hostStatus: status, message });
-      });
+      // `catch` before `finally`: the exec must always settle, and a rejected
+      // teardown must not surface as an unhandled rejection.
+      void this.invalidateKernel(status)
+        .catch(() => undefined)
+        .finally(() => {
+          inflight.settle({ hostStatus: status, message });
+        });
     };
     const effectiveTimeout = Math.min(request.timeoutMs, MAX_TIMER_DELAY_MS);
     const timeout = setTimeout(
@@ -456,6 +438,9 @@ export class NodeReplKernelManager {
     clearTimeout(timeout);
     request.signal?.removeEventListener('abort', onAbort);
     if (this.inflight === inflight) this.inflight = null;
+    // Flush any partial multi-byte sequence still held by the raw stream
+    // decoders so it cannot leak a replacement char into the next cell.
+    this.flushRawStreamDecoders();
 
     if ('hostStatus' in terminal) {
       return this.outcomeFromInflight(
@@ -545,6 +530,8 @@ export class NodeReplKernelManager {
       pid: child.pid,
       generation: this.generation,
       toKernel: child.stdio[4] as NodeJS.WritableStream,
+      stdoutDecoder: new StringDecoder('utf8'),
+      stderrDecoder: new StringDecoder('utf8'),
     };
     this.kernel = handle;
 
@@ -589,7 +576,6 @@ export class NodeReplKernelManager {
           homeDir: this.options.homeDir,
           tmpDir: this.sessionTmpDir,
           moduleRoots: [...this.moduleRoots],
-          trustedPackages: this.options.policy.getTrustedPackages(),
           readableRoots: [...this.readableRoots, this.sessionTmpDir],
         }),
       );
@@ -686,44 +672,6 @@ export class NodeReplKernelManager {
         this.pendingAddRoot.delete(message.requestId);
         if (message.ok) pending.resolve();
         else pending.reject(new Error(message.error ?? 'module root rejected'));
-        return;
-      }
-      case 'audit': {
-        const trustedEntry = this.options.policy
-          .getTrustedPackages()
-          .find((entry) => entry.packageName === message.packageName);
-        const trustedFile = trustedEntry
-          ? [
-              {
-                path: trustedEntry.entryPath,
-                sha256: trustedEntry.entrySha256,
-              },
-              ...trustedEntry.additionalFiles,
-            ].find(
-              (file) =>
-                file.path === message.modulePath &&
-                file.sha256 === message.moduleSha256,
-            )
-          : undefined;
-        if (
-          message.event !== 'trustedModuleLoaded' ||
-          message.generation !== handle.generation ||
-          typeof message.execId !== 'string' ||
-          message.execId !== this.inflight?.execId ||
-          !trustedFile ||
-          !(
-            message.version === null ||
-            (typeof message.version === 'string' &&
-              message.version.length <= 256 &&
-              !hasControlCharacters(message.version))
-          )
-        ) {
-          this.handleProtocolError(handle, new Error('invalid audit frame'));
-          return;
-        }
-        debugLogger.debug(
-          `[node-repl] trusted module loaded (package=${message.packageName}, module=${JSON.stringify(message.modulePath)}, version=${message.version ?? 'unknown'}, sha256=${message.moduleSha256}, generation=${handle.generation})`,
-        );
         return;
       }
       case 'fatal':
@@ -846,13 +794,32 @@ export class NodeReplKernelManager {
     inflight.events.push({ type: 'image', data, mimeType });
   }
 
+  /**
+   * Discards any partial multi-byte sequence buffered by the raw stdout/stderr
+   * decoders. Called when an exec settles so a truncated sequence from one cell
+   * cannot surface as a replacement character at the start of the next.
+   */
+  private flushRawStreamDecoders(): void {
+    const handle = this.kernel;
+    if (!handle) return;
+    handle.stdoutDecoder.end();
+    handle.stderrDecoder.end();
+  }
+
   private collectRawStream(
     handle: KernelHandle,
     kind: 'stdout' | 'stderr',
     chunk: Buffer,
   ): void {
     if (this.kernel !== handle || !this.inflight) return;
-    this.collectText(this.inflight.execId, kind, chunk.toString('utf8'), kind);
+    // Decode via a per-stream StringDecoder so a multi-byte UTF-8 sequence
+    // split across pipe chunks is not corrupted into U+FFFD.
+    const decoder =
+      kind === 'stdout' ? handle.stdoutDecoder : handle.stderrDecoder;
+    const text = decoder.write(chunk);
+    if (text.length === 0) return;
+    // `level` is for console levels only; raw pipes have none.
+    this.collectText(this.inflight.execId, kind, text);
   }
 
   private async sendAddRoot(root: NodeReplModuleRoot): Promise<void> {
@@ -889,12 +856,14 @@ export class NodeReplKernelManager {
     if (this.kernel !== handle) return;
     debugLogger.warn(`[node-repl] protocol error: ${error.message}`);
     const inflight = this.inflight;
-    void this.invalidateKernel('crashed').then(() => {
-      inflight?.settle({
-        hostStatus: 'crashed',
-        message: `The node_repl protocol failed: ${error.message}`,
+    void this.invalidateKernel('crashed')
+      .catch(() => undefined)
+      .finally(() => {
+        inflight?.settle({
+          hostStatus: 'crashed',
+          message: `The node_repl protocol failed: ${error.message}`,
+        });
       });
-    });
   }
 
   private handleChildError(handle: KernelHandle, error: Error): void {

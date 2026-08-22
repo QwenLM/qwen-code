@@ -1,17 +1,15 @@
 /**
  * @license
- * Copyright 2026 Qwen Team
+ * Copyright 2025 Qwen
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Part, PartListUnion } from '@google/genai';
-import { createDebugLogger } from '../../utils/debugLogger.js';
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import { createDebugLogger } from './debug-log.js';
 import {
   estimateTextTokenUnits,
   TOKEN_ESTIMATE_UNITS_PER_TOKEN,
-} from '../../utils/request-tokenizer/textTokenizer.js';
-import { ToolErrorType } from '../tool-error.js';
-import { MAX_TERMINAL_IMAGE_BYTES, type ToolResult } from '../tools.js';
+} from './tokenizer.js';
 import type {
   NodeReplExecOutcome,
   NodeReplImageEvent,
@@ -19,14 +17,23 @@ import type {
 } from './kernel-manager.js';
 
 export const MAX_MODEL_TEXT_TOKENS = 10_000;
-export const MAX_MODEL_TEXT_CHARS = MAX_MODEL_TEXT_TOKENS * 4;
 export const MAX_ERROR_CHARS = 16 * 1024;
+/** Per-image decoded-byte ceiling. */
+export const MAX_MODEL_IMAGE_BYTES = 4 * 1024 * 1024;
+/** Aggregate ceilings so one result cannot be tens of MB of JSON on stdout. */
+export const MAX_MODEL_IMAGES = 8;
+export const MAX_MODEL_IMAGE_TOTAL_BYTES = 8 * 1024 * 1024;
 const MAX_MODEL_TEXT_UNITS =
   MAX_MODEL_TEXT_TOKENS * TOKEN_ESTIMATE_UNITS_PER_TOKEN;
 
 const debugLogger = createDebugLogger('NODE_REPL');
 
 const ALLOWED_IMAGE_MIMES = new Set(['image/png', 'image/jpeg', 'image/webp']);
+
+/** MCP content block union we produce (text + image). */
+type TextBlock = { type: 'text'; text: string };
+type ImageBlock = { type: 'image'; data: string; mimeType: string };
+type OutputBlock = TextBlock | ImageBlock;
 
 function sniffMime(bytes: Buffer): string | null {
   if (
@@ -62,7 +69,7 @@ function sniffMime(bytes: Buffer): string | null {
 
 function validateImage(
   image: NodeReplImageEvent,
-): { ok: true } | { ok: false; reason: string } {
+): { ok: true; byteLength: number } | { ok: false; reason: string } {
   if (!ALLOWED_IMAGE_MIMES.has(image.mimeType)) {
     return { ok: false, reason: `unsupported image MIME ${image.mimeType}` };
   }
@@ -75,10 +82,10 @@ function validateImage(
   }
   const bytes = Buffer.from(image.data, 'base64');
   if (bytes.length === 0) return { ok: false, reason: 'empty image payload' };
-  if (bytes.length > MAX_TERMINAL_IMAGE_BYTES) {
+  if (bytes.length > MAX_MODEL_IMAGE_BYTES) {
     return {
       ok: false,
-      reason: `image exceeds ${MAX_TERMINAL_IMAGE_BYTES} bytes`,
+      reason: `image exceeds ${MAX_MODEL_IMAGE_BYTES} bytes`,
     };
   }
   const sniffed = sniffMime(bytes);
@@ -88,7 +95,7 @@ function validateImage(
       reason: `image bytes are ${sniffed ?? 'unknown'} but declared ${image.mimeType}`,
     };
   }
-  return { ok: true };
+  return { ok: true, byteLength: bytes.length };
 }
 
 function renderText(event: NodeReplTextEvent): string {
@@ -108,7 +115,12 @@ function renderText(event: NodeReplTextEvent): string {
 }
 
 function capChars(text: string, limit: number): string {
-  return text.length <= limit ? text : `${text.slice(0, limit)}…`;
+  if (text.length <= limit) return text;
+  let end = limit;
+  // Never split a surrogate pair.
+  const code = text.charCodeAt(end - 1);
+  if (end > 0 && code >= 0xd800 && code <= 0xdbff) end--;
+  return `${text.slice(0, end)}…`;
 }
 
 function takeTextWithinTokenUnits(
@@ -164,33 +176,35 @@ function capTextToTokenUnits(
   return { text: `${withRoom.text}${ellipsis}`, truncated: true };
 }
 
-function pushText(parts: Part[], text: string): void {
+/** Append text to the trailing text block, coalescing consecutive text. */
+function pushText(blocks: OutputBlock[], text: string): void {
   if (text.length === 0) return;
-  const previous = parts.at(-1);
-  if (previous?.text !== undefined) {
+  const previous = blocks.at(-1);
+  if (previous && previous.type === 'text') {
     previous.text += text;
   } else {
-    parts.push({ text });
+    blocks.push({ type: 'text', text });
   }
 }
 
-function modelContent(parts: Part[]): PartListUnion {
-  const hasNonText = parts.some((part) => part.inlineData !== undefined);
-  if (hasNonText) return parts;
-  return parts.map((part) => part.text ?? '').join('');
-}
-
-export function convertOutcomeToToolResult(
+/**
+ * Converts a kernel execution outcome into an MCP CallToolResult:
+ * text + image content blocks, with a ~10k-token text budget, base64/MIME image
+ * validation, and status folded into `isError` plus a leading status text block
+ * (MCP has no first-class error-type or display/model split).
+ */
+export function convertOutcomeToMcpResult(
   outcome: NodeReplExecOutcome,
-): ToolResult {
-  const parts: Part[] = [];
+): CallToolResult {
+  const blocks: OutputBlock[] = [];
   const truncationNotice = `[node_repl text truncated near ${MAX_MODEL_TEXT_TOKENS} estimated tokens]\n`;
   const droppedImagesNotice =
     outcome.imagesDropped > 0
       ? `[${outcome.imagesDropped} image(s) dropped by the raw sanity limit]\n`
       : '';
+
   let errorText: string | undefined;
-  let rawErrorNotice = '';
+  let statusNotice = '';
   if (outcome.status !== 'ok') {
     const error = outcome.error ?? {
       name: 'Error',
@@ -200,24 +214,32 @@ export function convertOutcomeToToolResult(
     if (outcome.status === 'error' && error.stack) {
       errorText += `\n${capChars(error.stack, 2048)}`;
     }
-    rawErrorNotice = `${errorText}\n`;
+    // Preserve the 5-way status that MCP's boolean isError would otherwise lose.
+    statusNotice = `[node_repl ${outcome.status}] ${errorText}\n`;
   }
+
   const noticeSeparators = '\n\n\n';
+  // Reserve for a worst-case "images omitted" notice too, so emitting it cannot
+  // push the result past the token budget (notices bypass addBudgetedText).
+  const imagesOmittedNoticeReserve =
+    '[999 image(s) omitted: model image budget exceeded]\n';
   const fixedNoticeUnits = estimateTextTokenUnits(
-    truncationNotice + droppedImagesNotice + noticeSeparators,
+    truncationNotice +
+      droppedImagesNotice +
+      imagesOmittedNoticeReserve +
+      noticeSeparators,
   );
-  const cappedErrorNotice = capTextToTokenUnits(
-    rawErrorNotice,
+  const cappedStatusNotice = capTextToTokenUnits(
+    statusNotice,
     Math.max(0, MAX_MODEL_TEXT_UNITS - fixedNoticeUnits),
   );
-  const errorNotice = cappedErrorNotice.text;
   const reservedTextUnits =
-    fixedNoticeUnits + estimateTextTokenUnits(errorNotice);
+    fixedNoticeUnits + estimateTextTokenUnits(cappedStatusNotice.text);
   let remainingTextUnits = Math.max(
     0,
     MAX_MODEL_TEXT_UNITS - reservedTextUnits,
   );
-  let textWasTruncated = cappedErrorNotice.truncated;
+  let textWasTruncated = cappedStatusNotice.truncated;
   let validImages = 0;
 
   const addBudgetedText = (text: string) => {
@@ -227,19 +249,31 @@ export function convertOutcomeToToolResult(
       return;
     }
     const taken = takeTextWithinTokenUnits(text, remainingTextUnits);
-    pushText(parts, taken.text);
-    remainingTextUnits -= taken.units;
-    textWasTruncated ||= !taken.complete;
+    pushText(blocks, taken.text);
+    if (taken.complete) {
+      remainingTextUnits -= taken.units;
+    } else {
+      // Budget is spent: saturate so later events hit the fast path instead of
+      // re-running a binary search that can only yield an empty prefix.
+      remainingTextUnits = 0;
+      textWasTruncated = true;
+    }
   };
 
   const pushNotice = (notice: string) => {
     if (notice.length === 0) return;
-    const previous = parts.at(-1);
-    if (previous?.text !== undefined && !previous.text.endsWith('\n')) {
-      pushText(parts, '\n');
+    const previous = blocks.at(-1);
+    if (previous && previous.type === 'text' && !previous.text.endsWith('\n')) {
+      pushText(blocks, '\n');
     }
-    pushText(parts, notice);
+    pushText(blocks, notice);
   };
+
+  // The status notice leads the output so the model sees the failure first.
+  pushNotice(cappedStatusNotice.text);
+
+  let imageBytesEmitted = 0;
+  let imagesOverBudget = 0;
 
   for (const event of outcome.events) {
     if (event.type === 'text') {
@@ -251,10 +285,17 @@ export function convertOutcomeToToolResult(
       addBudgetedText(`[image rejected: ${verdict.reason}]`);
       continue;
     }
+    // Aggregate budget: one tool result must not become tens of MB of JSON.
+    if (
+      validImages >= MAX_MODEL_IMAGES ||
+      imageBytesEmitted + verdict.byteLength > MAX_MODEL_IMAGE_TOTAL_BYTES
+    ) {
+      imagesOverBudget++;
+      continue;
+    }
     validImages++;
-    parts.push({
-      inlineData: { mimeType: event.mimeType, data: event.data },
-    });
+    imageBytesEmitted += verdict.byteLength;
+    blocks.push({ type: 'image', data: event.data, mimeType: event.mimeType });
   }
 
   if (textWasTruncated || outcome.rawTextTruncated) {
@@ -264,37 +305,26 @@ export function convertOutcomeToToolResult(
     pushNotice(truncationNotice);
   }
   pushNotice(droppedImagesNotice);
-  pushNotice(errorNotice);
-
-  const llmContent = modelContent(parts);
-  const displayText = parts
-    .map((part) => part.text ?? '')
-    .join('')
-    .trim();
-  const displaySuffix =
-    validImages > 0
-      ? `${displayText ? '\n' : ''}[${validImages} image(s)]`
-      : '';
-  const displayLimit = 8 * 1024;
-  const displayTextLimit = Math.max(0, displayLimit - displaySuffix.length);
-  const cappedDisplayText =
-    displayText.length <= displayTextLimit
-      ? displayText
-      : `${displayText.slice(0, Math.max(0, displayTextLimit - 1))}…`;
-  const display = `${cappedDisplayText}${displaySuffix}` || '(no output)';
-
-  if (outcome.status === 'ok') {
-    return { llmContent, returnDisplay: display };
+  if (imagesOverBudget > 0) {
+    pushNotice(
+      `[${imagesOverBudget} image(s) omitted: model image budget exceeded]\n`,
+    );
   }
-  return {
-    llmContent,
-    returnDisplay: `Error (${outcome.status}): ${display}`,
-    error: {
-      message: errorText ?? `node_repl execution ${outcome.status}`,
-      type:
-        outcome.status === 'timeout'
-          ? ToolErrorType.EXECUTION_TIMEOUT
-          : ToolErrorType.EXECUTION_FAILED,
-    },
+
+  const content: OutputBlock[] =
+    blocks.length > 0
+      ? blocks
+      : [
+          {
+            type: 'text',
+            text: '[node_repl ok — no output; use nodeRepl.write(value) to return a value]',
+          },
+        ];
+  const result: CallToolResult = {
+    content: content as CallToolResult['content'],
   };
+  if (outcome.status !== 'ok') {
+    result.isError = true;
+  }
+  return result;
 }

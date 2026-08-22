@@ -124,7 +124,7 @@ describe('prepareNodeReplCell', () => {
     });
   });
 
-  it('does not persist var declarations nested inside top-level statements', async () => {
+  it('persists var declarations nested inside top-level statements (hoisting)', async () => {
     const prepared = await prepareNodeReplCell(
       [
         'if (true) { var fromBlock = 1; }',
@@ -135,10 +135,32 @@ describe('prepareNodeReplCell', () => {
       ].join('\n'),
       { previousBindings: [], cellId: 'hoisted-var' },
     );
-    expect(prepared.bindingExports.map((entry) => entry.bindingName)).toEqual([
+    // `var` hoists to module scope from blocks and loop bodies, so all of these
+    // must persist. `hidden` must NOT: it belongs to nested()'s function scope.
+    expect(
+      prepared.bindingExports.map((entry) => entry.bindingName).sort(),
+    ).toEqual([
+      'fromBareForOfBody',
+      'fromBareLoopBody',
+      'fromBlock',
       'loopIndex',
       'nested',
     ]);
+  });
+
+  it('does not persist var declarations from inner function scopes', async () => {
+    const prepared = await prepareNodeReplCell(
+      [
+        'function fn() { var inFn = 1; }',
+        'const arrow = () => { var inArrow = 2; };',
+        'class Klass { method() { var inMethod = 3; } }',
+        'var kept = 4;',
+      ].join('\n'),
+      { previousBindings: [], cellId: 'fn-scope-var' },
+    );
+    expect(
+      prepared.bindingExports.map((entry) => entry.bindingName).sort(),
+    ).toEqual(['Klass', 'arrow', 'fn', 'kept']);
   });
 
   it('persists var bindings from each top-level loop initializer form', async () => {

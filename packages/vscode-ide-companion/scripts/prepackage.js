@@ -9,7 +9,7 @@
  *
  * We bundle the CLI into the extension so users don't need a global install.
  * To match the published CLI layout, we need to:
- * - build root bundle (dist/cli.js + vendor/ + runtime assets + sandbox profiles)
+ * - build root bundle (dist/cli.js + vendor/ + sandbox profiles)
  * - run root prepare:package (dist/package.json + locales + README/LICENSE)
  * - install production deps into root dist/ (dist/node_modules) so runtime deps
  *   like optional node-pty are present inside the VSIX payload.

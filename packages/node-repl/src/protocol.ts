@@ -20,28 +20,6 @@ export interface NodeReplModuleRoot {
   canonicalPath: string;
 }
 
-export interface TrustedPackageFile {
-  path: string;
-  sha256: string;
-}
-
-export interface TrustedPackagePolicyEntry {
-  root: string;
-  packageName: string;
-  entryPath: string;
-  entrySha256: string;
-  additionalFiles?: TrustedPackageFile[];
-}
-
-export interface TrustedPackageEntry {
-  root: string;
-  packageName: string;
-  packageDir: string;
-  entryPath: string;
-  entrySha256: string;
-  additionalFiles: TrustedPackageFile[];
-}
-
 export interface InitMessage {
   type: 'init';
   generation: number;
@@ -49,7 +27,6 @@ export interface InitMessage {
   homeDir: string;
   tmpDir: string;
   moduleRoots: NodeReplModuleRoot[];
-  trustedPackages: TrustedPackageEntry[];
   readableRoots: string[];
 }
 
@@ -122,17 +99,6 @@ export interface AddModuleRootResultMessage {
   error?: string;
 }
 
-export interface TrustedModuleAuditMessage {
-  type: 'audit';
-  event: 'trustedModuleLoaded';
-  generation: number;
-  execId: string | null;
-  packageName: string;
-  modulePath: string;
-  version: string | null;
-  moduleSha256: string;
-}
-
 export interface FatalMessage {
   type: 'fatal';
   message: string;
@@ -144,7 +110,6 @@ export type KernelToHostMessage =
   | ImageMessage
   | ExecResultMessage
   | AddModuleRootResultMessage
-  | TrustedModuleAuditMessage
   | FatalMessage;
 
 export function encodeFrame(message: object): string {
@@ -161,6 +126,7 @@ export type FrameErrorHandler = (error: Error) => void;
 export class FrameDecoder {
   private buffer = '';
   private bufferedBytes = 0;
+  private scanFrom = 0;
   private utf8 = new StringDecoder('utf8');
 
   constructor(
@@ -171,28 +137,39 @@ export class FrameDecoder {
   push(chunk: string | Buffer): void {
     const bytes = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
     this.bufferedBytes += bytes.length;
-    const previousLength = this.buffer.length;
+    // Where to begin scanning for the next newline. Normally the retained
+    // buffer is a newline-free partial frame, so we can skip it. If a previous
+    // drain was interrupted (a throwing frame handler), complete frames may
+    // still be buffered and we must rescan from the start.
+    const searchFrom = this.scanFrom;
     this.buffer += this.utf8.write(bytes);
 
-    let newlineIndex = this.buffer.indexOf('\n', previousLength);
-    while (newlineIndex !== -1) {
-      const line = this.buffer.slice(0, newlineIndex);
-      this.buffer = this.buffer.slice(newlineIndex + 1);
-      const frameBytes = Buffer.byteLength(line, 'utf8') + 1;
-      this.bufferedBytes = Math.max(0, this.bufferedBytes - frameBytes);
-      if (frameBytes > MAX_FRAME_BYTES) {
-        this.onError(
-          new Error(`protocol frame exceeds ${MAX_FRAME_BYTES} bytes`),
-        );
-      } else if (line.trim().length > 0) {
-        this.decodeLine(line);
+    let drained = false;
+    try {
+      let newlineIndex = this.buffer.indexOf('\n', searchFrom);
+      while (newlineIndex !== -1) {
+        const line = this.buffer.slice(0, newlineIndex);
+        this.buffer = this.buffer.slice(newlineIndex + 1);
+        const frameBytes = Buffer.byteLength(line, 'utf8') + 1;
+        this.bufferedBytes = Math.max(0, this.bufferedBytes - frameBytes);
+        if (frameBytes > MAX_FRAME_BYTES) {
+          this.onError(
+            new Error(`protocol frame exceeds ${MAX_FRAME_BYTES} bytes`),
+          );
+        } else if (line.trim().length > 0) {
+          this.decodeLine(line);
+        }
+        newlineIndex = this.buffer.indexOf('\n');
       }
-      newlineIndex = this.buffer.indexOf('\n');
+      drained = true;
+    } finally {
+      this.scanFrom = drained ? this.buffer.length : 0;
     }
 
     if (this.bufferedBytes > MAX_FRAME_BYTES) {
       this.buffer = '';
       this.bufferedBytes = 0;
+      this.scanFrom = 0;
       this.utf8 = new StringDecoder('utf8');
       this.onError(
         new Error(

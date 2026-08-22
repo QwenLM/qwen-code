@@ -483,9 +483,6 @@ function testRuntimePreparation(directory) {
   fs.mkdirSync(path.join(sourceRoot, 'dist', 'web-shell', 'assets'), {
     recursive: true,
   });
-  fs.mkdirSync(path.join(sourceRoot, 'dist', 'node-repl-runtime'), {
-    recursive: true,
-  });
   fs.writeFileSync(
     path.join(sourceRoot, 'package.json'),
     JSON.stringify({ version: '0.0.0-test' }),
@@ -508,9 +505,6 @@ function testRuntimePreparation(directory) {
   for (const file of [
     'cli.js',
     'cli-entry.js',
-    path.join('node-repl-runtime', 'kernel.mjs'),
-    path.join('node-repl-runtime', 'module-loader.mjs'),
-    path.join('node-repl-runtime', 'tree-sitter-javascript.wasm'),
     path.join('web-shell', 'index.html'),
     path.join('web-shell', 'assets', 'app.js'),
   ]) {
@@ -573,17 +567,6 @@ globalThis.fetch = async (url) => {
   assert.ok(
     fs.existsSync(path.join(runtimeDir, 'qwen-code', 'checksums.json')),
   );
-  for (const file of [
-    'kernel.mjs',
-    'module-loader.mjs',
-    'tree-sitter-javascript.wasm',
-  ]) {
-    assert.ok(
-      fs.existsSync(
-        path.join(runtimeDir, 'qwen-code', 'lib', 'node-repl-runtime', file),
-      ),
-    );
-  }
 
   const second = spawnSync(process.execPath, [testScript], {
     encoding: 'utf8',
@@ -614,25 +597,6 @@ globalThis.fetch = async (url) => {
     3,
   );
   assert.equal(fs.existsSync(path.join(cacheDir, 'SHASUMS256.txt')), false);
-
-  const requiredRuntimeAsset = path.join(
-    sourceRoot,
-    'dist',
-    'node-repl-runtime',
-    'kernel.mjs',
-  );
-  fs.rmSync(requiredRuntimeAsset);
-  const missingRuntimeAsset = spawnSync(process.execPath, [testScript], {
-    encoding: 'utf8',
-    env,
-  });
-  assert.notEqual(missingRuntimeAsset.status, 0);
-  assert.match(missingRuntimeAsset.stderr, /Missing bundled runtime asset/);
-  assert.deepEqual(
-    fs.readdirSync(runtimeDir).filter((entry) => entry.startsWith('.prepare-')),
-    [],
-  );
-  fs.writeFileSync(requiredRuntimeAsset, 'test');
 
   const marker = path.join(runtimeDir, 'qwen-code', 'complete-marker');
   fs.writeFileSync(marker, 'preserve me');
