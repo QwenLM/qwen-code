@@ -93,6 +93,7 @@ import type { TransportStream } from './transport-stream.js';
 
 const stdioMocks = vi.hoisted(() => ({
   writeStderrLine: vi.fn(),
+  writeStderrLineSafe: vi.fn(),
 }));
 
 const setupGithubMocks = vi.hoisted(() => ({
@@ -101,6 +102,7 @@ const setupGithubMocks = vi.hoisted(() => ({
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLine: stdioMocks.writeStderrLine,
+  writeStderrLineSafe: stdioMocks.writeStderrLineSafe,
 }));
 
 vi.mock('../../services/setup-github.js', async () => {
@@ -10603,6 +10605,7 @@ describe('ACP WebSocket transport security', () => {
   let port: number;
   let lanPort: number;
   let bridge: FakeBridge;
+  let cdpTunnelRegistry: CdpTunnelRegistry | undefined;
   let previousCdpMcpCommand: string | undefined;
 
   beforeEach(() => {
@@ -10628,6 +10631,9 @@ describe('ACP WebSocket transport security', () => {
       const app = express();
       app.use(express.json());
       const archiveCoordinator = new SessionArchiveCoordinator();
+      cdpTunnelRegistry = opts.cdpTunnelOverWs
+        ? new CdpTunnelRegistry()
+        : undefined;
       const credentials = opts.localControlToken
         ? new CredentialStore(opts.token)
         : undefined;
@@ -10661,7 +10667,7 @@ describe('ACP WebSocket transport security', () => {
         ...(opts.cdpTunnelOverWs
           ? {
               cdpTunnelOverWs: true,
-              cdpTunnelRegistry: new CdpTunnelRegistry(),
+              cdpTunnelRegistry: cdpTunnelRegistry!,
             }
           : {}),
       });
@@ -10774,13 +10780,21 @@ describe('ACP WebSocket transport security', () => {
     });
   }
 
-  function initializeCdpBridge(ws: WebSocket, id = 1): Promise<unknown> {
+  function initializeCdpBridge(
+    ws: WebSocket,
+    id = 1,
+    cdpMultiClient = true,
+  ): Promise<unknown> {
     return sendRpc(ws, {
       jsonrpc: '2.0',
       id,
       method: 'initialize',
       params: {
-        clientInfo: { name: 'qwen-cdp-bridge', version: '1.0.0' },
+        clientInfo: {
+          name: 'qwen-cdp-bridge',
+          version: '1.0.0',
+          cdpMultiClient,
+        },
       },
     });
   }
@@ -10888,6 +10902,19 @@ describe('ACP WebSocket transport security', () => {
       name: 'chrome-devtools',
       originatorClientId: bridge.runtimeMcpAdds[0]?.originatorClientId,
     });
+  });
+
+  it('records CDP bridge multi-client negotiation from initialize', async () => {
+    await startServer({ cdpTunnelOverWs: true });
+    const ws = await wsConnect();
+    await initializeCdpBridge(ws);
+
+    await vi.waitFor(() =>
+      expect(cdpTunnelRegistry?.getActive()?.multiClient).toBe(true),
+    );
+
+    ws.close();
+    await new Promise<void>((resolve) => ws.once('close', () => resolve()));
   });
 
   it('passes a custom CDP MCP command through to the runtime config', async () => {

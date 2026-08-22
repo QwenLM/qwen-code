@@ -181,6 +181,7 @@ async function connect(): Promise<void> {
     scheduleReconnect();
     return;
   }
+  if (socket) shutdownCdpBridge();
   socket = ws;
 
   ws.onopen = () => {
@@ -196,8 +197,16 @@ async function connect(): Promise<void> {
       method: 'initialize',
       // `clientInfo.name` gates which /acp connection becomes the CDP bridge
       // (vs web UI / Zed clients sharing /acp); must match the daemon's gate.
+      // `cdpMultiClient` (issue #8737) tells the daemon this build routes
+      // `cdp_*` frames by `linkId`, so several `/cdp` puppeteer clients can
+      // share the one debugger attachment. Old daemons ignore the field and
+      // send untagged frames, which map to the single default link.
       params: {
-        clientInfo: { name: CDP_BRIDGE_CLIENT_NAME, version: '1.0.0' },
+        clientInfo: {
+          name: CDP_BRIDGE_CLIENT_NAME,
+          version: '1.1.0',
+          cdpMultiClient: true,
+        },
       },
     });
   };

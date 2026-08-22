@@ -34,7 +34,10 @@ import { createRequestedSessionIdAdmission } from '../session-id-admission.js';
 
 const setupGithubMock = vi.hoisted(() => vi.fn());
 
-vi.mock('../../utils/stdioHelpers.js', () => ({ writeStderrLine: vi.fn() }));
+vi.mock('../../utils/stdioHelpers.js', () => ({
+  writeStderrLine: vi.fn(),
+  writeStderrLineSafe: vi.fn(),
+}));
 vi.mock('../../services/setup-github.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../services/setup-github.js')>()),
   setupGithub: setupGithubMock,

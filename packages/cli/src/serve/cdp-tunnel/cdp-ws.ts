@@ -12,10 +12,17 @@
  *                                            extension `/acp` socket  <--+
  *
  * The emulator answers browser-level CDP locally and forwards page-domain
- * commands to the real tab over the reverse link; tab events flow back. One
- * `/cdp` connection binds to the (single) active extension bridge in the
- * {@link CdpTunnelRegistry}; if no extension is connected the socket is closed
- * immediately with a clear reason.
+ * commands to the real tab over the reverse link; tab events flow back. Each
+ * `/cdp` connection acquires a link (minted `linkId`) on the active extension
+ * bridge in the {@link CdpTunnelRegistry}; if no extension is connected the
+ * socket is closed immediately with a clear reason.
+ *
+ * Multi-client (issue #8737): a bridge whose extension negotiated
+ * `clientInfo.cdpMultiClient` hosts N concurrent links — every interactive CLI
+ * session (and the daemon's own adapter) shares the extension's single
+ * `chrome.debugger` attachment instead of re-dialing Chrome per process. A
+ * legacy bridge keeps the original single-client behavior: the second
+ * connection is rejected so the first keeps working.
  *
  * See `packages/chrome-extension/docs/06-plan-c-cdp-tunnel.md`.
  */
@@ -34,7 +41,8 @@ const CDP_WS_HEARTBEAT_MS = 15_000;
 
 /**
  * Attach a single puppeteer `/cdp` WebSocket to the active extension bridge.
- * Closes the socket immediately if no extension is connected.
+ * Closes the socket immediately if no extension is connected, or when a legacy
+ * (single-client) bridge already has a bound link.
  *
  * @param ws the upgraded puppeteer WebSocket
  * @param registry the process-scoped tunnel registry
@@ -59,10 +67,11 @@ export function attachCdpClient(
     return;
   }
 
-  // Single puppeteer client by design (one daemon = one browser). A second
-  // overlapping `/cdp` connection would clobber the first's inbound routing,
-  // silently corrupting both — reject it instead so the first keeps working.
-  if (bridge.cdpBound) {
+  // Acquire this connection's link on the bridge. Legacy (non-multi-client)
+  // bridges refuse the second link — a second overlapping `/cdp` connection
+  // there would clobber the first's inbound routing, silently corrupting both.
+  const binding = registry.acquireLink({ routeInbound: () => false });
+  if (!binding) {
     log('qwen serve: /cdp rejected — a puppeteer client is already bound');
     try {
       ws.close(CLOSE_NO_BRIDGE, 'A CDP client is already connected');
@@ -71,11 +80,13 @@ export function attachCdpClient(
     }
     return;
   }
-  bridge.cdpBound = true;
+  const { linkId } = binding;
 
-  // Reverse link forwards page-domain commands to the extension's tab.
+  // Reverse link forwards page-domain commands to the extension's tab. On a
+  // multi-client bridge every outbound frame carries this link's `linkId` so
+  // the extension (and the registry's inbound routing) can correlate.
   const link = new CdpReverseLink(
-    (frame) => bridge.send(frame),
+    (frame) => bridge.send(bridge.multiClient ? { ...frame, linkId } : frame),
     undefined,
     log,
   );
@@ -90,9 +101,9 @@ export function attachCdpClient(
   });
   link.bindEmulator(emulator);
 
-  // Inbound extension `cdp_*` frames (cdp_result / cdp_event / cdp_detach)
-  // route through THIS link while the puppeteer client is bound.
-  bridge.routeInbound = (frame: Record<string, unknown>) =>
+  // Inbound extension `cdp_*` frames tagged with this `linkId` (plus broadcast
+  // events) route through THIS link while the puppeteer client is bound.
+  binding.routeInbound = (frame: Record<string, unknown>) =>
     link.handleInbound(frame);
 
   // If the extension reports detach, close the puppeteer socket so puppeteer
@@ -144,13 +155,18 @@ export function attachCdpClient(
     disposed = true;
     clearInterval(heartbeat);
     // The puppeteer `/cdp` client dropped while the extension is still bound:
-    // tell the extension to release its `chrome.debugger` attachment, otherwise
-    // the tab keeps Chrome's "started debugging this browser" banner until the
-    // `/acp` socket itself dies. Skipped on the `onExtensionGone` path — the
+    // tell the extension to drop this link's attachment ref (detaching
+    // `chrome.debugger` only when the last link releases), otherwise the tab
+    // keeps Chrome's "started debugging this browser" banner until the `/acp`
+    // socket itself dies. Skipped on the `onExtensionGone` path — the
     // extension is already gone, so there's nothing left to notify.
     if (notifyExtension && registry.getActive() === bridge) {
       try {
-        bridge.send({ type: CDP_FRAME_TYPES.release });
+        bridge.send(
+          bridge.multiClient
+            ? { type: CDP_FRAME_TYPES.release, linkId }
+            : { type: CDP_FRAME_TYPES.release },
+        );
         log(
           `qwen serve: /cdp sent release to extension (puppeteer disconnected: ${reason})`,
         );
@@ -163,13 +179,9 @@ export function attachCdpClient(
       }
     }
     link.dispose(reason);
-    // Detach this link from the bridge so a later `/cdp` client rebinds cleanly
-    // and stray extension frames don't route into a dead link.
-    if (registry.getActive() === bridge) {
-      bridge.routeInbound = () => false;
-      bridge.cdpBound = false;
-      bridge.onExtensionGone = undefined;
-    }
+    // Detach this link from the bridge so stray extension frames don't route
+    // into a dead link and a later `/cdp` client can rebind the slot.
+    registry.releaseLink(linkId);
   };
 
   link.onAttachFailure = (reason: string) => {
@@ -189,7 +201,7 @@ export function attachCdpClient(
   // Extension `/acp` socket dropped (bridge unregistered): the extension can no
   // longer answer page-domain commands, so close the puppeteer socket. Without
   // this, puppeteer hangs until the ~170s CDP command timeout.
-  bridge.onExtensionGone = () => {
+  binding.onExtensionGone = () => {
     log('qwen serve: extension /acp dropped; closing puppeteer /cdp socket');
     // Don't send a release frame here — the extension is already gone.
     dispose('extension /acp disconnected', false);
@@ -231,5 +243,8 @@ export function attachCdpClient(
   // Lazy attach: tools can load over `/cdp` without immediately putting Chrome
   // into debugging mode. The first page-domain command attaches the active tab.
 
-  log('qwen serve: /cdp puppeteer client bound to extension bridge');
+  log(
+    `qwen serve: /cdp puppeteer client '${linkId}' bound to extension bridge` +
+      (bridge.multiClient ? ' (multi-client)' : ''),
+  );
 }
