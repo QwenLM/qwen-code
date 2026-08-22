@@ -67,6 +67,38 @@ export function narrowToDelta(
   fullBytes: Buffer,
   deltaBytes: Buffer,
 ): Buffer | null {
+  const selection = selectNarrowing(fullBytes, deltaBytes);
+  return selection === null
+    ? null
+    : assembleSections(selection, selection.touched);
+}
+
+/** A parsed section of the full capture, as `parseDiff` reads it. */
+type FullSection = ReturnType<typeof parseDiff>['files'][number];
+
+/**
+ * What the narrowing decided, before it assembles anything.
+ *
+ * Exposed because the scope is not always exactly what the delta touched: the
+ * one-hop widening adds still-clean files that import a touched one, and it
+ * needs the same guards to have passed and the same sections to assemble out
+ * of. Keeping one selection means the widening cannot re-derive a set the
+ * refusals above already ruled out.
+ */
+export interface NarrowSelection {
+  /** The full capture's sections, in the order it rendered them. */
+  readonly sections: readonly FullSection[];
+  /** The full capture, decoded — the text every emitted line comes from. */
+  readonly fullText: string;
+  /** Paths the delta touched. Every one is carried by the full capture. */
+  readonly touched: ReadonlySet<string>;
+}
+
+/** The guard-and-select half of `narrowToDelta`. Null for the same reasons. */
+export function selectNarrowing(
+  fullBytes: Buffer,
+  deltaBytes: Buffer,
+): NarrowSelection | null {
   // Bytes in, bytes out. The selection below runs on decoded text, because
   // that is what `parseDiff` reads — so a capture that does not survive UTF-8
   // cannot be reassembled faithfully: re-encoding would write bytes git never
@@ -136,9 +168,6 @@ export function narrowToDelta(
     }
   }
 
-  // 1-based line numbers throughout, matching `parseDiff`'s own coordinates.
-  const lines = fullText.split('\n');
-
   // Whole SECTIONS, not selected hunks.
   //
   // The two captures are independent Myers alignments over overlapping
@@ -164,9 +193,24 @@ export function narrowToDelta(
   // of that file's PR hunks, not only the ones that moved since the anchor.
   // The saving incremental review exists for is the untouched files — a round
   // touching 2 of 40 reviews 2 — and that is untouched by this.
+  return { sections: full.files, fullText, touched };
+}
+
+/**
+ * The named sections of the full capture, in the capture's own order.
+ *
+ * Null when `paths` selects nothing — the same "nothing to narrow to" the
+ * caller turns into a full-range round.
+ */
+export function assembleSections(
+  selection: NarrowSelection,
+  paths: ReadonlySet<string>,
+): Buffer | null {
+  // 1-based line numbers throughout, matching `parseDiff`'s own coordinates.
+  const lines = selection.fullText.split('\n');
   const selected: Array<[number, number]> = [];
-  for (const file of full.files) {
-    if (!touched.has(file.path)) continue;
+  for (const file of selection.sections) {
+    if (!paths.has(file.path)) continue;
     selected.push([file.diffStart, file.diffEnd]);
   }
 

@@ -221,6 +221,44 @@ function mrHeadRefSpec(prNumber: number): string {
   return `refs/merge-requests/${prNumber}/head`;
 }
 
+/** The MR's live head SHA: under AGit-Flow `sourceBranch` IS the head.
+ *  Stated ONCE for the provider — every read site (presubmit facts,
+ *  getPrMeta, getFetchMeta, submit's pre-write drift gate, the
+ *  head-moved-during-post re-read) routes through here. Hand-derived
+ *  copies had already diverged on normalization (two of the five read
+ *  untrimmed), and a padded server value then drifted against the
+ *  trimmed reads — a phantom "PR head advanced during review" for an MR
+ *  that never moved (#9629 review). */
+function aoneHeadSha(view: NonNullable<AoneMrView['mergeRequest']>): string {
+  return (view.sourceBranch ?? '').trim();
+}
+
+/**
+ * The two MR facts presubmit's gate compares, from ONE `mr view` fetch:
+ * the author's account name (self-PR detection — compared against the
+ * gate's whoami account) and the live head SHA (the drift
+ * check — under AGit-Flow `sourceBranch` IS the head). A missing author
+ * (deleted account) reports '', which fails the comparison soft, like the
+ * GitHub path's `author: null`. `username` is server-controlled, so it is
+ * type-guarded to a string and trimmed exactly like the gate's whoami
+ * account — a non-string reaching `.toLowerCase()` would crash the command
+ * outside presubmit's fetch try/catch instead of failing soft.
+ */
+export function mrPresubmitFacts(
+  prNumber: number,
+  ownerRepo: string,
+): { author: string; headSha: string } {
+  checkOwnerRepo(ownerRepo);
+  const view = mrView(prNumber, ownerRepo);
+  return {
+    author:
+      typeof view.author?.username === 'string'
+        ? view.author.username.trim()
+        : '',
+    headSha: aoneHeadSha(view),
+  };
+}
+
 /**
  * Allowlist shape for a server-controlled branch name reaching git's argv:
  * a plain branch name and nothing else — no option spellings, no refspec
@@ -326,7 +364,7 @@ export const aoneReader: ReviewPlatformReader = {
     const view = mrView(prNumber, ownerRepo);
     return {
       number: prNumber,
-      headSha: view.sourceBranch ?? '',
+      headSha: aoneHeadSha(view),
       webUrl: view.detailUrl ?? '',
     };
   },
@@ -589,7 +627,7 @@ export const aoneReader: ReviewPlatformReader = {
     checkOwnerRepo(ownerRepo);
     const view = mrView(prNumber, ownerRepo);
     return {
-      headRefOid: view.sourceBranch ?? '',
+      headRefOid: aoneHeadSha(view),
       baseRefName: view.targetBranch ?? 'master',
       // The reviewer clones the repo the CR lives in — never cross-repo.
       isCrossRepository: false,
@@ -698,6 +736,15 @@ function createMrComment(
   message: string,
   inline?: { path: string; line: number },
 ): number | undefined {
+  // No AI-comment marking here, BY PLATFORM CONSTRAINT: probed 2026-08-21
+  // on a scratch CR (issue #9614) — `comment create` does NOT auto-set
+  // `isAiComment` for the posting identity (both a general and an inline
+  // probe read back false, re-checked minutes later against an async
+  // classifier), and a1 v0.1.90 exposes no flag to request it. Created
+  // comments therefore sit in the generic discussion gate, never the
+  // dedicated ai_comment merge gate; submit's REQUEST_CHANGES note
+  // discloses that. When a1 ships a marking flag, THIS call is where it
+  // gets passed.
   // a1JsonOnce is the tolerant read-back: an exec FAILURE propagates (a real
   // post failure — the partial-post path counts what landed before it), but a
   // SUCCEEDED exec whose answer does not parse is "accepted, id unknown", not
@@ -758,7 +805,8 @@ function a1Cause(err: unknown): string {
  * lands; COMMENT is the summary alone; REQUEST_CHANGES has NO native
  * equivalent — the summary carries an explicit blocking header, and the
  * unresolved inline Criticals carry the blocking semantics through the
- * discussion merge gate.
+ * discussion merge gate (NEVER the ai_comment gate: a1 cannot mark a
+ * comment as AI — see createMrComment).
  *
  * Throws BEFORE writing when the head drifted (the commit_id check
  * GitHub's API performs server-side). Throws AonePartialPostError when
@@ -777,7 +825,7 @@ export function submitAoneReview(req: AoneSubmitRequest): AoneSubmitResult {
   // review composed against the orphaned head would pin every inline
   // comment at code the author already replaced. An empty sourceBranch
   // cannot gate — nothing to compare against — and posts unanchored.
-  const liveHead = (view.sourceBranch ?? '').trim();
+  const liveHead = aoneHeadSha(view);
   if (liveHead !== '' && liveHead !== req.commitId) {
     throw new Error(
       `refusing to post: the MR head moved — the review was composed ` +
@@ -917,7 +965,7 @@ export function submitAoneReview(req: AoneSubmitRequest): AoneSubmitResult {
     headMovedDuringPost: (() => {
       try {
         const after = mrView(req.prNumber, req.ownerRepo);
-        const afterHead = (after.sourceBranch ?? '').trim();
+        const afterHead = aoneHeadSha(after);
         return afterHead !== '' && afterHead !== req.commitId;
       } catch {
         return false;
