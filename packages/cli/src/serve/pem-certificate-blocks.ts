@@ -35,18 +35,26 @@ interface ScannedCertificateBlock {
 
 function strictCertificateBlocks(contents: string): ScannedCertificateBlock[] {
   const blocks: ScannedCertificateBlock[] = [];
+  let coveredUntil = 0;
   for (const match of contents.matchAll(STRICT_CERTIFICATE_BLOCK)) {
+    if (
+      match.index === undefined ||
+      contents.slice(coveredUntil, match.index).trim() !== ''
+    ) {
+      return [];
+    }
     try {
       const certificate = new X509Certificate(match[0]);
       blocks.push({
         block: certificate.toString().trimEnd(),
         certificate,
       });
+      coveredUntil = match.index + match[0].length;
     } catch {
       return [];
     }
   }
-  return blocks;
+  return contents.slice(coveredUntil).trim() === '' ? blocks : [];
 }
 
 /**
