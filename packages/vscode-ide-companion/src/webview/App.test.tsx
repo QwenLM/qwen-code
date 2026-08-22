@@ -866,6 +866,37 @@ describe('App model selector gating', () => {
     },
   );
 
+  it('keeps the typed command and the menu when /model is declined under an overlay', async () => {
+    const rendered = renderApp();
+    root = rendered.root;
+    container = rendered.container;
+
+    await act(async () => {});
+
+    // Raise the overlay AFTER the completion-select handler exists, then
+    // select /model from the still-mounted completion menu. The gate must
+    // decline without stripping the typed trigger text: otherwise the
+    // composer ends up empty with nothing opened, and the user must dismiss
+    // the overlay and retype the command.
+    act(() => {
+      capturedWebViewHandlers.handlePermissionRequest?.(permissionPayload);
+    });
+
+    setInputSelection(rendered.container, '/model');
+    clickButton(rendered.container, 'select-model-command');
+
+    expect(rendered.container.querySelector('.model-selector')).toBeNull();
+    expect(mockModelSelectorMounts).not.toHaveBeenCalled();
+    // Neither the typed trigger text...
+    const inputField = rendered.container.querySelector(
+      '[data-testid="input-field"]',
+    );
+    expect(inputField?.textContent).toBe('/model');
+    // ...nor the completion menu is taken away; Enter can retry once the
+    // overlay clears.
+    expect(mockCloseCompletion).not.toHaveBeenCalled();
+  });
+
   /** Dispatch a Tab keydown on the mocked composer input. */
   function dispatchTabOnInput(target: HTMLElement) {
     act(() => {
@@ -916,6 +947,28 @@ describe('App model selector gating', () => {
     expect(mockPostMessage).not.toHaveBeenCalledWith(
       expect.objectContaining({ type: 'setApprovalMode' }),
     );
+  });
+
+  it('swallows Tab while the selector is open so focus cannot leave the composer', async () => {
+    // The selector never takes DOM focus. Without a swallow, the browser
+    // default for Tab moves focus to the next tabbable element while the
+    // dropdown stays open, and subsequent typing goes nowhere.
+    mockCompletionState.isOpen = false;
+    await renderWithOpenSelector();
+
+    const input = container?.querySelector('[data-testid="input-field"]');
+    expect(input).not.toBeNull();
+
+    const event = new KeyboardEvent('keydown', {
+      key: 'Tab',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      (input as HTMLElement).dispatchEvent(event);
+    });
+
+    expect(event.defaultPrevented).toBe(true);
   });
 
   it('wires selector visibility into completion suppression', async () => {
