@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { normalizeSessionIdForLookup } from '../../config/session-id.js';
+import { normalizeSessionIdForLookup } from '../config/session-id.js';
 
 export const LIVE_SESSION_SOURCE_PREFIX = 'realtime_voice:';
 export const STANDALONE_SESSION_SOURCE_TYPE = 'standalone';

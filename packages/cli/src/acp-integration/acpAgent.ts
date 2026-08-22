@@ -224,7 +224,7 @@ import {
   type PermissionRuleSet,
 } from '../config/permission-settings.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
-import { isCompatibleLiveSessionSource } from '../serve/conversations/session-source.js';
+import { isCompatibleLiveSessionSource } from '../runtime/live-session-source.js';
 import type { ApprovalModeValue } from './session/types.js';
 import { z } from 'zod';
 import type { CliArgs } from '../config/config.js';

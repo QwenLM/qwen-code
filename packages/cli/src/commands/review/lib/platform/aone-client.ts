@@ -112,6 +112,38 @@ export function a1JsonOnce<T>(...args: string[]): T | undefined {
 }
 
 /**
+ * The authenticated Aone account — the `account` field of `a1 auth whoami`.
+ * cleanup's bypass audit filters the MR's comment list by it (the author
+ * arm, design D8). A missing or unreadable account THROWS: matching nothing
+ * would read exactly like a clean window, and a tripwire whose off state is
+ * indistinguishable from its all-clear state is off.
+ */
+export function aoneWhoamiAccount(): string {
+  let out: { account?: unknown } | null;
+  try {
+    out = a1Json<{ account?: unknown } | null>('auth', 'whoami');
+  } catch (err) {
+    // A parse failure names the command, mirroring a1CommentList — the
+    // skip note must say WHAT failed; an exec failure rethrows untouched.
+    if (err instanceof SyntaxError) {
+      throw new Error('a1 auth whoami returned an unexpected shape');
+    }
+    throw err;
+  }
+  // A literal `null` answer PARSES, so it clears the SyntaxError arm;
+  // without its own check the property access below throws an untagged
+  // TypeError and the skip note names no command.
+  if (
+    out === null ||
+    typeof out.account !== 'string' ||
+    out.account.trim() === ''
+  ) {
+    throw new Error('a1 auth whoami returned no account');
+  }
+  return out.account;
+}
+
+/**
  * Fail fast with an actionable message when `a1` cannot run, and return the
  * authenticated account. Runs `a1 auth whoami --format json` ONCE — the
  * JSON spelling fully subsumes a plain auth gate, so presubmit reads its
