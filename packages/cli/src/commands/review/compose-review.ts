@@ -81,6 +81,7 @@ import {
   LEDGER_MAX_ROUND,
   LEDGER_UNKNOWN_FILE,
   serializeLedger,
+  streakOf,
   volumeOf,
   type Ledger,
   type LedgerFinding,
@@ -682,6 +683,26 @@ export interface ComposeReviewInput {
    * shapes cap; they never throw.
    */
   severityFloor?: 'critical' | 'suggestion' | 'auto';
+  /**
+   * This round's convergence census, from SKILL Step 6's fix-induced rule:
+   * `fresh` is how many findings first appear this round, `induced` how many
+   * of those the fix-induced rule ATTRIBUTED to the change that answered a
+   * previous entry. Attributed, not merely on-new-lines: a pull request whose
+   * author pushed a feature between rounds has most of its new findings on
+   * new lines and created none of them out of the review, so a bar built on
+   * the looser number would block a pull request for growing.
+   *
+   * The model OBSERVES; this module DECIDES. Splitting it that way is not
+   * ceremony: the census needs the worktree's git and the previous round's
+   * age reference, which only the orchestrator holds, while the threshold and
+   * the streak need the side file and the marker, which only this module
+   * holds — and a verdict computed where the prose is written is a verdict
+   * the prose can talk out of. Absent on every non-PR target, on a skill
+   * revision that predates the field, and whenever the age reference was
+   * unusable; absence carries the streak forward untouched rather than
+   * resetting it, because "not measured" is not "measured and converging".
+   */
+  convergence?: { fresh?: unknown; induced?: unknown };
   /**
    * Existing Criticals already on the PR whose Step 6 re-check landed on
    * `cannot tell` — one line each (location + what could not be decided).
@@ -1295,6 +1316,85 @@ export function composeReview(
   // is a trend nobody can read back.
   const prevFacts = prevLedgerFacts(input.planPath);
   const prevRound = prevFacts.round;
+  // The convergence verdict, decided HERE — beside the one side-file read
+  // that owns `prevRound` — and never inside the body composer, so this
+  // round's number, its streak and its census cannot come from two reads
+  // that disagree.
+  //
+  // Three states, and the middle one is the one worth spelling out:
+  //   above the bar  → the streak advances and may reach the filing bar;
+  //   below the bar  → the streak RESETS: a round that converged says so;
+  //   not measured   → the streak is CARRIED, neither advanced nor reset.
+  // Absence is a fact about this run — a non-PR target, a skill revision
+  // predating the field, an age reference the round could not validate — and
+  // reading it as "converging" would let one unmeasurable round wipe a
+  // standing claim about the pull request.
+  // The census is the model-written half of this trigger, so it gets the
+  // module's one-sided cross-check before it can arm anything: a FRESH
+  // finding only exists as something this round REPORTS — an inline draft, a
+  // body Critical, a deferral — so a denominator past everything reported,
+  // all three channels counted together, is a census this round cannot have
+  // measured. Refused as no census at all — the streak carries, exactly as
+  // absence does — or a round that reported nothing could file the
+  // non-convergence blocker on the model's say-so alone.
+  const reportedThisRound =
+    (Array.isArray(input.draftedComments) ? input.draftedComments.length : 0) +
+    (Array.isArray(input.bodyCriticals) ? input.bodyCriticals.length : 0) +
+    (Array.isArray(input.deferredSuggestions)
+      ? input.deferredSuggestions.length
+      : 0);
+  // Round 1 has no predecessor whose fixes could have induced anything, so a
+  // census there is the same impossible shape `churnCensusOf` refuses for
+  // `induced > fresh` — refused symmetric with the round-0 streak guard in
+  // `prevLedgerFacts`. A legitimate round-1 census can only carry
+  // `induced = 0`, which never trips the bar, so this changes no verdict.
+  // Context-unavailable is the OTHER unmeasurable state: the fix-induced
+  // test's age operand cannot be computed without a context, so a census
+  // presented under it cannot have come from the mechanical test that
+  // defines "measured". SKILL tells the round to omit the field there; this
+  // refusal is the module's half, symmetric with round 1 — absence then
+  // carries the streak, exactly as an unmeasured round must.
+  const readCensus =
+    prevRound === 0 || input.contextUnavailable === true
+      ? null
+      : churnCensusOf(input.convergence);
+  const churnCensus =
+    readCensus !== null && readCensus.fresh > reportedThisRound
+      ? null
+      : readCensus;
+  const churnAbove = aboveChurnBar(churnCensus);
+  // Below-minimum carries like absent: a census under CHURN_MIN_FRESH is a
+  // round that could not measure — a ratio over two or three findings is
+  // rounding, not a trend — and a round that could not measure carries the
+  // count without adding to it, exactly as the field's contract says.
+  // Resetting it instead zeroed a standing claim on the looping shape this
+  // exists for: above-bar rounds alternating with small ones never reached
+  // the filing bar.
+  const churnRounds = churnAbove
+    ? Math.min(prevFacts.churnRounds + 1, LEDGER_MAX_ROUND)
+    : churnCensus === null || churnCensus.fresh < CHURN_MIN_FRESH
+      ? prevFacts.churnRounds
+      : 0;
+  // Filing needs THIS ROUND above the bar — not merely a streak, and not a
+  // streak beside any census. The streak arrives from a posted review body,
+  // which is another account's writable surface, and a forged `churnRounds`
+  // gated on nothing else would block an arbitrary pull request; requiring
+  // this round's own census above the bar bounds the worst a forgery can do.
+  // The explicit `churnAbove` is load-bearing now that a below-minimum
+  // census CARRIES the streak: a carried streak at the bar beside a
+  // three-finding census satisfies `churnCensus && churnRounds >=
+  // CHURN_STREAK_TO_FILE` without this round measuring anything, and the
+  // guard is what keeps the blocker off it. Reaching the bar still takes at
+  // least two above-bar rounds — carrying never adds — so a filed blocker
+  // always has its two counted rounds behind it.
+  const nonConvergence =
+    churnAbove && churnCensus && churnRounds >= CHURN_STREAK_TO_FILE
+      ? nonConvergenceCritical(
+          churnCensus,
+          churnRounds,
+          Math.min(prevRound + 1, LEDGER_MAX_ROUND),
+        )
+      : null;
   // The floor, enforced before anything is composed or counted: everything
   // downstream — the counts, the body, the ledger marker — must describe
   // the set that actually posts. `contextUnavailable` is read leniently
@@ -1389,6 +1489,7 @@ export function composeReview(
         prevRound,
       ),
     },
+    nonConvergence,
   );
   // The ledger marker rides the body THIS function returns, because this — not
   // the CLI handler — is what `submit` calls and posts. Appending it in the
@@ -1429,6 +1530,7 @@ export function composeReview(
       // is evidence of absence.
       complete: prevRound > 0 && !prevFacts.truncated,
     },
+    churnRounds,
   );
   // `postedInline` came out of the body composer on the same input, so only
   // the predecessor's volume — which only this scope read — is added here.
@@ -1444,12 +1546,141 @@ export function composeReview(
 }
 
 /**
+ * The smallest round the churn ratio is allowed to speak for.
+ *
+ * A ratio over two or three findings is not a trend, it is rounding: one
+ * fix-induced finding out of two clears any percentage bar worth setting, and
+ * a review that blocked a pull request on that would be filing its
+ * non-convergence claim off noise. Four is the point where the bar below
+ * requires at least two independent fix-induced findings to trip, which is
+ * the weakest statement that is still a statement.
+ */
+export const CHURN_MIN_FRESH = 4;
+
+/**
+ * How many rounds counted against the churn bar are needed before the finding
+ * is filed.
+ *
+ * One round above the bar is an ordinary re-review: the fix round touched the
+ * code, so of course this round's findings are on it, and the measured
+ * baseline for that is roughly a third. Two counted rounds is the shortest
+ * window in which "each round is reviewing the last round's answer to it" is
+ * an observation rather than a single step — the same argument `prevPosted`
+ * makes for the volume trend.
+ */
+export const CHURN_STREAK_TO_FILE = 2;
+
+/**
+ * This round's census, or null when it cannot be read as one.
+ *
+ * Refuses a numerator larger than its denominator outright: `induced` counts
+ * a SUBSET of `fresh`, so `induced > fresh` is not a large ratio, it is a
+ * census that cannot be true — and the failing direction for a state field
+ * this module did not compute is to decide nothing with it.
+ */
+export function churnCensusOf(
+  raw: { fresh?: unknown; induced?: unknown } | undefined,
+): { fresh: number; induced: number } | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const fresh = volumeOf(raw.fresh);
+  const induced = volumeOf(raw.induced);
+  if (fresh === undefined || induced === undefined) return null;
+  if (induced > fresh) return null;
+  return { fresh, induced };
+}
+
+/**
+ * Is this round above the churn bar? Half or more of its first-appearing
+ * findings attributed by the fix-induced rule to the previous round's fixes
+ * — the ATTRIBUTED count, not findings on newly pushed lines.
+ *
+ * Half, not the measured third: the third IS the baseline — the rate an
+ * ordinary, healthy re-review runs at — and a bar set at the baseline fires
+ * on every pull request that ever gets a second round. The claim this arms
+ * is that at least half the round's first-appearing findings were work the
+ * previous round created — below that, the round is still mostly reviewing
+ * the change itself.
+ *
+ * Integer arithmetic on purpose (`induced * 2 >= fresh`): a float ratio
+ * compared against 0.5 puts the bar's behaviour at 5/10 at the mercy of
+ * binary rounding, and this one decides whether a pull request is blocked.
+ */
+export function aboveChurnBar(
+  census: { fresh: number; induced: number } | null,
+): boolean {
+  if (!census) return false;
+  if (census.fresh < CHURN_MIN_FRESH) return false;
+  return census.induced * 2 >= census.fresh;
+}
+
+/**
+ * The body Critical a non-converging round files.
+ *
+ * Deliberately not anchored: the claim is about the pull request, not about a
+ * line, and hanging it on whichever file happened to churn most would invite
+ * a fix at that line for a defect that is not there.
+ *
+ * **It counts DEFECTS, and it must not borrow the posting trend's words.**
+ * The same body carries the convergence diagnosis, which counts inline
+ * comments POSTED for the first time — and the two numbers legitimately
+ * differ: a fix-induced defect re-reported under the id it came from is
+ * newly identified here and a re-post there, so a round can newly identify
+ * six defects while posting two first-time comments. Both readings are
+ * right; what broke was the vocabulary, when this sentence said "findings
+ * first filed" beside the diagnosis's "reported for the first time" and one
+ * body published two numbers under one phrase. Hence "defects … newly
+ * identified" — distinct words for a distinct quantity.
+ *
+ * Do NOT "reconcile" the two by changing either count. Excluding carried-id
+ * re-reports from `fresh` would put `induced` outside it and every such
+ * census would be refused as impossible; counting them as first-time POSTS
+ * would tell the volume trend a re-post is new work, which is the reading
+ * `isFreshDraft` exists to refuse. The divergence is the design.
+ */
+export function nonConvergenceCritical(
+  census: { fresh: number; induced: number },
+  streak: number,
+  thisRound: number,
+): string {
+  return (
+    `This pull request is not converging. Of the ${census.fresh} defects ` +
+    `round ${thisRound} newly identified, ${census.induced} were introduced ` +
+    `by the previous round's fixes for this review's own findings — the ` +
+    `${streak}${ordinalSuffix(streak)} round counted against the churn bar ` +
+    `(rounds that could not measure carry the count rather than reset it), ` +
+    `and in every counted round at least half of its newly identified ` +
+    `defects were introduced by the previous round's fixes. Filing more ` +
+    `findings will not close this: split the change into separately ` +
+    `reviewable pieces, or ` +
+    `reconsider the approach under review, and re-request review after. ` +
+    `(Counted by the review from its own ledger and diff; it blocks so the ` +
+    `decision is a person's.)`
+  );
+}
+
+function ordinalSuffix(n: number): string {
+  const tens = n % 100;
+  if (tens >= 11 && tens <= 13) return 'th';
+  switch (n % 10) {
+    case 1:
+      return 'st';
+    case 2:
+      return 'nd';
+    case 3:
+      return 'rd';
+    default:
+      return 'th';
+  }
+}
+
+/**
  * Nothing recovered: round 1, no volume to compare against, no work list to
  * find recurrence in, and therefore no evidence to qualify. Named once so the
  * three ways this read gives up cannot drift apart as fields are added.
  */
 const EMPTY_PREV_FACTS = {
   round: 0,
+  churnRounds: 0,
   findings: [] as LedgerFinding[],
   truncated: false,
   foreign: false,
@@ -1494,6 +1725,12 @@ function prevLedgerFacts(planPath: string | undefined): {
   floor?: 'c' | 'o';
   /** How many of its comments were findings reported for the first time. */
   fresh?: number;
+  /**
+   * Its churn streak — how many rounds counted against the churn bar, the
+   * standing claim the non-convergence rule reads. Zero on every path that
+   * names no usable predecessor.
+   */
+  churnRounds: number;
   /** Whether it carried an incremental anchor at all. */
   anchored: boolean;
 } {
@@ -1526,6 +1763,17 @@ function prevLedgerFacts(planPath: string | undefined): {
     // otherwise attribute it to round 0 — and a round-1 marker would ship
     // `prevPosted` for a round that never existed, against this field's own
     // "absent on round 1" contract.
+    // The streak travels with its round for the same reason the volume does:
+    // a side file with no usable round is a file this recovery cannot place,
+    // and a streak attributed to round 0 would arm the non-convergence rule
+    // on a round-1 review that has no predecessor to have churned against.
+    // Clamped to the file's own ROUND too, mirroring `parseLedger`'s marker
+    // read: the side file is the same untrusted shape arriving by another
+    // route — a planted or hand-edited file — and an unclamped streak arms
+    // the bar past every round the pull request ever ran, inflating the
+    // posted ordinal ("the 10000th round…") after a single counted one.
+    const churnRounds =
+      round === 0 ? 0 : Math.min(streakOf(prev.churnRounds) ?? 0, round);
     // Through the ledger's OWN admission test, not a local restatement of
     // two of its checks. The side file is the same untrusted shape as a
     // marker, arriving by a different route: a file written before the id
@@ -1550,8 +1798,10 @@ function prevLedgerFacts(planPath: string | undefined): {
     // `persistRecoveredLedger` keeps that list across anonymous and
     // recovery-threw runs.
     const rejected = rawFindings.length - findings.length;
+
     return {
       round,
+      churnRounds,
       ...(posted === undefined || round === 0 ? {} : { posted }),
       // Gated on the round for the same reason the volume is: a work list
       // travels WITH the round that produced it or not at all. A side file
@@ -1642,6 +1892,7 @@ function ledgerMarkerFor(
   prevPostedInline: number | undefined,
   floorKind: CriticalFloorKind | undefined,
   carriedWorkList: { ids: ReadonlySet<string>; complete: boolean },
+  churnRounds: number,
 ): string | null {
   try {
     if (!input.planPath) return null;
@@ -1798,6 +2049,7 @@ function ledgerMarkerFor(
       floor: floorKind === undefined ? 'o' : 'c',
       // The part of that volume the trend is about — see `Ledger.fresh`.
       fresh: freshInline,
+      ...(churnRounds > 0 ? { churnRounds } : {}),
     });
   } catch {
     // A carry-forward convenience, never worth failing the verdict over.
@@ -1901,6 +2153,12 @@ function composeReviewBody(
      */
     floorEnforcementEngaged?: boolean;
   } | null = null,
+  /**
+   * The non-convergence body Critical this round files, or null. Passed in
+   * ready-made rather than computed here: the decision needs the side file's
+   * streak, which the caller reads once for the whole compose.
+   */
+  nonConvergence: string | null = null,
 ): ComposeReviewResult {
   // The posting set this body describes — `input` here is already the
   // post-enforcement one, so the count needs no second derivation and
@@ -2245,6 +2503,17 @@ function composeReviewBody(
     // dimension nobody reviewed. Inert on every diff the manifest does not mark.
     unreviewed.push(...layerAuditGate(input.planPath, input.env).unreviewed);
   }
+  // The non-convergence finding rides the SAME channel as the gates above,
+  // and for the same reason: it is deterministic by provenance — this module
+  // counted the streak from its own marker and side file, and the census
+  // beside it is the orchestrator-supplied half, checked in `composeReview`
+  // for shape and against everything this round reports before it could arm
+  // the streak. There is no verifier for it and there never will be, so
+  // routing it through `modelBodyCriticals` would demand one and cap the
+  // verdict on a gap no repair can close. It is pushed AFTER that capture on
+  // purpose; moving this line above it silently converts the finding into an
+  // unsatisfiable cap.
+  if (nonConvergence) bodyCriticals.push(nonConvergence);
 
   // The Criticals a verifier must have ruled on before this review may post them as
   // blockers. Only the MODEL's criticals are candidates — the gate's are excluded by
