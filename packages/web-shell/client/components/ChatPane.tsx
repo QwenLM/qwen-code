@@ -38,7 +38,7 @@ import {
   SESSION_MONITOR_TOOL_CORRELATION_FEATURE,
   SESSION_TRANSCRIPT_PAGINATION_FEATURE,
 } from '../constants/sessions';
-import { useAnimationFrameTranscriptBlocks } from '../hooks/useAnimationFrameTranscriptBlocks';
+import { useAnimationFrameTranscriptSnapshot } from '../hooks/useAnimationFrameTranscriptBlocks';
 import { useMessagesFromBlocks } from '../hooks/useMessages';
 import { useSessionArtifacts } from '../hooks/useSessionArtifacts';
 import { extractPendingPermission } from '../adapters/transcriptAdapter';
@@ -261,17 +261,22 @@ export function ChatPane({
   const sessionCatalogController = useSessionCatalogController(
     workspace.client,
   );
-
   const sessionHasActivePrompt = useSessionHasActivePrompt(
     workspace.client,
     workspaceCwd ?? connection.workspaceCwd,
     connection.sessionId,
   );
-  const blocks = useAnimationFrameTranscriptBlocks();
-  const messages = useMessagesFromBlocks(t, blocks);
+  const sessionHasActivePromptRef = useRef(sessionHasActivePrompt);
+  sessionHasActivePromptRef.current = sessionHasActivePrompt;
+  const { blocks, blockChangeSummary } = useAnimationFrameTranscriptSnapshot();
+  const messages = useMessagesFromBlocks(t, blocks, blockChangeSummary);
   const transcriptHistory = useTranscriptHistory();
   const store = useTranscriptStore();
   const streamingState = useStreamingState();
+  const queuedPromptStreamingState =
+    streamingState === 'idle' && sessionHasActivePrompt
+      ? 'responding'
+      : streamingState;
   const [goalControlBusy, setGoalControlBusy] = useState(false);
   const goalControlOpSeqRef = useRef(0);
   const goalControlOwnerRef = useRef<
@@ -603,8 +608,7 @@ export function ChatPane({
     canQueryMidTurn,
     canInjectMidTurnMedia,
     workspaceFileActions: attachmentWorkspaceTarget?.actions,
-    streamingState,
-    holdQueuedPromptsLocally: isGoalGateBlocked(connection),
+    streamingState: queuedPromptStreamingState,
     sessionActions: actions,
     store,
     editorRef,
@@ -798,16 +802,16 @@ export function ChatPane({
           onFirstPromptAdmitted(trimmed);
         }
       };
-      // Fail CLOSED on a hydrating `goalState`, exactly as the local hold
-      // above does: the load makes the composer writable before `goal()`
-      // resolves, and the daemon has no server-side prompt gate for an active
-      // Goal, so a direct send in that window bypasses the Goal queue.
-      if (
-        streamingStateRef.current === 'idle' &&
-        !isGoalGateBlocked({
+      const commandBlockedByGoal =
+        trimmed.startsWith('/') &&
+        isGoalGateBlocked({
           sessionId: connection.sessionId,
           goalState: connection.goalState,
-        })
+        });
+      if (commandBlockedByGoal) return false;
+      if (
+        streamingStateRef.current === 'idle' &&
+        !sessionHasActivePromptRef.current
       ) {
         const admissionOwner = admissionOwnerRef.current;
         let admissionStarted = false;
@@ -881,9 +885,6 @@ export function ChatPane({
       admissionPayloadLocked,
       catalogOwnerCwd,
       clearFollowup,
-      // The whole snapshot, not just the status: the gate distinguishes an
-      // absent (hydrating) snapshot from a Goal-less one, and both read as an
-      // undefined status.
       connection.goalState,
       connection.sessionId,
       connection.status,
@@ -1350,7 +1351,7 @@ export function ChatPane({
                 prompts={queuedPrompts}
                 t={t}
                 canMutateMidTurn={canMutateMidTurn}
-                canInsertMidTurn={streamingState !== 'idle'}
+                canInsertMidTurn={queuedPromptStreamingState !== 'idle'}
                 onDelete={removeQueuedPrompt}
                 onInsert={insertQueuedPrompt}
                 onEdit={editQueuedPrompt}
