@@ -266,7 +266,10 @@ describe('modelCommand', () => {
 
   it('records the session model in ACP mode after switching', async () => {
     const setValue = vi.fn();
-    const switchModel = vi.fn().mockResolvedValue(undefined);
+    let currentModel = 'old-model';
+    const switchModel = vi.fn().mockImplementation(async () => {
+      currentModel = 'qwen-max';
+    });
     const recordSessionModel = vi.fn().mockResolvedValue(true);
     mockContext = createMockCommandContext({
       executionMode: 'acp',
@@ -281,7 +284,7 @@ describe('modelCommand', () => {
             .fn()
             .mockReturnValue([{ id: 'qwen-max', label: 'Qwen Max' }]),
           switchModel,
-          getModel: vi.fn().mockReturnValue('qwen-max'),
+          getModel: vi.fn(() => currentModel),
           getAuthType: vi.fn().mockReturnValue(AuthType.QWEN_OAUTH),
           getActiveRuntimeModelSnapshot: vi.fn().mockReturnValue(undefined),
           getCurrentModelRegistryBaseUrl: vi.fn().mockReturnValue(undefined),
@@ -295,7 +298,9 @@ describe('modelCommand', () => {
 
     await modelCommand.action!(mockContext, 'qwen-max');
 
-    expect(switchModel).toHaveBeenCalled();
+    expect(switchModel.mock.invocationCallOrder[0]).toBeLessThan(
+      recordSessionModel.mock.invocationCallOrder[0],
+    );
     expect(recordSessionModel).toHaveBeenCalledWith({
       modelId: 'qwen-max',
       authType: AuthType.QWEN_OAUTH,

@@ -1131,6 +1131,75 @@ describe('ChatRecordingService', () => {
       ).resolves.toBe(true);
       expect(jsonl.writeLine).not.toHaveBeenCalled();
     });
+
+    it('restores session model bindings from a full-record replay', async () => {
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: {
+          messages: [
+            {
+              uuid: 'model-1',
+              parentUuid: null,
+              sessionId: 'test-session-id',
+              timestamp: '2026-06-27T00:00:00.000Z',
+              type: 'system',
+              subtype: 'session_model',
+              cwd: '/test/project/root',
+              version: '1.0.0',
+              systemPayload: {
+                modelId: 'qwen3-coder-plus',
+                authType: 'openai',
+              },
+            },
+          ],
+        },
+        lastCompletedUuid: 'model-1',
+      } as unknown as ReturnType<Config['getResumedSessionData']>);
+      const service = new ChatRecordingService(mockConfig, undefined, false);
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(
+        service.recordSessionModel({
+          modelId: 'qwen3-coder-plus',
+          authType: 'openai',
+        }),
+      ).resolves.toBe(true);
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+    });
+
+    it('skips a non-string session_model payload during full-record replay', async () => {
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        conversation: {
+          messages: [
+            {
+              uuid: 'model-1',
+              parentUuid: null,
+              sessionId: 'test-session-id',
+              timestamp: '2026-06-27T00:00:00.000Z',
+              type: 'system',
+              subtype: 'session_model',
+              cwd: '/test/project/root',
+              version: '1.0.0',
+              systemPayload: {
+                modelId: 42,
+                authType: 'openai',
+              },
+            },
+          ],
+        },
+        lastCompletedUuid: 'model-1',
+      } as unknown as ReturnType<Config['getResumedSessionData']>);
+      expect(
+        () => new ChatRecordingService(mockConfig, undefined, false),
+      ).not.toThrow();
+      const service = new ChatRecordingService(mockConfig, undefined, false);
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(
+        service.recordSessionModel({
+          modelId: 'qwen3-coder-plus',
+          authType: 'openai',
+        }),
+      ).resolves.toBe(true);
+      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+    });
   });
 
   describe('rewindRecording', () => {
@@ -2630,6 +2699,33 @@ describe('ChatRecordingService', () => {
       expect(jsonl.writeLine).toHaveBeenCalledOnce();
     });
 
+    it('canonicalizes a runtime-prefixed modelId before writing', async () => {
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(
+        chatRecordingService.recordSessionModel({
+          modelId: '$runtime|openai|custom-runtime',
+          authType: 'openai',
+          isRuntime: true,
+        }),
+      ).resolves.toBe(true);
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.systemPayload).toEqual({
+        modelId: 'custom-runtime',
+        authType: 'openai',
+        isRuntime: true,
+      });
+
+      vi.mocked(jsonl.writeLine).mockClear();
+      await expect(
+        chatRecordingService.recordSessionModel({
+          modelId: '$runtime|openai|custom-runtime',
+          authType: 'openai',
+          isRuntime: true,
+        }),
+      ).resolves.toBe(true);
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+    });
+
     it('re-anchors the live session model onto the rewind branch', async () => {
       chatRecordingService.recordUserMessage([{ text: 'first' }]);
       await chatRecordingService.recordSessionModel({
@@ -2850,6 +2946,30 @@ describe('ChatRecordingService', () => {
       service.recordUserMessage([{ text: 'legacy' }]);
       await service.flush();
 
+      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+    });
+
+    it('retries an identical session_model payload after a synchronous failure', async () => {
+      const writeFileSpy = vi.spyOn(fs, 'writeFileSync');
+      writeFileSpy.mockImplementationOnce(() => {
+        throw Object.assign(new Error('ENOSPC'), { code: 'ENOSPC' });
+      });
+      const service = new ChatRecordingService(mockConfig, undefined, false);
+
+      await expect(
+        service.recordSessionModel({
+          modelId: 'qwen3-coder-plus',
+          authType: 'openai',
+        }),
+      ).resolves.toBe(false);
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+
+      await expect(
+        service.recordSessionModel({
+          modelId: 'qwen3-coder-plus',
+          authType: 'openai',
+        }),
+      ).resolves.toBe(true);
       expect(jsonl.writeLine).toHaveBeenCalledOnce();
     });
 

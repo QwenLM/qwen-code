@@ -14,6 +14,7 @@ import {
   applyRestoredSessionModel,
   recordDaemonSessionModel,
   recordDaemonSessionModelFromConfig,
+  restoreSessionModelThenAuthenticate,
 } from './session-model-persistence.js';
 
 function recordingProjection(
@@ -167,6 +168,63 @@ describe('session-model-persistence', () => {
     );
   });
 
+  it('uses modelsConfig auth for last-assistant fallback before content-generator auth exists', async () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    const config = {
+      getModel: vi.fn().mockReturnValue('settings-default'),
+      getAuthType: vi.fn().mockReturnValue(undefined),
+      getModelsConfig: vi.fn().mockReturnValue({
+        getCurrentAuthType: vi.fn().mockReturnValue(AuthType.USE_OPENAI),
+      }),
+      getContentGeneratorConfig: vi.fn().mockReturnValue(undefined),
+      switchModel,
+    } as unknown as Config;
+
+    await applyRestoredSessionModel(
+      config,
+      recordingProjection({
+        lastCompletedUuid: 'leaf',
+        turnParentUuids: [null],
+        lastAssistantModel: 'legacy-turn-model',
+      }),
+    );
+
+    expect(switchModel).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI,
+      'legacy-turn-model',
+      undefined,
+    );
+  });
+
+  it('prefers the session_model record over lastAssistantModel', async () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    const config = {
+      getModel: vi.fn().mockReturnValue('settings-default'),
+      getAuthType: vi.fn().mockReturnValue(AuthType.USE_OPENAI),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({}),
+      switchModel,
+    } as unknown as Config;
+
+    await applyRestoredSessionModel(
+      config,
+      recordingProjection({
+        lastCompletedUuid: 'leaf',
+        turnParentUuids: [null],
+        sessionModel: {
+          modelId: 'qwen3-coder-plus',
+          authType: AuthType.USE_OPENAI,
+        },
+        lastAssistantModel: 'older-model',
+      }),
+    );
+
+    expect(switchModel).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI,
+      'qwen3-coder-plus',
+      undefined,
+    );
+  });
+
   it('does not switch when the live config already matches', async () => {
     const switchModel = vi.fn().mockResolvedValue(undefined);
     const config = {
@@ -190,6 +248,32 @@ describe('session-model-persistence', () => {
           modelId: 'qwen3-coder-plus',
           authType: AuthType.USE_OPENAI,
           baseUrl: 'https://example.test/v1',
+        },
+      }),
+    );
+
+    expect(switchModel).not.toHaveBeenCalled();
+  });
+
+  it('does not switch an implicit registry record when the live registry baseUrl is unset', async () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    const config = {
+      getModel: vi.fn().mockReturnValue('qwen3-coder-plus'),
+      getAuthType: vi.fn().mockReturnValue(AuthType.USE_OPENAI),
+      getActiveRuntimeModelSnapshot: vi.fn().mockReturnValue(undefined),
+      getCurrentModelRegistryBaseUrl: vi.fn().mockReturnValue(undefined),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({}),
+      switchModel,
+    } as unknown as Config;
+
+    await applyRestoredSessionModel(
+      config,
+      recordingProjection({
+        lastCompletedUuid: 'leaf',
+        turnParentUuids: [null],
+        sessionModel: {
+          modelId: 'qwen3-coder-plus',
+          authType: AuthType.USE_OPENAI,
         },
       }),
     );
@@ -348,6 +432,141 @@ describe('session-model-persistence', () => {
       'coder-model',
       { requireCachedCredentials: true },
     );
+  });
+
+  it('switches when recorded authType differs even if the model id matches', async () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    const config = {
+      getModel: vi.fn().mockReturnValue('coder-model'),
+      getAuthType: vi.fn().mockReturnValue(AuthType.USE_OPENAI),
+      getCurrentModelRegistryBaseUrl: vi.fn().mockReturnValue(undefined),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({}),
+      switchModel,
+    } as unknown as Config;
+
+    await applyRestoredSessionModel(
+      config,
+      recordingProjection({
+        lastCompletedUuid: 'leaf',
+        turnParentUuids: [null],
+        sessionModel: {
+          modelId: 'coder-model',
+          authType: AuthType.QWEN_OAUTH,
+        },
+      }),
+    );
+
+    expect(switchModel).toHaveBeenCalledWith(
+      AuthType.QWEN_OAUTH,
+      'coder-model',
+      { requireCachedCredentials: true },
+    );
+  });
+
+  it('trims padded recorded authType before switching', async () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    const config = {
+      getModel: vi.fn().mockReturnValue('settings-default'),
+      getAuthType: vi.fn().mockReturnValue(AuthType.USE_OPENAI),
+      getCurrentModelRegistryBaseUrl: vi.fn().mockReturnValue(undefined),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({}),
+      switchModel,
+    } as unknown as Config;
+
+    await applyRestoredSessionModel(
+      config,
+      recordingProjection({
+        lastCompletedUuid: 'leaf',
+        turnParentUuids: [null],
+        sessionModel: {
+          modelId: ' qwen3-coder-plus ',
+          authType: `${AuthType.USE_OPENAI}\n`,
+        },
+      }),
+    );
+
+    expect(switchModel).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI,
+      'qwen3-coder-plus',
+      undefined,
+    );
+  });
+
+  it('retries authentication on the settings model when restored auth fails', async () => {
+    let currentAuth: string | undefined = AuthType.USE_OPENAI;
+    let currentModel = 'settings-default';
+    const switchModel = vi.fn(
+      async (authType: string, modelId: string): Promise<void> => {
+        currentAuth = authType;
+        currentModel = modelId;
+      },
+    );
+    const authenticate = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('oauth expired'))
+      .mockResolvedValueOnce(undefined);
+    const config = {
+      getModel: vi.fn(() => currentModel),
+      getAuthType: vi.fn(() => currentAuth),
+      getCurrentModelRegistryBaseUrl: vi.fn().mockReturnValue(undefined),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({}),
+      switchModel,
+    } as unknown as Config;
+
+    await restoreSessionModelThenAuthenticate(
+      config,
+      recordingProjection({
+        lastCompletedUuid: 'leaf',
+        turnParentUuids: [null],
+        sessionModel: {
+          modelId: 'coder-model',
+          authType: AuthType.QWEN_OAUTH,
+        },
+      }),
+      authenticate,
+    );
+
+    expect(authenticate).toHaveBeenCalledTimes(2);
+    expect(switchModel).toHaveBeenNthCalledWith(
+      1,
+      AuthType.QWEN_OAUTH,
+      'coder-model',
+      { requireCachedCredentials: true },
+    );
+    expect(switchModel).toHaveBeenNthCalledWith(
+      2,
+      AuthType.USE_OPENAI,
+      'settings-default',
+      undefined,
+    );
+  });
+
+  it('does not retry authentication when restore did not change the live model', async () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    const authenticate = vi.fn().mockRejectedValue(new Error('auth required'));
+    const config = {
+      getModel: vi.fn().mockReturnValue('qwen3-coder-plus'),
+      getAuthType: vi.fn().mockReturnValue(AuthType.USE_OPENAI),
+      getCurrentModelRegistryBaseUrl: vi.fn().mockReturnValue(undefined),
+      getActiveRuntimeModelSnapshot: vi.fn().mockReturnValue(undefined),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({}),
+      switchModel,
+    } as unknown as Config;
+
+    await expect(
+      restoreSessionModelThenAuthenticate(
+        config,
+        recordingProjection({
+          lastCompletedUuid: 'leaf',
+          turnParentUuids: [null],
+          lastAssistantModel: 'qwen3-coder-plus',
+        }),
+        authenticate,
+      ),
+    ).rejects.toThrow('auth required');
+
+    expect(authenticate).toHaveBeenCalledTimes(1);
+    expect(switchModel).not.toHaveBeenCalled();
   });
 
   it('marks the payload isRuntime when a runtime snapshot is active', async () => {

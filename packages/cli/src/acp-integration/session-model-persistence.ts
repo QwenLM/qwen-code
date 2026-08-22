@@ -60,6 +60,12 @@ function hasMatchingRuntimeSnapshot(
   return snapshot?.authType === authType && snapshot.modelId === modelId;
 }
 
+function liveAuthType(config: Config): string | undefined {
+  return (
+    config.getAuthType() ?? config.getModelsConfig?.()?.getCurrentAuthType?.()
+  );
+}
+
 function recordedRouteMatches(
   recorded: SessionModelRecordPayload | undefined,
   currentRegistryBaseUrl: string | null | undefined,
@@ -87,12 +93,12 @@ export async function applyRestoredSessionModel(
 ): Promise<void> {
   const recorded = projection?.runtime.recording.sessionModel;
   const fallbackModel = projection?.runtime.recording.lastAssistantModel;
-  const authType = recorded?.authType || config.getAuthType();
+  const authType = (recorded?.authType || liveAuthType(config))?.trim();
   const modelId = recorded?.modelId || fallbackModel;
   if (!modelId?.trim() || !authType) return;
 
   const currentModel = stripRuntimeSnapshotPrefix(config.getModel() ?? '');
-  const currentAuth = config.getAuthType();
+  const currentAuth = liveAuthType(config);
   const targetModel = stripRuntimeSnapshotPrefix(modelId.trim());
   const targetBaseUrl = recorded?.baseUrl;
   const currentRegistryBaseUrl = config.getCurrentModelRegistryBaseUrl?.();
@@ -142,5 +148,44 @@ export async function applyRestoredSessionModel(
         error instanceof Error ? error.message : String(error)
       }`,
     );
+  }
+}
+
+export async function restoreSessionModelThenAuthenticate(
+  config: Config,
+  projection: SessionRestoreProjection | undefined,
+  authenticate: () => Promise<void>,
+): Promise<void> {
+  const originalAuth = liveAuthType(config);
+  const originalModel = config.getModel();
+  const originalBaseUrl = config.getCurrentModelRegistryBaseUrl?.();
+  await applyRestoredSessionModel(config, projection);
+  try {
+    await authenticate();
+  } catch (error) {
+    if (
+      liveAuthType(config) === originalAuth &&
+      config.getModel() === originalModel
+    ) {
+      throw error;
+    }
+    debugLogger.warn(
+      'restored session model made authentication fail; retrying with settings model',
+    );
+    if (!originalAuth || !originalModel) {
+      throw error;
+    }
+    try {
+      await config.switchModel(
+        originalAuth as AuthType,
+        originalModel,
+        typeof originalBaseUrl === 'string'
+          ? { baseUrl: originalBaseUrl }
+          : undefined,
+      );
+      await authenticate();
+    } catch {
+      throw error;
+    }
   }
 }

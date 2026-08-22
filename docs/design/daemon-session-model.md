@@ -72,8 +72,11 @@ Live attach/resume skips restore. Cold `loadSession` / `resumeSession`:
 
 1. `newSessionConfig` still constructs Config from current settings.
 2. Before `ensureAuthenticated`, apply the last `session_model` payload, else
-   the last assistant `model` (same auth), else keep settings.
-3. `switchModel` failure is non-fatal; resume continues on the settings model.
+   the last assistant `model` (same auth from `modelsConfig.getCurrentAuthType()`
+   when content-generator auth is not yet populated), else keep settings.
+3. `switchModel` failure is non-fatal. If the restored auth then fails
+   `ensureAuthenticated`, load/resume reverts to the settings model and
+   retries authentication once.
 
 ## Surfaces
 

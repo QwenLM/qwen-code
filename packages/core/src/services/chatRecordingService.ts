@@ -1167,7 +1167,12 @@ export class ChatRecordingService {
         const payload = record.systemPayload as
           | SessionModelRecordPayload
           | undefined;
-        if (payload?.modelId && payload.authType) {
+        if (
+          typeof payload?.modelId === 'string' &&
+          payload.modelId.trim() &&
+          typeof payload.authType === 'string' &&
+          payload.authType.trim()
+        ) {
           this.currentSessionModel = normalizeSessionModelPayload(payload);
         }
       }
@@ -2607,11 +2612,17 @@ export class ChatRecordingService {
       };
       // Assign before the awaited write so a rewind landing in the
       // pending-write window re-appends the new binding rather than the
-      // stale one. A failed strict write latches `writeFailure`
-      // permanently, so the optimistic state cannot cause a skipped write
-      // on a healthy recorder.
+      // stale one. Roll back on failure: ensureConversationFile can throw
+      // before writeFailure latches, and a later identical call would
+      // otherwise skip the write.
+      const previous = this.currentSessionModel;
       this.currentSessionModel = normalized;
-      await this.appendRecordStrict(record);
+      try {
+        await this.appendRecordStrict(record);
+      } catch (error) {
+        this.currentSessionModel = previous;
+        throw error;
+      }
       return true;
     } catch (error) {
       if (error !== this.writeFailure) {

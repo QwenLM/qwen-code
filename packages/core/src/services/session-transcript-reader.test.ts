@@ -1693,6 +1693,30 @@ describe('SessionTranscriptReader', () => {
     );
   });
 
+  it('drops a trailing session_model payload that is not a usable string pair', async () => {
+    const validModel: ChatRecord = {
+      ...record('model-1', null, ''),
+      type: 'system',
+      subtype: 'session_model',
+      message: undefined,
+      systemPayload: { modelId: 'qwen3-coder-plus', authType: 'openai' },
+    };
+    const invalidModel = {
+      ...record('model-2', 'model-1', ''),
+      type: 'system' as const,
+      subtype: 'session_model',
+      message: undefined,
+      systemPayload: { modelId: 42, authType: 'openai' },
+    };
+    await writeRecords([validModel, invalidModel as unknown as ChatRecord]);
+
+    const projection = await new SessionTranscriptReader(
+      workspaceDir,
+    ).readRestoreProjection(sessionId, { replay: { kind: 'none' } });
+
+    expect(projection?.runtime.recording.sessionModel).toBeUndefined();
+  });
+
   it('preserves malformed compression failure behavior', async () => {
     await writeRecords([
       record('u1', null, 'prompt'),
