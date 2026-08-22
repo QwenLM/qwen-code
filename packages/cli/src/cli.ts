@@ -379,6 +379,14 @@ export async function runCliEntry(
   }
 
   if (route === 'serve') {
+    // The serve daemon is long-lived and never reaches gemini.tsx main():
+    // arm the stale worktree sweep here so it fires once at startup. Import
+    // the storage module directly: pulling the core barrel into this route
+    // reshuffles the serve/ACP bundle chunks and breaks the closure guard.
+    const { enableStartupSweep } = await import(
+      '@qwen-code/qwen-code-core/startupSweep'
+    );
+    enableStartupSweep();
     const { tryRunServeFastPath } = await import('./serve/fast-path.js');
     if (await tryRunServeFastPath(argv)) {
       return;

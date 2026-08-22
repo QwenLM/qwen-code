@@ -7,9 +7,26 @@
 import * as path from 'node:path';
 import * as os from 'node:os';
 import * as fs from 'node:fs';
+import * as fsp from 'node:fs/promises';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { getProjectHash, QWEN_DIR, sanitizeCwd } from '../utils/paths.js';
+import {
+  getProjectHash,
+  QWEN_DIR,
+  realpathNearestExisting,
+  sanitizeCwd,
+} from '../utils/paths.js';
 import { FatalConfigError } from '../utils/errors.js';
+
+// The sweep's debug logger and runtime-status reader are imported lazily
+// inside the functions that use them: static edges from storage.ts to
+// debugLogger.ts (which imports Storage back) and to runtimeStatus.ts
+// (via atomicFileWrite.ts, which also logs at module scope) close a
+// module cycle that crashes forked children whose graph reaches
+// debugLogger first.
+async function storageLogger() {
+  const { createDebugLogger } = await import('../utils/debugLogger.js');
+  return createDebugLogger('storage');
+}
 
 export { QWEN_DIR } from '../utils/paths.js';
 export const GOOGLE_ACCOUNTS_FILENAME = 'google_accounts.json';
@@ -33,6 +50,351 @@ function isResolvedPathWithinDirectory(childPath: string, parentPath: string) {
   );
 }
 
+// realpathSync only resolves existing paths, but sweep candidates are usually
+// gone by definition: realpathNearestExisting walks up to the nearest existing
+// ancestor and re-appends the missing tail, so a deleted worktree still
+// resolves to its real location (on macOS /var/folders vs /private/var/folders
+// otherwise never matches). The helper never throws: an unresolvable candidate
+// comes back in lexical form, which fails the tmpdir containment check below
+// and keeps the bucket.
+function resolveSweepCandidate(candidate: string): string {
+  return realpathNearestExisting(candidate);
+}
+
+// The repo-existence conjunct needs positive proof: only a clean stat counts
+// as "the repo is still there". Any stat error (ESTALE/EIO on a downed mount,
+// EACCES, ELOOP) keeps the bucket.
+function isPositivelyExistingDirectorySync(candidate: string): boolean {
+  try {
+    return fs.statSync(candidate).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Worktree sessions snapshot a project dir under
+ * `<runtimeBaseDir>/projects/<sanitizeCwd(worktreePath)>` whose transcripts
+ * point at the temp worktree. The worktree is deleted on exit (or lost on
+ * crash), but the snapshot dir is never removed, so
+ * `%TEMP%/qwen-*-sess-*` entries accumulate forever (#7906). Sweep the
+ * project dirs that are keyed by a worktree path and whose worktree
+ * sidecars all point at paths that no longer exist, plus the buckets
+ * keyed by a sidecar's gone ephemeral launch cwd (its `originalCwd`
+ * field) inside the OS temp dir. Anything
+ * that cannot prove itself stale (no sidecar, corrupted sidecars, at
+ * least one live worktree, a launch cwd outside the temp dir or still
+ * present) is kept. Normal project buckets are never touched: they can
+ * hold worktree sidecars of their own (enter/exit run from the original
+ * repo does not relocate session storage), so a bucket whose launch cwd
+ * is not in the temp dir is kept regardless of what its sidecars say.
+ */
+export async function sweepStaleWorktreeProjects(
+  runtimeBaseDir: string,
+  keepBucket?: string,
+): Promise<string[]> {
+  const projectsDir = path.join(runtimeBaseDir, PROJECT_DIR_NAME);
+  let entries: string[];
+  try {
+    entries = await fsp.readdir(projectsDir);
+  } catch {
+    return [];
+  }
+
+  let realTmpdir: string;
+  try {
+    realTmpdir = fs.realpathSync(os.tmpdir());
+  } catch {
+    realTmpdir = os.tmpdir();
+  }
+  // A tmpdir that IS the filesystem root (TMPDIR=/) would put every launch
+  // cwd "inside the temp dir" and turn arm 2 into sweep-everything; treat it
+  // as no temp dir at all so arm 2 never fires.
+  const tmpdirIsUsable = realTmpdir !== path.parse(realTmpdir).root;
+
+  const removed: string[] = [];
+  for (const entry of entries.sort()) {
+    // The bucket this process just attached to is in use by definition; never
+    // sweep it out from under the live session. Its staleness is re-evaluated
+    // at the next start.
+    if (keepBucket !== undefined && entry === keepBucket) continue;
+    const chatsDir = path.join(projectsDir, entry, 'chats');
+    // Archiving is an explicit user retention action, and the sidecar move is
+    // best-effort (archived sidecars can be missing, unreadable, or corrupted,
+    // and a failed readdir would silently drop them all): any entry at all
+    // under chats/archive/ keeps the bucket, no parsing involved.
+    try {
+      if ((await fsp.readdir(path.join(chatsDir, 'archive'))).length > 0)
+        continue;
+    } catch {
+      // no archive dir: nothing retained
+    }
+    const sidecars = await readWorktreeSidecarRecords(chatsDir);
+    if (sidecars.length === 0) continue;
+
+    const allWorktreesGone = sidecars.every(
+      (sidecar) => !isDirectorySync(sidecar.worktreePath),
+    );
+
+    let stale: boolean;
+    if (
+      sidecars.some((sidecar) => entry === sanitizeCwd(sidecar.worktreePath))
+    ) {
+      // Bucket keyed by a worktree path itself. A normal project bucket can
+      // hold worktree sidecars too (enter/exit run from the original repo
+      // never relocates the session storage), so only this arm may sweep,
+      // and only once every worktree is gone and the owning repo is still
+      // there: ENOENT on the worktree path also reads as a downed or
+      // unmounted volume, and a sweep while the drive is offline would erase
+      // transcripts that come back with it.
+      stale =
+        allWorktreesGone &&
+        sidecars.every(
+          (sidecar) =>
+            sidecar.originalCwd !== undefined &&
+            isPositivelyExistingDirectorySync(sidecar.originalCwd),
+        );
+      if (stale && (await hasLiveSiblingWorktree(sidecars, entry))) {
+        // sanitizeCwd collapses fix.bug and fix-bug to one bucket name, so
+        // the gate cannot prove which worktree owns the bucket; a cold but
+        // on-disk co-owner worktree must keep it (cold data has no liveness
+        // signal for the vetoes below).
+        stale = false;
+      }
+    } else {
+      // Bucket keyed by a gone ephemeral launch cwd, #7906's main class:
+      // enter_worktree from a throwaway T lands the sidecar here with
+      // worktreePath = T/.qwen/worktrees/<slug>, which the arm above can
+      // never match. Sweep only when the bucket is actually keyed by that
+      // launch cwd (a repo bucket that merely holds such sidecars after a
+      // /cd relocation keeps its history), every sidecar places its launch
+      // cwd inside the OS temp dir, and that cwd is gone too. A real repo
+      // path (or a missing originalCwd) always keeps the bucket: an absent
+      // repo dir can mean an unplugged drive, not garbage.
+      stale =
+        allWorktreesGone &&
+        // A tmpdir root that will not stat cleanly is a downed volume, not an
+        // ephemeral scratch space: keep every bucket until it comes back.
+        tmpdirIsUsable &&
+        isPositivelyExistingDirectorySync(realTmpdir) &&
+        sidecars.every(
+          (sidecar) =>
+            sidecar.originalCwd !== undefined &&
+            entry === sanitizeCwd(sidecar.originalCwd) &&
+            isResolvedPathWithinDirectory(
+              resolveSweepCandidate(sidecar.originalCwd),
+              realTmpdir,
+            ) &&
+            !isDirectorySync(sidecar.originalCwd),
+        );
+    }
+    if (!stale) continue;
+
+    // sanitizeCwd collapses distinct worktrees to one bucket name (dots and
+    // dashes both become dashes), so the name gate above cannot prove which
+    // worktree owns the bucket. A session started with a plain `cd` writes no
+    // sidecar, and its live transcript would be deleted with the bucket; a
+    // live runtime.json anywhere in the bucket vetoes the sweep. runtime.json
+    // is only written by interactive sessions, so a recently touched
+    // transcript file vetoes too, covering headless/serve/ACP sessions.
+    if (
+      (await hasLiveRuntime(chatsDir)) ||
+      (await hasRecentTranscriptActivity(chatsDir))
+    ) {
+      continue;
+    }
+
+    // One unreadable entry must not abort the sweep for the rest.
+    try {
+      await fsp.rm(path.join(projectsDir, entry), {
+        recursive: true,
+        force: true,
+      });
+    } catch (error) {
+      (await storageLogger()).debug(
+        `Failed to remove stale worktree project snapshot ${entry}: ${String(error)}`,
+      );
+      continue;
+    }
+    removed.push(entry);
+    (await storageLogger()).debug(
+      `Removed stale worktree project snapshot ${entry} (all worktree sidecars point at removed paths)`,
+    );
+  }
+  return removed;
+}
+
+/**
+ * Collect the worktreePath (and originalCwd when present) of every readable
+ * sidecar under `chats/` and `chats/archive/`. A corrupted sidecar proves
+ * nothing and is skipped, never treated as a reason to delete or keep on its
+ * own.
+ */
+// True when any on-disk worktree of the owning repo sanitizes to this bucket
+// name. The dead worktrees named by the sidecars are gone by definition, so
+// any directory found is live.
+async function hasLiveSiblingWorktree(
+  sidecars: Array<{ worktreePath: string; originalCwd?: string }>,
+  entry: string,
+): Promise<boolean> {
+  for (const sidecar of sidecars) {
+    if (sidecar.originalCwd === undefined) continue;
+    const worktreesDir = path.join(sidecar.originalCwd, '.qwen', 'worktrees');
+    let names: string[];
+    try {
+      names = await fsp.readdir(worktreesDir);
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      const candidate = path.join(worktreesDir, name);
+      if (isDirectorySync(candidate) && sanitizeCwd(candidate) === entry) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+async function readWorktreeSidecarRecords(
+  chatsDir: string,
+): Promise<Array<{ worktreePath: string; originalCwd?: string }>> {
+  let names: string[];
+  try {
+    names = await fsp.readdir(chatsDir);
+  } catch {
+    return [];
+  }
+  const sidecars = names
+    .filter((name) => name.endsWith('.worktree.json'))
+    .map((name) => path.join(chatsDir, name))
+    .sort((a, b) => a.localeCompare(b));
+
+  const records: Array<{
+    worktreePath: string;
+    originalCwd?: string;
+  }> = [];
+  for (const sidecar of sidecars) {
+    try {
+      const parsed: unknown = JSON.parse(await fsp.readFile(sidecar, 'utf-8'));
+      if (
+        parsed !== null &&
+        typeof parsed === 'object' &&
+        typeof (parsed as Record<string, unknown>)['worktreePath'] === 'string'
+      ) {
+        const record = parsed as Record<string, unknown>;
+        records.push({
+          worktreePath: record['worktreePath'] as string,
+          originalCwd:
+            typeof record['originalCwd'] === 'string'
+              ? (record['originalCwd'] as string)
+              : undefined,
+        });
+      }
+    } catch {
+      // corrupted sidecar: try the next one before judging the bucket
+    }
+  }
+  return records;
+}
+
+function isDirectorySync(candidate: string): boolean {
+  try {
+    return fs.statSync(candidate).isDirectory();
+  } catch (error) {
+    // ENOENT means gone; anything else (permissions, transient fs errors)
+    // answers "cannot prove gone", which for a destructive sweep means keep.
+    return (error as NodeJS.ErrnoException).code !== 'ENOENT';
+  }
+}
+
+const TRANSCRIPT_LIVE_GRACE_MS = 10 * 60 * 1000;
+
+/**
+ * True when any chats/*.jsonl in the bucket was touched within the grace
+ * window. A running session keeps appending transcript lines regardless of
+ * session mode (interactive, headless, serve, ACP, daemon), so transcript
+ * freshness is the session-mode-agnostic liveness signal that runtime.json
+ * cannot provide for non-interactive sessions.
+ */
+async function hasRecentTranscriptActivity(chatsDir: string): Promise<boolean> {
+  const cutoff = Date.now() - TRANSCRIPT_LIVE_GRACE_MS;
+  let names: string[];
+  try {
+    names = await fsp.readdir(chatsDir);
+  } catch {
+    return false;
+  }
+  for (const name of names) {
+    if (!name.endsWith('.jsonl')) continue;
+    try {
+      const stat = await fsp.stat(path.join(chatsDir, name));
+      if (stat.mtimeMs >= cutoff) return true;
+    } catch {
+      continue;
+    }
+  }
+  return false;
+}
+
+/**
+ * True when any `*.runtime.json` in the bucket reports a live process.
+ * Mirrors getRuntimeStatusPathState: a different hostname cannot be verified
+ * and counts as live, and a pid probe failure other than ESRCH does too.
+ */
+async function hasLiveRuntime(chatsDir: string): Promise<boolean> {
+  let names: string[];
+  try {
+    names = await fsp.readdir(chatsDir);
+  } catch {
+    return false;
+  }
+  for (const name of names) {
+    if (!name.endsWith('.runtime.json')) continue;
+    const { readRuntimeStatus } = await import('../utils/runtimeStatus.js');
+    const status = await readRuntimeStatus(path.join(chatsDir, name));
+    if (!status) continue;
+    if (status.hostname !== os.hostname()) {
+      return true;
+    }
+    try {
+      process.kill(status.pid, 0);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+const staleWorktreeSweepStarted = new Set<string>();
+
+// The constructor-scheduled sweep deletes on-disk state, so it must not fire
+// from a bare Storage construction (unit tests build Storage against the real
+// default dir). Only the real CLI bootstrap opts in via enableStartupSweep().
+let startupSweepEnabled = false;
+
+export function enableStartupSweep(): void {
+  startupSweepEnabled = true;
+}
+
+function scheduleStaleWorktreeSweep(
+  runtimeBaseDir: string,
+  keepBucket?: string,
+): void {
+  if (staleWorktreeSweepStarted.has(runtimeBaseDir)) return;
+  staleWorktreeSweepStarted.add(runtimeBaseDir);
+  void sweepStaleWorktreeProjects(runtimeBaseDir, keepBucket).catch(
+    async (error: unknown) => {
+      (await storageLogger()).warn(
+        `stale worktree project sweep failed: ${error}`,
+      );
+    },
+  );
+}
+
 export class Storage {
   private readonly targetDir: string;
   private readonly runtimeBaseDir: string;
@@ -53,6 +415,12 @@ export class Storage {
   ) {
     this.targetDir = targetDir;
     this.runtimeBaseDir = path.resolve(runtimeBaseDir);
+    if (startupSweepEnabled) {
+      scheduleStaleWorktreeSweep(
+        this.runtimeBaseDir,
+        sanitizeCwd(this.targetDir),
+      );
+    }
   }
 
   /**
