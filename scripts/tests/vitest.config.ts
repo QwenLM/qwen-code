@@ -37,11 +37,10 @@ export default defineConfig({
       provider: 'v8',
       reporter: ['text', 'lcov'],
     },
-    poolOptions: {
-      threads: {
-        minThreads: 8,
-        maxThreads: 16,
-      },
-    },
+    // No poolOptions override: a fixed 8-16 worker floor oversubscribes the
+    // 3-core macOS runners and stalled the main thread long enough for the
+    // workers' final `onTaskUpdate` RPC to time out (the whole suite green,
+    // yet the run exiting 1). Vitest's default scales with the host cores,
+    // which is what every other suite in this repository uses.
   },
 });
