@@ -5051,6 +5051,14 @@ export function App({
       areSessionIdsEqual(prev, requested) ? prev : requested,
     );
     if (requested.length > 0) {
+      // A controlled host taking over the view is a cockpit departure too:
+      // strip the ?view=cockpit deep link the way every interactive departure
+      // does. Otherwise the host later clearing the split lands on 'chat'
+      // while the stale link reopens the cockpit (and a shrink-fold would
+      // strand the link the same way).
+      if (mainViewRef.current === 'cockpit') {
+        updateCockpitLocation(false, true);
+      }
       setActivePanel((prev) => (prev === null ? prev : null));
       setMainView((prev) => (prev === 'split' ? prev : 'split'));
     } else {

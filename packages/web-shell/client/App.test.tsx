@@ -5478,6 +5478,39 @@ describe('App session workflow', () => {
     ).not.toBeNull();
   });
 
+  it('strips the cockpit deep link when a controlled host takes over the view', async () => {
+    testState.settings = [sessionWorkflowSetting()];
+    window.history.replaceState(null, '', '/?view=cockpit');
+
+    const { container, rerender } = renderApp({
+      sidebar: false,
+      splitSessionIds: [],
+    });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="cockpit-page"]'),
+    ).not.toBeNull();
+
+    // A controlled host taking over the view is a cockpit departure: the deep
+    // link must be stripped the way every interactive departure does.
+    rerender({ sidebar: false, splitSessionIds: ['s1'] });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).not.toBeNull();
+    expect(new URLSearchParams(window.location.search).has('view')).toBe(false);
+
+    // When the host clears the split the app lands on chat — and stays
+    // there, instead of the stale deep link snapping back to the Workflow view.
+    rerender({ sidebar: false, splitSessionIds: [] });
+    await flush();
+    expect(
+      container.querySelector('[data-testid="split-view-page"]'),
+    ).toBeNull();
+    expect(container.querySelector('[data-testid="cockpit-page"]')).toBeNull();
+    expect(new URLSearchParams(window.location.search).has('view')).toBe(false);
+  });
+
   it('keeps the revision-bound plan approval in Chat', async () => {
     const approvedEntries = [
       {
