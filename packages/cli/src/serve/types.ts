@@ -377,6 +377,11 @@ export interface ServeOptions {
   /** Forward the experimental LSP opt-in to spawned ACP children. */
   experimentalLsp?: boolean;
   /**
+   * When true, load/resume re-hangs a trailing unanswered ask_user_question.
+   * Default false. Forwarded to spawned ACP children.
+   */
+  restoreAskUserQuestion?: boolean;
+  /**
    * Experimental: channels to host in a daemon-managed worker process.
    * Omitted means plain daemon mode with no channel worker.
    */
