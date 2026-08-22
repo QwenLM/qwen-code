@@ -639,6 +639,31 @@ describe('bundled review skill', () => {
     expect(body).not.toContain('--json closingIssuesReferences');
   });
 
+  it('keeps the incident-replay carve-out in rule 4 and the context paragraph', () => {
+    // Revert guard: drop the carve-out and the orchestrator runs under an
+    // unqualified "issue evidence outranks PR framing / do not treat the PR
+    // description as ground truth" while the verify brief still declares the
+    // exception — so in the no-linked-issue case, the exact one the replay
+    // duty exists for, a description-grounded replay finding is downgraded or
+    // dropped at orchestration. Both copies pinned: rule 4's and the Step 2
+    // context paragraph's.
+    const body = skillBody();
+    expect(body).toContain(
+      'One carve-out: when no issue evidence exists and the PR description itself narrates a motivating incident',
+    );
+    expect(body).toContain('the replay duty stands on the narrative alone');
+    // The orchestrator-side copy of the R2-1 routing rule, and the roll-call
+    // example that models the full four-item receipt: reverting either
+    // restores the pre-R2-1 standard in which a skipped replay reads
+    // identically to a performed one, while every brief-side pin stays green.
+    expect(body).toContain(
+      'a replay that found NO step changed arrives as a Critical **finding**, never inside this receipt',
+    );
+    expect(body).toContain(
+      'not a bugfix, description narrates no incident → scope empty',
+    );
+  });
+
   it('keeps the Step 6 comment-body tail-fetch and the Posted: fallback grounded', () => {
     // Revert guard: the tail-fetch must stay `--out … to the command the note
     // names` (a restored `--jq .body > file` redirect is rejected by yargs on
@@ -679,6 +704,38 @@ describe('bundled review skill', () => {
     expect(body).toContain('self-PR detection and head drift are a1-backed');
     expect(body).not.toContain('self-PR detection has no Aone backing');
     expect(body).not.toContain('`pr-context`, `comment-status`, `presubmit`');
+  });
+
+  it('keeps the corrected Aone --comment contract, not merge residue', () => {
+    // The merge that became this PR's head committed conflict markers and a
+    // STALE variant of the `--comment` bullet back-to-back with the corrected
+    // one (R8-1). The stale variant claims a blanket verdict cap and orders
+    // an unbounded drift re-review — contradicting the implementation:
+    // compose-review caps only APPROVE, submit's drift re-review stops at the
+    // once-per-review restart bound, and submit prints the could-not-re-verify
+    // warning the relay names. Re-resolving the merge against the stale side
+    // must fail here, not slip through.
+    const body = skillBody();
+    // No merge-conflict residue anywhere: a bare `=======` under a bullet
+    // list parses as a setext-heading underline and `>>>>>>>` renders as a
+    // blockquote, silently restructuring the instructions a review runs on.
+    expect(body).not.toMatch(/^(<{7}|={7}|>{7})/m);
+    // The cap keeps an Approve at Comment; a Request-changes verdict still
+    // posts its blocking summary — not the stale bullet's blanket cap.
+    expect(body).toContain(
+      'the context-unavailable cap keeps an **Approve** verdict at Comment (a Request-changes verdict still posts its blocking summary)',
+    );
+    expect(body).not.toContain('which caps the verdict at');
+    // The drift re-review is bounded by the once-per-review restart bound;
+    // the stale variant ordered it unconditionally.
+    expect(body).toContain(
+      'but ONLY while the per-review head-movement restart bound is unspent',
+    );
+    // The could-not-re-verify relay the corrected variant adds: submit
+    // prints the warning on both the success and the mid-batch-failure path.
+    expect(body).toContain(
+      'WARNING: could not re-verify the MR head after posting',
+    );
   });
 
   it('mandates the review-agent subagent type, never general-purpose', () => {

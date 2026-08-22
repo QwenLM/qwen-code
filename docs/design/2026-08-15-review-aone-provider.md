@@ -68,9 +68,13 @@ fetch routes through the platform reader (the MR description on Aone, already
 carried by the reader's fetch metadata), so the Test Plan check runs on Aone
 targets like any other._
 
-`--comment` on an Aone target refuses with a clear message (posting is Phase 3).
-_Update (2026-08-19, #9491): posting landed with Phase 3 — see the 2026-08-13
-design log's Phase 3 entries._
+~~`--comment` on an Aone target refuses with a clear message (posting is Phase 3).~~
+**Superseded — Phase 3 landed.** `--comment` on an Aone target POSTS: `submit`
+routes the write at `submitAoneReview` (one `a1 repo mr comment create` per
+inline finding, then the summary comment, `a1 repo mr approve` on APPROVE).
+See the "Landed" entries in
+`2026-08-13-review-platform-provider-abstraction.md` for the write-safety
+semantics (head-drift refusal, partial-post reporting, host binding).
 
 ## Key design decisions
 
