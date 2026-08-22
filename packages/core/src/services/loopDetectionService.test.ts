@@ -16,7 +16,7 @@ import type {
 import { GeminiEventType } from '../core/turn.js';
 import * as loggers from '../telemetry/loggers.js';
 import { LoopType } from '../telemetry/types.js';
-import { buildStub } from '../utils/truncation.js';
+import { buildStub, PREVIEW_SIZE_CHARS } from '../utils/truncation.js';
 import {
   DEFAULT_MAX_TOOL_CALLS_PER_TURN,
   LoopDetectionService,
@@ -2690,6 +2690,30 @@ describe('LoopDetectionService', () => {
           service.recordToolResult(
             { name: 'task_list', args: TASK_LIST_ARGS },
             stubResult(`poll_${i}`, `board state v${i}`),
+          );
+        }
+        expect(fired).toBe(false);
+        expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+      });
+
+      it('keeps oversized polling alive when the board changes beyond the preview window', () => {
+        // buildStub previews only the first PREVIEW_SIZE_CHARS chars, so a
+        // board whose mutations land beyond that window hashes to an
+        // identical preview on every poll. The full-output digest embedded
+        // in the stub must keep the fingerprints distinct; without it the
+        // always-on guard halts this productive poller at the 5th identical
+        // request.
+        const headerLine = 'task row header line\n';
+        const header = headerLine.repeat(
+          Math.ceil(PREVIEW_SIZE_CHARS / headerLine.length) + 10,
+        );
+        let fired = false;
+        for (let i = 0; i < 4 * TOOL_CALL_LOOP_THRESHOLD; i++) {
+          fired = service.checkAlwaysOnSafeties(taskListEvent(`poll_${i}`));
+          if (fired) break;
+          service.recordToolResult(
+            { name: 'task_list', args: TASK_LIST_ARGS },
+            stubResult(`poll_${i}`, `${header}tail state v${i}`),
           );
         }
         expect(fired).toBe(false);

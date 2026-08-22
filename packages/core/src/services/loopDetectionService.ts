@@ -21,6 +21,7 @@ import {
 import type { Config } from '../config/config.js';
 import { getToolCallRepeatKey } from '../utils/tool-call-repeat-key.js';
 import {
+  FULL_OUTPUT_DIGEST_LABEL,
   OUTPUT_TOO_LARGE_PREFIX,
   PERSISTED_OUTPUT_OPEN_TAG,
   PERSISTED_PREVIEW_MARKER,
@@ -432,17 +433,29 @@ export class LoopDetectionService {
    * embedding a random temp-file name. Hashing the envelope would make every
    * fingerprint unique per call — silently disabling every result-aware
    * guard for exactly the largest results — so reduce a stub to its
-   * semantic payload: the preview/truncated content that follows the stable
-   * marker. The markers are the shared constants from utils/truncation.ts
-   * so the parser cannot drift from the producer. The `<persisted-stub>`
-   * sentinel keeps a stub fingerprint from ever colliding with a small
-   * literal output that matches the payload.
+   * semantic payload. buildStub embeds a sha256 of the full pre-truncation
+   * output (FULL_OUTPUT_DIGEST_LABEL); prefer it, because the preview only
+   * covers the first PREVIEW_SIZE_CHARS chars — a board mutating beyond
+   * that window must still fingerprint differently each poll (and a frozen
+   * board identically). Stubs without a digest line fall back to the
+   * preview/truncated content after the stable marker. The markers are the
+   * shared constants from utils/truncation.ts so the parser cannot drift
+   * from the producer. The `<persisted-stub>` sentinel keeps a stub
+   * fingerprint from ever colliding with a small literal output that
+   * matches the payload.
    */
   private static stripPersistenceEnvelope(value: string): string {
     const isPreviewStub =
       value.includes(PERSISTED_OUTPUT_OPEN_TAG) ||
       value.startsWith(OUTPUT_TOO_LARGE_PREFIX);
     if (isPreviewStub) {
+      const digestIndex = value.indexOf(FULL_OUTPUT_DIGEST_LABEL);
+      if (digestIndex >= 0) {
+        const digestStart = digestIndex + FULL_OUTPUT_DIGEST_LABEL.length;
+        // sha256 hex digest length
+        const digest = value.slice(digestStart, digestStart + 64);
+        return `<persisted-stub>sha256:${digest}`;
+      }
       const marker = `${PERSISTED_PREVIEW_MARKER}\n`;
       const index = value.indexOf(marker);
       if (index >= 0) {

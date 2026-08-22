@@ -42,6 +42,16 @@ export const PERSISTED_PREVIEW_MARKER = `Preview (up to ${PREVIEW_SIZE_CHARS} ch
 export const TRUNCATED_PART_MARKER = 'Truncated part of the output:\n';
 
 /**
+ * Label of the line `buildStub` embeds carrying a sha256 of the FULL
+ * pre-truncation output. The preview only covers the first
+ * PREVIEW_SIZE_CHARS chars, so consumers that fingerprint results (the loop
+ * guards) preserve this digest to stay sensitive to mutations that land
+ * beyond the preview window (a task board whose changes sit past char 2000
+ * would otherwise fingerprint identically on every poll).
+ */
+export const FULL_OUTPUT_DIGEST_LABEL = 'Full output sha256: ';
+
+/**
  * Tolerance factor applied by the scheduler's combined (second) pass:
  * metadata appended after truncation is only re-bounded above 2x the
  * applicable budget, so compliant retained content can legitimately
@@ -517,10 +527,12 @@ export async function persistAndTruncateToolResult(
 
 /**
  * Builds the model-visible stub that replaces an oversized tool result.
- * `filePathOrNote` is either the absolute path of the persisted full output
- * (wrapped `<persisted-output>` envelope) or a short note explaining why it
- * was not persisted (unwrapped stub). Exported so tests build stubs with
- * the real producer instead of hand-mirroring its format.
+ * Embeds a sha256 of the full `content` (see FULL_OUTPUT_DIGEST_LABEL) so
+ * result fingerprinting stays faithful to mutations the head-only preview
+ * cuts off. `filePathOrNote` is either the absolute path of the persisted
+ * full output (wrapped `<persisted-output>` envelope) or a short note
+ * explaining why it was not persisted (unwrapped stub). Exported so tests
+ * build stubs with the real producer instead of hand-mirroring its format.
  */
 export function buildStub(
   content: string,
@@ -529,6 +541,8 @@ export function buildStub(
 ): string {
   const preview = generatePreview(content);
   const sizeKb = Math.round(byteSize / 1024);
+  const digest = crypto.createHash('sha256').update(content).digest('hex');
+  const digestLine = `${FULL_OUTPUT_DIGEST_LABEL}${digest}`;
   const isFilePath = path.isAbsolute(filePathOrNote);
 
   if (isFilePath) {
@@ -536,6 +550,7 @@ export function buildStub(
 ${OUTPUT_TOO_LARGE_PREFIX}${sizeKb} KB). Full output saved to: ${filePathOrNote}
 Note: this file may be cleaned up after 24 hours.
 To read the complete output, use the ${ReadFileTool.Name} tool with the absolute file path above.
+${digestLine}
 
 ${PERSISTED_PREVIEW_MARKER}
 ${preview}
@@ -543,6 +558,7 @@ ${preview}
   }
 
   return `${OUTPUT_TOO_LARGE_PREFIX}${sizeKb} KB). ${filePathOrNote}
+${digestLine}
 
 ${PERSISTED_PREVIEW_MARKER}
 ${preview}`;
