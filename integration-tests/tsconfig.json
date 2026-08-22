@@ -135,7 +135,7 @@
       // sites share one declaration — mixing src and dist declarations
       // produces duplicate-private-class errors.
       "@qwen-code/channel-base": ["../packages/channels/base/src/index.ts"],
-      // cli's channel-registry.ts imports the eight builtin channel
+      // cli's channel-registry.ts imports the nine builtin channel
       // adapters and html.ts imports web-templates; without entries they
       // resolve through their exports maps to dist, leaving the typecheck
       // dependent on those packages being built.
@@ -146,6 +146,7 @@
       "@qwen-code/channel-dingtalk": [
         "../packages/channels/dingtalk/src/index.ts"
       ],
+      "@qwen-code/channel-dws": ["../packages/channels/dws/src/index.ts"],
       "@qwen-code/channel-wecom": ["../packages/channels/wecom/src/index.ts"],
       "@qwen-code/channel-feishu": ["../packages/channels/feishu/src/index.ts"],
       "@qwen-code/channel-qqbot": ["../packages/channels/qqbot/src/index.ts"],
