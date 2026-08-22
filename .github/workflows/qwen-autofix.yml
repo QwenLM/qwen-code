@@ -102,7 +102,7 @@ env:
   # Full rationale → qwen-autofix.md#af-002
   CRITICAL_ONLY_AFTER_ROUND: '5'
   # Per-author tail budget inside Critical-only mode.
-  # Full rationale → qwen-autofix.md#af-074
+  # Full rationale → qwen-autofix.md#af-148
   CRITICAL_ONLY_HUMAN_BATCHES: '2'
   # Net-diff growth budgets per counting window — the SIZE sibling of the
   # round brake above. CRITICAL_ONLY_AFTER_ROUND counts rounds, but one round
@@ -3445,7 +3445,7 @@ jobs:
     # write+ (internal) authors at scan AND address time. That is an
     # Full rationale → qwen-autofix.md#af-038
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    timeout-minutes: 300
+    timeout-minutes: 325
     permissions:
       contents: 'read'
     strategy:
@@ -4682,6 +4682,8 @@ jobs:
             # Idle (silent-sandbox) timeouts are excluded like in the cap
             # census: the narrowing advice targets budget exhaustion, and an
             # infra-killed round never had any budget to exhaust (af-073).
+            # Repair-pass exhaustions are excluded on the same reading: this
+            # warning's "before finishing anything" is false there (af-148).
             PRIOR_TIMEOUTS="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${LIVE_REARM_KEY}" '
               [ .[] | select((.user.login // "") == $ab)
                 | select((.body // "") | contains("<!-- autofix-eval "))
@@ -4690,7 +4692,7 @@ jobs:
               ] | sort_by(.created_at)
               | map((.body | gsub("\r"; "") | split("\n")[0]))
               | (map(test("Addressed the latest review feedback|no changes needed")) | rindex(true) // -1) as $lastok
-              | [ .[($lastok + 1):][] | select(contains("AutoFix ran out of time before finishing") and (contains("AutoFix ran out of time before finishing (idle-timeout") | not)) ] | length' "${WORKDIR}/ic.json" 2> /dev/null || true)"
+              | [ .[($lastok + 1):][] | select(contains("AutoFix ran out of time before finishing") and (contains("AutoFix ran out of time before finishing (idle-timeout") | not) and (contains("AutoFix ran out of time before finishing (repair-timeout") | not)) ] | length' "${WORKDIR}/ic.json" 2> /dev/null || true)"
             if [[ "${PRIOR_TIMEOUTS}" -ge 1 ]]; then
               echo
               echo '## Budget warning: previous round(s) ran out of time'
@@ -4944,9 +4946,11 @@ jobs:
         # The outcome check fails closed: a FAILED resolver leaves the image
         # binding below empty, and an empty QWEN_SANDBOX_IMAGE relaunches
         # the CLI without any sandbox (#9527 review).
+        # Budget 40m under a 45m backstop; the old 18m/20m pair could never
+        # finish. Full rationale → qwen-autofix.md#af-148
         if: |-
           ${{ always() && steps.verify.outputs.retryable == 'true' && steps.sandbox_image.outcome == 'success' }}
-        timeout-minutes: 20
+        timeout-minutes: 45
         env:
           QWEN_SANDBOX_IMAGE: '${{ steps.sandbox_image.outputs.image }}'
           DOCKER_HOST: ''
@@ -4958,7 +4962,10 @@ jobs:
           OPENAI_MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
           NO_PROXY: '127.0.0.1,localhost,::1'
           QWEN_HOME: '${{ runner.temp }}/qwen-autofix-review-home'
-          QWEN_TIMEOUT_MS: '1080000'
+          QWEN_TIMEOUT_MS: '2400000'
+          # Names the budget in run-agent.mjs's timeout detail so the census
+          # can tell this pass apart; the cap's needle pins this literal.
+          QWEN_TIMEOUT_LABEL: 'repair-timeout'
           CONFLICT: '${{ steps.prepare.outputs.conflict }}'
           BASE: 'main'
           SETTINGS_JSON: |-
@@ -5778,11 +5785,23 @@ jobs:
               if [[ "${AGENT_TIMEOUT:-}" == 'idle-timeout'* ]]; then
                 IDLE_N=$(( IDLE_N + 1 ))
               fi
-              # Excluding idle from the cap must not hide it. The job log is
+              # Repair-pass exhaustions are EXCLUDED for the same reason: the
+              # primary pass FINISHED and only the smaller repair sub-budget
+              # ran out, so splitting the PR is not the fix. Still bounded by
+              # CONSECUTIVE_FAILURE_CAP.
+              # Full rationale → qwen-autofix.md#af-148
+              REPAIR_N="$(grep -c 'AutoFix ran out of time before finishing (repair-timeout' <<< "${PRIOR_HEADS}" || true)"
+              if [[ "${AGENT_TIMEOUT:-}" == 'repair-timeout'* ]]; then
+                REPAIR_N=$(( REPAIR_N + 1 ))
+              fi
+              # Excluding a class from the cap must not hide it. The job log is
               # the right surface: it reaches the operator without spending a
               # PR comment on infra noise.
               if [[ "${IDLE_N}" -gt 0 ]]; then
                 echo "::warning::#${PR}: ${IDLE_N} silent-sandbox (idle) timeout(s) this counting window — excluded from the ${TIMEOUT_WINDOW_CAP}-timeout cap; check the sandbox image and the runner docker daemon"
+              fi
+              if [[ "${REPAIR_N}" -gt 0 ]]; then
+                echo "::warning::#${PR}: ${REPAIR_N} repair-pass timeout(s) this counting window — excluded from the ${TIMEOUT_WINDOW_CAP}-timeout cap; the repair sub-budget, not the round budget, is what ran out"
               fi
               if [[ "${MARK_ROUND}" != "${MAX_ROUNDS}" ]]; then
                 # Needle matches the emitted headline verbatim — first lines
@@ -5793,11 +5812,11 @@ jobs:
                 if [[ -n "${AGENT_TIMEOUT:-}" ]]; then
                   TIMEOUT_N=$(( TIMEOUT_N + 1 ))
                 fi
-                # IDLE_N's needle is TIMEOUT_N's needle extended with the
-                # idle cause's opening token — every line matching it also
-                # matches TIMEOUT_N's, so IDLE_N can never exceed TIMEOUT_N
-                # and the subtraction below can never go negative.
-                BUDGET_TIMEOUT_N=$(( TIMEOUT_N - IDLE_N ))
+                # Both excluded needles are TIMEOUT_N's needle extended with
+                # their cause's opening token — every line matching either
+                # also matches TIMEOUT_N's, and the two causes are mutually
+                # exclusive, so the subtraction below can never go negative.
+                BUDGET_TIMEOUT_N=$(( TIMEOUT_N - IDLE_N - REPAIR_N ))
                 if [[ "${BUDGET_TIMEOUT_N}" -ge "${TIMEOUT_WINDOW_CAP}" ]]; then
                   MARK_ROUND="${MAX_ROUNDS}"
                   # The headline states what the census MEASURED — the
@@ -5817,8 +5836,14 @@ jobs:
                     IDLE_CLAUSE=" The window also holds ${IDLE_N} silent-sandbox (idle) timeout(s), which no budget increase can cure and which do NOT count toward this cap — investigate the sandbox image and runner docker daemon separately."
                     IDLE_CLAUSE_ZH="本窗口另有 ${IDLE_N} 次静默 sandbox（idle）超时，提高预算也治不了，且不计入本上限 —— 请另行排查 sandbox 镜像与 runner 的 docker daemon。"
                   fi
-                  HEADLINE="🤖 AutoFix stopped: this counting window now contains ${BUDGET_TIMEOUT_N} agent time-budget exhaustions (pushed rounds in between included; this round itself may have failed differently). That is ${BUDGET_TIMEOUT_N} full agent runs that pushed nothing.${IDLE_CLAUSE} A human should split or reduce the PR (or raise the agent time budget AND its step backstop together), then comment \`${RETRY_COMMAND}\` to re-arm. Until then future scans will skip this PR."
-                  HEADLINE_ZH="🤖 AutoFix 已停止：当前计数窗口内已累计 ${BUDGET_TIMEOUT_N} 次时间预算耗尽（含其间推送过的轮次；本轮本身可能以别的方式失败）。即 ${BUDGET_TIMEOUT_N} 次完整 agent 运行没有推送任何内容。${IDLE_CLAUSE_ZH}应由人工拆分或缩减该 PR（或同时提高 agent 时间预算与其步骤兜底），然后评论 \`${RETRY_COMMAND}\` 重新武装。在此之前，后续扫描将跳过本 PR。"
+                  REPAIR_CLAUSE=''
+                  REPAIR_CLAUSE_ZH=''
+                  if [[ "${REPAIR_N}" -gt 0 ]]; then
+                    REPAIR_CLAUSE=" It also holds ${REPAIR_N} repair-pass timeout(s), which do NOT count toward this cap either — there the primary pass finished and only the smaller repair sub-budget ran out."
+                    REPAIR_CLAUSE_ZH="另有 ${REPAIR_N} 次 repair pass 超时，同样不计入本上限 —— 那些轮次的主 pass 已经跑完，耗尽的只是更小的 repair 子预算。"
+                  fi
+                  HEADLINE="🤖 AutoFix stopped: this counting window now contains ${BUDGET_TIMEOUT_N} agent time-budget exhaustions (pushed rounds in between included; this round itself may have failed differently). That is ${BUDGET_TIMEOUT_N} full agent runs that pushed nothing.${IDLE_CLAUSE}${REPAIR_CLAUSE} A human should split or reduce the PR (or raise the agent time budget AND its step backstop together), then comment \`${RETRY_COMMAND}\` to re-arm. Until then future scans will skip this PR."
+                  HEADLINE_ZH="🤖 AutoFix 已停止：当前计数窗口内已累计 ${BUDGET_TIMEOUT_N} 次时间预算耗尽（含其间推送过的轮次；本轮本身可能以别的方式失败）。即 ${BUDGET_TIMEOUT_N} 次完整 agent 运行没有推送任何内容。${IDLE_CLAUSE_ZH}${REPAIR_CLAUSE_ZH}应由人工拆分或缩减该 PR（或同时提高 agent 时间预算与其步骤兜底），然后评论 \`${RETRY_COMMAND}\` 重新武装。在此之前，后续扫描将跳过本 PR。"
                 fi
               fi
             fi

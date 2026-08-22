@@ -38,6 +38,18 @@ const QWEN_IDLE_TIMEOUT_MS =
   Number.isFinite(parsedIdleTimeoutMs) && parsedIdleTimeoutMs > 0
     ? parsedIdleTimeoutMs
     : 20 * 60 * 1000;
+// Names WHICH budget ran out, because callers run this script for passes with
+// very different budgets and the consumer treats them differently: the autofix
+// timeout census counts a primary-pass exhaustion ("the PR is too big for a
+// round") but not a repair pass hitting its own smaller sub-budget. The token
+// is the first thing in the emitted detail, so it is what a census greps on;
+// keep it lowercase-dashed and short, and fall back to the neutral 'timeout'
+// for any caller that does not set one.
+const QWEN_TIMEOUT_LABEL = /^[a-z][a-z-]{0,23}$/.test(
+  process.env.QWEN_TIMEOUT_LABEL ?? '',
+)
+  ? process.env.QWEN_TIMEOUT_LABEL
+  : 'timeout';
 const MAX_STREAM_JSON_LINE_LENGTH = 1024 * 1024;
 const OVERSIZED_STREAM_JSON_LINE_NOTICE =
   '[run-agent] dropped oversized stream-json line; full bytes in agent.log\n';
@@ -523,7 +535,7 @@ if (
     : result.idleTimedOut
       ? `idle-timeout (no output for ${QWEN_IDLE_TIMEOUT_MS}ms — the sandbox likely hung at startup)`
       : result.timedOut
-        ? `timeout (${QWEN_TIMEOUT_MS}ms)`
+        ? `${QWEN_TIMEOUT_LABEL} (${QWEN_TIMEOUT_MS}ms)`
         : result.signal
           ? `signal ${result.signal}`
           : apiErrorWithoutVerdict
