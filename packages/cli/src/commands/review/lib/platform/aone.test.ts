@@ -44,8 +44,12 @@ vi.mock('../git.js', () => ({
 
 import {
   AonePartialPostError,
+  aoneAccountName,
   aoneReader,
-  mrPresubmitFacts,
+  aoneWhoami,
+  getMrAuthorAndHead,
+  getMrStatusChecks,
+  listMrComments,
   parseRemoteUrl,
   submitAoneReview,
 } from './aone.js';
@@ -609,7 +613,7 @@ describe('aoneReader.composeUrl', () => {
   });
 });
 
-describe("mrPresubmitFacts (the presubmit gate's Aone seam)", () => {
+describe("getMrAuthorAndHead (the presubmit gate's Aone seam)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
@@ -621,7 +625,7 @@ describe("mrPresubmitFacts (the presubmit gate's Aone seam)", () => {
         author: { username: 'wenshao' },
       },
     });
-    expect(mrPresubmitFacts(29295886, 'maxcompute/odps_src')).toEqual({
+    expect(getMrAuthorAndHead(29295886, 'maxcompute/odps_src')).toEqual({
       author: 'wenshao',
       headSha: 'sha123',
     });
@@ -642,14 +646,14 @@ describe("mrPresubmitFacts (the presubmit gate's Aone seam)", () => {
     a1JsonMock.mockReturnValue({
       mergeRequest: { sourceBranch: 'sha123' },
     });
-    expect(mrPresubmitFacts(7, 'g/p')).toEqual({
+    expect(getMrAuthorAndHead(7, 'g/p')).toEqual({
       author: '',
       headSha: 'sha123',
     });
     a1JsonMock.mockReturnValue({
       mergeRequest: { sourceBranch: 'sha123', author: {} },
     });
-    expect(mrPresubmitFacts(7, 'g/p').author).toBe('');
+    expect(getMrAuthorAndHead(7, 'g/p').author).toBe('');
   });
 
   it('type-guards a non-string username instead of letting it crash presubmit', () => {
@@ -659,11 +663,11 @@ describe("mrPresubmitFacts (the presubmit gate's Aone seam)", () => {
     a1JsonMock.mockReturnValue({
       mergeRequest: { sourceBranch: 'sha123', author: { username: 42 } },
     });
-    expect(mrPresubmitFacts(7, 'g/p').author).toBe('');
+    expect(getMrAuthorAndHead(7, 'g/p').author).toBe('');
     a1JsonMock.mockReturnValue({
       mergeRequest: { sourceBranch: 'sha123', author: { username: null } },
     });
-    expect(mrPresubmitFacts(7, 'g/p').author).toBe('');
+    expect(getMrAuthorAndHead(7, 'g/p').author).toBe('');
   });
 
   it('trims a padded sourceBranch and username, tolerating their absence', () => {
@@ -677,16 +681,16 @@ describe("mrPresubmitFacts (the presubmit gate's Aone seam)", () => {
         author: { username: '  wenshao\n' },
       },
     });
-    expect(mrPresubmitFacts(7, 'g/p')).toEqual({
+    expect(getMrAuthorAndHead(7, 'g/p')).toEqual({
       author: 'wenshao',
       headSha: 'sha123',
     });
     a1JsonMock.mockReturnValue({ mergeRequest: { author: {} } });
-    expect(mrPresubmitFacts(7, 'g/p').headSha).toBe('');
+    expect(getMrAuthorAndHead(7, 'g/p').headSha).toBe('');
   });
 
   it('rejects a malformed owner/repo before any a1 call', () => {
-    expect(() => mrPresubmitFacts(7, 'bogus')).toThrow(TypeError);
+    expect(() => getMrAuthorAndHead(7, 'bogus')).toThrow(TypeError);
     expect(a1JsonMock).not.toHaveBeenCalled();
   });
 
@@ -694,7 +698,9 @@ describe("mrPresubmitFacts (the presubmit gate's Aone seam)", () => {
     // presubmit catches this as metaUnavailable and caps the verdict; the
     // seam itself must not paper over it with empty facts.
     a1JsonMock.mockReturnValue({});
-    expect(() => mrPresubmitFacts(7, 'g/p')).toThrow(/no mergeRequest for #7/);
+    expect(() => getMrAuthorAndHead(7, 'g/p')).toThrow(
+      /no mergeRequest for #7/,
+    );
   });
 });
 
@@ -1661,5 +1667,216 @@ describe('submitAoneReview (the a1 write path)', () => {
     expect(result.postedInline).toBe(2);
     expect(result.summaryPosted).toBe(true);
     expect(result.headMovedDuringPost).toBeUndefined();
+  });
+});
+
+describe('aoneAccountName (tolerant account extraction)', () => {
+  it('prefers username, then account, login, name', () => {
+    expect(aoneAccountName({ username: 'u', name: 'N' })).toBe('u');
+    expect(aoneAccountName({ account: 'a', name: 'N' })).toBe('a');
+    expect(aoneAccountName({ login: 'l', name: 'N' })).toBe('l');
+    expect(aoneAccountName({ name: 'N' })).toBe('N');
+  });
+
+  it('accepts a bare string and trims it', () => {
+    expect(aoneAccountName(' someone ')).toBe('someone');
+  });
+
+  it('returns empty on unreadable shapes (never a fabricated match)', () => {
+    expect(aoneAccountName(undefined)).toBe('');
+    expect(aoneAccountName(null)).toBe('');
+    expect(aoneAccountName({ username: '' })).toBe('');
+    expect(aoneAccountName(42)).toBe('');
+  });
+});
+
+describe('comment/status reads (the a1 backing for dedup)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('getMrAuthorAndHead reads author + sourceBranch off mr view', () => {
+    a1JsonMock.mockReturnValue({
+      mergeRequest: {
+        sourceBranch: 'head-sha',
+        author: { username: 'author-one' },
+      },
+    });
+    expect(getMrAuthorAndHead(123, 'g/p')).toEqual({
+      author: 'author-one',
+      headSha: 'head-sha',
+    });
+    expect(a1JsonMock).toHaveBeenCalledWith(
+      'repo',
+      'mr',
+      'view',
+      '123',
+      '--repo',
+      'g/p',
+    );
+  });
+
+  it('getMrAuthorAndHead degrades to empty facts on absent fields', () => {
+    a1JsonMock.mockReturnValue({ mergeRequest: {} });
+    expect(getMrAuthorAndHead(123, 'g/p')).toEqual({
+      author: '',
+      headSha: '',
+    });
+  });
+
+  it('listMrComments threads the MR id and repo, tolerating null', () => {
+    a1JsonMock.mockReturnValue(null);
+    expect(listMrComments(123, 'g/p')).toEqual([]);
+    a1JsonMock.mockReturnValue([{ id: 1, note: 'n' }]);
+    expect(listMrComments(123, 'g/p')).toEqual([{ id: 1, note: 'n' }]);
+    expect(a1JsonMock).toHaveBeenCalledWith(
+      'repo',
+      'mr',
+      'comment',
+      'list',
+      '--mr',
+      '123',
+      '--repo',
+      'g/p',
+    );
+  });
+
+  it('listMrComments drops unpublished draft entries at the read site', () => {
+    // A leftover draft in the finding shape must never reach the dedup or
+    // the index: nobody can see it, so matching a new finding against it
+    // would silently withhold the finding.
+    a1JsonMock.mockReturnValue([
+      { id: 1, note: 'posted' },
+      { id: 2, note: 'never posted', isDraft: true },
+      { id: 3, note: 'draft-state unreadable — stays in', isDraft: null },
+    ]);
+    expect(listMrComments(123, 'g/p').map((c) => c.id)).toEqual([1, 3]);
+  });
+
+  it('listMrComments unions the default and --resolved queries, deduped by id', () => {
+    // The DEFAULT query excludes RESOLVED comments; `--resolved` returns
+    // the resolved root inline ones — cleanup's bypass audit measures and
+    // pins the same shape on this exact command. Without the union the
+    // comment-status index silently omits every resolved thread while the
+    // GitHub path lists all comments.
+    a1JsonMock
+      .mockReturnValueOnce([
+        { id: 1, note: 'open' },
+        { id: 2, note: 'both queries' },
+      ])
+      .mockReturnValueOnce([
+        { id: 2, note: 'both queries' },
+        { id: 3, note: 'resolved root', closed: 1 },
+      ]);
+    expect(listMrComments(123, 'g/p')).toEqual([
+      { id: 1, note: 'open' },
+      { id: 2, note: 'both queries' },
+      { id: 3, note: 'resolved root', closed: 1 },
+    ]);
+    expect(a1JsonMock).toHaveBeenNthCalledWith(
+      2,
+      'repo',
+      'mr',
+      'comment',
+      'list',
+      '--mr',
+      '123',
+      '--repo',
+      'g/p',
+      '--resolved',
+    );
+  });
+
+  it('listMrComments names an exit-0 error object instead of crashing .filter', () => {
+    // a1 can answer a well-formed error OBJECT with exit 0 (cleanup's
+    // a1CommentList measures the same command); surfacing its `message`
+    // in a named error is the difference between "auth outage" and
+    // "schema drift" for the paged human — an untagged TypeError kills
+    // presubmit with no report file.
+    a1JsonMock.mockReturnValue({
+      apiVersion: 'a1.error/v1',
+      message: 'backend auth failure',
+    });
+    expect(() => listMrComments(123, 'g/p')).toThrow(
+      'a1 mr comment list returned an unexpected shape: backend auth failure',
+    );
+    a1JsonMock.mockReturnValue({ apiVersion: 'a1.error/v1' });
+    expect(() => listMrComments(123, 'g/p')).toThrow(
+      'a1 mr comment list returned an unexpected shape',
+    );
+  });
+
+  it('aoneWhoami reads the account off auth whoami', () => {
+    a1JsonMock.mockReturnValue({ account: 'reviewer' });
+    expect(aoneWhoami()).toBe('reviewer');
+    expect(a1JsonMock).toHaveBeenCalledWith('auth', 'whoami');
+  });
+
+  it('getMrStatusChecks finds a top-level checks array', () => {
+    a1JsonMock.mockReturnValue({
+      checks: [{ name: 'test', state: 'success' }],
+      readyToMerge: true,
+    });
+    expect(getMrStatusChecks(123, 'g/p')).toEqual([
+      { name: 'test', state: 'success' },
+    ]);
+    expect(a1JsonMock).toHaveBeenCalledWith(
+      'repo',
+      'mr',
+      'status',
+      '123',
+      '--repo',
+      'g/p',
+    );
+  });
+
+  it('getMrStatusChecks finds a nested checks array one level down', () => {
+    a1JsonMock.mockReturnValue({
+      mergeRequestStatus: { checks: [{ name: 'discussion', state: 'failed' }] },
+    });
+    expect(getMrStatusChecks(123, 'g/p')).toEqual([
+      { name: 'discussion', state: 'failed' },
+    ]);
+  });
+
+  it('getMrStatusChecks returns undefined when no checks array is recognizable', () => {
+    // An unreadable gate state is NOT the same as "no checks exist" — the
+    // caller must not emit the all-clear shape over a shape drift.
+    a1JsonMock.mockReturnValue({ readyToMerge: false });
+    expect(getMrStatusChecks(123, 'g/p')).toBeUndefined();
+  });
+
+  it('getMrStatusChecks keeps a found-but-empty checks array (no gates)', () => {
+    // A gateless answer is a REAL statement — the GitHub contract's
+    // "no CI at all" shape — not an unreadable payload.
+    a1JsonMock.mockReturnValue({ checks: [], readyToMerge: true });
+    expect(getMrStatusChecks(123, 'g/p')).toEqual([]);
+  });
+
+  it('getMrStatusChecks drops non-object entries', () => {
+    a1JsonMock.mockReturnValue({
+      checks: [{ name: 'test', state: 'success' }, 'garbage', null],
+    });
+    expect(getMrStatusChecks(123, 'g/p')).toEqual([
+      { name: 'test', state: 'success' },
+    ]);
+  });
+
+  it('getMrStatusChecks reads an all-garbage checks array as unreadable', () => {
+    // A found array whose entries ALL fail the object filter is the same
+    // unreadable gate state as no array at all: collapsing it to [] would
+    // emit the all-clear shape over the string-entry drift the drop above
+    // anticipates, capping nothing where the no-array twin caps an Approve.
+    a1JsonMock.mockReturnValue({ checks: ['lint: ok', 'build: ok'] });
+    expect(getMrStatusChecks(123, 'g/p')).toBeUndefined();
+  });
+
+  it('getMrStatusChecks reads a null payload as unreadable, never a crash', () => {
+    // a1 can answer a bare `null` to mr status — the same payload shape
+    // listMrComments tolerates (and pins). The caller maps that unreadable
+    // gate state to pending; a throw here would crash presubmit with no
+    // report file, stalling Step 7 of an Aone review.
+    a1JsonMock.mockReturnValue(null);
+    expect(getMrStatusChecks(123, 'g/p')).toBeUndefined();
   });
 });
