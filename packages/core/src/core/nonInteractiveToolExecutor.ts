@@ -42,10 +42,12 @@ export async function executeToolCall(
           : config.getChatRecordingService(),
       outputUpdateHandler: options.outputUpdateHandler,
       onAllToolCallsComplete: async (completedToolCalls) => {
+        let accepted: boolean | void = undefined;
         if (options.onAllToolCallsComplete) {
-          await options.onAllToolCallsComplete(completedToolCalls);
+          accepted = await options.onAllToolCallsComplete(completedToolCalls);
         }
         resolve(completedToolCalls[0].response);
+        return accepted;
       },
       onToolCallsUpdate: options.onToolCallsUpdate,
       onToolResultFullTurnModel: options.onToolResultFullTurnModel,

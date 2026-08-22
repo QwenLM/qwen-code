@@ -146,6 +146,7 @@ vi.mock('../tools/tool-registry', () => {
   const ToolRegistryMock = vi.fn();
   ToolRegistryMock.prototype.registerTool = vi.fn();
   ToolRegistryMock.prototype.registerFactory = vi.fn();
+  ToolRegistryMock.prototype.unregisterFactory = vi.fn();
   ToolRegistryMock.prototype.ensureTool = vi.fn();
   ToolRegistryMock.prototype.warmAll = vi.fn();
   ToolRegistryMock.prototype.discoverAllTools = vi.fn();
@@ -7958,6 +7959,108 @@ describe('Server Config (config.ts)', () => {
       await config.createToolRegistry(undefined, { skipDiscovery: true });
       expect(webSearchNotices()).toHaveLength(1);
     });
+
+    it('registers tool_call only for the main session registry', async () => {
+      const config = new Config(baseParams);
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      const mainRegisteredNames = (registerToolMock as Mock).mock.calls.map(
+        (call) => call[0],
+      );
+      expect(mainRegisteredNames).toContain(ToolNames.TOOL_SEARCH);
+      expect(mainRegisteredNames).toContain(ToolNames.DEFERRED_TOOL_CALL);
+
+      (registerToolMock as Mock).mockClear();
+      await config.createToolRegistry(undefined, {
+        skipDiscovery: true,
+        forSubAgent: true,
+      });
+
+      const subagentRegisteredNames = (registerToolMock as Mock).mock.calls.map(
+        (call) => call[0],
+      );
+      expect(subagentRegisteredNames).toContain(ToolNames.TOOL_SEARCH);
+      expect(subagentRegisteredNames).not.toContain(
+        ToolNames.DEFERRED_TOOL_CALL,
+      );
+    });
+
+    it('keeps the internal deferred wrapper when coreTools only lists tool_search', async () => {
+      const config = new Config({
+        ...baseParams,
+        coreTools: [ToolNames.TOOL_SEARCH],
+      });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      const registeredNames = (registerToolMock as Mock).mock.calls.map(
+        (call) => call[0],
+      );
+
+      expect(registeredNames).toContain(ToolNames.TOOL_SEARCH);
+      expect(registeredNames).toContain(ToolNames.DEFERRED_TOOL_CALL);
+    });
+
+    it('does not register tool_call when tool_search is disabled', async () => {
+      const config = new Config({
+        ...baseParams,
+        disabledTools: [ToolNames.TOOL_SEARCH],
+      });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      const registeredNames = (registerToolMock as Mock).mock.calls.map(
+        (call) => call[0],
+      );
+      expect(registeredNames).not.toContain(ToolNames.TOOL_SEARCH);
+      expect(registeredNames).not.toContain(ToolNames.DEFERRED_TOOL_CALL);
+    });
+
+    it.each([
+      ['disabled', { disabledTools: [ToolNames.DEFERRED_TOOL_CALL] }],
+      ['denied', { permissions: { deny: [ToolNames.DEFERRED_TOOL_CALL] } }],
+    ] satisfies Array<[string, Partial<ConfigParameters>]>)(
+      'rolls back tool_search when tool_call is %s',
+      async (_reason, params) => {
+        const config = new Config({
+          ...baseParams,
+          ...params,
+        });
+        await config.initialize();
+
+        const registryMock = (
+          (await vi.importMock('../tools/tool-registry')) as {
+            ToolRegistry: {
+              prototype: {
+                registerFactory: Mock;
+                unregisterFactory: Mock;
+              };
+            };
+          }
+        ).ToolRegistry.prototype;
+        const registeredNames = registryMock.registerFactory.mock.calls.map(
+          (call) => call[0],
+        );
+        expect(registeredNames).toContain(ToolNames.TOOL_SEARCH);
+        expect(registeredNames).not.toContain(ToolNames.DEFERRED_TOOL_CALL);
+        expect(registryMock.unregisterFactory).toHaveBeenCalledWith(
+          ToolNames.TOOL_SEARCH,
+        );
+      },
+    );
 
     it('should register a tool if coreTools contains an argument-specific pattern', async () => {
       const params: ConfigParameters = {

@@ -63,9 +63,8 @@ describe('BackgroundAgentResumeService', () => {
         advertisedTools: FunctionDeclaration[];
         registeredTools?: FunctionDeclaration[];
       };
-      // Optional capability context used to exercise the non-empty branches of
-      // buildForkResumeCapabilityReminder (MCP instructions, skills, and
-      // deferred tools). Defaults keep the reminder minimal for other tests.
+      // Optional capability context used to exercise live MCP and skill
+      // reminders and verify that deferred tools stay out of resume history.
       mcpServerInstructions?: Map<string, string>;
       overrideMcpServerInstructions?: Map<string, string>;
       deferredToolSummary?: Array<{
@@ -2570,7 +2569,7 @@ describe('BackgroundAgentResumeService', () => {
     createSpy.mockRestore();
   });
 
-  it('injects live MCP, skill, and deferred-tool reminders into the resumed fork prompt', async () => {
+  it('injects live MCP and skill reminders without a deferred catalog', async () => {
     const sessionId = 'session-fork-cap-reminders';
     const agentId = 'agent-fork-cap-reminders';
     seedResumableForkTask(sessionId, agentId);
@@ -2645,9 +2644,8 @@ describe('BackgroundAgentResumeService', () => {
       'The following skills are available for use with the Skill tool',
     );
     expect(taskPrompt).toContain('auto-skill-demo');
-    // Deferred-tools reminder branch.
-    expect(taskPrompt).toContain('web_search');
-    expect(taskPrompt).toContain(ToolNames.TOOL_SEARCH);
+    expect(taskPrompt).not.toContain('web_search');
+    expect(taskPrompt).not.toContain('reachable via `tool_search`');
 
     createSpy.mockRestore();
   });

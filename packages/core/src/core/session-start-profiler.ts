@@ -31,7 +31,7 @@ export interface SessionStartProfileRecord {
   extraHistoryLength?: number;
   historyLength?: number;
   snapshotEntryCount?: number;
-  deferredReminderCount?: number;
+  deferredToolCount?: number;
   failedStage?: string;
 }
 
@@ -40,7 +40,7 @@ export interface SessionStartProfileFinishAttrs {
   extraHistoryLength?: number;
   historyLength?: number;
   snapshotEntryCount?: number;
-  deferredReminderCount?: number;
+  deferredToolCount?: number;
 }
 
 export interface SessionStartProfiler {
@@ -225,8 +225,8 @@ class EnabledSessionStartProfiler implements SessionStartProfiler {
         ...(attrs.snapshotEntryCount !== undefined
           ? { snapshotEntryCount: attrs.snapshotEntryCount }
           : {}),
-        ...(attrs.deferredReminderCount !== undefined
-          ? { deferredReminderCount: attrs.deferredReminderCount }
+        ...(attrs.deferredToolCount !== undefined
+          ? { deferredToolCount: attrs.deferredToolCount }
           : {}),
         ...(this.failedStage ? { failedStage: this.failedStage } : {}),
       };

@@ -7,6 +7,7 @@
 import type { Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import type { ToolArtifact } from '../tools/tools.js';
+import { ToolNames } from '../tools/tool-names.js';
 import { getPlanModeLifecyclePrefix } from '../core/plan-mode-entry-policy.js';
 import { createDebugLogger } from './debugLogger.js';
 import {
@@ -103,6 +104,7 @@ function collectTextSlots(
   entries: ToolResponseBudgetEntry[],
   includeTopLevelText = true,
   excludeBudgetExemptOutput = true,
+  exemptDeliveredSchemaSlots = false,
 ): TextSlot[] {
   const slots: TextSlot[] = [];
   for (let entryIndex = 0; entryIndex < entries.length; entryIndex++) {
@@ -110,6 +112,22 @@ function collectTextSlots(
     const parts = entry.responseParts;
     for (let partIndex = 0; partIndex < parts.length; partIndex++) {
       const part = parts[partIndex];
+      // Issue #6721: a delivered tool_search `<functions>` block is atomic —
+      // the presentation ledger marks the target schemas as presented, so
+      // truncating the block here would leave the model holding a partial
+      // (or stubbed-out) schema while the fail-closed gate still passes.
+      // Budget passes therefore exempt every tool_search slot; the schema
+      // block self-checks against the same budget inside tool_search before
+      // delivery, and tool_search is exempt from the persistence gate
+      // (GATE_EXEMPT_TOOLS) for the same reason.
+      const resolvedSlotToolName =
+        part.functionResponse?.name ?? entry.toolName;
+      if (
+        exemptDeliveredSchemaSlots &&
+        resolvedSlotToolName === ToolNames.TOOL_SEARCH
+      ) {
+        continue;
+      }
       if (includeTopLevelText && typeof part.text === 'string') {
         slots.push({
           entryIndex,
@@ -307,7 +325,7 @@ export function enforceFunctionResponseBudget(
   budget: number,
 ): ToolResponseBudgetEntry[] {
   if (!Number.isFinite(budget) || budget <= 0) return entries;
-  const slots = collectTextSlots(entries, false);
+  const slots = collectTextSlots(entries, false, true, true);
   const total = slots.reduce((sum, slot) => sum + slot.text.length, 0);
   if (total <= budget) return entries;
 
@@ -370,7 +388,7 @@ export async function finalizeToolResponses(
     return entries;
   }
 
-  const slots = collectTextSlots(entries);
+  const slots = collectTextSlots(entries, true, true, true);
   const total = slots.reduce((sum, slot) => sum + slot.text.length, 0);
   if (total <= budget) {
     observeUnchangedEntries();
@@ -477,7 +495,7 @@ export async function finalizeToolResponses(
   if (shouldAssociateBoundary) {
     associateFinalizerEntries(finalized, new Set(finalized.keys()));
   }
-  const finalizedTotal = collectTextSlots(finalized).reduce(
+  const finalizedTotal = collectTextSlots(finalized, true, true, true).reduce(
     (sum, slot) => sum + slot.text.length,
     0,
   );

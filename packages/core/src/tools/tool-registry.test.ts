@@ -11,13 +11,16 @@ import type { ConfigParameters } from '../config/config.js';
 import { Config, ApprovalMode } from '../config/config.js';
 import { ToolRegistry, DiscoveredTool } from './tool-registry.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
+import { EnterPlanModeTool } from './enterPlanMode.js';
 import { ExitPlanModeTool } from './exitPlanMode.js';
+import { DeferredToolCallTool } from './deferred-tool-call.js';
 import type { FunctionDeclaration, CallableTool } from '@google/genai';
 import { mcpToTool } from '@google/genai';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import { MockTool } from '../test-utils/mock-tool.js';
 import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
+import { ToolNames } from './tool-names.js';
 
 import { McpClientManager } from './mcp-client-manager.js';
 import {
@@ -158,6 +161,82 @@ describe('ToolRegistry', () => {
       const tool = new MockTool({ name: 'mock-tool' });
       toolRegistry.registerTool(tool);
       expect(toolRegistry.getTool('mock-tool')).toBe(tool);
+    });
+
+    it('qualifies MCP tools that use the reserved tool_call name', () => {
+      const rogueMcpTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'rogue-server',
+        'tool_call',
+        'description',
+        {},
+        undefined,
+        ToolNames.DEFERRED_TOOL_CALL,
+      );
+      toolRegistry.registerTool(rogueMcpTool);
+
+      expect(
+        toolRegistry.getTool(ToolNames.DEFERRED_TOOL_CALL),
+      ).toBeUndefined();
+      expect(
+        toolRegistry.getTool('mcp__rogue-server__tool_call'),
+      ).toBeDefined();
+    });
+
+    it('warns visibly when a command-discovered tool uses the reserved tool_call name', () => {
+      mockConfigGetToolDiscoveryCommand.mockReturnValue('my-discovery-command');
+      vi.spyOn(config, 'getToolCallCommand').mockReturnValue('my-call-command');
+      const warnSpy = vi
+        .spyOn(console, 'warn')
+        .mockImplementation(() => undefined);
+
+      toolRegistry.registerTool(
+        new DiscoveredTool(
+          config,
+          ToolNames.DEFERRED_TOOL_CALL,
+          'a discovered tool with the reserved name',
+          { type: 'object', properties: {} },
+        ),
+      );
+
+      expect(
+        toolRegistry.getTool(ToolNames.DEFERRED_TOOL_CALL),
+      ).toBeUndefined();
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('reserved'));
+    });
+
+    it('rejects ordinary factories that try to use the reserved tool_call name', () => {
+      expect(() =>
+        toolRegistry.registerFactory(
+          ToolNames.DEFERRED_TOOL_CALL,
+          async () => new MockTool({ name: ToolNames.DEFERRED_TOOL_CALL }),
+        ),
+      ).toThrow('reserved Qwen Code tool name');
+    });
+
+    it('excludes alwaysLoad deferred tools from proxy eligibility', () => {
+      toolRegistry.registerTool(
+        new MockTool({
+          name: 'always_loaded_deferred',
+          shouldDefer: true,
+          alwaysLoad: true,
+        }),
+      );
+
+      expect(
+        toolRegistry.isProxyEligibleDeferredTool('always_loaded_deferred'),
+      ).toBe(false);
+    });
+
+    it('excludes directly revealed deferred tools from proxy eligibility', () => {
+      toolRegistry.registerTool(
+        new MockTool({ name: 'revealed_deferred', shouldDefer: true }),
+      );
+      toolRegistry.revealDeferredTool('revealed_deferred');
+
+      expect(
+        toolRegistry.isProxyEligibleDeferredTool('revealed_deferred'),
+      ).toBe(false);
     });
 
     it('renames an MCP tool whose name shadows a registered lazy factory', async () => {
@@ -382,6 +461,17 @@ describe('ToolRegistry', () => {
       expect(names).toContain('loaded-tool');
       expect(names).toContain('lazy-tool');
     });
+
+    it('removes a lazy factory before it is loaded', async () => {
+      const factory = vi.fn(async () => new MockTool({ name: 'lazy-tool' }));
+      toolRegistry.registerFactory('lazy-tool', factory);
+
+      toolRegistry.unregisterFactory('lazy-tool');
+      await toolRegistry.warmAll();
+
+      expect(factory).not.toHaveBeenCalled();
+      expect(toolRegistry.getAllToolNames()).not.toContain('lazy-tool');
+    });
   });
 
   describe('deferred tool filtering', () => {
@@ -444,6 +534,18 @@ describe('ToolRegistry', () => {
       expect(names).toEqual(['a', 'z']);
     });
 
+    it('includes tool_call in function declarations', async () => {
+      toolRegistry.registerFactory(
+        ToolNames.DEFERRED_TOOL_CALL,
+        async () => new DeferredToolCallTool(),
+        { allowReservedName: true },
+      );
+      await toolRegistry.warmAll();
+
+      const names = toolRegistry.getFunctionDeclarations().map((d) => d.name);
+      expect(names).toContain(ToolNames.DEFERRED_TOOL_CALL);
+    });
+
     // Regression for #5210: the real exit_plan_mode is deferred-category but
     // must stay declared, otherwise the model cannot call it in plan mode.
     it('keeps the real exit_plan_mode tool declared (#5210)', () => {
@@ -456,6 +558,31 @@ describe('ToolRegistry', () => {
 
       expect(declared).toContain('exit_plan_mode');
       expect(deferred).not.toContain('exit_plan_mode');
+      expect(
+        toolRegistry.isDeferredToolRevealed(ToolNames.EXIT_PLAN_MODE),
+      ).toBe(false);
+    });
+
+    it('keeps declarations byte-stable when entering plan mode', async () => {
+      const enterPlanMode = new EnterPlanModeTool(config);
+      toolRegistry.registerTool(enterPlanMode);
+      toolRegistry.registerTool(new ExitPlanModeTool(config));
+      vi.spyOn(config, 'isInteractive').mockReturnValue(true);
+      const declarationsBefore = JSON.stringify(
+        toolRegistry.getFunctionDeclarations(),
+      );
+
+      const result = await enterPlanMode
+        .build({})
+        .execute(new AbortController().signal);
+
+      expect(result.llmContent).toContain('Plan mode is active');
+      expect(JSON.stringify(toolRegistry.getFunctionDeclarations())).toBe(
+        declarationsBefore,
+      );
+      expect(
+        toolRegistry.getFunctionDeclarations().map((tool) => tool.name),
+      ).toContain(ToolNames.EXIT_PLAN_MODE);
     });
 
     it('includes revealed deferred tools in getFunctionDeclarations', () => {
@@ -1406,5 +1533,121 @@ describe('ToolRegistry', () => {
 
       expect(disposeSpy).toHaveBeenCalledOnce();
     });
+  });
+});
+
+describe('ToolRegistry proxy schema presentation ledger', () => {
+  it('clearProxySchemaPresentations clears the ledger but keeps revealed tools', () => {
+    const config = new Config(baseConfigParams);
+    const registry = new ToolRegistry(config);
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+    const tool = new MockTool({ name: 'cron_create', shouldDefer: true });
+    registry.registerTool(tool);
+    const fingerprint = registry.schemaFingerprint(tool);
+    registry.markProxySchemaPresented('cron_create', fingerprint);
+    registry.revealDeferredTool('cron_create');
+
+    registry.clearProxySchemaPresentations();
+
+    // Issue #6721: proxy-presented schemas live only in history text, so a
+    // history mutation evicting them must drop callable eligibility…
+    expect(registry.hasPresentedProxySchema('cron_create', fingerprint)).toBe(
+      false,
+    );
+    // …while revealed (directly declared) tools keep theirs — their schema
+    // stays in the function-declaration list regardless of history.
+    expect(registry.isDeferredToolRevealed('cron_create')).toBe(true);
+  });
+
+  it('commitProxySchemaPresentations records every carried pair', () => {
+    const config = new Config(baseConfigParams);
+    const registry = new ToolRegistry(config);
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+
+    registry.commitProxySchemaPresentations([
+      { name: 'alpha', fingerprint: 'fp-a' },
+      { name: 'bravo', fingerprint: 'fp-b' },
+    ]);
+
+    expect(registry.hasPresentedProxySchema('alpha', 'fp-a')).toBe(true);
+    expect(registry.hasPresentedProxySchema('bravo', 'fp-b')).toBe(true);
+    expect(registry.hasPresentedProxySchema('alpha', 'other')).toBe(false);
+  });
+
+  it('getProxySchemaPresentationSnapshot returns an isolated copy', () => {
+    const config = new Config(baseConfigParams);
+    const registry = new ToolRegistry(config);
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+    registry.markProxySchemaPresented('alpha', 'fp-a');
+
+    const snapshot = registry.getProxySchemaPresentationSnapshot();
+
+    expect(snapshot.get('alpha')).toBe('fp-a');
+    // Mutating the live ledger afterwards must not leak into the snapshot:
+    // batch gates rely on the pre-batch state staying frozen.
+    registry.markProxySchemaPresented('bravo', 'fp-b');
+    registry.clearProxySchemaPresentations();
+    expect(snapshot.get('alpha')).toBe('fp-a');
+    expect(snapshot.has('bravo')).toBe(false);
+  });
+
+  it('restoreProxySchemaPresentationSnapshot rolls the ledger back to the snapshot', () => {
+    const config = new Config(baseConfigParams);
+    const registry = new ToolRegistry(config);
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+    registry.markProxySchemaPresented('alpha', 'fp-a');
+    const snapshot = registry.getProxySchemaPresentationSnapshot();
+    const generation = registry.getProxySchemaPresentationGeneration();
+    // A batch's tool_search commits after the snapshot was captured…
+    registry.commitProxySchemaPresentations([
+      { name: 'bravo', fingerprint: 'fp-b' },
+    ]);
+    expect(registry.hasPresentedProxySchema('bravo', 'fp-b')).toBe(true);
+
+    // …and the send-failure rollback drops the batch's marks while keeping
+    // the pre-batch state.
+    registry.restoreProxySchemaPresentationSnapshot(snapshot, generation);
+
+    expect(registry.hasPresentedProxySchema('alpha', 'fp-a')).toBe(true);
+    expect(registry.hasPresentedProxySchema('bravo', 'fp-b')).toBe(false);
+  });
+
+  it('skips a restore whose snapshot predates a ledger clear', () => {
+    const config = new Config(baseConfigParams);
+    const registry = new ToolRegistry(config);
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+    registry.markProxySchemaPresented('alpha', 'fp-a');
+    const snapshot = registry.getProxySchemaPresentationSnapshot();
+    const generation = registry.getProxySchemaPresentationGeneration();
+    registry.commitProxySchemaPresentations([
+      { name: 'bravo', fingerprint: 'fp-b' },
+    ]);
+    // Compression / truncation / setHistory clear the ledger between the
+    // snapshot and the rollback…
+    registry.clearProxySchemaPresentations();
+
+    registry.restoreProxySchemaPresentationSnapshot(snapshot, generation);
+
+    // …so the restore must stay a no-op: re-adding the snapshot would
+    // resurrect marks whose backing tool_search results were summarized out
+    // of active history, reopening the #6721 gate on an invisible schema.
+    expect(registry.hasPresentedProxySchema('alpha', 'fp-a')).toBe(false);
+    expect(registry.hasPresentedProxySchema('bravo', 'fp-b')).toBe(false);
+    expect(registry.getProxySchemaPresentationSnapshot().size).toBe(0);
+  });
+
+  it('clearRevealedDeferredTools also invalidates pending snapshots', () => {
+    const config = new Config(baseConfigParams);
+    const registry = new ToolRegistry(config);
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+    registry.markProxySchemaPresented('alpha', 'fp-a');
+    const snapshot = registry.getProxySchemaPresentationSnapshot();
+    const generation = registry.getProxySchemaPresentationGeneration();
+
+    // /clear drops revealed tools AND the presentation ledger.
+    registry.clearRevealedDeferredTools();
+
+    registry.restoreProxySchemaPresentationSnapshot(snapshot, generation);
+    expect(registry.hasPresentedProxySchema('alpha', 'fp-a')).toBe(false);
   });
 });

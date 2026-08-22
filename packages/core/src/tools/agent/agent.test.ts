@@ -7085,7 +7085,13 @@ describe('AgentTool', () => {
             parts: [{ text: 'parent system' }],
           },
           tools: [
-            { functionDeclarations: [{ name: 'Bash' }, { name: 'Read' }] },
+            {
+              functionDeclarations: [
+                { name: 'Bash' },
+                { name: ToolNames.DEFERRED_TOOL_CALL },
+                { name: 'Read' },
+              ],
+            },
           ],
         };
         const geminiClient = {

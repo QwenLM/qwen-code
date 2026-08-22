@@ -241,7 +241,6 @@ function setupGoalClient() {
     getHistory: vi.fn(() => []),
     getHistoryLength: vi.fn(() => 0),
   } as unknown as GeminiChat;
-  client['drainPendingAddedMcpToolsReminder'] = vi.fn();
   client['drainSkillAndCommandReminders'] = vi.fn(async () => undefined);
   client['drainAgentReminders'] = vi.fn(async () => undefined);
   return { client, config, runtime, recorder, order, unsubscribeGoalState };

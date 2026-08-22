@@ -182,9 +182,9 @@ describe('computeApiTruncationIndex', () => {
         `${SYSTEM_REMINDER_OPEN}\nNew tools available: foo\n${SYSTEM_REMINDER_CLOSE}`,
       );
 
-    it('does not count an MCP added-tool reminder as a user prompt', () => {
-      // drainPendingAddedMcpToolsReminder injects a pure <system-reminder>
-      // user entry mid-history. It is role:'user' with text, so a naive count
+    it('does not count a capability reminder as a user prompt', () => {
+      // Capability updates can inject a pure <system-reminder> user entry
+      // mid-history. It is role:'user' with text, so a naive count
       // treats it as a real prompt and lands the truncation index one turn
       // early, silently dropping a turn's context.
       const ui: HistoryItem[] = [

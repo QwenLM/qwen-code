@@ -55,6 +55,7 @@ export const ToolNames = {
   MONITOR: 'monitor',
   NOTEBOOK_EDIT: 'notebook_edit',
   TOOL_SEARCH: 'tool_search',
+  DEFERRED_TOOL_CALL: 'tool_call',
   READ_MCP_RESOURCE: 'read_mcp_resource',
   ENTER_WORKTREE: 'enter_worktree',
   EXIT_WORKTREE: 'exit_worktree',
@@ -115,6 +116,7 @@ export const ToolDisplayNames = {
   MONITOR: 'Monitor',
   NOTEBOOK_EDIT: 'NotebookEdit',
   TOOL_SEARCH: 'ToolSearch',
+  DEFERRED_TOOL_CALL: 'ToolCall',
   READ_MCP_RESOURCE: 'ReadMcpResource',
   ENTER_WORKTREE: 'EnterWorktree',
   EXIT_WORKTREE: 'ExitWorktree',
@@ -145,7 +147,12 @@ export const ToolNamesMigration = {
  * use this so an aliased call is treated identically everywhere.
  */
 export function canonicalToolName(toolName: string): string {
-  return (ToolNamesMigration as Record<string, string>)[toolName] ?? toolName;
+  // Object.hasOwn guard: tool names are model/user-controlled, and a bare
+  // index lookup resolves prototype members ('constructor', 'toString') to
+  // inherited functions instead of falling back to the input string.
+  return Object.hasOwn(ToolNamesMigration, toolName)
+    ? (ToolNamesMigration as Record<string, string>)[toolName]
+    : toolName;
 }
 
 // Migration from old tool display names to new tool display names

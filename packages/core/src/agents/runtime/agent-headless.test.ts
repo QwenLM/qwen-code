@@ -539,7 +539,6 @@ describe('subagent.ts', () => {
         // Check History (should include environment context)
         const history = callArgs[2];
         expect(getInitialChatHistory).toHaveBeenCalledWith(config, undefined, {
-          includeDeferredToolsReminder: false,
           includeAvailableSkillsReminder: true,
         });
         expect(history).toEqual([

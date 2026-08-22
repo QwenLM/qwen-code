@@ -82,6 +82,7 @@ const MCP_CALCULATE_SUM = 'mcp__sdk-calculator__calculate_sum';
 const MCP_REVERSE_STRING = 'mcp__sdk-calculator__reverse_string';
 const MCP_MAYBE_FAIL = 'mcp__sdk-error-test__maybe_fail';
 const MCP_DELAYED_RESPONSE = 'mcp__sdk-async__delayed_response';
+const DEFERRED_TOOL_CALL = 'tool_call';
 
 describe('SDK MCP Server Integration (E2E)', () => {
   let helper: SDKTestHelper;
@@ -153,8 +154,14 @@ describe('SDK MCP Server Integration (E2E)', () => {
         if (requestIndex === 1) {
           return {
             toolCalls: [
-              fakeToolCall(MCP_CALCULATE_SUM, { a: 25, b: 17 }),
-              fakeToolCall(MCP_REVERSE_STRING, { text: 'hello world' }),
+              fakeToolCall(DEFERRED_TOOL_CALL, {
+                name: MCP_CALCULATE_SUM,
+                arguments: { a: 25, b: 17 },
+              }),
+              fakeToolCall(DEFERRED_TOOL_CALL, {
+                name: MCP_REVERSE_STRING,
+                arguments: { text: 'hello world' },
+              }),
             ],
           };
         }
@@ -186,17 +193,24 @@ describe('SDK MCP Server Integration (E2E)', () => {
         }
 
         expect(advertisedToolNames(fakeServer, 1)).toEqual(
-          expect.arrayContaining([MCP_CALCULATE_SUM, MCP_REVERSE_STRING]),
+          advertisedToolNames(fakeServer, 0),
+        );
+        expect(advertisedToolNames(fakeServer, 1)).toContain(
+          DEFERRED_TOOL_CALL,
+        );
+        expect(advertisedToolNames(fakeServer, 1)).not.toContain(
+          MCP_CALCULATE_SUM,
+        );
+        expect(advertisedToolNames(fakeServer, 1)).not.toContain(
+          MCP_REVERSE_STRING,
         );
 
-        const toolResults = findToolResults(messages, MCP_CALCULATE_SUM);
-        expect(toolResults).toHaveLength(1);
+        const toolResults = findToolResults(messages, DEFERRED_TOOL_CALL);
+        expect(toolResults).toHaveLength(2);
         expect(toolResults[0]?.isError).toBe(false);
         expect(toolResults[0]?.content).toContain('42');
-        const stringResults = findToolResults(messages, MCP_REVERSE_STRING);
-        expect(stringResults).toHaveLength(1);
-        expect(stringResults[0]?.isError).toBe(false);
-        expect(stringResults[0]?.content).toContain('dlrow olleh');
+        expect(toolResults[1]?.isError).toBe(false);
+        expect(toolResults[1]?.content).toContain('dlrow olleh');
         expect(
           systemMessage?.mcp_servers?.some(
             (server) => server.name === 'sdk-calculator',
@@ -353,7 +367,12 @@ describe('SDK MCP Server Integration (E2E)', () => {
             }
           : requestIndex === 1
             ? {
-                toolCalls: [fakeToolCall(MCP_MAYBE_FAIL, { shouldFail: true })],
+                toolCalls: [
+                  fakeToolCall(DEFERRED_TOOL_CALL, {
+                    name: MCP_MAYBE_FAIL,
+                    arguments: { shouldFail: true },
+                  }),
+                ],
               }
             : { content: 'Done.' };
       };
@@ -378,8 +397,16 @@ describe('SDK MCP Server Integration (E2E)', () => {
           messages.push(message);
         }
 
-        expect(advertisedToolNames(fakeServer, 1)).toContain(MCP_MAYBE_FAIL);
-        const toolResults = findToolResults(messages, MCP_MAYBE_FAIL);
+        expect(advertisedToolNames(fakeServer, 1)).toEqual(
+          advertisedToolNames(fakeServer, 0),
+        );
+        expect(advertisedToolNames(fakeServer, 1)).toContain(
+          DEFERRED_TOOL_CALL,
+        );
+        expect(advertisedToolNames(fakeServer, 1)).not.toContain(
+          MCP_MAYBE_FAIL,
+        );
+        const toolResults = findToolResults(messages, DEFERRED_TOOL_CALL);
         expect(toolResults).toHaveLength(1);
         expect(toolResults[0]?.isError).toBe(true);
         expect(toolResults[0]?.content).toContain('Tool intentionally failed');
@@ -432,9 +459,12 @@ describe('SDK MCP Server Integration (E2E)', () => {
           : requestIndex === 1
             ? {
                 toolCalls: [
-                  fakeToolCall(MCP_DELAYED_RESPONSE, {
-                    delay: 50,
-                    value: 'test_async',
+                  fakeToolCall(DEFERRED_TOOL_CALL, {
+                    name: MCP_DELAYED_RESPONSE,
+                    arguments: {
+                      delay: 50,
+                      value: 'test_async',
+                    },
                   }),
                 ],
               }
@@ -461,10 +491,16 @@ describe('SDK MCP Server Integration (E2E)', () => {
           messages.push(message);
         }
 
+        expect(advertisedToolNames(fakeServer, 1)).toEqual(
+          advertisedToolNames(fakeServer, 0),
+        );
         expect(advertisedToolNames(fakeServer, 1)).toContain(
+          DEFERRED_TOOL_CALL,
+        );
+        expect(advertisedToolNames(fakeServer, 1)).not.toContain(
           MCP_DELAYED_RESPONSE,
         );
-        const toolResults = findToolResults(messages, MCP_DELAYED_RESPONSE);
+        const toolResults = findToolResults(messages, DEFERRED_TOOL_CALL);
         expect(toolResults).toHaveLength(1);
         expect(toolResults[0]?.isError).toBe(false);
         expect(toolResults[0]?.content.toLowerCase()).toMatch(/test_async/i);

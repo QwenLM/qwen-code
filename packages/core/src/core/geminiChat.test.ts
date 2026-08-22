@@ -5861,6 +5861,117 @@ describe('GeminiChat', async () => {
         getToolCallFingerprint('read_file', { file_path: 'a.ts' }),
       );
     });
+
+    it('does not mark a call handled when its only response is an error (R24-1)', () => {
+      // R24-1: the #6721 gate's rejection is an error functionResponse that
+      // carries the SAME id as the rejected wrapper call and instructs the
+      // model to re-issue it. Pairing that error response with the
+      // functionCall would mark the call "handled", so every surface that
+      // re-seeds this map from history (TUI per-batch admission, daemon
+      // per-turn rebuild, headless --continue/resume) would suppress the
+      // instructed identical re-issue as a replay — defeating the R23-30
+      // surface-local release, which loses to the history re-seed. Error
+      // answers (gate rejections, tool failures, cancellations) never
+      // executed the call; an identical re-issue is the model's retry and,
+      // on id-reusing providers, its ONLY retry.
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'go' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'tool_call_0',
+                name: 'tool_call',
+                args: { name: 'deferred_target', arguments: { x: 1 } },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'tool_call_0',
+                name: 'tool_call',
+                response: {
+                  error:
+                    'Deferred tool "deferred_target" has no presented schema in this session',
+                },
+              },
+            },
+          ],
+        },
+      ]);
+
+      expect(chat.getHistoryToolCallFingerprints()).toEqual(new Map());
+    });
+
+    it('marks a call handled once a non-error response answers it, even after an earlier error response (R24-1)', () => {
+      // The instructed retry after an error answer may itself succeed; that
+      // success (non-error) response DOES mark the id handled so a further
+      // identical re-issue is still suppressed as a replay.
+      chat.setHistory([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'tool_call_0',
+                name: 'tool_call',
+                args: { name: 'deferred_target', arguments: { x: 1 } },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'tool_call_0',
+                name: 'tool_call',
+                response: { error: 'no presented schema' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'tool_call_0__qwen_dup_2',
+                name: 'tool_call',
+                args: { name: 'deferred_target', arguments: { x: 1 } },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'tool_call_0__qwen_dup_2',
+                name: 'tool_call',
+                response: { output: 'done' },
+              },
+            },
+          ],
+        },
+      ]);
+
+      const fingerprints = chat.getHistoryToolCallFingerprints();
+      expect([...fingerprints.keys()]).toEqual(['tool_call_0__qwen_dup_2']);
+      expect(fingerprints.get('tool_call_0__qwen_dup_2')).toBe(
+        getToolCallFingerprint('tool_call', {
+          name: 'deferred_target',
+          arguments: { x: 1 },
+        }),
+      );
+    });
   });
 
   describe('getHistoryTail', () => {
@@ -12150,11 +12261,9 @@ describe('GeminiChat', async () => {
       expect(chat.getHistory()).toEqual([startupReminder]);
     });
 
-    it('preserves a mid-history MCP added-tool reminder when a later prompt fails', () => {
-      // drainPendingAddedMcpToolsReminder injects a system-reminder user
-      // entry; if the following prompt fails, popping it must NOT also pop
-      // the reminder — the announcement can't be re-queued (the tool is
-      // already in announcedDeferredToolNames) so it would be lost forever.
+    it('preserves a mid-history capability reminder when a later prompt fails', () => {
+      // Capability updates may inject a system-reminder user entry. If the
+      // following prompt fails, popping it must not also pop that reminder.
       const mcpReminder: Content = {
         role: 'user',
         parts: [
@@ -12226,6 +12335,66 @@ describe('GeminiChat', async () => {
       chat.stripOrphanedUserEntriesFromHistory();
 
       expect(chat.getHistory()).toEqual([]);
+    });
+
+    it('clears proxy-schema presentations when stripping a mixed tool-result entry (#6721)', () => {
+      const clearPresentations = vi.fn();
+      vi.mocked(mockConfig.getToolRegistry).mockReturnValue({
+        getTool: vi.fn(),
+        clearProxySchemaPresentations: clearPresentations,
+      } as unknown as ReturnType<typeof mockConfig.getToolRegistry>);
+
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'query' }] },
+        {
+          role: 'model',
+          parts: [{ functionCall: { name: 'tool_search', args: {} } }],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'tool_search',
+                response: { result: 'schema' },
+              },
+            },
+            // A mixed entry (functionResponse + appended reminder text) is
+            // not a *pure* completed tool result, so it is stripped.
+            { text: 'todo reminder' },
+          ],
+        },
+      ]);
+      // setHistory itself clears the ledger; isolate the strip's own call.
+      clearPresentations.mockClear();
+
+      const stripped = chat.stripOrphanedUserEntriesFromHistory();
+
+      expect(stripped).toHaveLength(1);
+      // The stripped entry carried a tool result, so the proxy-schema ledger
+      // must be cleared — otherwise a later model-emitted tool_call passes
+      // the stale-mark gate and executes on guessed arguments.
+      expect(clearPresentations).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not clear proxy-schema presentations when stripping a plain orphan prompt', () => {
+      const clearPresentations = vi.fn();
+      vi.mocked(mockConfig.getToolRegistry).mockReturnValue({
+        getTool: vi.fn(),
+        clearProxySchemaPresentations: clearPresentations,
+      } as unknown as ReturnType<typeof mockConfig.getToolRegistry>);
+
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'response' }] },
+        { role: 'user', parts: [{ text: 'orphaned prompt' }] },
+      ]);
+      // setHistory itself clears the ledger; isolate the strip's own call.
+      clearPresentations.mockClear();
+
+      chat.stripOrphanedUserEntriesFromHistory();
+
+      expect(clearPresentations).not.toHaveBeenCalled();
     });
   });
 
@@ -12554,6 +12723,43 @@ describe('GeminiChat', async () => {
       // synthetic fr FIRST, user text AFTER.
       expect(history[2]!.parts![0]!.functionResponse?.id).toBe('call_race_A');
       expect(history[2]!.parts![1]).toEqual({ text: 'retry prompt' });
+    });
+
+    it('keeps a pure system reminder separate from a synthesized response', () => {
+      const restoredSchemaReminder: Content = {
+        role: 'user',
+        parts: [
+          {
+            text: `${SYSTEM_REMINDER_OPEN}\nrestored schema\n</system-reminder>`,
+          },
+        ],
+      };
+      chat.setHistory([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call_crash_before_reminder',
+                name: 'tool_call',
+                args: {},
+              },
+            },
+          ],
+        },
+        restoredSchemaReminder,
+      ]);
+
+      chat.repairOrphanedToolUseTurns();
+
+      const history = chat.getHistory();
+      expect(history).toHaveLength(3);
+      expect(history[1]?.parts?.[0]?.functionResponse?.id).toBe(
+        'call_crash_before_reminder',
+      );
+      expect(history[2]).toEqual(restoredSchemaReminder);
+      expect(chat.stripOrphanedUserEntriesFromHistory()).toEqual([]);
+      expect(chat.getHistory()).toEqual(history);
     });
 
     it('hoists synthetic functionResponse AFTER pre-existing real ones (parallel partial submit)', () => {
@@ -16061,6 +16267,50 @@ describe('GeminiChat', async () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+  });
+
+  describe('proxy schema presentation ledger clearing (issue #6721)', () => {
+    // Proxy-presented schemas live only in history text. Every history
+    // mutation that can evict the carrying tool_search result must drop
+    // the presentation ledger so the fail-closed gate cannot pass against
+    // a schema that is no longer in the active model context.
+    function registryWithLedger() {
+      const clearProxySchemaPresentations = vi.fn();
+      vi.mocked(mockConfig.getToolRegistry).mockReturnValue({
+        getTool: vi.fn(),
+        clearProxySchemaPresentations,
+      } as never);
+      return clearProxySchemaPresentations;
+    }
+
+    it('clears the ledger when history is replaced (compression/setHistory)', () => {
+      const clearLedger = registryWithLedger();
+
+      chat.setHistory([{ role: 'user', parts: [{ text: 'compressed' }] }]);
+
+      expect(clearLedger).toHaveBeenCalledTimes(1);
+    });
+
+    it('clears the ledger when history is truncated (rewind)', () => {
+      const clearLedger = registryWithLedger();
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'second' }] },
+      ]);
+      clearLedger.mockClear();
+
+      chat.truncateHistory(1);
+
+      expect(clearLedger).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not clear the ledger when only thoughts are stripped', () => {
+      const clearLedger = registryWithLedger();
+
+      chat.stripThoughtsFromHistory();
+
+      expect(clearLedger).not.toHaveBeenCalled();
     });
   });
 });

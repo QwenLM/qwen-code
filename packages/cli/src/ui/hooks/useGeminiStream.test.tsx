@@ -464,6 +464,261 @@ describe('useGeminiStream', () => {
     };
   };
 
+  describe('stream context acceptance', () => {
+    it('accepts context once after the first normal stream event', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'first',
+          };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'second',
+          };
+        })(),
+      );
+      const onContextAccepted = vi.fn();
+      const onDelivered = vi.fn();
+      const onDeliveryFailed = vi.fn();
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery(
+          'test query',
+          SendMessageType.UserQuery,
+          undefined,
+          { onContextAccepted, onDelivered, onDeliveryFailed },
+        );
+      });
+
+      expect(onContextAccepted).toHaveBeenCalledOnce();
+      expect(onDelivered).toHaveBeenCalledOnce();
+      expect(onDeliveryFailed).not.toHaveBeenCalled();
+    });
+
+    it('reports delivery failure when the stream ends without events', async () => {
+      mockSendMessageStream.mockReturnValue((async function* () {})());
+      const onContextAccepted = vi.fn();
+      const onDelivered = vi.fn();
+      const onDeliveryFailed = vi.fn();
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery(
+          'test query',
+          SendMessageType.UserQuery,
+          undefined,
+          { onContextAccepted, onDelivered, onDeliveryFailed },
+        );
+      });
+
+      expect(onContextAccepted).not.toHaveBeenCalled();
+      expect(onDelivered).not.toHaveBeenCalled();
+      expect(onDeliveryFailed).toHaveBeenCalledOnce();
+    });
+
+    it('does not accept context after reactive compression mutates the carrying send', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ChatCompressed,
+            value: { originalTokenCount: 100, newTokenCount: 50 },
+          };
+          // Reactive overflow recovery rebuilds the payload; the retry is
+          // tagged so consumers report a delivery failure authoritatively.
+          yield { type: ServerGeminiEventType.Retry, payloadRebuilt: true };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'compressed retry response',
+          };
+        })(),
+      );
+      const onContextAccepted = vi.fn();
+      const onDelivered = vi.fn();
+      const onDeliveryFailed = vi.fn();
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery(
+          'schema-bearing tool result',
+          SendMessageType.ToolResult,
+          undefined,
+          { onContextAccepted, onDelivered, onDeliveryFailed },
+        );
+      });
+
+      expect(onContextAccepted).not.toHaveBeenCalled();
+      expect(onDelivered).not.toHaveBeenCalled();
+      expect(onDeliveryFailed).toHaveBeenCalledOnce();
+    });
+
+    it('does not report delivery failure for a pre-send auto-compression', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ChatCompressed,
+            value: { originalTokenCount: 100, newTokenCount: 50 },
+          };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'response after auto-compression',
+          };
+        })(),
+      );
+      const onContextAccepted = vi.fn();
+      const onDelivered = vi.fn();
+      const onDeliveryFailed = vi.fn();
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery(
+          'schema-bearing tool result',
+          SendMessageType.ToolResult,
+          undefined,
+          { onContextAccepted, onDelivered, onDeliveryFailed },
+        );
+      });
+
+      expect(onDeliveryFailed).not.toHaveBeenCalled();
+      expect(onDelivered).toHaveBeenCalledOnce();
+      expect(onContextAccepted).not.toHaveBeenCalled();
+    });
+
+    it('does not report delivery failure when a transient retry follows pre-send auto-compression', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ChatCompressed,
+            value: { originalTokenCount: 100, newTokenCount: 50 },
+          };
+          // A rate-limit retry after pre-send compression re-sends the
+          // identical payload (no payloadRebuilt tag), so the delivery is
+          // intact and must not be reported as failed — the ordering
+          // [Compressed, Retry] alone cannot prove a rebuilt payload.
+          yield { type: ServerGeminiEventType.Retry };
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'response after transient retry',
+          };
+        })(),
+      );
+      const onContextAccepted = vi.fn();
+      const onDelivered = vi.fn();
+      const onDeliveryFailed = vi.fn();
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery(
+          'schema-bearing tool result',
+          SendMessageType.ToolResult,
+          undefined,
+          { onContextAccepted, onDelivered, onDeliveryFailed },
+        );
+      });
+
+      expect(onDeliveryFailed).not.toHaveBeenCalled();
+      expect(onDelivered).toHaveBeenCalledOnce();
+    });
+
+    it.each([
+      {
+        caseName: 'an error event',
+        createStream: () =>
+          (async function* () {
+            yield {
+              type: ServerGeminiEventType.Error,
+              value: { error: { message: 'provider error' } },
+            };
+          })(),
+      },
+      {
+        caseName: 'a cancellation event',
+        createStream: () =>
+          (async function* () {
+            yield { type: ServerGeminiEventType.UserCancelled };
+          })(),
+      },
+      {
+        caseName: 'a local maximum-turns event',
+        createStream: () =>
+          (async function* () {
+            yield { type: ServerGeminiEventType.MaxSessionTurns };
+          })(),
+      },
+      {
+        caseName: 'a local session-token-limit event',
+        createStream: () =>
+          (async function* () {
+            yield {
+              type: ServerGeminiEventType.SessionTokenLimitExceeded,
+              value: {
+                currentTokens: 200,
+                limit: 100,
+                message: 'limit reached before send',
+              },
+            };
+          })(),
+      },
+      {
+        caseName: 'a retry control event',
+        createStream: () =>
+          (async function* () {
+            yield { type: ServerGeminiEventType.Retry };
+          })(),
+      },
+      {
+        caseName: 'a model-fallback control event',
+        createStream: () =>
+          (async function* () {
+            yield {
+              type: ServerGeminiEventType.ModelFallback,
+              fromModel: 'primary',
+              toModel: 'fallback',
+              fallbackIndex: 1,
+            };
+          })(),
+      },
+      {
+        caseName: 'a locally generated loop-detection event',
+        createStream: () =>
+          (async function* () {
+            yield {
+              type: ServerGeminiEventType.LoopDetected,
+              value: { loopType: 'consecutive_identical_tool_calls' },
+            };
+          })(),
+      },
+      {
+        caseName: 'a thrown stream error',
+        createStream: () =>
+          // eslint-disable-next-line require-yield
+          (async function* () {
+            throw new Error('stream failed');
+          })(),
+      },
+    ])('does not accept context after $caseName', async ({ createStream }) => {
+      mockSendMessageStream.mockReturnValue(createStream());
+      const onContextAccepted = vi.fn();
+      const onDelivered = vi.fn();
+      const onDeliveryFailed = vi.fn();
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery(
+          'test query',
+          SendMessageType.UserQuery,
+          undefined,
+          { onContextAccepted, onDelivered, onDeliveryFailed },
+        );
+      });
+
+      expect(onContextAccepted).not.toHaveBeenCalled();
+      expect(onDelivered).not.toHaveBeenCalled();
+      expect(onDeliveryFailed).toHaveBeenCalledOnce();
+    });
+  });
+
   it('sends a hidden Goal turn without user admission side effects', async () => {
     const permit = {
       goalId: 'goal-1',
@@ -1302,6 +1557,11 @@ describe('useGeminiStream', () => {
   });
 
   it('expands autonomous loop wakeup sentinels before queuing them', async () => {
+    mockSendMessageStream.mockImplementation(() =>
+      (async function* () {
+        yield { type: ServerGeminiEventType.Content, value: 'done' };
+      })(),
+    );
     let schedulerCallback:
       | ((job: { prompt: string; cronExpr?: string; missed?: boolean }) => void)
       | null = null;
@@ -1603,7 +1863,7 @@ describe('useGeminiStream', () => {
 
     // Capture the onComplete callback
     let capturedOnComplete:
-      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | ((completedTools: TrackedToolCall[]) => Promise<boolean | void>)
       | null = null;
 
     mockUseReactToolScheduler.mockImplementation((onComplete) => {
@@ -2218,7 +2478,7 @@ describe('useGeminiStream', () => {
         } as unknown as AnyToolInvocation,
       }) as unknown as TrackedCompletedToolCall;
     let capturedOnComplete:
-      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | ((completedTools: TrackedToolCall[]) => Promise<boolean | void>)
       | null = null;
     mockUseReactToolScheduler.mockImplementation((onComplete) => {
       capturedOnComplete = onComplete;
@@ -2269,8 +2529,11 @@ describe('useGeminiStream', () => {
     // The continuation batch drops the Goal context while the turn is still
     // active, which must fail close instead of reaching the model.
     mockAddItem.mockClear();
+    let missingExitAccepted: boolean | void;
     await act(async () => {
-      await capturedOnComplete?.([makeCompletedTool('cont-tool')]);
+      missingExitAccepted = await capturedOnComplete?.([
+        makeCompletedTool('cont-tool'),
+      ]);
     });
 
     await waitFor(() => {
@@ -2295,6 +2558,12 @@ describe('useGeminiStream', () => {
       errorMessage: 'missing Goal tool context',
       errorType: 'continuation_goal_context_missing',
     });
+    // R20-4: the fail-closed exit must report delivery-NOT-accepted so
+    // CoreToolScheduler settlement discards the batch's pending schema
+    // presentations — nothing entered model context, and a bare `return`
+    // (undefined) would decode as accepted and commit them (the #6721
+    // gate would later open on a schema the model never saw).
+    expect(missingExitAccepted).toBe(false);
   });
 
   it('fails close when a ToolResult batch has a stale Goal context', async () => {
@@ -2357,7 +2626,7 @@ describe('useGeminiStream', () => {
         } as unknown as AnyToolInvocation,
       }) as unknown as TrackedCompletedToolCall;
     let capturedOnComplete:
-      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | ((completedTools: TrackedToolCall[]) => Promise<boolean | void>)
       | null = null;
     mockUseReactToolScheduler.mockImplementation((onComplete) => {
       capturedOnComplete = onComplete;
@@ -2408,8 +2677,11 @@ describe('useGeminiStream', () => {
     // A revision bump (e.g. an edit) lands before the continuation batch
     // completes, so it carries a stale permit and must fail close.
     mockAddItem.mockClear();
+    let staleExitAccepted: boolean | void;
     await act(async () => {
-      await capturedOnComplete?.([makeCompletedTool('cont-tool', stalePermit)]);
+      staleExitAccepted = await capturedOnComplete?.([
+        makeCompletedTool('cont-tool', stalePermit),
+      ]);
     });
 
     await waitFor(() => {
@@ -2433,6 +2705,570 @@ describe('useGeminiStream', () => {
       promptId: 'prompt-goal-stale',
       errorMessage: 'stale Goal tool context',
       errorType: 'continuation_goal_context_stale',
+    });
+    // R20-4: see the missing-context test — the stale fail-closed exit must
+    // also report delivery-not-accepted.
+    expect(staleExitAccepted).toBe(false);
+  });
+
+  it('reports delivery-not-accepted from the mixed/invalid Goal-context fail-closed exit (R20-4)', async () => {
+    // A batch mixing two distinct Goal permits throws in sharedGoalPermit
+    // and fail-closes WITHOUT addHistory or a send. Same delivery contract
+    // as the missing/stale exits: return `false` so the scheduler's
+    // settlement discards (never commits) the batch's pending schema
+    // presentations.
+    const permitA: GoalTurnPermit = {
+      goalId: 'goal-a',
+      revision: 1,
+      turnId: 'turn-a',
+    };
+    const permitB: GoalTurnPermit = {
+      goalId: 'goal-b',
+      revision: 1,
+      turnId: 'turn-b',
+    };
+    const dispatch = vi.fn().mockResolvedValue(undefined);
+    const finishTurn = vi.fn().mockResolvedValue(undefined);
+    const runtime = {
+      permitForTurn: vi.fn(() => undefined),
+      dispatch,
+      finishTurn,
+      getSnapshot: vi.fn(() => undefined),
+    } as unknown as ReturnType<Config['getGoalRuntime']>;
+    mockConfig.getGoalRuntime = vi.fn(() => runtime);
+    mockConfig.getGoalRuntimeReady = vi.fn().mockResolvedValue(runtime);
+    mockConfig.getChatRecordingService = vi
+      .fn()
+      .mockReturnValue({ flush: vi.fn().mockResolvedValue(undefined) });
+    const makeCompletedTool = (
+      callId: string,
+      goalContext?: GoalTurnPermit,
+    ): TrackedCompletedToolCall =>
+      ({
+        request: {
+          callId,
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-goal-invalid',
+          ...(goalContext ? { goalContext } : {}),
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId,
+          responseParts: [{ text: `${callId} response` }],
+          errorType: undefined,
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => callId,
+        } as unknown as AnyToolInvocation,
+      }) as unknown as TrackedCompletedToolCall;
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<boolean | void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+    renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    let invalidExitAccepted: boolean | void;
+    await act(async () => {
+      invalidExitAccepted = await capturedOnComplete?.([
+        makeCompletedTool('tool-a', permitA),
+        makeCompletedTool('tool-b', permitB),
+      ]);
+    });
+
+    await waitFor(() => {
+      expect(mockAddItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.ERROR,
+          text: 'ToolResult batch has mixed Goal contexts',
+        },
+        expect.any(Number),
+      );
+    });
+    expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith(['tool-a', 'tool-b']);
+    expect(mockSendMessageStream).not.toHaveBeenCalled();
+    // R20-4: delivery-not-accepted so settlement discards the batch's
+    // pending presentations instead of committing them.
+    expect(invalidExitAccepted).toBe(false);
+  });
+
+  it('strips carried presentations from a secondary-interaction-span drop (R23-46)', async () => {
+    // R23-46 repro: a batch completing calls from TWO interaction spans
+    // delivers only the owning span's calls; the secondary span's calls are
+    // marked submitted and filtered out of the send. The scheduler settles
+    // the batch's pending schema presentations against ONE batch-level
+    // acceptance boolean over the whole completed array — so unless the
+    // secondary drop strips the dropped calls' carried presentations, an
+    // accepted owning send commits marks for schemas that never entered
+    // model context. (The dedup block's strip — 7892cbb688 — covers only
+    // the history-dedup drop site; this is the second drop site.)
+    const mainOwner = {};
+    const btwOwner = {};
+    const submissionInFlightRef = { current: false };
+    const goalQueueRef = {
+      current: {
+        peekNextUserBatchKey: () => undefined,
+        submissionInFlightRef,
+        waitForReservationSettlement: vi.fn().mockResolvedValue(undefined),
+      },
+    };
+    const ownersByPromptId = new Map<string, object>();
+    mockGetActiveInteractionSpan.mockImplementation((promptId?: string) =>
+      promptId ? ownersByPromptId.get(promptId) : undefined,
+    );
+
+    // Keep the main stream open across the ?btw submission so the btw
+    // query takes the concurrent path (active-interaction refs stay
+    // main-owned), then release it so the model-stream count is back to 0
+    // when the batch completes (direct, non-deferred path).
+    let resolveMainStream!: () => void;
+    const mainStreamGate = new Promise<void>((resolve) => {
+      resolveMainStream = resolve;
+    });
+    let callCount = 0;
+    let btwPromptId: string | undefined;
+    mockSendMessageStream.mockImplementation((_query, _signal, promptId) => {
+      callCount += 1;
+      if (callCount === 1) {
+        ownersByPromptId.set(promptId, mainOwner);
+        return (async function* () {
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'owner-tool',
+              name: 'testTool',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: promptId,
+            },
+          };
+          await mainStreamGate;
+        })();
+      }
+      if (callCount === 2) {
+        btwPromptId = promptId;
+        ownersByPromptId.set(promptId, btwOwner);
+        return (async function* () {
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'secondary-search',
+              name: 'tool_search',
+              args: { query: 'cron' },
+              isClientInitiated: false,
+              prompt_id: promptId,
+            },
+          };
+        })();
+      }
+      // The continuation send carrying the owning span's result.
+      return (async function* () {})();
+    });
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<boolean | void>)
+      | undefined;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    const client = new MockedGeminiClientClass(mockConfig);
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        client,
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        goalQueueRef,
+      ),
+    );
+
+    // Capture WITHOUT awaiting: the submission promise resolves only after
+    // the (gated) main stream ends, which this test releases later.
+    let mainRequest!: Promise<void>;
+    await act(async () => {
+      mainRequest = result.current.submitQuery(
+        'Main query',
+        SendMessageType.UserQuery,
+        'main-prompt',
+        { submittedPrompt: 'Main query' },
+      );
+    });
+    await waitFor(() =>
+      expect(result.current.streamingState).toBe(StreamingState.Responding),
+    );
+    await act(async () => {
+      await result.current.submitQuery(
+        '?btw search a tool',
+        SendMessageType.UserQuery,
+        undefined,
+        { submittedPrompt: '?btw search a tool' },
+      );
+    });
+    expect(btwPromptId).toBeDefined();
+    expect(mockScheduleToolCalls).toHaveBeenCalledWith(
+      [expect.objectContaining({ callId: 'secondary-search' })],
+      expect.any(AbortSignal),
+      undefined,
+    );
+
+    // Release the main stream so no model stream is active when the batch
+    // completes (direct settlement path) — wait for the hook to settle back
+    // to Idle so the submission cleanup (which decrements the active
+    // stream count) has finished before completing the batch.
+    await act(async () => {
+      resolveMainStream();
+      await mainRequest;
+    });
+    await waitFor(() =>
+      expect(result.current.streamingState).toBe(StreamingState.Idle),
+    );
+
+    const ownerCompleted = {
+      request: {
+        callId: 'owner-tool',
+        name: 'testTool',
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'main-prompt',
+      },
+      status: 'success',
+      responseSubmittedToGemini: false,
+      response: {
+        callId: 'owner-tool',
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'owner-tool',
+              name: 'testTool',
+              response: { output: 'owner done' },
+            },
+          },
+        ],
+        errorType: undefined,
+        pendingProxySchemaPresentations: [
+          { name: 'owner_tool_schema', fingerprint: 'fp-owner' },
+        ],
+      },
+      tool: { displayName: 'MockTool' },
+      invocation: {
+        getDescription: () => 'owner-tool',
+      } as unknown as AnyToolInvocation,
+    } as unknown as TrackedCompletedToolCall;
+    const secondarySearch = {
+      request: {
+        callId: 'secondary-search',
+        name: 'tool_search',
+        args: { query: 'cron' },
+        isClientInitiated: false,
+        prompt_id: btwPromptId,
+      },
+      status: 'success',
+      responseSubmittedToGemini: false,
+      response: {
+        callId: 'secondary-search',
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'secondary-search',
+              name: 'tool_search',
+              response: { output: '<functions>cron_create</functions>' },
+            },
+          },
+        ],
+        errorType: undefined,
+        pendingProxySchemaPresentations: [
+          { name: 'cron_create', fingerprint: 'fp-secondary' },
+        ],
+      },
+      tool: { displayName: 'ToolSearch' },
+      invocation: {
+        getDescription: () => 'secondary-search',
+      } as unknown as AnyToolInvocation,
+    } as unknown as TrackedCompletedToolCall;
+
+    await act(async () => {
+      await capturedOnComplete?.([ownerCompleted, secondarySearch]);
+    });
+
+    // The secondary drop ran and the owning span's continuation send
+    // shipped WITHOUT the dropped call's parts.
+    expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith(['secondary-search']);
+    await waitFor(
+      () => {
+        // The continuation send carries ONLY the owning span's call.
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(3);
+      },
+      { timeout: 8000 },
+    );
+    const sentParts = mockSendMessageStream.mock.calls[2][0];
+    expect(
+      sentParts.some(
+        (part: Part) => part.functionResponse?.id === 'owner-tool',
+      ),
+    ).toBe(true);
+    expect(
+      sentParts.some(
+        (part: Part) => part.functionResponse?.id === 'secondary-search',
+      ),
+    ).toBe(false);
+    // The dropped secondary call's carried presentations were stripped so
+    // the batch-level settlement (accepted via the owning send) cannot
+    // commit them; the delivered owner keeps its own.
+    expect(
+      (
+        secondarySearch.response as {
+          pendingProxySchemaPresentations?: unknown;
+        }
+      ).pendingProxySchemaPresentations,
+    ).toBeUndefined();
+    expect(ownerCompleted.response.pendingProxySchemaPresentations).toEqual([
+      { name: 'owner_tool_schema', fingerprint: 'fp-owner' },
+    ]);
+  });
+
+  it('commits deferred-flush presentations even when another batch completes inside the acceptance window (R23-1)', async () => {
+    // R23-1 repro: the deferred-batch flush used to read the delivered
+    // callIds from a shared ref across the acceptance await; a batch
+    // completing inside the continuation's time-to-first-token window ran
+    // handleCompletedTools' entry reset before the read, so the flush
+    // committed NOTHING for calls it had just delivered and the context
+    // accepted. The flush now captures the delivered set from its own
+    // handleCompletedTools invocation via a synchronous sink.
+    const presentations = [{ name: 'cron_create', fingerprint: 'fp-flush' }];
+    const commitSpy = vi.fn();
+    mockConfig.getToolRegistry = vi.fn(() => ({
+      commitProxySchemaPresentations: commitSpy,
+      getProxySchemaPresentationSnapshot: vi.fn(() => new Map()),
+      getProxySchemaPresentationGeneration: vi.fn(() => 0),
+      restoreProxySchemaPresentationSnapshot: vi.fn(),
+      hasPresentedProxySchema: vi.fn(() => false),
+      isDeferredProxyPairRegistered: vi.fn(() => true),
+    })) as unknown as ReturnType<typeof mockConfig.getToolRegistry>;
+
+    let resolveFirstToken!: () => void;
+    const firstTokenGate = new Promise<void>((resolve) => {
+      resolveFirstToken = resolve;
+    });
+    let resolveContinuationToken!: () => void;
+    const continuationGate = new Promise<void>((resolve) => {
+      resolveContinuationToken = resolve;
+    });
+    let streamCallCount = 0;
+    mockSendMessageStream.mockImplementation(() => {
+      streamCallCount += 1;
+      if (streamCallCount === 1) {
+        // The user-query stream: emits one tool call, stays active until
+        // the test releases it (so the batch completes while a model
+        // stream is active and gets DEFERRED).
+        return (async function* () {
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'deferred-search',
+              name: 'tool_search',
+              args: { query: 'cron' },
+              isClientInitiated: false,
+              prompt_id: 'prompt-flush',
+            },
+          };
+          await firstTokenGate;
+        })();
+      }
+      // The flush's continuation send: hold the first token so the test
+      // can complete a second batch inside the acceptance window.
+      return (async function* () {
+        await continuationGate;
+        yield { type: ServerGeminiEventType.Content, value: 'ok' };
+      })();
+    });
+
+    const searchCall: TrackedCompletedToolCall = {
+      request: {
+        callId: 'deferred-search',
+        name: 'tool_search',
+        args: { query: 'cron' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-flush',
+      },
+      status: 'success',
+      responseSubmittedToGemini: false,
+      response: {
+        callId: 'deferred-search',
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'deferred-search',
+              name: 'tool_search',
+              response: { output: '<functions>cron_create</functions>' },
+            },
+          },
+        ],
+        errorType: undefined,
+        pendingProxySchemaPresentations: presentations,
+      },
+      tool: { displayName: 'ToolSearch' },
+      invocation: {
+        getDescription: () => 'deferred-search',
+      } as unknown as AnyToolInvocation,
+    } as unknown as TrackedCompletedToolCall;
+    const windowCall: TrackedCompletedToolCall = {
+      request: {
+        callId: 'window-tool',
+        name: 'read_file',
+        args: { path: '/tmp/window.txt' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-flush',
+      },
+      status: 'success',
+      responseSubmittedToGemini: false,
+      response: {
+        callId: 'window-tool',
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'window-tool',
+              name: 'read_file',
+              response: { output: 'window contents' },
+            },
+          },
+        ],
+        errorType: undefined,
+      },
+      tool: { displayName: 'ReadFile' },
+      invocation: {
+        getDescription: () => 'window-tool',
+      } as unknown as AnyToolInvocation,
+    } as unknown as TrackedCompletedToolCall;
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<boolean | void>)
+      | undefined;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    const client = new MockedGeminiClientClass(mockConfig);
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        client,
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    let submission!: Promise<void>;
+    await act(async () => {
+      submission = result.current.submitQuery(
+        'Find cron tools',
+        SendMessageType.UserQuery,
+        'prompt-flush',
+        { submittedPrompt: 'Find cron tools' },
+      );
+    });
+    await waitFor(() => expect(capturedOnComplete).toBeDefined());
+
+    // The batch completes while the user-query stream is still active →
+    // deferred into pendingCompletedToolBatchesRef.
+    await act(async () => {
+      await capturedOnComplete?.([searchCall]);
+    });
+    expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+
+    // Release the user-query stream: the turn-end drain flushes the
+    // deferred batch through handleCompletedTools, whose continuation send
+    // parks on continuationGate (the acceptance window).
+    await act(async () => {
+      resolveFirstToken();
+    });
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+    });
+
+    // A second batch completes INSIDE the acceptance window. With the old
+    // shared-ref design its handleCompletedTools entry reset nulled the
+    // delivered-ids ref before the flush read it — the commit no-oped.
+    await act(async () => {
+      await capturedOnComplete?.([windowCall]);
+    });
+
+    // Accept the continuation; the flush must commit the delivered batch's
+    // presentations regardless of the window batch.
+    await act(async () => {
+      resolveContinuationToken();
+    });
+    await act(async () => {
+      await submission;
+    });
+
+    await waitFor(() => {
+      expect(commitSpy).toHaveBeenCalledWith(presentations);
     });
   });
 
@@ -3111,6 +3947,11 @@ describe('useGeminiStream', () => {
   });
 
   it('records mid-turn queued user messages after tool results accept them', async () => {
+    mockSendMessageStream.mockReturnValue(
+      (async function* () {
+        yield { type: ServerGeminiEventType.Content, value: '' };
+      })(),
+    );
     const queuedPrompt = 'save the logs locally first';
     const recordMidTurnUserMessage = vi.fn();
     mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
@@ -3757,6 +4598,11 @@ describe('useGeminiStream', () => {
   });
 
   it('resolves mid-turn @ image messages before submitting tool results', async () => {
+    mockSendMessageStream.mockReturnValue(
+      (async function* () {
+        yield { type: ServerGeminiEventType.Content, value: '' };
+      })(),
+    );
     const queuedPrompt = 'inspect @/tmp/screenshot.png';
     const resolvedImagePart: Part = {
       inlineData: {
@@ -3934,6 +4780,11 @@ describe('useGeminiStream', () => {
   });
 
   it('forwards mid-turn text when a bridge failure returns no replacement parts', async () => {
+    mockSendMessageStream.mockReturnValue(
+      (async function* () {
+        yield { type: ServerGeminiEventType.Content, value: '' };
+      })(),
+    );
     const queuedPrompt = 'inspect @/tmp/screenshot.png and summarize';
     const resolvedImagePart: Part = {
       inlineData: {
@@ -4669,6 +5520,11 @@ describe('useGeminiStream', () => {
   });
 
   it('handles mid-turn drain when chat recording is not configured', async () => {
+    mockSendMessageStream.mockReturnValue(
+      (async function* () {
+        yield { type: ServerGeminiEventType.Content, value: '' };
+      })(),
+    );
     const queuedPrompt = 'save the logs locally first';
     mockConfig.getChatRecordingService = vi.fn().mockReturnValue(undefined);
     const toolCallResponseParts: Part[] = [
@@ -5603,11 +6459,13 @@ describe('useGeminiStream', () => {
       ),
     );
 
+    let completionAccepted: boolean | void;
     await act(async () => {
       if (capturedOnComplete) {
-        await capturedOnComplete([lateRealResult]);
+        completionAccepted = await capturedOnComplete([lateRealResult]);
       }
     });
+    expect(completionAccepted).toBe(false);
 
     await waitFor(() => {
       // The dedup hit must `markToolsAsSubmitted` so the UI/scheduler is
@@ -5627,6 +6485,174 @@ describe('useGeminiStream', () => {
     // No follow-up submission: the synthetic in history already closes
     // the tool_use ↔ tool_result pair.
     expect(mockSendMessageStream).not.toHaveBeenCalled();
+  });
+
+  it('strips carried presentations from a deduped tool_search (Race A direct-path settlement)', async () => {
+    // R20-5 repro: a tool_search in flight when the inline repair pass
+    // plants a synthetic placeholder for its callId is dedup-dropped from
+    // the wire, while a sibling in the same batch is delivered and the
+    // context accepted. The scheduler settles the batch's pending schema
+    // presentations against ONE batch-level acceptance boolean over the
+    // whole completed array — so unless the dedup block strips the dropped
+    // call's carried presentations, the ledger commits a mark whose only
+    // trace in history is the placeholder, and a later guessed-argument
+    // tool_call passes the #6721 gate. (The deferred flush already filters
+    // to the delivered set; this is the direct path's equivalent.)
+    const droppedSearch = {
+      request: {
+        callId: 'call_search_race',
+        name: 'tool_search',
+        args: { query: 'cron' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-race-search',
+      },
+      status: 'success',
+      responseSubmittedToGemini: false,
+      response: {
+        callId: 'call_search_race',
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'call_search_race',
+              name: 'tool_search',
+              response: { output: '<functions>cron_create</functions>' },
+            },
+          },
+        ],
+        resultDisplay: undefined,
+        error: undefined,
+        errorType: undefined,
+        pendingProxySchemaPresentations: [
+          { name: 'cron_create', fingerprint: 'fp-search' },
+        ],
+      },
+      tool: {
+        name: 'tool_search',
+        displayName: 'ToolSearch',
+        description: 'Search tools',
+        build: vi.fn(),
+      } as any,
+      invocation: {
+        getDescription: () => 'search cron',
+      } as unknown as AnyToolInvocation,
+    } as unknown as TrackedCompletedToolCall;
+    const deliveredSibling = {
+      request: {
+        callId: 'sibling_race',
+        name: 'read_file',
+        args: { path: '/tmp/y.txt' },
+        isClientInitiated: false,
+        prompt_id: 'prompt-race-search',
+      },
+      status: 'success',
+      responseSubmittedToGemini: false,
+      response: {
+        callId: 'sibling_race',
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'sibling_race',
+              name: 'read_file',
+              response: { output: 'sibling contents' },
+            },
+          },
+        ],
+        resultDisplay: undefined,
+        error: undefined,
+        errorType: undefined,
+        pendingProxySchemaPresentations: [
+          { name: 'other_tool', fingerprint: 'fp-sibling' },
+        ],
+      },
+      tool: {
+        name: 'read_file',
+        displayName: 'ReadFile',
+        description: 'Read a file',
+        build: vi.fn(),
+      } as any,
+      invocation: {
+        getDescription: () => 'read /tmp/y.txt',
+      } as unknown as AnyToolInvocation,
+    } as unknown as TrackedCompletedToolCall;
+
+    const client = new MockedGeminiClientClass(mockConfig);
+    // The repair pass already planted a placeholder for the tool_search
+    // callId; the sibling has no functionResponse in history and ships.
+    client.getHistoryFunctionResponseIds = vi
+      .fn()
+      .mockReturnValue(new Set(['call_search_race']));
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<boolean | void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useGeminiStream(
+        client,
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete([droppedSearch, deliveredSibling]);
+      }
+    });
+
+    await waitFor(
+      () => {
+        // Only the sibling shipped — the dropped result never reached the
+        // wire (same witness as the finding: sentIds === ['sibling_race']).
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      },
+      { timeout: 15000 },
+    );
+    const sentParts = mockSendMessageStream.mock.calls[0][0];
+    expect(
+      sentParts.some(
+        (part: Part) => part.functionResponse?.id === 'sibling_race',
+      ),
+    ).toBe(true);
+    expect(
+      sentParts.some(
+        (part: Part) => part.functionResponse?.id === 'call_search_race',
+      ),
+    ).toBe(false);
+
+    // The deduped call's carried presentations were stripped in the dedup
+    // block, so the scheduler's batch-level settlement cannot commit them.
+    // The scheduler settles the SAME objects handed to onComplete — assert
+    // on them directly.
+    expect(
+      (droppedSearch.response as { pendingProxySchemaPresentations?: unknown })
+        .pendingProxySchemaPresentations,
+    ).toBeUndefined();
+    // The delivered sibling keeps its carried presentations — the strip is
+    // scoped to deduped calls.
+    expect(deliveredSibling.response.pendingProxySchemaPresentations).toEqual([
+      { name: 'other_tool', fingerprint: 'fp-sibling' },
+    ]);
   });
 
   it('skips recordCompletedToolCall for deduped CANCELLED tools (telemetry parity)', async () => {
@@ -5902,11 +6928,15 @@ describe('useGeminiStream', () => {
     expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
 
     // Now fire the deduped completion while isResponding=true.
+    let activeStreamCompletionAccepted: boolean | void;
     await act(async () => {
       if (capturedOnComplete) {
-        await capturedOnComplete([lateRealResult]);
+        activeStreamCompletionAccepted = await capturedOnComplete([
+          lateRealResult,
+        ]);
       }
     });
+    expect(activeStreamCompletionAccepted).toBe(false);
 
     // The dedup MUST still fire — markToolsAsSubmitted called with the
     // deduped callId — even though the active-stream guard would
@@ -5980,7 +7010,11 @@ describe('useGeminiStream', () => {
     const heldStream = (async function* () {
       await holdStream;
     })();
-    mockSendMessageStream.mockReturnValue(heldStream);
+    mockSendMessageStream.mockReturnValueOnce(heldStream).mockReturnValueOnce(
+      (async function* () {
+        yield { type: ServerGeminiEventType.Content, value: 'done' };
+      })(),
+    );
 
     const { result } = renderHook(() =>
       useGeminiStream(
@@ -6027,11 +7061,17 @@ describe('useGeminiStream', () => {
     });
 
     const staleCompletedOnComplete = staleOnComplete as
-      | ((completedTools: TrackedCompletedToolCall[]) => Promise<void>)
+      | ((
+          completedTools: TrackedCompletedToolCall[],
+        ) => Promise<boolean | void>)
       | null;
+    let staleCompletionAccepted: boolean | void;
     await act(async () => {
-      await staleCompletedOnComplete?.([fastFailedTool]);
+      staleCompletionAccepted = await staleCompletedOnComplete?.([
+        fastFailedTool,
+      ]);
     });
+    expect(staleCompletionAccepted).toBe(true);
 
     await waitFor(() => {
       expect(mockSendMessageStream).toHaveBeenCalledTimes(2);

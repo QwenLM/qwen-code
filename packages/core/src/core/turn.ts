@@ -20,6 +20,7 @@ import type {
   ToolResultBoundaryArtifact,
   ToolResult,
   ToolResultDisplay,
+  ProxySchemaPresentation,
 } from '../tools/tools.js';
 import { ToolErrorType } from '../tools/tool-error.js';
 import { getResponseText } from '../utils/partUtils.js';
@@ -44,6 +45,7 @@ import type {
   GoalTurnPermit,
 } from '../goals/goal-protocol.js';
 import { getProviderToolCallId } from './toolCallIdUtils.js';
+import { providerToolName } from './deferred-tool-call-normalization.js';
 
 const ERROR_REPORT_HISTORY_TAIL_COUNT = 8;
 const ERROR_REPORT_TEXT_PREVIEW_CHARS = 200;
@@ -90,6 +92,9 @@ export type ServerGeminiRetryEvent = {
   /** When true, the retry is a continuation (recovery) rather than a fresh
    *  restart. The UI should keep accumulated text so the continuation appends. */
   isContinuation?: boolean;
+  /** True only when reactive overflow recovery rebuilt the request payload;
+   *  the preceding send's context was not delivered intact. */
+  payloadRebuilt?: boolean;
 };
 
 export type ServerGeminiModelFallbackEvent = {
@@ -133,6 +138,12 @@ export interface ToolCallRequestInfo {
   providerCallId?: string;
   name: string;
   args: Record<string, unknown>;
+  /**
+   * Provider-visible wrapper name for normalized proxy calls. Internal
+   * scheduling, permission checks, validation, execution and telemetry use
+   * `name`/`args`; model-facing function responses use this field when set.
+   */
+  providerName?: string;
   isClientInitiated: boolean;
   prompt_id: string;
   response_id?: string;
@@ -161,6 +172,13 @@ export interface ToolCallResponseInfo {
   visionBridgeNotice?: string;
   artifacts?: ToolArtifact[];
   boundaryArtifact?: ToolResultBoundaryArtifact;
+  /**
+   * Deferred-tool schemas delivered by this result (tool_search), pending
+   * commitment to the registry presentation ledger. Issue #6721: committed
+   * only when the carrying result is accepted into active model history;
+   * discarded when delivery fails or is rejected.
+   */
+  pendingProxySchemaPresentations?: readonly ProxySchemaPresentation[];
 }
 
 function normalizeRequestParts(req: PartListUnion): Part[] {
@@ -240,7 +258,7 @@ export function createDuplicateProviderToolCallResponse(
       {
         functionResponse: {
           id: request.callId,
-          name: request.name,
+          name: providerToolName(request),
           response: { error: message },
         },
       },
@@ -577,6 +595,7 @@ export class Turn {
             type: GeminiEventType.Retry,
             retryInfo: streamEvent.retryInfo,
             isContinuation: streamEvent.isContinuation,
+            payloadRebuilt: streamEvent.payloadRebuilt,
           };
           continue; // Skip to the next event in the stream
         }

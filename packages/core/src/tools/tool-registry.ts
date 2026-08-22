@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
 import type { FunctionDeclaration } from '@google/genai';
 import type {
   AnyDeclarativeTool,
@@ -29,6 +30,7 @@ import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
 import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
 import { normalizeMcpToolName } from '../utils/tool-name-utils.js';
 import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
+import { ToolNames } from './tool-names.js';
 
 type ToolParams = Record<string, unknown>;
 
@@ -200,10 +202,24 @@ export class ToolRegistry {
   // In-flight factory promises — ensures concurrent ensureTool() calls for the
   // same name share one promise instead of running the factory multiple times.
   private inflight: Map<string, Promise<AnyDeclarativeTool>> = new Map();
-  // Deferred tools that ToolSearch has loaded this session. Once revealed, a
-  // tool's schema is included in subsequent function-declaration lists even
-  // though it would normally be hidden.
+  // Deferred tools revealed for direct declaration in this session. Once
+  // revealed, a tool's schema is included in subsequent function-declaration
+  // lists even though it would normally be hidden.
   private revealedDeferred: Set<string> = new Set();
+  // Schema fingerprints of deferred tools whose schema tool_search has
+  // delivered this session, keyed by canonical tool name. The `tool_call`
+  // proxy gates on this (fail closed): a wrapper call only routes once the
+  // model has been shown the target's current schema (issue #6721), so
+  // guessed arguments against an unseen or since-changed schema are
+  // rejected and re-presented instead of executed.
+  private proxySchemaPresentations: Map<string, string> = new Map();
+  // Monotonic counter incremented on every ledger clear. Rollback snapshots
+  // capture it; a restore that would cross an intervening clear is skipped —
+  // the clear (compression / microcompaction / rewind / setHistory) evicted
+  // the backing tool_search results from active history, so restoring the
+  // snapshot would resurrect marks for schemas the model can no longer see
+  // and reopen the #6721 gate on them.
+  private proxySchemaPresentationGeneration = 0;
   private config: Config;
   private mcpClientManager: McpClientManager;
 
@@ -274,6 +290,24 @@ export class ToolRegistry {
    * @param tool - The tool object containing schema and execution logic.
    */
   registerTool(tool: AnyDeclarativeTool): void {
+    if (tool.name === ToolNames.DEFERRED_TOOL_CALL) {
+      if (tool instanceof DiscoveredMCPTool) {
+        // Preserve the server tool under its normal qualified collision name.
+        // Only Qwen's provider-facing wrapper owns the reserved bare name.
+        tool = tool.asFullyQualifiedTool();
+      } else {
+        // Command-discovered tools have no server qualifier to preserve them
+        // under, and renaming would break the `toolCallCommand <name>`
+        // contract. Drop the tool, but visibly: debug logging is usually off,
+        // and a silently vanished user-configured tool would otherwise be
+        // undiagnosable.
+        // eslint-disable-next-line no-console -- operator-facing diagnostic; debug file logging is usually off
+        console.warn(
+          `Discovered tool "${ToolNames.DEFERRED_TOOL_CALL}" was skipped: the name is reserved for Qwen Code's deferred-tool proxy. Rename the tool in your tool discovery command output to keep it.`,
+        );
+        return;
+      }
+    }
     if (
       this.isToolDisabled(
         tool.name,
@@ -334,7 +368,19 @@ export class ToolRegistry {
    * Registers a lazy tool factory. The tool module is not imported and the tool
    * is not instantiated until {@link ensureTool} or {@link warmAll} is called.
    */
-  registerFactory(name: string, factory: ToolFactory): void {
+  registerFactory(
+    name: string,
+    factory: ToolFactory,
+    options?: { allowReservedName?: boolean },
+  ): void {
+    if (
+      name === ToolNames.DEFERRED_TOOL_CALL &&
+      options?.allowReservedName !== true
+    ) {
+      throw new Error(
+        `"${ToolNames.DEFERRED_TOOL_CALL}" is a reserved Qwen Code tool name.`,
+      );
+    }
     if (this.isToolDisabled(name)) {
       debugLogger.info(
         `Tool factory "${name}" skipped: present in disabledTools set.`,
@@ -342,6 +388,11 @@ export class ToolRegistry {
       return;
     }
     this.factories.set(name, factory);
+  }
+
+  /** Removes a lazy factory before it has been instantiated. */
+  unregisterFactory(name: string): void {
+    this.factories.delete(name);
   }
 
   /**
@@ -749,20 +800,16 @@ export class ToolRegistry {
   /**
    * Marks a deferred tool as revealed. Revealed tools are included in
    * {@link getFunctionDeclarations} output for the rest of the session, even
-   * though they are normally hidden. Called by the ToolSearch tool after it
-   * successfully loads a tool so the model can invoke it on subsequent turns.
+   * though they are normally hidden. This is the direct-declaration
+   * compatibility path for preloaded tools, old resumed transcripts, and the
+   * startup fallback when the discovery/proxy pair is unavailable.
    */
   revealDeferredTool(name: string): void {
     this.revealedDeferred.add(name);
   }
 
   /**
-   * Removes a single tool from the revealed-deferred set. Used for rollback
-   * when a `setTools()` re-sync fails after revealing — leaving the tool
-   * "revealed" in the registry while the chat's declaration list never
-   * received the schema would mean future ToolSearch keyword queries
-   * exclude the tool (per `collectCandidates`'s isDeferredToolRevealed
-   * filter), making it unreachable until `/clear`.
+   * Removes a single tool from the direct-declaration compatibility set.
    */
   unrevealDeferredTool(name: string): void {
     this.revealedDeferred.delete(name);
@@ -771,6 +818,34 @@ export class ToolRegistry {
   /** Whether a given tool has been revealed via {@link revealDeferredTool}. */
   isDeferredToolRevealed(name: string): boolean {
     return this.revealedDeferred.has(name);
+  }
+
+  /**
+   * Whether the discovery/proxy pair (tool_search + tool_call) is
+   * registered. The pair is registered or removed together (see Config tool
+   * registration); the normalization boundary uses this to reject wrapper
+   * calls in sessions where on-demand discovery is disabled.
+   */
+  isDeferredProxyPairRegistered(): boolean {
+    const registered = new Set([
+      ...this.tools.keys(),
+      ...this.factories.keys(),
+    ]);
+    return (
+      registered.has(ToolNames.TOOL_SEARCH) &&
+      registered.has(ToolNames.DEFERRED_TOOL_CALL)
+    );
+  }
+
+  isProxyEligibleDeferredTool(name: string): boolean {
+    const tool = this.tools.get(name);
+    return !!(
+      tool &&
+      tool.shouldDefer &&
+      !tool.alwaysLoad &&
+      !this.revealedDeferred.has(name) &&
+      !this.config.getVisibleTools().has(name)
+    );
   }
 
   /**
@@ -799,13 +874,113 @@ export class ToolRegistry {
    */
   clearRevealedDeferredTools(): void {
     this.revealedDeferred.clear();
+    this.clearProxySchemaPresentations();
   }
 
   /**
-   * Returns a lightweight summary of tools that are
-   * deferred from the initial function-declaration list. Used to describe the
-   * set of on-demand tools in the startup reminder so the model knows what is
-   * reachable via ToolSearch. `alwaysLoad` tools and tools listed in
+   * Clears only the proxy-schema presentation ledger, leaving the revealed
+   * (directly declared) set intact. Issue #6721's gate requires a presented
+   * schema to live in the ACTIVE model context; proxy-presented schemas live
+   * only in history text, so every history mutation that can evict tool
+   * results (compression, microcompaction, rewind/truncation, setHistory)
+   * clears the ledger — the affected tools deterministically require another
+   * search. Revealed tools keep their eligibility: their schemas stay in the
+   * function-declaration list regardless of history.
+   */
+  clearProxySchemaPresentations(): void {
+    this.proxySchemaPresentations.clear();
+    // Invalidate every snapshot captured before this clear (see
+    // restoreProxySchemaPresentationSnapshot).
+    this.proxySchemaPresentationGeneration++;
+  }
+
+  /**
+   * Generation of the presentation ledger. Captured together with a
+   * snapshot; if it has advanced by restore time, an intervening clear
+   * invalidated the snapshot and the restore must be skipped.
+   */
+  getProxySchemaPresentationGeneration(): number {
+    return this.proxySchemaPresentationGeneration;
+  }
+
+  /**
+   * Immutable copy of the presentation ledger. Delivery surfaces gate a
+   * whole tool batch against a snapshot taken before the batch executes so
+   * a mark committed mid-batch (e.g. by a tool_search running earlier in
+   * the same batch) cannot self-authorize a same-batch `tool_call`.
+   */
+  getProxySchemaPresentationSnapshot(): ReadonlyMap<string, string> {
+    return new Map(this.proxySchemaPresentations);
+  }
+
+  /**
+   * Commit delivered schema presentations to the ledger. Called by delivery
+   * surfaces only after the carrying tool result entered active history.
+   */
+  commitProxySchemaPresentations(
+    presentations: ReadonlyArray<{ name: string; fingerprint: string }>,
+  ): void {
+    for (const { name, fingerprint } of presentations) {
+      this.proxySchemaPresentations.set(name, fingerprint);
+    }
+  }
+
+  /**
+   * Roll the presentation ledger back to a previously captured snapshot.
+   * Used when a delivery surface committed presentations for a batch whose
+   * carrying tool result then failed to enter active history (the send threw
+   * before the history push): without the rollback the ledger mark survives
+   * while the schema never reached the model, letting a later `tool_call`
+   * pass the #6721 gate and execute on guessed arguments.
+   *
+   * `generation` is the value {@link getProxySchemaPresentationGeneration}
+   * returned when the snapshot was captured. If the generation has advanced
+   * since, an intervening ledger clear (compression, microcompaction,
+   * rewind/truncation, setHistory) deliberately dropped these marks — the
+   * backing tool_search results may have been summarized out of active
+   * history — so the restore becomes a no-op instead of resurrecting them.
+   */
+  restoreProxySchemaPresentationSnapshot(
+    snapshot: ReadonlyMap<string, string>,
+    generation: number,
+  ): void {
+    if (generation !== this.proxySchemaPresentationGeneration) return;
+    this.proxySchemaPresentations = new Map(snapshot);
+  }
+
+  /**
+   * Stable fingerprint of a tool's current schema. The `tool_call` proxy
+   * compares the fingerprint recorded when tool_search delivered the schema
+   * against the live schema at call time (issue #6721's fail-closed gate).
+   */
+  schemaFingerprint(tool: AnyDeclarativeTool): string {
+    return createHash('sha256')
+      .update(JSON.stringify(tool.schema ?? {}))
+      .digest('hex');
+  }
+
+  /**
+   * Record that tool_search delivered this tool's schema to the model,
+   * fingerprinting the schema version that was delivered.
+   */
+  markProxySchemaPresented(name: string, fingerprint: string): void {
+    this.proxySchemaPresentations.set(name, fingerprint);
+  }
+
+  /**
+   * Whether the tool's schema was presented to the model this session and
+   * still matches the live schema. `false` when never presented or when the
+   * schema changed since presentation (e.g. an MCP server reconnected with a
+   * revised schema).
+   */
+  hasPresentedProxySchema(name: string, fingerprint: string): boolean {
+    return this.proxySchemaPresentations.get(name) === fingerprint;
+  }
+
+  /**
+   * Returns a lightweight summary of tools that are deferred from the initial
+   * function-declaration list. Used to describe the on-demand catalog in the
+   * ToolSearch declaration. `alwaysLoad` tools and tools listed in
    * {@link Config.getVisibleTools} are excluded.
    */
   getDeferredToolSummary(): DeferredToolSummary[] {
@@ -825,7 +1000,7 @@ export class ToolRegistry {
         });
       }
     });
-    // Stable order so the startup reminder text is deterministic across runs.
+    // Stable order so the ToolSearch catalog is deterministic across runs.
     summary.sort((a, b) => a.name.localeCompare(b.name));
     return summary;
   }

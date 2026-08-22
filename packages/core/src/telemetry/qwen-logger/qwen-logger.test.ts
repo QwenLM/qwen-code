@@ -634,6 +634,64 @@ describe('QwenLogger', () => {
       const rumEvent = enqueueSpy.mock.calls[0][0];
       expect(rumEvent.properties).not.toHaveProperty('mcp_server_name');
     });
+
+    it('records the provider wrapper identity for proxied tool calls', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+      const event = {
+        'event.name': 'tool_call',
+        'event.timestamp': new Date().toISOString(),
+        function_name: 'cron_create',
+        function_args: { schedule: '0 9 * * *' },
+        call_id: 'call-proxy-1',
+        prompt_id: 'prompt-1',
+        response_id: 'response-1',
+        status: 'success',
+        execution_status: 'completed',
+        success: true,
+        decision: undefined,
+        duration_ms: 10,
+        tool_type: 'native',
+        'tool.provider_name': 'tool_call',
+      } as unknown as ToolCallEvent;
+
+      logger.logToolCallEvent(event);
+
+      expect(enqueueSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'tool_call#cron_create',
+          properties: expect.objectContaining({
+            tool_name: 'cron_create',
+            'tool.provider_name': 'tool_call',
+          }),
+        }),
+      );
+    });
+
+    it('omits tool.provider_name for ordinary tool calls', () => {
+      const logger = QwenLogger.getInstance(mockConfig)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+      const event = {
+        'event.name': 'tool_call',
+        'event.timestamp': new Date().toISOString(),
+        function_name: 'read_file',
+        function_args: { path: 'README.md' },
+        call_id: 'call-ordinary-1',
+        prompt_id: 'prompt-1',
+        response_id: 'response-1',
+        status: 'success',
+        execution_status: 'completed',
+        success: true,
+        decision: undefined,
+        duration_ms: 10,
+        tool_type: 'native',
+      } as unknown as ToolCallEvent;
+
+      logger.logToolCallEvent(event);
+
+      const rumEvent = enqueueSpy.mock.calls[0][0];
+      expect(rumEvent.properties).not.toHaveProperty('tool.provider_name');
+    });
   });
 
   describe('logHookCallEvent', () => {

@@ -118,7 +118,6 @@ import {
 import {
   formatDateForContext,
   buildChangedAgentsReminder,
-  buildChangedMcpToolsReminder,
   buildChangedSkillsReminder,
   getDirectoryContextString,
   getInitialChatHistory,
@@ -372,13 +371,6 @@ export class GeminiClient {
   private pendingMemoryPrefetch: MemoryPrefetchHandle | undefined;
   private lastSessionStartContext: string | undefined;
   private lastSessionStartSource: SessionStartSource | undefined;
-  private announcedDeferredToolNames = new Set<string>();
-  // MCP-only subset the model has actually seen via startup or delta reminders.
-  // `announcedDeferredToolNames` is broader and exists for deferred tool-search
-  // dedup; MCP add/remove deltas need this narrower model-visible set.
-  private announcedMcpToolNames = new Set<string>();
-  private pendingAddedMcpTools = new Map<string, DeferredToolSummary>();
-  private pendingRemovedMcpToolNames = new Set<string>();
   // Dedup state for the per-turn skill/command "now available" delta reminders
   // (drainSkillAndCommandReminders). Keys are "skill:<name>" / "cmd:<name>". The
   // set is seeded on the first drain from the current skills (the startup
@@ -829,11 +821,10 @@ export class GeminiClient {
         this.getHistoryShallow(),
       );
     }
-    const deferredTools = this.resolveDeferredToolsForReminder(deferredSummary);
+    const deferredTools = this.resolveDeferredToolsForCatalog(deferredSummary);
     const toolDeclarations = toolRegistry.getFunctionDeclarations();
     const tools: Tool[] = [{ functionDeclarations: toolDeclarations }];
     this.getChat().setTools(tools);
-    this.queueAddedMcpToolsReminder(deferredTools ?? []);
     recordStartupEvent('gemini_tools_updated', {
       toolCount: toolDeclarations.length,
       deferredCount: deferredTools?.length ?? 0,
@@ -1288,15 +1279,13 @@ export class GeminiClient {
    * the declaration list stays stable for the whole session and no
    * reveal ever invalidates the prompt-cache prefix.
    *
-   * Deliberately NOT called from setTools(): revealing a tool the startup
-   * reminder already announced would make queueAddedMcpToolsReminder flag
-   * it as removed, and a mid-session declaration change busts the very
-   * cache this preload exists to protect. Tools from servers that connect
-   * later stay deferred until the next session start.
+   * Deliberately NOT called from setTools(): a mid-session declaration change
+   * would bust the cache this preload exists to protect. Tools from servers
+   * that connect later stay deferred until the next session start.
    */
   private preloadDeferredToolsWithinBudget(): void {
     const toolRegistry = this.config.getToolRegistry();
-    // Without ToolSearch, resolveDeferredToolsForReminder() eagerly
+    // Without ToolSearch, resolveDeferredToolsForCatalog() eagerly
     // reveals everything — there is no budget decision to make.
     if (!toolRegistry.getTool(ToolNames.TOOL_SEARCH)) {
       return;
@@ -1324,11 +1313,25 @@ export class GeminiClient {
   }
 
   /**
+   * Whether both control tools required for deferred proxy calls are
+   * registered in the warmed registry. Treating either tool alone as
+   * sufficient would let history restore a proxy route that the current
+   * session cannot safely declare and execute end to end.
+   */
+  private isDeferredToolProxyAvailable(): boolean {
+    const toolRegistry = this.config.getToolRegistry();
+    return Boolean(
+      toolRegistry.getTool(ToolNames.TOOL_SEARCH) &&
+        toolRegistry.getTool(ToolNames.DEFERRED_TOOL_CALL),
+    );
+  }
+
+  /**
    * Reveals deferred tools referenced by function calls in existing history.
    *
-   * On resume this runs once before startup reminders are built. It also runs
-   * from setTools() because progressive MCP discovery can register deferred
-   * tools only after the resumed chat and its initial declarations exist.
+   * On resume this runs before declarations are built. It also runs from
+   * setTools() because progressive MCP discovery can register deferred tools
+   * only after the resumed chat and its initial declarations exist.
    */
   private revealDeferredToolsReferencedInHistory(
     deferredSummary: readonly DeferredToolSummary[],
@@ -1372,29 +1375,26 @@ export class GeminiClient {
   }
 
   /**
-   * Computes the deferred-tools list that should be announced through
-   * user-role system reminders.
+   * Computes the hidden deferred-tool catalog exposed by ToolSearch.
    *
    * Caller MUST `await toolRegistry.warmAll()` first — this method only
    * inspects the registry's eager state and would otherwise miss factory-
    * backed deferred tools.
    *
-   * Side effect: when ToolSearch is not registered (e.g. `--exclude-tools
-   * tool_search` or a deny rule), every deferred tool is eagerly revealed
-   * here so it lands in the declaration list. Skipping this would leave the
-   * tool both off the declarations AND off the deferred-summary list (since
-   * `undefined` is returned in that branch) — a silent disappearance that's
-   * harder to diagnose than seeing the tool name absent from `/mcp` output.
+   * Side effect: when ToolSearch or the deferred proxy wrapper is not
+   * registered, every deferred tool is eagerly revealed here so it lands in
+   * the declaration list. Skipping this would leave the tool both off the
+   * declarations AND off the deferred-summary list (since `undefined` is
+   * returned in that branch) — a silent disappearance that's harder to
+   * diagnose than seeing the tool name absent from `/mcp` output.
    *
-   * Returns `undefined` when ToolSearch is unavailable: reminders must not
-   * advertise tools the model has no way to load on demand.
+   * Returns `undefined` when the deferred proxy surface is unavailable.
    */
-  private resolveDeferredToolsForReminder(
+  private resolveDeferredToolsForCatalog(
     deferredSummary: readonly DeferredToolSummary[],
   ): DeferredToolSummary[] | undefined {
     const toolRegistry = this.config.getToolRegistry();
-    const toolSearchAvailable = !!toolRegistry.getTool(ToolNames.TOOL_SEARCH);
-    if (!toolSearchAvailable) {
+    if (!this.isDeferredToolProxyAvailable()) {
       if (deferredSummary.length > 0) {
         for (const t of deferredSummary) {
           toolRegistry.revealDeferredTool(t.name);
@@ -1405,109 +1405,6 @@ export class GeminiClient {
     return deferredSummary.filter(
       (t) => !toolRegistry.isDeferredToolRevealed(t.name),
     );
-  }
-
-  private rememberAnnouncedDeferredTools(
-    deferredTools: readonly DeferredToolSummary[] | undefined,
-  ): void {
-    this.announcedDeferredToolNames = new Set(
-      (deferredTools ?? []).map((tool) => tool.name),
-    );
-    this.announcedMcpToolNames = new Set(
-      (deferredTools ?? [])
-        .filter((tool) => tool.serverName)
-        .map((tool) => tool.name),
-    );
-    this.pendingAddedMcpTools.clear();
-    this.pendingRemovedMcpToolNames.clear();
-  }
-
-  private queueAddedMcpToolsReminder(
-    deferredTools: readonly DeferredToolSummary[],
-  ): void {
-    const toolRegistry = this.config.getToolRegistry();
-    const currentDeferredNames = new Set(
-      deferredTools.map((tool) => tool.name),
-    );
-    const currentMcpToolNames = new Set(
-      deferredTools.filter((tool) => tool.serverName).map((tool) => tool.name),
-    );
-    for (const name of this.pendingAddedMcpTools.keys()) {
-      if (!currentDeferredNames.has(name)) {
-        this.pendingAddedMcpTools.delete(name);
-      }
-    }
-    for (const name of this.pendingRemovedMcpToolNames) {
-      if (currentMcpToolNames.has(name) || toolRegistry.getTool(name)) {
-        this.pendingRemovedMcpToolNames.delete(name);
-      }
-    }
-
-    // Drop announced names that are no longer deferred (e.g. an MCP server
-    // disconnected and removeMcpToolsByServer() pruned its tools). Without
-    // this, a tool that reconnects later is still in announcedDeferredToolNames
-    // and gets silently skipped below, so the user never sees the "new tools
-    // available" reminder even though setTools() re-declared the tool.
-    for (const name of this.announcedDeferredToolNames) {
-      if (!currentDeferredNames.has(name)) {
-        this.announcedDeferredToolNames.delete(name);
-      }
-    }
-    for (const name of this.announcedMcpToolNames) {
-      if (currentMcpToolNames.has(name)) {
-        continue;
-      }
-      // A revealed or newly-visible tool is absent from the deferred reminder
-      // summary but still present in the registry. Keep tracking it as
-      // model-visible so a later real disconnect can still be announced; only
-      // a tool actually removed from the registry is unavailable now.
-      if (!toolRegistry.getTool(name)) {
-        this.pendingRemovedMcpToolNames.add(name);
-      }
-    }
-
-    for (const tool of deferredTools) {
-      if (tool.serverName) {
-        if (!this.announcedMcpToolNames.has(tool.name)) {
-          this.pendingAddedMcpTools.set(tool.name, tool);
-        }
-      }
-      this.announcedDeferredToolNames.add(tool.name);
-    }
-  }
-
-  private drainPendingAddedMcpToolsReminder(): void {
-    if (
-      this.pendingAddedMcpTools.size === 0 &&
-      this.pendingRemovedMcpToolNames.size === 0
-    ) {
-      return;
-    }
-
-    const addedMcpTools = Array.from(this.pendingAddedMcpTools.values());
-    const removedMcpToolNames = Array.from(this.pendingRemovedMcpToolNames);
-    const reminder = buildChangedMcpToolsReminder(
-      addedMcpTools,
-      removedMcpToolNames,
-    );
-
-    if (!reminder) {
-      return;
-    }
-
-    this.getChat().addHistory({
-      role: 'user',
-      parts: [{ text: reminder }],
-    });
-
-    for (const name of removedMcpToolNames) {
-      this.announcedMcpToolNames.delete(name);
-    }
-    for (const tool of addedMcpTools) {
-      this.announcedMcpToolNames.add(tool.name);
-    }
-    this.pendingAddedMcpTools.clear();
-    this.pendingRemovedMcpToolNames.clear();
   }
 
   /**
@@ -1721,19 +1618,20 @@ export class GeminiClient {
     // Clear stale cache params on session reset to prevent cross-session leakage
     clearCacheSafeParams();
 
+    const effectiveExtraHistory = extraHistory;
     const profiler = createSessionStartProfiler(sessionStartSource, {
       sessionId: this.config.getSessionId(),
     });
     let history: Content[] = [];
     let snapshotEntries: AvailableSkillEntry[] = [];
-    let deferredReminderCount = 0;
+    let deferredToolCount = 0;
     const finishProfile = (ok: boolean) => {
       profiler.finish({
         ok,
-        extraHistoryLength: extraHistory?.length ?? 0,
+        extraHistoryLength: effectiveExtraHistory?.length ?? 0,
         historyLength: history.length,
         snapshotEntryCount: snapshotEntries.length,
-        deferredReminderCount,
+        deferredToolCount,
       });
     };
 
@@ -1751,29 +1649,28 @@ export class GeminiClient {
       // the declaration list. Without this, the model sees history like
       // "I called foo_tool, got result" but the API rejects a follow-up
       // call to foo_tool because the schema is absent. This must happen
-      // BEFORE `resolveDeferredToolsForReminder()` runs so the resumed tools
-      // are correctly filtered out of the startup reminder built below.
+      // BEFORE `resolveDeferredToolsForCatalog()` runs so resumed direct-call
+      // compatibility tools are filtered out of the deferred catalog.
       profiler.timeSync('resume_deferred_tool_reveal', () => {
-        this.revealDeferredToolsReferencedInHistory(
-          deferredSummary,
-          () => extraHistory,
-        );
+        if (effectiveExtraHistory && effectiveExtraHistory.length > 0) {
+          this.revealDeferredToolsReferencedInHistory(
+            deferredSummary,
+            () => effectiveExtraHistory,
+          );
+        }
       });
-      // Budget-based deferred-tool preload runs BEFORE the deferred
-      // reminder is resolved so preloaded tools are filtered out of the
-      // startup reminder and never enter the announced set.
+      // Budget-based deferred-tool preload runs before the catalog is resolved
+      // so preloaded tools are filtered out.
       profiler.timeSync('deferred_tool_preload', () => {
         this.preloadDeferredToolsWithinBudget();
       });
-      const deferredTools = profiler.timeSync('deferred_reminder_setup', () => {
-        const resolved = this.resolveDeferredToolsForReminder(deferredSummary);
-        this.rememberAnnouncedDeferredTools(resolved);
-        return resolved;
-      });
-      deferredReminderCount = deferredTools?.length ?? 0;
+      const deferredTools = profiler.timeSync('deferred_catalog_setup', () =>
+        this.resolveDeferredToolsForCatalog(deferredSummary),
+      );
+      deferredToolCount = deferredTools?.length ?? 0;
       [history, snapshotEntries] = await profiler.time(
         'initial_chat_history',
-        () => getInitialChatHistory(this.config, extraHistory),
+        () => getInitialChatHistory(this.config, effectiveExtraHistory),
       );
       profiler.timeSync('skill_reminder_seed', () => {
         this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
@@ -3216,11 +3113,6 @@ export class GeminiClient {
         (messageType === SendMessageType.UserQuery ||
           messageType === SendMessageType.Cron)
       ) {
-        try {
-          this.drainPendingAddedMcpToolsReminder();
-        } catch (error) {
-          debugLogger.warn('drainPendingAddedMcpToolsReminder failed', error);
-        }
         try {
           await this.drainSkillAndCommandReminders();
         } catch (error) {

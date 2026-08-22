@@ -65,6 +65,10 @@ import {
   convertToFunctionResponse,
   createDuplicateProviderToolCallResponse,
   findPlanModeEntryBatchBoundaryIndex,
+  formatPermissionToolIdentity,
+  normalizeDeferredToolCallRequest,
+  providerToolName,
+  withPermissionToolIdentity,
   findRepeatedDuplicateProviderToolCall,
   findRestorableAskUserQuestion,
   restorableAskUserQuestionCallIds,
@@ -489,6 +493,23 @@ type RunToolResult = {
   loopDetected?: boolean;
   repeatedToolFailureBatch?: RepeatedToolFailureBatch;
   memoryWriteCandidates?: MemoryWriteCandidate[];
+  /**
+   * The proxy-schema presentation ledger as of BATCH START (before this
+   * batch's tool_search results committed their presentations). If the
+   * carrying functionResponse message then fails to enter active history
+   * (send throws before the history push), the caller rolls the ledger back
+   * to this snapshot so the committed marks do not outlive the schema they
+   * reference (#6721).
+   */
+  presentationSnapshot?: ReadonlyMap<string, string>;
+  /**
+   * The ledger generation captured together with `presentationSnapshot`
+   * (see ToolRegistry.getProxySchemaPresentationGeneration). The rollback
+   * is skipped if the generation advanced since — an intervening ledger
+   * clear (e.g. mid-send compression) already invalidated the snapshot,
+   * and restoring it would resurrect marks the clear deliberately dropped.
+   */
+  presentationSnapshotGeneration?: number;
 };
 
 type MidTurnDrainResult = {
@@ -3509,7 +3530,8 @@ export class Session implements SessionContext {
       );
     }
 
-    const chat = this.config.getGeminiClient()!.getChat();
+    const geminiClient = this.config.getGeminiClient()!;
+    const chat = geminiClient.getChat();
     const apiHistory = chat.getHistoryShallow();
     const apiTruncateIndex = this.#computeApiTruncationIndexForUserTurn(
       apiHistory,
@@ -3523,7 +3545,7 @@ export class Session implements SessionContext {
       );
     }
 
-    chat.truncateHistory(apiTruncateIndex);
+    geminiClient.truncateHistory(apiTruncateIndex);
     chat.stripThoughtsFromHistory();
     this.activeTodoPlanRevision = undefined;
     const preserveQueuedPromptPriority = this.todoStopGuardQueuedPromptPriority;
@@ -3587,10 +3609,7 @@ export class Session implements SessionContext {
       );
     }
 
-    this.config
-      .getGeminiClient()!
-      .getChat()
-      .setHistory(structuredClone(history));
+    this.config.getGeminiClient()!.setHistory(structuredClone(history));
     this.activeTodoPlanRevision = undefined;
     this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
   }
@@ -4556,9 +4575,9 @@ export class Session implements SessionContext {
                 return { stopReason: 'end_turn' };
               }
               if (recoveryPlan.continuation.mode === 'retry_user_parts') {
-                strippedOrphanEntries =
-                  this.#getCurrentChat().stripOrphanedUserEntriesFromHistory() ??
-                  null;
+                strippedOrphanEntries = this.config
+                  .getGeminiClient()!
+                  .stripOrphanedUserEntriesFromHistory();
                 orphanPushCountSnapshot =
                   this.#getCurrentChat().getUserContentPushCount?.() ?? 0;
                 continuationParts = recoveryPlan.continuation.parts;
@@ -4574,7 +4593,12 @@ export class Session implements SessionContext {
               // The orphaned content is already persisted; recording a new user
               // message would duplicate the turn in the transcript.
             } else if (isRetry) {
-              this.#getCurrentChat().stripOrphanedUserEntriesFromHistory();
+              // Use the client wrapper, not the raw chat strip: the wrapper
+              // also clears FileReadCache and forces a full IDE context
+              // resend, both required for a clean retry.
+              this.config
+                .getGeminiClient()!
+                .stripOrphanedUserEntriesFromHistory();
             } else if (!isSlashInput || slashCommandName !== 'advisor') {
               // record user message for session management. Only `/advisor`
               // defers its record to after command resolution below — a
@@ -4907,6 +4931,20 @@ export class Session implements SessionContext {
             const toolLoopState = createDaemonToolLoopState(
               channelTurn ? 'off' : this.repeatedToolFailureGuardMode,
             );
+            // Presentation-ledger rollback state (#6721): the most recent tool
+            // batch's pre-batch snapshot, cleared once its carrying message is
+            // delivered. If the carrying send throws before pushing to
+            // history, the catch below restores the ledger to this snapshot.
+            let pendingPresentationSnapshot:
+              | ReadonlyMap<string, string>
+              | undefined;
+            // Ledger generation at the time the snapshot was captured; an
+            // intervening clear (e.g. mid-send compression) advances it and
+            // turns the restore into a no-op (the clear already invalidated
+            // the snapshot).
+            let pendingPresentationGeneration = 0;
+            let presentationSendChat: GeminiChat | undefined;
+            let presentationPushCountBeforeSend = 0;
 
             // conversation_finished must fire on every terminal path of the
             // turn — restore of ask_user_question, the loop below's
@@ -5029,7 +5067,7 @@ export class Session implements SessionContext {
                 turnCount++;
                 if (pendingSend.signal.aborted) {
                   this.todoStopGuard.suspend();
-                  this.#getCurrentChat().addHistory(nextMessage);
+                  this.#preserveUnsentMessageHistory(nextMessage, true);
                   return { stopReason: 'cancelled' };
                 }
 
@@ -5061,6 +5099,9 @@ export class Session implements SessionContext {
                   // count and a checkpoint recording work that never ran.
                   // Re-assigning on later loop laps is harmless.
                   if (goalTurn) goalTurn.modelStarted = true;
+                  presentationSendChat = this.#getCurrentChat();
+                  presentationPushCountBeforeSend =
+                    presentationSendChat.getUserContentPushCount?.() ?? 0;
                   const sendResult =
                     await this.#sendMessageStreamWithAutoCompression(
                       promptId,
@@ -5082,6 +5123,11 @@ export class Session implements SessionContext {
                     return { stopReason: sendResult.stopReason };
                   }
                   const responseStream = sendResult.responseStream;
+                  // The carrying message was accepted by the send path, so the
+                  // batch's committed presentations are now backed by history
+                  // — drop the rollback snapshot (a later batch sets a fresh
+                  // one).
+                  pendingPresentationSnapshot = undefined;
                   nextMessage = null;
                   channelDeliveryResponseBlock =
                     beginChannelDeliveryResponseBlock(responseCapture);
@@ -5191,6 +5237,39 @@ export class Session implements SessionContext {
                       this.#getCurrentChat().addHistory(entry);
                     }
                     strippedOrphanEntries = null;
+                  }
+
+                  // If a tool batch's presentations were committed but the
+                  // carrying message never reached active history (the send
+                  // threw before the push), roll the presentation ledger back
+                  // to the pre-batch snapshot. Otherwise the marks survive and
+                  // a later model-emitted tool_call passes the #6721
+                  // fail-closed gate and executes on guessed arguments. The
+                  // generation check makes the restore a no-op when a ledger
+                  // clear (e.g. this send's own compression) intervened —
+                  // restoring across a clear would resurrect marks whose
+                  // backing tool_search results were summarized out of active
+                  // history.
+                  if (
+                    pendingPresentationSnapshot &&
+                    (!presentationSendChat ||
+                      (presentationSendChat.getUserContentPushCount?.() ?? 0) <=
+                        presentationPushCountBeforeSend)
+                  ) {
+                    // Test doubles may expose a registry without the restore
+                    // API; a ledger rollback must never break the send-failure
+                    // path.
+                    try {
+                      this.config
+                        .getToolRegistry()
+                        .restoreProxySchemaPresentationSnapshot(
+                          pendingPresentationSnapshot,
+                          pendingPresentationGeneration,
+                        );
+                    } catch {
+                      // Ignore — see above.
+                    }
+                    pendingPresentationSnapshot = undefined;
                   }
 
                   // Explicit user cancellation and session disposal are
@@ -5307,6 +5386,14 @@ export class Session implements SessionContext {
                       rejectOnLoopDetected,
                     );
                   nextMessage = nextAfterTools.message;
+                  // Track the batch's pre-batch snapshot so the carrying
+                  // message's send-failure path can roll the ledger back.
+                  // (The stopped/loop-detected early returns below preserve
+                  // the tool run into history, so a discarded snapshot there
+                  // is harmless.)
+                  pendingPresentationSnapshot = toolRun.presentationSnapshot;
+                  pendingPresentationGeneration =
+                    toolRun.presentationSnapshotGeneration ?? 0;
                   if (nextAfterTools.stoppedByRepeatedToolFailure) {
                     return {
                       stopReason: rejectOnLoopDetected
@@ -5732,6 +5819,15 @@ export class Session implements SessionContext {
     let initialSend = true;
     let automaticContinuationValidated = false;
     let supersededAutomaticContinuation = false;
+    // The presentation-ledger snapshot captured at the start of the most
+    // recent tool batch whose carrying functionResponse message has not yet
+    // been delivered. If that send throws before pushing to history, the
+    // catch below rolls the ledger back to this snapshot so the batch's
+    // committed marks do not outlive the schema they reference (#6721).
+    let pendingPresentationSnapshot: ReadonlyMap<string, string> | undefined;
+    // Ledger generation at snapshot capture; an intervening clear (e.g.
+    // mid-send compression) advances it and makes the restore a no-op.
+    let pendingPresentationGeneration = 0;
     const preservePendingMessage = (message: Content) => {
       if (initialSend) return;
       const preservedParts = (message.parts ?? []).filter(
@@ -6076,10 +6172,12 @@ export class Session implements SessionContext {
           const preservedParts = (messageForPreservation.parts ?? []).filter(
             (part) => !('text' in part && isTodoStopGuardPromptText(part.text)),
           );
-          this.#preserveUnsentMessageHistory(
+          const preservedMessage =
             preservedParts.length > 0
               ? { ...messageForPreservation, parts: preservedParts }
-              : null,
+              : null;
+          this.#preserveUnsentMessageHistory(
+            preservedMessage,
             sendResult.stopReason === 'cancelled' ||
               preservePreparedMessageOnSkippedSend,
           );
@@ -6093,6 +6191,10 @@ export class Session implements SessionContext {
         }
 
         const responseStream = sendResult.responseStream;
+        // The carrying message was accepted by the send path, so the batch's
+        // committed presentations are now backed by history — drop the
+        // rollback snapshot (a later batch will set a fresh one).
+        pendingPresentationSnapshot = undefined;
         nextMessage = null;
         channelDeliveryResponseBlock = beginChannelDeliveryResponseBlock(
           options.responseCapture,
@@ -6204,6 +6306,36 @@ export class Session implements SessionContext {
             { ...messageForPreservation, parts: preservedParts },
             true,
           );
+        }
+        // If a tool batch's presentations were committed but the message
+        // carrying them never reached active history (the send threw before
+        // the push), roll the presentation ledger back to the pre-batch
+        // snapshot. Otherwise the marks survive and a later model-emitted
+        // tool_call passes the #6721 fail-closed gate and executes on
+        // guessed arguments. The generation check makes the restore a no-op
+        // when a ledger clear (e.g. this send's own compression) intervened
+        // after the snapshot was captured — restoring across a clear would
+        // resurrect marks whose backing tool_search results were summarized
+        // out of active history.
+        if (
+          pendingPresentationSnapshot &&
+          (!providerSendChat ||
+            (providerSendChat.getUserContentPushCount?.() ?? 0) <=
+              userContentPushCountBeforeSend)
+        ) {
+          // Test doubles may expose a registry without the restore API; a
+          // ledger rollback must never break the send-failure path.
+          try {
+            this.config
+              .getToolRegistry()
+              .restoreProxySchemaPresentationSnapshot(
+                pendingPresentationSnapshot,
+                pendingPresentationGeneration,
+              );
+          } catch {
+            // Ignore — see above.
+          }
+          pendingPresentationSnapshot = undefined;
         }
         const isControlledCancellation =
           pendingSend.signal.aborted &&
@@ -6319,6 +6451,15 @@ export class Session implements SessionContext {
           options.rejectOnLoopDetected ?? false,
         );
         nextMessage = nextAfterTools.message;
+        // The batch's presentations were committed in runToolCalls; track the
+        // pre-batch snapshot so the carrying message's send-failure path can
+        // roll them back if the message never reaches active history. Cleared
+        // once the carrying send succeeds (below). The stop/loop-detected
+        // early returns above preserve the tool run into history, so they
+        // need no rollback and are skipped by setting this after them.
+        pendingPresentationSnapshot = toolRun.presentationSnapshot;
+        pendingPresentationGeneration =
+          toolRun.presentationSnapshotGeneration ?? 0;
         if (nextAfterTools.hadMidTurnUserInput) {
           nextGuardContinuation = undefined;
           continue;
@@ -6763,10 +6904,10 @@ export class Session implements SessionContext {
       },
     };
     const goalPermit = goalTurnContext.getStore();
-    const responseStream = goalPermit
+    const rawResponseStream = goalPermit
       ? await chat.sendMessageStream(model, request, promptId, goalPermit)
       : await chat.sendMessageStream(model, request, promptId);
-    return { responseStream };
+    return { responseStream: rawResponseStream };
   }
 
   #preserveUnsentMessageHistory(
@@ -6812,19 +6953,17 @@ export class Session implements SessionContext {
           { preserveFallbackOnAbort: true },
         )
       : await this.#drainMidTurnUserMessages(abortSignal);
-    this.#preserveUnsentMessageHistory(
-      {
-        role: 'user',
-        parts: [
-          ...toolRun.parts,
-          ...(toolRun.loopDetected
-            ? [{ text: LOOP_DETECTED_CONTEXT_MESSAGE }]
-            : []),
-          ...midTurnParts,
-        ],
-      },
-      true,
-    );
+    const message: Content = {
+      role: 'user',
+      parts: [
+        ...toolRun.parts,
+        ...(toolRun.loopDetected
+          ? [{ text: LOOP_DETECTED_CONTEXT_MESSAGE }]
+          : []),
+        ...midTurnParts,
+      ],
+    };
+    this.#preserveUnsentMessageHistory(message, true);
     await this.messageRewriter?.waitForPendingRewrites();
   }
 
@@ -6941,8 +7080,9 @@ export class Session implements SessionContext {
         stoppedByRepeatedToolFailure: true,
       };
     }
+    const message: Content = { role: 'user', parts };
     return {
-      message: { role: 'user', parts },
+      message,
       hadMidTurnUserInput,
     };
   }
@@ -7575,6 +7715,17 @@ export class Session implements SessionContext {
           },
           async () => {
             let turnCount = 0;
+            // Presentation-ledger rollback state (#6721): mirrors the main
+            // prompt loop — the most recent tool batch's pre-batch snapshot,
+            // cleared once its carrying message is delivered; the catch below
+            // restores the ledger to it when the carrying send throws before
+            // pushing to history.
+            let pendingPresentationSnapshot:
+              | ReadonlyMap<string, string>
+              | undefined;
+            let pendingPresentationGeneration = 0;
+            let presentationSendChat: GeminiChat | undefined;
+            let presentationPushCountBeforeSend = 0;
             try {
               await this.assertCanStartTurn();
               if (ac.signal.aborted) return;
@@ -7732,6 +7883,13 @@ export class Session implements SessionContext {
                 turnCount++;
                 if (ac.signal.aborted) {
                   this.todoStopGuard.suspend();
+                  // Mirror the main prompt loop's abort check: preserve the
+                  // carrying message (its functionResponse parts may back
+                  // committed proxy-schema presentations — dropping it here
+                  // would orphan the ledger marks for schemas that never
+                  // enter model context, failing the #6721 gate open on a
+                  // later guessed-argument tool_call).
+                  this.#preserveUnsentMessageHistory(nextMessage, true);
                   return;
                 }
 
@@ -7742,6 +7900,9 @@ export class Session implements SessionContext {
                 let usageMetadata: GenerateContentResponseUsageMetadata | null =
                   null;
                 const streamStartTime = Date.now();
+                presentationSendChat = this.#getCurrentChat();
+                presentationPushCountBeforeSend =
+                  presentationSendChat.getUserContentPushCount?.() ?? 0;
                 const sendResult =
                   await this.#sendMessageStreamWithAutoCompression(
                     promptId,
@@ -7760,6 +7921,11 @@ export class Session implements SessionContext {
                   return;
                 }
                 const responseStream = sendResult.responseStream;
+                // The carrying message was accepted by the send path, so the
+                // batch's committed presentations are now backed by history
+                // — drop the rollback snapshot (a later batch sets a fresh
+                // one).
+                pendingPresentationSnapshot = undefined;
                 const channelDeliveryResponseBlock:
                   | ChannelDeliveryResponseBlock
                   | undefined =
@@ -7908,6 +8074,14 @@ export class Session implements SessionContext {
                       toolLoopState,
                     );
                   nextMessage = nextAfterTools.message;
+                  // Track the batch's pre-batch snapshot so the carrying
+                  // message's send-failure path can roll the ledger back.
+                  // (The stopped/loop-detected early returns here preserve
+                  // the tool run into history, so a discarded snapshot is
+                  // harmless.)
+                  pendingPresentationSnapshot = toolRun.presentationSnapshot;
+                  pendingPresentationGeneration =
+                    toolRun.presentationSnapshotGeneration ?? 0;
                   if (toolRun.loopDetected) {
                     this.todoStopGuard.suspend();
                     await this.#preserveStoppedToolRun(toolRun, ac.signal);
@@ -7933,6 +8107,33 @@ export class Session implements SessionContext {
               }
               cronCompleted = stopReason === 'end_turn' && !ac.signal.aborted;
             } catch (error) {
+              // If a tool batch's presentations were committed but the
+              // carrying message never reached active history (the send
+              // threw before the push), roll the presentation ledger back to
+              // the pre-batch snapshot — mirrors the main prompt loop's
+              // send-failure rollback. Without it the mark survives, the
+              // session lives on, and a later model-emitted tool_call passes
+              // the #6721 gate on a schema that never entered model context.
+              if (
+                pendingPresentationSnapshot &&
+                (!presentationSendChat ||
+                  (presentationSendChat.getUserContentPushCount?.() ?? 0) <=
+                    presentationPushCountBeforeSend)
+              ) {
+                // Test doubles may expose a registry without the restore API;
+                // a ledger rollback must never break the send-failure path.
+                try {
+                  this.config
+                    .getToolRegistry()
+                    .restoreProxySchemaPresentationSnapshot(
+                      pendingPresentationSnapshot,
+                      pendingPresentationGeneration,
+                    );
+                } catch {
+                  // Ignore — see above.
+                }
+                pendingPresentationSnapshot = undefined;
+              }
               if (ac.signal.aborted) {
                 this.todoStopGuard.suspend();
                 return;
@@ -8372,6 +8573,17 @@ export class Session implements SessionContext {
         this.#prepareTodoStopGuardForAutomaticTurn(continuesCurrentWorkChain);
         const promptId =
           this.config.getSessionId() + '########notification' + Date.now();
+        // Presentation-ledger rollback state (#6721): mirrors the main
+        // prompt loop — the most recent tool batch's pre-batch snapshot,
+        // cleared once its carrying message is delivered; the catch below
+        // restores the ledger to it when the carrying send throws before
+        // pushing to history.
+        let pendingPresentationSnapshot:
+          | ReadonlyMap<string, string>
+          | undefined;
+        let pendingPresentationGeneration = 0;
+        let presentationSendChat: GeminiChat | undefined;
+        let presentationPushCountBeforeSend = 0;
         try {
           await this.assertCanStartTurn();
           if (ac.signal.aborted) return;
@@ -8413,6 +8625,9 @@ export class Session implements SessionContext {
           while (nextMessage !== null) {
             if (ac.signal.aborted) {
               this.todoStopGuard.suspend();
+              // Mirror the main prompt loop's abort check — see the cron
+              // loop's top-of-lap abort for the #6721 rationale.
+              this.#preserveUnsentMessageHistory(nextMessage, true);
               await this.#emitBackgroundNotificationEndTurn('cancelled');
               return;
             }
@@ -8426,6 +8641,9 @@ export class Session implements SessionContext {
             let responseText = '';
             const streamStartTime = Date.now();
 
+            presentationSendChat = this.#getCurrentChat();
+            presentationPushCountBeforeSend =
+              presentationSendChat.getUserContentPushCount?.() ?? 0;
             const sendResult = await this.#sendMessageStreamWithAutoCompression(
               promptId,
               nextMessage.parts ?? [],
@@ -8444,6 +8662,10 @@ export class Session implements SessionContext {
             }
 
             const responseStream = sendResult.responseStream;
+            // The carrying message was accepted by the send path, so the
+            // batch's committed presentations are now backed by history —
+            // drop the rollback snapshot (a later batch sets a fresh one).
+            pendingPresentationSnapshot = undefined;
             nextMessage = null;
             const messageDisplay = this.#createMessageDisplayDispatcher(
               ac.signal,
@@ -8566,6 +8788,14 @@ export class Session implements SessionContext {
                 toolLoopState,
               );
               nextMessage = nextAfterTools.message;
+              // Track the batch's pre-batch snapshot so the carrying
+              // message's send-failure path can roll the ledger back.
+              // (The stopped/loop-detected early returns here preserve the
+              // tool run into history, so a discarded snapshot is
+              // harmless.)
+              pendingPresentationSnapshot = toolRun.presentationSnapshot;
+              pendingPresentationGeneration =
+                toolRun.presentationSnapshotGeneration ?? 0;
               if (toolRun.loopDetected) {
                 this.todoStopGuard.suspend();
                 await this.#preserveStoppedToolRun(toolRun, ac.signal);
@@ -8597,6 +8827,33 @@ export class Session implements SessionContext {
             ac.signal.aborted ? 'cancelled' : stopReason,
           );
         } catch (error) {
+          // If a tool batch's presentations were committed but the carrying
+          // message never reached active history (the send threw before the
+          // push), roll the presentation ledger back to the pre-batch
+          // snapshot — mirrors the main prompt loop's send-failure rollback.
+          // Without it the mark survives, the session lives on, and a later
+          // model-emitted tool_call passes the #6721 gate on a schema that
+          // never entered model context.
+          if (
+            pendingPresentationSnapshot &&
+            (!presentationSendChat ||
+              (presentationSendChat.getUserContentPushCount?.() ?? 0) <=
+                presentationPushCountBeforeSend)
+          ) {
+            // Test doubles may expose a registry without the restore API; a
+            // ledger rollback must never break the send-failure path.
+            try {
+              this.config
+                .getToolRegistry()
+                .restoreProxySchemaPresentationSnapshot(
+                  pendingPresentationSnapshot,
+                  pendingPresentationGeneration,
+                );
+            } catch {
+              // Ignore — see above.
+            }
+            pendingPresentationSnapshot = undefined;
+          }
           if (ac.signal.aborted) {
             this.todoStopGuard.suspend();
             await this.#emitBackgroundNotificationEndTurn('cancelled');
@@ -9086,6 +9343,32 @@ export class Session implements SessionContext {
     todoWorkChainContext.enterWith(
       this.config.getActiveTodoWorkChainOwner(promptId),
     );
+    // Issue #6721's fail-closed gate runs wrapper calls against the ledger
+    // state as of BATCH START: runToolCalls executes calls sequentially, so
+    // without the snapshot a tool_search running earlier in this same batch
+    // would mark the ledger before a sibling tool_call is normalized and the
+    // pair would self-authorize — the exact shape the core scheduler
+    // rejects (it normalizes every request before any execution). The
+    // search result cannot have entered the model context inside the batch
+    // that contains the call.
+    const presentationSnapshot = this.config
+      .getToolRegistry()
+      .getProxySchemaPresentationSnapshot();
+    // Captured with the snapshot: if a ledger clear (compression,
+    // truncation, ...) happens before the send-failure rollback runs, the
+    // generation mismatch makes the restore a no-op instead of resurrecting
+    // marks the clear deliberately dropped.
+    const presentationSnapshotGeneration = this.config
+      .getToolRegistry()
+      .getProxySchemaPresentationGeneration();
+    // Schema presentations delivered by this batch's tool_search results,
+    // committed only once the batch aggregates into a returned result
+    // (every runToolCalls return path either sends the parts to the model
+    // or preserves them into history; a thrown batch commits nothing).
+    const pendingPresentationsInBatch: Array<{
+      name: string;
+      fingerprint: string;
+    }> = [];
     const dedupedFunctionCalls = dedupeToolCallsById(functionCalls);
     const generatedCallIdBase = randomUUID();
     const executionCallIds = new Map(
@@ -9107,6 +9390,19 @@ export class Session implements SessionContext {
     const finalizeRunToolResult = async (
       result: RunToolResult,
     ): Promise<RunToolResult> => {
+      // Issue #6721's delivery contract on the daemon surface: every
+      // runToolCalls return path either sends the aggregated parts to the
+      // model or preserves them into session history (a batch that throws
+      // never reaches this aggregator), so the schema presentations this
+      // batch's tool_search results delivered are committed here — the
+      // carrying results enter the session record from this point on.
+      // Committing at tool-execution time instead would keep marks for
+      // results a later batch failure withholds from the model.
+      if (pendingPresentationsInBatch.length > 0) {
+        this.config
+          .getToolRegistry()
+          .commitProxySchemaPresentations(pendingPresentationsInBatch);
+      }
       const orderedRecords = [...pendingToolResultRecords].sort(
         (left, right) =>
           left.ordinal - right.ordinal || left.sequence - right.sequence,
@@ -9127,7 +9423,12 @@ export class Session implements SessionContext {
         })),
       };
       if (orderedRecords.length === 0) {
-        return { ...result, repeatedToolFailureBatch };
+        return {
+          ...result,
+          repeatedToolFailureBatch,
+          presentationSnapshot,
+          presentationSnapshotGeneration,
+        };
       }
       const finalized = await finalizeToolResponses(
         this.config,
@@ -9147,9 +9448,10 @@ export class Session implements SessionContext {
         if (record.skipPersistence === true) {
           return;
         }
+        const finalizedParts = finalized[index].responseParts;
         this.config
           .getChatRecordingService()
-          ?.recordToolResult(finalized[index].responseParts, {
+          ?.recordToolResult(finalizedParts, {
             ...record.metadata,
             persistedOutputFiles: finalized[index].persistedOutputFiles,
             artifacts: finalized[index].artifacts,
@@ -9159,6 +9461,8 @@ export class Session implements SessionContext {
         ...result,
         parts: finalized.flatMap((entry) => entry.responseParts),
         repeatedToolFailureBatch,
+        presentationSnapshot,
+        presentationSnapshotGeneration,
       };
     };
     let skippedToolCallCounter = 0;
@@ -9475,6 +9779,24 @@ export class Session implements SessionContext {
         logContext: `ACP session ${this.sessionId} context-file memory tool batch`,
       });
     };
+    // R23-30 / R24-1: release the admission-time replay record for a
+    // gate-rejected wrapper call. Shared by both execution paths below:
+    // the bounded-concurrency runner AND the sequential lap. Every wrapper
+    // call admitted by runToolCalls is recorded for duplicate-provider-id
+    // replay detection before the gate runs; nothing executes for a
+    // rejected call, and the rejection text instructs the model to re-issue
+    // it, so the record must go to keep the instructed retry from being
+    // suppressed as a replay on providers that reuse tool-call ids.
+    const releaseRejectedCallReplayRecord = (rejectedFc: FunctionCall) => {
+      const pid = getProviderToolCallId(rejectedFc) ?? rejectedFc.id;
+      if (!pid) return;
+      if (
+        handledToolCallFingerprints.get(pid) ===
+        getFunctionCallFingerprint(rejectedFc)
+      ) {
+        handledToolCallFingerprints.delete(pid);
+      }
+    };
     // Bounded-concurrency runner: matches core's `runConcurrently`
     // behaviour (`coreToolScheduler.ts:1506`), capped by
     // `QWEN_CODE_MAX_TOOL_CONCURRENCY` (default 10). Results are returned
@@ -9541,6 +9863,9 @@ export class Session implements SessionContext {
           queueToolResultRecord,
           executionCallIds.get(calls[idx]),
           onFullTurnModel,
+          presentationSnapshot,
+          pendingPresentationsInBatch,
+          releaseRejectedCallReplayRecord,
         )
           .then((r) => {
             results[idx] = r;
@@ -9586,8 +9911,8 @@ export class Session implements SessionContext {
       return results;
     };
 
-    const parts: Part[] = [];
-    try {
+    const buildRunToolResult = async (): Promise<RunToolResult> => {
+      const parts: Part[] = [];
       for (const batch of batches) {
         if (batch.kind === 'duplicate') {
           await emitDuplicateBatch(batch);
@@ -9683,6 +10008,13 @@ export class Session implements SessionContext {
               queueToolResultRecord,
               executionCallIds.get(fc),
               onFullTurnModel,
+              presentationSnapshot,
+              pendingPresentationsInBatch,
+              // R24-1: the sequential lap executes every non-agent wrapper
+              // call; it needs the same release as the concurrent path
+              // (without it a gate-rejected call's admission record would
+              // survive within this turn's map).
+              releaseRejectedCallReplayRecord,
             );
             parts.push(...r.parts);
             collectMemoryWriteCandidates(r);
@@ -9716,9 +10048,17 @@ export class Session implements SessionContext {
         stopAfterPermissionCancel: false,
         memoryWriteCandidates,
       });
-    } finally {
+    };
+
+    let result: RunToolResult;
+    try {
+      result = await buildRunToolResult();
+    } catch (error) {
       await refreshMemoryIfNeeded();
+      throw error;
     }
+    await refreshMemoryIfNeeded();
+    return result;
   }
 
   /**
@@ -9771,9 +10111,26 @@ export class Session implements SessionContext {
     queueToolResultRecord?: QueueToolResultRecord,
     generatedCallId?: string,
     onFullTurnModel?: (model: string) => boolean,
+    presentationSnapshot?: ReadonlyMap<string, string>,
+    pendingPresentationsInBatch?: Array<{
+      name: string;
+      fingerprint: string;
+    }>,
+    /**
+     * R23-30: fired with the raw FunctionCall when deferred-wrapper
+     * normalization rejects it. The admission pass in runToolCalls recorded
+     * the call for duplicate-provider-id replay detection before the gate
+     * ran; nothing executed for a rejected call, and the rejection text
+     * instructs the model to re-issue it, so the caller releases that
+     * record to keep the instructed retry from being suppressed as a
+     * replay on providers that reuse tool-call ids.
+     */
+    onNormalizationRejected?: (fc: FunctionCall) => void,
   ): Promise<RunToolResult> {
     const callId = fc.id ?? generatedCallId ?? `${fc.name}-${Date.now()}`;
     let args = (fc.args ?? {}) as Record<string, unknown>;
+    let responseToolName = fc.name ?? 'unknown_tool';
+    let telemetryProviderName: string | undefined;
     let executionStatus: ToolExecutionStatus = 'not_started';
     let executionErrorType: ToolErrorType | undefined;
     let executeReturned = false;
@@ -9796,7 +10153,7 @@ export class Session implements SessionContext {
             : {
                 functionResponse: {
                   id: callId,
-                  name: fc.name ?? 'unknown_tool',
+                  name: responseToolName,
                   response: { error: LOOP_DETECTED_SKIP_MESSAGE },
                 },
               },
@@ -9835,6 +10192,9 @@ export class Session implements SessionContext {
           call_id: callId,
           prompt_id: promptId,
           function_name: toolName,
+          ...(telemetryProviderName
+            ? { 'tool.provider_name': telemetryProviderName }
+            : {}),
           function_args: args,
           duration_ms: durationMs,
           status,
@@ -9860,7 +10220,7 @@ export class Session implements SessionContext {
         {
           functionResponse: {
             id: callId,
-            name: toolName,
+            name: responseToolName,
             response: { error: error.message },
           },
         },
@@ -10008,9 +10368,84 @@ export class Session implements SessionContext {
       );
     }
 
-    const toolName = fc.name;
     const toolRegistry = this.config.getToolRegistry();
-    const tool = toolRegistry.getTool(toolName);
+    const requestInfo: ToolCallRequestInfo = {
+      callId,
+      name: fc.name,
+      args,
+      isClientInitiated: false,
+      prompt_id: promptId,
+    };
+    const normalizedRequest = await normalizeDeferredToolCallRequest(
+      requestInfo,
+      toolRegistry,
+      presentationSnapshot ? { presentationSnapshot } : undefined,
+    );
+    if (!normalizedRequest.ok) {
+      // Failure still has three distinct identities: responses must use the
+      // provider-declared wrapper, while telemetry/retry isolation use the
+      // attempted target and recordings retain the structured error type.
+      responseToolName = normalizedRequest.providerName;
+      telemetryProviderName = normalizedRequest.providerName;
+      try {
+        onNormalizationRejected?.(fc);
+      } catch {
+        // Replay-record bookkeeping must never break the rejection path.
+      }
+      return earlyErrorResponse(
+        normalizedRequest.error,
+        normalizedRequest.targetName ?? normalizedRequest.providerName,
+        {
+          status: 'error',
+          errorType: normalizedRequest.errorType,
+          executionStatus: 'not_started',
+          recordInvalidToolParams: true,
+        },
+      );
+    }
+
+    // Mirror CoreToolScheduler's wrapper gate: normalization rewrites the
+    // request to its target before any policy gate runs, and the enablement
+    // check below only sees the resolved target — so a deny rule naming the
+    // `tool_call` wrapper itself would never fire here. Deny rules are
+    // mutable mid-session, so check the wrapper identity per call before
+    // the target gates. (This path honors no legacy deny fallback — the
+    // daemon surface gates through the PermissionManager only.)
+    if (canonicalToolName(requestInfo.name) === ToolNames.DEFERRED_TOOL_CALL) {
+      const wrapperPm = this.config.getPermissionManager?.();
+      const wrapperDenied = wrapperPm
+        ? !(await wrapperPm.isToolEnabled(ToolNames.DEFERRED_TOOL_CALL))
+        : false;
+      if (wrapperDenied) {
+        const matchingRule = wrapperPm?.findMatchingDenyRule({
+          toolName: ToolNames.DEFERRED_TOOL_CALL,
+        });
+        const ruleInfo = matchingRule
+          ? ` Matching deny rule: "${matchingRule}".`
+          : '';
+        responseToolName = ToolNames.DEFERRED_TOOL_CALL;
+        telemetryProviderName = ToolNames.DEFERRED_TOOL_CALL;
+        return earlyErrorResponse(
+          new Error(
+            `Qwen Code requires permission to use "${ToolNames.DEFERRED_TOOL_CALL}", but that permission was declined.${ruleInfo}`,
+          ),
+          ToolNames.DEFERRED_TOOL_CALL,
+          {
+            status: 'error',
+            errorType: ToolErrorType.EXECUTION_DENIED,
+            executionStatus: 'not_started',
+          },
+        );
+      }
+    }
+
+    const effectiveRequest = normalizedRequest.request;
+    const toolName = effectiveRequest.name;
+    args = effectiveRequest.args;
+    responseToolName = providerToolName(effectiveRequest);
+    telemetryProviderName = effectiveRequest.providerName;
+    const tool =
+      normalizedRequest.resolvedTool ?? toolRegistry.getTool(toolName);
 
     if (!tool) {
       return earlyErrorResponse(
@@ -10039,6 +10474,9 @@ export class Session implements SessionContext {
       {
         'tool.call_id': callId,
         'gen_ai.tool.call.id': getProviderToolCallId(fc) ?? callId,
+        ...(telemetryProviderName
+          ? { 'tool.provider_name': telemetryProviderName }
+          : {}),
         // Dual-emit the legacy call_id/tool_name aliases like CoreToolScheduler
         // (coreToolScheduler.ts) so pre-Phase-2 dashboards keyed off call_id keep
         // matching daemon/ACP tool spans during the migration window.
@@ -10073,7 +10511,9 @@ export class Session implements SessionContext {
         if (enablementCancellation) return enablementCancellation;
         if (pm && !toolEnabled) {
           return earlyErrorResponse(
-            new Error(`Tool "${toolName}" is disabled.`),
+            new Error(
+              `Tool ${formatPermissionToolIdentity(effectiveRequest)} is disabled.`,
+            ),
             toolName,
             {
               status: 'error',
@@ -10219,7 +10659,11 @@ export class Session implements SessionContext {
 
           if (finalPermission === 'deny') {
             return earlyErrorResponse(
-              new Error(denyMessage ?? `Tool "${toolName}" is denied.`),
+              new Error(
+                denyMessage
+                  ? withPermissionToolIdentity(denyMessage, effectiveRequest)
+                  : `Tool ${formatPermissionToolIdentity(effectiveRequest)} is denied.`,
+              ),
               toolName,
               {
                 status: 'error',
@@ -10652,8 +11096,12 @@ export class Session implements SessionContext {
                 } else {
                   return earlyErrorResponse(
                     new Error(
-                      hookResult.denyMessage ||
-                        `Permission denied by hook for "${toolName}"`,
+                      hookResult.denyMessage
+                        ? withPermissionToolIdentity(
+                            hookResult.denyMessage,
+                            effectiveRequest,
+                          )
+                        : `Permission denied by hook for ${formatPermissionToolIdentity(effectiveRequest)}`,
                     ),
                     toolName,
                     {
@@ -11356,20 +11804,20 @@ export class Session implements SessionContext {
           // Create response parts first (needed for emitResult and recordToolResult)
           let responseParts = aborted
             ? convertToFunctionErrorResponse(
-                toolName,
+                responseToolName,
                 callId,
                 TOOL_EXECUTION_CANCELLED_MESSAGE,
                 TOOL_EXECUTION_CANCELLED_MESSAGE,
               )
             : toolResult.error
               ? convertToFunctionErrorResponse(
-                  toolName,
+                  responseToolName,
                   callId,
                   toolResult.llmContent,
                   toolResult.error.message,
                 )
               : convertToFunctionResponse(
-                  toolName,
+                  responseToolName,
                   callId,
                   toolResult.llmContent,
                 );
@@ -11534,7 +11982,7 @@ export class Session implements SessionContext {
           ) {
             status = 'cancelled';
             responseParts = convertToFunctionErrorResponse(
-              toolName,
+              responseToolName,
               callId,
               TOOL_POST_EXECUTION_CANCELLED_MESSAGE,
               TOOL_POST_EXECUTION_CANCELLED_MESSAGE,
@@ -11605,6 +12053,9 @@ export class Session implements SessionContext {
               'event.timestamp': new Date().toISOString(),
               call_id: callId,
               function_name: toolName,
+              ...(telemetryProviderName
+                ? { 'tool.provider_name': telemetryProviderName }
+                : {}),
               function_args: args,
               duration_ms: durationMs,
               status,
@@ -11652,7 +12103,6 @@ export class Session implements SessionContext {
               errorType: status === 'error' ? executionErrorType : undefined,
             },
           });
-
           if (succeeded && !nestedPermissionCancelled) {
             const result = responseParts.find(
               (part) => part.functionResponse !== undefined,
@@ -11669,6 +12119,16 @@ export class Session implements SessionContext {
           }
           if (status === 'error' && toolResult.error) {
             spanError = toolResult.error.message;
+          }
+          // Issue #6721: a successful tool_search result carries the schemas
+          // it delivered as PENDING presentations. Collect them for the
+          // batch-level commit in runToolCalls' finalizeRunToolResult —
+          // committing here at execution time would keep marks even when a
+          // later batch failure withholds the carrying parts from the model.
+          if (status === 'success' && toolResult.proxySchemaPresentations) {
+            pendingPresentationsInBatch?.push(
+              ...toolResult.proxySchemaPresentations,
+            );
           }
           return {
             parts: responseParts,

@@ -222,9 +222,9 @@ export abstract class DeclarativeTool<
     /**
      * When true, this tool is hidden from the initial function-declaration list
      * sent to the model to save tokens. The model discovers it on-demand via the
-     * {@link ToolNames.TOOL_SEARCH} tool, which injects the full schema into
-     * subsequent API requests. Mirrors the `shouldDefer` field described in
-     * Claude Code's tool framework.
+     * {@link ToolNames.TOOL_SEARCH} tool, which returns the full schema in model
+     * context for a later deferred proxy call. Mirrors the `shouldDefer` field
+     * described in Claude Code's tool framework.
      */
     readonly shouldDefer: boolean = false,
     /**
@@ -493,6 +493,19 @@ export interface ToolArtifact {
   metadata?: Record<string, string | number | boolean | null>;
 }
 
+/**
+ * A deferred-tool schema delivered by a tool result, pending commitment to
+ * the registry's presentation ledger. Issue #6721's fail-closed contract:
+ * the `tool_call` proxy may only route to a target whose schema actually
+ * entered the active model context, so delivery surfaces commit these pairs
+ * only when the carrying result is accepted into active history — never at
+ * tool execution time.
+ */
+export interface ProxySchemaPresentation {
+  name: string;
+  fingerprint: string;
+}
+
 export interface ToolResult {
   /**
    * Content meant to be included in LLM history.
@@ -554,6 +567,15 @@ export interface ToolResult {
    * honored when the tool batch carries a Goal context; ignored otherwise.
    */
   terminateTurn?: boolean;
+
+  /**
+   * Proxy-eligible deferred-tool schemas this result actually delivers to
+   * the model (tool_search only). Pending until the carrying result enters
+   * active history: the delivery surface commits each pair to the registry
+   * ledger ({@link ToolRegistry.markProxySchemaPresented}) on acceptance and
+   * discards them when delivery fails. Executing the search never commits.
+   */
+  proxySchemaPresentations?: readonly ProxySchemaPresentation[];
 }
 
 /**

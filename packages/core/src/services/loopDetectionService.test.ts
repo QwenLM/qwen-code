@@ -19,6 +19,7 @@ import {
   DEFAULT_MAX_TOOL_CALLS_PER_TURN,
   LoopDetectionService,
 } from './loopDetectionService.js';
+import { ToolNames } from '../tools/tool-names.js';
 
 vi.mock('../telemetry/loggers.js', () => ({
   logLoopDetected: vi.fn(),
@@ -1435,6 +1436,23 @@ describe('LoopDetectionService', () => {
       );
     });
 
+    it('tracks distinct deferred targets instead of the provider wrapper', () => {
+      service.reset('');
+
+      for (let i = 0; i < 8; i++) {
+        const isLoop = service.addAndCheck(
+          createToolCallRequestEvent(ToolNames.DEFERRED_TOOL_CALL, {
+            name: `deferred_tool_${i}`,
+            arguments: { value: i },
+          }),
+        );
+        expect(isLoop).toBe(false);
+      }
+
+      expect(service.getLastLoopType()).not.toBe(LoopType.ACTION_STAGNATION);
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
     it('should reset stagnation streak when a different tool is called', () => {
       service.reset('');
 
@@ -1892,6 +1910,23 @@ describe('LoopDetectionService', () => {
       for (let i = 0; i < GLOBAL_DUPLICATE_THRESHOLD; i++) {
         const isLoop = service.addAndCheckHeuristicLoops(
           createToolCallRequestEvent('stuck_tool', { param: i }),
+        );
+        expect(isLoop).toBe(false);
+      }
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
+    it('does not fire for repeated deferred proxy calls to the same target with different arguments', () => {
+      // The unwrap must keep the target arguments in the key: six proxy
+      // calls to one deferred tool with pairwise-different args are
+      // productive work, not a loop, even though they share a target name.
+      service.reset('');
+      for (let i = 0; i < GLOBAL_DUPLICATE_THRESHOLD; i++) {
+        const isLoop = service.addAndCheckHeuristicLoops(
+          createToolCallRequestEvent(ToolNames.DEFERRED_TOOL_CALL, {
+            name: 'crm_update',
+            arguments: { record_id: `record-${i}` },
+          }),
         );
         expect(isLoop).toBe(false);
       }

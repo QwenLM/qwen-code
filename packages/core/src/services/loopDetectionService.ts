@@ -18,6 +18,7 @@ import {
   LoopType,
 } from '../telemetry/types.js';
 import type { Config } from '../config/config.js';
+import { unwrapDeferredToolCallShape } from '../core/deferred-tool-call-normalization.js';
 import { getToolCallRepeatKey } from '../utils/tool-call-repeat-key.js';
 
 // Re-exported for existing importers (daemon turn-loop guard); the
@@ -272,8 +273,13 @@ export class LoopDetectionService {
         // observable progress — any prior thoughts should not carry over.
         this.thoughtHistory = [];
 
-        this.trackToolCall(event.value);
-        const toolCallKey = this.getToolCallKey(event.value);
+        // The provider sees every deferred invocation as the stable wrapper,
+        // but loop heuristics must reason about the real target. Otherwise
+        // eight different deferred tools look like one repeated action and
+        // falsely trip ACTION_STAGNATION.
+        const toolCall = unwrapDeferredToolCallShape(event.value);
+        this.trackToolCall(toolCall);
+        const toolCallKey = this.getToolCallKey(toolCall);
         const globalDup = this.checkGlobalDuplicate(toolCallKey);
         const alternating = this.checkAlternatingPattern(toolCallKey);
         const readFileLoop = this.checkReadFileLoop();
@@ -363,7 +369,12 @@ export class LoopDetectionService {
     // Hash the (tool,args) key once and share it across the guards that need
     // it (consecutive-identical and the adaptive cap's stuck tracker). Args
     // can be large (e.g. write_file content), so avoid recomputing per guard.
-    const key = this.getToolCallKey(event.value);
+    // Unwrap the deferred proxy envelope first so alternating direct +
+    // proxied identical calls hash to the same key instead of splitting the
+    // repetition across two keys and evading both guards. Pure-proxy repeats
+    // hash identically either way.
+    const toolCall = unwrapDeferredToolCallShape(event.value);
+    const key = this.getToolCallKey(toolCall);
 
     // Always-on stuck-repetition tracking for the adaptive cap (see
     // checkTurnToolCallCap): lets the cap tell a productive turn from a stuck
@@ -382,7 +393,7 @@ export class LoopDetectionService {
       return true;
     }
 
-    if (this.checkShellCommandStagnation(event.value)) {
+    if (this.checkShellCommandStagnation(toolCall)) {
       this.loopDetected = true;
       return true;
     }

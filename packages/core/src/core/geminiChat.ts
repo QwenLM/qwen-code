@@ -442,6 +442,11 @@ export type StreamEvent =
       isContinuation?: boolean;
       /** Set when the retry raised the automatic max output token limit. */
       maxOutputTokensEscalated?: number;
+      /** Set only on the reactive overflow retry: compression rebuilt the
+       *  request payload from scratch, so the preceding send's context was
+       *  never delivered intact. Pre-send auto-compression followed by a
+       *  transient retry leaves the payload identical and does NOT set it. */
+      payloadRebuilt?: boolean;
     }
   | { type: StreamEventType.COMPRESSED; info: ChatCompressionInfo }
   | { type: StreamEventType.MODEL_FALLBACK; info: ModelFallbackInfo };
@@ -1725,7 +1730,7 @@ function applyRepair(
   // (3) Place new parts at the head of the adjacent user turn, OR
   // insert a fresh user turn at the resolved adjacency.
   const next = history[adjacentIdx];
-  if (next?.role === 'user') {
+  if (next?.role === 'user' && !isSystemReminderContent(next)) {
     const existing = next.parts ?? [];
     const firstNonFr = existing.findIndex((part) => !part.functionResponse);
     const insertAt = firstNonFr === -1 ? existing.length : firstNonFr;
@@ -3274,7 +3279,7 @@ export class GeminiChat {
                       type: StreamEventType.COMPRESSED,
                       info: reactiveInfo,
                     };
-                    yield { type: StreamEventType.RETRY };
+                    yield { type: StreamEventType.RETRY, payloadRebuilt: true };
                     // Compression rebuilt `requestContents` from scratch, so
                     // any continuation staged against the old contents is
                     // stale — and the RETRY above already told the UI to drop
@@ -4294,6 +4299,18 @@ export class GeminiChat {
    * matching user-turn `functionResponse`. Walk-only, no clone, same
    * rationale as {@link getHistoryFunctionResponseIds}; fingerprints of
    * large args are cached per part object (see getFunctionCallFingerprint).
+   *
+   * Error responses (`functionResponse.response.error` set) do NOT mark the
+   * call as handled. A call answered with an error was never executed to
+   * completion, and an identical re-issue is the model's retry — on
+   * providers whose tool-call ids restart per response (`{name}_{index}`)
+   * it is the ONLY retry available, since the model cannot mint a new id.
+   * Counting error answers as handled would suppress exactly the retry the
+   * #6721 fail-closed gate's own rejection text instructs ("call tool_call
+   * again"), and would defeat the surfaces' release of the admission-time
+   * replay record for gate-rejected wrapper calls (R23-30): every surface
+   * re-seeds this map from history, and a history entry would win over any
+   * surface-local delete.
    */
   getHistoryToolCallFingerprints(): Map<string, string> {
     const fingerprintsById = new Map<string, string>();
@@ -4301,8 +4318,10 @@ export class GeminiChat {
     for (const entry of this.history) {
       if (entry.role === 'user') {
         for (const part of entry.parts ?? []) {
-          const id = part.functionResponse?.id;
-          if (id) respondedIds.add(id);
+          const functionResponse = part.functionResponse;
+          if (!functionResponse?.id) continue;
+          if (functionResponse.response?.['error'] !== undefined) continue;
+          respondedIds.add(functionResponse.id);
         }
         continue;
       }
@@ -4490,6 +4509,14 @@ export class GeminiChat {
     // push, corrupting the conversation. Drop the paired deferred-record
     // stash too: its referent (the model turn at the old index) is gone.
     this.clearPendingPartialState();
+    // Issue #6721: proxy-presented schemas live only in history text, so a
+    // history replacement that evicts the carrying tool_search result also
+    // evicts the schema from the active model context. Drop the presentation
+    // ledger so affected tools deterministically require another search
+    // instead of passing the gate against an invisible schema. Revealed
+    // (directly declared) tools are unaffected — their schemas stay in the
+    // function-declaration list regardless of history.
+    this.clearProxySchemaPresentationsIfRegistryAvailable();
     this.redactApprovedPlansFromLoadedHistory();
   }
 
@@ -4502,6 +4529,19 @@ export class GeminiChat {
     // sendMessageStream that pushed them has already finished or will
     // start fresh on the next call).
     this.clearPendingPartialState();
+    // Rewind/truncation can evict the tool_search result carrying a
+    // presented schema; clear the ledger for the same reason setHistory
+    // does (issue #6721's active-context requirement).
+    this.clearProxySchemaPresentationsIfRegistryAvailable();
+  }
+
+  private clearProxySchemaPresentationsIfRegistryAvailable(): void {
+    try {
+      this.config.getToolRegistry().clearProxySchemaPresentations();
+    } catch {
+      // Test doubles and early-init configs may not expose a registry;
+      // ledger clearing must never break a history mutation.
+    }
   }
 
   stripThoughtsFromHistory(): void {
@@ -4516,24 +4556,19 @@ export class GeminiChat {
     this.clearPendingPartialState();
   }
 
-  /**
-   * Pop orphaned trailing user entries from chat history.
-   * In a valid conversation the last entry is always a model response;
-   * any trailing user entries are leftovers from a request that failed.
-   */
+  /** Pop orphaned trailing user entries from chat history. */
   stripOrphanedUserEntriesFromHistory(): Content[] {
     const strippedEntries: Content[] = [];
+    let strippedToolResult = false;
     while (
       this.history.length > 0 &&
       this.history[this.history.length - 1]!.role === 'user'
     ) {
       // Never pop a *pure* system-reminder user entry. These are structural,
-      // not orphaned turns: the startup-context prelude (history[0]) and
-      // mid-history MCP added-tool reminders injected by
-      // drainPendingAddedMcpToolsReminder. Popping the latter would lose the
-      // announcement permanently — pendingAddedMcpTools is already cleared and
-      // the tool name is already in announcedDeferredToolNames, so
-      // queueAddedMcpToolsReminder won't re-queue it.
+      // not orphaned turns: the startup-context prelude (history[0]),
+      // mid-history MCP added-tool reminders, and resume-restored deferred
+      // schema context. Popping one would remove model-visible state that the
+      // runtime may still rely on.
       //
       // Must check EVERY part, not just parts[0]: a failed user turn in plan
       // mode (or with subagent/memory reminders) is recorded as one Content
@@ -4544,7 +4579,49 @@ export class GeminiChat {
       if (lastEntry && isSystemReminderContent(lastEntry)) {
         break;
       }
-      strippedEntries.unshift(this.history.pop()!);
+      const previousEntry = this.history[this.history.length - 2];
+      const lastParts = lastEntry?.parts ?? [];
+      const responses = lastParts.flatMap((part) =>
+        part.functionResponse ? [part.functionResponse] : [],
+      );
+      const calls = (previousEntry?.parts ?? []).flatMap((part) =>
+        part.functionCall ? [part.functionCall] : [],
+      );
+      const hasOnlyFunctionResponses =
+        lastParts.length > 0 &&
+        lastParts.every((part) => part.functionResponse !== undefined);
+      const isCompletedToolResult =
+        previousEntry?.role === 'model' &&
+        hasOnlyFunctionResponses &&
+        responses.length > 0 &&
+        responses.every((response) =>
+          calls.some((call) =>
+            call.id && response.id
+              ? call.id === response.id
+              : call.name === response.name,
+          ),
+        );
+      if (isCompletedToolResult) {
+        break;
+      }
+      const popped = this.history.pop()!;
+      // A MIXED trailing entry (e.g. [functionResponse(tool_search schema),
+      // {text: todo reminder}]) is not caught by isCompletedToolResult (the
+      // text part defeats the every-functionResponse check) and gets popped.
+      // Its presented proxy schema then leaves active history; remember that
+      // we stripped a tool result so the ledger marks are cleared below.
+      if (popped.parts?.some((part) => part.functionResponse !== undefined)) {
+        strippedToolResult = true;
+      }
+      strippedEntries.unshift(popped);
+    }
+    // If a popped entry carried a tool result, its presented proxy schema is
+    // no longer in history. Clear the ledger marks so a later model-emitted
+    // tool_call cannot pass the stale-mark gate and execute on guessed
+    // arguments (#6721). Fail-closed: clearing all presentations is safe —
+    // the next tool_search simply re-presents what is still needed.
+    if (strippedToolResult) {
+      this.clearProxySchemaPresentationsIfRegistryAvailable();
     }
     // Today this is safe even without the reset — only trailing user
     // entries are popped, which can't shift the index of an earlier

@@ -859,8 +859,34 @@ export const useGeminiStream = (
     new Set<AbortController>(),
   );
   const pendingCompletedToolBatchesRef = useRef<TrackedToolCall[][]>([]);
+  /**
+   * Commit the pending proxy-schema presentations carried by completed
+   * tool_search results once their delivery is accepted (issue #6721).
+   * Used by the deferred-batch flush, whose acceptance signal is not
+   * observed by the scheduler's own settlement.
+   */
+  const commitCarriedProxySchemaPresentations = useCallback(
+    (calls: TrackedToolCall[]): void => {
+      const pending = calls.flatMap((call) =>
+        'response' in call
+          ? (call.response?.pendingProxySchemaPresentations ?? [])
+          : [],
+      );
+      if (pending.length === 0) return;
+      try {
+        config.getToolRegistry().commitProxySchemaPresentations(pending);
+      } catch {
+        // Test doubles may not expose a registry; ledger commitment must
+        // never break the delivery flush.
+      }
+    },
+    [config],
+  );
   const handleCompletedToolsRef = useRef<
-    (completedTools: TrackedToolCall[]) => Promise<void>
+    (
+      completedTools: TrackedToolCall[],
+      onDeliveredCallIds?: (deliveredCallIds: Set<string>) => void,
+    ) => Promise<boolean | void>
   >(async () => {});
   const immediateDuplicateToolResponsesRef = useRef<{
     promptId: string | undefined;
@@ -936,7 +962,7 @@ export const useGeminiStream = (
             addItem(toolGroupDisplay, Date.now());
 
             // Handle tool response submission immediately when tools complete
-            await handleCompletedTools(
+            return await handleCompletedTools(
               completedToolCallsFromScheduler as TrackedToolCall[],
             );
           } finally {
@@ -956,11 +982,35 @@ export const useGeminiStream = (
             }
           }
         }
+        return false;
       },
       config,
       getPreferredEditor,
       onEditorClose,
       canUseToolResultFullTurnModel,
+      (rejectedRequest) => {
+        // R23-30: the scheduler rejected this deferred wrapper request at
+        // normalization, but the admission pass above already recorded it
+        // in the replay guard. Nothing ran for it, and the rejection text
+        // instructs the model to re-issue the call — release the record so
+        // an identical re-issue under a reused provider tool-call id is
+        // not suppressed as a replay. Guard on the fingerprint so a
+        // colliding entry recorded by a different (actually handled) call
+        // is never deleted.
+        const providerCallId = rejectedRequest.providerCallId;
+        if (!providerCallId) return;
+        const fingerprint = getCachedToolCallFingerprint(
+          rejectedRequest,
+          rejectedRequest.name,
+          rejectedRequest.args,
+        );
+        if (
+          handledToolCallFingerprintsRef.current.get(providerCallId) ===
+          fingerprint
+        ) {
+          handledToolCallFingerprintsRef.current.delete(providerCallId);
+        }
+      },
     );
 
   const pendingToolCallGroupDisplay = useMemo(() => {
@@ -3303,6 +3353,8 @@ export const useGeminiStream = (
       metadata?: {
         notificationDisplayText?: string;
         todoWorkChainId?: string;
+        /** Fires after the next model request accepts the prepared context. */
+        onContextAccepted?: () => void;
         onDelivered?: () => void;
         onDeliveryFailed?: () => void;
         onAdmissionFailed?: () => void;
@@ -3765,6 +3817,14 @@ export const useGeminiStream = (
         }
 
         let cleanupReviewLease = false;
+        // Stream rejection may be observed both while iterating and during
+        // post-processing. Report it once and suppress a later onDelivered.
+        let deliveryFailed = false;
+        const reportDeliveryFailure = () => {
+          if (deliveryFailed) return;
+          deliveryFailed = true;
+          metadata?.onDeliveryFailed?.();
+        };
         let keepGoalBinding = false;
         try {
           // Emit user message to dual output sidecar (if enabled).
@@ -3829,9 +3889,61 @@ export const useGeminiStream = (
                   : {}),
             },
           );
+          const acknowledgedStream = (async function* () {
+            let accepted = false;
+            let mutatedBeforeAcceptance = false;
+            for await (const event of stream) {
+              if (
+                !accepted &&
+                event.type === ServerGeminiEventType.ChatCompressed
+              ) {
+                mutatedBeforeAcceptance = true;
+              } else if (
+                !accepted &&
+                event.type === ServerGeminiEventType.Retry &&
+                event.payloadRebuilt
+              ) {
+                // Only reactive overflow recovery rebuilds the request payload,
+                // and it tags that retry with payloadRebuilt. A pre-send
+                // auto-compression followed by a transient retry leaves the
+                // payload intact (no flag), so ordering alone — which is
+                // identical in both cases — must not be used to infer a
+                // delivery failure.
+                reportDeliveryFailure();
+              }
+              const terminalRejection =
+                event.type === ServerGeminiEventType.Error ||
+                event.type === ServerGeminiEventType.UserCancelled;
+              // Only provider-produced output proves that the request context
+              // was accepted. Limit, retry, fallback, compression, and hook
+              // events can all be emitted locally before a request reaches
+              // the provider and must therefore fail closed.
+              const provesAcceptance =
+                event.type === ServerGeminiEventType.Content ||
+                event.type === ServerGeminiEventType.Thought ||
+                event.type === ServerGeminiEventType.ToolCallRequest ||
+                event.type === ServerGeminiEventType.Finished ||
+                event.type === ServerGeminiEventType.Citation;
+              if (terminalRejection) {
+                reportDeliveryFailure();
+              } else if (provesAcceptance && !accepted) {
+                accepted = true;
+                if (!mutatedBeforeAcceptance) {
+                  metadata?.onContextAccepted?.();
+                }
+              }
+              yield event;
+            }
+            // An empty stream or a stream containing only locally generated
+            // control events provides no evidence that the model received
+            // schema-bearing context, so fail closed.
+            if (!accepted) {
+              reportDeliveryFailure();
+            }
+          })();
 
           const processingResult = await processGeminiStreamEvents(
-            stream,
+            acknowledgedStream,
             userMessageTimestamp,
             processingSignal,
             submitType,
@@ -3858,7 +3970,7 @@ export const useGeminiStream = (
           ) {
             cleanupReviewLease = true;
             submitPromptOnCompleteRef.current = null;
-            metadata?.onDeliveryFailed?.();
+            reportDeliveryFailure();
             return;
           }
 
@@ -3971,8 +4083,8 @@ export const useGeminiStream = (
           }
 
           if (lastPromptErroredRef.current || goalTerminalErrorRef.current) {
-            metadata?.onDeliveryFailed?.();
-          } else {
+            reportDeliveryFailure();
+          } else if (!deliveryFailed) {
             metadata?.onDelivered?.();
           }
 
@@ -4008,7 +4120,7 @@ export const useGeminiStream = (
           }
         } catch (error: unknown) {
           cleanupReviewLease = true;
-          metadata?.onDeliveryFailed?.();
+          reportDeliveryFailure();
           if (error instanceof UnauthorizedError) {
             onAuthError('Session expired or is unauthorized.');
           } else if (!isNodeError(error) || error.name !== 'AbortError') {
@@ -4085,9 +4197,42 @@ export const useGeminiStream = (
               }
             }
             if (pendingCompletedTools.size > 0) {
-              await handleCompletedToolsRef.current([
-                ...pendingCompletedTools.values(),
-              ]);
+              const flushedTools = [...pendingCompletedTools.values()];
+              // Capture the delivered callIds from the flush's OWN
+              // handleCompletedTools invocation via a synchronous sink.
+              // A shared ref read across the acceptance await raced: a
+              // batch completing inside the continuation's
+              // time-to-first-token window ran handleCompletedTools'
+              // entry reset before this read, leaving the delivered set
+              // null/foreign and silently skipping the commit (R23-1).
+              // The sink fires before the send is issued, so the capture
+              // cannot interleave.
+              let flushedDeliveredIds: Set<string> | undefined;
+              const flushedAccepted = await handleCompletedToolsRef.current(
+                flushedTools,
+                (deliveredCallIds) => {
+                  flushedDeliveredIds = deliveredCallIds;
+                },
+              );
+              // Issue #6721: the scheduler settled these deferred batches
+              // with `false` (delivery not yet accepted), leaving their
+              // pending schema presentations uncommitted. Now that the
+              // flush delivered them and the context was accepted, commit
+              // the presentations the flushed results carry — but only for
+              // calls actually included in the accepted send.
+              // handleCompletedTools dedups any call whose callId already
+              // has a functionResponse in history (e.g. a synthetic
+              // placeholder planted by the inline repair pass), dropping its
+              // real result. Committing a dropped call's presentations would
+              // open the #6721 gate for a schema that never entered the
+              // model context, so filter to the delivered set.
+              if (flushedAccepted === true && flushedDeliveredIds) {
+                const deliveredIds = flushedDeliveredIds;
+                const deliveredTools = flushedTools.filter((toolCall) =>
+                  deliveredIds.has(toolCall.request.callId),
+                );
+                commitCarriedProxySchemaPresentations(deliveredTools);
+              }
             }
           }
         }
@@ -4140,6 +4285,7 @@ export const useGeminiStream = (
       releaseUndeliveredGoalTurn,
       retainSubmissionActivity,
       setSubmissionInFlight,
+      commitCarriedProxySchemaPresentations,
     ],
   );
 
@@ -4252,7 +4398,15 @@ export const useGeminiStream = (
   );
 
   const handleCompletedTools = useCallback(
-    async (completedToolCallsFromScheduler: TrackedToolCall[]) => {
+    async (
+      completedToolCallsFromScheduler: TrackedToolCall[],
+      // Deferred-batch flush only: receives the callIds this invocation
+      // actually delivers (post history-dedup), fired synchronously before
+      // the send is issued. The flush commits carried proxy-schema
+      // presentations against THIS set rather than a shared ref read across
+      // the acceptance await (R23-1).
+      onDeliveredCallIds?: (deliveredCallIds: Set<string>) => void,
+    ) => {
       const completedAndReadyToSubmitTools =
         completedToolCallsFromScheduler.filter(
           (
@@ -4311,6 +4465,17 @@ export const useGeminiStream = (
             `whose callId already has a functionResponse in history: ` +
             `${dedupedCallIds.join(', ')}`,
         );
+        // Issue #6721: a deduped call's real result never ships — only the
+        // synthetic placeholder (Race A) is in history. The scheduler settles
+        // this batch's pending schema presentations against ONE batch-level
+        // acceptance boolean over the whole completed array, so strip the
+        // dropped calls' carried presentations before any return; committing
+        // them would open the gate for a schema whose only trace in history
+        // is the placeholder. Mirrors the delivered-set filter the deferred
+        // flush applies below.
+        for (const tc of dedupedTools) {
+          tc.response.pendingProxySchemaPresentations = undefined;
+        }
         // Even though the wire-side submission is dropped, the tool DID
         // run locally — `toolCallCount` and `skillsModifiedInSession`
         // must reflect that. Without this, deduped skill-write tools
@@ -4386,7 +4551,7 @@ export const useGeminiStream = (
         if (deferredTools.length > 0) {
           pendingCompletedToolBatchesRef.current.push(deferredTools);
         }
-        return;
+        return false;
       }
 
       const continuationOwner = completedAndReadyToSubmitTools
@@ -4482,6 +4647,16 @@ export const useGeminiStream = (
           )
         : [];
       for (const toolCall of secondaryTools) {
+        // Issue #6721: secondary-interaction calls are dropped from this
+        // send (marked submitted and filtered out of `geminiTools` below),
+        // but the scheduler settles this batch's pending schema
+        // presentations against ONE batch-level acceptance boolean over the
+        // whole completed array — so an accepted owning send would commit
+        // the dropped calls' carried presentations for schemas that never
+        // entered model context. Strip them here, mirroring the dedup-block
+        // strip above. (The deferred flush is already safe: it filters to
+        // the delivered set, which excludes secondary calls.)
+        toolCall.response.pendingProxySchemaPresentations = undefined;
         const secondaryOwner = ownerForToolCall(toolCall);
         if (secondaryOwner && toolCall.request.prompt_id) {
           secondaryInteractionOwners.set(
@@ -4597,7 +4772,13 @@ export const useGeminiStream = (
           'invalid Goal tool context',
           'continuation_goal_context_invalid',
         );
-        return;
+        // Issue #6721 delivery contract: the batch was fail-closed WITHOUT
+        // addHistory or a send — nothing entered model context, so report
+        // delivery-not-accepted and let the scheduler discard the batch's
+        // pending schema presentations. A bare `return` (undefined) decodes
+        // as accepted at settlement and would commit presentations for
+        // schemas that never reached the model.
+        return false;
       }
       if (!toolGoalPermit && toolGoalContexts.length > 0) {
         const active = activeGoalTurnRef.current;
@@ -4631,7 +4812,9 @@ export const useGeminiStream = (
             'missing Goal tool context',
             'continuation_goal_context_missing',
           );
-          return;
+          // Fail-closed without addHistory — see the
+          // continuation_goal_context_invalid exit for the delivery contract.
+          return false;
         }
       }
       let toolGoalBinding: GoalTurnBinding | undefined;
@@ -4655,7 +4838,9 @@ export const useGeminiStream = (
             'stale Goal tool context',
             'continuation_goal_context_stale',
           );
-          return;
+          // Fail-closed without addHistory — see the
+          // continuation_goal_context_invalid exit for the delivery contract.
+          return false;
         }
         toolGoalBinding =
           existing ??
@@ -4777,7 +4962,7 @@ export const useGeminiStream = (
         } else {
           endToolInteraction('ok');
         }
-        return;
+        return false;
       }
 
       type ReadyToolResponse = {
@@ -4823,6 +5008,15 @@ export const useGeminiStream = (
         orderedResponses.push(...queue);
       }
 
+      // Hand the deferred-batch flush the callIds this send will actually
+      // deliver (post dedup), so it commits carried presentations only for
+      // calls whose result enters the model context. Fired synchronously
+      // here — before submitQuery below — so the capture cannot race with
+      // any concurrent handleCompletedTools invocation (R23-1).
+      onDeliveredCallIds?.(
+        new Set(orderedResponses.map(({ request }) => request.callId)),
+      );
+
       const finalizedResponses = await finalizeToolResponses(
         config,
         orderedResponses.map(({ request, response }) => ({
@@ -4844,9 +5038,10 @@ export const useGeminiStream = (
         (entry) => entry.responseParts,
       );
       orderedResponses.forEach(({ request, response, status }, index) => {
+        const finalizedParts = finalizedResponses[index].responseParts;
         const goalContext = request.goalContext;
         config.getChatRecordingService?.()?.recordToolResult?.(
-          finalizedResponses[index].responseParts,
+          finalizedParts,
           {
             callId: request.callId,
             status,
@@ -4881,7 +5076,7 @@ export const useGeminiStream = (
           );
         }
         endToolInteraction('cancelled');
-        return;
+        return false;
       }
 
       // If all the tools were cancelled, don't submit a response to Gemini.
@@ -4913,7 +5108,7 @@ export const useGeminiStream = (
           );
         }
         endToolInteraction('cancelled');
-        return;
+        return false;
       }
 
       const callIdsToMarkAsSubmitted = geminiTools.map(
@@ -5013,6 +5208,10 @@ export const useGeminiStream = (
         } else {
           endToolInteraction('ok');
         }
+        // Deliberate bare `return` (undefined ⇒ accepted at settlement):
+        // the addHistory above put the carrying results into the model
+        // context, so this batch's presentations ARE backed by history.
+        // Every other bare-return discard exit above returns `false`.
         return;
       }
 
@@ -5120,7 +5319,7 @@ export const useGeminiStream = (
           );
         }
         endToolInteraction('cancelled');
-        return;
+        return false;
       }
 
       const backgroundTaskRegistry = config.getBackgroundTaskRegistry();
@@ -5140,7 +5339,9 @@ export const useGeminiStream = (
           );
         });
       if (backgroundLaunchExhaustedCapacity) {
-        geminiClient?.addHistory({ role: 'user', parts: responsesToSend });
+        if (geminiClient) {
+          geminiClient.addHistory({ role: 'user', parts: responsesToSend });
+        }
         if (toolGoalBinding) {
           await failClosedGoalTurn(
             toolGoalBinding,
@@ -5152,7 +5353,7 @@ export const useGeminiStream = (
           'tool continuation capacity exhausted',
           'continuation_capacity_exhausted',
         );
-        return;
+        return false;
       }
 
       // Drain steerable user messages at this sampling boundary and append
@@ -5199,7 +5400,7 @@ export const useGeminiStream = (
           );
         }
         endToolInteraction('cancelled');
-        return;
+        return false;
       }
       if (toolGoalBinding?.controller.signal.aborted) {
         drainedSteer?.restore();
@@ -5208,18 +5409,32 @@ export const useGeminiStream = (
           'Goal tool continuation was preempted',
         );
         endToolInteraction('cancelled');
-        return;
+        return false;
       }
 
-      await submitQuery(responsesToSend, SendMessageType.ToolResult, promptId, {
+      let settled = false;
+      let settleAcceptance: (accepted: boolean) => void = () => {};
+      const acceptance = new Promise<boolean>((resolve) => {
+        settleAcceptance = (accepted) => {
+          if (settled) return;
+          settled = true;
+          resolve(accepted);
+        };
+      });
+      void submitQuery(responsesToSend, SendMessageType.ToolResult, promptId, {
         steerInput: drainedSteer,
-        onDelivered: drainedSteer?.accept,
+        onContextAccepted: () => {
+          drainedSteer?.accept();
+          settleAcceptance(true);
+        },
         onAdmissionFailed: () => {
+          drainedSteer?.restore();
           endToolInteraction(
             'error',
             'tool continuation admission failed',
             'continuation_admission_failed',
           );
+          settleAcceptance(false);
         },
         onDeliveryFailed: () => {
           drainedSteer?.restore();
@@ -5228,10 +5443,15 @@ export const useGeminiStream = (
             'tool continuation delivery failed',
             'continuation_delivery_failed',
           );
+          settleAcceptance(false);
         },
         goalBinding: toolGoalBinding,
         toolContinuationOwner: continuationOwner,
-      });
+      }).then(
+        () => settleAcceptance(false),
+        () => settleAcceptance(false),
+      );
+      return acceptance;
     },
     [
       submitQuery,

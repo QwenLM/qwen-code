@@ -179,6 +179,7 @@ export class ToolCallEvent implements BaseTelemetryEvent {
   'event.timestamp': string;
   call_id?: string;
   function_name: string;
+  'tool.provider_name'?: string;
   function_args: Record<string, unknown>;
   duration_ms: number;
   status: 'success' | 'error' | 'cancelled';
@@ -200,6 +201,9 @@ export class ToolCallEvent implements BaseTelemetryEvent {
     this['event.timestamp'] = new Date().toISOString();
     this.call_id = call.request.callId;
     this.function_name = call.request.name;
+    if (call.request.providerName) {
+      this['tool.provider_name'] = call.request.providerName;
+    }
     // structured_output args ARE the user's final structured payload (the
     // command's actual answer, already emitted in stdout `result` /
     // `structured_result`). Recording them again as ordinary tool-call

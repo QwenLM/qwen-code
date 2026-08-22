@@ -450,6 +450,9 @@ describe('Session', () => {
     refreshSystemInstruction: ReturnType<typeof vi.fn>;
     setTools: ReturnType<typeof vi.fn>;
     tryCompressChat: ReturnType<typeof vi.fn>;
+    stripOrphanedUserEntriesFromHistory: ReturnType<typeof vi.fn>;
+    setHistory: ReturnType<typeof vi.fn>;
+    truncateHistory: ReturnType<typeof vi.fn>;
   };
   let mockBackgroundTaskRegistry: {
     abortAll: ReturnType<typeof vi.fn>;
@@ -478,10 +481,29 @@ describe('Session', () => {
   let mockToolRegistry: {
     getTool: ReturnType<typeof vi.fn>;
     ensureTool: ReturnType<typeof vi.fn>;
+    isDeferredProxyPairRegistered: ReturnType<typeof vi.fn>;
+    isProxyEligibleDeferredTool: ReturnType<typeof vi.fn>;
     registerTool: ReturnType<typeof vi.fn>;
     warmAll: ReturnType<typeof vi.fn>;
     getFunctionDeclarationsFiltered: ReturnType<typeof vi.fn>;
+    schemaFingerprint: ReturnType<typeof vi.fn>;
+    markProxySchemaPresented: ReturnType<typeof vi.fn>;
+    hasPresentedProxySchema: ReturnType<typeof vi.fn>;
+    getProxySchemaPresentationSnapshot: ReturnType<typeof vi.fn>;
+    getProxySchemaPresentationGeneration: ReturnType<typeof vi.fn>;
+    commitProxySchemaPresentations: ReturnType<typeof vi.fn>;
+    clearProxySchemaPresentations: ReturnType<typeof vi.fn>;
+    restoreProxySchemaPresentationSnapshot: ReturnType<typeof vi.fn>;
   };
+  // Backing store for the mocked presentation ledger. Tests that expect a
+  // wrapper call to pass issue #6721's gate seed it (or deliver a
+  // tool_search result carrying proxySchemaPresentations, which the daemon
+  // commits at batch finalization).
+  let presentedProxySchemas: Map<string, string>;
+  // Mirrors ToolRegistry's ledger generation: bumped on every clear,
+  // captured with snapshots, and a restore across an intervening clear is a
+  // no-op (issue #6721 rollback must not resurrect cleared marks).
+  let presentationGeneration: number;
   let mockWorkflowRunRegistry: {
     setApprovalRequestCallback: ReturnType<typeof vi.fn>;
     resolvePendingApproval: ReturnType<typeof vi.fn>;
@@ -650,6 +672,11 @@ describe('Session', () => {
         newTokenCount: 0,
         compressionStatus: core.CompressionStatus.NOOP,
       }),
+      stripOrphanedUserEntriesFromHistory: vi.fn(() =>
+        mockChat.stripOrphanedUserEntriesFromHistory(),
+      ),
+      setHistory: vi.fn(),
+      truncateHistory: vi.fn(),
     };
     mockBackgroundTaskRegistry = {
       abortAll: vi.fn(),
@@ -747,13 +774,50 @@ describe('Session', () => {
       rewind: vi.fn(),
     };
 
+    presentedProxySchemas = new Map<string, string>();
+    presentationGeneration = 0;
     mockToolRegistry = {
       getTool: vi.fn(),
       ensureTool: vi.fn().mockResolvedValue(true),
+      isDeferredProxyPairRegistered: vi.fn().mockReturnValue(true),
+      isProxyEligibleDeferredTool: vi.fn().mockReturnValue(false),
       registerTool: vi.fn(),
       warmAll: vi.fn().mockResolvedValue(undefined),
       getFunctionDeclarationsFiltered: vi.fn((names: string[]) =>
         names.map((name) => ({ name })),
+      ),
+      schemaFingerprint: vi.fn().mockReturnValue('fp'),
+      markProxySchemaPresented: vi.fn((name: string, fingerprint: string) => {
+        presentedProxySchemas.set(name, fingerprint);
+      }),
+      hasPresentedProxySchema: vi.fn(
+        (name: string, fingerprint: string) =>
+          presentedProxySchemas.get(name) === fingerprint,
+      ),
+      getProxySchemaPresentationSnapshot: vi.fn(
+        () => new Map(presentedProxySchemas),
+      ),
+      getProxySchemaPresentationGeneration: vi.fn(() => presentationGeneration),
+      commitProxySchemaPresentations: vi.fn(
+        (
+          presentations: ReadonlyArray<{ name: string; fingerprint: string }>,
+        ) => {
+          for (const { name, fingerprint } of presentations) {
+            presentedProxySchemas.set(name, fingerprint);
+          }
+        },
+      ),
+      clearProxySchemaPresentations: vi.fn(() => {
+        presentedProxySchemas.clear();
+        presentationGeneration++;
+      }),
+      restoreProxySchemaPresentationSnapshot: vi.fn(
+        (snapshot: ReadonlyMap<string, string>, generation: number) => {
+          // Mirrors the real registry: a clear since the snapshot was
+          // captured invalidates the restore.
+          if (generation !== presentationGeneration) return;
+          presentedProxySchemas = new Map(snapshot);
+        },
       ),
     };
     const fileService = {
@@ -2668,9 +2732,9 @@ describe('Session', () => {
       mockChat.getHistory = vi
         .fn()
         .mockReturnValue([{ role: 'user', parts: [{ text: 'unanswered' }] }]);
-      mockChat.stripOrphanedUserEntriesFromHistory = vi
-        .fn()
-        .mockReturnValue([{ role: 'user', parts: [{ text: 'unanswered' }] }]);
+      mockGeminiClient.stripOrphanedUserEntriesFromHistory.mockReturnValue([
+        { role: 'user', parts: [{ text: 'unanswered' }] },
+      ]);
       // No token limit, so we reach the send; the send then throws.
       mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(0);
       mockChat.sendMessageStream = vi
@@ -2687,7 +2751,12 @@ describe('Session', () => {
         'send blew up',
       );
 
-      expect(mockChat.stripOrphanedUserEntriesFromHistory).toHaveBeenCalled();
+      expect(
+        mockGeminiClient.stripOrphanedUserEntriesFromHistory,
+      ).toHaveBeenCalled();
+      expect(
+        mockChat.stripOrphanedUserEntriesFromHistory,
+      ).not.toHaveBeenCalled();
       expect(mockChat.addHistory).toHaveBeenCalledWith(
         expect.objectContaining({
           role: 'user',
@@ -2696,6 +2765,26 @@ describe('Session', () => {
           ]),
         }),
       );
+    });
+
+    it('uses the client history wrapper when a daemon retry strips an orphan', async () => {
+      mockGeminiClient.stripOrphanedUserEntriesFromHistory.mockReturnValue([]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        prompt: [{ type: 'text', text: 'retry this turn' }],
+        sessionId: 'test-session-id',
+        _meta: { 'qwen.daemon.retry': true },
+      } as Parameters<typeof session.prompt>[0]);
+
+      expect(
+        mockGeminiClient.stripOrphanedUserEntriesFromHistory,
+      ).toHaveBeenCalledOnce();
+      expect(
+        mockChat.stripOrphanedUserEntriesFromHistory,
+      ).not.toHaveBeenCalled();
     });
 
     it('rejects (accepted:false) when a prompt is already in flight', async () => {
@@ -3384,7 +3473,8 @@ describe('Session', () => {
       const result = session.rewindToTurn(1);
 
       expect(result).toEqual({ targetTurnIndex: 1, apiTruncateIndex: 2 });
-      expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
+      expect(mockGeminiClient.truncateHistory).toHaveBeenCalledWith(2);
+      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
       expect(mockChat.stripThoughtsFromHistory).toHaveBeenCalled();
       const request = await runExitPlanModeApprovalPrompt();
       expect(request.toolCall._meta).toEqual(
@@ -3419,7 +3509,7 @@ describe('Session', () => {
       const result = session.rewindToTurn(1, { rewindFiles: false });
 
       expect(result).toEqual({ targetTurnIndex: 1, apiTruncateIndex: 2 });
-      expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
+      expect(mockGeminiClient.truncateHistory).toHaveBeenCalledWith(2);
       expect(
         mockFileHistoryService.restoreFromSnapshots,
       ).not.toHaveBeenCalled();
@@ -3449,7 +3539,7 @@ describe('Session', () => {
       const result = session.rewindToTurn(0);
 
       expect(result).toEqual({ targetTurnIndex: 0, apiTruncateIndex: 1 });
-      expect(mockChat.truncateHistory).toHaveBeenCalledWith(1);
+      expect(mockGeminiClient.truncateHistory).toHaveBeenCalledWith(1);
     });
 
     it('counts only real user prompts as rewindable turns', () => {
@@ -3479,9 +3569,9 @@ describe('Session', () => {
       expect(session.getRewindableUserTurnCount()).toBe(2);
     });
 
-    it('does not count a mid-history MCP added-tool reminder as a user turn', () => {
-      // drainPendingAddedMcpToolsReminder injects a pure <system-reminder>
-      // user entry mid-history. Counting it as a real turn would land the
+    it('does not count a mid-history capability reminder as a user turn', () => {
+      // Some capability updates inject a pure <system-reminder> user entry
+      // mid-history. Counting it as a real turn would land the
       // rewind one entry early, dropping the reminder plus a turn's context.
       const history: Content[] = [
         {
@@ -3513,7 +3603,7 @@ describe('Session', () => {
       // Keep startup + turn 1 + the MCP reminder (indices 0–3); truncate at
       // the second prompt (index 4). Counting the reminder would return 3.
       expect(result).toEqual({ targetTurnIndex: 1, apiTruncateIndex: 4 });
-      expect(mockChat.truncateHistory).toHaveBeenCalledWith(4);
+      expect(mockGeminiClient.truncateHistory).toHaveBeenCalledWith(4);
     });
 
     it('does not count Todo Stop Guard continuations as user turns', () => {
@@ -3544,7 +3634,7 @@ describe('Session', () => {
         targetTurnIndex: 1,
         apiTruncateIndex: 6,
       });
-      expect(mockChat.truncateHistory).toHaveBeenCalledWith(6);
+      expect(mockGeminiClient.truncateHistory).toHaveBeenCalledWith(6);
     });
 
     it('counts user text that only resembles a Todo Stop Guard prompt', () => {
@@ -3588,7 +3678,7 @@ describe('Session', () => {
       expect(() => session.rewindToTurn(2)).toThrow(
         'Cannot rewind to the requested turn',
       );
-      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+      expect(mockGeminiClient.truncateHistory).not.toHaveBeenCalled();
     });
 
     it('rejects rewinds while a cron prompt is mutating history', () => {
@@ -3597,14 +3687,14 @@ describe('Session', () => {
       expect(() => session.rewindToTurn(0)).toThrow(
         'Cannot rewind while a prompt is running',
       );
-      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+      expect(mockGeminiClient.truncateHistory).not.toHaveBeenCalled();
     });
 
     it('rejects invalid target turn indexes', () => {
       expect(() => session.rewindToTurn(-1)).toThrow(
         'targetTurnIndex must be a non-negative integer',
       );
-      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+      expect(mockGeminiClient.truncateHistory).not.toHaveBeenCalled();
     });
 
     it('rejects rewinds while a prompt is running', () => {
@@ -3614,7 +3704,7 @@ describe('Session', () => {
       expect(() => session.rewindToTurn(0)).toThrow(
         'Cannot rewind while a prompt is running',
       );
-      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+      expect(mockGeminiClient.truncateHistory).not.toHaveBeenCalled();
     });
 
     it('rejects history mutation until an aborted prompt actually settles', () => {
@@ -3630,8 +3720,8 @@ describe('Session', () => {
       expect(() => session.restoreHistory([])).toThrow(
         'Cannot restore history while a prompt is running',
       );
-      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
-      expect(mockChat.setHistory).not.toHaveBeenCalled();
+      expect(mockGeminiClient.truncateHistory).not.toHaveBeenCalled();
+      expect(mockGeminiClient.setHistory).not.toHaveBeenCalled();
     });
 
     it('rejects history mutation while close is in progress', () => {
@@ -3654,7 +3744,7 @@ describe('Session', () => {
       expect(() => session.rewindToTurn(0)).toThrow(
         'Cannot rewind while a prompt is running',
       );
-      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+      expect(mockGeminiClient.truncateHistory).not.toHaveBeenCalled();
     });
 
     it('rejects rewinds while a notification prompt is processing', () => {
@@ -3665,7 +3755,7 @@ describe('Session', () => {
       expect(() => session.rewindToTurn(0)).toThrow(
         'Cannot rewind while a prompt is running',
       );
-      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+      expect(mockGeminiClient.truncateHistory).not.toHaveBeenCalled();
     });
 
     it('rejects rewinds while a notification abort controller is active', () => {
@@ -3676,7 +3766,7 @@ describe('Session', () => {
       expect(() => session.rewindToTurn(0)).toThrow(
         'Cannot rewind while a prompt is running',
       );
-      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+      expect(mockGeminiClient.truncateHistory).not.toHaveBeenCalled();
     });
 
     it('restores a captured history snapshot', () => {
@@ -3690,7 +3780,8 @@ describe('Session', () => {
       session.restoreHistory(snapshot);
 
       expect(snapshot).toEqual(history);
-      expect(mockChat.setHistory).toHaveBeenCalledWith(history);
+      expect(mockGeminiClient.setHistory).toHaveBeenCalledWith(history);
+      expect(mockChat.setHistory).not.toHaveBeenCalled();
       expect(mockChat.getHistory).not.toHaveBeenCalled();
     });
 
@@ -3727,7 +3818,7 @@ describe('Session', () => {
       expect(() => session.restoreHistory([])).toThrow(
         'Cannot restore history while a prompt is running',
       );
-      expect(mockChat.setHistory).not.toHaveBeenCalled();
+      expect(mockGeminiClient.setHistory).not.toHaveBeenCalled();
     });
 
     it('rejects history restore while a cron prompt is mutating history', () => {
@@ -3736,7 +3827,7 @@ describe('Session', () => {
       expect(() => session.restoreHistory([])).toThrow(
         'Cannot restore history while a prompt is running',
       );
-      expect(mockChat.setHistory).not.toHaveBeenCalled();
+      expect(mockGeminiClient.setHistory).not.toHaveBeenCalled();
     });
 
     it('rejects history restore while a cron abort is active', () => {
@@ -3747,7 +3838,7 @@ describe('Session', () => {
       expect(() => session.restoreHistory([])).toThrow(
         'Cannot restore history while a prompt is running',
       );
-      expect(mockChat.setHistory).not.toHaveBeenCalled();
+      expect(mockGeminiClient.setHistory).not.toHaveBeenCalled();
     });
 
     it('rejects history restore while a notification prompt is processing', () => {
@@ -3758,7 +3849,7 @@ describe('Session', () => {
       expect(() => session.restoreHistory([])).toThrow(
         'Cannot restore history while a prompt is running',
       );
-      expect(mockChat.setHistory).not.toHaveBeenCalled();
+      expect(mockGeminiClient.setHistory).not.toHaveBeenCalled();
     });
 
     it('rejects history restore while a notification abort controller is active', () => {
@@ -3769,7 +3860,7 @@ describe('Session', () => {
       expect(() => session.restoreHistory([])).toThrow(
         'Cannot restore history while a prompt is running',
       );
-      expect(mockChat.setHistory).not.toHaveBeenCalled();
+      expect(mockGeminiClient.setHistory).not.toHaveBeenCalled();
     });
   });
 
@@ -26751,6 +26842,697 @@ describe('Session', () => {
       );
     });
 
+    function mockAllowedToolWithBuild(
+      name: string,
+      build: ReturnType<typeof vi.fn>,
+    ) {
+      return {
+        name,
+        kind: core.Kind.Read,
+        displayName: name,
+        description: name,
+        build,
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      };
+    }
+
+    it('routes tool_call to the target after tool_search', async () => {
+      const toolSearchBuild = vi.fn().mockReturnValue({
+        params: {},
+        execute: vi.fn().mockResolvedValue({
+          llmContent: '<functions>cron_create</functions>',
+          returnDisplay: 'Loaded cron_create',
+          // Mirrors the real tool_search delivery: the carried schema is
+          // PENDING until the daemon finalizes the batch (the carrying
+          // result entering the session record), never marked at execute.
+          proxySchemaPresentations: [
+            { name: core.ToolNames.CRON_CREATE, fingerprint: 'fp' },
+          ],
+        }),
+        getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+        getDescription: vi.fn().mockReturnValue(core.ToolNames.TOOL_SEARCH),
+        toolLocations: vi.fn().mockReturnValue([]),
+      });
+      const cronBuild = vi.fn((params: Record<string, unknown>) => ({
+        params,
+        execute: vi.fn().mockResolvedValue({
+          llmContent: 'cron created',
+          returnDisplay: 'cron created',
+        }),
+        getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+        getDescription: vi.fn().mockReturnValue(core.ToolNames.CRON_CREATE),
+        toolLocations: vi.fn().mockReturnValue([]),
+      }));
+      const toolsByName = new Map<
+        string,
+        ReturnType<typeof mockAllowedToolWithBuild>
+      >([
+        [
+          core.ToolNames.TOOL_SEARCH,
+          mockAllowedToolWithBuild(core.ToolNames.TOOL_SEARCH, toolSearchBuild),
+        ],
+        [
+          core.ToolNames.CRON_CREATE,
+          mockAllowedToolWithBuild(core.ToolNames.CRON_CREATE, cronBuild),
+        ],
+      ]);
+      mockToolRegistry.getTool.mockImplementation((name: string) =>
+        toolsByName.get(name),
+      );
+      mockToolRegistry.ensureTool.mockImplementation(async (name: string) =>
+        toolsByName.get(name),
+      );
+      mockToolRegistry.isProxyEligibleDeferredTool.mockImplementation(
+        (name: string) => name === core.ToolNames.CRON_CREATE,
+      );
+
+      await (session as unknown as ToolCallInternals).runToolCalls(
+        new AbortController().signal,
+        'prompt-search',
+        [
+          {
+            id: 'search_call',
+            name: core.ToolNames.TOOL_SEARCH,
+            args: { query: 'cron' },
+          },
+        ],
+      );
+      // The delivered schema is committed only once the search batch
+      // finalized (the carrying result entering the session record).
+      expect(presentedProxySchemas.get(core.ToolNames.CRON_CREATE)).toBe('fp');
+      const proxyResult = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-proxy', [
+        {
+          id: 'proxy_call',
+          name: core.ToolNames.DEFERRED_TOOL_CALL,
+          args: {
+            name: core.ToolNames.CRON_CREATE,
+            arguments: { schedule: '0 9 * * *' },
+          },
+        },
+      ]);
+
+      expect(cronBuild).toHaveBeenCalledWith({ schedule: '0 9 * * *' });
+      expect(proxyResult.parts[0]?.functionResponse?.name).toBe(
+        core.ToolNames.DEFERRED_TOOL_CALL,
+      );
+      expect(
+        mockChatRecordingService.recordToolResult,
+      ).toHaveBeenLastCalledWith(
+        proxyResult.parts,
+        expect.objectContaining({ status: 'success' }),
+      );
+    });
+
+    it('keeps the deferred wrapper response name when cancellation arrives after execution', async () => {
+      const abortController = new AbortController();
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'cron created',
+        returnDisplay: 'cron created',
+      });
+      const cronTool = mockAllowedToolWithBuild(
+        core.ToolNames.CRON_CREATE,
+        vi.fn().mockReturnValue({
+          params: {},
+          execute,
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue(core.ToolNames.CRON_CREATE),
+          toolLocations: vi.fn().mockReturnValue([]),
+        }),
+      );
+      mockToolRegistry.getTool.mockReturnValue(cronTool);
+      mockToolRegistry.ensureTool.mockResolvedValue(cronTool);
+      mockToolRegistry.isProxyEligibleDeferredTool.mockReturnValue(true);
+      // Presented by an earlier turn so the fail-closed gate passes and the
+      // cancellation-after-execution path under test is actually reached.
+      presentedProxySchemas.set(core.ToolNames.CRON_CREATE, 'fp');
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      bridgeToolResultImagesSpy.mockImplementationOnce(
+        async ({ responseParts }: { responseParts: Part[] }) => {
+          abortController.abort();
+          return responseParts;
+        },
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(abortController.signal, 'prompt-proxy-cancelled', [
+        {
+          id: 'proxy_cancelled_call',
+          name: core.ToolNames.DEFERRED_TOOL_CALL,
+          args: {
+            name: core.ToolNames.CRON_CREATE,
+            arguments: { schedule: '0 9 * * *' },
+          },
+        },
+      ]);
+
+      expect(execute).toHaveBeenCalledOnce();
+      expect(result.parts[0]?.functionResponse).toMatchObject({
+        id: 'proxy_cancelled_call',
+        name: core.ToolNames.DEFERRED_TOOL_CALL,
+        response: {
+          error: 'The tool had already completed; its output was discarded.',
+        },
+      });
+    });
+
+    it('shows the target and provider route when ACP hard-denies a proxy call', async () => {
+      const execute = vi.fn();
+      const targetTool = mockAllowedToolWithBuild(
+        core.ToolNames.CRON_CREATE,
+        vi.fn().mockReturnValue({
+          params: {},
+          execute,
+          getDefaultPermission: vi.fn().mockResolvedValue('deny'),
+          getDescription: vi.fn().mockReturnValue(core.ToolNames.CRON_CREATE),
+          toolLocations: vi.fn().mockReturnValue([]),
+        }),
+      );
+      mockToolRegistry.getTool.mockReturnValue(targetTool);
+      mockToolRegistry.ensureTool.mockResolvedValue(targetTool);
+      mockToolRegistry.isProxyEligibleDeferredTool.mockReturnValue(true);
+      // Presented by an earlier turn so the fail-closed gate passes and the
+      // hard-deny gate under test is actually reached.
+      presentedProxySchemas.set(core.ToolNames.CRON_CREATE, 'fp');
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-proxy-denied', [
+        {
+          id: 'proxy_denied',
+          name: core.ToolNames.DEFERRED_TOOL_CALL,
+          args: {
+            name: core.ToolNames.CRON_CREATE,
+            arguments: { schedule: '0 9 * * *' },
+          },
+        },
+      ]);
+
+      expect(result.parts[0]?.functionResponse).toEqual({
+        id: 'proxy_denied',
+        name: core.ToolNames.DEFERRED_TOOL_CALL,
+        response: {
+          error:
+            'Tool "cron_create" is denied: the tool\'s default permission is \'deny\'. (tool "cron_create" via "tool_call")',
+        },
+      });
+      // The hard-deny gate must reject before execution, not merely return
+      // the error-response shape.
+      expect(execute).not.toHaveBeenCalled();
+    });
+
+    it('denies a proxy call when the tool_call wrapper itself is disabled', async () => {
+      // Deny rules are mutable mid-session: even when the resolved target is
+      // enabled (its own default permission is allow, so the denied proxy
+      // route would otherwise execute outright), a rule naming the wrapper
+      // must reject the proxied route — mirroring the wrapper gate this PR
+      // adds to CoreToolScheduler.
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'cron created',
+        returnDisplay: 'cron created',
+      });
+      const cronTool = mockAllowedToolWithBuild(
+        core.ToolNames.CRON_CREATE,
+        vi.fn().mockReturnValue({
+          params: {},
+          execute,
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue(core.ToolNames.CRON_CREATE),
+          toolLocations: vi.fn().mockReturnValue([]),
+        }),
+      );
+      mockToolRegistry.getTool.mockReturnValue(cronTool);
+      mockToolRegistry.ensureTool.mockResolvedValue(cronTool);
+      mockToolRegistry.isProxyEligibleDeferredTool.mockReturnValue(true);
+      presentedProxySchemas.set(core.ToolNames.CRON_CREATE, 'fp');
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue({
+        isToolEnabled: vi.fn(
+          async (name: string) => name !== core.ToolNames.DEFERRED_TOOL_CALL,
+        ),
+        findMatchingDenyRule: vi.fn(({ toolName }: { toolName: string }) =>
+          toolName === core.ToolNames.DEFERRED_TOOL_CALL
+            ? 'tool_call'
+            : undefined,
+        ),
+      });
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-wrapper-denied', [
+        {
+          id: 'wrapper_denied',
+          name: core.ToolNames.DEFERRED_TOOL_CALL,
+          args: {
+            name: core.ToolNames.CRON_CREATE,
+            arguments: { schedule: '0 9 * * *' },
+          },
+        },
+      ]);
+
+      expect(execute).not.toHaveBeenCalled();
+      expect(result.parts[0]?.functionResponse).toEqual({
+        id: 'wrapper_denied',
+        name: core.ToolNames.DEFERRED_TOOL_CALL,
+        response: {
+          error: expect.stringContaining(
+            `Qwen Code requires permission to use "${core.ToolNames.DEFERRED_TOOL_CALL}"`,
+          ),
+        },
+      });
+    });
+
+    it('executes the deferred tool instance authorized by normalization', async () => {
+      const logToolCallSpy = vi
+        .spyOn(core, 'logToolCall')
+        .mockImplementation(() => {});
+      const startToolSpanSpy = vi.spyOn(core, 'startToolSpan');
+      const authorizedExecute = vi.fn().mockResolvedValue({
+        llmContent: 'authorized tool executed',
+        returnDisplay: 'authorized tool executed',
+      });
+      const replacementExecute = vi.fn().mockResolvedValue({
+        llmContent: 'replacement tool executed',
+        returnDisplay: 'replacement tool executed',
+      });
+      const authorizedBuild = vi.fn((params: Record<string, unknown>) => ({
+        params,
+        execute: authorizedExecute,
+        getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+        getDescription: vi.fn().mockReturnValue(core.ToolNames.CRON_CREATE),
+        toolLocations: vi.fn().mockReturnValue([]),
+      }));
+      const replacementBuild = vi.fn((params: Record<string, unknown>) => ({
+        params,
+        execute: replacementExecute,
+        getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+        getDescription: vi.fn().mockReturnValue(core.ToolNames.CRON_CREATE),
+        toolLocations: vi.fn().mockReturnValue([]),
+      }));
+      const authorizedTool = mockAllowedToolWithBuild(
+        core.ToolNames.CRON_CREATE,
+        authorizedBuild,
+      );
+      const replacementTool = mockAllowedToolWithBuild(
+        core.ToolNames.CRON_CREATE,
+        replacementBuild,
+      );
+      let currentTool = authorizedTool;
+      let replacementQueued = false;
+      // Presented by an earlier turn (runTool is invoked without a batch
+      // snapshot here, so the gate reads the live ledger).
+      presentedProxySchemas.set(core.ToolNames.CRON_CREATE, 'fp');
+      mockToolRegistry.ensureTool.mockResolvedValue(authorizedTool);
+      mockToolRegistry.getTool.mockImplementation(() => currentTool);
+      mockToolRegistry.isProxyEligibleDeferredTool.mockImplementation(() => {
+        if (!replacementQueued) {
+          replacementQueued = true;
+          queueMicrotask(() => {
+            currentTool = replacementTool;
+          });
+        }
+        return true;
+      });
+
+      const result = await (
+        session as unknown as {
+          runTool(
+            signal: AbortSignal,
+            promptId: string,
+            functionCall: FunctionCall,
+          ): Promise<{ parts: Part[] }>;
+        }
+      ).runTool(new AbortController().signal, 'prompt-proxy-toctou', {
+        id: 'proxy_call',
+        name: core.ToolNames.DEFERRED_TOOL_CALL,
+        args: {
+          name: core.ToolNames.CRON_CREATE,
+          arguments: { schedule: '0 9 * * *' },
+        },
+      });
+
+      expect(authorizedBuild).toHaveBeenCalledWith({ schedule: '0 9 * * *' });
+      expect(authorizedExecute).toHaveBeenCalledOnce();
+      expect(replacementExecute).not.toHaveBeenCalled();
+      expect(result.parts[0]?.functionResponse?.name).toBe(
+        core.ToolNames.DEFERRED_TOOL_CALL,
+      );
+      expect(startToolSpanSpy).toHaveBeenCalledWith(
+        core.ToolNames.CRON_CREATE,
+        expect.objectContaining({
+          tool_name: core.ToolNames.CRON_CREATE,
+          'tool.provider_name': core.ToolNames.DEFERRED_TOOL_CALL,
+        }),
+        expect.any(String),
+        'prompt-proxy-toctou',
+      );
+      expect(
+        logToolCallSpy.mock.calls
+          .map(
+            ([, event]) =>
+              event as {
+                function_name?: string;
+                'tool.provider_name'?: string;
+              },
+          )
+          .find((event) => event.function_name === core.ToolNames.CRON_CREATE),
+      ).toMatchObject({
+        function_name: core.ToolNames.CRON_CREATE,
+        'tool.provider_name': core.ToolNames.DEFERRED_TOOL_CALL,
+      });
+    });
+
+    it('preserves normalization failure target and error type', async () => {
+      const logToolCallSpy = vi
+        .spyOn(core, 'logToolCall')
+        .mockImplementation(() => {});
+      mockToolRegistry.ensureTool.mockResolvedValue(undefined);
+      const toolLoopState = {
+        totalToolCalls: 0,
+        invalidToolParamErrors: new Map<string, number>(),
+        toolCallKeyCounts: new Map<string, number>(),
+        maxToolCallKeyRepeat: 0,
+        loopDetected: false,
+      };
+      const calls: FunctionCall[] = [
+        core.ToolNames.CRON_CREATE,
+        core.ToolNames.CRON_LIST,
+        core.ToolNames.CRON_DELETE,
+      ].map((name, index) => ({
+        id: `missing_proxy_${index}`,
+        name: core.ToolNames.DEFERRED_TOOL_CALL,
+        args: { name, arguments: {} },
+      }));
+
+      const result = await (
+        session as unknown as {
+          runToolCalls(
+            signal: AbortSignal,
+            promptId: string,
+            functionCalls: FunctionCall[],
+            loopState: typeof toolLoopState,
+          ): Promise<{
+            parts: Part[];
+            loopDetected?: boolean;
+          }>;
+        }
+      ).runToolCalls(
+        new AbortController().signal,
+        'prompt-proxy-normalization-errors',
+        calls,
+        toolLoopState,
+      );
+
+      expect(result.loopDetected).not.toBe(true);
+      expect(result.parts.map((part) => part.functionResponse?.name)).toEqual([
+        core.ToolNames.DEFERRED_TOOL_CALL,
+        core.ToolNames.DEFERRED_TOOL_CALL,
+        core.ToolNames.DEFERRED_TOOL_CALL,
+      ]);
+      expect(toolLoopState.invalidToolParamErrors).toEqual(
+        new Map([
+          [core.ToolNames.CRON_CREATE, 1],
+          [core.ToolNames.CRON_LIST, 1],
+          [core.ToolNames.CRON_DELETE, 1],
+        ]),
+      );
+      const events = logToolCallSpy.mock.calls.map(
+        ([, event]) =>
+          event as {
+            function_name?: string;
+            'tool.provider_name'?: string;
+            error_type?: string;
+          },
+      );
+      expect(events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            function_name: core.ToolNames.CRON_CREATE,
+            'tool.provider_name': core.ToolNames.DEFERRED_TOOL_CALL,
+            error_type: core.ToolErrorType.TOOL_NOT_REGISTERED,
+          }),
+          expect.objectContaining({
+            function_name: core.ToolNames.CRON_LIST,
+            'tool.provider_name': core.ToolNames.DEFERRED_TOOL_CALL,
+            error_type: core.ToolErrorType.TOOL_NOT_REGISTERED,
+          }),
+          expect.objectContaining({
+            function_name: core.ToolNames.CRON_DELETE,
+            'tool.provider_name': core.ToolNames.DEFERRED_TOOL_CALL,
+            error_type: core.ToolErrorType.TOOL_NOT_REGISTERED,
+          }),
+        ]),
+      );
+      expect(
+        mockChatRecordingService.recordToolResult.mock.calls.map(
+          ([, metadata]) => metadata.errorType,
+        ),
+      ).toEqual([
+        core.ToolErrorType.TOOL_NOT_REGISTERED,
+        core.ToolErrorType.TOOL_NOT_REGISTERED,
+        core.ToolErrorType.TOOL_NOT_REGISTERED,
+      ]);
+    });
+
+    it('still detects repeated normalization failures for one target', async () => {
+      mockToolRegistry.ensureTool.mockResolvedValue(undefined);
+      const toolLoopState = {
+        totalToolCalls: 0,
+        invalidToolParamErrors: new Map<string, number>(),
+        toolCallKeyCounts: new Map<string, number>(),
+        maxToolCallKeyRepeat: 0,
+        loopDetected: false,
+      };
+      const calls: FunctionCall[] = Array.from({ length: 3 }, (_, index) => ({
+        id: `missing_proxy_${index}`,
+        name: core.ToolNames.DEFERRED_TOOL_CALL,
+        args: { name: core.ToolNames.CRON_CREATE, arguments: {} },
+      }));
+
+      const result = await (
+        session as unknown as {
+          runToolCalls(
+            signal: AbortSignal,
+            promptId: string,
+            functionCalls: FunctionCall[],
+            loopState: typeof toolLoopState,
+          ): Promise<{
+            parts: Part[];
+            loopDetected?: boolean;
+          }>;
+        }
+      ).runToolCalls(
+        new AbortController().signal,
+        'prompt-repeated-proxy-normalization-errors',
+        calls,
+        toolLoopState,
+      );
+
+      expect(result.loopDetected).toBe(true);
+      expect(toolLoopState.invalidToolParamErrors).toEqual(
+        new Map([[core.ToolNames.CRON_CREATE, 3]]),
+      );
+    });
+
+    it('rejects same-batch tool_search + tool_call self-authorization', async () => {
+      const toolSearchBuild = vi.fn().mockReturnValue({
+        params: {},
+        execute: vi.fn().mockResolvedValue({
+          llmContent: '<functions>cron_create</functions>',
+          returnDisplay: 'Loaded cron_create',
+          // Mirrors the real tool_search delivery: pending presentations
+          // committed at batch finalization, never at execute time.
+          proxySchemaPresentations: [
+            { name: core.ToolNames.CRON_CREATE, fingerprint: 'fp' },
+          ],
+        }),
+        getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+        getDescription: vi.fn().mockReturnValue(core.ToolNames.TOOL_SEARCH),
+        toolLocations: vi.fn().mockReturnValue([]),
+      });
+      const cronBuild = vi.fn((params: Record<string, unknown>) => ({
+        params,
+        execute: vi.fn().mockResolvedValue({
+          llmContent: 'cron created',
+          returnDisplay: 'cron created',
+        }),
+        getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+        getDescription: vi.fn().mockReturnValue(core.ToolNames.CRON_CREATE),
+        toolLocations: vi.fn().mockReturnValue([]),
+      }));
+      const toolsByName = new Map<
+        string,
+        ReturnType<typeof mockAllowedToolWithBuild>
+      >([
+        [
+          core.ToolNames.TOOL_SEARCH,
+          mockAllowedToolWithBuild(core.ToolNames.TOOL_SEARCH, toolSearchBuild),
+        ],
+        [
+          core.ToolNames.CRON_CREATE,
+          mockAllowedToolWithBuild(core.ToolNames.CRON_CREATE, cronBuild),
+        ],
+      ]);
+      mockToolRegistry.getTool.mockImplementation((name: string) =>
+        toolsByName.get(name),
+      );
+      mockToolRegistry.ensureTool.mockImplementation(async (name: string) =>
+        toolsByName.get(name),
+      );
+      mockToolRegistry.isProxyEligibleDeferredTool.mockImplementation(
+        (name: string) => name === core.ToolNames.CRON_CREATE,
+      );
+
+      const sameBatchResult = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-same-batch', [
+        {
+          id: 'search_call',
+          name: core.ToolNames.TOOL_SEARCH,
+          args: { query: 'cron' },
+        },
+        {
+          id: 'proxy_call',
+          name: core.ToolNames.DEFERRED_TOOL_CALL,
+          args: {
+            name: core.ToolNames.CRON_CREATE,
+            arguments: { schedule: '0 9 * * *' },
+          },
+        },
+      ]);
+
+      // Issue #6721's fail-closed contract: the wrapper call must be
+      // rejected instead of routed on guessed arguments. The batch gate
+      // runs against the presentation snapshot taken BEFORE the batch
+      // executed, so the schema the sibling tool_search delivered
+      // mid-batch cannot self-authorize the same-batch call (the search
+      // result cannot have entered the model context inside the batch
+      // that contains the call) — matching the core scheduler, which
+      // normalizes every request before any execution.
+      expect(cronBuild).not.toHaveBeenCalled();
+      expect(sameBatchResult.parts[1]?.functionResponse?.name).toBe(
+        core.ToolNames.DEFERRED_TOOL_CALL,
+      );
+      expect(sameBatchResult.parts[1]?.functionResponse?.response).toEqual({
+        error: expect.stringContaining('no presented schema'),
+      });
+      // The search itself still ran and its delivered schema was committed
+      // at batch finalization, so a FOLLOW-UP turn may route the call.
+      expect(sameBatchResult.parts[0]?.functionResponse?.name).toBe(
+        core.ToolNames.TOOL_SEARCH,
+      );
+      expect(presentedProxySchemas.get(core.ToolNames.CRON_CREATE)).toBe('fp');
+
+      const nextTurnResult = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-next-turn', [
+        {
+          id: 'proxy_call_next',
+          name: core.ToolNames.DEFERRED_TOOL_CALL,
+          args: {
+            name: core.ToolNames.CRON_CREATE,
+            arguments: { schedule: '0 9 * * *' },
+          },
+        },
+      ]);
+
+      expect(cronBuild).toHaveBeenCalledWith({ schedule: '0 9 * * *' });
+      expect(nextTurnResult.parts[0]?.functionResponse?.name).toBe(
+        core.ToolNames.DEFERRED_TOOL_CALL,
+      );
+      expect(nextTurnResult.parts[0]?.functionResponse?.response).not.toEqual(
+        expect.objectContaining({ error: expect.anything() }),
+      );
+    });
+
+    it('routes tool_call independently of a failed tool_search', async () => {
+      // An earlier turn already delivered the schema; a failed follow-up
+      // search carries no presentations and must not erase the existing
+      // eligibility.
+      presentedProxySchemas.set(core.ToolNames.CRON_CREATE, 'fp');
+      const toolSearchBuild = vi.fn().mockReturnValue({
+        params: {},
+        execute: vi.fn().mockResolvedValue({
+          llmContent: 'failed search',
+          returnDisplay: 'failed search',
+          error: {
+            message: 'search failed',
+            type: core.ToolErrorType.EXECUTION_FAILED,
+          },
+        }),
+        getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+        getDescription: vi.fn().mockReturnValue(core.ToolNames.TOOL_SEARCH),
+        toolLocations: vi.fn().mockReturnValue([]),
+      });
+      const cronBuild = vi.fn((params: Record<string, unknown>) => ({
+        params,
+        execute: vi.fn().mockResolvedValue({
+          llmContent: 'cron created',
+          returnDisplay: 'cron created',
+        }),
+        getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+        getDescription: vi.fn().mockReturnValue(core.ToolNames.CRON_CREATE),
+        toolLocations: vi.fn().mockReturnValue([]),
+      }));
+      const toolsByName = new Map<
+        string,
+        ReturnType<typeof mockAllowedToolWithBuild>
+      >([
+        [
+          core.ToolNames.TOOL_SEARCH,
+          mockAllowedToolWithBuild(core.ToolNames.TOOL_SEARCH, toolSearchBuild),
+        ],
+        [
+          core.ToolNames.CRON_CREATE,
+          mockAllowedToolWithBuild(core.ToolNames.CRON_CREATE, cronBuild),
+        ],
+      ]);
+      mockToolRegistry.getTool.mockImplementation((name: string) =>
+        toolsByName.get(name),
+      );
+      mockToolRegistry.ensureTool.mockImplementation(async (name: string) =>
+        toolsByName.get(name),
+      );
+      mockToolRegistry.isProxyEligibleDeferredTool.mockImplementation(
+        (name: string) => name === core.ToolNames.CRON_CREATE,
+      );
+
+      await (session as unknown as ToolCallInternals).runToolCalls(
+        new AbortController().signal,
+        'prompt-search-failed',
+        [
+          {
+            id: 'search_call',
+            name: core.ToolNames.TOOL_SEARCH,
+            args: { query: 'cron' },
+          },
+        ],
+      );
+      const proxyResult = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-proxy-blocked', [
+        {
+          id: 'proxy_call',
+          name: core.ToolNames.DEFERRED_TOOL_CALL,
+          args: {
+            name: core.ToolNames.CRON_CREATE,
+            arguments: { schedule: '0 9 * * *' },
+          },
+        },
+      ]);
+
+      expect(cronBuild).toHaveBeenCalledWith({ schedule: '0 9 * * *' });
+      expect(proxyResult.parts[0]?.functionResponse?.name).toBe(
+        core.ToolNames.DEFERRED_TOOL_CALL,
+      );
+      expect(proxyResult.parts[0]?.functionResponse?.response).not.toEqual(
+        expect.objectContaining({ error: expect.anything() }),
+      );
+    });
+
     it('marks cancelled ask_user_question as a turn stop', async () => {
       const execute = vi.fn().mockResolvedValue({
         llmContent: 'should not execute',
@@ -29262,6 +30044,477 @@ describe('Session', () => {
       expect(result.stopAfterPermissionCancel).toBe(false);
       expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledTimes(
         2,
+      );
+    });
+  });
+
+  describe('deferred proxy-schema ledger rollback (#6721)', () => {
+    function mockToolWithBuild(name: string, build: ReturnType<typeof vi.fn>) {
+      return {
+        name,
+        kind: core.Kind.Read,
+        displayName: name,
+        description: name,
+        build,
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      };
+    }
+
+    // Registers a tool_search whose result carries the cron_create schema
+    // as pending presentations (committed at batch finalization, mirroring
+    // the real delivery contract).
+    function setUpToolSearchCarryingCronSchema() {
+      const toolSearchBuild = vi.fn().mockReturnValue({
+        params: {},
+        execute: vi.fn().mockResolvedValue({
+          llmContent: '<functions>cron_create</functions>',
+          returnDisplay: 'Loaded cron_create',
+          proxySchemaPresentations: [
+            { name: core.ToolNames.CRON_CREATE, fingerprint: 'fp' },
+          ],
+        }),
+        getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+        getDescription: vi.fn().mockReturnValue(core.ToolNames.TOOL_SEARCH),
+        toolLocations: vi.fn().mockReturnValue([]),
+      });
+      const toolsByName = new Map<string, ReturnType<typeof mockToolWithBuild>>(
+        [
+          [
+            core.ToolNames.TOOL_SEARCH,
+            mockToolWithBuild(core.ToolNames.TOOL_SEARCH, toolSearchBuild),
+          ],
+        ],
+      );
+      mockToolRegistry.getTool.mockImplementation((name: string) =>
+        toolsByName.get(name),
+      );
+      mockToolRegistry.ensureTool.mockImplementation(async (name: string) =>
+        toolsByName.get(name),
+      );
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+    }
+
+    function toolSearchStream() {
+      return createStreamWithChunks([
+        {
+          type: core.StreamEventType.CHUNK,
+          value: {
+            functionCalls: [
+              {
+                id: 'search_call',
+                name: core.ToolNames.TOOL_SEARCH,
+                args: { query: 'cron' },
+              },
+            ],
+          },
+        },
+      ]);
+    }
+
+    it('rolls the ledger back when the cron loop carrying send fails', async () => {
+      setUpToolSearchCarryingCronSchema();
+      let cronCallback:
+        | ((job: { prompt: string; cronExpr?: string }) => void)
+        | undefined;
+      const scheduler = {
+        size: 1,
+        hasPendingWork: true,
+        start: vi.fn(
+          (callback: (job: { prompt: string; cronExpr?: string }) => void) => {
+            cronCallback = callback;
+          },
+        ),
+        stop: vi.fn(),
+        getExitSummary: vi.fn().mockReturnValue(undefined),
+      };
+      mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream());
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start session' }],
+      });
+
+      // The carrying send throws BEFORE pushing to history; at send time
+      // the batch's mark must be committed (so this test proves the
+      // rollback removed it rather than it never being committed).
+      let markAtCarryingSend: string | undefined;
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockImplementationOnce(() => Promise.resolve(toolSearchStream()))
+        .mockImplementationOnce(() => {
+          markAtCarryingSend = presentedProxySchemas.get(
+            core.ToolNames.CRON_CREATE,
+          );
+          return Promise.reject(new Error('cron send blew up'));
+        });
+      const internals = session as unknown as {
+        cronCompletion: Promise<void> | null;
+      };
+
+      cronCallback?.({ prompt: 'scheduled prompt', cronExpr: '* * * * *' });
+      // First wait until the carrying send was actually attempted (the
+      // drain starts asynchronously after the fire callback), then until
+      // the cron turn fully settled.
+      await vi.waitFor(
+        () => {
+          expect(markAtCarryingSend).toBe('fp');
+        },
+        { timeout: 15000 },
+      );
+      await vi.waitFor(
+        () => {
+          expect(
+            mockToolRegistry.restoreProxySchemaPresentationSnapshot,
+          ).toHaveBeenCalled();
+        },
+        { timeout: 15000 },
+      );
+      await vi.waitFor(
+        () => {
+          expect(internals.cronCompletion).toBeNull();
+        },
+        { timeout: 15000 },
+      );
+
+      // The send-failure rollback restored the pre-batch snapshot (empty):
+      // the mark must not outlive a schema that never reached the model.
+      expect(presentedProxySchemas.get(core.ToolNames.CRON_CREATE)).toBe(
+        undefined,
+      );
+    });
+
+    it('rolls the ledger back when the background-notification loop carrying send fails', async () => {
+      setUpToolSearchCarryingCronSchema();
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream());
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start session' }],
+      });
+
+      let markAtCarryingSend: string | undefined;
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockImplementationOnce(() => Promise.resolve(toolSearchStream()))
+        .mockImplementationOnce(() => {
+          markAtCarryingSend = presentedProxySchemas.get(
+            core.ToolNames.CRON_CREATE,
+          );
+          return Promise.reject(new Error('notification send blew up'));
+        });
+      const internals = session as unknown as {
+        notificationCompletion: Promise<void> | null;
+      };
+      const backgroundCallback = mockBackgroundTaskRegistry
+        .setNotificationCallback.mock.calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string; toolUseId?: string },
+      ) => void;
+
+      backgroundCallback('done', '<task-notification />', {
+        agentId: 'agent-1',
+        status: 'completed',
+      });
+      // First wait until the carrying send was actually attempted (the
+      // drain starts asynchronously after the notification callback), then
+      // until the notification turn fully settled.
+      await vi.waitFor(
+        () => {
+          expect(markAtCarryingSend).toBe('fp');
+        },
+        { timeout: 15000 },
+      );
+      await vi.waitFor(
+        () => {
+          expect(
+            mockToolRegistry.restoreProxySchemaPresentationSnapshot,
+          ).toHaveBeenCalled();
+        },
+        { timeout: 15000 },
+      );
+      await vi.waitFor(
+        () => {
+          expect(internals.notificationCompletion).toBeNull();
+        },
+        { timeout: 15000 },
+      );
+
+      expect(presentedProxySchemas.get(core.ToolNames.CRON_CREATE)).toBe(
+        undefined,
+      );
+    });
+
+    it('preserves the armed carrying message when the cron loop is aborted between laps (R23-27)', async () => {
+      setUpToolSearchCarryingCronSchema();
+      let cronCallback:
+        | ((job: { prompt: string; cronExpr?: string }) => void)
+        | undefined;
+      const scheduler = {
+        size: 1,
+        hasPendingWork: true,
+        start: vi.fn(
+          (callback: (job: { prompt: string; cronExpr?: string }) => void) => {
+            cronCallback = callback;
+          },
+        ),
+        stop: vi.fn(),
+        getExitSummary: vi.fn().mockReturnValue(undefined),
+      };
+      mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream());
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start session' }],
+      });
+
+      // Gate the mid-turn drain so the cron loop suspends AFTER the tool
+      // batch committed its mark (rollback snapshot armed) and BEFORE the
+      // next lap's top-of-lap abort check — the exact window a user
+      // prompt uses to preempt the daemon loop.
+      let resolveDrain!: () => void;
+      const drainGate = new Promise<void>((resolve) => {
+        resolveDrain = resolve;
+      });
+      mockClient.extMethod = vi
+        .fn()
+        .mockImplementation(async (method: string) => {
+          if (method === TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD) {
+            return { claimed: true, hasQueuedPrompt: false };
+          }
+          if (method === 'craft/drainMidTurnQueue') {
+            await drainGate;
+            return { messages: [], hasQueuedPrompt: false };
+          }
+          return { messages: [], hasQueuedPrompt: false };
+        });
+
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockImplementationOnce(() => Promise.resolve(toolSearchStream()));
+      const internals = session as unknown as {
+        cronCompletion: Promise<void> | null;
+        cronAbortController: AbortController | null;
+      };
+
+      cronCallback?.({ prompt: 'scheduled prompt', cronExpr: '* * * * *' });
+      // Wait until the batch committed its mark and the loop parked in the
+      // gated drain between runToolCalls and the next lap's abort check.
+      await vi.waitFor(
+        () => {
+          expect(presentedProxySchemas.get(core.ToolNames.CRON_CREATE)).toBe(
+            'fp',
+          );
+        },
+        { timeout: 15000 },
+      );
+      await vi.waitFor(
+        () => {
+          expect(mockClient.extMethod).toHaveBeenCalledWith(
+            'craft/drainMidTurnQueue',
+            expect.anything(),
+          );
+        },
+        { timeout: 15000 },
+      );
+      // A user prompt preempts the loop (prompt() aborts the cron
+      // controller); then release the drain so the loop reaches the
+      // top-of-lap abort check with the armed carrying message.
+      internals.cronAbortController?.abort();
+      resolveDrain();
+      await vi.waitFor(
+        () => {
+          expect(internals.cronCompletion).toBeNull();
+        },
+        { timeout: 15000 },
+      );
+
+      // R23-27: the abort check must preserve the carrying message
+      // (mirroring the main prompt loop) — its functionResponse parts back
+      // the committed mark. Before the fix the message was dropped
+      // unpreserved, orphaning the mark for a schema that never entered
+      // model context (fail-open at the #6721 gate).
+      expect(mockChat.addHistory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          role: 'user',
+          parts: expect.arrayContaining([
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({
+                id: 'search_call',
+              }),
+            }),
+          ]),
+        }),
+      );
+      expect(presentedProxySchemas.get(core.ToolNames.CRON_CREATE)).toBe('fp');
+      expect(
+        mockToolRegistry.restoreProxySchemaPresentationSnapshot,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('preserves the armed carrying message when the notification loop is aborted between laps (R23-27)', async () => {
+      setUpToolSearchCarryingCronSchema();
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream());
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start session' }],
+      });
+
+      let resolveDrain!: () => void;
+      const drainGate = new Promise<void>((resolve) => {
+        resolveDrain = resolve;
+      });
+      mockClient.extMethod = vi
+        .fn()
+        .mockImplementation(async (method: string) => {
+          if (method === TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD) {
+            return { claimed: true, hasQueuedPrompt: false };
+          }
+          if (method === 'craft/drainMidTurnQueue') {
+            await drainGate;
+            return { messages: [], hasQueuedPrompt: false };
+          }
+          return { messages: [], hasQueuedPrompt: false };
+        });
+
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockImplementationOnce(() => Promise.resolve(toolSearchStream()));
+      const internals = session as unknown as {
+        notificationCompletion: Promise<void> | null;
+        notificationAbortController: AbortController | null;
+      };
+      const backgroundCallback = mockBackgroundTaskRegistry
+        .setNotificationCallback.mock.calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string; toolUseId?: string },
+      ) => void;
+
+      backgroundCallback('done', '<task-notification />', {
+        agentId: 'agent-1',
+        status: 'completed',
+      });
+      await vi.waitFor(
+        () => {
+          expect(presentedProxySchemas.get(core.ToolNames.CRON_CREATE)).toBe(
+            'fp',
+          );
+        },
+        { timeout: 15000 },
+      );
+      await vi.waitFor(
+        () => {
+          expect(mockClient.extMethod).toHaveBeenCalledWith(
+            'craft/drainMidTurnQueue',
+            expect.anything(),
+          );
+        },
+        { timeout: 15000 },
+      );
+      internals.notificationAbortController?.abort();
+      resolveDrain();
+      await vi.waitFor(
+        () => {
+          expect(internals.notificationCompletion).toBeNull();
+        },
+        { timeout: 15000 },
+      );
+
+      expect(mockChat.addHistory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          role: 'user',
+          parts: expect.arrayContaining([
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({
+                id: 'search_call',
+              }),
+            }),
+          ]),
+        }),
+      );
+      expect(presentedProxySchemas.get(core.ToolNames.CRON_CREATE)).toBe('fp');
+      expect(
+        mockToolRegistry.restoreProxySchemaPresentationSnapshot,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('does not resurrect marks across a mid-send compression clear (main loop)', async () => {
+      setUpToolSearchCarryingCronSchema();
+      // Simulate what compression does to the ledger: tryCompressChat applies
+      // the compressed history via setHistory, which clears the ledger (and
+      // bumps its generation), then the send throws before the push. The
+      // rollback must NOT restore the pre-batch snapshot across that clear —
+      // the backing tool_search results were just summarized out of active
+      // history, so resurrecting the marks would reopen the #6721 gate on
+      // invisible schemas.
+      mockGeminiClient.tryCompressChat = vi.fn().mockImplementation(() => {
+        mockToolRegistry.clearProxySchemaPresentations();
+        return Promise.resolve({
+          originalTokenCount: 100,
+          newTokenCount: 50,
+          compressionStatus: core.CompressionStatus.COMPRESSED,
+        });
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockImplementationOnce(() => Promise.resolve(toolSearchStream()))
+        .mockRejectedValueOnce(new Error('send blew up'));
+
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'compress and fail' }],
+        }),
+      ).rejects.toThrow('send blew up');
+
+      // The batch committed its mark, the compression clear dropped it, and
+      // the send-failure rollback stayed a no-op across the clear.
+      expect(presentedProxySchemas.get(core.ToolNames.CRON_CREATE)).toBe(
+        undefined,
+      );
+      expect(presentedProxySchemas.size).toBe(0);
+      // The restore was attempted with the stale generation and refused.
+      expect(
+        mockToolRegistry.restoreProxySchemaPresentationSnapshot,
+      ).toHaveBeenCalled();
+      expect(mockGeminiClient.tryCompressChat).toHaveBeenCalledTimes(2);
+    });
+
+    it('rolls the ledger back on main-loop send failure without an intervening clear', async () => {
+      setUpToolSearchCarryingCronSchema();
+      let markAtCarryingSend: string | undefined;
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockImplementationOnce(() => Promise.resolve(toolSearchStream()))
+        .mockImplementationOnce(() => {
+          markAtCarryingSend = presentedProxySchemas.get(
+            core.ToolNames.CRON_CREATE,
+          );
+          return Promise.reject(new Error('send blew up'));
+        });
+
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'tool then fail' }],
+        }),
+      ).rejects.toThrow('send blew up');
+
+      expect(markAtCarryingSend).toBe('fp');
+      expect(presentedProxySchemas.get(core.ToolNames.CRON_CREATE)).toBe(
+        undefined,
       );
     });
   });

@@ -16,6 +16,7 @@ import {
 } from './agent-core.js';
 import { attachJsonlTranscriptWriter } from '../agent-transcript.js';
 import {
+  getCurrentAgentDeclaredToolNames,
   getCurrentAgentDepth,
   getCurrentAgentId,
   getRuntimeContentGenerator,
@@ -50,6 +51,7 @@ import {
   type InvocationContextV1,
 } from '../../utils/invocation-context.js';
 import { GeminiChat } from '../../core/geminiChat.js';
+import { CoreToolScheduler } from '../../core/coreToolScheduler.js';
 import { ContextState } from './agent-headless.js';
 import type { ToolResultBoundaryObservation } from '../../utils/tool-result-boundary-diagnostics.js';
 
@@ -525,6 +527,51 @@ describe('AgentCore.prepareTools', () => {
     expect(tools.map((t) => t.name)).toEqual(['lsp']);
   });
 
+  it('records the prepared declaration names on the agent context frame (R24-3)', async () => {
+    // tool_search's `select:` consults the recorded set to tell whether a
+    // registry-hidden deferred tool is nonetheless declared — and directly
+    // callable — for the current subagent. Wildcard agents declare the
+    // deferred tools, so the recorded set must include them.
+    const fnDecls: FunctionDeclaration[] = [
+      { name: 'core_tool', description: 'core' } as FunctionDeclaration,
+      {
+        name: 'mcp__github__create_issue',
+        description: 'mcp deferred',
+      } as FunctionDeclaration,
+    ];
+    const { core } = buildAgentForTools({ tools: ['*'] }, fnDecls);
+
+    await runWithAgentContext('agent-record', async () => {
+      expect(getCurrentAgentDeclaredToolNames()).toBeUndefined();
+      await core.prepareTools();
+      expect(getCurrentAgentDeclaredToolNames()).toEqual(
+        new Set(['core_tool', 'mcp__github__create_issue']),
+      );
+    });
+    // The recording must not leak past the frame.
+    expect(getCurrentAgentDeclaredToolNames()).toBeUndefined();
+  });
+
+  it('records only the listed names for explicit-tool-list subagents (R24-3)', async () => {
+    const fnDecls: FunctionDeclaration[] = [
+      { name: 'read_file', description: 'read' } as FunctionDeclaration,
+      {
+        name: 'mcp__github__create_issue',
+        description: 'mcp deferred',
+      } as FunctionDeclaration,
+    ];
+    const { core } = buildAgentForTools({ tools: ['read_file'] }, fnDecls);
+
+    await runWithAgentContext('agent-record', async () => {
+      await core.prepareTools();
+      // The explicit list omits the deferred tool, so the recorded set
+      // must NOT contain it — select: stays fail-closed for it.
+      expect(getCurrentAgentDeclaredToolNames()).toEqual(
+        new Set(['read_file']),
+      );
+    });
+  });
+
   it('explicit tools list does NOT use the wildcard inherit path', async () => {
     // When the subagent enumerates tools by name, deferred-tool inclusion
     // is not the wildcard branch's responsibility — getFunctionDeclarationsFiltered
@@ -630,6 +677,87 @@ describe('AgentCore.prepareTools', () => {
     expect(debugSpy).toHaveBeenCalledWith(
       `[prepareTools] Filtered inline declaration "${ToolNames.EXIT_PLAN_MODE}" from subagent tool list`,
     );
+  });
+
+  it('filters tool_call from inline subagent declarations', async () => {
+    const inlineWrapper = {
+      name: ToolNames.DEFERRED_TOOL_CALL,
+      description: 'stable deferred tool proxy',
+    } as FunctionDeclaration;
+    const { core, debugSpy } = buildAgentForTools(
+      { tools: [inlineWrapper] },
+      [],
+    );
+
+    const tools = await core.prepareTools();
+
+    expect(tools).toEqual([]);
+    expect(debugSpy).toHaveBeenCalledWith(
+      `[prepareTools] Filtered inline declaration "${ToolNames.DEFERRED_TOOL_CALL}" from subagent tool list`,
+    );
+
+    let teammateTools: FunctionDeclaration[] = [];
+    await runWithTeammateIdentity(
+      {
+        agentId: 'worker@test',
+        agentName: 'worker',
+        teamName: 'test',
+        isTeamLead: false,
+      },
+      async () => {
+        teammateTools = await core.prepareTools();
+      },
+    );
+    expect(teammateTools).toEqual([]);
+  });
+
+  it('rejects a subagent wrapper call before scheduler normalization', async () => {
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockRejectedValue(new Error('scheduler must not receive wrapper calls'));
+    try {
+      const { core } = buildAgentForTools(
+        {
+          tools: [
+            {
+              name: ToolNames.DEFERRED_TOOL_CALL,
+              description: 'stable deferred tool proxy',
+            } as FunctionDeclaration,
+          ],
+        },
+        [],
+      );
+      const tools = await runWithAgentContext('test-subagent', () =>
+        core.prepareTools(),
+      );
+
+      const result = await runWithAgentContext('test-subagent', () =>
+        core.runInAgentFrames(() =>
+          core.processFunctionCalls(
+            [
+              {
+                name: ToolNames.DEFERRED_TOOL_CALL,
+                args: { name: ToolNames.CRON_CREATE, arguments: {} },
+                id: 'proxy-call-1',
+              },
+            ],
+            new AbortController(),
+            'prompt-filtered-deferred-wrapper',
+            1,
+            tools,
+          ),
+        ),
+      );
+
+      const response = result.messages[0]?.parts?.[0]?.functionResponse
+        ?.response as { error?: string } | undefined;
+      expect(response?.error).toContain(
+        `Tool "${ToolNames.DEFERRED_TOOL_CALL}" not found`,
+      );
+      expect(scheduleSpy).not.toHaveBeenCalled();
+    } finally {
+      scheduleSpy.mockRestore();
+    }
   });
 
   it('keeps teammate coordination tools but excludes plan lifecycle tools', async () => {
