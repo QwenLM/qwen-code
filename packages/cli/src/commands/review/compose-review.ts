@@ -2973,12 +2973,14 @@ function composeReviewBody(
   /** What a rank drops, in the author's words — the note names it. */
   const RANK_NAMES: Record<number, { en: string; zh: string }> = {
     [-1]: { en: 'the mechanism-health note', zh: '机制健康说明' },
-    0: { en: 'the convergence observation', zh: '收敛情况观察' },
     1: { en: 'the deferred-findings list', zh: '延后发现清单' },
     2: {
       en: 'the not-reviewed and non-blocking disclosures',
       zh: '未审查范围与非阻断披露',
     },
+    // Last, and see the block that carries it for why: it is the smallest
+    // rank and the only one whose reader is the PR author alone.
+    3: { en: 'the convergence observation', zh: '收敛情况观察' },
   };
 
   /**
@@ -3054,7 +3056,7 @@ function composeReviewBody(
    * last-resort path drops ranks AND cuts, and a stderr record naming only
    * the cut leaves the kinds it dropped disclosed nowhere but the body.
    * Rank 1 has a second durable copy (each deferral is a `D<round>-<n>`
-   * entry in the findings artifact) and rank 0 has one too (the composed
+   * entry in the findings artifact) and rank 3 has one too (the composed
    * result carries the paragraph, and the command prints it as
    * `CONVERGENCE:`); a trimmed disclosure section survives nowhere but the
    * terminal summary, so ask for it there rather than pointing at an
@@ -3771,13 +3773,28 @@ function composeReviewBody(
   // paragraph here that comments on the SHAPE of the review history rather
   // than on the diff.
   //
-  // `trim: 0` — its own rank, shed before every other EXCEPT the
-  // mechanism-health note below it (rank -1, and see there for why it goes
-  // first). An untagged block
-  // ranks with the blockers and the verdict-qualifying sentences, and the
-  // rounds this fires on are precisely the high-volume rounds most likely to
-  // overflow: unranked, an advisory paragraph that decides nothing survived
-  // while the deferral list and the not-reviewed disclosures were spent.
+  // `trim: 3` — the LAST rank the ladder sheds, and the reason is
+  // arithmetic. Rendered bilingually this paragraph runs 603 characters when
+  // only the volume signal fired, 1,510 with three clusters, and 2,372 with
+  // the clusters, the evidence caveats and the land reading together —
+  // against a body budget of 56,830. Shed second (it was rank 0), it could
+  // pay for at most 4% of an overflow, so any overflow larger than itself
+  // spent it and then went on to spend the deferral list and the
+  // not-reviewed disclosures anyway. On the rounds this fires on — the
+  // high-volume ones — that is the normal case, not the edge: the author
+  // lost the only sentence about the SHAPE of the loop and lost the
+  // disclosures too.
+  //
+  // It is still ranked rather than untagged: if the body genuinely cannot
+  // hold the blockers, an advisory must yield, and being ranked is what
+  // makes the trim notice name it when it does. It is ranked LAST because
+  // it is the cheapest block to keep and the only one whose reader is the
+  // author of the pull request alone — the deferral list has a second
+  // durable copy in the findings artifact, the disclosures are restated in
+  // the terminal report, and the mechanism-health note above it is written
+  // for the operator, who has the `HEALTH:` line. This paragraph is the
+  // whole of what this pipeline tells a PR author about a loop that is not
+  // settling; shedding it early bought almost nothing and cost exactly that.
   //
   // A rank of its own, not a share of the deferral list's: every notice
   // surface keys on the RANK, not on what actually went — the rank's name,
@@ -3831,15 +3848,16 @@ function composeReviewBody(
           anchorFailsClosed(cappedBy, scopeUnproven, dimensionGapsAreDepthOnly),
       })
     : null;
-  // Its OWN rank, shed before the convergence paragraph. Sharing rank 0 made
-  // the notice name "the convergence observation" for a body whose rank-0
-  // content was only this note — a section that never existed. It goes first
+  // Its OWN rank, shed before every other. Sharing the convergence
+  // paragraph's rank made the notice name "the convergence observation" for
+  // a body whose content at that rank was only this note — a section that
+  // never existed. It goes first
   // because its primary reader is the operator, who has the `HEALTH:`
   // terminal line, while the convergence paragraph's recommendations are
   // addressed to the author reading the PR.
   const healthBlock: Bi[] = healthNote ? [{ ...healthNote, trim: -1 }] : [];
   const convergenceBlock: Bi[] = convergenceNote
-    ? [{ ...convergenceNote, trim: 0 }]
+    ? [{ ...convergenceNote, trim: 3 }]
     : [];
 
   // The resumed-run continuity note: the run reused certified work from an
