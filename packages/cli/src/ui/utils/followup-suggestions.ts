@@ -8,7 +8,7 @@ import {
   AuthType,
   type Config,
   type ContentGeneratorConfig,
-  resolveModelId,
+  resolvePromptSuggestionModelTarget,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 
@@ -33,8 +33,13 @@ type FollowupSuggestionConfig = Partial<
 
 export type FollowupSuggestionFeatureDecision = {
   enabled: boolean;
-  suppressedReason?: 'loopback_openai_default';
+  suppressedReason?: 'loopback_openai_default' | 'unresolved_provider';
 };
+
+type FollowupSuggestionProviderConfig = Pick<
+  ContentGeneratorConfig,
+  'authType' | 'baseUrl'
+> & { unresolved?: boolean };
 
 export function isFollowupSuggestionSettingConfigured(
   settings: FollowupSuggestionSettings,
@@ -54,7 +59,7 @@ export function isFollowupSuggestionSettingConfigured(
 
 export function getFollowupSuggestionProviderConfig(
   config: FollowupSuggestionConfig,
-): Pick<ContentGeneratorConfig, 'authType' | 'baseUrl'> | undefined {
+): FollowupSuggestionProviderConfig | undefined {
   const modelsConfig = config.getModelsConfig?.();
   const generationConfig =
     config.getContentGeneratorConfig?.() ??
@@ -65,18 +70,17 @@ export function getFollowupSuggestionProviderConfig(
 
   const fastModel = config.getFastModel?.();
   if (fastModel) {
-    const selector = (() => {
+    const target = (() => {
       try {
-        return resolveModelId(fastModel, {
-          currentAuthType: authType,
-          currentModel: config.getModel?.(),
-          getAvailableModels: (authTypes) =>
-            config.getAllConfiguredModels?.(authTypes) ?? [],
-        });
+        return resolvePromptSuggestionModelTarget(config as Config, fastModel);
       } catch {
         return undefined;
       }
     })();
+    if (!target) return primaryProvider;
+    if (target.usesPrimary) return primaryProvider;
+
+    const selector = target.selector;
     if (!selector) return primaryProvider;
 
     const resolvedModel = selector.authType
@@ -99,8 +103,8 @@ export function getFollowupSuggestionProviderConfig(
       if (availableModelProviderConfig) {
         return availableModelProviderConfig;
       }
-      if (selector.authType !== authType) {
-        return primaryProvider;
+      if (target.crossProvider) {
+        return { authType: selector.authType, unresolved: true };
       }
     }
   }
@@ -167,21 +171,24 @@ export function getFollowupSuggestionFeatureDecision(
 
 export function shouldEnableFollowupSuggestions(
   setting: { value: boolean | undefined; configured: boolean },
-  contentGeneratorConfig:
-    | Pick<ContentGeneratorConfig, 'authType' | 'baseUrl'>
-    | undefined,
+  contentGeneratorConfig: FollowupSuggestionProviderConfig | undefined,
 ): boolean {
   return getDecisionForProviderConfig(setting, contentGeneratorConfig).enabled;
 }
 
 function getDecisionForProviderConfig(
   setting: { value: boolean | undefined; configured: boolean },
-  contentGeneratorConfig:
-    | Pick<ContentGeneratorConfig, 'authType' | 'baseUrl'>
-    | undefined,
+  contentGeneratorConfig: FollowupSuggestionProviderConfig | undefined,
 ): FollowupSuggestionFeatureDecision {
   if (setting.value === false) {
     return { enabled: false, suppressedReason: undefined };
+  }
+
+  if (
+    !(setting.value === true && setting.configured) &&
+    contentGeneratorConfig?.unresolved
+  ) {
+    return { enabled: false, suppressedReason: 'unresolved_provider' };
   }
 
   const suppressedByLoopbackDefault =

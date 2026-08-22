@@ -504,7 +504,7 @@ describe('getFollowupSuggestionProviderConfig', () => {
     });
   });
 
-  it('falls back to the primary provider for unresolvable cross-auth fast models', () => {
+  it('marks unresolvable cross-auth fast models unavailable', () => {
     const providerConfig = getFollowupSuggestionProviderConfig({
       getContentGeneratorConfig: () => ({
         authType: AuthType.USE_OPENAI,
@@ -521,8 +521,8 @@ describe('getFollowupSuggestionProviderConfig', () => {
     });
 
     expect(providerConfig).toEqual({
-      authType: AuthType.USE_OPENAI,
-      baseUrl: 'http://localhost:11434/v1',
+      authType: AuthType.QWEN_OAUTH,
+      unresolved: true,
     });
     expect(
       shouldEnableFollowupSuggestions(
@@ -580,6 +580,76 @@ describe('getFollowupSuggestionFeatureDecision', () => {
     ).toEqual({
       enabled: false,
       suppressedReason: 'loopback_openai_default',
+    });
+  });
+
+  it('uses the active provider when the fast model is the current model', () => {
+    expect(
+      getFollowupSuggestionFeatureDecision(
+        {
+          merged: {
+            ui: {},
+          },
+        } as Parameters<typeof getFollowupSuggestionFeatureDecision>[0],
+        {
+          getContentGeneratorConfig: () => ({
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'http://localhost:11434/v1',
+            model: 'llama3.1',
+          }),
+          getModel: () => 'llama3.1',
+          getFastModel: () => 'llama3.1',
+          getAllConfiguredModels: () => [
+            {
+              authType: AuthType.USE_OPENAI,
+              id: 'llama3.1',
+              label: 'llama3.1',
+            },
+          ],
+          getModelsConfig: () =>
+            ({
+              getResolvedModel: () => ({
+                id: 'llama3.1',
+                authType: AuthType.USE_OPENAI,
+                baseUrl: 'https://api.openai.com/v1',
+                generationConfig: {},
+                capabilities: {},
+              }),
+            }) as unknown as ReturnType<Config['getModelsConfig']>,
+        },
+      ),
+    ).toEqual({
+      enabled: false,
+      suppressedReason: 'loopback_openai_default',
+    });
+  });
+
+  it('suppresses an unresolved cross-provider fast model', () => {
+    expect(
+      getFollowupSuggestionFeatureDecision(
+        {
+          merged: {
+            ui: {},
+          },
+        } as Parameters<typeof getFollowupSuggestionFeatureDecision>[0],
+        {
+          getContentGeneratorConfig: () => ({
+            authType: AuthType.QWEN_OAUTH,
+            baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+            model: 'qwen3-coder-plus',
+          }),
+          getModel: () => 'qwen3-coder-plus',
+          getFastModel: () => `${AuthType.USE_OPENAI}:missing-fast`,
+          getAllConfiguredModels: () => [],
+          getModelsConfig: () =>
+            ({
+              getResolvedModel: () => undefined,
+            }) as unknown as ReturnType<Config['getModelsConfig']>,
+        },
+      ),
+    ).toEqual({
+      enabled: false,
+      suppressedReason: 'unresolved_provider',
     });
   });
 
