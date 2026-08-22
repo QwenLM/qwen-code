@@ -229,14 +229,13 @@ describe('manifest repository context provider', () => {
         worktree,
         ['src/change.ts'],
         manifest({
-          rules: Array.from({ length: 65 }, (_, index) => ({
+          rules: Array.from({ length: 2 }, (_, ruleIndex) => ({
             paths: ['src/**'],
-            verificationNotes: [
-              `note-a-${String(index).padStart(3, '0')}`,
-              `note-b-${String(index).padStart(3, '0')}`,
-              `note-c-${String(index).padStart(3, '0')}`,
-              `note-d-${String(index).padStart(3, '0')}`,
-            ],
+            verificationNotes: Array.from(
+              { length: 200 },
+              (_, index) =>
+                `note-${ruleIndex}-${String(index).padStart(3, '0')}`,
+            ),
           })),
         }),
       ),
@@ -572,10 +571,11 @@ describe('manifest repository context provider', () => {
   });
 
   it('deduplicates related patterns before applying the merge bound', () => {
-    // 128 rules each contribute the same three patterns: 384 pre-dedup
-    // (OVER the cap) and 3 post-dedup (under it). A cap-before-dedup
-    // regression throws here; under it, two matching rules sharing one
-    // 200-pattern list would reject a legal, human-authored manifest.
+    // 128 rules each contribute the same two patterns plus one unique:
+    // 384 pre-dedup (OVER the cap) and 130 post-dedup (under it). A
+    // cap-before-dedup regression throws here; under it, two matching rules
+    // sharing one 100-pattern list would reject a legal, human-authored
+    // manifest.
     const worktree = temp();
     for (let index = 0; index < 5; index++) {
       write(join(worktree, 'src', `${index}.ts`));
@@ -583,9 +583,9 @@ describe('manifest repository context provider', () => {
     for (let index = 0; index < 4; index++) {
       write(join(worktree, 'docs', `${index}.ts`));
     }
-    const rules = Array.from({ length: 128 }, () => ({
+    const rules = Array.from({ length: 128 }, (_, index) => ({
       paths: ['src/**'],
-      relatedPaths: ['src/**', 'docs/**', 'extra/**'],
+      relatedPaths: ['src/**', 'docs/**', `empty-${index}/**`],
     }));
     expect(
       provide(worktree, ['src/change.ts'], manifest({ rules }))?.relatedPaths,

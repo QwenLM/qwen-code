@@ -691,3 +691,71 @@ describe('Storage – runtime base dir async context isolation', () => {
     });
   });
 });
+
+describe('Storage – getAuditFallbackDir', () => {
+  const originalEnv = process.env['QWEN_HOME'];
+  let home: string;
+
+  beforeEach(() => {
+    home = actualFs.mkdtempSync(path.join(os.tmpdir(), 'qwen-home-test-'));
+    process.env['QWEN_HOME'] = home;
+  });
+
+  afterEach(() => {
+    actualFs.rmSync(home, { recursive: true, force: true });
+    if (originalEnv === undefined) {
+      delete process.env['QWEN_HOME'];
+    } else {
+      process.env['QWEN_HOME'] = originalEnv;
+    }
+  });
+
+  it('lands under QWEN_HOME/audits/<project hash>', () => {
+    const dir = Storage.getAuditFallbackDir('/some/project');
+    expect(path.dirname(path.dirname(dir))).toBe(home);
+    expect(path.basename(path.dirname(dir))).toBe('audits');
+    expect(path.basename(dir)).toMatch(/^[0-9a-f]{64}$/);
+    expect(actualFs.statSync(dir).isDirectory()).toBe(true);
+  });
+
+  it('creates the landing 0700 so quoted module content stays private', () => {
+    const mode = actualFs.statSync(Storage.getAuditFallbackDir('/p')).mode;
+    // On Windows mkdirSync's mode is a no-op and libuv emulates permission
+    // bits by duplicating owner bits to group/other.
+    if (process.platform !== 'win32') {
+      expect(mode & 0o077).toBe(0);
+      expect(mode & 0o700).toBe(0o700);
+    }
+  });
+
+  it('separates projects and is idempotent', () => {
+    const first = Storage.getAuditFallbackDir('/project/a');
+    const second = Storage.getAuditFallbackDir('/project/b');
+    expect(first).not.toBe(second);
+    expect(Storage.getAuditFallbackDir('/project/a')).toBe(first);
+  });
+
+  it('is stable across symlink spellings of the same directory', () => {
+    // macOS `/var` → `/private/var`: plan-files and guard-check must hash the
+    // same logical directory to the same fallback root whichever spelling
+    // arrives, or the relocation-containment check spuriously fails.
+    if (process.platform === 'win32') return;
+    // The file-wide mock intercepts realpathSync; delegate to the real one
+    // so the symlink actually resolves.
+    mockRealpathSync.mockImplementation((p: unknown) =>
+      actualFs.realpathSync(String(p)),
+    );
+    const real = actualFs.mkdtempSync(path.join(os.tmpdir(), 'audit-real-'));
+    const link = path.join(os.tmpdir(), `audit-link-${Date.now()}`);
+    try {
+      actualFs.symlinkSync(real, link);
+      expect(Storage.getAuditFallbackDir(link)).toBe(
+        Storage.getAuditFallbackDir(actualFs.realpathSync(real)),
+      );
+    } finally {
+      actualFs.rmSync(link, { force: true });
+      actualFs.rmSync(real, { recursive: true, force: true });
+      mockRealpathSync.mockReset();
+    }
+  });
+});
