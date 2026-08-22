@@ -5278,12 +5278,12 @@ export const useGeminiStream = (
       // Settle the drained batch exactly once. The settlement carrier below
       // is passed through the existing `steerInput` option so GeminiClient
       // settles it next to the actual history push: acceptance compares the
-      // user-content push counter against a snapshot taken immediately
-      // before `turn.run` (after the UserPromptSubmit-hook await), and any
-      // exit that provably never pushed (hook block, cancel or failure
-      // before the push) restores the carrier unconditionally instead of
-      // consulting the global counter — a concurrent /btw push inside the
-      // hook window can therefore not supply the observed push.
+      // user-content push counter against the snapshot GeminiChat publishes
+      // on the request immediately before that push (no await between the
+      // snapshot and the push), and any exit that provably never pushed
+      // (hook block, cancel or failure before the push) restores the
+      // carrier unconditionally instead of consulting the global counter —
+      // a concurrent /btw push can therefore not supply the observed push.
       const settleDrainedTeammates = (accepted: boolean) => {
         if (!drainedTeammates || drainedTeammates.entries.length === 0) {
           return;

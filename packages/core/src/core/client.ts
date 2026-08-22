@@ -56,7 +56,7 @@ import { createSessionStartProfiler } from './session-start-profiler.js';
 const debugLogger = createDebugLogger('CLIENT');
 
 // Core modules
-import { GeminiChat } from './geminiChat.js';
+import { GeminiChat, userContentPushSnapshotKey } from './geminiChat.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
   assembleSystemPrompt,
@@ -2520,14 +2520,17 @@ export class GeminiClient {
       this.getChat().getUserContentPushCount?.() ?? 0;
 
     // Settle a carrier exactly once. With `pushCountBefore`, acceptance
-    // compares the user-content push counter against that snapshot.
-    // Without it (`undefined`), the send provably never pushed its user
-    // content — blocked by a UserPromptSubmit hook, or any exit before
-    // `turn.run` — so restore unconditionally instead of comparing the
-    // push counter: the counter is global, and a concurrent submission
-    // admitted during the hook await pushes its own content into the
-    // same counter, which would read as "accepted" for content THIS
-    // send never pushed.
+    // compares the user-content push counter against that snapshot — for
+    // the attached carrier the snapshot published by `GeminiChat`
+    // immediately before this send's own push, for the recursive
+    // continuations below the snapshot taken immediately before their
+    // send. Without it (`undefined`), the send provably never pushed its
+    // user content — blocked by a UserPromptSubmit hook, or any exit
+    // before the push site — so restore unconditionally instead of
+    // comparing the push counter: the counter is global, and a concurrent
+    // submission admitted in the meantime pushes its own content into the
+    // same counter, which would read as "accepted" for content THIS send
+    // never pushed.
     const settleSteerInput = (
       steerInput: SteerInput | undefined,
       pushCountBefore?: number,
@@ -2549,12 +2552,28 @@ export class GeminiClient {
     };
 
     const attachedSteerInput = options?.steerInput;
-    // Re-snapshotted immediately before `turn.run` (after the
-    // UserPromptSubmit hook await) so pushes from concurrent submissions
-    // admitted during the hook window stay out of this send's comparison
-    // window. `pushInitiated` tracks whether the send ever reached the
-    // push point; exits before it settle by unconditional restore.
-    let attachedSteerPushCount = currentPushCount();
+    // Acceptance snapshot for the attached carrier: `GeminiChat` publishes
+    // the user-content push counter on the request array immediately
+    // before this send's history push (see `userContentPushSnapshotKey`
+    // in geminiChat.ts), so the comparison window around the push is
+    // empty. A client-side snapshot — even one retaken immediately before
+    // `turn.run` — would still cover the send-lock and `tryCompress`
+    // awaits inside `chat.sendMessageStream`, where a concurrently
+    // admitted send (e.g. /btw) can push and supply the observed counter
+    // growth for a send that then exits before its own push.
+    // `attachedSnapshotSource` is the array handed to `turn.run`; a send
+    // that exits before the publish never pushed, so it settles by
+    // unconditional restore. `pushInitiated` tracks whether the send ever
+    // reached `turn.run`; exits before it settle the same way.
+    let attachedSnapshotSource: readonly unknown[] | undefined;
+    const attachedPushSnapshot = (): number | undefined => {
+      const published = attachedSnapshotSource
+        ? (attachedSnapshotSource as unknown as Record<PropertyKey, unknown>)[
+            userContentPushSnapshotKey
+          ]
+        : undefined;
+      return typeof published === 'number' ? published : undefined;
+    };
     let pushInitiated = false;
 
     const restoreStrippedRetryEntries = () => {
@@ -2827,6 +2846,12 @@ export class GeminiClient {
       for (const goalEvent of await finalizeInterruptedGoalTurn()) {
         yield goalEvent;
       }
+      // A Goal admission failure rethrows before the settlement
+      // try/finally below, and this send provably never pushed: settle the
+      // attached carrier here by unconditional restore, the same contract
+      // as the hook-failure catch above. Idempotently safe via the
+      // `settledSteerInputs` guard when the caller side settles too.
+      settleSteerInput(attachedSteerInput);
       throw error;
     }
     const isGoalRuntimeTurn = goalOrigin === 'runtime';
@@ -3458,11 +3483,12 @@ export class GeminiClient {
             )
           : null;
 
-      // Acceptance snapshot for the attached steer input, retaken here —
-      // after the UserPromptSubmit hook await, immediately before the push
-      // inside `turn.run` — so a concurrent submission pushing during the
-      // hook window cannot supply the observed push for THIS send.
-      attachedSteerPushCount = currentPushCount();
+      // The acceptance snapshot for the attached carrier is published by
+      // `chat.sendMessageStream` on `requestToSend` immediately before the
+      // actual history push (see `userContentPushSnapshotKey`); a
+      // client-side snapshot taken here would still cover the send-lock
+      // and compression awaits between `turn.run` and that push.
+      attachedSnapshotSource = requestToSend;
       pushInitiated = true;
       agentOutput.beginResponse();
       const resultStream = turn.run(model, requestToSend, signal);
@@ -3477,7 +3503,7 @@ export class GeminiClient {
             // UI history) ensures the queued user message renders above the
             // model's reply.  The outer finally re-runs settleSteerInput
             // as a no-op thanks to the settledSteerInputs guard.
-            settleSteerInput(attachedSteerInput, attachedSteerPushCount);
+            settleSteerInput(attachedSteerInput, attachedPushSnapshot());
             steerInputSettled = true;
           }
           if (event.type === GeminiEventType.ToolCallRequest) {
@@ -4230,11 +4256,14 @@ export class GeminiClient {
       }
       closeGoalStateEvents();
       if (pushInitiated) {
-        settleSteerInput(attachedSteerInput, attachedSteerPushCount);
+        // Snapshot published by the chat ⇒ compare against it; no snapshot
+        // ⇒ the send exited before its push site (no await between the
+        // publish and the push) and restores unconditionally.
+        settleSteerInput(attachedSteerInput, attachedPushSnapshot());
       } else {
         // Exited before `turn.run` (cancelled during the hook await, setup
-        // failure, ...): this send never pushed, so the entry-snapshot
-        // counter comparison could be fooled by concurrent pushes.
+        // failure, ...): this send never pushed, so any counter comparison
+        // could be fooled by concurrent pushes.
         settleSteerInput(attachedSteerInput);
       }
       restoreStrippedRetryEntries();

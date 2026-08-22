@@ -33,7 +33,7 @@ import {
 } from './contentGenerator.js';
 import { BaseLlmClient } from './baseLlmClient.js';
 import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
-import { GeminiChat } from './geminiChat.js';
+import { GeminiChat, userContentPushSnapshotKey } from './geminiChat.js';
 import { DEFAULT_TOKEN_LIMIT } from './tokenLimits.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
@@ -12497,7 +12497,12 @@ Other open files:
       it('settles an attached ToolResult steer only after history accepts it', async () => {
         let pushCount = 0;
         client.getChat().getUserContentPushCount = vi.fn(() => pushCount);
-        mockTurnRunFn.mockImplementation(() => {
+        mockTurnRunFn.mockImplementation((_model, request) => {
+          // Miniature of GeminiChat's contract: publish the push counter
+          // on the request immediately before pushing it.
+          (request as unknown as Record<PropertyKey, unknown>)[
+            userContentPushSnapshotKey
+          ] = pushCount;
           pushCount = 1;
           return (async function* () {
             yield { type: GeminiEventType.Content, value: 'response' };
@@ -12529,7 +12534,12 @@ Other open files:
       it('settles an attached steer before content events reach the consumer', async () => {
         let pushCount = 0;
         client.getChat().getUserContentPushCount = vi.fn(() => pushCount);
-        mockTurnRunFn.mockImplementation(() => {
+        mockTurnRunFn.mockImplementation((_model, request) => {
+          // Miniature of GeminiChat's contract: publish the push counter
+          // on the request immediately before pushing it.
+          (request as unknown as Record<PropertyKey, unknown>)[
+            userContentPushSnapshotKey
+          ] = pushCount;
           pushCount = 1;
           return (async function* () {
             yield { type: GeminiEventType.Content, value: 'first' };
@@ -12759,7 +12769,13 @@ Other open files:
         vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
           (event: string) => event === 'UserPromptSubmit',
         );
-        mockTurnRunFn.mockImplementationOnce(() => {
+        mockTurnRunFn.mockImplementationOnce((_model, request) => {
+          // Miniature of GeminiChat's contract: publish the push counter
+          // on the request immediately before pushing it — AFTER the
+          // concurrent hook-window push already advanced the counter.
+          (request as unknown as Record<PropertyKey, unknown>)[
+            userContentPushSnapshotKey
+          ] = pushCount;
           pushCount += 1; // this send pushes...
           pushCount -= 1; // ...then rolls the push back on a setup error
           throw new Error('setup failed after push rollback');
@@ -12785,6 +12801,119 @@ Other open files:
           ),
         ).rejects.toThrow('setup failed after push rollback');
 
+        expect(accept).not.toHaveBeenCalled();
+        expect(restore).toHaveBeenCalledOnce();
+      });
+
+      it('restores an attached steer when a concurrent push lands in the pre-push window and this send exits before pushing', async () => {
+        // Acceptance must be decided by the push-site snapshot GeminiChat
+        // publishes, not a client-side one: between the client's
+        // pre-`turn.run` snapshot and this send's actual push,
+        // `chat.sendMessageStream` awaits the send lock and compression,
+        // and a concurrently admitted send (/btw) pushing inside that
+        // window supplies the counter growth a client-side diff would
+        // read as THIS send's acceptance. This send exits before reaching
+        // its push site (no snapshot published), so the carrier must
+        // restore even though the global counter advanced.
+        let pushCount = 0;
+        client.getChat().getUserContentPushCount = vi.fn(() => pushCount);
+        mockTurnRunFn.mockImplementationOnce(() => {
+          pushCount += 1; // concurrent /btw push inside the pre-push window
+          // ...and this send exits before its push site: no snapshot is
+          // published on the request.
+          throw new Error('cancelled during compression');
+        });
+        const accept = vi.fn();
+        const restore = vi.fn();
+
+        await expect(
+          fromAsync(
+            client.sendMessageStream(
+              [{ text: 'tool result plus steer' }],
+              new AbortController().signal,
+              'prompt-attached-steer-window-push',
+              {
+                type: SendMessageType.ToolResult,
+                steerInput: {
+                  parts: [{ text: 'steer' }],
+                  accept,
+                  restore,
+                },
+              },
+            ),
+          ),
+        ).rejects.toThrow('cancelled during compression');
+
+        expect(accept).not.toHaveBeenCalled();
+        expect(restore).toHaveBeenCalledOnce();
+      });
+
+      it('accepts an attached steer by the push-site snapshot even when a concurrent push advanced the counter first', async () => {
+        let pushCount = 0;
+        client.getChat().getUserContentPushCount = vi.fn(() => pushCount);
+        mockTurnRunFn.mockImplementationOnce((_model, request) => {
+          pushCount += 1; // concurrent push inside the pre-push window
+          // GeminiChat publishes the snapshot immediately before THIS push.
+          (request as unknown as Record<PropertyKey, unknown>)[
+            userContentPushSnapshotKey
+          ] = pushCount;
+          pushCount += 1; // this send's own push
+          return (async function* () {
+            yield { type: GeminiEventType.Content, value: 'response' };
+          })();
+        });
+        const accept = vi.fn();
+        const restore = vi.fn();
+
+        await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'tool result plus steer' }],
+            new AbortController().signal,
+            'prompt-attached-steer-window-push-accepted',
+            {
+              type: SendMessageType.ToolResult,
+              steerInput: {
+                parts: [{ text: 'steer' }],
+                accept,
+                restore,
+              },
+            },
+          ),
+        );
+
+        expect(accept).toHaveBeenCalledOnce();
+        expect(restore).not.toHaveBeenCalled();
+      });
+
+      it('settles an attached carrier by restore when Goal turn admission fails', async () => {
+        // A Goal-type send without a permit fails admission and rethrows
+        // before the settlement try/finally; the attached carrier must
+        // still be settled (unconditional restore) instead of leaking:
+        // drained messages would otherwise be neither delivered nor
+        // requeued.
+        client.getChat().getUserContentPushCount = vi.fn().mockReturnValue(0);
+        const accept = vi.fn();
+        const restore = vi.fn();
+
+        await expect(
+          fromAsync(
+            client.sendMessageStream(
+              [{ text: 'goal continuation' }],
+              new AbortController().signal,
+              'prompt-goal-admission-carrier',
+              {
+                type: SendMessageType.Goal,
+                steerInput: {
+                  parts: [{ text: 'carrier' }],
+                  accept,
+                  restore,
+                },
+              },
+            ),
+          ),
+        ).rejects.toThrow('An automatic Goal turn requires an exact permit');
+
+        expect(mockTurnRunFn).not.toHaveBeenCalled();
         expect(accept).not.toHaveBeenCalled();
         expect(restore).toHaveBeenCalledOnce();
       });
@@ -12832,8 +12961,13 @@ Other open files:
         client.getChat().getUserContentPushCount = vi.fn(() => pushCount);
 
         let turnCall = 0;
-        mockTurnRunFn.mockImplementation(() => {
+        mockTurnRunFn.mockImplementation((_model, request) => {
           turnCall++;
+          // Miniature of GeminiChat's contract: publish the push counter
+          // on the request immediately before pushing it.
+          (request as unknown as Record<PropertyKey, unknown>)[
+            userContentPushSnapshotKey
+          ] = pushCount;
           pushCount = turnCall;
           return (async function* () {
             yield {
@@ -12902,8 +13036,13 @@ Other open files:
         vi.mocked(mockConfig.getStopHookBlockingCap).mockReturnValue(4);
 
         let turnCall = 0;
-        mockTurnRunFn.mockImplementation(() => {
+        mockTurnRunFn.mockImplementation((_model, request) => {
           turnCall++;
+          // Miniature of GeminiChat's contract: publish the push counter
+          // on the request immediately before pushing it.
+          (request as unknown as Record<PropertyKey, unknown>)[
+            userContentPushSnapshotKey
+          ] = pushCount;
           pushCount = turnCall;
           return (async function* () {
             yield {
