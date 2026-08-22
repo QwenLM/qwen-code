@@ -3524,7 +3524,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
-  it('records the current model after creating a new daemon session', async () => {
+  it('does not record a session model on an empty new daemon session', async () => {
     const innerConfig = makeInnerConfig();
     vi.mocked(loadCliConfig).mockResolvedValue(
       innerConfig as unknown as Config,
@@ -3559,10 +3559,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     expect(
       innerConfig.getChatRecordingService().recordSessionModel,
-    ).toHaveBeenCalledWith({
-      modelId: 'm',
-      authType: 'api-key',
-    });
+    ).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;

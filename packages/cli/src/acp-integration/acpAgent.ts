@@ -247,10 +247,7 @@ import {
   isInactiveExtensionSkill,
 } from './extension-skills.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
-import {
-  recordDaemonSessionModelFromConfig,
-  restoreSessionModelThenAuthenticate,
-} from './session-model-persistence.js';
+import { restoreSessionModelThenAuthenticate } from './session-model-persistence.js';
 import { HistoryReplayer } from './session/history-replayer.js';
 import { renderPreparedGoalUpdate } from './session/recovered-goal-update.js';
 import { ActiveWorkReporter } from './active-work-reporter.js';
@@ -5250,7 +5247,6 @@ class QwenAgent implements Agent {
             session = await profiler.time('session_register', () =>
               this.createAndStoreSession(config, settings),
             );
-            await recordDaemonSessionModelFromConfig(config);
           } catch (error) {
             return this.cleanupAfterRequestFailure(error, async () => {
               if (

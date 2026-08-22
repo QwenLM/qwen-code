@@ -53,11 +53,16 @@ identical payload is a no-op), except rewind: `rewindRecording` re-appends the
 in-memory binding after the rewind record so last-wins on the active branch
 still matches Config.
 
-1. `acpAgent.newSession` after `createAndStoreSession`.
-2. `Session.setModel` after a successful switch (including `persistDefault:
+1. `Session.setModel` after a successful switch (including `persistDefault:
 false`).
-3. ACP `/model <id>` via `switchMainModel` when `executionMode === 'acp'`.
-4. `rewindRecording`, which re-anchors the live binding (not a user switch).
+2. ACP `/model <id>` via `switchMainModel` when `executionMode === 'acp'`.
+3. `rewindRecording`, which re-anchors the live binding (not a user switch).
+
+`acpAgent.newSession` must not write. Empty daemon sessions have no transcript
+file; listing, DELETE, and child death all depend on that. A new session
+already inherits `settings.model.name`. Load/resume of a session that never
+switched models uses the last assistant `model`, else the current settings
+default.
 
 `loadSession` / `resumeSession` must not write. `workspaceReload` must not
 write.
