@@ -1128,6 +1128,20 @@ const STANDALONE_CLOSING_THINKING_TAG_PATTERN =
   /^\s*<\/(think|thinking)\s*>\s*$/i;
 const MAX_THINKING_TAG_CANDIDATE_LENGTH = 128;
 
+/**
+ * True when `text` carries more closing than opening thinking tags. The
+ * held-candidate superset strip uses this as a direction guard: a genuine
+ * continuation that re-starts with the held candidate's text must net-close
+ * the candidate's still-open depth (more closers than openers), while a
+ * renormalized re-send of the candidate re-opens at least as much as it
+ * closes — see the strip's comment.
+ */
+function carriesNetClosingTagSurplus(text: string): boolean {
+  const openers = text.match(/<think(?:ing)?\s*>/gi)?.length ?? 0;
+  const closers = text.match(/<\/think(?:ing)?\s*>/gi)?.length ?? 0;
+  return closers > openers;
+}
+
 function startsWithOpeningThinkingTag(text: string): boolean {
   return (
     LEADING_THINKING_TAG_PATTERN.test(text) &&
@@ -1649,31 +1663,36 @@ export function convertOpenAIChunkToGemini(
     // arriving after finish can therefore never contribute to the turn —
     // drop it here instead of running it through the replay and leaked-tag
     // gates, which would fail closed (PROTOCOL_TAG_LEAK) a completed turn
-    // the finish response already closed.
-    if (requestContext.finishChunkConverted === true && visibleText) {
-      parts = parts.filter((part) => !getVisibleText(part));
+    // the finish response already closed. Drop EVERY part, not just
+    // visible-text ones: redelivered reasoning_content still creates thought
+    // parts (getVisibleText returns '' for them, so a visible-text-only
+    // filter keeps them), and a reasoning-only redelivery carries no visible
+    // text at all — either shape surviving into the pipeline trips the
+    // pendingFinishProtocolTagSanitized latch ('Model response continued
+    // after a finish reason.', PROTOCOL_TAG_LEAK) on sanitized turns,
+    // hard-failing the completed turn this gate exists to protect.
+    if (requestContext.finishChunkConverted === true) {
+      parts = [];
       visibleText = '';
     }
 
     const pendingTagCandidate = requestContext.pendingThinkingTagCandidate;
-    const alignedRewindReplayText = visibleText.trimStart();
-    // Replay recognition keys on the accepted/emission sequence, not on
-    // per-chunk content equality alone. Pre-demotion, the held candidate is
-    // the accepted sequence: an equal re-send is an exact replay, and a
-    // proper-prefix re-send (rewind replay) is recognized too — but only
-    // when it carries a full tag word. Genuine deltas can prefix the held
-    // candidate as well (e.g. a literal '<' continuation), and dropping them
-    // silently loses content; a full tag word cannot legitimately re-arrive
-    // while the block it belongs to is still held.
+    // Replay recognition keys on the accepted/emission sequence: pre-demotion
+    // the held candidate is the accepted sequence, and an equal re-send is an
+    // exact replay. A proper-prefix re-send is NOT dropped: content equality
+    // and prefix comparison cannot tell a provider rewind apart from a
+    // genuine nested opening tag arriving as its own delta (arbitrary
+    // chunking of arbitrary content is undecidable against content
+    // comparison — a full tag word CAN legitimately re-arrive while the
+    // block it nests in is still held), and dropping the genuine shape
+    // corrupts a real thinking block. Such deltas are appended instead: a
+    // true rewind then degrades to duplicated content inside the hidden
+    // thought channel, which the depth-counting scanner absorbs, rather than
+    // failing a legitimate turn.
     const replayedTagPrefix =
       !pendingTagCandidate?.closingTagName &&
       /\S/.test(pendingTagCandidate?.text ?? '') &&
-      (pendingTagCandidate?.text === visibleText ||
-        (alignedRewindReplayText.length > 0 &&
-          THINKING_TAG_PATTERN.test(visibleText) &&
-          (pendingTagCandidate?.text ?? '')
-            .trimStart()
-            .startsWith(alignedRewindReplayText)));
+      pendingTagCandidate?.text === visibleText;
     const replayedClosingTag =
       STANDALONE_CLOSING_THINKING_TAG_PATTERN.exec(
         visibleText,
@@ -1688,21 +1707,26 @@ export function convertOpenAIChunkToGemini(
     }
     // Short cumulative replays can pass through normalizeStreamingTextDelta
     // verbatim. Detect them only from the complete accepted post-demotion
-    // sequence: equality is an exact replay, a prefix-extending chunk is
-    // a cumulative superset whose already-accepted prefix must be stripped,
-    // and a proper prefix of the sequence (rewind replay) is dropped when it
-    // carries a full tag word. Never infer replay from suffix equality —
-    // genuine adjacent deltas can repeat the same character or tag-like
-    // fragment — and never drop a prefix re-send that lacks a full tag word:
-    // genuine tag-like fragments ('<thi', '<thinkpad>') can prefix the
-    // baseline too and must reach the tag-tail hold intact. Compare
-    // trimStart()-aligned in every branch: a whitespace-only content delta
-    // can be emitted before any reasoning_content arrives (it cannot be held
-    // — no structured reasoning yet — and /\S/ keeps it from setting
-    // hasVisibleContent), so the provider's cumulative replay can carry
-    // leading whitespace the demotion-seeded baseline excludes; the mirror
-    // polarity (baseline seeded from a held candidate carrying whitespace the
-    // replay lacks) must be recognized too.
+    // sequence: equality is an exact replay, and a prefix-extending chunk is
+    // a cumulative superset whose already-accepted prefix must be stripped.
+    // A proper prefix of the sequence is NOT dropped: every demotion-seeded
+    // baseline starts with an opening tag, so a lone genuine consecutive
+    // block opener ('<thinking>') always prefixes the baseline and is
+    // indistinguishable from a rewind replay by content comparison alone —
+    // dropping it corrupts the genuine consecutive/nested block. Such
+    // deltas are appended instead: a true rewind then degrades to
+    // duplicated content inside the hidden thought channel — or to the
+    // fail-closed leaked-tag gate once visible content exists, matching the
+    // single-chunk twin — instead of silently losing a genuine block. Never
+    // infer replay from suffix equality — genuine adjacent deltas can repeat
+    // the same character or tag-like fragment. Compare trimStart()-aligned
+    // in every branch: a whitespace-only content delta can be emitted before
+    // any reasoning_content arrives (it cannot be held — no structured
+    // reasoning yet — and /\S/ keeps it from setting hasVisibleContent), so
+    // the provider's cumulative replay can carry leading whitespace the
+    // demotion-seeded baseline excludes; the mirror polarity (baseline
+    // seeded from a held candidate carrying whitespace the replay lacks)
+    // must be recognized too.
     if (
       requestContext.inlineThinkingBlockDemoted === true &&
       visibleText &&
@@ -1724,23 +1748,7 @@ export function convertOpenAIChunkToGemini(
         );
         parts = parts.filter((part) => !getVisibleText(part));
         if (visibleText) parts.push({ text: visibleText });
-      } else if (
-        alignedRewindReplayText.length > 0 &&
-        alignedReplayText.startsWith(alignedRewindReplayText) &&
-        THINKING_TAG_PATTERN.test(visibleText)
-      ) {
-        // Rewind replay: a proper-prefix re-send of the accepted
-        // post-demotion sequence. Left unrecognized it desyncs the baseline
-        // (the re-send is appended again) and its complete tag throws
-        // PROTOCOL_TAG_LEAK mid-stream on the legitimate turn the demotion
-        // route exists to accept.
-        parts = parts.filter((part) => !getVisibleText(part));
-        visibleText = '';
       }
-    }
-    if (requestContext.inlineThinkingBlockDemoted === true && visibleText) {
-      requestContext.postDemotionReplayText =
-        (requestContext.postDemotionReplayText ?? '') + visibleText;
     }
     // Cumulative superset replays can also arrive while the opening block is
     // still held in a pre-demotion candidate: a provider buffer renormalized
@@ -1759,12 +1767,21 @@ export function convertOpenAIChunkToGemini(
     // genuine '<' or reassembles the remainder into a block that gets
     // demoted into the hidden thought channel. Without the strip a sub-word
     // candidate still recombines correctly with its genuine continuation.
+    // Never strip a delta carrying more closing than opening tags either: a
+    // genuine nested continuation whose prefix coincidentally equals the
+    // held candidate (the inner block re-starts with the candidate's bytes)
+    // must net-close the candidate's still-open depth, while a renormalized
+    // re-send of the candidate re-opens at least as much as it closes.
+    // Stripping the net-closing shape reassembles an early-balancing block
+    // whose leftover stray closer fails the turn mid-stream; appending it
+    // lets the depth-counting scanner absorb the nested block instead.
     if (
       pendingTagCandidate &&
       !pendingTagCandidate.closingTagName &&
       /\S/.test(pendingTagCandidate.text) &&
       /<\/?think(?:ing)?/i.test(pendingTagCandidate.text) &&
-      visibleText
+      visibleText &&
+      !carriesNetClosingTagSurplus(visibleText)
     ) {
       const alignedCandidateText = pendingTagCandidate.text.trimStart();
       const alignedVisibleText = visibleText.trimStart();
@@ -1773,6 +1790,16 @@ export function convertOpenAIChunkToGemini(
         parts = parts.filter((part) => !getVisibleText(part));
         if (visibleText) parts.push({ text: visibleText });
       }
+    }
+    // Accumulate the baseline AFTER the superset strip above: accumulating
+    // the pre-strip delta would double-count the held rest's text into
+    // postDemotionReplayText when a cumulative-superset resend arrives while
+    // a post-demotion rest candidate is held, permanently desyncing the
+    // baseline from the accepted sequence. The baseline must always reflect
+    // the post-strip accepted content.
+    if (requestContext.inlineThinkingBlockDemoted === true && visibleText) {
+      requestContext.postDemotionReplayText =
+        (requestContext.postDemotionReplayText ?? '') + visibleText;
     }
     const combinedCandidateText =
       (pendingTagCandidate?.text ?? '') + visibleText;

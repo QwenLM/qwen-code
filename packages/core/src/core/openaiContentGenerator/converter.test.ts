@@ -1656,13 +1656,17 @@ describe('OpenAIContentConverter', () => {
       expect(replay.candidates?.[0]?.content?.parts).toEqual([]);
     });
 
-    it('drops a rewind replay that re-sends a proper prefix of the accepted post-demotion baseline (issue #9348)', () => {
-      // A rewind replay (a proper prefix of the accepted baseline) missed
-      // both post-demotion replay guards: the re-send desynced the baseline
-      // (it was appended again) and its complete tag threw
-      // PROTOCOL_TAG_LEAK mid-stream on the legitimate turn. Replay
-      // recognition keys on the accepted sequence, so a prefix re-send
-      // carrying a full tag word is dropped and the baseline stays intact.
+    it('fails closed on a tag-carrying prefix re-send after visible content instead of dropping it (issue #9348 inverted direction)', () => {
+      // Inverted failure direction: a proper-prefix re-send of the baseline
+      // carrying a full tag is no longer dropped, because content comparison
+      // cannot tell a provider rewind apart from a genuine consecutive block
+      // opener — every demotion-seeded baseline starts with '<thinking>',
+      // so any genuine new block opener prefixes the baseline and the old
+      // rewind drop corrupted genuine consecutive blocks (the lone
+      // '<thinking>' probe). Once visible content exists the candidate
+      // machinery is disengaged, so the appended complete tag fails closed
+      // mid-stream — chunking-consistent with the single-chunk twin, which
+      // also fails closed on a complete tag after a demotion.
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
@@ -1679,34 +1683,26 @@ describe('OpenAIContentConverter', () => {
         { text: 'OkMore' },
       ]);
 
-      const replay = converter.convertOpenAIChunkToGemini(
-        streamChunk('rewind-replay', { content: '<thinking>x</thinking>Ok' }),
-        stream,
-      );
-
-      expect(replay.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(stream.postDemotionReplayText).toBe(
-        '<thinking>x</thinking>OkMore',
-      );
-      expect(stream.pendingPostDemotionTagTail).toBeUndefined();
-
-      // The genuine continuation after the dropped replay still emits.
-      const continuation = converter.convertOpenAIChunkToGemini(
-        streamChunk('continuation', { content: 'Done' }, 'stop'),
-        stream,
-      );
-      expect(continuation.candidates?.[0]?.content?.parts).toEqual([
-        { text: 'Done' },
-      ]);
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('rewind-replay', {
+            content: '<thinking>x</thinking>Ok',
+          }),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
     });
 
-    it('drops a pre-demotion rewind replay that prefixes the held candidate (issue #9348)', () => {
-      // Pre-demotion the held candidate is the accepted sequence. A rewind
-      // replay carrying a proper prefix of it missed the equality-only
-      // replay guard, concatenated onto the held candidate and corrupted
-      // the block so the finish chunk threw PROTOCOL_TAG_LEAK. A prefix
-      // re-send is dropped only when it carries a full tag word, so
-      // genuine deltas that prefix the candidate stay intact.
+    it('demotes a genuine nested opening tag arriving as its own delta (issue #9348 inverted direction)', () => {
+      // Entrance A: a genuine nested opening tag arriving as its own delta —
+      // chunks '<thinking>a' / '<thinking>' / 'b</thinking></thinking>Answer'
+      // + stop. The lone '<thinking>' delta prefixes the held candidate, so
+      // the old rewind-replay disjunct dropped it; the balance walk then
+      // closed at the first closer and the leftover rest threw
+      // PROTOCOL_TAG_LEAK on the legitimate turn, while the identical bytes
+      // in one chunk demoted cleanly. Prefix re-sends are appended instead,
+      // so the depth-counting scanner absorbs the nested block and the
+      // outcome matches the single-chunk twin.
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
@@ -1715,44 +1711,87 @@ describe('OpenAIContentConverter', () => {
         stream,
       );
       const opening = converter.convertOpenAIChunkToGemini(
-        streamChunk('opening', { content: '<thinking>x' }),
+        streamChunk('opening', { content: '<thinking>a' }),
         stream,
       );
       expect(opening.candidates?.[0]?.content?.parts).toEqual([]);
       expect(stream.pendingThinkingTagCandidate).toEqual({
-        text: '<thinking>x',
+        text: '<thinking>a',
       });
 
+      const nested = converter.convertOpenAIChunkToGemini(
+        streamChunk('nested-opening', { content: '<thinking>' }),
+        stream,
+      );
+      expect(nested.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingThinkingTagCandidate).toEqual({
+        text: '<thinking>a<thinking>',
+      });
+
+      const rest = converter.convertOpenAIChunkToGemini(
+        streamChunk(
+          'rest',
+          { content: 'b</thinking></thinking>Answer' },
+          'stop',
+        ),
+        stream,
+      );
+      expect(rest.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'a<thinking>b</thinking>' },
+        { text: 'Answer' },
+      ]);
+    });
+
+    it('fails closed when an appended prefix re-send never re-balances (issue #9348 inverted direction)', () => {
+      // Degradation side of the inversion: when the appended prefix re-send
+      // is a true rewind (chunks '<thinking>x' / '<thinking>' /
+      // '</thinking>Answer'), the combined candidate re-held as
+      // '<thinking>x<thinking>' never balances and the finish chunk fails
+      // closed instead of the old silent drop. Accepted trade: the genuine
+      // nested shape above must not be dropped, and the two shapes are
+      // undecidable against content comparison.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('opening', { content: '<thinking>x' }),
+        stream,
+      );
       const replay = converter.convertOpenAIChunkToGemini(
         streamChunk('rewind-replay', { content: '<thinking>' }),
         stream,
       );
       expect(replay.candidates?.[0]?.content?.parts).toEqual([]);
       expect(stream.pendingThinkingTagCandidate).toEqual({
-        text: '<thinking>x',
+        text: '<thinking>x<thinking>',
       });
 
-      const rest = converter.convertOpenAIChunkToGemini(
-        streamChunk('rest', { content: '</thinking>Answer' }, 'stop'),
-        stream,
-      );
-      expect(rest.candidates?.[0]?.content?.parts).toEqual([
-        { thought: true, text: 'x' },
-        { text: 'Answer' },
-      ]);
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('rest', { content: '</thinking>Answer' }, 'stop'),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
     });
 
-    it('drops a replay of a demoted block while a rest candidate is held instead of re-demoting it (issue #9348)', () => {
-      // A replay re-sending the already-demoted block while the demotion
-      // rest was still held poisoned the baseline (the block was appended
-      // again) and re-demoted the block through the sub-word candidate
-      // strip — duplicating the thought part — so a later legitimate
-      // cumulative replay threw PROTOCOL_TAG_LEAK against the corrupted
-      // baseline.
+    it('appends a demoted-block replay arriving while a sub-word rest is held and fails closed when the rest never recombines (issue #9348 inverted direction)', () => {
+      // Inverted failure direction: the replay re-sending the demoted block
+      // is a proper prefix of the baseline carrying a full tag. It is no
+      // longer dropped (a genuine consecutive block opener is
+      // indistinguishable from it); the held-candidate strip reassembles it
+      // against the sub-word rest and the block re-demotes, duplicating the
+      // thought inside the hidden channel. When the provider's continuation
+      // then fails to recombine the sub-word rest, the complete tag fails
+      // closed instead of leaking — accepted trade for keeping genuine
+      // consecutive blocks intact.
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
-      const reasoning = converter.convertOpenAIChunkToGemini(
+      converter.convertOpenAIChunkToGemini(
         streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
@@ -1767,37 +1806,202 @@ describe('OpenAIContentConverter', () => {
         streamChunk('replay', { content: '<thinking>p1</thinking>' }),
         stream,
       );
-      expect(replay.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(replay.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'p1' },
+        { thought: true, text: 'p1' },
+      ]);
+      // The baseline accumulates the post-strip reassembled content, not the
+      // raw replay.
       expect(stream.postDemotionReplayText).toBe(
-        '<thinking>p1</thinking><think',
+        '<thinking>p1</thinking><thinking>p1</thinking>',
       );
 
-      const rest = converter.convertOpenAIChunkToGemini(
-        streamChunk('rest', { content: 'ing>p2</thinking>' }),
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('rest', { content: 'ing>p2</thinking>' }, 'stop'),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('keeps the baseline intact when a superset resend arrives while a post-demotion rest is held (issue #9348 R9-3)', () => {
+      // The baseline accumulation must run AFTER the held-candidate superset
+      // strip: chunks '<thinking>a</thinking><thinking>b' demote block 1 and
+      // hold rest '<thinking>b'; the renormalized resend
+      // '<thinking>b</thinking>X' (the exact anomaly the strip was built
+      // for) used to be appended unstripped, double-counting '<thinking>b'
+      // into the baseline, so a later genuine cumulative redelivery matched
+      // no branch and threw PROTOCOL_TAG_LEAK. With post-strip accumulation
+      // the baseline stays the accepted sequence and step 3 strips cleanly.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
         stream,
       );
-      expect(rest.candidates?.[0]?.content?.parts).toEqual([
-        { thought: true, text: 'p1' },
-        { thought: true, text: 'p2' },
-      ]);
+      const demoted = converter.convertOpenAIChunkToGemini(
+        streamChunk('block', {
+          content: '<thinking>a</thinking><thinking>b',
+        }),
+        stream,
+      );
+      expect(demoted.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingThinkingTagCandidate).toEqual({
+        text: '<thinking>b',
+      });
 
-      // The later legitimate cumulative replay now equals the intact
-      // baseline and is dropped instead of throwing PROTOCOL_TAG_LEAK.
-      const cumulativeReplay = converter.convertOpenAIChunkToGemini(
+      const resend = converter.convertOpenAIChunkToGemini(
+        streamChunk('superset-resend', {
+          content: '<thinking>b</thinking>X',
+        }),
+        stream,
+      );
+      expect(resend.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'a' },
+        { thought: true, text: 'b' },
+        { text: 'X' },
+      ]);
+      expect(stream.postDemotionReplayText).toBe(
+        '<thinking>a</thinking><thinking>b</thinking>X',
+      );
+
+      const redelivery = converter.convertOpenAIChunkToGemini(
         streamChunk(
-          'cumulative-replay',
-          { content: '<thinking>p1</thinking><thinking>p2</thinking>' },
+          'cumulative-redelivery',
+          { content: '<thinking>a</thinking><thinking>b</thinking>XY' },
           'stop',
         ),
         stream,
       );
-      expect(cumulativeReplay.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(redelivery.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'Y' },
+      ]);
+      expect(stream.postDemotionReplayText).toBe(
+        '<thinking>a</thinking><thinking>b</thinking>XY',
+      );
+    });
 
-      const thoughtTexts = [reasoning, demoted, replay, rest, cumulativeReplay]
-        .flatMap((r) => r.candidates?.[0]?.content?.parts ?? [])
-        .filter((part) => part.thought === true)
-        .map((part) => part.text ?? '');
-      expect(thoughtTexts).toEqual(['Let me think.', 'p1', 'p2']);
+    it('demotes genuine consecutive inline thinking blocks split one opener per chunk (issue #9348 inverted direction)', () => {
+      // Entrance B: after a demotion the baseline always starts with
+      // '<thinking>', so a lone genuine consecutive opener used to match the
+      // post-demotion rewind drop and vanish; the following body then threw
+      // PROTOCOL_TAG_LEAK. Appended instead, the opener re-enters the
+      // candidate machinery and the second block demotes — matching the
+      // single-chunk twin [{thought:'a'},{thought:'b'},{text:'Done'}].
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const first = converter.convertOpenAIChunkToGemini(
+        streamChunk('first', { content: '<thinking>a</thinking>' }),
+        stream,
+      );
+      expect(first.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'a' },
+      ]);
+
+      const opener = converter.convertOpenAIChunkToGemini(
+        streamChunk('second-opening', { content: '<thinking>' }),
+        stream,
+      );
+      expect(opener.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingThinkingTagCandidate).toEqual({
+        text: '<thinking>',
+      });
+
+      const second = converter.convertOpenAIChunkToGemini(
+        streamChunk('second-rest', { content: 'b</thinking>Done' }, 'stop'),
+        stream,
+      );
+      expect(second.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'b' },
+        { text: 'Done' },
+      ]);
+      expect(stream.postDemotionReplayText).toBe(
+        '<thinking>a</thinking><thinking>b</thinking>Done',
+      );
+    });
+
+    it('fails closed on an unclosed block opened after visible content, chunk-consistent with the single-chunk twin (issue #9348 inverted direction)', () => {
+      // Entrance B witness: '<thinking>a</thinking>Answer ' / '<thinking>' /
+      // 'raw thought body' + stop. The lone opener after visible content is
+      // appended (not dropped), so the post-demotion tag-tail gate fails
+      // closed on the complete tag — the same outcome as the single-chunk
+      // twin, which demotes block a and rejects the unclosed rest. The old
+      // rewind drop leaked the unclosed block body as visible text instead.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const first = converter.convertOpenAIChunkToGemini(
+        streamChunk('first', {
+          content: '<thinking>a</thinking>Answer ',
+        }),
+        stream,
+      );
+      expect(first.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'a' },
+        { text: 'Answer ' },
+      ]);
+
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('second-opening', { content: '<thinking>' }),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('does not strip a net-closing superset delta that restarts with the held candidate (issue #9348 inverted direction)', () => {
+      // Entrance C: a genuine nested continuation whose prefix coincidentally
+      // equals the held candidate (chunks '<thinking>a' /
+      // '<thinking>a</thinking></thinking>Answer' + stop) used to be
+      // stripped into the early-balancing '<thinking>a</thinking>' whose
+      // leftover stray closer threw mid-stream. The delta net-closes the
+      // held depth (more closers than openers), which a renormalized resend
+      // of the candidate never does, so the strip skips it and the
+      // depth-counting scanner absorbs the nested block. The diverged
+      // normalizer baseline makes the delta reach the converter unsliced.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const opening = converter.convertOpenAIChunkToGemini(
+        streamChunk('opening', { content: '<thinking>a' }),
+        stream,
+      );
+      expect(opening.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingThinkingTagCandidate).toEqual({
+        text: '<thinking>a',
+      });
+
+      stream.textDeltaState = {
+        emittedText: '<diverged-baseline>',
+        emittedLength: 19,
+        cumulativeMode: true,
+      };
+      const nested = converter.convertOpenAIChunkToGemini(
+        streamChunk(
+          'nested-continuation',
+          { content: '<thinking>a</thinking></thinking>Answer' },
+          'stop',
+        ),
+        stream,
+      );
+      expect(nested.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'a<thinking>a</thinking>' },
+        { text: 'Answer' },
+      ]);
     });
 
     it('keeps genuine content intact when a sub-word "<" candidate is held (issue #9348)', () => {
@@ -1921,6 +2125,52 @@ describe('OpenAIContentConverter', () => {
         stream,
       );
       expect(fullRedelivery.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.postDemotionReplayText).toBe('<thinking>x</thinking>Ok');
+    });
+
+    it('drops reasoning-only post-finish redelivery, including thought parts (issue #9348 R9-4)', () => {
+      // The finish-state gate used to drop only visible-text parts, and only
+      // when visible text existed: thought parts created from redelivered
+      // reasoning_content pass getVisibleText (it returns '' for thought
+      // parts), and a reasoning-only redelivery has no visible text at all,
+      // so the gate never fired. Any surviving part trips the pipeline's
+      // pendingFinishProtocolTagSanitized latch ('Model response continued
+      // after a finish reason.', PROTOCOL_TAG_LEAK) on sanitized turns,
+      // hard-failing the completed turn. The gate must drop every part.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('block', { content: '<thinking>x</thinking>Ok' }),
+        stream,
+      );
+      const finish = converter.convertOpenAIChunkToGemini(
+        streamChunk('finish', {}, 'stop'),
+        stream,
+      );
+      expect(finish.candidates?.[0]?.finishReason).toBeDefined();
+      expect(stream.finishChunkConverted).toBe(true);
+
+      const reasoningRedelivery = converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning-redelivery', {
+          reasoning_content: 'Let me think.',
+        }),
+        stream,
+      );
+      expect(reasoningRedelivery.candidates?.[0]?.content?.parts).toEqual([]);
+
+      const mixedRedelivery = converter.convertOpenAIChunkToGemini(
+        streamChunk('mixed-redelivery', {
+          reasoning_content: 'More reasoning.',
+          content: 'More text.',
+        }),
+        stream,
+      );
+      expect(mixedRedelivery.candidates?.[0]?.content?.parts).toEqual([]);
       expect(stream.postDemotionReplayText).toBe('<thinking>x</thinking>Ok');
     });
 
