@@ -15,6 +15,8 @@ import type { CompletionItem } from '../types/completionItemTypes.js';
 
 const {
   mockPostMessage,
+  mockVscodeApi,
+  mockFileContextApi,
   mockOpenCompletion,
   mockCloseCompletion,
   mockMessageState,
@@ -26,48 +28,66 @@ const {
   capturedSessionHandlers,
   capturedCompletionTriggerCalls,
   capturedInputFormProps,
-} = vi.hoisted(() => ({
-  mockPostMessage: vi.fn(),
-  mockOpenCompletion: vi.fn().mockResolvedValue(undefined),
-  mockCloseCompletion: vi.fn(),
-  mockMessageState: {
-    isStreaming: false,
-    isWaitingForResponse: false,
-  },
-  // Completion menu visibility for the mocked useCompletionTrigger. Tests
-  // that exercise composer key handling without the menu flip this to
-  // false; the default true keeps the /skills picker suites working.
-  mockCompletionState: {
-    isOpen: true,
-  },
-  mockAddMessage: vi.fn(),
-  mockEndStreaming: vi.fn(),
-  // Records every render in which InputForm receives showModelSelector=true,
-  // so tests can detect even a transient selector mount (the open gate must
-  // prevent mounting entirely, not merely get cleaned up after the fact).
-  mockModelSelectorMounts: vi.fn(),
-  // The mocked useWebViewMessages stores the real App setters here so tests
-  // can deliver overlay arrivals (permission / question / account) directly.
-  capturedWebViewHandlers: {
-    handlePermissionRequest: null as null | ((value: unknown) => void),
-    handleAskUserQuestion: null as null | ((value: unknown) => void),
-    setAccountInfo: null as null | ((value: unknown) => void),
-  },
-  // The mocked useSessionManagement exposes its real setShowSessionSelector
-  // setter here so tests can raise the SessionSelector overlay directly.
-  capturedSessionHandlers: {
-    setShowSessionSelector: null as null | ((value: boolean) => void),
-  },
-  // Every call the App makes to the mocked useCompletionTrigger, so tests
-  // can assert the suppression argument is actually wired at the call site.
-  capturedCompletionTriggerCalls: [] as unknown[][],
-  // The mocked InputForm stores the App-provided clearance callback here so
-  // tests can simulate the adapter's ResizeObserver height report (jsdom
-  // performs no layout, so the real observer always measures 0).
-  capturedInputFormProps: {
-    onModelSelectorClearance: null as null | ((heightPx: number) => void),
-  },
-}));
+} = vi.hoisted(() => {
+  const mockPostMessage = vi.fn();
+  return {
+    mockPostMessage,
+    // Stable object identity for the mocked useVSCode / useFileContext
+    // returns. Fresh objects every render would silently recreate every
+    // useCallback that lists them in a dependency array, masking a missing
+    // dependency entry (e.g. the /model overlay gate's) exactly the way an
+    // unmemoized real hook would.
+    mockVscodeApi: { postMessage: mockPostMessage },
+    mockFileContextApi: {
+      hasRequestedFiles: false,
+      workspaceFiles: [] as string[],
+      requestWorkspaceFiles: vi.fn(),
+      addFileReference: vi.fn(),
+      activeFileName: null as string | null,
+      activeSelection: null as { fileName: string; selection: string } | null,
+      focusActiveEditor: vi.fn(),
+    },
+    mockOpenCompletion: vi.fn().mockResolvedValue(undefined),
+    mockCloseCompletion: vi.fn(),
+    mockMessageState: {
+      isStreaming: false,
+      isWaitingForResponse: false,
+    },
+    // Completion menu visibility for the mocked useCompletionTrigger. Tests
+    // that exercise composer key handling without the menu flip this to
+    // false; the default true keeps the /skills picker suites working.
+    mockCompletionState: {
+      isOpen: true,
+    },
+    mockAddMessage: vi.fn(),
+    mockEndStreaming: vi.fn(),
+    // Records every render in which InputForm receives showModelSelector=true,
+    // so tests can detect even a transient selector mount (the open gate must
+    // prevent mounting entirely, not merely get cleaned up after the fact).
+    mockModelSelectorMounts: vi.fn(),
+    // The mocked useWebViewMessages stores the real App setters here so tests
+    // can deliver overlay arrivals (permission / question / account) directly.
+    capturedWebViewHandlers: {
+      handlePermissionRequest: null as null | ((value: unknown) => void),
+      handleAskUserQuestion: null as null | ((value: unknown) => void),
+      setAccountInfo: null as null | ((value: unknown) => void),
+    },
+    // The mocked useSessionManagement exposes its real setShowSessionSelector
+    // setter here so tests can raise the SessionSelector overlay directly.
+    capturedSessionHandlers: {
+      setShowSessionSelector: null as null | ((value: boolean) => void),
+    },
+    // Every call the App makes to the mocked useCompletionTrigger, so tests
+    // can assert the suppression argument is actually wired at the call site.
+    capturedCompletionTriggerCalls: [] as unknown[][],
+    // The mocked InputForm stores the App-provided clearance callback here
+    // so tests can simulate the adapter's ResizeObserver height report
+    // (jsdom performs no layout, so the real observer always measures 0).
+    capturedInputFormProps: {
+      onModelSelectorClearance: null as null | ((heightPx: number) => void),
+    },
+  };
+});
 
 const slashSkillsItem: CompletionItem = {
   id: 'skills',
@@ -105,9 +125,7 @@ const modelCommandItem: CompletionItem = {
 };
 
 vi.mock('./hooks/useVSCode.js', () => ({
-  useVSCode: () => ({
-    postMessage: mockPostMessage,
-  }),
+  useVSCode: () => mockVscodeApi,
 }));
 
 // Stateful mock: the real hook owns the SessionSelector visibility state,
@@ -141,15 +159,7 @@ vi.mock('./hooks/session/useSessionManagement.js', async () => {
 });
 
 vi.mock('./hooks/file/useFileContext.js', () => ({
-  useFileContext: () => ({
-    hasRequestedFiles: false,
-    workspaceFiles: [],
-    requestWorkspaceFiles: vi.fn(),
-    addFileReference: vi.fn(),
-    activeFileName: null,
-    activeSelection: null,
-    focusActiveEditor: vi.fn(),
-  }),
+  useFileContext: () => mockFileContextApi,
 }));
 
 vi.mock('./hooks/message/useMessageHandling.js', () => ({
@@ -248,28 +258,38 @@ vi.mock('./hooks/useImage.js', () => ({
   }),
 }));
 
-vi.mock('./hooks/useCompletionTrigger.js', () => ({
-  // Record every call so tests can assert the App actually passes its
-  // suppression argument (third positional parameter) — reverting the call
-  // site leaves it undefined and fails that assertion.
-  useCompletionTrigger: (...args: unknown[]) => {
-    capturedCompletionTriggerCalls.push(args);
-    return {
-      isOpen: mockCompletionState.isOpen,
-      triggerChar: '/',
-      query: 'skills ',
-      items: [
-        slashSkillsItem,
-        secondarySkillItem,
-        commitCommandItem,
-        clearCommandItem,
-      ],
-      closeCompletion: mockCloseCompletion,
-      openCompletion: mockOpenCompletion,
-      refreshCompletion: vi.fn(),
-    };
-  },
-}));
+vi.mock('./hooks/useCompletionTrigger.js', async () => {
+  const React = await import('react');
+  return {
+    // Record every call so tests can assert the App actually passes its
+    // suppression argument (third positional parameter) — reverting the call
+    // site leaves it undefined and fails that assertion. The returned object
+    // is memoized on isOpen (as a memoized real hook would): a fresh object
+    // every render would recreate handleCompletionSelect every render and
+    // mask a missing overlay-gate dependency entry.
+    useCompletionTrigger: (...args: unknown[]) => {
+      capturedCompletionTriggerCalls.push(args);
+      const isOpen = mockCompletionState.isOpen;
+      return React.useMemo(
+        () => ({
+          isOpen,
+          triggerChar: '/',
+          query: 'skills ',
+          items: [
+            slashSkillsItem,
+            secondarySkillItem,
+            commitCommandItem,
+            clearCommandItem,
+          ],
+          closeCompletion: mockCloseCompletion,
+          openCompletion: mockOpenCompletion,
+          refreshCompletion: vi.fn(),
+        }),
+        [isOpen],
+      );
+    },
+  };
+});
 
 vi.mock('./utils/contextUsage.js', () => ({
   computeContextUsage: () => null,
