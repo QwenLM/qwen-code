@@ -64,8 +64,11 @@ import {
   parseReceiptObject,
 } from './lib/receipt.js';
 import {
+  ENTRY_FENCE_DELIMITER_RE,
   composeReview,
   normalizeSeverityFloor,
+  tryIngestBodyCriticals,
+  tryToCount,
   type ComposeReviewInput,
 } from './compose-review.js';
 import {
@@ -87,9 +90,12 @@ import { githubReader } from './lib/platform/github.js';
 import {
   CRITICAL_PREFIX,
   SUGGESTION_PREFIX,
+  carriedClaimLine,
   countInlineFindings,
   severityOf,
+  stripSeverityPrefix,
 } from './lib/inline-counts.js';
+import { validateNewSideAnchors } from './lib/anchors.js';
 import {
   commentMarker,
   footerVersion,
@@ -178,6 +184,65 @@ function recordAoneReceipt(pr: number, newIds: number[], event: string): void {
  */
 function isDiffLine(n: unknown): n is number {
   return typeof n === 'number' && Number.isSafeInteger(n) && n > 0;
+}
+
+/**
+ * The body-Critical entry an Aone-unanchorable comment relocates as:
+ * `path:line — <claim>` — the attribution the inline anchor carried, kept.
+ * Single-line by construction (the claim is one line, and the path guard
+ * below keeps the prefix one), so compose-review's one-line entry
+ * ingestion carries it as-is.
+ */
+function relocatedAoneCriticalEntry(c: ReviewComment): string {
+  // The body arrives footer-appended — strip the canonical footer FIRST,
+  // or an empty claim line lets the extraction fall THROUGH into the
+  // footer text and post it as the claim (the separator strip eats the
+  // newline+colon and the footer's first line becomes the "claim").
+  const body = typeof c.body === 'string' ? stripReviewFooter(c.body) : null;
+  const rawClaim = body === null ? null : carriedClaimLine(body);
+  // A looping model drafts stacked markers and every other strip iterates
+  // to a fixpoint; compose quotes this entry as-is behind the template
+  // marker, so a carried second marker would post inside the blocker line.
+  const claim = rawClaim === null ? null : stripSeverityPrefix(rawClaim);
+  // The gate only relocates bodies with substance past the marker, but the
+  // claim line itself can still be empty (content on a later line) or a
+  // fence delimiter (a marker-alone body leading into a fence) — junk the
+  // one-line channel cannot carry. Both fall back to the placeholder
+  // instead of posting dangling or raw.
+  const visible =
+    claim !== null && !ENTRY_FENCE_DELIMITER_RE.test(claim) ? claim : null;
+  // The shape gate admits ANY non-empty string path, and the one-line
+  // channel cannot carry a hostile one: a newline collapses into a
+  // garbled attribution, a line-leading fence delimiter trips compose's
+  // fence refusal AFTER this relocation is disclosed, and the entry
+  // regenerates from the same path on every retry, so the re-compose
+  // loop cannot escape. Such a path falls back to the placeholder, the
+  // same fallback the claim half uses.
+  const path =
+    typeof c.path === 'string' &&
+    c.path !== '' &&
+    !/[\r\n]/.test(c.path) &&
+    !ENTRY_FENCE_DELIMITER_RE.test(c.path)
+      ? c.path
+      : '(no path)';
+  // The CLAIM leads the entry: buildLedger's body-Criticals leg reads a
+  // carried id off position 0 (LEDGER_ID_READBACK is ^-anchored), and the
+  // write side's convention is that a carried id leads the claim line —
+  // a `path:line — ` prefix there would silently strip the id and
+  // renumber a carried finding as new. The attribution rides behind the
+  // claim instead.
+  let entry = `${visible || 'finding'} — ${path}:${c.line}`;
+  // The guards above enumerate the hostile shapes this builder knows, but
+  // the entrance space is unbounded model text. Compose's own ingestion
+  // is the AUTHORITY on what the one-line channel carries — validate the
+  // BUILT entry against it, and degrade anything it would refuse to the
+  // inert constant (which passes by construction: no fence, no newline,
+  // renders as something), so a shape this list never anticipated
+  // degrades the entry instead of refusing the whole post mid-degrade.
+  if (tryIngestBodyCriticals([entry]) === undefined) {
+    entry = `finding — (no path):${c.line}`;
+  }
+  return entry;
 }
 
 interface SubmitArgs {
@@ -438,10 +503,117 @@ function structuralProblems(payload: ReviewPayload): string[] {
   return problems;
 }
 
+/**
+ * The per-comment shape checks the consistency gate refuses. One statement,
+ * two readers: `inconsistencies` reports them as the loud refusal, and the
+ * Aone anchor gate consults them to decide a comment is too malformed to
+ * anchor and must be LEFT to that refusal instead of relocated/discarded.
+ * Both boundaries must agree on what is too malformed to anchor, or a shape
+ * the gate disposes is a refusal the operator never hears — so the list is
+ * written once here and any future shape rule lands in both places at once.
+ */
+function commentShapeProblems(
+  c: ReviewComment,
+  i: number,
+  attribution: boolean,
+): string[] {
+  const problems: string[] = [];
+  const at = `comments[${i}]`;
+  // `path` must be a non-empty STRING — a truthy non-string (a number, an
+  // object) is not a path the write seam can post, and `!c.path` alone lets
+  // it through to the platform.
+  if (typeof c.path !== 'string' || c.path === '') {
+    problems.push(`${at} has no \`path\``);
+  }
+  if (!c.body) problems.push(`${at} has no \`body\` — an empty comment`);
+
+  // The verdict above was counted from these markers, so a body carrying
+  // neither weighed nothing in it. Step 6 already refuses unmarked drafts,
+  // but the skill's own re-compose instruction expects the comment set to
+  // churn after Step 6 — and a marker lost in that churn reaches exactly
+  // this boundary, the one that posts. A blocker that weighs nothing
+  // approves the review it should block.
+  if (c.body && severityOf(c) === null) {
+    problems.push(
+      `${at} opens with neither ${CRITICAL_PREFIX} nor ` +
+        `${SUGGESTION_PREFIX} — the verdict counts comments by their ` +
+        `severity marker, and an unmarked one weighs nothing in it`,
+    );
+  }
+
+  // A body that renders as nothing is the empty case wearing scaffolding.
+  // The check runs the FULL post-transform chain (plus the canonical
+  // footer that normalize may have appended) and projects through
+  // rendersAsNothing: whitespace-only, Cf-only, HTML-comment-only, and
+  // hollowed-fence residue all render as nothing on GitHub, and a
+  // scaffolded-but-invisible comment that posts counts toward the verdict
+  // and re-promotes as an unanswerable blocker.
+  if (c.body && severityOf(c) !== null) {
+    const stripped = stripReviewFooter(stripForUnattributedPost(c.body));
+    if (rendersAsNothing(stripped)) {
+      problems.push(
+        `${at} renders as nothing (marker-only, empty comment, or ` +
+          `otherwise invisible) — redraft it with the finding's description`,
+      );
+    } else if (!attribution && swallowsAppendedMarker(stripped)) {
+      // The prefix strip can move a fence delimiter to line-leading
+      // position on a draft whose delimiter sat mid-line; the unclosed
+      // fence then swallows the appended invisible marker as visible
+      // code and the claim into its info string. The exposure is
+      // created by the strip, so the check runs on the post-strip
+      // shape, mirroring the fence refusal the body lists apply.
+      problems.push(
+        `${at} leaves a code fence open in its posted shape — the ` +
+          `invisible marker this mode appends would post inside it as ` +
+          `visible code. Redraft it quoting the code inline or ` +
+          `indented instead`,
+      );
+    }
+  }
+
+  if (!isDiffLine(c.line)) {
+    problems.push(
+      `${at} has no usable \`line\` (${JSON.stringify(c.line)}) — a line is a ` +
+        `positive whole number; resolve its anchor first`,
+    );
+  }
+
+  // A multi-line comment without both side fields is a 422 that takes the
+  // whole review with it. `start_line` must also *be* a line, and must come
+  // before the line it ends on.
+  if (c.start_line !== undefined) {
+    if (!isDiffLine(c.start_line)) {
+      problems.push(
+        `${at} has a \`start_line\` of ${JSON.stringify(c.start_line)}, ` +
+          `which is not a positive whole number`,
+      );
+    } else if (isDiffLine(c.line) && c.start_line > c.line) {
+      problems.push(
+        `${at} starts at ${c.start_line} and ends at ${c.line} — a range ` +
+          `cannot end before it begins`,
+      );
+    }
+    if (c.side !== 'RIGHT' || c.start_side !== 'RIGHT') {
+      problems.push(
+        `${at} sets \`start_line\` without \`side\` and ` +
+          `\`start_side\` — GitHub 422s the entire review`,
+      );
+    }
+  }
+  return problems;
+}
+
 function inconsistencies(
   payload: ReviewPayload,
   event: string,
   attribution: boolean,
+  /**
+   * The model-authored index of each comment, once a removal ahead of
+   * this gate has renumbered the array — the refusal cites the authored
+   * index, the one that names the culprit in the model's own payload
+   * JSON, not its post-removal position.
+   */
+  authoredIndices?: number[],
 ): string[] {
   const problems: string[] = [];
   const comments = payload.comments ?? [];
@@ -460,83 +632,9 @@ function inconsistencies(
   // each of these discards every blocker in the review along with itself. The
   // API is the wrong place to find out.
   comments.forEach((c, i) => {
-    const at = `comments[${i}]`;
-    if (!c.path) problems.push(`${at} has no \`path\``);
-    if (!c.body) problems.push(`${at} has no \`body\` — an empty comment`);
-
-    // The verdict above was counted from these markers, so a body carrying
-    // neither weighed nothing in it. Step 6 already refuses unmarked drafts,
-    // but the skill's own re-compose instruction expects the comment set to
-    // churn after Step 6 — and a marker lost in that churn reaches exactly
-    // this boundary, the one that posts. A blocker that weighs nothing
-    // approves the review it should block.
-    if (c.body && severityOf(c) === null) {
-      problems.push(
-        `${at} opens with neither ${CRITICAL_PREFIX} nor ` +
-          `${SUGGESTION_PREFIX} — the verdict counts comments by their ` +
-          `severity marker, and an unmarked one weighs nothing in it`,
-      );
-    }
-
-    // A body that renders as nothing is the empty case wearing scaffolding.
-    // The check runs the FULL post-transform chain (plus the canonical
-    // footer that normalize may have appended) and projects through
-    // rendersAsNothing: whitespace-only, Cf-only, HTML-comment-only, and
-    // hollowed-fence residue all render as nothing on GitHub, and a
-    // scaffolded-but-invisible comment that posts counts toward the verdict
-    // and re-promotes as an unanswerable blocker.
-    if (c.body && severityOf(c) !== null) {
-      const stripped = stripReviewFooter(stripForUnattributedPost(c.body));
-      if (rendersAsNothing(stripped)) {
-        problems.push(
-          `${at} renders as nothing (marker-only, empty comment, or ` +
-            `otherwise invisible) — redraft it with the finding's description`,
-        );
-      } else if (!attribution && swallowsAppendedMarker(stripped)) {
-        // The prefix strip can move a fence delimiter to line-leading
-        // position on a draft whose delimiter sat mid-line; the unclosed
-        // fence then swallows the appended invisible marker as visible
-        // code and the claim into its info string. The exposure is
-        // created by the strip, so the check runs on the post-strip
-        // shape, mirroring the fence refusal the body lists apply.
-        problems.push(
-          `${at} leaves a code fence open in its posted shape — the ` +
-            `invisible marker this mode appends would post inside it as ` +
-            `visible code. Redraft it quoting the code inline or ` +
-            `indented instead`,
-        );
-      }
-    }
-
-    if (!isDiffLine(c.line)) {
-      problems.push(
-        `${at} has no usable \`line\` (${JSON.stringify(c.line)}) — a line is a ` +
-          `positive whole number; resolve its anchor first`,
-      );
-    }
-
-    // A multi-line comment without both side fields is a 422 that takes the
-    // whole review with it. `start_line` must also *be* a line, and must come
-    // before the line it ends on.
-    if (c.start_line !== undefined) {
-      if (!isDiffLine(c.start_line)) {
-        problems.push(
-          `${at} has a \`start_line\` of ${JSON.stringify(c.start_line)}, ` +
-            `which is not a positive whole number`,
-        );
-      } else if (isDiffLine(c.line) && c.start_line > c.line) {
-        problems.push(
-          `${at} starts at ${c.start_line} and ends at ${c.line} — a range ` +
-            `cannot end before it begins`,
-        );
-      }
-      if (c.side !== 'RIGHT' || c.start_side !== 'RIGHT') {
-        problems.push(
-          `${at} sets \`start_line\` without \`side\` and ` +
-            `\`start_side\` — GitHub 422s the entire review`,
-        );
-      }
-    }
+    problems.push(
+      ...commentShapeProblems(c, authoredIndices?.[i] ?? i, attribution),
+    );
   });
   return problems;
 }
@@ -877,6 +975,196 @@ function submit(
     ),
   };
 
+  // The Aone anchor gate. GitHub validates every anchor server-side and
+  // 422s the whole review — the skill's recovery loop then relocates the
+  // failing Criticals into the body and discards the failing Suggestions.
+  // Aone Code performs NO anchor validation (probed 2026-08-21 on a
+  // scratch CR: any positive integer posts; an old-side number silently
+  // becomes the same-numbered new-side line — the silent-wrong-line class
+  // GitHub refuses), so the check and the relocate run HERE, in code,
+  // before anything posts: every MARKED comment's anchor must sit inside
+  // a new-side hunk of the captured diff, exactly the rule the GitHub
+  // recovery re-derives by hand. Unmarked comments are left alone — the
+  // consistency gate below refuses them, unchanged. The verdict is then
+  // composed over the corrected set, so `C`/`S`, the event and the body
+  // stay one computation. (docs/design/2026-08-21-review-aone-removed-line-anchoring.md)
+  let anchorsRelocated = 0;
+  let anchorsDiscarded = 0;
+  // True only on a dry run whose gate could not run (the captured diff is
+  // missing): the preview composes but reports it would NOT post.
+  let anchorsUnchecked = false;
+  // The model-authored indices of payload.comments, kept once a removal
+  // ahead of the consistency gate renumbers the array — the refusal text
+  // cites these, so the re-compose loop fixes the comment the index names
+  // in the model's own payload JSON. Undefined while no removal has run
+  // (the identity).
+  let authoredIndices: number[] | undefined;
+  if (aoneWrite) {
+    // The captured diff is the ONLY view of the MR this boundary can
+    // validate against — the platform's own read-back cannot tell a
+    // misanchored comment from an anchored one (`outdated` stays false
+    // for every in-EOF line). Its absence therefore refuses the WHOLE
+    // post: an irreversible write the boundary cannot vouch for is the
+    // one thing it must not perform. (GitHub needs no such condition —
+    // its server holds the diff.) A dry run is the exception: it writes
+    // nothing, so the rationale cannot apply — it skips the gate with a
+    // disclosure and reports that the real post would refuse.
+    const diffRel = tmpFile(`pr-${args.pr}`, 'diff.txt');
+    let diffText: string | undefined;
+    try {
+      diffText = readFileSync(diffRel, 'utf8');
+    } catch {
+      if (!args.dryRun) {
+        writeStderrLine(
+          `REFUSED to post the review to ${args.repo}#${args.pr} on ` +
+            `Aone Code: the Aone platform validates no inline anchor, so ` +
+            `this write path validates every one against the review's ` +
+            `captured diff — and ${diffRel} does not exist or cannot be ` +
+            `read. Re-run the review so the diff is captured. Nothing was ` +
+            `written; the findings are in the terminal output and the ` +
+            `saved report.`,
+        );
+        writeStdoutLine(
+          JSON.stringify(
+            { posted: false, reason: 'aone-post-refused' },
+            null,
+            2,
+          ),
+        );
+        process.exitCode = 3;
+        return;
+      }
+      anchorsUnchecked = true;
+      writeStderrLine(
+        `Aone anchor check: SKIPPED — ${diffRel} does not exist or ` +
+          `cannot be read, and the gate validates anchors against that ` +
+          `captured diff. --dry-run writes nothing, so the preview ` +
+          `composes the payload AS AUTHORED (anchors unchecked); the ` +
+          `real post refuses until the review is re-run and the diff ` +
+          `is captured.`,
+      );
+    }
+    if (diffText !== undefined) {
+      // A diff that parses to no files (corrupt capture) validates nothing:
+      // every anchor then fails as "file is not in the diff" and the degrade
+      // below discloses each one — safe, and visibly anomalous, without a
+      // second refusal shape.
+      const comments = payload.comments ?? [];
+      const verdicts = validateNewSideAnchors(
+        diffText,
+        comments.map((c) => ({
+          path: c.path ?? '',
+          line: c.line ?? 0,
+          startLine: c.start_line,
+          side: c.side,
+          startSide: c.start_side,
+        })),
+      );
+      const kept: ReviewComment[] = [];
+      const keptIndices: number[] = [];
+      const relocated: string[] = [];
+      const disclosures: string[] = [];
+      comments.forEach((c, i) => {
+        const sev = severityOf(c);
+        // Comments too malformed to anchor are not the gate's to dispose — the
+        // consistency gate below owns those refusals, unchanged, and the gate
+        // reads the SAME shape list (commentShapeProblems) that gate reports,
+        // so the two cannot drift: whatever the consistency gate would loudly
+        // refuse, the gate leaves to it. The gate rules only WELL-FORMED
+        // anchors. A single-line comment on a declared non-RIGHT side is
+        // well-formed but unanchorable on Aone — relocating it is the point.
+        if (
+          commentShapeProblems(c, i, attribution).length > 0 ||
+          verdicts[i]?.valid === true
+        ) {
+          kept.push(c);
+          keptIndices.push(i);
+          return;
+        }
+        const at = `${c.path}:${c.line}`;
+        if (sev === 'critical') {
+          relocated.push(relocatedAoneCriticalEntry(c));
+          disclosures.push(
+            `  relocated into the summary body: ${at} — ` +
+              `${verdicts[i]?.reason ?? 'unanchorable'}`,
+          );
+        } else {
+          anchorsDiscarded++;
+          disclosures.push(
+            `  discarded: ${at} — ${verdicts[i]?.reason ?? 'unanchorable'}`,
+          );
+        }
+      });
+      anchorsRelocated = relocated.length;
+      const state = payload.state ?? ({} as ComposeReviewInput);
+      const bc = state.bodyCriticals;
+      // The stand-down: ANY degrade that touches the payload must not run
+      // over a field compose owns when compose would REFUSE that field.
+      // Relocating into a refused `bodyCriticals` shatters a string into
+      // per-character junk entries — each counted toward `C` and posted —
+      // or pollutes compose's pinned refusal with the gate's own entry;
+      // discarding ahead of an uncountable `suggestionsDiscarded`
+      // announces a degrade that compose's refusal then unpublishes.
+      // Either way the terminal would name a degrade that did not
+      // survive, over a payload compose never saw unchanged. Stand the
+      // WHOLE gate down instead: the payload reaches compose unchanged
+      // and dies the pinned death; nothing posts either way, and the
+      // findings stay in the saved report. "Refused" reads compose's OWN
+      // total acceptance, not a mirror: for `bodyCriticals` the CONTENT
+      // gates too (the fence refusal, the renders-nothing refusal), a
+      // string array passing shape while compose refuses its entries;
+      // tryIngestBodyCriticals and tryToCount ARE those tables, so the
+      // two reads of each field can never drift.
+      const bcAccepted = tryIngestBodyCriticals(bc);
+      const sdCount = tryToCount(state.suggestionsDiscarded);
+      const standDown =
+        (anchorsRelocated > 0 || anchorsDiscarded > 0) &&
+        (bcAccepted === undefined || sdCount === undefined);
+      if (standDown) {
+        anchorsRelocated = 0;
+        anchorsDiscarded = 0;
+      } else if (anchorsRelocated > 0 || anchorsDiscarded > 0) {
+        // The discard count merges into the state's own — the model may
+        // have discarded unanchorable findings upstream (resolve-anchors'
+        // unmatched dispose) and the body's sentence names the TOTAL.
+        // Absence and `null` both count zero for compose, so both merge
+        // from zero here.
+        const mergedDiscarded =
+          anchorsDiscarded === 0
+            ? undefined
+            : (sdCount ?? 0) + anchorsDiscarded;
+        payload = {
+          ...payload,
+          comments: kept,
+          state: {
+            ...state,
+            ...(anchorsRelocated > 0
+              ? {
+                  bodyCriticals: [
+                    ...(Array.isArray(bc) ? bc : []),
+                    ...relocated,
+                  ],
+                }
+              : {}),
+            ...(mergedDiscarded !== undefined
+              ? { suggestionsDiscarded: mergedDiscarded }
+              : {}),
+          },
+        };
+        // The removal renumbers the array the consistency gate below
+        // reports on; keep the authored indices so the refusal names the
+        // comment the re-compose loop must fix.
+        authoredIndices = keptIndices;
+        writeStderrLine(
+          `Aone anchor check: ${anchorsRelocated + anchorsDiscarded} inline ` +
+            `comment(s) cannot be anchored to the MR's new side (Aone Code ` +
+            `performs no server-side anchor validation):\n` +
+            disclosures.join('\n'),
+        );
+      }
+    }
+  }
+
   // The operator's floor, from the CLI's verbatim record — never only the
   // state's transcription of it. The state field is a model-written copy of
   // the operator's policy, and a copy that can drift must not decide
@@ -974,10 +1262,13 @@ function submit(
   // refuses below).
   if (floorEnforced.length > 0) {
     const drop = new Set(floorEnforced);
+    const comments = payload.comments ?? [];
+    const base = authoredIndices ?? comments.map((_, i) => i);
     payload = {
       ...payload,
-      comments: (payload.comments ?? []).filter((_, i) => !drop.has(i)),
+      comments: comments.filter((_, i) => !drop.has(i)),
     };
+    authoredIndices = base.filter((_, i) => !drop.has(i));
     writeStderrLine(
       `Floor enforcement: ${floorEnforced.length} Suggestion comment(s) ` +
         `drafted past the resolved critical floor were moved into the ` +
@@ -985,7 +1276,12 @@ function submit(
     );
   }
 
-  const problems = inconsistencies(payload, event, attribution);
+  const problems = inconsistencies(
+    payload,
+    event,
+    attribution,
+    authoredIndices,
+  );
   if (problems.length > 0) {
     throw new Error(
       `The review payload contradicts itself; refusing to post it:\n` +
@@ -1047,11 +1343,21 @@ function submit(
       JSON.stringify(
         {
           posted: false,
-          wouldPost: true,
+          // A dry run whose gate could not run (missing capture) composes
+          // the preview but reports the real post would refuse — the
+          // reason distinguishes it from both a would-post and the
+          // real write's exit-3 refusal shape.
+          wouldPost: !anchorsUnchecked,
+          ...(anchorsUnchecked ? { reason: 'aone-diff-missing' } : {}),
           target,
           event,
           cappedBy,
           floorEnforced: floorEnforced.length,
+          // Aone-only gate counts — the GitHub server performs this
+          // validation itself; the fields exist only where the gate ran.
+          ...(aoneWrite && !anchorsUnchecked
+            ? { anchorsRelocated, anchorsDiscarded }
+            : {}),
         },
         null,
         2,
@@ -1284,6 +1590,8 @@ function submit(
             ? { summaryCommentId: result.summaryCommentId }
             : {}),
           floorEnforced: floorEnforced.length,
+          anchorsRelocated,
+          anchorsDiscarded,
           summaryPosted: result.summaryPosted,
           ...(event === 'APPROVE' ? { approved: result.approved } : {}),
           ...(postedUrl ? { url: postedUrl } : {}),

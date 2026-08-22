@@ -849,7 +849,17 @@ export const aoneReader: ReviewPlatformReader = {
 /** One inline finding as it lands on the MR. */
 export interface AoneInlineComment {
   path: string;
-  /** The new-side line — a multi-line range posts on its END line. */
+  /**
+   * The new-side line — a multi-line range posts on its END line. The
+   * old side CANNOT be anchored (a1 expresses `--line` as a new-side
+   * position only — probed 2026-08-21, see
+   * docs/design/2026-08-21-review-aone-removed-line-anchoring.md), and
+   * the platform validates NOTHING (any integer posts; a wrong number
+   * lands on the same-numbered new-side line silently). submit therefore
+   * validates every anchor against the captured diff and relocates the
+   * unanchorable BEFORE this batch is built — nothing reaching here is
+   * unvouched.
+   */
   line: number;
   body: string;
 }

@@ -368,6 +368,19 @@ Enterprise paragraph.
     documented for the user. Still open: dedup/self-PR backing for Aone,
     `composeUrl`, AI-comment marking (Q4), the
     render-adjudication carve-out.
+  - **Anchored (2026-08-21, issue #9615):** Q2's controlled probe
+    (scratch MR 29427547 of base-biz/sqlt, a1 v0.2.51) proved the
+    platform posts ANY `--line` unvalidated and cannot express the old
+    side — an old-side number silently becomes the same-numbered
+    new-side line. `submit`'s Aone branch now validates every inline
+    anchor against the review's captured diff BEFORE posting: an
+    unanchorable Critical is relocated into the summary body, an
+    unanchorable Suggestion discarded and counted (the GitHub
+    422-recovery dispose, performed in code), each disclosed in the
+    terminal; a missing captured diff refuses the whole post. Probe
+    evidence and pinned semantics:
+    `docs/design/2026-08-21-review-aone-removed-line-anchoring.md`.
+
   - **Landed (2026-08-21, #9617):** the cleanup bypass audit — D8's
     "`comment list` filtered by author within the audit window". `cleanup`
     selects the audit backend from the fetch report's recorded host, with
@@ -553,9 +566,16 @@ create --file/--line` and `-f json` stability? Provider version floor TBD.~~
    actionable upgrade message; an unparseable `--version` and a failed
    probe alike are disclosed on stderr and fail OPEN, never refusing an
    a1 the check merely cannot read.
-2. **Q2 — Inline anchor semantics.** Does `--line` accept only new-side lines?
-   How are removed-line (`side: left`) comments posted? Needs a controlled
-   experiment on a scratch CR.
+2. **Q2 — Inline anchor semantics. RESOLVED (2026-08-21).** The controlled
+   probe (scratch MR 29427547 of base-biz/sqlt, a1 v0.2.51) proved: `--line`
+   is new-side only (no `--side` flag exists; an old-side number silently
+   becomes the same-numbered new-side line), the server performs ZERO anchor
+   validation (even beyond-EOF lines post), and `--file` without `--line`
+   drops the path entirely (file-level is MR-level in disguise). Semantics
+   pinned in `docs/design/2026-08-21-review-aone-removed-line-anchoring.md`:
+   client-side hunk validation in submit's Aone branch, with the GitHub
+   422-recovery degrade (Critical → body, Suggestion → discarded) performed
+   in code and disclosed in the terminal.
 3. **Q3 — REQUEST_CHANGES.** ~~Confirm no native reject/unapprove API
    exists.~~ **Re-confirmed 2026-08-21 on a1 v0.1.90:** the `repo mr` surface
    (approve/close/comment/cr/create/diff/edit/list/merge/remind/reopen/
