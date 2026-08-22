@@ -2011,11 +2011,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   let lastSessionMock:
     | {
         captureHistorySnapshot: ReturnType<typeof vi.fn>;
+        captureHistoryPromptIds: ReturnType<typeof vi.fn>;
         emitGoalStatus: ReturnType<typeof vi.fn>;
         restoreHistory: ReturnType<typeof vi.fn>;
         rewindToTurn: ReturnType<typeof vi.fn>;
+        rewindToPrompt: ReturnType<typeof vi.fn>;
         beginHistoryMutation: ReturnType<typeof vi.fn>;
-        getRewindableUserTurnCount: ReturnType<typeof vi.fn>;
+        getRewindableSnapshotTargets: ReturnType<typeof vi.fn>;
         clearActiveTodoPlanRevision: ReturnType<typeof vi.fn>;
         clearTodoStopGuardTrust: ReturnType<typeof vi.fn>;
         hardSuspendTodoStopGuard: ReturnType<typeof vi.fn>;
@@ -3889,6 +3891,14 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       }),
       getFileSystemService: vi.fn().mockReturnValue(undefined),
+      getFileHistoryService: vi.fn().mockReturnValue({
+        getSnapshots: vi.fn().mockReturnValue([]),
+        getDiffStats: vi.fn().mockResolvedValue(undefined),
+        rewind: vi
+          .fn()
+          .mockResolvedValue({ filesChanged: [], filesFailed: [] }),
+        restoreFromSnapshots: vi.fn(),
+      }),
       getChatRecordingService: vi.fn().mockReturnValue({
         flush: vi.fn().mockResolvedValue(undefined),
         finalize: vi.fn(),
@@ -4167,12 +4177,20 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         captureHistorySnapshot: vi
           .fn()
           .mockReturnValue([{ role: 'user', parts: [{ text: 'before' }] }]),
+        captureHistoryPromptIds: vi.fn().mockReturnValue([null]),
         restoreHistory: vi.fn(),
-        rewindToTurn: vi
-          .fn()
-          .mockReturnValue({ targetTurnIndex: 1, apiTruncateIndex: 2 }),
+        rewindToTurn: vi.fn().mockReturnValue({
+          targetTurnIndex: 1,
+          apiTruncateIndex: 2,
+          promptId: `${sessionId}########2`,
+        }),
+        rewindToPrompt: vi.fn().mockReturnValue({
+          targetTurnIndex: 1,
+          apiTruncateIndex: 2,
+          promptId: `${sessionId}########2`,
+        }),
         beginHistoryMutation: vi.fn().mockImplementation(() => vi.fn()),
-        getRewindableUserTurnCount: vi.fn().mockReturnValue(1),
+        getRewindableSnapshotTargets: vi.fn().mockReturnValue([]),
         clearActiveTodoPlanRevision: vi.fn(),
         clearTodoStopGuardTrust: vi.fn(),
         hardSuspendTodoStopGuard: vi.fn(),
@@ -13905,6 +13923,17 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(lastSessionMock?.rewindToTurn).toHaveBeenCalledWith(1, {
       rewindFiles: true,
     });
+    // The numeric arm resolves the target's identity inside the session and
+    // must run the file rewind with it (the VS Code companion's
+    // message-edit flow sends no promptId). The store is empty here, so the
+    // consumed-boundary drop has nothing to remove.
+    expect(innerConfig.getFileHistoryService().rewind).toHaveBeenCalledWith(
+      `${sessionId}########2`,
+      true,
+    );
+    expect(
+      innerConfig.getFileHistoryService().restoreFromSnapshots,
+    ).not.toHaveBeenCalled();
     expect(lastSessionMock?.beginHistoryMutation).toHaveBeenCalledOnce();
     expect(releaseHistoryMutation).toHaveBeenCalledOnce();
     expect(SessionService).toHaveBeenCalledWith('/tmp');
@@ -13912,11 +13941,113 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(response).toEqual({
       success: true,
       historyBeforeRewind: [{ role: 'user', parts: [{ text: 'before' }] }],
+      historyBeforeRewindPromptIds: [null],
       targetTurnIndex: 1,
       apiTruncateIndex: 2,
+      promptId: `${sessionId}########2`,
       filesChanged: [],
       filesFailed: [],
       artifactSnapshot,
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('drives file rewind and the boundary drop through two successive numeric rewinds', async () => {
+    // The VS Code companion's message-edit flow sends numeric-only
+    // ({ sessionId, targetTurnIndex, cwd }). The file rewind and the
+    // consumed-boundary drop must key on the identity the session resolved
+    // for that arm too — otherwise the live store keeps the boundary while
+    // the conversation keeps one fewer turn, and the strict legacy pairing
+    // gate fails the SECOND edit closed until a session reload. Drive the
+    // handler through two successive numeric rewinds and assert the drop
+    // actually runs each time instead of simulating the post-drop store.
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const snap = (ordinal: number) => ({
+      promptId: `${sessionId}########${ordinal}`,
+      timestamp: new Date(`2026-06-13T00:0${ordinal}:00.000Z`),
+      trackedFileBackups: {},
+    });
+    const fileHistory = innerConfig.getFileHistoryService();
+    fileHistory.getSnapshots.mockReturnValue([snap(0), snap(1), snap(2)]);
+    fileHistory.rewind.mockResolvedValue({
+      filesChanged: ['a.ts'],
+      filesFailed: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    lastSessionMock!.rewindToTurn.mockReturnValueOnce({
+      targetTurnIndex: 1,
+      apiTruncateIndex: 2,
+      promptId: `${sessionId}########1`,
+    });
+
+    const first = await agent.extMethod('rewindSession', {
+      sessionId,
+      targetTurnIndex: 1,
+      cwd: '/tmp',
+    });
+
+    expect(lastSessionMock?.rewindToTurn).toHaveBeenCalledWith(1, {
+      rewindFiles: true,
+    });
+    // The numeric arm fired the file rewind with the resolved identity...
+    expect(fileHistory.rewind).toHaveBeenCalledWith(
+      `${sessionId}########1`,
+      true,
+    );
+    // ...and dropped the consumed boundary from the live store.
+    expect(fileHistory.restoreFromSnapshots).toHaveBeenCalledWith([
+      snap(0),
+      snap(1),
+    ]);
+    expect(first).toMatchObject({
+      success: true,
+      promptId: `${sessionId}########1`,
+      filesChanged: ['a.ts'],
+      filesFailed: [],
+    });
+
+    // The store settles at the dropped shape; the second numeric rewind
+    // stays repeatable instead of failing closed.
+    vi.mocked(fileHistory.getSnapshots).mockReturnValue([snap(0), snap(1)]);
+    vi.mocked(fileHistory.restoreFromSnapshots).mockClear();
+    lastSessionMock!.rewindToTurn.mockReturnValueOnce({
+      targetTurnIndex: 0,
+      apiTruncateIndex: 0,
+      promptId: `${sessionId}########0`,
+    });
+
+    const second = await agent.extMethod('rewindSession', {
+      sessionId,
+      targetTurnIndex: 0,
+      cwd: '/tmp',
+    });
+
+    expect(fileHistory.rewind).toHaveBeenLastCalledWith(
+      `${sessionId}########0`,
+      true,
+    );
+    expect(fileHistory.restoreFromSnapshots).toHaveBeenCalledWith([snap(0)]);
+    expect(second).toMatchObject({
+      success: true,
+      promptId: `${sessionId}########0`,
+      filesChanged: ['a.ts'],
+      filesFailed: [],
     });
 
     mockConnectionState.resolve();
@@ -14069,14 +14200,15 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }) as AgentLike;
 
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    const promptId = `${sessionId}########2`;
     await agent.extMethod('rewindSession', {
       sessionId,
-      targetTurnIndex: 1,
+      promptId,
       rewindFiles: false,
       cwd: '/tmp',
     });
 
-    expect(lastSessionMock?.rewindToTurn).toHaveBeenCalledWith(1, {
+    expect(lastSessionMock?.rewindToPrompt).toHaveBeenCalledWith(promptId, {
       rewindFiles: false,
     });
 
@@ -14350,13 +14482,18 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
     const history = [{ role: 'user', parts: [{ text: 'restored' }] }];
+    const promptIds = ['original-prompt'];
     const response = await agent.extMethod('restoreSessionHistory', {
       sessionId,
       history,
+      promptIds,
       cwd: '/tmp',
     });
 
-    expect(lastSessionMock?.restoreHistory).toHaveBeenCalledWith(history);
+    expect(lastSessionMock?.restoreHistory).toHaveBeenCalledWith(
+      history,
+      promptIds,
+    );
     expect(response).toEqual({ success: true });
 
     mockConnectionState.resolve();

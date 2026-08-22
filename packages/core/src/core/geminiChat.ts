@@ -69,6 +69,7 @@ import {
 } from '../telemetry/loggers.js';
 import { subagentNameContext } from '../utils/subagentNameContext.js';
 import { type ChatRecordingService } from '../services/chatRecordingService.js';
+import { markApiHistoryPrompt } from '../services/session-api-history.js';
 import {
   ChatCompressionService,
   computeThresholds,
@@ -448,6 +449,8 @@ export type StreamEvent =
 export interface GeminiChatSendOptions {
   /** Skip only the configured model fallback chain for this request. */
   disableModelFallbacks?: boolean;
+  /** Stable identity for a real user turn; omitted from provider payloads. */
+  promptId?: string;
 }
 
 interface TryCompressOptions {
@@ -2599,6 +2602,7 @@ export class GeminiChat {
       }
 
       // Add user content to history ONCE before any attempts.
+      markApiHistoryPrompt(userContent, options?.promptId);
       this.history.push(userContent);
       currentUserContent = userContent;
       userContentAdded = true;

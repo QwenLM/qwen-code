@@ -264,6 +264,10 @@ function convertToHistoryItems(
   };
 
   for (const record of conversation.messages) {
+    const promptId =
+      typeof record.promptId === 'string' && record.promptId.length > 0
+        ? record.promptId
+        : undefined;
     // A detected history gap begins at this record — surface a visible divider
     // so the surviving turns below are not read as contiguous across the lost
     // segment. Flush any pending tool group first so the divider is not
@@ -361,7 +365,14 @@ function convertToHistoryItems(
         pendingAtCommands.push(payload);
       }
       if (record.subtype === 'rewind') {
-        items.push({ type: 'info', text: 'Conversation rewound.' });
+        // A fully rolled-back rewind truncated nothing — the divider would
+        // claim the conversation was cut while every turn is intact.
+        const truncatedCount = (
+          record.systemPayload as { truncatedCount?: number } | undefined
+        )?.truncatedCount;
+        if (truncatedCount !== 0) {
+          items.push({ type: 'info', text: 'Conversation rewound.' });
+        }
       }
       continue;
     }
@@ -417,7 +428,11 @@ function convertToHistoryItems(
             payload.userText ||
             (projection.displayText ?? extractTextFromParts(projection.parts));
           if (text) {
-            items.push({ type: 'user', text });
+            items.push({
+              type: 'user',
+              text,
+              ...(promptId ? { promptId } : {}),
+            });
           }
 
           const toolDisplays = buildAtCommandDisplays(payload);
@@ -451,7 +466,11 @@ function convertToHistoryItems(
             ? '[User message with attachments]'
             : extractTextFromParts(projection.parts));
         if (text) {
-          items.push({ type: 'user', text });
+          items.push({
+            type: 'user',
+            text,
+            ...(promptId ? { promptId } : {}),
+          });
         }
         break;
       }

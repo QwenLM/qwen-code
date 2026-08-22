@@ -204,6 +204,7 @@ export interface SessionRuntimeResumeState {
   recording: {
     lastCompletedUuid: string;
     turnParentUuids: Array<string | null>;
+    turnPromptIds?: Array<string | undefined>;
     customTitle?: string;
     titleSource?: TitleSource;
     parentSessionId?: string;
@@ -2477,6 +2478,7 @@ export class SessionTranscriptReader {
       recording: {
         lastCompletedUuid: index.leafUuid,
         turnParentUuids: turnStateValue.turnParentUuids,
+        turnPromptIds: turnStateValue.turnPromptIds,
         ...(customTitle !== undefined ? { customTitle } : {}),
         ...(titleSource !== undefined ? { titleSource } : {}),
         ...(parentSessionId !== undefined ? { parentSessionId } : {}),

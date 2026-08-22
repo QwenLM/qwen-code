@@ -8,6 +8,9 @@ import type { HistoryItem, HistoryItemUser } from '../types.js';
 import type { Content } from '@google/genai';
 import {
   CompressionStatus,
+  findApiHistoryPromptIndex,
+  getApiHistoryPromptId,
+  getApiHistoryPromptIndexes,
   getStartupContextLength,
   isClearedMediaPlaceholder,
   isSystemReminderContent,
@@ -153,7 +156,41 @@ export function computeApiTruncationIndex(
   const compressionIndex = findLastSuccessfulCompressionIndex(uiHistory);
   if (compressionIndex !== -1 && targetIndex <= compressionIndex) return -1;
 
-  // Count how many UI user turns exist before the target
+  const target = uiHistory[targetIndex]!;
+  if (isRealUserTurn(target) && target.promptId) {
+    const identifiedIndex = findApiHistoryPromptIndex(
+      apiHistory,
+      target.promptId,
+    );
+    if (identifiedIndex !== -1) {
+      return identifiedIndex;
+    }
+    // Fail closed only when EVERY user prompt the positional walk counts
+    // carries a stable identity. /restore installs a checkpoint
+    // round-tripped through JSON.stringify, which drops the symbol-keyed
+    // identity from clientHistory while the persisted UI items keep their
+    // string promptId; the next prompt then marks only the NEW entry. For a
+    // restored target the marker is lost in the round-trip, but the target
+    // textually exists in API history, so while any identity-less user
+    // prompt remains the positional fallback below is still sound and must
+    // run instead of aborting the rewind with -1. Mirrors the
+    // partial-coverage rule of the ACP session twin
+    // (#getRewindTurnProjection in acp-integration/session/Session.ts);
+    // the TUI twin's isUserTextContent already excludes placeholder-only
+    // and reminder entries from the count, so no extra exception is needed
+    // here.
+    const historyFullyIdentified =
+      (getApiHistoryPromptIndexes(apiHistory) ?? []).length > 0 &&
+      apiHistory.every(
+        (content) =>
+          !isUserTextContent(content) || !!getApiHistoryPromptId(content),
+      );
+    if (historyFullyIdentified) {
+      return -1;
+    }
+  }
+
+  // Legacy sessions have no promptId and still need the positional fallback.
   let uiUserTurnCount = 0;
   for (
     let i = compressionIndex === -1 ? 0 : compressionIndex + 1;

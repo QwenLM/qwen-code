@@ -67,6 +67,7 @@ import ansiEscapes from 'ansi-escapes';
 import {
   type Config,
   makeFakeConfig,
+  markApiHistoryPrompt,
   SendMessageType,
   type GeminiClient,
   type GoalTurnHost,
@@ -536,10 +537,11 @@ describe('AppContainer State Management', () => {
     promptId,
   });
 
-  const apiUser = (text: string): Content => ({
-    role: 'user',
-    parts: [{ text }],
-  });
+  const apiUser = (text: string, promptId: string): Content => {
+    const content: Content = { role: 'user', parts: [{ text }] };
+    markApiHistoryPrompt(content, promptId);
+    return content;
+  };
 
   const apiModel = (text: string): Content => ({
     role: 'model',
@@ -596,9 +598,9 @@ describe('AppContainer State Management', () => {
     });
 
     const apiHistory = options.apiHistory ?? [
-      apiUser('first prompt'),
+      apiUser('first prompt', 'prompt-1'),
       apiModel('first response'),
-      apiUser('second prompt'),
+      apiUser('second prompt', 'prompt-2'),
       apiModel('second response'),
     ];
     const getHistoryShallow = vi.fn(() => apiHistory);
@@ -6205,7 +6207,10 @@ describe('AppContainer State Management', () => {
 
     it('bails before file restore when the target turn is compressed', async () => {
       const harness = renderRewindHarness({
-        apiHistory: [apiUser('first prompt'), apiModel('first response')],
+        apiHistory: [
+          apiUser('first prompt', 'prompt-1'),
+          apiModel('first response'),
+        ],
       });
 
       await runRewind(harness.target, 'both');

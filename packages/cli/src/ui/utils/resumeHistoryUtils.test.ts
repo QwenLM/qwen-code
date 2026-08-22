@@ -110,6 +110,42 @@ describe('resumeHistoryUtils', () => {
     ]);
   });
 
+  it('shows the rewind divider only when the rewind truncated something', () => {
+    const userRecord = {
+      uuid: 'user-1',
+      parentUuid: null,
+      type: 'user' as const,
+      timestamp: '2026-06-13T00:00:00.000Z',
+      message: { role: 'user' as const, parts: [{ text: 'hello' }] },
+    };
+    const rewindRecord = (uuid: string, truncatedCount: number) => ({
+      uuid,
+      parentUuid: 'user-1',
+      type: 'system' as const,
+      subtype: 'rewind' as const,
+      timestamp: '2026-06-13T00:01:00.000Z',
+      systemPayload: { truncatedCount },
+    });
+    const build = (truncatedCount: number) =>
+      buildResumedHistoryItems(
+        {
+          conversation: {
+            messages: [userRecord, rewindRecord('rewind-1', truncatedCount)],
+          },
+        } as unknown as ResumedSessionData,
+        makeConfig({}),
+        100,
+      );
+
+    // A real rewind keeps the divider.
+    expect(build(3).filter((item) => item.type === 'info')).toMatchObject([
+      { text: 'Conversation rewound.' },
+    ]);
+    // A fully rolled-back rewind truncated nothing: every turn is intact,
+    // so the divider would be a false claim.
+    expect(build(0).filter((item) => item.type === 'info')).toEqual([]);
+  });
+
   it('suppresses checkpoint bookkeeping cards after a verifier rejection', () => {
     const goal: NonNullable<GoalSnapshotV2['goal']> = {
       goalId: 'goal-1',
@@ -475,6 +511,7 @@ describe('resumeHistoryUtils', () => {
           },
           {
             type: 'user',
+            promptId: 'prompt-1',
             message: {
               parts: [{ text: 'expanded model prompt' }, { text: tagged }],
             },
@@ -486,8 +523,14 @@ describe('resumeHistoryUtils', () => {
         makeConfig({}),
         1_000,
       );
-      const userItem = items.find((i) => i.type === 'user') as { text: string };
-      expect(userItem.text).toBe('@file.ts summarize this');
+      const userItem = items.find((i) => i.type === 'user') as {
+        text: string;
+        promptId?: string;
+      };
+      expect(userItem).toMatchObject({
+        text: '@file.ts summarize this',
+        promptId: 'prompt-1',
+      });
       expect(userItem.text).not.toContain('qwen:user-prompt-submit-context');
     });
 
@@ -729,6 +772,7 @@ describe('resumeHistoryUtils', () => {
       messages: [
         {
           type: 'user',
+          promptId: 'prompt-1',
           message: {
             parts: [
               { text: 'expanded model prompt' } as Part,
@@ -755,7 +799,14 @@ describe('resumeHistoryUtils', () => {
 
     const items = buildResumedHistoryItems(session, makeConfig({}), 30);
 
-    expect(items).toEqual([{ id: 31, type: 'user', text: 'raw @file prompt' }]);
+    expect(items).toEqual([
+      {
+        id: 31,
+        type: 'user',
+        text: 'raw @file prompt',
+        promptId: 'prompt-1',
+      },
+    ]);
   });
 
   it('projects the user turn when legacy @-command metadata has no userText', () => {

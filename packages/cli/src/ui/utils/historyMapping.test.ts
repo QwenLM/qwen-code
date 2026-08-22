@@ -10,6 +10,7 @@ import type { HistoryItem } from '../types.js';
 import type { Content, Part } from '@google/genai';
 import {
   CompressionStatus,
+  markApiHistoryPrompt,
   SYSTEM_REMINDER_OPEN,
   SYSTEM_REMINDER_CLOSE,
 } from '@qwen-code/qwen-code-core';
@@ -47,12 +48,14 @@ function userItem(
   id: number,
   text = `prompt ${id}`,
   sentToModel?: boolean,
+  promptId?: string,
 ): HistoryItem {
   return {
     type: 'user',
     id,
     text,
     ...(sentToModel === undefined ? {} : { sentToModel }),
+    ...(promptId ? { promptId } : {}),
   } as HistoryItem;
 }
 
@@ -684,6 +687,46 @@ describe('computeApiTruncationIndex', () => {
       // …while every later target fails loud (-1).
       expect(computeApiTruncationIndex(ui, 5, api)).toBe(-1);
     });
+
+    it('maps by stable identity when UI and API shapes are ambiguous', () => {
+      const exactPlaceholderText = '[Old inline media cleared: image/png]';
+      const ui: HistoryItem[] = [
+        userItem(1, 'hello', undefined, 'prompt-1'),
+        geminiItem(2),
+        userItem(3, exactPlaceholderText, undefined, 'prompt-2'),
+        geminiItem(4),
+        userItem(5, 'world', undefined, 'prompt-3'),
+        geminiItem(6),
+      ];
+      const api: Content[] = [
+        startupEntry(),
+        userContent('hello'),
+        modelContent('response hello'),
+        userContent(exactPlaceholderText),
+        modelContent('response colliding'),
+        userContent('world'),
+        modelContent('response world'),
+      ];
+      markApiHistoryPrompt(api[1]!, 'prompt-1');
+      markApiHistoryPrompt(api[3]!, 'prompt-2');
+      markApiHistoryPrompt(api[5]!, 'prompt-3');
+
+      expect(computeApiTruncationIndex(ui, 3, api)).toBe(3);
+      expect(computeApiTruncationIndex(ui, 5, api)).toBe(5);
+    });
+
+    it('rewinds positionally when the target carries a promptId but no API entry is marked', () => {
+      // Superseded by R4-2: this shape is exactly what /restore produces —
+      // the checkpoint round-trip strips the symbol identities from API
+      // history while the UI item keeps its string promptId. The target
+      // textually exists, so the pre-identity positional path must run
+      // instead of aborting the rewind. Fail-closed still applies when the
+      // API history DOES carry identities and the target is not among them
+      // (see 'identified mode' below).
+      const ui = [userItem(1, 'hello', undefined, 'prompt-1')];
+
+      expect(computeApiTruncationIndex(ui, 1, [userContent('hello')])).toBe(0);
+    });
   });
 
   describe('mid-turn user messages (notification type)', () => {
@@ -796,6 +839,104 @@ describe('computeApiTruncationIndex', () => {
         modelContent('response 1'),
       ];
       expect(computeApiTruncationIndex(ui, 1, api)).toBe(0);
+    });
+  });
+
+  describe('identified mode', () => {
+    it('resolves the target by promptId when API history carries identities', () => {
+      const ui: HistoryItem[] = [
+        userItem(1, 'prompt 1', true, 'prompt-id-1'),
+        geminiItem(2),
+        userItem(3, 'prompt 3', true, 'prompt-id-3'),
+        geminiItem(4),
+      ];
+      const api: Content[] = [
+        userContent('prompt 1'),
+        modelContent('response 1'),
+        userContent('prompt 3'),
+        modelContent('response 3'),
+      ];
+      markApiHistoryPrompt(api[0]!, 'prompt-id-1');
+      markApiHistoryPrompt(api[2]!, 'prompt-id-3');
+
+      expect(computeApiTruncationIndex(ui, 3, api)).toBe(2);
+    });
+
+    it('fails closed when identities exist but the target promptId is gone', () => {
+      const ui: HistoryItem[] = [
+        userItem(1, 'prompt 1', true, 'prompt-id-1'),
+        geminiItem(2),
+        userItem(3, 'prompt 3', true, 'prompt-id-3'),
+        geminiItem(4),
+      ];
+      const api: Content[] = [
+        userContent('prompt 1'),
+        modelContent('response 1'),
+        userContent('prompt 3'),
+        modelContent('response 3'),
+      ];
+      markApiHistoryPrompt(api[0]!, 'prompt-id-1');
+      // The second entry carries an identity, but the target's promptId is
+      // not among them (e.g. absorbed by compression) — fail closed.
+      markApiHistoryPrompt(api[2]!, 'prompt-id-other');
+
+      expect(computeApiTruncationIndex(ui, 3, api)).toBe(-1);
+    });
+
+    it('falls back to positional counting after a JSON round-trip stripped the identities', () => {
+      // /restore installs the checkpoint round-tripped through
+      // JSON.stringify, which drops the symbol-keyed identity from
+      // clientHistory while persisted UI items keep their string promptId.
+      // The target textually exists, so the positional path must run
+      // instead of aborting the rewind with -1.
+      const ui: HistoryItem[] = [
+        userItem(1, 'prompt 1', true, 'prompt-id-1'),
+        geminiItem(2),
+        userItem(3, 'prompt 3', true, 'prompt-id-3'),
+        geminiItem(4),
+      ];
+      const api: Content[] = [
+        userContent('prompt 1'),
+        modelContent('response 1'),
+        userContent('prompt 3'),
+        modelContent('response 3'),
+      ];
+
+      expect(computeApiTruncationIndex(ui, 3, api)).toBe(2);
+    });
+
+    it('keeps restored turns rewindable after a new identified prompt lands (partial coverage)', () => {
+      // /restore round-trips the checkpoint through JSON.stringify, which
+      // strips the symbol-keyed identities from clientHistory while the UI
+      // items keep their string promptId. Sending ANY new prompt afterwards
+      // marks only the new entry, leaving the history PARTIALLY identified.
+      // The gate must not treat that as fully identified: the restored
+      // targets textually exist, so positional rewind must run instead of
+      // aborting with -1 (mirrors the session twin's partial-coverage
+      // fallback).
+      const ui: HistoryItem[] = [
+        userItem(1, 'restored one', true, 'prompt-id-1'),
+        geminiItem(2),
+        userItem(3, 'restored two', true, 'prompt-id-2'),
+        geminiItem(4),
+        userItem(5, 'new prompt', true, 'prompt-id-new'),
+        geminiItem(6),
+      ];
+      const api: Content[] = [
+        userContent('restored one'),
+        modelContent('response 1'),
+        userContent('restored two'),
+        modelContent('response 2'),
+        userContent('new prompt'),
+        modelContent('response 3'),
+      ];
+      markApiHistoryPrompt(api[4]!, 'prompt-id-new');
+
+      // Rewinding to a restored (identity-less) turn resolves positionally.
+      expect(computeApiTruncationIndex(ui, 3, api)).toBe(2);
+      expect(computeApiTruncationIndex(ui, 1, api)).toBe(0);
+      // The new identified turn still resolves by identity.
+      expect(computeApiTruncationIndex(ui, 5, api)).toBe(4);
     });
   });
 });

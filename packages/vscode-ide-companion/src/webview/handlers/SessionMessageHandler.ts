@@ -617,6 +617,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
     let editStoreMutationApplied = false;
     let editAcpMutationApplied = false;
     let editAcpHistorySnapshot: unknown[] | null = null;
+    let editAcpHistoryPromptIds: Array<string | null> | undefined;
 
     if (editTargetTurnIndex !== undefined) {
       if (!Number.isInteger(editTargetTurnIndex) || editTargetTurnIndex < 0) {
@@ -699,6 +700,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
         const rewindResult =
           await this.agentManager.rewindSession(editTargetTurnIndex);
         editAcpHistorySnapshot = rewindResult?.historyBeforeRewind ?? null;
+        editAcpHistoryPromptIds = rewindResult?.historyBeforeRewindPromptIds;
         editAcpMutationApplied = true;
 
         this.sendToWebView({
@@ -710,6 +712,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
           try {
             await this.agentManager.restoreSessionHistory(
               editAcpHistorySnapshot,
+              editAcpHistoryPromptIds,
             );
           } catch (restoreError) {
             logger.warn(
@@ -785,7 +788,10 @@ export class SessionMessageHandler extends BaseMessageHandler {
 
       if (editAcpMutationApplied && editAcpHistorySnapshot) {
         try {
-          await this.agentManager.restoreSessionHistory(editAcpHistorySnapshot);
+          await this.agentManager.restoreSessionHistory(
+            editAcpHistorySnapshot,
+            editAcpHistoryPromptIds,
+          );
         } catch (restoreError) {
           logger.warn(
             '[SessionMessageHandler] Failed to restore ACP history after user message save failure:',
@@ -924,7 +930,10 @@ export class SessionMessageHandler extends BaseMessageHandler {
 
       if (editAcpMutationApplied && editAcpHistorySnapshot) {
         try {
-          await this.agentManager.restoreSessionHistory(editAcpHistorySnapshot);
+          await this.agentManager.restoreSessionHistory(
+            editAcpHistorySnapshot,
+            editAcpHistoryPromptIds,
+          );
         } catch (restoreError) {
           logger.warn(
             '[SessionMessageHandler] Failed to restore ACP history after send failure:',

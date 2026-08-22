@@ -62,6 +62,7 @@ import {
   type BranchPoint,
   type BranchToolCallIdentity,
 } from './branch-points.js';
+import { getApiHistoryPromptId } from './session-api-history.js';
 
 const debugLogger = createDebugLogger('CHAT_RECORDING');
 
@@ -318,6 +319,8 @@ export interface ChatRecord {
     | 'goal_runtime'
     | 'realtime_message'
     | 'turn_result';
+  /** Stable identity shared by the UI and API representation of a user turn. */
+  promptId?: string;
   /** Explicit source classification used by Goal evidence validation. */
   provenance?: ChatRecordProvenance;
   /** Goal identity and logical turn that owned this model-facing record. */
@@ -497,6 +500,8 @@ export interface ChatCompressionRecordPayload {
    * resume reconstruction.
    */
   compressedHistory: Content[];
+  /** Stable prompt identities aligned with compressedHistory by index. */
+  promptIds?: Array<string | null>;
 }
 
 export interface SlashCommandRecordPayload {
@@ -816,11 +821,22 @@ export interface BranchCheckpointCursor {
 export interface ChatRecordingRestoreState {
   lastCompletedUuid: string;
   turnParentUuids: Array<string | null>;
+  turnPromptIds?: Array<string | undefined>;
   customTitle?: string;
   titleSource?: TitleSource;
   parentSessionId?: string;
   sourceType?: string;
   sourceId?: string;
+}
+
+export interface ChatRecordingRewindCheckpoint {
+  lastRecordUuid: string | null;
+  activeBranchRecords: ChatRecord[];
+  activeBranchBaseUuid: string | null;
+  pendingBranchToolCalls: BranchToolCallIdentity[];
+  turnParentUuids: Array<string | null>;
+  turnPromptIds: Array<string | undefined>;
+  userDisplayTextsForTitle: Array<string | undefined>;
 }
 
 /**
@@ -871,6 +887,7 @@ export class ChatRecordingService {
    * record).
    */
   private turnParentUuids: Array<string | null> = [];
+  private turnPromptIds: Array<string | undefined> = [];
   private chatsDirEnsured = false;
   private cachedConversationFile: string | undefined;
   /** Session identity pinned by `pinSessionIdentity` at rotation time. */
@@ -1143,6 +1160,9 @@ export class ChatRecordingService {
     this.lastPersistedRecordUuid = state.lastCompletedUuid;
     this.activeBranchBaseUuid = state.lastCompletedUuid;
     this.turnParentUuids = [...state.turnParentUuids];
+    this.turnPromptIds = state.turnPromptIds
+      ? [...state.turnPromptIds]
+      : state.turnParentUuids.map(() => undefined);
     this.currentCustomTitle = state.customTitle;
     this.currentTitleSource = state.titleSource;
     this.currentParentSessionId = state.parentSessionId;
@@ -1748,13 +1768,16 @@ export class ChatRecordingService {
     message: PartListUnion,
     goalContext?: GoalTurnPermit,
     promptPayload?: UserPromptRecordPayload,
+    promptId?: string,
   ): void {
     try {
       this.trackUserDisplayTextForTitle(promptPayload?.displayText);
       this.turnParentUuids.push(this.lastRecordUuid);
+      this.turnPromptIds.push(promptId);
       const record: ChatRecord = {
         ...this.createBaseRecord('user'),
         ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
+        ...(promptId ? { promptId } : {}),
         message: createUserContent(message),
         ...(promptPayload ? { systemPayload: promptPayload } : {}),
       };
@@ -1766,6 +1789,57 @@ export class ChatRecordingService {
 
   getUserDisplayTextsForTitle(): ReadonlyArray<string | undefined> {
     return this.userDisplayTextsForTitle;
+  }
+
+  getRewindableTurnPromptIds(): ReadonlyArray<string | undefined> {
+    return [...this.turnPromptIds];
+  }
+
+  captureRewindCheckpoint(): ChatRecordingRewindCheckpoint {
+    return {
+      lastRecordUuid: this.lastRecordUuid,
+      activeBranchRecords: [...this.activeBranchRecords],
+      activeBranchBaseUuid: this.activeBranchBaseUuid,
+      pendingBranchToolCalls: [...this.pendingBranchToolCalls],
+      turnParentUuids: [...this.turnParentUuids],
+      turnPromptIds: [...this.turnPromptIds],
+      userDisplayTextsForTitle: [...this.userDisplayTextsForTitle],
+    };
+  }
+
+  restoreRewindCheckpoint(
+    checkpoint: ChatRecordingRewindCheckpoint,
+    survivingFileHistorySnapshots?: FileHistorySnapshot[],
+    legacyPromptIds = false,
+  ): void {
+    this.lastRecordUuid = checkpoint.lastRecordUuid;
+    this.activeBranchRecords = [...checkpoint.activeBranchRecords];
+    this.activeBranchBaseUuid = checkpoint.activeBranchBaseUuid;
+    this.pendingBranchToolCalls = [...checkpoint.pendingBranchToolCalls];
+    this.turnParentUuids = [...checkpoint.turnParentUuids];
+    this.turnPromptIds = legacyPromptIds
+      ? checkpoint.turnPromptIds.map(() => undefined)
+      : [...checkpoint.turnPromptIds];
+    this.userDisplayTextsForTitle.splice(
+      0,
+      this.userDisplayTextsForTitle.length,
+      ...checkpoint.userDisplayTextsForTitle,
+    );
+    this.lastAttributionSnapshotJson = undefined;
+    const record: ChatRecord = {
+      ...this.createBaseRecord('system'),
+      type: 'system',
+      subtype: 'rewind',
+      systemPayload: { truncatedCount: 0 },
+    };
+    this.appendRecord(record);
+    if (survivingFileHistorySnapshots?.length) {
+      this.recordFileHistorySnapshotBatch(survivingFileHistorySnapshots);
+    }
+  }
+
+  useLegacyTurnPromptIds(): void {
+    this.turnPromptIds = this.turnPromptIds.map(() => undefined);
   }
 
   recordGoalRuntimeMessage(
@@ -2217,11 +2291,16 @@ export class ChatRecordingService {
    */
   recordChatCompression(payload: ChatCompressionRecordPayload): void {
     try {
+      const promptIds = payload.compressedHistory.map(
+        (content) => getApiHistoryPromptId(content) ?? null,
+      );
       const record: ChatRecord = {
         ...this.createBaseRecord('system'),
         type: 'system',
         subtype: 'chat_compression',
-        systemPayload: payload,
+        systemPayload: promptIds.some(Boolean)
+          ? { ...payload, promptIds }
+          : payload,
       };
 
       this.appendRecord(record);
@@ -2278,6 +2357,7 @@ export class ChatRecordingService {
       );
       // Trim future boundaries — they no longer exist in the active branch.
       this.turnParentUuids = this.turnParentUuids.slice(0, targetTurnIndex);
+      this.turnPromptIds = this.turnPromptIds.slice(0, targetTurnIndex);
       // The previous attribution snapshot now sits on the abandoned
       // branch — clear the dedup key so the next snapshot lands on the
       // active branch and `/resume` can find it. Without this, a
@@ -2312,6 +2392,7 @@ export class ChatRecordingService {
    */
   rebuildTurnBoundaries(messages: ChatRecord[]): void {
     this.turnParentUuids = [];
+    this.turnPromptIds = [];
     this.activeBranchRecords = [...messages];
     this.activeBranchBaseUuid = messages[0]?.parentUuid ?? null;
     this.pendingBranchToolCalls = collectPendingBranchToolCalls(messages);
@@ -2329,6 +2410,7 @@ export class ChatRecordingService {
         // Reconstructed histories can start mid-chain; the persisted edge is
         // the source of truth, not the previous item in this sliced list.
         this.turnParentUuids.push(record.parentUuid ?? null);
+        this.turnPromptIds.push(record.promptId);
       }
     }
     // Ensure lastRecordUuid points to the end of the reconstructed chain.
