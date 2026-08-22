@@ -686,10 +686,27 @@ export function clearPersistedAuth(): void {
       }
       // Standard OpenAI bucket (legacy + the api-key flow's default).
       delete env['OPENAI_API_KEY'];
-      // Every preset provider with a static string envKey.
+      // Every preset provider env key, including keys derived from endpoint
+      // options.
       for (const p of ALL_PROVIDERS) {
         if (typeof p.envKey === 'string') {
           delete env[p.envKey];
+          continue;
+        }
+        const protocols = p.protocolOptions?.length
+          ? p.protocolOptions
+          : [p.protocol];
+        const baseUrls = Array.isArray(p.baseUrl)
+          ? p.baseUrl.map((option) => option.url)
+          : [p.baseUrl ?? ''];
+        for (const protocol of protocols) {
+          for (const baseUrl of baseUrls) {
+            try {
+              delete env[p.envKey(protocol, baseUrl)];
+            } catch {
+              continue;
+            }
+          }
         }
       }
       // Custom-provider env keys are derived dynamically by
@@ -716,7 +733,12 @@ export function clearPersistedAuth(): void {
       for (const p of ALL_PROVIDERS) {
         try {
           const key = resolveMetadataKey(p);
-          if (key) delete pm[key];
+          if (!key) continue;
+          for (const metadataKey of Object.keys(pm)) {
+            if (metadataKey === key || metadataKey.startsWith(`${key}--`)) {
+              delete pm[metadataKey];
+            }
+          }
         } catch {
           /* skip metadata cleanup for a misconfigured provider id */
         }

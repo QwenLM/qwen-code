@@ -153,17 +153,18 @@ function buildModelConfigs(
 ): ProviderModelConfig[] {
   const envKey = resolveEnvKey(config, inputs);
   const prefix = resolveModelNamePrefix(config, inputs.baseUrl);
+  const providerModels = resolveProviderModels(config, inputs.baseUrl);
 
   let models: ProviderModelConfig[];
 
   // Fixed ModelSpec[] (not editable) — use specs directly
-  if (config.models && !config.modelsEditable) {
-    models = config.models.map((spec) =>
+  if (providerModels && !config.modelsEditable) {
+    models = providerModels.map((spec) =>
       specToModelConfig(spec, prefix, inputs.baseUrl, envKey),
     );
-  } else if (config.models && config.modelsEditable) {
+  } else if (providerModels && config.modelsEditable) {
     // Editable ModelSpec[] — look up per-model metadata for known IDs
-    const specMap = new Map(config.models.map((s) => [s.id, s]));
+    const specMap = new Map(providerModels.map((s) => [s.id, s]));
     models = inputs.modelIds.map((id) => {
       const spec = specMap.get(id);
       if (spec) {
@@ -197,15 +198,77 @@ function buildModelConfigs(
   return applyProviderCustomHeaders(models, config);
 }
 
+function mergePreservedGenerationConfig(
+  preserved: ProviderModelConfig['generationConfig'],
+  generated: ProviderModelConfig['generationConfig'],
+  advancedConfig: ProviderSetupInputs['advancedConfig'],
+): ProviderModelConfig['generationConfig'] {
+  const merged = { ...preserved, ...generated };
+  if (preserved?.extra_body || generated?.extra_body) {
+    merged.extra_body = {
+      ...preserved?.extra_body,
+      ...generated?.extra_body,
+    };
+  }
+  if (preserved?.samplingParams || generated?.samplingParams) {
+    merged.samplingParams = {
+      ...preserved?.samplingParams,
+      ...generated?.samplingParams,
+    };
+  }
+  if (preserved?.customHeaders || generated?.customHeaders) {
+    merged.customHeaders = {
+      ...generated?.customHeaders,
+      ...preserved?.customHeaders,
+    };
+  }
+  if (advancedConfig?.enableThinking === false && merged.extra_body) {
+    const extraBody = { ...merged.extra_body };
+    delete extraBody['enable_thinking'];
+    if (Object.keys(extraBody).length > 0) merged.extra_body = extraBody;
+    else delete merged.extra_body;
+  }
+  if (
+    advancedConfig?.multimodal !== undefined &&
+    !Object.values(advancedConfig.multimodal).some(Boolean)
+  ) {
+    delete merged.modalities;
+  }
+  if (
+    advancedConfig?.contextWindowSize !== undefined &&
+    advancedConfig.contextWindowSize <= 0
+  ) {
+    delete merged.contextWindowSize;
+  }
+  if (
+    advancedConfig?.maxTokens !== undefined &&
+    advancedConfig.maxTokens <= 0
+  ) {
+    const samplingParams = { ...merged.samplingParams };
+    delete samplingParams['max_tokens'];
+    if (Object.keys(samplingParams).length > 0) {
+      merged.samplingParams = samplingParams;
+    } else {
+      delete merged.samplingParams;
+    }
+  }
+  return Object.keys(merged).length > 0 ? merged : undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Version tracking — auto-derived for providers with static model lists
 // ---------------------------------------------------------------------------
 
 /**
- * Returns the provider's metadata key (same as `config.id`).
+ * Returns the provider's metadata key. Multi-endpoint providers that merge
+ * models by identity use a stable endpoint suffix so each installed endpoint
+ * can track its model-list version independently.
  * Only defined for providers with a static `models` list.
  */
-export function resolveMetadataKey(config: ProviderConfig): string | undefined {
+export function resolveMetadataKey(
+  config: ProviderConfig,
+  baseUrl?: string,
+): string | undefined {
   if (!config.models) return undefined;
   // setValue uses dotted-path traversal — a provider id containing '.' would
   // be split into multiple nested objects (`providerMetadata.foo.bar` →
@@ -216,6 +279,20 @@ export function resolveMetadataKey(config: ProviderConfig): string | undefined {
     throw new Error(
       `Provider id must not contain '.' (would corrupt providerMetadata.${config.id} dotted writes): ${config.id}`,
     );
+  }
+  if (
+    baseUrl &&
+    config.mergeModelsByIdentity &&
+    Array.isArray(config.baseUrl)
+  ) {
+    const normalizedBaseUrl = normalizeBaseUrlForMatching(baseUrl);
+    const option = config.baseUrl.find(
+      (candidate) =>
+        normalizeBaseUrlForMatching(candidate.url) === normalizedBaseUrl,
+    );
+    if (option) {
+      return `${config.id}--${option.id.replaceAll('.', '%2E')}`;
+    }
   }
   return config.id;
 }
@@ -229,18 +306,81 @@ export const PROVIDER_METADATA_NS = 'providerMetadata';
 function resolveProviderState(
   config: ProviderConfig,
   baseUrl: string,
-  models: ProviderModelConfig[],
 ): ProviderInstallState | undefined {
-  const key = resolveMetadataKey(config);
+  const key = resolveMetadataKey(config, baseUrl);
   if (key) {
+    // The version tracks the provider's built-in template, never the user's
+    // selection: findAllPendingUpdates compares against a template hash, so a
+    // deselected default or a carried custom model must not poison the hash
+    // and re-trigger the update prompt on every launch.
     return {
       [`${PROVIDER_METADATA_NS}.${key}`]: {
-        version: computeModelListVersion(models),
+        version: computeModelListVersion(
+          buildProviderTemplate(config, baseUrl),
+        ),
         baseUrl,
       },
     };
   }
   return undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Attribution of baseUrl-less legacy entries by their stored env key
+// ---------------------------------------------------------------------------
+
+/**
+ * Classifies baseUrl-less legacy model entries (which predate baseUrl
+ * stamping and carry their endpoint only in their env key) against the
+ * endpoint (`protocol`, `baseUrl`):
+ *
+ * - `namesSelectedEndpoint` — the stored key IS the selected endpoint's own
+ *   key, in the current shape or an UNAMBIGUOUS historical shape. Such an
+ *   entry belongs to this endpoint and may be stamped/migrated/claimed here.
+ * - `namesSiblingEndpoint` — the stored key affirmatively names a DIFFERENT
+ *   endpoint of this provider. Such an entry must be left alone entirely:
+ *   a connect here must neither delete nor rewrite it (R38-3, R39-2,
+ *   R40-1).
+ * - neither — the key names no endpoint (a floating hand-written key) or
+ *   cannot be attributed; an implicit reconnect leaves it untouched, an
+ *   explicit selection may adopt it.
+ */
+export function legacyEnvKeyAttribution(
+  config: ProviderConfig,
+  protocol: AuthType,
+  baseUrl: string,
+): {
+  endpointEnvKey: string | undefined;
+  namesSelectedEndpoint: (model: { envKey?: string }) => boolean;
+  namesSiblingEndpoint: (model: { envKey?: string }) => boolean;
+} {
+  let endpointEnvKey: string | undefined;
+  try {
+    endpointEnvKey =
+      typeof config.envKey === 'function'
+        ? config.envKey(protocol, baseUrl)
+        : config.envKey;
+  } catch {
+    endpointEnvKey = undefined;
+  }
+  const envKeyFn =
+    typeof config.envKey === 'function' ? config.envKey : undefined;
+  const namesSelectedEndpoint = (model: { envKey?: string }): boolean =>
+    typeof model.envKey === 'string' &&
+    endpointEnvKey !== undefined &&
+    (model.envKey === endpointEnvKey ||
+      config.ownsEnvKeyShape?.(model.envKey, protocol, baseUrl) === true);
+  const namesSiblingEndpoint = (model: { envKey?: string }): boolean => {
+    if (typeof model.envKey !== 'string') return false;
+    const storedKey = model.envKey;
+    const namesAnEndpoint = config.envKeyNamesAnEndpoint
+      ? config.envKeyNamesAnEndpoint(storedKey, protocol)
+      : Array.isArray(config.baseUrl) &&
+        envKeyFn !== undefined &&
+        config.baseUrl.some((opt) => envKeyFn(protocol, opt.url) === storedKey);
+    return namesAnEndpoint && !namesSelectedEndpoint(model);
+  };
+  return { endpointEnvKey, namesSelectedEndpoint, namesSiblingEndpoint };
 }
 
 // ---------------------------------------------------------------------------
@@ -252,11 +392,102 @@ export function buildInstallPlan(
   inputs: ProviderSetupInputs,
 ): ProviderInstallPlan {
   const protocol = inputs.protocol ?? config.protocol;
-  const envKey = resolveEnvKey(config, inputs);
-  const models = inputs.prebuiltModels ?? buildModelConfigs(config, inputs);
+  // Canonicalize the endpoint once so models, modelSelection, and
+  // providerState all persist the provider's own URL. A variant (trailing
+  // slash) would poison the version hash and identity matching downstream.
+  const baseUrl = resolveBaseUrl(config, inputs.baseUrl);
+  const resolvedInputs = { ...inputs, baseUrl };
+  const envKey = resolveEnvKey(config, resolvedInputs);
+  const generatedModels =
+    inputs.prebuiltModels ?? buildModelConfigs(config, resolvedInputs);
+  const configuredModelIds = new Set(
+    (resolveProviderModels(config, baseUrl) ?? []).map((model) => model.id),
+  );
+  const sameModelIdentity = (
+    left: ProviderModelConfig,
+    right: ProviderModelConfig,
+  ) =>
+    left.id === right.id &&
+    normalizeBaseUrlForMatching(left.baseUrl) ===
+      normalizeBaseUrlForMatching(right.baseUrl);
+  const models = inputs.preserveModels?.length
+    ? [
+        ...generatedModels.map((generated) => {
+          const preserved = inputs.preserveModels?.find((model) =>
+            sameModelIdentity(generated, model),
+          );
+          if (!preserved) return generated;
+          const generationConfig = mergePreservedGenerationConfig(
+            preserved.generationConfig,
+            generated.generationConfig,
+            inputs.prebuiltModels || configuredModelIds.has(generated.id)
+              ? undefined
+              : inputs.advancedConfig,
+          );
+          const mergedModel = {
+            ...preserved,
+            ...generated,
+          };
+          if (generationConfig) mergedModel.generationConfig = generationConfig;
+          else delete mergedModel.generationConfig;
+          return mergedModel;
+        }),
+        ...inputs.preserveModels.filter(
+          (model) =>
+            !generatedModels.some((generated) =>
+              sameModelIdentity(generated, model),
+            ),
+        ),
+      ]
+    : generatedModels;
+  const providerOwnsModel = resolveOwnsModel(config);
+  const selectedEndpoint = normalizeBaseUrlForMatching(baseUrl);
+  // Only the ids the caller migrated in THIS run may be claimed by
+  // id-collision. Deriving the set from "any preserved model stamped at the
+  // selected endpoint" is unsound: a normally-stamped entry whose id merely
+  // collides with a baseUrl-less entry at a sibling endpoint would claim and
+  // delete that sibling entry (R40-2). Callers that stamp baseUrl-less
+  // legacy entries pass those ids explicitly; callers that never stamp pass
+  // nothing, so no id-collision claim happens on their behalf.
+  const migratedLegacyModelIds = new Set(inputs.migratedLegacyModelIds ?? []);
+  const freeFormProvider = config.baseUrl === undefined;
+  // A baseUrl-less entry predates baseUrl stamping, so nothing on the entry
+  // itself names its endpoint — except its env key, which the provider's env
+  // key generation derives endpoint-uniquely. Attribute such an entry to the
+  // selected endpoint only when its stored key is that endpoint's own key in
+  // any UNAMBIGUOUS shape the provider has generated (a deselection at the
+  // entry's endpoint must remove it like any other omitted entry; otherwise
+  // the deselection silently no-ops), or when this very run migrated it
+  // (stamped it, or collapsed it into an existing stamped twin). Claiming by
+  // anything weaker — e.g. any planned/preserved same-id model — let a
+  // connect at one endpoint delete another endpoint's legacy models whenever
+  // the ids collided (R38-3, R39-2, R40-2), and a key that names no endpoint
+  // is left alone entirely: it cannot be attributed, so it survives like it
+  // did before this PR (R39-3).
+  const ownsLegacyEnvKey = (storedKey: string | undefined): boolean =>
+    typeof storedKey === 'string' &&
+    (storedKey === envKey ||
+      (config.ownsEnvKeyShape?.(storedKey, protocol, baseUrl) ?? false));
+  // Defense-in-depth for the id-collision clause: even an id this run
+  // migrated must never claim a baseUrl-less entry whose env key names a
+  // SIBLING endpoint — such an entry belongs there, and no migration here can
+  // legitimately own it (R40-2).
+  const { namesSiblingEndpoint } = legacyEnvKeyAttribution(
+    config,
+    protocol,
+    baseUrl,
+  );
   const ownsModel = config.mergeModelsByIdentity
-    ? undefined
-    : resolveOwnsModel(config);
+    ? (Array.isArray(config.baseUrl) || freeFormProvider) && providerOwnsModel
+      ? (model: ProviderModelConfig) =>
+          providerOwnsModel(model) &&
+          (normalizeBaseUrlForMatching(model.baseUrl) === selectedEndpoint ||
+            (model.baseUrl === undefined &&
+              !namesSiblingEndpoint(model) &&
+              (migratedLegacyModelIds.has(model.id) ||
+                (freeFormProvider && ownsLegacyEnvKey(model.envKey)))))
+      : undefined
+    : providerOwnsModel;
   const firstModel = models[0];
   if (models.length === 0) {
     throw new Error(
@@ -285,9 +516,17 @@ export function buildInstallPlan(
         models,
         mergeStrategy: 'prepend-and-remove-owned' as const,
         ...(ownsModel ? { ownsModel } : {}),
+        ...(config.mergeModelsByIdentity && Array.isArray(config.baseUrl)
+          ? {
+              retainCurrentModelAcrossEndpoints: true,
+              ...(providerOwnsModel
+                ? { ownsModelAcrossEndpoints: providerOwnsModel }
+                : {}),
+            }
+          : {}),
       },
     ],
-    providerState: resolveProviderState(config, inputs.baseUrl, models),
+    providerState: resolveProviderState(config, baseUrl),
   };
 }
 
@@ -346,8 +585,11 @@ export function resolveBaseUrl(
   return selectedBaseUrl ?? '';
 }
 
-function normalizeBaseUrlForMatching(baseUrl: string | undefined): string {
-  if (baseUrl === undefined) return '';
+/** Strips trailing slashes so `.../v1` and `.../v1/` compare as one endpoint. */
+export function normalizeBaseUrlForMatching(
+  baseUrl: string | undefined,
+): string {
+  if (typeof baseUrl !== 'string') return '';
   let end = baseUrl.length;
   while (end > 0 && baseUrl.charCodeAt(end - 1) === 47) {
     end--;
@@ -359,8 +601,27 @@ function normalizeBaseUrlForMatching(baseUrl: string | undefined): string {
 // Resolve model IDs from config
 // ---------------------------------------------------------------------------
 
-export function getDefaultModelIds(config: ProviderConfig): string[] {
-  return config.models?.map((s) => s.id) ?? [];
+export function resolveProviderModels(
+  config: ProviderConfig,
+  baseUrl?: string,
+): ModelSpec[] | undefined {
+  if (baseUrl !== undefined && Array.isArray(config.baseUrl)) {
+    const resolvedBaseUrl = resolveBaseUrl(config, baseUrl);
+    const option = config.baseUrl.find(
+      (candidate) =>
+        normalizeBaseUrlForMatching(candidate.url) ===
+        normalizeBaseUrlForMatching(resolvedBaseUrl),
+    );
+    if (option?.models) return option.models;
+  }
+  return config.models;
+}
+
+export function getDefaultModelIds(
+  config: ProviderConfig,
+  baseUrl?: string,
+): string[] {
+  return resolveProviderModels(config, baseUrl)?.map((s) => s.id) ?? [];
 }
 
 function isProviderModelConfig(value: unknown): value is ProviderModelConfig {
@@ -373,22 +634,25 @@ function isProviderModelConfig(value: unknown): value is ProviderModelConfig {
 
 /**
  * Find the model entries a user has already saved for `config` under the
- * `modelProviders` map in settings. Returns the first protocol (in the
- * provider's own preference order) that owns stored models, or `undefined`
- * when none are saved. Used to pre-fill the auth wizard / connect form with
- * existing model IDs instead of resetting to the provider's built-in defaults.
+ * `modelProviders` map in settings. When `selectedProtocol` is provided, only
+ * that bucket is inspected; otherwise the first protocol in the provider's
+ * preference order that owns stored models is returned. Used to pre-fill the
+ * auth wizard / connect form without crossing protocol-specific model state.
  */
 export function findExistingProviderModels(
   config: ProviderConfig,
   modelProviders: Record<string, unknown> | undefined,
+  selectedProtocol?: ProviderConfig['protocol'],
 ):
   | { protocol: ProviderConfig['protocol']; models: ProviderModelConfig[] }
   | undefined {
   const ownsModel = resolveOwnsModel(config);
   if (!ownsModel || !modelProviders) return undefined;
-  const protocols = config.protocolOptions?.length
-    ? config.protocolOptions
-    : [config.protocol];
+  const protocols = selectedProtocol
+    ? [selectedProtocol]
+    : config.protocolOptions?.length
+      ? config.protocolOptions
+      : [config.protocol];
   for (const protocol of protocols) {
     const raw = modelProviders[protocol];
     if (!Array.isArray(raw)) continue;
@@ -514,6 +778,6 @@ export function buildProviderTemplate(
   return buildModelConfigs(config, {
     baseUrl: resolved,
     apiKey: '',
-    modelIds: getDefaultModelIds(config),
+    modelIds: getDefaultModelIds(config, resolved),
   });
 }

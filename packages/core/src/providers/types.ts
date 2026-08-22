@@ -30,6 +30,8 @@ export interface BaseUrlOption {
   id: string;
   label: string;
   url: string;
+  /** Override the provider's model list when this endpoint is selected. */
+  models?: ModelSpec[];
   documentationUrl?: string;
   apiKeyUrl?: string;
 }
@@ -103,6 +105,33 @@ export interface ProviderConfig {
   ownsModel?: (model: ProviderModelConfig) => boolean;
 
   /**
+   * Reports whether a stored env key belongs to the endpoint
+   * (`protocol`, `baseUrl`), recognizing historical key shapes this provider
+   * used to generate in addition to the current one. Used to attribute
+   * baseUrl-less legacy model entries (which predate baseUrl stamping) to an
+   * endpoint — their env key is the only endpoint signal they carry. When
+   * omitted, only an exact match with the endpoint's currently derived env
+   * key attributes such an entry.
+   */
+  ownsEnvKeyShape?: (
+    envKey: string,
+    protocol: AuthType,
+    baseUrl: string,
+  ) => boolean;
+
+  /**
+   * Reports whether a stored env key is a key this provider generated for
+   * SOME endpoint under `protocol` — selected or not. Used to tell a
+   * baseUrl-less legacy entry that affirmatively names a sibling endpoint
+   * (never adopt, never claim) apart from a floating hand-written key that
+   * names no endpoint (an explicit selection may adopt it). When omitted,
+   * array-baseUrl providers fall back to comparing against every endpoint's
+   * derived key, and any key that is not the selected endpoint's own is
+   * treated as floating.
+   */
+  envKeyNamesAnEndpoint?: (envKey: string, protocol: AuthType) => boolean;
+
+  /**
    * Install-time merge behavior. When true, installs replace only incoming
    * model identities (id + baseUrl) instead of every model matched by
    * ownsModel. Useful for user-defined providers where multiple endpoints and
@@ -135,6 +164,20 @@ export interface ProviderSetupInputs {
   modelIds: string[];
   /** Pre-built model configs (e.g. OpenRouter fetches models from API). Overrides modelIds. */
   prebuiltModels?: ProviderModelConfig[];
+  /** Existing custom models that a defaults-only/headless reconnect cannot display. */
+  preserveModels?: ProviderModelConfig[];
+  /**
+   * Ids of baseUrl-less legacy entries this very run migrated toward the
+   * selected endpoint — either freshly stamped into `preserveModels` or
+   * dropped from it because a stamped twin already exists there. Only these
+   * ids may be claimed by id-collision when owning baseUrl-less stored
+   * entries; every other baseUrl-less entry is owned only through its env
+   * key. Inferring this set from "any preserved model stamped at the
+   * selected endpoint" is unsound: a normally-stamped entry whose id merely
+   * collides with another endpoint's legacy entry would claim and delete it
+   * (R40-2).
+   */
+  migratedLegacyModelIds?: readonly string[];
   advancedConfig?: {
     enableThinking?: boolean;
     multimodal?: InputModalities;
@@ -152,6 +195,10 @@ export interface ProviderModelProvidersPatch {
   models: ProviderModelConfig[];
   mergeStrategy: 'prepend-and-remove-owned' | 'replace-owned' | 'append';
   ownsModel?: (model: ProviderModelConfig) => boolean;
+  /** Keep a selected sibling endpoint model when it survives this patch. */
+  retainCurrentModelAcrossEndpoints?: boolean;
+  /** Identify this provider's models across all of its sibling endpoints. */
+  ownsModelAcrossEndpoints?: (model: ProviderModelConfig) => boolean;
 }
 
 /**

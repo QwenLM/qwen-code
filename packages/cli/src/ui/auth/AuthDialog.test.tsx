@@ -4,15 +4,29 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { render as renderInk } from 'ink';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { AuthDialog } from './AuthDialog.js';
+import {
+  AuthDialog,
+  getExistingProviderSetup,
+  getProtocolSetups,
+  getMaxItemsToShow,
+} from './AuthDialog.js';
 import { LoadedSettings } from '../../config/settings.js';
 import type { Settings } from '../../config/settingsSchema.js';
 import type { Config } from '@qwen-code/qwen-code-core';
-import { AuthType } from '@qwen-code/qwen-code-core';
+import {
+  AuthType,
+  customProvider,
+  findProviderById,
+} from '@qwen-code/qwen-code-core';
 import { renderWithProviders } from '../../test-utils/render.js';
 import { UIStateContext } from '../contexts/UIStateContext.js';
 import { UIActionsContext } from '../contexts/UIActionsContext.js';
+import { ConfigContext } from '../contexts/ConfigContext.js';
+import { KeypressProvider } from '../contexts/KeypressContext.js';
+import { SettingsContext } from '../contexts/SettingsContext.js';
+import { ShellFocusContext } from '../contexts/ShellFocusContext.js';
 import type { UIState } from '../contexts/UIStateContext.js';
 import type { UIActions } from '../contexts/UIActionsContext.js';
 
@@ -85,6 +99,8 @@ const renderAuthDialog = (
   uiActionsOverrides: UIActionsOverrides = {},
   configAuthType: AuthType | undefined = undefined,
   configApiKey: string | undefined = undefined,
+  availableTerminalHeight?: number,
+  initialViewLevel?: 'main' | 'alibaba-select' | 'thirdparty-select',
 ) => {
   const uiState = createMockUIState(uiStateOverrides);
   const uiActions = createMockUIActions(uiActionsOverrides);
@@ -97,12 +113,49 @@ const renderAuthDialog = (
   return renderWithProviders(
     <UIStateContext.Provider value={uiState}>
       <UIActionsContext.Provider value={uiActions}>
-        <AuthDialog />
+        <AuthDialog
+          availableTerminalHeight={availableTerminalHeight}
+          initialViewLevel={initialViewLevel}
+        />
       </UIActionsContext.Provider>
     </UIStateContext.Provider>,
     { settings, config: mockConfig },
   );
 };
+
+const createSettings = () =>
+  new LoadedSettings(
+    {
+      settings: { ui: { customThemes: {} }, mcpServers: {} },
+      originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+      path: '',
+    },
+    {
+      settings: {},
+      originalSettings: {},
+      path: '',
+    },
+    {
+      settings: {
+        security: { auth: { selectedType: undefined } },
+        ui: { customThemes: {} },
+        mcpServers: {},
+      },
+      originalSettings: {
+        security: { auth: { selectedType: undefined } },
+        ui: { customThemes: {} },
+        mcpServers: {},
+      },
+      path: '',
+    },
+    {
+      settings: { ui: { customThemes: {} }, mcpServers: {} },
+      originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+      path: '',
+    },
+    true,
+    new Set(),
+  );
 
 /**
  * Type text into the terminal one character at a time.
@@ -125,6 +178,23 @@ const escapeRegExp = (text: string) =>
   text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const WAIT_FOR_TIMEOUT = 5000;
+
+describe('getMaxItemsToShow', () => {
+  it('uses pagination only when the available height cannot fit every item', () => {
+    expect(getMaxItemsToShow(24, 4, 7)).toBe(4);
+    expect(getMaxItemsToShow(18, 6, 7)).toBe(2);
+  });
+
+  it('shows every item when the height fits and guards an empty list', () => {
+    expect(getMaxItemsToShow(100, 4, 7)).toBe(4);
+    expect(getMaxItemsToShow(24, 0, 7)).toBe(1);
+  });
+
+  it('clamps to a single item when the floor computation goes non-positive', () => {
+    expect(getMaxItemsToShow(12, 6, 7)).toBe(1);
+    expect(getMaxItemsToShow(10, 6, 7)).toBe(1);
+  });
+});
 
 const expectSelectedOption = (frame: string | undefined, label: string) => {
   expect(frame).toMatch(
@@ -149,6 +219,7 @@ const pressEnterAndWaitFor = async (
   lastFrame: () => string | undefined,
   expectedText: string,
 ) => {
+  await new Promise((resolve) => setTimeout(resolve, 50));
   stdin.write('\r');
   await vi.waitFor(
     () => {
@@ -156,6 +227,7 @@ const pressEnterAndWaitFor = async (
     },
     { timeout: WAIT_FOR_TIMEOUT },
   );
+  await new Promise((resolve) => setTimeout(resolve, 50));
 };
 
 const moveDownAndWaitForSelection = async (
@@ -163,8 +235,10 @@ const moveDownAndWaitForSelection = async (
   lastFrame: () => string | undefined,
   label: string,
 ) => {
+  await new Promise((resolve) => setTimeout(resolve, 50));
   stdin.write('\u001b[B');
   await waitForSelectedOption(lastFrame, label);
+  await new Promise((resolve) => setTimeout(resolve, 50));
 };
 
 const navigateToCustomProtocolSelect = async (
@@ -239,6 +313,405 @@ const isUnreliableTuiInputEnvironment =
 const itWhenTuiInputReliable = isUnreliableTuiInputEnvironment ? it.skip : it;
 
 describe('AuthDialog', { timeout: 15000 }, () => {
+  it('restores the installed Kimi endpoint instead of the first option', () => {
+    const kimi = findProviderById('kimi');
+    expect(kimi).toBeDefined();
+
+    const setup = getExistingProviderSetup(kimi!, {
+      [AuthType.USE_OPENAI]: [
+        {
+          id: 'kimi-k3',
+          name: '[Kimi API] kimi-k3',
+          baseUrl: 'https://api.moonshot.ai/v1',
+          envKey: 'MOONSHOT_API_KEY',
+        },
+      ],
+    });
+
+    expect(setup).toEqual({
+      initialProtocol: AuthType.USE_OPENAI,
+      initialBaseUrl: 'https://api.moonshot.ai/v1',
+      customModelIds: [],
+      trimmedDefaultModelIds: [
+        'kimi-k2.7-code',
+        'kimi-k2.7-code-highspeed',
+        'kimi-k2.6',
+      ],
+      modelIdsByBaseUrl: new Map([['https://api.moonshot.ai/v1', ['kimi-k3']]]),
+    });
+  });
+
+  it("scopes the restored model seed to one endpoint but carries every endpoint's custom entries", () => {
+    const kimi = findProviderById('kimi');
+    expect(kimi).toBeDefined();
+
+    const codeCustom = {
+      id: 'custom-code-model',
+      name: '[Kimi Code] custom-code-model',
+      baseUrl: 'https://api.kimi.com/coding/v1',
+      envKey: 'KIMI_CODE_API_KEY',
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    const apiCustom = {
+      id: 'custom-kimi-model',
+      name: '[Kimi API] custom-kimi-model',
+      baseUrl: 'https://api.moonshot.ai/v1',
+      envKey: 'MOONSHOT_API_KEY',
+    };
+    const setup = getExistingProviderSetup(kimi!, {
+      [AuthType.USE_OPENAI]: [
+        {
+          id: 'k3-256k',
+          name: '[Kimi Code] k3-256k',
+          baseUrl: 'https://api.kimi.com/coding/v1',
+          envKey: 'KIMI_CODE_API_KEY',
+        },
+        codeCustom,
+        {
+          id: 'kimi-k3',
+          name: '[Kimi API] kimi-k3',
+          baseUrl: 'https://api.moonshot.ai/v1',
+          envKey: 'MOONSHOT_API_KEY',
+        },
+        apiCustom,
+      ],
+    });
+
+    expect(setup).toEqual({
+      initialProtocol: AuthType.USE_OPENAI,
+      initialBaseUrl: 'https://api.kimi.com/coding/v1',
+      customModelIds: ['custom-code-model'],
+      trimmedDefaultModelIds: [
+        'k3',
+        'kimi-for-coding',
+        'kimi-for-coding-highspeed',
+      ],
+      modelIdsByBaseUrl: new Map([
+        ['https://api.kimi.com/coding/v1', ['k3-256k', 'custom-code-model']],
+        ['https://api.moonshot.ai/v1', ['kimi-k3', 'custom-kimi-model']],
+      ]),
+      // Every endpoint's custom entries are carried: the user can switch the
+      // endpoint field before submitting, and the submitted endpoint's rich
+      // entries must survive the rebuild (buildCurrentInputs still filters
+      // sibling entries out of the actual submission for merge providers).
+      preserveModels: [codeCustom, apiCustom],
+    });
+  });
+
+  it('restores saved model state for every Kimi endpoint', () => {
+    const kimi = findProviderById('kimi');
+    expect(kimi).toBeDefined();
+
+    const setup = getExistingProviderSetup(kimi!, {
+      [AuthType.USE_OPENAI]: [
+        {
+          id: 'k3-256k',
+          name: '[Kimi Code] k3-256k',
+          baseUrl: 'https://api.kimi.com/coding/v1',
+          envKey: 'KIMI_CODE_API_KEY',
+        },
+        {
+          id: 'code-custom',
+          name: '[Kimi Code] code-custom',
+          baseUrl: 'https://api.kimi.com/coding/v1',
+          envKey: 'KIMI_CODE_API_KEY',
+        },
+        {
+          id: 'kimi-k3',
+          name: '[Kimi API] kimi-k3',
+          baseUrl: 'https://api.moonshot.ai/v1',
+          envKey: 'MOONSHOT_API_KEY',
+        },
+        {
+          id: 'api-custom',
+          name: '[Kimi API] api-custom',
+          baseUrl: 'https://api.moonshot.ai/v1',
+          envKey: 'MOONSHOT_API_KEY',
+        },
+      ],
+    });
+
+    expect(setup.modelIdsByBaseUrl).toEqual(
+      new Map([
+        ['https://api.kimi.com/coding/v1', ['k3-256k', 'code-custom']],
+        ['https://api.moonshot.ai/v1', ['kimi-k3', 'api-custom']],
+      ]),
+    );
+  });
+
+  it('keeps restored models whose id collides with a sibling endpoint built-in', () => {
+    const kimi = findProviderById('kimi');
+    expect(kimi).toBeDefined();
+
+    const collidingCustom = {
+      id: 'kimi-k3',
+      name: '[Kimi Code] kimi-k3',
+      baseUrl: 'https://api.kimi.com/coding/v1',
+      envKey: 'KIMI_CODE_API_KEY',
+    };
+    const setup = getExistingProviderSetup(kimi!, {
+      [AuthType.USE_OPENAI]: [
+        {
+          id: 'k3-256k',
+          name: '[Kimi Code] k3-256k',
+          baseUrl: 'https://api.kimi.com/coding/v1',
+          envKey: 'KIMI_CODE_API_KEY',
+        },
+        collidingCustom,
+      ],
+    });
+
+    expect(setup).toEqual({
+      initialProtocol: AuthType.USE_OPENAI,
+      initialBaseUrl: 'https://api.kimi.com/coding/v1',
+      // kimi-k3 is a built-in of the *API* endpoints, but this model was saved
+      // under the coding endpoint, so it is user data for the restored
+      // endpoint and must stay in the seed instead of being deleted on the
+      // next no-op resubmit.
+      customModelIds: ['kimi-k3'],
+      trimmedDefaultModelIds: [
+        'k3',
+        'kimi-for-coding',
+        'kimi-for-coding-highspeed',
+      ],
+      modelIdsByBaseUrl: new Map([
+        ['https://api.kimi.com/coding/v1', ['k3-256k', 'kimi-k3']],
+      ]),
+      preserveModels: [collidingCustom],
+    });
+  });
+
+  it('restores legacy provider models without a baseUrl', () => {
+    const deepseek = findProviderById('deepseek');
+    expect(deepseek).toBeDefined();
+
+    const setup = getExistingProviderSetup(deepseek!, {
+      [AuthType.USE_OPENAI]: [
+        {
+          id: 'deepseek-v4-flash',
+          name: '[DeepSeek] deepseek-v4-flash',
+          baseUrl: 'https://api.deepseek.com',
+          envKey: 'DEEPSEEK_API_KEY',
+        },
+        {
+          id: 'legacy-custom',
+          name: '[DeepSeek] legacy-custom',
+          envKey: 'DEEPSEEK_API_KEY',
+          generationConfig: { contextWindowSize: 54321 },
+        },
+        {
+          id: 'proxy-custom',
+          name: '[DeepSeek] proxy-custom',
+          baseUrl: 'https://corp-proxy.example/v1',
+          envKey: 'DEEPSEEK_API_KEY',
+          generationConfig: { contextWindowSize: 12345 },
+        },
+      ],
+    });
+
+    expect(setup.customModelIds).toContain('legacy-custom');
+    expect(setup.customModelIds).not.toContain('proxy-custom');
+    expect(setup.preserveModels).toEqual([
+      {
+        id: 'legacy-custom',
+        name: '[DeepSeek] legacy-custom',
+        baseUrl: 'https://api.deepseek.com',
+        envKey: 'DEEPSEEK_API_KEY',
+        generationConfig: { contextWindowSize: 54321 },
+      },
+      {
+        id: 'proxy-custom',
+        name: '[DeepSeek] proxy-custom',
+        baseUrl: 'https://corp-proxy.example/v1',
+        envKey: 'DEEPSEEK_API_KEY',
+        generationConfig: { contextWindowSize: 12345 },
+      },
+    ]);
+    expect(setup.initialBaseUrl).toBe('https://api.deepseek.com');
+  });
+
+  it('preserves a stamped proxy model when the first saved model is legacy', () => {
+    const deepseek = findProviderById('deepseek');
+    expect(deepseek).toBeDefined();
+    const proxyCustom = {
+      id: 'proxy-custom',
+      name: '[DeepSeek] proxy-custom',
+      baseUrl: 'https://corp-proxy.example/v1',
+      envKey: 'DEEPSEEK_API_KEY',
+      generationConfig: { contextWindowSize: 12345 },
+    };
+
+    const setup = getExistingProviderSetup(deepseek!, {
+      [AuthType.USE_OPENAI]: [
+        {
+          id: 'legacy-custom',
+          name: '[DeepSeek] legacy-custom',
+          envKey: 'DEEPSEEK_API_KEY',
+        },
+        proxyCustom,
+      ],
+    });
+
+    expect(setup.initialBaseUrl).toBe('https://api.deepseek.com');
+    expect(setup.customModelIds).toEqual(['legacy-custom']);
+    expect(setup.preserveModels).toEqual([
+      {
+        id: 'legacy-custom',
+        name: '[DeepSeek] legacy-custom',
+        baseUrl: 'https://api.deepseek.com',
+        envKey: 'DEEPSEEK_API_KEY',
+      },
+      proxyCustom,
+    ]);
+  });
+
+  it('seeds no trims or customs for a provider without saved models', () => {
+    const kimi = findProviderById('kimi');
+    expect(kimi).toBeDefined();
+
+    // No saved record at all, and an empty record map: the dialog must not
+    // mark every default as previously trimmed (which would empty the Models
+    // step and install zero models).
+    for (const setup of [
+      getExistingProviderSetup(kimi!, undefined),
+      getExistingProviderSetup(kimi!, {}),
+    ]) {
+      expect(setup).toEqual({
+        initialProtocol: undefined,
+        initialBaseUrl: undefined,
+        customModelIds: [],
+        trimmedDefaultModelIds: [],
+        modelIdsByBaseUrl: new Map(),
+      });
+    }
+  });
+
+  it('computes per-protocol saved views so a protocol switch preserves the selected bucket', () => {
+    const proxyUrl = 'https://proxy.example/v1';
+    const {
+      modelIdsByBaseUrlByProtocol,
+      preserveModelsByProtocol,
+      baseUrlByProtocol,
+    } = getProtocolSetups(customProvider, {
+      [AuthType.USE_OPENAI]: [
+        {
+          id: 'a-oai',
+          baseUrl: proxyUrl,
+          envKey: 'QWEN_CUSTOM_API_KEY_OPENAI',
+        },
+        {
+          id: 'b-oai',
+          baseUrl: proxyUrl,
+          envKey: 'QWEN_CUSTOM_API_KEY_OPENAI',
+        },
+      ],
+      [AuthType.USE_ANTHROPIC]: [
+        {
+          id: 'c-ant',
+          baseUrl: proxyUrl,
+          envKey: 'QWEN_CUSTOM_API_KEY_ANTHROPIC',
+        },
+        {
+          id: 'd-ant',
+          baseUrl: proxyUrl,
+          envKey: 'QWEN_CUSTOM_API_KEY_ANTHROPIC',
+        },
+      ],
+    });
+
+    // Each protocol bucket gets its own endpoint→ids view, so the models
+    // field can be re-seeded with the selected protocol's own models.
+    expect(modelIdsByBaseUrlByProtocol.get(AuthType.USE_OPENAI)).toEqual(
+      new Map([[proxyUrl, ['a-oai', 'b-oai']]]),
+    );
+    expect(modelIdsByBaseUrlByProtocol.get(AuthType.USE_ANTHROPIC)).toEqual(
+      new Map([[proxyUrl, ['c-ant', 'd-ant']]]),
+    );
+
+    // Each protocol's preserveModels carries that bucket's own custom models
+    // (R34-2): switching to Anthropic and submitting must preserve c-ant/
+    // d-ant, not the first bucket's a-oai/b-oai.
+    expect(preserveModelsByProtocol.get(AuthType.USE_OPENAI)).toEqual([
+      { id: 'a-oai', baseUrl: proxyUrl, envKey: 'QWEN_CUSTOM_API_KEY_OPENAI' },
+      { id: 'b-oai', baseUrl: proxyUrl, envKey: 'QWEN_CUSTOM_API_KEY_OPENAI' },
+    ]);
+    expect(preserveModelsByProtocol.get(AuthType.USE_ANTHROPIC)).toEqual([
+      {
+        id: 'c-ant',
+        baseUrl: proxyUrl,
+        envKey: 'QWEN_CUSTOM_API_KEY_ANTHROPIC',
+      },
+      {
+        id: 'd-ant',
+        baseUrl: proxyUrl,
+        envKey: 'QWEN_CUSTOM_API_KEY_ANTHROPIC',
+      },
+    ]);
+
+    expect(baseUrlByProtocol.get(AuthType.USE_OPENAI)).toBe(proxyUrl);
+    expect(baseUrlByProtocol.get(AuthType.USE_ANTHROPIC)).toBe(proxyUrl);
+  });
+
+  it('seeds only the restored custom-provider endpoint, ignoring trailing slashes', () => {
+    const setup = getExistingProviderSetup(customProvider, {
+      [AuthType.USE_OPENAI]: [
+        {
+          id: 'gpt-oss',
+          baseUrl: 'https://y.example/v1',
+          envKey: 'QWEN_CUSTOM_API_KEY_OPENAI_Y',
+        },
+        {
+          id: 'llama',
+          baseUrl: 'https://x.example/v1',
+          envKey: 'QWEN_CUSTOM_API_KEY_OPENAI_X',
+        },
+        {
+          id: 'x-shared-env',
+          baseUrl: 'https://x.example/v1',
+          envKey: 'QWEN_CUSTOM_API_KEY_OPENAI_Y',
+        },
+        {
+          id: 'y-alias',
+          baseUrl: 'https://y.example/v1/',
+          envKey: 'QWEN_CUSTOM_API_KEY_OPENAI_Y',
+        },
+      ],
+    });
+
+    expect(setup).toEqual({
+      initialProtocol: AuthType.USE_OPENAI,
+      initialBaseUrl: 'https://y.example/v1',
+      customModelIds: ['gpt-oss', 'y-alias'],
+      trimmedDefaultModelIds: [],
+      modelIdsByBaseUrl: new Map([
+        ['https://y.example/v1', ['gpt-oss', 'y-alias']],
+        ['https://x.example/v1', ['llama', 'x-shared-env']],
+      ]),
+      preserveModels: [
+        {
+          id: 'gpt-oss',
+          baseUrl: 'https://y.example/v1',
+          envKey: 'QWEN_CUSTOM_API_KEY_OPENAI_Y',
+        },
+        {
+          id: 'llama',
+          baseUrl: 'https://x.example/v1',
+          envKey: 'QWEN_CUSTOM_API_KEY_OPENAI_X',
+        },
+        {
+          id: 'x-shared-env',
+          baseUrl: 'https://x.example/v1',
+          envKey: 'QWEN_CUSTOM_API_KEY_OPENAI_Y',
+        },
+        {
+          id: 'y-alias',
+          baseUrl: 'https://y.example/v1/',
+          envKey: 'QWEN_CUSTOM_API_KEY_OPENAI_Y',
+        },
+      ],
+    });
+  });
+
   const wait = (ms = 50) => new Promise((resolve) => setTimeout(resolve, ms));
 
   let originalEnv: NodeJS.ProcessEnv;
@@ -252,6 +725,181 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
   afterEach(() => {
     process.env = originalEnv;
+  });
+
+  it('should paginate the main menu when the dialog height is small', () => {
+    const { lastFrame } = renderAuthDialog(
+      createSettings(),
+      {},
+      {},
+      undefined,
+      undefined,
+      17,
+    );
+
+    const frame = lastFrame();
+    expect(frame?.split('\n')).toHaveLength(17);
+    expect(frame).toContain('Alibaba ModelStudio');
+    expect(frame).not.toContain('Third-party Providers');
+    expect(frame).not.toContain('Custom Provider');
+    expect(frame).toContain('▲');
+    expect(frame).toContain('▼');
+  });
+
+  it('should paginate the provider sub-menu when the dialog height is small', () => {
+    const { lastFrame } = renderAuthDialog(
+      createSettings(),
+      {},
+      {},
+      undefined,
+      undefined,
+      17,
+      'thirdparty-select',
+    );
+
+    const frame = lastFrame();
+    expect(frame?.split('\n')).toHaveLength(17);
+    expect(frame).toContain('Third-party Providers · Provider');
+    expect(frame).toContain('DeepSeek API Key');
+    expect(frame).not.toContain('Z.AI API Key');
+    expect(frame).toContain('▲');
+    expect(frame).toContain('▼');
+  });
+
+  it('omits scroll arrows when only one main-menu item fits', () => {
+    const { lastFrame } = renderAuthDialog(
+      createSettings(),
+      {},
+      {},
+      undefined,
+      undefined,
+      14,
+    );
+
+    const frame = lastFrame();
+    expect(frame?.split('\n').length).toBeLessThanOrEqual(14);
+    expect(frame).not.toContain('▲');
+    expect(frame).not.toContain('▼');
+  });
+
+  it('omits scroll arrows when only one provider item fits', () => {
+    const { lastFrame } = renderAuthDialog(
+      createSettings(),
+      {},
+      {},
+      undefined,
+      undefined,
+      11,
+      'thirdparty-select',
+    );
+
+    const frame = lastFrame();
+    expect(frame?.split('\n').length).toBeLessThanOrEqual(11);
+    expect(frame).not.toContain('▲');
+    expect(frame).not.toContain('▼');
+  });
+
+  it('keeps a long title on one row in a narrow terminal', async () => {
+    const frames: string[] = [];
+    const stdout = Object.create(process.stdout, {
+      columns: { value: 32 },
+      rows: { value: 17 },
+      isTTY: { value: true },
+      write: {
+        value(chunk: string | Uint8Array) {
+          frames.push(String(chunk));
+          return true;
+        },
+      },
+    }) as NodeJS.WriteStream;
+    const settings = createSettings();
+    const uiState = createMockUIState();
+    const uiActions = createMockUIActions();
+    const mockConfig = {
+      getAuthType: vi.fn(() => undefined),
+      getContentGeneratorConfig: vi.fn(() => ({ apiKey: undefined })),
+    } as unknown as Config;
+    const instance = renderInk(
+      <SettingsContext.Provider value={settings}>
+        <ConfigContext.Provider value={mockConfig}>
+          <ShellFocusContext.Provider value={true}>
+            <KeypressProvider kittyProtocolEnabled={true}>
+              <UIStateContext.Provider value={uiState}>
+                <UIActionsContext.Provider value={uiActions}>
+                  <AuthDialog
+                    availableTerminalHeight={17}
+                    initialViewLevel="thirdparty-select"
+                  />
+                </UIActionsContext.Provider>
+              </UIStateContext.Provider>
+            </KeypressProvider>
+          </ShellFocusContext.Provider>
+        </ConfigContext.Provider>
+      </SettingsContext.Provider>,
+      {
+        stdout,
+        debug: true,
+        exitOnCtrlC: false,
+        interactive: false,
+        patchConsole: false,
+      },
+    );
+    try {
+      await vi.waitFor(
+        () => {
+          expect(
+            frames.some((frame) =>
+              frame.includes('Third-party Providers · Pro…'),
+            ),
+          ).toBe(true);
+        },
+        { timeout: 1000 },
+      );
+      const lastFrame = frames.findLast((frame) =>
+        frame.includes('Third-party Providers · Pro…'),
+      );
+      expect(lastFrame?.split('\n').length).toBeLessThanOrEqual(17);
+      expect(lastFrame).toContain('Third-party Providers · Pro…');
+    } finally {
+      instance.unmount();
+      instance.cleanup();
+    }
+  });
+
+  it('keeps the main menu within the exact height when an error is shown', () => {
+    const { lastFrame } = renderAuthDialog(
+      createSettings(),
+      { authError: 'Authentication failed' },
+      {},
+      undefined,
+      undefined,
+      19,
+    );
+
+    const frame = lastFrame();
+    expect(frame?.split('\n')).toHaveLength(19);
+    expect(frame).toContain('Authentication failed');
+    expect(frame).toContain('▲');
+    expect(frame).toContain('▼');
+  });
+
+  it('keeps a provider sub-menu within the exact height when an error is shown', () => {
+    const { lastFrame } = renderAuthDialog(
+      createSettings(),
+      { authError: `Authentication failed: ${'x'.repeat(200)}` },
+      {},
+      undefined,
+      undefined,
+      22,
+      'thirdparty-select',
+    );
+
+    const frame = lastFrame();
+    expect(frame).toContain('Third-party Providers · Provider');
+    expect(frame?.split('\n')).toHaveLength(22);
+    expect(frame).toContain('Authentication failed');
+    expect(frame).toContain('▲');
+    expect(frame).toContain('▼');
   });
 
   it('should show an error if the initial auth type is invalid', () => {
@@ -767,40 +1415,6 @@ describe('AuthDialog', { timeout: 15000 }, () => {
   itWhenTuiInputReliable(
     'should preserve the selected main entry when returning from each top-level flow',
     async () => {
-      const createSettings = () =>
-        new LoadedSettings(
-          {
-            settings: { ui: { customThemes: {} }, mcpServers: {} },
-            originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
-            path: '',
-          },
-          {
-            settings: {},
-            originalSettings: {},
-            path: '',
-          },
-          {
-            settings: {
-              security: { auth: { selectedType: undefined } },
-              ui: { customThemes: {} },
-              mcpServers: {},
-            },
-            originalSettings: {
-              security: { auth: { selectedType: undefined } },
-              ui: { customThemes: {} },
-              mcpServers: {},
-            },
-            path: '',
-          },
-          {
-            settings: { ui: { customThemes: {} }, mcpServers: {} },
-            originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
-            path: '',
-          },
-          true,
-          new Set(),
-        );
-
       const cases = [
         {
           label: 'Alibaba ModelStudio',
@@ -975,7 +1589,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
   );
 
   itWhenTuiInputReliable(
-    'should show preset providers in third-party provider options',
+    'should limit third-party providers to the available dialog height',
     async () => {
       const settings: LoadedSettings = new LoadedSettings(
         {
@@ -1010,26 +1624,43 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         new Set(),
       );
 
-      const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
+      const { stdin, lastFrame, unmount } = renderAuthDialog(
+        settings,
+        { authError: `Authentication failed: ${'x'.repeat(200)}` },
+        {},
+        undefined,
+        undefined,
+        22,
+      );
 
       await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      await wait();
       await moveDownAndWaitForSelection(
         stdin,
         lastFrame,
         'Third-party Providers',
       );
+      await wait();
       await pressEnterAndWaitFor(
         stdin,
         lastFrame,
         'Third-party Providers · Provider',
       );
+      await wait();
 
       await vi.waitFor(
         () => {
           const frame = lastFrame();
+          expect(frame?.split('\n')).toHaveLength(22);
+          expect(frame).toContain('Authentication failed');
           expect(frame).toContain('DeepSeek API Key');
-          expect(frame).toContain('MiniMax API Key');
-          expect(frame).toContain('Z.AI API Key');
+          // 'Idealab API Key' is the real last visible row at this height;
+          // Kimi is off-screen and 'Kimi' matched only Idealab's description.
+          expect(frame).toContain('Idealab API Key');
+          expect(frame).not.toContain('MiniMax API Key');
+          expect(frame).not.toContain('Z.AI API Key');
+          expect(frame).toContain('▲');
+          expect(frame).toContain('▼');
           expect(frame).not.toContain('OpenAI API Key');
           expect(frame).not.toContain('HuggingFace API Key');
           expect(frame).not.toContain('Standard API Key');
@@ -1091,6 +1722,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         'Third-party Providers · Provider',
       );
       await waitForSelectedOption(lastFrame, 'DeepSeek API Key');
+      await wait();
       await pressEnterAndWaitFor(
         stdin,
         lastFrame,
@@ -1103,21 +1735,109 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         },
         { timeout: WAIT_FOR_TIMEOUT },
       );
-      await moveDownAndWaitForSelection(stdin, lastFrame, 'MiniMax API Key');
+      await wait();
+      for (const label of [
+        'Grok (xAI) API Key',
+        'Idealab API Key',
+        'Kimi',
+        'MiniMax API Key',
+        'ModelScope API Key',
+        'OpenRouter',
+        'Requesty',
+        'Xiaomi MiMo API Key',
+        'Z.AI API Key',
+      ]) {
+        await moveDownAndWaitForSelection(stdin, lastFrame, label);
+        await wait();
+      }
       await pressEnterAndWaitFor(
         stdin,
         lastFrame,
-        'MiniMax API Key · Step 1/3 · Endpoint',
+        'Z.AI API Key · Step 1/3 · Endpoint',
       );
 
       await vi.waitFor(
         () => {
           const frame = lastFrame();
-          expect(frame).toContain('International');
-          expect(frame).toContain('China');
+          expect(frame).toContain('Standard API Key');
+          expect(frame).toContain('Coding Plan');
         },
         { timeout: WAIT_FOR_TIMEOUT },
       );
+
+      unmount();
+    },
+  );
+
+  itWhenTuiInputReliable(
+    'opens the setup flow at the restored Kimi endpoint',
+    async () => {
+      const userSettings = {
+        security: { auth: { selectedType: undefined } },
+        ui: { customThemes: {} },
+        mcpServers: {},
+        modelProviders: {
+          [AuthType.USE_OPENAI]: [
+            {
+              id: 'kimi-k3',
+              name: '[Kimi API] kimi-k3',
+              baseUrl: 'https://api.moonshot.ai/v1',
+              envKey: 'MOONSHOT_API_KEY',
+            },
+          ],
+        },
+      } as Settings;
+      const settings: LoadedSettings = new LoadedSettings(
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        {
+          settings: {},
+          originalSettings: {},
+          path: '',
+        },
+        {
+          settings: userSettings,
+          originalSettings: userSettings,
+          path: '',
+        },
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        true,
+        new Set(),
+      );
+
+      const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
+
+      await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      await moveDownAndWaitForSelection(
+        stdin,
+        lastFrame,
+        'Third-party Providers',
+      );
+      await pressEnterAndWaitFor(
+        stdin,
+        lastFrame,
+        'Third-party Providers · Provider',
+      );
+      await waitForSelectedOption(lastFrame, 'DeepSeek API Key');
+      for (const label of ['Grok (xAI) API Key', 'Idealab API Key', 'Kimi']) {
+        await moveDownAndWaitForSelection(stdin, lastFrame, label);
+        await wait();
+      }
+      // The setup flow must open at the endpoint step with the restored
+      // API Key (International) option highlighted, not the first option.
+      await pressEnterAndWaitFor(
+        stdin,
+        lastFrame,
+        'Kimi · Step 1/3 · Access type',
+      );
+      await waitForSelectedOption(lastFrame, 'API Key (International)');
 
       unmount();
     },

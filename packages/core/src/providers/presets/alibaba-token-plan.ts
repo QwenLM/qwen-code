@@ -117,6 +117,9 @@ export const tokenPlanProvider: ProviderConfig = {
         model.baseUrl === TOKEN_PLAN_GLOBAL_BASE_URL)) ||
       (typeof model.name === 'string' &&
         model.name.startsWith('[ModelStudio Token Plan]'))),
+  // Region endpoints share one auth type and env key. Scope replacement and
+  // metadata by model identity so resubmitting one region preserves siblings.
+  mergeModelsByIdentity: true,
   uiGroup: 'alibaba',
   uiLabels: { flowTitle: 'Alibaba ModelStudio', baseUrlStepTitle: 'Region' },
 };

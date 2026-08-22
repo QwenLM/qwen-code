@@ -44,6 +44,9 @@ describe('GenAI provider resolution', () => {
     ['https://api.z.ai/api/paas/v4', 'z_ai'],
     ['https://open.bigmodel.cn/api/paas/v4', 'z_ai'],
     ['https://api-inference.modelscope.cn/v1', 'modelscope'],
+    ['https://api.kimi.com/coding/v1', 'kimi'],
+    ['https://api.moonshot.ai/v1', 'kimi'],
+    ['https://api.moonshot.cn/v1', 'kimi'],
     ['https://api.xiaomimimo.com/v1', 'mimo'],
     ['https://openrouter.ai/api/v1', 'openrouter'],
     ['https://router.requesty.ai/v1', 'requesty'],
@@ -78,6 +81,12 @@ describe('GenAI provider resolution', () => {
       resolveGenAiProviderName({
         authType: 'openai',
         baseUrl: 'https://example.openai.azure.com.attacker.example/v1',
+      }),
+    ).toBe('openai');
+    expect(
+      resolveGenAiProviderName({
+        authType: 'openai',
+        baseUrl: 'https://api.kimi.com.attacker.example/v1',
       }),
     ).toBe('openai');
   });
@@ -120,12 +129,15 @@ describe('GenAI provider resolution', () => {
     ['DASHSCOPE_API_KEY', 'dashscope'],
     ['DEEPSEEK_API_KEY', 'deepseek'],
     ['IDEALAB_API_KEY', 'dashscope'],
+    ['KIMI_CODE_API_KEY', 'kimi'],
     ['XAI_API_KEY', 'x_ai'],
     ['MISTRAL_API_KEY', 'mistral_ai'],
     ['MINIMAX_API_KEY', 'minimax'],
     ['MIMO_API_KEY', 'mimo'],
+    ['MIMO_TOKEN_PLAN_API_KEY', 'mimo'],
     ['ZAI_API_KEY', 'z_ai'],
     ['MODELSCOPE_API_KEY', 'modelscope'],
+    ['MOONSHOT_API_KEY', 'kimi'],
     ['OPENAI_API_KEY', 'openai'],
     ['XIAOMI_MIMO_API_KEY', 'mimo'],
     ['OPENROUTER_API_KEY', 'openrouter'],

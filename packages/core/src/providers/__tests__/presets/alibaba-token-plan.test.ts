@@ -92,7 +92,10 @@ describe('token plan provider', () => {
     expect(plan.providerId).toBe('token-plan');
     expect(plan.authType).toBe(AuthType.USE_OPENAI);
     expect(plan.env).toEqual({ [TOKEN_PLAN_ENV_KEY]: 'sk-token' });
-    expect(plan.modelSelection).toEqual({ modelId: template[0].id });
+    expect(plan.modelSelection).toEqual({
+      modelId: template[0].id,
+      baseUrl: TOKEN_PLAN_CHINA_BASE_URL,
+    });
     expect(plan.modelProviders).toEqual([
       {
         authType: AuthType.USE_OPENAI,
@@ -102,10 +105,12 @@ describe('token plan provider', () => {
         })),
         mergeStrategy: 'prepend-and-remove-owned',
         ownsModel: expect.any(Function),
+        retainCurrentModelAcrossEndpoints: true,
+        ownsModelAcrossEndpoints: expect.any(Function),
       },
     ]);
     expect(plan.providerState).toEqual({
-      'providerMetadata.token-plan': {
+      'providerMetadata.token-plan--cn-beijing': {
         baseUrl: TOKEN_PLAN_CHINA_BASE_URL,
         version,
       },
@@ -142,7 +147,7 @@ describe('token plan provider', () => {
       envKey: TOKEN_PLAN_ENV_KEY,
     });
     expect(plan.providerState).toEqual({
-      'providerMetadata.token-plan': {
+      'providerMetadata.token-plan--ap-southeast-1': {
         baseUrl: TOKEN_PLAN_GLOBAL_BASE_URL,
         version,
       },

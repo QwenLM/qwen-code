@@ -17,6 +17,7 @@ import { SessionMessageHandler } from './SessionMessageHandler.js';
 import { FileMessageHandler } from './FileMessageHandler.js';
 import { EditorMessageHandler } from './EditorMessageHandler.js';
 import { AuthMessageHandler } from './AuthMessageHandler.js';
+import { snapshotSettingsForRollback } from '../../services/settingsWriter.js';
 
 /**
  * Message Router
@@ -71,6 +72,18 @@ export class MessageRouter {
       conversationStore,
       currentConversationId,
       sendToWebView,
+      () => {
+        const snapshot = snapshotSettingsForRollback();
+        if (snapshot === null) {
+          throw new Error(
+            'Could not read saved model providers; aborting to protect the existing configuration.',
+          );
+        }
+        const modelProviders = snapshot?.['modelProviders'];
+        return modelProviders && typeof modelProviders === 'object'
+          ? (modelProviders as Record<string, unknown>)
+          : undefined;
+      },
     );
 
     // Register handlers in order of priority

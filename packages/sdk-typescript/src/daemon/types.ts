@@ -3917,6 +3917,8 @@ export interface DaemonAuthProviderBaseUrlOption {
   id: string;
   label: string;
   url: string;
+  envKey?: string;
+  models?: DaemonAuthProviderModel[];
   documentationUrl?: string;
   apiKeyUrl?: string;
 }

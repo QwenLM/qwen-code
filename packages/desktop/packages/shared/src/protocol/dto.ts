@@ -776,6 +776,8 @@ export interface QwenProviderBaseUrlOption {
   id: string
   label: string
   url: string
+  envKey?: string
+  models?: QwenProviderModelSpec[]
   documentationUrl?: string
   apiKeyUrl?: string
 }
@@ -809,8 +811,19 @@ export interface QwenProviderSummary {
   existingConfig?: {
     protocol?: string
     baseUrl?: string
-    apiKey?: string
+    /** The ACP catalog never serializes the stored key, only its presence. */
+    hasApiKey?: boolean
     modelIds?: string[]
+    /** Stored model ids grouped by canonical endpoint URL. */
+    modelIdsByBaseUrl?: Record<string, string[]>
+    /**
+     * Per-protocol saved views (R35-12): stored model ids grouped by endpoint
+     * for each protocol bucket, so the form can re-seed the model field when
+     * the protocol Select changes.
+     */
+    modelIdsByBaseUrlByProtocol?: Record<string, Record<string, string[]>>
+    /** The saved baseUrl for each protocol bucket. */
+    baseUrlByProtocol?: Record<string, string>
     advancedConfig?: QwenProviderAdvancedConfig
   }
 }

@@ -17,6 +17,7 @@ import {
   buildProviderTemplate,
   computeModelListVersion,
   getDefaultModelIds,
+  normalizeBaseUrlForMatching,
   PROVIDER_METADATA_NS,
   providerMatchesCredentials,
   resolveBaseUrl,
@@ -43,7 +44,9 @@ export interface ModelUpdateDiff {
 export type UpdateChoice = 'update' | 'later' | 'skip';
 
 export interface ProviderUpdateEntry {
+  metadataKey: string;
   providerLabel: string;
+  endpointLabel?: string;
   diff: ModelUpdateDiff;
 }
 
@@ -75,8 +78,7 @@ function getProviderMetadata(
 ): ProviderMetadata {
   const mergedSettings = settings.merged as Record<string, unknown>;
   const ns = mergedSettings[PROVIDER_METADATA_NS] as
-    | Record<string, unknown>
-    | undefined;
+    Record<string, unknown> | undefined;
   if (!ns) return {};
   const metadata = ns[metadataKey];
   return metadata && typeof metadata === 'object'
@@ -161,75 +163,267 @@ interface PendingUpdate {
   diff: ModelUpdateDiff;
 }
 
-function readInstalledOwnedIds(
+function readInstalledModels(
   settings: LoadedSettings,
   provider: ProviderConfig,
-): string[] {
+): ProviderModelConfig[] {
   const protocol = provider.protocol;
   if (!protocol) return [];
   const mergedSettings = settings.merged as Record<string, unknown>;
   const modelProviders = mergedSettings['modelProviders'] as
-    | Record<string, ProviderModelConfig[]>
-    | undefined;
+    Record<string, ProviderModelConfig[]> | undefined;
   if (!modelProviders) return [];
   const allModels: ProviderModelConfig[] = modelProviders[protocol] ?? [];
   const ownsFn = resolveOwnsModel(provider);
-  return ownsFn
-    ? allModels.filter(ownsFn).map((m) => m.id)
-    : allModels.map((m) => m.id);
+  return ownsFn ? allModels.filter(ownsFn) : allModels;
+}
+
+function modelsAtBaseUrl(
+  models: ProviderModelConfig[],
+  baseUrl: string,
+): ProviderModelConfig[] {
+  const normalized = normalizeBaseUrlForMatching(baseUrl);
+  return models.filter(
+    (model) => normalizeBaseUrlForMatching(model.baseUrl) === normalized,
+  );
+}
+
+function persistEndpointMetadataMigration(
+  settings: LoadedSettings,
+  metadataKey: string,
+  baseUrl: string,
+  metadata: ProviderMetadata,
+): boolean {
+  if (!metadata.version) return false;
+  const persistScope = getPersistScopeForModelSelection(settings);
+  const writes: Array<Parameters<LoadedSettings['setValues']>[0][number]> = [
+    {
+      scope: persistScope,
+      key: `${PROVIDER_METADATA_NS}.${metadataKey}.version`,
+      value: metadata.version,
+    },
+    {
+      scope: persistScope,
+      key: `${PROVIDER_METADATA_NS}.${metadataKey}.baseUrl`,
+      value: baseUrl,
+    },
+  ];
+  if (metadata.ignoredVersion) {
+    writes.push({
+      scope: persistScope,
+      key: `${PROVIDER_METADATA_NS}.${metadataKey}.ignoredVersion`,
+      value: metadata.ignoredVersion,
+    });
+  }
+  if (metadata.postponedVersion && typeof metadata.postponedAt === 'number') {
+    writes.push(
+      {
+        scope: persistScope,
+        key: `${PROVIDER_METADATA_NS}.${metadataKey}.postponedVersion`,
+        value: metadata.postponedVersion,
+      },
+      {
+        scope: persistScope,
+        key: `${PROVIDER_METADATA_NS}.${metadataKey}.postponedAt`,
+        value: metadata.postponedAt,
+      },
+    );
+  }
+  try {
+    settings.setValues(writes);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function getInstalledOwnedModelIds(
   settings: LoadedSettings,
   provider: ProviderConfig,
+  baseUrl: string,
 ): string[] {
   // Only compare built-in model IDs — user-added custom models should not
   // appear as "removed" in the diff since they were never part of the
   // provider's built-in list.
-  const builtinIds = new Set(getDefaultModelIds(provider));
-  return readInstalledOwnedIds(settings, provider).filter((id) =>
-    builtinIds.has(id),
-  );
+  const builtinIds = new Set(getDefaultModelIds(provider, baseUrl));
+  return modelsAtBaseUrl(readInstalledModels(settings, provider), baseUrl)
+    .map((model) => model.id)
+    .filter((id) => builtinIds.has(id));
+}
+
+function resolveUpdateTargets(
+  settings: LoadedSettings,
+  provider: ProviderConfig,
+  activeConfig:
+    | {
+        authType?: string;
+        baseUrl?: string;
+        apiKeyEnvKey?: string;
+      }
+    | undefined,
+): Array<{
+  metadataKey: string;
+  baseUrl: string;
+  metadata: ProviderMetadata;
+}> {
+  const legacyKey = resolveMetadataKey(provider);
+  if (!legacyKey) return [];
+  const legacyMetadata = getProviderMetadata(settings, legacyKey);
+
+  if (!provider.mergeModelsByIdentity || !Array.isArray(provider.baseUrl)) {
+    if (!legacyMetadata.version) return [];
+    return [
+      {
+        metadataKey: legacyKey,
+        baseUrl: legacyMetadata.baseUrl || resolveBaseUrl(provider),
+        metadata: legacyMetadata,
+      },
+    ];
+  }
+
+  const installedModels = readInstalledModels(settings, provider);
+  return provider.baseUrl.flatMap((option) => {
+    const endpointModels = modelsAtBaseUrl(installedModels, option.url);
+    if (endpointModels.length === 0) return [];
+    const metadataKey = resolveMetadataKey(provider, option.url);
+    if (!metadataKey) return [];
+    const endpointMetadata = getProviderMetadata(settings, metadataKey);
+    if (endpointMetadata.version) {
+      return [{ metadataKey, baseUrl: option.url, metadata: endpointMetadata }];
+    }
+    if (
+      legacyMetadata.version &&
+      normalizeBaseUrlForMatching(legacyMetadata.baseUrl) ===
+        normalizeBaseUrlForMatching(option.url)
+    ) {
+      const migratedMetadata = { ...legacyMetadata, ...endpointMetadata };
+      if (
+        !persistEndpointMetadataMigration(
+          settings,
+          metadataKey,
+          option.url,
+          migratedMetadata,
+        )
+      ) {
+        return [];
+      }
+      return [
+        {
+          metadataKey,
+          baseUrl: option.url,
+          metadata: migratedMetadata,
+        },
+      ];
+    }
+    const configuredEnv = (settings.merged.env ?? {}) as Record<
+      string,
+      unknown
+    >;
+    const hasStoredCredential = endpointModels.some(
+      (model) =>
+        typeof model.envKey === 'string' &&
+        typeof configuredEnv[model.envKey] === 'string' &&
+        configuredEnv[model.envKey] !== '',
+    );
+    const isActiveProvider =
+      activeConfig?.authType === provider.protocol &&
+      normalizeBaseUrlForMatching(activeConfig.baseUrl) ===
+        normalizeBaseUrlForMatching(option.url) &&
+      providerMatchesCredentials(
+        provider,
+        activeConfig.baseUrl,
+        activeConfig.apiKeyEnvKey,
+      );
+    if (!legacyMetadata.version && !hasStoredCredential && !isActiveProvider) {
+      return [];
+    }
+    const builtinIds = new Set(getDefaultModelIds(provider, option.url));
+    const installedBuiltins = endpointModels.filter((model) =>
+      builtinIds.has(model.id),
+    );
+    const legacySuppression = legacyMetadata.baseUrl
+      ? {}
+      : {
+          ...(legacyMetadata.ignoredVersion
+            ? { ignoredVersion: legacyMetadata.ignoredVersion }
+            : {}),
+          ...(legacyMetadata.postponedVersion
+            ? { postponedVersion: legacyMetadata.postponedVersion }
+            : {}),
+          ...(typeof legacyMetadata.postponedAt === 'number'
+            ? { postponedAt: legacyMetadata.postponedAt }
+            : {}),
+        };
+    const inferredMetadata = {
+      ...legacySuppression,
+      ...endpointMetadata,
+      version: computeModelListVersion(installedBuiltins),
+    };
+    if (
+      !persistEndpointMetadataMigration(
+        settings,
+        metadataKey,
+        option.url,
+        inferredMetadata,
+      )
+    ) {
+      return [];
+    }
+    return [{ metadataKey, baseUrl: option.url, metadata: inferredMetadata }];
+  });
 }
 
 function findAllPendingUpdates(
   settings: LoadedSettings,
   currentModel: string,
+  activeConfig:
+    | {
+        authType?: string;
+        baseUrl?: string;
+        apiKeyEnvKey?: string;
+      }
+    | undefined,
 ): PendingUpdate[] {
   const results: PendingUpdate[] = [];
   for (const provider of ALL_PROVIDERS) {
-    const metadataKey = resolveMetadataKey(provider);
-    if (!metadataKey) continue;
+    for (const { metadataKey, baseUrl, metadata } of resolveUpdateTargets(
+      settings,
+      provider,
+      activeConfig,
+    )) {
+      const currentTemplate = buildProviderTemplate(provider, baseUrl);
+      const currentVersion = computeModelListVersion(currentTemplate);
 
-    const metadata = getProviderMetadata(settings, metadataKey);
-    if (!metadata.version) continue;
+      if (metadata.version === currentVersion) continue;
+      if (metadata.ignoredVersion === currentVersion) continue;
 
-    const baseUrl = metadata.baseUrl || resolveBaseUrl(provider);
-    const currentVersion = computeModelListVersion(
-      buildProviderTemplate(provider, baseUrl),
-    );
+      // A "later" choice suppresses re-prompting for the same version while the
+      // cooldown is active. A new version (postponedVersion mismatch) re-prompts.
+      // Negative elapsed time (a backward clock jump) is treated as expired so
+      // the prompt is not suppressed until the wall clock catches up.
+      if (
+        metadata.postponedVersion === currentVersion &&
+        typeof metadata.postponedAt === 'number' &&
+        Date.now() - metadata.postponedAt >= 0 &&
+        Date.now() - metadata.postponedAt < LATER_COOLDOWN_MS
+      ) {
+        continue;
+      }
 
-    if (metadata.version === currentVersion) continue;
-    if (metadata.ignoredVersion === currentVersion) continue;
+      const existingModelIds = getInstalledOwnedModelIds(
+        settings,
+        provider,
+        baseUrl,
+      );
+      const newModelIds = getDefaultModelIds(provider, baseUrl);
+      const diff = computeModelDiff(
+        existingModelIds,
+        newModelIds,
+        currentModel,
+      );
 
-    // A "later" choice suppresses re-prompting for the same version while the
-    // cooldown is active. A new version (postponedVersion mismatch) re-prompts.
-    // Negative elapsed time (a backward clock jump) is treated as expired so
-    // the prompt is not suppressed until the wall clock catches up.
-    if (
-      metadata.postponedVersion === currentVersion &&
-      typeof metadata.postponedAt === 'number' &&
-      Date.now() - metadata.postponedAt >= 0 &&
-      Date.now() - metadata.postponedAt < LATER_COOLDOWN_MS
-    ) {
-      continue;
+      results.push({ provider, metadataKey, baseUrl, currentVersion, diff });
     }
-
-    const existingModelIds = getInstalledOwnedModelIds(settings, provider);
-    const newModelIds = provider.models!.map((s) => s.id);
-    const diff = computeModelDiff(existingModelIds, newModelIds, currentModel);
-
-    results.push({ provider, metadataKey, baseUrl, currentVersion, diff });
   }
   return results;
 }
@@ -263,14 +457,29 @@ export function useProviderUpdates(
         // An update only refreshes built-in models — user-added custom IDs
         // must be carried through so they are not deleted by the
         // prepend-and-remove-owned merge.
-        const defaultIds = getDefaultModelIds(providerCfg);
-        const customIds = readInstalledOwnedIds(settings, providerCfg).filter(
-          (id) => !defaultIds.includes(id),
-        );
+        const defaultIds = getDefaultModelIds(providerCfg, resolved);
+        const builtInIds = new Set(defaultIds);
+        const installedOwnedModels = readInstalledModels(settings, providerCfg);
+        const selectedEndpoint = normalizeBaseUrlForMatching(resolved);
+        const preservedModels = installedOwnedModels.filter((model) => {
+          const belongsToSelectedEndpoint =
+            normalizeBaseUrlForMatching(model.baseUrl) === selectedEndpoint;
+          if (providerCfg.mergeModelsByIdentity) {
+            return belongsToSelectedEndpoint && !builtInIds.has(model.id);
+          }
+          // Non-merge providers replace every owned model in one patch. Keep
+          // exact sibling-endpoint entries (including built-ins) and only
+          // replace the selected endpoint's built-in template.
+          return !belongsToSelectedEndpoint || !builtInIds.has(model.id);
+        });
         const installPlan = buildInstallPlan(providerCfg, {
           baseUrl: resolved,
           apiKey: '',
-          modelIds: [...defaultIds, ...customIds],
+          modelIds: defaultIds,
+          prebuiltModels: buildProviderTemplate(providerCfg, resolved),
+          ...(preservedModels.length > 0
+            ? { preserveModels: preservedModels }
+            : {}),
         });
         installPlan.providerState![
           `${PROVIDER_METADATA_NS}.${pending.metadataKey}`
@@ -282,6 +491,13 @@ export function useProviderUpdates(
         const activeConfig = config.getContentGeneratorConfig();
         const updatesActiveProvider =
           activeConfig?.authType === providerCfg.protocol &&
+          // An array-base provider owns several endpoints under one authType;
+          // only the endpoint being updated can be the live session's provider, so
+          // a sibling endpoint must not trigger a mid-session re-auth.
+          (!Array.isArray(providerCfg.baseUrl) ||
+            !activeConfig?.baseUrl ||
+            normalizeBaseUrlForMatching(activeConfig.baseUrl) ===
+              normalizeBaseUrlForMatching(resolved)) &&
           providerMatchesCredentials(
             providerCfg,
             activeConfig.baseUrl,
@@ -370,14 +586,29 @@ export function useProviderUpdates(
     }
 
     const currentModel = config.getModel();
-    const pendingList = findAllPendingUpdates(settings, currentModel);
+    const pendingList = findAllPendingUpdates(
+      settings,
+      currentModel,
+      config.getContentGeneratorConfig(),
+    );
 
     if (pendingList.length === 0) return;
 
-    const entries: ProviderUpdateEntry[] = pendingList.map((p) => ({
-      providerLabel: t(p.provider.label),
-      diff: p.diff,
-    }));
+    const entries: ProviderUpdateEntry[] = pendingList.map((p) => {
+      const endpoint = Array.isArray(p.provider.baseUrl)
+        ? p.provider.baseUrl.find(
+            (option) =>
+              normalizeBaseUrlForMatching(option.url) ===
+              normalizeBaseUrlForMatching(p.baseUrl),
+          )
+        : undefined;
+      return {
+        metadataKey: p.metadataKey,
+        providerLabel: t(p.provider.label),
+        ...(endpoint ? { endpointLabel: t(endpoint.label) } : {}),
+        diff: p.diff,
+      };
+    });
 
     setUpdateRequest({
       entries,

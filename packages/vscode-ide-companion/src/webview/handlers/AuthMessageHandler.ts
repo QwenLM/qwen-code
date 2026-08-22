@@ -15,9 +15,12 @@ import {
   THIRD_PARTY_PROVIDERS,
   shouldShowStep,
   resolveBaseUrl,
+  findExistingProviderModels,
   getDefaultBaseUrlForProtocol,
   getDefaultModelIds,
+  normalizeBaseUrlForMatching,
   type ProviderConfig,
+  type ProviderModelConfig,
   type ProviderSetupInputs,
   type BaseUrlOption,
 } from '@qwen-code/qwen-code-core';
@@ -33,6 +36,23 @@ export class AuthMessageHandler extends BaseMessageHandler {
   private authInteractiveHandler:
     | ((config: ProviderConfig, inputs: ProviderSetupInputs) => Promise<void>)
     | null = null;
+
+  constructor(
+    agentManager: ConstructorParameters<typeof BaseMessageHandler>[0],
+    conversationStore: ConstructorParameters<typeof BaseMessageHandler>[1],
+    currentConversationId: string | null,
+    sendToWebView: (message: unknown) => void,
+    private readonly getModelProviders: () =>
+      | Record<string, unknown>
+      | undefined = () => undefined,
+  ) {
+    super(
+      agentManager,
+      conversationStore,
+      currentConversationId,
+      sendToWebView,
+    );
+  }
 
   canHandle(messageType: string): boolean {
     return ['auth', 'getAccountInfo'].includes(messageType);
@@ -352,20 +372,52 @@ export class AuthMessageHandler extends BaseMessageHandler {
 
     // Step 3: Model selection (if needed)
     let modelIds: string[];
+    let preserveModels: ProviderModelConfig[] | undefined;
     if (shouldShowStep(provider, 'models')) {
-      const defaults = getDefaultModelIds(provider);
+      const defaults = getDefaultModelIds(provider, baseUrl);
+      const defaultIdSet = new Set(defaults);
+      const existing = findExistingProviderModels(
+        provider,
+        this.getModelProviders(),
+        protocol,
+      );
+      const selectedEndpoint = normalizeBaseUrlForMatching(baseUrl);
+      const isSelectedEndpointModel = (model: ProviderModelConfig) => {
+        const endpointScoped =
+          provider.mergeModelsByIdentity && Array.isArray(provider.baseUrl);
+        return endpointScoped
+          ? model.baseUrl !== undefined &&
+              normalizeBaseUrlForMatching(model.baseUrl) === selectedEndpoint
+          : model.baseUrl === undefined ||
+              normalizeBaseUrlForMatching(model.baseUrl) === selectedEndpoint;
+      };
+      const restoredModels = (
+        existing?.models.filter(isSelectedEndpointModel) ?? []
+      ).filter(
+        (model, index, models) =>
+          models.findIndex((candidate) => candidate.id === model.id) === index,
+      );
+      const restoredIds = [...new Set(restoredModels.map((model) => model.id))];
+      const seededModelIds = [
+        ...defaults,
+        ...restoredIds.filter((id) => !defaults.includes(id)),
+      ];
       const modelInput = await this.input({
         title: `${flowTitle}: Models`,
         prompt: 'Enter model IDs (comma-separated)',
         placeHolder: defaults.join(',') || 'model-name',
-        value: defaults.join(','),
+        value: seededModelIds.join(','),
         required: true,
       });
       if (!modelInput) return;
-      modelIds = modelInput
-        .split(',')
-        .map((id) => id.trim())
-        .filter(Boolean);
+      modelIds = [
+        ...new Set(
+          modelInput
+            .split(',')
+            .map((id) => id.trim())
+            .filter(Boolean),
+        ),
+      ];
       if (modelIds.length === 0) {
         // E.g. user typed only whitespace/commas like ", , ,". No
         // authCancelled — see the base-URL validation note above.
@@ -375,8 +427,32 @@ export class AuthMessageHandler extends BaseMessageHandler {
         });
         return;
       }
+      const selectedIdSet = new Set(modelIds);
+      preserveModels = provider.mergeModelsByIdentity
+        ? restoredModels
+            .filter(
+              (model) =>
+                !defaultIdSet.has(model.id) && selectedIdSet.has(model.id),
+            )
+            // Stamp a selected legacy model before identity merging so its
+            // rich configuration survives canonical regeneration (same as
+            // the non-merge branch below and the CLI/ACP/serve surfaces).
+            .map((model) =>
+              model.baseUrl === undefined ? { ...model, baseUrl } : model,
+            )
+        : existing?.models.flatMap((model) => {
+            if (!isSelectedEndpointModel(model)) return [model];
+            if (defaultIdSet.has(model.id) || !selectedIdSet.has(model.id)) {
+              return [];
+            }
+            // Stamp a selected legacy model before identity merging so its
+            // rich configuration survives canonical regeneration.
+            return [
+              model.baseUrl === undefined ? { ...model, baseUrl } : model,
+            ];
+          });
     } else {
-      modelIds = getDefaultModelIds(provider);
+      modelIds = getDefaultModelIds(provider, baseUrl);
     }
 
     // Step 4: Advanced config (if needed)
@@ -425,6 +501,9 @@ export class AuthMessageHandler extends BaseMessageHandler {
       baseUrl,
       apiKey,
       modelIds,
+      ...(preserveModels && preserveModels.length > 0
+        ? { preserveModels }
+        : {}),
       advancedConfig,
     });
   }

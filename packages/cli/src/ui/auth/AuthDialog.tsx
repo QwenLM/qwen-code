@@ -21,10 +21,14 @@ import {
   findProviderByCredentials,
   findExistingProviderModels,
   getDefaultModelIds,
+  normalizeBaseUrlForMatching,
+  resolveBaseUrl,
   customProvider,
   ALIBABA_PROVIDERS,
   THIRD_PARTY_PROVIDERS,
+  type AuthType,
   type ProviderConfig,
+  type ProviderModelConfig,
 } from '@qwen-code/qwen-code-core';
 import { useProviderSetupFlow } from './useProviderSetupFlow.js';
 import { ProviderSetupSteps } from './ProviderSetupSteps.js';
@@ -81,7 +85,11 @@ function providerToItem(config: ProviderConfig) {
     key: config.id,
     title: t(config.label),
     label: t(config.label),
-    description: t(config.description),
+    description: (
+      <Text color={theme.text.secondary} wrap="truncate">
+        {t(config.description)}
+      </Text>
+    ),
     value: config.id,
   };
 }
@@ -113,11 +121,214 @@ const VIEW_TITLES: Record<string, string> = {
   'thirdparty-select': t('Third-party Providers · Provider'),
 };
 
+const DEFAULT_DIALOG_HEIGHT = 24;
+const MAIN_LIST_FIXED_ROWS = 10;
+const SUB_MENU_LIST_FIXED_ROWS = 7;
+const LIST_ITEM_ROWS = 3;
+// Two arrow rows plus the two extra gaps itemGap adds around them.
+const SCROLL_AFFORDANCE_ROWS = 4;
+
+interface AuthDialogProps {
+  availableTerminalHeight?: number;
+  initialViewLevel?: Exclude<ViewLevel, 'provider-setup'>;
+}
+
+export function getMaxItemsToShow(
+  dialogHeight: number,
+  itemCount: number,
+  fixedRows: number,
+): number {
+  if (itemCount === 0) return 1;
+  if (fixedRows + itemCount * LIST_ITEM_ROWS <= dialogHeight) {
+    return itemCount;
+  }
+  return Math.max(
+    1,
+    Math.floor(
+      (dialogHeight - fixedRows - SCROLL_AFFORDANCE_ROWS) / LIST_ITEM_ROWS,
+    ),
+  );
+}
+
+export function getExistingProviderSetup(
+  providerConfig: ProviderConfig,
+  modelProviders: Record<string, unknown> | undefined,
+): {
+  initialProtocol: ProviderConfig['protocol'] | undefined;
+  initialBaseUrl: string | undefined;
+  customModelIds: string[];
+  trimmedDefaultModelIds: string[];
+  modelIdsByBaseUrl: ReadonlyMap<string, readonly string[]>;
+  preserveModels?: ProviderModelConfig[];
+} {
+  const saved = findExistingProviderModels(providerConfig, modelProviders);
+  const savedBaseUrl = saved?.models[0]?.baseUrl;
+  const initialBaseUrl = saved
+    ? typeof providerConfig.baseUrl === 'string' || savedBaseUrl === undefined
+      ? resolveBaseUrl(providerConfig, savedBaseUrl)
+      : savedBaseUrl
+    : undefined;
+  const modelIdsByBaseUrl = new Map<string, string[]>();
+  for (const model of saved?.models ?? []) {
+    const modelBaseUrl = model.baseUrl ?? initialBaseUrl;
+    if (modelBaseUrl === undefined) continue;
+    const resolvedBaseUrl = normalizeBaseUrlForMatching(
+      resolveBaseUrl(providerConfig, modelBaseUrl),
+    );
+    const modelIds = modelIdsByBaseUrl.get(resolvedBaseUrl) ?? [];
+    if (!modelIds.includes(model.id)) modelIds.push(model.id);
+    modelIdsByBaseUrl.set(resolvedBaseUrl, modelIds);
+  }
+  // Scope built-ins to the restored endpoint: a saved model whose id collides
+  // with a *sibling* endpoint's built-in is user data for this endpoint, and
+  // dropping it here lets the prepend-and-remove-owned merge delete it on the
+  // next no-op resubmit.
+  const builtinIds = new Set(
+    getDefaultModelIds(providerConfig, initialBaseUrl),
+  );
+  const restoredModelIds =
+    saved?.models
+      .filter(
+        (model) =>
+          model.baseUrl === undefined ||
+          normalizeBaseUrlForMatching(model.baseUrl) ===
+            normalizeBaseUrlForMatching(initialBaseUrl),
+      )
+      .map((model) => model.id) ?? [];
+  const restoredEndpoint = normalizeBaseUrlForMatching(initialBaseUrl);
+  const preserveModels = (saved?.models ?? []).flatMap((model) => {
+    if (initialBaseUrl === undefined) return [];
+    const preserved =
+      model.baseUrl === undefined
+        ? { ...model, baseUrl: initialBaseUrl }
+        : model;
+    const modelEndpoint = preserved.baseUrl ?? initialBaseUrl;
+    const belongsToAnotherEndpoint =
+      normalizeBaseUrlForMatching(modelEndpoint) !== restoredEndpoint;
+    const endpointDefaults = new Set(
+      getDefaultModelIds(providerConfig, modelEndpoint),
+    );
+    const shouldPreserve =
+      (!providerConfig.mergeModelsByIdentity && belongsToAnotherEndpoint) ||
+      // Custom models of every saved endpoint are carried: submitting at a
+      // sibling endpoint must rebuild its models from these rich entries,
+      // otherwise their stored generationConfig is silently reset. Sibling
+      // entries keep their own baseUrl and are written back unchanged.
+      !endpointDefaults.has(preserved.id);
+    return shouldPreserve ? [preserved] : [];
+  });
+  const restoredModelIdSet = new Set(restoredModelIds);
+  return {
+    initialProtocol: saved?.protocol,
+    initialBaseUrl,
+    // The form restores the first saved model's endpoint, so seed only that
+    // endpoint's custom models; siblings are retained as exact model objects.
+    customModelIds: restoredModelIds.filter((id) => !builtinIds.has(id)),
+    trimmedDefaultModelIds: saved
+      ? [...builtinIds].filter((id) => !restoredModelIdSet.has(id))
+      : [],
+    modelIdsByBaseUrl,
+    ...(preserveModels.length > 0 ? { preserveModels } : {}),
+  };
+}
+
+/**
+ * Per-protocol saved-state views. The same baseUrl can be connected under
+ * several protocol buckets (LiteLLM-style proxies are the stated Custom
+ * Provider use case). Seeding only the first bucket means switching protocol
+ * then submitting deletes the selected bucket's saved models (their ids never
+ * reach preserveModels) and pre-fills the wrong protocol's ids (R34-2/
+ * R35-12). Compute each supported protocol's saved state so the flow can
+ * swap on protocol change.
+ */
+export function getProtocolSetups(
+  providerConfig: ProviderConfig,
+  modelProviders: Record<string, unknown> | undefined,
+): {
+  modelIdsByBaseUrlByProtocol: ReadonlyMap<
+    AuthType,
+    ReadonlyMap<string, readonly string[]>
+  >;
+  preserveModelsByProtocol: ReadonlyMap<
+    AuthType,
+    readonly ProviderModelConfig[]
+  >;
+  baseUrlByProtocol: ReadonlyMap<AuthType, string>;
+} {
+  const supportedProtocols = providerConfig.protocolOptions?.length
+    ? providerConfig.protocolOptions
+    : [providerConfig.protocol];
+  const modelIdsByBaseUrlByProtocol = new Map<
+    AuthType,
+    Map<string, string[]>
+  >();
+  const preserveModelsByProtocol = new Map<AuthType, ProviderModelConfig[]>();
+  const baseUrlByProtocol = new Map<AuthType, string>();
+  for (const proto of supportedProtocols) {
+    const savedForProto = findExistingProviderModels(
+      providerConfig,
+      modelProviders,
+      proto,
+    );
+    if (!savedForProto || savedForProto.models.length === 0) continue;
+    const protoFirstBaseUrl = savedForProto.models[0]?.baseUrl;
+    const protoBaseUrl =
+      typeof providerConfig.baseUrl === 'string' ||
+      protoFirstBaseUrl === undefined
+        ? resolveBaseUrl(providerConfig, protoFirstBaseUrl)
+        : protoFirstBaseUrl;
+    if (protoBaseUrl) {
+      baseUrlByProtocol.set(proto, protoBaseUrl);
+    }
+    const protoModelIdsByBaseUrl = new Map<string, string[]>();
+    for (const model of savedForProto.models) {
+      const modelBaseUrl = model.baseUrl ?? protoBaseUrl;
+      if (modelBaseUrl === undefined) continue;
+      const resolvedModelBaseUrl = normalizeBaseUrlForMatching(
+        resolveBaseUrl(providerConfig, modelBaseUrl),
+      );
+      const ids = protoModelIdsByBaseUrl.get(resolvedModelBaseUrl) ?? [];
+      if (!ids.includes(model.id)) ids.push(model.id);
+      protoModelIdsByBaseUrl.set(resolvedModelBaseUrl, ids);
+    }
+    modelIdsByBaseUrlByProtocol.set(proto, protoModelIdsByBaseUrl);
+    const protoRestoredEndpoint = normalizeBaseUrlForMatching(protoBaseUrl);
+    const protoPreserveModels = savedForProto.models.flatMap((model) => {
+      if (protoBaseUrl === undefined) return [];
+      const preserved =
+        model.baseUrl === undefined
+          ? { ...model, baseUrl: protoBaseUrl }
+          : model;
+      const modelEndpoint = preserved.baseUrl ?? protoBaseUrl;
+      const belongsToAnotherEndpoint =
+        normalizeBaseUrlForMatching(modelEndpoint) !== protoRestoredEndpoint;
+      const endpointDefaults = new Set(
+        getDefaultModelIds(providerConfig, modelEndpoint),
+      );
+      const shouldPreserve =
+        (!providerConfig.mergeModelsByIdentity && belongsToAnotherEndpoint) ||
+        !endpointDefaults.has(preserved.id);
+      return shouldPreserve ? [preserved] : [];
+    });
+    if (protoPreserveModels.length > 0) {
+      preserveModelsByProtocol.set(proto, protoPreserveModels);
+    }
+  }
+  return {
+    modelIdsByBaseUrlByProtocol,
+    preserveModelsByProtocol,
+    baseUrlByProtocol,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // AuthDialog
 // ---------------------------------------------------------------------------
 
-export function AuthDialog(): React.JSX.Element {
+export function AuthDialog({
+  availableTerminalHeight,
+  initialViewLevel = 'main',
+}: AuthDialogProps = {}): React.JSX.Element {
   const {
     auth: { authError },
   } = useUIState();
@@ -128,7 +339,7 @@ export function AuthDialog(): React.JSX.Element {
   const settings = useSettings();
 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [viewLevel, setViewLevel] = useState<ViewLevel>('main');
+  const [viewLevel, setViewLevel] = useState<ViewLevel>(initialViewLevel);
   const [_viewStack, setViewStack] = useState<ViewLevel[]>([]);
 
   const [mainIndex, setMainIndex] = useState<number | null>(null);
@@ -173,25 +384,33 @@ export function AuthDialog(): React.JSX.Element {
 
   const existingEnv = (settings.merged.env ?? {}) as Record<string, string>;
 
-  const getExistingModelIds = (providerConfig: ProviderConfig): string[] => {
-    const saved = findExistingProviderModels(
-      providerConfig,
-      settings.merged.modelProviders as Record<string, unknown> | undefined,
-    );
-    if (!saved) return [];
-    const builtinIds = new Set(getDefaultModelIds(providerConfig));
-    return saved.models.map((m) => m.id).filter((id) => !builtinIds.has(id));
-  };
-
   const handleProviderSelect = (providerId: string) => {
     clearErrors();
     const providerConfig = findProviderById(providerId);
     if (!providerConfig) return;
+    const mergedModelProviders = settings.merged.modelProviders as
+      | Record<string, unknown>
+      | undefined;
+    const existingSetup = getExistingProviderSetup(
+      providerConfig,
+      mergedModelProviders,
+    );
+    const protocolSetups = getProtocolSetups(
+      providerConfig,
+      mergedModelProviders,
+    );
     setupFlow.start(
       providerConfig,
-      undefined,
+      existingSetup.initialProtocol,
       existingEnv,
-      getExistingModelIds(providerConfig),
+      existingSetup.customModelIds,
+      existingSetup.initialBaseUrl,
+      existingSetup.trimmedDefaultModelIds,
+      existingSetup.modelIdsByBaseUrl,
+      existingSetup.preserveModels,
+      protocolSetups.modelIdsByBaseUrlByProtocol,
+      protocolSetups.preserveModelsByProtocol,
+      protocolSetups.baseUrlByProtocol,
     );
     pushView('provider-setup');
   };
@@ -214,6 +433,18 @@ export function AuthDialog(): React.JSX.Element {
   };
 
   const activeSubMenu = subMenus[viewLevel];
+  const dialogHeight = availableTerminalHeight ?? DEFAULT_DIALOG_HEIGHT;
+  const listHeight = dialogHeight - (authError || errorMessage ? 2 : 0);
+  const maxMainItems = getMaxItemsToShow(
+    listHeight,
+    MAIN_ITEMS.length,
+    MAIN_LIST_FIXED_ROWS,
+  );
+  const maxSubMenuItems = getMaxItemsToShow(
+    listHeight,
+    activeSubMenu?.items.length ?? 0,
+    SUB_MENU_LIST_FIXED_ROWS,
+  );
 
   // -- Default main index from current auth state ---------------------------
 
@@ -244,15 +475,34 @@ export function AuthDialog(): React.JSX.Element {
       case 'THIRD_PARTY_PROVIDERS':
         pushView('thirdparty-select');
         break;
-      case 'CUSTOM_PROVIDER':
+      case 'CUSTOM_PROVIDER': {
+        const customModelProviders = settings.merged.modelProviders as
+          | Record<string, unknown>
+          | undefined;
+        const existingSetup = getExistingProviderSetup(
+          customProvider,
+          customModelProviders,
+        );
+        const customProtocolSetups = getProtocolSetups(
+          customProvider,
+          customModelProviders,
+        );
         setupFlow.start(
           customProvider,
-          undefined,
+          existingSetup.initialProtocol,
           existingEnv,
-          getExistingModelIds(customProvider),
+          existingSetup.customModelIds,
+          existingSetup.initialBaseUrl,
+          existingSetup.trimmedDefaultModelIds,
+          existingSetup.modelIdsByBaseUrl,
+          existingSetup.preserveModels,
+          customProtocolSetups.modelIdsByBaseUrlByProtocol,
+          customProtocolSetups.preserveModelsByProtocol,
+          customProtocolSetups.baseUrlByProtocol,
         );
         pushView('provider-setup');
         break;
+      }
       default:
         break;
     }
@@ -310,7 +560,9 @@ export function AuthDialog(): React.JSX.Element {
       padding={1}
       width="100%"
     >
-      <Text bold>{viewTitle}</Text>
+      <Text bold wrap="truncate">
+        {viewTitle}
+      </Text>
 
       {viewLevel === 'main' && (
         <Box marginTop={1}>
@@ -324,6 +576,12 @@ export function AuthDialog(): React.JSX.Element {
               );
             }}
             itemGap={1}
+            maxItemsToShow={maxMainItems}
+            showScrollArrows={
+              MAIN_ITEMS.length > maxMainItems &&
+              listHeight >=
+                MAIN_LIST_FIXED_ROWS + LIST_ITEM_ROWS + SCROLL_AFFORDANCE_ROWS
+            }
           />
         </Box>
       )}
@@ -344,10 +602,18 @@ export function AuthDialog(): React.JSX.Element {
                 }));
               }}
               itemGap={1}
+              maxItemsToShow={maxSubMenuItems}
+              showScrollArrows={
+                activeSubMenu.items.length > maxSubMenuItems &&
+                listHeight >=
+                  SUB_MENU_LIST_FIXED_ROWS +
+                    LIST_ITEM_ROWS +
+                    SCROLL_AFFORDANCE_ROWS
+              }
             />
           </Box>
           <Box marginTop={1}>
-            <Text color={theme?.text?.secondary}>
+            <Text color={theme?.text?.secondary} wrap="truncate">
               {t('Enter to select, ↑↓ to navigate, Esc to go back')}
             </Text>
           </Box>
@@ -360,17 +626,21 @@ export function AuthDialog(): React.JSX.Element {
 
       {(authError || errorMessage) && (
         <Box marginTop={1}>
-          <Text color={theme.status.error}>{authError || errorMessage}</Text>
+          <Text color={theme.status.error} wrap="truncate">
+            {authError || errorMessage}
+          </Text>
         </Box>
       )}
 
       {viewLevel === 'main' && (
         <>
           <Box marginY={1}>
-            <Text color={theme.border.default}>{'─'.repeat(80)}</Text>
+            <Text color={theme.border.default} wrap="truncate">
+              {'─'.repeat(80)}
+            </Text>
           </Box>
           <Box>
-            <Text color={theme.text.primary}>
+            <Text color={theme.text.primary} wrap="truncate">
               {t('Terms of Services and Privacy Notice')}:
             </Text>
           </Box>
@@ -379,7 +649,7 @@ export function AuthDialog(): React.JSX.Element {
               url="https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/"
               fallback={false}
             >
-              <Text color={theme.text.secondary} underline>
+              <Text color={theme.text.secondary} underline wrap="truncate">
                 https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/
               </Text>
             </Link>

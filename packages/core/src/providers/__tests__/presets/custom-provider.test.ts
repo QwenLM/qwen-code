@@ -110,7 +110,7 @@ describe('customProvider', () => {
     ]);
   });
 
-  it('keeps custom ownership detection but merges installs by model identity', () => {
+  it('keeps custom ownership detection and scopes installs to the selected endpoint', () => {
     expect(customProvider.ownsModel).toBeTypeOf('function');
     expect(
       customProvider.ownsModel?.({
@@ -133,7 +133,7 @@ describe('customProvider', () => {
       modelIds: ['model-a'],
     });
 
-    expect(plan.modelProviders?.[0]?.ownsModel).toBeUndefined();
+    expect(plan.modelProviders?.[0]?.ownsModel).toBeTypeOf('function');
     expect(plan.modelSelection).toEqual({
       modelId: 'model-a',
       baseUrl: 'https://my-proxy.com/v1',

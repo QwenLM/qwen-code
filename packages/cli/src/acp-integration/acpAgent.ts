@@ -23,6 +23,8 @@ import {
   getUserAutoMemoryRoot,
   getDefaultBaseUrlForProtocol,
   getDefaultModelIds,
+  normalizeBaseUrlForMatching,
+  resolveProviderModels,
   getScopedEnvContents,
   QwenOAuth2Event,
   qwenOAuth2Events,
@@ -98,6 +100,7 @@ import {
   addDaemonRequestAttribute,
   extractDaemonTraceContext,
   withDaemonSpan,
+  legacyEnvKeyAttribution,
   emptyGoalSnapshot,
   GoalConflictError,
   GoalInvalidTransitionError,
@@ -2364,6 +2367,106 @@ function readExistingProviderConfig(
   if (!hasExistingConfig) return undefined;
 
   const advancedConfig = readExistingAdvancedConfig(firstModel);
+  const restoredEndpoint = normalizeBaseUrlForMatching(baseUrl);
+  const endpointScoped =
+    config.mergeModelsByIdentity && Array.isArray(config.baseUrl);
+  const modelIdsByBaseUrl =
+    existing && Array.isArray(config.baseUrl)
+      ? Object.fromEntries(
+          config.baseUrl.flatMap((option) => {
+            const ids = existing.models
+              .filter(
+                (model) =>
+                  normalizeBaseUrlForMatching(model.baseUrl) ===
+                    normalizeBaseUrlForMatching(option.url) ||
+                  (!config.mergeModelsByIdentity &&
+                    model.baseUrl === undefined &&
+                    normalizeBaseUrlForMatching(option.url) ===
+                      restoredEndpoint),
+              )
+              .map((model) => model.id);
+            return ids.length > 0 ? [[option.url, [...new Set(ids)]]] : [];
+          }),
+        )
+      : existing && config.baseUrl === undefined
+        ? // Free-form provider: group saved models by their own endpoint so
+          // the client can restore the right model list when the typed
+          // endpoint matches a saved one. Without this map the client seeds
+          // only the restored endpoint's ids, and reconnecting at a sibling
+          // endpoint deletes that endpoint's saved models.
+          Object.fromEntries(
+            existing.models.reduce<Map<string, string[]>>(
+              (byEndpoint, model) => {
+                // Sanitize like every other wire-bound baseUrl in this
+                // payload: a saved URL may carry basic-auth userinfo, which
+                // must not be serialized into the response map keys.
+                const endpoint = sanitizeProviderBaseUrl(
+                  normalizeBaseUrlForMatching(model.baseUrl ?? baseUrl),
+                );
+                const ids = byEndpoint.get(endpoint) ?? [];
+                if (!ids.includes(model.id)) ids.push(model.id);
+                byEndpoint.set(endpoint, ids);
+                return byEndpoint;
+              },
+              new Map(),
+            ),
+          )
+        : undefined;
+
+  // Per-protocol views (R35-12): a Custom Provider can be connected
+  // under several protocol buckets at the same baseUrl. The client seeds the
+  // model field from the first bucket only, so flipping the protocol Select
+  // shows the wrong models and submitting rebuilds the selected bucket from
+  // the other protocol's ids (silently deleting the selected bucket's
+  // models). Expose each supported protocol's saved endpoint->ids view and
+  // baseUrl so the client can re-seed on protocol change. Only meaningful
+  // for providers that expose a protocol choice (protocolOptions); single-
+  // protocol providers never show the protocol Select.
+  const modelProvidersRecord = (settings.merged as Record<string, unknown>)[
+    'modelProviders'
+  ] as Record<string, unknown> | undefined;
+  const modelIdsByBaseUrlByProtocol: Record<
+    string,
+    Record<string, string[]>
+  > = {};
+  const baseUrlByProtocol: Record<string, string> = {};
+  if (config.protocolOptions?.length) {
+    for (const proto of config.protocolOptions) {
+      const savedForProto = findExistingProviderModels(
+        config,
+        modelProvidersRecord,
+        proto,
+      );
+      if (!savedForProto || savedForProto.models.length === 0) continue;
+      const protoFirstBaseUrl = savedForProto.models[0]?.baseUrl;
+      const protoBaseUrl =
+        typeof protoFirstBaseUrl === 'string'
+          ? protoFirstBaseUrl
+          : resolveBaseUrl(config);
+      // A bucket whose saved models carry no baseUrl (pre-stamping legacy
+      // shape) has no restorable endpoint: emitting '' makes the client
+      // treat the protocol as "connected", blank the user's typed endpoint
+      // on a protocol flip, and submitting installs the legacy models under
+      // the protocol DEFAULT URL. Omit the key so the flip keeps the typed
+      // endpoint untouched — same guard the CLI producer uses (R39-4).
+      if (protoBaseUrl) {
+        baseUrlByProtocol[proto] = sanitizeProviderBaseUrl(protoBaseUrl);
+      }
+      const byEndpoint: Record<string, string[]> = {};
+      for (const model of savedForProto.models) {
+        // Sanitize like baseUrlByProtocol above so the bucket's keys and
+        // baseUrl agree on the wire (a saved URL may carry basic-auth
+        // userinfo).
+        const endpoint = sanitizeProviderBaseUrl(
+          normalizeBaseUrlForMatching(model.baseUrl ?? protoBaseUrl),
+        );
+        const ids = byEndpoint[endpoint] ?? [];
+        if (!ids.includes(model.id)) ids.push(model.id);
+        byEndpoint[endpoint] = ids;
+      }
+      modelIdsByBaseUrlByProtocol[proto] = byEndpoint;
+    }
+  }
 
   return {
     protocol,
@@ -2371,7 +2474,32 @@ function readExistingProviderConfig(
     // Never serialize the raw secret over the ACP wire. Expose only whether a
     // key is stored; the client can omit `apiKey` on connect to keep it.
     ...(apiKey ? { hasApiKey: true } : {}),
-    ...(existing ? { modelIds: existing.models.map((model) => model.id) } : {}),
+    // Scope seeded IDs to the restored endpoint (the first saved model's);
+    // sibling-endpoint models would otherwise be rewritten under the restored
+    // baseUrl/envKey on submit.
+    ...(existing
+      ? {
+          modelIds: existing.models
+            .filter((model) =>
+              endpointScoped
+                ? model.baseUrl !== undefined &&
+                  normalizeBaseUrlForMatching(model.baseUrl) ===
+                    restoredEndpoint
+                : model.baseUrl === undefined ||
+                  firstModel?.baseUrl === undefined ||
+                  normalizeBaseUrlForMatching(model.baseUrl) ===
+                    normalizeBaseUrlForMatching(firstModel?.baseUrl),
+            )
+            .map((model) => model.id),
+          ...(modelIdsByBaseUrl && Object.keys(modelIdsByBaseUrl).length > 0
+            ? { modelIdsByBaseUrl }
+            : {}),
+        }
+      : {}),
+    ...(Object.keys(modelIdsByBaseUrlByProtocol).length > 0
+      ? { modelIdsByBaseUrlByProtocol }
+      : {}),
+    ...(Object.keys(baseUrlByProtocol).length > 0 ? { baseUrlByProtocol } : {}),
     ...(advancedConfig ? { advancedConfig } : {}),
   };
 }
@@ -2399,6 +2527,12 @@ function serializeProviderConfig(
       ? getDefaultBaseUrlForProtocol(defaultProtocol)
       : resolveBaseUrl(config);
   const existingConfig = readExistingProviderConfig(config, settings);
+  const serializedBaseUrl = Array.isArray(config.baseUrl)
+    ? config.baseUrl.map((option) => ({
+        ...option,
+        envKey: resolveProviderEnvKey(config, defaultProtocol, option.url),
+      }))
+    : config.baseUrl;
 
   return {
     id: config.id,
@@ -2406,11 +2540,11 @@ function serializeProviderConfig(
     description: config.description,
     protocol: config.protocol,
     protocolOptions: config.protocolOptions ?? [],
-    baseUrl: config.baseUrl,
+    baseUrl: serializedBaseUrl,
     baseUrlPlaceholder:
       config.baseUrl === undefined ? defaultBaseUrl : undefined,
-    defaultModelIds: getDefaultModelIds(config),
-    models: config.models ?? [],
+    defaultModelIds: getDefaultModelIds(config, defaultBaseUrl),
+    models: resolveProviderModels(config, defaultBaseUrl) ?? [],
     modelsEditable: config.modelsEditable === true || !config.models,
     showAdvancedConfig: config.showAdvancedConfig === true,
     apiKeyPlaceholder: config.apiKeyPlaceholder,
@@ -2428,6 +2562,7 @@ function readProviderSetupInputs(
     protocol: ProviderConfig['protocol'],
     baseUrl: string,
   ) => string | undefined,
+  modelProviders?: Record<string, unknown>,
 ): ProviderSetupInputs {
   const protocol = readOptionalString(params['protocol'], 'protocol') as
     | AuthType
@@ -2470,7 +2605,7 @@ function readProviderSetupInputs(
     throw RequestError.invalidParams(undefined, apiKeyError);
   }
 
-  const defaultModelIds = getDefaultModelIds(config);
+  const defaultModelIds = getDefaultModelIds(config, baseUrl);
   const modelIds = readStringArray(params['modelIds'], 'modelIds');
   const resolvedModelIds = modelIds.length > 0 ? modelIds : defaultModelIds;
   if (resolvedModelIds.length === 0) {
@@ -2481,12 +2616,114 @@ function readProviderSetupInputs(
   }
 
   const advancedConfig = readProviderAdvancedConfig(params['advancedConfig']);
+  const selectedEndpoint = normalizeBaseUrlForMatching(baseUrl);
+  const defaultModelIdSet = new Set(defaultModelIds);
+  const requestedModelIdSet = new Set(resolvedModelIds);
+  // `readStringArray` normalizes `null`, `undefined`, `[]`, and
+  // whitespace-only elements all to `[]`, and the resolution above treats
+  // every one of those shapes as "no selection" (endpoint defaults), so the
+  // preserve decision must too: with `params['modelIds'] != null` a
+  // `modelIds: []` reconnect resolved default models while treating the
+  // request as an explicit selection that deselects every saved custom model
+  // — silently deleting them via the install plan, while the identical
+  // request with the key omitted preserved them (R38-1, R39-1).
+  const hasExplicitModelIds = modelIds.length > 0;
+  const existingModels = findExistingProviderModels(
+    config,
+    modelProviders,
+    protocol ?? config.protocol,
+  )?.models;
+  // Ids that already have a stamped entry at the selected endpoint. An
+  // implicit reconnect must not preserve a same-id baseUrl-less legacy entry
+  // beside its stamped twin: the pair would persist as two permanent
+  // duplicate (id, baseUrl) entries, re-preserved on every reconnect (R39-7).
+  const stampedIdsAtSelectedEndpoint = new Set(
+    existingModels
+      ?.filter(
+        (model) =>
+          model.baseUrl !== undefined &&
+          normalizeBaseUrlForMatching(model.baseUrl) === selectedEndpoint,
+      )
+      .map((model) => model.id) ?? [],
+  );
+  const migrateEnvKey = resolveProviderEnvKey(
+    config,
+    protocol ?? config.protocol,
+    baseUrl,
+  );
+  // Endpoint attribution for baseUrl-less legacy entries (R40-1): see the
+  // matching comment in serve's buildProviderSetupInputs. A key naming a
+  // sibling endpoint is left alone entirely; a floating key is adopted only
+  // by an explicit selection that requests its id.
+  const { namesSelectedEndpoint, namesSiblingEndpoint } =
+    legacyEnvKeyAttribution(config, protocol ?? config.protocol, baseUrl);
+  // Ids of baseUrl-less entries whose stored original this run replaces with
+  // a copy stamped at the selected endpoint (R39-7 collapse included).
+  // buildInstallPlan claims baseUrl-less entries by id-collision ONLY for
+  // these ids (R40-2).
+  const migratedLegacyModelIds: string[] = [];
+  const preserveModels = existingModels?.flatMap((model) => {
+    const preserved =
+      model.baseUrl === undefined
+        ? {
+            ...model,
+            baseUrl,
+            // Stamping migrates the entry to the selected endpoint; its env
+            // key must follow so the entry points at the key this install
+            // writes, not at the pre-migration one (R39-6).
+            ...(migrateEnvKey ? { envKey: migrateEnvKey } : {}),
+          }
+        : model;
+    if (!config.mergeModelsByIdentity) {
+      const belongsToAnotherEndpoint =
+        normalizeBaseUrlForMatching(preserved.baseUrl) !== selectedEndpoint;
+      const shouldPreserve =
+        belongsToAnotherEndpoint ||
+        (!defaultModelIdSet.has(preserved.id) &&
+          (!hasExplicitModelIds || requestedModelIdSet.has(preserved.id)));
+      return shouldPreserve ? [preserved] : [];
+    }
+    if (model.baseUrl === undefined) {
+      // A baseUrl-less legacy entry carries no endpoint of its own; its env
+      // key decides. A key naming a sibling endpoint keeps the entry out of
+      // this plan entirely, so a selection here neither deletes nor rewrites
+      // it (R38-3, R39-2, R40-1).
+      const owned = config.ownsModel ? config.ownsModel(model) : true;
+      const attributable = namesSelectedEndpoint(model);
+      const adoptable = owned && (attributable || !namesSiblingEndpoint(model));
+      if (!adoptable) return [];
+      if (stampedIdsAtSelectedEndpoint.has(model.id)) {
+        // A stamped twin at the selected endpoint wins (R39-7); claim the
+        // stored original so the pair collapses to the twin.
+        migratedLegacyModelIds.push(model.id);
+        return [];
+      }
+      const shouldPreserve =
+        !defaultModelIdSet.has(preserved.id) &&
+        (attributable
+          ? !hasExplicitModelIds || requestedModelIdSet.has(preserved.id)
+          : hasExplicitModelIds && requestedModelIdSet.has(preserved.id));
+      if (shouldPreserve) {
+        migratedLegacyModelIds.push(model.id);
+        return [preserved];
+      }
+      return [];
+    }
+    const selectedByEditableFreeForm = requestedModelIdSet.has(preserved.id);
+    const shouldPreserve =
+      !defaultModelIdSet.has(preserved.id) &&
+      (!hasExplicitModelIds || selectedByEditableFreeForm) &&
+      normalizeBaseUrlForMatching(preserved.baseUrl) === selectedEndpoint;
+    return shouldPreserve ? [preserved] : [];
+  });
 
   return {
     ...(protocol ? { protocol } : {}),
     baseUrl,
     apiKey,
     modelIds: resolvedModelIds,
+    ...(preserveModels && preserveModels.length > 0 ? { preserveModels } : {}),
+    ...(migratedLegacyModelIds.length > 0 ? { migratedLegacyModelIds } : {}),
     ...(advancedConfig ? { advancedConfig } : {}),
   };
 }
@@ -8579,6 +8816,9 @@ class QwenAgent implements Agent {
               protocol,
               baseUrl,
             ),
+          (this.settings.merged as Record<string, unknown>)[
+            'modelProviders'
+          ] as Record<string, unknown> | undefined,
         );
         const persistScope = readProviderConnectScope(params['scope']);
         const plan = buildInstallPlan(providerConfig, inputs);

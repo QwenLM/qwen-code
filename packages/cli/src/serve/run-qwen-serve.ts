@@ -67,10 +67,12 @@ import {
 } from '@qwen-code/acp-bridge/workspacePaths';
 import type {
   AuthType,
+  ProviderModelConfig,
   ProviderSetupInputs,
   TelemetryRuntimeConfig,
   TelemetrySettings,
 } from '@qwen-code/qwen-code-core';
+import { legacyEnvKeyAttribution } from '@qwen-code/qwen-code-core/providerConfig';
 import { MEMORY_PROJECT_SCOPES } from '@qwen-code/qwen-code-core/memoryScopes';
 import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 // Dynamic-imported below (not at module scope) so the serve fast-path bundle
@@ -959,6 +961,7 @@ function channelServiceStartingConflictError(): Error {
 function normalizeInstallModelIds(
   req: ServeAuthProviderInstallRequest,
   provider: ProviderConfig,
+  baseUrl: string,
   getDefaultModelIds: CoreRuntime['getDefaultModelIds'],
 ): string[] {
   const fromRequest = req.modelIds
@@ -967,29 +970,139 @@ function normalizeInstallModelIds(
   const modelIds =
     fromRequest && fromRequest.length > 0
       ? fromRequest
-      : getDefaultModelIds(provider);
+      : getDefaultModelIds(provider, baseUrl);
   return [...new Set(modelIds)];
 }
 
-function buildProviderSetupInputs(
+export function buildProviderSetupInputs(
   req: ServeAuthProviderInstallRequest,
   provider: ProviderConfig,
   helpers: {
     getDefaultModelIds: CoreRuntime['getDefaultModelIds'];
     resolveBaseUrl: CoreRuntime['resolveBaseUrl'];
+    normalizeBaseUrlForMatching?: CoreRuntime['normalizeBaseUrlForMatching'];
+    existingModels?: ProviderModelConfig[];
   },
 ): ProviderSetupInputs {
   const protocol = (req.protocol ?? provider.protocol) as AuthType;
   const baseUrl = helpers.resolveBaseUrl(provider, req.baseUrl);
+  const modelIds = normalizeInstallModelIds(
+    req,
+    provider,
+    baseUrl,
+    helpers.getDefaultModelIds,
+  );
+  const defaultIds = new Set(helpers.getDefaultModelIds(provider, baseUrl));
+  const requestedIds = new Set(modelIds);
+  // `normalizeInstallModelIds` treats JSON `null` like `undefined` (both fall
+  // back to the endpoint defaults), so the preserve decision must too.
+  const hasExplicitModelIds = req.modelIds != null;
+  const selectedEndpoint = helpers.normalizeBaseUrlForMatching?.(baseUrl);
+  // Ids that already have a stamped entry at the selected endpoint. An
+  // implicit reconnect must not preserve a same-id baseUrl-less legacy entry
+  // beside its stamped twin: nothing downstream dedups preserved-against-
+  // preserved, so the pair would persist as two permanent duplicate
+  // (id, baseUrl) entries, re-preserved on every reconnect (R39-7).
+  const stampedIdsAtSelectedEndpoint = new Set(
+    helpers.existingModels
+      ?.filter(
+        (model) =>
+          model.baseUrl !== undefined &&
+          helpers.normalizeBaseUrlForMatching?.(model.baseUrl) ===
+            selectedEndpoint,
+      )
+      .map((model) => model.id) ?? [],
+  );
+  const migrateEnvKey =
+    typeof provider.envKey === 'function'
+      ? provider.envKey(protocol, baseUrl)
+      : undefined;
+  // Endpoint attribution for baseUrl-less legacy entries (R40-1). The stored
+  // env key is the only endpoint signal such an entry carries: the selected
+  // endpoint's own key (in any UNAMBIGUOUS historical shape) attributes it
+  // here, a key that affirmatively names a sibling endpoint attributes it
+  // there — such an entry must be left alone entirely, never stamped into
+  // this endpoint's preserve list, or the id-collision claim below would
+  // relocate it here and re-key it to this endpoint's credential. A key that
+  // names no endpoint is floating: an explicit selection may adopt it, but an
+  // implicit (defaults-only) reconnect must not.
+  const { namesSelectedEndpoint, namesSiblingEndpoint } =
+    legacyEnvKeyAttribution(provider, protocol, baseUrl);
+  // Ids of baseUrl-less entries whose stored original this run replaces with
+  // a copy stamped at the selected endpoint — either freshly stamped into
+  // preserveModels or dropped because a stamped twin already exists there
+  // (R39-7). buildInstallPlan claims baseUrl-less entries by id-collision
+  // ONLY for these ids (R40-2).
+  const migratedLegacyModelIds: string[] = [];
+  const preserveModels = helpers.existingModels?.flatMap((model) => {
+    const preserved =
+      model.baseUrl === undefined
+        ? {
+            ...model,
+            baseUrl,
+            // Stamping migrates the entry to the selected endpoint; its env
+            // key must follow so the entry points at the key this install
+            // writes — a key rotation plus merge-only reconnect must not
+            // leave the migrated model authenticating with the pre-rotation
+            // key (R39-6).
+            ...(migrateEnvKey ? { envKey: migrateEnvKey } : {}),
+          }
+        : model;
+    if (!provider.mergeModelsByIdentity) {
+      const belongsToAnotherEndpoint =
+        helpers.normalizeBaseUrlForMatching?.(preserved.baseUrl) !==
+        selectedEndpoint;
+      const shouldPreserve =
+        belongsToAnotherEndpoint ||
+        (!defaultIds.has(preserved.id) &&
+          (!hasExplicitModelIds || requestedIds.has(preserved.id)));
+      return shouldPreserve ? [preserved] : [];
+    }
+    if (model.baseUrl === undefined) {
+      // A baseUrl-less legacy entry (predating baseUrl stamping) carries no
+      // endpoint of its own; its env key decides. Entries whose key names a
+      // sibling endpoint are left out of the plan entirely — buildInstallPlan
+      // then only owns them at their own endpoint's env key, so a selection
+      // here neither deletes nor rewrites them (R38-3, R39-2, R40-1).
+      const owned = provider.ownsModel ? provider.ownsModel(model) : true;
+      const attributable = namesSelectedEndpoint(model);
+      const adoptable = owned && (attributable || !namesSiblingEndpoint(model));
+      if (!adoptable) return [];
+      if (stampedIdsAtSelectedEndpoint.has(model.id)) {
+        // A stamped twin at the selected endpoint wins (R39-7); claim the
+        // stored original so the pair collapses to the twin instead of
+        // persisting as two permanent duplicate (id, baseUrl) entries.
+        migratedLegacyModelIds.push(model.id);
+        return [];
+      }
+      const shouldPreserve =
+        !defaultIds.has(model.id) &&
+        (attributable
+          ? !hasExplicitModelIds || requestedIds.has(model.id)
+          : hasExplicitModelIds && requestedIds.has(model.id));
+      if (shouldPreserve) {
+        migratedLegacyModelIds.push(model.id);
+        return [preserved];
+      }
+      return [];
+    }
+    const selectedModel =
+      helpers.normalizeBaseUrlForMatching?.(preserved.baseUrl) ===
+      selectedEndpoint;
+    // The serve catalog does not expose existingConfig, so Web Shell and SDK
+    // callers cannot seed and round-trip a free-form provider's saved IDs.
+    // Treat this route as merge-only; seeded CLI/ACP/VS flows remain the
+    // authoritative replacement surfaces.
+    const shouldPreserve = selectedModel && !defaultIds.has(preserved.id);
+    return shouldPreserve ? [preserved] : [];
+  });
   return {
     ...(provider.protocolOptions ? { protocol } : {}),
     baseUrl,
     apiKey: req.apiKey.trim(),
-    modelIds: normalizeInstallModelIds(
-      req,
-      provider,
-      helpers.getDefaultModelIds,
-    ),
+    modelIds,
+    ...(preserveModels && preserveModels.length > 0 ? { preserveModels } : {}),
+    ...(migratedLegacyModelIds.length > 0 ? { migratedLegacyModelIds } : {}),
     ...(req.advancedConfig ? { advancedConfig: req.advancedConfig } : {}),
   };
 }
@@ -6073,12 +6186,21 @@ async function runQwenServeImpl(
             if (!provider) {
               throw new Error(`Unsupported auth provider: ${req.providerId}`);
             }
+            const fresh = loadSettingsForPersistence(boundWorkspace);
+            const existing = core.findExistingProviderModels(
+              provider,
+              (fresh.merged as Record<string, unknown>)['modelProviders'] as
+                | Record<string, unknown>
+                | undefined,
+              req.protocol ?? provider.protocol,
+            );
             const inputs = buildProviderSetupInputs(req, provider, {
               getDefaultModelIds: core.getDefaultModelIds,
               resolveBaseUrl: core.resolveBaseUrl,
+              normalizeBaseUrlForMatching: core.normalizeBaseUrlForMatching,
+              existingModels: existing?.models,
             });
             const plan = core.buildInstallPlan(provider, inputs);
-            const fresh = loadSettingsForPersistence(boundWorkspace);
             const adapter =
               settingsRuntime.loadedSettingsAdapter.createLoadedSettingsAdapter(
                 fresh,

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
   ArrowLeft,
@@ -30,6 +30,20 @@ import type {
   QwenProviderConnectResult,
   QwenProviderSummary,
 } from '../../../shared/types';
+import {
+  apiKeyAfterBaseUrlChange,
+  baseUrlAfterProtocolChange,
+  canonicalBaseUrl,
+  customModelIdsAfterEdit,
+  defaultBaseUrl,
+  defaultModelIds,
+  initialApiKey,
+  parseModelIds,
+  seedProtocolModelState,
+  seedProviderModelState,
+  switchEndpointModelState,
+  trimmedDefaultModelIds,
+} from './provider-state';
 
 type ProviderGroup = 'alibaba' | 'third-party' | 'custom';
 
@@ -52,32 +66,8 @@ function isProviderGroup(value: string | undefined): value is ProviderGroup {
   return value === 'alibaba' || value === 'third-party' || value === 'custom';
 }
 
-function parseModelIds(value: string): string[] {
-  return Array.from(
-    new Set(
-      value
-        .split(/[\n,]/)
-        .map((item) => item.trim())
-        .filter(Boolean),
-    ),
-  );
-}
-
 function defaultProtocol(provider: QwenProviderSummary): string {
   return provider.protocolOptions[0] || provider.protocol;
-}
-
-function defaultBaseUrl(provider: QwenProviderSummary): string {
-  if (typeof provider.baseUrl === 'string') return provider.baseUrl;
-  if (Array.isArray(provider.baseUrl)) return provider.baseUrl[0]?.url ?? '';
-  return provider.baseUrlPlaceholder ?? '';
-}
-
-function initialModelIds(provider: QwenProviderSummary): string[] {
-  const existingModelIds = provider.existingConfig?.modelIds ?? [];
-  return existingModelIds.length > 0
-    ? existingModelIds
-    : provider.defaultModelIds;
 }
 
 function AnimatedSection({
@@ -133,6 +123,14 @@ export function ProviderConnectForm({
   const [contextWindowSize, setContextWindowSize] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const apiKeyDraftsRef = useRef(new Map<string, string>());
+  const customModelIdsRef = useRef<string[]>([]);
+  const customModelIdsByBaseUrlRef = useRef(new Map<string, string[]>());
+  const trimmedDefaultModelIdsRef = useRef(new Map<string, string[]>());
+  // The endpoint the per-endpoint model state was last reconciled against.
+  // The free-form input reconciles on blur (typed URLs are incomplete
+  // mid-keystroke, so onChange cannot switch model state).
+  const committedBaseUrlRef = useRef('');
 
   const groups = useMemo(
     () =>
@@ -194,17 +192,64 @@ export function ProviderConnectForm({
   const selectProvider = useCallback((provider: QwenProviderSummary) => {
     const existingConfig = provider.existingConfig;
     const contextWindowSize = existingConfig?.advancedConfig?.contextWindowSize;
+    const baseUrl = canonicalBaseUrl(
+      provider,
+      existingConfig?.baseUrl ?? defaultBaseUrl(provider),
+    );
     setSelectedProviderId(provider.id);
     setProtocol(existingConfig?.protocol ?? defaultProtocol(provider));
-    setBaseUrl(existingConfig?.baseUrl ?? defaultBaseUrl(provider));
-    setApiKey(existingConfig?.apiKey ?? '');
-    setModelIdsText(initialModelIds(provider).join(', '));
+    setBaseUrl(baseUrl);
+    committedBaseUrlRef.current = baseUrl;
+    setApiKey(initialApiKey(apiKeyDraftsRef.current));
+    const seeded = seedProviderModelState(provider, baseUrl);
+    customModelIdsRef.current = seeded.customModelIds;
+    customModelIdsByBaseUrlRef.current = seeded.customModelIdsByBaseUrl;
+    trimmedDefaultModelIdsRef.current = seeded.trimmedDefaultModelIds;
+    setModelIdsText(seeded.modelIds.join(', '));
     setEnableThinking(existingConfig?.advancedConfig?.enableThinking === true);
     setContextWindowSize(
       typeof contextWindowSize === 'number' ? String(contextWindowSize) : '',
     );
     setFormError(null);
   }, []);
+
+  // Re-seed the model field from the selected protocol bucket's own saved
+  // models (R35-12). Without this, flipping the protocol Select kept the
+  // previous protocol's models and submitting rebuilt the selected bucket
+  // from the wrong protocol's ids, silently deleting its saved models.
+  const handleProtocolChange = useCallback(
+    (nextProtocol: string) => {
+      setProtocol(nextProtocol);
+      if (!selectedProvider || nextProtocol === protocol) return;
+      const nextBaseUrl = baseUrlAfterProtocolChange(
+        selectedProvider,
+        nextProtocol,
+      );
+      if (nextBaseUrl === undefined) {
+        // No saved bucket for this protocol yet: keep the user's typed
+        // endpoint, model field, and per-endpoint state untouched. Falling
+        // back to the provider default here would overwrite the endpoint
+        // with the DEFAULT protocol's placeholder — e.g. switching a
+        // Custom Provider from openai to anthropic would stamp
+        // https://api.openai.com/v1 into the field.
+        setFormError(null);
+        return;
+      }
+      setBaseUrl(nextBaseUrl);
+      committedBaseUrlRef.current = nextBaseUrl;
+      const seeded = seedProtocolModelState(
+        selectedProvider,
+        nextProtocol,
+        nextBaseUrl,
+      );
+      customModelIdsRef.current = seeded.customModelIds;
+      customModelIdsByBaseUrlRef.current = seeded.customModelIdsByBaseUrl;
+      trimmedDefaultModelIdsRef.current = seeded.trimmedDefaultModelIds;
+      setModelIdsText(seeded.modelIds.join(', '));
+      setFormError(null);
+    },
+    [selectedProvider, protocol],
+  );
 
   const handleSubmit = useCallback(async () => {
     if (!selectedProvider) return;
@@ -409,7 +454,7 @@ export function ProviderConnectForm({
             <Label>{t('providerConnect.protocol')}</Label>
             <Select
               value={protocol}
-              onValueChange={setProtocol}
+              onValueChange={handleProtocolChange}
               disabled={submitting}
             >
               <SelectTrigger>
@@ -437,7 +482,32 @@ export function ProviderConnectForm({
             {baseUrlOptions.length > 0 ? (
               <Select
                 value={baseUrl}
-                onValueChange={setBaseUrl}
+                onValueChange={(value) => {
+                  setBaseUrl(value);
+                  if (value !== baseUrl) {
+                    setFormError(null);
+                    setApiKey(
+                      apiKeyAfterBaseUrlChange(
+                        selectedProvider,
+                        baseUrl,
+                        value,
+                        apiKey,
+                        apiKeyDraftsRef.current,
+                      ),
+                    );
+                    const nextModelIds = switchEndpointModelState(
+                      selectedProvider,
+                      baseUrl,
+                      value,
+                      modelIdsText,
+                      customModelIdsRef.current,
+                      customModelIdsByBaseUrlRef.current,
+                      trimmedDefaultModelIdsRef.current,
+                    );
+                    customModelIdsRef.current = nextModelIds.customModelIds;
+                    setModelIdsText(nextModelIds.modelIds.join(', '));
+                  }
+                }}
                 disabled={submitting}
               >
                 <SelectTrigger>
@@ -455,6 +525,45 @@ export function ProviderConnectForm({
               <Input
                 value={baseUrl}
                 onChange={(event) => setBaseUrl(event.target.value)}
+                onBlur={() => {
+                  // Canonicalize (trim + strip trailing slashes) so the
+                  // committed/submitted endpoint matches the producer's
+                  // slash-stripped per-endpoint keys.
+                  const nextBaseUrl = canonicalBaseUrl(
+                    selectedProvider,
+                    baseUrl,
+                  );
+                  const committed = committedBaseUrlRef.current;
+                  if (!nextBaseUrl || nextBaseUrl === committed) return;
+                  // Same reconciliation as the endpoint-options select:
+                  // save the old endpoint's edited custom ids and restore the
+                  // new endpoint's saved state, so reconnecting at a
+                  // sibling endpoint seeds that endpoint's models instead
+                  // of re-homing the previous endpoint's ids onto it.
+                  setBaseUrl(nextBaseUrl);
+                  committedBaseUrlRef.current = nextBaseUrl;
+                  setFormError(null);
+                  setApiKey(
+                    apiKeyAfterBaseUrlChange(
+                      selectedProvider,
+                      committed,
+                      nextBaseUrl,
+                      apiKey,
+                      apiKeyDraftsRef.current,
+                    ),
+                  );
+                  const nextModelIds = switchEndpointModelState(
+                    selectedProvider,
+                    committed,
+                    nextBaseUrl,
+                    modelIdsText,
+                    customModelIdsRef.current,
+                    customModelIdsByBaseUrlRef.current,
+                    trimmedDefaultModelIdsRef.current,
+                  );
+                  customModelIdsRef.current = nextModelIds.customModelIds;
+                  setModelIdsText(nextModelIds.modelIds.join(', '));
+                }}
                 placeholder={
                   selectedProvider.baseUrlPlaceholder ||
                   'https://api.example.com/v1'
@@ -483,7 +592,35 @@ export function ProviderConnectForm({
           <Label>{t('providerConnect.models')}</Label>
           <Textarea
             value={modelIdsText}
-            onChange={(event) => setModelIdsText(event.target.value)}
+            onChange={(event) => {
+              const value = event.target.value;
+              setModelIdsText(value);
+              const ids = parseModelIds(value);
+              const endpoint = canonicalBaseUrl(selectedProvider, baseUrl);
+              const defaults = [...defaultModelIds(selectedProvider, endpoint)];
+              customModelIdsRef.current = customModelIdsAfterEdit(
+                defaults,
+                customModelIdsRef.current,
+                ids,
+              );
+              // Same provenance-preserving write the endpoint-switch path
+              // uses: a bare `field − defaults` would erase ids carried from
+              // a sibling endpoint that collide with this endpoint's
+              // built-ins, so the next endpoint switch would read an emptied
+              // entry and silently drop the tracked custom model.
+              customModelIdsByBaseUrlRef.current.set(
+                endpoint,
+                customModelIdsAfterEdit(
+                  defaults,
+                  customModelIdsByBaseUrlRef.current.get(endpoint) ?? [],
+                  ids,
+                ),
+              );
+              trimmedDefaultModelIdsRef.current.set(
+                endpoint,
+                trimmedDefaultModelIds(selectedProvider, endpoint, ids),
+              );
+            }}
             placeholder={t('providerConnect.modelsPlaceholder')}
             className="min-h-20"
             disabled={submitting || !selectedProvider.modelsEditable}

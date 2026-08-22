@@ -84,7 +84,9 @@ describe('buildInstallPlan', () => {
     });
     expect(models?.[1]?.generationConfig).toBeUndefined();
     expect(plan.providerState?.['providerMetadata.test']?.['version']).toBe(
-      computeModelListVersion(models ?? []),
+      computeModelListVersion(
+        buildProviderTemplateSrc(config, 'https://api.test.com/v1'),
+      ),
     );
   });
 
@@ -385,6 +387,31 @@ describe('getDefaultModelIds', () => {
     const config = makeConfig({ models: undefined });
     expect(getDefaultModelIds(config)).toEqual([]);
   });
+
+  it('returns endpoint-specific models for a selected base URL', () => {
+    const config = makeConfig({
+      baseUrl: [
+        {
+          id: 'one',
+          label: 'One',
+          url: 'https://one.example.com/v1',
+          models: [{ id: 'one-model' }],
+        },
+        {
+          id: 'two',
+          label: 'Two',
+          url: 'https://two.example.com/v1',
+          models: [{ id: 'two-model' }],
+        },
+      ],
+      models: [{ id: 'one-model' }, { id: 'two-model' }],
+    });
+
+    expect(getDefaultModelIds(config)).toEqual(['one-model', 'two-model']);
+    expect(getDefaultModelIds(config, 'https://two.example.com/v1')).toEqual([
+      'two-model',
+    ]);
+  });
 });
 
 describe('findExistingProviderModels', () => {
@@ -446,6 +473,29 @@ describe('findExistingProviderModels', () => {
     });
     expect(result?.protocol).toBe(AuthType.USE_ANTHROPIC);
     expect(result?.models.map((m) => m.id)).toEqual(['anthropic-model']);
+  });
+
+  it('scopes restored models to an explicitly selected protocol', () => {
+    const multiProtocol = makeConfig({
+      modelNamePrefix: '',
+      envKey: 'TEST_API_KEY',
+      protocolOptions: [AuthType.USE_OPENAI, AuthType.USE_ANTHROPIC],
+    });
+    const result = findExistingProviderModels(
+      multiProtocol,
+      {
+        [AuthType.USE_OPENAI]: [{ id: 'openai-model', envKey: 'TEST_API_KEY' }],
+        [AuthType.USE_ANTHROPIC]: [
+          { id: 'anthropic-model', envKey: 'TEST_API_KEY' },
+        ],
+      },
+      AuthType.USE_ANTHROPIC,
+    );
+
+    expect(result).toEqual({
+      protocol: AuthType.USE_ANTHROPIC,
+      models: [{ id: 'anthropic-model', envKey: 'TEST_API_KEY' }],
+    });
   });
 });
 
@@ -923,5 +973,201 @@ describe('resolveMetadataKey dotted-id guard', () => {
   it("throws when the id contains '.' (would corrupt dotted setValue writes)", () => {
     const config = makeConfig({ id: 'company.ai', models: [{ id: 'm1' }] });
     expect(() => resolveMetadataKeySrc(config)).toThrow(/must not contain/);
+  });
+});
+
+import { buildProviderTemplate as buildProviderTemplateSrc } from '../provider-config.js';
+
+describe('providerState version semantics', () => {
+  it('persists the template version even when the selection adds custom models', () => {
+    const config = makeConfig({
+      modelsEditable: true,
+      models: [{ id: 'model-a' }, { id: 'model-b' }],
+    });
+    const plan = buildInstallPlanSrc(config, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['model-a', 'model-b', 'my-custom'],
+    });
+
+    expect(plan.providerState).toEqual({
+      'providerMetadata.test': {
+        baseUrl: 'https://api.test.com/v1',
+        version: computeModelListVersion(
+          buildProviderTemplateSrc(config, 'https://api.test.com/v1'),
+        ),
+      },
+    });
+  });
+
+  it('persists the template version even when the selection drops defaults', () => {
+    const config = makeConfig({
+      modelsEditable: true,
+      models: [{ id: 'model-a' }, { id: 'model-b' }],
+    });
+    const plan = buildInstallPlanSrc(config, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['model-a'],
+    });
+
+    // findAllPendingUpdates compares the stored version against a hash of the
+    // built-ins-only template; a deselected default must not diverge from it
+    // and re-trigger the update prompt on every launch.
+    expect(plan.providerState?.['providerMetadata.test']?.['version']).toBe(
+      computeModelListVersion(
+        buildProviderTemplateSrc(config, 'https://api.test.com/v1'),
+      ),
+    );
+  });
+});
+
+describe('headless custom-model preservation', () => {
+  it('keeps exact saved custom models beside defaults-only inputs', () => {
+    const config = makeConfig({
+      modelsEditable: true,
+      models: [{ id: 'model-a' }],
+    });
+    const savedCustom = {
+      id: 'saved-custom',
+      name: 'Saved Custom',
+      baseUrl: 'https://proxy.example/v1',
+      envKey: 'TEST_API_KEY',
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    const plan = buildInstallPlanSrc(config, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['model-a'],
+      preserveModels: [savedCustom],
+    });
+
+    expect(plan.modelProviders?.[0]?.models).toContainEqual(savedCustom);
+  });
+
+  it('keeps one rich model on normalized identity collisions without new advanced config', () => {
+    const config = makeConfig({
+      modelsEditable: true,
+      models: [{ id: 'model-a' }],
+    });
+    const plan = buildInstallPlanSrc(config, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['model-a', 'saved-custom'],
+      preserveModels: [
+        {
+          id: 'saved-custom',
+          name: 'Saved Custom',
+          baseUrl: 'https://api.test.com/v1/',
+          envKey: 'TEST_API_KEY',
+          generationConfig: { contextWindowSize: 12345 },
+        },
+      ],
+    });
+    const savedModels = plan.modelProviders?.[0]?.models.filter(
+      (model) => model.id === 'saved-custom',
+    );
+
+    expect(savedModels).toHaveLength(1);
+    expect(savedModels?.[0]).toMatchObject({
+      baseUrl: 'https://api.test.com/v1',
+      generationConfig: { contextWindowSize: 12345 },
+    });
+  });
+
+  it('merges saved rich config with newly submitted advanced config on identity collisions', () => {
+    const config = makeConfig({
+      modelsEditable: true,
+      models: [{ id: 'model-a' }],
+    });
+    const savedCustom = {
+      id: 'saved-custom',
+      name: 'Saved Custom',
+      baseUrl: 'https://api.test.com/v1',
+      envKey: 'TEST_API_KEY',
+      generationConfig: {
+        contextWindowSize: 12345,
+        samplingParams: { max_tokens: 4096, temperature: 0.5 },
+      },
+    };
+    const plan = buildInstallPlanSrc(config, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['model-a', 'saved-custom'],
+      preserveModels: [savedCustom],
+      advancedConfig: { contextWindowSize: 8192, maxTokens: 8192 },
+    });
+
+    expect(plan.modelProviders?.[0]?.models).toContainEqual(
+      expect.objectContaining({
+        id: 'saved-custom',
+        name: '[Test] saved-custom',
+        generationConfig: expect.objectContaining({
+          contextWindowSize: 8192,
+          samplingParams: { max_tokens: 8192, temperature: 0.5 },
+        }),
+      }),
+    );
+  });
+
+  it('clears explicitly disabled advanced fields without dropping unrelated saved config', () => {
+    const config = makeConfig({
+      modelsEditable: true,
+      models: [{ id: 'model-a' }],
+    });
+    const plan = buildInstallPlanSrc(config, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['model-a', 'saved-custom'],
+      preserveModels: [
+        {
+          id: 'saved-custom',
+          baseUrl: 'https://api.test.com/v1',
+          envKey: 'TEST_API_KEY',
+          generationConfig: {
+            extra_body: { enable_thinking: true, keep: true },
+            modalities: { image: true },
+            contextWindowSize: 12345,
+            samplingParams: { max_tokens: 4096, temperature: 0.5 },
+          },
+        },
+      ],
+      advancedConfig: {
+        enableThinking: false,
+        multimodal: { image: false },
+        contextWindowSize: 0,
+        maxTokens: 0,
+      },
+    });
+    const generationConfig = plan.modelProviders?.[0]?.models.find(
+      (model) => model.id === 'saved-custom',
+    )?.generationConfig;
+
+    expect(generationConfig).toEqual({
+      extra_body: { keep: true },
+      samplingParams: { temperature: 0.5 },
+    });
+  });
+
+  it('removes generationConfig when an explicit disable clears its last field', () => {
+    const config = makeConfig({ modelsEditable: true, models: [] });
+    const plan = buildInstallPlanSrc(config, {
+      baseUrl: 'https://api.test.com/v1',
+      apiKey: 'sk-test',
+      modelIds: ['saved-custom'],
+      preserveModels: [
+        {
+          id: 'saved-custom',
+          baseUrl: 'https://api.test.com/v1',
+          envKey: 'TEST_API_KEY',
+          generationConfig: { extra_body: { enable_thinking: true } },
+        },
+      ],
+      advancedConfig: { enableThinking: false },
+    });
+
+    expect(
+      plan.modelProviders?.[0]?.models[0]?.generationConfig,
+    ).toBeUndefined();
   });
 });

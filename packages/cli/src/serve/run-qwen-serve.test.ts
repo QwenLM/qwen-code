@@ -19,6 +19,7 @@ import {
   InvalidPolicyConfigError,
   createDisabledChannelWorkerSupervisor,
   createBoundChannelDeliveryHandler,
+  buildProviderSetupInputs,
   resolveRuntimeStartupTimeoutMs,
   runQwenServe,
   type RunHandle,
@@ -116,6 +117,569 @@ const BASE_BRIDGE_SNAPSHOT: BridgeDaemonStatusSnapshot = {
   permissionPolicy: 'first-responder',
   sessions: [],
 };
+
+describe('buildProviderSetupInputs', () => {
+  // Settings adapter spy for end-to-end buildInstallPlan +
+  // applyProviderInstallPlan assertions.
+  function createSettingsAdapter(
+    modelProviders: qwenCore.ModelProvidersConfig = {},
+  ) {
+    return {
+      getValue: vi.fn(),
+      setValue: vi.fn(),
+      getModelProviders: vi.fn(() => modelProviders),
+      persist: vi.fn(),
+      backup: vi.fn(),
+      restore: vi.fn(),
+      cleanupBackup: vi.fn(),
+    };
+  }
+
+  it('uses endpoint-specific Kimi defaults when model IDs are omitted', () => {
+    const getDefaultModelIds = vi.fn(qwenCore.getDefaultModelIds);
+    const inputs = buildProviderSetupInputs(
+      {
+        providerId: 'kimi',
+        apiKey: 'sk-kimi',
+        baseUrl: qwenCore.KIMI_CODE_BASE_URL,
+      },
+      qwenCore.kimiProvider,
+      {
+        getDefaultModelIds,
+        resolveBaseUrl: qwenCore.resolveBaseUrl,
+      },
+    );
+
+    expect(getDefaultModelIds).toHaveBeenCalledWith(
+      qwenCore.kimiProvider,
+      qwenCore.KIMI_CODE_BASE_URL,
+    );
+    expect(inputs.modelIds).toEqual([
+      'k3-256k',
+      'k3',
+      'kimi-for-coding',
+      'kimi-for-coding-highspeed',
+    ]);
+  });
+
+  it('uses Kimi API defaults for the international API endpoint', () => {
+    const baseUrl = 'https://api.moonshot.ai/v1';
+    const getDefaultModelIds = vi.fn(qwenCore.getDefaultModelIds);
+    const inputs = buildProviderSetupInputs(
+      {
+        providerId: 'kimi',
+        apiKey: 'sk-kimi',
+        baseUrl,
+      },
+      qwenCore.kimiProvider,
+      {
+        getDefaultModelIds,
+        resolveBaseUrl: qwenCore.resolveBaseUrl,
+      },
+    );
+
+    expect(getDefaultModelIds).toHaveBeenCalledWith(
+      qwenCore.kimiProvider,
+      baseUrl,
+    );
+    expect(inputs.modelIds).toEqual([
+      'kimi-k3',
+      'kimi-k2.7-code',
+      'kimi-k2.7-code-highspeed',
+      'kimi-k2.6',
+    ]);
+  });
+
+  it('preserves saved endpoint custom models for a defaults-only web reconnect', () => {
+    const baseUrl = 'https://api.moonshot.ai/v1';
+    const savedCustom = {
+      id: 'my-kimi-custom',
+      name: '[Kimi API] my-kimi-custom',
+      baseUrl,
+      envKey: qwenCore.KIMI_API_ENV_KEY,
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    const inputs = buildProviderSetupInputs(
+      {
+        providerId: 'kimi',
+        apiKey: 'sk-kimi',
+        baseUrl,
+        modelIds: qwenCore.getDefaultModelIds(qwenCore.kimiProvider, baseUrl),
+      },
+      qwenCore.kimiProvider,
+      {
+        getDefaultModelIds: qwenCore.getDefaultModelIds,
+        resolveBaseUrl: qwenCore.resolveBaseUrl,
+        normalizeBaseUrlForMatching: qwenCore.normalizeBaseUrlForMatching,
+        existingModels: [savedCustom],
+      },
+    );
+
+    expect(inputs.preserveModels).toEqual([savedCustom]);
+  });
+
+  it('preserves a same-id proxy model for a non-merge provider', () => {
+    const provider = qwenCore.findProviderById('deepseek');
+    expect(provider).toBeDefined();
+    const savedProxy = {
+      id: 'deepseek-v4-pro',
+      name: '[DeepSeek] deepseek-v4-pro',
+      baseUrl: 'https://corp-proxy.example/v1',
+      envKey: 'DEEPSEEK_API_KEY',
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    const legacyCustom = {
+      id: 'legacy-custom',
+      name: '[DeepSeek] legacy-custom',
+      envKey: 'DEEPSEEK_API_KEY',
+      generationConfig: { contextWindowSize: 54321 },
+    };
+    const inputs = buildProviderSetupInputs(
+      {
+        providerId: 'deepseek',
+        apiKey: 'sk-deepseek',
+        modelIds: ['deepseek-v4-pro', 'legacy-custom'],
+      },
+      provider!,
+      {
+        getDefaultModelIds: qwenCore.getDefaultModelIds,
+        resolveBaseUrl: qwenCore.resolveBaseUrl,
+        normalizeBaseUrlForMatching: qwenCore.normalizeBaseUrlForMatching,
+        existingModels: [savedProxy, legacyCustom],
+      },
+    );
+
+    expect(inputs.preserveModels).toEqual([
+      savedProxy,
+      { ...legacyCustom, baseUrl: 'https://api.deepseek.com' },
+    ]);
+
+    const implicitInputs = buildProviderSetupInputs(
+      {
+        providerId: 'deepseek',
+        apiKey: 'sk-deepseek',
+      },
+      provider!,
+      {
+        getDefaultModelIds: qwenCore.getDefaultModelIds,
+        resolveBaseUrl: qwenCore.resolveBaseUrl,
+        normalizeBaseUrlForMatching: qwenCore.normalizeBaseUrlForMatching,
+        existingModels: [savedProxy, legacyCustom],
+      },
+    );
+    expect(implicitInputs.preserveModels).toEqual([
+      savedProxy,
+      { ...legacyCustom, baseUrl: 'https://api.deepseek.com' },
+    ]);
+  });
+
+  it('scopes custom-provider preserved models to the selected endpoint', () => {
+    const firstBaseUrl = 'https://first.example/v1';
+    const secondBaseUrl = 'https://second.example/v1';
+    const firstModel = {
+      id: 'shared-model',
+      baseUrl: firstBaseUrl,
+      envKey: qwenCore.generateCustomEnvKey(
+        qwenCore.AuthType.USE_OPENAI,
+        firstBaseUrl,
+      ),
+    };
+    const secondModel = {
+      id: 'shared-model',
+      baseUrl: secondBaseUrl,
+      envKey: qwenCore.generateCustomEnvKey(
+        qwenCore.AuthType.USE_OPENAI,
+        secondBaseUrl,
+      ),
+      generationConfig: { contextWindowSize: 22222 },
+    };
+
+    const inputs = buildProviderSetupInputs(
+      {
+        providerId: qwenCore.customProvider.id,
+        protocol: qwenCore.AuthType.USE_OPENAI,
+        apiKey: 'sk-second',
+        baseUrl: secondBaseUrl,
+        modelIds: ['shared-model'],
+      },
+      qwenCore.customProvider,
+      {
+        getDefaultModelIds: qwenCore.getDefaultModelIds,
+        resolveBaseUrl: qwenCore.resolveBaseUrl,
+        normalizeBaseUrlForMatching: qwenCore.normalizeBaseUrlForMatching,
+        existingModels: [firstModel, secondModel],
+      },
+    );
+
+    expect(inputs.preserveModels).toEqual([secondModel]);
+  });
+
+  it('merges unseeded custom-provider reconnects without deleting omitted models', () => {
+    const baseUrl = 'https://llm.internal.example/v1';
+    const envKey = qwenCore.generateCustomEnvKey(
+      qwenCore.AuthType.USE_OPENAI,
+      baseUrl,
+    );
+    const existingModels = ['a', 'b', 'c'].map((id) => ({
+      id,
+      baseUrl,
+      envKey,
+      generationConfig: { contextWindowSize: 12345 },
+    }));
+
+    const inputs = buildProviderSetupInputs(
+      {
+        providerId: qwenCore.customProvider.id,
+        protocol: qwenCore.AuthType.USE_OPENAI,
+        apiKey: 'sk-custom',
+        baseUrl,
+        modelIds: ['a'],
+      },
+      qwenCore.customProvider,
+      {
+        getDefaultModelIds: qwenCore.getDefaultModelIds,
+        resolveBaseUrl: qwenCore.resolveBaseUrl,
+        normalizeBaseUrlForMatching: qwenCore.normalizeBaseUrlForMatching,
+        existingModels,
+      },
+    );
+
+    expect(inputs.modelIds).toEqual(['a']);
+    expect(inputs.preserveModels).toEqual(existingModels);
+  });
+
+  it('leaves a baseUrl-less custom-provider legacy model to endpoint-key-scoped ownership', () => {
+    // A baseUrl-less legacy entry (predating baseUrl stamping) carries no
+    // endpoint of its own — its env key is the endpoint signal. This one
+    // carries endpoint B's key (6-hex shape), so it is attributable to B:
+    // an explicit selection at B that omits it must not fold it into
+    // preserveModels (R38-3), while requesting its id or an implicit
+    // reconnect at B migrates it.
+    const aBaseUrl = 'https://a.example/v1';
+    const bBaseUrl = 'https://b.example/v1';
+    const legacyModel = {
+      id: 'legacy-model',
+      name: 'legacy-model',
+      envKey: qwenCore.legacyCustomEnvKey6Hex(
+        qwenCore.AuthType.USE_OPENAI,
+        bBaseUrl,
+      ),
+      generationConfig: { contextWindowSize: 54321 },
+    };
+    const existingModels = [
+      {
+        id: 'a-model',
+        baseUrl: aBaseUrl,
+        envKey: qwenCore.generateCustomEnvKey(
+          qwenCore.AuthType.USE_OPENAI,
+          aBaseUrl,
+        ),
+      },
+      legacyModel,
+    ];
+
+    const explicit = buildProviderSetupInputs(
+      {
+        providerId: qwenCore.customProvider.id,
+        protocol: qwenCore.AuthType.USE_OPENAI,
+        apiKey: 'sk-b',
+        baseUrl: bBaseUrl,
+        modelIds: ['b-model'],
+      },
+      qwenCore.customProvider,
+      {
+        getDefaultModelIds: qwenCore.getDefaultModelIds,
+        resolveBaseUrl: qwenCore.resolveBaseUrl,
+        normalizeBaseUrlForMatching: qwenCore.normalizeBaseUrlForMatching,
+        existingModels,
+      },
+    );
+    expect(explicit.preserveModels).toBeUndefined();
+
+    // Explicitly requesting the legacy id migrates it (stamped with B), and
+    // the migrated entry's envKey follows the stamp: it must point at the
+    // endpoint's own key, the one the install writes (R39-6).
+    const requested = buildProviderSetupInputs(
+      {
+        providerId: qwenCore.customProvider.id,
+        protocol: qwenCore.AuthType.USE_OPENAI,
+        apiKey: 'sk-b',
+        baseUrl: bBaseUrl,
+        modelIds: ['b-model', 'legacy-model'],
+      },
+      qwenCore.customProvider,
+      {
+        getDefaultModelIds: qwenCore.getDefaultModelIds,
+        resolveBaseUrl: qwenCore.resolveBaseUrl,
+        normalizeBaseUrlForMatching: qwenCore.normalizeBaseUrlForMatching,
+        existingModels,
+      },
+    );
+    expect(requested.preserveModels).toEqual([
+      {
+        ...legacyModel,
+        baseUrl: bBaseUrl,
+        envKey: qwenCore.generateCustomEnvKey(
+          qwenCore.AuthType.USE_OPENAI,
+          bBaseUrl,
+        ),
+      },
+    ]);
+
+    // Implicit reconnects (no modelIds) keep everything as-is: the merge-only
+    // route carries the legacy entry stamped with the selected endpoint — with
+    // the envKey re-stamped too, so a key rotation never leaves the migrated
+    // model authenticating with the pre-rotation key (R39-6).
+    const implicit = buildProviderSetupInputs(
+      {
+        providerId: qwenCore.customProvider.id,
+        protocol: qwenCore.AuthType.USE_OPENAI,
+        apiKey: 'sk-b',
+        baseUrl: bBaseUrl,
+      },
+      qwenCore.customProvider,
+      {
+        getDefaultModelIds: qwenCore.getDefaultModelIds,
+        resolveBaseUrl: qwenCore.resolveBaseUrl,
+        normalizeBaseUrlForMatching: qwenCore.normalizeBaseUrlForMatching,
+        existingModels,
+      },
+    );
+    expect(implicit.preserveModels).toEqual([
+      {
+        ...legacyModel,
+        baseUrl: bBaseUrl,
+        envKey: qwenCore.generateCustomEnvKey(
+          qwenCore.AuthType.USE_OPENAI,
+          bBaseUrl,
+        ),
+      },
+    ]);
+  });
+
+  it('collapses a same-id legacy+stamped pair to the stamped entry on an implicit reconnect (R39-7)', () => {
+    // A same-id baseUrl-less legacy entry beside its stamped twin (a state
+    // main's identity-only merge could create) must not both reach
+    // preserveModels on an implicit reconnect: nothing downstream dedups
+    // preserved-against-preserved, so the pair would persist as two
+    // permanent duplicate (id, baseUrl) entries. The stamped twin wins.
+    const aBaseUrl = 'https://a.example/v1';
+    const legacyModel = {
+      id: 'x',
+      name: 'x',
+      envKey: qwenCore.legacyCustomEnvKey6Hex(
+        qwenCore.AuthType.USE_OPENAI,
+        aBaseUrl,
+      ),
+      generationConfig: { contextWindowSize: 11111 },
+    };
+    const stampedModel = {
+      id: 'x',
+      name: 'x',
+      baseUrl: aBaseUrl,
+      envKey: qwenCore.generateCustomEnvKey(
+        qwenCore.AuthType.USE_OPENAI,
+        aBaseUrl,
+      ),
+      generationConfig: { contextWindowSize: 22222 },
+    };
+    const existingModels = [legacyModel, stampedModel];
+
+    const implicit = buildProviderSetupInputs(
+      {
+        providerId: qwenCore.customProvider.id,
+        protocol: qwenCore.AuthType.USE_OPENAI,
+        apiKey: 'sk-a',
+        baseUrl: aBaseUrl,
+      },
+      qwenCore.customProvider,
+      {
+        getDefaultModelIds: qwenCore.getDefaultModelIds,
+        resolveBaseUrl: qwenCore.resolveBaseUrl,
+        normalizeBaseUrlForMatching: qwenCore.normalizeBaseUrlForMatching,
+        existingModels,
+      },
+    );
+    expect(implicit.preserveModels).toEqual([stampedModel]);
+
+    // Control: without the stamped twin the legacy entry is still migrated.
+    const legacyOnly = buildProviderSetupInputs(
+      {
+        providerId: qwenCore.customProvider.id,
+        protocol: qwenCore.AuthType.USE_OPENAI,
+        apiKey: 'sk-a',
+        baseUrl: aBaseUrl,
+      },
+      qwenCore.customProvider,
+      {
+        getDefaultModelIds: qwenCore.getDefaultModelIds,
+        resolveBaseUrl: qwenCore.resolveBaseUrl,
+        normalizeBaseUrlForMatching: qwenCore.normalizeBaseUrlForMatching,
+        existingModels: [legacyModel],
+      },
+    );
+    expect(legacyOnly.preserveModels).toEqual([
+      {
+        ...legacyModel,
+        baseUrl: aBaseUrl,
+        envKey: qwenCore.generateCustomEnvKey(
+          qwenCore.AuthType.USE_OPENAI,
+          aBaseUrl,
+        ),
+      },
+    ]);
+  });
+
+  it('does not relocate a sibling-attributable baseUrl-less legacy entry on an implicit reconnect (R40-1)', async () => {
+    // A baseUrl-less legacy entry whose env key names endpoint B belongs to
+    // B. An implicit (defaults-only) reconnect at endpoint A must not stamp
+    // it into preserveModels with A's baseUrl/envKey: doing so migrated the
+    // entry to A and re-keyed it to A's credential, silently stealing B's
+    // model. The entry survives, byte-identical.
+    const aBaseUrl = 'https://api.example.com/v1';
+    const bBaseUrl = 'https://api.other.com/v1';
+    const legacyModel = {
+      id: 'my-model',
+      name: 'my-model',
+      envKey: qwenCore.legacyCustomEnvKey6Hex(
+        qwenCore.AuthType.USE_OPENAI,
+        bBaseUrl,
+      ),
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    const stampedAtA = {
+      id: 'a-model',
+      name: 'a-model',
+      baseUrl: aBaseUrl,
+      envKey: qwenCore.generateCustomEnvKey(
+        qwenCore.AuthType.USE_OPENAI,
+        aBaseUrl,
+      ),
+    };
+
+    const inputs = buildProviderSetupInputs(
+      {
+        providerId: qwenCore.customProvider.id,
+        protocol: qwenCore.AuthType.USE_OPENAI,
+        apiKey: 'sk-a',
+        baseUrl: aBaseUrl,
+      },
+      qwenCore.customProvider,
+      {
+        getDefaultModelIds: qwenCore.getDefaultModelIds,
+        resolveBaseUrl: qwenCore.resolveBaseUrl,
+        normalizeBaseUrlForMatching: qwenCore.normalizeBaseUrlForMatching,
+        existingModels: [stampedAtA, legacyModel],
+      },
+    );
+    // The sibling entry is not folded into the plan at all.
+    expect(inputs.preserveModels).toEqual([stampedAtA]);
+
+    const aEnvKey = qwenCore.generateCustomEnvKey(
+      qwenCore.AuthType.USE_OPENAI,
+      aBaseUrl,
+    );
+    const adapter = createSettingsAdapter({
+      [qwenCore.AuthType.USE_OPENAI]: [stampedAtA, legacyModel],
+    });
+    const plan = qwenCore.buildInstallPlan(qwenCore.customProvider, {
+      ...inputs,
+      apiKey: 'sk-a',
+    });
+    try {
+      await qwenCore.applyProviderInstallPlan(plan, {
+        settings: adapter,
+        doRefreshAuth: false,
+      });
+    } finally {
+      delete process.env[aEnvKey];
+    }
+
+    const written = adapter.setValue.mock.calls.find(
+      (call: unknown[]) => call[0] === 'modelProviders.openai',
+    )?.[1] as Array<Record<string, unknown>> | undefined;
+    expect(written).toBeDefined();
+    expect(written).toContainEqual(legacyModel);
+    expect(written).toContainEqual(
+      expect.objectContaining({ id: 'a-model', baseUrl: aBaseUrl }),
+    );
+    expect(written).toHaveLength(2);
+  });
+
+  it('does not delete a same-id sibling-endpoint legacy entry on an implicit reconnect (R40-2)', async () => {
+    // X = a Kimi Code legacy entry (no baseUrl), Y = a same-id entry already
+    // stamped at api-china. An implicit reconnect at api-china preserves Y,
+    // but must not let Y's id claim and delete X: ownership of a baseUrl-less
+    // entry follows its env key (KIMI_CODE_API_KEY names the coding endpoint),
+    // and only ids THIS run migrated are claimed by id-collision.
+    const apiChinaBaseUrl = 'https://api.moonshot.cn/v1';
+    const legacyKimiCode = {
+      id: 'k3',
+      name: '[Kimi Code] k3',
+      envKey: qwenCore.KIMI_CODE_ENV_KEY,
+      generationConfig: { contextWindowSize: 11111 },
+    };
+    const stampedAtChina = {
+      id: 'k3',
+      name: '[Kimi API] k3',
+      baseUrl: apiChinaBaseUrl,
+      envKey: qwenCore.KIMI_API_ENV_KEY,
+      generationConfig: { contextWindowSize: 22222 },
+    };
+
+    const inputs = buildProviderSetupInputs(
+      {
+        providerId: qwenCore.kimiProvider.id,
+        protocol: qwenCore.AuthType.USE_OPENAI,
+        apiKey: 'sk-moon',
+        baseUrl: apiChinaBaseUrl,
+      },
+      qwenCore.kimiProvider,
+      {
+        getDefaultModelIds: qwenCore.getDefaultModelIds,
+        resolveBaseUrl: qwenCore.resolveBaseUrl,
+        normalizeBaseUrlForMatching: qwenCore.normalizeBaseUrlForMatching,
+        existingModels: [legacyKimiCode, stampedAtChina],
+      },
+    );
+    // Only the already-stamped api-china entry is carried; the Kimi Code
+    // entry is left out of the plan (and out of migratedLegacyModelIds).
+    expect(inputs.preserveModels).toEqual([stampedAtChina]);
+
+    const adapter = createSettingsAdapter({
+      [qwenCore.AuthType.USE_OPENAI]: [legacyKimiCode, stampedAtChina],
+    });
+    const plan = qwenCore.buildInstallPlan(qwenCore.kimiProvider, {
+      ...inputs,
+      apiKey: 'sk-moon',
+    });
+    try {
+      await qwenCore.applyProviderInstallPlan(plan, {
+        settings: adapter,
+        doRefreshAuth: false,
+      });
+    } finally {
+      delete process.env[qwenCore.KIMI_API_ENV_KEY];
+    }
+
+    const written = adapter.setValue.mock.calls.find(
+      (call: unknown[]) => call[0] === 'modelProviders.openai',
+    )?.[1] as Array<Record<string, unknown>> | undefined;
+    expect(written).toBeDefined();
+    expect(written).toContainEqual(
+      expect.objectContaining({ id: 'k3', envKey: qwenCore.KIMI_CODE_ENV_KEY }),
+    );
+    expect(written).toContainEqual(
+      expect.objectContaining({
+        id: 'k3',
+        baseUrl: apiChinaBaseUrl,
+        envKey: qwenCore.KIMI_API_ENV_KEY,
+      }),
+    );
+    // 4 api-china defaults + both k3 entries.
+    expect(written).toHaveLength(6);
+  });
+});
 
 describe('createBoundChannelDeliveryHandler', () => {
   const info = {

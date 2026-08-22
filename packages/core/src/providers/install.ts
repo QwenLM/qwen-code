@@ -11,6 +11,7 @@ import type {
   ProviderModelProvidersPatch,
   ProviderSettingsAdapter,
 } from './types.js';
+import { normalizeBaseUrlForMatching } from './provider-config.js';
 
 /**
  * Environment variable names an install plan must never set — they alter
@@ -40,7 +41,11 @@ function isSameModelIdentity(
   a: { id: string; baseUrl?: string },
   b: { id: string; baseUrl?: string },
 ): boolean {
-  return a.id === b.id && (a.baseUrl ?? '') === (b.baseUrl ?? '');
+  return (
+    a.id === b.id &&
+    normalizeBaseUrlForMatching(a.baseUrl) ===
+      normalizeBaseUrlForMatching(b.baseUrl)
+  );
 }
 
 function applyModelProvidersPatch(
@@ -54,19 +59,47 @@ function applyModelProvidersPatch(
     updatedModels = [...existingModels, ...patch.models];
   } else {
     const ownsModel = patch.ownsModel;
-    const preservedModels = existingModels.filter((model) => {
+    const removesModel = (model: (typeof existingModels)[number]) => {
       if (ownsModel) {
-        return !ownsModel(model);
+        return ownsModel(model);
       }
-      return !patch.models.some((newModel) =>
+      return patch.models.some((newModel) =>
         isSameModelIdentity(newModel, model),
       );
-    });
+    };
+    const firstRemovedIndex = existingModels.findIndex(removesModel);
+    const preservedModels = existingModels.filter(
+      (model) => !removesModel(model),
+    );
 
-    updatedModels =
-      patch.mergeStrategy === 'replace-owned'
-        ? [...preservedModels, ...patch.models]
-        : [...patch.models, ...preservedModels];
+    if (patch.mergeStrategy === 'replace-owned') {
+      updatedModels = [...preservedModels, ...patch.models];
+    } else if (firstRemovedIndex < 0) {
+      const collidesWithPreservedModel = patch.models.some((incoming) =>
+        preservedModels.some(
+          (existing) =>
+            existing.id === incoming.id &&
+            patch.ownsModelAcrossEndpoints?.(existing),
+        ),
+      );
+      updatedModels =
+        patch.retainCurrentModelAcrossEndpoints && collidesWithPreservedModel
+          ? [...preservedModels, ...patch.models]
+          : [...patch.models, ...preservedModels];
+    } else {
+      // Updating an existing endpoint must not reorder sibling endpoints.
+      // Duplicate model ids are resolved by first match, so prepending a
+      // replacement can silently change the selected region when baseUrl is
+      // intentionally absent from a legacy/id-only selection.
+      const insertionIndex = existingModels
+        .slice(0, firstRemovedIndex)
+        .filter((model) => !removesModel(model)).length;
+      updatedModels = [
+        ...preservedModels.slice(0, insertionIndex),
+        ...patch.models,
+        ...preservedModels.slice(insertionIndex),
+      ];
+    }
   }
 
   return {
@@ -152,6 +185,7 @@ export async function applyProviderInstallPlan(
   // (an EACCES from persist vs a refreshAuth rejection look identical
   // otherwise — eight steps, one anonymous error).
   let currentStep = 'init';
+  const overwrittenEnvKeys = new Set<string>();
 
   try {
     // backup() inside the try so a failure here (e.g. structuredClone on a
@@ -181,6 +215,9 @@ export async function applyProviderInstallPlan(
         shadowedEnvKeys.push(key);
       }
       previousEnvValues.set(key, previous);
+      if (settings.getValue(`env.${key}`) !== value) {
+        overwrittenEnvKeys.add(key);
+      }
       settings.setValue(`env.${key}`, value);
       process.env[key] = value;
     }
@@ -239,20 +276,74 @@ export async function applyProviderInstallPlan(
       const currentBaseUrl = settings.getValue('model.baseUrl') as
         | string
         | undefined;
+      const retainAcrossEndpoints = (plan.modelProviders ?? []).filter(
+        (patch) => patch.retainCurrentModelAcrossEndpoints,
+      );
+      const installedModels = (plan.modelProviders ?? []).flatMap(
+        (patch) => patch.models,
+      );
+      const offeredModels = retainAcrossEndpoints.length
+        ? (updatedModelProviders[plan.authType] ?? []).filter((model) => {
+            // A sibling that shares a credential being replaced by this plan
+            // is no longer a valid offer for the old endpoint. Only models in
+            // the selected patch may retain the active selection in that case.
+            const ownedAcrossEndpoints = retainAcrossEndpoints.some((patch) =>
+              patch.ownsModelAcrossEndpoints?.(model),
+            );
+            if (!ownedAcrossEndpoints) return false;
+            if (
+              !model.envKey ||
+              !overwrittenEnvKeys.has(model.envKey) ||
+              installedModels.some((installed) =>
+                isSameModelIdentity(installed, model),
+              )
+            ) {
+              return true;
+            }
+            return false;
+          })
+        : (plan.modelProviders ?? []).flatMap((patch) => patch.models);
       const planOffersCurrentModel =
         typeof currentModelId === 'string' &&
         currentModelId.length > 0 &&
-        (plan.modelProviders ?? []).some((patch) =>
-          patch.models.some((model) =>
-            currentBaseUrl === '' || currentBaseUrl === undefined
-              ? model.id === currentModelId
+        offeredModels.some((model) =>
+          currentBaseUrl === '' || currentBaseUrl === undefined
+            ? model.id === currentModelId
+            : isSameModelIdentity(
+                { id: currentModelId, baseUrl: currentBaseUrl },
+                model,
+              ),
+        );
+      const invalidatedCurrentSibling =
+        typeof currentModelId === 'string' &&
+        (updatedModelProviders[plan.authType] ?? []).some(
+          (model) =>
+            model.id === currentModelId &&
+            (currentBaseUrl === '' || currentBaseUrl === undefined
+              ? true
               : isSameModelIdentity(
                   { id: currentModelId, baseUrl: currentBaseUrl },
                   model,
-                ),
-          ),
+                )) &&
+            model.envKey !== undefined &&
+            overwrittenEnvKeys.has(model.envKey) &&
+            !installedModels.some((installed) =>
+              isSameModelIdentity(installed, model),
+            ),
         );
-      if (planOffersCurrentModel) {
+      const installedCurrentModel =
+        typeof currentModelId === 'string'
+          ? installedModels.find((model) => model.id === currentModelId)
+          : undefined;
+      if (invalidatedCurrentSibling && installedCurrentModel) {
+        // The shared credential moved an id-only selection to this endpoint.
+        // Keep the user's current model when the target offers it instead of
+        // falling back to the plan's first/default model.
+        effectiveModelSelection = {
+          modelId: installedCurrentModel.id,
+          baseUrl: installedCurrentModel.baseUrl,
+        };
+      } else if (planOffersCurrentModel) {
         effectiveModelSelection = undefined;
       }
     }

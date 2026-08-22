@@ -108,6 +108,63 @@ describe('AuthMessageHandler', () => {
     expect(sendToWebView).not.toHaveBeenCalledWith({ type: 'authCancelled' });
   });
 
+  it('restores proxy custom models for a non-merge provider', async () => {
+    const seeded = ['deepseek-v4-pro', 'deepseek-v4-flash', 'legacy-custom'];
+    const proxyCustom = {
+      id: 'proxy-custom',
+      name: '[DeepSeek] proxy-custom',
+      baseUrl: 'https://corp-proxy.example/v1',
+      envKey: 'DEEPSEEK_API_KEY',
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    const legacyCustom = {
+      id: 'legacy-custom',
+      name: '[DeepSeek] legacy-custom',
+      envKey: 'DEEPSEEK_API_KEY',
+      generationConfig: { contextWindowSize: 54321 },
+    };
+    mockShowQuickPick.mockResolvedValueOnce({ value: 'deepseek' });
+    mockShowInputBox
+      .mockResolvedValueOnce('sk-deepseek')
+      .mockResolvedValueOnce(seeded.join(','));
+
+    const handler = new AuthMessageHandler(
+      {} as never,
+      {} as never,
+      null,
+      vi.fn(),
+      () => ({
+        openai: [
+          {
+            id: 'deepseek-v4-flash',
+            name: '[DeepSeek] deepseek-v4-flash',
+            baseUrl: 'https://api.deepseek.com',
+            envKey: 'DEEPSEEK_API_KEY',
+          },
+          proxyCustom,
+          legacyCustom,
+        ],
+      }),
+    );
+    const authInteractiveHandler = vi.fn().mockResolvedValue(undefined);
+    handler.setAuthInteractiveHandler(authInteractiveHandler);
+
+    await handler.handle({ type: 'auth' });
+
+    expect(mockShowInputBox.mock.calls[1]?.[0]).toEqual(
+      expect.objectContaining({ value: seeded.join(',') }),
+    );
+    expect(authInteractiveHandler).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'deepseek' }),
+      expect.objectContaining({
+        preserveModels: [
+          proxyCustom,
+          { ...legacyCustom, baseUrl: 'https://api.deepseek.com' },
+        ],
+      }),
+    );
+  });
+
   it('sends authError and aborts when validateApiKey rejects the key', async () => {
     // coding-plan validateApiKey requires keys starting with sk-sp-
     mockShowQuickPick
@@ -171,24 +228,15 @@ describe('AuthMessageHandler', () => {
     );
   });
 
-  // -- Custom provider flow ------------------------------------------------
-  // The custom provider exercises every step in runProviderSetupFlow:
-  // protocol pick, free-form URL input + scheme validation, API key,
-  // comma-split model IDs + empty-input guard, and advanced config.
-
-  it('drives custom provider through protocol + url + key + models + advanced', async () => {
-    // 1) Provider pick → custom (custom-openai-compatible)
-    // 2) Protocol pick → Anthropic
-    // 3) Advanced config pick → modality-only (no thinking)
+  it('uses endpoint-specific defaults for a multi-endpoint provider', async () => {
     mockShowQuickPick
-      .mockResolvedValueOnce({ value: 'custom-openai-compatible' })
-      .mockResolvedValueOnce({ value: 'anthropic' })
-      .mockResolvedValueOnce({ value: 'no' });
-    // URL → API key → model IDs (advanced is a separate pick already mocked)
+      .mockResolvedValueOnce({ value: 'kimi' })
+      .mockResolvedValueOnce({ value: 'https://api.moonshot.ai/v1' });
     mockShowInputBox
-      .mockResolvedValueOnce('https://my-proxy.example.com/v1')
-      .mockResolvedValueOnce('sk-custom-anthropic')
-      .mockResolvedValueOnce('claude-3-opus, claude-3-sonnet');
+      .mockResolvedValueOnce('sk-kimi')
+      .mockResolvedValueOnce(
+        'kimi-k3,kimi-k2.7-code,kimi-k2.7-code-highspeed,kimi-k2.6',
+      );
 
     const sendToWebView = vi.fn();
     const handler = new AuthMessageHandler(
@@ -202,13 +250,211 @@ describe('AuthMessageHandler', () => {
 
     await handler.handle({ type: 'auth' });
 
+    expect(mockShowInputBox.mock.calls[1]?.[0]).toEqual(
+      expect.objectContaining({
+        value: 'kimi-k3,kimi-k2.7-code,kimi-k2.7-code-highspeed,kimi-k2.6',
+      }),
+    );
+    expect(authInteractiveHandler).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'kimi' }),
+      expect.objectContaining({
+        baseUrl: 'https://api.moonshot.ai/v1',
+        apiKey: 'sk-kimi',
+        modelIds: [
+          'kimi-k3',
+          'kimi-k2.7-code',
+          'kimi-k2.7-code-highspeed',
+          'kimi-k2.6',
+        ],
+      }),
+    );
+  });
+
+  it('restores saved endpoint custom models into the models step', async () => {
+    const codingUrl = 'https://api.kimi.com/coding/v1';
+    const defaults = [
+      'k3-256k',
+      'k3',
+      'kimi-for-coding',
+      'kimi-for-coding-highspeed',
+    ];
+    const seeded = [...defaults, 'my-custom'];
+    const savedCustom = {
+      id: 'my-custom',
+      name: '[Kimi Code] my-custom',
+      baseUrl: codingUrl,
+      envKey: 'KIMI_CODE_API_KEY',
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    mockShowQuickPick
+      .mockResolvedValueOnce({ value: 'kimi' })
+      .mockResolvedValueOnce({ value: codingUrl });
+    mockShowInputBox
+      .mockResolvedValueOnce('sk-kimi')
+      .mockResolvedValueOnce(seeded.join(','));
+
+    const sendToWebView = vi.fn();
+    const handler = new AuthMessageHandler(
+      {} as never,
+      {} as never,
+      null,
+      sendToWebView,
+      () => ({
+        openai: [
+          {
+            id: 'k3-256k',
+            name: '[Kimi Code] k3-256k',
+            baseUrl: codingUrl,
+            envKey: 'KIMI_CODE_API_KEY',
+          },
+          savedCustom,
+          {
+            ...savedCustom,
+            baseUrl: `${codingUrl}/`,
+            generationConfig: { contextWindowSize: 99999 },
+          },
+          {
+            id: 'legacy-custom',
+            name: '[Kimi Code] legacy-custom',
+            envKey: 'KIMI_CODE_API_KEY',
+          },
+          {
+            id: 'api-custom',
+            name: '[Kimi API] api-custom',
+            baseUrl: 'https://api.moonshot.ai/v1',
+            envKey: 'MOONSHOT_API_KEY',
+          },
+        ],
+      }),
+    );
+    const authInteractiveHandler = vi.fn().mockResolvedValue(undefined);
+    handler.setAuthInteractiveHandler(authInteractiveHandler);
+
+    await handler.handle({ type: 'auth' });
+
+    expect(mockShowInputBox.mock.calls[1]?.[0]).toEqual(
+      expect.objectContaining({ value: seeded.join(',') }),
+    );
+    expect(authInteractiveHandler).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'kimi' }),
+      expect.objectContaining({
+        baseUrl: codingUrl,
+        modelIds: seeded,
+        preserveModels: [savedCustom],
+      }),
+    );
+  });
+
+  it('stamps a selected baseUrl-less legacy model for a merge provider', async () => {
+    // R34-4: custom-openai-compatible is mergeModelsByIdentity. A restored
+    // legacy model without baseUrl must be stamped with the submitted
+    // endpoint before identity merging, matching the non-merge branch and
+    // the CLI/ACP/serve surfaces — otherwise buildInstallPlan writes a
+    // duplicate regenerated entry and strands the rich generationConfig on
+    // an orphan.
+    const customUrl = 'https://my-proxy.example.com/v1';
+    const legacyCustom = {
+      id: 'legacy-custom',
+      name: 'legacy-custom',
+      envKey: 'QWEN_CUSTOM_API_KEY_OPENAI',
+      generationConfig: { contextWindowSize: 54321 },
+    };
+    mockShowQuickPick
+      .mockResolvedValueOnce({ value: 'custom-openai-compatible' })
+      .mockResolvedValueOnce({ value: 'openai' })
+      .mockResolvedValueOnce({ value: 'no' });
+    mockShowInputBox
+      .mockResolvedValueOnce(customUrl)
+      .mockResolvedValueOnce('sk-custom-openai')
+      .mockResolvedValueOnce('legacy-custom');
+
+    const sendToWebView = vi.fn();
+    const handler = new AuthMessageHandler(
+      {} as never,
+      {} as never,
+      null,
+      sendToWebView,
+      () => ({ openai: [legacyCustom] }),
+    );
+    const authInteractiveHandler = vi.fn().mockResolvedValue(undefined);
+    handler.setAuthInteractiveHandler(authInteractiveHandler);
+
+    await handler.handle({ type: 'auth' });
+
+    expect(authInteractiveHandler).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'custom-openai-compatible' }),
+      expect.objectContaining({
+        baseUrl: customUrl,
+        modelIds: ['legacy-custom'],
+        preserveModels: [
+          expect.objectContaining({
+            id: 'legacy-custom',
+            baseUrl: customUrl,
+            generationConfig: { contextWindowSize: 54321 },
+          }),
+        ],
+      }),
+    );
+  });
+
+  // -- Custom provider flow ------------------------------------------------
+  // The custom provider exercises every step in runProviderSetupFlow:
+  // protocol pick, free-form URL input + scheme validation, API key,
+  // comma-split model IDs + empty-input guard, and advanced config.
+
+  it('drives custom provider through protocol + url + key + models + advanced', async () => {
+    const customUrl = 'https://my-proxy.example.com/v1';
+    // 1) Provider pick → custom (custom-openai-compatible)
+    // 2) Protocol pick → Anthropic
+    // 3) Advanced config pick → modality-only (no thinking)
+    mockShowQuickPick
+      .mockResolvedValueOnce({ value: 'custom-openai-compatible' })
+      .mockResolvedValueOnce({ value: 'anthropic' })
+      .mockResolvedValueOnce({ value: 'no' });
+    // URL → API key → model IDs (advanced is a separate pick already mocked)
+    mockShowInputBox
+      .mockResolvedValueOnce(customUrl)
+      .mockResolvedValueOnce('sk-custom-anthropic')
+      .mockResolvedValueOnce('claude-3-opus, claude-3-sonnet');
+
+    const sendToWebView = vi.fn();
+    const handler = new AuthMessageHandler(
+      {} as never,
+      {} as never,
+      null,
+      sendToWebView,
+      () => ({
+        openai: [
+          {
+            id: 'openai-saved',
+            baseUrl: customUrl,
+            envKey: 'QWEN_CUSTOM_API_KEY_OPENAI',
+          },
+        ],
+        anthropic: [
+          {
+            id: 'anthropic-saved',
+            baseUrl: customUrl,
+            envKey: 'QWEN_CUSTOM_API_KEY_ANTHROPIC',
+          },
+        ],
+      }),
+    );
+    const authInteractiveHandler = vi.fn().mockResolvedValue(undefined);
+    handler.setAuthInteractiveHandler(authInteractiveHandler);
+
+    await handler.handle({ type: 'auth' });
+
     expect(authInteractiveHandler).toHaveBeenCalledTimes(1);
+    expect(mockShowInputBox.mock.calls[2]?.[0]).toEqual(
+      expect.objectContaining({ value: 'anthropic-saved' }),
+    );
     const [providerConfig, inputs] = authInteractiveHandler.mock.calls[0]!;
     expect(providerConfig.id).toBe('custom-openai-compatible');
     expect(inputs).toMatchObject({
       // Protocol from the picker is threaded through.
       protocol: 'anthropic',
-      baseUrl: 'https://my-proxy.example.com/v1',
+      baseUrl: customUrl,
       apiKey: 'sk-custom-anthropic',
       modelIds: ['claude-3-opus', 'claude-3-sonnet'],
     });

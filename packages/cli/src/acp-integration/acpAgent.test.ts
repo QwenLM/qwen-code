@@ -217,6 +217,12 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   emptyGoalSnapshot: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).emptyGoalSnapshot,
+  // The real helper: the provider-connect preserve builder attributes
+  // baseUrl-less legacy entries with it, and the assertions compare against
+  // its exact classification.
+  legacyEnvKeyAttribution: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).legacyEnvKeyAttribution,
   // The real class: `acpAgent` narrows on it with `instanceof`, so a stand-in
   // would make the goal get/clear fallbacks untestable.
   GoalPersistenceUnavailableError: (
@@ -385,6 +391,40 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
         uiGroup: 'third-party',
       };
     }
+    if (id === 'kimi') {
+      return {
+        id: 'kimi',
+        label: 'Kimi',
+        description: 'Kimi access',
+        protocol: 'openai',
+        baseUrl: [
+          {
+            id: 'coding-plan',
+            label: 'Coding Plan',
+            url: 'https://api.kimi.com/coding/v1',
+            models: [{ id: 'k3-256k' }],
+          },
+          {
+            id: 'api-international',
+            label: 'API Key (International)',
+            url: 'https://api.moonshot.ai/v1',
+            models: [{ id: 'kimi-k3' }],
+          },
+        ],
+        envKey: (_protocol: string, baseUrl: string) =>
+          baseUrl === 'https://api.kimi.com/coding/v1'
+            ? 'KIMI_CODE_API_KEY'
+            : 'MOONSHOT_API_KEY',
+        models: [{ id: 'k3-256k' }, { id: 'kimi-k3' }],
+        modelsEditable: true,
+        mergeModelsByIdentity: true,
+        modelNamePrefix: 'Kimi',
+        ownsModel: (model: { envKey?: string }) =>
+          model.envKey === 'KIMI_CODE_API_KEY' ||
+          model.envKey === 'MOONSHOT_API_KEY',
+        uiGroup: 'third-party',
+      };
+    }
     if (id === 'custom-openai-compatible') {
       return {
         id: 'custom-openai-compatible',
@@ -401,6 +441,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
         models: undefined,
         modelsEditable: true,
         modelNamePrefix: '',
+        mergeModelsByIdentity: true,
         uiGroup: 'third-party',
         ownsModel: (model: { envKey?: string }) =>
           typeof model.envKey === 'string' &&
@@ -410,9 +451,45 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     return undefined;
   }),
   getDefaultBaseUrlForProtocol: vi.fn(() => 'https://api.openai.com/v1'),
+  normalizeBaseUrlForMatching: vi.fn((baseUrl: string | undefined) => {
+    if (baseUrl === undefined) return '';
+    let end = baseUrl.length;
+    while (end > 0 && baseUrl.charCodeAt(end - 1) === 47) {
+      end--;
+    }
+    return baseUrl.slice(0, end);
+  }),
   getDefaultModelIds: vi.fn(
-    (provider: { models?: Array<{ id: string }> }) =>
-      provider.models?.map((model) => model.id) ?? [],
+    (
+      provider: {
+        baseUrl?:
+          | string
+          | Array<{ url: string; models?: Array<{ id: string }> }>;
+        models?: Array<{ id: string }>;
+      },
+      baseUrl?: string,
+    ) =>
+      (Array.isArray(provider.baseUrl)
+        ? provider.baseUrl
+            .find((option) => option.url === baseUrl)
+            ?.models?.map((model) => model.id)
+        : undefined) ??
+      provider.models?.map((model) => model.id) ??
+      [],
+  ),
+  resolveProviderModels: vi.fn(
+    (
+      provider: {
+        baseUrl?:
+          | string
+          | Array<{ url: string; models?: Array<{ id: string }> }>;
+        models?: Array<{ id: string }>;
+      },
+      baseUrl?: string,
+    ) =>
+      (Array.isArray(provider.baseUrl)
+        ? provider.baseUrl.find((option) => option.url === baseUrl)?.models
+        : undefined) ?? provider.models,
   ),
   resolveBaseUrl: vi.fn(
     (
@@ -422,7 +499,11 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
       typeof provider.baseUrl === 'string'
         ? provider.baseUrl
         : Array.isArray(provider.baseUrl)
-          ? (provider.baseUrl[0]?.url ?? selectedBaseUrl ?? '')
+          ? (provider.baseUrl.find((option) => option.url === selectedBaseUrl)
+              ?.url ??
+            provider.baseUrl[0]?.url ??
+            selectedBaseUrl ??
+            '')
           : (selectedBaseUrl ?? ''),
   ),
   resolveOwnsModel: vi.fn(
@@ -442,6 +523,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
         ownsModel?: (model: { envKey?: string }) => boolean;
       },
       modelProviders: Record<string, unknown> | undefined,
+      selectedProtocol?: string,
     ) => {
       const ownsModel =
         provider.ownsModel ??
@@ -449,8 +531,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
           ? (model: { envKey?: string }) => model.envKey === provider.envKey
           : undefined);
       if (!ownsModel || !modelProviders) return undefined;
-      const protocols =
-        provider.protocolOptions && provider.protocolOptions.length > 0
+      const protocols = selectedProtocol
+        ? [selectedProtocol]
+        : provider.protocolOptions && provider.protocolOptions.length > 0
           ? provider.protocolOptions
           : [provider.protocol];
       for (const protocol of protocols) {
@@ -924,6 +1007,7 @@ import type { Config, GoalSnapshotV2 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
 import type { CliArgs } from '../config/config.js';
 import {
+  ALL_PROVIDERS,
   AuthType,
   BranchPointInvalidError,
   SessionEndReason,
@@ -12647,6 +12731,655 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('qwen/providers/list includes endpoint-specific model lists', async () => {
+    const providers = ALL_PROVIDERS as unknown as Array<
+      Record<string, unknown>
+    >;
+    const settings = makeSessionSettings();
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    try {
+      providers.push({
+        id: 'kimi',
+        label: 'Kimi',
+        description: 'Kimi access',
+        protocol: 'openai',
+        baseUrl: [
+          {
+            id: 'coding-plan',
+            label: 'Coding Plan',
+            url: 'https://api.kimi.com/coding/v1',
+            models: [{ id: 'k3-256k' }],
+          },
+          {
+            id: 'api-international',
+            label: 'API Key (International)',
+            url: 'https://api.moonshot.ai/v1',
+            models: [{ id: 'kimi-k3' }],
+          },
+        ],
+        envKey: (_protocol: string, baseUrl: string) =>
+          baseUrl === 'https://api.kimi.com/coding/v1'
+            ? 'KIMI_CODE_API_KEY'
+            : 'MOONSHOT_API_KEY',
+        models: [{ id: 'kimi-fallback' }],
+        modelsEditable: true,
+        modelNamePrefix: 'Kimi',
+        uiGroup: 'third-party',
+      });
+
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+
+      await expect(agent.extMethod('qwen/providers/list', {})).resolves.toEqual(
+        {
+          providers: expect.arrayContaining([
+            expect.objectContaining({
+              id: 'kimi',
+              defaultModelIds: ['k3-256k'],
+              models: [{ id: 'k3-256k' }],
+              baseUrl: [
+                expect.objectContaining({
+                  id: 'coding-plan',
+                  envKey: 'KIMI_CODE_API_KEY',
+                  models: [{ id: 'k3-256k' }],
+                }),
+                expect.objectContaining({
+                  id: 'api-international',
+                  envKey: 'MOONSHOT_API_KEY',
+                  models: [{ id: 'kimi-k3' }],
+                }),
+              ],
+            }),
+          ]),
+        },
+      );
+    } finally {
+      providers.pop();
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('qwen/providers/connect resolves endpoint-specific default models when modelIds is omitted', async () => {
+    const baseSettings = makeSessionSettings();
+    const settings = {
+      ...baseSettings,
+      merged: {
+        ...baseSettings.merged,
+        modelProviders: {
+          openai: [
+            {
+              id: 'my-kimi-custom',
+              name: '[Kimi API] my-kimi-custom',
+              baseUrl: 'https://api.moonshot.ai/v1',
+              envKey: 'MOONSHOT_API_KEY',
+              generationConfig: { contextWindowSize: 12345 },
+            },
+          ],
+        },
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'kimi',
+        baseUrl: 'https://api.moonshot.ai/v1',
+        apiKey: 'sk-test',
+      }),
+    ).resolves.toMatchObject({
+      success: true,
+      providerId: 'kimi',
+      modelId: 'kimi-k3',
+    });
+
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'kimi' }),
+      expect.objectContaining({
+        baseUrl: 'https://api.moonshot.ai/v1',
+        modelIds: ['kimi-k3'],
+        preserveModels: [
+          expect.objectContaining({
+            id: 'my-kimi-custom',
+            generationConfig: { contextWindowSize: 12345 },
+          }),
+        ],
+      }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/providers/connect preserves rich same-endpoint custom models when modelIds is explicit and drops them when deselected', async () => {
+    const baseSettings = makeSessionSettings();
+    const savedCustom = {
+      id: 'my-kimi-custom',
+      name: '[Kimi API] my-kimi-custom',
+      baseUrl: 'https://api.moonshot.ai/v1',
+      envKey: 'MOONSHOT_API_KEY',
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    const settings = {
+      ...baseSettings,
+      merged: {
+        ...baseSettings.merged,
+        modelProviders: { openai: [savedCustom] },
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'kimi',
+        baseUrl: 'https://api.moonshot.ai/v1',
+        apiKey: 'sk-test',
+        modelIds: ['kimi-k3', 'my-kimi-custom'],
+      }),
+    ).resolves.toMatchObject({ success: true, providerId: 'kimi' });
+
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'kimi' }),
+      expect.objectContaining({
+        modelIds: ['kimi-k3', 'my-kimi-custom'],
+        preserveModels: [savedCustom],
+      }),
+    );
+
+    vi.mocked(buildInstallPlan).mockClear();
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'kimi',
+        baseUrl: 'https://api.moonshot.ai/v1',
+        apiKey: 'sk-test',
+        modelIds: ['kimi-k3'],
+      }),
+    ).resolves.toMatchObject({ success: true, providerId: 'kimi' });
+    // Deselection must win: the custom model the user removed from the
+    // field is not preserved, so the install plan can delete it instead
+    // of resurrecting it on every reconnect.
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'kimi' }),
+      expect.not.objectContaining({ preserveModels: expect.anything() }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/providers/connect treats null modelIds like an omitted key', async () => {
+    // readStringArray collapses JSON `null` to [] exactly like `undefined`
+    // (the request resolves endpoint defaults either way), so the preserve
+    // decision must too: with `null` a saved custom model used to be treated
+    // as deselected and deleted by the install plan, while the identical
+    // request with the key omitted preserved it (R38-1).
+    const baseSettings = makeSessionSettings();
+    const savedCustom = {
+      id: 'my-kimi-custom',
+      name: '[Kimi API] my-kimi-custom',
+      baseUrl: 'https://api.moonshot.ai/v1',
+      envKey: 'MOONSHOT_API_KEY',
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    const settings = {
+      ...baseSettings,
+      merged: {
+        ...baseSettings.merged,
+        modelProviders: { openai: [savedCustom] },
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'kimi',
+        baseUrl: 'https://api.moonshot.ai/v1',
+        apiKey: 'sk-test',
+        modelIds: null,
+      }),
+    ).resolves.toMatchObject({ success: true, providerId: 'kimi' });
+
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'kimi' }),
+      expect.objectContaining({
+        modelIds: ['kimi-k3'],
+        preserveModels: [savedCustom],
+      }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/providers/connect treats empty and whitespace-only modelIds like an omitted key', async () => {
+    // readStringArray collapses `[]` and `[" "]` to [] exactly like
+    // `null`/`undefined` (the request resolves endpoint defaults either
+    // way), so the preserve decision must too: with `[]` a saved custom
+    // model used to be treated as deselected and deleted by the install
+    // plan, while the identical request with the key omitted preserved it
+    // (R39-1).
+    const baseSettings = makeSessionSettings();
+    const savedCustom = {
+      id: 'my-kimi-custom',
+      name: '[Kimi API] my-kimi-custom',
+      baseUrl: 'https://api.moonshot.ai/v1',
+      envKey: 'MOONSHOT_API_KEY',
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    const settings = {
+      ...baseSettings,
+      merged: {
+        ...baseSettings.merged,
+        modelProviders: { openai: [savedCustom] },
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    for (const modelIds of [[], [' '], ['   ']]) {
+      vi.mocked(buildInstallPlan).mockClear();
+      await expect(
+        agent.extMethod('qwen/providers/connect', {
+          providerId: 'kimi',
+          baseUrl: 'https://api.moonshot.ai/v1',
+          apiKey: 'sk-test',
+          modelIds,
+        }),
+      ).resolves.toMatchObject({ success: true, providerId: 'kimi' });
+
+      expect(buildInstallPlan).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'kimi' }),
+        expect.objectContaining({
+          modelIds: ['kimi-k3'],
+          preserveModels: [savedCustom],
+        }),
+      );
+    }
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it("qwen/providers/connect leaves a sibling endpoint's baseUrl-less legacy model out of an explicit selection", async () => {
+    // A baseUrl-less legacy entry carries no endpoint of its own; ownership
+    // is decided by its stored env key in buildInstallPlan. The ACP surface
+    // must therefore not fold it into preserveModels (stamped with the
+    // selected endpoint) when an explicit selection at a sibling endpoint
+    // does not request it — that turned the entry into a "migration" and let
+    // the connect rewrite it with the sibling's baseUrl (R38-3).
+    const customEnvKey = (protocol: string, baseUrl: string) =>
+      `QWEN_CUSTOM_API_KEY_${protocol}_${baseUrl.replace(/[^A-Za-z0-9]/g, '_')}`;
+    const aBaseUrl = 'https://a.example/v1';
+    const bBaseUrl = 'https://b.example/v1';
+    const legacyModel = {
+      id: 'legacy-model',
+      name: 'legacy-model',
+      envKey: 'QWEN_CUSTOM_API_KEY_OPENAI',
+      generationConfig: { contextWindowSize: 54321 },
+    };
+    const baseSettings = makeSessionSettings();
+    const settings = {
+      ...baseSettings,
+      merged: {
+        ...baseSettings.merged,
+        modelProviders: {
+          openai: [
+            {
+              id: 'a-model',
+              name: 'a-model',
+              baseUrl: aBaseUrl,
+              envKey: customEnvKey('openai', aBaseUrl),
+            },
+            legacyModel,
+          ],
+        },
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'custom-openai-compatible',
+        protocol: 'openai',
+        baseUrl: bBaseUrl,
+        apiKey: 'sk-b',
+        modelIds: ['b-model'],
+      }),
+    ).resolves.toMatchObject({
+      success: true,
+      providerId: 'custom-openai-compatible',
+    });
+
+    // The legacy entry is neither requested nor stamped into preserveModels;
+    // buildInstallPlan's endpoint-key-scoped ownership leaves it untouched.
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'custom-openai-compatible' }),
+      expect.not.objectContaining({ preserveModels: expect.anything() }),
+    );
+
+    // Explicitly requesting the legacy id at the sibling endpoint migrates
+    // it: it is preserved stamped with the selected endpoint, and its envKey
+    // follows the stamp so the migrated entry points at the endpoint's own
+    // key (R39-6).
+    vi.mocked(buildInstallPlan).mockClear();
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'custom-openai-compatible',
+        protocol: 'openai',
+        baseUrl: bBaseUrl,
+        apiKey: 'sk-b',
+        modelIds: ['legacy-model'],
+      }),
+    ).resolves.toMatchObject({
+      success: true,
+      providerId: 'custom-openai-compatible',
+    });
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'custom-openai-compatible' }),
+      expect.objectContaining({
+        preserveModels: [
+          {
+            ...legacyModel,
+            baseUrl: bBaseUrl,
+            envKey: customEnvKey('openai', bBaseUrl),
+          },
+        ],
+      }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/providers/connect collapses a same-id legacy+stamped pair on an implicit reconnect (R39-7)', async () => {
+    // A same-id baseUrl-less legacy entry beside its stamped twin (a state
+    // main's identity-only merge could create) must not both survive an
+    // implicit reconnect: the pair would persist as two permanent duplicate
+    // (id, baseUrl) entries. The stamped twin wins; the legacy copy is left
+    // to buildInstallPlan's ownership, which removes it.
+    const moonshotBaseUrl = 'https://api.moonshot.ai/v1';
+    const legacyModel = {
+      id: 'my-custom',
+      name: 'my-custom',
+      envKey: 'MOONSHOT_API_KEY',
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    const stampedModel = {
+      id: 'my-custom',
+      name: '[Kimi API] my-custom',
+      baseUrl: moonshotBaseUrl,
+      envKey: 'MOONSHOT_API_KEY',
+      generationConfig: { contextWindowSize: 67890 },
+    };
+    const baseSettings = makeSessionSettings();
+    const settings = {
+      ...baseSettings,
+      merged: {
+        ...baseSettings.merged,
+        modelProviders: { openai: [legacyModel, stampedModel] },
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'kimi',
+        baseUrl: moonshotBaseUrl,
+        apiKey: 'sk-test',
+      }),
+    ).resolves.toMatchObject({ success: true, providerId: 'kimi' });
+
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'kimi' }),
+      expect.objectContaining({
+        preserveModels: [stampedModel],
+      }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/providers/connect leaves a sibling-attributable legacy entry out of an implicit reconnect (R40-1)', async () => {
+    // A baseUrl-less legacy entry whose env key names the coding endpoint
+    // belongs there. An implicit reconnect at the API endpoint must not stamp
+    // it into preserveModels with the API endpoint's baseUrl/envKey (that
+    // relocated and re-keyed it), nor list its id in migratedLegacyModelIds.
+    const moonshotBaseUrl = 'https://api.moonshot.ai/v1';
+    const legacyKimiCode = {
+      id: 'k3-legacy',
+      name: '[Kimi Code] k3-legacy',
+      envKey: 'KIMI_CODE_API_KEY',
+      generationConfig: { contextWindowSize: 11111 },
+    };
+    const stampedAtInternational = {
+      id: 'my-api-custom',
+      name: '[Kimi API] my-api-custom',
+      baseUrl: moonshotBaseUrl,
+      envKey: 'MOONSHOT_API_KEY',
+      generationConfig: { contextWindowSize: 22222 },
+    };
+    const baseSettings = makeSessionSettings();
+    const settings = {
+      ...baseSettings,
+      merged: {
+        ...baseSettings.merged,
+        modelProviders: { openai: [legacyKimiCode, stampedAtInternational] },
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'kimi',
+        baseUrl: moonshotBaseUrl,
+        apiKey: 'sk-test',
+      }),
+    ).resolves.toMatchObject({ success: true, providerId: 'kimi' });
+
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'kimi' }),
+      expect.objectContaining({
+        preserveModels: [stampedAtInternational],
+      }),
+    );
+    // The sibling-attributable legacy id is not claimed by id-collision.
+    expect(buildInstallPlan).not.toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'kimi' }),
+      expect.objectContaining({
+        migratedLegacyModelIds: expect.arrayContaining(['k3-legacy']),
+      }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/providers/connect preserves a same-id proxy model for a non-merge provider', async () => {
+    const baseSettings = makeSessionSettings();
+    const proxyModel = {
+      id: 'deepseek-chat',
+      name: '[DeepSeek] deepseek-chat',
+      baseUrl: 'https://corp-proxy.example/v1',
+      envKey: 'DEEPSEEK_API_KEY',
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    const legacyCustom = {
+      id: 'legacy-custom',
+      name: '[DeepSeek] legacy-custom',
+      envKey: 'DEEPSEEK_API_KEY',
+      generationConfig: { contextWindowSize: 54321 },
+    };
+    const settings = {
+      ...baseSettings,
+      merged: {
+        ...baseSettings.merged,
+        modelProviders: {
+          openai: [
+            {
+              id: 'deepseek-chat',
+              name: '[DeepSeek] deepseek-chat',
+              baseUrl: 'https://api.deepseek.com',
+              envKey: 'DEEPSEEK_API_KEY',
+            },
+            proxyModel,
+            legacyCustom,
+          ],
+        },
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'deepseek',
+        apiKey: 'sk-test',
+        modelIds: ['deepseek-chat', 'legacy-custom'],
+      }),
+    ).resolves.toMatchObject({ success: true, providerId: 'deepseek' });
+
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'deepseek' }),
+      expect.objectContaining({
+        modelIds: ['deepseek-chat', 'legacy-custom'],
+        preserveModels: [
+          proxyModel,
+          {
+            ...legacyCustom,
+            baseUrl: 'https://api.deepseek.com',
+          },
+        ],
+      }),
+    );
+
+    vi.mocked(buildInstallPlan).mockClear();
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'deepseek',
+        apiKey: 'sk-test',
+      }),
+    ).resolves.toMatchObject({ success: true, providerId: 'deepseek' });
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'deepseek' }),
+      expect.objectContaining({
+        preserveModels: [
+          proxyModel,
+          {
+            ...legacyCustom,
+            baseUrl: 'https://api.deepseek.com',
+          },
+        ],
+      }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/providers/connect reuses the stored apiKey resolved through the endpoint env key', async () => {
+    const settings = {
+      ...makeSessionSettings(),
+      merged: {
+        mcpServers: {},
+        env: { MOONSHOT_API_KEY: 'sk-stored-intl' },
+        modelProviders: {},
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    // The list response carries only hasApiKey, so the client reconnects
+    // without apiKey; the stored key must be found via the REQUESTED
+    // endpoint's env key, not the preset's first/default endpoint.
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'kimi',
+        baseUrl: 'https://api.moonshot.ai/v1',
+        modelIds: ['kimi-k3'],
+      }),
+    ).resolves.toMatchObject({ success: true, providerId: 'kimi' });
+
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'kimi' }),
+      expect.objectContaining({
+        baseUrl: 'https://api.moonshot.ai/v1',
+        apiKey: 'sk-stored-intl',
+        modelIds: ['kimi-k3'],
+      }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('qwen/providers/connect returns preserved model when adapter getValue returns a non-empty string', async () => {
     vi.mocked(createLoadedSettingsAdapter).mockImplementationOnce(
       (settings: unknown) => {
@@ -12735,6 +13468,289 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
+  });
+
+  it('qwen/providers/list scopes existing model IDs to the restored endpoint', async () => {
+    const providers = ALL_PROVIDERS as unknown as Array<
+      Record<string, unknown>
+    >;
+    const settings = {
+      ...makeSessionSettings(),
+      merged: {
+        mcpServers: {},
+        env: { FIRST_API_KEY: 'sk-first' },
+        modelProviders: {
+          openai: [
+            {
+              id: 'first-model',
+              baseUrl: 'https://first.example/v1',
+              envKey: 'FIRST_API_KEY',
+            },
+            {
+              id: 'custom-first',
+              baseUrl: 'https://first.example/v1/',
+              envKey: 'FIRST_API_KEY',
+            },
+            {
+              id: 'legacy-without-base-url',
+              envKey: 'FIRST_API_KEY',
+            },
+            {
+              id: 'custom-second',
+              baseUrl: 'https://second.example/v1',
+              envKey: 'SECOND_API_KEY',
+            },
+            {
+              id: 'wrong-url-shared-env',
+              baseUrl: 'https://second.example/v1',
+              envKey: 'FIRST_API_KEY',
+            },
+          ],
+        },
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    try {
+      providers.push({
+        id: 'multi-endpoint',
+        label: 'Multi Endpoint',
+        description: 'Multi endpoint access',
+        protocol: 'openai',
+        baseUrl: [
+          {
+            id: 'first',
+            label: 'First',
+            url: 'https://first.example/v1',
+            models: [{ id: 'first-model' }],
+          },
+          {
+            id: 'second',
+            label: 'Second',
+            url: 'https://second.example/v1',
+            models: [{ id: 'second-model' }],
+          },
+        ],
+        envKey: (_protocol: string, baseUrl: string) =>
+          baseUrl === 'https://first.example/v1'
+            ? 'FIRST_API_KEY'
+            : 'SECOND_API_KEY',
+        models: [{ id: 'first-model' }, { id: 'second-model' }],
+        modelsEditable: true,
+        mergeModelsByIdentity: true,
+        modelNamePrefix: 'Multi',
+        ownsModel: (model: { envKey?: string }) =>
+          model.envKey === 'FIRST_API_KEY' || model.envKey === 'SECOND_API_KEY',
+        uiGroup: 'third-party',
+      });
+
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+
+      await expect(agent.extMethod('qwen/providers/list', {})).resolves.toEqual(
+        {
+          providers: [
+            expect.objectContaining({ id: 'deepseek' }),
+            expect.objectContaining({
+              id: 'multi-endpoint',
+              existingConfig: {
+                protocol: 'openai',
+                baseUrl: 'https://first.example/v1',
+                hasApiKey: true,
+                modelIds: ['first-model', 'custom-first'],
+                modelIdsByBaseUrl: {
+                  'https://first.example/v1': ['first-model', 'custom-first'],
+                  'https://second.example/v1': [
+                    'custom-second',
+                    'wrong-url-shared-env',
+                  ],
+                },
+              },
+            }),
+          ],
+        },
+      );
+    } finally {
+      providers.pop();
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('qwen/providers/list sanitizes userinfo out of per-endpoint map keys', async () => {
+    const providers = ALL_PROVIDERS as unknown as Array<
+      Record<string, unknown>
+    >;
+    const settings = {
+      ...makeSessionSettings(),
+      merged: {
+        mcpServers: {},
+        env: { CUSTOM_FF_KEY: 'sk-custom' },
+        modelProviders: {
+          openai: [
+            {
+              id: 'proxy-model',
+              baseUrl: 'https://user:sk-tunnel@proxy.corp.example/v1',
+              envKey: 'CUSTOM_FF_KEY',
+            },
+          ],
+        },
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    try {
+      providers.push({
+        id: 'custom-freeform',
+        label: 'Custom Free Form',
+        description: 'Free form access',
+        protocol: 'openai',
+        protocolOptions: ['openai', 'anthropic'],
+        baseUrl: undefined,
+        envKey: (_protocol: string, _baseUrl: string) => 'CUSTOM_FF_KEY',
+        modelsEditable: true,
+        mergeModelsByIdentity: true,
+        modelNamePrefix: '',
+        ownsModel: (model: { envKey?: string }) =>
+          model.envKey === 'CUSTOM_FF_KEY',
+        uiGroup: 'custom',
+      });
+
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+
+      await expect(agent.extMethod('qwen/providers/list', {})).resolves.toEqual(
+        {
+          providers: [
+            expect.objectContaining({ id: 'deepseek' }),
+            expect.objectContaining({
+              id: 'custom-freeform',
+              existingConfig: {
+                protocol: 'openai',
+                baseUrl: 'https://proxy.corp.example/v1',
+                hasApiKey: true,
+                modelIds: ['proxy-model'],
+                // Both per-endpoint views must key by the sanitized URL,
+                // matching the sibling baseUrl fields of the same payload —
+                // the saved basic-auth userinfo never rides the wire.
+                modelIdsByBaseUrl: {
+                  'https://proxy.corp.example/v1': ['proxy-model'],
+                },
+                modelIdsByBaseUrlByProtocol: {
+                  openai: {
+                    'https://proxy.corp.example/v1': ['proxy-model'],
+                  },
+                },
+                baseUrlByProtocol: {
+                  openai: 'https://proxy.corp.example/v1',
+                },
+              },
+            }),
+          ],
+        },
+      );
+
+      const listed = await agent.extMethod('qwen/providers/list', {});
+      expect(JSON.stringify(listed)).not.toContain('sk-tunnel');
+      expect(JSON.stringify(listed)).not.toContain('user:sk-tunnel');
+    } finally {
+      providers.pop();
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('qwen/providers/list omits baseUrlByProtocol for a baseUrl-less legacy bucket (R39-4)', async () => {
+    // A protocol bucket whose saved models predate baseUrl stamping has no
+    // restorable endpoint. Emitting '' for it made the desktop client treat
+    // the protocol as "connected": flipping the protocol Select blanked the
+    // user's typed endpoint and submitting installed the legacy models under
+    // the protocol default URL. The key must be omitted — the same guard the
+    // CLI producer (getProtocolSetups) applies.
+    const providers = ALL_PROVIDERS as unknown as Array<
+      Record<string, unknown>
+    >;
+    const settings = {
+      ...makeSessionSettings(),
+      merged: {
+        mcpServers: {},
+        env: { CUSTOM_FF_KEY: 'sk-custom' },
+        modelProviders: {
+          openai: [
+            {
+              id: 'proxy-model',
+              baseUrl: 'https://proxy.corp.example/v1',
+              envKey: 'CUSTOM_FF_KEY',
+            },
+          ],
+          anthropic: [
+            {
+              id: 'legacy-model',
+              envKey: 'CUSTOM_FF_KEY',
+            },
+          ],
+        },
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    try {
+      providers.push({
+        id: 'custom-freeform',
+        label: 'Custom Free Form',
+        description: 'Free form access',
+        protocol: 'openai',
+        protocolOptions: ['openai', 'anthropic'],
+        baseUrl: undefined,
+        envKey: (_protocol: string, _baseUrl: string) => 'CUSTOM_FF_KEY',
+        modelsEditable: true,
+        mergeModelsByIdentity: true,
+        modelNamePrefix: '',
+        ownsModel: (model: { envKey?: string }) =>
+          model.envKey === 'CUSTOM_FF_KEY',
+        uiGroup: 'custom',
+      });
+
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+
+      const listed = (await agent.extMethod('qwen/providers/list', {})) as {
+        providers: Array<{
+          id: string;
+          existingConfig?: {
+            baseUrlByProtocol?: Record<string, string>;
+          };
+        }>;
+      };
+      const freeform = listed.providers.find(
+        (provider) => provider.id === 'custom-freeform',
+      );
+      expect(freeform).toBeDefined();
+      // The stamped openai bucket keeps its endpoint; the baseUrl-less
+      // anthropic bucket is absent from the map entirely (no '' entry).
+      expect(freeform?.existingConfig?.baseUrlByProtocol).toEqual({
+        openai: 'https://proxy.corp.example/v1',
+      });
+    } finally {
+      providers.pop();
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
   });
 
   it('qwen/skills/install rejects http and non-GitHub source URLs', async () => {
@@ -13267,6 +14283,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect.objectContaining({
         apiKey: 'sk-second',
         baseUrl: secondBaseUrl,
+        preserveModels: [
+          expect.objectContaining({
+            id: 'custom-model',
+            baseUrl: secondBaseUrl,
+          }),
+        ],
       }),
     );
     expect(buildInstallPlan).not.toHaveBeenCalledWith(

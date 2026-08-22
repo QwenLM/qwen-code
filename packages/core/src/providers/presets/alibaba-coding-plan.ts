@@ -91,6 +91,9 @@ export const codingPlanProvider: ProviderConfig = {
     typeof model.baseUrl === 'string' &&
     (model.baseUrl === CODING_PLAN_CHINA_BASE_URL ||
       model.baseUrl === CODING_PLAN_GLOBAL_BASE_URL),
+  // Region endpoints share one auth type and env key. Scope replacement and
+  // metadata by model identity so resubmitting one region preserves siblings.
+  mergeModelsByIdentity: true,
   uiGroup: 'alibaba',
   uiLabels: { flowTitle: 'Alibaba ModelStudio', baseUrlStepTitle: 'Region' },
 };

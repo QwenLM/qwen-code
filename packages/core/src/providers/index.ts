@@ -26,11 +26,14 @@ export {
   findExistingProviderModels,
   getDefaultBaseUrlForProtocol,
   getDefaultModelIds,
+  legacyEnvKeyAttribution,
+  normalizeBaseUrlForMatching,
   providerMatchesCredentials,
   PROVIDER_METADATA_NS,
   resolveBaseUrl,
   resolveMetadataKey,
   resolveOwnsModel,
+  resolveProviderModels,
   shouldShowStep,
 } from './provider-config.js';
 
@@ -46,15 +49,19 @@ export {
   findProviderByCredentials,
   findProviderById,
   generateCustomEnvKey,
+  legacyCustomEnvKey,
+  legacyCustomEnvKey6Hex,
   getAllProviderBaseUrls,
   grokProvider,
   idealabProvider,
+  kimiProvider,
   minimaxProvider,
   modelscopeProvider,
   openRouterProvider,
   requestyProvider,
   THIRD_PARTY_PROVIDERS,
   tokenPlanProvider,
+  xiaomiMimoProvider,
   zaiProvider,
 } from './all-providers.js';
 
@@ -72,10 +79,19 @@ export {
 } from './presets/alibaba-token-plan.js';
 export { GROK_BASE_URL, GROK_ENV_KEY } from './presets/grok.js';
 export {
+  KIMI_API_ENV_KEY,
+  KIMI_CODE_BASE_URL,
+  KIMI_CODE_ENV_KEY,
+} from './presets/kimi.js';
+export {
   OPENROUTER_BASE_URL,
   OPENROUTER_ENV_KEY,
 } from './presets/openrouter.js';
 export { REQUESTY_BASE_URL, REQUESTY_ENV_KEY } from './presets/requesty.js';
+export {
+  XIAOMI_MIMO_ENV_KEY,
+  XIAOMI_MIMO_TOKEN_ENV_KEY,
+} from './presets/xiaomi-mimo.js';
 
 // Install logic
 export {

@@ -14,7 +14,7 @@ import { theme } from '../semantic-colors.js';
 import { ICON } from '../constants.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { t } from '../../i18n/index.js';
-import { AuthType } from '@qwen-code/qwen-code-core';
+import { AuthType, resolveProviderModels } from '@qwen-code/qwen-code-core';
 import type {
   ProviderConfig,
   BaseUrlOption,
@@ -263,20 +263,24 @@ function ModelIdsStep({
   config: ProviderConfig;
   flow: ProviderSetupFlow;
 }): React.JSX.Element {
-  const defaultIds = config.models?.map((m) => m.id).join(', ') ?? '';
-  const hasSelectableModels = (config.models?.length ?? 0) > 0;
+  const providerModels = useMemo(
+    () => resolveProviderModels(config, flow.state.baseUrl),
+    [config, flow.state.baseUrl],
+  );
+  const defaultIds = providerModels?.map((m) => m.id).join(', ') ?? '';
+  const hasSelectableModels = (providerModels?.length ?? 0) > 0;
   const selectedModelIds = useMemo(
     () => normalizeModelIds(flow.state.modelIds),
     [flow.state.modelIds],
   );
   const modelOptions = useMemo<ModelOption[]>(
     () =>
-      config.models?.map((model) => ({
+      providerModels?.map((model) => ({
         key: model.id,
         value: model.id,
         label: formatModelOptionLabel(model),
       })) ?? [],
-    [config.models],
+    [providerModels],
   );
   const recommendedModelIds = useMemo(
     () => new Set(modelOptions.map((item) => item.key)),
@@ -761,12 +765,18 @@ export function ProviderSetupSteps({
       const items = PROTOCOL_ITEMS.filter((p) =>
         protocolOpts.includes(p.value as AuthType),
       );
+      // Highlight the restored protocol for providers whose saved setup
+      // seeded one (custom provider); fresh flows start on the first item.
+      const initialIndex = Math.max(
+        0,
+        items.findIndex((p) => p.value === flow.state.protocol),
+      );
       return (
         <>
           <Box marginTop={1}>
             <DescriptiveRadioButtonSelect
               items={items}
-              initialIndex={0}
+              initialIndex={initialIndex}
               onSelect={flow.selectProtocol}
               itemGap={1}
             />
