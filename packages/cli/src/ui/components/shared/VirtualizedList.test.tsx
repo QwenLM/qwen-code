@@ -21,6 +21,7 @@ import {
   type VirtualizedListRef,
   SCROLL_TO_ITEM_END,
 } from './VirtualizedList.js';
+import { ScrollableList, type ScrollableListRef } from './ScrollableList.js';
 import { HistoryItemDisplay } from '../HistoryItemDisplay.js';
 import { buildThoughtHeadIdMap } from '../../utils/historyUtils.js';
 import { SettingsContext } from '../../contexts/SettingsContext.js';
@@ -483,6 +484,61 @@ describe('<VirtualizedList />', () => {
     });
     rerender(<Wrapper />);
     expect(listRef!.getScrollIndex()).toBe(12);
+  });
+
+  it('getScrollAnchor returns the committed index and within-item offset', () => {
+    type RefShape = VirtualizedListRef<Item>;
+    let listRef: RefShape | null = null;
+
+    // Item 1 is a 5-row block; every other item is a single row. Offsets are
+    // therefore item0=[0,1), item1=[1,6), item2=[6,7)… so a scrollTop partway
+    // through item 1 must report a NON-ZERO within-item offset.
+    const tallRenderItem = ({ item }: { item: Item }) => {
+      if (item.id === 1) {
+        return (
+          <Box flexDirection="column">
+            {[0, 1, 2, 3, 4].map((row) => (
+              <Text key={row}>tall-row-{row}</Text>
+            ))}
+          </Box>
+        );
+      }
+      return <Text>{item.label}</Text>;
+    };
+    const tallEstimate = (index: number) => (index === 1 ? 5 : 1);
+
+    function Wrapper() {
+      const ref = useRef<RefShape>(null);
+      if (ref.current) listRef = ref.current;
+      return (
+        <VirtualizedList<Item>
+          ref={ref}
+          data={makeItems(20)}
+          renderItem={tallRenderItem}
+          estimatedItemHeight={tallEstimate}
+          keyExtractor={keyExtractor}
+          initialScrollIndex={0}
+          containerHeight={10}
+          width={40}
+          showScrollbar={false}
+        />
+      );
+    }
+
+    const { rerender } = render(<Wrapper />);
+    rerender(<Wrapper />);
+    expect(listRef).not.toBeNull();
+
+    // Scroll partway into the tall item 1 (rows 1..5); scrollTop 3 is 2 rows
+    // past item 1's top.
+    act(() => {
+      listRef!.scrollBy(3);
+    });
+    rerender(<Wrapper />);
+    expect(listRef!.getScrollState().scrollTop).toBe(3);
+    const anchor = listRef!.getScrollAnchor();
+    expect(anchor.index).toBe(1);
+    expect(anchor.offset).toBe(2);
   });
 
   it('survives a renderItem that throws (isolates per-item errors)', () => {
@@ -1382,5 +1438,57 @@ describe('<VirtualizedList /> VP collapsed thought groups', () => {
     expect((harness.lastFrame() ?? '').includes('c1 thought line 0')).toBe(
       true,
     );
+  });
+});
+
+describe('<ScrollableList /> getScrollAnchor pass-through', () => {
+  it('forwards getScrollAnchor to the inner VirtualizedList anchor', () => {
+    type RefShape = ScrollableListRef<Item>;
+    let listRef: RefShape | null = null;
+    const tallRenderItem = ({ item }: { item: Item }) => {
+      if (item.id === 1) {
+        return (
+          <Box flexDirection="column">
+            {[0, 1, 2, 3, 4].map((row) => (
+              <Text key={row}>tall-row-{row}</Text>
+            ))}
+          </Box>
+        );
+      }
+      return <Text>{item.label}</Text>;
+    };
+    const tallEstimate = (index: number) => (index === 1 ? 5 : 1);
+    function Wrapper() {
+      const ref = useRef<RefShape>(null);
+      if (ref.current) listRef = ref.current;
+      return (
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <ScrollableList<Item>
+            ref={ref}
+            hasFocus={false}
+            data={makeItems(20)}
+            renderItem={tallRenderItem}
+            estimatedItemHeight={tallEstimate}
+            keyExtractor={keyExtractor}
+            initialScrollIndex={0}
+            containerHeight={10}
+            width={40}
+            showScrollbar={false}
+          />
+        </KeypressProvider>
+      );
+    }
+    const { rerender } = render(<Wrapper />);
+    rerender(<Wrapper />);
+    expect(listRef).not.toBeNull();
+    act(() => {
+      listRef!.scrollBy(3);
+    });
+    rerender(<Wrapper />);
+    // Same committed anchor as the underlying VirtualizedList: partway into
+    // the 5-row item 1 (scrollTop 3 → index 1, offset 2).
+    const anchor = listRef!.getScrollAnchor();
+    expect(anchor.index).toBe(1);
+    expect(anchor.offset).toBe(2);
   });
 });

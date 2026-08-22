@@ -70,6 +70,16 @@ interface ThinkMessageProps {
   contentWidth: number;
   durationMs?: number;
   /**
+   * Summary of a completed all-read/search tool batch folded into this
+   * thought's line ("Thought for 9s, searched 2 patterns").
+   */
+  toolSummary?: string;
+  /**
+   * Thought finished but still pending (commit deferred until the following
+   * tool batch completes). Renders the completed style, not "Thinking…".
+   */
+  finalized?: boolean;
+  /**
    * VP mode only: the collapsed line is mouse-clickable, so the hint advertises
    * "click" in addition to the keyboard toggle. Non-VP has no click handler.
    */
@@ -373,18 +383,29 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
   availableTerminalHeight,
   contentWidth,
   durationMs,
+  toolSummary,
+  finalized = false,
   clickable = false,
 }) => {
   const durationSuffix =
     durationMs != null ? ` ${formatDuration(durationMs)}` : '';
+  // Lowercase the summary's leading letter so it reads as a continuation of
+  // the thought label ("Thought for 9s, searched 2 patterns"). No-op for
+  // caseless scripts.
+  const mergedSuffix = toolSummary
+    ? `, ${toolSummary.charAt(0).toLowerCase()}${toolSummary.slice(1)}`
+    : '';
   const completedLabel =
     durationMs == null
       ? null
       : durationMs < BRIEF_THOUGHT_THRESHOLD_MS
-        ? t('Thought briefly')
-        : `${t('Thought for')} ${formatDuration(durationMs)}`;
+        ? `${t('Thought briefly')}${mergedSuffix}`
+        : `${t('Thought for')} ${formatDuration(durationMs)}${mergedSuffix}`;
+  // A finalized-but-pending thought (its commit is deferred until the tool
+  // batch that follows it completes) renders with the completed style.
+  const treatAsCompleted = !isPending || finalized;
 
-  if (!isPending && !expanded) {
+  if (treatAsCompleted && !expanded) {
     const label = completedLabel ?? t('Thinking');
     const hint = clickable
       ? t('(click or {{keyHint}} to expand)', { keyHint: toggleKeyHint })
@@ -397,24 +418,28 @@ export const ThinkMessage: React.FC<ThinkMessageProps> = ({
     );
   }
 
-  const label = isPending
-    ? `${t('Thinking')}…${durationSuffix}`
-    : (completedLabel ?? `${t('Thinking')}…`);
+  const label = treatAsCompleted
+    ? (completedLabel ?? `${t('Thinking')}…`)
+    : `${t('Thinking')}…${durationSuffix}`;
   const collapseHint =
-    !isPending && expanded
+    treatAsCompleted && expanded
       ? ` ${t('({{keyHint}} to collapse)', { keyHint: toggleKeyHint })}`
       : '';
 
   return (
     <Box flexDirection="column">
       <Text dimColor italic>
-        {isPending ? THINKING_ICON_PENDING : THINKING_ICON}
+        {treatAsCompleted ? THINKING_ICON : THINKING_ICON_PENDING}
         {label}
         {collapseHint}
       </Text>
       <ThinkBody
         text={text}
-        isPending={isPending}
+        // A finalized thought is complete: keep the raw `isPending` out of
+        // MarkdownDisplay so the deferred-batch window doesn't subject the
+        // finished body to streaming-only slicing (which would hide its tail
+        // without a truncation cue).
+        isPending={isPending && !finalized}
         expanded={expanded}
         availableTerminalHeight={availableTerminalHeight}
         contentWidth={contentWidth}

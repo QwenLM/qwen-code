@@ -55,6 +55,11 @@ function ScrollableList<T>(
       scrollToScrollbarRow: (row) =>
         virtualizedListRef.current?.scrollToScrollbarRow(row),
       getScrollIndex: () => virtualizedListRef.current?.getScrollIndex() ?? 0,
+      getScrollAnchor: () =>
+        virtualizedListRef.current?.getScrollAnchor() ?? {
+          index: 0,
+          offset: 0,
+        },
       getScrollState: () =>
         virtualizedListRef.current?.getScrollState() ?? {
           scrollTop: 0,

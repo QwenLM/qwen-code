@@ -9,6 +9,7 @@ import {
   memo,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -134,6 +135,7 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
   const streamingState = uiState.streamingState;
   const showScrollbar = uiState.showScrollbar ?? true;
   const {
+    history,
     pendingHistoryItems,
     terminalWidth,
     mainAreaWidth,
@@ -142,13 +144,25 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
     historyRemountKey,
   } = uiState;
 
-  // Filter out items whose display is suppressed (e.g. /history collapse).
+  // Filter out items whose display is suppressed (e.g. /history collapse)
+  // and tool groups folded into a preceding thought line ("Thought for 9s,
+  // searched 2 patterns"). The folded groups stay in history (turn mapping,
+  // export, SDK) but render only in full detail, where the Ctrl+O remount
+  // re-runs this filter with fullDetail on.
   const visibleHistory = useMemo(
-    () => uiState.history.filter(isHistoryItemVisibleAfterRestore),
-    [uiState.history],
+    () =>
+      history.filter(
+        (item) =>
+          isHistoryItemVisibleAfterRestore(item) &&
+          (fullDetail ||
+            item.type !== 'tool_group' ||
+            !item.display?.mergedIntoThought),
+      ),
+    [history, fullDetail],
   );
 
-  // History is rendered as-is (no cross-group merging).
+  // Merging happens at commit time (useGeminiStream folds a completed
+  // all-read/search batch into the thought item); rendering stays per-item.
 
   // Virtual viewport path short-circuits below before any of the
   // <Static>-only machinery is needed. The offsets / progressive-replay
@@ -286,6 +300,59 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
       ? historyItemsWithSourceCopyOffsets
       : historyItemsWithSourceCopyOffsets.slice(0, replayCount);
 
+  // batchIds of committed tool_groups folded into a thought line
+  // (display.mergedIntoThought), fullDetail-agnostic. The scheduler keeps its
+  // LIVE pending display copy until onComplete's await (tool-response
+  // submission) returns, so BOTH render paths must suppress that live copy
+  // by batchId identity for that window, or the user sees the merged thought
+  // line PLUS a duplicate group row — in BOTH fullDetail states: fullDetail
+  // OFF filters the committed copy out of visibleHistory (the live copy is
+  // the duplicate); fullDetail ON re-admits the committed copy, and the
+  // #9420 collapse only exists in allVirtualItems — the VP path — so on the
+  // legacy Static path the live copy is the duplicate again.
+  const mergedBatchIdsAll = useMemo(() => {
+    const ids = new Set<string>();
+    for (const item of history) {
+      if (
+        item.type === 'tool_group' &&
+        item.batchId !== undefined &&
+        item.display?.mergedIntoThought
+      ) {
+        ids.add(item.batchId);
+      }
+    }
+    return ids;
+  }, [history]);
+
+  // The VP path's suppression set, gated on fullDetail: under fullDetail ON
+  // the committed copy re-renders and allVirtualItems' #9420 collapse keeps
+  // the LIVE copy (it still updates), so the VP path must NOT suppress it
+  // there (it suppresses the committed copy instead). The legacy Static path
+  // never consumes allVirtualItems and uses the ungated set below.
+  const mergedBatchIds = useMemo(
+    () => (fullDetail ? new Set<string>() : mergedBatchIdsAll),
+    [fullDetail, mergedBatchIdsAll],
+  );
+
+  // The legacy Static path renders the pending region unfiltered; suppress a
+  // merged batch's live pending copy there regardless of fullDetail (see
+  // mergedBatchIdsAll), so the default (useTerminalBuffer=false) renderer
+  // does not show the merged thought line PLUS a duplicate group row.
+  const staticPendingItems = useMemo(
+    () =>
+      mergedBatchIdsAll.size === 0
+        ? pendingHistoryItemsWithSourceCopyOffsets
+        : pendingHistoryItemsWithSourceCopyOffsets.filter(
+            ({ item }) =>
+              !(
+                item.type === 'tool_group' &&
+                item.batchId !== undefined &&
+                mergedBatchIdsAll.has(item.batchId)
+              ),
+          ),
+    [pendingHistoryItemsWithSourceCopyOffsets, mergedBatchIdsAll],
+  );
+
   // Combine completed history + live pending items for the virtualized list.
   // The banner sentinel is prepended so it scrolls with content (not pinned).
   // Pending items get negative IDs (-(i+1)) so renderItem can tell them apart.
@@ -335,9 +402,127 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
       }
     }
     for (const item of committedByBatchId.values()) dropped.add(item);
+    // A MERGED batch's committed copy is filtered out of visibleHistory
+    // above (fullDetail off), so the collapse loop never sees it — suppress
+    // its live pending copy by the shared mergedBatchIds identity (see the
+    // memo above; the legacy Static path filters via the ungated
+    // mergedBatchIdsAll set in staticPendingItems).
+    if (mergedBatchIds.size > 0) {
+      for (const item of combined) {
+        if (
+          item.id < 0 &&
+          item.type === 'tool_group' &&
+          item.batchId !== undefined &&
+          mergedBatchIds.has(item.batchId)
+        ) {
+          dropped.add(item);
+        }
+      }
+    }
     if (dropped.size === 0) return combined;
     return combined.filter((item) => !dropped.has(item));
-  }, [visibleHistory, pendingHistoryItems]);
+  }, [visibleHistory, pendingHistoryItems, mergedBatchIds]);
+
+  // Ctrl+O (fullDetail) inserts/removes merged tool_groups in the MIDDLE of
+  // the virtual list, but VirtualizedList's scroll anchor is index-based —
+  // without help, the anchored ITEM changes identity and a user scrolled up
+  // loses their reading position. Capture the anchored item during the
+  // fullDetail-flip render (the ref still holds the pre-flip handle and the
+  // pre-flip list) and scroll back to it once the new list commits.
+  const prevFullDetailRef = useRef(fullDetail);
+  const allVirtualItemsRef = useRef(allVirtualItems);
+  const anchorRestoreItemRef = useRef<VpItem | null>(null);
+  const anchorRestoreOffsetRef = useRef(0);
+  if (prevFullDetailRef.current !== fullDetail) {
+    prevFullDetailRef.current = fullDetail;
+    anchorRestoreItemRef.current = null;
+    anchorRestoreOffsetRef.current = 0;
+    if (useVirtualScroll) {
+      const list = scrollRef.current;
+      const prevItems = allVirtualItemsRef.current;
+      const state = list?.getScrollState();
+      const atBottom =
+        !!state &&
+        state.innerHeight > 0 &&
+        state.scrollTop + state.innerHeight >= state.scrollHeight - 1;
+      const anchor = list?.getScrollAnchor() ?? { index: -1, offset: 0 };
+      const anchorIndex = anchor.index;
+      // At-bottom stays glued to the end via VirtualizedList's own
+      // data-change re-anchor; restoring there would fight it. Pending
+      // items (negative ids) get a fresh object every render, so only
+      // committed history items keep a stable identity across the filter
+      // re-run. Anchors in the pending region therefore get no
+      // capture/restore at all: a toggle that inserts/removes merged
+      // groups above the pending tail shifts it by that many rows, and
+      // there is no identity-stable handle to restore to (restoring by
+      // recomputed index would need the pending item's own height, which
+      // re-measures after the flip). Accepted limitation — the pending
+      // region is transient by nature; the committed-history case below is
+      // the one that loses real reading position.
+      if (!atBottom && anchorIndex >= 0 && anchorIndex < prevItems.length) {
+        let item: VpItem | undefined = prevItems[anchorIndex];
+        // Toggle-OFF removes merged tool_groups: when the anchored item is
+        // itself one, restoring to it no-ops (indexOf fails) while the
+        // shrunken list slides the viewport up by every removed group's
+        // height. Restore to the thought line it folded into instead —
+        // committed immediately before it.
+        if (
+          item &&
+          !fullDetail &&
+          item.type === 'tool_group' &&
+          item.display?.mergedIntoThought
+        ) {
+          const prev = prevItems[anchorIndex - 1];
+          item =
+            prev && prev.type !== 'vp-banner' && prev.id > 0 ? prev : undefined;
+        }
+        if (item && item.type !== 'vp-banner' && item.id > 0) {
+          anchorRestoreItemRef.current = item;
+          // Preserve the within-item pixel offset: anchor offsets are
+          // routinely non-zero under incremental VP scrolling, and
+          // scrollToItem's default (viewOffset 0) snaps the item's TOP to
+          // the viewport top, dropping the reading depth inside tall items.
+          // Depth preservation is only correct when the anchored item does
+          // not SHRINK across the flip. Toggle-ON grows items, so the offset
+          // stays valid. Toggle-OFF collapses thought bodies (fullDetail
+          // forces them open; ThinkBody returns null when collapsed, so a
+          // tall expanded thought becomes a 1-line label, and the
+          // merged-group → preceding-thought remap above targets that same
+          // 1-line thought), AND tool_group rows: fullDetail force-expands
+          // every tool (forceExpandAll), un-truncates results, and expands
+          // memory-only/parallel-agent groups, all of which toggle-OFF
+          // re-collapses. Re-applying the pre-toggle offset then lands N
+          // rows PAST the top of the now-short item, scrolling it off above
+          // the viewport (and, on a short transcript, the maxScroll clamp
+          // lands the restore at the bottom). Items that keep their height
+          // on toggle-OFF (answers, user rows) preserve their offset.
+          // Restore to a shrinking item's top on toggle-OFF.
+          anchorRestoreOffsetRef.current =
+            anchor.offset === SCROLL_TO_ITEM_END ||
+            (!fullDetail &&
+              (item.type === 'gemini_thought' ||
+                item.type === 'gemini_thought_content' ||
+                item.type === 'tool_group'))
+              ? 0
+              : anchor.offset;
+        }
+      }
+    }
+  }
+  allVirtualItemsRef.current = allVirtualItems;
+  useLayoutEffect(() => {
+    const item = anchorRestoreItemRef.current;
+    if (!item) return;
+    anchorRestoreItemRef.current = null;
+    // Runs after VirtualizedList's own data-change layout effect
+    // (child effects fire before parent effects), so the restore wins.
+    // scrollToItem resolves via data.indexOf(item) — reference identity —
+    // and no-ops if the toggle filtered the item out of the new list.
+    scrollRef.current?.scrollToItem({
+      item,
+      viewOffset: anchorRestoreOffsetRef.current,
+    });
+  }, [allVirtualItems]);
 
   // Source-copy index offsets propagation. The legacy <Static> path threads
   // per-item offsets so `/copy mermaid N` / `/copy latex N` hints under each
@@ -608,27 +793,23 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
             }
             overflow="hidden"
           >
-            {pendingHistoryItemsWithSourceCopyOffsets.map(
-              ({ item, sourceCopyIndexOffsets }, i) => (
-                <HistoryItemDisplay
-                  key={i}
-                  availableTerminalHeight={
-                    uiState.constrainHeight
-                      ? availableTerminalHeight
-                      : undefined
-                  }
-                  terminalWidth={terminalWidth}
-                  mainAreaWidth={mainAreaWidth}
-                  item={{ ...item, id: 0 }}
-                  isPending={true}
-                  isFocused={!uiState.isEditorDialogOpen}
-                  activeShellPtyId={uiState.activePtyId}
-                  embeddedShellFocused={uiState.embeddedShellFocused}
-                  sourceCopyIndexOffsets={sourceCopyIndexOffsets}
-                  fullDetail={fullDetail}
-                />
-              ),
-            )}
+            {staticPendingItems.map(({ item, sourceCopyIndexOffsets }, i) => (
+              <HistoryItemDisplay
+                key={i}
+                availableTerminalHeight={
+                  uiState.constrainHeight ? availableTerminalHeight : undefined
+                }
+                terminalWidth={terminalWidth}
+                mainAreaWidth={mainAreaWidth}
+                item={{ ...item, id: 0 }}
+                isPending={true}
+                isFocused={!uiState.isEditorDialogOpen}
+                activeShellPtyId={uiState.activePtyId}
+                embeddedShellFocused={uiState.embeddedShellFocused}
+                sourceCopyIndexOffsets={sourceCopyIndexOffsets}
+                fullDetail={fullDetail}
+              />
+            ))}
           </Box>
           <ShowMoreLines constrainHeight={uiState.constrainHeight} />
         </Box>

@@ -12,6 +12,8 @@ import {
   AssistantMessageContent,
   ThinkMessage,
   ThinkMessageContent,
+  THINKING_ICON,
+  THINKING_ICON_PENDING,
   toggleKeyHint,
 } from './ConversationMessages.js';
 
@@ -278,6 +280,104 @@ describe('<ThinkMessage />', () => {
     expect(output).toContain('Thinking');
     expect(output).toContain('Line 1');
     expect(output).toContain('Line 5');
+  });
+
+  it('should fold a tool summary into the collapsed line', () => {
+    const { lastFrame } = render(
+      <ThinkMessage
+        {...defaultProps}
+        isPending={false}
+        expanded={false}
+        durationMs={9000}
+        toolSummary="Searched 2 patterns"
+      />,
+    );
+    const output = lastFrame();
+    expect(output).toContain('Thought for 9s, searched 2 patterns');
+    expect(output).toContain(`${toggleKeyHint} to expand`);
+  });
+
+  it('should fold a tool summary into a brief thought', () => {
+    const { lastFrame } = render(
+      <ThinkMessage
+        {...defaultProps}
+        isPending={false}
+        expanded={false}
+        durationMs={500}
+        toolSummary="Read a.ts"
+      />,
+    );
+    const output = lastFrame();
+    expect(output).toContain('Thought briefly, read a.ts');
+  });
+
+  it('should render the completed style while pending but finalized', () => {
+    const { lastFrame } = render(
+      <ThinkMessage
+        {...defaultProps}
+        isPending={true}
+        expanded={false}
+        durationMs={5000}
+        finalized={true}
+      />,
+    );
+    const output = lastFrame();
+    expect(output).toContain('Thought for 5s');
+    expect(output).not.toContain('Thinking');
+  });
+
+  it('should render the completed style while pending but finalized (expanded)', () => {
+    // Expanded variant: pins the label ternary, the collapse hint, and the
+    // icon branch in the expanded path — the only state where
+    // treatAsCompleted diverges from !isPending there is a
+    // finalized-but-pending deferred thought the user expands.
+    const { lastFrame } = render(
+      <ThinkMessage
+        {...defaultProps}
+        isPending={true}
+        expanded={true}
+        durationMs={5000}
+        finalized={true}
+      />,
+    );
+    const output = lastFrame();
+    expect(output).toContain('Thought for 5s');
+    expect(output).toContain(`${toggleKeyHint} to collapse`);
+    expect(output).not.toContain('Thinking');
+    // The icon branch: a finalized-but-pending thought shows the COMPLETED
+    // (therefore) icon, not the pending (because) one. Without this a
+    // regression flipping the ternary back to key on isPending ships green
+    // while the expanded thought shows the pending icon.
+    expect(output).toContain(THINKING_ICON.trim());
+    expect(output).not.toContain(THINKING_ICON_PENDING.trim());
+    // Expanded still shows the body.
+    expect(output).toContain('Analyzing the code structure');
+  });
+
+  it('should not slice a finalized thought body as streaming content', () => {
+    // While the merge deferral holds a FINALIZED thought in the pending
+    // area, the body must not get streaming-only MarkdownDisplay treatment:
+    // fitPendingSlice would slice the complete content to the viewport
+    // budget while the truncation cue stays suppressed (it only shows for
+    // complete content), silently hiding the tail of finished reasoning.
+    const lines = Array.from({ length: 20 }, (_, i) => `Step ${i + 1}`);
+    const { lastFrame } = render(
+      <ThinkMessage
+        {...defaultProps}
+        text={lines.join('\n')}
+        isPending={true}
+        expanded={true}
+        durationMs={5000}
+        finalized={true}
+        availableTerminalHeight={6}
+      />,
+    );
+    const output = lastFrame();
+    expect(output).toContain('Thought for 5s');
+    expect(output).toContain('Step 1');
+    // The tail must survive: with the raw isPending forwarded to the body
+    // the pending slice drops it.
+    expect(output).toContain('Step 20');
   });
 });
 

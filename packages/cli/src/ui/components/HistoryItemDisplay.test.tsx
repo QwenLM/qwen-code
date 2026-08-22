@@ -576,6 +576,80 @@ describe('<HistoryItemDisplay />', () => {
     expect(passedProps.fullDetail).toBe(true);
   });
 
+  it('renders a merged tool summary on the thought line', () => {
+    const item: HistoryItem = {
+      id: 1,
+      type: 'gemini_thought',
+      text: 'Inspecting the repository',
+      durationMs: 9000,
+      toolSummary: 'Searched 2 patterns',
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <HistoryItemDisplay item={item} terminalWidth={100} isPending={false} />,
+    );
+
+    const output = lastFrame() ?? '';
+    expect(output).toContain('Thought for 9s, searched 2 patterns');
+    expect(output).not.toContain('Inspecting the repository');
+  });
+
+  it('renders a merged-away tool_group as nothing outside full detail', () => {
+    vi.mocked(ToolGroupMessage).mockClear();
+    const item: HistoryItem = {
+      id: 1,
+      type: 'tool_group',
+      tools: [
+        {
+          callId: '123',
+          name: 'grep_search',
+          description: 'pattern: alpha',
+          resultDisplay: 'found',
+          status: ToolCallStatus.Success,
+          confirmationDetails: undefined,
+        },
+      ],
+      display: { mergedIntoThought: true },
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <HistoryItemDisplay item={item} terminalWidth={80} isPending={false} />,
+    );
+
+    expect(vi.mocked(ToolGroupMessage)).not.toHaveBeenCalled();
+    expect((lastFrame() ?? '').trim()).toBe('');
+  });
+
+  it('renders a merged-away tool_group in full detail', () => {
+    vi.mocked(ToolGroupMessage).mockClear();
+    const item: HistoryItem = {
+      id: 1,
+      type: 'tool_group',
+      tools: [
+        {
+          callId: '123',
+          name: 'grep_search',
+          description: 'pattern: alpha',
+          resultDisplay: 'found',
+          status: ToolCallStatus.Success,
+          confirmationDetails: undefined,
+        },
+      ],
+      display: { mergedIntoThought: true },
+    };
+
+    renderWithProviders(
+      <HistoryItemDisplay
+        item={item}
+        terminalWidth={80}
+        isPending={false}
+        fullDetail
+      />,
+    );
+
+    expect(vi.mocked(ToolGroupMessage)).toHaveBeenCalledTimes(1);
+  });
+
   describe('showTimestamps', () => {
     const timestampItem: HistoryItem = {
       ...baseItem,
