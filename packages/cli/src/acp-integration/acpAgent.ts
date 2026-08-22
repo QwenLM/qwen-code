@@ -5370,6 +5370,7 @@ class QwenAgent implements Agent {
         loadSettingsCached(params.cwd),
       );
       const liveConfig = liveSession.getConfig();
+      const activePromptBeforeRead = this.activePromptCalls.has(sessionId);
       return profiler.time('live_restore', async () => {
         await this.assertLiveSessionScope(liveConfig, settings, params.cwd);
         return this.withLiveSessionRestore(
@@ -5405,6 +5406,13 @@ class QwenAgent implements Agent {
                 replayState: replayPage.replay,
                 goalBootstrap: replayGoalBootstrap(projection),
                 suppressRestoreAskUserQuestion,
+                // A trailing unmatched call is in-flight, not abandoned,
+                // while a prompt is still running in this process (#9704);
+                // keep it pending instead of finalizing it as a permanent
+                // failure. Mirrors the transcript paging guard below.
+                finalizeDangling:
+                  !activePromptBeforeRead &&
+                  !this.activePromptCalls.has(sessionId),
                 ...(restoreOptions.replay.kind === 'recent'
                   ? {
                       limits: {
@@ -11870,6 +11878,7 @@ class QwenAgent implements Agent {
         }
 
         const liveSession = this.sessions.get(sessionId);
+        const activePromptBeforeRead = this.activePromptCalls.has(sessionId);
         let replayConfig = this.config;
         let sessionData: ResumedSessionData | undefined;
         if (liveSession) {
@@ -11908,6 +11917,9 @@ class QwenAgent implements Agent {
           gaps: sessionData.historyGaps,
           cumulativeUsage: createReplayCumulativeUsage(),
           logger: debugLogger,
+          // Same in-flight guard as the session-load replay (#9704).
+          finalizeDangling:
+            !activePromptBeforeRead && !this.activePromptCalls.has(sessionId),
         });
 
         return {
