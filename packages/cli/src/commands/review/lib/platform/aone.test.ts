@@ -1487,7 +1487,7 @@ describe('comment/status reads (the a1 backing for dedup)', () => {
     expect(listMrComments(123, 'g/p')).toEqual([]);
     a1JsonMock.mockReturnValue([{ id: 1, note: 'n' }]);
     expect(listMrComments(123, 'g/p')).toEqual([{ id: 1, note: 'n' }]);
-    expect(a1JsonMock).toHaveBeenLastCalledWith(
+    expect(a1JsonMock).toHaveBeenCalledWith(
       'repo',
       'mr',
       'comment',
@@ -1509,6 +1509,59 @@ describe('comment/status reads (the a1 backing for dedup)', () => {
       { id: 3, note: 'draft-state unreadable — stays in', isDraft: null },
     ]);
     expect(listMrComments(123, 'g/p').map((c) => c.id)).toEqual([1, 3]);
+  });
+
+  it('listMrComments unions the default and --resolved queries, deduped by id', () => {
+    // The DEFAULT query excludes RESOLVED comments; `--resolved` returns
+    // the resolved root inline ones — cleanup's bypass audit measures and
+    // pins the same shape on this exact command. Without the union the
+    // comment-status index silently omits every resolved thread while the
+    // GitHub path lists all comments.
+    a1JsonMock
+      .mockReturnValueOnce([
+        { id: 1, note: 'open' },
+        { id: 2, note: 'both queries' },
+      ])
+      .mockReturnValueOnce([
+        { id: 2, note: 'both queries' },
+        { id: 3, note: 'resolved root', closed: 1 },
+      ]);
+    expect(listMrComments(123, 'g/p')).toEqual([
+      { id: 1, note: 'open' },
+      { id: 2, note: 'both queries' },
+      { id: 3, note: 'resolved root', closed: 1 },
+    ]);
+    expect(a1JsonMock).toHaveBeenNthCalledWith(
+      2,
+      'repo',
+      'mr',
+      'comment',
+      'list',
+      '--mr',
+      '123',
+      '--repo',
+      'g/p',
+      '--resolved',
+    );
+  });
+
+  it('listMrComments names an exit-0 error object instead of crashing .filter', () => {
+    // a1 can answer a well-formed error OBJECT with exit 0 (cleanup's
+    // a1CommentList measures the same command); surfacing its `message`
+    // in a named error is the difference between "auth outage" and
+    // "schema drift" for the paged human — an untagged TypeError kills
+    // presubmit with no report file.
+    a1JsonMock.mockReturnValue({
+      apiVersion: 'a1.error/v1',
+      message: 'backend auth failure',
+    });
+    expect(() => listMrComments(123, 'g/p')).toThrow(
+      'a1 mr comment list returned an unexpected shape: backend auth failure',
+    );
+    a1JsonMock.mockReturnValue({ apiVersion: 'a1.error/v1' });
+    expect(() => listMrComments(123, 'g/p')).toThrow(
+      'a1 mr comment list returned an unexpected shape',
+    );
   });
 
   it('aoneWhoami reads the account off auth whoami', () => {

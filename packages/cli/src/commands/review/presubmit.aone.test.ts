@@ -395,6 +395,74 @@ describe('presubmit handler (Aone backing)', () => {
     expect(report.existingComments.noConflict[0].id).toBe(110);
   });
 
+  it('recognizes a version-less footer variant from another CLI version', async () => {
+    // The recognition regex is deliberately lenient on the footer shape —
+    // a prior-round finding posted by any other CLI version must still
+    // dedup, or the next round re-posts every finding already on the MR
+    // (the duplicate storm this backing exists to prevent).
+    mocks.listMrComments.mockReturnValue([
+      {
+        id: 205,
+        note: '**[Critical]** prior\n\n_— qwen-max via Qwen Code /review_',
+        path: 'a.ts',
+        line: 42,
+        author: { username: 'another-bot' },
+      },
+    ]);
+    mocks.readFileSync.mockReturnValue(
+      JSON.stringify([{ path: 'a.ts', line: 42 }]),
+    );
+    await run({ 'new-findings': '/repo/.qwen/tmp/new-findings.json' });
+    const report = reportWritten();
+    expect(report.existingComments.byBucket.overlap).toBe(1);
+    expect(report.blockOnExistingComments).toBe(true);
+  });
+
+  it('recognizes the own account case-insensitively in the dedup filter', async () => {
+    // a1 usernames diverge in case from `a1 auth whoami` in the wild; the
+    // filter lowercases BOTH sides — a strict comparison leaves the
+    // location undeduped and re-posts the finding on the live thread.
+    mocks.listMrComments.mockReturnValue([
+      {
+        id: 151,
+        note: '**[Critical]** prior claim',
+        path: 'a.ts',
+        line: 42,
+        author: { username: 'REVIEWER' },
+      },
+    ]);
+    mocks.readFileSync.mockReturnValue(
+      JSON.stringify([{ path: 'a.ts', line: 42 }]),
+    );
+    await run({ 'new-findings': '/repo/.qwen/tmp/new-findings.json' });
+    const report = reportWritten();
+    expect(report.existingComments.byBucket.overlap).toBe(1);
+    expect(report.blockOnExistingComments).toBe(true);
+  });
+
+  it('recognizes an attribution-off post by its marker alone', async () => {
+    // `submit` posts attribution-off findings as the stripped body plus
+    // `<!-- qwen-review <sev> -->` — no severity prefix, no footer — so
+    // ONLY the marker disjunct recognizes them; dropping it leaves every
+    // attribution-off post on the MR unrecognized and re-posted.
+    mocks.listMrComments.mockReturnValue([
+      {
+        id: 152,
+        note: 'null deref\n\n<!-- qwen-review critical -->',
+        path: 'a.ts',
+        line: 42,
+        author: { username: 'reviewer' },
+      },
+    ]);
+    mocks.readFileSync.mockReturnValue(
+      JSON.stringify([{ path: 'a.ts', line: 42 }]),
+    );
+    await run({ 'new-findings': '/repo/.qwen/tmp/new-findings.json' });
+    const report = reportWritten();
+    expect(report.existingComments.byBucket.overlap).toBe(1);
+    expect(report.blockOnExistingComments).toBe(true);
+  });
+
   it('an unreadable account never recognizes an author-less marker comment as own', async () => {
     // The `me !== ''` guard: a deleted-account or author-less payload maps
     // to '' on BOTH sides, and without it the own-account comparison
@@ -449,6 +517,17 @@ describe('presubmit handler (Aone backing)', () => {
         note: `**[Critical]** resolved concern\n\n${FOOTER}`,
         path: 'a.ts',
         line: 42,
+        // The MEASURED payload shape: a1 stamps the numeric 1 (cleanup's
+        // RawAoneComment pins the same field on the same command); the
+        // boolean arm below stays tolerated for shape drift.
+        closed: 1,
+        author: { username: 'reviewer' },
+      },
+      {
+        id: 131,
+        note: `**[Suggestion]** boolean shape\n\n${FOOTER}`,
+        path: 'b.ts',
+        line: 7,
         closed: true,
         author: { username: 'reviewer' },
       },
@@ -458,7 +537,7 @@ describe('presubmit handler (Aone backing)', () => {
     );
     await run({ 'new-findings': '/repo/.qwen/tmp/new-findings.json' });
     const report = reportWritten();
-    expect(report.existingComments.byBucket.resolved).toBe(1);
+    expect(report.existingComments.byBucket.resolved).toBe(2);
     expect(report.existingComments.byBucket.overlap).toBe(0);
     expect(report.blockOnExistingComments).toBe(false);
   });
@@ -485,6 +564,38 @@ describe('presubmit handler (Aone backing)', () => {
     // lands in resolved — the engaged-thread bucket, same as GitHub.
     expect(report.existingComments.total).toBe(1);
     expect(report.existingComments.byBucket.resolved).toBe(1);
+    expect(report.blockOnExistingComments).toBe(false);
+  });
+
+  it('a finding-shaped own REPLY never enters the dedup set (recognition side)', async () => {
+    // The `!c.in_reply_to_id` guard in the recognition filter: without it
+    // a finding-shaped own reply reads as a posted finding, lands in
+    // `overlap` at a carried location, and blockOnExistingComments
+    // silently withholds a genuinely new finding.
+    mocks.listMrComments.mockReturnValue([
+      {
+        id: 140,
+        note: `**[Critical]** a concern\n\n${FOOTER}`,
+        path: 'b.ts',
+        line: 7,
+        author: { username: 'reviewer' },
+      },
+      {
+        id: 142,
+        note: '**[Critical]** follow-up',
+        path: 'a.ts',
+        line: 42,
+        parentNoteId: 140,
+        author: { username: 'reviewer' },
+      },
+    ]);
+    mocks.readFileSync.mockReturnValue(
+      JSON.stringify([{ path: 'a.ts', line: 42 }]),
+    );
+    await run({ 'new-findings': '/repo/.qwen/tmp/new-findings.json' });
+    const report = reportWritten();
+    expect(report.existingComments.total).toBe(1);
+    expect(report.existingComments.byBucket.overlap).toBe(0);
     expect(report.blockOnExistingComments).toBe(false);
   });
 

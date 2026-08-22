@@ -1206,8 +1206,9 @@ async function runPresubmitAone(args: PresubmitArgs): Promise<void> {
     // Aone's `closed` marks a RESOLVED discussion — the engaged-thread
     // equivalent of GitHub's replied-to. It lands in the resolved bucket,
     // which the priority order above keeps OUT of the overlap drop: a
-    // resolved thread at a location does not bar a new finding there.
-    if (c.closed === true) {
+    // resolved thread at a location does not bar a new finding there. The
+    // measured payload stamps the numeric 1; a boolean stays tolerated.
+    if (c.closed === 1 || c.closed === true) {
       repliedToIds.add(
         typeof c.parentNoteId === 'number' && c.parentNoteId !== 0
           ? c.parentNoteId

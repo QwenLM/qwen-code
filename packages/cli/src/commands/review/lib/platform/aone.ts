@@ -614,12 +614,16 @@ export const aoneReader: ReviewPlatformReader = {
 // ---------------------------------------------------------------------------
 // Comment / status reads — the Aone backing for `comment-status` and
 // `presubmit` (Phase 3's dedup/self-PR slice of
-// docs/design/2026-08-13-review-platform-provider-abstraction.md). Aone has
-// ONE flat comment collection per MR (inline comments, replies, and global
-// summary comments all in `mr comment list`); threading rides `parentNoteId`,
-// thread state rides `closed`/`outdated`. Comments carry NO commit anchor —
-// the commit_id half of GitHub's classification has no input here, and the
-// consumers map around it (presubmit keys staleness on `outdated` instead).
+// docs/design/2026-08-13-review-platform-provider-abstraction.md). Aone's
+// comment collection is flat (inline comments, replies, and global summary
+// comments all in `mr comment list`), but the DEFAULT query excludes
+// RESOLVED comments while a `--resolved` query returns the resolved root
+// inline ones (measured — cleanup's bypass audit pins the same shape on
+// this exact command), so listMrComments unions the two. Threading rides
+// `parentNoteId`, thread state rides `closed`/`outdated`. Comments carry NO
+// commit anchor — the commit_id half of GitHub's classification has no
+// input here, and the consumers map around it (presubmit keys staleness on
+// `outdated` instead).
 // ---------------------------------------------------------------------------
 
 /** One entry of `a1 repo mr comment list --mr <id> -f json` (the fields the
@@ -633,8 +637,10 @@ export interface AoneMrComment {
   line?: number | null;
   /** 'right' (new side) or 'left' (old side). */
   side?: string;
-  /** The discussion was resolved. */
-  closed?: boolean;
+  /** The discussion was resolved — a1 stamps the numeric 1 (measured;
+   *  cleanup's RawAoneComment pins the same payload); a boolean stays
+   *  tolerated for shape drift. */
+  closed?: number | boolean;
   /** The anchor no longer maps to the live head's diff (a past amend moved
    *  the code). */
   outdated?: boolean;
@@ -681,29 +687,67 @@ export function getMrAuthorAndHead(
   };
 }
 
-/** The MR's flat comment list (inline + replies + global). Draft
- *  (unpublished) entries are dropped at the read site so BOTH consumers —
- *  the comment-status index and presubmit's dedup — never classify a
- *  comment nobody can see: a leftover draft in the finding shape would
- *  otherwise overlap-drop a genuinely new finding, silently withholding
- *  it. Only an explicit `true` reads as unpublished — an unreadable draft
- *  state stays in (fail toward the visible-comment reading). */
+/** One `a1 repo mr comment list` query, shape-checked: a1 can also answer
+ *  a well-formed error OBJECT with exit 0 (cleanup's a1CommentList
+ *  measures the same command) — a bare `null` stays the tolerated
+ *  "no comments" shape, any other non-array must surface a1's `message` as
+ *  a named error, not crash `.filter` with an untagged TypeError. */
+function mrCommentListQuery(...flags: string[]): AoneMrComment[] {
+  const out = a1Json<AoneMrComment[] | null>(
+    'repo',
+    'mr',
+    'comment',
+    'list',
+    ...flags,
+  );
+  if (out === null) return [];
+  if (!Array.isArray(out)) {
+    const cause = (out as { message?: unknown } | null)?.message;
+    throw new Error(
+      'a1 mr comment list returned an unexpected shape' +
+        (typeof cause === 'string' && cause.trim() !== ''
+          ? `: ${cause.trim()}`
+          : ''),
+    );
+  }
+  return out;
+}
+
+/** The MR's comment list (inline + replies + global): the DEFAULT query
+ *  unioned with the `--resolved` query, deduped by id — the default
+ *  excludes RESOLVED comments while `--resolved` returns the resolved ROOT
+ *  INLINE ones (the shape cleanup's bypass audit measures and pins on this
+ *  exact command); resolved replies stay invisible, a1 exposes no listing
+ *  that includes them. Draft (unpublished) entries are dropped at the read
+ *  site so BOTH consumers — the comment-status index and presubmit's dedup
+ *  — never classify a comment nobody can see: a leftover draft in the
+ *  finding shape would otherwise overlap-drop a genuinely new finding,
+ *  silently withholding it. Only an explicit `true` reads as unpublished —
+ *  an unreadable draft state stays in (fail toward the visible-comment
+ *  reading). */
 export function listMrComments(
   prNumber: number,
   ownerRepo: string,
 ): AoneMrComment[] {
   checkOwnerRepo(ownerRepo);
-  const comments = a1Json<AoneMrComment[] | null>(
-    'repo',
-    'mr',
-    'comment',
-    'list',
+  const listed = mrCommentListQuery(
     '--mr',
     String(prNumber),
     '--repo',
     ownerRepo,
   );
-  return (comments ?? []).filter((c) => c.isDraft !== true);
+  const resolved = mrCommentListQuery(
+    '--mr',
+    String(prNumber),
+    '--repo',
+    ownerRepo,
+    '--resolved',
+  );
+  const byId = new Map<number, AoneMrComment>();
+  for (const c of [...listed, ...resolved]) {
+    if (typeof c.id === 'number' && !byId.has(c.id)) byId.set(c.id, c);
+  }
+  return [...byId.values()].filter((c) => c.isDraft !== true);
 }
 
 /** The reviewing account, as `a1 auth whoami -f json` reports it. */

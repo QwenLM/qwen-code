@@ -672,7 +672,13 @@ async function runCommentStatusAone(args: CommentStatusArgs): Promise<void> {
   const mrId = Number(prNumber);
 
   try {
-    ensureAoneAuthenticated();
+    // The gate doubles as the account read (presubmit's twin consumes it
+    // the same way): a SECOND whoami wired into the identity gate would
+    // re-run the lookup after the MR fetch, where a transient a1 outage
+    // throws and discards a fully fetched index over a query already
+    // answered. The truthy form keeps the gate's legitimate empty-string
+    // answer falling back to a fresh whoami.
+    const gateAccount = ensureAoneAuthenticated();
 
     // The same two-sample race detection as the GitHub path: `sourceBranch`
     // IS the head under AGit-Flow, and an amend landing between the sample
@@ -698,7 +704,7 @@ async function runCommentStatusAone(args: CommentStatusArgs): Promise<void> {
       liveHeadBefore,
       liveHeadAfter,
       comments,
-      resolveMe: aoneWhoami,
+      resolveMe: gateAccount ? () => gateAccount : aoneWhoami,
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

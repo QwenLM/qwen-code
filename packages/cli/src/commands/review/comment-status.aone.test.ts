@@ -310,6 +310,32 @@ describe('comment-status handler (Aone backing)', () => {
     expect(warnings().join('\n')).toContain('comment-status failed');
   });
 
+  it('reuses the gate account when whoami fails after the auth gate', async () => {
+    // The gate already answered whoami; a transient a1 outage AFTER it must
+    // not re-run the lookup inside the identity gate and discard a fully
+    // fetched index over a query whose answer was already in hand.
+    mocks.ensureAoneAuthenticated.mockReturnValue('reviewer');
+    mocks.aoneWhoami.mockImplementation(() => {
+      throw new Error('Command failed: a1 auth whoami — connection reset');
+    });
+    const { commentMarker } = await import('./lib/review-footer.js');
+    mocks.listMrComments.mockReturnValue([
+      {
+        id: 70,
+        note: `a finding\n\n${commentMarker('critical')}`,
+        path: 'a.ts',
+        line: 4,
+        author: { username: 'reviewer' },
+      },
+    ]);
+    await run();
+    const report = reportWritten();
+    expect(report.error).toBeUndefined();
+    expect(report.inlineComments).toBe(1);
+    expect(report.threads[0].isBlocker).toBe(true);
+    expect(mocks.aoneWhoami).not.toHaveBeenCalled();
+  });
+
   it('degrades to an empty report when a1 auth fails', async () => {
     mocks.ensureAoneAuthenticated.mockImplementation(() => {
       throw new Error('a1 CLI not found on PATH — install the `a1` CLI first.');
