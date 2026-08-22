@@ -63,7 +63,11 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
-import { runScratchTree, scratchTreeCommand } from './scratch-tree.js';
+import {
+  runScratchTree,
+  scratchTreeCommand,
+  type ScratchTreeReport,
+} from './scratch-tree.js';
 import { scratchWorktreePath } from './lib/paths.js';
 import { isolateHostGitConfig } from './lib/test-utils.js';
 
@@ -239,44 +243,132 @@ describe('runScratchTree', () => {
     ).toBe(false);
   });
 
-  it('reports the reset breached when the checkout THREW after executing a self-erasing plant', () => {
-    // A checkout can throw AFTER executing a plant: the smudge fires,
-    // leaves its trace, and kills git — the spawn dies on the signal and
-    // `gitOut` throws. The reset's catch used to answer `{ ok: false }`
-    // without the paired re-read, and the same call's discard-and-rebuild
-    // then laundered the execution: the rebuild screened clean (the plant
-    // had erased itself) and certified a fresh tree over the run. The
-    // GLOBAL killer is the screen's disclosed limit — never a candidate —
-    // so the pre-read clears it; the trace it leaves is the set+unset in
-    // the common config, which restores the content but not the clock.
-    const first = run();
-    expect(first.available).toBe(true);
-    const marker = join(repo, 'PWNED-kill');
-    writeFileSync(join(worktree, '.gitattributes'), '*.ts filter=killer\n');
-    git(worktree, 'add', '-A');
-    git(worktree, 'commit', '-qm', 'attributes');
-    execFileSync(
-      'git',
-      [
-        'config',
-        '--global',
-        'filter.killer.smudge',
-        `git config qwen.plant.x 1; git config --unset qwen.plant.x; touch ${marker}; kill -9 $PPID`,
-      ],
-      { cwd: worktree },
-    );
-    // Residue, so the reset's checkout rewrites a tracked file and the
-    // smudge fires.
-    writeFileSync(join(first.path!, 'a.ts'), 'prior-run residue\n');
+  // POSIX-only by construction: the killer arms `kill -9 $PPID` and a
+  // marker embedded UNQUOTED in the shell-lexed smudge, and on a Windows
+  // lane the backslashes of the platform path are shell escapes — the
+  // marker can never land at the asserted path and the positive assertion
+  // is deterministically red regardless of the guard under test.
+  it.skipIf(process.platform === 'win32')(
+    'reports the reset breached when the checkout THREW after executing a self-erasing plant',
+    () => {
+      // A checkout can throw AFTER executing a plant: the smudge fires,
+      // leaves its trace, and kills git — the spawn dies on the signal and
+      // `gitOut` throws. The reset's catch used to answer `{ ok: false }`
+      // without the paired re-read, and the same call's discard-and-rebuild
+      // then laundered the execution: the rebuild screened clean (the plant
+      // had erased itself) and certified a fresh tree over the run. The
+      // GLOBAL killer is the screen's disclosed limit — never a candidate —
+      // so the pre-read clears it; the trace it leaves is the set+unset in
+      // the common config, which restores the content but not the clock.
+      const first = run();
+      expect(first.available).toBe(true);
+      const marker = join(repo, 'PWNED-kill');
+      writeFileSync(join(worktree, '.gitattributes'), '*.ts filter=killer\n');
+      git(worktree, 'add', '-A');
+      git(worktree, 'commit', '-qm', 'attributes');
+      execFileSync(
+        'git',
+        [
+          'config',
+          '--global',
+          'filter.killer.smudge',
+          `git config qwen.plant.x 1; git config --unset qwen.plant.x; touch ${marker}; kill -9 $PPID`,
+        ],
+        { cwd: worktree },
+      );
+      // Residue, so the reset's checkout rewrites a tracked file and the
+      // smudge fires.
+      writeFileSync(join(first.path!, 'a.ts'), 'prior-run residue\n');
 
-    const r = run();
+      const r = run();
 
-    // The plant EXECUTED (the marker), and the run is breached — not a
-    // create failure, which is what the laundered path reported.
-    expect(existsSync(marker)).toBe(true);
-    expect(r.available).toBe(false);
-    expect(r.note).toContain('may have EXECUTED');
-  });
+      // The plant EXECUTED (the marker), and the run is breached — not a
+      // create failure, which is what the laundered path reported.
+      expect(existsSync(marker)).toBe(true);
+      expect(r.available).toBe(false);
+      expect(r.note).toContain('may have EXECUTED');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'reports the rebuild breached when the add THREW after executing a self-erasing plant',
+    () => {
+      // The rebuild's catch used to report the ordinary create failure:
+      // a smudge that fires during the add's initial checkout and only
+      // THEN kills git leaves the spawn throwing — and with the plant
+      // having erased itself, the next call screened clean over the
+      // execution. The baseline the screen captured still stands at the
+      // catch, so the paired re-read attributes it there (the reset
+      // path's catch above carries the twin of this re-read; POSIX-only
+      // for the same reason as that fixture).
+      writeFileSync(join(worktree, '.gitattributes'), '*.ts filter=killer\n');
+      git(worktree, 'add', '-A');
+      git(worktree, 'commit', '-qm', 'attributes');
+      const marker = join(repo, 'PWNED-rebuild-kill');
+      execFileSync(
+        'git',
+        [
+          'config',
+          '--global',
+          'filter.killer.smudge',
+          `git config qwen.plant.x 1; git config --unset qwen.plant.x; touch ${marker}; kill -9 $PPID`,
+        ],
+        { cwd: worktree },
+      );
+
+      // A fresh label: no tree stands, so this call takes the
+      // sweep→screen→add rebuild path, not the reset.
+      const r = run('shard--rebuild--kill');
+
+      expect(existsSync(marker)).toBe(true);
+      expect(r.available).toBe(false);
+      expect(r.note).toContain('may have EXECUTED');
+      expect(r.note).toContain('changed');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'reports the detected rebuild breach even when the rollback itself throws',
+    () => {
+      // The breach rollback ran INSIDE the try whose catch converts
+      // everything to the ordinary create-failure note: a rollback that
+      // THREW (rmSync EACCES — `force` suppresses ENOENT only) silently
+      // discarded an already-DETECTED breach and left the breached tree
+      // for the next call to certify. The armer builds the throw — a
+      // mode-555 dir whose child rmSync cannot unlink — beside planting
+      // the STANDING key the re-read names (self-erasing here would
+      // leave the detection nothing to name either). Skips on uid-0
+      // lanes because CAP_DAC_OVERRIDE defeats the 555 barrier, the way
+      // the worktree.test.ts permission fixtures skip.
+      writeFileSync(join(worktree, '.gitattributes'), '*.ts filter=armer\n');
+      git(worktree, 'add', '-A');
+      git(worktree, 'commit', '-qm', 'attributes');
+      const tree = scratchWorktreePath(worktree, 'shard--rebuild--lock');
+      execFileSync(
+        'git',
+        [
+          'config',
+          '--global',
+          'filter.armer.smudge',
+          `git config filter.evil.smudge true; mkdir -p ${tree}/LOCK; touch ${tree}/LOCK/f; chmod 555 ${tree}/LOCK; cat`,
+        ],
+        { cwd: worktree },
+      );
+
+      let r: ScratchTreeReport;
+      try {
+        r = run('shard--rebuild--lock');
+      } finally {
+        // The LOCK dir outlives the phase (the discard fails on it);
+        // give the afterEach its permissions back.
+        chmodSync(join(tree, 'LOCK'), 0o755);
+      }
+
+      expect(r.available).toBe(false);
+      expect(r.note).toContain('may have EXECUTED');
+      expect(r.note).toContain('filter.evil.smudge');
+    },
+  );
 
   it('re-reads the leaf AFTER the screen — a swap during the screen never reaches the checkout', () => {
     // The leaf re-read used to sit ABOVE the screen, widening the swap

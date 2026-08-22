@@ -2180,8 +2180,15 @@ export function runOneHunkProbe(
   if (applyBreach !== null) {
     // Put the neutralised file back before reporting: the tree must not
     // carry a reverted hunk into the next probe because this one stopped.
-    mkdirSync(dirname(abs), { recursive: true });
-    writeFileSync(abs, original, 'utf8');
+    // Re-validated at the write, the way the finally below does: this
+    // branch fires precisely when an actor is live in this tree — the
+    // apply may just have EXECUTED its filter — and a relink landed in
+    // that window would carry this write (O_TRUNC, the PR's own content)
+    // to whatever the link names outside the probe tree.
+    if (!probeTargetEscapes(probeTree, hunk.file)) {
+      mkdirSync(dirname(abs), { recursive: true });
+      writeFileSync(abs, original, 'utf8');
+    }
     return { ...meta, verdict: 'inconclusive', detail: applyBreach };
   }
   // Re-validation of the restore write must be able to STOP the phase — a
@@ -2672,6 +2679,12 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
     let created = false;
     let sweep: SweepResult | undefined;
     let createDetail = '';
+    // Hoisted above the try: the catch below runs the paired re-read when
+    // the add THREW, and a re-read without the baseline the screen
+    // captured is blind to every self-erasing shape.
+    const captured: { baseline: LocalFilterBaseline | null } = {
+      baseline: null,
+    };
     try {
       // Clear a stale probe tree left by a crashed run — it would fail `add`.
       // Its stderr is kept to explain a subsequent `add` failure.
@@ -2684,9 +2697,6 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
       // forever (every rerun wedged at the phase's entry, measured live).
       // (A filter planted DURING a run is what the restore screens and the
       // revert phase's own screen below are for.)
-      const captured: { baseline: LocalFilterBaseline | null } = {
-        baseline: null,
-      };
       const refusal = localFilterRefusal(
         worktree,
         "the probe phase's checkouts — the probe tree's own creation, every " +
@@ -2733,12 +2743,23 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
     } catch (e) {
       // Could not isolate — probe nothing rather than fall back to mutating the
       // shared tree. Probes are inconclusive; the unreachable findings, which
-      // need no probe, still ship.
-      createDetail = worktreeCreateFailureDetail(
-        'probe',
-        e,
-        String(sweep?.stderr ?? ''),
-      );
+      // need no probe, still ship. But an add that THREW may still have
+      // executed a plant first — a smudge that kills git mid-checkout fires
+      // and only THEN makes the spawn throw — and the ordinary failure
+      // detail would bury the execution while the next run's screen reads
+      // clean, the plant having erased itself. Attribute it while the
+      // baseline the screen captured still stands.
+      let breach: string | null = null;
+      if (captured.baseline !== null) {
+        breach = localFilterBreach(
+          worktree,
+          "the probe tree's creation",
+          captured.baseline,
+        );
+      }
+      createDetail =
+        breach ??
+        worktreeCreateFailureDetail('probe', e, String(sweep?.stderr ?? ''));
     }
     if (!created) {
       for (const file of probes) {

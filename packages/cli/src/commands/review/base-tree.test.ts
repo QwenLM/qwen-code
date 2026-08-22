@@ -401,44 +401,52 @@ describe('runBaseTree', () => {
     }
   });
 
-  it('attributes a plant the add EXECUTED even when the checkout threw after it', () => {
-    // A checkout can throw AFTER executing a plant: the smudge fires,
-    // leaves its self-erasing trace in the common config, and kills git —
-    // the spawn dies on the signal and `git` throws. The catch used to
-    // report the add failure alone, burying the execution under it, and
-    // the next call screened clean over the run (the plant had erased
-    // itself). The baseline the screen captured still stands at the
-    // catch, so the paired re-read attributes it there.
-    const isolation = isolateHostGitConfig();
-    try {
-      const pwned = join(repo, 'PWNED-base-kill');
-      writeFileSync(join(repo, '.gitattributes'), '*.txt filter=killer\n');
-      git(repo, 'add', '-A');
-      git(repo, 'commit', '-qam', 'base-with-attributes');
-      const armedBase = git(repo, 'rev-parse', 'HEAD');
-      execFileSync(
-        'git',
-        [
-          'config',
-          '--global',
-          'filter.killer.smudge',
-          `git config qwen.plant.x 1; git config --unset qwen.plant.x; touch ${pwned}; kill -9 $PPID`,
-        ],
-        { cwd: repo },
-      );
+  // POSIX-only by construction: the killer arms `kill -9 $PPID` and a
+  // marker embedded UNQUOTED in the shell-lexed smudge, and on a Windows
+  // lane the backslashes of the platform path are shell escapes — the
+  // marker can never land at the asserted path and the positive assertion
+  // is deterministically red regardless of the guard under test.
+  it.skipIf(process.platform === 'win32')(
+    'attributes a plant the add EXECUTED even when the checkout threw after it',
+    () => {
+      // A checkout can throw AFTER executing a plant: the smudge fires,
+      // leaves its self-erasing trace in the common config, and kills git —
+      // the spawn dies on the signal and `git` throws. The catch used to
+      // report the add failure alone, burying the execution under it, and
+      // the next call screened clean over the run (the plant had erased
+      // itself). The baseline the screen captured still stands at the
+      // catch, so the paired re-read attributes it there.
+      const isolation = isolateHostGitConfig();
+      try {
+        const pwned = join(repo, 'PWNED-base-kill');
+        writeFileSync(join(repo, '.gitattributes'), '*.txt filter=killer\n');
+        git(repo, 'add', '-A');
+        git(repo, 'commit', '-qam', 'base-with-attributes');
+        const armedBase = git(repo, 'rev-parse', 'HEAD');
+        execFileSync(
+          'git',
+          [
+            'config',
+            '--global',
+            'filter.killer.smudge',
+            `git config qwen.plant.x 1; git config --unset qwen.plant.x; touch ${pwned}; kill -9 $PPID`,
+          ],
+          { cwd: repo },
+        );
 
-      const r = run({ plan: { mergeBaseSha: armedBase } });
+        const r = run({ plan: { mergeBaseSha: armedBase } });
 
-      // The plant EXECUTED — and the report says so, instead of reading
-      // as an add failure.
-      expect(existsSync(pwned)).toBe(true);
-      expect(r.available).toBe(false);
-      expect(r.note).toContain('may have EXECUTED');
-      expect(r.note).toContain('changed');
-    } finally {
-      isolation.dispose();
-    }
-  });
+        // The plant EXECUTED — and the report says so, instead of reading
+        // as an add failure.
+        expect(existsSync(pwned)).toBe(true);
+        expect(r.available).toBe(false);
+        expect(r.note).toContain('may have EXECUTED');
+        expect(r.note).toContain('changed');
+      } finally {
+        isolation.dispose();
+      }
+    },
+  );
 
   it('sweeps a stale tree whose own admin config holds a plant, instead of wedging on it', () => {
     // The screen's candidate set reads every `<common>/worktrees/*/

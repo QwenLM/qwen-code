@@ -1704,47 +1704,62 @@ describe('localFilterCommands', () => {
     expect(breach!).toContain('changed');
   });
 
-  it('refuses when a config directory cannot be enumerated — EACCES is not "nothing registered"', () => {
-    // The screen discovers candidates by listing directories; a catch that
-    // read EVERY enumeration failure as "no worktrees here" failed OPEN:
-    // an execute-only (`--x`) directory defeats readdirSync (needs read)
-    // while git's path-based reads through it still succeed (need only
-    // execute) — the plant inside screened clean and fired on the checkout
-    // (probe, git 2.39: readdir EACCES, path read and stat through the
-    // mode-100 dir both fine).
-    const worktreesDir = join(repo, '.git', 'worktrees');
-    chmodSync(worktreesDir, 0o100);
-    try {
-      const got = localFilterCommands(tree);
-      expect(got.keys).toEqual([]);
-      expect(got.unclearable).toHaveLength(1);
-      expect(got.unclearable[0]).toContain(worktreesDir);
-      expect(got.unclearable[0]).toContain('cannot list');
-      expect(localFilterRefusal(tree, 'a guarded checkout')).not.toBeNull();
-    } finally {
-      chmodSync(worktreesDir, 0o755);
-    }
-  });
+  // skipIf, not convenience: on uid-0 lanes CAP_DAC_OVERRIDE defeats the
+  // chmod barrier (readdirSync succeeds, the screen clears every candidate,
+  // and the unclearable assertion fails on the runner, not the screen), and
+  // on Windows chmod toggles only the read-only attribute — it cannot build
+  // a readdir barrier at all. The file's :561 precedent skips the same
+  // fixture class for the same reason.
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'refuses when a config directory cannot be enumerated — EACCES is not "nothing registered"',
+    () => {
+      // The screen discovers candidates by listing directories; a catch that
+      // read EVERY enumeration failure as "no worktrees here" failed OPEN:
+      // an execute-only (`--x`) directory defeats readdirSync (needs read)
+      // while git's path-based reads through it still succeed (need only
+      // execute) — the plant inside screened clean and fired on the checkout
+      // (probe, git 2.39: readdir EACCES, path read and stat through the
+      // mode-100 dir both fine).
+      const worktreesDir = join(repo, '.git', 'worktrees');
+      chmodSync(worktreesDir, 0o100);
+      try {
+        const got = localFilterCommands(tree);
+        expect(got.keys).toEqual([]);
+        expect(got.unclearable).toHaveLength(1);
+        expect(got.unclearable[0]).toContain(worktreesDir);
+        expect(got.unclearable[0]).toContain('cannot list');
+        expect(localFilterRefusal(tree, 'a guarded checkout')).not.toBeNull();
+      } finally {
+        chmodSync(worktreesDir, 0o755);
+      }
+    },
+  );
 
-  it('refuses when the modules dir cannot be enumerated, and still clears an absent one', () => {
-    // The twin catch under the submodule walk gets the same split: only
-    // ENOENT genuinely means "no (further) submodules".
-    const modulesDir = join(repo, '.git', 'modules');
-    mkdirSync(modulesDir);
-    chmodSync(modulesDir, 0o100);
-    try {
-      const got = localFilterCommands(tree);
-      expect(got.keys).toEqual([]);
-      expect(got.unclearable).toHaveLength(1);
-      expect(got.unclearable[0]).toContain(modulesDir);
-    } finally {
-      chmodSync(modulesDir, 0o755);
-    }
-    // ENOENT stays the clean answer: nothing registered is nothing to
-    // clear (rmSync the dir, so the next line is the missing shape).
-    rmSync(modulesDir, { recursive: true, force: true });
-    expect(localFilterCommands(tree)).toEqual({ keys: [], unclearable: [] });
-  });
+  // Same fixture class as the worktrees-dir twin above: the chmod barrier
+  // is void on uid-0 lanes (CAP_DAC_OVERRIDE) and unbuildable on Windows,
+  // so the skip guard is the fixture's correctness, not a convenience.
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'refuses when the modules dir cannot be enumerated, and still clears an absent one',
+    () => {
+      // The twin catch under the submodule walk gets the same split: only
+      // ENOENT genuinely means "no (further) submodules".
+      const modulesDir = join(repo, '.git', 'modules');
+      mkdirSync(modulesDir);
+      chmodSync(modulesDir, 0o100);
+      try {
+        const got = localFilterCommands(tree);
+        expect(got.keys).toEqual([]);
+        expect(got.unclearable).toHaveLength(1);
+        expect(got.unclearable[0]).toContain(modulesDir);
+      } finally {
+        chmodSync(modulesDir, 0o755);
+      }
+      // ENOENT stays the clean answer: nothing registered is nothing to
+      // clear (rmSync the dir, so the next line is the missing shape).
+      rmSync(modulesDir, { recursive: true, force: true });
+      expect(localFilterCommands(tree)).toEqual({ keys: [], unclearable: [] });
+    },
+  );
 
   it('refuses on a non-directory where a config directory should be', () => {
     // ENOTDIR is the shape that needs no permissions at all: a file where
@@ -2164,6 +2179,86 @@ describe('localFilterCommands', () => {
     rmSync(subA, { recursive: true, force: true });
     rmSync(subB, { recursive: true, force: true });
   });
+
+  it('re-scans a physical file reached through a second directory — git resolves relative includes per source', () => {
+    // The seen dedup used to key on realpath ALONE: two candidates
+    // symlinked to the SAME physical file collapsed before the second
+    // one's include closure was walked, while git — which opens each
+    // config source by path and never dedups by inode — resolves that
+    // file's relative include against the second source's own directory,
+    // executing a closure the screen never scanned (static plant, no
+    // race). Keying on (literal directory, realpath) re-scans the second
+    // arrival with its own include base.
+    const common = join(repo, '.git');
+    const physical = join(common, 'physical-config');
+    writeFileSync(physical, '[include]\n\tpath = inc\n');
+    // Clean closure through the common dir, armed closure through the
+    // per-worktree admin dir.
+    writeFileSync(join(common, 'inc'), '');
+    const admin = join(common, 'worktrees', 'evil-twin');
+    mkdirSync(admin, { recursive: true });
+    writeFileSync(
+      join(admin, 'inc'),
+      '[filter "evil"]\n\tsmudge = touch /tmp/qwen-never\n',
+    );
+    // Both candidates reach the SAME physical file through different
+    // directories.
+    rmSync(join(common, 'config'));
+    symlinkSync(physical, join(common, 'config'));
+    symlinkSync(physical, join(admin, 'config.worktree'));
+
+    const got = localFilterCommands(tree);
+
+    expect(got.keys).toContain('filter.evil.smudge');
+    expect(got.unclearable).toEqual([]);
+  });
+
+  it('stops scanning once the refusal is sealed — a planted blocker costs ONE deadline, not N', () => {
+    // The refusal fires on ANY unclearable entry but used to be assembled
+    // only after the whole candidate loop returned: N planted blocking
+    // candidates cost N full spawn deadlines before it could fire (180
+    // FIFOs outran a 6-hour CI budget on a single screen, the plant
+    // persisting across retries). Truncating after the first unclearable
+    // cannot turn a refusal into a pass, so the scan now stops there —
+    // two unclearable candidates report exactly one.
+    const common = join(repo, '.git');
+    for (const label of ['e1', 'e2']) {
+      const admin = join(common, 'worktrees', label);
+      mkdirSync(admin, { recursive: true });
+      writeFileSync(
+        join(admin, 'config.worktree'),
+        '[include]\n\tpath = %(prefix)/unresolvable\n',
+      );
+    }
+
+    const got = localFilterCommands(tree);
+
+    expect(got.unclearable).toHaveLength(1);
+    expect(got.unclearable[0]).toContain(
+      'names a path this screen cannot resolve',
+    );
+    expect(got.keys).toEqual(['include.path']);
+  });
+
+  it('dedups keys linearly — a padded plant of distinct keys cannot stall the screen', () => {
+    // The per-record dedup used to be `Array.includes` over the keys
+    // already found — quadratic: a plant padded with distinct
+    // `filter.<name>.clean` entries (one include.path write) stalled this
+    // synchronous loop for HOURS (measured: 80k keys → 65 s), a one-write
+    // persistent DoS of every review of this repository in pure JS no
+    // spawn timeout reaches. Membership rides a Set now; 100k keys must
+    // both COMPLETE inside this budget and survive without loss.
+    const lines: string[] = [];
+    for (let i = 0; i < 100_000; i++) {
+      lines.push(`[filter "p${i}"]\n\tclean = true\n`);
+    }
+    writeFileSync(join(repo, '.git', 'config'), lines.join(''));
+
+    const got = localFilterCommands(tree);
+
+    expect(got.unclearable).toEqual([]);
+    expect(got.keys).toHaveLength(100_000);
+  }, 15_000);
 
   it('fails closed when the matching output overflows the buffer', () => {
     // The ENOBUFS half of the screen's fail-closed discipline, reproduced

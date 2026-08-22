@@ -20,7 +20,7 @@ import {
   chmodSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import {
   git as gitUnderTest,
   gitProbe,
@@ -239,7 +239,17 @@ describe('the INERT_GIT_ARGS prefix — checkouts through this module execute no
     const hook = join(hooksDir, 'post-checkout');
     writeFileSync(hook, `#!/bin/sh\ntouch "${repo}/PWNED-hook"\n`);
     chmodSync(hook, 0o755);
-    git('config', 'core.fsmonitor', `touch ${repo}/PWNED-fsm`);
+    // Forward slashes for the shell half: git executes `core.fsmonitor`
+    // through `sh -c`, where backslashes are escapes — the unquoted
+    // platform-native path never landed at the asserted marker on a
+    // Windows lane, and the negative control's positive assertion went
+    // red on every test_windows run regardless of the guard under test.
+    // `/` separators work in both uses on every platform.
+    git(
+      'config',
+      'core.fsmonitor',
+      `touch ${repo.split(sep).join('/')}/PWNED-fsm`,
+    );
 
     // Negative control: the SAME add without the prefix fires both plants —
     // the fixture is armed, so an inert run below proves the prefix, not an

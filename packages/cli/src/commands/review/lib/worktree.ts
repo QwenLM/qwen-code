@@ -855,13 +855,44 @@ export function localFilterCommands(
   // shallower turn arrives; cycles still terminate because every lap
   // arrives deeper than the last.
   const seen = new Map<string, number>();
+  // Membership rides a Set beside the array: the dedup used to be a
+  // per-record `includes` over the keys already found — quadratic, and a
+  // plant padded with distinct `filter.<name>.clean` entries (up to ~3.7M
+  // records under the 64 MiB maxBuffer, one `include.path` write) stalled
+  // this synchronous loop for HOURS: a one-write persistent DoS of every
+  // review of this repository, in pure JS no spawn timeout reaches.
+  const seenKeys = new Set<string>();
+  const pushKey = (key: string): void => {
+    if (!seenKeys.has(key)) {
+      seenKeys.add(key);
+      screen.keys.push(key);
+    }
+  };
   const scan = (file: string, depth: number): void => {
     // git's own include limit is depth 10; a chain beyond it never executes,
     // so it clears the screen rather than feeding an unbounded walk.
     if (depth > 10) return;
-    let dedupe = file;
+    // Stop once the verdict is sealed: ANY unclearable entry is a refusal,
+    // so every remaining candidate can only add to the naming, never turn a
+    // refusal into a pass. Each of them can cost a full spawn deadline (a
+    // FIFO planted at a config path blocks its `git config` until the
+    // timeout), and N planted blockers used to cost N of them before the
+    // refusal could fire — 180 outran a 6-hour CI budget on a single
+    // screen, the plant persisting across every retry. The baseline this
+    // walk fills is captured only beside a CLEAN screen, so stopping early
+    // cannot blind the paired re-read.
+    if (screen.unclearable.length > 0) return;
+    // Keyed on the pair of the file's LITERAL directory and its realpath,
+    // not the realpath alone: git opens each config source BY PATH and
+    // never dedups by inode, resolving a relative include against the
+    // source's own directory. Two candidates symlinked to the SAME physical
+    // file used to collapse here before the second one's includes were
+    // walked, while the checkout resolved that file's relative include
+    // against the second source's directory — executing a closure the
+    // screen never scanned (live-reproduced with a static plant).
+    let dedupe = `${dirname(file)}\u0000${file}`;
     try {
-      dedupe = realpathSync(file);
+      dedupe = `${dirname(file)}\u0000${realpathSync(file)}`;
     } catch {
       // Unresolvable: the literal path still dedupes the plain cycle.
     }
@@ -960,7 +991,7 @@ export function localFilterCommands(
       const nl = record.indexOf('\n');
       const key = nl === -1 ? record : record.slice(0, nl);
       if (!includeKey.test(key)) {
-        if (!screen.keys.includes(key)) screen.keys.push(key);
+        pushKey(key);
         continue;
       }
       const target = resolveIncludeTarget(
@@ -968,7 +999,7 @@ export function localFilterCommands(
         nl === -1 ? '' : record.slice(nl + 1),
       );
       if (target === null) {
-        if (!screen.keys.includes(key)) screen.keys.push(key);
+        pushKey(key);
         screen.unclearable.push(
           `${file}: include ${key} names a path this screen cannot resolve`,
         );
@@ -984,7 +1015,7 @@ export function localFilterCommands(
         screen.keys.length > keysBefore ||
         screen.unclearable.length > unclearableBefore
       ) {
-        if (!screen.keys.includes(key)) screen.keys.push(key);
+        pushKey(key);
       }
     }
   };

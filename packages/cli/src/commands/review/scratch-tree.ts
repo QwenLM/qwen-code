@@ -516,6 +516,12 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
   }
 
   let sweep: SweepResult | undefined;
+  // Hoisted above the try: the catch below runs the paired re-read when
+  // the add THREW, and a re-read without the baseline the screen captured
+  // is blind to every self-erasing shape.
+  const captured: { baseline: LocalFilterBaseline | null } = {
+    baseline: null,
+  };
   try {
     // Clears both a leftover from a crashed run and a tree the reset above
     // could not rescue; either would fail `add` with `already exists`.
@@ -525,9 +531,6 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
     // refused on only while it still exists: the sweep just destroyed it,
     // and the add never reads it. The reset path's comment names the
     // window this placement leaves against concurrent writers.
-    const captured: { baseline: LocalFilterBaseline | null } = {
-      baseline: null,
-    };
     const refusal = localFilterRefusal(
       worktree,
       'the rebuild this command runs',
@@ -560,7 +563,17 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
       captured.baseline,
     );
     if (breach !== null) {
-      discardWorktree(worktree, tree);
+      // Best-effort rollback: `discardWorktree`'s rmSync can still throw
+      // (`force` suppresses ENOENT but not EPERM/EBUSY), and a throw here
+      // falls into the catch below, which would launder an already-DETECTED
+      // breach into the ordinary create-failure note and leave the breached
+      // tree standing for the next call to certify. The note is the report;
+      // a tree this call cannot remove costs the next one its pre-sweep.
+      try {
+        discardWorktree(worktree, tree);
+      } catch {
+        // The breach note already records why this rebuild stopped.
+      }
       return {
         available: false,
         reused: false,
@@ -572,6 +585,35 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
       };
     }
   } catch (e) {
+    // An add that THREW may still have executed a plant first — a smudge
+    // that kills git mid-checkout fires and only THEN makes the spawn
+    // throw. Attribute it while the baseline the screen captured still
+    // stands: a self-erasing plant leaves the next call's screen clean,
+    // and the ordinary create-failure note below would bury the execution
+    // (the reset path's catch carries the same re-read).
+    if (captured.baseline !== null) {
+      const breach = localFilterBreach(
+        worktree,
+        'the rebuild this command ran',
+        captured.baseline,
+      );
+      if (breach !== null) {
+        try {
+          discardWorktree(worktree, tree);
+        } catch {
+          // Same contract as the success-path rollback above.
+        }
+        return {
+          available: false,
+          reused: false,
+          dependencies: null,
+          sharedTreeResidue,
+          sharedTreeResidueTotal: residue.total,
+          sharedTreeUnmeasured: residue.unmeasured,
+          note: breach,
+        };
+      }
+    }
     // Not `unavailable()`: the residue was already measured, and a report whose
     // note names contaminated paths while its `sharedTreeResidue` field says
     // `[]` would tell a reader and a script two different things.

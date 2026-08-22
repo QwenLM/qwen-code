@@ -2155,54 +2155,109 @@ process.stdout.write(JSON.stringify({
     expect(existsSync(probeWorktreePath(wt))).toBe(false);
   });
 
-  it('reports the breach — and never scores — when the creation rollback itself fails', async () => {
-    // The creation breach rolls the tree back with `discardWorktree`, whose
-    // rmSync can still THROW (`force` suppresses ENOENT but not EPERM/EACCES).
-    // The flags used to be set AFTER that call: a throw left `created`
-    // true, the outer catch overwrote the breach, and the phase went on
-    // scoring the tree the re-read had just condemned. The armer's payload
-    // builds the throw — a mode-555 dir whose child rmSync cannot unlink —
-    // beside planting the key the re-read names.
-    const { wt, base } = scaffoldModifiedPr();
-    write('.gitattributes', '*.ts filter=armer\n');
-    commitAll('attributes');
-    const head = git(repo, 'rev-parse', 'HEAD').trim();
-    git(wt, 'checkout', '-q', '--detach', head);
-    const probeTree = probeWorktreePath(wt);
-    execFileSync(
-      'git',
-      [
-        'config',
-        '--global',
-        'filter.armer.smudge',
-        `git config filter.evil.smudge true; mkdir -p ${probeTree}/LOCK; touch ${probeTree}/LOCK/f; chmod 555 ${probeTree}/LOCK; cat`,
-      ],
-      { cwd: repo },
-    );
+  it.skipIf(process.platform === 'win32')(
+    "attributes a plant the probe tree's creation EXECUTED even when the add threw after it",
+    async () => {
+      // The creation catch used to convert EVERY failure into the
+      // ordinary create-failure detail — including a checkout that THREW
+      // after executing a plant: the smudge fires, kills git mid-checkout,
+      // the spawn throws, and with the plant having erased itself the
+      // next run screens clean over the execution. The baseline the
+      // screen captured still stands at the catch, so the paired re-read
+      // attributes it there. POSIX-only by construction: the killer arms
+      // `kill -9 $PPID` inside the shell-lexed smudge, the same trade
+      // the reap test below names.
+      const { wt, base } = scaffoldModifiedPr();
+      write('.gitattributes', '*.ts filter=killer\n');
+      commitAll('attributes');
+      const head = git(repo, 'rev-parse', 'HEAD').trim();
+      git(wt, 'checkout', '-q', '--detach', head);
+      execFileSync(
+        'git',
+        [
+          'config',
+          '--global',
+          'filter.killer.smudge',
+          'git config qwen.plant.x 1; git config --unset qwen.plant.x; kill -9 $PPID',
+        ],
+        { cwd: repo },
+      );
 
-    try {
       await runHandler({
         report: join(repo, 'report.json'),
         worktree: wt,
         base,
         out: join(repo, 'out.json'),
       });
-    } finally {
-      // The LOCK dir outlives the phase (both discards fail on it); give
-      // the afterEach its permissions back.
-      chmodSync(join(probeTree, 'LOCK'), 0o755);
-    }
 
-    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
-    expect(out.probed).toEqual([
-      expect.objectContaining({
-        verdict: 'inconclusive',
-        reason: 'not-run',
-      }),
-    ]);
-    expect(out.probed[0].detail).toContain('may have EXECUTED');
-    expect(out.probed[0].detail).toContain('filter.evil.smudge');
-  });
+      const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+      expect(out.probed).toEqual([
+        expect.objectContaining({
+          file: 'packages/lib/src/f.test.ts',
+          verdict: 'inconclusive',
+        }),
+      ]);
+      expect(out.probed[0].detail).toContain('may have EXECUTED');
+      expect(out.probed[0].detail).toContain('changed');
+    },
+  );
+
+  // skipIf, not convenience: on uid-0 lanes CAP_DAC_OVERRIDE defeats the
+  // 555 barrier (the rollback SUCCEEDS, and the unconditional finally
+  // chmod then dies ENOENT on the removed LOCK dir), and on Windows lanes
+  // the POSIX-only sh payload is unverified — the sibling reap test below
+  // carries the skipIf(win32) guard this fixture lacked.
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'reports the breach — and never scores — when the creation rollback itself fails',
+    async () => {
+      // The creation breach rolls the tree back with `discardWorktree`, whose
+      // rmSync can still THROW (`force` suppresses ENOENT but not EPERM/EACCES).
+      // The flags used to be set AFTER that call: a throw left `created`
+      // true, the outer catch overwrote the breach, and the phase went on
+      // scoring the tree the re-read had just condemned. The armer's payload
+      // builds the throw — a mode-555 dir whose child rmSync cannot unlink —
+      // beside planting the key the re-read names.
+      const { wt, base } = scaffoldModifiedPr();
+      write('.gitattributes', '*.ts filter=armer\n');
+      commitAll('attributes');
+      const head = git(repo, 'rev-parse', 'HEAD').trim();
+      git(wt, 'checkout', '-q', '--detach', head);
+      const probeTree = probeWorktreePath(wt);
+      execFileSync(
+        'git',
+        [
+          'config',
+          '--global',
+          'filter.armer.smudge',
+          `git config filter.evil.smudge true; mkdir -p ${probeTree}/LOCK; touch ${probeTree}/LOCK/f; chmod 555 ${probeTree}/LOCK; cat`,
+        ],
+        { cwd: repo },
+      );
+
+      try {
+        await runHandler({
+          report: join(repo, 'report.json'),
+          worktree: wt,
+          base,
+          out: join(repo, 'out.json'),
+        });
+      } finally {
+        // The LOCK dir outlives the phase (both discards fail on it); give
+        // the afterEach its permissions back.
+        chmodSync(join(probeTree, 'LOCK'), 0o755);
+      }
+
+      const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+      expect(out.probed).toEqual([
+        expect.objectContaining({
+          verdict: 'inconclusive',
+          reason: 'not-run',
+        }),
+      ]);
+      expect(out.probed[0].detail).toContain('may have EXECUTED');
+      expect(out.probed[0].detail).toContain('filter.evil.smudge');
+    },
+  );
 
   it('pairs the hunk reverse-apply — a plant arming between the restore and the apply never scores', async () => {
     // `git apply --reverse` is not a checkout, but it EXECUTES content

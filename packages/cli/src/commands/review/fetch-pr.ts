@@ -1016,6 +1016,21 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
           env: sanitizedGitEnv(),
         }),
       );
+      // An add that THREW may still have executed a plant first — a smudge
+      // that kills git mid-checkout fires and only THEN makes the spawn
+      // throw — and the failure detail below would bury the execution under
+      // an ordinary add error while the next run screens clean, the plant
+      // having erased itself. Attribute it while the baseline the screen
+      // captured still stands, the way base-tree's identical add catch
+      // does.
+      if (captured.baseline !== null) {
+        const breach = localFilterBreach(
+          process.cwd(),
+          'the review worktree add this command runs',
+          captured.baseline,
+        );
+        if (breach !== null) throw new Error(breach);
+      }
       throw new Error(
         `Failed to create worktree at ${wt}: ${(err as Error).message}`,
       );

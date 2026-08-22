@@ -637,6 +637,31 @@ describe('fetch-pr report assembly', () => {
     ).toBe(true);
   });
 
+  it('attributes a plant the add EXECUTED even when the add threw after it', async () => {
+    // An add can throw AFTER executing a plant: a smudge that kills git
+    // mid-checkout fires and only THEN makes the spawn throw. The catch
+    // used to report the add failure alone, burying the execution under
+    // it — and with the plant having erased itself, the next run screened
+    // clean over the run. The deterministic shape for both halves: the
+    // mocked add leaves the self-erasing trace (set+unset — content
+    // restored, ctime not) and throws; the paired re-read the catch now
+    // runs attributes it (base-tree's add catch carries the twin).
+    producerMocks.git.mockImplementation((...args: string[]) => {
+      if (args[0] === 'worktree' && args[1] === 'add') {
+        spawnSync('git', ['config', 'qwen.plant.x', '1'], {
+          cwd: fixtureRepo,
+        });
+        spawnSync('git', ['config', '--unset', 'qwen.plant.x'], {
+          cwd: fixtureRepo,
+        });
+        throw new Error('reset died of signal 9');
+      }
+      return args[0] === 'rev-parse' ? 'f00df00df00d' : '';
+    });
+
+    await expect(reportFor({})).rejects.toThrow('may have EXECUTED');
+  });
+
   it('screens BELOW cleanStale — a plant in the stale tree admin dir does not wedge the fetch gate', async () => {
     // The screen's candidate set reads every `<common>/worktrees/*/
     // config.worktree`, and it used to run ABOVE `cleanStale`'s release of

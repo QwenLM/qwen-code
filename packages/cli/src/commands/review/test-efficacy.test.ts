@@ -44,6 +44,13 @@ import { isolateHostGitConfig } from './lib/test-utils.js';
 const screenOverride = vi.hoisted(() => ({
   fn: null as null | ((worktree: string, context: string) => string | null),
 }));
+// The paired re-read gets the same seam the screen has: the single-threaded
+// window between an apply and its breach-restore write is reachable from
+// nowhere else, so a test that must act inside it acts from here. Forwards
+// EVERY argument, the way the integration suite's seam does.
+const breachOverride = vi.hoisted(() => ({
+  fn: null as null | ((...args: unknown[]) => string | null),
+}));
 vi.mock('./lib/worktree.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./lib/worktree.js')>();
   return {
@@ -52,6 +59,12 @@ vi.mock('./lib/worktree.js', async (importOriginal) => {
       screenOverride.fn !== null
         ? screenOverride.fn(worktree, context)
         : actual.localFilterRefusal(worktree, context),
+    localFilterBreach: (
+      ...args: Parameters<typeof actual.localFilterBreach>
+    ) =>
+      breachOverride.fn !== null
+        ? breachOverride.fn(...args)
+        : actual.localFilterBreach(...args),
   };
 });
 import {
@@ -449,6 +462,88 @@ describe('probe write sites refuse a symlinked target', () => {
       expect(readFileSync(join(outside, 'src', 'lib.ts'), 'utf8')).toBe(
         original,
       );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('the hunk breach-restore write re-validates its target', () => {
+  // The breach branch's restore write runs precisely when an actor is live
+  // in the probe tree — the apply may just have EXECUTED its filter — and
+  // every OTHER restore write in runOneHunkProbe re-checks
+  // probeTargetEscapes first (the finally below does, for the identical
+  // write shape). This one used to write through: a relink landed in the
+  // apply/breach window carried the PR's own content, O_TRUNC, to a path
+  // outside the probe tree.
+  it('reports the breach but never restores through a relink landed during the apply', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-hunk-breach-'));
+    const outside = mkdtempSync(join(tmpdir(), 'qwen-hunk-breach-target-'));
+    try {
+      const g = (...args: string[]) =>
+        execFileSync(
+          'git',
+          [
+            '-c',
+            'user.email=t@t.t',
+            '-c',
+            'user.name=t',
+            '-c',
+            'commit.gpgsign=false',
+            ...args,
+          ],
+          { cwd: dir, encoding: 'utf8' },
+        ).trim();
+      // base → head adds line2, so the tree at HEAD carries the
+      // post-image and the reverse-apply succeeds against a real file.
+      writeFileSync(join(dir, 'f.ts'), 'line1\n');
+      asCheckout(dir);
+      writeFileSync(join(dir, 'f.ts'), 'line1\nline2\n');
+      g('add', '-A');
+      g('commit', '-qm', 'head');
+      // `git apply` needs the trailing newline the `.trim()` above ate:
+      // a patch that does not end in one is `corrupt patch at line N`.
+      const patch = g('diff', 'HEAD~1', 'HEAD', '--', 'f.ts') + '\n';
+      const victim = join(outside, 'victim.ts');
+      writeFileSync(victim, 'victim content\n');
+
+      breachOverride.fn = (...args: unknown[]) => {
+        // Only the APPLY's paired re-read is the window under test; the
+        // restore's earlier re-read (context "this tree's restore") reads
+        // clean, the way the real one does on this fixture.
+        if (args[1] !== 'the hunk reverse-apply') return null;
+        breachOverride.fn = null; // one-shot
+        // The relink lands inside the apply/breach window: after every
+        // pre-write check, before the breach-restore write.
+        rmSync(join(dir, 'f.ts'));
+        symlinkSync(victim, join(dir, 'f.ts'));
+        return 'may have EXECUTED (fixture)';
+      };
+      let r;
+      try {
+        r = runOneHunkProbe(
+          dir,
+          {
+            file: 'f.ts',
+            index: 0,
+            header: '@@ -1 +1,2 @@',
+            startLine: 1,
+            patch,
+          },
+          [],
+        );
+      } finally {
+        breachOverride.fn = null;
+      }
+
+      expect(r.verdict).toBe('inconclusive');
+      expect(r.detail).toContain('may have EXECUTED');
+      // The escape this pins: before the re-check, the restore write
+      // followed the link and overwrote the victim with the saved head
+      // content; with it, the write is refused and the victim keeps its
+      // own content.
+      expect(readFileSync(victim, 'utf8')).toBe('victim content\n');
     } finally {
       rmSync(dir, { recursive: true, force: true });
       rmSync(outside, { recursive: true, force: true });
