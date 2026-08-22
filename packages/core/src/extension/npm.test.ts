@@ -18,6 +18,7 @@ import { promises as dns } from 'node:dns';
 vi.mock('node:fs', () => ({
   readFileSync: vi.fn(),
   existsSync: vi.fn(),
+  createReadStream: vi.fn(),
   createWriteStream: vi.fn(),
   promises: {
     readdir: vi.fn(),
@@ -26,6 +27,10 @@ vi.mock('node:fs', () => ({
     unlink: vi.fn(),
     mkdir: vi.fn(),
   },
+}));
+
+vi.mock('node:stream/promises', () => ({
+  pipeline: vi.fn().mockResolvedValue(undefined),
 }));
 
 describe('parseNpmPackageSource', () => {
