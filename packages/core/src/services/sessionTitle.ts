@@ -46,6 +46,19 @@ Return ONLY a JSON object with a single "title" key. No preamble, no reasoning, 
 const TITLE_USER_PROMPT =
   'Generate the session title now. Populate the schema with a single short title string.';
 
+// The "Good examples" shown to the model in TITLE_SYSTEM_PROMPT. When the
+// recent conversation carries little topical signal (boilerplate-heavy
+// channel/hook context), the model takes the cheapest schema-valid answer
+// and parrots one of these back verbatim (#9706). A canned example says
+// nothing about the session, so matches are rejected like empty results.
+// Keep in sync with the "Good examples" block in TITLE_SYSTEM_PROMPT.
+const TITLE_PROMPT_EXAMPLE_TITLES = [
+  'Fix login button on mobile',
+  'Add OAuth authentication flow',
+  'Debug failing CI pipeline tests',
+  '重构用户鉴权中间件',
+];
+
 const TITLE_SCHEMA = {
   type: 'object',
   properties: {
@@ -80,9 +93,10 @@ const TRAILING_PAIRED_BRACKETS_RE =
  *   usually means the session hasn't authenticated yet.
  * - `empty_history`: the conversation has fewer than 2 turns of usable text.
  *   User should send at least one message before asking for a title.
- * - `empty_result`: the model returned nothing parseable into a title. Often
- *   means the model is too small or the conversation text is meaningless
- *   (e.g., only tool calls).
+ * - `empty_result`: the model returned nothing parseable into a title, or
+ *   only parroted back one of the prompt's own example titles (#9706).
+ *   Often means the model is too small or the conversation text is
+ *   meaningless (e.g., only tool calls).
  * - `aborted`: AbortSignal fired (user pressed Ctrl-C / new session / switch).
  * - `model_error`: the LLM call threw — rate limit, auth, network, etc.
  */
@@ -168,7 +182,9 @@ export async function tryGenerateSessionTitle(
     const rawTitle =
       typeof result?.['title'] === 'string' ? (result['title'] as string) : '';
     const title = sanitizeTitle(rawTitle);
-    if (!title) return { ok: false, reason: 'empty_result' };
+    if (!title || isPromptExampleEcho(title)) {
+      return { ok: false, reason: 'empty_result' };
+    }
 
     return { ok: true, title, modelUsed: model };
   } catch (err) {
@@ -209,6 +225,20 @@ export function sanitizeTitle(s: string): string {
     t = t.replace(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '');
   }
   return t;
+}
+
+/**
+ * Detect a sanitized title that is just the model echoing one of the
+ * prompt's own "Good examples" back (#9706). Exact, case-insensitive match
+ * after sanitization — deliberately not fuzzy, so a genuinely topical title
+ * that merely resembles an example still passes. Also catches the prompt's
+ * "Bad (wrong case)" variant of the first example.
+ */
+function isPromptExampleEcho(title: string): boolean {
+  const normalized = title.trim().toLowerCase();
+  return TITLE_PROMPT_EXAMPLE_TITLES.some(
+    (example) => example.toLowerCase() === normalized,
+  );
 }
 
 /**
