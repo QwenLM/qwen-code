@@ -5486,6 +5486,180 @@ describe('useGeminiStream', () => {
     expect(deliveredSends.match(/also check the logs/g)).toHaveLength(1);
   });
 
+  it('keeps the pristine retry payload when settle accepted the drained steer before the failure', async () => {
+    // Accept-branch variant: the bridge failed (marker sent, pristine stored
+    // for Ctrl+Y) and the push LANDED — settle accepts the input — before the
+    // stream failed. restore() must then stay a no-op (no strip, no re-queue):
+    // the retry is the single recovery channel and re-bridges the pristine.
+    const queuedPrompt = 'listen @/tmp/recording.wav';
+    const resolvedAudioPart: Part = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    const resolvedTextPart: Part = { text: queuedPrompt };
+    const markerPart: Part = {
+      text: '[Audio bridge could not transcribe attached audio: no voice model is configured.]',
+    };
+    mockRunAudioBridge
+      .mockResolvedValueOnce({
+        status: 'failed',
+        parts: [resolvedTextPart, markerPart],
+        audioCount: 1,
+        convertedCount: 0,
+        egressCount: 0,
+        error: 'no voice model is configured',
+      })
+      .mockResolvedValueOnce({
+        status: 'ok',
+        parts: [{ text: 'recovered transcript' }],
+        audioCount: 1,
+        convertedCount: 1,
+        egressCount: 1,
+        modelId: 'qwen3-asr-flash',
+      });
+    vi.spyOn(atCommandProcessor, 'resolveAtCommandQuery').mockResolvedValue({
+      processedQuery: [resolvedTextPart, resolvedAudioPart],
+      shouldProceed: true,
+    });
+    const recordMidTurnUserMessage = vi.fn();
+    mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+      recordMidTurnUserMessage,
+    });
+    const makeCompletedToolCall = (
+      callId: string,
+      promptId: string,
+    ): TrackedToolCall[] => [
+      {
+        request: {
+          callId,
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: promptId,
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId,
+          responseParts: [
+            {
+              functionResponse: {
+                id: callId,
+                name: 'testTool',
+                response: { result: 'ok' },
+              },
+            },
+          ],
+          errorType: undefined,
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => 'Mock description',
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    const queue: string[] = [queuedPrompt];
+    const midTurnDrainRef = {
+      current: vi.fn(() => queue.splice(0, queue.length)),
+    };
+    const restoreSteer = vi.fn((messages: string[]) => {
+      queue.unshift(...messages);
+    });
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        midTurnDrainRef,
+        undefined,
+        undefined,
+        undefined,
+        { current: restoreSteer },
+      ),
+    );
+
+    mockSendMessageStream
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'partial response',
+          };
+          // Emulate core settle for a push that LANDED: accept() settles the
+          // steer input before the stream failure reaches the CLI's failure
+          // handler, so the restore() that handler triggers must be a no-op.
+          (
+            mockSendMessageStream.mock.calls[0]?.[3] as {
+              steerInput?: SteerInput;
+            }
+          ).steerInput?.accept();
+          throw new Error('stream failed');
+        })(),
+      )
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete(
+          makeCompletedToolCall('call1', 'prompt-id-drain-accept-settled'),
+        );
+      }
+    });
+
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+    // The in-stream accept() above settled the input (recording fired with
+    // it); the failure path's restore() must therefore have been a no-op —
+    // the stored pristine payload stays intact for Ctrl+Y.
+    expect(restoreSteer).not.toHaveBeenCalled();
+    expect(queue).toHaveLength(0);
+    expect(recordMidTurnUserMessage).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await result.current.retryLastPrompt();
+    });
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+    });
+    // The retry re-bridged the pristine media: exactly one more bridge call,
+    // delivering the transcript; no re-drain delivery follows.
+    expect(mockRunAudioBridge).toHaveBeenCalledTimes(2);
+    const retrySent = JSON.stringify(mockSendMessageStream.mock.calls[1][0]);
+    expect(retrySent).toContain('recovered transcript');
+    expect(retrySent).not.toContain('could not transcribe');
+  });
+
   it('re-bridges a client-driven steer drain via Ctrl+Y when the Steer send fails', async () => {
     // The client-driven boundary drain consumes only `parts` in core; core
     // surfaces the resolved drain via onSteerResolved so the hook can store
