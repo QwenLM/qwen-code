@@ -26749,6 +26749,84 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('does not downgrade a different-text manual title on an auto re-rename (#8977)', async () => {
+      // The keepalive witness: a user renamed the bound task session to their
+      // own name, then a daemon restart empties the keepalive's `renamed` set
+      // and its first tick re-names the session with the derived ⏰ text +
+      // `auto`. The text differs from the manual name, so the old
+      // identical-text-only guard let the downgrade through; the guard must
+      // block ANY manual→auto rename or the user's name is lost in memory and
+      // on disk within one tick.
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      // A user renames the task session to their own name (manual).
+      bridge.updateSessionMetadata(session.sessionId, {
+        displayName: 'My digest run',
+        titleSource: 'manual',
+      });
+      // The keepalive's post-restart re-name with the derived text + `auto`.
+      const effective = bridge.updateSessionMetadata(session.sessionId, {
+        displayName: '⏰ run the nightly digest',
+        titleSource: 'auto',
+      });
+      // The downgrade is refused; the caller sees the existing manual fields.
+      expect(effective).toMatchObject({
+        displayName: 'My digest run',
+        titleSource: 'manual',
+      });
+
+      const attached = await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+      });
+      expect(attached.displayName).toBe('My digest run');
+      expect(attached.titleSource).toBe('manual');
+
+      await bridge.shutdown();
+    });
+
+    it('still auto-names a never-titled session and re-names an auto session (#8977)', async () => {
+      // The broader manual→auto guard must not break legitimate machine
+      // naming: a session with no title yet accepts the derived ⏰ name +
+      // `auto`, and an already-auto session can be re-named (e.g. the task
+      // prompt changed).
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const first = bridge.updateSessionMetadata(session.sessionId, {
+        displayName: '⏰ first prompt',
+        titleSource: 'auto',
+      });
+      expect(first).toMatchObject({
+        displayName: '⏰ first prompt',
+        titleSource: 'auto',
+      });
+
+      // A task-prompt change re-names the auto session (auto → auto allowed).
+      const second = bridge.updateSessionMetadata(session.sessionId, {
+        displayName: '⏰ changed prompt',
+        titleSource: 'auto',
+      });
+      expect(second).toMatchObject({
+        displayName: '⏰ changed prompt',
+        titleSource: 'auto',
+      });
+
+      const attached = await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+      });
+      expect(attached.displayName).toBe('⏰ changed prompt');
+      expect(attached.titleSource).toBe('auto');
+
+      await bridge.shutdown();
+    });
+
     it('seeds known and unknown title sources on cold restore (#8977)', async () => {
       const titleUpdates: unknown[] = [];
       const bridge = makeBridge({

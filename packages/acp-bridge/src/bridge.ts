@@ -9896,19 +9896,22 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         const nextTitleSource = nextDisplayName
           ? (metadata.titleSource ?? 'manual')
           : undefined;
-        // Same-text updates may still move the source, but only upward: a
-        // user adopting the derived name (auto → manual) must stick, while
-        // the scheduled-task keepalive's post-restart re-name with the
-        // identical derived text + `auto` must not silently downgrade a
-        // `manual` title (which would drop it at the next /clear).
-        const sameTextDowngrade =
-          entry.displayName === nextDisplayName &&
-          entry.titleSource === 'manual' &&
-          nextTitleSource === 'auto';
+        // Provenance may move upward (a user adopting the derived name,
+        // auto → manual, must stick) but never downward: a `manual` title is
+        // an explicit user choice, so a machine re-name carrying `auto` must
+        // not overwrite it regardless of whether the text matches. The
+        // scheduled-task keepalive, after every daemon restart, re-names ALL
+        // bound sessions with the derived ⏰ text + `auto`; without the
+        // text-agnostic block a session the user renamed to something else
+        // loses its manual name in memory and on disk within one tick. The
+        // identical-text case is the subset this guard originally covered
+        // (#8977).
+        const manualToAutoDowngrade =
+          entry.titleSource === 'manual' && nextTitleSource === 'auto';
         if (
           (entry.displayName !== nextDisplayName ||
             entry.titleSource !== nextTitleSource) &&
-          !sameTextDowngrade
+          !manualToAutoDowngrade
         ) {
           entry.displayName = nextDisplayName;
           entry.titleSource = nextTitleSource;
