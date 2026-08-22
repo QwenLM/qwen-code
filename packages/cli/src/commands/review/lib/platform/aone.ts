@@ -674,37 +674,59 @@ export const aoneReader: ReviewPlatformReader = {
     const view = mrView(prNumber, ownerRepo);
     // One flat collection serves the three GitHub channels; `--sort asc`
     // gives chronological order (the GitHub endpoints' natural order).
-    // a1 has no pagination flags — the full list arrives in one payload.
-    const raw = a1Json<unknown>(
-      'repo',
-      'mr',
-      'comment',
-      'list',
-      '--mr',
-      String(prNumber),
-      '--repo',
-      ownerRepo,
-      '--sort',
-      'asc',
-    );
-    // a1 can answer this exact command with a well-formed `a1.error/v1`
-    // error OBJECT at exit 0 (a backend auth failure or a client timeout —
-    // measured by cleanup's a1CommentList, same payload, same guard).
-    // `?? []` does not coalesce an object, `.filter` would throw an
-    // untagged TypeError out of getReviewContext, and the envelope's
-    // actionable message — the difference between "re-authenticate" and
-    // "schema drift" — would be lost at exactly the moment the context
-    // read fails for a recoverable reason.
-    if (!Array.isArray(raw)) {
-      const cause = (raw as { message?: unknown } | null)?.message;
-      throw new Error(
-        'a1 mr comment list returned an unexpected shape' +
-          (typeof cause === 'string' && cause.trim() !== ''
-            ? `: ${cause.trim()}`
-            : ''),
+    // a1 has no pagination flags — each query returns the full list.
+    //
+    // The DEFAULT listing EXCLUDES resolved comments (measured by cleanup's
+    // auditAoneMrWrites: the MR's `comments` minus `closedComments` is
+    // exactly what it returns), and GitHub's REST fetches INCLUDE
+    // resolved-thread comments — a bundle missing them would silently drop
+    // resolved blocker roots from the re-check walk, and a resolved marker
+    // root could not fire the fail-closed identity gate. Union the default
+    // and `--resolved` listings the way the audit does, dedupe by id.
+    const listComments = (...extra: string[]): AoneComment[] => {
+      const out = a1Json<unknown>(
+        'repo',
+        'mr',
+        'comment',
+        'list',
+        '--mr',
+        String(prNumber),
+        '--repo',
+        ownerRepo,
+        '--sort',
+        'asc',
+        ...extra,
       );
+      // a1 can answer this exact command with a well-formed `a1.error/v1`
+      // error OBJECT at exit 0 (a backend auth failure or a client timeout
+      // — measured by cleanup's a1CommentList, same payload, same guard).
+      // `?? []` does not coalesce an object, `.filter` would throw an
+      // untagged TypeError out of getReviewContext, and the envelope's
+      // actionable message — the difference between "re-authenticate" and
+      // "schema drift" — would be lost at exactly the moment the context
+      // read fails for a recoverable reason.
+      if (!Array.isArray(out)) {
+        const cause = (out as { message?: unknown } | null)?.message;
+        throw new Error(
+          'a1 mr comment list returned an unexpected shape' +
+            (typeof cause === 'string' && cause.trim() !== ''
+              ? `: ${cause.trim()}`
+              : ''),
+        );
+      }
+      return out as AoneComment[];
+    };
+    const byId = new Map<number, AoneComment>();
+    for (const c of [...listComments(), ...listComments('--resolved')]) {
+      if (typeof c.id === 'number' && !byId.has(c.id)) byId.set(c.id, c);
     }
-    const comments: ReviewContextComment[] = (raw as AoneComment[])
+    // DISCLOSED RESIDUAL: resolved REPLIES stay invisible — the `--resolved`
+    // listing returns resolved ROOT inline comments only, and a1 exposes no
+    // listing that includes their replies (same residual cleanup's audit
+    // discloses, design doc #9617). A resolved thread therefore renders its
+    // root without its reply chain; the re-check walk is unaffected (a
+    // reply alone never retires a blocker — the code decides).
+    const comments: ReviewContextComment[] = [...byId.values()]
       .filter((c) => !c.isDraft)
       .map((c) => ({
         id: c.id,

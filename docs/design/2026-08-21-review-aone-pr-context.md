@@ -147,9 +147,17 @@ One flat comment collection serves three GitHub channels:
   shape ("skip the age rule, not the review").
 - `isDraft` comments are skipped (the PENDING-review analogue: a draft is
   not a posted round and not settled discussion).
-- `closed`/`outdated` are IGNORED this phase — parity with the GitHub REST
-  surface pr-context reads (resolved-thread state is not in `pulls/comments`
-  either). Their consumer is comment-status (#9613).
+- Resolved comments are INCLUDED: the default `comment list` excludes them
+  (measured: the MR's `comments` minus `closedComments`), while GitHub's
+  REST fetches include resolved-thread comments — so `getReviewContext`
+  unions the default and `--resolved` listings, deduped by id, the same
+  union `cleanup`'s audit applies. The `closed`/`outdated` FLAGS are still
+  ignored this phase (their consumer is comment-status, #9613); the union
+  is about which comments ARRIVE, not how their state is rendered.
+  Disclosed residual: resolved REPLIES stay invisible — the `--resolved`
+  listing returns resolved ROOT inline comments only, so a resolved thread
+  renders its root without its reply chain (the re-check walk is unaffected
+  — a reply alone never retires a blocker).
 - `verdicts` is empty: Aone has no review object. The "Review summaries"
   section therefore renders nothing on Aone; human overall comments are
   thread comments and render in the thread channels like GitHub issue

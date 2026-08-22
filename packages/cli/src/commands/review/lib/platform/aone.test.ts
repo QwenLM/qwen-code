@@ -524,10 +524,12 @@ describe('aoneReader.getReviewContext / getCurrentUser', () => {
     vi.clearAllMocks();
   });
 
-  /** mr view answer first, comment list second — call order is fixed. */
+  /** mr view first, then the default listing, then the `--resolved`
+   *  listing — call order is fixed. */
   function mockContext(
     comments: Array<Record<string, unknown>>,
     view?: Record<string, unknown>,
+    resolved: Array<Record<string, unknown>> = [],
   ): void {
     a1JsonMock
       .mockReturnValueOnce({
@@ -542,7 +544,8 @@ describe('aoneReader.getReviewContext / getCurrentUser', () => {
           ...view,
         },
       })
-      .mockReturnValueOnce(comments);
+      .mockReturnValueOnce(comments)
+      .mockReturnValueOnce(resolved);
   }
 
   it('splits one flat comment list into the inline and thread channels', () => {
@@ -572,6 +575,52 @@ describe('aoneReader.getReviewContext / getCurrentUser', () => {
     expect(thread.map((c) => c.id)).toEqual([2]);
     // No review object exists on Aone.
     expect(ctx.verdicts).toEqual([]);
+  });
+
+  it('unions the default and --resolved listings, deduped by id', () => {
+    // The DEFAULT listing EXCLUDES resolved comments (measured by cleanup's
+    // auditAoneMrWrites), and GitHub's REST fetches INCLUDE resolved-thread
+    // comments — so the bundle must union the `--resolved` listing or a
+    // resolved blocker/marker root silently drops out of the context (and
+    // the fail-closed identity gate). Mirror of the audit's union.
+    mockContext(
+      [
+        { id: 1, note: 'open inline', path: 'src/a.ts', line: 3 },
+        { id: 2, note: 'open global' },
+      ],
+      undefined,
+      [
+        { id: 3, note: 'resolved root', path: 'src/b.ts', line: 9 },
+        { id: 1, note: 'open inline', path: 'src/a.ts', line: 3 },
+      ],
+    );
+    const ctx = aoneReader.getReviewContext(7, 'g/p');
+    // Union order: default listing first, then resolved-only additions;
+    // the duplicate id 1 appears once.
+    expect(ctx.comments.map((c) => c.id)).toEqual([1, 2, 3]);
+    expect(ctx.comments[2]).toMatchObject({
+      id: 3,
+      body: 'resolved root',
+      path: 'src/b.ts',
+      line: 9,
+    });
+  });
+
+  it('fails closed when the --resolved listing returns an error envelope', () => {
+    // A failure of EITHER listing must fail the whole read — degrading to
+    // the default-only list would reintroduce the resolved-blind hole.
+    a1JsonMock
+      .mockReturnValueOnce({
+        mergeRequest: { sourceBranch: 'sha123', targetBranch: 'master' },
+      })
+      .mockReturnValueOnce([{ id: 1, note: 'open' }])
+      .mockReturnValueOnce({
+        schemaVersion: 'a1.error/v1',
+        message: 'listing resolved comments: backend auth failure',
+      });
+    expect(() => aoneReader.getReviewContext(7, 'g/p')).toThrow(
+      'a1 mr comment list returned an unexpected shape: listing resolved comments: backend auth failure',
+    );
   });
 
   it('maps the MR view onto the metadata (stats stay absent)', () => {
