@@ -31,6 +31,7 @@ const catalogController = vi.hoisted(() => ({
 let connectionState: any;
 let streamingStateValue: string;
 let pendingPermission: any;
+let sessionHasActivePromptValue: boolean;
 let latestOnSubmit:
   | ((
       text: string,
@@ -136,6 +137,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
 
 vi.mock('../session-catalog/session-catalog-hooks', () => ({
   useSessionCatalogController: () => catalogController,
+  useSessionHasActivePrompt: () => sessionHasActivePromptValue,
 }));
 
 vi.mock('../hooks/useQueuedPrompts', () => ({
@@ -220,6 +222,7 @@ vi.mock('./StreamingStatus', () => ({
         props.startedAt === undefined ? 'none' : String(props.startedAt)
       }
       data-show-phrase={String(props.showPhrase)}
+      data-has-active-prompt={String(props.hasActivePrompt === true)}
     />
   ),
 }));
@@ -400,6 +403,7 @@ beforeEach(() => {
   latestOnSubmit = undefined;
   latestChatEditorProps = undefined;
   renderRealChatEditor = false;
+  sessionHasActivePromptValue = false;
   latestComposerCoreOptions.current = null;
   latestFollowupAccept = undefined;
   latestMonitorDetailsOnOpen = undefined;
@@ -2706,5 +2710,30 @@ describe('ChatPane', () => {
     expect(latestComposerCoreOptions.current?.builtinAtProviders).toBe(
       builtinAtProviders,
     );
+  });
+});
+
+describe('ChatPane daemon keep-alive (#9487)', () => {
+  it('passes the daemon active-prompt flag to the indicator and composer', () => {
+    streamingStateValue = 'idle';
+    sessionHasActivePromptValue = true;
+    render({ onError: vi.fn() });
+
+    const status = testid('pane-streaming');
+    expect(status).not.toBeNull();
+    expect(status!.getAttribute('data-has-active-prompt')).toBe('true');
+    // The stop/cancel affordance stays available during the silent gap:
+    // the daemon still has an active prompt, so cancel genuinely works.
+    expect(testid('pane-running')!.textContent).toBe('true');
+  });
+
+  it('keeps the pane idle without a daemon active prompt', () => {
+    streamingStateValue = 'idle';
+    sessionHasActivePromptValue = false;
+    render({ onError: vi.fn() });
+
+    const status = testid('pane-streaming');
+    expect(status!.getAttribute('data-has-active-prompt')).toBe('false');
+    expect(testid('pane-running')!.textContent).toBe('false');
   });
 });
