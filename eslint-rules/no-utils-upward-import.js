@@ -13,11 +13,13 @@ import path from 'node:path';
  * `acp-integration/`, ...): that is the dependency-direction invariant
  * tracked in #9146.
  *
- * The only permitted "upward" references are `import type` specifiers. A
- * type-only import is erased at compile time, so it cannot create a runtime
- * module cycle. The two remaining instances (`Settings` in
- * `modelConfigUtils.ts`, `CommandContext` in `sessionPaths.ts`) are this
- * irreducible type-level coupling.
+ * The only permitted "upward" references are type-only constructs:
+ * `import type`, `export type ... from`, and TS `import('...').T` type
+ * queries. All of them are erased at compile time, so they cannot create a
+ * runtime module cycle; everything else (value imports, value re-exports,
+ * literal/template dynamic `import()`) is reported. The two remaining
+ * instances (`Settings` in `modelConfigUtils.ts`, `CommandContext` in
+ * `sessionPaths.ts`) are this irreducible type-level coupling.
  */
 
 const CLI_UTILS_MARKER = 'packages/cli/src/utils/';
