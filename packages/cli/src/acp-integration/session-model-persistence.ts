@@ -15,6 +15,25 @@ import {
 } from '@qwen-code/qwen-code-core';
 
 const debugLogger = createDebugLogger('SESSION_MODEL');
+const AUTH_TYPES = new Set<string>(Object.values(AuthType));
+
+function isAuthType(value: string): value is AuthType {
+  return AUTH_TYPES.has(value);
+}
+
+function registryHonoredBaseUrl(
+  config: Config,
+  authType: AuthType,
+  modelId: string,
+  baseUrl: string | undefined,
+): string | undefined {
+  if (typeof baseUrl !== 'string' || !baseUrl) {
+    return undefined;
+  }
+  return config.getResolvedModelConfig?.(authType, modelId, baseUrl)
+    ? baseUrl
+    : undefined;
+}
 
 export async function recordDaemonSessionModel(
   config: Config,
@@ -93,16 +112,34 @@ export async function applyRestoredSessionModel(
 ): Promise<void> {
   const recorded = projection?.runtime.recording.sessionModel;
   const fallbackModel = projection?.runtime.recording.lastAssistantModel;
-  const authType = (recorded?.authType || liveAuthType(config))?.trim();
+  const recordedAuth = recorded?.authType?.trim();
+  const authType = (
+    recordedAuth && isAuthType(recordedAuth)
+      ? recordedAuth
+      : liveAuthType(config)
+  )?.trim();
   const modelId = recorded?.modelId || fallbackModel;
-  if (!modelId?.trim() || !authType) return;
+  if (!modelId?.trim() || !authType || !isAuthType(authType)) return;
 
   const currentModel = stripRuntimeSnapshotPrefix(config.getModel() ?? '');
   const currentAuth = liveAuthType(config);
   const targetModel = stripRuntimeSnapshotPrefix(modelId.trim());
-  const targetBaseUrl = recorded?.baseUrl;
+  const targetBaseUrl = recorded?.isRuntime
+    ? undefined
+    : registryHonoredBaseUrl(config, authType, targetModel, recorded?.baseUrl);
+  const recordedRoute = recorded
+    ? {
+        ...recorded,
+        ...(targetBaseUrl
+          ? { baseUrl: targetBaseUrl }
+          : { baseUrl: undefined }),
+      }
+    : undefined;
   const currentRegistryBaseUrl = config.getCurrentModelRegistryBaseUrl?.();
-  const baseUrlMatches = recordedRouteMatches(recorded, currentRegistryBaseUrl);
+  const baseUrlMatches = recordedRouteMatches(
+    recordedRoute,
+    currentRegistryBaseUrl,
+  );
   const currentRuntimeMatches = hasMatchingRuntimeSnapshot(
     config,
     authType,
@@ -137,11 +174,7 @@ export async function applyRestoredSessionModel(
         }
       : undefined;
   try {
-    await config.switchModel(
-      authType as AuthType,
-      switchModelId,
-      switchOptions,
-    );
+    await config.switchModel(authType, switchModelId, switchOptions);
   } catch (error) {
     debugLogger.warn(
       `restore session model failed (${targetModel}/${authType}): ${

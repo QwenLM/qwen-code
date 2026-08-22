@@ -1693,7 +1693,7 @@ describe('SessionTranscriptReader', () => {
     );
   });
 
-  it('drops a trailing session_model payload that is not a usable string pair', async () => {
+  it('keeps the last valid session_model when a trailing payload is unusable', async () => {
     const validModel: ChatRecord = {
       ...record('model-1', null, ''),
       type: 'system',
@@ -1709,6 +1709,26 @@ describe('SessionTranscriptReader', () => {
       systemPayload: { modelId: 42, authType: 'openai' },
     };
     await writeRecords([validModel, invalidModel as unknown as ChatRecord]);
+
+    const projection = await new SessionTranscriptReader(
+      workspaceDir,
+    ).readRestoreProjection(sessionId, { replay: { kind: 'none' } });
+
+    expect(projection?.runtime.recording.sessionModel).toEqual({
+      modelId: 'qwen3-coder-plus',
+      authType: 'openai',
+    });
+  });
+
+  it('drops a session_model payload that is not a usable string pair', async () => {
+    const invalidModel = {
+      ...record('model-1', null, ''),
+      type: 'system' as const,
+      subtype: 'session_model',
+      message: undefined,
+      systemPayload: { modelId: 42, authType: 'openai' },
+    };
+    await writeRecords([invalidModel as unknown as ChatRecord]);
 
     const projection = await new SessionTranscriptReader(
       workspaceDir,

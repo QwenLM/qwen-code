@@ -36,6 +36,12 @@ function recordingProjection(
   };
 }
 
+function resolvedWhen(baseUrl: string) {
+  return vi.fn((_auth: string, _model: string, url?: string) =>
+    url === baseUrl ? { id: _model } : undefined,
+  );
+}
+
 describe('session-model-persistence', () => {
   it('records through ChatRecordingService', async () => {
     const recordSessionModel = vi.fn().mockResolvedValue(true);
@@ -120,6 +126,7 @@ describe('session-model-persistence', () => {
       getModel: vi.fn().mockReturnValue('settings-default'),
       getAuthType: vi.fn().mockReturnValue(AuthType.USE_OPENAI),
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
+      getResolvedModelConfig: resolvedWhen('https://example.test/v1'),
       switchModel,
     } as unknown as Config;
 
@@ -236,6 +243,7 @@ describe('session-model-persistence', () => {
       getContentGeneratorConfig: vi.fn().mockReturnValue({
         baseUrl: 'https://example.test/v1',
       }),
+      getResolvedModelConfig: resolvedWhen('https://example.test/v1'),
       switchModel,
     } as unknown as Config;
 
@@ -594,6 +602,7 @@ describe('session-model-persistence', () => {
       getCurrentModelRegistryBaseUrl: vi.fn(() => currentBaseUrl),
       getActiveRuntimeModelSnapshot: vi.fn().mockReturnValue(undefined),
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
+      getResolvedModelConfig: resolvedWhen('https://session.example/v1'),
       switchModel,
     } as unknown as Config;
 
@@ -896,6 +905,7 @@ describe('session-model-persistence', () => {
       getContentGeneratorConfig: vi.fn().mockReturnValue({
         baseUrl: 'https://b.example/v1',
       }),
+      getResolvedModelConfig: resolvedWhen('https://a.example/v1'),
       switchModel,
     } as unknown as Config;
 
@@ -926,6 +936,7 @@ describe('session-model-persistence', () => {
       getAuthType: vi.fn().mockReturnValue(AuthType.USE_OPENAI),
       getCurrentModelRegistryBaseUrl: vi.fn().mockReturnValue(null),
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
+      getResolvedModelConfig: resolvedWhen('https://a.example/v1'),
       switchModel,
     } as unknown as Config;
 
@@ -971,6 +982,65 @@ describe('session-model-persistence', () => {
         sessionModel: {
           modelId: 'qwen3-coder-plus',
           authType: AuthType.USE_OPENAI,
+        },
+      }),
+    );
+
+    expect(switchModel).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI,
+      'qwen3-coder-plus',
+      undefined,
+    );
+  });
+
+  it('drops a recorded baseUrl that is not a configured registry route', async () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    const config = {
+      getModel: vi.fn().mockReturnValue('settings-default'),
+      getAuthType: vi.fn().mockReturnValue(AuthType.USE_OPENAI),
+      getCurrentModelRegistryBaseUrl: vi.fn().mockReturnValue(undefined),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({}),
+      getResolvedModelConfig: vi.fn().mockReturnValue(undefined),
+      switchModel,
+    } as unknown as Config;
+
+    await applyRestoredSessionModel(
+      config,
+      recordingProjection({
+        lastCompletedUuid: 'leaf',
+        turnParentUuids: [null],
+        sessionModel: {
+          modelId: 'qwen3-coder-plus',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://attacker.example/v1',
+        },
+      }),
+    );
+
+    expect(switchModel).toHaveBeenCalledWith(
+      AuthType.USE_OPENAI,
+      'qwen3-coder-plus',
+      undefined,
+    );
+  });
+
+  it('ignores a recorded authType that is not a known AuthType', async () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    const config = {
+      getModel: vi.fn().mockReturnValue('settings-default'),
+      getAuthType: vi.fn().mockReturnValue(AuthType.USE_OPENAI),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({}),
+      switchModel,
+    } as unknown as Config;
+
+    await applyRestoredSessionModel(
+      config,
+      recordingProjection({
+        lastCompletedUuid: 'leaf',
+        turnParentUuids: [null],
+        sessionModel: {
+          modelId: 'qwen3-coder-plus',
+          authType: 'not-an-auth',
         },
       }),
     );

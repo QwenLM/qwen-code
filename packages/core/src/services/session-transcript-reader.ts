@@ -2151,10 +2151,11 @@ export class SessionTranscriptReader {
       index,
       (entry) => entry.type === 'system' && entry.subtype === 'session_source',
     );
-    const sessionModelUuid = lastUuidMatching(
-      index,
-      (entry) => entry.type === 'system' && entry.subtype === 'session_model',
-    );
+    const sessionModelUuids = index.runtimeUuids.filter((uuid) => {
+      const entry = index.byUuid.get(uuid);
+      return entry?.type === 'system' && entry.subtype === 'session_model';
+    });
+    const sessionModelSet = new Set(sessionModelUuids);
     // The legacy-model fallback reads the last assistant record's `model`.
     // Without an explicit selection it is only dispatched when it happens to
     // land in the replay/model read sets, so on a resume whose tail is a
@@ -2196,7 +2197,7 @@ export class SessionTranscriptReader {
       [
         parentSessionUuid,
         sessionSourceUuid,
-        sessionModelUuid,
+        ...sessionModelUuids,
         lastAssistantUuid,
       ].filter((uuid): uuid is string => uuid !== undefined),
     );
@@ -2256,7 +2257,7 @@ export class SessionTranscriptReader {
           | undefined;
         sourceType = payload?.sourceType;
         sourceId = payload?.sourceId;
-      } else if (record.uuid === sessionModelUuid) {
+      } else if (sessionModelSet.has(record.uuid)) {
         if (isValidSessionModelPayload(record.systemPayload)) {
           sessionModel = record.systemPayload;
         }

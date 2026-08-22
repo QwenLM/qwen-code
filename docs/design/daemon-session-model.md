@@ -76,9 +76,13 @@ so the session leaves the snapshot endpoint instead of no-op'ing.
 Live attach/resume skips restore. Cold `loadSession` / `resumeSession`:
 
 1. `newSessionConfig` still constructs Config from current settings.
-2. Before `ensureAuthenticated`, apply the last `session_model` payload, else
-   the last assistant `model` (same auth from `modelsConfig.getCurrentAuthType()`
-   when content-generator auth is not yet populated), else keep settings.
+2. Before `ensureAuthenticated`, apply the last valid `session_model` payload,
+   else the last assistant `model` (same auth from
+   `modelsConfig.getCurrentAuthType()` when content-generator auth is not yet
+   populated), else keep settings. A recorded `baseUrl` is a registry route
+   selector, not an arbitrary endpoint: it is honored only when it matches a
+   configured registry route for that auth type and model, otherwise the
+   implicit registry route is used. `authType` must be a known `AuthType`.
 3. `switchModel` failure is non-fatal. If the restored auth then fails
    `ensureAuthenticated`, load/resume reverts to the settings model and
    retries authentication once.
