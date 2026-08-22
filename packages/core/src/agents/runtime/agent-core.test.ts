@@ -52,6 +52,16 @@ import {
 import { GeminiChat } from '../../core/geminiChat.js';
 import { ContextState } from './agent-headless.js';
 import type { ToolResultBoundaryObservation } from '../../utils/tool-result-boundary-diagnostics.js';
+import {
+  CoreToolScheduler,
+  type ToolCall,
+  type WaitingToolCall,
+} from '../../core/coreToolScheduler.js';
+import { ToolConfirmationOutcome } from '../../tools/tools.js';
+import {
+  AgentEventType,
+  type AgentApprovalRequestEvent,
+} from './agent-events.js';
 
 const boundaryObserveMock = vi.hoisted(() =>
   vi.fn((_observation: ToolResultBoundaryObservation) => false),
@@ -420,6 +430,526 @@ describe('AgentCore.runInAgentFrames', () => {
     }, otherView);
 
     expect(observed).toBe(ownView);
+  });
+});
+
+describe('AgentCore approval response deduplication', () => {
+  function buildApprovalCore(): {
+    core: AgentCore;
+    errorSpy: ReturnType<typeof vi.fn>;
+  } {
+    const errorSpy = vi.fn();
+    const config = {
+      getToolRegistry: vi.fn().mockReturnValue({
+        getTool: vi.fn(),
+      }),
+      getDebugLogger: vi
+        .fn()
+        .mockReturnValue({ debug: vi.fn(), error: errorSpy }),
+      getToolOutputBatchBudget: vi
+        .fn()
+        .mockReturnValue(Number.POSITIVE_INFINITY),
+      getToolResultBytesWritten: vi.fn().mockReturnValue(0),
+      getSessionId: vi.fn().mockReturnValue('approval-session'),
+    } as unknown as Config;
+    const core = new AgentCore(
+      'approval-agent',
+      config,
+      { systemPrompt: '' },
+      { model: 'test-model' },
+      { max_turns: 1 },
+    );
+    return { core, errorSpy };
+  }
+
+  it('automatically retries an approval after transient delivery failure', async () => {
+    const { core, errorSpy } = buildApprovalCore();
+    const deliveryError = new Error('approval listener failed');
+    let shouldThrow = true;
+    core.getEventEmitter().on(AgentEventType.TOOL_WAITING_APPROVAL, () => {
+      if (shouldThrow) {
+        shouldThrow = false;
+        throw deliveryError;
+      }
+    });
+    const approvalEvents: AgentApprovalRequestEvent[] = [];
+    core.getEventEmitter().on(AgentEventType.TOOL_WAITING_APPROVAL, (event) => {
+      approvalEvents.push(event);
+    });
+
+    const request = {
+      callId: 'call-retry',
+      name: 'Shell',
+      args: { command: 'git status' },
+      isClientInitiated: true,
+      prompt_id: 'prompt-retry',
+    };
+    const waiting = {
+      status: 'awaiting_approval',
+      request,
+      confirmationDetails: {
+        type: 'exec',
+        title: 'Run command?',
+        command: 'git status',
+        rootCommand: 'git status',
+        onConfirm: vi.fn(async () => {}),
+      },
+    } as unknown as WaitingToolCall;
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockImplementation(async function (this: CoreToolScheduler) {
+        const scheduler = this as unknown as {
+          onToolCallsUpdate?: (calls: ToolCall[]) => void;
+        };
+        scheduler.onToolCallsUpdate?.([waiting]);
+      });
+    const abortController = new AbortController();
+
+    const processing = core.processFunctionCalls(
+      [{ id: request.callId, name: request.name, args: request.args }],
+      abortController,
+      request.prompt_id,
+      1,
+      [{ name: request.name } as FunctionDeclaration],
+    );
+    try {
+      await vi.waitFor(() => expect(approvalEvents).toHaveLength(1));
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'Approval event delivery failed for call-retry',
+        ),
+        deliveryError,
+      );
+    } finally {
+      abortController.abort();
+      await processing;
+      scheduleSpy.mockRestore();
+    }
+  });
+
+  it('bounds automatic approval delivery retries', async () => {
+    vi.useFakeTimers();
+    const { core } = buildApprovalCore();
+    const deliveryError = new Error('approval listener always fails');
+    let attempts = 0;
+    core.getEventEmitter().on(AgentEventType.TOOL_WAITING_APPROVAL, () => {
+      attempts++;
+      throw deliveryError;
+    });
+
+    const request = {
+      callId: 'call-bounded-retry',
+      name: 'Shell',
+      args: { command: 'git status' },
+      isClientInitiated: true,
+      prompt_id: 'prompt-bounded-retry',
+    };
+    const waiting = {
+      status: 'awaiting_approval',
+      request,
+      confirmationDetails: {
+        type: 'exec',
+        title: 'Run command?',
+        command: 'git status',
+        rootCommand: 'git status',
+        onConfirm: vi.fn(async () => {}),
+      },
+    } as unknown as WaitingToolCall;
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockImplementation(async function (this: CoreToolScheduler) {
+        const scheduler = this as unknown as {
+          onToolCallsUpdate?: (calls: ToolCall[]) => void;
+        };
+        scheduler.onToolCallsUpdate?.([waiting]);
+      });
+    const abortController = new AbortController();
+
+    const processing = core.processFunctionCalls(
+      [{ id: request.callId, name: request.name, args: request.args }],
+      abortController,
+      request.prompt_id,
+      1,
+      [{ name: request.name } as FunctionDeclaration],
+    );
+    try {
+      await vi.runAllTimersAsync();
+      expect(attempts).toBe(3);
+      const scheduler = scheduleSpy.mock.instances[0] as unknown as {
+        onToolCallsUpdate?: (calls: ToolCall[]) => void;
+      };
+      const siblingRequest = {
+        callId: 'call-sibling',
+        name: 'Shell',
+        args: { command: 'pwd' },
+        isClientInitiated: true,
+        prompt_id: 'prompt-bounded-retry',
+      };
+      scheduler.onToolCallsUpdate?.([
+        waiting,
+        {
+          status: 'scheduled',
+          request: siblingRequest,
+        } as unknown as ToolCall,
+      ]);
+      scheduler.onToolCallsUpdate?.([
+        waiting,
+        {
+          status: 'executing',
+          request: siblingRequest,
+        } as unknown as ToolCall,
+      ]);
+      expect(attempts).toBe(3);
+    } finally {
+      abortController.abort();
+      await processing;
+      scheduleSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('cancels a pending delivery retry when the approval settles', async () => {
+    vi.useFakeTimers();
+    const { core } = buildApprovalCore();
+    let attempts = 0;
+    core.getEventEmitter().on(AgentEventType.TOOL_WAITING_APPROVAL, () => {
+      attempts++;
+      throw new Error('approval listener failed');
+    });
+
+    const request = {
+      callId: 'call-settled-retry',
+      name: 'Shell',
+      args: { command: 'git status' },
+      isClientInitiated: true,
+      prompt_id: 'prompt-settled-retry',
+    };
+    const waiting = {
+      status: 'awaiting_approval',
+      request,
+      confirmationDetails: {
+        type: 'exec',
+        title: 'Run command?',
+        command: 'git status',
+        rootCommand: 'git status',
+        onConfirm: vi.fn(async () => {}),
+      },
+    } as unknown as WaitingToolCall;
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockImplementation(async function (this: CoreToolScheduler) {
+        const scheduler = this as unknown as {
+          onToolCallsUpdate?: (calls: ToolCall[]) => void;
+        };
+        scheduler.onToolCallsUpdate?.([waiting]);
+        scheduler.onToolCallsUpdate?.([]);
+      });
+    const abortController = new AbortController();
+
+    const processing = core.processFunctionCalls(
+      [{ id: request.callId, name: request.name, args: request.args }],
+      abortController,
+      request.prompt_id,
+      1,
+      [{ name: request.name } as FunctionDeclaration],
+    );
+    try {
+      await vi.runAllTimersAsync();
+      expect(attempts).toBe(1);
+    } finally {
+      abortController.abort();
+      await processing;
+      scheduleSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('shares one response latch across partial delivery retries', async () => {
+    const { core } = buildApprovalCore();
+    const retainedEvents: AgentApprovalRequestEvent[] = [];
+    core.getEventEmitter().on(AgentEventType.TOOL_WAITING_APPROVAL, (event) => {
+      retainedEvents.push(event);
+    });
+    let shouldThrow = true;
+    core.getEventEmitter().on(AgentEventType.TOOL_WAITING_APPROVAL, () => {
+      if (shouldThrow) {
+        shouldThrow = false;
+        throw new Error('later listener failed');
+      }
+    });
+    let retryEvent: AgentApprovalRequestEvent | undefined;
+    core.getEventEmitter().on(AgentEventType.TOOL_WAITING_APPROVAL, (event) => {
+      retryEvent = event;
+    });
+
+    const onConfirm = vi.fn(async () => {});
+    const request = {
+      callId: 'call-partial-delivery',
+      name: 'Shell',
+      args: { command: 'git status' },
+      isClientInitiated: true,
+      prompt_id: 'prompt-partial-delivery',
+    };
+    const waiting = {
+      status: 'awaiting_approval',
+      request,
+      confirmationDetails: {
+        type: 'exec',
+        title: 'Run command?',
+        command: 'git status',
+        rootCommand: 'git status',
+        onConfirm,
+      },
+    } as unknown as WaitingToolCall;
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockImplementation(async function (this: CoreToolScheduler) {
+        const scheduler = this as unknown as {
+          onToolCallsUpdate?: (calls: ToolCall[]) => void;
+        };
+        scheduler.onToolCallsUpdate?.([waiting]);
+      });
+    const abortController = new AbortController();
+
+    const processing = core.processFunctionCalls(
+      [{ id: request.callId, name: request.name, args: request.args }],
+      abortController,
+      request.prompt_id,
+      1,
+      [{ name: request.name } as FunctionDeclaration],
+    );
+    try {
+      await vi.waitFor(() => expect(retryEvent).toBeDefined());
+      expect(retainedEvents).toHaveLength(2);
+      await Promise.all([
+        retainedEvents[0].respond(ToolConfirmationOutcome.ProceedOnce),
+        retryEvent!.respond(ToolConfirmationOutcome.ProceedOnce),
+      ]);
+      expect(onConfirm).toHaveBeenCalledOnce();
+    } finally {
+      abortController.abort();
+      await processing;
+      scheduleSpy.mockRestore();
+    }
+  });
+
+  it('rejects an old approval after the call bounces to a new incarnation', async () => {
+    const { core } = buildApprovalCore();
+    const approvalEvents: AgentApprovalRequestEvent[] = [];
+    core.getEventEmitter().on(AgentEventType.TOOL_WAITING_APPROVAL, (event) => {
+      approvalEvents.push(event);
+    });
+
+    const firstOnConfirm = vi.fn(async () => {});
+    const secondOnConfirm = vi.fn(async () => {});
+    const request = {
+      callId: 'call-stale-approval',
+      name: 'Shell',
+      args: { command: 'git status' },
+      isClientInitiated: true,
+      prompt_id: 'prompt-stale-approval',
+    };
+    const firstWaiting = {
+      status: 'awaiting_approval',
+      request,
+      confirmationDetails: {
+        type: 'exec',
+        title: 'Run command?',
+        command: 'git status',
+        rootCommand: 'git status',
+        onConfirm: firstOnConfirm,
+      },
+    } as unknown as WaitingToolCall;
+    const secondWaiting = {
+      status: 'awaiting_approval',
+      request,
+      confirmationDetails: {
+        type: 'info',
+        title: 'Hook confirmation',
+        prompt: 'Approve bounced execution?',
+        onConfirm: secondOnConfirm,
+      },
+    } as unknown as WaitingToolCall;
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockImplementation(async function (this: CoreToolScheduler) {
+        const scheduler = this as unknown as {
+          onToolCallsUpdate?: (calls: ToolCall[]) => void;
+        };
+        scheduler.onToolCallsUpdate?.([firstWaiting]);
+      });
+    const abortController = new AbortController();
+
+    const processing = core.processFunctionCalls(
+      [{ id: request.callId, name: request.name, args: request.args }],
+      abortController,
+      request.prompt_id,
+      1,
+      [{ name: request.name } as FunctionDeclaration],
+    );
+    try {
+      await vi.waitFor(() => expect(approvalEvents).toHaveLength(1));
+      const scheduler = scheduleSpy.mock.instances[0] as unknown as {
+        onToolCallsUpdate?: (calls: ToolCall[]) => void;
+      };
+      scheduler.onToolCallsUpdate?.([secondWaiting]);
+      await vi.waitFor(() => expect(approvalEvents).toHaveLength(2));
+
+      await approvalEvents[0].respond(ToolConfirmationOutcome.ProceedOnce);
+      await approvalEvents[1].respond(ToolConfirmationOutcome.ProceedOnce);
+
+      expect(firstOnConfirm).not.toHaveBeenCalled();
+      expect(secondOnConfirm).toHaveBeenCalledOnce();
+    } finally {
+      abortController.abort();
+      await processing;
+      scheduleSpy.mockRestore();
+    }
+  });
+
+  it('creates a new approval when the same details become active again', async () => {
+    const { core } = buildApprovalCore();
+    const approvalEvents: AgentApprovalRequestEvent[] = [];
+    core.getEventEmitter().on(AgentEventType.TOOL_WAITING_APPROVAL, (event) => {
+      approvalEvents.push(event);
+    });
+
+    const onConfirm = vi.fn(async () => {});
+    const request = {
+      callId: 'call-reused-details',
+      name: 'Shell',
+      args: { command: 'git status' },
+      isClientInitiated: true,
+      prompt_id: 'prompt-reused-details',
+    };
+    const waiting = {
+      status: 'awaiting_approval',
+      request,
+      confirmationDetails: {
+        type: 'exec',
+        title: 'Run command?',
+        command: 'git status',
+        rootCommand: 'git status',
+        onConfirm,
+      },
+    } as unknown as WaitingToolCall;
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockImplementation(async function (this: CoreToolScheduler) {
+        const scheduler = this as unknown as {
+          onToolCallsUpdate?: (calls: ToolCall[]) => void;
+        };
+        scheduler.onToolCallsUpdate?.([waiting]);
+      });
+    const abortController = new AbortController();
+
+    const processing = core.processFunctionCalls(
+      [{ id: request.callId, name: request.name, args: request.args }],
+      abortController,
+      request.prompt_id,
+      1,
+      [{ name: request.name } as FunctionDeclaration],
+    );
+    try {
+      expect(approvalEvents).toHaveLength(1);
+      const scheduler = scheduleSpy.mock.instances[0] as unknown as {
+        onToolCallsUpdate?: (calls: ToolCall[]) => void;
+      };
+      scheduler.onToolCallsUpdate?.([]);
+      scheduler.onToolCallsUpdate?.([waiting]);
+      expect(approvalEvents).toHaveLength(2);
+
+      await approvalEvents[0].respond(ToolConfirmationOutcome.ProceedOnce);
+      await approvalEvents[1].respond(ToolConfirmationOutcome.ProceedOnce);
+
+      expect(onConfirm).toHaveBeenCalledOnce();
+    } finally {
+      abortController.abort();
+      await processing;
+      scheduleSpy.mockRestore();
+    }
+  });
+
+  it('emits once per approval incarnation and allows each response', async () => {
+    const { core } = buildApprovalCore();
+    const approvalEvents: AgentApprovalRequestEvent[] = [];
+    core.getEventEmitter().on(AgentEventType.TOOL_WAITING_APPROVAL, (event) => {
+      approvalEvents.push(event);
+    });
+
+    const firstOnConfirm = vi.fn(async () => {});
+    const secondOnConfirm = vi.fn(async () => {});
+    const request = {
+      callId: 'call-1',
+      name: 'Shell',
+      args: { command: 'git status' },
+      isClientInitiated: true,
+      prompt_id: 'prompt-1',
+    };
+    const secondWaiting = {
+      status: 'awaiting_approval',
+      request,
+      confirmationDetails: {
+        type: 'info',
+        title: 'Hook confirmation',
+        prompt: 'Approve bounced execution?',
+        onConfirm: secondOnConfirm,
+      },
+    } as unknown as WaitingToolCall;
+    const firstWaiting = {
+      status: 'awaiting_approval',
+      request,
+      confirmationDetails: {
+        type: 'exec',
+        title: 'Run command?',
+        command: 'git status',
+        rootCommand: 'git status',
+        onConfirm: vi.fn(async () => {
+          await firstOnConfirm();
+          const scheduler = scheduleSpy.mock.instances[0] as unknown as {
+            onToolCallsUpdate?: (calls: ToolCall[]) => void;
+          };
+          scheduler.onToolCallsUpdate?.([secondWaiting]);
+        }),
+      },
+    } as unknown as WaitingToolCall;
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockImplementation(async function (this: CoreToolScheduler) {
+        const scheduler = this as unknown as {
+          onToolCallsUpdate?: (calls: ToolCall[]) => void;
+        };
+        scheduler.onToolCallsUpdate?.([firstWaiting]);
+        scheduler.onToolCallsUpdate?.([firstWaiting]);
+      });
+    const abortController = new AbortController();
+
+    const processing = core.processFunctionCalls(
+      [{ id: request.callId, name: request.name, args: request.args }],
+      abortController,
+      request.prompt_id,
+      1,
+      [{ name: request.name } as FunctionDeclaration],
+    );
+    try {
+      await vi.waitFor(() => expect(approvalEvents).toHaveLength(1));
+      await Promise.all([
+        approvalEvents[0].respond(ToolConfirmationOutcome.ProceedOnce),
+        approvalEvents[0].respond(ToolConfirmationOutcome.ProceedOnce),
+      ]);
+      await vi.waitFor(() => expect(approvalEvents).toHaveLength(2));
+      await Promise.all([
+        approvalEvents[1].respond(ToolConfirmationOutcome.ProceedOnce),
+        approvalEvents[1].respond(ToolConfirmationOutcome.ProceedOnce),
+      ]);
+
+      expect(firstOnConfirm).toHaveBeenCalledOnce();
+      expect(secondOnConfirm).toHaveBeenCalledOnce();
+    } finally {
+      abortController.abort();
+      await processing;
+      scheduleSpy.mockRestore();
+    }
   });
 });
 
