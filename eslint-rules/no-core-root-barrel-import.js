@@ -17,13 +17,13 @@ function isCoreProductionFile(filename) {
   if (!filename || filename === '<input>' || filename === '<text>')
     return false;
   const normalized = path.normalize(filename).replaceAll('\\', '/');
-  const start = normalized.indexOf(CORE_SRC_MARKER);
+  const start = normalized.lastIndexOf(CORE_SRC_MARKER);
   if (start < 0) return false;
   const relativePath = normalized.slice(start + CORE_SRC_MARKER.length);
   const segments = relativePath.split('/');
   return (
     !segments.some((segment) => TEST_OR_FIXTURE_SEGMENTS.has(segment)) &&
-    !/\.test\.[cm]?[jt]sx?$/.test(relativePath)
+    !/\.(test|spec)\.[cm]?[jt]sx?$/.test(relativePath)
   );
 }
 
@@ -44,7 +44,7 @@ function resolvesToCoreRootBarrel(filename, importedPath) {
   const sourceRoot = path.resolve(
     normalized.slice(
       0,
-      normalized.indexOf(CORE_SRC_MARKER) + CORE_SRC_MARKER.length,
+      normalized.lastIndexOf(CORE_SRC_MARKER) + CORE_SRC_MARKER.length,
     ),
   );
   const resolvedImport = path.resolve(path.dirname(filename), importedPath);
@@ -55,7 +55,8 @@ function resolvesToCoreRootBarrel(filename, importedPath) {
     relativeToSource === 'index.js' ||
     relativeToSource === 'index.ts' ||
     relativeToSource === '../index.js' ||
-    relativeToSource === '../index.ts'
+    relativeToSource === '../index.ts' ||
+    relativeToSource === '../dist/index.js'
   );
 }
 

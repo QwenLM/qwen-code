@@ -25,6 +25,12 @@ describe('no-core-root-barrel-import', () => {
     ['packages/core/src/core/client.ts', '../../index.js'],
     // .ts spelling of the src barrel
     ['packages/core/src/core/client.ts', '../index.ts'],
+    // nested checkout: a parent directory also contains the marker, so the
+    // rule must anchor on the LAST occurrence to derive the correct source root
+    [
+      '/tmp/packages/core/src/checkout/repo/packages/core/src/core/client.ts',
+      '../index.js',
+    ],
     // exports-map subpaths that reach the same root barrel
     [
       'packages/core/src/core/client.ts',
@@ -34,6 +40,13 @@ describe('no-core-root-barrel-import', () => {
       'packages/core/src/core/client.ts',
       '@qwen-code/qwen-code-core/dist/index.js',
     ],
+    // .ts spelling of the exports-map src subpath
+    [
+      'packages/core/src/core/client.ts',
+      '@qwen-code/qwen-code-core/src/index.ts',
+    ],
+    // relative import of the compiled barrel
+    ['packages/core/src/core/client.ts', '../../dist/index.js'],
   ])('rejects root barrel imports from %s', (filename, importedPath) => {
     expect(
       runRule(`import value from '${importedPath}';`, filename),
@@ -78,6 +91,12 @@ describe('no-core-root-barrel-import', () => {
       runRule(
         "import value from '../index.js';",
         'packages/core/src/core/client.test.ts',
+      ),
+    ).toHaveLength(0);
+    expect(
+      runRule(
+        "import value from '../index.js';",
+        'packages/core/src/core/client.spec.ts',
       ),
     ).toHaveLength(0);
     expect(
