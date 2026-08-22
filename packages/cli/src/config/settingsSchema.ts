@@ -1500,7 +1500,7 @@ const SETTINGS_SCHEMA = {
     requiresRestart: false,
     default: '',
     description:
-      'Model used for voice transcription. Set with /model --voice. Leave empty to keep voice dictation disabled until a voice model is selected.',
+      'Model used for voice transcription and the audio bridge for text-only primary models. Set with /model --voice. Leave empty to keep voice dictation and audio bridging disabled until a voice model is selected.',
     showInDialog: false,
   },
 

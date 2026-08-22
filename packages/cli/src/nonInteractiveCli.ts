@@ -97,6 +97,12 @@ import {
 } from './utils/chat-recording-failure.js';
 import { registerCleanup } from './utils/cleanup.js';
 import { cleanupReviewWorktreeLeases } from './services/review-worktree-lease.js';
+import {
+  formatAudioBridgeNotice,
+  hasAudioParts,
+  replaceAudioPartsWithUnavailable,
+  runAudioBridge,
+} from './services/audio-bridge-service.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
 
@@ -1262,6 +1268,9 @@ export async function runNonInteractive(
             onDebugMessage: () => {},
             messageId: Date.now(),
             signal: abortController.signal,
+            // Unconditional (mirrors ACP): runAudioBridge owns the
+            // fail-closed outcome when no batch voice model can transcribe.
+            preserveUnsupportedAudioForBridge: true,
           });
 
           if (!shouldProceed || !processedQuery) {
@@ -1345,20 +1354,149 @@ export async function runNonInteractive(
       let initialParts = normalizePartList(initialPartList);
       let fullTurnModelOverride: string | undefined;
       let fullTurnRuntimeView: RuntimeContentGeneratorView | undefined;
-      const emitVisionNotice = (subtype: string, notice: string) => {
+      const emitBridgeNotice = (subtype: string, notice: string) => {
         if (outputFormat === OutputFormat.TEXT) {
           process.stderr.write(`${notice}\n`);
         } else {
           adapter.emitSystemMessage(subtype, { notice });
         }
       };
+      let inlineModelOverrideResolutionFailed = false;
+      // Capability-check ANY media against the inline override, not only
+      // audio: raw images exact-routed to a target that cannot see them are
+      // placeholder-substituted by the route's slimming — the model would
+      // answer about an image it never received, with nothing on stderr.
+      const bridgeImagesForInlineOverride = async (
+        parts: Part[],
+      ): Promise<Part[]> => {
+        if (!shouldRunVisionBridge(config)) {
+          const reason = 'the active model override does not support images';
+          emitBridgeNotice('vision_bridge', `Image was not sent: ${reason}.`);
+          return splitImageParts(parts).nonImageParts;
+        }
+        try {
+          const bridgeResult = await runVisionBridge({
+            config,
+            parts,
+            signal: abortController.signal,
+          });
+          if (
+            bridgeResult.status !== 'skipped' ||
+            bridgeResult.egressOccurred
+          ) {
+            emitBridgeNotice(
+              'vision_bridge',
+              formatVisionBridgeNotice(bridgeResult),
+            );
+          }
+          return bridgeResult.applied && bridgeResult.parts != null
+            ? normalizePartList(bridgeResult.parts)
+            : splitImageParts(parts).nonImageParts;
+        } catch (error) {
+          debugLogger.debug(
+            `vision bridge: failed before replacement; falling back to text-only parts error=${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+          emitBridgeNotice(
+            'vision_bridge_failed',
+            'Vision bridge failed; proceeding without the image(s).',
+          );
+          return splitImageParts(parts).nonImageParts;
+        }
+      };
+      if (
+        inlineModelOverride !== undefined &&
+        (hasAudioParts(initialParts) || hasImageParts(initialParts))
+      ) {
+        let supportsAudio = false;
+        let supportsImage = false;
+        let routeResolutionFailed = false;
+        try {
+          const runtimeView = await config
+            .getBaseLlmClient()
+            .resolveForModel(inlineModelOverride, { failClosed: true });
+          supportsAudio =
+            runtimeView.contentGeneratorConfig.modalities?.audio === true;
+          supportsImage =
+            runtimeView.contentGeneratorConfig.modalities?.image === true;
+        } catch (error) {
+          routeResolutionFailed = true;
+          debugLogger.warn(
+            `media route capability check failed for '${inlineModelOverride}': ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+        if (routeResolutionFailed) {
+          // The route cannot be capability-checked: drop the override so
+          // audio is bridged on the primary route and images flow through
+          // the clamp + vision-bridge path below (fail-closed either way).
+          inlineModelOverrideResolutionFailed = true;
+          inlineModelOverride = undefined;
+        } else {
+          if (hasAudioParts(initialParts)) {
+            if (!supportsAudio) {
+              const reason =
+                'the active model override does not support audio';
+              initialParts = replaceAudioPartsWithUnavailable(
+                initialParts,
+                reason,
+              );
+              emitBridgeNotice(
+                'audio_bridge',
+                `Audio was not sent: ${reason}.`,
+              );
+            } else {
+              initialParts = initialParts.map((part) =>
+                hasAudioParts([part]) ? clampInlineMediaPart(part) : part,
+              );
+            }
+          }
+          if (hasImageParts(initialParts) && !supportsImage) {
+            initialParts = await bridgeImagesForInlineOverride(initialParts);
+          }
+        }
+      }
+      if (inlineModelOverride === undefined && hasAudioParts(initialParts)) {
+        const audioBridgeResult = await runAudioBridge({
+          config,
+          settings,
+          parts: initialParts,
+          signal: abortController.signal,
+        });
+        if (
+          audioBridgeResult.status !== 'skipped' ||
+          audioBridgeResult.egressCount > 0
+        ) {
+          emitBridgeNotice(
+            'audio_bridge',
+            formatAudioBridgeNotice(audioBridgeResult),
+          );
+        }
+        initialParts = audioBridgeResult.parts;
+        if (abortController.signal.aborted) {
+          await routeAbort();
+        }
+      }
+      if (
+        (inlineModelOverride !== undefined ||
+          inlineModelOverrideResolutionFailed) &&
+        hasImageParts(initialParts)
+      ) {
+        initialParts = initialParts.map((part) => clampInlineMediaPart(part));
+      }
       if (
         inlineModelOverride === undefined &&
         shouldRunVisionBridge(config) &&
         hasImageParts(initialParts)
       ) {
         const fullTurnModel = config.getDefaultVisionBridgeModel();
-        if (fullTurnModel?.agentCapable) {
+        if (
+          !inlineModelOverrideResolutionFailed &&
+          fullTurnModel?.agentCapable &&
+          !hasAudioParts(initialParts)
+        ) {
           const fullTurnParts = initialParts.map((part) =>
             clampInlineMediaPart(part),
           );
@@ -1371,7 +1509,7 @@ export async function runNonInteractive(
               .resolveForModel(fullTurnModelOverride.slice(0, -1), {
                 failClosed: true,
               });
-            emitVisionNotice(
+            emitBridgeNotice(
               'vision_routing',
               formatFullTurnVisionNotice(fullTurnModel),
             );
@@ -1387,7 +1525,7 @@ export async function runNonInteractive(
               bridgeResult.status !== 'skipped' ||
               bridgeResult.egressOccurred
             ) {
-              emitVisionNotice(
+              emitBridgeNotice(
                 'vision_bridge',
                 formatVisionBridgeNotice(bridgeResult),
               );
@@ -1402,7 +1540,7 @@ export async function runNonInteractive(
                 error instanceof Error ? error.message : String(error)
               }`,
             );
-            emitVisionNotice(
+            emitBridgeNotice(
               'vision_bridge_failed',
               'Vision bridge failed; proceeding without the image(s).',
             );
@@ -1538,8 +1676,16 @@ export async function runNonInteractive(
       let isFirstTurn = true;
       let isFirstGoalSegment = activeGoalTurn !== undefined;
       let hasUnsentToolResponse = false;
+      // Media surviving the bridges above is routed raw to the inline override
+      // target, so the selector needs the trailing-NUL exact-route marker for
+      // that target's own modalities to apply. Text-only overrides stay bare and
+      // keep their pre-existing compression and model-fallback behavior.
       let modelOverride: string | undefined =
-        inlineModelOverride ?? fullTurnModelOverride;
+        inlineModelOverride === undefined
+          ? fullTurnModelOverride
+          : hasAudioParts(initialParts) || hasImageParts(initialParts)
+            ? `${inlineModelOverride}\0`
+            : inlineModelOverride;
       // An explicit inline `/model <id> <prompt>` override wins for the whole
       // turn: while active, skill-tool `modelOverride` writes (including the
       // undefined-clears case) are skipped so they cannot silently revert the

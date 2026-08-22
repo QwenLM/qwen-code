@@ -15,6 +15,13 @@ import { sanitizeMimeForPlaceholder } from '../services/compactionInputSlimming.
 export const DEFAULT_MAX_INLINE_MEDIA_BYTES = 10 * 1024 * 1024;
 
 /**
+ * Default ceiling for a single audio payload handed to the voice bridge,
+ * measured in decoded bytes. Oversized audio is rejected outright, never
+ * placeholder-substituted.
+ */
+export const DEFAULT_MAX_AUDIO_BRIDGE_BYTES = 10 * 1024 * 1024;
+
+/**
  * Resolve the inline-media byte ceiling, allowing override via the
  * `QWEN_CODE_MAX_INLINE_MEDIA_BYTES` env var. Falls back to the default for
  * missing, non-numeric, non-integer, or non-positive values.

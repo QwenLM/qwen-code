@@ -18,6 +18,7 @@ import type { Config } from '../config/config.js';
 import { createDebugLogger } from './debugLogger.js';
 import { getErrorMessage, isAbortError, isNodeError } from './errors.js';
 import type { InputModalities } from '../core/contentGenerator.js';
+import { DEFAULT_MAX_AUDIO_BRIDGE_BYTES } from '../core/inlineMediaLimit.js';
 import { detectEncodingFromBuffer } from './systemEncoding.js';
 import type { PDFRenderedImage } from './pdf.js';
 import {
@@ -457,7 +458,9 @@ export async function detectFileEncoding(
  * @returns The specific MIME type string (e.g., 'text/python', 'application/javascript') or undefined if not found or ambiguous.
  */
 export function getSpecificMimeType(filePath: string): string | undefined {
-  const lookedUpMime = mime.getType(filePath);
+  const lookedUpMime =
+    mime.getType(filePath) ??
+    MIME_LITE_MISSING_MEDIA_TYPES.get(path.extname(filePath).toLowerCase());
   return typeof lookedUpMime === 'string' ? lookedUpMime : undefined;
 }
 
@@ -792,14 +795,18 @@ function isTextMime(lookedUpMimeType: string): boolean {
 }
 
 /**
- * Video containers whose MIME type `mime/lite` does not carry in its default
- * "standard" database. `.m4v`'s `video/x-m4v` mapping lives only in the
- * non-default "other" set, so `mime.getType('clip.m4v')` returns null and —
- * without this override — {@link detectFileType} falls through to the content
- * sampler and misclassifies a real video as binary.
+ * Media containers whose MIME type `mime/lite` does not carry in its default
+ * "standard" database. Without these overrides, real media falls through to
+ * the content sampler and is misclassified as binary. Keep this map shared by
+ * the lightweight type detector, inline media reader, and synchronous MIME
+ * gates (for example ACP `@` path resolution).
  */
-const MIME_LITE_MISSING_VIDEO_TYPES: ReadonlyMap<string, string> = new Map([
+const MIME_LITE_MISSING_MEDIA_TYPES: ReadonlyMap<string, string> = new Map([
   ['.m4v', 'video/x-m4v'],
+  ['.flac', 'audio/x-flac'],
+  ['.wma', 'audio/x-ms-wma'],
+  ['.aiff', 'audio/x-aiff'],
+  ['.aif', 'audio/x-aiff'],
 ]);
 
 /**
@@ -829,11 +836,11 @@ export async function detectFileType(filePath: string): Promise<FileType> {
   }
 
   // Returns null if not found, or the mime type string. `mime/lite` omits a
-  // few video containers (see MIME_LITE_MISSING_VIDEO_TYPES), so fall back to
-  // that override before giving up — otherwise a real video falls through to
+  // a few media containers (see MIME_LITE_MISSING_MEDIA_TYPES), so fall back to
+  // that override before giving up — otherwise real media falls through to
   // the content sampler and is misclassified as binary.
   const lookedUpMimeType =
-    mime.getType(filePath) ?? MIME_LITE_MISSING_VIDEO_TYPES.get(ext) ?? null;
+    mime.getType(filePath) ?? MIME_LITE_MISSING_MEDIA_TYPES.get(ext) ?? null;
   if (lookedUpMimeType) {
     if (lookedUpMimeType.startsWith('image/')) {
       return 'image';
@@ -977,6 +984,11 @@ export interface ProcessSingleFileContentOptions {
    */
   preserveUnsupportedImage?: boolean;
   /**
+   * When true, keep audio inline for a text-only model so a caller can
+   * transcribe it before the primary-model request.
+   */
+  preserveUnsupportedAudio?: boolean;
+  /**
    * Prepare PDF page images for `read_file` to transcribe through the vision
    * bridge. Unlike `preserveUnsupportedImage`, this never changes how ordinary
    * image files are handled.
@@ -1065,6 +1077,7 @@ export async function processSingleFileContent(
     limit,
     pages,
     preserveUnsupportedImage = false,
+    preserveUnsupportedAudio = false,
     preparePdfForVisionBridge = false,
     signal,
     largePdfBehavior = 'error',
@@ -1125,7 +1138,7 @@ export async function processSingleFileContent(
       : await detectFileType(filePath);
     const mediaMimeType =
       mime.getType(filePath) ??
-      MIME_LITE_MISSING_VIDEO_TYPES.get(path.extname(filePath).toLowerCase()) ??
+      MIME_LITE_MISSING_MEDIA_TYPES.get(path.extname(filePath).toLowerCase()) ??
       'application/octet-stream';
     const shouldRenderImageOverview =
       fileType === 'image' && CANONICAL_IMAGE_MIME_TYPES.has(mediaMimeType);
@@ -1269,11 +1282,22 @@ export async function processSingleFileContent(
         errorType: ToolErrorType.FILE_TOO_LARGE,
       };
     }
+    // Bridge-bound audio may exceed the inline data-URI budget, but it must
+    // still fit the bridge's decoded-byte ceiling before we read or encode it.
+    // `!modalities.audio` keeps model-directed audio on the inline gates: the
+    // bridge skips parts the target natively accepts, so nothing else would
+    // own their size.
+    const bridgeCanAcceptAudio =
+      fileType === 'audio' &&
+      preserveUnsupportedAudio &&
+      !modalities.audio &&
+      stats.size <= DEFAULT_MAX_AUDIO_BRIDGE_BYTES;
     if (
       fileSizeInMB > 9.9 &&
       !willExtractPdfText &&
       fileType !== 'text' &&
-      !shouldRenderImageOverview
+      !shouldRenderImageOverview &&
+      !bridgeCanAcceptAudio
     ) {
       return {
         llmContent: 'File size exceeds the 10MB limit.',
@@ -1290,12 +1314,10 @@ export async function processSingleFileContent(
     const modality = mediaModalityKey(fileType);
     if (modality && modality !== 'pdf') {
       if (!modalities[modality]) {
-        // On the interactive @-resolution path, the caller can keep image parts
-        // inline so the vision bridge can transcribe them downstream for a
-        // text-only model. Other media (audio/video) are always skipped.
-        const bridgeWillHandleImage =
-          modality === 'image' && preserveUnsupportedImage;
-        if (!bridgeWillHandleImage) {
+        const bridgeWillHandleMedia =
+          (modality === 'image' && preserveUnsupportedImage) ||
+          (modality === 'audio' && preserveUnsupportedAudio);
+        if (!bridgeWillHandleMedia) {
           const message = unsupportedModalityMessage(modality, displayName);
           debugLogger.warn(
             `Model '${config.getModel()}' does not support ${modality} input. ` +
@@ -1307,7 +1329,7 @@ export async function processSingleFileContent(
           };
         }
         debugLogger.debug(
-          `Preserving unsupported image for vision bridge: ${relativePathForDisplay}`,
+          `Preserving unsupported ${modality} for bridge: ${relativePathForDisplay}`,
         );
       }
     }
@@ -1620,7 +1642,7 @@ export async function processSingleFileContent(
         const base64Data = contentBuffer.toString('base64');
         const base64SizeInMB = base64Data.length / (1024 * 1024);
         // Use 9.9MB instead of 10MB to leave margin for small overhead (#1880)
-        if (base64SizeInMB > 9.9) {
+        if (base64SizeInMB > 9.9 && !bridgeCanAcceptAudio) {
           return {
             llmContent: `File exceeds the 10MB data URI limit after base64 encoding (${base64SizeInMB.toFixed(2)}MB encoded).`,
             returnDisplay: `File exceeds the 10MB data URI limit after base64 encoding.`,

@@ -6,6 +6,7 @@
 
 import { describe, it, expect, afterEach } from 'vitest';
 import {
+  DEFAULT_MAX_AUDIO_BRIDGE_BYTES,
   DEFAULT_MAX_INLINE_MEDIA_BYTES,
   getMaxInlineMediaBytes,
   approxBase64Bytes,
@@ -42,6 +43,7 @@ describe('getMaxInlineMediaBytes', () => {
 
   it('defaults to 10MB', () => {
     delete process.env[ENV_KEY];
+    expect(DEFAULT_MAX_AUDIO_BRIDGE_BYTES).toBe(10 * 1024 * 1024);
     expect(DEFAULT_MAX_INLINE_MEDIA_BYTES).toBe(10 * 1024 * 1024);
     expect(getMaxInlineMediaBytes()).toBe(DEFAULT_MAX_INLINE_MEDIA_BYTES);
   });

@@ -312,9 +312,9 @@ The `extra_body` field allows you to add custom parameters to the request body s
 
 #### voiceModel
 
-| Setting      | Type   | Description                                                                                                                                             | Default |
-| ------------ | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| `voiceModel` | string | Model used for voice transcription. Leave empty to keep voice dictation disabled until a voice model is selected. Can also be set via `/model --voice`. | `""`    |
+| Setting      | Type   | Description                                                                                                                                                                                                                                                 | Default |
+| ------------ | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `voiceModel` | string | Model used for voice transcription and as the audio bridge when a text-only main model receives an audio attachment. Leave empty to keep voice dictation and audio bridging disabled until a voice model is selected. Can also be set via `/model --voice`. | `""`    |
 
 #### modelFallbacks
 

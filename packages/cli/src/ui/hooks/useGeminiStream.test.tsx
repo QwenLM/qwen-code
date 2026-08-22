@@ -38,6 +38,7 @@ import {
   getRuntimeContentGenerator,
   getToolCallFingerprint,
   runWithRuntimeContentGenerator,
+  splitImageParts,
 } from '@qwen-code/qwen-code-core';
 import type { Part, PartListUnion } from '@google/genai';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
@@ -57,6 +58,7 @@ const mockSendMessageStream = vi
   .mockReturnValue((async function* () {})());
 const mockStartChat = vi.fn();
 const mockRunVisionBridge = vi.hoisted(() => vi.fn());
+const mockRunAudioBridge = vi.hoisted(() => vi.fn());
 
 const MockedGeminiClientClass = vi.hoisted(() =>
   vi.fn().mockImplementation(function (this: any, _config: any) {
@@ -129,6 +131,14 @@ const mockDualOutput = vi.hoisted(() => ({
 vi.mock('../../services/review-worktree-lease.js', () => ({
   cleanupReviewWorktreeLeases: mockCleanupReviewWorktreeLeases,
 }));
+
+vi.mock('../../services/audio-bridge-service.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('../../services/audio-bridge-service.js')
+    >();
+  return { ...actual, runAudioBridge: mockRunAudioBridge };
+});
 
 vi.mock('../../dualOutput/DualOutputContext.js', () => ({
   useDualOutput: mockUseDualOutput,
@@ -353,6 +363,10 @@ describe('useGeminiStream', () => {
       .mockReturnValue((async function* () {})());
     handleAtCommandSpy = vi.spyOn(atCommandProcessor, 'handleAtCommand');
     mockRunVisionBridge.mockReset();
+    mockRunAudioBridge.mockReset();
+    Object.assign(mockLoadedSettings, {
+      merged: { preferredEditor: 'vscode' },
+    });
     mockCleanupReviewWorktreeLeases.mockReset();
     mockUseDualOutput.mockReset().mockReturnValue(null);
   });
@@ -749,6 +763,1074 @@ describe('useGeminiStream', () => {
     );
   });
 
+  it('converts attached audio before sending it to the primary model', async () => {
+    const audioPart = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    handleAtCommandSpy.mockResolvedValue({
+      processedQuery: [{ text: 'listen' }, audioPart],
+      shouldProceed: true,
+    } as unknown as Awaited<
+      ReturnType<typeof atCommandProcessor.handleAtCommand>
+    >);
+    mockRunAudioBridge.mockResolvedValue({
+      status: 'ok',
+      parts: [{ text: 'machine transcript' }],
+      audioCount: 1,
+      convertedCount: 1,
+      egressCount: 1,
+      modelId: 'qwen3-asr-flash',
+    });
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: vi.fn(() => ({})),
+    });
+    mockLoadedSettings.merged.voiceModel = 'qwen3-asr-flash';
+    const { result, mockSendMessageStream } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery('@recording.wav listen');
+    });
+
+    expect(mockRunAudioBridge).toHaveBeenCalledWith({
+      config: mockConfig,
+      settings: mockLoadedSettings,
+      parts: [{ text: 'listen' }, audioPart],
+      signal: expect.any(AbortSignal),
+    });
+    expect(handleAtCommandSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ preserveUnsupportedAudioForBridge: true }),
+    );
+    expect(mockSendMessageStream.mock.calls[0]?.[0]).toEqual([
+      { text: 'machine transcript' },
+    ]);
+    expect(mockAddItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: MessageType.INFO,
+        text: expect.stringContaining('Converted 1 audio file(s)'),
+      }),
+      expect.any(Number),
+    );
+  });
+
+  it('forwards audio without a bridge notice when conversion is skipped', async () => {
+    const audioPart = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    const parts = [{ text: 'listen' }, audioPart];
+    handleAtCommandSpy.mockResolvedValue({
+      processedQuery: parts,
+      shouldProceed: true,
+    } as unknown as Awaited<
+      ReturnType<typeof atCommandProcessor.handleAtCommand>
+    >);
+    mockRunAudioBridge.mockResolvedValue({
+      status: 'skipped',
+      parts,
+      audioCount: 1,
+      convertedCount: 0,
+      egressCount: 0,
+    });
+    const { result, mockSendMessageStream } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery('@recording.wav listen');
+    });
+
+    expect(mockRunAudioBridge).toHaveBeenCalledWith({
+      config: mockConfig,
+      settings: mockLoadedSettings,
+      parts,
+      signal: expect.any(AbortSignal),
+    });
+    expect(mockSendMessageStream.mock.calls[0]?.[0]).toEqual(parts);
+    expect(mockAddItem).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('audio file(s)'),
+      }),
+      expect.any(Number),
+    );
+  });
+
+  it('forwards audio when an inline model override supports audio', async () => {
+    const audioPart = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    mockConfig.getModel = vi.fn(() => 'session-model');
+    mockConfig.getContentGeneratorConfig = vi.fn(
+      () => ({ authType: AuthType.QWEN_OAUTH }) as never,
+    );
+    mockConfig.getAvailableModelsForAuthType = vi.fn(
+      () =>
+        [
+          {
+            id: 'audio-model',
+            authType: AuthType.QWEN_OAUTH,
+            modalities: { audio: true },
+          },
+        ] as never,
+    );
+    const resolveForModel = vi.fn().mockResolvedValue({
+      contentGeneratorConfig: { modalities: { audio: true } },
+    });
+    mockConfig.getBaseLlmClient = vi.fn(() => ({ resolveForModel }) as never);
+    mockHandleSlashCommand.mockResolvedValue({
+      type: 'submit_prompt',
+      content: [{ text: 'listen' }, audioPart],
+      modelOverride: 'audio-model',
+    });
+    const { result, mockSendMessageStream } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery('/model audio-model listen');
+    });
+
+    expect(mockRunAudioBridge).not.toHaveBeenCalled();
+    expect(resolveForModel).toHaveBeenCalledWith('audio-model', {
+      failClosed: true,
+    });
+    expect(mockSendMessageStream).toHaveBeenCalledWith(
+      [{ text: 'listen' }, audioPart],
+      expect.any(AbortSignal),
+      expect.any(String),
+      expect.objectContaining({ modelOverride: 'audio-model\0' }),
+    );
+  });
+
+  it('clamps audio forwarded through an audio-capable inline override', async () => {
+    vi.stubEnv('QWEN_CODE_MAX_INLINE_MEDIA_BYTES', '1');
+    const audioPart = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    mockConfig.getModel = vi.fn(() => 'session-model');
+    mockConfig.getContentGeneratorConfig = vi.fn(
+      () => ({ authType: AuthType.QWEN_OAUTH }) as never,
+    );
+    mockConfig.getAvailableModelsForAuthType = vi.fn(
+      () =>
+        [
+          {
+            id: 'audio-model',
+            authType: AuthType.QWEN_OAUTH,
+            modalities: { audio: true },
+          },
+        ] as never,
+    );
+    const resolveForModel = vi.fn().mockResolvedValue({
+      contentGeneratorConfig: { modalities: { audio: true } },
+    });
+    mockConfig.getBaseLlmClient = vi.fn(() => ({ resolveForModel }) as never);
+    mockHandleSlashCommand.mockResolvedValue({
+      type: 'submit_prompt',
+      content: [{ text: 'listen' }, audioPart],
+      modelOverride: 'audio-model',
+    });
+    const { result, mockSendMessageStream } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery('/model audio-model listen');
+    });
+
+    expect(mockRunAudioBridge).not.toHaveBeenCalled();
+    expect(mockSendMessageStream.mock.calls[0]?.[0]).toEqual([
+      { text: 'listen' },
+      expect.objectContaining({
+        text: expect.stringContaining('Media omitted'),
+      }),
+    ]);
+  });
+
+  it('clamps images forwarded through a multimodal inline override', async () => {
+    vi.stubEnv('QWEN_CODE_MAX_INLINE_MEDIA_BYTES', '1');
+    const audioPart = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    const imagePart = {
+      inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' },
+    };
+    mockConfig.getModel = vi.fn(() => 'session-model');
+    mockConfig.getContentGeneratorConfig = vi.fn(
+      () => ({ authType: AuthType.QWEN_OAUTH }) as never,
+    );
+    mockConfig.getAvailableModelsForAuthType = vi.fn(
+      () =>
+        [
+          {
+            id: 'omni-model',
+            authType: AuthType.QWEN_OAUTH,
+            modalities: { audio: true, image: true },
+          },
+        ] as never,
+    );
+    const resolveForModel = vi.fn().mockResolvedValue({
+      contentGeneratorConfig: {
+        modalities: { audio: true, image: true },
+      },
+    });
+    mockConfig.getBaseLlmClient = vi.fn(() => ({ resolveForModel }) as never);
+    mockHandleSlashCommand.mockResolvedValue({
+      type: 'submit_prompt',
+      content: [{ text: 'inspect and listen' }, audioPart, imagePart],
+      modelOverride: 'omni-model',
+    });
+    const { result, mockSendMessageStream } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery('/model omni-model inspect');
+    });
+
+    expect(mockRunAudioBridge).not.toHaveBeenCalled();
+    expect(mockRunVisionBridge).not.toHaveBeenCalled();
+    const sent = JSON.stringify(mockSendMessageStream.mock.calls[0]?.[0]);
+    expect(sent.match(/Media omitted/g)).toHaveLength(2);
+    expect(sent).not.toContain('inlineData');
+  });
+
+  it('clamps images forwarded through an inline override on an audio-free turn', async () => {
+    vi.stubEnv('QWEN_CODE_MAX_INLINE_MEDIA_BYTES', '1');
+    const imagePart = {
+      inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' },
+    };
+    mockConfig.getModel = vi.fn(() => 'session-model');
+    mockConfig.getEffectiveInputModalities = vi.fn(() => ({}));
+    mockConfig.getDefaultVisionBridgeModel = vi.fn(
+      () =>
+        ({
+          id: 'vision-agent',
+          agentCapable: true,
+        }) as never,
+    );
+    mockConfig.getContentGeneratorConfig = vi.fn(
+      () => ({ authType: AuthType.QWEN_OAUTH }) as never,
+    );
+    mockConfig.getAvailableModelsForAuthType = vi.fn(
+      () =>
+        [
+          {
+            id: 'image-model',
+            authType: AuthType.QWEN_OAUTH,
+            modalities: { image: true },
+          },
+        ] as never,
+    );
+    mockHandleSlashCommand.mockResolvedValue({
+      type: 'submit_prompt',
+      content: [{ text: 'inspect' }, imagePart],
+      modelOverride: 'image-model',
+    });
+    const { result, mockSendMessageStream } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery('/model image-model inspect');
+    });
+
+    // The vision bridge is skipped for an inline override, so this turn's only
+    // size guard is the clamp — which used to run for audio-bearing turns only.
+    expect(mockRunVisionBridge).not.toHaveBeenCalled();
+    const sent = JSON.stringify(mockSendMessageStream.mock.calls[0]?.[0]);
+    expect(sent).toContain('Media omitted');
+    expect(sent).not.toContain('inlineData');
+    // Nothing media-shaped survived the clamp, so the selector stays bare.
+    expect(mockSendMessageStream.mock.calls[0]?.[3]?.modelOverride).toBe(
+      'image-model',
+    );
+  });
+
+  it('fails closed when an inline model override does not support audio', async () => {
+    const audioPart = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    mockConfig.getModel = vi.fn(() => 'session-model');
+    mockConfig.getContentGeneratorConfig = vi.fn(
+      () => ({ authType: AuthType.QWEN_OAUTH }) as never,
+    );
+    mockConfig.getAvailableModelsForAuthType = vi.fn(
+      () => [{ id: 'text-model', authType: AuthType.QWEN_OAUTH }] as never,
+    );
+    mockConfig.getBaseLlmClient = vi.fn(
+      () =>
+        ({
+          resolveForModel: vi.fn().mockResolvedValue({
+            contentGeneratorConfig: { modalities: {} },
+          }),
+        }) as never,
+    );
+    mockHandleSlashCommand.mockResolvedValue({
+      type: 'submit_prompt',
+      content: [{ text: 'listen' }, audioPart],
+      modelOverride: 'text-model',
+    });
+    const { result, mockSendMessageStream } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery('/model text-model listen');
+    });
+
+    expect(mockRunAudioBridge).not.toHaveBeenCalled();
+    expect(mockSendMessageStream.mock.calls[0]?.[0]).toEqual([
+      { text: 'listen' },
+      expect.objectContaining({
+        text: expect.stringContaining(
+          'active model override does not support audio',
+        ),
+      }),
+    ]);
+    expect(mockAddItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: MessageType.ERROR,
+        text: expect.stringContaining('Audio was not sent'),
+      }),
+      expect.any(Number),
+    );
+  });
+
+  it('fails closed a tool-result image an audio-only inline override cannot see', async () => {
+    const audioPart = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    mockConfig.getModel = vi.fn(() => 'session-model');
+    mockConfig.getEffectiveInputModalities = vi.fn(() => ({ audio: true }));
+    mockConfig.getContentGeneratorConfig = vi.fn(
+      () => ({ authType: AuthType.QWEN_OAUTH }) as never,
+    );
+    mockConfig.getAvailableModelsForAuthType = vi.fn(
+      () =>
+        [
+          {
+            id: 'audio-model',
+            authType: AuthType.QWEN_OAUTH,
+            modalities: { audio: true },
+          },
+        ] as never,
+    );
+    const resolveForModel = vi.fn().mockResolvedValue({
+      contentGeneratorConfig: { modalities: { audio: true } },
+    });
+    mockConfig.getBaseLlmClient = vi.fn(() => ({ resolveForModel }) as never);
+    mockHandleSlashCommand.mockResolvedValue({
+      type: 'submit_prompt',
+      content: [{ text: 'listen' }, audioPart],
+      modelOverride: 'audio-model',
+    });
+    const { result, mockSendMessageStream } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery('/model audio-model listen');
+    });
+    // The routed audio turn exact-routes to the audio-only override and stamps
+    // the owning prompt.
+    expect(mockSendMessageStream.mock.calls[0]?.[3]?.modelOverride).toBe(
+      'audio-model\0',
+    );
+
+    // Mid-turn a tool returns an image nested in the function response. The
+    // audio-only override was only validated for audio, so the continuation
+    // must fail the image closed visibly instead of exact-routing it to a route
+    // whose slimming would silently placeholder-substitute it.
+    await act(async () => {
+      await result.current.submitQuery(
+        [
+          {
+            functionResponse: {
+              id: 'tool-call',
+              name: 'read_file',
+              response: { output: 'screenshot attached' },
+              parts: [
+                { inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' } },
+              ],
+            },
+          } as never,
+        ],
+        SendMessageType.ToolResult,
+      );
+    });
+
+    const sent = JSON.stringify(mockSendMessageStream.mock.calls[1]?.[0]);
+    expect(sent).not.toContain('image/png');
+    expect(sent).not.toContain('aW1hZ2U=');
+    expect(sent).toContain('was not sent');
+    expect(mockAddItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: MessageType.ERROR,
+        text: expect.stringContaining('Image returned by a tool was not sent'),
+      }),
+      expect.any(Number),
+    );
+  });
+
+  it('retries the original audio after an inline override fails closed', async () => {
+    const audioPart = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    mockConfig.getModel = vi.fn(() => 'session-model');
+    mockConfig.getContentGeneratorConfig = vi.fn(
+      () => ({ authType: AuthType.QWEN_OAUTH }) as never,
+    );
+    mockConfig.getAvailableModelsForAuthType = vi.fn(
+      () => [{ id: 'text-model', authType: AuthType.QWEN_OAUTH }] as never,
+    );
+    mockConfig.getBaseLlmClient = vi.fn(
+      () =>
+        ({
+          resolveForModel: vi.fn().mockResolvedValue({
+            contentGeneratorConfig: { modalities: {} },
+          }),
+        }) as never,
+    );
+    mockHandleSlashCommand.mockResolvedValue({
+      type: 'submit_prompt',
+      content: [{ text: 'listen' }, audioPart],
+      modelOverride: 'text-model',
+    });
+    mockRunAudioBridge.mockResolvedValue({
+      status: 'ok',
+      parts: [{ text: 'listen' }, { text: 'retry transcript' }],
+      audioCount: 1,
+      convertedCount: 1,
+      egressCount: 1,
+      modelId: 'qwen3-asr-flash',
+    });
+    const { result, mockSendMessageStream } = renderTestHook();
+    mockSendMessageStream
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'partial response',
+          };
+          throw new Error('stream failed');
+        })(),
+      )
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+    await act(async () => {
+      await result.current.submitQuery('/model text-model listen');
+    });
+    expect(JSON.stringify(mockSendMessageStream.mock.calls[0]?.[0])).toContain(
+      'active model override does not support audio',
+    );
+
+    await act(async () => {
+      await result.current.retryLastPrompt();
+    });
+
+    // The audio only failed closed because of the one-shot override, and the
+    // retry drops it: the recording has to be re-derived from the original
+    // bytes rather than resending the unavailable marker forever.
+    expect(mockRunAudioBridge).toHaveBeenCalledOnce();
+    expect(mockRunAudioBridge.mock.calls[0]?.[0]?.parts).toEqual([
+      { text: 'listen' },
+      audioPart,
+    ]);
+    expect(mockSendMessageStream.mock.calls[1]?.[0]).toEqual([
+      { text: 'listen' },
+      { text: 'retry transcript' },
+    ]);
+  });
+
+  it('retries the original image after an inline override fails closed', async () => {
+    const imagePart = {
+      inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' },
+    };
+    mockConfig.getModel = vi.fn(() => 'session-model');
+    mockConfig.getContentGeneratorConfig = vi.fn(
+      () => ({ authType: AuthType.QWEN_OAUTH }) as never,
+    );
+    mockConfig.getAvailableModelsForAuthType = vi.fn(
+      () => [{ id: 'text-model', authType: AuthType.QWEN_OAUTH }] as never,
+    );
+    mockConfig.getBaseLlmClient = vi.fn(
+      () =>
+        ({
+          resolveForModel: vi.fn().mockResolvedValue({
+            contentGeneratorConfig: { modalities: {} },
+          }),
+        }) as never,
+    );
+    mockHandleSlashCommand.mockResolvedValue({
+      type: 'submit_prompt',
+      content: [{ text: 'describe' }, imagePart],
+      modelOverride: 'text-model',
+    });
+    const { result, mockSendMessageStream } = renderTestHook();
+    mockSendMessageStream
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'partial response',
+          };
+          throw new Error('stream failed');
+        })(),
+      )
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+    await act(async () => {
+      await result.current.submitQuery('/model text-model describe');
+    });
+    expect(JSON.stringify(mockSendMessageStream.mock.calls[0]?.[0])).toContain(
+      'Image was not sent',
+    );
+
+    await act(async () => {
+      await result.current.retryLastPrompt();
+    });
+
+    // The image only failed closed because of the one-shot override, and the
+    // retry drops it: the pristine image stored as preOverrideParts has to be
+    // re-derived (re-bridged/re-routed) instead of resending the marker text
+    // forever — the same invariant the audio fail-closed branch guarantees.
+    expect(mockRunVisionBridge).not.toHaveBeenCalled();
+    expect(mockSendMessageStream.mock.calls[1]?.[0]).toEqual([
+      { text: 'describe' },
+      imagePart,
+    ]);
+    expect(
+      JSON.stringify(mockSendMessageStream.mock.calls[1]?.[0]),
+    ).not.toContain('Image was not sent');
+    expect(
+      mockSendMessageStream.mock.calls[1]?.[3]?.modelOverride,
+    ).toBeUndefined();
+  });
+
+  it('re-bridges the pristine image when a vision-bridge failure is retried', async () => {
+    const imagePart = {
+      inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' },
+    };
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: vi.fn(() => ({})),
+      getDefaultVisionBridgeModel: () => ({ id: 'vision-model' }),
+    });
+    mockRunVisionBridge
+      .mockResolvedValueOnce({
+        applied: false,
+        status: 'failed',
+        convertedCount: 0,
+        omittedCount: 1,
+        modelId: 'vision-model',
+        egressOccurred: false,
+        error: 'bridge unavailable',
+      })
+      .mockResolvedValueOnce({
+        applied: true,
+        status: 'ok',
+        parts: [{ text: 'describe' }, { text: '[image description]' }],
+        transcript: '[image description]',
+        convertedCount: 1,
+        omittedCount: 0,
+        modelId: 'vision-model',
+        egressOccurred: true,
+      });
+    mockHandleSlashCommand.mockResolvedValue({
+      type: 'submit_prompt',
+      content: [{ text: 'describe' }, imagePart],
+    });
+    const { result, mockSendMessageStream } = renderTestHook();
+    mockSendMessageStream
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'partial response',
+          };
+          throw new Error('stream failed');
+        })(),
+      )
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+    await act(async () => {
+      await result.current.submitQuery('/describe describe');
+    });
+    expect(JSON.stringify(mockSendMessageStream.mock.calls[0]?.[0])).toContain(
+      'Vision bridge could not interpret',
+    );
+
+    await act(async () => {
+      await result.current.retryLastPrompt();
+    });
+
+    // The bridge failure stored the pristine image as preOverrideParts; the
+    // retry must re-bridge it (the bridge recovered here) instead of passing
+    // raw images to a session model whose route slimming would silently
+    // placeholder-substitute them.
+    expect(mockRunVisionBridge).toHaveBeenCalledTimes(2);
+    expect(mockRunVisionBridge.mock.calls[1]?.[0]?.parts).toEqual([
+      { text: 'describe' },
+      imagePart,
+    ]);
+    expect(mockSendMessageStream.mock.calls[1]?.[0]).toEqual([
+      { text: 'describe' },
+      { text: '[image description]' },
+    ]);
+  });
+
+  it('rechecks retained audio after clearing an inline override on retry', async () => {
+    const audioPart = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    mockConfig.getModel = vi.fn(() => 'session-model');
+    mockConfig.getContentGeneratorConfig = vi.fn(
+      () => ({ authType: AuthType.QWEN_OAUTH }) as never,
+    );
+    mockConfig.getAvailableModelsForAuthType = vi.fn(
+      () => [{ id: 'audio-model', authType: AuthType.QWEN_OAUTH }] as never,
+    );
+    mockConfig.getBaseLlmClient = vi.fn(
+      () =>
+        ({
+          resolveForModel: vi.fn().mockResolvedValue({
+            contentGeneratorConfig: { modalities: { audio: true } },
+          }),
+        }) as never,
+    );
+    mockHandleSlashCommand.mockResolvedValue({
+      type: 'submit_prompt',
+      content: [{ text: 'listen' }, audioPart],
+      modelOverride: 'audio-model',
+    });
+    mockRunAudioBridge.mockResolvedValue({
+      status: 'ok',
+      parts: [{ text: 'retry transcript' }],
+      audioCount: 1,
+      convertedCount: 1,
+      egressCount: 1,
+      modelId: 'qwen3-asr-flash',
+    });
+    const { result, mockSendMessageStream: sendMessageStream } =
+      renderTestHook();
+    sendMessageStream
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'partial response',
+          };
+          throw new Error('stream failed');
+        })(),
+      )
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+    await act(async () => {
+      await result.current.submitQuery('/model audio-model listen');
+    });
+    expect(mockRunAudioBridge).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await result.current.retryLastPrompt();
+    });
+
+    expect(mockRunAudioBridge).toHaveBeenCalledOnce();
+    expect(sendMessageStream).toHaveBeenCalledTimes(2);
+    expect(sendMessageStream.mock.calls[1]?.[0]).toEqual([
+      { text: 'retry transcript' },
+    ]);
+    expect(JSON.stringify(sendMessageStream.mock.calls[1]?.[0])).not.toContain(
+      'audio/wav',
+    );
+    expect(sendMessageStream.mock.calls[1]?.[3]?.modelOverride).toBeUndefined();
+  });
+
+  it('fails closed when inline override capability resolution rejects', async () => {
+    const audioPart = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    mockConfig.getModel = vi.fn(() => 'session-model');
+    mockConfig.getContentGeneratorConfig = vi.fn(
+      () => ({ authType: AuthType.QWEN_OAUTH }) as never,
+    );
+    mockConfig.getAvailableModelsForAuthType = vi.fn(
+      () => [{ id: 'text-model', authType: AuthType.QWEN_OAUTH }] as never,
+    );
+    mockConfig.getBaseLlmClient = vi.fn(
+      () =>
+        ({
+          resolveForModel: vi
+            .fn()
+            .mockRejectedValue(new Error('route unavailable')),
+        }) as never,
+    );
+    mockHandleSlashCommand.mockResolvedValue({
+      type: 'submit_prompt',
+      content: [{ text: 'listen' }, audioPart],
+      modelOverride: 'text-model',
+    });
+    const { result, mockSendMessageStream } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery('/model text-model listen');
+    });
+
+    expect(mockRunAudioBridge).not.toHaveBeenCalled();
+    expect(mockSendMessageStream.mock.calls[0]?.[0]).toEqual([
+      { text: 'listen' },
+      expect.objectContaining({
+        text: expect.stringContaining(
+          'active model override could not be resolved',
+        ),
+      }),
+    ]);
+    expect(
+      mockSendMessageStream.mock.calls[0]?.[3]?.modelOverride,
+    ).toBeUndefined();
+    expect(mockAddItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: MessageType.ERROR,
+        text: expect.stringContaining('Audio was not sent'),
+      }),
+      expect.any(Number),
+    );
+  });
+
+  it('clamps resolution-failed images destined for an image-capable session model', async () => {
+    vi.stubEnv('QWEN_CODE_MAX_INLINE_MEDIA_BYTES', '1');
+    const audioPart = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    const imagePart = {
+      inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' },
+    };
+    mockConfig.getModel = vi.fn(() => 'session-model');
+    // The session model accepts images, so the vision bridge gate is false and
+    // images flow straight through to it — the size clamp is their only guard.
+    mockConfig.getEffectiveInputModalities = vi.fn(() => ({ image: true }));
+    mockConfig.getContentGeneratorConfig = vi.fn(
+      () => ({ authType: AuthType.QWEN_OAUTH }) as never,
+    );
+    mockConfig.getAvailableModelsForAuthType = vi.fn(
+      () => [{ id: 'voice-model', authType: AuthType.QWEN_OAUTH }] as never,
+    );
+    mockConfig.getBaseLlmClient = vi.fn(
+      () =>
+        ({
+          resolveForModel: vi
+            .fn()
+            .mockRejectedValue(new Error('route unavailable')),
+        }) as never,
+    );
+    mockHandleSlashCommand.mockResolvedValue({
+      type: 'submit_prompt',
+      content: [{ text: 'look and listen' }, audioPart, imagePart],
+      modelOverride: 'voice-model',
+    });
+    const { result, mockSendMessageStream } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery('/model voice-model look');
+    });
+
+    // The audio fails closed (marker) and the vision bridge is skipped because
+    // the session model is image-capable. Without the resolution-failed clamp
+    // the oversized image would be forwarded raw, bypassing the size limit.
+    expect(mockRunAudioBridge).not.toHaveBeenCalled();
+    expect(mockRunVisionBridge).not.toHaveBeenCalled();
+    const sent = JSON.stringify(mockSendMessageStream.mock.calls[0]?.[0]);
+    expect(sent).toContain('Media omitted');
+    expect(sent).not.toContain('inlineData');
+    expect(sent).toContain('active model override could not be resolved');
+  });
+
+  it('does not send bridge output when cancellation lands during conversion', async () => {
+    const audioPart = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    handleAtCommandSpy.mockResolvedValue({
+      processedQuery: [{ text: 'listen' }, audioPart],
+      shouldProceed: true,
+    } as unknown as Awaited<
+      ReturnType<typeof atCommandProcessor.handleAtCommand>
+    >);
+    mockRunAudioBridge.mockImplementation(async ({ signal }) => {
+      Object.defineProperty(signal, 'aborted', { value: true });
+      return {
+        status: 'failed',
+        parts: [{ text: 'transcription was cancelled' }],
+        audioCount: 1,
+        convertedCount: 0,
+        egressCount: 1,
+        modelId: 'qwen3-asr-flash',
+        error: 'transcription was cancelled',
+      };
+    });
+    const { result, mockSendMessageStream } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery('@recording.wav listen');
+    });
+
+    expect(mockSendMessageStream).not.toHaveBeenCalled();
+    expect(mockAddItem).toHaveBeenCalledWith(
+      expect.objectContaining({ type: MessageType.INFO }),
+      expect.any(Number),
+    );
+  });
+
+  it('shows partial audio conversion failures as information', async () => {
+    const audioPart = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    handleAtCommandSpy.mockResolvedValue({
+      processedQuery: [audioPart],
+      shouldProceed: true,
+    } as unknown as Awaited<
+      ReturnType<typeof atCommandProcessor.handleAtCommand>
+    >);
+    mockRunAudioBridge.mockResolvedValue({
+      status: 'failed',
+      parts: [{ text: 'one transcript' }, { text: 'audio unavailable' }],
+      audioCount: 2,
+      convertedCount: 1,
+      egressCount: 2,
+      modelId: 'qwen3-asr-flash',
+      error: 'one transcription failed',
+    });
+    const { result, mockSendMessageStream } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery('@first.wav @second.wav');
+    });
+
+    expect(mockAddItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: MessageType.INFO,
+        text: expect.stringContaining('Converted 1 of 2 audio file(s)'),
+      }),
+      expect.any(Number),
+    );
+    // The turn still proceeds with the successful transcript included.
+    expect(mockSendMessageStream.mock.calls[0]?.[0]).toEqual([
+      { text: 'one transcript' },
+      { text: 'audio unavailable' },
+    ]);
+  });
+
+  it('shows an error when every audio conversion fails', async () => {
+    const audioPart = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    handleAtCommandSpy.mockResolvedValue({
+      processedQuery: [audioPart],
+      shouldProceed: true,
+    } as unknown as Awaited<
+      ReturnType<typeof atCommandProcessor.handleAtCommand>
+    >);
+    mockRunAudioBridge.mockResolvedValue({
+      status: 'failed',
+      parts: [{ text: 'audio unavailable' }],
+      audioCount: 1,
+      convertedCount: 0,
+      egressCount: 1,
+      modelId: 'qwen3-asr-flash',
+      error: 'transcription was unavailable',
+    });
+    const { result, mockSendMessageStream } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery('@recording.wav listen');
+    });
+
+    expect(mockAddItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: MessageType.ERROR,
+        text: expect.stringContaining('no transcript was produced'),
+      }),
+      expect.any(Number),
+    );
+    // The turn still proceeds with the unavailable marker, not dropped.
+    expect(mockSendMessageStream.mock.calls[0]?.[0]).toEqual([
+      { text: 'audio unavailable' },
+    ]);
+  });
+
+  it('notices a failed audio bridge that never sent audio anywhere', async () => {
+    const audioPart = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    handleAtCommandSpy.mockResolvedValue({
+      processedQuery: [audioPart],
+      shouldProceed: true,
+    } as unknown as Awaited<
+      ReturnType<typeof atCommandProcessor.handleAtCommand>
+    >);
+    mockRunAudioBridge.mockResolvedValue({
+      status: 'failed',
+      parts: [{ text: 'audio unavailable: no voice model is configured' }],
+      audioCount: 1,
+      convertedCount: 0,
+      egressCount: 0,
+      error: 'no voice model is configured',
+    });
+    const { result, mockSendMessageStream } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery('@recording.wav');
+    });
+
+    expect(mockAddItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: MessageType.ERROR,
+        text: 'Audio bridge could not transcribe 1 audio file(s): no voice model is configured.',
+      }),
+      expect.any(Number),
+    );
+    expect(mockSendMessageStream.mock.calls[0]?.[0]).toEqual([
+      { text: 'audio unavailable: no voice model is configured' },
+    ]);
+  });
+
+  it('feeds audio-converted parts into the vision bridge for mixed audio+image prompts', async () => {
+    const audioPart = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    const imagePart = {
+      inlineData: { mimeType: 'image/png', data: 'abc123' },
+    };
+    handleAtCommandSpy.mockResolvedValue({
+      processedQuery: [{ text: 'listen' }, audioPart, imagePart],
+      shouldProceed: true,
+    } as unknown as Awaited<
+      ReturnType<typeof atCommandProcessor.handleAtCommand>
+    >);
+    mockRunAudioBridge.mockResolvedValue({
+      status: 'ok',
+      parts: [{ text: 'listen' }, { text: 'machine transcript' }, imagePart],
+      audioCount: 1,
+      convertedCount: 1,
+      egressCount: 1,
+      modelId: 'qwen3-asr-flash',
+    });
+    mockRunVisionBridge.mockResolvedValue({
+      applied: true,
+      status: 'ok',
+      parts: [
+        { text: 'listen' },
+        { text: 'machine transcript' },
+        { text: 'vision output' },
+      ],
+      transcript: 'vision output',
+      convertedCount: 1,
+      omittedCount: 0,
+      modelId: 'vm',
+      egressOccurred: true,
+    });
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: vi.fn(() => ({})),
+      getDefaultVisionBridgeModel: () => ({ id: 'vision-model' }),
+    });
+    mockLoadedSettings.merged.voiceModel = 'qwen3-asr-flash';
+    const { result, mockSendMessageStream } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery('@recording.wav listen');
+    });
+
+    await waitFor(() => expect(mockRunVisionBridge).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+    expect(mockRunAudioBridge).toHaveBeenCalledWith({
+      config: mockConfig,
+      settings: mockLoadedSettings,
+      parts: [{ text: 'listen' }, audioPart, imagePart],
+      signal: expect.any(AbortSignal),
+    });
+    // The vision bridge must receive the audio-converted parts, not the
+    // original prompt parts: feeding it the pre-conversion list would drop the
+    // transcript and forward raw audio to a text-only model.
+    expect(mockRunVisionBridge).toHaveBeenCalledWith({
+      config: mockConfig,
+      parts: [{ text: 'listen' }, { text: 'machine transcript' }, imagePart],
+      signal: expect.any(AbortSignal),
+    });
+    expect(mockSendMessageStream.mock.calls[0]?.[0]).toEqual([
+      { text: 'listen' },
+      { text: 'machine transcript' },
+      { text: 'vision output' },
+    ]);
+    const sent = JSON.stringify(mockSendMessageStream.mock.calls[0]?.[0]);
+    expect(sent).not.toContain('audio/wav');
+    expect(sent).not.toContain('inlineData');
+  });
+
+  it('feeds failed-audio markers into the vision bridge for mixed prompts', async () => {
+    const audioPart = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    const imagePart = {
+      inlineData: { mimeType: 'image/png', data: 'abc123' },
+    };
+    const audioMarker = { text: 'audio unavailable' };
+    handleAtCommandSpy.mockResolvedValue({
+      processedQuery: [{ text: 'listen' }, audioPart, imagePart],
+      shouldProceed: true,
+    } as unknown as Awaited<
+      ReturnType<typeof atCommandProcessor.handleAtCommand>
+    >);
+    mockRunAudioBridge.mockResolvedValue({
+      status: 'failed',
+      parts: [{ text: 'listen' }, audioMarker, imagePart],
+      audioCount: 1,
+      convertedCount: 0,
+      egressCount: 0,
+      error: 'no voice model is configured',
+    });
+    mockRunVisionBridge.mockResolvedValue({
+      applied: true,
+      status: 'ok',
+      parts: [{ text: 'listen' }, audioMarker, { text: 'vision output' }],
+      transcript: 'vision output',
+      convertedCount: 1,
+      omittedCount: 0,
+      modelId: 'vm',
+      egressOccurred: true,
+    });
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: vi.fn(() => ({})),
+      getDefaultVisionBridgeModel: () => ({ id: 'vision-model' }),
+    });
+    const { result, mockSendMessageStream } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery('@recording.wav listen');
+    });
+
+    await waitFor(() => expect(mockRunVisionBridge).toHaveBeenCalledTimes(1));
+    expect(mockRunVisionBridge).toHaveBeenCalledWith({
+      config: mockConfig,
+      parts: [{ text: 'listen' }, audioMarker, imagePart],
+      signal: expect.any(AbortSignal),
+    });
+    expect(mockSendMessageStream.mock.calls[0]?.[0]).toEqual([
+      { text: 'listen' },
+      audioMarker,
+      { text: 'vision output' },
+    ]);
+  });
+
   describe('vision bridge gate', () => {
     const imagePart = { inlineData: { mimeType: 'image/png', data: 'abc123' } };
     const enableBridge = (primaryAcceptsImages = false) => {
@@ -903,7 +1985,6 @@ describe('useGeminiStream', () => {
       expect(mockSendMessageStream.mock.calls[2]?.[3]).toMatchObject({
         modelOverride: selector,
       });
-
       handleAtCommandSpy.mockResolvedValue({
         processedQuery: [{ text: 'next text turn' }],
         shouldProceed: true,
@@ -3918,6 +4999,7 @@ describe('useGeminiStream', () => {
         config: mockConfig,
         onDebugMessage: mockOnDebugMessage,
         signal: expect.any(AbortSignal),
+        preserveUnsupportedAudioForBridge: true,
       }),
     );
     expect(recordMidTurnUserMessage).toHaveBeenCalledWith(
@@ -3938,16 +5020,1612 @@ describe('useGeminiStream', () => {
     );
   });
 
-  it('forwards mid-turn text when a bridge failure returns no replacement parts', async () => {
+  it('resolves and bridges mid-turn @ audio messages before submitting tool results', async () => {
+    const queuedPrompt = 'listen @/tmp/recording.wav';
+    const resolvedAudioPart: Part = {
+      inlineData: {
+        mimeType: 'audio/wav',
+        data: 'UklGRg==',
+      },
+    };
+    const resolvedTextPart: Part = { text: queuedPrompt };
+    const transcriptPart: Part = { text: '[mid-turn audio transcript]' };
+    mockLoadedSettings.merged.voiceModel = 'qwen3-asr-flash';
+    mockRunAudioBridge.mockResolvedValue({
+      status: 'ok',
+      parts: [transcriptPart],
+      audioCount: 1,
+      convertedCount: 1,
+      egressCount: 1,
+      modelId: 'qwen3-asr-flash',
+    });
+    const resolveAtCommandQuerySpy = vi
+      .spyOn(atCommandProcessor, 'resolveAtCommandQuery')
+      .mockResolvedValue({
+        processedQuery: [resolvedTextPart, resolvedAudioPart],
+        shouldProceed: true,
+      });
+    const toolCallResponseParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'call1',
+          name: 'testTool',
+          response: { result: 'ok' },
+        },
+      },
+    ];
+    const completedToolCalls: TrackedToolCall[] = [
+      {
+        request: {
+          callId: 'call1',
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-midturn-audio',
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId: 'call1',
+          responseParts: toolCallResponseParts,
+          errorType: undefined,
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => 'Mock description',
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    const midTurnDrainRef = {
+      current: vi
+        .fn<() => string[]>()
+        .mockReturnValueOnce([queuedPrompt])
+        .mockReturnValue([]),
+    };
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        midTurnDrainRef,
+      ),
+    );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete(completedToolCalls);
+      }
+    });
+
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+    expect(resolveAtCommandQuerySpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        query: queuedPrompt,
+        preserveUnsupportedAudioForBridge: true,
+      }),
+    );
+    expect(mockRunAudioBridge).toHaveBeenCalledWith({
+      config: mockConfig,
+      settings: mockLoadedSettings,
+      parts: [resolvedTextPart, resolvedAudioPart],
+      signal: expect.any(AbortSignal),
+    });
+    const sent = JSON.stringify(mockSendMessageStream.mock.calls[0][0]);
+    expect(sent).toContain('[mid-turn audio transcript]');
+    expect(sent).not.toContain('inlineData');
+    expect(mockSendMessageStream).toHaveBeenCalledWith(
+      [...toolCallResponseParts, transcriptPart],
+      expect.any(AbortSignal),
+      'prompt-id-midturn-audio',
+      expect.objectContaining({ type: SendMessageType.ToolResult }),
+    );
+  });
+
+  it('re-bridges mid-turn drained audio via the re-drain instead of resending the marker', async () => {
+    const queuedPrompt = 'listen @/tmp/recording.wav';
+    const resolvedAudioPart: Part = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    const resolvedTextPart: Part = { text: queuedPrompt };
+    const markerPart: Part = {
+      text: '[Audio bridge could not transcribe attached audio: no voice model is configured.]',
+    };
+    // First the drain's bridge fails (no voice model); the re-drain's
+    // re-bridge then succeeds once one is configured.
+    mockRunAudioBridge
+      .mockResolvedValueOnce({
+        status: 'failed',
+        parts: [resolvedTextPart, markerPart],
+        audioCount: 1,
+        convertedCount: 0,
+        egressCount: 0,
+        error: 'no voice model is configured',
+      })
+      .mockResolvedValueOnce({
+        status: 'ok',
+        parts: [{ text: 'recovered transcript' }],
+        audioCount: 1,
+        convertedCount: 1,
+        egressCount: 1,
+        modelId: 'qwen3-asr-flash',
+      });
+    const resolveAtCommandQuerySpy = vi
+      .spyOn(atCommandProcessor, 'resolveAtCommandQuery')
+      .mockResolvedValue({
+        processedQuery: [resolvedTextPart, resolvedAudioPart],
+        shouldProceed: true,
+      });
+    const makeCompletedToolCall = (
+      callId: string,
+      promptId: string,
+    ): TrackedToolCall[] => [
+      {
+        request: {
+          callId,
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: promptId,
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId,
+          responseParts: [
+            {
+              functionResponse: {
+                id: callId,
+                name: 'testTool',
+                response: { result: 'ok' },
+              },
+            },
+          ],
+          errorType: undefined,
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => 'Mock description',
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    // A faithful steer queue: drain empties it, restore prepends back into it.
+    const queue: string[] = [queuedPrompt];
+    const midTurnDrainRef = {
+      current: vi.fn(() => queue.splice(0, queue.length)),
+    };
+    const restoreSteer = vi.fn((messages: string[]) => {
+      queue.unshift(...messages);
+    });
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        midTurnDrainRef,
+        undefined,
+        undefined,
+        undefined,
+        { current: restoreSteer },
+      ),
+    );
+
+    mockSendMessageStream
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'partial response',
+          };
+          throw new Error('stream failed');
+        })(),
+      )
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      )
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete(
+          makeCompletedToolCall('call1', 'prompt-id-midturn-drain-retry'),
+        );
+      }
+    });
+
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+    expect(resolveAtCommandQuerySpy).toHaveBeenCalled();
+    // The drain sent the marker (not the raw audio)…
+    const firstSent = JSON.stringify(mockSendMessageStream.mock.calls[0][0]);
+    expect(firstSent).toContain('could not transcribe');
+    expect(firstSent).not.toContain('inlineData');
+    expect(mockRunAudioBridge).toHaveBeenCalledTimes(1);
+    // …and the failed continuation re-queued the message so the pristine
+    // audio is not stranded with the marker.
+    expect(restoreSteer).toHaveBeenCalledTimes(1);
+    expect(queue).toEqual([queuedPrompt]);
+
+    // Ctrl+Y retries only the tool responses — the steer segment was stripped
+    // from the stored retry payload when the re-queue took over recovery.
+    await act(async () => {
+      await result.current.retryLastPrompt();
+    });
+
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+    });
+    const retrySent = JSON.stringify(mockSendMessageStream.mock.calls[1][0]);
+    expect(retrySent).toContain('testTool');
+    expect(retrySent).not.toContain('could not transcribe');
+    expect(retrySent).not.toContain('audio/wav');
+    expect(mockRunAudioBridge).toHaveBeenCalledTimes(1);
+
+    // The next continuation re-drains the restored message and re-bridges
+    // the pristine audio (second bridge call) instead of resending the marker.
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete(
+          makeCompletedToolCall('call2', 'prompt-id-midturn-drain-retry-2'),
+        );
+      }
+    });
+
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(3);
+    });
+    expect(mockRunAudioBridge).toHaveBeenCalledTimes(2);
+    expect(
+      JSON.stringify(mockRunAudioBridge.mock.calls[1]?.[0]?.parts),
+    ).toContain('audio/wav');
+    const redeliveredSent = JSON.stringify(
+      mockSendMessageStream.mock.calls[2][0],
+    );
+    expect(redeliveredSent).toContain('recovered transcript');
+    expect(redeliveredSent).not.toContain('could not transcribe');
+  });
+
+  it('delivers a failed drained steer exactly once when the bridge failed', async () => {
+    const queuedPrompt = 'listen @/tmp/recording.wav';
+    const resolvedAudioPart: Part = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    const resolvedTextPart: Part = { text: queuedPrompt };
+    const markerPart: Part = {
+      text: '[Audio bridge could not transcribe attached audio: no voice model is configured.]',
+    };
+    // First the drain's bridge fails (no voice model); the re-drain's
+    // re-bridge then succeeds once one is configured.
+    mockRunAudioBridge
+      .mockResolvedValueOnce({
+        status: 'failed',
+        parts: [resolvedTextPart, markerPart],
+        audioCount: 1,
+        convertedCount: 0,
+        egressCount: 0,
+        error: 'no voice model is configured',
+      })
+      .mockResolvedValueOnce({
+        status: 'ok',
+        parts: [{ text: 'recovered transcript' }],
+        audioCount: 1,
+        convertedCount: 1,
+        egressCount: 1,
+        modelId: 'qwen3-asr-flash',
+      });
+    vi.spyOn(atCommandProcessor, 'resolveAtCommandQuery').mockResolvedValue({
+      processedQuery: [resolvedTextPart, resolvedAudioPart],
+      shouldProceed: true,
+    });
+    const recordMidTurnUserMessage = vi.fn();
+    mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+      recordMidTurnUserMessage,
+    });
+    const makeCompletedToolCall = (
+      callId: string,
+      promptId: string,
+    ): TrackedToolCall[] => [
+      {
+        request: {
+          callId,
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: promptId,
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId,
+          responseParts: [
+            {
+              functionResponse: {
+                id: callId,
+                name: 'testTool',
+                response: { result: 'ok' },
+              },
+            },
+          ],
+          errorType: undefined,
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => 'Mock description',
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    // A faithful steer queue: drain empties it, restore prepends back into it.
+    // The failed continuation re-queues the message, and the stored retry
+    // payload is stripped back to the tool responses, so the steer recovers
+    // through exactly one channel (the re-drain).
+    const queue: string[] = [queuedPrompt];
+    const midTurnDrainRef = {
+      current: vi.fn(() => queue.splice(0, queue.length)),
+    };
+    const restoreSteer = vi.fn((messages: string[]) => {
+      queue.unshift(...messages);
+    });
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        midTurnDrainRef,
+        undefined,
+        undefined,
+        undefined,
+        { current: restoreSteer },
+      ),
+    );
+
+    mockSendMessageStream
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'partial response',
+          };
+          throw new Error('stream failed');
+        })(),
+      )
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      )
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete(
+          makeCompletedToolCall('call1', 'prompt-id-drain-single-recovery'),
+        );
+      }
+    });
+
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+    // The re-queue owns the steer's recovery: the message is restored and the
+    // stored retry payload is stripped back to the tool responses.
+    expect(restoreSteer).toHaveBeenCalledTimes(1);
+    expect(queue).toEqual([queuedPrompt]);
+
+    await act(async () => {
+      await result.current.retryLastPrompt();
+    });
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+    });
+    // Ctrl+Y re-sends only the tool responses — the steer segment is no
+    // longer in the retry payload, so it cannot double-deliver.
+    const retrySent = JSON.stringify(mockSendMessageStream.mock.calls[1][0]);
+    expect(retrySent).toContain('testTool');
+    expect(retrySent).not.toContain('recovered transcript');
+    expect(retrySent).not.toContain('could not transcribe');
+    expect(retrySent).not.toContain('audio/wav');
+
+    // A later tool continuation drains the queue and delivers the steer
+    // exactly once (via the re-drain), re-bridging the pristine media.
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete(
+          makeCompletedToolCall('call2', 'prompt-id-drain-single-recovery-2'),
+        );
+      }
+    });
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(3);
+    });
+    const thirdSent = JSON.stringify(mockSendMessageStream.mock.calls[2][0]);
+    expect(thirdSent).toContain('recovered transcript');
+    expect(thirdSent).not.toContain('could not transcribe');
+    expect(mockRunAudioBridge).toHaveBeenCalledTimes(2);
+    // The re-drain's delivery fires accept(): recording/history track the
+    // steered content exactly once, alongside the content itself.
+    expect(recordMidTurnUserMessage).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(recordMidTurnUserMessage.mock.calls[0])).toContain(
+      'recovered transcript',
+    );
+    const userItems = mockAddItem.mock.calls
+      .map(([item]) => item)
+      .filter(
+        (item) =>
+          item &&
+          typeof item === 'object' &&
+          (item as { type?: string }).type === 'user',
+      );
+    expect(userItems.length).toBeGreaterThan(0);
+  });
+
+  it('delivers a failed drained steer exactly once when the bridge succeeded', async () => {
+    // Path A: the drain's bridge SUCCEEDED (no retryParts stored), then the
+    // stream failed. The re-queue must own recovery here too: the retry
+    // payload is stripped back to the tool responses so the steered content
+    // cannot reach the model both via Ctrl+Y and via the re-drain.
+    const queuedPrompt = 'also check the logs';
+    vi.spyOn(atCommandProcessor, 'resolveAtCommandQuery').mockResolvedValue({
+      processedQuery: [{ text: queuedPrompt }],
+      shouldProceed: true,
+    });
+    const makeCompletedToolCall = (
+      callId: string,
+      promptId: string,
+    ): TrackedToolCall[] => [
+      {
+        request: {
+          callId,
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: promptId,
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId,
+          responseParts: [
+            {
+              functionResponse: {
+                id: callId,
+                name: 'testTool',
+                response: { result: 'ok' },
+              },
+            },
+          ],
+          errorType: undefined,
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => 'Mock description',
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    const queue: string[] = [queuedPrompt];
+    const midTurnDrainRef = {
+      current: vi.fn(() => queue.splice(0, queue.length)),
+    };
+    const restoreSteer = vi.fn((messages: string[]) => {
+      queue.unshift(...messages);
+    });
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        midTurnDrainRef,
+        undefined,
+        undefined,
+        undefined,
+        { current: restoreSteer },
+      ),
+    );
+
+    mockSendMessageStream
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'partial response',
+          };
+          throw new Error('stream failed');
+        })(),
+      )
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      )
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete(
+          makeCompletedToolCall('call1', 'prompt-id-drain-path-a'),
+        );
+      }
+    });
+
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+    // The first send carried the drained steer AND the message was
+    // re-queued: the strip must make the retry channel drop the steer.
+    const firstSent = JSON.stringify(mockSendMessageStream.mock.calls[0][0]);
+    expect(firstSent).toContain(queuedPrompt);
+    expect(restoreSteer).toHaveBeenCalledTimes(1);
+    expect(queue).toEqual([queuedPrompt]);
+
+    await act(async () => {
+      await result.current.retryLastPrompt();
+    });
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+    });
+    const retrySent = JSON.stringify(mockSendMessageStream.mock.calls[1][0]);
+    expect(retrySent).toContain('testTool');
+    expect(retrySent).not.toContain(queuedPrompt);
+
+    // The re-drain owns the steer: exactly one more delivery carries it.
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete(
+          makeCompletedToolCall('call2', 'prompt-id-drain-path-a-2'),
+        );
+      }
+    });
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(3);
+    });
+    const thirdSent = JSON.stringify(mockSendMessageStream.mock.calls[2][0]);
+    expect(thirdSent).toContain(queuedPrompt);
+    // Delivered exactly once: call 1 (failed send) and call 3 (re-drain).
+    const deliveredSends = [
+      JSON.stringify(mockSendMessageStream.mock.calls[1][0]),
+      JSON.stringify(mockSendMessageStream.mock.calls[2][0]),
+    ].join('\n');
+    expect(deliveredSends.match(/also check the logs/g)).toHaveLength(1);
+  });
+
+  it('keeps the pristine retry payload when settle accepted the drained steer before the failure', async () => {
+    // Accept-branch variant: the bridge failed (marker sent, pristine stored
+    // for Ctrl+Y) and the push LANDED — settle accepts the input — before the
+    // stream failed. restore() must then stay a no-op (no strip, no re-queue):
+    // the retry is the single recovery channel and re-bridges the pristine.
+    const queuedPrompt = 'listen @/tmp/recording.wav';
+    const resolvedAudioPart: Part = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    const resolvedTextPart: Part = { text: queuedPrompt };
+    const markerPart: Part = {
+      text: '[Audio bridge could not transcribe attached audio: no voice model is configured.]',
+    };
+    mockRunAudioBridge
+      .mockResolvedValueOnce({
+        status: 'failed',
+        parts: [resolvedTextPart, markerPart],
+        audioCount: 1,
+        convertedCount: 0,
+        egressCount: 0,
+        error: 'no voice model is configured',
+      })
+      .mockResolvedValueOnce({
+        status: 'ok',
+        parts: [{ text: 'recovered transcript' }],
+        audioCount: 1,
+        convertedCount: 1,
+        egressCount: 1,
+        modelId: 'qwen3-asr-flash',
+      });
+    vi.spyOn(atCommandProcessor, 'resolveAtCommandQuery').mockResolvedValue({
+      processedQuery: [resolvedTextPart, resolvedAudioPart],
+      shouldProceed: true,
+    });
+    const recordMidTurnUserMessage = vi.fn();
+    mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+      recordMidTurnUserMessage,
+    });
+    const makeCompletedToolCall = (
+      callId: string,
+      promptId: string,
+    ): TrackedToolCall[] => [
+      {
+        request: {
+          callId,
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: promptId,
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId,
+          responseParts: [
+            {
+              functionResponse: {
+                id: callId,
+                name: 'testTool',
+                response: { result: 'ok' },
+              },
+            },
+          ],
+          errorType: undefined,
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => 'Mock description',
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    const queue: string[] = [queuedPrompt];
+    const midTurnDrainRef = {
+      current: vi.fn(() => queue.splice(0, queue.length)),
+    };
+    const restoreSteer = vi.fn((messages: string[]) => {
+      queue.unshift(...messages);
+    });
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        midTurnDrainRef,
+        undefined,
+        undefined,
+        undefined,
+        { current: restoreSteer },
+      ),
+    );
+
+    mockSendMessageStream
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'partial response',
+          };
+          // Emulate core settle for a push that LANDED: accept() settles the
+          // steer input before the stream failure reaches the CLI's failure
+          // handler, so the restore() that handler triggers must be a no-op.
+          (
+            mockSendMessageStream.mock.calls[0]?.[3] as {
+              steerInput?: SteerInput;
+            }
+          ).steerInput?.accept();
+          throw new Error('stream failed');
+        })(),
+      )
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete(
+          makeCompletedToolCall('call1', 'prompt-id-drain-accept-settled'),
+        );
+      }
+    });
+
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+    // The in-stream accept() above settled the input (recording fired with
+    // it); the failure path's restore() must therefore have been a no-op —
+    // the stored pristine payload stays intact for Ctrl+Y.
+    expect(restoreSteer).not.toHaveBeenCalled();
+    expect(queue).toHaveLength(0);
+    expect(recordMidTurnUserMessage).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await result.current.retryLastPrompt();
+    });
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+    });
+    // The retry re-bridged the pristine media: exactly one more bridge call,
+    // delivering the transcript; no re-drain delivery follows.
+    expect(mockRunAudioBridge).toHaveBeenCalledTimes(2);
+    const retrySent = JSON.stringify(mockSendMessageStream.mock.calls[1][0]);
+    expect(retrySent).toContain('recovered transcript');
+    expect(retrySent).not.toContain('could not transcribe');
+  });
+
+  it('re-bridges a client-driven steer drain via Ctrl+Y when the Steer send fails', async () => {
+    // The client-driven boundary drain consumes only `parts` in core; core
+    // surfaces the resolved drain via onSteerResolved so the hook can store
+    // the pristine retry payload (retryParts) exactly like the hook path's
+    // metadata.preOverrideParts. A failed Steer send then stays retryable.
+    mockRunAudioBridge.mockResolvedValue({
+      status: 'ok',
+      parts: [{ text: 'recovered client transcript' }],
+      audioCount: 1,
+      convertedCount: 1,
+      egressCount: 1,
+      modelId: 'qwen3-asr-flash',
+    });
+    mockSendMessageStream
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'partial response',
+          };
+          throw new Error('steer send failed');
+        })(),
+      )
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        { current: vi.fn(() => []) },
+        undefined,
+        undefined,
+        undefined,
+        { current: vi.fn() },
+      ),
+    );
+
+    await act(async () => {
+      await result.current.submitQuery(
+        'start the analysis',
+        SendMessageType.UserQuery,
+        'prompt-id-client-steer-retry',
+      );
+    });
+    expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    const sendOptions = mockSendMessageStream.mock.calls[0][3] as {
+      onSteerResolved?: (steerInput: SteerInput) => void;
+    };
+    expect(sendOptions.onSteerResolved).toEqual(expect.any(Function));
+
+    const markerPart: Part = {
+      text: '[Audio bridge could not transcribe attached audio: no voice model is configured.]',
+    };
+    const pristineAudio: Part = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    await act(async () => {
+      sendOptions.onSteerResolved!({
+        parts: [{ text: 'start the analysis' }, markerPart],
+        retryParts: [{ text: 'start the analysis' }, pristineAudio],
+        accept: vi.fn(),
+        restore: vi.fn(),
+      });
+    });
+
+    await act(async () => {
+      await result.current.retryLastPrompt();
+    });
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+    });
+    const retrySent = JSON.stringify(mockSendMessageStream.mock.calls[1][0]);
+    expect(retrySent).toContain('recovered client transcript');
+    expect(retrySent).not.toContain('could not transcribe');
+  });
+
+  it('drops the stored client-steer retry payload when the drain is restored', async () => {
+    // When settle restores the boundary drain (the push never landed), the
+    // re-queue owns recovery; the stored retry payload must be invalidated so
+    // Ctrl+Y cannot also deliver the steer (or duplicate the already-sent
+    // original turn).
+    mockSendMessageStream.mockReturnValueOnce(
+      (async function* () {
+        yield {
+          type: ServerGeminiEventType.Content,
+          value: 'partial response',
+        };
+        throw new Error('steer send failed');
+      })(),
+    );
+
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        { current: vi.fn(() => []) },
+        undefined,
+        undefined,
+        undefined,
+        { current: vi.fn() },
+      ),
+    );
+
+    await act(async () => {
+      await result.current.submitQuery(
+        'start the analysis',
+        SendMessageType.UserQuery,
+        'prompt-id-client-steer-restore',
+      );
+    });
+    expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    const sendOptions = mockSendMessageStream.mock.calls[0][3] as {
+      onSteerResolved?: (steerInput: SteerInput) => void;
+    };
+
+    const steerInput: SteerInput = {
+      parts: [{ text: 'start the analysis' }],
+      retryParts: [
+        { text: 'start the analysis' },
+        { inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' } },
+      ],
+      accept: vi.fn(),
+      restore: vi.fn(),
+    };
+    // Mirror the production restore closure: settling fires onRestore.
+    steerInput.restore = vi.fn(() => steerInput.onRestore?.());
+    await act(async () => {
+      sendOptions.onSteerResolved!(steerInput);
+    });
+    await act(async () => {
+      steerInput.restore();
+    });
+
+    await act(async () => {
+      await result.current.retryLastPrompt();
+    });
+    // The retry channel is inert now: nothing is re-sent.
+    expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+  });
+
+  it('rechecks earlier drained audio against a later full-turn vision route', async () => {
+    const audioPrompt = 'listen @/tmp/recording.wav';
+    const imagePrompt = 'inspect @/tmp/screenshot.png';
+    const audioPart: Part = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    const imagePart: Part = {
+      inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' },
+    };
+    const transcriptPart: Part = { text: '[final-route transcript]' };
+    const visionSelector = 'vision-agent\0https://vision.example.com/v1\0';
+    const resolveForModel = vi.fn(async (selector: string) => ({
+      contentGeneratorConfig: {
+        modalities: selector === 'audio-skill-model' ? { audio: true } : {},
+      },
+    }));
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: () => ({}),
+      getDefaultVisionBridgeModel: () => ({
+        id: 'vision-agent',
+        baseUrl: 'https://vision.example.com/v1',
+        agentCapable: true,
+      }),
+      getBaseLlmClient: () => ({ resolveForModel }),
+    });
+    mockLoadedSettings.merged.voiceModel = 'qwen3-asr-flash';
+    mockRunAudioBridge.mockResolvedValue({
+      status: 'ok',
+      parts: [transcriptPart],
+      audioCount: 1,
+      convertedCount: 1,
+      egressCount: 1,
+      modelId: 'qwen3-asr-flash',
+    });
+    vi.spyOn(atCommandProcessor, 'resolveAtCommandQuery').mockImplementation(
+      async ({ query }) => ({
+        processedQuery:
+          query === audioPrompt
+            ? [{ text: audioPrompt }, audioPart]
+            : [{ text: imagePrompt }, imagePart],
+        shouldProceed: true,
+      }),
+    );
+    const completedToolCalls: TrackedToolCall[] = [
+      {
+        request: {
+          callId: 'call-final-route',
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-final-route',
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId: 'call-final-route',
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'call-final-route',
+                name: 'testTool',
+                response: { result: 'ok' },
+              },
+            },
+          ],
+          errorType: undefined,
+          modelOverride: 'audio-skill-model',
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => 'Mock description',
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    const midTurnDrainRef = {
+      current: vi
+        .fn<() => string[]>()
+        .mockReturnValueOnce([audioPrompt, imagePrompt])
+        .mockReturnValue([]),
+    };
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        midTurnDrainRef,
+      ),
+    );
+
+    await act(async () => {
+      await capturedOnComplete?.(completedToolCalls);
+    });
+
+    await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalledOnce());
+    expect(resolveForModel).toHaveBeenCalledWith('audio-skill-model', {
+      failClosed: true,
+    });
+    expect(resolveForModel).toHaveBeenCalledWith(
+      'vision-agent\0https://vision.example.com/v1',
+      { failClosed: true },
+    );
+    expect(mockRunAudioBridge).toHaveBeenCalledWith(
+      expect.objectContaining({
+        targetSupportsAudio: false,
+        parts: [{ text: audioPrompt }, audioPart],
+      }),
+    );
+    const send = mockSendMessageStream.mock.calls[0];
+    expect(send?.[3]).toMatchObject({ modelOverride: visionSelector });
+    expect(JSON.stringify(send?.[0])).toContain('[final-route transcript]');
+    expect(JSON.stringify(send?.[0])).not.toContain('audio/wav');
+  });
+
+  it('keeps a failed skill route fallback sticky across drained media', async () => {
+    const queuedPrompt = 'listen @/tmp/recording.wav';
+    const imagePrompt = 'inspect @/tmp/first.png';
+    const mixedPrompt =
+      'inspect @/tmp/second.png and listen @/tmp/recording.wav';
+    const resolvedAudioPart: Part = {
+      inlineData: {
+        mimeType: 'audio/wav',
+        data: 'UklGRg==',
+      },
+    };
+    const resolvedTextPart: Part = { text: queuedPrompt };
+    const firstImagePart: Part = {
+      inlineData: { mimeType: 'image/png', data: 'Zmlyc3Q=' },
+    };
+    const secondImagePart: Part = {
+      inlineData: { mimeType: 'image/png', data: 'c2Vjb25k' },
+    };
+    const transcriptPart: Part = { text: '[mid-turn audio transcript]' };
+    const visionTranscriptPart: Part = {
+      text: '[mid-turn image transcript]',
+    };
+    const resolveForModel = vi.fn().mockResolvedValue({
+      contentGeneratorConfig: { modalities: {} },
+    });
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: () => ({ audio: true }),
+      getDefaultVisionBridgeModel: () => ({
+        id: 'vision-agent',
+        baseUrl: 'https://vision.example.com/v1',
+        agentCapable: true,
+      }),
+      getBaseLlmClient: () => ({ resolveForModel }),
+    });
+    mockLoadedSettings.merged.voiceModel = 'qwen3-asr-flash';
+    mockRunAudioBridge.mockResolvedValue({
+      status: 'ok',
+      parts: [transcriptPart],
+      audioCount: 1,
+      convertedCount: 1,
+      egressCount: 1,
+      modelId: 'qwen3-asr-flash',
+    });
+    mockRunVisionBridge.mockImplementation(
+      async ({ parts }: { parts: PartListUnion }) => ({
+        applied: true,
+        status: 'ok',
+        parts: [...splitImageParts(parts).nonImageParts, visionTranscriptPart],
+        convertedCount: 1,
+        omittedCount: 0,
+        modelId: 'vision-model',
+        egressOccurred: true,
+      }),
+    );
+    vi.spyOn(atCommandProcessor, 'resolveAtCommandQuery').mockImplementation(
+      async ({ query }) => {
+        if (query === queuedPrompt) {
+          return {
+            processedQuery: [resolvedTextPart, resolvedAudioPart],
+            shouldProceed: true,
+          };
+        }
+        if (query === imagePrompt) {
+          return {
+            processedQuery: [{ text: imagePrompt }, firstImagePart],
+            shouldProceed: true,
+          };
+        }
+        return {
+          processedQuery: [
+            { text: mixedPrompt },
+            resolvedAudioPart,
+            secondImagePart,
+          ],
+          shouldProceed: true,
+        };
+      },
+    );
+    const toolCallResponseParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'call1',
+          name: 'testTool',
+          response: { result: 'ok' },
+        },
+      },
+    ];
+    const completedToolCalls: TrackedToolCall[] = [
+      {
+        request: {
+          callId: 'call1',
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-midturn-audio-skill-override',
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId: 'call1',
+          responseParts: toolCallResponseParts,
+          errorType: undefined,
+          // Internal (skill-tool) override: not a user-chosen route, so audio
+          // must still be transcribed via the voice bridge instead of being
+          // fail-closed-stripped.
+          modelOverride: 'skill-model',
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => 'Mock description',
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    const midTurnDrainRef = {
+      current: vi
+        .fn<() => string[]>()
+        .mockReturnValueOnce([queuedPrompt])
+        .mockReturnValueOnce([imagePrompt, mixedPrompt])
+        .mockReturnValue([]),
+    };
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        midTurnDrainRef,
+      ),
+    );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete(completedToolCalls);
+      }
+    });
+
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+    expect(mockRunAudioBridge).toHaveBeenCalledWith({
+      config: mockConfig,
+      settings: mockLoadedSettings,
+      parts: [resolvedTextPart, resolvedAudioPart],
+      signal: expect.any(AbortSignal),
+      targetSupportsAudio: false,
+    });
+    expect(resolveForModel).toHaveBeenCalledWith('skill-model', {
+      failClosed: true,
+    });
+    expect(mockSendMessageStream).toHaveBeenCalledWith(
+      [...toolCallResponseParts, transcriptPart],
+      expect.any(AbortSignal),
+      'prompt-id-midturn-audio-skill-override',
+      expect.objectContaining({
+        type: SendMessageType.ToolResult,
+        // The audio was transcribed, so nothing media-shaped is routed to the
+        // skill model: the selector stays bare instead of becoming an exact
+        // route.
+        modelOverride: 'skill-model',
+      }),
+    );
+    expect(mockAddItem).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('Audio was not sent'),
+      }),
+      expect.any(Number),
+    );
+
+    resolveForModel.mockRejectedValueOnce(new Error('route unavailable'));
+    mockRunAudioBridge.mockResolvedValue({
+      status: 'ok',
+      parts: [{ text: mixedPrompt }, transcriptPart, secondImagePart],
+      audioCount: 1,
+      convertedCount: 1,
+      egressCount: 1,
+      modelId: 'qwen3-asr-flash',
+    });
+    mockRunAudioBridge.mockClear();
+    const secondToolCalls: TrackedToolCall[] = [
+      {
+        ...completedToolCalls[0],
+        request: {
+          ...completedToolCalls[0].request,
+          callId: 'call2',
+          prompt_id: 'prompt-id-midturn-audio-route-failure',
+        },
+        responseSubmittedToGemini: false,
+        response: {
+          ...completedToolCalls[0].response,
+          callId: 'call2',
+        },
+      } as TrackedCompletedToolCall,
+    ];
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete(secondToolCalls);
+      }
+    });
+
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+    });
+    expect(mockRunAudioBridge).toHaveBeenCalledOnce();
+    expect(mockRunAudioBridge.mock.calls[0]?.[0]).not.toHaveProperty(
+      'targetSupportsAudio',
+    );
+    expect(mockRunVisionBridge).toHaveBeenCalledTimes(2);
+    const secondSent = JSON.stringify(mockSendMessageStream.mock.calls[1]?.[0]);
+    expect(secondSent).toContain('[mid-turn audio transcript]');
+    expect(secondSent).toContain('[mid-turn image transcript]');
+    expect(secondSent).not.toContain('inlineData');
+    expect(
+      mockSendMessageStream.mock.calls[1]?.[3].modelOverride,
+    ).toBeUndefined();
+    expect(mockAddItem).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('Audio was not sent'),
+      }),
+      expect.any(Number),
+    );
+  });
+
+  it.each([
+    ['audio-only active route', false],
+    ['audio-and-image active route', true],
+  ] as const)(
+    'keeps raw audio on its %s for a mixed media turn',
+    async (_label, supportsImage) => {
+      const queuedPrompt =
+        'inspect @/tmp/screenshot.png and listen @/tmp/recording.wav';
+      const resolvedTextPart: Part = { text: queuedPrompt };
+      const resolvedAudioPart: Part = {
+        inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+      };
+      const resolvedImagePart: Part = {
+        inlineData: { mimeType: 'image/png', data: 'iVBORw0KGgo=' },
+      };
+      const visionTextPart: Part = { text: '[mid-turn image transcript]' };
+      const resolveForModel = vi.fn().mockResolvedValue({
+        contentGeneratorConfig: {
+          modalities: {
+            audio: true,
+            ...(supportsImage ? { image: true } : {}),
+          },
+        },
+      });
+      Object.assign(mockConfig, {
+        getEffectiveInputModalities: () => ({}),
+        getDefaultVisionBridgeModel: () => ({
+          id: 'vision-agent',
+          agentCapable: true,
+        }),
+        getBaseLlmClient: () => ({ resolveForModel }),
+      });
+      mockRunVisionBridge.mockResolvedValue({
+        applied: true,
+        status: 'ok',
+        parts: [resolvedTextPart, resolvedAudioPart, visionTextPart],
+        convertedCount: 1,
+        omittedCount: 0,
+        modelId: 'vision-agent',
+        egressOccurred: true,
+      });
+      vi.spyOn(atCommandProcessor, 'resolveAtCommandQuery').mockResolvedValue({
+        processedQuery: [
+          resolvedTextPart,
+          resolvedAudioPart,
+          resolvedImagePart,
+        ],
+        shouldProceed: true,
+      });
+      const toolCallResponseParts: Part[] = [
+        {
+          functionResponse: {
+            id: 'call1',
+            name: 'testTool',
+            response: { result: 'ok' },
+          },
+        },
+      ];
+      const completedToolCalls: TrackedToolCall[] = [
+        {
+          request: {
+            callId: 'call1',
+            name: 'testTool',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'prompt-id-mixed-skill-override',
+          },
+          status: 'success',
+          responseSubmittedToGemini: false,
+          response: {
+            callId: 'call1',
+            responseParts: toolCallResponseParts,
+            errorType: undefined,
+            modelOverride: 'audio-skill-model',
+          },
+          tool: { displayName: 'MockTool' },
+          invocation: {
+            getDescription: () => 'Mock description',
+          } as unknown as AnyToolInvocation,
+        } as TrackedCompletedToolCall,
+      ];
+      const midTurnDrainRef = {
+        current: vi
+          .fn<() => string[]>()
+          .mockReturnValueOnce([queuedPrompt])
+          .mockReturnValue([]),
+      };
+      let capturedOnComplete:
+        | ((completedTools: TrackedToolCall[]) => Promise<void>)
+        | null = null;
+      mockUseReactToolScheduler.mockImplementation((onComplete) => {
+        capturedOnComplete = onComplete;
+        return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+      });
+
+      renderHook(() =>
+        useGeminiStream(
+          new MockedGeminiClientClass(mockConfig),
+          [],
+          mockAddItem,
+          mockConfig,
+          true,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          () => {},
+          () => {},
+          () => {},
+          80,
+          24,
+          midTurnDrainRef,
+        ),
+      );
+
+      await act(async () => {
+        if (capturedOnComplete) {
+          await capturedOnComplete(completedToolCalls);
+        }
+      });
+
+      await waitFor(() =>
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1),
+      );
+      expect(mockRunAudioBridge).not.toHaveBeenCalled();
+      if (supportsImage) {
+        expect(mockRunVisionBridge).not.toHaveBeenCalled();
+        expect(mockSendMessageStream).toHaveBeenCalledWith(
+          [
+            ...toolCallResponseParts,
+            resolvedTextPart,
+            resolvedAudioPart,
+            resolvedImagePart,
+          ],
+          expect.any(AbortSignal),
+          'prompt-id-mixed-skill-override',
+          expect.objectContaining({ modelOverride: 'audio-skill-model\0' }),
+        );
+      } else {
+        expect(mockRunVisionBridge).toHaveBeenCalledWith({
+          config: mockConfig,
+          parts: [resolvedTextPart, resolvedAudioPart, resolvedImagePart],
+          signal: expect.any(AbortSignal),
+        });
+        expect(mockSendMessageStream).toHaveBeenCalledWith(
+          [
+            ...toolCallResponseParts,
+            resolvedTextPart,
+            resolvedAudioPart,
+            visionTextPart,
+          ],
+          expect.any(AbortSignal),
+          'prompt-id-mixed-skill-override',
+          expect.objectContaining({ modelOverride: 'audio-skill-model\0' }),
+        );
+      }
+    },
+  );
+
+  it('keeps an image-only mid-turn message when a bridge failure returns no replacement parts', async () => {
     const queuedPrompt = 'inspect @/tmp/screenshot.png and summarize';
     const resolvedImagePart: Part = {
       inlineData: {
         mimeType: 'image/png',
         data: 'iVBORw0KGgo=',
       },
-    };
-    const resolvedTextPart: Part = {
-      text: 'inspect @/tmp/screenshot.png and summarize',
     };
     const recordMidTurnUserMessage = vi.fn();
     Object.assign(mockConfig, {
@@ -3970,7 +6648,7 @@ describe('useGeminiStream', () => {
       recordMidTurnUserMessage,
     });
     vi.spyOn(atCommandProcessor, 'resolveAtCommandQuery').mockResolvedValue({
-      processedQuery: [resolvedTextPart, resolvedImagePart],
+      processedQuery: [resolvedImagePart],
       shouldProceed: true,
     } as unknown as Awaited<
       ReturnType<typeof atCommandProcessor.resolveAtCommandQuery>
@@ -4057,11 +6735,19 @@ describe('useGeminiStream', () => {
       expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
     });
     const sent = JSON.stringify(mockSendMessageStream.mock.calls[0][0]);
-    expect(sent).toContain('inspect @/tmp/screenshot.png and summarize');
+    expect(sent).toContain('Vision bridge could not interpret');
     expect(sent).not.toContain('inlineData');
     expect(recordMidTurnUserMessage).toHaveBeenCalledWith(
-      [resolvedTextPart],
+      [
+        expect.objectContaining({
+          text: expect.stringContaining('unavailable'),
+        }),
+      ],
       queuedPrompt,
+    );
+    expect(mockAddItem).toHaveBeenCalledWith(
+      { type: MessageType.USER, text: queuedPrompt, sentToModel: false },
+      expect.any(Number),
     );
   });
 
@@ -9619,6 +12305,12 @@ describe('useGeminiStream', () => {
           id: 'vision-agent',
           agentCapable: true,
         }));
+        const resolveForModel = vi.fn().mockResolvedValue({
+          contentGeneratorConfig: { modalities: { image: true } },
+        });
+        mockConfig.getBaseLlmClient = vi.fn(
+          () => ({ resolveForModel }) as never,
+        );
         mockHandleSlashCommand.mockResolvedValue({
           type: 'submit_prompt',
           content: [
@@ -9671,9 +12363,14 @@ describe('useGeminiStream', () => {
         });
         await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
         expect(mockSendMessageStream.mock.calls[0][3]).toMatchObject({
-          modelOverride: 'inline-model',
+          modelOverride: 'inline-model\0',
         });
         expect(mockRunVisionBridge).not.toHaveBeenCalled();
+
+        // The routed turn's prompt id; a tool continuation of this turn
+        // carries the same prompt id (the tool call was scheduled by it), so
+        // the exact-route marker stays scoped to this turn.
+        const routedPromptId = mockSendMessageStream.mock.calls[0][2];
 
         mockSendMessageStream.mockClear();
 
@@ -9688,7 +12385,7 @@ describe('useGeminiStream', () => {
               name: 'pdf-skill',
               args: {},
               isClientInitiated: false,
-              prompt_id: 'prompt-id-skill',
+              prompt_id: routedPromptId,
             },
             status: 'success',
             responseSubmittedToGemini: false,
@@ -9719,7 +12416,7 @@ describe('useGeminiStream', () => {
         await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
         expect(mockSendMessageStream.mock.calls[0][3]).toMatchObject({
           type: SendMessageType.ToolResult,
-          modelOverride: 'inline-model',
+          modelOverride: 'inline-model\0',
         });
       });
 
@@ -9733,7 +12430,8 @@ describe('useGeminiStream', () => {
 
         const { result } = renderTestHook();
 
-        // Turn 1: inline override applied.
+        // Turn 1: inline override applied. The prompt is text-only, so the
+        // selector stays bare rather than becoming an exact route.
         await act(async () => {
           await result.current.submitQuery('/model inline-model do the thing');
         });
@@ -9822,6 +12520,62 @@ describe('useGeminiStream', () => {
         expect(
           mockSendMessageStream.mock.calls[0][3].modelOverride,
         ).toBeUndefined();
+      });
+
+      it('does not re-apply the exact-route marker to a media-free notification turn', async () => {
+        allowInlineModel();
+        const imagePart = {
+          inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' },
+        };
+        mockConfig.getEffectiveInputModalities = vi.fn(() => ({}));
+        const resolveForModel = vi.fn().mockResolvedValue({
+          contentGeneratorConfig: { modalities: { image: true } },
+        });
+        mockConfig.getBaseLlmClient = vi.fn(
+          () => ({ resolveForModel }) as never,
+        );
+        mockHandleSlashCommand.mockResolvedValue({
+          type: 'submit_prompt',
+          content: [{ text: 'inspect' }, imagePart],
+          modelOverride: 'inline-model',
+        });
+
+        const { result } = renderTestHook();
+
+        // Turn 1: the inline override routes the image, so the send is an
+        // exact route (trailing NUL) and the media-routed marker is stamped
+        // onto this turn's prompt id.
+        await act(async () => {
+          await result.current.submitQuery('/model inline-model inspect');
+        });
+        await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+        expect(mockSendMessageStream.mock.calls[0][3]).toMatchObject({
+          modelOverride: 'inline-model\0',
+        });
+
+        mockSendMessageStream.mockClear();
+
+        // A background completion drains afterwards as a standalone, text-only
+        // Notification turn under its own prompt id. It inherits the override
+        // (per #7114 it must not be cleared) but keeps the bare selector — the
+        // routed media belongs to turn 1, so the marker must not be re-applied
+        // to this media-free turn.
+        await act(async () => {
+          await result.current.submitQuery(
+            '<task-notification>completed</task-notification>',
+            SendMessageType.Notification,
+            'notification-turn-prompt-id',
+            {
+              notificationDisplayText: 'Background shell "npm test" completed.',
+            },
+          );
+        });
+
+        await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+        expect(mockSendMessageStream.mock.calls[0][3]).toMatchObject({
+          type: SendMessageType.Notification,
+          modelOverride: 'inline-model',
+        });
       });
 
       it('drops a queued running monitor event after cancellation', async () => {

@@ -53,6 +53,7 @@ export interface ResolveAtCommandParams {
   onDebugMessage: (message: string) => void;
   messageId: number;
   signal: AbortSignal;
+  preserveUnsupportedAudioForBridge?: boolean;
 }
 
 interface HandleAtCommandParams extends ResolveAtCommandParams {
@@ -198,6 +199,7 @@ export async function resolveAtCommandQuery({
   onDebugMessage,
   messageId: userMessageTimestamp,
   signal,
+  preserveUnsupportedAudioForBridge,
 }: ResolveAtCommandParams): Promise<ResolveAtCommandResult> {
   const commandParts = parseAllAtCommands(query);
   const atPathCommandParts = commandParts.filter(
@@ -908,6 +910,7 @@ export async function resolveAtCommandQuery({
         paths: revalidatedPathSpecs,
         signal,
         preserveUnsupportedImageForBridge: shouldRunVisionBridge(config),
+        preserveUnsupportedAudioForBridge,
         validatedPathIdentities,
         displayPaths: revalidatedDisplayPaths,
       });

@@ -45,6 +45,9 @@ export interface ReadManyFilesOptions {
    */
   preserveUnsupportedImageForBridge?: boolean;
 
+  /** Keep unsupported audio inline for the CLI audio bridge. */
+  preserveUnsupportedAudioForBridge?: boolean;
+
   /**
    * File identities captured after caller-side workspace/ignore validation.
    * Matching paths are rechecked immediately before and after reading so a
@@ -139,6 +142,7 @@ export async function readManyFiles(
   const {
     paths: inputPatterns,
     preserveUnsupportedImageForBridge,
+    preserveUnsupportedAudioForBridge,
     signal,
     validatedPathIdentities,
     displayPaths,
@@ -214,6 +218,7 @@ export async function readManyFiles(
               fullPath,
               validatedIdentity!,
               preserveUnsupportedImageForBridge,
+              preserveUnsupportedAudioForBridge,
               signal,
               displayPath,
             );
@@ -239,6 +244,7 @@ export async function readManyFiles(
               config,
               snapshot?.filePath ?? fullPath,
               preserveUnsupportedImageForBridge,
+              preserveUnsupportedAudioForBridge,
               signal,
               displayPath,
               snapshot?.stats,
@@ -285,6 +291,7 @@ async function readValidatedTextFileContent(
   filePath: string,
   expected: ReadManyFilesPathIdentity,
   preserveUnsupportedImage = false,
+  preserveUnsupportedAudio = false,
   signal: AbortSignal | undefined,
   displayPath: string,
 ): ReturnType<typeof readFileContent> {
@@ -305,6 +312,7 @@ async function readValidatedTextFileContent(
       config,
       filePath,
       preserveUnsupportedImage,
+      preserveUnsupportedAudio,
       signal,
       displayPath,
       stats,
@@ -467,6 +475,7 @@ async function readFileContent(
   config: Config,
   filePath: string,
   preserveUnsupportedImage = false,
+  preserveUnsupportedAudio = false,
   signal?: AbortSignal,
   displayPath = filePath,
   validatedStats?: fs.Stats,
@@ -480,6 +489,7 @@ async function readFileContent(
   try {
     const fileReadResult = await processSingleFileContent(filePath, config, {
       preserveUnsupportedImage,
+      preserveUnsupportedAudio,
       ...(signal !== undefined ? { signal } : {}),
       largePdfBehavior: 'reference',
       displayPath,

@@ -18,6 +18,7 @@ import {
   resolveVoiceTranscriptionConfig,
   resolveVoiceTransport,
   transcribeVoiceAudio,
+  unsupportedAudioFormat,
 } from './voice-transcriber.js';
 
 function createConfig(models: ReturnType<Config['getAllConfiguredModels']>) {
@@ -1200,6 +1201,103 @@ describe('voice-transcriber', () => {
     ).rejects.toThrow(/private-network address/);
   });
 
+  it('blocks IPv4-translated IPv6 DNS records it cannot safely unwrap', async () => {
+    await expect(
+      assertVoiceBaseUrlNetworkAllowed(
+        {
+          model: 'qwen3-asr-flash',
+          baseUrl: 'https://asr.example/v1',
+        },
+        vi.fn().mockResolvedValue({ address: '::ffff:0:c612:40' }),
+      ),
+    ).rejects.toThrow(/private-network address/);
+  });
+
+  it('rejects private IPv4-translated IPv6 DNS records', async () => {
+    await expect(
+      assertVoiceBaseUrlNetworkAllowed(
+        {
+          model: 'qwen3-asr-flash',
+          baseUrl: 'https://asr.example/v1',
+        },
+        vi.fn().mockResolvedValue({ address: '::ffff:0:c0a8:101' }),
+      ),
+    ).rejects.toThrow(/private-network address/);
+  });
+
+  it.each([
+    '64:ff9b::a9fe:a9fe',
+    '64:ff9b::a00:1',
+    '64:ff9b::169.254.169.254',
+    // RFC 6052 section 2.2 layouts under the RFC 8215 local-use prefix.
+    '64:ff9b:1:a9fe:a9:fe00::',
+    '64:ff9b:1:c0a8:0:100::',
+    '64:ff9b:1:ac10:0:100::',
+    '64:ff9b:1:6440:0:100::',
+    '64:ff9b:1:7f01:2:300::',
+    '64:ff9b:1:a9:fe:a9fe::',
+    '64:ff9b:1:0:a9:fea9:fe00::',
+    // Ambiguous prefix lengths fail closed when any valid window is private.
+    '64:ff9b:1:80a:0:100::',
+    '64:ff9b:1:8:a:1::',
+    '64:ff9b:1:a9:fea9:fe00::',
+    '64:ff9b:1:a00:0:100::',
+    '64:ff9b:1:a9fe:a9:fe01::',
+    '64:ff9b:1:0:a9fe:a9fe::',
+    // Unrecognized 64:ff9b:1::/48 sub-prefix layouts fail closed.
+    '64:ff9b:1::a9fe:a9fe',
+    '64:ff9b:1:a9fe:a9:fe00:0:1',
+    '64:ff9b:1:0:0:1:a9fe:a9fe',
+    '64:ff9b:1:fffe::a9fe:a9fe',
+    '64:ff9b:1:abcd:0:5431:a9fe:a9fe',
+    '64:ff9b:1:1:a9:fea9:fe00::',
+    // The voice network policy blocks the complete RFC 8215 local-use
+    // transition range, including addresses that embed public IPv4 targets.
+    '64:ff9b:1:808:8:800::',
+    '64:ff9b:1:8:8:808::',
+    '64:ff9b:1:0:8:808:800::',
+  ])(
+    'rejects private or transition-range NAT64 address %s',
+    async (address) => {
+      await expect(
+        assertVoiceBaseUrlNetworkAllowed(
+          {
+            model: 'qwen3-asr-flash',
+            baseUrl: 'https://asr.example/v1',
+          },
+          vi.fn().mockResolvedValue({ address }),
+        ),
+      ).rejects.toThrow(/private-network address/);
+    },
+  );
+
+  it.each(['64:ff9b::808:808', '64:ff9b::8.8.8.8'])(
+    'allows public IPv4 embedded in NAT64 address %s',
+    async (address) => {
+      await expect(
+        assertVoiceBaseUrlNetworkAllowed(
+          {
+            model: 'qwen3-asr-flash',
+            baseUrl: 'https://asr.example/v1',
+          },
+          vi.fn().mockResolvedValue({ address }),
+        ),
+      ).resolves.toBeUndefined();
+    },
+  );
+
+  it('allows a compressed IPv4-mapped public address', async () => {
+    await expect(
+      assertVoiceBaseUrlNetworkAllowed(
+        {
+          model: 'qwen3-asr-flash',
+          baseUrl: 'https://asr.example/v1',
+        },
+        vi.fn().mockResolvedValue({ address: '::ffff:5db8:d822' }),
+      ),
+    ).resolves.toBeUndefined();
+  });
+
   it('rejects voice model hosts when DNS safety lookup fails', async () => {
     await expect(
       transcribeVoiceAudio(
@@ -1487,6 +1585,65 @@ describe('voice-transcriber', () => {
       /^data:audio\/webm;codecs=opus;base64,/,
     );
     expect(userMsg.content[0].input_audio.format).toBe('webm');
+  });
+
+  it.each([
+    ['audio/x-wav', 'wav'],
+    ['audio/wave', 'wav'],
+    ['audio/vnd.wave', 'wav'],
+    ['audio/mpeg', 'mp3'],
+    ['audio/x-mpeg', 'mp3'],
+    ['audio/x-m4a', 'm4a'],
+    ['audio/x-aac', 'aac'],
+    ['audio/x-flac', 'flac'],
+    ['audio/x-aiff', 'aiff'],
+    ['audio/x-ms-wma', 'wma'],
+    ['audio/x-ogg', 'ogg'],
+    // Inherited prototype keys must not resolve as formats (hasOwn guard).
+    ['audio/constructor', 'constructor'],
+    ['audio/__proto__', '__proto__'],
+  ])(
+    'maps %s to the supported input_audio format %s',
+    async (mimeType, format) => {
+      const fetchFn = vi.fn().mockResolvedValue({
+        ok: true,
+        json: vi
+          .fn()
+          .mockResolvedValue({ choices: [{ message: { content: 'hello' } }] }),
+      });
+
+      await transcribeVoiceAudio(
+        { data: new Uint8Array([1, 2, 3]), mimeType },
+        {
+          config: createConfig([
+            {
+              id: 'qwen3-asr-flash',
+              label: 'Custom ASR',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://asr.example/v1',
+            },
+          ]),
+          settings: createSettings(),
+          voiceModel: 'qwen3-asr-flash',
+          lookupHost: lookupPublicHost,
+          fetchFn,
+        },
+      );
+
+      const [, init] = fetchFn.mock.calls[0];
+      const body = JSON.parse(init.body as string);
+      const userMsg = body.messages.find(
+        (message: { role: string }) => message.role === 'user',
+      );
+      expect(userMsg.content[0].input_audio.format).toBe(format);
+    },
+  );
+
+  it('reports audio/mp4 as an unsupported transcription format', () => {
+    expect(unsupportedAudioFormat('audio/mp4')).toBe('mp4');
+    expect(unsupportedAudioFormat('audio/mp4;codecs=aac')).toBe('mp4');
+    expect(unsupportedAudioFormat('audio/wav')).toBeUndefined();
+    expect(unsupportedAudioFormat('audio/x-m4a')).toBe('m4a');
   });
 
   it('falls back to wav for octet-stream audio uploads', async () => {

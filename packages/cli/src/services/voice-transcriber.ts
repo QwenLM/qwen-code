@@ -7,7 +7,10 @@
 import process from 'node:process';
 import { lookup as dnsLookup } from 'node:dns/promises';
 import { BlockList, isIP } from 'node:net';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import {
+  createDebugLogger,
+  DEFAULT_MAX_AUDIO_BRIDGE_BYTES,
+} from '@qwen-code/qwen-code-core';
 import type { AvailableModel } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
 import { buildVoiceKeyterms } from './voice-keyterms.js';
@@ -700,7 +703,7 @@ export function isKeytermEcho(
 
 // Qwen-ASR caps each audio file at 10 MB / 5 minutes. Our 16 kHz mono 16-bit WAV
 // is ~32 KB/s, so guard before encoding to give a clear error on overlong holds.
-export const MAX_AUDIO_BYTES = 10 * 1024 * 1024;
+export const MAX_AUDIO_BYTES = DEFAULT_MAX_AUDIO_BRIDGE_BYTES;
 const MAX_TRANSCRIPTION_ERROR_LENGTH = 200;
 
 function escapeRegExp(value: string): string {
@@ -730,11 +733,45 @@ export function sanitizeVoiceErrorMessage(
     : redacted;
 }
 
+const AUDIO_FORMAT_ALIASES: Record<string, string> = {
+  mpeg: 'mp3',
+  wave: 'wav',
+  'vnd.wave': 'wav',
+  'x-wav': 'wav',
+  'x-m4a': 'm4a',
+  'x-aac': 'aac',
+  'x-aiff': 'aiff',
+  'x-flac': 'flac',
+  'x-ogg': 'ogg',
+  'x-mpeg': 'mp3',
+  'x-ms-wma': 'wma',
+};
+
 function inputAudioFormat(mimeType: string): string {
   const subtype = mimeType.split(';', 1)[0]?.trim().toLowerCase() ?? '';
-  return subtype.startsWith('audio/')
+  const raw = subtype.startsWith('audio/')
     ? subtype.slice('audio/'.length) || 'wav'
     : 'wav';
+  // hasOwn guard: the subtype is attacker-influenceable (ACP clients supply
+  // mimeType), and inherited prototype keys would otherwise leak as formats.
+  return Object.hasOwn(AUDIO_FORMAT_ALIASES, raw)
+    ? AUDIO_FORMAT_ALIASES[raw]
+    : raw;
+}
+
+// mime/lite resolves `.m4a` to `audio/mp4` (no extension maps to the `x-m4a`
+// alias), and qwen3-asr-flash's documented format list includes neither
+// `mp4` nor `m4a`, so fail closed instead of sending an undocumented format.
+// If the endpoint is ever verified to accept `m4a`, replace this with an
+// `mp4: 'm4a'` entry in AUDIO_FORMAT_ALIASES.
+const UNSUPPORTED_INPUT_AUDIO_FORMATS: ReadonlySet<string> = new Set([
+  'm4a',
+  'mp4',
+]);
+
+export function unsupportedAudioFormat(mimeType: string): string | undefined {
+  const format = inputAudioFormat(mimeType);
+  return UNSUPPORTED_INPUT_AUDIO_FORMATS.has(format) ? format : undefined;
 }
 
 function transcriptionAbortSignal(abortSignal?: AbortSignal): AbortSignal {

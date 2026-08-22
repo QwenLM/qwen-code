@@ -96,6 +96,7 @@ describe('handleAtCommand', () => {
       getUsageStatisticsEnabled: () => false,
       getTruncateToolOutputThreshold: () => 2500,
       getTruncateToolOutputLines: () => 500,
+      getModel: () => 'test-model',
     } as unknown as Config;
   });
 
@@ -171,6 +172,62 @@ describe('handleAtCommand', () => {
     expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Success);
     expect(result.toolDisplays![0].description).toBe('@file.txt');
   });
+
+  it('preserves unsupported audio for the audio bridge', async () => {
+    const audioPath = await createTestFile(
+      path.join(testRootDir, 'recording.wav'),
+      'fake wav data',
+    );
+
+    const result = await handleAtCommand({
+      query: `listen to @${audioPath}`,
+      config: mockConfig,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 126,
+      signal: abortController.signal,
+      preserveUnsupportedAudioForBridge: true,
+    });
+
+    const parts = Array.isArray(result.processedQuery)
+      ? result.processedQuery
+      : [result.processedQuery];
+    expect(parts).toContainEqual({
+      inlineData: {
+        data: Buffer.from('fake wav data').toString('base64'),
+        mimeType: 'audio/wav',
+        displayName: 'recording.wav',
+      },
+    });
+  });
+
+  it.each([{ preserveUnsupportedAudioForBridge: false }, {}])(
+    'forwards a non-preserving caller flag as an audio skip (options: %j)',
+    async (options) => {
+      const audioPath = await createTestFile(
+        path.join(testRootDir, 'recording.wav'),
+        'fake wav data',
+      );
+
+      const result = await handleAtCommand({
+        query: `listen to @${audioPath}`,
+        config: mockConfig,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 127,
+        signal: abortController.signal,
+        ...options,
+      });
+
+      const parts = Array.isArray(result.processedQuery)
+        ? result.processedQuery
+        : [result.processedQuery];
+      expect(
+        parts.some(
+          (part) => typeof part !== 'string' && part && 'inlineData' in part,
+        ),
+      ).toBe(false);
+      expect(JSON.stringify(parts)).toContain('Unsupported audio file');
+    },
+  );
 
   it.skipIf(process.platform === 'win32')(
     'reads a file symlink through its canonical target type',

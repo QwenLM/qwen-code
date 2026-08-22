@@ -28,6 +28,7 @@ import {
   isWithinRoot,
   isBinaryFile,
   detectFileType,
+  getSpecificMimeType,
   processSingleFileContent,
   detectBOM,
   readFileWithLineAndLimit,
@@ -903,6 +904,14 @@ describe('fileUtils', () => {
       expect(await detectFileType('tutorial.m4v')).toBe('video');
     });
 
+    it.each(['.flac', '.wma', '.aiff', '.aif'])(
+      'should detect %s as audio when mime/lite has no mapping',
+      async (extension) => {
+        mockMimeGetType.mockReturnValueOnce(null);
+        expect(await detectFileType(`recording${extension}`)).toBe('audio');
+      },
+    );
+
     it('should detect known binary extensions as binary (e.g. .zip)', async () => {
       mockMimeGetType.mockReturnValueOnce('application/zip');
       expect(await detectFileType('archive.zip')).toBe('binary');
@@ -1612,6 +1621,175 @@ describe('fileUtils', () => {
       );
       expect(typeof result.llmContent).toBe('string');
       expect(result.llmContent).toContain('does not support audio input');
+    });
+
+    it('keeps audio inline when preserveUnsupportedAudio is true', async () => {
+      const audioBytes = Buffer.from('fake audio data');
+      const audioPath = path.join(tempRootDir, 'clip.mp3');
+      actualNodeFs.writeFileSync(audioPath, audioBytes);
+      mockMimeGetType.mockReturnValue('audio/mpeg');
+      const mockConfigNoAudio = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: {} }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        audioPath,
+        mockConfigNoAudio,
+        { preserveUnsupportedAudio: true },
+      );
+
+      expect(result.llmContent).toEqual({
+        inlineData: {
+          data: audioBytes.toString('base64'),
+          mimeType: 'audio/mpeg',
+          displayName: 'clip.mp3',
+        },
+      });
+      expect(result.returnDisplay).toContain('Read audio file');
+    });
+
+    it('exempts bridge-bound audio from the 9.9 MB read-time gates', async () => {
+      // 9.95 MiB: above both ~9.9 MB gates but within the bridge's decoded
+      // MAX_AUDIO_BYTES (10 MiB), so it must reach the bridge intact.
+      const audioBytes = Buffer.alloc(Math.floor(9.95 * 1024 * 1024), 7);
+      const audioPath = path.join(tempRootDir, 'long-recording.wav');
+      actualNodeFs.writeFileSync(audioPath, audioBytes);
+      mockMimeGetType.mockReturnValue('audio/wav');
+      const mockConfigNoAudio = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: {} }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        audioPath,
+        mockConfigNoAudio,
+        { preserveUnsupportedAudio: true },
+      );
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toEqual({
+        inlineData: {
+          data: audioBytes.toString('base64'),
+          mimeType: 'audio/wav',
+          displayName: 'long-recording.wav',
+        },
+      });
+    });
+
+    it('rejects bridge-bound audio above 10 MiB before reading it', async () => {
+      const audioPath = path.join(tempRootDir, 'oversized-recording.wav');
+      actualNodeFs.writeFileSync(audioPath, '');
+      actualNodeFs.truncateSync(audioPath, 10 * 1024 * 1024 + 1);
+      mockMimeGetType.mockReturnValue('audio/wav');
+      const readFileSpy = vi.spyOn(fs.promises, 'readFile');
+      const mockConfigNoAudio = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: {} }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        audioPath,
+        mockConfigNoAudio,
+        { preserveUnsupportedAudio: true },
+      );
+
+      expect(result.errorType).toBe(ToolErrorType.FILE_TOO_LARGE);
+      expect(result.llmContent).toContain('File size exceeds the 10MB limit');
+      expect(readFileSpy).not.toHaveBeenCalled();
+    });
+
+    it('still applies the base64 gate to non-bridge audio', async () => {
+      const audioBytes = Buffer.alloc(8 * 1024 * 1024, 7);
+      const audioPath = path.join(tempRootDir, 'long-inline.wav');
+      actualNodeFs.writeFileSync(audioPath, audioBytes);
+      mockMimeGetType.mockReturnValue('audio/wav');
+      const audioConfig = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({
+          modalities: { audio: true },
+        }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(audioPath, audioConfig);
+
+      expect(typeof result.llmContent).toBe('string');
+      expect(result.llmContent).toContain(
+        'File exceeds the 10MB data URI limit after base64 encoding',
+      );
+      expect(result.errorType).toBe(ToolErrorType.FILE_TOO_LARGE);
+    });
+
+    it('still applies the read-time gate to flagged audio on audio-capable models', async () => {
+      // preserveUnsupportedAudio is passed unconditionally by ACP/headless;
+      // for a model that natively accepts audio the bridge skips the part,
+      // so the 9.9 MB read-time gate must still own its size.
+      const audioPath = path.join(tempRootDir, 'big-flagged.wav');
+      actualNodeFs.writeFileSync(audioPath, '');
+      actualNodeFs.truncateSync(audioPath, Math.floor(9.95 * 1024 * 1024));
+      mockMimeGetType.mockReturnValue('audio/wav');
+      const audioConfig = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({
+          modalities: { audio: true },
+        }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(audioPath, audioConfig, {
+        preserveUnsupportedAudio: true,
+      });
+
+      expect(result.errorType).toBe(ToolErrorType.FILE_TOO_LARGE);
+      expect(result.llmContent).toContain('File size exceeds the 10MB limit');
+    });
+
+    it('still applies the base64 gate to flagged audio on audio-capable models', async () => {
+      const audioBytes = Buffer.alloc(8 * 1024 * 1024, 7);
+      const audioPath = path.join(tempRootDir, 'long-flagged.wav');
+      actualNodeFs.writeFileSync(audioPath, audioBytes);
+      mockMimeGetType.mockReturnValue('audio/wav');
+      const audioConfig = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({
+          modalities: { audio: true },
+        }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(audioPath, audioConfig, {
+        preserveUnsupportedAudio: true,
+      });
+
+      expect(typeof result.llmContent).toBe('string');
+      expect(result.llmContent).toContain(
+        'File exceeds the 10MB data URI limit after base64 encoding',
+      );
+      expect(result.errorType).toBe(ToolErrorType.FILE_TOO_LARGE);
+    });
+
+    it('keeps mime/lite-missing FLAC inline for the audio bridge', async () => {
+      const audioBytes = Buffer.from('fake flac data');
+      const audioPath = path.join(tempRootDir, 'clip.flac');
+      actualNodeFs.writeFileSync(audioPath, audioBytes);
+      mockMimeGetType.mockReturnValue(null);
+      const mockConfigNoAudio = {
+        ...mockConfig,
+        getContentGeneratorConfig: () => ({ modalities: {} }),
+      } as unknown as Config;
+
+      const result = await processSingleFileContent(
+        audioPath,
+        mockConfigNoAudio,
+        { preserveUnsupportedAudio: true },
+      );
+
+      expect(getSpecificMimeType(audioPath)).toBe('audio/x-flac');
+      expect(result.llmContent).toEqual({
+        inlineData: {
+          data: audioBytes.toString('base64'),
+          mimeType: 'audio/x-flac',
+          displayName: 'clip.flac',
+        },
+      });
     });
 
     it('keeps supported audio bytes unchanged', async () => {
