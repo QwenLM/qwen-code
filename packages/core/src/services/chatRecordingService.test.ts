@@ -908,6 +908,7 @@ describe('ChatRecordingService', () => {
           evidenceCursor: { recordId: 'goal-record' },
           turnCount: 0,
           activeTimeMs: 0,
+          tokensUsed: 0,
           createdAt: 100,
           updatedAt: 100,
         },
@@ -3367,4 +3368,109 @@ describe('ChatRecordingService', () => {
   // Note: Session management tests (listSessions, loadSession, deleteSession, etc.)
   // have been moved to sessionService.test.ts
   // Session resume integration tests should test via SessionService mock
+});
+
+describe('Goal turn token ledger', () => {
+  it('bills a Goal turn from the assistant records it produced', () => {
+    // The wiring that matters: recordAssistantTurn must feed the ledger. A
+    // ledger that is never fed reports every Goal turn as free.
+    const service = Object.create(
+      ChatRecordingService.prototype,
+    ) as ChatRecordingService;
+    const appended: unknown[] = [];
+    Object.assign(service, {
+      createBaseRecord: () => ({ type: 'assistant' }),
+      appendRecord: (record: unknown) => appended.push(record),
+      maybeTriggerAutoTitle: () => {},
+    });
+    const goalContext = { goalId: 'goal-1', revision: 1, turnId: 'turn-1' };
+
+    service.recordAssistantTurn({
+      model: 'qwen',
+      tokens: { totalTokenCount: 900 },
+      goalContext,
+    });
+    service.recordAssistantTurn({
+      model: 'qwen',
+      tokens: { totalTokenCount: 100 },
+      goalContext,
+    });
+    // A record with no Goal permit belongs to no Goal turn.
+    service.recordAssistantTurn({
+      model: 'qwen',
+      tokens: { totalTokenCount: 5_000 },
+    });
+
+    expect(appended).toHaveLength(3);
+    expect(service.takeGoalTurnTokens('turn-1')).toBe(1_000);
+  });
+
+  function recorderForGoalSpend() {
+    const service = Object.create(
+      ChatRecordingService.prototype,
+    ) as ChatRecordingService;
+    return service;
+  }
+
+  const permit = (turnId: string) => ({
+    goalId: 'goal-1',
+    revision: 1,
+    turnId,
+  });
+
+  it("sums a turn's usage and hands it over once", () => {
+    const service = recorderForGoalSpend();
+    const accumulate = (
+      service as unknown as {
+        accumulateGoalTurnTokens: (
+          turnId: string,
+          usage: { totalTokenCount?: number },
+        ) => void;
+      }
+    ).accumulateGoalTurnTokens.bind(service);
+
+    accumulate(permit('turn-1').turnId, { totalTokenCount: 1_000 });
+    accumulate(permit('turn-1').turnId, { totalTokenCount: 250 });
+
+    expect(service.takeGoalTurnTokens('turn-1')).toBe(1_250);
+    // Consumed: a turn is billed once.
+    expect(service.takeGoalTurnTokens('turn-1')).toBe(0);
+  });
+
+  it("does not bill one turn for another turn's usage", () => {
+    const service = recorderForGoalSpend();
+    const accumulate = (
+      service as unknown as {
+        accumulateGoalTurnTokens: (
+          turnId: string,
+          usage: { totalTokenCount?: number },
+        ) => void;
+      }
+    ).accumulateGoalTurnTokens.bind(service);
+
+    accumulate('turn-1', { totalTokenCount: 1_000 });
+    // A record stamped with the next turn ends the previous one.
+    accumulate('turn-2', { totalTokenCount: 40 });
+
+    expect(service.takeGoalTurnTokens('turn-1')).toBe(0);
+    expect(service.takeGoalTurnTokens('turn-2')).toBe(40);
+  });
+
+  it('ignores usage with no usable total', () => {
+    const service = recorderForGoalSpend();
+    const accumulate = (
+      service as unknown as {
+        accumulateGoalTurnTokens: (
+          turnId: string,
+          usage: { totalTokenCount?: number },
+        ) => void;
+      }
+    ).accumulateGoalTurnTokens.bind(service);
+
+    accumulate('turn-1', {});
+    accumulate('turn-1', { totalTokenCount: Number.NaN });
+    accumulate('turn-1', { totalTokenCount: -5 });
+
+    expect(service.takeGoalTurnTokens('turn-1')).toBe(0);
+  });
 });
