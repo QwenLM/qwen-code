@@ -687,6 +687,11 @@ export interface BridgeSessionSummary {
   worktree?: { slug: string; path: string; branch: string };
   /** Present when the session was created with a new branch. */
   branch?: { name: string; baseBranch: string };
+  /**
+   * GitHub PRs bound to the session, in binding order (last = latest). A
+   * session can produce several PRs (stacked or follow-up work).
+   */
+  prs?: SessionPrInfo[];
 }
 
 /**
@@ -717,8 +722,16 @@ export interface BridgeSessionGoal {
   } | null;
 }
 
+export interface SessionPrInfo {
+  number: number;
+  url: string;
+}
+
 export interface SessionMetadataUpdate {
   displayName?: string;
+  pr?: SessionPrInfo;
+  /** Full binding list after the update (return value only; ignored on input). */
+  prs?: SessionPrInfo[];
 }
 
 export interface CloseSessionOpts {
@@ -1415,7 +1428,7 @@ export interface AcpSessionBridge {
   ): Promise<void>;
 
   /**
-   * Update mutable session metadata. Currently supports `displayName` only.
+   * Update mutable session metadata. Supports `displayName` and `pr`.
    * Throws `SessionNotFoundError` for unknown ids.
    */
   updateSessionMetadata(
@@ -1423,6 +1436,16 @@ export interface AcpSessionBridge {
     metadata: SessionMetadataUpdate,
     context?: BridgeClientRequestContext,
   ): SessionMetadataUpdate;
+
+  /**
+   * Re-hydrate the in-memory PR binding list of a live session from the
+   * persisted sidecar after the entry was re-created empty (daemon
+   * restart, close/reload, archive/restore). No-op when the entry is
+   * unknown or already holds bindings, so this-daemon-lifetime state
+   * always wins. Callers own sidecar I/O; the bridge stays
+   * storage-agnostic. Optional so lightweight fakes may omit it.
+   */
+  seedSessionPrs?(sessionId: string, prs: SessionPrInfo[]): void;
 
   /**
    * List the structured artifacts registered for a live session. Throws
