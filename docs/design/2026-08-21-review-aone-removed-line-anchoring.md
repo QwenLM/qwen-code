@@ -78,7 +78,14 @@ For an Aone target, `/review --comment` inline anchoring is:
   validates nothing. The check is the one GitHub performs server-side: a
   comment's anchor must sit inside a new-side hunk of the captured diff
   (and a multi-line range inside ONE hunk); a comment declaring a non-RIGHT
-  `side`/`start_side` is unanchorable by construction.
+  `side`/`start_side` is unanchorable by construction. One carve-out,
+  deliberate: the non-RIGHT degrade runs for SINGLE-LINE comments only —
+  a MULTI-LINE comment with non-RIGHT side fields is a shape the
+  consistency gate refuses whole (the same refusal as a missing side
+  beside `start_line`), so the gate KEEPS it for that loud refusal
+  instead of relocating it. An explicit JSON `null` side is not a
+  declaration at all — it reads as absent (default RIGHT), the model's
+  idiom for an omitted optional field.
 - **Degrade per severity, disclosed** — the GitHub 422-recovery dispose,
   performed deterministically in code: an unanchorable **Critical** is
   relocated into the summary body (it keeps counting toward `C`; the verdict
@@ -136,29 +143,43 @@ side?, startSide?}`, report valid / invalid-with-reason. Reuses
    shapes (a missing path/line, a reversed range, a renders-as-nothing
    body) keep their downstream consistency-gate refusals: the gate rules
    ANCHORS, not shapes; remove the failures, relocating each Critical's
-   claim line into `state.bodyCriticals` (prefixed `path:line —` so the
-   body entry keeps its attribution) and incrementing
+   claim line into `state.bodyCriticals` and incrementing
    `state.suggestionsDiscarded` per discarded Suggestion; disclose each on
    stderr. The verdict is then composed over the corrected set, so
    `C`/`S`, the event, and the body stay one computation. The removal
    keeps the model-authored comment indices, and the consistency gate's
    refusals cite THOSE — a renumbered index would point the re-compose
-   loop at the wrong comment. The relocated entry is the marker-stripped
-   CLAIM line — single-line by construction, which is what compose-review's
-   entry ingestion carries. The path half is sanitised the way the claim
-   half is: a path with a CR/LF or leading a fence delimiter falls back to
-   the `(no path)` placeholder — a folded newline would post a garbled
-   attribution compose's ingestion does not catch, and a line-leading
-   delimiter would trip compose's fence refusal only AFTER the relocation
-   is disclosed, regenerating from the same path on every retry. The claim
-   extraction strips a leading marker RUN, not a single marker (a looping
-   model drafts stacked markers, and
-   compose quotes the entry as-is behind the template marker), and a claim
-   line that IS a fence delimiter (a marker-alone body leading into a
-   fence) falls back to the `finding` placeholder — the entry's
-   `path:line — ` prefix would hide the delimiter from compose's
-   line-anchored fence refusal, so the gate refuses to carry it; the full
-   text stays in the terminal and the saved report. One stand-down keeps
+   loop at the wrong comment. The relocated entry is
+   `<claim> — <path>:<line>` — the CLAIM LEADS: the ledger builder's
+   body-Criticals leg reads a carried id off position 0 (the readback
+   regex is `^`-anchored, and the write side's convention is that a
+   carried id leads the claim line), so a `path:line — ` prefix there
+   would silently strip a carried id and renumber it as new; the
+   attribution rides behind the claim instead. The claim is the
+   marker-stripped CLAIM line — single-line by construction, which is
+   what compose-review's entry ingestion carries. The path half is
+   sanitised the way the claim half is: a path with a CR/LF or leading a
+   fence delimiter falls back to the `(no path)` placeholder — a folded
+   newline would post a garbled attribution compose's ingestion does not
+   catch, and a line-leading delimiter would trip compose's fence refusal
+   only AFTER the relocation is disclosed, regenerating from the same
+   path on every retry. The claim extraction strips a leading marker RUN,
+   not a single marker (a looping model drafts stacked markers, and
+   compose quotes the entry as-is behind the template marker), and a
+   claim line that IS a fence delimiter (a marker-alone body leading into
+   a fence) falls back to the `finding` placeholder — with the claim at
+   position 0 the delimiter would open a fence in the posted body, so the
+   gate refuses to carry it; the full text stays in the terminal and the
+   saved report. Finally, the BUILT entry is validated against compose's
+   OWN ingestion (`tryIngestBodyCriticals` over the single entry) and any
+   shape it refuses degrades to the inert constant
+   `finding — (no path):<line>`: the enumerated guards above cover the
+   known hostile shapes, but the entrance space is unbounded model text,
+   and compose's acceptance is the authority — a shape the list never
+   anticipated degrades the entry instead of refusing the whole post
+   mid-degrade (a lone CR inside the claim is the demonstrated entrance:
+   it passes the leading-fence guard, then compose's CR normalisation
+   splits the entry and the second line leads with a fence delimiter). One stand-down keeps
    the degrade from laundering fields the compose gates own: ANY degrade
    that touches the payload stands the WHOLE gate down when `bodyCriticals`
    is a field compose REFUSES — its shape (neither absent nor an array of
@@ -207,10 +228,13 @@ side?, startSide?}`, report valid / invalid-with-reason. Reuses
 | Shape                                                                                                                 | Outcome                                                                                                                                                       |
 | --------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Anchor inside a new-side hunk                                                                                         | posts, as today                                                                                                                                               |
-| Anchor outside every hunk / file not in diff / non-RIGHT side, severity Critical                                      | relocated into the body, counted toward `C`, disclosed                                                                                                        |
+| Anchor outside every hunk / file not in diff, severity Critical                                                       | relocated into the body, counted toward `C`, disclosed                                                                                                        |
 | Same, severity Suggestion                                                                                             | discarded, counted toward `S`, disclosed                                                                                                                      |
+| Non-RIGHT side declared, SINGLE-LINE comment                                                                          | unanchorable by construction — relocated/discarded per severity, same as the rows above                                                                       |
+| Non-RIGHT side declared, MULTI-LINE comment (start_line set)                                                          | untouched — the consistency gate refuses the shape whole (the carve-out is deliberate; an explicit JSON `null` side is absent, not non-RIGHT, and validates)  |
 | Same, UNMARKED comment                                                                                                | untouched — the existing consistency gate refuses it                                                                                                          |
 | Malformed shape (missing path/line, reversed range, renders-as-nothing body)                                          | untouched — the consistency gate's refusal stands; the gate rules anchors, not shapes                                                                         |
+| Built entry compose's ingestion would refuse                                                                          | the entry degrades to the inert constant `finding — (no path):<line>`; the relocation itself still runs and is disclosed                                      |
 | Any degrade, but `state.bodyCriticals` is refused by compose (shape or content) or `suggestionsDiscarded` uncountable | whole gate stands down — compose's pinned refusal fires over the untouched payload                                                                            |
 | Captured diff absent/unreadable                                                                                       | exit-3 refusal, whole batch, nothing written; a `--dry-run` preview skips the gate (disclosed) and reports `wouldPost: false` (`reason: 'aone-diff-missing'`) |
 | Mid-batch a1 failure                                                                                                  | unchanged (`AonePartialPostError`, do-not-re-run)                                                                                                             |

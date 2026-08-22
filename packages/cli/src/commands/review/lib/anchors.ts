@@ -626,14 +626,16 @@ export type AnchorResult = Omit<AnchorRequest, 'line'> & {
  * One inline anchor as the posting boundary must vouch for it. `side` /
  * `startSide` are the payload's declared sides (GitHub's spelling); a
  * missing side defaults to RIGHT, which is the only side an Aone anchor
- * can express.
+ * can express. Both fields admit `null` because that is the shape a
+ * model-written payload uses for an ABSENT optional field — it reads
+ * exactly like `undefined` (default RIGHT), never like a declared side.
  */
 export interface NewSideAnchorCheck {
   path: string;
   line: number;
   startLine?: number;
-  side?: string;
-  startSide?: string;
+  side?: string | null;
+  startSide?: string | null;
 }
 
 export interface NewSideAnchorVerdict {
@@ -695,9 +697,17 @@ export function validateNewSideAnchors(
         reason: 'the range ends before it begins',
       };
     }
+    // A `null` side is the model's idiom for an ABSENT optional field
+    // (a documented recurring shape in this pipeline — JSON `null`, not a
+    // declaration). Treat it exactly like `undefined`: defaulting to
+    // RIGHT, per the contract above. Only a PRESENT, non-RIGHT value is a
+    // declared old-side anchor.
+    const sideDeclared = check.side !== undefined && check.side !== null;
+    const startSideDeclared =
+      check.startSide !== undefined && check.startSide !== null;
     if (
-      (check.side !== undefined && check.side !== 'RIGHT') ||
-      (check.startSide !== undefined && check.startSide !== 'RIGHT')
+      (sideDeclared && check.side !== 'RIGHT') ||
+      (startSideDeclared && check.startSide !== 'RIGHT')
     ) {
       return {
         valid: false,

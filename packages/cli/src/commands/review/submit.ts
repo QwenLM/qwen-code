@@ -207,9 +207,8 @@ function relocatedAoneCriticalEntry(c: ReviewComment): string {
   // The gate only relocates bodies with substance past the marker, but the
   // claim line itself can still be empty (content on a later line) or a
   // fence delimiter (a marker-alone body leading into a fence) — junk the
-  // one-line channel cannot carry, since the entry's `path:line — ` prefix
-  // hides the delimiter from compose's line-anchored fence refusal. Both
-  // fall back to the placeholder instead of posting dangling or raw.
+  // one-line channel cannot carry. Both fall back to the placeholder
+  // instead of posting dangling or raw.
   const visible =
     claim !== null && !ENTRY_FENCE_DELIMITER_RE.test(claim) ? claim : null;
   // The shape gate admits ANY non-empty string path, and the one-line
@@ -226,7 +225,24 @@ function relocatedAoneCriticalEntry(c: ReviewComment): string {
     !ENTRY_FENCE_DELIMITER_RE.test(c.path)
       ? c.path
       : '(no path)';
-  return `${path}:${c.line} — ${visible || 'finding'}`;
+  // The CLAIM leads the entry: buildLedger's body-Criticals leg reads a
+  // carried id off position 0 (LEDGER_ID_READBACK is ^-anchored), and the
+  // write side's convention is that a carried id leads the claim line —
+  // a `path:line — ` prefix there would silently strip the id and
+  // renumber a carried finding as new. The attribution rides behind the
+  // claim instead.
+  let entry = `${visible || 'finding'} — ${path}:${c.line}`;
+  // The guards above enumerate the hostile shapes this builder knows, but
+  // the entrance space is unbounded model text. Compose's own ingestion
+  // is the AUTHORITY on what the one-line channel carries — validate the
+  // BUILT entry against it, and degrade anything it would refuse to the
+  // inert constant (which passes by construction: no fence, no newline,
+  // renders as something), so a shape this list never anticipated
+  // degrades the entry instead of refusing the whole post mid-degrade.
+  if (tryIngestBodyCriticals([entry]) === undefined) {
+    entry = `finding — (no path):${c.line}`;
+  }
+  return entry;
 }
 
 interface SubmitArgs {

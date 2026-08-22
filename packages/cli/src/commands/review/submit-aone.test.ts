@@ -1613,7 +1613,7 @@ describe('the Aone anchor gate — the validation the platform does not perform'
     // posts.
     const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
     expect(input['bodyCriticals']).toEqual([
-      'src/foo.ts:4 — Old-side number — would misanchor.',
+      'Old-side number — would misanchor. — src/foo.ts:4',
     ]);
     expect(input['suggestionsDiscarded']).toBe(1);
     expect(input['criticalsInline']).toBe(0);
@@ -1661,7 +1661,7 @@ describe('the Aone anchor gate — the validation the platform does not perform'
     expect(req.comments).toEqual([]);
     const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
     expect(input['bodyCriticals']).toEqual([
-      'src/foo.ts:12 — About the deleted old-side line.',
+      'About the deleted old-side line. — src/foo.ts:12',
     ]);
     expect(stderrMock).toHaveBeenCalledWith(
       expect.stringContaining('relocated into the summary body: src/foo.ts:12'),
@@ -1696,7 +1696,7 @@ describe('the Aone anchor gate — the validation the platform does not perform'
     // inside the hunk and looks fine.
     const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
     expect(input['bodyCriticals']).toEqual([
-      'src/foo.ts:40 — Range crosses out of the hunk.',
+      'Range crosses out of the hunk. — src/foo.ts:40',
     ]);
     expect(stderrMock).toHaveBeenCalledWith(
       expect.stringContaining('relocated into the summary body: src/foo.ts:40'),
@@ -1726,7 +1726,7 @@ describe('the Aone anchor gate — the validation the platform does not perform'
     ).not.toThrow();
     const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
     expect(input['bodyCriticals']).toEqual([
-      'src/foo.ts:4 — Off-by-one in the loop bound.',
+      'Off-by-one in the loop bound. — src/foo.ts:4',
     ]);
   });
 
@@ -1753,7 +1753,7 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       }),
     ).not.toThrow();
     const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
-    expect(input['bodyCriticals']).toEqual(['src/foo.ts:9999 — finding']);
+    expect(input['bodyCriticals']).toEqual(['finding — src/foo.ts:9999']);
   });
 
   it('relocates an empty-claim draft through the placeholder (attribution off)', () => {
@@ -1778,7 +1778,7 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       }),
     ).not.toThrow();
     const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
-    expect(input['bodyCriticals']).toEqual(['src/foo.ts:9999 — finding']);
+    expect(input['bodyCriticals']).toEqual(['finding — src/foo.ts:9999']);
   });
 
   it('merges gate discards into an existing suggestionsDiscarded count', () => {
@@ -2112,7 +2112,7 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       expect(req.comments).toEqual([]);
       const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
       expect(input['bodyCriticals']).toEqual([
-        expect.stringContaining('src/foo.ts:12 —'),
+        expect.stringContaining('— src/foo.ts:12'),
       ]);
       expect(stderrMock).toHaveBeenCalledWith(
         expect.stringContaining('file is not in the diff (0 file(s) changed)'),
@@ -2219,7 +2219,7 @@ describe('the Aone anchor gate — the validation the platform does not perform'
     // while diverging the preview verdict from the real post: the one
     // thing --dry-run exists to prevent.
     const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
-    expect(input['bodyCriticals']).toEqual(['src/foo.ts:4 — Would misanchor.']);
+    expect(input['bodyCriticals']).toEqual(['Would misanchor. — src/foo.ts:4']);
     expect(input['criticalsInline']).toBe(0);
     expect(input['suggestionsInline']).toBe(1);
   });
@@ -2370,7 +2370,7 @@ describe('the Aone anchor gate — the validation the platform does not perform'
     const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
     expect(input['bodyCriticals']).toEqual([
       'prior blocker',
-      'src/foo.ts:9999 — Would misanchor.',
+      'Would misanchor. — src/foo.ts:9999',
     ]);
   });
 
@@ -2399,7 +2399,7 @@ describe('the Aone anchor gate — the validation the platform does not perform'
       }),
     ).not.toThrow();
     const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
-    expect(input['bodyCriticals']).toEqual(['src/foo.ts:9999 — finding']);
+    expect(input['bodyCriticals']).toEqual(['finding — src/foo.ts:9999']);
   });
 
   it('relocates a range whose START sits outside every hunk and END inside', () => {
@@ -2429,7 +2429,7 @@ describe('the Aone anchor gate — the validation the platform does not perform'
     expect(req.comments).toEqual([]);
     const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
     expect(input['bodyCriticals']).toEqual([
-      'src/foo.ts:12 — Start outside, end inside.',
+      'Start outside, end inside. — src/foo.ts:12',
     ]);
   });
 
@@ -2506,7 +2506,7 @@ describe('the Aone anchor gate — the validation the platform does not perform'
     expect(req.comments).toEqual([]);
     const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
     expect(input['bodyCriticals']).toEqual([
-      'src/foo.ts:12 — About the old side.',
+      'About the old side. — src/foo.ts:12',
     ]);
   });
   it('relocates a newline or fence-bearing path through the PATH PLACEHOLDER — the entry stays one postable line', () => {
@@ -2530,6 +2530,15 @@ describe('the Aone anchor gate — the validation the platform does not perform'
           line: 9998,
           body: '**[Critical]** Fence-leading path cannot ride the one-line channel.',
         },
+        {
+          // The `\r` half of the guard: compose's ingestion normalizes a
+          // bare `\r` to a line break, so a CR-bearing path splits the
+          // entry into two lines — the same hostile shape as `\n`, and a
+          // guard narrowed to `\n` alone ships green without this witness.
+          path: 'src/a.ts\r```',
+          line: 9997,
+          body: '**[Critical]** CR path cannot ride the one-line channel.',
+        },
       ],
       state: { modelId: 'test-model' },
     };
@@ -2540,9 +2549,148 @@ describe('the Aone anchor gate — the validation the platform does not perform'
     ).not.toThrow();
     const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
     expect(input['bodyCriticals']).toEqual([
-      '(no path):9999 — Newline path cannot ride the one-line channel.',
-      '(no path):9998 — Fence-leading path cannot ride the one-line channel.',
+      'Newline path cannot ride the one-line channel. — (no path):9999',
+      'Fence-leading path cannot ride the one-line channel. — (no path):9998',
+      'CR path cannot ride the one-line channel. — (no path):9997',
     ]);
+  });
+
+  it('degrades a built entry compose would refuse to the inert constant', () => {
+    // The enumerated guards cannot cover the unbounded entrance space: a
+    // lone CR inside the CLAIM passes them (the claim does not LEAD with
+    // a fence delimiter), but compose's ingestion normalizes the CR to a
+    // line break and the second line LEADS with a fence delimiter — the
+    // fence refusal fires mid-degrade. The built entry is validated
+    // against compose's OWN acceptance, and a refusal degrades the entry
+    // to the inert constant instead of refusing the whole post.
+    const crFenceClaim = {
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 9999,
+          body: '**[Critical]** leaked text\r```ts',
+        },
+      ],
+      state: { modelId: 'test-model' },
+    };
+    expect(() =>
+      runSubmit(base({ review: writeReview(crFenceClaim) }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(input['bodyCriticals']).toEqual(['finding — (no path):9999']);
+  });
+
+  it('keeps a carried ledger id at position 0 of the relocated entry', () => {
+    // buildLedger's body-Criticals leg reads a carried id off the entry
+    // through the ^-anchored LEDGER_ID_READBACK — a carried finding
+    // relocated on Aone must keep its id at position 0, or the ledger
+    // silently renumbers it as a new finding and cross-round dedup
+    // breaks. The claim leads the entry for exactly this reason.
+    const carried = {
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 9999,
+          body: '**[Critical]** R2-3: the same claim, still standing',
+        },
+      ],
+      state: { modelId: 'test-model' },
+    };
+    expect(() =>
+      runSubmit(base({ review: writeReview(carried) }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
+    const entry = (input['bodyCriticals'] as string[])[0];
+    expect(entry).toBe(
+      'R2-3: the same claim, still standing — src/foo.ts:9999',
+    );
+    expect(entry).toMatch(/^(R\d+-\d+)[:.)\]]?(?=\s|$)/);
+  });
+
+  it('floor enforcement drops the right comment AFTER the gate renumbers the array', () => {
+    // The gate removes authored index 0 (relocate), renumbering the
+    // posting array; compose then returns floorEnforced keyed on the
+    // POST-GATE array. The remap through authoredIndices must drop the
+    // comment floor enforcement names — authored index 1 ("B", post-gate
+    // index 0) — and keep authored index 2 ("C"). A remap keyed on the
+    // authored array (or no remap at all) drops the wrong comment; the
+    // non-identity authoredIndices branch is exactly what this exercises.
+    composeMock.mockReturnValue({
+      event: 'REQUEST_CHANGES',
+      body: 'One confirmed blocker blocks the merge.',
+      cappedBy: [],
+      floorEnforced: [0],
+    });
+    const renumbered = {
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 9999,
+          body: '**[Critical]** A — unanchorable, the gate relocates me.',
+        },
+        {
+          path: 'src/foo.ts',
+          line: 12,
+          body: '**[Suggestion]** B — floor enforcement drops me.',
+        },
+        {
+          path: 'src/foo.ts',
+          line: 13,
+          body: '**[Suggestion]** C — I post.',
+        },
+      ],
+      state: { modelId: 'test-model' },
+    };
+    expect(() =>
+      runSubmit(base({ review: writeReview(renumbered) }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    const req = submitAoneMock.mock.calls[0][0] as AoneSubmitRequest;
+    expect(req.comments).toHaveLength(1);
+    expect(req.comments[0].body).toContain('C — I post.');
+    const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(input['bodyCriticals']).toEqual([
+      expect.stringContaining('— src/foo.ts:9999'),
+    ]);
+    expect(stderrMock).toHaveBeenCalledWith(
+      expect.stringContaining('Floor enforcement: 1 Suggestion comment(s)'),
+    );
+  });
+
+  it('posts a single-line comment with an explicit null side inline — null is absent, not old-side', () => {
+    // A JSON `null` side is the model's idiom for an ABSENT optional
+    // field, not a declared old side: it defaults to RIGHT and validates
+    // on its (in-hunk) line, instead of relocating as unanchorable.
+    const nullSide = {
+      commit_id: 'abc123',
+      comments: [
+        {
+          path: 'src/foo.ts',
+          line: 12,
+          side: null,
+          body: '**[Critical]** Null side means absent.',
+        },
+      ],
+      state: { modelId: 'test-model' },
+    };
+    expect(() =>
+      runSubmit(base({ review: writeReview(nullSide) }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    const req = submitAoneMock.mock.calls[0][0] as AoneSubmitRequest;
+    // NOT relocated — the comment posts inline.
+    expect(req.comments).toHaveLength(1);
+    const input = composeMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(input['bodyCriticals']).toBeUndefined();
   });
 
   it('stands the WHOLE gate down over a renders-as-nothing bodyCriticals entry compose will refuse', () => {

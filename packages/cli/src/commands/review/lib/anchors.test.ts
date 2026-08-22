@@ -1023,6 +1023,18 @@ describe('validateNewSideAnchors — the Aone write-path gate', () => {
     expect(verdicts.every((v) => v.valid)).toBe(true);
   });
 
+  it('treats an explicit null side as ABSENT (defaults to RIGHT), not old-side', () => {
+    // A JSON `null` side is the model's idiom for an absent optional
+    // field — a documented recurring shape in this pipeline — not a
+    // declaration. Reading it as "declared non-RIGHT" relocates a
+    // perfectly anchorable in-hunk comment; it must default to RIGHT.
+    const verdicts = validateNewSideAnchors(PAY_DIFF, [
+      { path: 'src/pay.ts', line: 11, side: null },
+      { path: 'src/pay.ts', line: 12, startLine: 11, startSide: null },
+    ]);
+    expect(verdicts.every((v) => v.valid)).toBe(true);
+  });
+
   it('accepts a multi-line range inside ONE hunk', () => {
     const [v] = validateNewSideAnchors(PAY_DIFF, [
       { path: 'src/pay.ts', line: 12, startLine: 11 },
