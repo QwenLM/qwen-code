@@ -7,11 +7,13 @@
 import { describe, expect, it } from 'vitest';
 import type {
   DaemonEvent,
+  DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceSkillsStatus,
 } from '@qwen-code/sdk/daemon';
 import {
   getReplayTokenCount,
   getReplayTokenUsage,
+  mapProviderStatus,
   mapReasoningControls,
   mapWorkspaceSkills,
   selectGoalState,
@@ -95,6 +97,93 @@ describe('mapReasoningControls', () => {
     });
   });
 });
+
+describe('mapProviderStatus reasoning preview', () => {
+  it('maps a valid preview onto its model entry', () => {
+    const result = mapProviderStatus(
+      workspaceProvidersWithConfigOptions([
+        {
+          id: 'reasoning_effort',
+          currentValue: 'xhigh',
+          options: [
+            { value: 'none' },
+            { value: 'low' },
+            { value: 'medium' },
+            { value: 'xhigh' },
+          ],
+          _meta: {
+            'qwenCode/reasoning': { defaultEffort: 'xhigh' },
+          },
+        },
+      ]),
+    );
+
+    expect(result.models[0]?.reasoningPreview).toEqual({
+      enabled: true,
+      effort: 'xhigh',
+      efforts: ['low', 'medium', 'xhigh'],
+    });
+  });
+
+  it.each([
+    { name: 'absent', configOptions: undefined },
+    { name: 'empty', configOptions: [] },
+    {
+      name: 'missing Thinking off',
+      configOptions: [
+        {
+          id: 'reasoning_effort',
+          currentValue: 'xhigh',
+          options: [{ value: 'default' }, { value: 'xhigh' }],
+        },
+      ],
+    },
+    {
+      name: 'unknown current value',
+      configOptions: [
+        {
+          id: 'reasoning_effort',
+          currentValue: 'bogus',
+          options: [{ value: 'none' }, { value: 'low' }],
+        },
+      ],
+    },
+  ])('ignores $name preview', ({ configOptions }) => {
+    const result = mapProviderStatus(
+      workspaceProvidersWithConfigOptions(configOptions),
+    );
+    expect(result.models[0]?.reasoningPreview).toBeUndefined();
+  });
+});
+
+function workspaceProvidersWithConfigOptions(
+  configOptions: unknown[] | undefined,
+): DaemonWorkspaceProvidersStatus {
+  return {
+    v: 1,
+    workspaceCwd: '/workspace',
+    initialized: true,
+    current: { modelId: 'qwen3.8-max' },
+    providers: [
+      {
+        kind: 'model_provider',
+        status: 'ok',
+        authType: 'qwen-oauth',
+        current: true,
+        models: [
+          {
+            modelId: 'qwen3.8-max',
+            baseModelId: 'qwen3.8-max',
+            name: 'Qwen 3.8 Max',
+            isCurrent: true,
+            isRuntime: false,
+            ...(configOptions ? { configOptions } : {}),
+          },
+        ],
+      },
+    ],
+  };
+}
 
 describe('getReplayTokenCount', () => {
   it('returns undefined for an empty array', () => {

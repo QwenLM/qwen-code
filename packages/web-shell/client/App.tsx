@@ -6004,6 +6004,16 @@ export function App({
       })),
     [connection.models],
   );
+  const hasAuthoritativeReasoningContext = Boolean(
+    connection.sessionId &&
+      connection.context?.sessionId === connection.sessionId,
+  );
+  const displayedReasoning = hasAuthoritativeReasoningContext
+    ? connection.reasoning
+    : !connection.sessionId && !connection.context
+      ? connection.models?.find((model) => model.id === currentModel)
+          ?.reasoningPreview
+      : undefined;
   // The workspace the Changes dialog reads — the same active workspace the
   // git-status effect targets (computed once above), so the chip and the
   // dialog always target the same repo.
@@ -12885,8 +12895,12 @@ export function App({
                           availableModels={availableModels}
                           onSelectMode={handleSetMode}
                           onSelectModel={handleModelSelect}
-                          reasoning={connection.reasoning}
-                          onSelectReasoningEffort={handleReasoningEffort}
+                          reasoning={displayedReasoning}
+                          onSelectReasoningEffort={
+                            hasAuthoritativeReasoningContext
+                              ? handleReasoningEffort
+                              : undefined
+                          }
                           workspaces={composerWorkspaces}
                           selectedWorkspaceCwd={
                             connection.sessionId
