@@ -157,21 +157,39 @@ describe('resolveSeatbeltProfileFile', () => {
   });
 
   it('keeps source-mode seatbelt profile paths next to the module', () => {
-    const utilsDir = path.resolve(
+    const serveDir = path.resolve(
       path.sep,
       'repo',
       'packages',
       'cli',
       'src',
-      'utils',
+      'serve',
     );
     const sourceUrl = pathToFileURL(
-      path.join(utilsDir, 'sandbox.ts'),
+      path.join(serveDir, 'sandbox.ts'),
     ).toString();
 
     expect(resolveSeatbeltProfileFile('restrictive-closed', sourceUrl)).toBe(
-      path.join(utilsDir, 'sandbox-macos-restrictive-closed.sb'),
+      path.join(serveDir, 'sandbox-macos-restrictive-closed.sb'),
     );
+  });
+
+  it('keeps every builtin seatbelt profile colocated with the real module', () => {
+    // Uses the default `import.meta.url` (the real module location), so this
+    // fails loudly if sandbox.ts or the .sb profiles move without the other.
+    const builtinProfiles = [
+      'permissive-open',
+      'permissive-closed',
+      'permissive-proxied',
+      'restrictive-open',
+      'restrictive-closed',
+      'restrictive-proxied',
+    ];
+
+    for (const profile of builtinProfiles) {
+      const profileFile = resolveSeatbeltProfileFile(profile);
+      expect(fs.existsSync(profileFile), `missing ${profileFile}`).toBe(true);
+    }
   });
 
   it('keeps custom seatbelt profiles under project settings', () => {
