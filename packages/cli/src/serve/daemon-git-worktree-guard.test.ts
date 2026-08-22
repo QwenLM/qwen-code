@@ -9,10 +9,17 @@ import { mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, describe, expect, it, vi } from 'vitest';
-import { GitWorktreeService, ToolNames } from '@qwen-code/qwen-code-core';
+import {
+  getShellConfiguration,
+  GitWorktreeService,
+  ToolNames,
+} from '@qwen-code/qwen-code-core';
 import type { ExternalToolGuardPrepareRequest } from '@qwen-code/acp-bridge/bridgeOptions';
 import { SHELL_EXECUTING_TOOL_NAMES } from '@qwen-code/acp-bridge/externalToolGuard';
-import { createDaemonToolGuard } from './daemon-git-worktree-guard.js';
+import {
+  createDaemonToolGuard,
+  preserveWindowsPathSeparators,
+} from './daemon-git-worktree-guard.js';
 
 const temporaryRoot = mkdtempSync(path.join(os.tmpdir(), 'daemon-guard-'));
 const effectiveCwd = path.join(temporaryRoot, 'workspace', 'worktree');
@@ -524,53 +531,117 @@ it -C ${outsideRepo} reset --hard`,
     ).resolves.toEqual({ allowed: true });
   });
 
+  // The string->string transform behind the win32 pipeline tests below,
+  // pinned on every lane: the pipeline runs only in the merge_group Windows
+  // lane, so a regression in this state machine would otherwise pass every
+  // PR check green and first go red inside the merge queue.
+  describe('preserveWindowsPathSeparators (pure mapping)', () => {
+    const map = (segment: string, shell: 'cmd' | 'powershell' | 'bash') =>
+      preserveWindowsPathSeparators(segment, 'win32', shell);
+
+    it('escapes the separator before an ordinary path character', () => {
+      expect(map('git -C C:\\repo\\sub', 'cmd')).toBe(
+        'git -C C:\\\\repo\\\\sub',
+      );
+    });
+
+    it.each([' ', '\t'])(
+      'keeps whitespace after a separator as a word boundary %#',
+      (whitespace) => {
+        expect(map(`git -C C:\\repo\\${whitespace}-C out`, 'cmd')).toBe(
+          `git -C C:\\\\repo"\\\\"${whitespace}-C out`,
+        );
+      },
+    );
+
+    it.each([';', '|', '&', '<', '>', '(', ')'])(
+      'keeps a boundary operator after a separator delimiting %#',
+      (operator) => {
+        expect(map(`a\\${operator}b`, 'cmd')).toBe(`a"\\\\"${operator}b`);
+      },
+    );
+
+    it('escapes a trailing separator at the end of the segment', () => {
+      expect(map('git -C C:\\repo\\', 'cmd')).toBe('git -C C:\\\\repo\\\\');
+    });
+
+    it('applies the same mapping for PowerShell sessions', () => {
+      expect(map('git -C C:\\repo\\ status', 'powershell')).toBe(
+        'git -C C:\\\\repo"\\\\" status',
+      );
+    });
+
+    it('leaves single-quoted bodies alone', () => {
+      const quoted = "git -C 'C:\\repo\\ path' status";
+      expect(map(quoted, 'cmd')).toBe(quoted);
+    });
+
+    it('leaves double-quoted bodies alone', () => {
+      const quoted = 'git -C "C:\\repo\\ path" status';
+      expect(map(quoted, 'cmd')).toBe(quoted);
+    });
+
+    it('stays off for bash-executed sessions on Windows', () => {
+      const command = 'git -C C:\\repo\\ status';
+      expect(map(command, 'bash')).toBe(command);
+    });
+
+    it('stays off on other platforms', () => {
+      const command = 'git -C C:\\repo\\ status';
+      expect(preserveWindowsPathSeparators(command, 'linux', 'cmd')).toBe(
+        command,
+      );
+    });
+  });
+
   // cmd.exe has no backslash escape, so a path separator followed by
   // whitespace is a word boundary in the executed argv. These shapes only
-  // mean what they say on win32, where both the separator pre-pass and the
-  // path resolution are Windows-aware; on other platforms they would
-  // exercise a chimera of win32 tokenisation and POSIX path rules.
-  describe.runIf(process.platform === 'win32')(
-    'trailing-separator-before-flag shapes (cmd.exe argv)',
-    () => {
-      it.each([' ', '\t'])(
-        'keeps whitespace after a trailing separator as a word boundary %#',
-        async (whitespace) => {
-          // `git -C <in>\ -C <out>` splits at the whitespace and applies BOTH
-          // -C flags. Gluing the whitespace into the first value would hide
-          // the second relocation inside it — the bypass this shape pins.
-          const guard = createDaemonToolGuard();
-          await expect(
-            guard(
-              request(
-                `git -C ${effectiveCwd}\\${whitespace}-C ${outsideRepo} reset --hard`,
-              ),
-            ),
-          ).resolves.toMatchObject({
-            allowed: false,
-            reason: expect.stringContaining(outsideRepo),
-          });
-        },
-      );
-
-      it('keeps a flag parked after a trailing separator visible to the analysis', async () => {
+  // mean what they say on win32 executing through cmd.exe or PowerShell,
+  // where both the separator pre-pass and the path resolution are
+  // Windows-aware; on other platforms — or under a win32 Git Bash session,
+  // where the pre-pass stays off by design — they would exercise a chimera
+  // of win32 tokenisation and POSIX path rules.
+  describe.runIf(
+    process.platform === 'win32' && getShellConfiguration().shell !== 'bash',
+  )('trailing-separator-before-flag shapes (cmd.exe argv)', () => {
+    it.each([' ', '\t'])(
+      'keeps whitespace after a trailing separator as a word boundary %#',
+      async (whitespace) => {
+        // `git -C <in>\ -C <out>` splits at the whitespace and applies BOTH
+        // -C flags. Gluing the whitespace into the first value would hide
+        // the second relocation inside it — the bypass this shape pins.
         const guard = createDaemonToolGuard();
         await expect(
           guard(
             request(
-              `git -C ${effectiveCwd}\\ --git-dir=${path.join(outsideRepo, '.git')} reset --hard`,
+              `git -C ${effectiveCwd}\\${whitespace}-C ${outsideRepo} reset --hard`,
             ),
           ),
-        ).resolves.toMatchObject({ allowed: false });
-      });
+        ).resolves.toMatchObject({
+          allowed: false,
+          reason: expect.stringContaining(outsideRepo),
+        });
+      },
+    );
 
-      it('still allows a trailing separator that stays inside the boundary', async () => {
-        const guard = createDaemonToolGuard();
-        await expect(
-          guard(request(`git -C ${effectiveCwd}\\ reset --hard`)),
-        ).resolves.toEqual({ allowed: true });
-      });
-    },
-  );
+    it('keeps a flag parked after a trailing separator visible to the analysis', async () => {
+      const guard = createDaemonToolGuard();
+      await expect(
+        guard(
+          request(
+            `git -C ${effectiveCwd}\\ --git-dir=${path.join(outsideRepo, '.git')} reset --hard`,
+          ),
+        ),
+      ).resolves.toMatchObject({ allowed: false });
+    });
+
+    it('still allows a trailing separator that stays inside the boundary', async () => {
+      const guard = createDaemonToolGuard();
+      await expect(
+        guard(request(`git -C ${effectiveCwd}\\ reset --hard`)),
+      ).resolves.toEqual({ allowed: true });
+    });
+  });
 
   it('checks work-tree and git-dir targets independently', async () => {
     const guard = createDaemonToolGuard();

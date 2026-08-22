@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   linkSync,
   mkdirSync,
@@ -19,6 +19,20 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { isSameFile } from './same-file.js';
 
+// Lets a test pose as a volume that exposes no inode numbers: statSync
+// reports ino 0 while enabled, everything else delegates to the real thing.
+const inoZeroVolume = vi.hoisted(() => ({ enabled: false }));
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  const statSync = ((filePath: string) => {
+    const stats = actual.statSync(filePath);
+    if (inoZeroVolume.enabled) stats.ino = 0;
+    return stats;
+  }) as typeof actual.statSync;
+  return { ...actual, statSync, default: { ...actual, statSync } };
+});
+
 describe('isSameFile', () => {
   let dir: string;
 
@@ -32,7 +46,7 @@ describe('isSameFile', () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it('treats two hard links to one file as the same file', () => {
+  it('treats two hard links to one file as the same file', (ctx) => {
     const original = join(dir, 'original.json');
     writeFileSync(original, '{}');
     const linked = join(dir, 'linked.json');
@@ -40,9 +54,35 @@ describe('isSameFile', () => {
     // Hard-link identity rides dev/ino; on volumes that expose no inode
     // numbers (ino 0) the comparison degrades to canonical spellings by
     // design and cannot see through a hard link.
-    if (Number(statSync(original).ino) === 0) return;
+    if (Number(statSync(original).ino) === 0) {
+      ctx.skip();
+      return;
+    }
     expect(isSameFile(original, linked)).toBe(true);
     expect(isSameFile(linked, original)).toBe(true);
+  });
+
+  it('decides by canonical spelling when inodes are unverifiable', () => {
+    // FAT/exFAT-style volumes report ino 0 for every file; the comparison
+    // must fall back to canonical spellings there — never equating distinct
+    // files through a shared zero, never missing two spellings of one path.
+    const left = join(dir, 'ino-left.json');
+    const right = join(dir, 'ino-right.json');
+    writeFileSync(left, '{}');
+    writeFileSync(right, '{}');
+    mkdirSync(join(dir, 'ino-real'));
+    writeFileSync(join(dir, 'ino-real', 'aliased.json'), '{}');
+    symlinkSync(join(dir, 'ino-real'), join(dir, 'ino-link'));
+    const aliased = join(dir, 'ino-real', 'aliased.json');
+    const throughLink = join(dir, 'ino-link', 'aliased.json');
+    inoZeroVolume.enabled = true;
+    try {
+      expect(isSameFile(left, right)).toBe(false);
+      expect(isSameFile(aliased, throughLink)).toBe(true);
+      expect(isSameFile(throughLink, aliased)).toBe(true);
+    } finally {
+      inoZeroVolume.enabled = false;
+    }
   });
 
   it('treats two distinct files as different files', () => {

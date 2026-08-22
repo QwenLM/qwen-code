@@ -8,11 +8,13 @@ import { realpath, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { parse } from 'shell-quote';
 import {
+  getShellConfiguration,
   GitWorktreeService,
   isWithinRoot,
   realpathNearestExistingAsync,
   splitCommands,
 } from '@qwen-code/qwen-code-core';
+import type { ShellType } from '@qwen-code/qwen-code-core';
 import {
   EXTERNAL_TOOL_GUARD_MAX_DENIAL_REASON_CHARS,
   SHELL_EXECUTING_TOOL_NAMES as SHELL_EXECUTING_TOOLS,
@@ -403,8 +405,9 @@ interface TokenizedSegment {
   readonly endDepth: number;
 }
 
-// On Windows a backslash is a path separator, not a shell escape: the daemon
-// executes commands through cmd.exe (or a shell handed Windows paths), so
+// On Windows a backslash is a path separator, not a shell escape, when the
+// session executes through cmd.exe or PowerShell — the shell
+// getShellConfiguration() selects from the environment — so
 // `git -C C:\repo\sub` must reach the analysis with its separators intact.
 // POSIX tokenisation would consume each unquoted `\x` as an escape for `x`,
 // mangling the path into a relative word. Escape the backslash itself and
@@ -418,7 +421,10 @@ interface TokenizedSegment {
 // WITHOUT swallowing the next character; before any other character a plain
 // escaped backslash suffices. Both quoted forms already keep backslashes
 // literal under POSIX rules, so they are left alone; a `$'…'` body starts
-// with `$`, marking its token dynamic either way.
+// with `$`, marking its token dynamic either way. Git Bash sessions execute
+// through bash, whose backslash escapes the POSIX tokeniser already models,
+// so the rewrite stays off there — applying it would split words the
+// executed argv keeps glued.
 const WINDOWS_CMD_BOUNDARY_CHARS = new Set([
   ' ',
   '\t',
@@ -431,8 +437,12 @@ const WINDOWS_CMD_BOUNDARY_CHARS = new Set([
   ')',
 ]);
 
-function preserveWindowsPathSeparators(segment: string): string {
-  if (process.platform !== 'win32') return segment;
+export function preserveWindowsPathSeparators(
+  segment: string,
+  platform: string = process.platform,
+  shell: ShellType = getShellConfiguration().shell,
+): string {
+  if (platform !== 'win32' || shell === 'bash') return segment;
   let single = false;
   let double = false;
   let out = '';

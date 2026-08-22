@@ -7,6 +7,7 @@
 import { realpathSync, statSync } from 'node:fs';
 import type { Stats } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
+import { hasVerifiableInode } from '@qwen-code/qwen-code-core';
 
 function tryStat(path: string): Stats | undefined {
   try {
@@ -41,23 +42,23 @@ function identityOfAbsent(path: string): string {
 
 /**
  * True when two paths name the same file. Where both exist and the
- * filesystem exposes inode numbers, filesystem identity (dev/ino) decides:
- * hard links and case-variant spellings are one file under names no string
- * compare sees through, and statSync follows a symlinked directory component
- * on the way to the file. FAT/exFAT and some Windows volumes report
- * `ino === 0` for every file; dev/ino would then collapse unrelated files
- * onto one identity, so zero is treated as "unverifiable" and the
+ * filesystem exposes verifiable inode numbers, filesystem identity (dev/ino)
+ * decides: hard links and case-variant spellings are one file under names no
+ * string compare sees through, and statSync follows a symlinked directory
+ * component on the way to the file. Where inodes are unverifiable
+ * (`hasVerifiableInode`: FAT/exFAT-style volumes reporting `ino === 0`),
+ * dev/ino would collapse unrelated files onto one identity, so the
  * comparison falls back to canonical spellings — losing hard-link identity
  * there, but never equating distinct files. Where a side is absent, the
- * deepest existing ancestor is canonicalised instead, keeping the
- * comparison honest for files a command is about to create.
+ * deepest existing ancestor is canonicalised instead, keeping the comparison
+ * honest for files a command is about to create.
  */
 export function isSameFile(left: string, right: string): boolean {
   if (left === right) return true;
   const leftStat = tryStat(left);
   const rightStat = tryStat(right);
   if (leftStat !== undefined && rightStat !== undefined) {
-    if (Number(leftStat.ino) !== 0 && Number(rightStat.ino) !== 0) {
+    if (hasVerifiableInode(leftStat.ino) && hasVerifiableInode(rightStat.ino)) {
       return leftStat.dev === rightStat.dev && leftStat.ino === rightStat.ino;
     }
     return realpathSync(left) === realpathSync(right);
