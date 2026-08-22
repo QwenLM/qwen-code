@@ -276,18 +276,23 @@ export const githubReader: ReviewPlatformReader = {
     checkOwnerRepo(ownerRepo);
     // The PR-page grammar is deterministic — no API call. The host is the
     // one gh calls are currently routed at (a subcommand's setGhHost), else
-    // the operator-exported GH_HOST a gh child would inherit, else
-    // github.com — the routing precedence this codebase applies, so the
-    // composed link lands where the review ran (every submit write routes
-    // a host before reaching here; gh's own hosts.yml fallback is
-    // unreachable through this pipeline). The spelling rides the shared
-    // PR-page helper — the SAME normalization compose-review's comment
-    // anchors apply, so one run cannot print two textual spellings of the
-    // same page (`--host GHE.Corp:443` lands on `https://ghe.corp/…` in
-    // both).
-    const host = normalizeGhHostForUrl(
-      getGhHost() ?? resolveGhHost(undefined) ?? 'github.com',
-    );
+    // the operator-exported GH_HOST a gh child would inherit — the routing
+    // this codebase applies, so the composed link lands where the review
+    // ran. When NEITHER names a host, fail CLOSED with '': gh's own third
+    // fallback is hosts.yml's authenticated default (a single recorded host
+    // wins — go-gh's defaultHost), which this process cannot see, so
+    // composing github.com there affirms a host the write may not have
+    // taken — the link can resolve to a real, unrelated PR of a
+    // same-named github.com repo while the review sits on a GHE host. ''
+    // leaves the receipt linkless — submit's truthy checks drop the url,
+    // and the skill relays the target's coordinates instead. The spelling
+    // rides the shared PR-page helper — the SAME normalization
+    // compose-review's comment anchors apply, so one run cannot print two
+    // textual spellings of the same page (`--host GHE.Corp:443` lands on
+    // `https://ghe.corp/…` in both).
+    const routed = getGhHost() ?? resolveGhHost(undefined);
+    if (!routed) return '';
+    const host = normalizeGhHostForUrl(routed);
     return `https://${host}/${ownerRepo}/pull/${prNumber}`;
   },
 };
