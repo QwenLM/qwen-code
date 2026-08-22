@@ -30,6 +30,36 @@ So: **prose belongs here, long steps belong in `.github/scripts/`.**
 `.github/scripts/check-workflow-size.sh` fails CI before the limit can be
 reached again.
 
+### Steps that moved out, not just their prose
+
+`review-address` · `Push and report` was 626 lines of inline shell — ~41 KB,
+the third-largest `run:` body in the file after
+`Scan for PRs with new feedback` and `Prepare branch and feedback` — and its
+body now lives in `.github/scripts/autofix-push-and-report.sh`. The YAML keeps
+the step's `if:` and `env:`: when it runs, and what reaches it.
+
+**The file is never executed from disk.** The stage step reads it from the
+trusted-base checkout, before any branch code has run, and passes the text
+through step output; the step runs those bytes. That is the delivery the inline
+block already had — the workflow file's own bytes, chosen by GitHub, not by
+anything on the runner — and the one `upsert-deferred-issue.sh` uses.
+
+This matters because `Push and report` holds the PAT and runs _after_ the agent
+and the verification gate have executed branch code on this host. A copy staged
+under `${RUNNER_TEMP}` would be theirs to swap, which is why the staged scripts
+that do live on disk (`resanitize-git-config.sh`, the gate runner) each carry a
+digest the invoking step re-checks. Content delivery removes the object those
+digests exist to protect: nothing to stage, nothing to digest, nothing to type
+check, no second open, and no check→use window between the steps. The
+qualifier that makes it hold is that a step output is fixed when its step ends
+— later steps read the recorded value, so a disk write after staging cannot
+change what arrives here. It is not a claim that the value is unreachable
+while the stage step is still running.
+
+`docs/design/autofix-gate-runner-isolation.md` finishes the job: once this step
+is its own `publish` job, checking out the trusted base and never executing
+branch code, the script can simply be run from the checkout.
+
 ## How the pointers work
 
 Where a block of commentary used to sit, the workflow keeps its opening lines
