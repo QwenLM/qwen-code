@@ -338,6 +338,16 @@ export const App: React.FC = () => {
     null,
   );
   const [showModelSelector, setShowModelSelector] = useState(false);
+  // Measured height of the open model-selector dropdown, reported by the
+  // InputForm adapter (which renders the dropdown). While open, the
+  // dropdown paints over the messages viewport, so the messages container
+  // reserves this much bottom scroll clearance — letting the last message
+  // scroll up above the dropdown instead of being hidden behind it
+  // (issue #8617).
+  const [modelSelectorClearance, setModelSelectorClearance] = useState(0);
+  const handleModelSelectorClearanceChange = useCallback((heightPx: number) => {
+    setModelSelectorClearance(heightPx);
+  }, []);
   const [accountInfo, setAccountInfo] = useState<AccountInfo | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   // Maps DOM child position → allMessages index. Built during render by
@@ -471,7 +481,18 @@ export const App: React.FC = () => {
     [fileContext, availableCommands, availableSkills, modelInfo?.name],
   );
 
-  const completion = useCompletionTrigger(inputFieldRef, getCompletionItems);
+  // Suppressed while the model selector is open so the completion menu can
+  // never mount alongside it: both menus anchor over the same area, and the
+  // selector's capture-phase document keydown listener consumes
+  // ArrowUp/ArrowDown/Enter/Escape while visible. Other keys (e.g. Tab) are
+  // NOT captured by the selector and fall through to the composer, so
+  // handleInputKeyDown separately disables the Tab approval-mode toggle
+  // while the selector is open.
+  const completion = useCompletionTrigger(
+    inputFieldRef,
+    getCompletionItems,
+    showModelSelector,
+  );
   const {
     isOpen: completionIsOpen,
     triggerChar: completionTriggerChar,
@@ -617,6 +638,9 @@ export const App: React.FC = () => {
         message?.type === 'conversationCleared'
       ) {
         setEditingMessage(null);
+        // The selector belongs to the previous conversation; a session
+        // switch/load/clear is an overlay-equivalent takeover.
+        setShowModelSelector(false);
         return;
       }
 
@@ -873,6 +897,59 @@ export const App: React.FC = () => {
     return () => clearTimeout(timeout);
   }, [isAuthenticated]);
 
+  // Single source of truth for "a fixed overlay layer is mounted". Besides
+  // the modal dialogs (PermissionDrawer / AskUserQuestionDialog /
+  // AccountInfoDialog) this includes webui's SessionSelector, whose backdrop
+  // and dropdown are also fixed z-[999]/z-[1000] layers. Both the
+  // close-effect below and the /model open gate must use this one predicate:
+  // the selector paints beneath every one of these layers (z-0), so the two
+  // must never be mounted together in either direction. Keeping the check in
+  // one place is what prevents the two call sites from drifting apart.
+  const isOverlayActive = Boolean(
+    permissionRequest ||
+      askUserQuestionRequest ||
+      // accountInfo doubles as the AccountInfoDialog visibility flag: it is
+      // only set by the on-demand accountInfo message and reset by the
+      // dialog's onClose, so truthy here means "the dialog is up".
+      accountInfo ||
+      sessionManagement.showSessionSelector,
+  );
+
+  // Close the model selector when an overlay takes over: while open the
+  // selector consumes Enter/Escape/arrow keys via a capture-phase document
+  // listener, and since it paints below the overlays (z-0) those keystrokes
+  // must reach the visible overlay instead. The /model open path is gated on
+  // the same isOverlayActive predicate.
+  //
+  // useLayoutEffect, not useEffect: the close must land inside the same
+  // commit as the overlay's arrival. A passive effect would leave one commit
+  // in which the overlay and the selector are mounted together, with the
+  // selector's capture-phase keydown listener still armed beneath the
+  // visible overlay — an Enter in that window silently switches the model
+  // instead of answering the overlay.
+  useLayoutEffect(() => {
+    if (showModelSelector && isOverlayActive) {
+      setShowModelSelector(false);
+    }
+  }, [showModelSelector, isOverlayActive]);
+
+  // While the selector is open, the messages container carries extra bottom
+  // padding (the dropdown clearance). Re-anchor a view pinned to the bottom
+  // to the new scroll floor so the last message sits above the dropdown's
+  // top edge instead of behind the dropdown (issue #8617). Users who
+  // scrolled away are left alone — no scroll stealing.
+  useLayoutEffect(() => {
+    if (!showModelSelector || modelSelectorClearance <= 0 || !pinnedToBottom) {
+      return;
+    }
+    const container = messagesContainerRef.current;
+    if (!container) {
+      return;
+    }
+    const top = container.scrollHeight - container.clientHeight;
+    container.scrollTo({ top });
+  }, [showModelSelector, modelSelectorClearance, pinnedToBottom]);
+
   // Handle permission response
   const handlePermissionResponse = useCallback(
     (optionId: string) => {
@@ -991,18 +1068,42 @@ export const App: React.FC = () => {
         };
 
         // Client-side commands that trigger extension actions directly
-        // instead of being sent to the agent as messages.
-        const clientActions: Record<string, () => void> = {
-          auth: () => vscode.postMessage({ type: 'auth', data: {} }),
-          account: () =>
-            vscode.postMessage({ type: 'getAccountInfo', data: {} }),
-          model: () => setShowModelSelector(true),
+        // instead of being sent to the agent as messages. Each returns
+        // false when it declines, in which case the caller leaves the typed
+        // trigger text and the completion menu untouched.
+        const clientActions: Record<string, () => boolean> = {
+          auth: () => {
+            vscode.postMessage({ type: 'auth', data: {} });
+            return true;
+          },
+          account: () => {
+            vscode.postMessage({ type: 'getAccountInfo', data: {} });
+            return true;
+          },
+          // Never arm the selector underneath an active overlay: its
+          // capture-phase document keydown listener would steal keys from
+          // the visible topmost layer. Same isOverlayActive predicate as the
+          // close-effect above — the two must stay in sync, so both read the
+          // one derived boolean instead of re-listing overlays here.
+          model: () => {
+            if (isOverlayActive) {
+              return false;
+            }
+            setShowModelSelector(true);
+            return true;
+          },
         };
 
         const clientAction = clientActions[itemId];
         if (clientAction) {
+          // Run the action before mutating the composer: a declined action
+          // (the /model overlay gate) must keep the typed trigger text and
+          // the completion menu, so the user can retry the selection once
+          // the overlay clears instead of retyping the command.
+          if (!clientAction()) {
+            return;
+          }
           clearTriggerText();
-          clientAction();
           closeCompletion();
           return;
         }
@@ -1177,6 +1278,7 @@ export const App: React.FC = () => {
       completionTriggerChar,
       fileContext,
       inputFieldRef,
+      isOverlayActive,
       openCompletion,
       setInputText,
       vscode,
@@ -1230,20 +1332,33 @@ export const App: React.FC = () => {
     });
   }, [vscode]);
 
-  // Handle Tab key to cycle approval modes when input is focused
+  // Handle Tab key to cycle approval modes when input is focused.
+  // Suppressed while the model selector is open: the selector does not
+  // handle Tab itself, but the user's keyboard focus belongs to the selector
+  // then, and a stray Tab must not silently cycle the approval mode (which
+  // reaches YOLO) underneath it.
   const handleInputKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
+      if (e.key === 'Tab' && !e.shiftKey && showModelSelector) {
+        // The selector never takes DOM focus, so an unhandled Tab would
+        // move focus to the next tabbable element while the dropdown stays
+        // open, leaving subsequent typing nowhere to go. Swallow it, like
+        // the mode-cycle branch below did before the guard existed.
+        e.preventDefault();
+        return;
+      }
       if (
         e.key === 'Tab' &&
         !e.shiftKey &&
         !isComposing &&
-        !completion.isOpen
+        !completion.isOpen &&
+        !showModelSelector
       ) {
         e.preventDefault();
         handleToggleEditMode();
       }
     },
-    [completion.isOpen, handleToggleEditMode, isComposing],
+    [completion.isOpen, handleToggleEditMode, isComposing, showModelSelector],
   );
 
   const handleToggleThinking = useCallback(() => {
@@ -1532,7 +1647,24 @@ export const App: React.FC = () => {
 
       <div
         ref={messagesContainerRef}
-        className="chat-messages messages-container flex-1 overflow-y-auto overflow-x-hidden pt-5 pr-5 pl-5 pb-[140px] flex flex-col relative min-w-0 focus:outline-none [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:rounded-sm [&>*]:flex [&>*]:gap-0 [&>*]:items-start [&>*]:text-left [&>*]:py-2 [&>*:not(:last-child)]:pb-[8px] [&>*]:flex-col [&>*]:relative [&>*]:animate-[fadeIn_0.2s_ease-in]"
+        // pb-2: the input form's wrapper is now an in-flow flex child sized
+        // to the measured form height, so the messages viewport already ends
+        // at the form's top edge. The old overlay layout floated the form
+        // over the messages and needed pb-[140px] of scroll clearance;
+        // keeping it would strand ~140px of dead space above the form.
+        className="chat-messages messages-container flex-1 overflow-y-auto overflow-x-hidden pt-5 pr-5 pl-5 pb-2 flex flex-col relative min-w-0 focus:outline-none [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:rounded-sm [&>*]:flex [&>*]:gap-0 [&>*]:items-start [&>*]:text-left [&>*]:py-2 [&>*:not(:last-child)]:pb-[8px] [&>*]:flex-col [&>*]:relative [&>*]:animate-[fadeIn_0.2s_ease-in]"
+        // While the model selector is open it paints over the bottom of this
+        // viewport. Add bottom scroll clearance for the dropdown's measured
+        // height (plus its 8px mb-2 gap to the form and an 8px gap above
+        // the dropdown's top edge) so the last message can scroll up clear
+        // of the dropdown instead of being hidden behind it (issue #8617).
+        // Applied only while open, so no dead space is stranded once it
+        // closes.
+        style={
+          showModelSelector && modelSelectorClearance > 0
+            ? { paddingBottom: `${modelSelectorClearance + 16}px` }
+            : undefined
+        }
         data-vscode-context={
           hasContent ? '{"webviewSection": "chat-messages"}' : undefined
         }
@@ -1712,6 +1844,7 @@ export const App: React.FC = () => {
           currentModelId={modelInfo?.modelId}
           onSelectModel={handleModelSelect}
           onCloseModelSelector={() => setShowModelSelector(false)}
+          onModelSelectorClearance={handleModelSelectorClearanceChange}
         />
       )}
 
