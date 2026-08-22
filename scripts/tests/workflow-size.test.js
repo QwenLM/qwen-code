@@ -321,6 +321,16 @@ describe('qwen-autofix.yml design-record pointers', () => {
     expect(anchors.filter((id) => !pointers.includes(id))).toEqual([]);
   });
 
+  it('allocates each section id exactly once', () => {
+    // A double allocation (two blocks minted with the same id, e.g. a branch
+    // that numbered a new block before a same-numbered block landed on main)
+    // passes every other check here: pointers resolve, anchors stay pointed
+    // at, and the contents table mirrors the duplication. Browsers resolve
+    // the anchor to the FIRST occurrence, so one feature's rationale pointer
+    // silently shows the other's block.
+    expect(new Set(anchors).size).toBe(anchors.length);
+  });
+
   it('lists every section in the contents table', () => {
     const listed = [...doc.matchAll(/^- \[\d+\..*?\]\(#(af-\d+)\)$/gm)].map(
       (m) => m[1],

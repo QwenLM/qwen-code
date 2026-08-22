@@ -134,80 +134,81 @@ task-oriented guides — what a maintainer types and what happens next — see:
 - [70. review-address · Report dry-run / failure — -c drops any partial multi-byte sequence a byte-level head -c may have split, so the…](#af-070)
 - [71. review-address · Report dry-run / failure — Bilingual companion. Repo convention is English first, Chinese in a collapsed <details>.…](#af-071)
 - [72. review-address · Report dry-run / failure — Flip the status comment out of "working" so a finished round never leaves a live-looking…](#af-072)
-- [73. run — Per-author tail budget inside Critical-only mode. An account is an…](#af-073)
-- [74. run — Growth audit: a budget breach engages Critical-only AND makes the round a…](#af-074)
-- [75. run — Failed-check annotation patterns that mean the INFRASTRUCTURE died, not the code…](#af-075)
-- [76. run — Upper bound on review targets emitted per scan (fan-out defense-in-depth; excess…](#af-076)
-- [77. run — Upper bound on candidates INSPECTED per scan: idle candidates consume serial API…](#af-077)
-- [78. run — Commit-status context stamped PENDING on a PR head when a scan dispatches a…](#af-078)
-- [79. run — Consecutive-failure sub-cap, distinct from the total round cap (MAX_ROUNDS,…](#af-079)
-- [80. run — Cumulative agent-timeout sub-cap, the sibling of the consecutive cap for the…](#af-080)
-- [81. route · Decide phases — Real-time review triggers: process the SAME managed set the scheduled scan does,…](#af-081)
-- [82. route · Decide phases — Comment-command sugar over the labels: TAKEOVER_COMMAND applies TAKEOVER_LABEL,…](#af-082)
-- [83. route · Decide phases — The bot only applies this label from takeover-command, which posts the engage…](#af-083)
-- [84. issue-autofix · Sanitize workspace git config — Rather than denylist each exec-vector family (which kept missing new ones), KEEP…](#af-084)
-- [85. issue-autofix · Stage trusted schema gate — The staged copy's trusted-base provenance holds at cp time only: RUNNER_TEMP is…](#af-085)
-- [86. issue-autofix · Verification gate — Settings-schema freshness gate, shared with the triage-and-address verify step…](#af-086)
-- [87. issue-autofix · Withdraw claim on failure — Same hygiene as the PR-lane DETAIL_FILE excerpt: -c drops a partial multi-byte…](#af-087)
-- [88. takeover-command · Toggle takeover label — Ack HERE, not via the pull_request:labeled round-trip: that event has been…](#af-088)
-- [89. takeover-command · Toggle takeover label — Release ack, direct from the command — the exact mirror of the engage side…](#af-089)
-- [90. retry-command · Post re-arm marker — Management resumed — the escalation label is stale. 404 is the common case (the…](#af-090)
-- [91. takeover-ack · Acknowledge takeover state change — R2-4 mirror for the engaged direction: a delayed engaged ack — a red run re-run…](#af-091)
-- [92. takeover-ack · Acknowledge takeover state change — The escalation label goes stale on a real engage or any release (a human is…](#af-092)
-- [93. review-scan · Scan for PRs with new feedback — Every lane that reaches this scan is supposed to hold the PAT: route now…](#af-093)
-- [94. review-scan · Scan for PRs with new feedback — Candidate PRs: open, same-repo, targeting main, and either authored by the…](#af-094)
-- [95. review-scan · Scan for PRs with new feedback — Same admission as the scheduled scan below. In-repo PRs fail CLOSED on a missing…](#af-095)
-- [96. review-scan · Scan for PRs with new feedback — Skip-labeled PRs are excluded HERE, not only at the address gate: that gate…](#af-096)
-- [97. review-scan · Scan for PRs with new feedback — Dispatch-pending marker: a scan that dispatched this PR within…](#af-097)
-- [98. review-scan · Scan for PRs with new feedback — Delay-window fallback: a review run parked BEFORE its job starts (the 10-minute…](#af-098)
-- [99. review-scan · Scan for PRs with new feedback — Auto-rerun a check that died on INFRASTRUCTURE, not the code (see…](#af-099)
-- [100. review-scan · Scan for PRs with new feedback — startedAt is the only staleness clock: a check blocks only if it started within…](#af-100)
-- [101. review-scan · Scan for PRs with new feedback — Ack-on-defer (#8888): a real-time human review routed this scan straight here,…](#af-101)
-- [102. review-scan · Scan for PRs with new feedback — Pre-first-eval floor: the PR's IMMUTABLE creation time. Feedback cannot predate…](#af-102)
-- [103. review-scan · Scan for PRs with new feedback — ROUND counting is windowed by KEY EQUALITY, not timestamps: the current window…](#af-103)
-- [104. review-scan · Scan for PRs with new feedback — Seed for THIS window, from the '<cmd> from N' marker carried by the comment that…](#af-104)
-- [105. review-scan · Scan for PRs with new feedback — Consent may have moved since PR_META: skip wins everywhere, and a takeover…](#af-105)
-- [106. review-scan · Scan for PRs with new feedback — The escalation label rides EVERY cap detection, noticed or not: the…](#af-106)
-- [107. review-scan · Scan for PRs with new feedback — Conflict-park gate for the loop's OWN head move: while a conflict handoff pends…](#af-107)
-- [108. review-scan · Scan for PRs with new feedback — Auto-update a PR that is red ONLY because of a stale base (see the…](#af-108)
-- [109. review-scan · Scan for PRs with new feedback — STALE_BASE_REDS is pure jq over data already in memory (CHECKS_JSON,…](#af-109)
-- [110. review-address · Stage trusted schema gate and agent runner — The staged copies' trusted-base provenance holds at cp time only: RUNNER_TEMP is…](#af-110)
-- [111. review-address · Prepare branch and feedback — This PAT-bearing step runs git (status/restore/fetch/checkout and a push…](#af-111)
-- [112. review-address · Prepare branch and feedback — ---- address-time eligibility recheck --------------------------- Fan-out can…](#af-112)
-- [113. review-address · Prepare branch and feedback — Maintainer-fork target: the branch does not exist on origin — fetch it (data…](#af-113)
-- [114. review-address · Prepare branch and feedback — Allow-edits pushes ride the classic-PAT grant — GITHUB_TOKEN and fine-grained…](#af-114)
-- [115. review-address · Prepare branch and feedback — Release the dispatch-pending marker the emitting scan stamped on this head: the…](#af-115)
-- [116. review-address · Prepare branch and feedback — Mechanical churn must not burn the budget: one dependency bump rewrites hundreds…](#af-116)
-- [117. review-address · Prepare branch and feedback — The instant THIS round's net was measured. Stamped into the growth-now marker so…](#af-117)
-- [118. review-address · Prepare branch and feedback — NOTE (#9114 R2-8/R6-3): re-anchoring on an EXTERNAL head move (an author push)…](#af-118)
-- [119. review-address · Prepare branch and feedback — KNOWN RESIDUAL (#9114): this sibling read still filters on the comment's…](#af-119)
-- [120. review-address · Prepare branch and feedback — Growth audit: a budget breach engages Critical-only AND makes the round a…](#af-120)
-- [121. review-address · Prepare branch and feedback — Conflict-handoff idempotence: a conflict verdict parks the PR at a genuinely…](#af-121)
-- [122. review-address · Prepare branch and feedback — Growth audit (a size signal triggers a JUDGMENT, never a stop): the window is…](#af-122)
-- [123. review-address · Post autofix status comment — The agent below runs for up to 130 minutes and the verification gate adds more,…](#af-123)
-- [124. review-address · Triage and address — The primary attempt's real budget: 120m, with a 10-minute margin under the…](#af-124)
-- [125. review-address · Triage and address — Prepare severed hooks for its PAT-bearing git ops; THIS step holds no PAT, so…](#af-125)
-- [126. review-address · Repair deterministic rejection — Which side is corrupt is NOT known here — jq -s fails if EITHER input is…](#af-126)
-- [127. review-address · Finalize verification — The verdict travels WITH the attempt whose outcome is selected: a repair pass…](#af-127)
-- [128. review-address · Finalize verification — Conclusion gate: fixed/noop are the ONLY outcomes that release the PAT push. A…](#af-128)
-- [129. review-address · Finalize verification — handoff and the two brake-violation rejections are deliberate, PUBLISHED…](#af-129)
-- [130. review-address · Push and report — Growth-audit trail (+ re-arm on sound): audit rounds record the verdict under…](#af-130)
-- [131. review-address · Push and report — The mirror of the resolve above: a finding the agent did NOT resolve keeps its…](#af-131)
-- [132. review-address · Push and report — Idempotence gate: a crash-and-rerun of this round, a same-run repair that…](#af-132)
-- [133. review-address · Push and report — The tree the gate verified is what gets pushed: assert HEAD is the gate's…](#af-133)
-- [134. review-address · Push and report — Bounded retry on the report post: this one comment carries the round's ENTIRE…](#af-134)
-- [135. review-address · Push and report — Crossing trigger, not an equality test: failure rounds also advance the round…](#af-135)
-- [136. review-address · Report dry-run / failure — This step also posts a round report (timeout / gate-rejection / abort), so it…](#af-136)
-- [137. review-address · Report dry-run / failure — handoff rounds end with a SUCCESS job status (a deliberate verdict), so they…](#af-137)
-- [138. review-address · Report dry-run / failure — Cause-aware wording, most specific first — a model error and a gate crash each…](#af-138)
-- [139. review-address · Report dry-run / failure — A deliberate stop, not a failed fix: the agent stopped under instruction and…](#af-139)
-- [140. review-address · Report dry-run / failure — A brake VIOLATION, not a failed fix: the agent stopped under instruction but…](#af-140)
-- [141. review-address · Report dry-run / failure — The committed sibling of the dirty-handoff violation: the round HAS a commit…](#af-141)
-- [142. review-address · Report dry-run / failure — A conflict round must PARK quietly at the human call: its own stale-base merge…](#af-142)
-- [143. review-address · Report dry-run / failure — Prepare RAN (outcome success/failure) but produced no feedback to read — prepare…](#af-143)
-- [144. review-address · Report dry-run / failure — CUMULATIVE timeout breaker — the sibling of the consecutive one above, for the…](#af-144)
-- [145. review-address · Report dry-run / failure — The agent committed (verify recorded committed=true before any gate could fail),…](#af-145)
-- [146. review-address · Report dry-run / failure — Same byte-budget hygiene as the English excerpt above. 3000 bytes ≈ 1000 CJK…](#af-146)
+- [73. review-address · Report dry-run / failure — Idle (silent-sandbox) timeouts are EXCLUDED from the cumulative timeout cap.…](#af-073)
+- [74. run — Per-author tail budget inside Critical-only mode. An account is an…](#af-074)
+- [75. run — Growth audit: a budget breach engages Critical-only AND makes the round a…](#af-075)
+- [76. run — Failed-check annotation patterns that mean the INFRASTRUCTURE died, not the code…](#af-076)
+- [77. run — Upper bound on review targets emitted per scan (fan-out defense-in-depth; excess…](#af-077)
+- [78. run — Upper bound on candidates INSPECTED per scan: idle candidates consume serial API…](#af-078)
+- [79. run — Commit-status context stamped PENDING on a PR head when a scan dispatches a…](#af-079)
+- [80. run — Consecutive-failure sub-cap, distinct from the total round cap (MAX_ROUNDS,…](#af-080)
+- [81. run — Cumulative agent-timeout sub-cap, the sibling of the consecutive cap for the…](#af-081)
+- [82. route · Decide phases — Real-time review triggers: process the SAME managed set the scheduled scan does,…](#af-082)
+- [83. route · Decide phases — Comment-command sugar over the labels: TAKEOVER_COMMAND applies TAKEOVER_LABEL,…](#af-083)
+- [84. route · Decide phases — The bot only applies this label from takeover-command, which posts the engage…](#af-084)
+- [85. issue-autofix · Sanitize workspace git config — Rather than denylist each exec-vector family (which kept missing new ones), KEEP…](#af-085)
+- [86. issue-autofix · Stage trusted schema gate — The staged copy's trusted-base provenance holds at cp time only: RUNNER_TEMP is…](#af-086)
+- [87. issue-autofix · Verification gate — Settings-schema freshness gate, shared with the triage-and-address verify step…](#af-087)
+- [88. issue-autofix · Withdraw claim on failure — Same hygiene as the PR-lane DETAIL_FILE excerpt: -c drops a partial multi-byte…](#af-088)
+- [89. takeover-command · Toggle takeover label — Ack HERE, not via the pull_request:labeled round-trip: that event has been…](#af-089)
+- [90. takeover-command · Toggle takeover label — Release ack, direct from the command — the exact mirror of the engage side…](#af-090)
+- [91. retry-command · Post re-arm marker — Management resumed — the escalation label is stale. 404 is the common case (the…](#af-091)
+- [92. takeover-ack · Acknowledge takeover state change — R2-4 mirror for the engaged direction: a delayed engaged ack — a red run re-run…](#af-092)
+- [93. takeover-ack · Acknowledge takeover state change — The escalation label goes stale on a real engage or any release (a human is…](#af-093)
+- [94. review-scan · Scan for PRs with new feedback — Every lane that reaches this scan is supposed to hold the PAT: route now…](#af-094)
+- [95. review-scan · Scan for PRs with new feedback — Candidate PRs: open, same-repo, targeting main, and either authored by the…](#af-095)
+- [96. review-scan · Scan for PRs with new feedback — Same admission as the scheduled scan below. In-repo PRs fail CLOSED on a missing…](#af-096)
+- [97. review-scan · Scan for PRs with new feedback — Skip-labeled PRs are excluded HERE, not only at the address gate: that gate…](#af-097)
+- [98. review-scan · Scan for PRs with new feedback — Dispatch-pending marker: a scan that dispatched this PR within…](#af-098)
+- [99. review-scan · Scan for PRs with new feedback — Delay-window fallback: a review run parked BEFORE its job starts (the 10-minute…](#af-099)
+- [100. review-scan · Scan for PRs with new feedback — Auto-rerun a check that died on INFRASTRUCTURE, not the code (see…](#af-100)
+- [101. review-scan · Scan for PRs with new feedback — startedAt is the only staleness clock: a check blocks only if it started within…](#af-101)
+- [102. review-scan · Scan for PRs with new feedback — Ack-on-defer (#8888): a real-time human review routed this scan straight here,…](#af-102)
+- [103. review-scan · Scan for PRs with new feedback — Pre-first-eval floor: the PR's IMMUTABLE creation time. Feedback cannot predate…](#af-103)
+- [104. review-scan · Scan for PRs with new feedback — ROUND counting is windowed by KEY EQUALITY, not timestamps: the current window…](#af-104)
+- [105. review-scan · Scan for PRs with new feedback — Seed for THIS window, from the '<cmd> from N' marker carried by the comment that…](#af-105)
+- [106. review-scan · Scan for PRs with new feedback — Consent may have moved since PR_META: skip wins everywhere, and a takeover…](#af-106)
+- [107. review-scan · Scan for PRs with new feedback — The escalation label rides EVERY cap detection, noticed or not: the…](#af-107)
+- [108. review-scan · Scan for PRs with new feedback — Conflict-park gate for the loop's OWN head move: while a conflict handoff pends…](#af-108)
+- [109. review-scan · Scan for PRs with new feedback — Auto-update a PR that is red ONLY because of a stale base (see the…](#af-109)
+- [110. review-scan · Scan for PRs with new feedback — STALE_BASE_REDS is pure jq over data already in memory (CHECKS_JSON,…](#af-110)
+- [111. review-address · Stage trusted schema gate and agent runner — The staged copies' trusted-base provenance holds at cp time only: RUNNER_TEMP is…](#af-111)
+- [112. review-address · Prepare branch and feedback — This PAT-bearing step runs git (status/restore/fetch/checkout and a push…](#af-112)
+- [113. review-address · Prepare branch and feedback — ---- address-time eligibility recheck --------------------------- Fan-out can…](#af-113)
+- [114. review-address · Prepare branch and feedback — Maintainer-fork target: the branch does not exist on origin — fetch it (data…](#af-114)
+- [115. review-address · Prepare branch and feedback — Allow-edits pushes ride the classic-PAT grant — GITHUB_TOKEN and fine-grained…](#af-115)
+- [116. review-address · Prepare branch and feedback — Release the dispatch-pending marker the emitting scan stamped on this head: the…](#af-116)
+- [117. review-address · Prepare branch and feedback — Mechanical churn must not burn the budget: one dependency bump rewrites hundreds…](#af-117)
+- [118. review-address · Prepare branch and feedback — The instant THIS round's net was measured. Stamped into the growth-now marker so…](#af-118)
+- [119. review-address · Prepare branch and feedback — NOTE (#9114 R2-8/R6-3): re-anchoring on an EXTERNAL head move (an author push)…](#af-119)
+- [120. review-address · Prepare branch and feedback — KNOWN RESIDUAL (#9114): this sibling read still filters on the comment's…](#af-120)
+- [121. review-address · Prepare branch and feedback — Growth audit: a budget breach engages Critical-only AND makes the round a…](#af-121)
+- [122. review-address · Prepare branch and feedback — Conflict-handoff idempotence: a conflict verdict parks the PR at a genuinely…](#af-122)
+- [123. review-address · Prepare branch and feedback — Growth audit (a size signal triggers a JUDGMENT, never a stop): the window is…](#af-123)
+- [124. review-address · Post autofix status comment — The agent below runs for up to 130 minutes and the verification gate adds more,…](#af-124)
+- [125. review-address · Triage and address — The primary attempt's real budget: 120m, with a 10-minute margin under the…](#af-125)
+- [126. review-address · Triage and address — Prepare severed hooks for its PAT-bearing git ops; THIS step holds no PAT, so…](#af-126)
+- [127. review-address · Repair deterministic rejection — Which side is corrupt is NOT known here — jq -s fails if EITHER input is…](#af-127)
+- [128. review-address · Finalize verification — The verdict travels WITH the attempt whose outcome is selected: a repair pass…](#af-128)
+- [129. review-address · Finalize verification — Conclusion gate: fixed/noop are the ONLY outcomes that release the PAT push. A…](#af-129)
+- [130. review-address · Finalize verification — handoff and the two brake-violation rejections are deliberate, PUBLISHED…](#af-130)
+- [131. review-address · Push and report — Growth-audit trail (+ re-arm on sound): audit rounds record the verdict under…](#af-131)
+- [132. review-address · Push and report — The mirror of the resolve above: a finding the agent did NOT resolve keeps its…](#af-132)
+- [133. review-address · Push and report — Idempotence gate: a crash-and-rerun of this round, a same-run repair that…](#af-133)
+- [134. review-address · Push and report — The tree the gate verified is what gets pushed: assert HEAD is the gate's…](#af-134)
+- [135. review-address · Push and report — Bounded retry on the report post: this one comment carries the round's ENTIRE…](#af-135)
+- [136. review-address · Push and report — Crossing trigger, not an equality test: failure rounds also advance the round…](#af-136)
+- [137. review-address · Report dry-run / failure — This step also posts a round report (timeout / gate-rejection / abort), so it…](#af-137)
+- [138. review-address · Report dry-run / failure — handoff rounds end with a SUCCESS job status (a deliberate verdict), so they…](#af-138)
+- [139. review-address · Report dry-run / failure — Cause-aware wording, most specific first — a model error and a gate crash each…](#af-139)
+- [140. review-address · Report dry-run / failure — A deliberate stop, not a failed fix: the agent stopped under instruction and…](#af-140)
+- [141. review-address · Report dry-run / failure — A brake VIOLATION, not a failed fix: the agent stopped under instruction but…](#af-141)
+- [142. review-address · Report dry-run / failure — The committed sibling of the dirty-handoff violation: the round HAS a commit…](#af-142)
+- [143. review-address · Report dry-run / failure — A conflict round must PARK quietly at the human call: its own stale-base merge…](#af-143)
+- [144. review-address · Report dry-run / failure — Prepare RAN (outcome success/failure) but produced no feedback to read — prepare…](#af-144)
+- [145. review-address · Report dry-run / failure — CUMULATIVE timeout breaker — the sibling of the consecutive one above, for the…](#af-145)
+- [146. review-address · Report dry-run / failure — The agent committed (verify recorded committed=true before any gate could fail),…](#af-146)
+- [147. review-address · Report dry-run / failure — Same byte-budget hygiene as the English excerpt above. 3000 bytes ≈ 1000 CJK…](#af-147)
 
 ---
 
@@ -2177,7 +2178,72 @@ round, and it is exactly the case that must not stay "working".
 
 <a id="af-073"></a>
 
-### 73. run — Per-author tail budget inside Critical-only mode. An account is an…
+### 73. review-address · Report dry-run / failure — Idle (silent-sandbox) timeouts are EXCLUDED from the cumulative timeout cap.
+
+In `review-address` · `Report dry-run / failure`.
+
+```text
+TIMEOUT_WINDOW_CAP exists to stop a PR that is too big to finish a
+round inside the agent's time budget; its remedy says so ("split or
+reduce the PR, or raise the agent time budget AND its step backstop").
+An idle timeout is a different failure entirely: run-agent.mjs's idle
+watchdog kills the round after QWEN_IDLE_TIMEOUT_MS (20m) because the
+sandbox produced no output at all — the four observed hangs (#8663 x2,
+#8761 r3, #8763 r4) each printed their last byte at docker container
+entry and then sat silent. Nothing about the PR caused it, and the
+breaker's own headline already told the reader that "no budget increase
+can cure" it. Counting a failure whose prescribed remedy is
+inapplicable is what parked healthy PRs.
+
+Measured on 2026-08-21, over the preceding 14 days: 119 timeouts, of
+which 58 (49%) were idle. 51 windows tripped this cap, every one of
+them at exactly N=3. Of the 12 open PRs then carrying
+autofix/needs-human, 9 had been stopped here — #8332 at 24 rounds,
+#8368 at 28, #8276 at 16, all still producing pushed rounds when they
+were parked. With idle rounds counted, the fleet timeout rate was
+8.5% per round, so a window accumulated three of them in ~35 rounds by
+arithmetic alone, independent of whether the PR was stuck. Excluding
+idle drops the rate to 4.3%, which needs ~69 rounds — beyond the
+deepest window ever observed (22/100).
+
+The escape hatch that makes the exclusion safe: an idle round pushes
+nothing and matches none of CONSEC_FAIL's streak-reset needles
+("Addressed the latest review feedback", "no changes needed", "AutoFix
+could not start", "updated a stale base"), so a persistently wedged
+sandbox still terminates the PR at CONSECUTIVE_FAILURE_CAP. What no
+longer terminates it is idle rounds INTERLEAVED with real progress —
+which is the intended change: that PR is not stuck, the runner is.
+
+Two consequences inside the block. IDLE_N's needle became the full
+emitted headline prefix ('AutoFix ran out of time before finishing
+(idle-timeout') rather than a bare 'idle-timeout' substring: IDLE_N is
+now subtracted from TIMEOUT_N, so it MUST be a subset of it, and a
+loose needle could otherwise match provider error text that
+API_ERROR_DETAIL puts on the same first line and drive the difference
+negative. And the all-idle remedy branch is gone as unreachable: the
+guard now fires only when BUDGET_TIMEOUT_N alone reaches the cap, so a
+tripped window always holds at least TIMEOUT_WINDOW_CAP genuine budget
+timeouts — idle rounds can outnumber budget ones in it, but the budget
+remedy applies because those budget timeouts exist, not because they
+are the majority.
+
+Idle rounds stay visible through a job-log ::warning:: rather than a PR
+comment — the signal belongs to whoever owns the runners, and infra
+noise should not spend a comment on someone's PR. The census and its
+warning run outside the cap's terminal guard: the all-idle shape stops
+via the consecutive breaker with that breaker's headline, and the
+terminal run's log is exactly where the wedged runner must be named.
+
+The same exclusion applies to the prepare step's PRIOR_TIMEOUTS census
+(af-049): its budget warning tells the agent to narrow scope — the
+budget remedy again — and an idle round never exhausted any budget, so
+it must not steer the narrowing. Idle rounds are excluded there with
+the same needle the cap census uses.
+```
+
+<a id="af-074"></a>
+
+### 74. run — Per-author tail budget inside Critical-only mode. An account is an…
 
 In `run`.
 
@@ -2194,9 +2260,9 @@ one conscious act (**[Critical]**, a Request changes review, or /retry),
 which is precisely what separates intent from automation.
 ```
 
-<a id="af-074"></a>
+<a id="af-075"></a>
 
-### 74. run — Growth audit: a budget breach engages Critical-only AND makes the round a…
+### 75. run — Growth audit: a budget breach engages Critical-only AND makes the round a…
 
 In `run`.
 
@@ -2220,9 +2286,9 @@ MAX_ROUNDS so the actionable "check the model key" message lands in an
 hour instead of a day. Transient (429/5xx) errors keep the full budget.
 ```
 
-<a id="af-075"></a>
+<a id="af-076"></a>
 
-### 75. run — Failed-check annotation patterns that mean the INFRASTRUCTURE died, not the code…
+### 76. run — Failed-check annotation patterns that mean the INFRASTRUCTURE died, not the code…
 
 In `run`.
 
@@ -2240,9 +2306,9 @@ a real regression (a co-present timeout does not block a match — one
 matching line classifies the run). Case-insensitive, vs the annotations.
 ```
 
-<a id="af-076"></a>
+<a id="af-077"></a>
 
-### 76. run — Upper bound on review targets emitted per scan (fan-out defense-in-depth; excess…
+### 77. run — Upper bound on review targets emitted per scan (fan-out defense-in-depth; excess…
 
 In `run`.
 
@@ -2260,9 +2326,9 @@ same-repo candidate pool was 51, so 30 still bounds a pathological
 backlog. RAISE BOTH TOGETHER: this must stay above QWEN_AUTOFIX_MAX_PARALLEL.
 ```
 
-<a id="af-077"></a>
+<a id="af-078"></a>
 
-### 77. run — Upper bound on candidates INSPECTED per scan: idle candidates consume serial API…
+### 78. run — Upper bound on candidates INSPECTED per scan: idle candidates consume serial API…
 
 In `run`.
 
@@ -2279,9 +2345,9 @@ candidate pool or the oldest PRs starve. The pool was 51 same-repo open
 PRs on 2026-08-08, still under the 60 fallback.
 ```
 
-<a id="af-078"></a>
+<a id="af-079"></a>
 
-### 78. run — Commit-status context stamped PENDING on a PR head when a scan dispatches a…
+### 79. run — Commit-status context stamped PENDING on a PR head when a scan dispatches a…
 
 In `run`.
 
@@ -2299,9 +2365,9 @@ authenticates with a PAT. Same-repo heads only get a stamp: a fork head
 sha does not exist in this repo's object store.
 ```
 
-<a id="af-079"></a>
+<a id="af-080"></a>
 
-### 79. run — Consecutive-failure sub-cap, distinct from the total round cap (MAX_ROUNDS,…
+### 80. run — Consecutive-failure sub-cap, distinct from the total round cap (MAX_ROUNDS,…
 
 In `run`.
 
@@ -2318,9 +2384,9 @@ unbroken run of failures. Observed on #6723: 7 straight failed rounds (3
 timeouts, 4 gate rejections) over 8 hours, heading for 100.
 ```
 
-<a id="af-080"></a>
+<a id="af-081"></a>
 
-### 80. run — Cumulative agent-timeout sub-cap, the sibling of the consecutive cap for the…
+### 81. run — Cumulative agent-timeout sub-cap, the sibling of the consecutive cap for the…
 
 In `run`.
 
@@ -2333,12 +2399,14 @@ runner time) and pushes nothing. Observed on #7929: three timeouts with
 pushed rounds in between, so the consecutive cap never fired and the PR
 kept walking into the same wall; #7846 the same, twice. Counted over the
 current counting window (window-scoped like every other census), so a
-re-arm clears it along with the round counter.
+re-arm clears it along with the round counter. Counts BUDGET timeouts
+only: silent-sandbox (idle) timeouts are infra, not PR size, and are
+excluded — see qwen-autofix.md#af-073.
 ```
 
-<a id="af-081"></a>
+<a id="af-082"></a>
 
-### 81. route · Decide phases — Real-time review triggers: process the SAME managed set the scheduled scan does,…
+### 82. route · Decide phases — Real-time review triggers: process the SAME managed set the scheduled scan does,…
 
 In `route` · `Decide phases`.
 
@@ -2354,9 +2422,9 @@ review-scan runs. Only pull_request_review:submitted triggers
 multi-comment reviews.
 ```
 
-<a id="af-082"></a>
+<a id="af-083"></a>
 
-### 82. route · Decide phases — Comment-command sugar over the labels: TAKEOVER_COMMAND applies TAKEOVER_LABEL,…
+### 83. route · Decide phases — Comment-command sugar over the labels: TAKEOVER_COMMAND applies TAKEOVER_LABEL,…
 
 In `route` · `Decide phases`.
 
@@ -2373,9 +2441,9 @@ narrows a previously fully-closed surface reopened under
 maintainer mandate.
 ```
 
-<a id="af-083"></a>
+<a id="af-084"></a>
 
-### 83. route · Decide phases — The bot only applies this label from takeover-command, which posts the engage…
+### 84. route · Decide phases — The bot only applies this label from takeover-command, which posts the engage…
 
 In `route` · `Decide phases`.
 
@@ -2390,9 +2458,9 @@ the immediate scan is this event's real work and
 still routes.
 ```
 
-<a id="af-084"></a>
+<a id="af-085"></a>
 
-### 84. issue-autofix · Sanitize workspace git config — Rather than denylist each exec-vector family (which kept missing new ones), KEEP…
+### 85. issue-autofix · Sanitize workspace git config — Rather than denylist each exec-vector family (which kept missing new ones), KEEP…
 
 Duplicated verbatim in 3 places: `issue-autofix` · `Sanitize workspace git config`, `build-cli` · `Sanitize workspace git config`, `review-address` · `Sanitize workspace git config`.
 
@@ -2410,9 +2478,9 @@ runner) means grep exits 1, which would kill the step exactly
 when there is nothing to clean.
 ```
 
-<a id="af-085"></a>
+<a id="af-086"></a>
 
-### 85. issue-autofix · Stage trusted schema gate — The staged copy's trusted-base provenance holds at cp time only: RUNNER_TEMP is…
+### 86. issue-autofix · Stage trusted schema gate — The staged copy's trusted-base provenance holds at cp time only: RUNNER_TEMP is…
 
 In `issue-autofix` · `Stage trusted schema gate`.
 
@@ -2427,9 +2495,9 @@ $GITHUB_ENV-planted PATH/preload cannot swap the sha256sum/bash/git
 the PAT step resolves (that would defeat the digest gate itself).
 ```
 
-<a id="af-086"></a>
+<a id="af-087"></a>
 
-### 86. issue-autofix · Verification gate — Settings-schema freshness gate, shared with the triage-and-address verify step…
+### 87. issue-autofix · Verification gate — Settings-schema freshness gate, shared with the triage-and-address verify step…
 
 In `issue-autofix` · `Verification gate`.
 
@@ -2444,9 +2512,9 @@ and kill the gate with no outcome), and the gate logic must come
 from the trusted base, not the branch under verification.
 ```
 
-<a id="af-087"></a>
+<a id="af-088"></a>
 
-### 87. issue-autofix · Withdraw claim on failure — Same hygiene as the PR-lane DETAIL_FILE excerpt: -c drops a partial multi-byte…
+### 88. issue-autofix · Withdraw claim on failure — Same hygiene as the PR-lane DETAIL_FILE excerpt: -c drops a partial multi-byte…
 
 In `issue-autofix` · `Withdraw claim on failure`.
 
@@ -2461,9 +2529,9 @@ swallowing the 中文说明 <details> block appended below
 under set -eo pipefail would drop the whole comment post).
 ```
 
-<a id="af-088"></a>
+<a id="af-089"></a>
 
-### 88. takeover-command · Toggle takeover label — Ack HERE, not via the pull_request:labeled round-trip: that event has been…
+### 89. takeover-command · Toggle takeover label — Ack HERE, not via the pull_request:labeled round-trip: that event has been…
 
 In `takeover-command` · `Toggle takeover label`.
 
@@ -2481,9 +2549,9 @@ heals it on the next scan if this post fails, which is why
 a failure here only warns.
 ```
 
-<a id="af-089"></a>
+<a id="af-090"></a>
 
-### 89. takeover-command · Toggle takeover label — Release ack, direct from the command — the exact mirror of the engage side…
+### 90. takeover-command · Toggle takeover label — Release ack, direct from the command — the exact mirror of the engage side…
 
 In `takeover-command` · `Toggle takeover label`.
 
@@ -2500,9 +2568,9 @@ the same PR_INFO the gates used); the route side suppresses
 the unlabeled-path ack when the label sender is the bot.
 ```
 
-<a id="af-090"></a>
+<a id="af-091"></a>
 
-### 90. retry-command · Post re-arm marker — Management resumed — the escalation label is stale. 404 is the common case (the…
+### 91. retry-command · Post re-arm marker — Management resumed — the escalation label is stale. 404 is the common case (the…
 
 In `retry-command` · `Post re-arm marker`.
 
@@ -2518,9 +2586,9 @@ also wins over re-arm everywhere (a frozen PR keeps its label),
 and the read FAILS CLOSED (mirrors takeover-ack's exit-1).
 ```
 
-<a id="af-091"></a>
+<a id="af-092"></a>
 
-### 91. takeover-ack · Acknowledge takeover state change — R2-4 mirror for the engaged direction: a delayed engaged ack — a red run re-run…
+### 92. takeover-ack · Acknowledge takeover state change — R2-4 mirror for the engaged direction: a delayed engaged ack — a red run re-run…
 
 In `takeover-ack` · `Acknowledge takeover state change`.
 
@@ -2537,9 +2605,9 @@ posting or touching labels; an unreadable history skips too
 genuinely missed ack, while nothing heals a stale marker).
 ```
 
-<a id="af-092"></a>
+<a id="af-093"></a>
 
-### 92. takeover-ack · Acknowledge takeover state change — The escalation label goes stale on a real engage or any release (a human is…
+### 93. takeover-ack · Acknowledge takeover state change — The escalation label goes stale on a real engage or any release (a human is…
 
 In `takeover-ack` · `Acknowledge takeover state change`.
 
@@ -2556,9 +2624,9 @@ informational), so a transient comment failure aborting this step
 under set -e must not strand the stale label.
 ```
 
-<a id="af-093"></a>
+<a id="af-094"></a>
 
-### 93. review-scan · Scan for PRs with new feedback — Every lane that reaches this scan is supposed to hold the PAT: route now…
+### 94. review-scan · Scan for PRs with new feedback — Every lane that reaches this scan is supposed to hold the PAT: route now…
 
 In `review-scan` · `Scan for PRs with new feedback`.
 
@@ -2576,9 +2644,9 @@ empty candidate list and report a healthy fleet of zero — green,
 forever, while the whole loop is dead.
 ```
 
-<a id="af-094"></a>
+<a id="af-095"></a>
 
-### 94. review-scan · Scan for PRs with new feedback — Candidate PRs: open, same-repo, targeting main, and either authored by the…
+### 95. review-scan · Scan for PRs with new feedback — Candidate PRs: open, same-repo, targeting main, and either authored by the…
 
 In `review-scan` · `Scan for PRs with new feedback`.
 
@@ -2593,9 +2661,9 @@ jq's // treats false as empty, so that form is false for EVERY
 input and silently green-no-op'd all forced dispatches.
 ```
 
-<a id="af-095"></a>
+<a id="af-096"></a>
 
-### 95. review-scan · Scan for PRs with new feedback — Same admission as the scheduled scan below. In-repo PRs fail CLOSED on a missing…
+### 96. review-scan · Scan for PRs with new feedback — Same admission as the scheduled scan below. In-repo PRs fail CLOSED on a missing…
 
 In `review-scan` · `Scan for PRs with new feedback`.
 
@@ -2611,9 +2679,9 @@ per-candidate permission call) so the real-time route's fork
 pickup is not silently discarded here.
 ```
 
-<a id="af-096"></a>
+<a id="af-097"></a>
 
-### 96. review-scan · Scan for PRs with new feedback — Skip-labeled PRs are excluded HERE, not only at the address gate: that gate…
+### 97. review-scan · Scan for PRs with new feedback — Skip-labeled PRs are excluded HERE, not only at the address gate: that gate…
 
 In `review-scan` · `Scan for PRs with new feedback`.
 
@@ -2628,9 +2696,9 @@ oldest tail FOREVER once the pool exceeds the budget; rotation
 guarantees every candidate is reached within pool/budget scans.
 ```
 
-<a id="af-097"></a>
+<a id="af-098"></a>
 
-### 97. review-scan · Scan for PRs with new feedback — Dispatch-pending marker: a scan that dispatched this PR within…
+### 98. review-scan · Scan for PRs with new feedback — Dispatch-pending marker: a scan that dispatched this PR within…
 
 In `review-scan` · `Scan for PRs with new feedback`.
 
@@ -2647,9 +2715,9 @@ after the metadata fetch, so it consumes inspection budget;
 acceptable because the case is rare (a PR dispatched <30m ago).
 ```
 
-<a id="af-098"></a>
+<a id="af-099"></a>
 
-### 98. review-scan · Scan for PRs with new feedback — Delay-window fallback: a review run parked BEFORE its job starts (the 10-minute…
+### 99. review-scan · Scan for PRs with new feedback — Delay-window fallback: a review run parked BEFORE its job starts (the 10-minute…
 
 In `review-scan` · `Scan for PRs with new feedback`.
 
@@ -2665,9 +2733,9 @@ the newest run page once above; match by immutable head SHA or
 PR number, never by fork-controlled bare branch name.
 ```
 
-<a id="af-099"></a>
+<a id="af-100"></a>
 
-### 99. review-scan · Scan for PRs with new feedback — Auto-rerun a check that died on INFRASTRUCTURE, not the code (see…
+### 100. review-scan · Scan for PRs with new feedback — Auto-rerun a check that died on INFRASTRUCTURE, not the code (see…
 
 In `review-scan` · `Scan for PRs with new feedback`.
 
@@ -2683,9 +2751,9 @@ the attempt increments so the next scan skips it. Any API failure
 here is fail-safe: it just means no rerun.
 ```
 
-<a id="af-100"></a>
+<a id="af-101"></a>
 
-### 100. review-scan · Scan for PRs with new feedback — startedAt is the only staleness clock: a check blocks only if it started within…
+### 101. review-scan · Scan for PRs with new feedback — startedAt is the only staleness clock: a check blocks only if it started within…
 
 In `review-scan` · `Scan for PRs with new feedback`.
 
@@ -2700,9 +2768,9 @@ the authority on it — the 330-minute horizon here would keep a
 stranded marker blocking long past its TTL.
 ```
 
-<a id="af-101"></a>
+<a id="af-102"></a>
 
-### 101. review-scan · Scan for PRs with new feedback — Ack-on-defer (#8888): a real-time human review routed this scan straight here,…
+### 102. review-scan · Scan for PRs with new feedback — Ack-on-defer (#8888): a real-time human review routed this scan straight here,…
 
 In `review-scan` · `Scan for PRs with new feedback`.
 
@@ -2719,9 +2787,9 @@ nothing arrived in them that a human is waiting on, and the
 fleet table already shows the deferral.
 ```
 
-<a id="af-102"></a>
+<a id="af-103"></a>
 
-### 102. review-scan · Scan for PRs with new feedback — Pre-first-eval floor: the PR's IMMUTABLE creation time. Feedback cannot predate…
+### 103. review-scan · Scan for PRs with new feedback — Pre-first-eval floor: the PR's IMMUTABLE creation time. Feedback cannot predate…
 
 In `review-scan` · `Scan for PRs with new feedback`.
 
@@ -2736,9 +2804,9 @@ first eval writes a marker) but never buries. NEVER fall back to the
 mutable head commit date: a base-sync HEAD would recreate the burial.
 ```
 
-<a id="af-103"></a>
+<a id="af-104"></a>
 
-### 103. review-scan · Scan for PRs with new feedback — ROUND counting is windowed by KEY EQUALITY, not timestamps: the current window…
+### 104. review-scan · Scan for PRs with new feedback — ROUND counting is windowed by KEY EQUALITY, not timestamps: the current window…
 
 In `review-scan` · `Scan for PRs with new feedback`.
 
@@ -2756,9 +2824,9 @@ the highest round wins (a terminal handoff marker must make the
 scan skip regardless of order).
 ```
 
-<a id="af-104"></a>
+<a id="af-105"></a>
 
-### 104. review-scan · Scan for PRs with new feedback — Seed for THIS window, from the '<cmd> from N' marker carried by the comment that…
+### 105. review-scan · Scan for PRs with new feedback — Seed for THIS window, from the '<cmd> from N' marker carried by the comment that…
 
 In `review-scan` · `Scan for PRs with new feedback`.
 
@@ -2774,9 +2842,9 @@ seed from a SUPERSEDED window can never leak into the live one.
 workflow's own, which is always the final line).
 ```
 
-<a id="af-105"></a>
+<a id="af-106"></a>
 
-### 105. review-scan · Scan for PRs with new feedback — Consent may have moved since PR_META: skip wins everywhere, and a takeover…
+### 106. review-scan · Scan for PRs with new feedback — Consent may have moved since PR_META: skip wins everywhere, and a takeover…
 
 In `review-scan` · `Scan for PRs with new feedback`.
 
@@ -2791,9 +2859,9 @@ collapsing the failure to '' would ignore a concurrently
 added skip for standard bot PRs.
 ```
 
-<a id="af-106"></a>
+<a id="af-107"></a>
 
-### 106. review-scan · Scan for PRs with new feedback — The escalation label rides EVERY cap detection, noticed or not: the…
+### 107. review-scan · Scan for PRs with new feedback — The escalation label rides EVERY cap detection, noticed or not: the…
 
 In `review-scan` · `Scan for PRs with new feedback`.
 
@@ -2808,9 +2876,9 @@ via the scan rotation after this ships (idle backoff:
 expect hours, not the first scan).
 ```
 
-<a id="af-107"></a>
+<a id="af-108"></a>
 
-### 107. review-scan · Scan for PRs with new feedback — Conflict-park gate for the loop's OWN head move: while a conflict handoff pends…
+### 108. review-scan · Scan for PRs with new feedback — Conflict-park gate for the loop's OWN head move: while a conflict handoff pends…
 
 In `review-scan` · `Scan for PRs with new feedback`.
 
@@ -2828,9 +2896,9 @@ stale during a park is re-handled by the address gate's own
 stale-base retry once a human wakes a round.
 ```
 
-<a id="af-108"></a>
+<a id="af-109"></a>
 
-### 108. review-scan · Scan for PRs with new feedback — Auto-update a PR that is red ONLY because of a stale base (see the…
+### 109. review-scan · Scan for PRs with new feedback — Auto-update a PR that is red ONLY because of a stale base (see the…
 
 In `review-scan` · `Scan for PRs with new feedback`.
 
@@ -2845,9 +2913,9 @@ because a stuck-on-stale-base PR often has no NEW feedback at all (it
 just sits red), which is exactly #7490's case.
 ```
 
-<a id="af-109"></a>
+<a id="af-110"></a>
 
-### 109. review-scan · Scan for PRs with new feedback — STALE_BASE_REDS is pure jq over data already in memory (CHECKS_JSON,…
+### 110. review-scan · Scan for PRs with new feedback — STALE_BASE_REDS is pure jq over data already in memory (CHECKS_JSON,…
 
 In `review-scan` · `Scan for PRs with new feedback`.
 
@@ -2864,9 +2932,9 @@ statuses are also excluded: a StatusContext exposes .context, not
 (conservative — only Actions check-runs are matched).
 ```
 
-<a id="af-110"></a>
+<a id="af-111"></a>
 
-### 110. review-address · Stage trusted schema gate and agent runner — The staged copies' trusted-base provenance holds at cp time only: RUNNER_TEMP is…
+### 111. review-address · Stage trusted schema gate and agent runner — The staged copies' trusted-base provenance holds at cp time only: RUNNER_TEMP is…
 
 In `review-address` · `Stage trusted schema gate and agent runner`.
 
@@ -2884,9 +2952,9 @@ sha256sum/bash/git the steps resolve (that would defeat the digest
 gate itself).
 ```
 
-<a id="af-111"></a>
+<a id="af-112"></a>
 
-### 111. review-address · Prepare branch and feedback — This PAT-bearing step runs git (status/restore/fetch/checkout and a push…
+### 112. review-address · Prepare branch and feedback — This PAT-bearing step runs git (status/restore/fetch/checkout and a push…
 
 In `review-address` · `Prepare branch and feedback`.
 
@@ -2902,9 +2970,9 @@ setup, npm ci, artifact download all sit before it — cannot steer
 its git, and a fsmonitor/askpass/gpg.program plant cannot fire).
 ```
 
-<a id="af-112"></a>
+<a id="af-113"></a>
 
-### 112. review-address · Prepare branch and feedback — ---- address-time eligibility recheck --------------------------- Fan-out can…
+### 113. review-address · Prepare branch and feedback — ---- address-time eligibility recheck --------------------------- Fan-out can…
 
 In `review-address` · `Prepare branch and feedback`.
 
@@ -2920,9 +2988,9 @@ UNKNOWN and discards too (fail closed — the next scan re-emits a
 still-valid target).
 ```
 
-<a id="af-113"></a>
+<a id="af-114"></a>
 
-### 113. review-address · Prepare branch and feedback — Maintainer-fork target: the branch does not exist on origin — fetch it (data…
+### 114. review-address · Prepare branch and feedback — Maintainer-fork target: the branch does not exist on origin — fetch it (data…
 
 In `review-address` · `Prepare branch and feedback`.
 
@@ -2937,9 +3005,9 @@ and `http.sslVerify=true` pins the transport. Fail closed on a
 401 rather than authenticate.
 ```
 
-<a id="af-114"></a>
+<a id="af-115"></a>
 
-### 114. review-address · Prepare branch and feedback — Allow-edits pushes ride the classic-PAT grant — GITHUB_TOKEN and fine-grained…
+### 115. review-address · Prepare branch and feedback — Allow-edits pushes ride the classic-PAT grant — GITHUB_TOKEN and fine-grained…
 
 In `review-address` · `Prepare branch and feedback`.
 
@@ -2954,9 +3022,9 @@ planted helper must never answer first) and http.sslVerify
 pins the transport — see 'Publish PR' for the full rationale.
 ```
 
-<a id="af-115"></a>
+<a id="af-116"></a>
 
-### 115. review-address · Prepare branch and feedback — Release the dispatch-pending marker the emitting scan stamped on this head: the…
+### 116. review-address · Prepare branch and feedback — Release the dispatch-pending marker the emitting scan stamped on this head: the…
 
 In `review-address` · `Prepare branch and feedback`.
 
@@ -2973,9 +3041,9 @@ head sha is absent from this repo's object store and was never
 stamped; dry runs stamp nothing either.
 ```
 
-<a id="af-116"></a>
+<a id="af-117"></a>
 
-### 116. review-address · Prepare branch and feedback — Mechanical churn must not burn the budget: one dependency bump rewrites hundreds…
+### 117. review-address · Prepare branch and feedback — Mechanical churn must not burn the budget: one dependency bump rewrites hundreds…
 
 In `review-address` · `Prepare branch and feedback`.
 
@@ -2991,9 +3059,9 @@ to BOTH measurements: a lockfile can live under a test directory
 side only would corrupt the NET_SRC subtraction.
 ```
 
-<a id="af-117"></a>
+<a id="af-118"></a>
 
-### 117. review-address · Prepare branch and feedback — The instant THIS round's net was measured. Stamped into the growth-now marker so…
+### 118. review-address · Prepare branch and feedback — The instant THIS round's net was measured. Stamped into the growth-now marker so…
 
 In `review-address` · `Prepare branch and feedback`.
 
@@ -3009,9 +3077,9 @@ that still stamped would be explicit in the per-run collapse and
 displace the same run's real measurement (#9192 R4-3).
 ```
 
-<a id="af-118"></a>
+<a id="af-119"></a>
 
-### 118. review-address · Prepare branch and feedback — NOTE (#9114 R2-8/R6-3): re-anchoring on an EXTERNAL head move (an author push)…
+### 119. review-address · Prepare branch and feedback — NOTE (#9114 R2-8/R6-3): re-anchoring on an EXTERNAL head move (an author push)…
 
 In `review-address` · `Prepare branch and feedback`.
 
@@ -3028,9 +3096,9 @@ PERSISTED cut (a one-round cut is re-admitted the next round);
 that is its own change, tracked in #9114.
 ```
 
-<a id="af-119"></a>
+<a id="af-120"></a>
 
-### 119. review-address · Prepare branch and feedback — KNOWN RESIDUAL (#9114): this sibling read still filters on the comment's…
+### 120. review-address · Prepare branch and feedback — KNOWN RESIDUAL (#9114): this sibling read still filters on the comment's…
 
 In `review-address` · `Prepare branch and feedback`.
 
@@ -3046,9 +3114,9 @@ growth-base marker is tracked with the rest of #9114 rather than
 widening this change.
 ```
 
-<a id="af-120"></a>
+<a id="af-121"></a>
 
-### 120. review-address · Prepare branch and feedback — Growth audit: a budget breach engages Critical-only AND makes the round a…
+### 121. review-address · Prepare branch and feedback — Growth audit: a budget breach engages Critical-only AND makes the round a…
 
 In `review-address` · `Prepare branch and feedback`.
 
@@ -3104,9 +3172,9 @@ attempt already posted a marker, so counting it would over-report
 the round's own attempt as a PRIOR one.
 ```
 
-<a id="af-121"></a>
+<a id="af-122"></a>
 
-### 121. review-address · Prepare branch and feedback — Conflict-handoff idempotence: a conflict verdict parks the PR at a genuinely…
+### 122. review-address · Prepare branch and feedback — Conflict-handoff idempotence: a conflict verdict parks the PR at a genuinely…
 
 In `review-address` · `Prepare branch and feedback`.
 
@@ -3152,9 +3220,9 @@ conflict round's own stale-base retry both skip parked PRs),
 so any check newer than both clocks is human-caused.
 ```
 
-<a id="af-122"></a>
+<a id="af-123"></a>
 
-### 122. review-address · Prepare branch and feedback — Growth audit (a size signal triggers a JUDGMENT, never a stop): the window is…
+### 123. review-address · Prepare branch and feedback — Growth audit (a size signal triggers a JUDGMENT, never a stop): the window is…
 
 In `review-address` · `Prepare branch and feedback`.
 
@@ -3170,9 +3238,9 @@ window's audit trail so a re-audit after a prior verdict must
 bring new evidence to repeat it.
 ```
 
-<a id="af-123"></a>
+<a id="af-124"></a>
 
-### 123. review-address · Post autofix status comment — The agent below runs for up to 130 minutes and the verification gate adds more,…
+### 124. review-address · Post autofix status comment — The agent below runs for up to 130 minutes and the verification gate adds more,…
 
 In `review-address` · `Post autofix status comment`.
 
@@ -3189,9 +3257,9 @@ never announces a round it will not run. Best-effort: a status post that
 fails warns and continues — it must never cost the round.
 ```
 
-<a id="af-124"></a>
+<a id="af-125"></a>
 
-### 124. review-address · Triage and address — The primary attempt's real budget: 120m, with a 10-minute margin under the…
+### 125. review-address · Triage and address — The primary attempt's real budget: 120m, with a 10-minute margin under the…
 
 In `review-address` · `Triage and address`.
 
@@ -3208,9 +3276,9 @@ requires editing this default, BUDGET_CAP_MS, and the step backstop,
 while a misconfigured variable degrades to a warning, not a misreport.
 ```
 
-<a id="af-125"></a>
+<a id="af-126"></a>
 
-### 125. review-address · Triage and address — Prepare severed hooks for its PAT-bearing git ops; THIS step holds no PAT, so…
+### 126. review-address · Triage and address — Prepare severed hooks for its PAT-bearing git ops; THIS step holds no PAT, so…
 
 In `review-address` · `Triage and address`.
 
@@ -3227,9 +3295,9 @@ write-capable collaborators); keep AUTOFIX_OPENAI_API_KEY a
 low-privilege, quota-bounded, rotatable key.
 ```
 
-<a id="af-126"></a>
+<a id="af-127"></a>
 
-### 126. review-address · Repair deterministic rejection — Which side is corrupt is NOT known here — jq -s fails if EITHER input is…
+### 127. review-address · Repair deterministic rejection — Which side is corrupt is NOT known here — jq -s fails if EITHER input is…
 
 In `review-address` · `Repair deterministic rejection`.
 
@@ -3247,9 +3315,9 @@ neutralized because the content is agent-written and a raw
 `::` at line start would be parsed as a workflow command.
 ```
 
-<a id="af-127"></a>
+<a id="af-128"></a>
 
-### 127. review-address · Finalize verification — The verdict travels WITH the attempt whose outcome is selected: a repair pass…
+### 128. review-address · Finalize verification — The verdict travels WITH the attempt whose outcome is selected: a repair pass…
 
 In `review-address` · `Finalize verification`.
 
@@ -3264,9 +3332,9 @@ a repair that validated nothing leaves the first pass's
 validated verdict as the record.
 ```
 
-<a id="af-128"></a>
+<a id="af-129"></a>
 
-### 128. review-address · Finalize verification — Conclusion gate: fixed/noop are the ONLY outcomes that release the PAT push. A…
+### 129. review-address · Finalize verification — Conclusion gate: fixed/noop are the ONLY outcomes that release the PAT push. A…
 
 In `review-address` · `Finalize verification`.
 
@@ -3282,9 +3350,9 @@ report's retry path), never as a verdict, and the audit bit
 riding the tainted outputs is discarded with it.
 ```
 
-<a id="af-129"></a>
+<a id="af-130"></a>
 
-### 129. review-address · Finalize verification — handoff and the two brake-violation rejections are deliberate, PUBLISHED…
+### 130. review-address · Finalize verification — handoff and the two brake-violation rejections are deliberate, PUBLISHED…
 
 In `review-address` · `Finalize verification`.
 
@@ -3303,9 +3371,9 @@ the very item the headline promises not to retry, turning
 one deliberate stop into a self-feeding loop.
 ```
 
-<a id="af-130"></a>
+<a id="af-131"></a>
 
-### 130. review-address · Push and report — Growth-audit trail (+ re-arm on sound): audit rounds record the verdict under…
+### 131. review-address · Push and report — Growth-audit trail (+ re-arm on sound): audit rounds record the verdict under…
 
 In `review-address` · `Push and report`.
 
@@ -3324,9 +3392,9 @@ round then FAILED must not re-anchor the window — the failure
 path re-measures under the same window instead.
 ```
 
-<a id="af-131"></a>
+<a id="af-132"></a>
 
-### 131. review-address · Push and report — The mirror of the resolve above: a finding the agent did NOT resolve keeps its…
+### 132. review-address · Push and report — The mirror of the resolve above: a finding the agent did NOT resolve keeps its…
 
 In `review-address` · `Push and report`.
 
@@ -3341,9 +3409,9 @@ identity, so it could otherwise smuggle a forged control marker.
 Best-effort: a reply failure must never fail a good push.
 ```
 
-<a id="af-132"></a>
+<a id="af-133"></a>
 
-### 132. review-address · Push and report — Idempotence gate: a crash-and-rerun of this round, a same-run repair that…
+### 133. review-address · Push and report — Idempotence gate: a crash-and-rerun of this round, a same-run repair that…
 
 In `review-address` · `Push and report`.
 
@@ -3361,9 +3429,9 @@ a stale or empty threads view this degrades to the old
 post-always behavior.
 ```
 
-<a id="af-133"></a>
+<a id="af-134"></a>
 
-### 133. review-address · Push and report — The tree the gate verified is what gets pushed: assert HEAD is the gate's…
+### 134. review-address · Push and report — The tree the gate verified is what gets pushed: assert HEAD is the gate's…
 
 In `review-address` · `Push and report`.
 
@@ -3378,9 +3446,9 @@ in GITHUB_OUTPUT (unreachable from a disk write). Empty
 verified_head only on a noop, which does not reach this push.
 ```
 
-<a id="af-134"></a>
+<a id="af-135"></a>
 
-### 134. review-address · Push and report — Bounded retry on the report post: this one comment carries the round's ENTIRE…
+### 135. review-address · Push and report — Bounded retry on the report post: this one comment carries the round's ENTIRE…
 
 In `review-address` · `Push and report`.
 
@@ -3396,9 +3464,9 @@ keeps today's semantics (step fails, no marker, next scan
 retries the round).
 ```
 
-<a id="af-135"></a>
+<a id="af-136"></a>
 
-### 135. review-address · Push and report — Crossing trigger, not an equality test: failure rounds also advance the round…
+### 136. review-address · Push and report — Crossing trigger, not an equality test: failure rounds also advance the round…
 
 In `review-address` · `Push and report`.
 
@@ -3415,9 +3483,9 @@ is the seed — otherwise the seed-inflated counter digests on
 the window's first push with a 1-2 round census.
 ```
 
-<a id="af-136"></a>
+<a id="af-137"></a>
 
-### 136. review-address · Report dry-run / failure — This step also posts a round report (timeout / gate-rejection / abort), so it…
+### 137. review-address · Report dry-run / failure — This step also posts a round report (timeout / gate-rejection / abort), so it…
 
 In `review-address` · `Report dry-run / failure`.
 
@@ -3433,9 +3501,9 @@ marker these fallbacks exist to keep); the reader falls back to
 the comment's created_at.
 ```
 
-<a id="af-137"></a>
+<a id="af-138"></a>
 
-### 137. review-address · Report dry-run / failure — handoff rounds end with a SUCCESS job status (a deliberate verdict), so they…
+### 138. review-address · Report dry-run / failure — handoff rounds end with a SUCCESS job status (a deliberate verdict), so they…
 
 In `review-address` · `Report dry-run / failure`.
 
@@ -3450,9 +3518,9 @@ cannot re-select the PR), so they key on the outcome the same
 way.
 ```
 
-<a id="af-138"></a>
+<a id="af-139"></a>
 
-### 138. review-address · Report dry-run / failure — Cause-aware wording, most specific first — a model error and a gate crash each…
+### 139. review-address · Report dry-run / failure — Cause-aware wording, most specific first — a model error and a gate crash each…
 
 In `review-address` · `Report dry-run / failure`.
 
@@ -3468,9 +3536,9 @@ problem.) No Run log here — the report block below appends
 it (avoid a duplicate).
 ```
 
-<a id="af-139"></a>
+<a id="af-140"></a>
 
-### 139. review-address · Report dry-run / failure — A deliberate stop, not a failed fix: the agent stopped under instruction and…
+### 140. review-address · Report dry-run / failure — A deliberate stop, not a failed fix: the agent stopped under instruction and…
 
 In `review-address` · `Report dry-run / failure`.
 
@@ -3487,9 +3555,9 @@ reason, and this stop is transient (the loop stays
 engaged); the shepherd contract test pins the distinction.
 ```
 
-<a id="af-140"></a>
+<a id="af-141"></a>
 
-### 140. review-address · Report dry-run / failure — A brake VIOLATION, not a failed fix: the agent stopped under instruction but…
+### 141. review-address · Report dry-run / failure — A brake VIOLATION, not a failed fix: the agent stopped under instruction but…
 
 In `review-address` · `Report dry-run / failure`.
 
@@ -3507,9 +3575,9 @@ Wording guard: no "🤖 AutoFix stopped" prefix, same
 reason as the handoff branch above.
 ```
 
-<a id="af-141"></a>
+<a id="af-142"></a>
 
-### 141. review-address · Report dry-run / failure — The committed sibling of the dirty-handoff violation: the round HAS a commit…
+### 142. review-address · Report dry-run / failure — The committed sibling of the dirty-handoff violation: the round HAS a commit…
 
 In `review-address` · `Report dry-run / failure`.
 
@@ -3526,9 +3594,9 @@ Wording guard: no "🤖 AutoFix stopped" prefix, same
 reason as the handoff branch above.
 ```
 
-<a id="af-142"></a>
+<a id="af-143"></a>
 
-### 142. review-address · Report dry-run / failure — A conflict round must PARK quietly at the human call: its own stale-base merge…
+### 143. review-address · Report dry-run / failure — A conflict round must PARK quietly at the human call: its own stale-base merge…
 
 In `review-address` · `Report dry-run / failure`.
 
@@ -3543,9 +3611,9 @@ gate; base staleness is re-handled by this retry once a
 human wakes.
 ```
 
-<a id="af-143"></a>
+<a id="af-144"></a>
 
-### 143. review-address · Report dry-run / failure — Prepare RAN (outcome success/failure) but produced no feedback to read — prepare…
+### 144. review-address · Report dry-run / failure — Prepare RAN (outcome success/failure) but produced no feedback to read — prepare…
 
 In `review-address` · `Report dry-run / failure`.
 
@@ -3560,9 +3628,9 @@ zero rounds happened. The headline states the real recovery
 max-round guard would ignore.
 ```
 
-<a id="af-144"></a>
+<a id="af-145"></a>
 
-### 144. review-address · Report dry-run / failure — CUMULATIVE timeout breaker — the sibling of the consecutive one above, for the…
+### 145. review-address · Report dry-run / failure — CUMULATIVE timeout breaker — the sibling of the consecutive one above, for the…
 
 In `review-address` · `Report dry-run / failure`.
 
@@ -3574,14 +3642,18 @@ but it does not make the next timeout cheaper — each burns a
 full agent budget with nothing to show (observed on #7929:
 three timeouts with successes in between; #7846 twice). The
 census reuses PRIOR_HEADS, so it is window-scoped exactly
-like the consecutive one and a re-arm clears it. Only
-overrides a would-be RETRY: a round already terminal keeps
-its own headline (the consecutive breaker included).
+like the consecutive one and a re-arm clears it. Only the
+cap gate below overrides a would-be RETRY: a round already
+terminal keeps its own headline (the consecutive breaker
+included). The idle census and its warning run OUTSIDE that
+guard: the all-idle shape terminates via the consecutive
+breaker above, and that terminal run's job log is exactly
+where the wedged runner must be named.
 ```
 
-<a id="af-145"></a>
+<a id="af-146"></a>
 
-### 145. review-address · Report dry-run / failure — The agent committed (verify recorded committed=true before any gate could fail),…
+### 146. review-address · Report dry-run / failure — The agent committed (verify recorded committed=true before any gate could fail),…
 
 In `review-address` · `Report dry-run / failure`.
 
@@ -3596,9 +3668,9 @@ paths (failure.md, dirty tree, unchanged branch, missing
 summary) made no commit and keep the neutral framing below.
 ```
 
-<a id="af-146"></a>
+<a id="af-147"></a>
 
-### 146. review-address · Report dry-run / failure — Same byte-budget hygiene as the English excerpt above. 3000 bytes ≈ 1000 CJK…
+### 147. review-address · Report dry-run / failure — Same byte-budget hygiene as the English excerpt above. 3000 bytes ≈ 1000 CJK…
 
 In `review-address` · `Report dry-run / failure`.
 
