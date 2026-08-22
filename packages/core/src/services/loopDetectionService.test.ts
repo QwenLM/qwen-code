@@ -2862,6 +2862,45 @@ describe('LoopDetectionService', () => {
           await fs.rm(spillDir, { recursive: true, force: true });
         }
       });
+
+      it('keeps truncated-output polling alive when the board changes in the truncated middle band', async () => {
+        // truncateAndSaveToFile retains a head and a tail and drops the
+        // middle band, so a board mutating inside that band hashes to an
+        // identical head+tail payload on every poll. The full-output digest
+        // embedded in the envelope must keep the fingerprints distinct;
+        // without it the always-on guard halts this productive poller at
+        // the 5th identical request.
+        const spillDir = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'loop-detection-stub-'),
+        );
+        const head = 'task row head line\n'.repeat(30);
+        const tail = 'task row tail line\n'.repeat(30);
+        try {
+          let fired = false;
+          for (let i = 0; i < 4 * TOOL_CALL_LOOP_THRESHOLD; i++) {
+            fired = service.checkAlwaysOnSafeties(taskListEvent(`poll_${i}`));
+            if (fired) break;
+            const middle = `middle band state v${i}\n`.repeat(400);
+            const { content } = await truncateAndSaveToFile(
+              `${head}${middle}${tail}`,
+              `task_list_poll_${i}`,
+              spillDir,
+              1024,
+              Number.POSITIVE_INFINITY,
+              'both',
+              400,
+            );
+            service.recordToolResult(
+              { name: 'task_list', args: TASK_LIST_ARGS },
+              taskListResult(content, `poll_${i}`),
+            );
+          }
+          expect(fired).toBe(false);
+          expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+        } finally {
+          await fs.rm(spillDir, { recursive: true, force: true });
+        }
+      });
     });
   });
 });

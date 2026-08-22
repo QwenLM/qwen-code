@@ -425,37 +425,42 @@ export class LoopDetectionService {
   }
 
   /**
-   * Oversized tool results are rewritten by the response finalizer into
-   * truncation stubs (see utils/truncation.ts): a `<persisted-output>`
-   * envelope embedding the unique `<toolResultsDir>/<callId>.txt` path, an
-   * unwrapped `Output too large (...)` envelope whose session-dependent note
-   * can also vary between calls, or the `truncateAndSaveToFile` fallback
-   * embedding a random temp-file name. Hashing the envelope would make every
-   * fingerprint unique per call — silently disabling every result-aware
-   * guard for exactly the largest results — so reduce a stub to its
-   * semantic payload. buildStub embeds a sha256 of the full pre-truncation
-   * output (FULL_OUTPUT_DIGEST_LABEL); prefer it, because the preview only
-   * covers the first PREVIEW_SIZE_CHARS chars — a board mutating beyond
-   * that window must still fingerprint differently each poll (and a frozen
-   * board identically). Stubs without a digest line fall back to the
-   * preview/truncated content after the stable marker. The markers are the
-   * shared constants from utils/truncation.ts so the parser cannot drift
-   * from the producer. The `<persisted-stub>` sentinel keeps a stub
-   * fingerprint from ever colliding with a small literal output that
-   * matches the payload.
+   * Oversized tool results are rewritten into truncation stubs (see
+   * utils/truncation.ts and the batch-budget finalizer): a
+   * `<persisted-output>` envelope embedding the unique
+   * `<toolResultsDir>/<callId>.txt` path, an unwrapped `Output too large
+   * (...)` envelope whose session-dependent note can also vary between
+   * calls, the `truncateAndSaveToFile` shape embedding a random temp-file
+   * name, or a batch-budget fit whose header embeds a per-call artifact
+   * path. Hashing the envelope would make every fingerprint unique per call
+   * — silently disabling every result-aware guard for exactly the largest
+   * results — so reduce a stub to its semantic payload. The producers embed
+   * a sha256 of the full pre-truncation output (FULL_OUTPUT_DIGEST_LABEL);
+   * prefer it over any visible content, because previews and head+tail
+   * payloads only cover the first/last chars — a board mutating in the
+   * dropped band must still fingerprint differently each poll (and a
+   * frozen board identically) no matter which stub shape carries it. The
+   * digest-first rule also covers stubs nested inside a further batch-budget
+   * fit, where the outer digest fingerprints the inner stub as a whole.
+   * Stubs without a digest line fall back to the shape's visible payload
+   * after its stable marker. The markers are the shared constants from
+   * utils/truncation.ts so the parser cannot drift from the producer. The
+   * `<persisted-stub>` sentinel keeps a stub fingerprint from ever
+   * colliding with a small literal output that matches the payload.
    */
   private static stripPersistenceEnvelope(value: string): string {
+    const digestIndex = value.indexOf(FULL_OUTPUT_DIGEST_LABEL);
+    if (digestIndex >= 0) {
+      const digestStart = digestIndex + FULL_OUTPUT_DIGEST_LABEL.length;
+      // sha256 hex digest length
+      const digest = value.slice(digestStart, digestStart + 64);
+      return `<persisted-stub>sha256:${digest}`;
+    }
+
     const isPreviewStub =
       value.includes(PERSISTED_OUTPUT_OPEN_TAG) ||
       value.startsWith(OUTPUT_TOO_LARGE_PREFIX);
     if (isPreviewStub) {
-      const digestIndex = value.indexOf(FULL_OUTPUT_DIGEST_LABEL);
-      if (digestIndex >= 0) {
-        const digestStart = digestIndex + FULL_OUTPUT_DIGEST_LABEL.length;
-        // sha256 hex digest length
-        const digest = value.slice(digestStart, digestStart + 64);
-        return `<persisted-stub>sha256:${digest}`;
-      }
       const marker = `${PERSISTED_PREVIEW_MARKER}\n`;
       const index = value.indexOf(marker);
       if (index >= 0) {

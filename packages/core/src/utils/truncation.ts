@@ -203,10 +203,16 @@ export async function truncateAndSaveToFile(
   // Sanitize fileName to prevent path traversal.
   const safeFileName = `${path.basename(fileName)}.output`;
   const outputFile = path.join(projectTempDir, safeFileName);
+  // sha256 of the FULL pre-truncation output (see FULL_OUTPUT_DIGEST_LABEL):
+  // the head+tail below drops the middle band, so consumers that fingerprint
+  // results (the loop guards) need the digest to stay sensitive to mutations
+  // landing in that band (issue #9450).
+  const fullDigest = crypto.createHash('sha256').update(content).digest('hex');
   const wrappedMessage = `${TOOL_OUTPUT_TRUNCATED_PREFIX}.
 The full output has been saved to: ${outputFile}
 To read the complete output, use the ${ReadFileTool.Name} tool with the absolute file path above.
 The truncated output below shows the beginning and end of the content. The marker '... [CONTENT TRUNCATED] ...' indicates where content was removed.
+${FULL_OUTPUT_DIGEST_LABEL}${fullDigest}
 
 ${TRUNCATED_PART_MARKER}${truncatedContent}`;
 
@@ -235,9 +241,10 @@ ${TRUNCATED_PART_MARKER}${truncatedContent}`;
       `Failed to save truncated output to ${outputFile}:`,
       error,
     );
+    // Keep the digest even on the unsaved path: the fingerprinting
+    // consumers must not regress to the head+tail-only payload here.
     return {
-      content:
-        truncatedContent + `\n[Note: Could not save full output to file]`,
+      content: `${FULL_OUTPUT_DIGEST_LABEL}${fullDigest}\n${truncatedContent}\n[Note: Could not save full output to file]`,
     };
   }
 }
