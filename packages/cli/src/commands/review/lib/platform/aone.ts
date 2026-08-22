@@ -683,7 +683,7 @@ export const aoneReader: ReviewPlatformReader = {
     // One flat collection serves the three GitHub channels; `--sort asc`
     // gives chronological order (the GitHub endpoints' natural order).
     // a1 has no pagination flags — the full list arrives in one payload.
-    const raw = a1Json<AoneComment[]>(
+    const raw = a1Json<unknown>(
       'repo',
       'mr',
       'comment',
@@ -695,7 +695,24 @@ export const aoneReader: ReviewPlatformReader = {
       '--sort',
       'asc',
     );
-    const comments: ReviewContextComment[] = (raw ?? [])
+    // a1 can answer this exact command with a well-formed `a1.error/v1`
+    // error OBJECT at exit 0 (a backend auth failure or a client timeout —
+    // measured by cleanup's a1CommentList, same payload, same guard).
+    // `?? []` does not coalesce an object, `.filter` would throw an
+    // untagged TypeError out of getReviewContext, and the envelope's
+    // actionable message — the difference between "re-authenticate" and
+    // "schema drift" — would be lost at exactly the moment the context
+    // read fails for a recoverable reason.
+    if (!Array.isArray(raw)) {
+      const cause = (raw as { message?: unknown } | null)?.message;
+      throw new Error(
+        'a1 mr comment list returned an unexpected shape' +
+          (typeof cause === 'string' && cause.trim() !== ''
+            ? `: ${cause.trim()}`
+            : ''),
+      );
+    }
+    const comments: ReviewContextComment[] = (raw as AoneComment[])
       .filter((c) => !c.isDraft)
       .map((c) => ({
         id: c.id,

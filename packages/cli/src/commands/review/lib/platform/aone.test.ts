@@ -683,6 +683,36 @@ describe('aoneReader.getReviewContext / getCurrentUser', () => {
     expect(ctx.headRefOid).toBe('sha123');
     expect(ctx.headRefName).toBe('sha123');
   });
+
+  it('tags the exit-0 a1.error/v1 envelope from the comment listing', () => {
+    // a1 can answer `comment list` with a well-formed error OBJECT at
+    // exit 0 (a backend auth failure or a client timeout — measured by
+    // cleanup's a1CommentList, same payload). The guard surfaces the
+    // envelope's actionable message instead of an untagged TypeError.
+    a1JsonMock
+      .mockReturnValueOnce({
+        mergeRequest: { sourceBranch: 'sha123', targetBranch: 'master' },
+      })
+      .mockReturnValueOnce({
+        schemaVersion: 'a1.error/v1',
+        code: 'COMMAND_FAILED',
+        message: 'listing MR comments: backend auth failure — token expired',
+      });
+    expect(() => aoneReader.getReviewContext(7, 'g/p')).toThrow(
+      'a1 mr comment list returned an unexpected shape: listing MR comments: backend auth failure — token expired',
+    );
+  });
+
+  it('tags the unexpected-shape refusal when the envelope has no message', () => {
+    a1JsonMock
+      .mockReturnValueOnce({
+        mergeRequest: { sourceBranch: 'sha123', targetBranch: 'master' },
+      })
+      .mockReturnValueOnce({ schemaVersion: 'a1.error/v1' });
+    expect(() => aoneReader.getReviewContext(7, 'g/p')).toThrow(
+      'a1 mr comment list returned an unexpected shape',
+    );
+  });
 });
 
 describe("mrPresubmitFacts (the presubmit gate's Aone seam)", () => {
