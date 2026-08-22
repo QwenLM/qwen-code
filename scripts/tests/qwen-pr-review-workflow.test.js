@@ -3069,9 +3069,19 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
     expect(job.if).toContain("needs.review-pr.result == 'failure'");
     // A review-pr that dies to its own job-level timeout is auto-cancelled
     // (result 'cancelled', failure() false), which would open neither this
-    // gate nor the in-job step; a run-level cancel cancels this queued job
-    // too, so a live evaluation seeing 'cancelled' is the timeout case.
-    expect(job.if).toContain("needs.review-pr.result == 'cancelled'");
+    // gate nor the in-job step — but `always()` keeps this job alive through
+    // a RUN-level cancel, so a bare 'cancelled' clause posts a false "did
+    // not complete" from a concurrency-superseded run while its same-head
+    // twin is still reviewing (PR #9131, run 32558544379 — same head, so
+    // the in-step head-moved guard cannot catch it). The two cancels differ
+    // in `needs`: a timeout cancels review-pr ALONE, a run-level cancel
+    // sweeps the upstream chain too. Pin the full compound clause — the
+    // grouping included — so reverting either upstream conjunct fails here.
+    expect(job.if).toContain(
+      "(needs.review-pr.result == 'cancelled' &&\n" +
+        "  needs.authorize.result != 'cancelled' &&\n" +
+        "  needs.delay-automatic-review.result != 'cancelled') ||",
+    );
     expect(job.if).toContain("needs.authorize.result == 'failure'");
     expect(job.if).toContain("needs.review-config.result == 'failure'");
     expect(job.if).toContain(
