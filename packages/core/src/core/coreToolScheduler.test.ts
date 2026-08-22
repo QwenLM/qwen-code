@@ -17548,6 +17548,12 @@ describe('CoreToolScheduler activation wiring', () => {
   function buildSchedulerWithSkillManager(opts: {
     matchAndActivateByPaths: ReturnType<typeof vi.fn>;
     skillToolPresent: boolean;
+    /**
+     * What the owner DECLARED to the model, when it filters its declarations.
+     * `undefined` leaves the option off, which is the top-level session shape:
+     * the scheduler then falls back to the registry.
+     */
+    declaredHasSkillTool?: boolean;
     toolResult?: ToolResult;
     // Names the mock SkillManager.listSkills will report as available. When
     // omitted, defaults to ["tsx-helper"] which satisfies the common case.
@@ -17642,6 +17648,9 @@ describe('CoreToolScheduler activation wiring', () => {
       onToolCallsUpdate,
       getPreferredEditor: () => 'vscode',
       onEditorClose: vi.fn(),
+      ...(opts.declaredHasSkillTool === undefined
+        ? {}
+        : { hasSkillTool: () => opts.declaredHasSkillTool! }),
     });
     return { scheduler, onAllToolCallsComplete };
   }
@@ -17680,6 +17689,73 @@ describe('CoreToolScheduler activation wiring', () => {
     const responseText = getResponseText(completed[0]);
     expect(responseText).toContain('tsx-helper');
     expect(responseText).toContain('became available via the Skill tool');
+  });
+
+  it('stays silent when SkillTool is registered but was never declared', async () => {
+    // The defect this gate was written for, and the shape the registry cannot
+    // see. `SKILL` is registered unconditionally — no `forSubAgent` guard —
+    // so a subagent running an explicit `tools` list that omits it still has
+    // `getTool(SKILL)` return a tool. Reading the registry therefore held the
+    // gate permanently open, and the agent got a reminder naming a tool
+    // absent from its declarations: a wasted turn on `Tool "skill" not
+    // found`, and an announcement marked consumed on the shared Config, so
+    // the parent that CAN invoke it never learns the skill activated.
+    const matchAndActivateByPaths = vi.fn().mockResolvedValue(['tsx-helper']);
+    const { scheduler, onAllToolCallsComplete } =
+      buildSchedulerWithSkillManager({
+        matchAndActivateByPaths,
+        skillToolPresent: true,
+        declaredHasSkillTool: false,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: ToolNames.READ_FILE,
+          args: { file_path: '/proj/src/App.tsx' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const completed = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    expect(completed[0].status).toBe('success');
+    const responseText = getResponseText(completed[0]);
+    expect(responseText).not.toContain('became available via the Skill tool');
+    expect(responseText).not.toContain('tsx-helper');
+  });
+
+  it('announces when the owner declares SkillTool, whatever the registry holds', async () => {
+    // The other direction, so the predicate is not mistaken for a second
+    // "off" switch: an owner that declares the tool gets the reminder.
+    const matchAndActivateByPaths = vi.fn().mockResolvedValue(['tsx-helper']);
+    const { scheduler, onAllToolCallsComplete } =
+      buildSchedulerWithSkillManager({
+        matchAndActivateByPaths,
+        skillToolPresent: true,
+        declaredHasSkillTool: true,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: ToolNames.READ_FILE,
+          args: { file_path: '/proj/src/App.tsx' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const completed = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    expect(getResponseText(completed[0])).toContain(
+      'became available via the Skill tool',
+    );
   });
 
   it('includes concrete result paths in skill activation candidates', async () => {

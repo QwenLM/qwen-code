@@ -1732,6 +1732,13 @@ export class AgentCore {
     const scheduler = new CoreToolScheduler({
       config: this.runtimeContext,
       shouldObserveProducer: (callId) => !emittedCallIds.has(callId),
+      // The same predicate that decides whether to inject the startup
+      // `<available_skills>` snapshot, so the snapshot and the per-tool-call
+      // activation reminder cannot disagree about whether this agent can
+      // invoke a skill. The scheduler's own fallback reads the registry,
+      // where `SKILL` is present for every subagent regardless of what its
+      // `tools` list declares.
+      hasSkillTool: () => this.willHaveSkillTool(),
       outputUpdateHandler: (callId, outputChunk) => {
         // Shell liveness heartbeats have no subagent consumer; broadcasting
         // one would overwrite the live output view kept in liveOutputs.

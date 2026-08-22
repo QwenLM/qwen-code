@@ -1218,6 +1218,19 @@ interface CoreToolSchedulerOptions {
   onToolResultFullTurnModel?: (model: string) => boolean;
   /** Lets an outer owner suppress a scheduler result it already emitted. */
   shouldObserveProducer?: (callId: string) => boolean;
+  /**
+   * Whether the model this scheduler serves was DECLARED the Skill tool.
+   *
+   * The skill-activation reminder must not announce a skill to a model that
+   * cannot invoke one, and the registry cannot answer that: `SKILL` is
+   * registered unconditionally, including for subagents, while a subagent
+   * running an explicit `tools` list may never have it declared. An owner
+   * that filters its declarations passes its own predicate here — the same
+   * one it used for the startup `<available_skills>` snapshot, so the two
+   * cannot disagree. Omitted, the scheduler falls back to the registry,
+   * which is correct for an owner that declares whatever it registers.
+   */
+  hasSkillTool?: () => boolean;
 }
 
 // ─── Tool Concurrency Helpers ────────────────────────────────
@@ -1392,6 +1405,7 @@ export class CoreToolScheduler {
   private chatRecordingService?: ChatRecordingService;
   private onToolResultFullTurnModel?: (model: string) => boolean;
   private shouldObserveProducer: (callId: string) => boolean;
+  private hasSkillToolOverride?: () => boolean;
   private isFinalizingToolCalls = false;
   private postToolBatchEnabledForBatch = false;
   private postToolBatchSpanCallId: string | undefined;
@@ -1462,6 +1476,7 @@ export class CoreToolScheduler {
     this.chatRecordingService = options.chatRecordingService;
     this.onToolResultFullTurnModel = options.onToolResultFullTurnModel;
     this.shouldObserveProducer = options.shouldObserveProducer ?? (() => true);
+    this.hasSkillToolOverride = options.hasSkillTool;
   }
 
   private get memoryMonitor(): MemoryPressureMonitor | undefined {
@@ -5242,9 +5257,27 @@ export class CoreToolScheduler {
           if (activatedSkills && activatedSkills.length > 0 && skillManager) {
             // Subagents share the parent's SkillManager but may run with a
             // restricted toolsList that excludes SkillTool. Announcing a skill
-            // such a context can't invoke wastes a turn, so gate on whether the
-            // active registry actually exposes SkillTool to the model.
-            const hasSkillTool = !!this.toolRegistry.getTool(ToolNames.SKILL);
+            // such a context can't invoke wastes a turn, so gate on whether
+            // SkillTool was DECLARED to the model.
+            //
+            // The registry cannot answer that. `SKILL` is registered
+            // unconditionally — `registerLazy(ToolNames.SKILL, …)` carries no
+            // `forSubAgent` guard — and `prepareTools`' `warmAll()` loads it,
+            // so `getTool(SKILL)` is true even for a subagent whose explicit
+            // `tools` list never names it. Reading the registry made this gate
+            // unconditionally open, which is the state it was written to
+            // prevent: the agent gets a reminder naming a tool absent from its
+            // declarations, and burns a turn discovering that (the invocation
+            // answers `Tool "skill" not found`). Worse, the announcement is
+            // marked consumed on the SHARED Config, so the orchestrator — which
+            // does hold the tool — never learns the skill activated.
+            //
+            // An owner that filters its declarations therefore supplies the
+            // predicate, and supplies the same one it used for the startup
+            // snapshot so the two views cannot drift apart.
+            const hasSkillTool = this.hasSkillToolOverride
+              ? this.hasSkillToolOverride()
+              : !!this.toolRegistry.getTool(ToolNames.SKILL);
             if (hasSkillTool) {
               // Render the just-activated skills with their description/whenToUse
               // (the full listing is no longer in the tool description, so the
