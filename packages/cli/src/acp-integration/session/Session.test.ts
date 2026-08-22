@@ -3495,6 +3495,10 @@ describe('Session', () => {
     });
 
     it('uses stable identities instead of classifying user-shaped entries', () => {
+      // A structural media-clear replacement inside an identified session
+      // keeps its promptId mark (microcompaction rebuilds entries as
+      // { ...content, parts }, preserving marks), so it stays an
+      // identified turn and does not force the positional fallback.
       const history: Content[] = [
         { role: 'user', parts: [{ text: 'first' }] },
         { role: 'model', parts: [{ text: 'first reply' }] },
@@ -3506,11 +3510,13 @@ describe('Session', () => {
         { role: 'user', parts: [{ text: 'second' }] },
       ];
       core.markApiHistoryPrompt(history[0]!, 'prompt-1');
+      core.markApiHistoryPrompt(history[2]!, 'prompt-media');
       core.markApiHistoryPrompt(history[4]!, 'prompt-2');
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
       mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
         'prompt-1',
         undefined,
+        'prompt-media',
         'prompt-2',
       ]);
       mockFileHistoryService.isEnabled.mockReturnValue(true);
@@ -3526,23 +3532,29 @@ describe('Session', () => {
           trackedFileBackups: {},
         },
         {
-          promptId: 'prompt-2',
+          promptId: 'prompt-media',
           timestamp: new Date('2026-06-13T00:02:00.000Z'),
+          trackedFileBackups: {},
+        },
+        {
+          promptId: 'prompt-2',
+          timestamp: new Date('2026-06-13T00:03:00.000Z'),
           trackedFileBackups: {},
         },
       ]);
 
-      expect(session.getRewindableUserTurnCount()).toBe(2);
+      expect(session.getRewindableUserTurnCount()).toBe(3);
       // Advertised turnIndexes are POSITIONAL (the client's numeric index
-      // space); the recording ordinal (2 for prompt-2, whose boundary sits
-      // behind the goal-runtime snapshot) is only the internal
-      // rewindRecording key.
+      // space); the recording ordinal (3 for prompt-2, whose boundary sits
+      // behind the goal-runtime snapshot and the undefined slot) is only
+      // the internal rewindRecording key.
       expect(session.getRewindableSnapshotTargets()).toEqual([
         { promptId: 'prompt-1', turnIndex: 0 },
-        { promptId: 'prompt-2', turnIndex: 1 },
+        { promptId: 'prompt-media', turnIndex: 1 },
+        { promptId: 'prompt-2', turnIndex: 2 },
       ]);
-      expect(session.rewindToTurn(1)).toEqual({
-        targetTurnIndex: 1,
+      expect(session.rewindToTurn(2)).toEqual({
+        targetTurnIndex: 2,
         apiTruncateIndex: 4,
         promptId: 'prompt-2',
       });
@@ -3554,12 +3566,60 @@ describe('Session', () => {
       // surviving prefix holds, and a resume rebuilding the store from this
       // batch must see the aligned shape (the agent drops the boundary from
       // the live store once the files sit AT it). The re-root itself uses
-      // the recording ordinal (2), not the positional index.
+      // the recording ordinal (3), not the positional index.
       expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
-        2,
+        3,
         { truncatedCount: 1 },
-        mockFileHistoryService.getSnapshots().slice(0, 2),
+        mockFileHistoryService.getSnapshots().slice(0, 3),
       );
+    });
+
+    it('counts a cleared media-only legacy turn in the positional fallback', () => {
+      // An UNMARKED placeholder-only entry can only be a media-only turn
+      // from before stable identities that microcompaction cleared: marks
+      // survive the rebuild, so nothing structural arrives unmarked.
+      // #isUserTextContent counts the placeholder (the media-only prompt
+      // created a file-history snapshot), so skipping it in the coverage
+      // loop would flip the session to identified mode and silently drop
+      // the legacy turn from the target space even though its snapshot
+      // still exists — pre-diff the positional walk rewound to it.
+      const history: Content[] = [
+        {
+          role: 'user',
+          parts: [{ text: '[Old inline media cleared: image/png]' }],
+        },
+        { role: 'model', parts: [{ text: 'legacy reply' }] },
+        { role: 'user', parts: [{ text: 'new prompt' }] },
+        { role: 'model', parts: [{ text: 'new reply' }] },
+      ];
+      core.markApiHistoryPrompt(history[2]!, 'prompt-new');
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
+        undefined,
+        'prompt-new',
+      ]);
+      mockFileHistoryService.isEnabled.mockReturnValue(true);
+      const snap = (promptId: string, minutes: number) => ({
+        promptId,
+        timestamp: new Date(`2026-06-13T00:0${minutes}:00.000Z`),
+        trackedFileBackups: {},
+      });
+      mockFileHistoryService.getSnapshots.mockReturnValue([
+        snap('snap-0', 0),
+        snap('prompt-new', 1),
+      ]);
+
+      expect(session.getRewindableUserTurnCount()).toBe(2);
+      expect(session.getRewindableSnapshotTargets()).toEqual([
+        { promptId: 'snap-0', turnIndex: 0 },
+        { promptId: 'prompt-new', turnIndex: 1 },
+      ]);
+      expect(session.rewindToTurn(0)).toEqual({
+        targetTurnIndex: 0,
+        apiTruncateIndex: 0,
+        promptId: 'snap-0',
+      });
+      expect(mockChat.truncateHistory).toHaveBeenCalledWith(0);
     });
 
     it('counts a legacy turn whose text only starts with the media-clear prefix', () => {

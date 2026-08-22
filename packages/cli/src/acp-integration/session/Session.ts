@@ -204,7 +204,6 @@ import {
   buildBackgroundEntryLabel,
   collectSessionTurnState,
   computeInitialTurnFromHistory as computeInitialTurnFromHistoryCore,
-  isClearedMediaPlaceholder,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
@@ -3844,29 +3843,21 @@ export class Session implements SessionContext {
     // older (unmarked) turn from the rewind target space. While any
     // identity-less user turn exists, keep the positional enumeration —
     // the same fallback the TUI twin computeApiTruncationIndex retains.
-    // Microcompaction media-clear placeholders are the exception: they are
-    // structural replacements inside an identified session, not legacy
-    // turns. The shared predicate matches only complete placeholders, so a
-    // genuine user prompt that merely starts with the prefix still counts.
-    // Skip only placeholder-ONLY entries: microcompaction rebuilds entries
-    // as { ...content, parts: newParts } and preserves sibling text parts,
-    // so an entry mixing genuine text with a placeholder is a real legacy
-    // turn and must force the positional fallback (mirrors the TUI twin's
-    // documented rule in historyMapping.ts).
+    // No placeholder exception: microcompaction rebuilds entries as
+    // { ...content, parts: newParts } and PRESERVES the identity mark, so
+    // a structural media-clear replacement inside an identified session is
+    // MARKED and already skipped by the promptId check above. An UNMARKED
+    // placeholder-only entry can only be a media-only LEGACY turn whose
+    // media was cleared — #isUserTextContent counts it (its file-history
+    // snapshot exists; see that twin's documented rule), so skipping it
+    // here would silently drop a live, snapshot-backed turn from the
+    // target space. Force the positional fallback like any other unmarked
+    // turn (mirrors the fork twin selectForkHistory, which dropped the
+    // same exception for the same reason).
     for (let index = startIndex; index < apiHistory.length; index++) {
       const content = apiHistory[index]!;
       if (!this.#isUserTextContent(content)) continue;
       if (getApiHistoryPromptId(content)) continue;
-      const textParts =
-        content.parts
-          ?.filter(
-            (part): part is Part & { text: string } =>
-              'text' in part && typeof part.text === 'string',
-          )
-          .map((part) => part.text) ?? [];
-      if (textParts.length > 0 && textParts.every(isClearedMediaPlaceholder)) {
-        continue;
-      }
       return { mode: 'legacy', turns: positionalTurns() };
     }
 
