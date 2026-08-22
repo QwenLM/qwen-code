@@ -1065,6 +1065,13 @@ export async function runNonInteractive(
       // a fresh one: a new batch means the previous batch's carrying send
       // either pushed (clear) or never did (restore).
       settlePendingPresentationLedger();
+      // R24-2: invalidate the baseline. Until the NEXT send captures a fresh
+      // one, no send has carried this batch's results to the model; settling
+      // in that window (structured-output early return, turn-limit exit,
+      // abort between arm and carry) must restore, not compare against the
+      // PRODUCING send's baseline — that send pushed, but it carried the
+      // user/turn prompt, not this batch's tool results.
+      presentationSendChat = undefined;
       try {
         const registry = config.getToolRegistry();
         pendingPresentationSnapshot =
@@ -2605,6 +2612,15 @@ export async function runNonInteractive(
         }
         captureActiveInteractionOwner();
 
+        // R24-2: settle the armed snapshot at THIS send's own boundary,
+        // before any later send can overwrite the baseline. If this send
+        // pushed, it backs the armed batch's committed marks (keep); if it
+        // returned without pushing — a blocking UserPromptSubmit hook
+        // decision on the ToolResult carry, an early error — restore now,
+        // while the attribution is still exact. Mirrors Session.ts, which
+        // settles each carrying send at its own accept/fail boundary.
+        settlePendingPresentationLedger();
+
         // Finalize assistant message
         adapter.finalizeAssistantMessage();
         totalApiDurationMs += Date.now() - apiStartTime;
@@ -2656,6 +2672,11 @@ export async function runNonInteractive(
             // task_notification events to land, then emits the
             // structured success envelope. Same helper as the drain-turn
             // post-loop branch — see emitStructuredSuccess above.
+            // R24-2: the run ends BEFORE any carrying send ships this
+            // batch's tool results, so the armed snapshot is unbacked —
+            // force-settle it here (restore) instead of letting the
+            // finally-settle compare against the producing send's baseline.
+            settlePendingPresentationLedger();
             return emitStructuredSuccess();
           }
           if (
@@ -2931,6 +2952,10 @@ export async function runNonInteractive(
               }
               captureActiveInteractionOwner();
 
+              // R24-2: settle at this drain send's own boundary — same
+              // rationale as the main-loop settle above.
+              settlePendingPresentationLedger();
+
               adapter.finalizeAssistantMessage();
               totalApiDurationMs += Date.now() - itemApiStartTime;
 
@@ -3181,6 +3206,11 @@ export async function runNonInteractive(
           // metrics snapshot after the holdback so any task notifications
           // that landed during shutdown contribute to the totals.
           if (structuredSubmission !== undefined) {
+            // R24-2: same force-settle as the main-turn early return —
+            // the drain batch's carrying send never shipped its results,
+            // so the armed snapshot must be restored, not kept on the
+            // producing send's pushed baseline.
+            settlePendingPresentationLedger();
             return emitStructuredSuccess();
           }
 

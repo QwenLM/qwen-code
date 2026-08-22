@@ -3279,6 +3279,233 @@ describe('runNonInteractive', () => {
       expect(restoreSpy).not.toHaveBeenCalled();
     });
 
+    it('restores at the blocked carrying send even when a later send pushes (R24-2)', async () => {
+      // R24-2 trigger 1: settlement used ONE shared push-count baseline
+      // that every send overwrote. A carrying send blocked by a
+      // UserPromptSubmit hook decision returns without pushing, and any
+      // later send that pushes (here: a stalled-teammate status drain)
+      // overwrites the baseline — the finally-settle computed pushed=true
+      // against the WRONG send and dropped the armed snapshot without
+      // restoring, leaving marks with no schema in model context. The
+      // armed snapshot must settle at the carrying send's own boundary.
+      setupMetricsMock();
+      const presentedLedger = new Map<string, string>();
+      const restoreSpy = vi.fn((snapshot: ReadonlyMap<string, string>) => {
+        presentedLedger.clear();
+        for (const [k, v] of snapshot) presentedLedger.set(k, v);
+      });
+      Object.assign(mockToolRegistry, {
+        getProxySchemaPresentationSnapshot: vi.fn(
+          () => new Map(presentedLedger),
+        ),
+        getProxySchemaPresentationGeneration: vi.fn(() => 0),
+        restoreProxySchemaPresentationSnapshot: restoreSpy,
+      });
+
+      let pushCount = 0;
+      const chatStub = {
+        getUserContentPushCount: vi.fn(() => pushCount),
+      };
+      mockGeminiClient.getChat = vi.fn(
+        () => chatStub,
+      ) as unknown as typeof mockGeminiClient.getChat;
+
+      let teammatesActive = true;
+      const teamEvents = new EventEmitter();
+      const teamManager = {
+        hasActiveTeammates: vi.fn(() => teammatesActive),
+        allRemainingStalled: vi.fn(() => true),
+        abortStalledTeammates: vi.fn(),
+        buildTeamStatusSummary: vi.fn(() => 'teammate final status'),
+        drainLeaderInbox: vi.fn().mockResolvedValue(undefined),
+        setLeaderMessageCallback: vi.fn(),
+        getEventEmitter: () => teamEvents,
+      };
+      vi.mocked(mockConfig.getTeamManager).mockReturnValue(
+        teamManager as never,
+      );
+
+      mockCoreExecuteToolCall.mockImplementation(
+        async (_config: unknown, request: ToolCallRequestInfo) => {
+          presentedLedger.set('cron_create', 'fp');
+          return {
+            responseParts: [
+              {
+                functionResponse: {
+                  id: request.callId,
+                  name: request.name,
+                  response: { output: '<functions>cron_create</functions>' },
+                },
+              },
+            ],
+          };
+        },
+      );
+
+      let markAtCarryingSend: string | undefined;
+      mockGeminiClient.sendMessageStream
+        .mockImplementationOnce(() => {
+          // Producing send: pushes the user prompt, model emits a search.
+          pushCount += 1;
+          return createStreamFromEvents([
+            {
+              type: GeminiEventType.ToolCallRequest,
+              value: {
+                callId: 'search-1',
+                name: ToolNames.TOOL_SEARCH,
+                args: { query: 'cron' },
+                isClientInitiated: false,
+                prompt_id: 'p-headless-attr',
+              },
+            },
+          ]);
+        })
+        .mockImplementationOnce(() => {
+          // Carrying send BLOCKED (hook decision): yields nothing, never
+          // pushes. Pre-fix, the settle deferred past this boundary and a
+          // later pushing send polluted the attribution.
+          markAtCarryingSend = presentedLedger.get('cron_create');
+          return createStreamFromEvents([]);
+        })
+        .mockImplementationOnce(() => {
+          // Stall-status drain send: pushes (overwrites the shared
+          // baseline pre-fix) and ends the run with plain text.
+          pushCount += 1;
+          teammatesActive = false;
+          return createStreamFromEvents([
+            { type: GeminiEventType.Content, value: 'done' },
+            {
+              type: GeminiEventType.Finished,
+              value: {
+                reason: undefined,
+                usageMetadata: { totalTokenCount: 1 },
+              },
+            },
+          ]);
+        });
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'go',
+        'p-headless-attr',
+      );
+
+      // The batch committed its mark before the blocked carrying send...
+      expect(markAtCarryingSend).toBe('fp');
+      // ...and the rollback fired ONCE — at the blocked carrying send's own
+      // boundary, restoring the pre-batch (empty) snapshot. Pre-fix the
+      // settle ran only at run end against the drain send's baseline:
+      // pushed=true, restore never called, mark survived.
+      expect(restoreSpy).toHaveBeenCalledTimes(1);
+      const restoredSnapshot = restoreSpy.mock.calls[0][0] as Map<
+        string,
+        string
+      >;
+      expect(restoredSnapshot.has('cron_create')).toBe(false);
+      expect(presentedLedger.has('cron_create')).toBe(false);
+    });
+
+    it('restores the armed snapshot when a non-json-schema structured_output tool ends the run before the carrying send (R24-2)', async () => {
+      // R24-2 trigger 2: with a real tool literally named
+      // `structured_output` registered (the collision the budget-exemption
+      // comment acknowledges) and no --json-schema, the capture is ungated
+      // by structuredOutputActive and the run returns emitStructuredSuccess
+      // BEFORE any carrying send ships the batch's results. Pre-fix the
+      // finally-settle compared against the PRODUCING send's baseline
+      // (which pushed) and kept the unbacked marks.
+      setupMetricsMock();
+      const presentedLedger = new Map<string, string>();
+      const restoreSpy = vi.fn((snapshot: ReadonlyMap<string, string>) => {
+        presentedLedger.clear();
+        for (const [k, v] of snapshot) presentedLedger.set(k, v);
+      });
+      Object.assign(mockToolRegistry, {
+        getProxySchemaPresentationSnapshot: vi.fn(
+          () => new Map(presentedLedger),
+        ),
+        getProxySchemaPresentationGeneration: vi.fn(() => 0),
+        restoreProxySchemaPresentationSnapshot: restoreSpy,
+      });
+
+      let pushCount = 0;
+      const chatStub = {
+        getUserContentPushCount: vi.fn(() => pushCount),
+      };
+      mockGeminiClient.getChat = vi.fn(
+        () => chatStub,
+      ) as unknown as typeof mockGeminiClient.getChat;
+
+      mockCoreExecuteToolCall.mockImplementation(
+        async (_config: unknown, request: ToolCallRequestInfo) => {
+          if (request.name === ToolNames.TOOL_SEARCH) {
+            presentedLedger.set('cron_create', 'fp');
+          }
+          return {
+            responseParts: [
+              {
+                functionResponse: {
+                  id: request.callId,
+                  name: request.name,
+                  response: { output: 'ok' },
+                },
+              },
+            ],
+          };
+        },
+      );
+
+      mockGeminiClient.sendMessageStream.mockImplementationOnce(() => {
+        // Producing send pushes; the model emits a tool_search alongside a
+        // real (MCP-style) tool literally named structured_output.
+        pushCount += 1;
+        return createStreamFromEvents([
+          {
+            type: GeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'search-1',
+              name: ToolNames.TOOL_SEARCH,
+              args: { query: 'cron' },
+              isClientInitiated: false,
+              prompt_id: 'p-headless-so',
+            },
+          },
+          {
+            type: GeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'so-1',
+              name: ToolNames.STRUCTURED_OUTPUT,
+              args: { summary: 'colliding tool output' },
+              isClientInitiated: false,
+              prompt_id: 'p-headless-so',
+            },
+          },
+        ]);
+      });
+
+      const exitCode = await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'go',
+        'p-headless-so',
+      );
+
+      // The run ended on the structured-output capture: exactly one send
+      // (the producing one) — the carrying send never shipped the batch's
+      // tool results, yet it committed a presentation mark.
+      expect(exitCode).toBe(0);
+      expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(1);
+      // The armed snapshot was force-restored at the early-return site:
+      // the unbacked mark must not outlive the run.
+      expect(restoreSpy).toHaveBeenCalledTimes(1);
+      const restoredSnapshot = restoreSpy.mock.calls[0][0] as Map<
+        string,
+        string
+      >;
+      expect(restoredSnapshot.has('cron_create')).toBe(false);
+      expect(presentedLedger.has('cron_create')).toBe(false);
+    });
+
     it('rolls the presentation ledger back on a recoverable interrupt before the carrying send pushes (R23-33)', async () => {
       // R23-33 trigger 2: reusable stream-json sessions reuse one registry
       // across messages; a control interrupt (TurnInterruptedError) aborts
