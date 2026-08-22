@@ -836,7 +836,7 @@ export interface ComposeReviewResult {
    * not-reviewed disclosures (the model's own inputs), a diagnosis derived
    * from the side file has no other copy anywhere. Ranking it last does not
    * retire this copy — it makes it the one that matters, because the rounds
-   * that reach rank 3 are the rounds that shed everything.
+   * that reach trim rank 3 are the rounds that shed everything.
    */
   convergence?: { en: string; zh: string };
   /**
@@ -3059,7 +3059,7 @@ function composeReviewBody(
    * last-resort path drops ranks AND cuts, and a stderr record naming only
    * the cut leaves the kinds it dropped disclosed nowhere but the body.
    * Rank 1 has a second durable copy (each deferral is a `D<round>-<n>`
-   * entry in the findings artifact) and rank 3 has one too (the composed
+   * entry in the findings artifact) and trim rank 3 has one too (the composed
    * result carries the paragraph, and the command prints it as
    * `CONVERGENCE:`); a trimmed disclosure section survives nowhere but the
    * terminal summary, so ask for it there rather than pointing at an
@@ -3515,8 +3515,12 @@ function composeReviewBody(
     cannotTell.length === 0
       ? []
       : [
-          // Deliberately untagged (rank 3, spent first by the last-resort
-          // cut). These entries are open blockers the review could not
+          // Deliberately untagged, so `keep` defaults to 3 and the
+          // last-resort cut spends it first. That 3 is the CUT's axis, not a
+          // `trim` rank — the two share the number and mean opposite things:
+          // `trim: 3` is the LAST rank the ladder sheds, while `keep: 3` is
+          // the FIRST thing the cut below the ladder spends.
+          // These entries are open blockers the review could not
           // clear — and every one of them was DELIVERED to the author in
           // the round that raised it, where this round's body Criticals are
           // the only copy that exists. So when the cut has to choose, it
@@ -4955,8 +4959,9 @@ export const composeReviewCommand: CommandModule = {
     // (findings artifact) or the not-reviewed disclosures (the model's own
     // inputs) it has no other copy anywhere — so the notice's "read them in
     // the terminal report" was a false record until this line existed. Last
-    // does not mean safe: a body that reaches rank 3 has already shed every
-    // other rank, which is exactly when this line is the only copy left.
+    // does not mean safe: a body that reaches trim rank 3 has already shed
+    // every other rank, which is exactly when this line is the only copy
+    // left.
     if (result.convergence) {
       writeStderrLine(`CONVERGENCE: ${result.convergence.en}`);
     }
