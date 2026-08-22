@@ -12,6 +12,7 @@
 
 import { useState, useCallback, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
+import { usePlatform } from '../../context/PlatformContext'
 import * as ContextMenu from '@radix-ui/react-context-menu'
 import { Check, Copy, ExternalLink, FolderOpen, type LucideIcon } from 'lucide-react'
 import { PreviewHeader, PreviewHeaderBadge, type PreviewBadgeVariant } from '../ui/PreviewHeader'
@@ -21,7 +22,6 @@ import {
   StyledDropdownMenuContent,
   StyledDropdownMenuItem,
 } from '../ui/StyledDropdown'
-import { usePlatform } from '../../context/PlatformContext'
 import { cn } from '../../lib/utils'
 
 /** Structured type badge — tool/format indicator (e.g. "Read", "Image", "Bash") */
@@ -203,18 +203,23 @@ export function FullscreenOverlayBaseHeader({
   copyContent,
 }: FullscreenOverlayBaseHeaderProps) {
   const { t } = useTranslation()
+  const { onCopyToClipboard } = usePlatform()
   const [copied, setCopied] = useState(false)
 
   const handleCopy = useCallback(async () => {
     if (!copyContent) return
     try {
-      await navigator.clipboard.writeText(copyContent)
+      if (onCopyToClipboard) {
+        await onCopyToClipboard(copyContent)
+      } else {
+        await navigator.clipboard.writeText(copyContent)
+      }
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
     } catch (err) {
       console.error('Failed to copy:', err)
     }
-  }, [copyContent])
+  }, [copyContent, onCopyToClipboard])
 
   // Built-in copy button + any custom header actions, rendered in PreviewHeader's right actions area
   const rightActions = (

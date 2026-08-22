@@ -70,6 +70,7 @@ import { skillsAtom } from '@/atoms/skills'
 import { extractBadges } from '@/lib/mentions'
 import { extractCommandBadges } from '@/lib/slash-command-badges'
 import { contentBadgesToTextElements } from '@craft-agent/core/utils'
+import { RPC_CHANNELS } from '@craft-agent/shared/protocol'
 import { getDefaultStore } from 'jotai'
 import {
   ShikiThemeProvider,
@@ -2327,6 +2328,13 @@ export default function App() {
     // Bypass link interceptor — opens file directly in system editor.
     // Used by overlay header badges (when already viewing a file, "Open" should launch editor).
     onOpenFileExternal: linkInterceptor.openFileExternal,
+    onCopyToClipboard: async (text: string) => {
+      if (window.electronAPI.isChannelAvailable(RPC_CHANNELS.system.COPY_TO_CLIPBOARD)) {
+        await window.electronAPI.copyToClipboard(text)
+      } else {
+        await navigator.clipboard.writeText(text)
+      }
+    },
     // Read file contents as UTF-8 string (used by datatable/spreadsheet/html-preview src fields)
     onReadFile: (path: string) => window.electronAPI.readFile(path),
     // Read file as data URL (used by image-preview blocks)

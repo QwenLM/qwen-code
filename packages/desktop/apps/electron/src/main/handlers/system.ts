@@ -2,6 +2,7 @@ import { resolve } from 'path'
 import { join } from 'path'
 import { homedir } from 'os'
 import { execSync } from 'child_process'
+import { clipboard } from 'electron'
 import { RPC_CHANNELS } from '@craft-agent/shared/protocol'
 import { getGitBashPath, setGitBashPath, clearGitBashPath } from '@craft-agent/shared/config'
 import { isSafeExternalUrl } from '@craft-agent/shared/utils/url-safety'
@@ -34,6 +35,7 @@ export const CORE_HANDLED_CHANNELS = [
 ] as const
 
 export const GUI_HANDLED_CHANNELS = [
+  RPC_CHANNELS.system.COPY_TO_CLIPBOARD,
   RPC_CHANNELS.update.CHECK,
   RPC_CHANNELS.update.GET_INFO,
   RPC_CHANNELS.update.INSTALL,
@@ -268,6 +270,10 @@ export function registerSystemCoreHandlers(server: RpcServer, deps: HandlerDeps)
 export function registerSystemGuiHandlers(server: RpcServer, deps: HandlerDeps): void {
   const { sessionManager } = deps
   const windowManager = deps.windowManager
+
+  server.handle(RPC_CHANNELS.system.COPY_TO_CLIPBOARD, async (_ctx, text: string) => {
+    clipboard.writeText(text)
+  })
 
   // Auto-update handlers
   server.handle(RPC_CHANNELS.update.CHECK, async () => {

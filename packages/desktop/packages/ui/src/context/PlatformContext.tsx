@@ -69,7 +69,7 @@ export interface PlatformActions {
 
   /**
    * Copy text to clipboard
-   * Works in both environments via navigator.clipboard
+   * Uses the native platform clipboard when available, with browser fallback.
    */
   onCopyToClipboard?: (text: string) => Promise<void>
 

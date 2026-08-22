@@ -274,6 +274,7 @@ const EXPECTED_CHANNELS: string[] = [
   'statuses:changed',
   'statuses:list',
   'statuses:reorder',
+  'system:copyToClipboard',
   'system:homeDir',
   'system:isDebugMode',
   'system:versions',
