@@ -36,7 +36,12 @@ export default defineConfig({
       junit: 'junit.xml',
     },
     coverage: {
-      enabled: true,
+      // CI consumes coverage only from the ubuntu lane (the upload and the
+      // coverage comment both pin coverage-reports-*-ubuntu-latest). On the
+      // Windows/macOS runners the report generation stalls the main thread
+      // long enough for vitest's worker RPC to time out at the end of an
+      // all-green run; skip it there. Local runs keep coverage everywhere.
+      enabled: !process.env.CI || process.platform === 'linux',
       provider: 'v8',
       reportsDirectory: './coverage',
       include: ['src/**/*'],
