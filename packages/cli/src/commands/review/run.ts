@@ -204,7 +204,7 @@ function nothingToReviewFrom(
   cls: RunTargetClass,
   cutoffMs: number,
   runId: string,
-): { reason: string; openBlockers: number } | null {
+): { reason: string } | null {
   // The capture's sidecar, not the plan: `--out` is the orchestrator's to
   // choose, so the plan has no name the parent can predict. This one is
   // derived from the same target the parent derives.
@@ -218,22 +218,15 @@ function nothingToReviewFrom(
   try {
     const stop = JSON.parse(readFileSync(found.path, 'utf8')) as {
       reason?: unknown;
-      openBlockers?: unknown;
       runId?: unknown;
     };
     // Stamped by THIS run, or it is not this run's verdict. The name is a
     // flattened target token and that token is not injective, so a concurrent
     // review whose path flattens alike writes the same file — and its
-    // `openBlockers` would decide this run's exit code.
+    // its verdict would decide this run's exit code.
     if (stop.runId !== runId) return null;
     if (typeof stop.reason !== 'string' || stop.reason === '') return null;
-    return {
-      reason: stop.reason,
-      openBlockers:
-        typeof stop.openBlockers === 'number' && stop.openBlockers > 0
-          ? stop.openBlockers
-          : 0,
-    };
+    return { reason: stop.reason };
   } catch {
     return null; // unreadable or not JSON: no claim either way
   }
@@ -689,19 +682,26 @@ async function runReview(args: RunReviewArgs): Promise<void> {
   // a field the CLI wrote into its own plan, not a sentence the model chose.
   const stop = nothingToReviewFrom(targetClass, cutoffMs, runId);
   const completed = composed !== null || stop !== null;
-  // A decided stop is not automatically a CLEAN one. Both of SKILL.md's stop
-  // branches open by rendering the cache's still-open findings, and the common
-  // shape is a user who committed without fixing a Critical — a permanently
-  // clean tree that stops every later round. Reported with no verdict at all,
-  // `--fail-on request-changes` returned 0 over a blocker the round itself was
-  // calling standing: the gate passed the moment the author stopped touching
-  // the tree. The capture counts what the ledger still holds open; a stop that
-  // holds blockers carries the same event a blocking review would.
-  const stopEvent =
-    stop !== null && stop.openBlockers > 0 ? 'REQUEST_CHANGES' : null;
+  // A stop carries NO synthesised verdict, deliberately.
+  //
+  // An earlier attempt mapped the cache's open-Critical count to
+  // REQUEST_CHANGES, reasoning that a stop round rendering standing blockers
+  // should not pass `--fail-on`. It is the wrong direction of wrong. The
+  // ledger is only rewritten by a round that writes the cache, and a stop
+  // round does not — so once a user FIXES the blocker and commits (the
+  // ordinary workflow), every later round reads the same stale `open` entry,
+  // fails the gate over code that no longer contains the defect, and nothing
+  // the user can do clears it. A false failure that no action clears is worse
+  // than a false pass beside a rendered blocker list, and the CLI cannot tell
+  // the two cases apart: both leave a clean tree and a moved HEAD.
+  //
+  // The real answer to the gate question is a composed verdict on the stop
+  // path — a verdict the model produces after re-ruling the ledger, not one
+  // this process invents from a file it cannot date against the code.
+
   const result: RunReviewResult = {
     completed,
-    event: composed?.event ?? stopEvent,
+    event: composed?.event ?? null,
     verdictLine: composed?.verdictLine ?? null,
     baseEvent: composed?.baseEvent ?? null,
     cappedBy: composed?.cappedBy ?? [],

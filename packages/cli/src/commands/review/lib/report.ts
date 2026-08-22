@@ -298,8 +298,12 @@ export interface IncrementalScope {
    * measured 23 KB against the plan's one-read budget.
    */
   contextFileCount: number;
-  /** Where the full-range diff still is, for a reader who needs all of it. */
-  fullDiffPath: string | null;
+  /**
+   * Where the full-range diff still is, for a reader who needs all of it.
+   * The local flow writes it; the PR flow has no retained full-range diff to
+   * point at yet and omits the field.
+   */
+  fullDiffPath?: string | null;
 }
 
 /**

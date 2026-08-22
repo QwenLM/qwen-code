@@ -7,8 +7,8 @@
 import { describe, it, expect } from 'vitest';
 import { basename, dirname, join, resolve } from 'node:path';
 import {
-  mkdtempSync,
   mkdirSync,
+  mkdtempSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -16,6 +16,7 @@ import {
 import { tmpdir } from 'node:os';
 import {
   assertUnredirectedParent,
+  repoRelativeOf,
   inertPath,
   tmpFile,
   probeWorktreePath,
@@ -187,6 +188,26 @@ describe('inertPath', () => {
     );
     expect(inertPath('caf\u00e9.ts')).toBe('caf\u00e9.ts');
     expect(inertPath('my probe.ts')).toBe('my probe.ts');
+  });
+});
+describe('repoRelativeOf — the repository root is inside the repository', () => {
+  it('does not classify the root itself as an escape', () => {
+    // `classifyRunTarget` accepts a directory target, so the root is a
+    // reachable one — and calling it an escape split the two sides that must
+    // agree: the parent pinned the typed spelling while the child derived
+    // `safeTarget('') === 'target'`, so the poll never matched and a review
+    // that HAD run reported no verdict. `--file <root>` also threw
+    // "resolves to <root>, which is outside the repository at <root>".
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'repo-rel-')));
+    try {
+      const out = repoRelativeOf(root, root, root);
+      expect(out.escapes).toBe(false);
+      expect(out.rel).toBe('');
+      // …and a genuine escape still is one.
+      expect(repoRelativeOf(root, '..', root).escapes).toBe(true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

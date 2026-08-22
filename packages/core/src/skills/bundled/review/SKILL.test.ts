@@ -253,6 +253,28 @@ describe('bundled review skill', () => {
     );
     // The work list crosses models even when the anchor does not.
     expect(body).toContain('the work list carries across models');
+    // …and the PR cache RECORDS the gate's kind of string: the fetch report's
+    // `reviewModelId` — provider-qualified, the same string the gate compares
+    // — copied verbatim. `{{model}}` interpolates the bare id, so a cache
+    // written with it fails the gate as `cross-model-anchor` on every later
+    // round and never heals — every round rewrites the cache bare again.
+    expect(body).not.toContain('"lastModelId": "{{model}}"');
+    expect(body).toContain(
+      "`lastModelId` is COPIED, not typed: it is the fetch report's `reviewModelId`",
+    );
+    // The absent-identity arm: omit the field, never substitute — Step 1's
+    // omit-`--since-model` rule and the gate's fail-closed full review are
+    // the designed state for an unrecorded identity.
+    expect(body).toContain(
+      'omit the `lastModelId` field entirely — do not substitute anything',
+    );
+    // …and the ledger-source prose reads the cache the way the writer names
+    // it: from the plan's published `cachePath`. A revert to the old
+    // hand-spelled `<target>.json` would misdescribe a file-review cache that
+    // is namespaced by source path (a digest no hand spelling can predict).
+    expect(body).toContain(
+      "read at the plan's `cachePath`, never a name you compute",
+    );
   });
 
   it('launches the 3B convergence pair in the same response', () => {

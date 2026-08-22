@@ -96,4 +96,64 @@ describe('hashWorktreeFiles — the attributes probe is byte-faithful', () => {
     // probe ran at all rather than falling back wholesale.
     expect(out['plain.ts']).toContain('diff=unspecified');
   });
+
+  it("folds a driver's binary flag only into the paths naming THAT driver", () => {
+    // The fold used to match the record string by substring, so a driver
+    // whose name is a PREFIX of another (`md` / `mdbook`) folded its config
+    // into the other's paths: toggling `diff.md.binary` then re-reviewed
+    // every `mdbook` file each round although its bytes, mode and own driver
+    // never moved — the wasted re-review the attribute component exists to
+    // prevent.
+    writeFileSync(join(repo, 'a.md'), '# a\n');
+    writeFileSync(join(repo, 'book.md'), '# book\n');
+    writeFileSync(
+      join(repo, '.gitattributes'),
+      'a.md diff=md\nbook.md diff=mdbook\n',
+    );
+    git('config', 'diff.md.binary', 'true');
+
+    const out = hashWorktreeFiles(repo, ['a.md', 'book.md']);
+
+    // The fold lands on the path naming the driver…
+    expect(out['a.md']).toContain('diff=md');
+    expect(out['a.md']).toContain('md.binary=true');
+    // …and the PREFIXED driver's path keeps its identity clean of it.
+    expect(out['book.md']).toContain('diff=mdbook');
+    expect(out['book.md']).not.toContain('md.binary');
+  });
+
+  it('folds a driver whose NAME CONTAINS A COMMA — matched as a value, never re-parsed', () => {
+    // `*.bin diff=a,b` is a legal gitattributes line, and the fold used to
+    // re-parse the comma-joined attribute serialization — `split(',')` can
+    // never match a value containing a comma. The flag was silently dropped
+    // from the identity, so flipping it changed how `git diff` rendered the
+    // same bytes while the identity stood still: the next round's gate
+    // compared equal and sliced the file out of scope, carrying the previous
+    // verdict forward against a different rendering. `.gitattributes` is
+    // worktree content of the reviewed PR, so the driver name is plantable.
+    writeFileSync(join(repo, 'data.bin'), 'x\n');
+    writeFileSync(join(repo, '.gitattributes'), 'data.bin diff=a,b\n');
+    git('config', 'diff.a,b.binary', 'true');
+
+    const on = hashWorktreeFiles(repo, ['data.bin']);
+    expect(on['data.bin']).toContain('a,b.binary=true');
+
+    git('config', 'diff.a,b.binary', 'false');
+    const off = hashWorktreeFiles(repo, ['data.bin']);
+    expect(off['data.bin']).toContain('a,b.binary=false');
+    expect(off['data.bin']).not.toBe(on['data.bin']);
+  });
+});
+describe('hashWorktreeFiles — a decoded path is not a name', () => {
+  it('refuses to hash a path carrying U+FFFD', () => {
+    // The capture pins `core.quotePath=false` and decodes with `toString`,
+    // so every invalid byte folds to U+FFFD. Beside a file LITERALLY named
+    // with one, two plan paths fold to a single key: `lstat` succeeds on the
+    // real file, the invalid-byte sibling inherits its identity, is never
+    // hashed, and its changes compare unchanged for ever. The `lstat` guard
+    // cannot see it, because the stat succeeds.
+    writeFileSync(join(repo, '\ufffd.ts'), 'export const a = 1;\n');
+    const out = hashWorktreeFiles(repo, ['\ufffd.ts', 'plain.ts']);
+    expect(out['\ufffd.ts']).toBe('unhashable');
+  });
 });

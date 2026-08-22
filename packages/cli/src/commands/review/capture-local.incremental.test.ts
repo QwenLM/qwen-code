@@ -299,8 +299,8 @@ describe('capture-local — incremental local rounds', () => {
     git('config', 'diff.mydrv.binary', 'true');
     const cachePath = promoteCandidate(capture(), 'model-a');
 
-    // Only the CONFIG changes: no file in the tree moves, and `check-attr`
-    //答案 is identical before and after.
+    // Only the CONFIG changes: no file in the tree moves, and `check-attr`'s
+    // answer is identical before and after.
     git('config', 'diff.mydrv.binary', 'false');
     const plan = capture({ cache: cachePath, model: 'model-a' });
     expect(plan.incremental!.scope!.deltaFiles).toContain(CHANGED);
@@ -404,6 +404,25 @@ describe('capture-local — round-2 regressions from the stop work', () => {
     expect(plan['nothingToReview']).toBeUndefined();
   });
 
+  it('does not tell a FILE review of an unchanged file that the tree is clean', () => {
+    // The field gate excludes file reviews; the prose channel beside it did
+    // not, so stderr still said "the working tree is clean … do not run the
+    // review agents" over a capture that was pathspec-scoped — 0 chunks says
+    // nothing about the tree (the bystanders here are dirty), and an
+    // orchestrator that stops on prose left the user-named file unread. The
+    // no-diff branch owes this shape a whole-file review.
+    seedDirtyTree();
+    git('add', CHANGED);
+    git('commit', '-q', '--no-verify', '-m', 'commit only the reviewed file');
+
+    stderrLines.length = 0;
+    const plan = capture({ file: CHANGED });
+    expect(plan['nothingToReview']).toBeUndefined();
+    const err = stderrLines.join('\n');
+    expect(err).not.toContain('the working tree is clean');
+    expect(err).toContain('whole-file review');
+  });
+
   it('stamps the stop sidecar with the run that asked for it', () => {
     // The sidecar decides `completed` and can carry a REQUEST_CHANGES event,
     // while its NAME is the flattened target token — which is not injective,
@@ -457,6 +476,34 @@ describe('capture-local — promotion through the REAL cache-commit', () => {
       model: 'model-a',
     });
     expect(second.incremental?.scope?.deltaFiles).toEqual(['src/foo.ts']);
+  });
+});
+
+describe('capture-local — round-5 sibling gaps', () => {
+  it('does not stop a FILE review whose anchored change was discarded', () => {
+    // `scope-emptied` lacked the exclusion both sibling stops carry, so the
+    // same tree decided differently depending on whether a cache existed:
+    // with one it completed as a decided round, without one it routed to the
+    // whole-file review SKILL.md owes a file target.
+    seedDirtyTree();
+    write('src/foo.ts', 'export const real = 1;\n');
+    const first = capture({ file: 'src/foo.ts', model: 'model-a' });
+    mkdirSync(join(repo, '.qwen/review-cache'), { recursive: true });
+    writeFileSync(
+      first['cachePath'] as string,
+      readFileSync(first.cacheCandidatePath, 'utf8'),
+    );
+    // Discard the reviewed change entirely; HEAD does not move. The file was
+    // untracked, so discarding it removes it — the anchored path vanishes and
+    // the slice keeps nothing.
+    rmSync(join(repo, 'src/foo.ts'));
+
+    const second = capture({
+      file: 'src/foo.ts',
+      cache: join(repo, '.qwen/review-cache'),
+      model: 'model-a',
+    });
+    expect(second['nothingToReview']).toBeUndefined();
   });
 });
 
@@ -682,6 +729,10 @@ describe('capture-local — the cache key is the SOURCE path, not the token', ()
     });
     expect(other['target']).toBe('src_foo.ts');
     expect(other.incremental).toBeUndefined();
+    // …and SAID, like every sibling gate's reason: a refactor relocating the
+    // check into the reader (fail-quiet null) would surface "the cache is
+    // missing or unreadable" — a false diagnosis for exactly this collision.
+    expect(stderrLines.join('\n')).toContain('belongs to source path');
 
     // …and the file the cache actually belongs to still scopes.
     write('src/foo.ts', 'export const real = 2;\n');
@@ -691,6 +742,30 @@ describe('capture-local — the cache key is the SOURCE path, not the token', ()
       model: 'model-a',
     });
     expect(same.incremental).toBeDefined();
+  });
+
+  it('a hostile source path reaches stderr escaped, never raw', () => {
+    // Mirrors the hostile-lastModelId pin: the refusal interpolates the
+    // cache's recorded source through `display()`, so a crafted value cannot
+    // forge warning lines or emit terminal escapes.
+    seedDirtyTree();
+    write('src_foo.ts', 'export const collide = 1;\n');
+    const cachePath = promoteCandidate(
+      capture({ file: 'src_foo.ts', model: 'model-a' }),
+      'model-a',
+    );
+    const cache = JSON.parse(readFileSync(cachePath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    cache['source'] = 'evil\nWARNING: forged line \u001b[31m';
+    writeFileSync(cachePath, JSON.stringify(cache));
+    stderrLines.length = 0;
+    write('src/foo.ts', 'export const real = 1;\n');
+    capture({ file: 'src/foo.ts', cache: cachePath, model: 'model-a' });
+    const err = stderrLines.join('|');
+    expect(err).not.toContain('\u001b'); // no raw ESC byte at the terminal
+    expect(err).toContain('\\n'); // the newline arrives as an escape, quoted
   });
 });
 
@@ -732,6 +807,21 @@ describe('capture-local — the local same-model gate', () => {
     // …and the same provider still scopes.
     const same = capture({ cache: cachePath, model: A });
     expect(same.incremental?.scope?.deltaFiles).toEqual([CHANGED]);
+  });
+
+  it('names the fallback when the CACHED identity is empty too', () => {
+    // `roundModelIdFrom` records `''` when the runtime published nothing —
+    // reachable in normal operation, not an error state. The refusal must
+    // print the fallback on the cached side as well; a blank certifier name
+    // ("reviewed by , not …") reads as a recorded-but-different identity
+    // when both sides are unrecorded.
+    seedDirtyTree();
+    const cachePath = promoteCandidate(capture(), '');
+    write(CHANGED, 'export const v = 2;\n');
+    capture({ cache: cachePath, model: 'model-b' });
+    expect(stderrLines.join('\n')).toContain(
+      'reviewed by an unrecorded model, not model-b',
+    );
   });
 
   it('treats a runtime that published NO identity as a mismatch', () => {
@@ -895,6 +985,13 @@ describe('capture-local — identity soundness and refusal contract', () => {
     capture({ cache: cachePath, model: 'model-a' });
     expect(stderrLines.join('\n')).toContain(
       'HEAD moved since the last local round',
+    );
+
+    stderrLines.length = 0;
+    writeFileSync(cachePath, 'not json');
+    capture({ cache: cachePath, model: 'model-a' });
+    expect(stderrLines.join('\n')).toContain(
+      'the cache is missing or unreadable',
     );
   });
 

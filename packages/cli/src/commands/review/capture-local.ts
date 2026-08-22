@@ -171,7 +171,7 @@ function anchorRefusalReason(
     // missing, and an unverifiable contract is a failed one — which is what
     // `certifierMatchesRound` answers for an empty running identity too.
     return `the previous local round was reviewed by ${display(
-      (cache.lastModelId ?? 'an unrecorded model').slice(0, 64),
+      (cache.lastModelId || 'an unrecorded model').slice(0, 64),
     )}, not ${display(model || 'an unrecorded model')}`;
   }
   if (cache.target !== target) {
@@ -208,9 +208,11 @@ function anchorRefusalReason(
 }
 
 /**
- * The cache file `--cache` names: the path itself, or `<dir>/<target>.json`
- * when it names a directory. Null when a directory holds no cache for this
- * target, which every caller already treats as "no anchor".
+ * The cache file `--cache` names: the path itself, or — when it names a
+ * directory — the same spelling `cachePathFor` writes (`<dir>/<target>.json`
+ * for the whole tree, `<dir>/file-<target>-<digest>.json` for a file
+ * review). Null when a directory holds no cache for this target, which
+ * every caller already treats as "no anchor".
  */
 function resolveCachePath(
   given: string,
@@ -234,7 +236,14 @@ function resolveCachePath(
 }
 
 /**
- * How many blockers the cached ledger still holds open.
+ * How many blockers the cached ledger still holds open — REPORTING only.
+ *
+ * `run` deliberately does not turn this into a verdict: the ledger is
+ * rewritten only by a round that writes the cache, and a stop round does not,
+ * so a blocker the user has since FIXED and committed stays `open` for ever.
+ * Mapped to an exit code it produced a failure no action could clear. It is
+ * here because the orchestrator's stop branches render these entries, and a
+ * count beside them tells a human reader whether the round had any.
  *
  * A decided stop is not necessarily a CLEAN one: SKILL.md's two stop branches
  * both open by rendering the cache's still-open findings, and the common shape
@@ -725,7 +734,14 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     incremental !== undefined &&
     plan.chunks.length === 0 &&
     capture.skipped.length === 0 &&
-    treeHeldStill
+    treeHeldStill &&
+    // …and NOT a file review, the same exclusion both sibling stops carry.
+    // A file review whose anchored change was discarded has nothing in the
+    // slice, but SKILL.md owes it a whole-file review exactly as it does for
+    // the no-cache case — and without this the two disagreed on identical
+    // trees: with a cache the round completed decided, without one it routed
+    // to the whole-file review.
+    args.file === undefined
   ) {
     nothingToReview = { reason: 'scope-emptied' };
   }
@@ -843,19 +859,31 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
             `${capture.skipped.length} untracked file(s) were SKIPPED (above). ` +
             `This is not a clean tree: report them under "Not reviewed" and do ` +
             `not certify the working tree as reviewed.`
-        : treeHeldStill
-          ? 'WARNING: the working tree is clean — 0 chunks. There is nothing ' +
-            'to review; do not run the review agents.'
-          : // …and NOT when the guard just proved the tree moved. The
-            // machine-readable stop is gated on `treeHeldStill`; this
-            // sentence was not, so the round printed "the working tree
-            // changed while the capture was being hashed" and "the working
-            // tree is clean" back to back and the orchestrator — which reads
-            // prose here — stopped on the second. The same contradiction the
-            // field-level gate closed, one layer up.
-            'WARNING: 0 chunks, but the working tree changed while the ' +
-            'capture was being hashed (above): this is NOT a clean tree. ' +
-            'Re-run the review rather than reporting nothing to review.',
+        : file !== undefined
+          ? // The same exclusion the field gate above applies: an empty diff
+            // is not a decided round for a FILE target. The capture was
+            // pathspec-scoped, so 0 chunks says nothing about the tree — and
+            // SKILL's no-diff branch owes a whole-file review for exactly
+            // this shape. The field channel got the exclusion; this prose
+            // channel — which the orchestrator also reads — did not, and a
+            // round that stopped on it left the user-named file unread.
+            '0 chunks — no diff was captured for the file the review named. ' +
+            'This is NOT a decided stop: the no-diff branch owes it a ' +
+            'whole-file review — read the file and review its current ' +
+            'state; do not report nothing-to-review.'
+          : treeHeldStill
+            ? 'WARNING: the working tree is clean — 0 chunks. There is nothing ' +
+              'to review; do not run the review agents.'
+            : // …and NOT when the guard just proved the tree moved. The
+              // machine-readable stop is gated on `treeHeldStill`; this
+              // sentence was not, so the round printed "the working tree
+              // changed while the capture was being hashed" and "the working
+              // tree is clean" back to back and the orchestrator — which reads
+              // prose here — stopped on the second. The same contradiction the
+              // field-level gate closed, one layer up.
+              'WARNING: 0 chunks, but the working tree changed while the ' +
+              'capture was being hashed (above): this is NOT a clean tree. ' +
+              'Re-run the review rather than reporting nothing to review.',
     );
   }
   writeStderrLine(
@@ -908,8 +936,9 @@ export const captureLocalCommand: CommandModule = {
         describe:
           "The previous local round's review cache — the file, or the " +
           'DIRECTORY holding it (`.qwen/review-cache`), in which case this ' +
-          'command resolves `<dir>/<target>.json` from the target IT ' +
-          'derives. Prefer the directory for a file review: the target is ' +
+          "command resolves this target's cache file — the same spelling " +
+          'the plan publishes as `cachePath` — from the target IT derives. ' +
+          'Prefer the directory for a file review: the target is ' +
           "this command's to compute, and a caller that predicts the name " +
           'gets it wrong for any non-canonical spelling. When the anchor ' +
           'validates — same identity, same HEAD — the capture is scoped to ' +
