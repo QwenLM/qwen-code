@@ -73,12 +73,14 @@ export function parseAskUserQuestionParams(
 /**
  * Trailing unanswered `ask_user_question` that load/resume may re-hang.
  * Mixed dangling tools in the last model turn are not restorable.
+ *
+ * Takes only the last history entry (e.g. `chat.peekLastHistoryEntry()`) so
+ * callers never pay for a full-history `structuredClone` — which also drops
+ * the Symbol-keyed provider tool-call id attached by `normalizeModelToolCallIds`.
  */
 export function findRestorableAskUserQuestion(
-  history: Content[],
+  last: Content | undefined,
 ): RestorableAskUserQuestion | undefined {
-  if (history.length === 0) return undefined;
-  const last = history[history.length - 1];
   if (last?.role !== 'model') return undefined;
 
   const functionCalls: FunctionCall[] = [];
@@ -94,9 +96,9 @@ export function findRestorableAskUserQuestion(
 }
 
 export function restorableAskUserQuestionCallIds(
-  history: Content[],
+  last: Content | undefined,
 ): Set<string> | undefined {
-  const restorable = findRestorableAskUserQuestion(history);
+  const restorable = findRestorableAskUserQuestion(last);
   if (!restorable) return undefined;
   return new Set(
     restorable.functionCalls

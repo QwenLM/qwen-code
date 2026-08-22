@@ -3307,6 +3307,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       (sessionId: string) =>
         ({
           getId: vi.fn().mockReturnValue(sessionId),
+          shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
@@ -3459,6 +3460,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       (sessionId: string) =>
         ({
           getId: vi.fn().mockReturnValue(sessionId),
+          shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
@@ -3651,6 +3653,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       (sessionId: string) =>
         ({
           getId: vi.fn().mockReturnValue(sessionId),
+          shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
@@ -3781,6 +3784,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       () =>
         ({
           getId: vi.fn().mockReturnValue('test-session-id'),
+          shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(innerConfig),
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
@@ -3962,6 +3966,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       () =>
         ({
           getId: vi.fn().mockReturnValue(sessionId),
+          shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(innerConfig),
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
@@ -4144,6 +4149,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       const sessionMock = {
         sessionId: createdSessionId,
         getId: vi.fn().mockReturnValue(createdSessionId),
+        shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
         getConfig: vi.fn().mockReturnValue(createdConfig),
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi.fn().mockResolvedValue(undefined),
@@ -8065,6 +8071,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       () =>
         ({
           getId: vi.fn().mockReturnValue('remember-session'),
+          shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(innerConfig),
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
@@ -8143,6 +8150,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       () =>
         ({
           getId: vi.fn().mockReturnValue('remember-noop-session'),
+          shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(innerConfig),
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
@@ -8221,6 +8229,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       () =>
         ({
           getId: vi.fn().mockReturnValue('remember-fail-session'),
+          shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(innerConfig),
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
@@ -13805,6 +13814,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       const cfg = sessionId === 'session-end-a' ? innerConfigA : innerConfigB;
       return {
         getId: vi.fn().mockReturnValue(sessionId),
+        shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
         getConfig: vi.fn().mockReturnValue(cfg),
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi.fn().mockResolvedValue(undefined),
@@ -15037,6 +15047,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
       () =>
         ({
           getId: vi.fn().mockReturnValue(liveSessionId),
+          shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(innerConfig),
           cancelPendingPrompt: liveCancelPendingPrompt,
           beginClose: liveBeginClose,
@@ -16734,6 +16745,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       const releaseCloseGate = vi.fn();
       const sessionMock = {
         getId: vi.fn().mockReturnValue('persisted-1'),
+        shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
         getConfig: vi.fn().mockReturnValue(innerConfig),
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi
@@ -17623,6 +17635,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     });
     const liveSession = {
       getId: vi.fn().mockReturnValue('persisted-1'),
+      shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
       getConfig: vi.fn().mockReturnValue(innerConfig),
       assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
       beginClose: vi.fn().mockReturnValue(vi.fn()),
@@ -18631,6 +18644,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     const replacementDispose = vi.fn();
     const replacement = {
       getId: vi.fn().mockReturnValue('persisted-1'),
+      shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
       getConfig: vi.fn().mockReturnValue(replacementConfig),
       beginClose: vi.fn().mockReturnValue(vi.fn()),
       beginCloseIfAvailable: vi.fn().mockReturnValue(vi.fn()),
@@ -20445,6 +20459,7 @@ describe('sessionLanguage multi-session propagation', () => {
       const id = (cfg.getSessionId as ReturnType<typeof vi.fn>)();
       const mock = {
         getId: vi.fn().mockReturnValue(id),
+        shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
         getConfig: vi.fn().mockReturnValue(cfg),
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         installRewriter: vi.fn(),
@@ -20550,6 +20565,7 @@ describe('sessionLanguage multi-session propagation', () => {
       const id = (cfg.getSessionId as ReturnType<typeof vi.fn>)();
       const mock = {
         getId: vi.fn().mockReturnValue(id),
+        shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
         getConfig: vi.fn().mockReturnValue(cfg),
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         installRewriter: vi.fn(),
@@ -20635,6 +20651,7 @@ describe('sessionLanguage multi-session propagation', () => {
       sessionIdx++;
       return {
         getId: vi.fn().mockReturnValue(id),
+        shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
         getConfig: vi.fn().mockReturnValue(cfg),
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         installRewriter: vi.fn(),
@@ -20725,6 +20742,7 @@ describe('sessionLanguage multi-session propagation', () => {
       () =>
         ({
           getId: vi.fn().mockReturnValue('s-reload'),
+          shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(cfg),
           isIdle: vi.fn().mockReturnValue(true),
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
@@ -20796,6 +20814,7 @@ describe('sessionLanguage multi-session propagation', () => {
       () =>
         ({
           getId: vi.fn().mockReturnValue('s-plan-reload'),
+          shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(cfg),
           isIdle: vi.fn().mockReturnValue(true),
           clearActiveTodoPlanRevision,
@@ -20875,6 +20894,7 @@ describe('sessionLanguage multi-session propagation', () => {
       (id) =>
         ({
           getId: vi.fn().mockReturnValue(id),
+          shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(id === 'skill-1' ? cfg1 : cfg2),
           isIdle: vi.fn().mockReturnValue(false),
           reloadSkillSettings: id === 'skill-1' ? reload1 : reload2,
@@ -20958,6 +20978,7 @@ describe('sessionLanguage multi-session propagation', () => {
       () =>
         ({
           getId: vi.fn().mockReturnValue('skill-content'),
+          shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(sessionConfig),
           isIdle: vi.fn().mockReturnValue(false),
           reloadSkillSettings: reloadSessionSettings,
@@ -21075,6 +21096,7 @@ describe('sessionLanguage multi-session propagation', () => {
       () =>
         ({
           getId: vi.fn().mockReturnValue('s-ext'),
+          shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(cfg),
           sendAvailableCommandsUpdate,
           installRewriter: vi.fn(),
@@ -21178,6 +21200,7 @@ describe('sessionLanguage multi-session propagation', () => {
       () =>
         ({
           getId: vi.fn().mockReturnValue('s-ext'),
+          shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(cfg),
           sendAvailableCommandsUpdate,
           installRewriter: vi.fn(),
@@ -21257,6 +21280,7 @@ describe('sessionLanguage multi-session propagation', () => {
       () =>
         ({
           getId: vi.fn().mockReturnValue('s-ext'),
+          shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
           getConfig: vi.fn().mockReturnValue(cfg),
           sendAvailableCommandsUpdate,
           installRewriter: vi.fn(),

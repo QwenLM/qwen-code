@@ -1179,6 +1179,52 @@ describe('createTranscriptReplayMachine', () => {
     ]);
   });
 
+  it('matches the skip set against raw transcript ids after dedup renames', () => {
+    const machine = createTranscriptReplayMachine({
+      skipFinalizeCallIds: new Set(['call-auq']),
+    });
+    // Two dangling calls with the SAME transcript id: the second is renamed
+    // to `call-auq:2`, but the skip set (derived from chat history) holds
+    // the raw id, so both must stay pending.
+    updates(
+      machine,
+      record('assistant-1', 'assistant', {
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-auq',
+                name: 'ask_user_question',
+                args: {},
+              },
+            },
+          ],
+        },
+      }),
+    );
+    updates(
+      machine,
+      record('assistant-2', 'assistant', {
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-auq',
+                name: 'ask_user_question',
+                args: {},
+              },
+            },
+          ],
+        },
+      }),
+    );
+
+    expect([...machine.finalize()]).toEqual([]);
+    expect(machine.snapshot().pendingToolCalls).toHaveLength(2);
+  });
+
   it('correlates an id-less result only to one same-name pending call', () => {
     const machine = createTranscriptReplayMachine();
     updates(

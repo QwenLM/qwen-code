@@ -144,6 +144,7 @@ import {
   DAEMON_MODEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
+  DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY,
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
   LOAD_REPLAY_MAX_UPDATES,
@@ -6550,10 +6551,68 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     fn: AcpSessionBridge['sendPrompt'] | undefined;
   } = { fn: undefined };
 
+  // Fire-and-forget restore prompt for a session whose transcript ends on an
+  // unanswered ask_user_question. Returns true only when the prompt was
+  // admitted synchronously. Best-effort: admission failures (sendPrompt
+  // throws synchronously by contract) and async failures are logged, never
+  // propagated — a successful load/resume must not error over a side effect.
+  const maybeFireRestoreAskUserQuestionPrompt = (
+    entry: SessionEntry,
+    restoreAskUserQuestionHint: boolean,
+    requestedClientId: string | undefined,
+    registeredClientId: string,
+    options: { suppressRestorePrompt?: boolean },
+  ): boolean => {
+    if (
+      opts.restoreAskUserQuestion !== true ||
+      restoreAskUserQuestionHint !== true ||
+      // Nobody can answer the re-hung question without an attached client;
+      // internal restores (boot rehydrate, keepalive, sub-session resume)
+      // pass no clientId and must not fabricate a 5-minute permission wait.
+      requestedClientId === undefined ||
+      options.suppressRestorePrompt === true ||
+      // Admission-time busy check: pendingPromptCount flips synchronously
+      // when a prompt is accepted, before the queue callback sets
+      // promptActive; Goal turns never set promptActive at all.
+      entry.promptActive ||
+      entry.pendingPromptCount > 0 ||
+      entry.goalTurnActive === true
+    ) {
+      return false;
+    }
+    let restorePrompt: Promise<PromptResponse> | undefined;
+    try {
+      restorePrompt = sendTrackedPrompt.fn?.(
+        entry.sessionId,
+        { sessionId: entry.sessionId, prompt: [] } as Parameters<
+          AcpSessionBridge['sendPrompt']
+        >[1],
+        undefined,
+        { clientId: registeredClientId, restoreAskUserQuestion: true },
+      );
+    } catch (err) {
+      teeServeDebugLine(
+        `restoreAskUserQuestion: restore prompt admission failed for ${entry.sessionId}: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+      return false;
+    }
+    restorePrompt?.catch((err) => {
+      teeServeDebugLine(
+        `restoreAskUserQuestion: restore prompt failed for ${entry.sessionId}: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+    return true;
+  };
+
   async function restoreSession(
     action: 'load' | 'resume',
     req: BridgeRestoreSessionRequest,
-    options: { skipFreshSessionAdmission?: boolean } = {},
+    options: {
+      skipFreshSessionAdmission?: boolean;
+      suppressRestorePrompt?: boolean;
+    } = {},
   ): Promise<BridgeRestoredSession> {
     if (shuttingDown) {
       throw new Error('AcpSessionBridge is shutting down');
@@ -7061,6 +7120,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 mcpServers: [],
                 _meta: {
                   ...sessionSourceRequestMeta(req.sourceType, req.sourceId),
+                  // Decline decisions known before the child RPC: keep the
+                  // child's replay finalize-skip aligned with the re-hang.
+                  ...(opts.restoreAskUserQuestion === true &&
+                  (req.clientId === undefined ||
+                    options.suppressRestorePrompt === true)
+                    ? {
+                        [DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY]: true,
+                      }
+                    : {}),
                   ...(historyReplay === 'response'
                     ? {
                         [LOAD_REPLAY_MODE_META_KEY]: LOAD_REPLAY_BULK_MODE,
@@ -7082,7 +7150,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               sessionId: req.sessionId,
               cwd: workspaceKey,
               mcpServers: [],
-              _meta: sessionSourceRequestMeta(req.sourceType, req.sourceId),
+              _meta: {
+                ...sessionSourceRequestMeta(req.sourceType, req.sourceId),
+                ...(opts.restoreAskUserQuestion === true &&
+                (req.clientId === undefined ||
+                  options.suppressRestorePrompt === true)
+                  ? {
+                      [DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY]: true,
+                    }
+                  : {}),
+              },
             });
             return await restoreChannel.connection.unstable_resumeSession(
               request,
@@ -7235,29 +7312,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             throw error;
           }
         }
-        if (
-          opts.restoreAskUserQuestion === true &&
-          restoreAskUserQuestionHint &&
-          !racedEntry.promptActive
-        ) {
-          const restorePrompt = sendTrackedPrompt.fn?.(
-            racedEntry.sessionId,
-            { sessionId: racedEntry.sessionId, prompt: [] } as Parameters<
-              AcpSessionBridge['sendPrompt']
-            >[1],
-            undefined,
-            {
-              ...(clientId !== undefined ? { clientId } : {}),
-              restoreAskUserQuestion: true,
-            },
-          );
-          restorePrompt?.catch((err) => {
-            teeServeDebugLine(
-              `restoreAskUserQuestion: restore prompt failed for ${racedEntry.sessionId}: ` +
-                `${err instanceof Error ? err.message : String(err)}`,
-            );
-          });
-        }
+        const restorePromptAdmitted = maybeFireRestoreAskUserQuestionPrompt(
+          racedEntry,
+          restoreAskUserQuestionHint,
+          req.clientId,
+          clientId,
+          options,
+        );
         return {
           sessionId: racedEntry.sessionId,
           workspaceCwd: racedEntry.workspaceCwd,
@@ -7275,7 +7336,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             : {}),
           state: racedEntry.restoreState ?? {},
           hasActivePrompt:
-            racedEntry.promptActive || racedEntry.goalTurnActive === true,
+            restorePromptAdmitted ||
+            racedEntry.promptActive ||
+            racedEntry.goalTurnActive === true,
           ...replayFieldsFor(racedEntry, action, liveReplayMode),
         };
       }
@@ -7356,29 +7419,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // directly.
       entry.attachCount = coalesceState.count;
       registeredEntry = entry;
-      if (
-        opts.restoreAskUserQuestion === true &&
-        restoreAskUserQuestionHint &&
-        !entry.promptActive
-      ) {
-        const restorePrompt = sendTrackedPrompt.fn?.(
-          entry.sessionId,
-          { sessionId: entry.sessionId, prompt: [] } as Parameters<
-            AcpSessionBridge['sendPrompt']
-          >[1],
-          undefined,
-          {
-            ...(clientId !== undefined ? { clientId } : {}),
-            restoreAskUserQuestion: true,
-          },
-        );
-        restorePrompt?.catch((err) => {
-          teeServeDebugLine(
-            `restoreAskUserQuestion: restore prompt failed for ${entry.sessionId}: ` +
-              `${err instanceof Error ? err.message : String(err)}`,
-          );
-        });
-      }
+      const restorePromptAdmitted = maybeFireRestoreAskUserQuestionPrompt(
+        entry,
+        restoreAskUserQuestionHint,
+        req.clientId,
+        clientId,
+        options,
+      );
       // Explicit `session/load` / `session/resume` is "give me THIS
       // id"; it must NOT become the implicit attach target for
       // subsequent omitted-id `POST /session` callers under `single`
@@ -7398,7 +7445,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         ...(artifactRestoreWarnings.length > 0
           ? { artifactWarnings: artifactRestoreWarnings }
           : {}),
-        hasActivePrompt: entry.promptActive || entry.goalTurnActive === true,
+        hasActivePrompt:
+          restorePromptAdmitted ||
+          entry.promptActive ||
+          entry.goalTurnActive === true,
         ...replayFieldsFor(entry, action, liveReplayMode),
       };
     })().finally(async () => {
@@ -9493,6 +9543,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               },
               {
                 skipFreshSessionAdmission: true,
+                // A fork inherits the parent's dangling ask_user_question
+                // tail, but forks cannot run that tool — never fire a
+                // restore prompt into a brand-new branch.
+                suppressRestorePrompt: true,
               },
             );
             releaseAdmissionOnce();

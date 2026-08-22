@@ -29,7 +29,9 @@ Daemon boot does **not** scan or auto-resume waiting sessions.
 Generic continue classifies a dangling `functionCall` as
 `interrupted_turn` and synthesizes an **error** function response. Restoring
 a question as a tool crash would lose the HITL. Restore is a separate
-tracked prompt path. Continue semantics stay unchanged.
+tracked prompt path. When the flag is on and the trailing question is
+restorable, `continueLastTurn` declines (`accepted: false, interruption:
+none`) instead of answering the restored question with a synthetic failure.
 
 ## Eligibility
 
@@ -43,28 +45,46 @@ All of the following must hold:
   batch stays on orphan repair.
 - The live session has no in-flight prompt (already waiting → do not
   restore twice).
+- The load/resume request carries an attached client id — without one,
+  nobody could answer the re-hung question (keepalive, boot rehydrate and
+  sub-session resumes pass none).
+- The session is not a fork created by `branchSession` in this call.
 
 Main session only. Forks/subagents cannot run this tool.
 
 ## Switch
 
 `--restore-ask-user-question` on `qwen serve` and on the ACP child
-(`qwen --acp --restore-ask-user-question`). Default false. No settings.json
-key and no capability tag in v1.
+(`qwen --acp --restore-ask-user-question`). Default false. The child-side
+flag is honored only in ACP mode: in the plain TUI nothing can re-hang the
+question, and skipping load-time orphan repair would wedge the resumed
+session. No settings.json key and no capability tag in v1.
 
 ## Runtime
 
-1. `startChat` skips orphan repair **only** for the eligible AUQ call ids.
+1. `startChat` skips orphan repair **only** for the eligible AUQ call ids;
+   the per-send inline repair pass does the same, so a prompt that beats
+   the restore prompt does not close the preserved call with a synthetic
+   failure.
 2. Transcript replay `finalize()` skips those call ids so the UI stays
-   in-progress.
+   in-progress. Skip and re-hang stay in lockstep: when the daemon already
+   knows it will decline (no attached client, fork restore), the
+   child-bound request carries
+   `qwen.daemon.suppressRestoreAskUserQuestion` and the child neither hints
+   nor skips — the replay finalizes the question as failed.
 3. Child load/resume `_meta` includes `qwen.daemon.restoreAskUserQuestion`
    when eligible.
 4. Bridge sees the hint **and** the daemon switch, then admits a tracked
    `sendPrompt` with that meta (same admission as continue). External
-   `POST /prompt` cannot smuggle the meta.
+   `POST /prompt` cannot smuggle the meta. Admission additionally requires
+   the entry to be idle at fire time (`promptActive`, `pendingPromptCount`
+   and `goalTurnActive` are all clear); admission failures are logged and
+   swallowed — restore is a best-effort side effect of a successful load.
 5. `Session.prompt()` rebuilds the tool, `requestPermission`, then Submit
-   writes the real function response and continues the model; Cancel /
-   permission timeout matches live decline handling.
+   writes the real function response and continues the model. Cancel
+   persists a decline (live decline handling). A **timeout** on a restored
+   question persists nothing: the call stays dangling in the transcript so
+   a later load can re-hang it again.
 
 `requestId` is not persisted across restarts.
 

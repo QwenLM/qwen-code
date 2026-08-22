@@ -828,6 +828,25 @@ export interface BridgeClientRequestContext {
 export const DAEMON_MODEL_PROMPT_META_KEY = 'qwen.daemon.modelPrompt';
 export const DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY =
   'qwen.daemon.restoreAskUserQuestion';
+/**
+ * Response `_meta` key on `session/request_permission` cancellations telling
+ * the child WHY the bridge resolved a cancel (`timeout` / `agent_cancelled`
+ * / `session_closed`). The ACP wire frame itself only carries
+ * `{outcome:'cancelled'}`; the child uses this to avoid persisting a
+ * fabricated "canceled by the user" tool result when an unattended restore
+ * prompt's permission wait simply timed out.
+ */
+export const DAEMON_PERMISSION_CANCEL_REASON_META_KEY =
+  'qwen.daemon.permissionCancelReason';
+/**
+ * Request `_meta` key on the child-bound `session/load` / `session/resume`
+ * telling the child NOT to emit the restore hint and NOT to skip finalizing
+ * the trailing ask_user_question during replay. The daemon sets it when it
+ * already knows it will decline the re-hang (no attached client, fork
+ * restore) — keeping the replay skip and the re-hang decision in lockstep.
+ */
+export const DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY =
+  'qwen.daemon.suppressRestoreAskUserQuestion';
 export const DAEMON_ATTACHMENT_REFERENCES_META_KEY =
   'qwen.daemon.attachmentReferences';
 export const MAX_TRUSTED_MODEL_PROMPT_CHARS = 64 * 1024;

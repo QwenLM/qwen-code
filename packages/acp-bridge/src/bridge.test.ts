@@ -12426,6 +12426,7 @@ describe('createAcpSessionBridge', () => {
       await bridge.loadSession({
         sessionId: 'persisted-auq',
         workspaceCwd: WS_A,
+        clientId: 'client-1',
       });
       await vi.waitFor(() => {
         expect(handle.agent.promptCalls).toHaveLength(1);
@@ -12436,6 +12437,30 @@ describe('createAcpSessionBridge', () => {
           'qwen.daemon.restoreAskUserQuestion'
         ],
       ).toBe(true);
+      await bridge.shutdown();
+    });
+
+    it('does not fire a restore prompt without an attached client', async () => {
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+        loadSessionImpl: () => ({
+          configOptions: [],
+          _meta: { 'qwen.daemon.restoreAskUserQuestion': true },
+        }),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        restoreAskUserQuestion: true,
+      });
+
+      // Internal restores (boot rehydrate, keepalive) pass no clientId;
+      // nobody could answer the re-hung question, so it must not fire.
+      await bridge.loadSession({
+        sessionId: 'persisted-auq',
+        workspaceCwd: WS_A,
+      });
+      await Promise.resolve();
+      expect(handle.agent.promptCalls).toHaveLength(0);
       await bridge.shutdown();
     });
 

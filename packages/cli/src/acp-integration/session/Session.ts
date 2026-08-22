@@ -211,6 +211,7 @@ import {
   type ActiveWorkHoldV1,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_ATTACHMENT_REFERENCES_META_KEY,
+  DAEMON_PERMISSION_CANCEL_REASON_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
   MID_TURN_QUEUE_DRAIN_METHOD,
@@ -628,6 +629,8 @@ type PendingToolResultRecord = {
   toolType?: 'native' | 'mcp';
   executionErrorType?: ToolErrorType;
   providerDuplicate?: boolean;
+  /** Skip the durable JSONL write; the in-memory result is still produced. */
+  skipPersistence?: boolean;
   metadata: Omit<Partial<ToolCallResponseInfo>, 'executionStatus'> & {
     status: 'success' | 'error' | 'cancelled';
     executionStatus: ToolExecutionStatus;
@@ -1907,6 +1910,14 @@ export class Session implements SessionContext {
   /** One-shot model notice for background agents restored with the session. */
   pendingRecoveredAgentsNotice: string | null = null;
 
+  /**
+   * Call ids of the ask_user_question being re-hung by the current restore
+   * turn, if any. While set, a permission cancel that the bridge resolved as
+   * an unattended timeout does NOT persist the fabricated decline — the
+   * transcript keeps the dangling call so a later load can re-hang it again.
+   */
+  private restoringAskUserQuestionCallIds: Set<string> | undefined;
+
   // Implement SessionContext interface
   readonly sessionId: string;
 
@@ -3121,8 +3132,9 @@ export class Session implements SessionContext {
     if (this.config.getRestoreAskUserQuestion?.() !== true) return false;
     if (this.pendingPrompt && !this.pendingPrompt.signal.aborted) return false;
     return (
-      findRestorableAskUserQuestion(this.#getCurrentChat().getHistory()) !==
-      undefined
+      findRestorableAskUserQuestion(
+        this.#getCurrentChat().peekLastHistoryEntry(),
+      ) !== undefined
     );
   }
 
@@ -3455,12 +3467,17 @@ export class Session implements SessionContext {
     this.primeTurnFromHistory(records);
     const skipFinalizeCallIds =
       this.config.getRestoreAskUserQuestion?.() === true
-        ? restorableAskUserQuestionCallIds(this.#getCurrentChat().getHistory())
+        ? restorableAskUserQuestionCallIds(
+            this.#getCurrentChat().peekLastHistoryEntry(),
+          )
         : undefined;
     try {
       await this.historyReplayer.replay(records, gaps, {
-        ...options,
         ...(skipFinalizeCallIds ? { skipFinalizeCallIds } : {}),
+        // Explicit caller options win: the daemon passes
+        // `skipFinalizeCallIds: undefined` when it declined the re-hang, so
+        // the replay finalizes the trailing question instead of skipping it.
+        ...options,
       });
     } finally {
       // Replayed plan updates re-stamp the revision via sendUpdate, but they
@@ -4172,6 +4189,15 @@ export class Session implements SessionContext {
     // not need to structuredClone the whole history. The authoritative
     // re-detection inside the fired prompt() reads full history for the strip.
     const chat = this.#getCurrentChat();
+    // A trailing restorable ask_user_question is awaiting its restore
+    // prompt, not an interruption to close: `interrupted_turn` would answer
+    // the re-hung question with a synthesized failure functionResponse.
+    if (
+      this.config.getRestoreAskUserQuestion?.() === true &&
+      findRestorableAskUserQuestion(chat.peekLastHistoryEntry()) !== undefined
+    ) {
+      return { accepted: false, interruption: 'none' };
+    }
     const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
       sessionId: this.sessionId,
       apiHistory:
@@ -4449,9 +4475,24 @@ export class Session implements SessionContext {
                 DAEMON_CONTINUE_META_KEY
               ] === true;
             const isRestoreAskUserQuestion =
+              this.config.getRestoreAskUserQuestion?.() === true &&
               (params as { _meta?: Record<string, unknown> })._meta?.[
                 DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY
               ] === true;
+            if (
+              isRestoreAskUserQuestion &&
+              !findRestorableAskUserQuestion(
+                this.#getCurrentChat().peekLastHistoryEntry(),
+              )
+            ) {
+              // The restore prompt is fire-and-forget and races the state it
+              // re-checks: the trailing question may already be answered (or
+              // the meta key spoofed by a direct ACP client). Bail before any
+              // per-turn bookkeeping — todo work chains, file-history
+              // snapshots, `conversation_finished` — so each such no-op
+              // restore doesn't persist phantom records.
+              return { stopReason: 'end_turn' };
+            }
             if (
               !isRetry &&
               !isContinue &&
@@ -4844,12 +4885,15 @@ export class Session implements SessionContext {
               this.pendingRecoveredAgentsNotice = null;
             }
 
-            const activeTodoReminder = this.config.takeActiveTodoReminder(
-              promptId,
-              true,
-            );
+            // A restore turn must not TAKE the reminder: `take` burns it and
+            // resets its refresh counter, and the restore branch discards
+            // `parts` — the reminder would vanish and then stay suppressed
+            // for ACTIVE_TODO_REMINDER_REFRESH_TURNS on the post-answer
+            // continuation that actually needs it.
+            const activeTodoReminder = isRestoreAskUserQuestion
+              ? undefined
+              : this.config.takeActiveTodoReminder(promptId, true);
             if (
-              !isRestoreAskUserQuestion &&
               activeTodoReminder &&
               !parts.some((part) => part.text === activeTodoReminder)
             ) {
@@ -4876,22 +4920,35 @@ export class Session implements SessionContext {
             try {
               if (isRestoreAskUserQuestion) {
                 const restorable = findRestorableAskUserQuestion(
-                  this.#getCurrentChat().getHistory(),
+                  this.#getCurrentChat().peekLastHistoryEntry(),
                 );
                 if (!restorable) {
                   return { stopReason: 'end_turn' };
                 }
-                const toolRun = await this.#runWithFullTurnModel(
-                  fullTurnModelOverride,
-                  () =>
-                    this.runToolCalls(
-                      pendingSend.signal,
-                      promptId,
-                      restorable.functionCalls,
-                      toolLoopState,
-                      onFullTurnModel,
-                    ),
+                this.restoringAskUserQuestionCallIds = new Set(
+                  restorable.functionCalls
+                    .map((call) => call.id)
+                    .filter((id): id is string => typeof id === 'string'),
                 );
+                // The permission-timeout persistence skip only needs to
+                // cover the run itself — the durable record is written on
+                // runToolCalls' return path.
+                let toolRun: RunToolResult;
+                try {
+                  toolRun = await this.#runWithFullTurnModel(
+                    fullTurnModelOverride,
+                    () =>
+                      this.runToolCalls(
+                        pendingSend.signal,
+                        promptId,
+                        restorable.functionCalls,
+                        toolLoopState,
+                        onFullTurnModel,
+                      ),
+                  );
+                } finally {
+                  this.restoringAskUserQuestionCallIds = undefined;
+                }
                 if (
                   toolRun.stopAfterPermissionCancel ||
                   pendingSend.signal.aborted
@@ -4939,6 +4996,19 @@ export class Session implements SessionContext {
                           toolLoopState,
                         )
                       : getAbortAwareEndTurnStopReason(pendingSend.signal),
+                  };
+                }
+                if (nextMessage?.parts && systemReminders.length > 0) {
+                  // Mirror the normal send path: the restore turn replaces
+                  // `parts` with the tool responses, so plan-mode / arena
+                  // reminders built above would otherwise never reach the
+                  // model on the post-answer continuation.
+                  nextMessage = {
+                    ...nextMessage,
+                    parts: insertAfterFunctionResponses(
+                      nextMessage.parts,
+                      systemReminders,
+                    ),
                   };
                 }
                 if (nextMessage?.parts && this.pendingWorktreeNotice) {
@@ -9071,6 +9141,12 @@ export class Session implements SessionContext {
         new Map(orderedRecords.map((record) => [record.callId, promptId])),
       );
       orderedRecords.forEach((record, index) => {
+        // A restored ask_user_question whose permission wait timed out stays
+        // dangling on disk so a later load can re-hang it; only the
+        // in-memory result is produced.
+        if (record.skipPersistence === true) {
+          return;
+        }
         this.config
           .getChatRecordingService()
           ?.recordToolResult(finalized[index].responseParts, {
@@ -9800,6 +9876,7 @@ export class Session implements SessionContext {
         executionStatus: ToolExecutionStatus;
         recordInvalidToolParams?: boolean;
         stopAfterPermissionCancel?: boolean;
+        skipPersistence?: boolean;
         settledMetadata?: {
           artifacts?: ToolArtifact[];
           persistedOutputFiles?: string[];
@@ -9869,6 +9946,7 @@ export class Session implements SessionContext {
           executionStatus === 'error'
             ? (executionErrorType ?? opts.errorType)
             : undefined,
+        ...(opts.skipPersistence === true ? { skipPersistence: true } : {}),
         metadata: {
           callId,
           status: opts.status,
@@ -10682,7 +10760,10 @@ export class Session implements SessionContext {
                   },
                 },
               };
-              const stopAfterPermissionCancel = (message?: string) => {
+              const stopAfterPermissionCancel = (
+                message?: string,
+                opts?: { skipPersistence?: boolean },
+              ) => {
                 onStopAfterPermissionCancel?.();
                 return earlyErrorResponse(
                   new Error(
@@ -10694,6 +10775,9 @@ export class Session implements SessionContext {
                     errorType: undefined,
                     executionStatus: 'not_started',
                     stopAfterPermissionCancel: true,
+                    ...(opts?.skipPersistence === true
+                      ? { skipPersistence: true }
+                      : {}),
                   },
                 );
               };
@@ -10866,13 +10950,26 @@ export class Session implements SessionContext {
                   throw new Error(
                     'Switch-to-Default outcome must be normalized before execution.',
                   );
-                case ToolConfirmationOutcome.Cancel:
+                case ToolConfirmationOutcome.Cancel: {
+                  // A restored ask_user_question whose permission wait timed
+                  // out (nobody was there to answer) must not persist the
+                  // fabricated decline — leave the transcript dangling so a
+                  // later load can re-hang the question. A deliberate user
+                  // cancel persists, matching live decline handling.
+                  const cancelReason = (
+                    output as { _meta?: Record<string, unknown> | null }
+                  )._meta?.[DAEMON_PERMISSION_CANCEL_REASON_META_KEY];
+                  const skipPersistence =
+                    cancelReason === 'timeout' &&
+                    this.restoringAskUserQuestionCallIds?.has(callId) === true;
                   // Route through the terminal helper so the declined call is
                   // emitted and recorded consistently without marking its span
                   // as an error.
                   return stopAfterPermissionCancel(
                     confirmationPayload?.cancelMessage,
+                    skipPersistence ? { skipPersistence: true } : undefined,
                   );
+                }
                 case ToolConfirmationOutcome.ProceedOnce:
                 case ToolConfirmationOutcome.ProceedAlways:
                 case ToolConfirmationOutcome.ProceedAlwaysProject:

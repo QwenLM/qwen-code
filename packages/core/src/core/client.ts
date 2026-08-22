@@ -1816,7 +1816,7 @@ export class GeminiClient {
       // shape.)
       profiler.timeSync('orphan_tool_use_repair', () => {
         const preserveCallIds = this.config.getRestoreAskUserQuestion?.()
-          ? restorableAskUserQuestionCallIds(chat.getHistory())
+          ? restorableAskUserQuestionCallIds(chat.peekLastHistoryEntry())
           : undefined;
         this.repairOrphanedToolUseTurnsInHistory(
           undefined,

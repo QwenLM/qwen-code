@@ -252,6 +252,7 @@ export async function collectHistoryReplayUpdates({
   replayState,
   goalBootstrap,
   limits,
+  suppressRestoreAskUserQuestion,
 }: {
   sessionId: string;
   config?: Config;
@@ -262,14 +263,29 @@ export async function collectHistoryReplayUpdates({
   replayState?: unknown;
   goalBootstrap?: import('./history-replayer.js').HistoryReplayGoalBootstrap;
   limits?: HistoryReplayLimits;
+  /**
+   * The daemon declined the re-hang (no attached client / fork restore):
+   * finalize the trailing ask_user_question normally instead of skipping it,
+   * so the replayed card doesn't spin forever with no restore prompt coming.
+   */
+  suppressRestoreAskUserQuestion?: boolean;
 }): Promise<{ updates: SessionUpdate[]; replayError?: string }> {
   const updates: SessionUpdate[] = [];
   try {
     const initial = parseTranscriptReplayState(replayState, logger);
+    // `getChat()` THROWS 'Chat not initialized' when startChat never ran —
+    // optional chaining cannot catch that, and the bootstrap config used for
+    // non-live sessions is deliberately never chat-initialized. An
+    // uninitialized chat has no re-hung question in this process anyway, so
+    // guarding on isInitialized() is semantically right, not just
+    // throw-avoidance.
+    const replayClient = config?.getGeminiClient?.();
     const skipFinalizeCallIds =
-      config?.getRestoreAskUserQuestion?.() === true
+      suppressRestoreAskUserQuestion !== true &&
+      config?.getRestoreAskUserQuestion?.() === true &&
+      replayClient?.isInitialized?.() === true
         ? restorableAskUserQuestionCallIds(
-            config.getGeminiClient?.()?.getChat?.()?.getHistory?.() ?? [],
+            replayClient.getChat().peekLastHistoryEntry(),
           )
         : undefined;
     await new HistoryReplayer(
@@ -353,19 +369,12 @@ export async function replayTranscriptRecordPage({
   let replayState: TranscriptReplayStateV1;
   let replayError: string | undefined;
   try {
-    const skipFinalizeCallIds =
-      config?.getRestoreAskUserQuestion?.() === true
-        ? restorableAskUserQuestionCallIds(
-            config.getGeminiClient?.()?.getChat?.()?.getHistory?.() ?? [],
-          )
-        : undefined;
     const replayPageState = await replayer.replayPage(page.records, {
       pendingToolCalls:
         page.direction === 'backward' ? [] : state.pendingToolCalls,
       finalizeDangling:
         finalizeDangling && (page.direction === 'backward' || !page.hasMore),
       gaps: page.gaps,
-      ...(skipFinalizeCallIds ? { skipFinalizeCallIds } : {}),
       ...(state.goalState ? { goalState: state.goalState } : {}),
       ...(state.goalCause ? { goalCause: state.goalCause } : {}),
     });

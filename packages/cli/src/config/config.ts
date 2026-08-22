@@ -2289,7 +2289,13 @@ export async function loadCliConfig(
     // Undefined flows through to Config's default (5) and clamp logic.
     maxSubagentDepth: resolveMaxSubagentDepth(argv, settings),
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
-    restoreAskUserQuestion: argv.restoreAskUserQuestion === true,
+    // ACP/serve-scoped: only the spawned ACP child can re-hang a restored
+    // ask_user_question. In the plain TUI the flag would skip load-time
+    // orphan repair (client.ts) with nothing able to re-hang the question,
+    // leaving the resumed session wedged until the next send repairs it.
+    restoreAskUserQuestion:
+      (argv.acp || argv.experimentalAcp || false) &&
+      argv.restoreAskUserQuestion === true,
     sessionWriterLeaseEnabled:
       settings.experimental?.sessionWriterLease === true,
     cronEnabled: settings.experimental?.cron ?? true,

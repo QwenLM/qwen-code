@@ -58,11 +58,11 @@ describe('findRestorableAskUserQuestion', () => {
         ],
       },
     ];
-    const restorable = findRestorableAskUserQuestion(history);
+    const restorable = findRestorableAskUserQuestion(history.at(-1));
     expect(restorable?.functionCalls).toEqual([
       { id: 'call-auq', name: 'ask_user_question', args: AUQ_ARGS },
     ]);
-    expect(restorableAskUserQuestionCallIds(history)).toEqual(
+    expect(restorableAskUserQuestionCallIds(history.at(-1))).toEqual(
       new Set(['call-auq']),
     );
   });
@@ -90,44 +90,57 @@ describe('findRestorableAskUserQuestion', () => {
         ],
       },
     ];
-    expect(findRestorableAskUserQuestion(history)).toBeUndefined();
+    expect(findRestorableAskUserQuestion(history.at(-1))).toBeUndefined();
   });
 
   it('does not hit when there is no dangling model turn', () => {
     expect(
-      findRestorableAskUserQuestion([
-        { role: 'user', parts: [{ text: 'hi' }] },
-        { role: 'model', parts: [{ text: 'done' }] },
-      ]),
+      findRestorableAskUserQuestion({
+        role: 'model',
+        parts: [{ text: 'done' }],
+      }),
     ).toBeUndefined();
     expect(
-      findRestorableAskUserQuestion([
-        { role: 'user', parts: [{ text: 'hi' }] },
-        {
-          role: 'model',
-          parts: [
-            {
-              functionCall: {
-                id: 'call-auq',
-                name: 'ask_user_question',
-                args: AUQ_ARGS,
-              },
+      findRestorableAskUserQuestion({
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call-auq',
+              name: 'ask_user_question',
+              response: { output: 'answered' },
             },
-          ],
-        },
-        {
-          role: 'user',
-          parts: [
-            {
-              functionResponse: {
-                id: 'call-auq',
-                name: 'ask_user_question',
-                response: { output: 'answered' },
-              },
-            },
-          ],
-        },
-      ]),
+          },
+        ],
+      }),
     ).toBeUndefined();
+    expect(findRestorableAskUserQuestion(undefined)).toBeUndefined();
+  });
+
+  it('does not hit a trailing ask_user_question with invalid params', () => {
+    const last: Content = {
+      role: 'model',
+      parts: [
+        {
+          functionCall: {
+            id: 'call-auq',
+            name: 'ask_user_question',
+            args: {
+              questions: [
+                {
+                  question: 'Pick?',
+                  header: 'H',
+                  // fail-closed: a single-option question is invalid and
+                  // must degrade to the failed-tool-result fallback.
+                  options: [{ label: 'Only', description: 'one option' }],
+                },
+              ],
+            },
+          },
+        },
+      ],
+    };
+    expect(findRestorableAskUserQuestion(last)).toBeUndefined();
+    expect(restorableAskUserQuestionCallIds(last)).toBeUndefined();
   });
 });
