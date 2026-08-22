@@ -933,10 +933,41 @@ export class ContentGenerationPipeline {
             'PROTOCOL_TAG_LEAK',
           );
         }
+        // Sub-word fragment (e.g. a truncated '<thi'): release it as literal
+        // text, merged with the held parts the way the sibling candidate
+        // branch above does — on hasThinkingTagInReasoning turns every
+        // non-finish chunk is held by shouldHoldParts, so yielding only the
+        // tail would silently discard the demoted thought, the reasoning
+        // thought, and all visible text accumulated so far.
+        const pendingParts = context.pendingUntrustedResponseParts;
+        context.pendingUntrustedResponseParts = undefined;
         const response = new GenerateContentResponse();
         response.candidates = [
           {
-            content: { parts: [{ text: tail }], role: 'model' },
+            content: {
+              parts: [...(pendingParts ?? []), { text: tail }],
+              role: 'model',
+            },
+            index: 0,
+          },
+        ];
+        yield response;
+      }
+
+      // Root-level flush of anything still held: with no candidate and no
+      // post-demotion tail pending (the common clean-EOF shape — visible text
+      // that does not end in a tag-like suffix), no backstop above runs, yet
+      // on hasThinkingTagInReasoning turns every non-finish chunk was held by
+      // shouldHoldParts and the converter's finish-time flush never executed
+      // because no finish chunk arrived. Completing with zero responses would
+      // silently discard the held content; yield it instead.
+      if (context.pendingUntrustedResponseParts?.length) {
+        const pendingParts = context.pendingUntrustedResponseParts;
+        context.pendingUntrustedResponseParts = undefined;
+        const response = new GenerateContentResponse();
+        response.candidates = [
+          {
+            content: { parts: pendingParts, role: 'model' },
             index: 0,
           },
         ];

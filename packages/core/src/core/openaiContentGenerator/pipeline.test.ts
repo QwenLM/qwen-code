@@ -2802,6 +2802,115 @@ describe('ContentGenerationPipeline', () => {
       ]);
     });
 
+    it('merges held response parts into a released post-demotion tag tail at clean stream EOF', async () => {
+      // On hasThinkingTagInReasoning turns every non-finish chunk is held by
+      // shouldHoldParts, so the tail backstop must flush
+      // pendingUntrustedResponseParts the way the sibling candidate branch
+      // does — yielding only the tail would silently discard the demoted
+      // thought, the reasoning thought, and all visible text.
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'response-id',
+            choices: [{ delta: { content: '<thi' }, finish_reason: null }],
+          } as OpenAI.Chat.ChatCompletionChunk;
+        },
+      };
+      const emptyResponse = new GenerateContentResponse();
+      emptyResponse.candidates = [
+        { content: { parts: [], role: 'model' }, index: 0 },
+      ];
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToGemini as Mock).mockImplementation(
+        (_chunk, context) => {
+          context.pendingPostDemotionTagTail = '<thi';
+          context.pendingUntrustedResponseParts = [
+            { thought: true, text: 'reasoning' },
+            { thought: true, text: 'demoted thought' },
+            { text: 'visible ' },
+          ];
+          return emptyResponse;
+        },
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        'test-prompt-id',
+      );
+      const results = [];
+      for await (const result of resultGenerator) results.push(result);
+
+      expect(results).toHaveLength(1);
+      expect(results[0]?.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'reasoning' },
+        { thought: true, text: 'demoted thought' },
+        { text: 'visible ' },
+        { text: '<thi' },
+      ]);
+    });
+
+    it('flushes held response parts at clean stream EOF when no candidate or tail is pending', async () => {
+      // The common clean-EOF shape: visible text does not end in a tag-like
+      // suffix, so no tail is held and no candidate is pending. On
+      // hasThinkingTagInReasoning turns every non-finish chunk was still held
+      // by shouldHoldParts and no finish chunk ever ran the converter's
+      // finish-time flush, so the generator must not complete with zero
+      // responses and silently discard the held content.
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'response-id',
+            choices: [{ delta: { content: 'Answer' }, finish_reason: null }],
+          } as OpenAI.Chat.ChatCompletionChunk;
+        },
+      };
+      const emptyResponse = new GenerateContentResponse();
+      emptyResponse.candidates = [
+        { content: { parts: [], role: 'model' }, index: 0 },
+      ];
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToGemini as Mock).mockImplementation(
+        (_chunk, context) => {
+          context.pendingUntrustedResponseParts = [
+            { thought: true, text: 'reasoning' },
+            { thought: true, text: 'demoted thought' },
+            { text: 'Answer' },
+          ];
+          return emptyResponse;
+        },
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        'test-prompt-id',
+      );
+      const results = [];
+      for await (const result of resultGenerator) results.push(result);
+
+      expect(results).toHaveLength(1);
+      expect(results[0]?.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'reasoning' },
+        { thought: true, text: 'demoted thought' },
+        { text: 'Answer' },
+      ]);
+    });
+
     it('rejects a held post-demotion closing tag tail at clean stream EOF', async () => {
       // Closing-tag twin of the full-tag-word EOF backstop: pins the closing
       // branch (`\/?`) of the backstop regex — a held '</think' must fail
