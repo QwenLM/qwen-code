@@ -148,10 +148,13 @@ letting the model run unattended.
 - Commands Qwen Code already understands keep their built-in classification.
   Listing `rm`, `git`, `sed`, or `tee` does not make `rm -rf build` or
   `git push` read-only.
-- Shell interpreters and generic command wrappers — `bash`, `sh`, `zsh`, `env`,
-  `sudo`, `xargs`, `nohup`, `timeout`, `exec`, `eval`, and similar — are
-  rejected, because each exists to run some other command and accepting one
-  would bypass the analysis entirely.
+- Shell interpreters, multi-call binaries, and generic command launchers —
+  `bash`, `sh`, `zsh`, `busybox`, `env`, `sudo`, `su`, `xargs`, `watch`,
+  `nohup`, `timeout`, `setsid`, `exec`, `eval`, and similar — are rejected,
+  because each exists to run some other command and accepting one would bypass
+  the analysis entirely. That list is a denylist, so it cannot be exhaustive:
+  the rule above — only list a command you would let the model run unattended —
+  is what protects you from anything it misses.
 
 Anything that is not a bare command name (a path, a command with arguments, or
 a string containing shell metacharacters) is also dropped.

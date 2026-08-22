@@ -87,11 +87,13 @@ drops:
 
 - anything that is not a bare command name (the classifier matches the
   lowercased root token, so a path or an argument string could never match);
-- `NON_VOUCHABLE_READ_ONLY_ROOTS` — shell interpreters and generic command
-  wrappers (`bash`, `sh`, `env`, `sudo`, `xargs`, `nohup`, `timeout`, `exec`,
-  `eval`, …). Each exists to run some other command, so accepting one would let
-  a single settings line bypass the AST analysis entirely
-  (`bash -c 'rm -rf /'`).
+- `NON_VOUCHABLE_READ_ONLY_ROOTS` — shell interpreters, multi-call binaries,
+  and generic command launchers (`bash`, `sh`, `busybox`, `env`, `sudo`, `su`,
+  `xargs`, `watch`, `nohup`, `timeout`, `setsid`, `chroot`, `exec`, `eval`, …).
+  Each exists to run some other command, so accepting one would let a single
+  settings line bypass the AST analysis entirely (`bash -c 'rm -rf /'`). Being
+  a denylist it cannot be exhaustive; the documented whole-binary scope of a
+  vouch is the backstop for anything it misses.
 
 `Config.getPlanModeReadOnlyRoots()` returns the normalised set only while
 `getApprovalMode() === ApprovalMode.PLAN`, and an empty set otherwise. Callers

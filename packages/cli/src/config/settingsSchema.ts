@@ -2511,9 +2511,10 @@ const SETTINGS_SCHEMA = {
               'substitution, environment-assignment prefixes and pipes into ' +
               'unknown commands are unaffected, commands the classifier ' +
               'already understands (git, rm, sed, …) keep their built-in ' +
-              'classification, and shell interpreters or command wrappers ' +
-              '(bash, env, sudo, xargs, …) are ignored. Applies only in Plan ' +
-              'Mode; use permissions.allow for other modes.',
+              'classification, and shell interpreters, multi-call binaries ' +
+              'or command launchers (bash, busybox, env, sudo, watch, ' +
+              'xargs, …) are ignored. Applies only in Plan Mode; use ' +
+              'permissions.allow for other modes.',
             showInDialog: false,
             mergeStrategy: MergeStrategy.UNION,
           },

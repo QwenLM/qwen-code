@@ -9006,6 +9006,25 @@ describe('setApprovalMode with folder trust', () => {
         ]),
       ).toEqual(new Set(['ib']));
     });
+
+    it('drops multi-call binaries and privilege/namespace launchers', () => {
+      expect(
+        normalizePlanModeReadOnlyRoots([
+          'busybox',
+          'toybox',
+          'watch',
+          'su',
+          'runuser',
+          'pkexec',
+          'setsid',
+          'chroot',
+          'unshare',
+          'nsenter',
+          'flock',
+          'ib',
+        ]),
+      ).toEqual(new Set(['ib']));
+    });
   });
 
   describe('getPlanModeReadOnlyRoots', () => {

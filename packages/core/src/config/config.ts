@@ -475,9 +475,16 @@ export interface PlanModeSettings {
  * Roots that can never be vouched for as read-only. Each one exists to run
  * some other command, so accepting it would let a single settings entry
  * bypass the AST analysis entirely (`bash -c 'rm -rf /'`).
+ *
+ * Being a denylist, this cannot be exhaustive; it covers shell interpreters,
+ * multi-call binaries, and generic command launchers. The backstop for
+ * anything it misses is that a vouched entry is documented as covering the
+ * whole binary, mutating sub-commands included.
  */
 const NON_VOUCHABLE_READ_ONLY_ROOTS = new Set([
   'bash',
+  'busybox',
+  'chroot',
   'command',
   'csh',
   'dash',
@@ -486,16 +493,25 @@ const NON_VOUCHABLE_READ_ONLY_ROOTS = new Set([
   'eval',
   'exec',
   'fish',
+  'flock',
   'ksh',
   'nice',
   'nohup',
+  'nsenter',
+  'pkexec',
+  'runuser',
   'script',
+  'setsid',
   'sh',
   'source',
   'stdbuf',
+  'su',
   'sudo',
   'tcsh',
   'timeout',
+  'toybox',
+  'unshare',
+  'watch',
   'xargs',
   'zsh',
 ]);
