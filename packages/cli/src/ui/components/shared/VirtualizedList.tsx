@@ -407,14 +407,18 @@ function VirtualizedList<T>(
   const prevScrollTop = useRef(actualScrollTop);
   const prevContainerHeight = useRef(scrollableContainerHeight);
   // Set by the re-anchor branch when it clamps a scrolled-away viewport to
-  // the new bottom, holding the anchor the clamp installed. While the
-  // current anchor still sits where the clamp parked it, that position is
-  // content-driven, so the re-stick gate must not read it as the user
-  // having scrolled to the bottom. Any scroll moves the anchor, and the
-  // mismatch clears the mark.
-  const reAnchorClampMark = useRef<{ index: number; offset: number } | null>(
-    null,
-  );
+  // the new bottom, holding the anchor the clamp installed plus the key of
+  // the item parked there. While the current anchor still sits where the
+  // clamp parked it, that position is content-driven, so the re-stick gate
+  // must not read it as the user having scrolled to the bottom. Any scroll
+  // moves the anchor, and the mismatch clears the mark; a wholesale dataset
+  // swap (/resume — ScrollableList carries no key) changes the key at the
+  // mark's index and clears it the same way (#9305 review R17-3).
+  const reAnchorClampMark = useRef<{
+    index: number;
+    offset: number;
+    key: string;
+  } | null>(null);
 
   useLayoutEffect(() => {
     const contentPreviouslyFit =
@@ -435,11 +439,15 @@ function VirtualizedList<T>(
     // viewport at the bottom pixels. A position installed by the re-anchor
     // clamp is not a user-driven bottom either (#9305): suppress the flip
     // while the anchor still matches the clamp mark.
+    const clampMark = reAnchorClampMark.current;
+    const clampMarkItem = clampMark ? data[clampMark.index] : undefined;
     const clampParked =
-      reAnchorClampMark.current !== null &&
-      scrollAnchor.index === reAnchorClampMark.current.index &&
-      scrollAnchor.offset === reAnchorClampMark.current.offset;
-    if (reAnchorClampMark.current !== null && !clampParked) {
+      clampMark !== null &&
+      clampMarkItem !== undefined &&
+      scrollAnchor.index === clampMark.index &&
+      scrollAnchor.offset === clampMark.offset &&
+      keyExtractor(clampMarkItem, clampMark.index) === clampMark.key;
+    if (clampMark !== null && !clampParked) {
       reAnchorClampMark.current = null;
     }
     if (
@@ -468,9 +476,13 @@ function VirtualizedList<T>(
       // container shrink. While the content fit, the user could see
       // everything, so follow must come back once it overflows instead of
       // content rendering below the fold (#9305 reviews R11-6, R14-1).
+      // Banner-only remnants never cross back: there is no conversation to
+      // follow, and the surviving banner carries the park mark across the
+      // collapse (#9305 review R17-1).
       ((listGrew && (isStickingToBottom || (wasAtBottom && !clampParked))) ||
         (clampParked &&
           contentPreviouslyFit &&
+          data.length > 1 &&
           totalHeight > scrollableContainerHeight) ||
         // A shrink landing in the same render must reach the drop/re-anchor
         // branch below, not be preempted here on the stale render-time
@@ -524,9 +536,24 @@ function VirtualizedList<T>(
         // so one installed at rest reads as clampParked forever and kills
         // growth auto-follow, defending nothing — the re-stick gate is
         // already blocked by `!contentPreviouslyFit` (#9305 reviews R8-1,
-        // R10-1).
-        if (newScrollTop > 0 || (!isStickingToBottom && data.length > 1)) {
-          reAnchorClampMark.current = newAnchor;
+        // R10-1). An out-of-range carried anchor with a multi-item remnant
+        // is a wholesale dataset swap (/resume — ScrollableList carries no
+        // key) or a truncation below the anchor: the park lands on content
+        // the user never scrolled, and a mark there would keep follow dead
+        // in the new dataset; the banner-only collapse keeps its mark
+        // (#9305 review R17-2).
+        const swapEntry = scrollAnchor.index >= data.length && data.length > 1;
+        const markItem = data[newAnchor.index];
+        if (
+          markItem !== undefined &&
+          ((newScrollTop > 0 && !swapEntry) ||
+            (newScrollTop === 0 && !isStickingToBottom && data.length > 1))
+        ) {
+          reAnchorClampMark.current = {
+            index: newAnchor.index,
+            offset: newAnchor.offset,
+            key: keyExtractor(markItem, newAnchor.index),
+          };
         }
         setScrollAnchor(newAnchor);
       }
@@ -541,7 +568,8 @@ function VirtualizedList<T>(
     prevScrollTop.current = actualScrollTop;
     prevContainerHeight.current = scrollableContainerHeight;
   }, [
-    data.length,
+    data,
+    keyExtractor,
     totalHeight,
     actualScrollTop,
     scrollableContainerHeight,
