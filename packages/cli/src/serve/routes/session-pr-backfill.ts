@@ -9,6 +9,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { Application, RequestHandler } from 'express';
 import {
+  detectGhPrCreateBinding,
   fetchGitHubPullRequests,
   readSessionPrs,
   readWorktreeSession,
@@ -102,6 +103,8 @@ interface BackfillCandidate {
   conventionNumber: number | undefined;
   /** Worktree branch plus every `gitBranch` seen in the transcript. */
   branches: readonly string[];
+  /** PRs the session created via `gh pr create` (number → printed URL). */
+  direct: ReadonlyMap<number, string>;
 }
 
 // Transcript records carry the branch the session was on; the set is small
@@ -109,21 +112,75 @@ interface BackfillCandidate {
 const GIT_BRANCH_PATTERN = /"gitBranch":"([^"]+)"/g;
 const MAX_DISTINCT_BRANCHES = 64;
 
-async function collectTranscriptBranches(
-  filePath: string,
-): Promise<readonly string[]> {
-  let raw: string;
-  try {
-    raw = await fs.readFile(filePath, 'utf8');
-  } catch {
-    return [];
-  }
+function collectTranscriptBranches(raw: string): readonly string[] {
   const branches = new Set<string>();
   for (const match of raw.matchAll(GIT_BRANCH_PATTERN)) {
     branches.add(match[1]);
     if (branches.size >= MAX_DISTINCT_BRANCHES) break;
   }
   return [...branches];
+}
+
+interface TranscriptToolPart {
+  functionCall?: {
+    id?: string;
+    name?: string;
+    args?: { command?: string };
+  };
+  functionResponse?: {
+    id?: string;
+    name?: string;
+    response?: { output?: string };
+  };
+}
+
+/**
+ * Recovers PRs the session created by running `gh pr create` in the shell:
+ * pairs each `run_shell_command` call (by part id) with its response and
+ * applies the same command+URL gate as the live shell-tool binding. Covers
+ * sessions that predate the live hook.
+ */
+function collectGhPrCreateBindings(raw: string): ReadonlyMap<number, string> {
+  const commandById = new Map<string, string>();
+  const bindings = new Map<number, string>();
+  for (const line of raw.split('\n')) {
+    if (!line.includes('run_shell_command')) continue;
+    let parts: unknown;
+    try {
+      parts = (JSON.parse(line) as { message?: { parts?: unknown } })?.message
+        ?.parts;
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(parts)) continue;
+    for (const part of parts as TranscriptToolPart[]) {
+      const call = part.functionCall;
+      if (
+        call?.name === 'run_shell_command' &&
+        typeof call.id === 'string' &&
+        typeof call.args?.command === 'string'
+      ) {
+        commandById.set(call.id, call.args.command);
+        continue;
+      }
+      const response = part.functionResponse;
+      if (
+        response?.name !== 'run_shell_command' ||
+        typeof response.id !== 'string' ||
+        typeof response.response?.output !== 'string'
+      ) {
+        continue;
+      }
+      const command = commandById.get(response.id);
+      if (command === undefined) continue;
+      const binding = detectGhPrCreateBinding(
+        command,
+        response.response.output,
+      );
+      if (binding) bindings.set(binding.number, binding.url);
+    }
+  }
+  return bindings;
 }
 
 /**
@@ -172,16 +229,28 @@ export async function backfillWorkspaceSessionPrs(
         } catch {
           worktree = null;
         }
+        let transcriptRaw: string;
+        try {
+          transcriptRaw = await fs.readFile(
+            path.join(dir, `${item.sessionId}.jsonl`),
+            'utf8',
+          );
+        } catch {
+          transcriptRaw = '';
+        }
         const branches = [
           ...(worktree ? [worktree.worktreeBranch] : []),
-          ...(await collectTranscriptBranches(
-            path.join(dir, `${item.sessionId}.jsonl`),
-          )),
+          ...collectTranscriptBranches(transcriptRaw),
         ];
+        const direct = collectGhPrCreateBindings(transcriptRaw);
         const conventionNumber = worktree
           ? parsePrNumberFromWorktree(worktree.slug, worktree.worktreeBranch)
           : undefined;
-        if (branches.length === 0 && conventionNumber === undefined) {
+        if (
+          branches.length === 0 &&
+          conventionNumber === undefined &&
+          direct.size === 0
+        ) {
           continue;
         }
         candidates.push({
@@ -189,6 +258,7 @@ export async function backfillWorkspaceSessionPrs(
           archiveState,
           conventionNumber,
           branches,
+          direct,
         });
       }
       cursor = page.nextCursor;
@@ -225,6 +295,9 @@ export async function backfillWorkspaceSessionPrs(
         numbers.push(mapped);
       }
     }
+    for (const directNumber of candidate.direct.keys()) {
+      if (!numbers.includes(directNumber)) numbers.push(directNumber);
+    }
     if (numbers.length === 0) continue;
     const prPath = sessionService.getPrSessionPathForArchiveState(
       candidate.sessionId,
@@ -242,7 +315,7 @@ export async function backfillWorkspaceSessionPrs(
         result.alreadyBound += 1;
         continue;
       }
-      let url = numberToUrl.get(number);
+      let url = numberToUrl.get(number) ?? candidate.direct.get(number);
       if (url === undefined && number === candidate.conventionNumber) {
         remoteWebUrl ??= getRemoteWebUrl(runtime.workspaceCwd);
         if (remoteWebUrl !== undefined) url = `${remoteWebUrl}/pull/${number}`;

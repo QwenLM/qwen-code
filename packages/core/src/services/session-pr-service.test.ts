@@ -10,6 +10,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   SESSION_PR_LIST_LIMIT,
+  detectGhPrCreateBinding,
   mergeSessionPrLists,
   readSessionPrs,
   updateSessionPrStates,
@@ -301,5 +302,38 @@ describe('mergeSessionPrLists', () => {
     expect(merged).toHaveLength(SESSION_PR_LIST_LIMIT);
     expect(merged[0]?.number).toBe(2);
     expect(merged[merged.length - 1]?.number).toBe(SESSION_PR_LIST_LIMIT + 1);
+  });
+});
+
+describe('detectGhPrCreateBinding', () => {
+  const url = 'https://github.com/owner/repo/pull/9729';
+
+  it('binds the PR URL printed by a successful gh pr create', () => {
+    expect(
+      detectGhPrCreateBinding(
+        'cd /w && gh pr create --title x --body y',
+        `some noise\n${url}\n`,
+      ),
+    ).toEqual({ number: 9729, url });
+  });
+
+  it('matches wrapped commands and the gh.exe spelling', () => {
+    expect(
+      detectGhPrCreateBinding('bash -c "gh.exe pr create --fill"', url),
+    ).toEqual({ number: 9729, url });
+  });
+
+  it('returns undefined when the command is not gh pr create', () => {
+    expect(detectGhPrCreateBinding('gh pr view 1', url)).toBeUndefined();
+    expect(detectGhPrCreateBinding('git commit -m gh', url)).toBeUndefined();
+  });
+
+  it('returns undefined for dry runs and failed creates (no URL)', () => {
+    expect(
+      detectGhPrCreateBinding('gh pr create --dry-run', url),
+    ).toBeUndefined();
+    expect(
+      detectGhPrCreateBinding('gh pr create --title x', 'error: not logged in'),
+    ).toBeUndefined();
   });
 });

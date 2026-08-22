@@ -411,6 +411,80 @@ describe('backfillWorkspaceSessionPrs', () => {
     );
     expect(prs?.map((pr) => pr.number).sort()).toEqual([42, 43]);
   });
+
+  it('recovers PRs created via gh pr create in the session shell', async () => {
+    const sessionId = '00000000-0000-4000-8000-000000000008';
+    await seedSession(sessionId);
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    const call = {
+      uuid: `${sessionId}-call`,
+      parentUuid: `${sessionId}-user-1`,
+      sessionId,
+      timestamp: '2026-08-02T00:00:00.000Z',
+      type: 'assistant',
+      message: {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: 'call-1',
+              name: 'run_shell_command',
+              args: { command: 'gh pr create --title x --body y' },
+            },
+          },
+        ],
+      },
+      cwd: workspaceCwd,
+    };
+    const response = {
+      uuid: `${sessionId}-resp`,
+      parentUuid: `${sessionId}-call`,
+      sessionId,
+      timestamp: '2026-08-02T00:00:01.000Z',
+      type: 'user',
+      message: {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call-1',
+              name: 'run_shell_command',
+              response: {
+                output: `created\nhttps://github.com/o/r/pull/99\n`,
+              },
+            },
+          },
+        ],
+      },
+      cwd: workspaceCwd,
+    };
+    await fsp.appendFile(
+      path.join(chatsDir, `${sessionId}.jsonl`),
+      `${JSON.stringify(call)}\n${JSON.stringify(response)}\n`,
+      'utf8',
+    );
+    // gh is unavailable: the URL printed at create time is the only source.
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'cli_unavailable',
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 1 });
+    const prs = await readSessionPrs(
+      sessionService.getPrSessionPathForArchiveState(sessionId, 'active'),
+    );
+    expect(prs).toEqual([
+      {
+        number: 99,
+        url: 'https://github.com/o/r/pull/99',
+        createdAt: expect.any(String),
+      },
+    ]);
+  });
 });
 
 describe('registerSessionPrBackfillRoutes', () => {

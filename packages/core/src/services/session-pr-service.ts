@@ -126,6 +126,25 @@ export async function writeSessionPrs(
   await atomicWriteJSON(filePath, { prs } satisfies SessionPrList);
 }
 
+const GH_PR_CREATE_COMMAND_PATTERN = /\bgh(?:\.exe)?\s+pr\s+create\b/;
+const GH_PR_CREATE_URL_PATTERN = /https?:\/\/[^\s"'<>)]+\/pull\/(\d+)/;
+
+/**
+ * Recognizes a `gh pr create` run from the shell tool: the command names the
+ * action and gh prints the new PR's URL on success. Failed or `--dry-run`
+ * runs print no URL, which is the false-positive gate.
+ */
+export function detectGhPrCreateBinding(
+  command: string,
+  output: string,
+): { number: number; url: string } | undefined {
+  if (!GH_PR_CREATE_COMMAND_PATTERN.test(command)) return undefined;
+  if (command.includes('--dry-run')) return undefined;
+  const match = GH_PR_CREATE_URL_PATTERN.exec(output);
+  if (!match) return undefined;
+  return { number: Number(match[1]), url: match[0] };
+}
+
 /**
  * Union two binding lists, deduping by PR number and keeping each number's
  * freshest entry (by createdAt), ordered by binding time and capped. Used

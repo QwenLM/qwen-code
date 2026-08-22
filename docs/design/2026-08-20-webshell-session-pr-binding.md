@@ -36,6 +36,7 @@ Web Shell 同时运行 20+ 会话时，侧栏信息不足以回答"哪个会话�
 - bridge `updateSessionMetadata`（`packages/acp-bridge/src/bridge.ts`）先做全部校验再变更（组合请求不允许部分生效）；upsert 进 live entry.prs（去重按 number，上限 10），`session_metadata_updated` SSE 事件 data 带完整 `prs`。
 - ACP `session/update_metadata`（`acp-http/dispatch.ts`）同样把最新绑定 upsert 进 sidecar。
 - `GitDialog.doCreatePr` 成功后：仅用 dialog 已有的 `sessionId`（`sessionIdRef.current`，即连接会话或 dialog 已为提交信息生成等操作解析出的会话）调用 `updateSessionMetadata(sessionId, { pr })`。**不调 `resolveSessionForWorkspace`**——它可能创建幽灵会话或误绑"最近会话"。写入失败仅降级为 console 警告，不影响 PR 创建成功的状态展示。
+- **shell 工具 post-hook**：`run_shell_command` 完成且未中止时，`detectGhPrCreateBinding(command, output)`（core `session-pr-service.ts`）识别 `gh pr create`（排除 `--dry-run`）并从 stdout 提取首个 `/pull/<N>` URL——gh 失败/dry-run 不打印 URL，天然防误报；命中则直接 `upsertSessionPr(..., state:'open')` 直写 sidecar（复刻 worktree sidecar 的"工具进程直写"模式，CLI/daemon 双模生效，daemon 列表 ~2s 内展示）。best-effort，失败不影响工具结果。
 
 ### 持久化
 
@@ -57,9 +58,10 @@ Web Shell 同时运行 20+ 会话时，侧栏信息不足以回答"哪个会话�
 
 新增 daemon 路由 `POST /sessions/backfill-prs`（进程级、按需触发，启动不自动扫描），实现见 `packages/cli/src/serve/routes/session-pr-backfill.ts`：
 
-- 遍历 registry 中所有 trusted workspace runtime；每个 workspace 扫描 persisted 会话（active + archived），候选分支 = worktree sidecar branch ∪ transcript 各记录的 `gitBranch`（正则提取，distinct 上限 64），解析双源：
+- 遍历 registry 中所有 trusted workspace runtime；每个 workspace 扫描 persisted 会话（active + archived），候选分支 = worktree sidecar branch ∪ transcript 各记录的 `gitBranch`（正则提取，distinct 上限 64），解析三源：
   1. **约定**：slug `pr-<N>` / branch `worktree-pr-<N>` 直接给出 PR 号（零网络）；
-  2. **gh 批量**：每 workspace 一次 `fetchGitHubPullRequests({state:'all', limit:500, slim:true})`，把候选分支与 headRefName 交集映射到 number + url。实测存量里 `pr-<N>` slug 与 worktree branch 几乎零命中（PR 基本不从 worktree 分支提交），`gitBranch` 是主力来源（主 workspace 342 会话命中 272）。
+  2. **gh 批量**：每 workspace 一次 `fetchGitHubPullRequests({state:'all', limit:500, slim:true})`，把候选分支与 headRefName 交集映射到 number + url。实测存量里 `pr-<N>` slug 与 worktree branch 几乎零命中（PR 基本不从 worktree 分支提交），`gitBranch` 是主力来源（主 workspace 342 会话命中 272）；
+  3. **transcript `gh pr create` 痕迹**：按 part id 配对 `run_shell_command` 的 functionCall/functionResponse，复用 `detectGhPrCreateBinding` 提取创建时打印的 URL——gh 不可用时也能绑（URL 兜底链：gh 映射 → 创建时打印的 URL → remote 推导仅约定号）。
 - `slim` 只取 number/url/headRefName：带 CI rollup 的全字段查询在 `--state all --limit 500` 下触发 GitHub GraphQL 504；slim 约 4s/60KB。
 - URL 优先取 gh 映射；gh 不可用时由 git remote web URL 推导 `<repo>/pull/<N>`（支持 https / scp 风格 ssh / `ssh://` 与 enterprise host，仅约定号）；解析不到号的会话原样跳过。
 - 已知副作用：曾 checkout/review 他人 PR 分支的会话也会被绑定（多 PR 列表可容纳，搜索语义上属于"相关会话"）。
@@ -72,11 +74,11 @@ Web Shell 同时运行 20+ 会话时，侧栏信息不足以回答"哪个会话�
 - **定时器**：daemon 启动后挂独立低频任务（不挂列表轮询热路径），默认 **5 分钟**一轮，环境变量 `QWEN_SESSION_PR_REFRESH_MINUTES` 可调（`0` = 关闭）；`unref()` 不阻碍进程退出，首轮延迟启动避开 boot。
 - **每轮**：遍历 trusted workspace → 读 `.pr.json` sidecar 挑出非 merged 绑定 → 无目标直接跳过（零 gh 调用）→ 有目标发一次 slim `gh pr list --state all --limit 500` → `updateSessionPrStates` 原地回写 state（**不重排顺序、不刷新 createdAt**，与 upsert 共享同一路径写入队列避免竞态）→ badge 经现有 2s 轮询自动更新。
 - **成本**：只对含未合入绑定的 workspace 发查询（每 ~4s）；gh 不可用时静默跳过该轮。
-- **明确不做**：不自动发现新 PR（agent shell 里 `gh pr create` 的发现需重扫 transcript，全量 6 分钟不适合进定时器；GitDialog 创建路径自绑定已覆盖主流）。
+- **明确不做**：定时器不做新 PR 发现（重扫 transcript 全量 6 分钟不适合 5 分钟周期）；发现由 shell post-hook（实时）与 backfill（按需）承担。
 
 ## 关键决策
 
-- **绑定时机 = GitDialog 创建 PR 成功时**。Agent 在 shell 里自行 `gh pr create` 的路径无法拦截，MVP 不覆盖；用户主力流程是 GitDialog。
+- **绑定时机 = GitDialog 创建 PR 成功时**（用户主力流程）；agent 在 shell 里 `gh pr create` 由 shell 工具 post-hook 实时识别 + backfill 的 transcript 痕迹源回填存量（后续补充，见写入端与回填章节）。
 - **sidecar 而非 transcript 记录**：displayName 走 `custom_title` transcript 记录是因为标题属于会话内容流；PR 绑定是会话外部元数据，worktree sidecar 是同类先例，改动面更小。
 - **多 PR 列表（cap 10）**：一个会话可能创建多个 PR（stacked PR、连续修复），只保留最新一个会让"按 PR 号反查会话"在这些场景失效。绑定按 number 去重、重复绑定移到最新位；badge 显示最新号 + `+N`，tooltip 列全部，搜索匹配任意一个。上限 10 防无界增长。
 - **workspace 级打开 GitDialog（无会话上下文）时不回写**：dialog 没有已解析的会话就跳过，不报错；绝不通过 `resolveSessionForWorkspace` 创建新会话来绑定（会产生幽灵会话/误绑）。
@@ -90,7 +92,7 @@ Web Shell 同时运行 20+ 会话时，侧栏信息不足以回答"哪个会话�
 | SDK 客户端  | `packages/sdk-typescript/src/daemon/DaemonClient.ts`（updateSessionMetadata 参数）                                                                        |
 | bridge 类型 | `packages/acp-bridge/src/bridgeTypes.ts`（BridgeSessionSummary.pr、metadata 参数）                                                                        |
 | bridge      | `packages/acp-bridge/src/bridge.ts`（updateSessionMetadata 校验/存储/广播）                                                                               |
-| core        | `packages/core/src/services/session-pr-service.ts`（新增）+ SessionService 路径助手/归档移动/删除清理                                                     |
+| core        | `packages/core/src/services/session-pr-service.ts`（新增）+ SessionService 路径助手/归档移动/删除清理；`tools/shell.ts`（gh pr create post-hook）         |
 | daemon 路由 | `packages/cli/src/serve/routes/session.ts`（两个 PATCH 路由校验 + sidecar 写入）、`acp-http/dispatch.ts`（ACP `session/update_metadata` 的 sidecar 写入） |
 | daemon 列表 | `packages/cli/src/serve/server/session-list.ts`（enrichPrSidecars）                                                                                       |
 | daemon 回填 | `packages/cli/src/serve/routes/session-pr-backfill.ts`（`POST /sessions/backfill-prs`，存量会话按需回填）                                                 |
@@ -100,8 +102,7 @@ Web Shell 同时运行 20+ 会话时，侧栏信息不足以回答"哪个会话�
 ## 范围边界（明确不做）
 
 - 服务端分页过滤（20+ 会话规模客户端搜索足够；`sourceType/sourceId` 过滤管道是将来扩展的样板）。
-- 无 worktree sidecar 的纯 branch 会话：branch 未持久化，回填无可靠来源，不覆盖。
-- Agent shell 内 `gh pr create` 的自动发现。
+- 无 worktree sidecar 且 transcript 无 `gh pr create`/`gitBranch` 痕迹的会话：回填无可靠来源，不覆盖。
 
 ## 开放问题
 

@@ -36,6 +36,10 @@ import {
   type StagedFileInfo,
 } from '../services/commitAttribution.js';
 import { buildGitNotesCommand } from '../services/attributionTrailer.js';
+import {
+  detectGhPrCreateBinding,
+  upsertSessionPr,
+} from '../services/session-pr-service.js';
 import type {
   ShellExecutionConfig,
   ShellExecutionResult,
@@ -2717,6 +2721,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
       return promotedToolResult;
     }
 
+    if (!result.aborted) {
+      this.bindGhPrCreate(commandToExecute, result.output);
+    }
+
     const abortReasonName = getAbortReasonName(combinedSignal);
     const wasTimeout =
       result.aborted &&
@@ -3051,6 +3059,27 @@ export class ShellToolInvocation extends BaseToolInvocation<
       ...(persistedOutputFiles !== undefined ? { persistedOutputFiles } : {}),
       ...executionError,
     };
+  }
+
+  /**
+   * Best-effort PR binding for agents that create PRs via `gh pr create` in
+   * the shell (the GitDialog binds at creation; this covers the shell path).
+   * Writes the session's PR sidecar directly, mirroring the worktree sidecar
+   * pattern; a failure must never shadow the tool result.
+   */
+  private bindGhPrCreate(command: string, output: string): void {
+    const binding = detectGhPrCreateBinding(command, output);
+    if (!binding) return;
+    try {
+      const prPath = this.config
+        .getSessionService()
+        .getPrSessionPathForArchiveState(this.config.getSessionId(), 'active');
+      void upsertSessionPr(prPath, { ...binding, state: 'open' }).catch(() => {
+        /* best-effort binding */
+      });
+    } catch {
+      /* best-effort binding */
+    }
   }
 
   /**
