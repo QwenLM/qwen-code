@@ -20,6 +20,7 @@ import {
 } from '../telemetry/types.js';
 import type { Config } from '../config/config.js';
 import { getToolCallRepeatKey } from '../utils/tool-call-repeat-key.js';
+import { BATCH_BUDGET_FIT_PREFIX } from '../utils/tool-response-finalizer.js';
 import {
   FULL_OUTPUT_DIGEST_LABEL,
   OUTPUT_TOO_LARGE_PREFIX,
@@ -55,6 +56,16 @@ const MAX_HISTORY_LENGTH = 1000;
 // the argument-only behavior, and other team tools (`send_message`,
 // `task_update`) have different mutation/delivery semantics and stay out.
 const STATEFUL_READ_TOOLS: ReadonlySet<string> = new Set(['task_list']);
+
+/**
+ * Whether a tool is a stateful read tool (see STATEFUL_READ_TOOLS).
+ * Exported so the daemon's turn-loop guard (ACP Session) applies the same
+ * result-aware treatment as this service — the two runtimes must not drift
+ * (issue #9450 requirement #6).
+ */
+export function isStatefulReadTool(toolName: string): boolean {
+  return STATEFUL_READ_TOOLS.has(toolName);
+}
 
 // Bound for the callId → request map used to pair tool results with their
 // requests (recordToolResultByCallId). Parallel tool batches are far smaller;
@@ -147,6 +158,159 @@ export function shouldHaltOnTurnToolCallCap(
   return isExplicitCap || totalCalls > hardCap || stuck;
 }
 
+// Producer shapes of the oversized-result stubs (see utils/truncation.ts
+// and the batch-budget finalizer). Recognition is anchored on these
+// prefixes: task results such as task_list embed peer-authored text
+// verbatim, and that text can quote stub markers (this PR puts a
+// `Full output sha256: <hex>` line into every oversized output, and agents
+// quote stubs into board state). Honoring a marker found MID-string would
+// let quoted content collapse or vary the whole-board fingerprint —
+// re-shipping the #9450 false halt via content. Every shape here embeds a
+// per-call unique artifact path in its envelope, which is exactly why it
+// must be reduced to its digest; content that merely contains (or even
+// starts with) the digest label carries no per-call path and is
+// fingerprinted verbatim instead.
+const STUB_PRODUCER_PREFIXES: readonly string[] = [
+  PERSISTED_OUTPUT_OPEN_TAG,
+  OUTPUT_TOO_LARGE_PREFIX,
+  TOOL_OUTPUT_TRUNCATED_PREFIX,
+  // The batch-budget finalizer's fitText header.
+  BATCH_BUDGET_FIT_PREFIX,
+];
+
+/**
+ * Extracts the sha256 digest a stub producer embedded for the FULL
+ * pre-truncation output, anchored to a producer line: the label must start
+ * its line and be followed by exactly 64 hex chars ending the line. A
+ * mid-string mention of the label (e.g. board content quoting a stub) never
+ * matches. Returns null when no anchored digest is present.
+ */
+function extractAnchoredStubDigest(value: string): string | null {
+  let searchFrom = 0;
+  for (;;) {
+    const index = value.indexOf(FULL_OUTPUT_DIGEST_LABEL, searchFrom);
+    if (index < 0) return null;
+    const digestStart = index + FULL_OUTPUT_DIGEST_LABEL.length;
+    const lineAnchored = index === 0 || value[index - 1] === '\n';
+    if (lineAnchored) {
+      const digest = value.slice(digestStart, digestStart + 64);
+      const terminator = value[digestStart + 64];
+      if (
+        /^[0-9a-f]{64}$/.test(digest) &&
+        (terminator === undefined || terminator === '\n' || terminator === '\r')
+      ) {
+        return digest;
+      }
+    }
+    searchFrom = index + 1;
+  }
+}
+
+/**
+ * Reduces an oversized-result stub to its semantic payload for
+ * fingerprinting. Oversized tool results are rewritten into truncation
+ * stubs: a `<persisted-output>` envelope embedding the unique
+ * `<toolResultsDir>/<callId>.txt` path, an unwrapped `Output too large
+ * (...)` envelope whose session-dependent note can also vary between
+ * calls, the `truncateAndSaveToFile` shape embedding a random temp-file
+ * name, or a batch-budget fit whose header embeds a per-call artifact
+ * path. Hashing the envelope would make every fingerprint unique per call
+ * — silently disabling every result-aware guard for exactly the largest
+ * results. The producers embed a sha256 of the full pre-truncation output
+ * (FULL_OUTPUT_DIGEST_LABEL); prefer it over any visible content, because
+ * previews and head+tail payloads only cover the first/last chars — a
+ * board mutating in the dropped band must still fingerprint differently
+ * each poll (and a frozen board identically) no matter which stub shape
+ * carries it. The digest-first rule also covers stubs nested inside a
+ * further batch-budget fit, where the outer digest fingerprints the inner
+ * stub as a whole. Stubs without a digest line fall back to the shape's
+ * visible payload after its stable marker. The markers are the shared
+ * constants from utils/truncation.ts and the batch-budget finalizer so the
+ * parser cannot drift from the producer. The `<persisted-stub>` sentinel
+ * keeps a stub fingerprint from ever colliding with a small literal output
+ * that matches the payload.
+ *
+ * Stub recognition is gated on the producer prefixes (see
+ * STUB_PRODUCER_PREFIXES) and the digest must be line-anchored with a full
+ * 64-hex payload, so arbitrary result text that merely contains the label
+ * is fingerprinted verbatim instead of being collapsed to a quoted window.
+ */
+function stripPersistenceEnvelope(value: string): string {
+  const isProducerStub = STUB_PRODUCER_PREFIXES.some((prefix) =>
+    value.startsWith(prefix),
+  );
+  if (!isProducerStub) {
+    return value;
+  }
+
+  const digest = extractAnchoredStubDigest(value);
+  if (digest !== null) {
+    return `<persisted-stub>sha256:${digest}`;
+  }
+
+  const isPreviewStub =
+    value.startsWith(PERSISTED_OUTPUT_OPEN_TAG) ||
+    value.startsWith(OUTPUT_TOO_LARGE_PREFIX);
+  if (isPreviewStub) {
+    const marker = `${PERSISTED_PREVIEW_MARKER}\n`;
+    const index = value.indexOf(marker);
+    if (index >= 0) {
+      return `<persisted-stub>${value.slice(index + marker.length)}`;
+    }
+    return value;
+  }
+  if (value.startsWith(TOOL_OUTPUT_TRUNCATED_PREFIX)) {
+    const marker = `\n${TRUNCATED_PART_MARKER}`;
+    const index = value.indexOf(marker);
+    if (index >= 0) {
+      return `<persisted-stub>${value.slice(index + marker.length)}`;
+    }
+  }
+  return value;
+}
+
+/**
+ * Reconstructs the model-visible result text from tool response parts.
+ * Only the fingerprint of this text is retained by the guards, never the
+ * text itself. Returns null when the parts carry no functionResponse
+ * content. Shared by this service and the daemon's turn-loop guard (ACP
+ * Session) so both runtimes fingerprint results identically and cannot
+ * drift (issue #9450 requirement #6).
+ */
+export function extractToolResultText(
+  responseParts: readonly Part[],
+): string | null {
+  const chunks: string[] = [];
+  for (const part of responseParts) {
+    const functionResponse = part.functionResponse;
+    if (!functionResponse) continue;
+    // Oversized results arrive as persistence stubs whose envelope embeds
+    // a per-call unique file path; fingerprint the semantic payload only
+    // (see stripPersistenceEnvelope) so identical underlying results stay
+    // identical no matter where they were persisted.
+    chunks.push(
+      JSON.stringify(functionResponse.response ?? {}, (_key, value) =>
+        typeof value === 'string' ? stripPersistenceEnvelope(value) : value,
+      ),
+    );
+  }
+  return chunks.length > 0 ? chunks.join('\n') : null;
+}
+
+/**
+ * sha256 fingerprint of a tool result's model-visible text (see
+ * extractToolResultText), or null when the parts carry no functionResponse
+ * content. Shared with the daemon's turn-loop guard for the same
+ * cannot-drift reason as extractToolResultText.
+ */
+export function fingerprintToolResult(
+  responseParts: readonly Part[],
+): string | null {
+  const resultText = extractToolResultText(responseParts);
+  if (resultText === null) return null;
+  return createHash('sha256').update(resultText).digest('hex');
+}
+
 /**
  * Service for detecting and preventing infinite loops in AI responses.
  * Monitors tool call repetitions and content sentence repetitions.
@@ -224,6 +388,17 @@ export class LoopDetectionService {
   // whether exceeding the soft cap halts (stuck) or is allowed (productive).
   private capKeyCounts = new Map<string, number>();
   private capMaxKeyRepeat = 0;
+
+  // Stateful-read contribution to the cap's stuck signal: the running max of
+  // the CURRENT consecutive-identical-result streaks (see
+  // statefulRepeatState). Unlike capMaxKeyRepeat this disarms when a result
+  // changes — a frozen-then-thawed board must release the cap exactly as it
+  // releases the result-time global-duplicate count, so the adaptive cap
+  // cannot latch a stale peak from a frozen phase and halt productive
+  // polling just past the soft cap. Kept separate from capMaxKeyRepeat
+  // (which stays a high-water mark for deterministic tools, where a 6x
+  // repeat is never productive even if the model later varies its calls).
+  private statefulCapKeyRepeat = 0;
 
   // Result-aware tracking for stateful read tools (see STATEFUL_READ_TOOLS).
   // Keyed by the (tool, args) repeat key. `resultsObserved` /
@@ -319,9 +494,8 @@ export class LoopDetectionService {
     if (this.disabledForSession) return false;
     if (!this.isStatefulReadTool(toolCall.name)) return false;
 
-    const resultText = LoopDetectionService.extractResultText(responseParts);
-    if (resultText === null) return false;
-    const fingerprint = createHash('sha256').update(resultText).digest('hex');
+    const fingerprint = fingerprintToolResult(responseParts);
+    if (fingerprint === null) return false;
     const key = this.getToolCallKey(toolCall);
 
     // Rolling result history for the alternating-pattern carve-out (see
@@ -376,8 +550,21 @@ export class LoopDetectionService {
       ? 1
       : state.consecutiveIdenticalResults + 1;
     state.consecutiveIdenticalResults = consecutiveIdentical;
-    if (consecutiveIdentical > this.capMaxKeyRepeat) {
-      this.capMaxKeyRepeat = consecutiveIdentical;
+
+    // Cap stuck signal from result evidence (see statefulCapKeyRepeat). A
+    // raised peak must NOT latch: when a result changes, recompute the peak
+    // from the keys' CURRENT streaks so a thawed board disarms the adaptive
+    // cap exactly as it disarms the result-time global-duplicate count.
+    if (consecutiveIdentical > this.statefulCapKeyRepeat) {
+      this.statefulCapKeyRepeat = consecutiveIdentical;
+    } else if (fingerprintChanged) {
+      let peak = consecutiveIdentical;
+      for (const other of this.statefulRepeatState.values()) {
+        if (other.consecutiveIdenticalResults > peak) {
+          peak = other.consecutiveIdenticalResults;
+        }
+      }
+      this.statefulCapKeyRepeat = peak;
     }
 
     // The global-duplicate detector is gated (skipLoopDetection) exactly as
@@ -420,88 +607,7 @@ export class LoopDetectionService {
   }
 
   private isStatefulReadTool(toolName: string): boolean {
-    return STATEFUL_READ_TOOLS.has(toolName);
-  }
-
-  /**
-   * Reconstructs the model-visible result text from tool response parts.
-   * Only the fingerprint of this text is retained, never the text itself.
-   * Returns null when the parts carry no functionResponse content.
-   */
-  private static extractResultText(
-    responseParts: readonly Part[],
-  ): string | null {
-    const chunks: string[] = [];
-    for (const part of responseParts) {
-      const functionResponse = part.functionResponse;
-      if (!functionResponse) continue;
-      // Oversized results arrive as persistence stubs whose envelope embeds
-      // a per-call unique file path; fingerprint the semantic payload only
-      // (see stripPersistenceEnvelope) so identical underlying results stay
-      // identical no matter where they were persisted.
-      chunks.push(
-        JSON.stringify(functionResponse.response ?? {}, (_key, value) =>
-          typeof value === 'string'
-            ? LoopDetectionService.stripPersistenceEnvelope(value)
-            : value,
-        ),
-      );
-    }
-    return chunks.length > 0 ? chunks.join('\n') : null;
-  }
-
-  /**
-   * Oversized tool results are rewritten into truncation stubs (see
-   * utils/truncation.ts and the batch-budget finalizer): a
-   * `<persisted-output>` envelope embedding the unique
-   * `<toolResultsDir>/<callId>.txt` path, an unwrapped `Output too large
-   * (...)` envelope whose session-dependent note can also vary between
-   * calls, the `truncateAndSaveToFile` shape embedding a random temp-file
-   * name, or a batch-budget fit whose header embeds a per-call artifact
-   * path. Hashing the envelope would make every fingerprint unique per call
-   * — silently disabling every result-aware guard for exactly the largest
-   * results — so reduce a stub to its semantic payload. The producers embed
-   * a sha256 of the full pre-truncation output (FULL_OUTPUT_DIGEST_LABEL);
-   * prefer it over any visible content, because previews and head+tail
-   * payloads only cover the first/last chars — a board mutating in the
-   * dropped band must still fingerprint differently each poll (and a
-   * frozen board identically) no matter which stub shape carries it. The
-   * digest-first rule also covers stubs nested inside a further batch-budget
-   * fit, where the outer digest fingerprints the inner stub as a whole.
-   * Stubs without a digest line fall back to the shape's visible payload
-   * after its stable marker. The markers are the shared constants from
-   * utils/truncation.ts so the parser cannot drift from the producer. The
-   * `<persisted-stub>` sentinel keeps a stub fingerprint from ever
-   * colliding with a small literal output that matches the payload.
-   */
-  private static stripPersistenceEnvelope(value: string): string {
-    const digestIndex = value.indexOf(FULL_OUTPUT_DIGEST_LABEL);
-    if (digestIndex >= 0) {
-      const digestStart = digestIndex + FULL_OUTPUT_DIGEST_LABEL.length;
-      // sha256 hex digest length
-      const digest = value.slice(digestStart, digestStart + 64);
-      return `<persisted-stub>sha256:${digest}`;
-    }
-
-    const isPreviewStub =
-      value.includes(PERSISTED_OUTPUT_OPEN_TAG) ||
-      value.startsWith(OUTPUT_TOO_LARGE_PREFIX);
-    if (isPreviewStub) {
-      const marker = `${PERSISTED_PREVIEW_MARKER}\n`;
-      const index = value.indexOf(marker);
-      if (index >= 0) {
-        return `<persisted-stub>${value.slice(index + marker.length)}`;
-      }
-      return value;
-    }
-    if (value.startsWith(TOOL_OUTPUT_TRUNCATED_PREFIX)) {
-      const marker = `\n${TRUNCATED_PART_MARKER}`;
-      const index = value.indexOf(marker);
-      if (index >= 0) {
-        return `<persisted-stub>${value.slice(index + marker.length)}`;
-      }
-    }
-    return value;
+    return isStatefulReadTool(toolName);
   }
 
   private getToolCallKey(toolCall: { name: string; args: object }): string {
@@ -628,6 +734,7 @@ export class LoopDetectionService {
       this.resetToolCallCount();
       this.capKeyCounts.clear();
       this.capMaxKeyRepeat = 0;
+      this.statefulCapKeyRepeat = 0;
       // A retry replays the failed attempt's tool calls; drop the stateful
       // result evidence too so the replayed attempt is judged on its own
       // results (the consecutive counts re-accumulate as results land,
@@ -1249,7 +1356,10 @@ export class LoopDetectionService {
     if (
       !shouldHaltOnTurnToolCallCap(
         this.turnToolCallTotal,
-        this.capMaxKeyRepeat,
+        // Request-time evidence (deterministic tools) and result-time
+        // evidence (stateful reads) feed the same stuck signal; the
+        // stateful half disarms when results change (statefulCapKeyRepeat).
+        Math.max(this.capMaxKeyRepeat, this.statefulCapKeyRepeat),
         this.config.getMaxToolCallsPerTurn(),
         this.config.isMaxToolCallsPerTurnExplicit(),
       )
@@ -1381,6 +1491,7 @@ export class LoopDetectionService {
     this.turnToolCallTotalCommitted = 0;
     this.capKeyCounts.clear();
     this.capMaxKeyRepeat = 0;
+    this.statefulCapKeyRepeat = 0;
     this.statefulRepeatState.clear();
     this.statefulRepeatKeys.clear();
     this.statefulAlternationHistory.clear();

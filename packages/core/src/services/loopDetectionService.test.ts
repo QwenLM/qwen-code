@@ -2804,6 +2804,129 @@ describe('LoopDetectionService', () => {
       );
     });
 
+    it('disarms the adaptive cap when a frozen board thaws (no latched peak)', () => {
+      // The cap's stateful stuck signal must NOT be a high-water ratchet: a
+      // frozen phase builds it, but once results change it must fall back to
+      // the current streak so a thawed board keeps polling past the soft cap.
+      const capService = new LoopDetectionService(makeConfig(20));
+      capService.reset('cap-thaw');
+
+      let fired = false;
+      let totalCalls = 0;
+      const poll = (board: string, round: number) => {
+        fired ||= capService.checkAlwaysOnSafeties(
+          taskListEvent(`tl-${round}`),
+        );
+        totalCalls++;
+        if (fired) return;
+        fired ||= capService.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('tool_b', { step: round }),
+        );
+        totalCalls++;
+        if (fired) return;
+        fired = capService.recordToolResult(
+          { name: 'task_list', args: TASK_LIST_ARGS },
+          taskListResult(board),
+        );
+      };
+
+      // 6 frozen results (interleaved so the consecutive guard never fires):
+      // the stateful stuck signal reaches GLOBAL_DUPLICATE_THRESHOLD.
+      for (
+        let round = 0;
+        round < GLOBAL_DUPLICATE_THRESHOLD && !fired;
+        round++
+      ) {
+        poll('frozen board', round);
+      }
+      expect(fired).toBe(false);
+
+      // Board thaws: every subsequent result differs. The stuck signal must
+      // disarm, so polling sails past the soft cap of 20 without halting.
+      for (
+        let round = GLOBAL_DUPLICATE_THRESHOLD;
+        round < 40 && !fired;
+        round++
+      ) {
+        poll(`thawed board v${round}`, round);
+      }
+      expect(fired).toBe(false);
+      expect(totalCalls).toBeGreaterThanOrEqual(40);
+    });
+
+    it('still arms the adaptive cap on a permanently frozen board', () => {
+      // Regression guard for the disarm fix: a board that NEVER changes keeps
+      // the stateful stuck signal at the threshold, so the adaptive cap still
+      // halts the stuck poller just past the soft cap.
+      const capService = new LoopDetectionService(makeConfig(20));
+      capService.reset('cap-frozen');
+
+      let fired = false;
+      for (let round = 0; round < 40 && !fired; round++) {
+        fired = capService.checkAlwaysOnSafeties(taskListEvent(`tl-${round}`));
+        if (fired) break;
+        fired = capService.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('tool_b', { step: round }),
+        );
+        if (fired) break;
+        fired = capService.recordToolResult(
+          { name: 'task_list', args: TASK_LIST_ARGS },
+          taskListResult('frozen board'),
+        );
+      }
+      expect(fired).toBe(true);
+      expect(capService.getLastLoopType()).toBe(LoopType.TURN_TOOL_CALL_CAP);
+    });
+
+    it('does not collapse the fingerprint when board content merely quotes the digest label', () => {
+      // task_list embeds peer-authored text verbatim, and agents quote stub
+      // text (including the `Full output sha256: <hex>` line this PR adds to
+      // every oversized output) into board state. A board whose quoted label
+      // + digest window stays constant while the REST of the board changes
+      // must fingerprint by its full content — collapsing to the quoted
+      // 64-char window would halt this productive poller at the 5th request.
+      const quotedDigest = 'deadbeef'.repeat(8); // constant 64-hex window
+      let fired = false;
+      for (let i = 0; i < 4 * TOOL_CALL_LOOP_THRESHOLD; i++) {
+        fired = service.checkAlwaysOnSafeties(taskListEvent(`poll_${i}`));
+        if (fired) break;
+        const board =
+          `board row changing ${i}\n` +
+          `Full output sha256: ${quotedDigest}\n` +
+          `more changing content ${i}`;
+        service.recordToolResult(
+          { name: 'task_list', args: TASK_LIST_ARGS },
+          taskListResult(board, `poll_${i}`),
+        );
+      }
+      expect(fired).toBe(false);
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
+    it('still halts when board content quoting the digest label is frozen', () => {
+      // Inverse of the injection guard: quoting the label does not grant
+      // immunity. A fully frozen board (quoted window AND the rest constant)
+      // must still corroborate the consecutive-identical halt.
+      const quotedDigest = 'deadbeef'.repeat(8);
+      const board =
+        'frozen board row\n' +
+        `Full output sha256: ${quotedDigest}\n` +
+        'frozen tail';
+      let fired = false;
+      for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD; i++) {
+        fired = service.checkAlwaysOnSafeties(taskListEvent(`poll_${i}`));
+        if (fired) break;
+        service.recordToolResult(
+          { name: 'task_list', args: TASK_LIST_ARGS },
+          taskListResult(board, `poll_${i}`),
+        );
+      }
+      expect(fired).toBe(true);
+      expect(service.getLastLoopType()).toBe(
+        LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+      );
+    });
+
     describe('persisted oversized results (issue #9450 follow-up)', () => {
       // Results over the response-finalizer budget are rewritten into
       // persistence stubs (utils/truncation.ts buildStub) whose envelope

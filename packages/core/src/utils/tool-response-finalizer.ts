@@ -209,6 +209,14 @@ function sliceEndWithoutBrokenSurrogate(text: string, length: number): string {
   return text.slice(start);
 }
 
+/**
+ * First line of the header fitText prepends to every batch-budget fit.
+ * Exported so consumers that parse stubs (the loop guards in
+ * services/loopDetectionService.ts) recognize the shape with the
+ * producer's constant instead of a hand-mirrored literal that can drift.
+ */
+export const BATCH_BUDGET_FIT_PREFIX = 'Tool output truncated.';
+
 function fitText(
   text: string,
   maxChars: number,
@@ -234,8 +242,8 @@ function fitText(
             .join('\n')}`
       : undefined;
   const header = artifactNote
-    ? `Tool output truncated.\n${digestLine}\n${artifactNote}`
-    : `Tool output truncated.\n${digestLine}`;
+    ? `${BATCH_BUDGET_FIT_PREFIX}\n${digestLine}\n${artifactNote}`
+    : `${BATCH_BUDGET_FIT_PREFIX}\n${digestLine}`;
   if (header.length >= maxChars) {
     return sliceStartWithoutBrokenSurrogate(header, maxChars);
   }
