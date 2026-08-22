@@ -22,13 +22,20 @@ const {
   gitRawMock: vi.fn(),
 }));
 
-vi.mock('./aone-client.js', () => ({
-  a1Json: a1JsonMock,
-  a1JsonOnce: a1JsonOnceMock,
-  a1Once: a1OnceMock,
-  a1: vi.fn(),
-  ensureAoneAuthenticated: ensureAuthMock,
-}));
+vi.mock('./aone-client.js', async (importOriginal) => {
+  // The cause helper stays REAL: the composeUrl/resolveRepo catches must
+  // run the transport's actual extraction, not a mocked re-implementation.
+  const { execErrorCause } =
+    await importOriginal<typeof import('./aone-client.js')>();
+  return {
+    a1Json: a1JsonMock,
+    a1JsonOnce: a1JsonOnceMock,
+    a1Once: a1OnceMock,
+    a1: vi.fn(),
+    ensureAoneAuthenticated: ensureAuthMock,
+    execErrorCause,
+  };
+});
 
 vi.mock('../git.js', () => ({
   git: gitMock,
@@ -495,6 +502,110 @@ describe('aoneReader.getFetchMeta / fetchHeadRefSpec', () => {
     expect(() => aoneReader.getFetchMeta(7, 'g/p')).toThrow(
       /no mergeRequest for #7/,
     );
+  });
+});
+
+describe('aoneReader.composeUrl', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('returns the platform detailUrl — the reader is the ONLY link source', () => {
+    // An Aone MR link can never be ASSEMBLED from owner/repo: the collapse
+    // to the last two segments names a different repo for a nested-group
+    // project. The URL is always the platform's own detailUrl.
+    a1JsonMock.mockReturnValue({
+      mergeRequest: {
+        detailUrl:
+          'https://code.alibaba-inc.com/odps/odps_src/codereview/29295886',
+      },
+    });
+    expect(aoneReader.composeUrl(29295886, 'odps/odps_src')).toBe(
+      'https://code.alibaba-inc.com/odps/odps_src/codereview/29295886',
+    );
+  });
+
+  it('returns empty when the platform serves no detailUrl', () => {
+    a1JsonMock.mockReturnValue({ mergeRequest: { sourceBranch: 'sha' } });
+    expect(aoneReader.composeUrl(7, 'g/p')).toBe('');
+  });
+
+  it('returns empty (never throws) when the fetch fails — but DISCLOSES it on stderr', () => {
+    // The degrade to '' stands (a missing link must not fail a consumer
+    // that owns the post's fate), but not silently: a failing lookup —
+    // auth expiry, a blip past the retry budget — must stay
+    // distinguishable from the designed coordinates-relay case. The cause
+    // extraction skips the execFileSync "Command failed: …" preamble line.
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    a1JsonMock.mockImplementation(() => {
+      throw new Error('Command failed: a1 repo mr view 7\nnetwork down\n');
+    });
+    expect(aoneReader.composeUrl(7, 'g/p')).toBe('');
+    expect(stderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('WARNING: the Aone MR-link lookup failed'),
+    );
+    expect(stderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('network down'),
+    );
+    stderrSpy.mockRestore();
+  });
+
+  it('a single-line fetch failure warns without disclosing the preamble as the cause', () => {
+    // No cause line (a killed child with no stderr): the fallback must
+    // not be the preamble itself (the copy-time drift round 3 found) —
+    // the warning names the failure, nothing else.
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    a1JsonMock.mockImplementation(() => {
+      throw new Error('Command failed: a1 repo mr view 7');
+    });
+    expect(aoneReader.composeUrl(7, 'g/p')).toBe('');
+    expect(stderrSpy).toHaveBeenCalledWith(
+      'WARNING: the Aone MR-link lookup failed; the Posted line degrades ' +
+        "to the target's coordinates.\n",
+    );
+    stderrSpy.mockRestore();
+  });
+
+  it('a NON-exec failure keeps its one diagnostic line as the cause', () => {
+    // The platform answered without the field: mrView throws the
+    // no-mergeRequest refusal itself — a single-line message with no exec
+    // preamble. A preamble-blind slice(1) discarded exactly this line,
+    // leaving the warning cause-less on the platform-anomaly state it must
+    // keep distinguishable from a transport failure.
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    a1JsonMock.mockReturnValue({});
+    expect(aoneReader.composeUrl(7, 'g/p')).toBe('');
+    expect(stderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('WARNING: the Aone MR-link lookup failed'),
+    );
+    expect(stderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('a1 returned no mergeRequest for #7 of g/p'),
+    );
+    stderrSpy.mockRestore();
+  });
+
+  it('a JSON.parse SyntaxError from the fetch rides the warning too', () => {
+    // a1 answered unparseably (a gateway's HTML error page): the
+    // SyntaxError carries no exec preamble, so its message IS the cause.
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    a1JsonMock.mockImplementation(() => {
+      throw new SyntaxError(
+        'Unexpected token \'<\', "<html>502 "... is not valid JSON',
+      );
+    });
+    expect(aoneReader.composeUrl(7, 'g/p')).toBe('');
+    expect(stderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('WARNING: the Aone MR-link lookup failed'),
+    );
+    expect(stderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Unexpected token'),
+    );
+    stderrSpy.mockRestore();
+  });
+
+  it('refuses a malformed ownerRepo before any a1 call', () => {
+    expect(() => aoneReader.composeUrl(7, 'not-a-repo')).toThrow(TypeError);
+    expect(a1JsonMock).not.toHaveBeenCalled();
   });
 });
 
