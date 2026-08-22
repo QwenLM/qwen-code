@@ -639,6 +639,31 @@ describe('bundled review skill', () => {
     expect(body).not.toContain('--json closingIssuesReferences');
   });
 
+  it('keeps the incident-replay carve-out in rule 4 and the context paragraph', () => {
+    // Revert guard: drop the carve-out and the orchestrator runs under an
+    // unqualified "issue evidence outranks PR framing / do not treat the PR
+    // description as ground truth" while the verify brief still declares the
+    // exception — so in the no-linked-issue case, the exact one the replay
+    // duty exists for, a description-grounded replay finding is downgraded or
+    // dropped at orchestration. Both copies pinned: rule 4's and the Step 2
+    // context paragraph's.
+    const body = skillBody();
+    expect(body).toContain(
+      'One carve-out: when no issue evidence exists and the PR description itself narrates a motivating incident',
+    );
+    expect(body).toContain('the replay duty stands on the narrative alone');
+    // The orchestrator-side copy of the R2-1 routing rule, and the roll-call
+    // example that models the full four-item receipt: reverting either
+    // restores the pre-R2-1 standard in which a skipped replay reads
+    // identically to a performed one, while every brief-side pin stays green.
+    expect(body).toContain(
+      'a replay that found NO step changed arrives as a Critical **finding**, never inside this receipt',
+    );
+    expect(body).toContain(
+      'not a bugfix, description narrates no incident → scope empty',
+    );
+  });
+
   it('keeps the Step 6 comment-body tail-fetch and the Posted: fallback grounded', () => {
     // Revert guard: the tail-fetch must stay `--out … to the command the note
     // names` (a restored `--jq .body > file` redirect is rejected by yargs on
