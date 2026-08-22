@@ -99,6 +99,7 @@ import {
   GoalPersistenceUnavailableError,
   type GoalTurnHost,
 } from '../goals/goal-runtime.js';
+import type { GoalTurnPermit } from '../goals/goal-protocol.js';
 import {
   getSessionWriterLockPath,
   SessionTranscriptChangedError,
@@ -2397,6 +2398,7 @@ describe('Server Config (config.ts)', () => {
               evidenceCursor: { recordId: 'goal-active' },
               turnCount: 1,
               activeTimeMs: 10,
+              tokensUsed: 0,
               createdAt: 1,
               updatedAt: 2,
             },
@@ -2633,6 +2635,29 @@ describe('Server Config (config.ts)', () => {
       await expect(
         first.dispatch({ action: 'create', objective: 'stale' }),
       ).rejects.toThrow('Goal runtime has been disposed');
+    });
+
+    it('bills Goal turns through the canonical chat recorder', async () => {
+      const config = new Config({ ...baseParams, chatRecording: true });
+      const started: GoalTurnPermit[] = [];
+      config.bindGoalTurnHost({
+        startGoalTurn: vi.fn(async ({ permit }) => {
+          started.push(permit);
+        }),
+        preemptGoalTurn: vi.fn(),
+      });
+      const runtime = config.getGoalRuntime();
+      await runtime.dispatch({ action: 'create', objective: 'ship' });
+      const permit = started[0]!;
+
+      config.getChatRecordingService()!.recordAssistantTurn({
+        model: 'test-model',
+        tokens: { totalTokenCount: 4_500 },
+        goalContext: permit,
+      });
+      await runtime.finishTurn(permit);
+
+      expect(runtime.getSnapshot().goal).toMatchObject({ tokensUsed: 4_500 });
     });
 
     it('rebinds the current Goal host to every replacement runtime', async () => {
@@ -3201,6 +3226,51 @@ describe('Server Config (config.ts)', () => {
         acquire.mockRestore();
       },
     );
+
+    it('adopts the active transcript when writer activation sees both states', async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440099';
+      const sessionData = {
+        conversation: {
+          sessionId,
+          projectHash: 'test',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          messages: [],
+        },
+        filePath: `/tmp/${sessionId}.jsonl`,
+        lastCompletedUuid: null,
+      } as ResumedSessionData;
+      const config = new Config({
+        ...baseParams,
+        sessionId,
+        chatRecording: true,
+        experimentalZedIntegration: true,
+        sessionWriterLeaseEnabled: true,
+      });
+      const service = config.getSessionService();
+      vi.spyOn(service, 'getSessionLocation').mockResolvedValue('conflict');
+      const loadSession = vi
+        .spyOn(service, 'loadSession')
+        .mockResolvedValue(sessionData);
+      const lease = {
+        sessionId,
+        transcriptExistedAtAcquire: true,
+        isReleased: false,
+        assertOwnedAndUnchanged: vi.fn().mockResolvedValue(undefined),
+        release: vi.fn().mockResolvedValue(undefined),
+      } as unknown as SessionWriterLease;
+      const acquire = vi
+        .spyOn(SessionWriterLease, 'acquire')
+        .mockResolvedValue(lease);
+
+      await (
+        config as unknown as { activateChatRecording(): Promise<void> }
+      ).activateChatRecording();
+
+      expect(loadSession).toHaveBeenCalledWith(sessionId);
+      expect(config.hasSessionWriteOwnership()).toBe(true);
+      acquire.mockRestore();
+    });
 
     it('releases a pending lease while a real baseline read is gated', async () => {
       const root = await mkdtemp(path.join(os.tmpdir(), 'qwen-config-writer-'));
@@ -6343,6 +6413,7 @@ describe('Server Config (config.ts)', () => {
       oldChatsDir,
       `${sessionId}.worktree.json`,
     );
+    const oldPrSessionPath = path.join(oldChatsDir, `${sessionId}.pr.json`);
     const newTranscriptPath = path.join(newChatsDir, `${sessionId}.jsonl`);
     const newRuntimeStatusPath = path.join(
       newChatsDir,
@@ -6352,6 +6423,7 @@ describe('Server Config (config.ts)', () => {
       newChatsDir,
       `${sessionId}.worktree.json`,
     );
+    const newPrSessionPath = path.join(newChatsDir, `${sessionId}.pr.json`);
     const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
       // Keep the test process in its original directory.
     });
@@ -6360,6 +6432,7 @@ describe('Server Config (config.ts)', () => {
       oldTranscriptPath,
       oldRuntimeStatusPath,
       oldWorktreeSessionPath,
+      oldPrSessionPath,
     ];
     vi.mocked(fs.existsSync).mockImplementation((pathToCheck) => {
       const checked = pathToCheck.toString();
@@ -6382,6 +6455,10 @@ describe('Server Config (config.ts)', () => {
     expect(fs.renameSync).toHaveBeenCalledWith(
       oldWorktreeSessionPath,
       newWorktreeSessionPath,
+    );
+    expect(fs.renameSync).toHaveBeenCalledWith(
+      oldPrSessionPath,
+      newPrSessionPath,
     );
     expect(config.getTranscriptPath()).toBe(newTranscriptPath);
 

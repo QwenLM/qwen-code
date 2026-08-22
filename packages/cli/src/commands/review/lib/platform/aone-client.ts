@@ -112,13 +112,181 @@ export function a1JsonOnce<T>(...args: string[]): T | undefined {
 }
 
 /**
- * Fail fast with an actionable message when `a1` cannot run. A missing
- * binary (ENOENT — the dominant first-run state for this new dependency) is
- * a different remedy than an unauthenticated one.
+ * The oldest `a1` this provider runs against. The provider's platform facts
+ * — the `mr comment create --file/--line/--message` flags, the native
+ * `mr approve`, and stable `--format json` output across every subcommand
+ * it calls — were probed against a1 0.1.90 (the facts table in
+ * docs/design/2026-08-13-review-platform-provider-abstraction.md; open
+ * question Q1 resolved to the probed version, since nothing older was
+ * verified). An older install is missing flags the provider passes and
+ * fails obscurely deep in a review; the floor turns that into a
+ * first-run error whose message names the remedy.
  */
-export function ensureAoneAuthenticated(): void {
+export const A1_MIN_VERSION = '0.1.90';
+
+/** The `major.minor.patch` triple of an `a1 --version` line such as
+ *  `a1 version 0.2.51 (2026-08-20)`. Anchored at the `version` token
+ *  first — a banner that prints a dotted build date BEFORE the version
+ *  must not supply the triple the floor compares; the bare-triple parse
+ *  is the fallback for a variant that dropped the token. */
+export function parseA1Version(
+  out: string,
+): [number, number, number] | undefined {
+  const m =
+    /version[^\d]*(\d+)\.(\d+)\.(\d+)/i.exec(out) ??
+    /(\d+)\.(\d+)\.(\d+)/.exec(out);
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : undefined;
+}
+
+/** Numeric component-wise compare — a lexicographic one reads 0.10.0 < 0.9.0. */
+export function a1VersionAtLeast(
+  version: [number, number, number],
+  floor: [number, number, number],
+): boolean {
+  for (let i = 0; i < 3; i++) {
+    if (version[i] !== floor[i]) return version[i] > floor[i];
+  }
+  return true;
+}
+
+/** The cause inside a failure message, extracted ONCE for the transport —
+ *  shape-aware, because two shapes arrive. An execFileSync failure BEGINS
+ *  with the fixed "Command failed: <argv>" / "spawnSync a1 <errno>"
+ *  preamble, so line zero is NEVER the cause there: the cause is the first
+ *  NON-empty line after it, and a failure with no cause line (a killed
+ *  child with no stderr) returns '' — falling back to the preamble would
+ *  disclose a fixed constant AS the cause. A message WITHOUT the preamble
+ *  IS the cause: the provider's own throws (mrView's no-mergeRequest
+ *  refusal, a1Json's JSON.parse SyntaxError) are single-line diagnostics,
+ *  and a preamble-blind slice(1) discarded exactly the line these warnings
+ *  exist to surface. Both a1 and git invocations share the exec shape. */
+export function execErrorCause(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  const lines = message.split('\n').map((l) => l.trim());
+  const candidates = /^(Command failed:|spawnSync |spawn )/.test(message)
+    ? lines.slice(1)
+    : lines;
+  return candidates.find(Boolean) ?? '';
+}
+
+/**
+ * The authenticated Aone account — the `account` field of `a1 auth whoami`.
+ * cleanup's bypass audit filters the MR's comment list by it (the author
+ * arm, design D8). A missing or unreadable account THROWS: matching nothing
+ * would read exactly like a clean window, and a tripwire whose off state is
+ * indistinguishable from its all-clear state is off.
+ */
+export function aoneWhoamiAccount(): string {
+  let out: { account?: unknown } | null;
   try {
-    a1('auth', 'whoami');
+    out = a1Json<{ account?: unknown } | null>('auth', 'whoami');
+  } catch (err) {
+    // A parse failure names the command, mirroring a1CommentList — the
+    // skip note must say WHAT failed; an exec failure rethrows untouched.
+    if (err instanceof SyntaxError) {
+      throw new Error('a1 auth whoami returned an unexpected shape');
+    }
+    throw err;
+  }
+  // A literal `null` answer PARSES, so it clears the SyntaxError arm;
+  // without its own check the property access below throws an untagged
+  // TypeError and the skip note names no command.
+  if (
+    out === null ||
+    typeof out.account !== 'string' ||
+    out.account.trim() === ''
+  ) {
+    throw new Error('a1 auth whoami returned no account');
+  }
+  return out.account;
+}
+
+/**
+ * Fail fast with an actionable message when `a1` cannot run, and return the
+ * authenticated account. Three failure states, three distinct remedies: a
+ * missing or not-runnable binary (ENOENT/EACCES/ENOEXEC — the dominant
+ * first-run state for this dependency) → install; a version below
+ * A1_MIN_VERSION → upgrade; an unauthenticated login → `a1 auth login`.
+ * The checks run in that order — presence, then version, then auth — so
+ * a stale install is named BEFORE a login that upgrading would invalidate
+ * anyway. The whoami runs ONCE, `--format json`: the JSON spelling fully
+ * subsumes a plain auth gate, so presubmit reads its self-MR comparison
+ * account off this call instead of spawning a second whoami (which retried
+ * its own delays a second time under the same transient outage, and could
+ * throw uncaught after the report's graceful path had already been
+ * decided). An EXEC-successful answer that does not parse or names no
+ * account returns '': the exec's success already proves the auth state,
+ * and an unreadable account fails presubmit's self-MR comparison soft,
+ * like the GitHub path's empty login.
+ */
+export function ensureAoneAuthenticated(): string {
+  // `a1 --version` is a local op — no auth, no network — so it can precede
+  // the login check.
+  let versionOut: string | undefined;
+  try {
+    versionOut = a1('--version');
+  } catch (err) {
+    // EACCES/ENOEXEC join ENOENT: a present-but-not-runnable a1 (chmod a-x,
+    // a half-finished update) has the same remedy as a missing one — and a
+    // fall-through here lands in whoami, which blames the login: the one
+    // remedy a permissions problem cannot be fixed by.
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'EACCES' || code === 'ENOEXEC') {
+      throw new Error(
+        'a1 CLI not found on PATH or not executable — install the `a1` CLI first.',
+      );
+    }
+    // The binary runs but the version probe failed — no floor ruling is
+    // possible. Absent evidence, not evidence of absence: fall through to
+    // the auth check rather than refusing an a1 whose `--version` this
+    // check merely cannot read — disclosed, like the unparseable-output
+    // arm below.
+    if ((err as { signal?: string }).signal) {
+      // The 120 s deadline kills the child — signal set, usually no
+      // stderr, so a single-line message no cause extraction can read.
+      // The whoami catch classifies the identical anomaly the same way.
+      process.stderr.write(
+        `WARNING: the a1 version probe timed out or was killed (check ` +
+          `the network / a1 install) — the review provider requires ` +
+          `a1 >= ${A1_MIN_VERSION}; continuing without a floor ruling.\n`,
+      );
+    } else {
+      const why = execErrorCause(err);
+      process.stderr.write(
+        `WARNING: the a1 version probe failed` +
+          (why ? ` (${JSON.stringify(why.slice(0, 80))})` : '') +
+          ` — the review provider requires a1 >= ${A1_MIN_VERSION}; ` +
+          `continuing without a floor ruling.\n`,
+      );
+    }
+  }
+  if (versionOut !== undefined) {
+    // The constant parses — the `!` is a compile-time formality.
+    const floor = parseA1Version(A1_MIN_VERSION)!;
+    const version = parseA1Version(versionOut);
+    if (version === undefined) {
+      // Disclosed fail-open: an unreadable version gets the benefit of the
+      // doubt (a variant output format is not a stale install), and a
+      // genuine staleness still fails later on its missing flags — but at
+      // least this run was warned what the provider expects.
+      process.stderr.write(
+        `WARNING: could not read the a1 version from ` +
+          `${JSON.stringify(versionOut.slice(0, 80))} — the review ` +
+          `provider requires a1 >= ${A1_MIN_VERSION}; continuing.\n`,
+      );
+    } else if (!a1VersionAtLeast(version, floor)) {
+      throw new Error(
+        `a1 ${version.join('.')} is older than the ${A1_MIN_VERSION} this ` +
+          `review provider requires — it depends on the comment-create ` +
+          `flags and stable \`--format json\` output introduced there. ` +
+          `Upgrade the a1 CLI (https://code.alibaba-inc.com/aone/a1) ` +
+          `and retry.`,
+      );
+    }
+  }
+  let raw: string;
+  try {
+    raw = a1('auth', 'whoami', '--format', 'json');
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
       throw new Error('a1 CLI not found on PATH — install the `a1` CLI first.');
@@ -132,16 +300,7 @@ export function ensureAoneAuthenticated(): void {
         'a1 auth check timed out or was killed — check the network / a1 install.',
       );
     }
-    // execFileSync failure messages BEGIN with the fixed preamble
-    // "Command failed: a1 auth whoami"; a1's real first stderr line is the
-    // first NON-empty line after it. `.split('\n')[0]` would render only the
-    // preamble and drop the cause.
-    const cause =
-      e.message
-        .split('\n')
-        .slice(1)
-        .map((l) => l.trim())
-        .find(Boolean) ?? '';
+    const cause = execErrorCause(err);
     // Neutral on purpose: this fall-through covers MORE than a missing login
     // — a persistent network failure whose message TRANSIENT_RE does not
     // match (ENOTFOUND, a proxy 403) lands here too, and `a1 auth login`
@@ -152,5 +311,11 @@ export function ensureAoneAuthenticated(): void {
         (cause ? ` — ${cause}` : '') +
         ` (if you have not logged in, run \`a1 auth login\`)`,
     );
+  }
+  try {
+    const out = JSON.parse(raw) as { account?: unknown };
+    return typeof out.account === 'string' ? out.account.trim() : '';
+  } catch {
+    return '';
   }
 }
