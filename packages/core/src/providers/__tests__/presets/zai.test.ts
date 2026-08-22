@@ -42,7 +42,6 @@ describe('zaiProvider', () => {
       name: '[Z.AI] GLM-5.2',
       generationConfig: {
         contextWindowSize: 1000000,
-        extra_body: { enable_thinking: true },
       },
     });
     expect(models?.[1]).toMatchObject({

@@ -14,6 +14,7 @@ import {
   DashScopeOpenAICompatibleProvider,
   DeepSeekOpenAICompatibleProvider,
   ZaiOpenAICompatibleProvider,
+  MoonshotOpenAICompatibleProvider,
   ModelScopeOpenAICompatibleProvider,
   MiMoOpenAICompatibleProvider,
   MiniMaxOpenAICompatibleProvider,
@@ -30,6 +31,7 @@ export {
   type OpenAICompatibleProvider,
   DashScopeOpenAICompatibleProvider,
   DeepSeekOpenAICompatibleProvider,
+  MoonshotOpenAICompatibleProvider,
   MiMoOpenAICompatibleProvider,
   MiniMaxOpenAICompatibleProvider,
   MistralOpenAICompatibleProvider,
@@ -79,6 +81,13 @@ export function determineProvider(
 
   if (ZaiOpenAICompatibleProvider.isZaiProvider(config)) {
     return new ZaiOpenAICompatibleProvider(contentGeneratorConfig, cliConfig);
+  }
+
+  if (MoonshotOpenAICompatibleProvider.isMoonshotProvider(config)) {
+    return new MoonshotOpenAICompatibleProvider(
+      contentGeneratorConfig,
+      cliConfig,
+    );
   }
 
   if (MiMoOpenAICompatibleProvider.isMiMoProvider(config)) {

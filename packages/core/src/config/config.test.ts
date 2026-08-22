@@ -4668,6 +4668,46 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('reasoning effort override', () => {
+    it('syncs reasoning controls without dropping sibling settings', () => {
+      const config = new Config({
+        ...baseParams,
+        generationConfig: {
+          reasoning: { effort: 'low', budget_tokens: 4096 },
+        },
+      });
+      (
+        config as unknown as {
+          contentGeneratorConfig: ContentGeneratorConfig;
+        }
+      ).contentGeneratorConfig = {
+        model: 'qwen3.8-max',
+        authType: AuthType.QWEN_OAUTH,
+        reasoning: { effort: 'low', budget_tokens: 4096 },
+      };
+
+      config.setReasoningEffort('max');
+      expect(config.getContentGeneratorConfig().reasoning).toEqual({
+        effort: 'max',
+        budget_tokens: 4096,
+      });
+      expect(config.getModelsConfig().getGenerationConfig().reasoning).toEqual({
+        effort: 'max',
+        budget_tokens: 4096,
+      });
+
+      config.setReasoningDisabled(true);
+      expect(config.getContentGeneratorConfig().reasoning).toBe(false);
+      expect(config.getModelsConfig().getGenerationConfig().reasoning).toBe(
+        false,
+      );
+
+      config.setReasoningDisabled(false);
+      expect(config.getContentGeneratorConfig().reasoning).toBeUndefined();
+      expect(
+        config.getModelsConfig().getGenerationConfig().reasoning,
+      ).toBeUndefined();
+    });
+
     it('reports a higher-priority DashScope knob that shadows reasoning effort', () => {
       const config = new Config({
         ...baseParams,
@@ -4869,6 +4909,29 @@ describe('Server Config (config.ts)', () => {
       });
     });
 
+    it('preserves disabled reasoning across an auth refresh', async () => {
+      const config = new Config({
+        ...baseParams,
+        generationConfig: { reasoning: false },
+      });
+      const authType = AuthType.USE_OPENAI;
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'glm-5.2',
+          authType,
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+
+      await config.refreshAuth(authType);
+
+      expect(config.getContentGeneratorConfig().reasoning).toBe(false);
+      expect(config.getModelsConfig().getGenerationConfig().reasoning).toBe(
+        false,
+      );
+    });
+
     it('re-applies the reasoning effort on a full-refresh model switch that wiped modelsConfig', async () => {
       // Regression for the model-switch path: switchModel() runs
       // applyResolvedModelDefaults() (which overwrites modelsConfig's
@@ -4926,6 +4989,125 @@ describe('Server Config (config.ts)', () => {
       expect(config.getContentGeneratorConfig().model).toBe('gemini-b');
       expect(config.getReasoningEffort()).toBe('high');
     });
+
+    it.each([
+      {
+        name: 'drops a preset disable on hot-update',
+        authType: AuthType.QWEN_OAUTH,
+        requiresRefresh: false,
+        initialReasoning: false as const,
+        initialSource: 'modelProviders' as const,
+        expected: undefined,
+      },
+      {
+        name: 'drops a preset disable on full-refresh',
+        authType: AuthType.USE_OPENAI,
+        requiresRefresh: true,
+        initialReasoning: false as const,
+        initialSource: 'modelProviders' as const,
+        expected: undefined,
+      },
+      {
+        name: 'preserves a user disable on hot-update',
+        authType: AuthType.QWEN_OAUTH,
+        requiresRefresh: false,
+        userDisabled: true,
+        expected: false as const,
+      },
+      {
+        name: 'preserves a user disable on full-refresh',
+        authType: AuthType.USE_OPENAI,
+        requiresRefresh: true,
+        userDisabled: true,
+        expected: false as const,
+      },
+      {
+        name: 'uses the target preset after Default on hot-update',
+        authType: AuthType.QWEN_OAUTH,
+        requiresRefresh: false,
+        clearDisabled: true,
+        targetReasoning: { effort: 'low' as const },
+        expected: { effort: 'low' as const },
+      },
+      {
+        name: 'uses the target preset after Default on full-refresh',
+        authType: AuthType.USE_OPENAI,
+        requiresRefresh: true,
+        clearDisabled: true,
+        targetReasoning: { effort: 'low' as const },
+        expected: { effort: 'low' as const },
+      },
+    ])(
+      '$name',
+      async ({
+        authType,
+        requiresRefresh,
+        initialReasoning,
+        initialSource,
+        userDisabled,
+        clearDisabled,
+        targetReasoning,
+        expected,
+      }) => {
+        const config = new Config({
+          ...baseParams,
+          ...(initialReasoning === undefined
+            ? {}
+            : { generationConfig: { reasoning: initialReasoning } }),
+          ...(initialSource
+            ? {
+                generationConfigSources: {
+                  reasoning: { kind: initialSource },
+                },
+              }
+            : {}),
+        });
+        vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+          config: {
+            apiKey: 'test-key',
+            model: 'model-a',
+            authType,
+            reasoning: initialReasoning,
+          } as ContentGeneratorConfig,
+          sources: initialSource ? { reasoning: { kind: initialSource } } : {},
+        });
+        await config.refreshAuth(authType);
+        if (userDisabled) {
+          config.setReasoningDisabled(true);
+        } else if (clearDisabled) {
+          config.setReasoningDisabled(true);
+          config.setReasoningDisabled(false);
+        }
+
+        const generation = config.getModelsConfig().getGenerationConfig();
+        generation.reasoning = targetReasoning;
+        vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+          config: {
+            apiKey: 'test-key',
+            model: 'model-b',
+            authType,
+            reasoning: targetReasoning,
+          } as ContentGeneratorConfig,
+          sources: targetReasoning
+            ? { reasoning: { kind: 'modelProviders' } }
+            : {},
+        });
+
+        await (
+          config as unknown as {
+            handleModelChange: (
+              authType: AuthType,
+              requiresRefresh: boolean,
+            ) => Promise<void>;
+          }
+        ).handleModelChange(authType, requiresRefresh);
+
+        expect(config.getContentGeneratorConfig().reasoning).toEqual(expected);
+        expect(
+          config.getModelsConfig().getGenerationConfig().reasoning,
+        ).toEqual(expected);
+      },
+    );
 
     it('should fire auth_success notification hook when hooks are enabled', async () => {
       const mockMessageBus = { request: vi.fn() };

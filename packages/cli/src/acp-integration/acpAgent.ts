@@ -259,6 +259,7 @@ import {
 import {
   getModelConfiguration,
   type ModelReasoningConfiguration,
+  normalizeModelReasoningEffort,
 } from './model-configuration.js';
 import { buildSessionTasksStatus } from './session/tasksSnapshot.js';
 import {
@@ -6063,11 +6064,13 @@ class QwenAgent implements Agent {
           session.getConfig(),
         );
         if (modelReasoning) {
+          const canDisable =
+            modelReasoning.toggleOnly || modelReasoning.canDisable !== false;
           const effortValues = modelReasoning.toggleOnly
             ? undefined
             : modelReasoning.efforts;
           const selected =
-            value === ACP_REASONING_EFFORT_NONE
+            value === ACP_REASONING_EFFORT_NONE && canDisable
               ? ACP_REASONING_EFFORT_NONE
               : modelReasoning.toggleOnly
                 ? value === ACP_REASONING_EFFORT_DEFAULT
@@ -6076,7 +6079,7 @@ class QwenAgent implements Agent {
                 : effortValues?.find((effort) => effort === value);
           if (!selected) {
             const choices = [
-              ACP_REASONING_EFFORT_NONE,
+              ...(canDisable ? [ACP_REASONING_EFFORT_NONE] : []),
               ...(effortValues ?? [ACP_REASONING_EFFORT_DEFAULT]),
             ];
             throw RequestError.invalidParams(
@@ -6084,17 +6087,16 @@ class QwenAgent implements Agent {
               `Unknown reasoning effort: ${value}. Choose one of: ${choices.join(', ')}`,
             );
           }
-          const generation = session.getConfig().getContentGeneratorConfig();
+          const config = session.getConfig();
           if (selected === ACP_REASONING_EFFORT_NONE) {
-            generation.reasoning = false;
+            config.setReasoningDisabled(true);
           } else if (selected === ACP_REASONING_EFFORT_DEFAULT) {
-            generation.reasoning = undefined;
+            config.setReasoningDisabled(false);
           } else {
-            const current = generation.reasoning;
-            generation.reasoning = {
-              ...(current || {}),
-              effort: selected,
-            };
+            if (config.getContentGeneratorConfig().reasoning === false) {
+              config.setReasoningDisabled(false);
+            }
+            config.setReasoningEffort(selected);
           }
           break;
         }
@@ -13293,6 +13295,8 @@ class QwenAgent implements Agent {
 
     const modelReasoning = this.getModelReasoningConfiguration(config);
     const currentModelEffort = config.getReasoningEffort?.();
+    const canDisableReasoning =
+      modelReasoning?.toggleOnly || modelReasoning?.canDisable !== false;
     const reasoningEffortConfigOption: SessionConfigOption = modelReasoning
       ? {
           id: 'reasoning_effort',
@@ -13301,19 +13305,25 @@ class QwenAgent implements Agent {
           category: 'thought_level',
           type: 'select' as const,
           currentValue:
-            config.getContentGeneratorConfig().reasoning === false
+            config.getContentGeneratorConfig().reasoning === false &&
+            canDisableReasoning
               ? ACP_REASONING_EFFORT_NONE
               : modelReasoning.toggleOnly
                 ? ACP_REASONING_EFFORT_DEFAULT
-                : (modelReasoning.efforts.find(
-                    (effort) => effort === currentModelEffort,
+                : (normalizeModelReasoningEffort(
+                    modelReasoning,
+                    currentModelEffort,
                   ) ?? modelReasoning.defaultEffort),
           options: [
-            {
-              value: ACP_REASONING_EFFORT_NONE,
-              name: 'Thinking off',
-              description: 'Disable thinking for this session',
-            },
+            ...(canDisableReasoning
+              ? [
+                  {
+                    value: ACP_REASONING_EFFORT_NONE,
+                    name: 'Thinking off',
+                    description: 'Disable thinking for this session',
+                  },
+                ]
+              : []),
             ...(modelReasoning.toggleOnly
               ? [
                   {
@@ -13333,6 +13343,7 @@ class QwenAgent implements Agent {
               ...(modelReasoning.toggleOnly
                 ? { toggleOnly: true }
                 : { defaultEffort: modelReasoning.defaultEffort }),
+              ...(!canDisableReasoning ? { canDisable: false } : {}),
             },
           },
         }
@@ -13366,19 +13377,22 @@ class QwenAgent implements Agent {
   ): ModelReasoningConfiguration | undefined {
     if (
       config.getActiveRuntimeModelSnapshot?.() ||
-      config.getReasoningEffortOverride?.() ||
-      config.getContentGeneratorConfig().thinkingMandatory === true
+      config.getReasoningEffortOverride?.()
     ) {
       return undefined;
     }
-    const reasoning = getModelConfiguration(config.getModel())?.reasoning;
-    const currentEffort = config.getReasoningEffort?.();
-    return reasoning?.thinking &&
-      (reasoning.toggleOnly ||
-        !currentEffort ||
-        reasoning.efforts.includes(currentEffort))
-      ? reasoning
-      : undefined;
+    const generation = config.getContentGeneratorConfig();
+    const reasoning = getModelConfiguration(config.getModel(), {
+      authType: generation.authType,
+      baseUrl: generation.baseUrl,
+    })?.reasoning;
+    if (
+      generation.thinkingMandatory === true &&
+      reasoning?.canDisable !== false
+    ) {
+      return undefined;
+    }
+    return reasoning?.thinking ? reasoning : undefined;
   }
 
   private buildSelectableModelOptions(config: Config) {

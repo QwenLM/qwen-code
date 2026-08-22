@@ -328,6 +328,54 @@ test('toggles reasoning without effort tiers for qwen3.7-plus @smoke', async ({
   await expect(modelButton).toContainText('Thinking');
 });
 
+test('selects mandatory Kimi K3 reasoning tiers without a toggle @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    currentModel: 'kimi-k3',
+    state: {
+      configOptions: [
+        {
+          id: 'reasoning_effort',
+          name: 'Reasoning effort',
+          type: 'select',
+          currentValue: 'max',
+          options: [
+            { value: 'low', name: 'Low' },
+            { value: 'high', name: 'High' },
+            { value: 'max', name: 'Max' },
+          ],
+          _meta: {
+            'qwenCode/reasoning': {
+              defaultEffort: 'max',
+              canDisable: false,
+            },
+          },
+        },
+      ],
+    },
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoSession(page, scenario, daemon);
+
+  const modelButton = page.locator('[data-web-shell-model-button]');
+  await expect(modelButton).toContainText('Max');
+  await modelButton.click();
+  const controls = page.locator('[data-web-shell-model-reasoning]');
+  await expect(controls).toBeVisible();
+  await expect(
+    controls.locator('[data-web-shell-thinking-toggle]'),
+  ).toHaveCount(0);
+  await expect(controls.locator('[data-web-shell-effort]')).toHaveCount(3);
+
+  await controls.locator('[data-web-shell-effort="low"]').click();
+  await expect.poll(() => daemon.configOptionRequests().length).toBe(1);
+  expect(
+    requestBodyRecord(firstRequest(daemon.configOptionRequests())),
+  ).toEqual({ configId: 'reasoning_effort', value: 'low' });
+  await expect(modelButton).toContainText('Low');
+});
+
 test('uploads an Extension archive from the manager @smoke', async ({
   page,
 }, testInfo) => {

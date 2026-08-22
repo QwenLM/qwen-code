@@ -37,7 +37,6 @@ describe('deepseekProvider', () => {
       contextWindowSize: 1000000,
     });
     expect(models?.[1]?.generationConfig).toEqual({
-      extra_body: { enable_thinking: true },
       contextWindowSize: 1000000,
     });
   });

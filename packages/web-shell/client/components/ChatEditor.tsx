@@ -1061,6 +1061,7 @@ function ModelReasoningControls({
 }) {
   const { t } = useI18n();
   const [busy, setBusy] = useState(false);
+  const canDisable = reasoning.canDisable !== false;
   const hasEffortOptions = reasoning.efforts.length > 0;
   const select = async (value: string) => {
     if (busy) return;
@@ -1079,21 +1080,23 @@ function ModelReasoningControls({
       <div className={styles.reasoningSectionTitle}>
         {t('reasoning.options')}
       </div>
-      <div className={styles.reasoningThinkingRow}>
-        <span>{t('reasoning.thinking')}</span>
-        <Switch
-          checked={reasoning.enabled}
-          disabled={busy}
-          aria-label={t('reasoning.thinking')}
-          data-web-shell-thinking-toggle
-          onCheckedChange={(enabled) =>
-            void select(enabled ? reasoning.effort : 'none')
-          }
-        />
-      </div>
+      {canDisable ? (
+        <div className={styles.reasoningThinkingRow}>
+          <span>{t('reasoning.thinking')}</span>
+          <Switch
+            checked={reasoning.enabled}
+            disabled={busy}
+            aria-label={t('reasoning.thinking')}
+            data-web-shell-thinking-toggle
+            onCheckedChange={(enabled) =>
+              void select(enabled ? reasoning.effort : 'none')
+            }
+          />
+        </div>
+      ) : null}
       {hasEffortOptions ? (
         <>
-          <div className={styles.reasoningDivider} />
+          {canDisable ? <div className={styles.reasoningDivider} /> : null}
           <div className={styles.reasoningSectionTitle}>
             {t('reasoning.effort')}
           </div>

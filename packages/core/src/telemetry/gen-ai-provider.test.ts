@@ -31,6 +31,10 @@ describe('GenAI provider resolution', () => {
       'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
       'dashscope',
     ],
+    [
+      'https://workspace-id.eu-central-1.maas.aliyuncs.com/compatible-mode/v1',
+      'dashscope',
+    ],
     ['https://idealab.alibaba-inc.com/api/openai/v1', 'dashscope'],
     ['https://gateway.alibaba-inc.com/dashscope/v1', 'dashscope'],
     ['https://model-gateway.aliyun-inc.com/dashscope/v1', 'dashscope'],

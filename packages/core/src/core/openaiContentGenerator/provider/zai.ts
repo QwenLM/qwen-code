@@ -6,6 +6,7 @@
 
 import type OpenAI from 'openai';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
+import { isZaiModelReasoningHostname } from '../../model-reasoning-config.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 import { createDebugLogger } from '../../../utils/debugLogger.js';
 
@@ -29,12 +30,7 @@ export function isZaiHostname(
   }
   try {
     const hostname = new URL(baseUrl).hostname.toLowerCase();
-    return (
-      hostname === 'z.ai' ||
-      hostname.endsWith('.z.ai') ||
-      hostname === 'bigmodel.cn' ||
-      hostname.endsWith('.bigmodel.cn')
-    );
+    return isZaiModelReasoningHostname(hostname);
   } catch {
     return false;
   }

@@ -58,6 +58,7 @@ const TOKEN_PLAN_MODELS: ModelSpec[] = [
     id: 'kimi-k2.7-code',
     contextWindowSize: 262144,
     enableThinking: true,
+    thinkingMandatory: true,
     modalities: { image: true, video: true },
   },
   {
