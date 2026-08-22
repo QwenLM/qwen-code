@@ -16402,6 +16402,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         cancelPendingPrompt: ReturnType<typeof vi.fn>;
         sendUpdate: ReturnType<typeof vi.fn>;
         dispose: ReturnType<typeof vi.fn>;
+        shouldHintAskUserQuestionRestore?: ReturnType<typeof vi.fn>;
       }
     | undefined;
   let processExitSpy: MockInstance<typeof process.exit>;
@@ -16412,6 +16413,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockArgv.restoreAskUserQuestion = undefined;
     mockHistoryV2GoalBootstrap.mockImplementation(
       (goalState: unknown, goalCause: unknown) =>
         goalState && goalCause
@@ -16638,6 +16640,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     recoveredGoalError?: Error;
     recoveredGoalSendError?: Error;
     primeTurnStateImpl?: (...args: unknown[]) => unknown;
+    hintAskUserQuestionRestore?: boolean;
   }) {
     const innerConfig = makeRestoreInnerConfig({
       resumedConversation: opts.resumedConversation,
@@ -16745,7 +16748,9 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       const releaseCloseGate = vi.fn();
       const sessionMock = {
         getId: vi.fn().mockReturnValue('persisted-1'),
-        shouldHintAskUserQuestionRestore: vi.fn().mockReturnValue(false),
+        shouldHintAskUserQuestionRestore: vi
+          .fn()
+          .mockReturnValue(opts.hintAskUserQuestionRestore === true),
         getConfig: vi.fn().mockReturnValue(innerConfig),
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi
@@ -16831,6 +16836,78 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     mockConnectionState.resolve();
     await agentPromise;
   });
+
+  it.each(['load', 'resume'] as const)(
+    '%s skips the restore hint when the switch is off',
+    async (action) => {
+      bindRestoreMocks({
+        sessionExists: true,
+        hintAskUserQuestionRestore: true,
+      });
+      const { agent, agentPromise } = await spawnAgent();
+
+      try {
+        const params = {
+          cwd: '/tmp',
+          sessionId: 'persisted-1',
+          mcpServers: [],
+        };
+        const response =
+          action === 'load'
+            ? await agent.loadSession(params)
+            : await agent.unstable_resumeSession(params);
+
+        expect(
+          lastSessionMock?.shouldHintAskUserQuestionRestore,
+        ).not.toHaveBeenCalled();
+        expect(
+          (response as { _meta?: Record<string, unknown> })._meta?.[
+            'qwen.daemon.restoreAskUserQuestion'
+          ],
+        ).toBeUndefined();
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it.each(['load', 'resume'] as const)(
+    '%s attaches the restore hint when the switch is on',
+    async (action) => {
+      bindRestoreMocks({
+        sessionExists: true,
+        hintAskUserQuestionRestore: true,
+      });
+      mockArgv.restoreAskUserQuestion = true;
+      const { agent, agentPromise } = await spawnAgent();
+
+      try {
+        const params = {
+          cwd: '/tmp',
+          sessionId: 'persisted-1',
+          mcpServers: [],
+        };
+        const response =
+          action === 'load'
+            ? await agent.loadSession(params)
+            : await agent.unstable_resumeSession(params);
+
+        expect(
+          lastSessionMock?.shouldHintAskUserQuestionRestore,
+        ).toHaveBeenCalledOnce();
+        expect(
+          (response as { _meta?: Record<string, unknown> })._meta?.[
+            'qwen.daemon.restoreAskUserQuestion'
+          ],
+        ).toBe(true);
+      } finally {
+        mockArgv.restoreAskUserQuestion = undefined;
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
 
   it.each(['load', 'resume'] as const)(
     'profiles %s restore stages under the daemon trace context',

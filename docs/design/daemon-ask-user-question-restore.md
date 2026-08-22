@@ -73,7 +73,8 @@ session. No settings.json key and no capability tag in v1.
    `qwen.daemon.suppressRestoreAskUserQuestion` and the child neither hints
    nor skips — the replay finalizes the question as failed.
 3. Child load/resume `_meta` includes `qwen.daemon.restoreAskUserQuestion`
-   when eligible.
+   when the argv switch is on and the session is eligible. The default-off
+   path never calls the restore-only Session helper.
 4. Bridge sees the hint **and** the daemon switch, then admits a tracked
    `sendPrompt` with that meta (same admission as continue). External
    `POST /prompt` cannot smuggle the meta. Admission additionally requires

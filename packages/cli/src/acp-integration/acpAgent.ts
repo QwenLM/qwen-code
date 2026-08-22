@@ -4656,6 +4656,9 @@ class QwenAgent implements Agent {
   private withAskUserQuestionRestoreHint<
     T extends { _meta?: Record<string, unknown> | null },
   >(session: Session | undefined, response: T): T {
+    if (this.argv.restoreAskUserQuestion !== true) {
+      return response;
+    }
     if (!session?.shouldHintAskUserQuestionRestore()) {
       return response;
     }
