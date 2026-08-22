@@ -3667,7 +3667,6 @@ export class Session implements SessionContext {
       }
     }
 
-    const recording = this.config.getChatRecordingService();
     this.rewindCheckpoint = {
       promptIds: this.captureHistoryPromptIds(apiHistory),
       ...(recording ? { recording: recording.captureRewindCheckpoint() } : {}),
@@ -3686,6 +3685,10 @@ export class Session implements SessionContext {
     this.todoStopGuard.blockUntilOrdinaryPromptStarts();
 
     if (survivingSnapshots) {
+      // The live store keeps the target's boundary snapshot: the file
+      // rewind that runs after this method (FileHistoryService.rewind via
+      // the agent / TUI restore paths) must still find it to apply it, and
+      // the agent drops it once the files sit AT it.
       fileHistoryService.restoreFromSnapshots(survivingSnapshots);
     }
 
@@ -3697,7 +3700,12 @@ export class Session implements SessionContext {
           apiHistory.length - target.apiTruncateIndex,
         ),
       },
-      survivingSnapshots,
+      // Re-record the surviving snapshots WITHOUT the target's boundary
+      // snapshot: the conversation keeps one fewer turn than the surviving
+      // snapshot prefix holds, and a resume that rebuilds the store from
+      // this batch must see the same aligned shape the live store settles
+      // into once the boundary is dropped.
+      survivingSnapshots?.slice(0, -1),
     );
 
     if (shouldDrainAutomaticQueues) {

@@ -3482,10 +3482,15 @@ describe('Session', () => {
       expect(mockFileHistoryService.restoreFromSnapshots).toHaveBeenCalledWith(
         mockFileHistoryService.getSnapshots(),
       );
+      // The batch re-recorded into the transcript excludes the target's
+      // boundary snapshot: the conversation keeps one fewer turn than the
+      // surviving prefix holds, and a resume rebuilding the store from this
+      // batch must see the aligned shape (the agent drops the boundary from
+      // the live store once the files sit AT it).
       expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
         2,
         { truncatedCount: 1 },
-        mockFileHistoryService.getSnapshots(),
+        mockFileHistoryService.getSnapshots().slice(0, 2),
       );
     });
 
@@ -3662,6 +3667,82 @@ describe('Session', () => {
         mockFileHistoryService.restoreFromSnapshots,
       ).not.toHaveBeenCalled();
       expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+    });
+
+    it('keeps legacy file rewind repeatable by dropping the consumed boundary', () => {
+      // The rewind path itself used to create a +1 snapshot surplus: it
+      // kept the target's boundary snapshot (k+1 snapshots) while the
+      // conversation kept k turns, and the strict alignment gates then
+      // treated that self-produced shape as corruption — every later
+      // file-rewind failed. The batch re-recorded into the transcript must
+      // exclude the boundary, and once the store settles back to the
+      // aligned shape (the agent drops the boundary after applying it) the
+      // next rewind must work again.
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'legacy one' }] },
+        { role: 'model', parts: [{ text: 'legacy reply one' }] },
+        { role: 'user', parts: [{ text: 'legacy two' }] },
+        { role: 'model', parts: [{ text: 'legacy reply two' }] },
+        { role: 'user', parts: [{ text: 'legacy three' }] },
+        { role: 'model', parts: [{ text: 'legacy reply three' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
+        undefined,
+        undefined,
+        undefined,
+      ]);
+      mockFileHistoryService.isEnabled.mockReturnValue(true);
+      const snap = (promptId: string, minutes: number) => ({
+        promptId,
+        timestamp: new Date(`2026-06-13T00:0${minutes}:00.000Z`),
+        trackedFileBackups: {},
+      });
+      mockFileHistoryService.getSnapshots.mockReturnValue([
+        snap('snap-0', 0),
+        snap('snap-1', 1),
+        snap('snap-2', 2),
+      ]);
+
+      // First rewind succeeds and keeps the boundary in the live store so
+      // the file rewind can still find and apply it...
+      expect(session.rewindToTurn(1)).toEqual({
+        targetTurnIndex: 1,
+        apiTruncateIndex: 2,
+        promptId: 'snap-1',
+      });
+      expect(mockFileHistoryService.restoreFromSnapshots).toHaveBeenCalledWith([
+        snap('snap-0', 0),
+        snap('snap-1', 1),
+      ]);
+      // ...but the batch re-recorded into the transcript excludes the
+      // consumed boundary, so a resume rebuilds an aligned store.
+      expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
+        1,
+        { truncatedCount: 4 },
+        [snap('snap-0', 0)],
+      );
+
+      // Terminal state after the file rewind applied and the agent dropped
+      // the consumed boundary: 1 snapshot <-> 1 surviving turn, aligned.
+      const truncatedHistory = history.slice(0, 2);
+      vi.mocked(mockChat.getHistory).mockReturnValue(truncatedHistory);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(truncatedHistory);
+      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
+        undefined,
+      ]);
+      mockFileHistoryService.getSnapshots.mockReturnValue([snap('snap-0', 0)]);
+
+      // The second rewind is reachable again.
+      expect(session.getRewindableSnapshotTargets()).toEqual([
+        { promptId: 'snap-0', turnIndex: 0 },
+      ]);
+      expect(session.rewindToTurn(0)).toEqual({
+        targetTurnIndex: 0,
+        apiTruncateIndex: 0,
+        promptId: 'snap-0',
+      });
     });
 
     it('does not fall back to positional rewinds when recorder identities are missing from API history', () => {

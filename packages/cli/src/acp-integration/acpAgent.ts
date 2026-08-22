@@ -11699,6 +11699,20 @@ class QwenAgent implements Agent {
                 const fileResult = await fhs.rewind(promptId, true);
                 filesChanged = fileResult.filesChanged;
                 filesFailed = fileResult.filesFailed;
+                if (fileResult.filesFailed.length === 0) {
+                  // The rewind consumed the target's boundary snapshot: the
+                  // workspace files now sit AT it while the truncated
+                  // conversation keeps one fewer turn, leaving the store
+                  // permanently one snapshot ahead. Every legacy pairing
+                  // gate would then fail closed, making file rewind
+                  // one-shot. Drop the consumed boundary (last entry after
+                  // rewind's own truncation) so snapshot-i <-> turn-i
+                  // realigns and the next rewind works.
+                  const surviving = fhs.getSnapshots();
+                  if (surviving.length > 0) {
+                    fhs.restoreFromSnapshots(surviving.slice(0, -1));
+                  }
+                }
               } catch (err) {
                 const reason = err instanceof Error ? err.message : String(err);
                 debugLogger.error(
