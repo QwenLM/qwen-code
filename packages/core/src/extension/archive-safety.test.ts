@@ -150,6 +150,35 @@ describe('assertTarArchiveHasNoLinks', () => {
     },
   );
 
+  it('rejects a pre-aborted signal without opening the archive stream', async () => {
+    const controller = new AbortController();
+    const abortReason = new Error('install cancelled');
+    controller.abort(abortReason);
+    let createReadStreamCalls = 0;
+    streamProbe.onReadStream = (filePath, options, original) => {
+      createReadStreamCalls += 1;
+      const stream = original(filePath, options);
+      // If the regression returns, the abandoned stream would emit an
+      // unhandled ENOENT 'error' event; swallow it so the assertion below
+      // fails the test cleanly instead of crashing the worker.
+      stream.on('error', () => {});
+      return stream;
+    };
+
+    try {
+      await expect(
+        assertTarArchiveHasNoLinks(
+          path.join(root, 'missing.tar'),
+          controller.signal,
+        ),
+      ).rejects.toBe(abortReason);
+    } finally {
+      streamProbe.onReadStream = undefined;
+    }
+
+    expect(createReadStreamCalls).toBe(0);
+  });
+
   const resourceLimits = { enforceResourceLimits: true };
 
   it('accepts an archive with exactly the entry-count limit', async () => {

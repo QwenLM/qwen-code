@@ -42,7 +42,6 @@ export async function assertTarArchiveHasNoLinks(
   let entryCount = 0;
   let expandedBytes = 0;
   let validationError: Error | undefined;
-  const stream = fs.createReadStream(file);
   // Stop reading as soon as validation fails instead of walking the rest of
   // a potentially hostile archive.
   const failValidation = (error: Error) => {
@@ -89,6 +88,10 @@ export async function assertTarArchiveHasNoLinks(
     }
   };
   signal?.throwIfAborted();
+  // Open the stream only after the abort check: entering with a pre-aborted
+  // signal must not leave a live ReadStream behind (an unhandled ENOENT
+  // 'error' event for a missing file, or a leaked fd otherwise).
+  const stream = fs.createReadStream(file);
   try {
     await pipeline(stream, tar.t({ onReadEntry }), { signal });
   } catch (error) {
