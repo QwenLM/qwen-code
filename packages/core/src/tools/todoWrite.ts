@@ -298,6 +298,29 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
       if (validationError) throw new Error(validationError);
       const finalTodos = candidateTodos as TodoItem[];
 
+      if (isDeepStrictEqual(oldTodos, finalTodos)) {
+        debugLogger.debug(
+          '[TodoWriteTool] No-op: todos unchanged, skipping write/hooks',
+        );
+
+        const todoResultDisplay = {
+          type: 'todo_list' as const,
+          ...(previousPlan.planId ? { planId: previousPlan.planId } : {}),
+          todos: finalTodos,
+          changes: { created: [], completed: [] },
+          unchanged: true,
+        };
+
+        return {
+          llmContent: `Todo list is already up to date. No changes were needed.
+
+<system-reminder>
+Your todo list was not modified because it is already current. Continue with your existing tasks.
+</system-reminder>`,
+          returnDisplay: todoResultDisplay,
+        };
+      }
+
       // 2. Detect changes
       const changes = detectTodoChanges(oldTodos, finalTodos);
       const oldTodosMap = new Map(oldTodos.map((t) => [t.id, t]));

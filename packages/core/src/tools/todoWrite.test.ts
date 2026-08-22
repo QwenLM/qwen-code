@@ -322,8 +322,6 @@ describe('TodoWriteTool', () => {
           todos: [{ id: '1', content: 'Done', status: 'completed' }],
         }),
       );
-      mockFs.mkdir.mockResolvedValue(undefined);
-      mockAtomicWrite.mockResolvedValue(undefined);
 
       const result = await tool
         .build({
@@ -331,10 +329,78 @@ describe('TodoWriteTool', () => {
         })
         .execute(mockAbortSignal);
 
-      expect(result.returnDisplay).toMatchObject({ planId: 'finished-plan' });
-      expect(
-        JSON.parse(mockAtomicWrite.mock.calls[0][1] as string),
-      ).toMatchObject({ planId: 'finished-plan' });
+      // Identical todos → no-op short-circuit, no write
+      expect(mockAtomicWrite).not.toHaveBeenCalled();
+      expect(result.returnDisplay).toMatchObject({
+        planId: 'finished-plan',
+        unchanged: true,
+      });
+    });
+
+    it('should short-circuit with unchanged flag when todos are identical', async () => {
+      const existingTodos: TodoItem[] = [
+        { id: '1', content: 'Task 1', status: 'in_progress' },
+        { id: '2', content: 'Task 2', status: 'pending' },
+      ];
+
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({ planId: 'plan-abc', todos: existingTodos }),
+      );
+
+      const result = await tool
+        .build({ todos: existingTodos })
+        .execute(mockAbortSignal);
+
+      // No file write or hooks should fire
+      expect(mockAtomicWrite).not.toHaveBeenCalled();
+      expect(mockFs.mkdir).not.toHaveBeenCalled();
+
+      // Display signals unchanged to UI layer
+      expect(result.returnDisplay).toMatchObject({
+        type: 'todo_list',
+        planId: 'plan-abc',
+        todos: existingTodos,
+        changes: { created: [], completed: [] },
+        unchanged: true,
+      });
+
+      // LLM content tells model no change occurred
+      expect(result.llmContent).toContain('already up to date');
+      expect(result.llmContent).toContain('No changes were needed');
+      expect(result.llmContent).not.toContain('modified successfully');
+    });
+
+    it('should not fire hooks on no-op todo_write', async () => {
+      const existingTodos: TodoItem[] = [
+        { id: '1', content: 'Task 1', status: 'pending' },
+      ];
+
+      const mockHookSystem = {
+        fireTodoCreatedEvent: vi.fn(),
+        fireTodoCompletedEvent: vi.fn(),
+      };
+      mockConfig = {
+        getSessionId: () => 'test-session-123',
+        getHookSystem: () => mockHookSystem,
+      } as unknown as Config;
+      tool = new TodoWriteTool(mockConfig);
+
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({ todos: existingTodos }),
+      );
+
+      await tool.build({ todos: existingTodos }).execute(mockAbortSignal);
+
+      expect(mockHookSystem.fireTodoCreatedEvent).not.toHaveBeenCalled();
+      expect(mockHookSystem.fireTodoCompletedEvent).not.toHaveBeenCalled();
+    });
+
+    it('should still validate params before no-op short-circuit', () => {
+      expect(() =>
+        tool.build({ todos: [{ id: '1', content: '', status: 'pending' }] }),
+      ).toThrow('non-empty "content"');
+
+      expect(mockAtomicWrite).not.toHaveBeenCalled();
     });
 
     it('should start a new plan after the previous plan completed', async () => {
