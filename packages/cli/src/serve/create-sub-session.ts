@@ -53,6 +53,7 @@ import type {
   CreateSubSessionResult,
 } from '@qwen-code/acp-bridge/bridgeOptions';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { restoreSessionTitleFields } from './session-restore-title.js';
 
 const log = createDebugLogger('SUB_SESSION');
 
@@ -129,6 +130,7 @@ export interface SubSessionLauncher {
 export interface CreateSubSessionLauncherOptions {
   getBridge: () => AcpSessionBridge | undefined;
   boundWorkspace: string;
+  sessionRuntimeBaseDir?: string;
   /** Return sent-mode completions to the parent as automatic follow-up turns.
    * Enabled only for the Live conversation runtime. */
   notifySentCompletion?: boolean;
@@ -397,6 +399,7 @@ async function awaitSentCompletionAcceptance(
 async function deliverSentCompletion(
   bridge: AcpSessionBridge,
   boundWorkspace: string,
+  sessionRuntimeBaseDir: string | undefined,
   parentSessionId: string,
   notification: BridgeBackgroundNotification,
   stopSignal: AbortSignal,
@@ -421,9 +424,31 @@ async function deliverSentCompletion(
     : undefined;
   let materializedDirectoryUnused = isolatedCwd !== undefined;
   try {
+    const titleService = new SessionService(boundWorkspace, {
+      ...(sessionRuntimeBaseDir !== undefined
+        ? { runtimeBaseDir: sessionRuntimeBaseDir }
+        : {}),
+    });
+    // The persisted title record lives next to the transcript, so the read
+    // must use the case-corrected storage id (parity with the session/load +
+    // session/resume handlers and the REST restore handler); the raw caller
+    // spelling can miss an uppercase-written transcript on a case-sensitive
+    // filesystem and silently drop the manual name this restore is meant to
+    // keep (#8977). Lookup failures keep the caller spelling: a title read
+    // must never fail the completion delivery itself.
+    let titleStorageSessionId = parentSessionId;
+    try {
+      titleStorageSessionId =
+        (await titleService.findSessionIdIgnoringCase(parentSessionId)) ??
+        parentSessionId;
+    } catch {
+      titleStorageSessionId = parentSessionId;
+    }
+    const titleInfo = titleService.getSessionTitleInfo(titleStorageSessionId);
     restoredParent = await bridge.resumeSession({
       sessionId: parentSessionId,
       workspaceCwd: boundWorkspace,
+      ...restoreSessionTitleFields(titleInfo.title, titleInfo.source),
     });
     if (isolatedCwd !== undefined) {
       if (
@@ -657,6 +682,7 @@ export function createSubSessionLauncher(
   const {
     getBridge,
     boundWorkspace,
+    sessionRuntimeBaseDir,
     notifySentCompletion = false,
     isolatedWorkspace,
   } = opts;
@@ -807,6 +833,7 @@ export function createSubSessionLauncher(
       try {
         bridge.updateSessionMetadata(sessionId, {
           displayName: subSessionName(info.name ?? info.prompt),
+          titleSource: 'auto',
         });
       } catch (err) {
         log.debug('sub-session: updateSessionMetadata failed', sessionId, err);
@@ -904,6 +931,7 @@ export function createSubSessionLauncher(
               await deliverSentCompletion(
                 bridge,
                 boundWorkspace,
+                sessionRuntimeBaseDir,
                 info.callerSessionId,
                 notification,
                 stopAc.signal,

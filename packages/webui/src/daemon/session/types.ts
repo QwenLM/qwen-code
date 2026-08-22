@@ -91,6 +91,7 @@ export interface DaemonConnectionState {
   reasoning?: DaemonReasoningControls;
   currentMode?: string;
   displayName?: string;
+  titleSource?: 'manual' | 'auto';
   /** Latest main-conversation model usage event. */
   tokenUsage?: DaemonTokenUsage;
   /** Authoritative Goal v2 state for the current session. */
@@ -450,7 +451,10 @@ export interface DaemonSessionActions {
   getContextUsage(opts?: {
     detail?: boolean;
   }): Promise<DaemonSessionContextUsageStatus>;
-  renameSession(displayName: string): Promise<SessionMetadataResult>;
+  renameSession(
+    displayName: string,
+    opts?: { silent?: boolean; titleSource?: 'manual' | 'auto' },
+  ): Promise<SessionMetadataResult>;
   recapSession(): Promise<DaemonSessionRecapResult>;
   generateSessionContent(
     prompt: string,

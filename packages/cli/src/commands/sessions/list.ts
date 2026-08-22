@@ -118,8 +118,11 @@ function outputHuman(items: SessionListItem[]): void {
     );
     const time = truncate(sanitize(formatTime(item.startTime)), TIME_COL);
     const sanitizedPrompt = sanitize(item.prompt ?? '');
+    // Falsy, not nullish: an empty-string customTitle is the clear-tombstone
+    // (an explicitly cleared title) and must fall back to the prompt instead
+    // of rendering a blank TITLE column (#8977).
     const title = truncate(
-      item.customTitle != null ? sanitize(item.customTitle) : sanitizedPrompt,
+      item.customTitle ? sanitize(item.customTitle) : sanitizedPrompt,
       TITLE_COL,
     );
     const branch = truncate(
@@ -141,7 +144,9 @@ function toJsonItem(item: SessionListItem): Record<string, unknown> {
     mtime: item.mtime,
     prompt: item.prompt,
     gitBranch: item.gitBranch ?? null,
-    customTitle: item.customTitle ?? null,
+    // Falsy, not nullish: the clear-tombstone ('' customTitle) is reported as
+    // no title rather than an empty-string value (#8977).
+    customTitle: item.customTitle || null,
     titleSource: item.titleSource ?? null,
     filePath: item.filePath,
     cwd: item.cwd,

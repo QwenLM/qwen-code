@@ -129,6 +129,7 @@ import {
   listWorkspaceSessionsForResponse,
 } from '../server.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
+import { restoreSessionTitleFields } from '../session-restore-title.js';
 import {
   archiveDaemonSessions,
   assertSessionRestorable,
@@ -1897,6 +1898,16 @@ export class AcpDispatcher {
                 ) {
                   throw new SessionNotFoundError(sessionId);
                 }
+                // The persisted title record lives next to the transcript,
+                // so the read must use the case-corrected storage id like the
+                // adjacent persisted reads above; the raw request spelling can
+                // miss the file on case-sensitive filesystems.
+                const titleInfo =
+                  sessionService.getSessionTitleInfo(storageSessionId);
+                const persistedTitle = restoreSessionTitleFields(
+                  titleInfo.title,
+                  titleInfo.source,
+                );
                 // The private directory belongs to the live entry, which the
                 // bridge registers under the canonical id, so every other
                 // materialize/discard call site keys it the same way. Hashing
@@ -1916,12 +1927,14 @@ export class AcpDispatcher {
                         clientId: conn.clientId,
                         historyReplay: 'response',
                         ...metadata,
+                        ...persistedTitle,
                       })
                     : await sessionRuntime.bridge.resumeSession({
                         sessionId,
                         workspaceCwd: cwd,
                         clientId: conn.clientId,
                         ...metadata,
+                        ...persistedTitle,
                       });
                 // Live creation and cold restore reserve this relocation before
                 // returning an id that can be prompted. An active entry has

@@ -5343,7 +5343,11 @@ export class DaemonClient {
    */
   async updateSessionMetadata(
     sessionId: string,
-    metadata: { displayName?: string; pr?: DaemonSessionPrInfo },
+    metadata: {
+      displayName?: string;
+      titleSource?: 'manual' | 'auto';
+      pr?: DaemonSessionPrInfo;
+    },
     clientId?: string,
   ): Promise<SessionMetadataResult> {
     return await this.fetchWithTimeout(
@@ -5357,11 +5361,15 @@ export class DaemonClient {
         if (res.status === 200) {
           const body = (await res.json()) as {
             displayName?: unknown;
+            titleSource?: unknown;
             prs?: unknown;
           };
           const result: SessionMetadataResult = {};
           if (typeof body.displayName === 'string') {
             result.displayName = body.displayName;
+          }
+          if (body.titleSource === 'manual' || body.titleSource === 'auto') {
+            result.titleSource = body.titleSource;
           }
           if (Array.isArray(body.prs)) {
             // Per-entry gate: a buggy or hostile daemon response cannot
@@ -6128,7 +6136,11 @@ export class WorkspaceDaemonClient {
 
   updateSessionMetadata(
     sessionId: string,
-    metadata: { displayName?: string; pr?: DaemonSessionPrInfo },
+    metadata: {
+      displayName?: string;
+      titleSource?: 'manual' | 'auto';
+      pr?: DaemonSessionPrInfo;
+    },
     clientId?: string,
   ): Promise<SessionMetadataResult> {
     return this.client.workspaceJsonRequest<SessionMetadataResult>(

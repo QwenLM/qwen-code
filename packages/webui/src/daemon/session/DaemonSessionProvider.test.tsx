@@ -58,6 +58,13 @@ interface MockSession {
   sessionId: string;
   workspaceCwd: string;
   clientId: string;
+  session: {
+    sessionId: string;
+    workspaceCwd: string;
+    attached: boolean;
+    displayName?: string;
+    titleSource?: 'manual' | 'auto';
+  };
   state?: Record<string, unknown>;
   hasActivePrompt?: boolean;
   historyHasMore?: boolean;
@@ -8747,6 +8754,93 @@ describe('DaemonSessionProvider', () => {
     });
   });
 
+  it('restores persisted title provenance before live metadata arrives (#8977)', async () => {
+    sdkMocks.sessions.push(
+      createMockSession({
+        session: {
+          sessionId: 'session-1',
+          workspaceCwd: '/mock-workspace',
+          attached: false,
+          displayName: 'Manual session',
+          titleSource: 'manual',
+        },
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+
+    expect(connection).toMatchObject({
+      sessionId: 'session-1',
+      displayName: 'Manual session',
+      titleSource: 'manual',
+    });
+  });
+
+  it('clears stale title provenance when a restored legacy session has none (#8977)', async () => {
+    const firstSession = createMockSession({
+      events: async function* metadataThenResync() {
+        yield {
+          id: 9,
+          v: 1,
+          type: 'session_metadata_updated',
+          data: {
+            sessionId: 'session-1',
+            displayName: 'Manual session',
+            titleSource: 'manual',
+          },
+        };
+        yield {
+          id: 10,
+          v: 1,
+          type: 'state_resync_required',
+          data: {
+            reason: 'slow_client',
+            lastDeliveredId: 9,
+            earliestAvailableId: 10,
+          },
+        };
+      },
+    });
+    const legacyReload = createMockSession({
+      session: {
+        sessionId: 'session-1',
+        workspaceCwd: '/mock-workspace',
+        attached: true,
+        displayName: 'Legacy session',
+      },
+      events: createIdleEvents(),
+    });
+    sdkMocks.sessions.push(firstSession, legacyReload);
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await wait(20);
+      await flushPromises();
+    });
+
+    expect(connection).toMatchObject({
+      sessionId: 'session-1',
+      displayName: 'Legacy session',
+    });
+    expect(connection?.titleSource).toBeUndefined();
+  });
+
   it('updates the connection display name from metadata events', async () => {
     sdkMocks.sessions.push(
       createMockSession({
@@ -11615,6 +11709,16 @@ describe('DaemonSessionProvider', () => {
       callCount += 1;
       if (callCount === 1) {
         yield {
+          id: 4,
+          v: 1 as const,
+          type: 'session_metadata_updated' as const,
+          data: {
+            sessionId: 'session-1',
+            displayName: 'Live rename',
+            titleSource: 'manual' as const,
+          },
+        } satisfies DaemonEvent;
+        yield {
           id: 5,
           v: 1 as const,
           type: 'session_update' as const,
@@ -11652,9 +11756,11 @@ describe('DaemonSessionProvider', () => {
     const session = createMockSession({ events });
     sdkMocks.sessions.push(session);
     let blocks: readonly DaemonTranscriptBlock[] = [];
+    let connection: DaemonConnectionState | undefined;
 
     function Harness() {
       blocks = useDaemonTranscriptBlocks();
+      connection = useDaemonConnection();
       return null;
     }
 
@@ -11675,6 +11781,10 @@ describe('DaemonSessionProvider', () => {
     expect(blocks).toMatchObject([
       { kind: 'assistant', text: 'before error after resume' },
     ]);
+    expect(connection).toMatchObject({
+      displayName: 'Live rename',
+      titleSource: 'manual',
+    });
   });
 
   it('clears an existing error during autoReconnect backoff', async () => {
@@ -14605,6 +14715,11 @@ function createMockSession(opts: Partial<MockSession> = {}): MockSession {
     sessionId: opts.sessionId ?? 'session-1',
     workspaceCwd: opts.workspaceCwd ?? '/mock-workspace',
     clientId: opts.clientId ?? 'client-1',
+    session: opts.session ?? {
+      sessionId: opts.sessionId ?? 'session-1',
+      workspaceCwd: opts.workspaceCwd ?? '/mock-workspace',
+      attached: false,
+    },
     state: opts.state ?? {},
     hasActivePrompt: opts.hasActivePrompt ?? false,
     historyHasMore: opts.historyHasMore ?? false,

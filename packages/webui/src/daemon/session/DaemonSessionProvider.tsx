@@ -63,6 +63,7 @@ import { extractHttpStatus, isRecord } from './httpErrors.js';
 import { useOptionalDaemonWorkspace } from '../workspace/DaemonWorkspaceProvider.js';
 import {
   getCurrentMode,
+  getRestoredSessionTitle,
   getSessionDisplayName,
   getReplayTokenUsage,
   getTokenCountFromUsage,
@@ -1247,6 +1248,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       let userDeletedSession = false;
 
       while (!disposed && !abort.signal.aborted) {
+        let loadedSessionThisIteration = false;
         const skipMetadataRefreshThisIteration = skipMetadataRefresh;
         skipMetadataRefresh = false;
         let loadingRequestedSession = false;
@@ -1733,6 +1735,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             ];
             replayTokenUsage = getReplayTokenUsage(replayEvents);
             replayTokenCount = getTokenCountFromUsage(replayTokenUsage);
+            loadedSessionThisIteration = true;
             session = nextSession;
             reconnectSessionId = session.sessionId;
             shouldCreateFreshSession = false;
@@ -2209,6 +2212,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             // tens of MiB after adaptive journal growth.
             activeSession.consumeReplaySnapshot();
           }
+          const restoredTitle = getRestoredSessionTitle(activeSession.session);
           setConnection((current) => ({
             ...current,
             status: 'connected',
@@ -2217,11 +2221,31 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ? { clientId: activeSession.clientId }
               : {}),
             workspaceCwd: activeSession.workspaceCwd,
-            displayName:
-              getSessionDisplayName(activeSession.state) ??
-              (current.sessionId === activeSession.sessionId
+            displayName: loadedSessionThisIteration
+              ? (getSessionDisplayName(activeSession.state) ??
+                restoredTitle.displayName ??
+                (current.sessionId === activeSession.sessionId
+                  ? current.displayName
+                  : undefined))
+              : current.sessionId === activeSession.sessionId
                 ? current.displayName
-                : undefined),
+                : undefined,
+            // Provenance follows whichever name source won above: a
+            // server-provided name carries the snapshot's source (a legacy
+            // snapshot with none clears a stale client-side 'manual'); only
+            // when the name itself came from the current connection (e.g. a
+            // replayed metadata event during repair) is the current source
+            // kept.
+            titleSource: loadedSessionThisIteration
+              ? (getSessionDisplayName(activeSession.state) ??
+                  restoredTitle.displayName) !== undefined
+                ? restoredTitle.titleSource
+                : current.sessionId === activeSession.sessionId
+                  ? current.titleSource
+                  : undefined
+              : current.sessionId === activeSession.sessionId
+                ? current.titleSource
+                : undefined,
             tokenUsage:
               replayTokenUsage !== undefined
                 ? replayTokenUsage
@@ -2413,6 +2437,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                       current.reasoning?.effort,
                     )
                   : current.reasoning,
+              // Refresh the title from the live session state on every
+              // iteration (repairs and metadata refreshes mutate it without a
+              // load, so the load-gated merge above never sees it).
               displayName:
                 getSessionDisplayName(activeSession.state) ??
                 current.displayName,

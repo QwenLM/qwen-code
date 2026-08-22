@@ -99,7 +99,7 @@ export interface ScheduledTasksSessionBridge {
    * session list (rather than a bare id). Best-effort. */
   updateSessionMetadata(
     sessionId: string,
-    metadata: { displayName?: string },
+    metadata: { displayName?: string; titleSource?: 'manual' | 'auto' },
   ): unknown;
 }
 
@@ -603,6 +603,7 @@ function registerScheduledTaskCrudRoutes(
                 displayName: scheduledTaskSessionName(
                   nameResult.value ?? prompt,
                 ),
+                titleSource: 'auto',
               }),
             );
           } catch {
@@ -995,6 +996,7 @@ function registerScheduledTaskCrudRoutes(
             displayName: scheduledTaskSessionName(
               updated.name ?? updated.prompt,
             ),
+            titleSource: 'auto',
           });
         } catch {
           // non-critical — the schedule change already persisted

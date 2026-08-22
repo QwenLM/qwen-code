@@ -202,6 +202,7 @@ export function getConnectionAfterSessionClear(
     delete next.sessionId;
     delete next.clientId;
     delete next.displayName;
+    delete next.titleSource;
     delete next.tokenUsage;
     delete next.tokenCount;
     delete next.goalState;
@@ -610,6 +611,7 @@ export function createDaemonSessionActions({
         workspaceCwd: targetWorkspaceCwd,
         clientId: undefined,
         displayName: undefined,
+        titleSource: undefined,
         goalState: undefined,
         error: undefined,
         errorStatus: undefined,
@@ -1572,19 +1574,48 @@ export function createDaemonSessionActions({
       }
     },
 
-    async renameSession(displayName) {
-      const session = requireSessionForAction(
-        addNotice,
-        sessionRef.current,
-        'Rename session failed',
-        'rename_session',
-      );
+    async renameSession(displayName, opts) {
+      const session = sessionRef.current;
+      if (!session) {
+        // Silent callers (the /clear carry-over rename) never initiated a
+        // rename; surfacing the missing-session notice would toast for an
+        // internal best-effort operation. Still throw so the caller's
+        // creation teardown runs.
+        const missingError = new Error('Daemon session is not connected');
+        if (opts?.silent) throw missingError;
+        throw dispatchActionError(
+          addNotice,
+          'Rename session failed',
+          missingError,
+          'rename_session',
+        );
+      }
+      const baseline = getConnection();
       try {
-        return await withActionTimeout(
-          session.updateMetadata({ displayName }),
+        const result = await withActionTimeout(
+          session.updateMetadata({
+            displayName,
+            ...(opts?.titleSource ? { titleSource: opts.titleSource } : {}),
+          }),
           'Rename session timed out',
         );
+        setConnection((current) =>
+          current.sessionId === session.sessionId &&
+          current.displayName === baseline.displayName &&
+          current.titleSource === baseline.titleSource
+            ? {
+                ...current,
+                displayName: result.displayName ?? displayName,
+                titleSource:
+                  result.titleSource ?? opts?.titleSource ?? 'manual',
+              }
+            : current,
+        );
+        return result;
       } catch (error) {
+        if (opts?.silent) {
+          throw error instanceof Error ? error : new Error(String(error));
+        }
         throw dispatchActionError(
           addNotice,
           'Rename session failed',

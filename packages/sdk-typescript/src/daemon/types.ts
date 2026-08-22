@@ -1048,6 +1048,10 @@ export interface DaemonSession {
   createdAt?: string;
   /** True while the live session has an in-flight prompt. */
   hasActivePrompt?: boolean;
+  /** Persisted session title, when one exists. */
+  displayName?: string;
+  /** Whether the persisted title was chosen by the user or generated. */
+  titleSource?: 'manual' | 'auto';
   /**
    * Epoch token of the session's event bus. Newer daemons stamp it on the
    * create/attach response; older daemons omit it and the first subscription
@@ -1156,12 +1160,15 @@ export interface DaemonBranchPoint {
 export interface DaemonPersistedBranchedSession {
   sessionId: string;
   displayName: string;
+  titleSource: 'manual' | 'auto';
   forkedFrom: { sessionId: string; displayName: string };
 }
 
-export interface DaemonBranchedSession
-  extends DaemonRestoredSession,
-    DaemonPersistedBranchedSession {}
+export interface DaemonBranchedSession extends DaemonRestoredSession {
+  displayName: string;
+  titleSource: 'manual' | 'auto';
+  forkedFrom: { sessionId: string; displayName: string };
+}
 
 export type DaemonBranchSessionResult =
   | DaemonBranchedSession
@@ -1464,6 +1471,7 @@ export interface DaemonUnarchiveSessionsResult {
 /** Effective mutable metadata returned from `PATCH /session/:id/metadata`. */
 export interface SessionMetadataResult {
   displayName?: string;
+  titleSource?: 'manual' | 'auto';
   prs?: DaemonSessionPrInfo[];
 }
 

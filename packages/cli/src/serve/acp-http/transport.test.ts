@@ -4799,7 +4799,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   });
 
   it.each(['session/load', 'session/resume'] as const)(
-    '%s re-seeds the persisted parent lineage into the bridge restore call',
+    '%s re-seeds persisted metadata into the bridge restore call',
     async (method) => {
       await withRuntimeDir(async () => {
         const sessionId = '550e8400-e29b-41d4-a716-446655440130';
@@ -4808,11 +4808,14 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         // creates the live entry without it, so the dispatcher must recover it
         // from the transcript and pass it to load/resume.
         await writeStoredSession(sessionId, 'active', parentId);
+        const readTitle = vi
+          .spyOn(SessionService.prototype, 'getSessionTitleInfo')
+          .mockReturnValue({ title: 'Manual session', source: 'manual' });
 
-        let loadParent: unknown = 'unset';
-        let resumeParent: unknown = 'unset';
+        let loadRequest: unknown;
+        let resumeRequest: unknown;
         bridge.loadSession = async (req) => {
-          loadParent = (req as { parentSessionId?: string }).parentSessionId;
+          loadRequest = req;
           return {
             sessionId: req.sessionId,
             workspaceCwd: TEST_WORKSPACE,
@@ -4822,7 +4825,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           };
         };
         bridge.resumeSession = async (req) => {
-          resumeParent = (req as { parentSessionId?: string }).parentSessionId;
+          resumeRequest = req;
           return {
             sessionId: req.sessionId,
             workspaceCwd: TEST_WORKSPACE,
@@ -4844,11 +4847,15 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         expect(await reader.next()).toMatchObject({ id: 214 });
         reader.close();
 
-        if (method === 'session/load') {
-          expect(loadParent).toBe(parentId);
-        } else {
-          expect(resumeParent).toBe(parentId);
-        }
+        expect(
+          method === 'session/load' ? loadRequest : resumeRequest,
+        ).toMatchObject({
+          sessionId,
+          parentSessionId: parentId,
+          displayName: 'Manual session',
+          titleSource: 'manual',
+        });
+        readTitle.mockRestore();
       });
     },
   );
@@ -4914,6 +4921,69 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           result: { stopReason: 'end_turn' },
         });
         sessionReader.close();
+      });
+    },
+  );
+
+  it.each(['session/load', 'session/resume'] as const)(
+    '%s reads the persisted title with the case-corrected storage id',
+    async (method) => {
+      await withRuntimeDir(async () => {
+        // The transcript (and the custom_title record next to it) is stored
+        // under the uppercase spelling while the caller requests the
+        // normalized lowercase id; the title read must use the corrected
+        // spelling or it misses the file on case-sensitive filesystems.
+        const sessionId = '550e8400-e29b-41d4-a716-446655440138';
+        const storageSessionId = sessionId.toUpperCase();
+        await writeStoredSession(storageSessionId);
+        const readTitle = vi
+          .spyOn(SessionService.prototype, 'getSessionTitleInfo')
+          .mockReturnValue({ title: 'Manual session', source: 'manual' });
+
+        let restoreRequest: unknown;
+        bridge.loadSession = async (req) => {
+          restoreRequest = req;
+          return {
+            sessionId: req.sessionId,
+            workspaceCwd: TEST_WORKSPACE,
+            attached: true,
+            clientId: 'client-load',
+            state: { replayed: true },
+          };
+        };
+        bridge.resumeSession = async (req) => {
+          restoreRequest = req;
+          return {
+            sessionId: req.sessionId,
+            workspaceCwd: TEST_WORKSPACE,
+            attached: true,
+            clientId: 'client-resume',
+            state: { resumed: true },
+          };
+        };
+
+        try {
+          const connId = await initialize();
+          const stream = await openStream(connId);
+          const reader = frameReader(stream);
+          await post(connId, {
+            jsonrpc: '2.0',
+            id: 237,
+            method,
+            params: { sessionId },
+          });
+          expect(await reader.next()).toMatchObject({ id: 237 });
+          reader.close();
+
+          expect(readTitle).toHaveBeenCalledWith(storageSessionId);
+          expect(restoreRequest).toMatchObject({
+            sessionId,
+            displayName: 'Manual session',
+            titleSource: 'manual',
+          });
+        } finally {
+          readTitle.mockRestore();
+        }
       });
     },
   );

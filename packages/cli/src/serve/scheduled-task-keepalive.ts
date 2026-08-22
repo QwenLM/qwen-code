@@ -42,6 +42,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { MAX_SESSION_RESTORE_TIMEOUT_MS } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 import { scheduledTaskSessionName } from './routes/scheduled-tasks.js';
+import { restoreSessionTitleFields } from './session-restore-title.js';
 
 const log = createDebugLogger('SCHED_KEEPALIVE');
 
@@ -83,6 +84,8 @@ export interface KeepaliveBridge {
     workspaceCwd: string;
     sourceType?: string;
     sourceId?: string;
+    displayName?: string;
+    titleSource?: 'manual' | 'auto';
   }): Promise<unknown>;
   spawnOrAttach(req: {
     workspaceCwd: string;
@@ -98,7 +101,7 @@ export interface KeepaliveBridge {
   markSessionCatalogChanged?(): void;
   updateSessionMetadata(
     sessionId: string,
-    metadata: { displayName?: string },
+    metadata: { displayName?: string; titleSource?: 'manual' | 'auto' },
   ): unknown;
 }
 
@@ -191,6 +194,7 @@ async function bindAndNameSessions(
       try {
         bridge.updateSessionMetadata(sessionId, {
           displayName: scheduledTaskSessionName(task.prompt),
+          titleSource: 'auto',
         });
         renamed.add(sessionId);
       } catch {
@@ -240,6 +244,7 @@ async function bindAndNameSessions(
     try {
       bridge.updateSessionMetadata(sessionId, {
         displayName: scheduledTaskSessionName(task.prompt),
+        titleSource: 'auto',
       });
       renamed.add(sessionId);
     } catch (err) {
@@ -341,13 +346,14 @@ export function startScheduledTaskKeepalive(
         }
         log.debug('keepalive: recordHeartbeat failed for', sessionId, err);
         reviving.add(sessionId);
-        const metadata = await new SessionService(
-          boundWorkspace,
-        ).readCreationMetadata(sessionId);
+        const sessionService = new SessionService(boundWorkspace);
+        const metadata = await sessionService.readCreationMetadata(sessionId);
+        const titleInfo = sessionService.getSessionTitleInfo(sessionId);
         const resume = bridge.resumeSession({
           sessionId,
           workspaceCwd: boundWorkspace,
           ...metadata,
+          ...restoreSessionTitleFields(titleInfo.title, titleInfo.source),
         });
         // Clear the in-flight guard on the resume's TRUE settlement (not the
         // timeout below) so a still-running load keeps blocking a duplicate.
@@ -489,6 +495,8 @@ export interface RehydrateBridge {
     workspaceCwd: string;
     sourceType?: string;
     sourceId?: string;
+    displayName?: string;
+    titleSource?: 'manual' | 'auto';
   }): Promise<unknown>;
 }
 
@@ -544,13 +552,14 @@ export async function rehydrateScheduledTaskSessions(deps: {
   const loaded: string[] = [];
   const failed: string[] = [];
   const loadOne = async (sessionId: string) => {
-    const metadata = await new SessionService(
-      boundWorkspace,
-    ).readCreationMetadata(sessionId);
+    const sessionService = new SessionService(boundWorkspace);
+    const metadata = await sessionService.readCreationMetadata(sessionId);
+    const titleInfo = sessionService.getSessionTitleInfo(sessionId);
     const resume = bridge.resumeSession({
       sessionId,
       workspaceCwd: boundWorkspace,
       ...metadata,
+      ...restoreSessionTitleFields(titleInfo.title, titleInfo.source),
     });
     // resumeSession isn't abortable, so a timed-out resume keeps running
     // in the background. Swallow its eventual settlement up front so it can't

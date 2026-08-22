@@ -4410,6 +4410,7 @@ describe('SessionService', () => {
       const result = await service.forkSession(oldId, newId, {
         atRecordId: 'checkpoint-1',
         title: 'Historical branch',
+        titleSource: 'auto',
       });
       const written = fs
         .readFileSync(result.filePath, 'utf8')
@@ -4426,7 +4427,10 @@ describe('SessionService', () => {
       expect(written[2].systemPayload).not.toHaveProperty('promptId');
       expect(written.at(-1)).toMatchObject({
         subtype: 'custom_title',
-        systemPayload: { customTitle: 'Historical branch' },
+        systemPayload: {
+          customTitle: 'Historical branch',
+          titleSource: 'auto',
+        },
       });
       expect(
         fs
@@ -4434,6 +4438,29 @@ describe('SessionService', () => {
           .split('\n')
           .some((line) => line.includes('later answer')),
       ).toBe(true);
+    });
+
+    it('defaults a forked title provenance to manual when omitted', async () => {
+      const oldId = '44444444-4444-1444-9444-444444444401';
+      const newId = '44444444-4444-1444-9444-444444444402';
+      seedSession(oldId);
+
+      const result = await service.forkSession(oldId, newId, {
+        title: 'Default provenance branch',
+      });
+      const written = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+
+      expect(written.at(-1)).toMatchObject({
+        subtype: 'custom_title',
+        systemPayload: {
+          customTitle: 'Default provenance branch',
+          titleSource: 'manual',
+        },
+      });
     });
 
     it('keeps a checkpoint valid when its creation-metadata boundary is filtered', async () => {

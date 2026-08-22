@@ -41,6 +41,7 @@ import {
   readLoadableLiveConversationMetadata,
 } from '../../runtime/live-session-source.js';
 import { conversationRuntimeUnavailableError } from '../conversations/conversation-runtime-errors.js';
+import { restoreSessionTitleFields } from '../session-restore-title.js';
 
 const DEFAULT_LIST_LIMIT = 20;
 const DEFAULT_READ_TURN_LIMIT = 3;
@@ -1069,10 +1070,12 @@ export class LiveTaskService {
     if (metadata === undefined) {
       throw new SessionNotFoundError(task.summary.sessionId);
     }
+    const titleInfo = service.getSessionTitleInfo(task.summary.sessionId);
     await task.runtime.bridge.resumeSession({
       sessionId: task.summary.sessionId,
       workspaceCwd: task.runtime.workspaceCwd,
       ...metadata,
+      ...restoreSessionTitleFields(titleInfo.title, titleInfo.source),
     });
     if (task.runtime.provenance === 'live-conversation') {
       const directory = await this.options.materializeConversationDirectory(

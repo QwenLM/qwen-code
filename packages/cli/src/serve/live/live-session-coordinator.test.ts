@@ -394,7 +394,7 @@ describe('LiveSessionCoordinator', () => {
     });
     expect(harness.bridge.updateSessionMetadata).toHaveBeenCalledWith(
       'live-new',
-      { displayName: 'Voice chat' },
+      { displayName: 'Voice chat', titleSource: 'auto' },
     );
     expect(harness.host.setCallState).toHaveBeenLastCalledWith(1, 'listening');
 
@@ -975,6 +975,8 @@ describe('LiveSessionCoordinator', () => {
           sessionId: 'live-old',
           sourceType: 'default',
           sourceId: LIVE_SESSION_SOURCE_PREFIX + 'previous',
+          customTitle: 'Manual Live session',
+          titleSource: 'manual',
         } as SessionListItem,
       ],
     });
@@ -997,6 +999,8 @@ describe('LiveSessionCoordinator', () => {
       workspaceCwd: '/conversations',
       sourceType: 'default',
       sourceId: LIVE_SESSION_SOURCE_PREFIX + 'previous',
+      displayName: 'Manual Live session',
+      titleSource: 'manual',
     });
     expect(harness.bridge.spawnOrAttach).not.toHaveBeenCalled();
     await harness.finishTurn(0, [{ type: 'message', text: '继续完成。' }]);

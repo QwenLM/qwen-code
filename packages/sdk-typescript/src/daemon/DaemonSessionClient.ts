@@ -946,6 +946,7 @@ export class DaemonSessionClient {
 
   async updateMetadata(metadata: {
     displayName?: string;
+    titleSource?: 'manual' | 'auto';
     pr?: DaemonSessionPrInfo;
   }): Promise<SessionMetadataResult> {
     return await this.client.updateSessionMetadata(

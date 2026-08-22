@@ -47,14 +47,18 @@ interface StubBridge {
   closeSession(sessionId: string): Promise<unknown>;
   updateSessionMetadata(
     sessionId: string,
-    metadata: { displayName?: string },
+    metadata: { displayName?: string; titleSource?: 'manual' | 'auto' },
   ): unknown;
   markSessionCatalogChanged: ReturnType<typeof vi.fn>;
   spawned: string[];
   spawnScopes: Array<'single' | 'thread' | undefined>;
   spawnSources: Array<{ sourceType?: string; sourceId?: string }>;
   closed: string[];
-  named: Array<{ sessionId: string; displayName?: string }>;
+  named: Array<{
+    sessionId: string;
+    displayName?: string;
+    titleSource?: 'manual' | 'auto';
+  }>;
   failNext: boolean;
 }
 
@@ -618,13 +622,18 @@ describe('scheduled-tasks routes', () => {
       prompt: 'summarize the day',
     });
     expect(h.bridge.named).toEqual([
-      { sessionId: named.body.sessionId, displayName: '⏰ Digest' },
+      {
+        sessionId: named.body.sessionId,
+        displayName: '⏰ Digest',
+        titleSource: 'auto',
+      },
     ]);
 
     const unnamed = await create({ cron: '0 9 * * *', prompt: 'do the thing' });
     expect(h.bridge.named[1]).toEqual({
       sessionId: unnamed.body.sessionId,
       displayName: '⏰ do the thing',
+      titleSource: 'auto',
     });
   });
 
@@ -1218,7 +1227,9 @@ describe('scheduled-tasks routes', () => {
     });
     const id = created.body.id as string;
     const sid = created.body.sessionId as string;
-    expect(h.bridge.named).toEqual([{ sessionId: sid, displayName: '⏰ Old' }]);
+    expect(h.bridge.named).toEqual([
+      { sessionId: sid, displayName: '⏰ Old', titleSource: 'auto' },
+    ]);
 
     // Renaming the task re-labels its session.
     const rename = await request(h.app)
@@ -1228,6 +1239,7 @@ describe('scheduled-tasks routes', () => {
     expect(h.bridge.named).toContainEqual({
       sessionId: sid,
       displayName: '⏰ New',
+      titleSource: 'auto',
     });
 
     // A bare cron edit does NOT re-touch the session name.
@@ -1242,6 +1254,7 @@ describe('scheduled-tasks routes', () => {
     expect(h.bridge.named).toContainEqual({
       sessionId: sid,
       displayName: '⏰ p',
+      titleSource: 'auto',
     });
   });
 

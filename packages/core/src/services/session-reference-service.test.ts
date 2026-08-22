@@ -457,6 +457,64 @@ describe('title derivation', () => {
     expect(res.meta.title).toBe('Auth investigation');
   });
 
+  it('treats a cleared (empty-string) custom_title tombstone as last-write-wins and falls back to the first prompt', async () => {
+    // Rename to a manual name, then clear the title: the clear appends an
+    // empty-string custom_title tombstone. The tombstone is the last write,
+    // so the cleared name must NOT be returned — derivation falls back to
+    // the first user prompt instead (#8977).
+    const svc = makeSvc(
+      fakeResumed([
+        {
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'Fix the auth bug' }] },
+        },
+        {
+          type: 'system',
+          subtype: 'custom_title',
+          systemPayload: { customTitle: 'My debug session' },
+          message: undefined,
+        },
+        {
+          type: 'system',
+          subtype: 'custom_title',
+          systemPayload: { customTitle: '', titleSource: 'manual' },
+          message: undefined,
+        },
+      ]),
+    );
+    const res = await svc.resolve('s1');
+    if ('notFound' in res) throw new Error('unexpected');
+    expect(res.meta.title).toBe('Fix the auth bug');
+  });
+
+  it('returns a non-empty renamed title even when an earlier record was cleared', async () => {
+    // The tombstone only wins as the LAST write: clearing then renaming back
+    // to a real name must surface the real name, not the fallback.
+    const svc = makeSvc(
+      fakeResumed([
+        {
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'Fix the auth bug' }] },
+        },
+        {
+          type: 'system',
+          subtype: 'custom_title',
+          systemPayload: { customTitle: '', titleSource: 'manual' },
+          message: undefined,
+        },
+        {
+          type: 'system',
+          subtype: 'custom_title',
+          systemPayload: { customTitle: 'Renamed again' },
+          message: undefined,
+        },
+      ]),
+    );
+    const res = await svc.resolve('s1');
+    if ('notFound' in res) throw new Error('unexpected');
+    expect(res.meta.title).toBe('Renamed again');
+  });
+
   it('truncates a long first user message to 80 chars', async () => {
     const long = 'A'.repeat(120);
     const svc = makeSvc(

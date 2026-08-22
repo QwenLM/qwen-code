@@ -3203,6 +3203,7 @@ describe('DaemonClient', () => {
         clientId: 'branch-client',
         state: {},
         displayName: 'Live branch',
+        titleSource: 'manual',
         forkedFrom: {
           sessionId: 'source-1',
           displayName: 'Source session',
@@ -3233,6 +3234,7 @@ describe('DaemonClient', () => {
       const reply = {
         sessionId: 'branch-1',
         displayName: 'Historical branch',
+        titleSource: 'manual',
         forkedFrom: {
           sessionId: 'source/1',
           displayName: 'Source session',
@@ -3672,18 +3674,24 @@ describe('DaemonClient', () => {
         jsonResponse(200, {
           sessionId: 's-1',
           displayName: 'My Session',
+          titleSource: 'auto',
         }),
       );
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
       const result = await client.updateSessionMetadata('s-1', {
         displayName: 'My Session',
+        titleSource: 'auto',
       });
       expect(calls[0]?.url).toBe('http://daemon/session/s-1/metadata');
       expect(calls[0]?.method).toBe('PATCH');
       expect(JSON.parse(calls[0]!.body!)).toEqual({
         displayName: 'My Session',
+        titleSource: 'auto',
       });
-      expect(result).toEqual({ displayName: 'My Session' });
+      expect(result).toEqual({
+        displayName: 'My Session',
+        titleSource: 'auto',
+      });
     });
 
     it('sends client identity header', async () => {

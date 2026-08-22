@@ -235,7 +235,9 @@ describe('scheduled-task keepalive', () => {
         condition: 'files_changed',
       } as unknown as Partial<DurableCronTask>),
     ]);
-    const names: Array<[string, { displayName?: string }]> = [];
+    const names: Array<
+      [string, { displayName?: string; titleSource?: 'manual' | 'auto' }]
+    > = [];
     const naming = {
       ...bridge,
       recordHeartbeat: () => {
@@ -243,7 +245,10 @@ describe('scheduled-task keepalive', () => {
         // be attempted for this session in the first place.
         throw new Error('unexpected heartbeat for legacy session');
       },
-      updateSessionMetadata: (id: string, m: { displayName?: string }) => {
+      updateSessionMetadata: (
+        id: string,
+        m: { displayName?: string; titleSource?: 'manual' | 'auto' },
+      ) => {
         names.push([id, m]);
       },
     };
@@ -279,6 +284,9 @@ describe('scheduled-task keepalive', () => {
         sourceType: 'scheduled_task',
         sourceId: 'a',
       });
+    const readTitle = vi
+      .spyOn(SessionService.prototype, 'getSessionTitleInfo')
+      .mockReturnValue({ title: 'Manual task', source: 'manual' });
     const loadRequests: unknown[] = [];
     const reviving = {
       recordHeartbeat: (id: string) => {
@@ -314,9 +322,12 @@ describe('scheduled-task keepalive', () => {
         workspaceCwd: workspace,
         sourceType: 'scheduled_task',
         sourceId: 'a',
+        displayName: 'Manual task',
+        titleSource: 'manual',
       },
     ]);
     readMetadata.mockRestore();
+    readTitle.mockRestore();
   });
 
   it('a failed revive is swallowed and does not block siblings', async () => {
@@ -487,10 +498,18 @@ describe('scheduled-task keepalive', () => {
         sourceType: 'scheduled_task',
         sourceId: `task-for-${sessionId}`,
       }));
+    const readTitle = vi
+      .spyOn(SessionService.prototype, 'getSessionTitleInfo')
+      .mockImplementation((sessionId) => ({
+        title: `Manual ${sessionId}`,
+        source: 'manual',
+      }));
     const loaded: Array<{
       sessionId: string;
       sourceType?: string;
       sourceId?: string;
+      displayName?: string;
+      titleSource?: 'manual' | 'auto';
     }> = [];
     const res = await rehydrateScheduledTaskSessions({
       bridge: {
@@ -506,17 +525,22 @@ describe('scheduled-task keepalive', () => {
           sessionId: 'sess-1',
           sourceType: 'scheduled_task',
           sourceId: 'task-for-sess-1',
+          displayName: 'Manual sess-1',
+          titleSource: 'manual',
         }),
         expect.objectContaining({
           sessionId: 'sess-2',
           sourceType: 'scheduled_task',
           sourceId: 'task-for-sess-2',
+          displayName: 'Manual sess-2',
+          titleSource: 'manual',
         }),
       ]),
     );
     expect(res.loaded.sort()).toEqual(['sess-1', 'sess-2']);
     expect(res.failed).toEqual([]);
     readMetadata.mockRestore();
+    readTitle.mockRestore();
   });
 
   it('rehydrate records a gone session as failed but keeps loading siblings', async () => {
@@ -665,7 +689,9 @@ describe('scheduled-task keepalive', () => {
       task({ id: 'unbound-1', prompt: 'check build' }),
     ]);
     const spawns: unknown[] = [];
-    const names: Array<[string, { displayName?: string }]> = [];
+    const names: Array<
+      [string, { displayName?: string; titleSource?: 'manual' | 'auto' }]
+    > = [];
     const binding = {
       ...bridge,
       spawnOrAttach: async (req: unknown) => {
@@ -673,7 +699,10 @@ describe('scheduled-task keepalive', () => {
         return { sessionId: 'new-sess-1' };
       },
       closeSession: async () => {},
-      updateSessionMetadata: (id: string, m: { displayName?: string }) => {
+      updateSessionMetadata: (
+        id: string,
+        m: { displayName?: string; titleSource?: 'manual' | 'auto' },
+      ) => {
         names.push([id, m]);
       },
     };
@@ -694,6 +723,7 @@ describe('scheduled-task keepalive', () => {
     expect(names).toHaveLength(1);
     expect(names[0]![0]).toBe('new-sess-1');
     expect(names[0]![1].displayName).toContain('⏰');
+    expect(names[0]![1].titleSource).toBe('auto');
     const tasks = await readCronTasks(workspace);
     expect(tasks[0]!.sessionId).toBe('new-sess-1');
   });
@@ -702,10 +732,15 @@ describe('scheduled-task keepalive', () => {
     await updateCronTasks(workspace, () => [
       task({ id: 'bound-1', sessionId: 'existing-sess', prompt: 'lint' }),
     ]);
-    const names: Array<[string, { displayName?: string }]> = [];
+    const names: Array<
+      [string, { displayName?: string; titleSource?: 'manual' | 'auto' }]
+    > = [];
     const naming = {
       ...bridge,
-      updateSessionMetadata: (id: string, m: { displayName?: string }) => {
+      updateSessionMetadata: (
+        id: string,
+        m: { displayName?: string; titleSource?: 'manual' | 'auto' },
+      ) => {
         names.push([id, m]);
       },
     };
@@ -720,6 +755,7 @@ describe('scheduled-task keepalive', () => {
     expect(names).toHaveLength(1);
     expect(names[0]![0]).toBe('existing-sess');
     expect(names[0]![1].displayName).toContain('⏰');
+    expect(names[0]![1].titleSource).toBe('auto');
   });
 
   it('does not bind disabled unbound tasks', async () => {

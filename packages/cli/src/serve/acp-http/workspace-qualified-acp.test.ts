@@ -849,6 +849,7 @@ describe('workspace-qualified ACP (/workspaces/:workspace/acp)', () => {
         clientId: 'forked-primary-client',
         state: {},
         displayName: 'Forked primary session',
+        titleSource: 'manual' as const,
         forkedFrom: { sessionId, displayName: sessionId },
       };
     });

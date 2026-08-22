@@ -1163,6 +1163,7 @@ describe('createAcpSessionBridge', () => {
       releaseFirstBranch.resolve();
       await expect(firstBranch).resolves.toMatchObject({
         sessionId: 'branch-1',
+        titleSource: 'auto',
       });
       await expect(queuedBranch).rejects.toBeInstanceOf(SessionNotFoundError);
       expect(branchCalls).toBe(1);
@@ -14855,6 +14856,7 @@ describe('createAcpSessionBridge', () => {
         expect(branch).toEqual({
           sessionId: 'branch-1',
           displayName: 'Branch 1',
+          titleSource: 'manual',
           forkedFrom: {
             sessionId: session.sessionId,
             displayName: session.sessionId.slice(0, 8),
@@ -14905,6 +14907,7 @@ describe('createAcpSessionBridge', () => {
       expect(branch).toMatchObject({
         sessionId: 'branch-live',
         displayName: 'Live branch',
+        titleSource: 'manual',
         workspaceCwd: WS_A,
         attached: false,
         clientId: expect.any(String),
@@ -14915,6 +14918,15 @@ describe('createAcpSessionBridge', () => {
       if (!('clientId' in branch)) {
         throw new Error('latest-state branch was not restored');
       }
+      await expect(
+        bridge.loadSession({
+          sessionId: branch.sessionId,
+          workspaceCwd: WS_A,
+        }),
+      ).resolves.toMatchObject({
+        displayName: 'Live branch',
+        titleSource: 'manual',
+      });
       await expect(
         bridge.readSessionAttachment(
           branch.sessionId,
@@ -24915,6 +24927,47 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('clears a stale title source when a child omits it', async () => {
+      let capturedConn: AgentSideConnection | undefined;
+      const bridge = makeBridge({
+        channelFactory: titleFactory((c) => (capturedConn = c)),
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      void capturedConn!.extNotification('qwen/notify/session/title-update', {
+        v: 1,
+        sessionId: session.sessionId,
+        title: 'Manual title',
+        titleSource: 'manual',
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      await expect(
+        bridge.loadSession({
+          sessionId: session.sessionId,
+          workspaceCwd: WS_A,
+        }),
+      ).resolves.toMatchObject({
+        displayName: 'Manual title',
+        titleSource: 'manual',
+      });
+
+      void capturedConn!.extNotification('qwen/notify/session/title-update', {
+        v: 1,
+        sessionId: session.sessionId,
+        title: 'Legacy title',
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+
+      const attached = await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+      });
+      expect(attached.displayName).toBe('Legacy title');
+      expect(attached.titleSource).toBeUndefined();
+
+      await bridge.shutdown();
+    });
+
     it('drops malformed title-update payloads', async () => {
       let capturedConn: AgentSideConnection | undefined;
       const bridge = makeBridge({
@@ -26421,9 +26474,418 @@ describe('createAcpSessionBridge', () => {
       expect((metaEvent?.data as { displayName: string }).displayName).toBe(
         'Test Session',
       );
+      expect((metaEvent?.data as { titleSource?: string }).titleSource).toBe(
+        'manual',
+      );
 
       await bridge.closeSession(session.sessionId);
       await drain;
+      await bridge.shutdown();
+    });
+
+    it('publishes a JSON-survivable null marker when the title is cleared (#8977)', async () => {
+      // The persisted custom_title records in write order — the stand-in for
+      // the transcript's title file. The sessionTitle ext-method appends one
+      // record per call, and a cold restore seeds the fresh bridge from the
+      // LAST record, honoring an empty title as "no title" (the
+      // readSessionTitleInfoFromFileSync contract).
+      const persistedTitles: Array<{
+        displayName: string;
+        titleSource?: 'manual' | 'auto';
+      }> = [];
+      const bridge = makeBridge({
+        channelFactory: async () =>
+          makeChannel({
+            extMethodImpl: (method, params) => {
+              if (method === SERVE_CONTROL_EXT_METHODS.sessionTitle) {
+                persistedTitles.push({
+                  displayName: params['displayName'] as string,
+                  ...(params['titleSource'] !== undefined
+                    ? {
+                        titleSource: params['titleSource'] as 'manual' | 'auto',
+                      }
+                    : {}),
+                });
+              }
+              return { persisted: true };
+            },
+          }).channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      bridge.updateSessionMetadata(session.sessionId, {
+        displayName: 'Named session',
+        titleSource: 'manual',
+      });
+
+      const events: BridgeEvent[] = [];
+      const sub = bridge.subscribeEvents(session.sessionId);
+      const drain = (async () => {
+        for await (const ev of sub) events.push(ev);
+      })();
+      await new Promise((r) => setImmediate(r));
+
+      const cleared = bridge.updateSessionMetadata(session.sessionId, {
+        displayName: '',
+      });
+      expect(cleared).toEqual({});
+
+      await new Promise((r) => setImmediate(r));
+      const clearEvent = events.find(
+        (e) => e.type === 'session_metadata_updated',
+      );
+      expect(clearEvent).toBeDefined();
+      // The wire shape is what matters: JSON drops `undefined` keys, so a
+      // cleared title must serialize as `null` for the client-side
+      // hasOwnProperty gate to open and drop the stale name + provenance.
+      const wire = JSON.parse(JSON.stringify(clearEvent?.data)) as Record<
+        string,
+        unknown
+      >;
+      expect(Object.prototype.hasOwnProperty.call(wire, 'displayName')).toBe(
+        true,
+      );
+      expect(wire['displayName']).toBeNull();
+      expect(Object.prototype.hasOwnProperty.call(wire, 'titleSource')).toBe(
+        false,
+      );
+
+      // The clear must reach the persisted store too, as an empty-title
+      // tombstone — without it a daemon restart / idle-reap cold restore
+      // re-seeds the just-deleted name from the stale record.
+      await vi.waitFor(() => expect(persistedTitles).toHaveLength(2));
+      expect(persistedTitles[0]).toEqual({
+        displayName: 'Named session',
+        titleSource: 'manual',
+      });
+      expect(persistedTitles[1]).toEqual({ displayName: '' });
+
+      const reloaded = await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+      });
+      expect(reloaded.displayName).toBeUndefined();
+      expect(reloaded.titleSource).toBeUndefined();
+
+      await bridge.closeSession(session.sessionId);
+      await drain;
+      await bridge.shutdown();
+
+      // Cold restore: a fresh bridge seeded from the persisted title store
+      // (as the session/load + session/resume handlers do via
+      // getSessionTitleInfo) must still see no title. Loading through the
+      // still-live entry above never touches the persisted state, so it
+      // alone cannot prove the clear is durable.
+      const lastPersisted = persistedTitles[persistedTitles.length - 1];
+      const persistedTitleFields = lastPersisted?.displayName
+        ? {
+            displayName: lastPersisted.displayName,
+            ...(lastPersisted.titleSource !== undefined
+              ? { titleSource: lastPersisted.titleSource }
+              : {}),
+          }
+        : {};
+      const coldBridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const restored = await coldBridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+        ...persistedTitleFields,
+      });
+      expect(restored.displayName).toBeUndefined();
+      expect(restored.titleSource).toBeUndefined();
+      await coldBridge.shutdown();
+    });
+
+    it('suppresses stale child title echoes while a daemon rename/clear persist is outstanding (#8977)', async () => {
+      // The daemon applies a rename/clear to the entry and dispatches a
+      // sessionTitle persist; the child echoes every persist back as a
+      // `title-update`. Hold the persist responses open so the echoes land
+      // while the persists are still outstanding, then prove a stale rename
+      // echo cannot resurrect a just-cleared name. Without the outstanding-
+      // persist suppression the delayed 'Foo' echo below re-sets the entry
+      // and the cleared name comes back.
+      const pendingPersists: Array<{
+        resolve: (value: { persisted: boolean }) => void;
+      }> = [];
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionTitle) {
+            const d = deferred<{ persisted: boolean }>();
+            pendingPersists.push(d);
+            return await d.promise;
+          }
+          return { persisted: true };
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      // Rename to 'Foo', then clear — two daemon-initiated persists.
+      bridge.updateSessionMetadata(session.sessionId, {
+        displayName: 'Foo',
+        titleSource: 'manual',
+      });
+      bridge.updateSessionMetadata(session.sessionId, { displayName: '' });
+      expect(
+        bridge.getSessionSummary(session.sessionId).displayName,
+      ).toBeUndefined();
+
+      // Delayed child echoes: the rename ('Foo') then the clear (''), both
+      // arriving while their persists are still outstanding.
+      await handle.agentConnection.extNotification(
+        'qwen/notify/session/title-update',
+        {
+          v: 1,
+          sessionId: session.sessionId,
+          title: 'Foo',
+          titleSource: 'manual',
+        },
+      );
+      await handle.agentConnection.extNotification(
+        'qwen/notify/session/title-update',
+        {
+          v: 1,
+          sessionId: session.sessionId,
+          title: '',
+          titleSource: 'manual',
+        },
+      );
+      // Give any (wrongly) applied echo time to land — a regression that
+      // re-applies the stale 'Foo' must not hide behind an early assertion.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(
+        bridge.getSessionSummary(session.sessionId).displayName,
+      ).toBeUndefined();
+
+      // Settle the outstanding persists; the cleared state must still hold.
+      for (const persist of pendingPersists) {
+        persist.resolve({ persisted: true });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(
+        bridge.getSessionSummary(session.sessionId).displayName,
+      ).toBeUndefined();
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
+    it('persists a manual source when the name matches an auto title (#8977)', async () => {
+      const titleUpdates: unknown[] = [];
+      const bridge = makeBridge({
+        channelFactory: async () =>
+          makeChannel({
+            extMethodImpl: (method, params) => {
+              if (method === SERVE_CONTROL_EXT_METHODS.sessionTitle) {
+                titleUpdates.push(params);
+              }
+              return { persisted: true };
+            },
+          }).channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      bridge.updateSessionMetadata(session.sessionId, {
+        displayName: 'Same title',
+        titleSource: 'auto',
+      });
+
+      await vi.waitFor(() => expect(titleUpdates).toHaveLength(1));
+      expect(titleUpdates[0]).toMatchObject({
+        displayName: 'Same title',
+        titleSource: 'auto',
+      });
+      const automatic = await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+      });
+      expect(automatic.titleSource).toBe('auto');
+
+      bridge.updateSessionMetadata(session.sessionId, {
+        displayName: 'Same title',
+      });
+
+      await vi.waitFor(() => expect(titleUpdates).toHaveLength(2));
+      expect(titleUpdates[1]).toMatchObject({
+        displayName: 'Same title',
+        titleSource: 'manual',
+      });
+      const attached = await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+      });
+      expect(attached.titleSource).toBe('manual');
+
+      await bridge.shutdown();
+    });
+
+    it('does not downgrade a manual title on a same-text auto re-rename (#8977)', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      // A user names the session (manual).
+      bridge.updateSessionMetadata(session.sessionId, {
+        displayName: '⏰ check the build',
+        titleSource: 'manual',
+      });
+      // The scheduled-task keepalive, after a daemon restart, re-names with
+      // the identical derived text but `auto`. That must not downgrade the
+      // manual source.
+      bridge.updateSessionMetadata(session.sessionId, {
+        displayName: '⏰ check the build',
+        titleSource: 'auto',
+      });
+
+      const attached = await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+      });
+      expect(attached.displayName).toBe('⏰ check the build');
+      expect(attached.titleSource).toBe('manual');
+
+      await bridge.shutdown();
+    });
+
+    it('does not downgrade a different-text manual title on an auto re-rename (#8977)', async () => {
+      // The keepalive witness: a user renamed the bound task session to their
+      // own name, then a daemon restart empties the keepalive's `renamed` set
+      // and its first tick re-names the session with the derived ⏰ text +
+      // `auto`. The text differs from the manual name, so the old
+      // identical-text-only guard let the downgrade through; the guard must
+      // block ANY manual→auto rename or the user's name is lost in memory and
+      // on disk within one tick.
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      // A user renames the task session to their own name (manual).
+      bridge.updateSessionMetadata(session.sessionId, {
+        displayName: 'My digest run',
+        titleSource: 'manual',
+      });
+      // The keepalive's post-restart re-name with the derived text + `auto`.
+      const effective = bridge.updateSessionMetadata(session.sessionId, {
+        displayName: '⏰ run the nightly digest',
+        titleSource: 'auto',
+      });
+      // The downgrade is refused; the caller sees the existing manual fields.
+      expect(effective).toMatchObject({
+        displayName: 'My digest run',
+        titleSource: 'manual',
+      });
+
+      const attached = await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+      });
+      expect(attached.displayName).toBe('My digest run');
+      expect(attached.titleSource).toBe('manual');
+
+      await bridge.shutdown();
+    });
+
+    it('still auto-names a never-titled session and re-names an auto session (#8977)', async () => {
+      // The broader manual→auto guard must not break legitimate machine
+      // naming: a session with no title yet accepts the derived ⏰ name +
+      // `auto`, and an already-auto session can be re-named (e.g. the task
+      // prompt changed).
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const first = bridge.updateSessionMetadata(session.sessionId, {
+        displayName: '⏰ first prompt',
+        titleSource: 'auto',
+      });
+      expect(first).toMatchObject({
+        displayName: '⏰ first prompt',
+        titleSource: 'auto',
+      });
+
+      // A task-prompt change re-names the auto session (auto → auto allowed).
+      const second = bridge.updateSessionMetadata(session.sessionId, {
+        displayName: '⏰ changed prompt',
+        titleSource: 'auto',
+      });
+      expect(second).toMatchObject({
+        displayName: '⏰ changed prompt',
+        titleSource: 'auto',
+      });
+
+      const attached = await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+      });
+      expect(attached.displayName).toBe('⏰ changed prompt');
+      expect(attached.titleSource).toBe('auto');
+
+      await bridge.shutdown();
+    });
+
+    it('seeds known and unknown title sources on cold restore (#8977)', async () => {
+      const titleUpdates: unknown[] = [];
+      const bridge = makeBridge({
+        channelFactory: async () =>
+          makeChannel({
+            extMethodImpl: (method, params) => {
+              if (method === SERVE_CONTROL_EXT_METHODS.sessionTitle) {
+                titleUpdates.push(params);
+              }
+              return { persisted: true };
+            },
+          }).channel,
+      });
+
+      const restored = await bridge.loadSession({
+        sessionId: 'restored-manual',
+        workspaceCwd: WS_A,
+        displayName: 'Payments bug',
+        titleSource: 'manual',
+      });
+      expect(restored).toMatchObject({
+        displayName: 'Payments bug',
+        titleSource: 'manual',
+      });
+
+      const automatic = await bridge.loadSession({
+        sessionId: 'restored-auto',
+        workspaceCwd: WS_A,
+        displayName: 'Generated title',
+        titleSource: 'auto',
+      });
+      expect(automatic).toMatchObject({
+        displayName: 'Generated title',
+        titleSource: 'auto',
+      });
+
+      const legacy = await bridge.loadSession({
+        sessionId: 'restored-legacy',
+        workspaceCwd: WS_A,
+        displayName: 'Legacy name',
+      });
+      expect(legacy.displayName).toBe('Legacy name');
+      expect(legacy.titleSource).toBeUndefined();
+
+      const renamed = bridge.updateSessionMetadata(legacy.sessionId, {
+        displayName: 'Legacy name',
+      });
+      expect(renamed.titleSource).toBe('manual');
+      await vi.waitFor(() => expect(titleUpdates).toHaveLength(1));
+      expect(titleUpdates[0]).toMatchObject({
+        displayName: 'Legacy name',
+        titleSource: 'manual',
+      });
+      const reloaded = await bridge.loadSession({
+        sessionId: legacy.sessionId,
+        workspaceCwd: WS_A,
+      });
+      expect(reloaded.titleSource).toBe('manual');
+
       await bridge.shutdown();
     });
 
@@ -26484,6 +26946,22 @@ describe('createAcpSessionBridge', () => {
       ).toThrow(InvalidSessionMetadataError);
 
       await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
+    it('rejects unknown title sources', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      expect(() =>
+        bridge.updateSessionMetadata(session.sessionId, {
+          displayName: 'Title',
+          titleSource: 'legacy' as 'manual',
+        }),
+      ).toThrow(InvalidSessionMetadataError);
+
       await bridge.shutdown();
     });
 

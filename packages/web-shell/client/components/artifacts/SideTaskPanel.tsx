@@ -252,7 +252,7 @@ function SideTaskSession({
           attempt++
         ) {
           try {
-            await actions.renameSession(nextTitle);
+            await actions.renameSession(nextTitle, { titleSource: 'auto' });
             if (connection.sessionId && catalogOwnerCwd) {
               sessionCatalogController.renamed(
                 catalogOwnerCwd,

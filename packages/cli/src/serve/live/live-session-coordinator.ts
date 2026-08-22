@@ -44,6 +44,7 @@ import {
   LIVE_SESSION_SOURCE_PREFIX,
 } from '../../runtime/live-session-source.js';
 import type { LiveProviderReadiness, LiveSessionLocator } from './types.js';
+import { restoreSessionTitleFields } from '../session-restore-title.js';
 
 export { LIVE_SESSION_SOURCE_PREFIX } from '../../runtime/live-session-source.js';
 
@@ -519,7 +520,7 @@ export class LiveSessionCoordinator {
         try {
           context.runtime?.bridge.updateSessionMetadata(
             context.coordinator.sessionId,
-            { displayName: 'Voice chat' },
+            { displayName: 'Voice chat', titleSource: 'auto' },
           );
         } catch {
           /* the session remains usable when a title write fails */
@@ -1414,6 +1415,10 @@ export class LiveSessionCoordinator {
             : {}),
           ...(candidate.sourceType ? { sourceType: candidate.sourceType } : {}),
           ...(candidate.sourceId ? { sourceId: candidate.sourceId } : {}),
+          ...restoreSessionTitleFields(
+            candidate.customTitle,
+            candidate.titleSource,
+          ),
         });
         await this.prepareCoordinatorSession(context, runtime, resumed, false);
         sessionId = resumed.sessionId;

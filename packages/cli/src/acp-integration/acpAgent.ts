@@ -12019,10 +12019,13 @@ class QwenAgent implements Agent {
                     baseName,
                     sessionService,
                   );
+                  const titleSource =
+                    typeof name === 'string' && name.trim() ? 'manual' : 'auto';
                   const newSessionId = randomUUID();
                   const fork = () =>
                     sessionService.forkSession(sessionId, newSessionId, {
                       title,
+                      titleSource,
                       ...(atRecordId !== undefined ? { atRecordId } : {}),
                     });
                   if (recording) {
@@ -12030,7 +12033,12 @@ class QwenAgent implements Agent {
                   } else {
                     await fork();
                   }
-                  return { newSessionId, title, displayName: title };
+                  return {
+                    newSessionId,
+                    title,
+                    displayName: title,
+                    titleSource,
+                  };
                 } finally {
                   releaseHistoryMutation();
                 }
@@ -12052,6 +12060,8 @@ class QwenAgent implements Agent {
         if (recording) await recording.flush();
         const sessionService = sourceConfig.getSessionService();
         const title = deriveForkBaseName(name, recording, sessionId);
+        const titleSource =
+          typeof name === 'string' && name.trim() ? 'manual' : 'auto';
         const newSessionId = randomUUID();
         const fork = () =>
           sessionService.forkSession(sessionId, newSessionId, {
@@ -12060,13 +12070,14 @@ class QwenAgent implements Agent {
               sourceId: sessionId,
             },
             title,
+            titleSource,
           });
         if (recording) {
           await recording.runWithWriteBarrier(fork);
         } else {
           await fork();
         }
-        return { newSessionId, title, displayName: title };
+        return { newSessionId, title, displayName: title, titleSource };
       }
       case 'qwen/settings/getCore': {
         const settings = loadSettings(cwd);

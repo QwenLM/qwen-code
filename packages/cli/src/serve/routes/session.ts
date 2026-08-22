@@ -120,6 +120,7 @@ import {
   withPromptTerminals,
 } from '../prompt-terminal-ledger.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
+import { restoreSessionTitleFields } from '../session-restore-title.js';
 import {
   omitSkillDetailsForSdkSurface,
   omitSkillDetailsFromReplayArrays,
@@ -3244,6 +3245,17 @@ export function registerSessionRoutes(
             ) {
               throw new SessionNotFoundError(sessionId);
             }
+            // The persisted title record lives next to the transcript, so
+            // the read must use the case-corrected storage id like the
+            // adjacent persisted reads above; the raw request spelling can
+            // miss the file on case-sensitive filesystems.
+            const titleInfo = sessionService.getSessionTitleInfo(
+              restoredStorageSessionId,
+            );
+            const persistedTitle = restoreSessionTitleFields(
+              titleInfo.title,
+              titleInfo.source,
+            );
             assertRuntimeGenerationOpen?.();
             if (isInternalWorkspaceRuntime(runtime)) {
               sessionIdReservation = requestedSessionIdAdmission.reserveRestore(
@@ -3282,6 +3294,7 @@ export function registerSessionRoutes(
                     ...(clientId !== undefined ? { clientId } : {}),
                     ...(approvalMode !== undefined ? { approvalMode } : {}),
                     ...metadata,
+                    ...persistedTitle,
                   })
                 : await runtime.bridge.resumeSession({
                     sessionId,
@@ -3289,6 +3302,7 @@ export function registerSessionRoutes(
                     ...(clientId !== undefined ? { clientId } : {}),
                     ...(approvalMode !== undefined ? { approvalMode } : {}),
                     ...metadata,
+                    ...persistedTitle,
                   });
             // Every path that can register a Live entry relocates it before a
             // prompt can start. Re-queuing cd for an active entry would block
@@ -5299,6 +5313,7 @@ export function registerSessionRoutes(
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
         const rawDisplayName = body['displayName'];
+        const rawTitleSource = body['titleSource'];
         if (
           rawDisplayName !== undefined &&
           typeof rawDisplayName !== 'string'
@@ -5307,6 +5322,18 @@ export function registerSessionRoutes(
             error: '`displayName` must be a string',
             code: 'invalid_metadata',
             field: 'displayName',
+          });
+          return;
+        }
+        if (
+          rawTitleSource !== undefined &&
+          rawTitleSource !== 'manual' &&
+          rawTitleSource !== 'auto'
+        ) {
+          res.status(400).json({
+            error: '`titleSource` must be manual or auto',
+            code: 'invalid_metadata',
+            field: 'titleSource',
           });
           return;
         }
@@ -5343,7 +5370,13 @@ export function registerSessionRoutes(
           // keeps a rejected request from leaving a durable binding behind.
           effective = runtime.bridge.updateSessionMetadata(
             sessionId,
-            { displayName, ...(pr ? { pr } : {}) },
+            {
+              displayName,
+              ...(rawTitleSource !== undefined
+                ? { titleSource: rawTitleSource }
+                : {}),
+              ...(pr ? { pr } : {}),
+            },
             clientId !== undefined ? { clientId } : undefined,
           );
           if (pr) {
@@ -5384,12 +5417,26 @@ export function registerSessionRoutes(
       }
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) return;
-      const rawDisplayName = safeBody(req)['displayName'];
+      const body = safeBody(req);
+      const rawDisplayName = body['displayName'];
+      const rawTitleSource = body['titleSource'];
       if (rawDisplayName !== undefined && typeof rawDisplayName !== 'string') {
         res.status(400).json({
           error: '`displayName` must be a string',
           code: 'invalid_metadata',
           field: 'displayName',
+        });
+        return;
+      }
+      if (
+        rawTitleSource !== undefined &&
+        rawTitleSource !== 'manual' &&
+        rawTitleSource !== 'auto'
+      ) {
+        res.status(400).json({
+          error: '`titleSource` must be manual or auto',
+          code: 'invalid_metadata',
+          field: 'titleSource',
         });
         return;
       }
@@ -5464,6 +5511,7 @@ export function registerSessionRoutes(
           await runWithWorkspaceRuntimeStorage(runtime, async () => {
             let effective: {
               displayName?: string;
+              titleSource?: 'manual' | 'auto';
               prs?: Array<{ number: number; url: string }>;
             };
             const service = createWorkspaceRuntimeSessionService(runtime);
@@ -5498,7 +5546,13 @@ export function registerSessionRoutes(
               // located archive state.
               effective = runtime.bridge.updateSessionMetadata(
                 sessionId,
-                { displayName, ...(pr ? { pr } : {}) },
+                {
+                  displayName,
+                  ...(rawTitleSource !== undefined
+                    ? { titleSource: rawTitleSource }
+                    : {}),
+                  ...(pr ? { pr } : {}),
+                },
                 clientId !== undefined ? { clientId } : undefined,
               );
               assertRuntimeGenerationOpen?.();
@@ -5531,6 +5585,7 @@ export function registerSessionRoutes(
               // likely to fail (the newer sidecar path) must run first — a
               // failed sidecar write may not strand an already-persisted
               // rename that the error response never announces.
+              let persistedWrite = false;
               if (pr) {
                 const persisted = await upsertSessionPr(
                   service.getPrSessionPathForArchiveState(sessionId, location),
@@ -5541,25 +5596,50 @@ export function registerSessionRoutes(
                   number,
                   url,
                 }));
+                persistedWrite = true;
               }
               if (displayName !== undefined) {
-                const renamed = await service.renameSession(
+                // Mirror the live path's same-text downgrade guard in
+                // `bridge.updateSessionMetadata`: an `auto` re-rename whose
+                // text equals the persisted manual title must not append a
+                // downgrade record — the /clear carry gate would then drop
+                // the user's manual name (the #8977 regression itself).
+                // Skip the write and report the existing fields, as the
+                // live path does.
+                const persistedTitle = service.getSessionTitleInfo(
                   sessionId,
-                  displayName,
-                  'manual',
                   location,
                 );
-                assertRuntimeGenerationOpen?.();
-                if (!renamed) {
-                  throw new SessionNotFoundError(sessionId);
+                if (
+                  rawTitleSource === 'auto' &&
+                  persistedTitle.source === 'manual' &&
+                  persistedTitle.title === displayName
+                ) {
+                  effective.displayName = displayName;
+                  effective.titleSource = 'manual';
+                } else {
+                  const renamed = await service.renameSession(
+                    sessionId,
+                    displayName,
+                    rawTitleSource ?? 'manual',
+                    location,
+                  );
+                  assertRuntimeGenerationOpen?.();
+                  if (!renamed) {
+                    throw new SessionNotFoundError(sessionId);
+                  }
+                  effective.displayName = displayName || undefined;
+                  effective.titleSource = rawTitleSource ?? 'manual';
+                  persistedWrite = true;
                 }
-                effective.displayName = displayName;
               }
-              // The persisted mutation is picked up by the next catalog
-              // scan, so this fallback must advance the same catalog
-              // revision the live update marks — otherwise version-watching
-              // clients keep the stale metadata.
-              runtime.bridge.markSessionCatalogChanged();
+              if (persistedWrite) {
+                // The persisted mutation is picked up by the next catalog
+                // scan, so this fallback must advance the same catalog
+                // revision the live update marks — otherwise version-watching
+                // clients keep the stale metadata.
+                runtime.bridge.markSessionCatalogChanged();
+              }
             }
             invalidateSessionLists(runtime, ['active', 'archived']);
             res.status(200).json({ sessionId, ...effective });

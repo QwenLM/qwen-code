@@ -974,6 +974,17 @@ interface SessionEntry {
   effectiveCwd: string;
   createdAt: string;
   displayName?: string;
+  titleSource?: 'manual' | 'auto';
+  /**
+   * Number of daemon-initiated `sessionTitle` persists that have been
+   * dispatched but not yet settled. The child echoes every persisted title
+   * back as a `qwen/notify/session/title-update` notification; while this is
+   * non-zero the echo mirror in `BridgeClient` must skip re-applying the
+   * title, otherwise a stale echo can resurrect a just-cleared name (or
+   * downgrade a manual title to auto) after the daemon already applied the
+   * authoritative change (#8977).
+   */
+  pendingTitlePersistCount?: number;
   /** Id of the session that spawned this one (via `create_sub_session`).
    * Immutable — written once at creation, never on attach. Absent for a
    * top-level session. */
@@ -3627,6 +3638,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
     }
   };
+  const sessionTitleFields = (entry: SessionEntry) => ({
+    ...(entry.displayName !== undefined
+      ? { displayName: entry.displayName }
+      : {}),
+    ...(entry.titleSource !== undefined
+      ? { titleSource: entry.titleSource }
+      : {}),
+  });
   const toSessionSummary = (entry: SessionEntry): BridgeSessionSummary => {
     let isWaitingForPermission = false;
     let isWaitingForUserQuestion = false;
@@ -5953,6 +5972,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       parentSessionId?: string;
       sourceType?: string;
       sourceId?: string;
+      displayName?: string;
+      titleSource?: 'manual' | 'auto';
       worktree?: { slug: string; path: string; branch: string };
       branch?: { name: string; baseBranch: string };
     } = {},
@@ -5967,6 +5988,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         : {}),
       ...(options.sourceType ? { sourceType: options.sourceType } : {}),
       ...(options.sourceId !== undefined ? { sourceId: options.sourceId } : {}),
+      ...(options.displayName !== undefined
+        ? { displayName: options.displayName }
+        : {}),
+      ...(options.titleSource !== undefined
+        ? { titleSource: options.titleSource }
+        : {}),
       ...(options.worktree ? { worktree: options.worktree } : {}),
       ...(options.branch ? { branch: options.branch } : {}),
       channel: ci.channel,
@@ -6717,6 +6744,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         ...(existing.sourceId !== undefined
           ? { sourceId: existing.sourceId }
           : {}),
+        ...sessionTitleFields(existing),
         // Late attachers get the same ACP state the original restore
         // caller saw; spawn-only sessions don't carry a state payload.
         state: existing.restoreState ?? {},
@@ -7340,6 +7368,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           ...(racedEntry.sourceId !== undefined
             ? { sourceId: racedEntry.sourceId }
             : {}),
+          ...sessionTitleFields(racedEntry),
           state: racedEntry.restoreState ?? {},
           hasActivePrompt:
             restorePromptAdmitted ||
@@ -7364,6 +7393,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             : {}),
           ...(req.sourceType ? { sourceType: req.sourceType } : {}),
           ...(req.sourceId !== undefined ? { sourceId: req.sourceId } : {}),
+          ...(req.displayName !== undefined
+            ? { displayName: req.displayName }
+            : {}),
+          ...(req.titleSource !== undefined
+            ? { titleSource: req.titleSource }
+            : {}),
         },
       );
       releaseAdmissionOnce();
@@ -7447,6 +7482,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         createdAt: entry.createdAt,
         ...(entry.sourceType ? { sourceType: entry.sourceType } : {}),
         ...(entry.sourceId !== undefined ? { sourceId: entry.sourceId } : {}),
+        ...sessionTitleFields(entry),
         state: publicState,
         ...(artifactRestoreWarnings.length > 0
           ? { artifactWarnings: artifactRestoreWarnings }
@@ -8176,6 +8212,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             ...(existing.sourceId !== undefined
               ? { sourceId: existing.sourceId }
               : {}),
+            ...sessionTitleFields(existing),
             hasActivePrompt:
               existing.promptActive || existing.goalTurnActive === true,
           };
@@ -8253,6 +8290,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             ...session,
             attached: true,
             clientId,
+            ...sessionTitleFields(attachedEntry),
             hasActivePrompt:
               attachedEntry.promptActive ||
               attachedEntry.goalTurnActive === true,
@@ -9466,6 +9504,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             newSessionId: string;
             title?: string;
             displayName?: string;
+            titleSource?: 'manual' | 'auto';
           };
           try {
             result = (await Promise.race([
@@ -9517,11 +9556,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             typeof rawBranchName === 'string'
               ? rawBranchName
               : result.newSessionId.slice(0, 8);
+          const branchTitleSource =
+            result.titleSource ??
+            (typeof req.name === 'string' && req.name.trim()
+              ? 'manual'
+              : 'auto');
 
           if (!restoreBranch) {
             return {
               sessionId: result.newSessionId,
               displayName: branchDisplayName,
+              titleSource: branchTitleSource,
               forkedFrom: {
                 sessionId,
                 displayName: entry.displayName ?? sessionId.slice(0, 8),
@@ -9546,6 +9591,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                     }
                   : {}),
                 ...source,
+                displayName: branchDisplayName,
+                titleSource: branchTitleSource,
               },
               {
                 skipFreshSessionAdmission: true,
@@ -9600,7 +9647,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               );
             }
           }
-          if (newEntry) newEntry.displayName = branchDisplayName;
           let sourcePersisted: boolean | undefined;
           if (newEntry?.sourceType) {
             try {
@@ -9634,6 +9680,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           return {
             ...restored,
             displayName: branchDisplayName,
+            titleSource: branchTitleSource,
             forkedFrom: {
               sessionId,
               displayName: entry.displayName ?? sessionId.slice(0, 8),
@@ -9795,8 +9842,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           ? resolveTrustedClientId(entry, context.clientId)
           : undefined;
       // Validate everything before mutating anything: a combined
-      // displayName+pr request must not partially apply when the pr is
+      // displayName+pr request must not partially apply when one field is
       // invalid.
+      if (
+        metadata.titleSource !== undefined &&
+        metadata.titleSource !== 'manual' &&
+        metadata.titleSource !== 'auto'
+      ) {
+        throw new InvalidSessionMetadataError(
+          'titleSource',
+          'must be manual or auto',
+        );
+      }
       if (metadata.pr !== undefined) {
         const pr = metadata.pr as unknown;
         if (
@@ -9836,8 +9893,28 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           );
         }
         const nextDisplayName = metadata.displayName || undefined;
-        if (entry.displayName !== nextDisplayName) {
+        const nextTitleSource = nextDisplayName
+          ? (metadata.titleSource ?? 'manual')
+          : undefined;
+        // Provenance may move upward (a user adopting the derived name,
+        // auto → manual, must stick) but never downward: a `manual` title is
+        // an explicit user choice, so a machine re-name carrying `auto` must
+        // not overwrite it regardless of whether the text matches. The
+        // scheduled-task keepalive, after every daemon restart, re-names ALL
+        // bound sessions with the derived ⏰ text + `auto`; without the
+        // text-agnostic block a session the user renamed to something else
+        // loses its manual name in memory and on disk within one tick. The
+        // identical-text case is the subset this guard originally covered
+        // (#8977).
+        const manualToAutoDowngrade =
+          entry.titleSource === 'manual' && nextTitleSource === 'auto';
+        if (
+          (entry.displayName !== nextDisplayName ||
+            entry.titleSource !== nextTitleSource) &&
+          !manualToAutoDowngrade
+        ) {
           entry.displayName = nextDisplayName;
+          entry.titleSource = nextTitleSource;
           // The catalog exposes display names; an actual rename is a
           // static-metadata change. Mark before the SSE publish so the
           // revision never trails the client-visible event.
@@ -9849,33 +9926,63 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 ? ` by client ${JSON.stringify(context.clientId)}`
                 : ''),
           );
-          if (nextDisplayName) {
-            entry.connection
-              .extMethod(SERVE_CONTROL_EXT_METHODS.sessionTitle, {
-                sessionId,
-                displayName: nextDisplayName,
-                titleSource: 'manual',
-              })
-              .then((res: unknown) => {
-                const r = res as { persisted?: boolean } | undefined;
-                if (r && r.persisted === false) {
-                  writeStderrLine(
-                    `qwen serve: displayName for ${sessionId} was not persisted`,
-                  );
-                }
-              })
-              .catch((err: unknown) => {
+          // Echo suppression bookkeeping: the child echoes every persisted
+          // title back as a `title-update` notification. Mark the persist
+          // outstanding before dispatch so the echo mirror skips it, and
+          // clear the mark when the persist settles (#8977).
+          entry.pendingTitlePersistCount =
+            (entry.pendingTitlePersistCount ?? 0) + 1;
+          entry.connection
+            .extMethod(SERVE_CONTROL_EXT_METHODS.sessionTitle, {
+              sessionId,
+              // Persist clears too, as an empty-title tombstone: the title
+              // readers treat an empty custom_title record as "no title",
+              // so without this write a daemon restart / idle-reap cold
+              // restore re-seeds the just-deleted name (with 'manual'
+              // provenance) from the stale persisted record, and the next
+              // /clear carry resurrects it (#8977).
+              displayName: nextDisplayName ?? '',
+              titleSource: nextTitleSource,
+            })
+            .then((res: unknown) => {
+              entry.pendingTitlePersistCount = Math.max(
+                0,
+                (entry.pendingTitlePersistCount ?? 0) - 1,
+              );
+              const r = res as { persisted?: boolean } | undefined;
+              if (r && r.persisted === false) {
                 writeStderrLine(
-                  `qwen serve: failed to persist displayName for ${sessionId}: ${
-                    err instanceof Error ? err.message : String(err)
-                  }`,
+                  `qwen serve: displayName for ${sessionId} was not persisted`,
                 );
-              });
-          }
+              }
+            })
+            .catch((err: unknown) => {
+              entry.pendingTitlePersistCount = Math.max(
+                0,
+                (entry.pendingTitlePersistCount ?? 0) - 1,
+              );
+              writeStderrLine(
+                `qwen serve: failed to persist displayName for ${sessionId}: ${
+                  err instanceof Error ? err.message : String(err)
+                }`,
+              );
+            });
           try {
             entry.events.publish({
               type: 'session_metadata_updated',
-              data: { sessionId, displayName: entry.displayName },
+              data: {
+                sessionId,
+                // Publish a cleared title as `null`, never `undefined`: JSON
+                // serialization drops undefined keys, and clients gate the
+                // clear on the key being present (the SDK validator accepts
+                // null here). Without the marker a connection would keep the
+                // stale name AND its `manual` provenance, letting the next
+                // /clear carry resurrect the deleted title (#8977).
+                displayName: entry.displayName ?? null,
+                ...(entry.titleSource !== undefined
+                  ? { titleSource: entry.titleSource }
+                  : {}),
+              },
               ...(metadataOriginatorClientId
                 ? { originatorClientId: metadataOriginatorClientId }
                 : {}),
@@ -9928,7 +10035,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         }
       }
       return {
-        displayName: entry.displayName,
+        ...sessionTitleFields(entry),
         ...(entry.prs && entry.prs.length > 0 ? { prs: entry.prs } : {}),
       };
     },

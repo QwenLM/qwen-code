@@ -5076,6 +5076,9 @@ export function App({
       saveSplitSessions(splitSessionIds);
     }
   }, [mainView, splitSessionIds, externalSplitControlled]);
+  const pendingManualTitleRef = useRef<{ displayName: string } | undefined>(
+    undefined,
+  );
   // If the viewport shrinks below the large-screen breakpoint, fold away the
   // Session Overview panel and the split view — both are large-screen-only
   // surfaces whose entry points are hidden on small screens. The split is only
@@ -5124,7 +5127,21 @@ export function App({
         // pane the single connection can't own) just leaves the empty chat.
         const firstPane = splitSessionIdsRef.current[0];
         if (firstPane && !currentSessionIdRef.current) {
-          void sessionActions.loadSession(firstPane).catch(() => undefined);
+          // Invalidate the carried name only once the landing actually
+          // succeeds: a failed load leaves the empty chat the carry exists
+          // for, and the first prompt there must still receive the name.
+          void sessionActions
+            .loadSession(firstPane)
+            .then(() => {
+              // …and only when no deferred creation has captured the carry:
+              // an in-flight creation manages the token's lifecycle itself
+              // (identity-checked rename + post-success clear), and clearing
+              // here mid-flight would race the name away from it.
+              if (!createSessionPromiseRef.current) {
+                pendingManualTitleRef.current = undefined;
+              }
+            })
+            .catch(() => undefined);
         }
       }
     }
@@ -5573,6 +5590,7 @@ export function App({
       return Promise.resolve(undefined);
     }
     if (currentSessionId) return Promise.resolve(undefined);
+    const pendingManualTitle = pendingManualTitleRef.current;
     const promise = (async () => {
       let allocatedSessionId: string | undefined;
       const modelId =
@@ -5613,7 +5631,29 @@ export function App({
             gitModeIntentRef.current.mode === 'branch'
               ? { name: gitModeIntentRef.current.name }
               : undefined,
-          onSessionCreated: onSessionCreatedRef.current,
+          onSessionCreated: async (sessionId) => {
+            // Gate on value, not object identity: a repeated /clear during an
+            // in-flight creation re-arms the ref with a *new* object carrying
+            // the same name, which must still rename. /new sets the ref to
+            // undefined, so value comparison still invalidates it.
+            if (
+              pendingManualTitle &&
+              pendingManualTitleRef.current?.displayName ===
+                pendingManualTitle.displayName
+            ) {
+              // Best-effort internal rename the user never initiated: keep
+              // it silent so a failure (e.g. a still-warming runtime) tears
+              // down the creation without a confusing "Rename session
+              // failed" toast.
+              await sessionActions.renameSession(
+                pendingManualTitle.displayName,
+                {
+                  silent: true,
+                },
+              );
+            }
+            await onSessionCreatedRef.current?.(sessionId);
+          },
           onSessionAllocated: (sessionId) => {
             preparingSessionIdRef.current = sessionId;
             allocatedSessionId = sessionId;
@@ -5635,6 +5675,14 @@ export function App({
           }
           if (result.branch) {
             setSessionBranch(result.branch);
+          }
+          // Consume by identity, not value: the rename gate above compares
+          // values so a mid-creation re-arm (a new object with the same
+          // name) still renames, but the cleanup must only consume the token
+          // this creation captured — a value comparison here would erase the
+          // re-armed carry and leave the user's next session unnamed.
+          if (pendingManualTitleRef.current === pendingManualTitle) {
+            pendingManualTitleRef.current = undefined;
           }
           // Clear the pending intent only on success. On failure the
           // composer chip stays in the selected mode so the user knows
@@ -7881,8 +7929,11 @@ export function App({
        * stay mounted until its prompt is admitted, or a rejection has nowhere to
        * render. Only that caller passes this.
        */
-      opts?: { keepView?: boolean },
+      opts?: { keepView?: boolean; carryManualName?: string },
     ) => {
+      pendingManualTitleRef.current = opts?.carryManualName
+        ? { displayName: opts.carryManualName }
+        : undefined;
       const targetWorkspaceCwd = lockedWorkspaceCwd ?? workspaceCwd;
       composerSourceVersionRef.current += 1;
       selectedWorkspaceCwdRef.current = targetWorkspaceCwd;
@@ -7959,6 +8010,7 @@ export function App({
           await createNewSession(workspaceCwd);
           return;
         }
+        pendingManualTitleRef.current = undefined;
         composerSourceVersionRef.current += 1;
         selectedWorkspaceCwdRef.current = workspaceCwd;
         setSelectedWorkspaceCwd(workspaceCwd);
@@ -8348,6 +8400,7 @@ export function App({
   const sessionOpenInvocationRef = useRef(0);
   const loadSidebarSession = useCallback(
     async (sessionId: string, workspaceCwd?: string) => {
+      pendingManualTitleRef.current = undefined;
       const invocation = ++sessionOpenInvocationRef.current;
       composerFocusRequestRef.current += 1;
       setSidebarSwitchingSessionId(sessionId);
@@ -9674,7 +9727,19 @@ export function App({
             return true;
           }
           if (cmd === 'clear') {
-            createNewSession();
+            const current = connectionRef.current;
+            const carryManualName = current.sessionId
+              ? current.titleSource === 'manual' && current.displayName?.trim()
+                ? current.displayName
+                : current.titleSource === undefined
+                  ? // In-flight deferred creation: the connection already
+                    // exposes the freshly allocated session id, but the carry
+                    // rename has not landed yet (no title source). Fall back
+                    // to the still-armed carry instead of dropping it.
+                    pendingManualTitleRef.current?.displayName
+                  : undefined
+              : pendingManualTitleRef.current?.displayName;
+            createNewSession(undefined, { carryManualName });
             return true;
           }
           if (cmd === 'new' || cmd === 'reset') {

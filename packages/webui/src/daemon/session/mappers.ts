@@ -338,9 +338,15 @@ export function updateConnectionFromDaemonEvent(
     case 'session_metadata_updated': {
       const data = getRecord(event.data);
       if (Object.prototype.hasOwnProperty.call(data ?? {}, 'displayName')) {
+        const displayName = getString(data, 'displayName');
+        const titleSource = getString(data, 'titleSource');
         setConnection((current) => ({
           ...current,
-          displayName: getString(data, 'displayName'),
+          displayName,
+          titleSource:
+            displayName && (titleSource === 'manual' || titleSource === 'auto')
+              ? titleSource
+              : undefined,
         }));
       }
       break;
@@ -642,6 +648,23 @@ export function getSessionDisplayName(
 ): string | undefined {
   const displayName = getString(state, 'displayName');
   return displayName?.trim() ? displayName : undefined;
+}
+
+export function getRestoredSessionTitle(session: unknown): {
+  displayName?: string;
+  titleSource?: 'manual' | 'auto';
+} {
+  const record = getRecord(session);
+  const displayName = getString(record, 'displayName');
+  const titleSource = getString(record, 'titleSource');
+  const normalizedDisplayName = displayName?.trim() ? displayName : undefined;
+  return {
+    ...(normalizedDisplayName ? { displayName: normalizedDisplayName } : {}),
+    ...(normalizedDisplayName &&
+    (titleSource === 'manual' || titleSource === 'auto')
+      ? { titleSource }
+      : {}),
+  };
 }
 
 export function getCurrentMode(

@@ -15,6 +15,7 @@ import {
   LITE_READ_BUF_SIZE,
   readLastJsonStringFieldSync,
   readLastJsonStringFieldsSync,
+  readSessionTitleInfoFromFileSync,
   unescapeJsonString,
 } from './sessionStorageUtils.js';
 
@@ -771,6 +772,80 @@ describe('sessionStorageUtils', () => {
           'custom_title',
         ),
       ).toEqual({ customTitle: 'new', titleSource: 'auto' });
+    });
+  });
+
+  describe('readSessionTitleInfoFromFileSync', () => {
+    let tmpDir: string;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sst-titleinfo-'));
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    function writeFile(name: string, content: string): string {
+      const p = path.join(tmpDir, name);
+      fs.writeFileSync(p, content);
+      return p;
+    }
+
+    it('returns {} when the file has no custom_title record', () => {
+      const p = writeFile(
+        'no-title.jsonl',
+        '{"type":"user","message":"hello"}\n',
+      );
+      expect(readSessionTitleInfoFromFileSync(p)).toEqual({});
+    });
+
+    it('returns the latest truthy title with its source', () => {
+      const p = writeFile(
+        'titled.jsonl',
+        '{"subtype":"custom_title","customTitle":"First","titleSource":"auto"}\n' +
+          '{"subtype":"custom_title","customTitle":"Second","titleSource":"manual"}\n',
+      );
+      expect(readSessionTitleInfoFromFileSync(p)).toEqual({
+        title: 'Second',
+        source: 'manual',
+      });
+    });
+
+    it('surfaces an empty-title tombstone as empty-but-present', () => {
+      // A cleared title persists as an empty-string custom_title record.
+      // Presence (title === '') must survive this reader so the recorder
+      // can keep re-anchoring the tombstone inside the tail window —
+      // coercing it to {} here is what let the head-window fallback
+      // resurrect the deleted name (#8977).
+      const p = writeFile(
+        'tombstone.jsonl',
+        '{"subtype":"custom_title","customTitle":"Deleted Name","titleSource":"manual"}\n' +
+          '{"subtype":"custom_title","customTitle":"","titleSource":"manual"}\n',
+      );
+      expect(readSessionTitleInfoFromFileSync(p)).toEqual({
+        title: '',
+        source: 'manual',
+      });
+    });
+
+    it('keeps the tombstone visible when it sits inside the tail window', () => {
+      const tombstone =
+        '{"subtype":"custom_title","customTitle":"","titleSource":"manual"}\n';
+      const filler =
+        '{"type":"user","message":"' +
+        'x'.repeat(LITE_READ_BUF_SIZE - 4 * 1024) +
+        '"}\n';
+      const p = writeFile(
+        'tombstone-tail.jsonl',
+        '{"subtype":"custom_title","customTitle":"Deleted Name","titleSource":"manual"}\n' +
+          filler +
+          tombstone,
+      );
+      expect(readSessionTitleInfoFromFileSync(p)).toEqual({
+        title: '',
+        source: 'manual',
+      });
     });
   });
 });

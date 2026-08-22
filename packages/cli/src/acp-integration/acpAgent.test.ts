@@ -15637,12 +15637,13 @@ describe('QwenAgent extMethod renameSession routing', () => {
     expect(sessionService.forkSession).toHaveBeenCalledWith(
       liveSessionId,
       expect.any(String),
-      { title: 'Source session (Branch)' },
+      { title: 'Source session (Branch)', titleSource: 'auto' },
     );
     expect(sessionService.renameSession).not.toHaveBeenCalled();
     expect(result).toMatchObject({
       title: 'Source session (Branch)',
       displayName: 'Source session (Branch)',
+      titleSource: 'auto',
     });
 
     mockConnectionState.resolve();
@@ -15687,11 +15688,12 @@ describe('QwenAgent extMethod renameSession routing', () => {
       expect(sessionService.forkSession).toHaveBeenCalledWith(
         liveSessionId,
         expect.any(String),
-        { title: expectedTitle },
+        { title: expectedTitle, titleSource: 'auto' },
       );
       expect(result).toMatchObject({
         title: expectedTitle,
         displayName: expectedTitle,
+        titleSource: 'auto',
       });
 
       mockConnectionState.resolve();
@@ -15731,6 +15733,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
           sourceId: liveSessionId,
         },
         title: 'Side task',
+        titleSource: 'manual',
       },
     );
     expect(recording.runWithWriteBarrier).toHaveBeenCalledOnce();
@@ -15739,6 +15742,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
     expect(result).toMatchObject({
       title: 'Side task',
       displayName: 'Side task',
+      titleSource: 'manual',
     });
 
     mockConnectionState.resolve();
@@ -15803,7 +15807,11 @@ describe('QwenAgent extMethod renameSession routing', () => {
     expect(sessionService.forkSession).toHaveBeenCalledWith(
       liveSessionId,
       expect.any(String),
-      { title: 'Source session (Branch)', atRecordId: checkpoint },
+      {
+        title: 'Source session (Branch)',
+        titleSource: 'auto',
+        atRecordId: checkpoint,
+      },
     );
     expect(liveBeginHistoryMutation).toHaveBeenCalledOnce();
     expect(liveReleaseHistoryMutation).toHaveBeenCalledOnce();

@@ -186,6 +186,10 @@ export interface BridgeSession {
   createdAt?: string;
   /** True while the live session has an in-flight prompt. */
   hasActivePrompt?: boolean;
+  /** Current session name, when known. */
+  displayName?: string;
+  /** How the current name was produced. Absent when the source is unknown. */
+  titleSource?: 'manual' | 'auto';
   /**
    * Only present when this spawn carried a `parentSessionId`. `true` iff the
    * parent lineage was durably written to the child's transcript (survives a
@@ -235,6 +239,10 @@ export interface BridgeRestoreSessionRequest {
   sourceType?: string;
   /** Optional persisted identifier paired with `sourceType`. */
   sourceId?: string;
+  /** Persisted session name recovered by the serve layer. */
+  displayName?: string;
+  /** Persisted name source. Absent for legacy records with unknown source. */
+  titleSource?: 'manual' | 'auto';
 }
 
 export const LOAD_REPLAY_MODE_META_KEY = 'qwen.session.loadReplayMode';
@@ -501,12 +509,15 @@ export interface BridgeBranchSessionRequest {
 export interface BridgePersistedBranchedSession {
   sessionId: string;
   displayName: string;
+  titleSource: 'manual' | 'auto';
   forkedFrom: { sessionId: string; displayName: string };
 }
 
-export interface BridgeBranchedSession
-  extends BridgeRestoredSession,
-    BridgePersistedBranchedSession {}
+export interface BridgeBranchedSession extends BridgeRestoredSession {
+  displayName: string;
+  titleSource: 'manual' | 'auto';
+  forkedFrom: { sessionId: string; displayName: string };
+}
 
 export type BridgeBranchSessionResult =
   | BridgeBranchedSession
@@ -729,6 +740,8 @@ export interface SessionPrInfo {
 
 export interface SessionMetadataUpdate {
   displayName?: string;
+  /** Defaults to `manual`; machine-generated callers pass `auto`. */
+  titleSource?: 'manual' | 'auto';
   pr?: SessionPrInfo;
   /** Full binding list after the update (return value only; ignored on input). */
   prs?: SessionPrInfo[];
@@ -1455,7 +1468,8 @@ export interface AcpSessionBridge {
   ): Promise<void>;
 
   /**
-   * Update mutable session metadata. Supports `displayName` and `pr`.
+   * Update mutable session metadata. Supports `displayName`, `titleSource`,
+   * and `pr`.
    * Throws `SessionNotFoundError` for unknown ids.
    */
   updateSessionMetadata(

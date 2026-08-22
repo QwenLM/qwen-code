@@ -487,6 +487,19 @@ export function readLastJsonStringFieldsSync(
   }
 }
 
+/**
+ * Reads the latest `custom_title` record's title + source pair.
+ *
+ * Returns `{ title: '', source }` — an empty-but-present title — when the
+ * latest record is a clear-tombstone (an explicitly cleared title written
+ * as an empty string). Callers that display titles must treat an empty
+ * title the same as no title (falsy check); callers that maintain the
+ * title re-anchor invariant use the presence (`title !== undefined`) to
+ * keep re-appending the tombstone so this reader's tail window never
+ * loses it and falls back to the head window, which would resurrect the
+ * deleted name. `{}` (title === undefined) means no `custom_title` record
+ * was found in either window.
+ */
 export function readSessionTitleInfoFromFileSync(
   filePath: string,
   scratchBuffer?: Buffer,
@@ -499,7 +512,7 @@ export function readSessionTitleInfoFromFileSync(
     scratchBuffer,
   );
   const title = hit['customTitle'];
-  if (!title) return {};
+  if (title === undefined) return {};
   const rawSource = hit['titleSource'];
   const source =
     rawSource === 'auto' || rawSource === 'manual' ? rawSource : undefined;

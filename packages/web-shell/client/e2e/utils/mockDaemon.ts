@@ -1507,6 +1507,7 @@ async function handleDaemonRoute(
       const response: DaemonPersistedBranchedSession = {
         sessionId: branch.sessionId,
         displayName: branch.displayName,
+        titleSource: 'manual',
         forkedFrom: {
           sessionId,
           displayName: scenario.displayName,

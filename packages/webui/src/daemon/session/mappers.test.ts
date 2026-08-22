@@ -868,4 +868,58 @@ describe('updateConnectionFromDaemonEvent', () => {
     expect(next.commands).toEqual([]);
     expect(next.skills).toEqual([]);
   });
+
+  it('replaces the title source with every metadata name update (#8977)', () => {
+    const manual = applyEvent(
+      { status: 'connected' as const, workspaceCwd: '/workspace' },
+      {
+        v: 1,
+        type: 'session_metadata_updated',
+        data: {
+          sessionId: 's1',
+          displayName: 'Manual name',
+          titleSource: 'manual',
+        },
+      },
+    );
+    expect(manual.titleSource).toBe('manual');
+
+    const unknown = applyEvent(manual, {
+      v: 1,
+      type: 'session_metadata_updated',
+      data: { sessionId: 's1', displayName: 'Legacy update' },
+    });
+    expect(unknown.displayName).toBe('Legacy update');
+    expect(unknown.titleSource).toBeUndefined();
+  });
+
+  it('clears the stored name and provenance on a cleared-title event (#8977)', () => {
+    // The bridge publishes a cleared title as `displayName: null` (undefined
+    // keys never survive JSON). The hasOwnProperty gate must open on the null
+    // marker and reset BOTH fields — leaving the stale `manual` provenance
+    // behind would let the next /clear carry resurrect the deleted name.
+    const named = applyEvent(
+      { status: 'connected' as const, workspaceCwd: '/workspace' },
+      {
+        v: 1,
+        type: 'session_metadata_updated',
+        data: {
+          sessionId: 's1',
+          displayName: 'Manual name',
+          titleSource: 'manual',
+        },
+      },
+    );
+    expect(named.displayName).toBe('Manual name');
+    expect(named.titleSource).toBe('manual');
+
+    const cleared = applyEvent(named, {
+      v: 1,
+      type: 'session_metadata_updated',
+      // JSON round-trip pins the wire shape the daemon actually delivers.
+      data: JSON.parse(JSON.stringify({ sessionId: 's1', displayName: null })),
+    });
+    expect(cleared.displayName).toBeUndefined();
+    expect(cleared.titleSource).toBeUndefined();
+  });
 });

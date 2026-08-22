@@ -324,7 +324,9 @@ it('names a restored empty side task from its first prompt', async () => {
     await Promise.resolve();
   });
 
-  expect(renameSession).toHaveBeenCalledWith('Investigate restored task');
+  expect(renameSession).toHaveBeenCalledWith('Investigate restored task', {
+    titleSource: 'auto',
+  });
   expect(catalogController.renamed).toHaveBeenCalledWith(
     '/work/project',
     'side-session-1',
@@ -384,7 +386,9 @@ it('truncates the first-prompt title by code point, not code unit', async () => 
   });
 
   const expected = `${'a'.repeat(199)}\u{1F600}`;
-  expect(renameSession).toHaveBeenCalledWith(expected);
+  expect(renameSession).toHaveBeenCalledWith(expected, {
+    titleSource: 'auto',
+  });
   expect(onTitleChange).toHaveBeenCalledWith(
     'side-task:side-session-1',
     expected,
@@ -415,6 +419,7 @@ it('sends the /btw question as the first side-task prompt', async () => {
   );
   expect(renameSession).toHaveBeenCalledWith(
     'Explain the current implementation',
+    { titleSource: 'auto' },
   );
   expect(catalogController.promptAdmitted).toHaveBeenCalledWith(
     '/work/project',
@@ -523,7 +528,9 @@ it('names a newly created side task from its first prompt', async () => {
     'Investigate cache invalidation',
     true,
   );
-  expect(renameSession).toHaveBeenCalledWith('Investigate cache invalidation');
+  expect(renameSession).toHaveBeenCalledWith('Investigate cache invalidation', {
+    titleSource: 'auto',
+  });
 
   act(() => {
     root!.render(null);
@@ -584,8 +591,12 @@ it('retries the first-prompt title before marking it complete', async () => {
   });
 
   expect(renameSession).toHaveBeenCalledTimes(2);
-  expect(renameSession).toHaveBeenNthCalledWith(1, 'Retry this title');
-  expect(renameSession).toHaveBeenNthCalledWith(2, 'Retry this title');
+  expect(renameSession).toHaveBeenNthCalledWith(1, 'Retry this title', {
+    titleSource: 'auto',
+  });
+  expect(renameSession).toHaveBeenNthCalledWith(2, 'Retry this title', {
+    titleSource: 'auto',
+  });
   expect(onTitleChange).toHaveBeenCalledWith(
     'side-task:draft:1',
     'Retry this title',

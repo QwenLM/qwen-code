@@ -30,6 +30,9 @@ const sessionSources = vi.hoisted(
       { parentSessionId?: string; sourceType?: string; sourceId?: string }
     >(),
 );
+const sessionTitles = vi.hoisted(
+  () => new Map<string, { title?: string; source?: 'manual' | 'auto' }>(),
+);
 const removeSessionMock = vi.hoisted(() =>
   vi.fn(async (_sessionId: string) => true),
 );
@@ -75,6 +78,10 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
               : {}),
           },
         );
+      }
+
+      getSessionTitleInfo(sessionId: string) {
+        return sessionTitles.get(sessionId) ?? {};
       }
 
       async readCreationMetadataIfReadable(
@@ -337,6 +344,7 @@ beforeEach(() => {
   persistedSessionLoadDelays.clear();
   parentSessions.clear();
   sessionSources.clear();
+  sessionTitles.clear();
   removeSessionMock.mockClear();
   removeSessionRuntimeBaseDirs.length = 0;
   listWorkspaceSessionsForResponse.mockReset();
@@ -920,6 +928,10 @@ describe('LiveTaskService', () => {
     persistedSessions.set('task-1', persisted('task-1'));
     persistedSessionOwners.set('task-1', '/conversations');
     sessionSources.set('task-1', { sourceType: 'default', sourceId });
+    sessionTitles.set('task-1', {
+      title: 'Manual Live task',
+      source: 'manual',
+    });
     listWorkspaceSessionsForResponse.mockResolvedValue({ sessions: [summary] });
 
     await harness.service.handle({
@@ -933,6 +945,8 @@ describe('LiveTaskService', () => {
       workspaceCwd: '/conversations',
       sourceType: 'default',
       sourceId,
+      displayName: 'Manual Live task',
+      titleSource: 'manual',
     });
     expect(harness.sendPrompt).toHaveBeenCalledOnce();
   });

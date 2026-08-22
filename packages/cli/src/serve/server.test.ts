@@ -12810,6 +12810,63 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it('passes persisted title provenance through load and resume cold restores (#8977)', async () => {
+      const titleSpy = vi
+        .spyOn(SessionService.prototype, 'getSessionTitleInfo')
+        .mockImplementation((sessionId) =>
+          sessionId.startsWith('persisted-manual')
+            ? { title: 'Manual title', source: 'manual' }
+            : { title: 'Legacy title' },
+        );
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      try {
+        await request(app)
+          .post('/session/persisted-manual/load')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({});
+        await request(app)
+          .post('/session/persisted-manual-resume/resume')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({});
+        await request(app)
+          .post('/session/persisted-legacy/load')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({});
+
+        expect(bridge.loadCalls).toEqual([
+          {
+            sessionId: 'persisted-manual',
+            workspaceCwd: WS_BOUND,
+            historyReplay: 'response',
+            displayName: 'Manual title',
+            titleSource: 'manual',
+          },
+          {
+            sessionId: 'persisted-legacy',
+            workspaceCwd: WS_BOUND,
+            historyReplay: 'response',
+            displayName: 'Legacy title',
+          },
+        ]);
+        expect(bridge.resumeCalls).toEqual([
+          {
+            sessionId: 'persisted-manual-resume',
+            workspaceCwd: WS_BOUND,
+            displayName: 'Manual title',
+            titleSource: 'manual',
+          },
+        ]);
+      } finally {
+        titleSpy.mockRestore();
+      }
+    });
+
     it('passes the requested live replay mode to load', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(
@@ -13024,6 +13081,56 @@ describe('createServeApp', () => {
         } finally {
           findSessionId.mockRestore();
           readCreationMetadata.mockRestore();
+        }
+      },
+    );
+
+    it.each(['load', 'resume'] as const)(
+      'reads the persisted title with the case-corrected storage id on %s (#8977)',
+      async (action) => {
+        // The custom_title record lives next to the transcript, so the
+        // title read must use the corrected spelling resolved by
+        // findSessionIdIgnoringCase or it misses the file on
+        // case-sensitive filesystems.
+        const sessionId = '550e8400-e29b-41d4-a716-446655440160';
+        const storageSessionId = sessionId.toUpperCase();
+        const bridge = fakeBridge();
+        const findSessionId = vi
+          .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+          .mockResolvedValue(storageSessionId);
+        const readCreationMetadata = vi
+          .spyOn(SessionService.prototype, 'readCreationMetadata')
+          .mockResolvedValue({});
+        const titleSpy = vi
+          .spyOn(SessionService.prototype, 'getSessionTitleInfo')
+          .mockReturnValue({ title: 'Manual title', source: 'manual' });
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        try {
+          const res = await request(app)
+            .post(`/session/${sessionId}/${action}`)
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .send({});
+
+          expect(res.status).toBe(200);
+          expect(titleSpy).toHaveBeenCalledWith(storageSessionId);
+          const calls =
+            action === 'load' ? bridge.loadCalls : bridge.resumeCalls;
+          expect(calls).toEqual([
+            expect.objectContaining({
+              sessionId,
+              displayName: 'Manual title',
+              titleSource: 'manual',
+            }),
+          ]);
+        } finally {
+          findSessionId.mockRestore();
+          readCreationMetadata.mockRestore();
+          titleSpy.mockRestore();
         }
       },
     );
@@ -25885,7 +25992,7 @@ describe('createServeApp', () => {
         request(app).patch(
           '/session/550e8400-e29b-41d4-a716-446655440321/metadata',
         ),
-      ).send({ displayName: 'My Session' });
+      ).send({ displayName: 'My Session', titleSource: 'auto' });
       expect(res.status).toBe(200);
       expect(res.body).toEqual({
         sessionId: '550e8400-e29b-41d4-a716-446655440321',
@@ -25897,6 +26004,7 @@ describe('createServeApp', () => {
       );
       expect(bridge.updateMetadataCalls[0]?.metadata).toEqual({
         displayName: 'My Session',
+        titleSource: 'auto',
       });
     });
 
@@ -26459,6 +26567,170 @@ describe('createServeApp', () => {
       expect(res.body.code).toBe('invalid_metadata');
     });
 
+    it('400 when titleSource is invalid on both metadata routes', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).patch(
+          '/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+        ),
+      ).send({ displayName: 'Renamed', titleSource: 'bogus' });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_metadata');
+      expect(res.body.field).toBe('titleSource');
+      expect(bridge.updateMetadataCalls).toHaveLength(0);
+
+      const secondaryBridge = fakeBridge();
+      const { app: workspaceApp } = createWorkspaceMetadataApp(secondaryBridge);
+      const workspaceRes = await auth(
+        request(workspaceApp).patch(
+          '/workspaces/ws-secondary/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+        ),
+      ).send({ displayName: 'Renamed', titleSource: 'bogus' });
+      expect(workspaceRes.status).toBe(400);
+      expect(workspaceRes.body.code).toBe('invalid_metadata');
+      expect(workspaceRes.body.field).toBe('titleSource');
+      expect(secondaryBridge.updateMetadataCalls).toHaveLength(0);
+    });
+
+    it('persists the requested titleSource through the workspace fallback', async () => {
+      const runtimeBaseDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-workspace-metadata-source-'),
+      );
+      const sessionId = '550e8400-e29b-41d4-a716-446655440034';
+      const chatsDir = path.join(
+        new Storage(WS_DIFFERENT, runtimeBaseDir).getProjectDir(),
+        'chats',
+      );
+      const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
+      await fsp.mkdir(chatsDir, { recursive: true });
+      await fsp.writeFile(
+        filePath,
+        `${JSON.stringify({
+          uuid: 'record-1',
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-05-17T12:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'original' }] },
+          cwd: WS_DIFFERENT,
+        })}\n`,
+        'utf8',
+      );
+      const secondaryBridge = fakeBridge({
+        updateMetadataImpl: () => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const { app } = createWorkspaceMetadataApp(secondaryBridge, {
+        sessionRuntimeBaseDir: runtimeBaseDir,
+      });
+
+      try {
+        const res = await auth(
+          request(app).patch(
+            `/workspaces/ws-secondary/session/${sessionId}/metadata`,
+          ),
+        ).send({ displayName: 'Machine rename', titleSource: 'auto' });
+        expect(res.status).toBe(200);
+        expect(res.body).toEqual({
+          sessionId,
+          displayName: 'Machine rename',
+          titleSource: 'auto',
+        });
+        // The provenance must reach the persisted custom_title record, not
+        // just the response body.
+        expect(await fsp.readFile(filePath, 'utf8')).toContain(
+          '"titleSource":"auto"',
+        );
+      } finally {
+        await fsp.rm(runtimeBaseDir, { recursive: true, force: true });
+      }
+    });
+
+    it.each([['active'], ['archived']] as const)(
+      'does not downgrade a persisted manual title on a same-text auto fallback (%s) (#8977)',
+      async (location) => {
+        const runtimeBaseDir = await fsp.mkdtemp(
+          path.join(os.tmpdir(), 'qwen-workspace-metadata-downgrade-'),
+        );
+        const sessionId = '550e8400-e29b-41d4-a716-446655440034';
+        const chatsDir = path.join(
+          new Storage(WS_DIFFERENT, runtimeBaseDir).getProjectDir(),
+          'chats',
+          ...(location === 'archived' ? ['archive'] : []),
+        );
+        const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
+        await fsp.mkdir(chatsDir, { recursive: true });
+        await fsp.writeFile(
+          filePath,
+          `${JSON.stringify({
+            uuid: 'record-1',
+            parentUuid: null,
+            sessionId,
+            timestamp: '2026-05-17T12:00:00.000Z',
+            type: 'user',
+            message: { role: 'user', parts: [{ text: 'original' }] },
+            cwd: WS_DIFFERENT,
+          })}\n${JSON.stringify({
+            uuid: 'record-2',
+            parentUuid: 'record-1',
+            sessionId,
+            timestamp: '2026-05-17T12:05:00.000Z',
+            type: 'system',
+            subtype: 'custom_title',
+            cwd: WS_DIFFERENT,
+            systemPayload: {
+              customTitle: 'Daily digest task',
+              titleSource: 'manual',
+            },
+          })}\n`,
+          'utf8',
+        );
+        const secondaryBridge = fakeBridge({
+          updateMetadataImpl: () => {
+            throw new SessionNotFoundError(sessionId);
+          },
+        });
+        const { app } = createWorkspaceMetadataApp(secondaryBridge, {
+          sessionRuntimeBaseDir: runtimeBaseDir,
+        });
+
+        try {
+          const res = await auth(
+            request(app).patch(
+              `/workspaces/ws-secondary/session/${sessionId}/metadata`,
+            ),
+          ).send({ displayName: 'Daily digest task', titleSource: 'auto' });
+          expect(res.status).toBe(200);
+          // The guard mirrors the live path: report the existing manual
+          // fields instead of writing a downgrade.
+          expect(res.body).toEqual({
+            sessionId,
+            displayName: 'Daily digest task',
+            titleSource: 'manual',
+          });
+          // No downgrade record may be appended — the transcript keeps
+          // exactly its one manual custom_title record, so the next /clear
+          // carry gate still sees the manual name.
+          const records = (await fsp.readFile(filePath, 'utf8'))
+            .trim()
+            .split('\n')
+            .map((line) => JSON.parse(line) as Record<string, unknown>);
+          const titleRecords = records.filter(
+            (record) => record['subtype'] === 'custom_title',
+          );
+          expect(titleRecords).toHaveLength(1);
+          expect(titleRecords[0]?.['systemPayload']).toEqual({
+            customTitle: 'Daily digest task',
+            titleSource: 'manual',
+          });
+        } finally {
+          await fsp.rm(runtimeBaseDir, { recursive: true, force: true });
+        }
+      },
+    );
+
     it('updates the selected workspace runtime with client identity', async () => {
       const secondaryBridge = fakeBridge();
       const { app, primaryBridge } =
@@ -26631,6 +26903,9 @@ describe('createServeApp', () => {
           expect(res.body).toEqual({
             sessionId,
             displayName: 'Persisted rename',
+            // The persisted path receives no titleSource, so the response
+            // defaults to 'manual'.
+            titleSource: 'manual',
           });
           expect(await fsp.readFile(filePath, 'utf8')).toContain(
             'Persisted rename',

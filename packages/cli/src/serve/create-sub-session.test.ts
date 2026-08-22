@@ -77,7 +77,11 @@ function makeFakeBridge(opts?: {
   }> = [];
   const prompts: Array<{ sessionId: string; promptId?: string; text: string }> =
     [];
-  const names: Array<{ sessionId: string; displayName?: string }> = [];
+  const names: Array<{
+    sessionId: string;
+    displayName?: string;
+    titleSource?: 'manual' | 'auto';
+  }> = [];
   const closes: string[] = [];
   const relocations: Array<{
     sessionId: string;
@@ -87,7 +91,12 @@ function makeFakeBridge(opts?: {
   }> = [];
   const kills: string[] = [];
   const detaches: Array<{ sessionId: string; clientId?: string }> = [];
-  const resumes: Array<{ sessionId: string; workspaceCwd: string }> = [];
+  const resumes: Array<{
+    sessionId: string;
+    workspaceCwd: string;
+    displayName?: string;
+    titleSource?: 'manual' | 'auto';
+  }> = [];
   const operations: string[] = [];
   const notifications: Array<{
     sessionId: string;
@@ -122,14 +131,22 @@ function makeFakeBridge(opts?: {
     },
     updateSessionMetadata: (
       sessionId: string,
-      metadata: { displayName?: string },
+      metadata: {
+        displayName?: string;
+        titleSource?: 'manual' | 'auto';
+      },
     ) => {
-      names.push({ sessionId, displayName: metadata.displayName });
+      names.push({ sessionId, ...metadata });
       return metadata;
     },
     getSessionLastEventId: () => 0,
     getSessionEventEpoch: () => 'fake-epoch',
-    resumeSession: async (req: { sessionId: string; workspaceCwd: string }) => {
+    resumeSession: async (req: {
+      sessionId: string;
+      workspaceCwd: string;
+      displayName?: string;
+      titleSource?: 'manual' | 'auto';
+    }) => {
       operations.push(`resume:${req.sessionId}`);
       resumes.push(req);
       if (req.sessionId !== opts?.reapedParentSessionId) {
@@ -321,6 +338,7 @@ describe('sub-session launcher', () => {
     ]);
     expect(fake.prompts[0]!.text).toBe('do the thing');
     expect(fake.names[0]!.displayName).toContain('my task');
+    expect(fake.names[0]!.titleSource).toBe('auto');
     // 'sent' returns immediately but starts a background subscription to hold
     // the concurrency slot until the sub-session's turn finishes (so the cap
     // stays meaningful). The subscription is fire-and-forget — the launch
@@ -732,6 +750,78 @@ describe('sub-session launcher', () => {
   });
 
   it('sent mode: restores a reaped parent and keeps it alive through the automatic continuation', async () => {
+    const sessionRuntimeBaseDir = '/runtime/parent';
+    const readTitle = vi
+      .spyOn(SessionService.prototype, 'getSessionTitleInfo')
+      .mockImplementation(function (this: SessionService) {
+        const storage = (
+          this as unknown as {
+            storage: { getRuntimeBaseDir(): string };
+          }
+        ).storage;
+        expect(storage.getRuntimeBaseDir()).toBe(sessionRuntimeBaseDir);
+        return { title: 'Manual parent', source: 'manual' };
+      });
+    const fake = makeFakeBridge({
+      events: (pid) => [chunk('durable result'), turnComplete(pid)],
+      reapedParentSessionId: 'parent-reaped',
+    });
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+      sessionRuntimeBaseDir,
+      notifySentCompletion: true,
+    });
+
+    const launched = await launcher.launch({
+      prompt: 'finish after the parent goes idle',
+      completion: 'sent',
+      callerSessionId: 'parent-reaped',
+    });
+
+    await vi.waitFor(() =>
+      expect(fake.parentObserverClosures).toEqual([launched.sessionId]),
+    );
+    expect(fake.resumes).toEqual([
+      {
+        sessionId: 'parent-reaped',
+        workspaceCwd: WS,
+        displayName: 'Manual parent',
+        titleSource: 'manual',
+      },
+    ]);
+    expect(fake.notifications).toHaveLength(1);
+    expect(fake.notifications[0]).toMatchObject({
+      sessionId: 'parent-reaped',
+      notification: {
+        taskId: launched.sessionId,
+        status: 'completed',
+      },
+    });
+    // Child completion + parent notification/continuation observer.
+    expect(fake.subscribeCalls()).toBe(2);
+    expect(stderrLines).toEqual([]);
+    expect(fake.relocations).toEqual([]);
+    readTitle.mockRestore();
+    launcher.stop();
+  });
+
+  it('sent mode: reads the reaped parent title with the case-corrected storage id', async () => {
+    // A persisted transcript written with an uppercase UUID (legacy
+    // `uuidgen` spelling) while the caller id arrives lowercase. The title
+    // record lives next to the transcript, so the read must go through the
+    // case-corrected storage id — the raw caller spelling misses the file
+    // on a case-sensitive filesystem and silently drops the manual name.
+    const findStorageId = vi
+      .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+      .mockResolvedValue('PARENT-REAPED');
+    const titleReads: string[] = [];
+    const readTitle = vi
+      .spyOn(SessionService.prototype, 'getSessionTitleInfo')
+      .mockImplementation((sessionId: string) => {
+        titleReads.push(sessionId);
+        return { title: 'Manual parent', source: 'manual' };
+      });
     const fake = makeFakeBridge({
       events: (pid) => [chunk('durable result'), turnComplete(pid)],
       reapedParentSessionId: 'parent-reaped',
@@ -751,21 +841,19 @@ describe('sub-session launcher', () => {
     await vi.waitFor(() =>
       expect(fake.parentObserverClosures).toEqual([launched.sessionId]),
     );
+    // The title read must use the case-corrected storage id, not the raw
+    // caller spelling.
+    expect(titleReads).toEqual(['PARENT-REAPED']);
     expect(fake.resumes).toEqual([
-      { sessionId: 'parent-reaped', workspaceCwd: WS },
-    ]);
-    expect(fake.notifications).toHaveLength(1);
-    expect(fake.notifications[0]).toMatchObject({
-      sessionId: 'parent-reaped',
-      notification: {
-        taskId: launched.sessionId,
-        status: 'completed',
+      {
+        sessionId: 'parent-reaped',
+        workspaceCwd: WS,
+        displayName: 'Manual parent',
+        titleSource: 'manual',
       },
-    });
-    // Child completion + parent notification/continuation observer.
-    expect(fake.subscribeCalls()).toBe(2);
-    expect(stderrLines).toEqual([]);
-    expect(fake.relocations).toEqual([]);
+    ]);
+    findStorageId.mockRestore();
+    readTitle.mockRestore();
     launcher.stop();
   });
 

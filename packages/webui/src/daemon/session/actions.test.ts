@@ -27,6 +27,7 @@ describe('getConnectionAfterSessionClear', () => {
         sessionId: 'session-a',
         clientId: 'client-a',
         displayName: 'Session A',
+        titleSource: 'manual',
         tokenCount: 42,
         goalState: { v: 2, goal: null, activity: 'idle' },
         commands: [commandInfo('old-command')],
@@ -54,6 +55,7 @@ describe('getConnectionAfterSessionClear', () => {
     expect(next).not.toHaveProperty('sessionId');
     expect(next).not.toHaveProperty('clientId');
     expect(next).not.toHaveProperty('displayName');
+    expect(next).not.toHaveProperty('titleSource');
     expect(next).not.toHaveProperty('tokenCount');
     expect(next).not.toHaveProperty('goalState');
     expect(next).not.toHaveProperty('supportedCommands');
@@ -172,6 +174,147 @@ describe('resolveSessionRestoreTimeouts', () => {
 });
 
 describe('createDaemonSessionActions', () => {
+  it('marks a completed user rename as manual in the local connection', async () => {
+    const session = createMockSession('session-a');
+    session.updateMetadata.mockResolvedValueOnce({
+      displayName: 'Server-normalized title',
+    });
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        displayName: 'Automatic title',
+        titleSource: 'auto',
+      },
+      session,
+    });
+
+    await actions.renameSession('Manual title');
+
+    expect(session.updateMetadata).toHaveBeenCalledWith({
+      displayName: 'Manual title',
+    });
+    expect(getConnection()).toMatchObject({
+      displayName: 'Server-normalized title',
+      titleSource: 'manual',
+    });
+  });
+
+  it('does not stamp a completed rename onto a different session connection', async () => {
+    // Rename session A, but the connection has already moved on to session
+    // B (switch or /clear) while the updateMetadata RPC was in flight: the
+    // optimistic stamp must not land on B's connection.
+    const session = createMockSession('session-a');
+    session.updateMetadata.mockResolvedValueOnce({
+      displayName: 'Manual title',
+    });
+    const { actions, getConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-b',
+        displayName: 'Other session name',
+        titleSource: 'auto',
+      },
+      session,
+    });
+
+    await actions.renameSession('Manual title');
+
+    expect(session.updateMetadata).toHaveBeenCalledWith({
+      displayName: 'Manual title',
+    });
+    expect(getConnection()).toMatchObject({
+      sessionId: 'session-b',
+      displayName: 'Other session name',
+      titleSource: 'auto',
+    });
+  });
+
+  it('does not overwrite a newer metadata event with a late rename result', async () => {
+    const session = createMockSession('session-a');
+    const rename = createDeferred<{
+      displayName: string;
+      titleSource: 'manual';
+    }>();
+    session.updateMetadata.mockReturnValueOnce(rename.promise);
+    const { actions, getConnection, replaceConnection } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        displayName: 'Before',
+        titleSource: 'auto',
+      },
+      session,
+    });
+
+    const pending = actions.renameSession('First');
+    replaceConnection({
+      ...getConnection(),
+      displayName: 'Newer',
+      titleSource: 'manual',
+    });
+    rename.resolve({ displayName: 'First', titleSource: 'manual' });
+    await pending;
+
+    expect(getConnection()).toMatchObject({
+      displayName: 'Newer',
+      titleSource: 'manual',
+    });
+  });
+
+  it('forwards rename options into updateMetadata', async () => {
+    const session = createMockSession('session-a');
+    session.updateMetadata.mockResolvedValueOnce({
+      displayName: 'Side-task name',
+      titleSource: 'auto',
+    });
+    const { actions } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        sessionId: 'session-a',
+        displayName: 'Before',
+        titleSource: 'manual',
+      },
+      session,
+    });
+
+    await actions.renameSession('Side-task name', { titleSource: 'auto' });
+
+    expect(session.updateMetadata).toHaveBeenCalledWith({
+      displayName: 'Side-task name',
+      titleSource: 'auto',
+    });
+  });
+
+  it('rethrows without a notice when a silent rename fails', async () => {
+    const session = createMockSession('session-a');
+    session.updateMetadata.mockRejectedValueOnce(new Error('runtime warming'));
+    const addNotice = vi.fn();
+    const { actions } = createActionsHarness({
+      addNotice,
+      connection: { status: 'connected', sessionId: 'session-a' },
+      session,
+    });
+
+    await expect(
+      actions.renameSession('Carried name', { silent: true }),
+    ).rejects.toThrow('runtime warming');
+    expect(addNotice).not.toHaveBeenCalled();
+  });
+
+  it('rethrows without a notice when a silent rename has no session', async () => {
+    const addNotice = vi.fn();
+    const { actions } = createActionsHarness({
+      addNotice,
+      connection: { status: 'disconnected', workspaceCwd: '/workspace' },
+    });
+
+    await expect(
+      actions.renameSession('Carried name', { silent: true }),
+    ).rejects.toThrow('Daemon session is not connected');
+    expect(addNotice).not.toHaveBeenCalled();
+  });
+
   it('clears the previous Goal before starting a fresh session', async () => {
     const { actions, getConnection } = createActionsHarness({
       connection: {
@@ -2550,6 +2693,12 @@ function createMockSession(
     })),
     removeAttachment: vi.fn(async () => true),
     removePendingPrompt: vi.fn(async () => ({ removed: true })),
+    updateMetadata: vi.fn(
+      async (metadata: {
+        displayName?: string;
+        titleSource?: 'manual' | 'auto';
+      }) => metadata,
+    ),
     submitPrompt: vi.fn(async () => ({ promptId: 'prompt-1' })),
     supportedCommands: vi.fn(async () => supportedCommandsStatus(sessionId)),
     tasks: vi.fn(async () => ({ v: 1 as const, sessionId, tasks: [] })),
