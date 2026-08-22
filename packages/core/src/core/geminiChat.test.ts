@@ -3252,7 +3252,15 @@ describe('GeminiChat', async () => {
       }
 
       expect(compressSpy).toHaveBeenCalledTimes(1);
-      expect(compressSpy.mock.calls[0][1].originalTokenCount).toBe(123_456);
+      // The seeded authoritative count is the baseline of this attempt's
+      // effective count (seed + locally-estimated pending message), so the
+      // published number is the effective count, not the bare seed.
+      expect(
+        compressSpy.mock.calls[0][1].originalTokenCount,
+      ).toBeGreaterThanOrEqual(123_456);
+      expect(
+        compressSpy.mock.calls[0][1].precomputedEffectiveTokens,
+      ).toBeGreaterThanOrEqual(123_456);
     });
 
     it('yields a COMPRESSED stream event as the first event after auto-compression succeeds', async () => {
@@ -3628,6 +3636,12 @@ describe('GeminiChat', async () => {
       ).mock.calls[1]![0];
       expect(secondRequest.contents).toEqual(expectedRequestContents);
       expect(events[0]?.type).toBe(StreamEventType.COMPRESSED);
+      // The overflow message reports the actual token count (135000), so the
+      // published original count is provider-authoritative — no `~` marker.
+      expect(
+        (events[0] as { type: StreamEventType; info: ChatCompressionInfo }).info
+          .originalTokenCountIsEstimated,
+      ).toBe(false);
       expect(events[1]?.type).toBe(StreamEventType.RETRY);
       expect(events[1]).not.toHaveProperty('retryInfo');
       expect(
@@ -3674,12 +3688,23 @@ describe('GeminiChat', async () => {
         { message: 'latest' },
         'prompt-id-reactive-limit-only',
       );
-      for await (const _ of stream) {
-        /* consume */
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
       }
 
       expect(compressSpy).toHaveBeenCalledTimes(2);
       expect(compressSpy.mock.calls[1][1].originalTokenCount).toBe(128_000);
+      // The overflow message carries no actual token count, so the published
+      // original count is the parsed limit — a projection that must keep
+      // the `~` estimated marker.
+      const compressedEvent = events.find(
+        (event) => event.type === StreamEventType.COMPRESSED,
+      );
+      expect(
+        (compressedEvent as { info: ChatCompressionInfo }).info
+          .originalTokenCountIsEstimated,
+      ).toBe(true);
     });
 
     it('uses the configured context window when reactive overflow has no token counts', async () => {
@@ -3719,12 +3744,22 @@ describe('GeminiChat', async () => {
         { message: 'latest' },
         'prompt-id-reactive-window-fallback',
       );
-      for await (const _ of stream) {
-        /* consume */
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
       }
 
       expect(compressSpy).toHaveBeenCalledTimes(2);
       expect(compressSpy.mock.calls[1][1].originalTokenCount).toBe(262_144);
+      // Neither actual nor limit tokens parsed — the configured window is a
+      // fallback projection and must keep the `~` estimated marker.
+      const compressedEvent = events.find(
+        (event) => event.type === StreamEventType.COMPRESSED,
+      );
+      expect(
+        (compressedEvent as { info: ChatCompressionInfo }).info
+          .originalTokenCountIsEstimated,
+      ).toBe(true);
     });
 
     it('does not attempt reactive compression more than once per send', async () => {
@@ -15575,6 +15610,76 @@ describe('GeminiChat', async () => {
 
       const info = await chat.tryCompress('p-authoritative-original', true);
 
+      expect(info.originalTokenCountIsEstimated).toBe(false);
+    });
+
+    it('marks the precomputed effective count as estimated even when the stored API count is authoritative', async () => {
+      // Normal/hard-rescue auto-compaction: the send path publishes the
+      // precomputed effective count (stored baseline + locally estimated
+      // pending message / previous output). That projection must carry the
+      // `~` marker even though the stored baseline came from the API
+      // (review probe on #9568).
+      const compressSpy = mockCompressionService('compressed');
+      chat.setHistory([userMsg('a'), modelMsg('b')]);
+      chat.seedResumeTokenCounts(5000, 0, false);
+
+      const info = await chat.tryCompress(
+        'p-precomputed-effective-estimated',
+        true,
+        undefined,
+        {
+          precomputedEffectiveTokens: 6200,
+          pendingUserMessage: userMsg('next'),
+          trigger: 'auto',
+        },
+      );
+
+      expect(compressSpy.mock.calls[0][1].originalTokenCount).toBe(6200);
+      expect(info.originalTokenCountIsEstimated).toBe(true);
+    });
+
+    it('keeps a fallback override estimated while publishing its count', async () => {
+      // Reactive overflow without a provider-reported actual count: the
+      // limit/config/default fallback override is a projection and must
+      // keep the `~` marker.
+      const compressSpy = mockCompressionService('compressed');
+      chat.setHistory([userMsg('a'), modelMsg('b')]);
+      chat.seedResumeTokenCounts(5000, 0, false);
+
+      const info = await chat.tryCompress(
+        'p-override-fallback-estimated',
+        true,
+        undefined,
+        {
+          originalTokenCountOverride: { count: 128_000, isEstimated: true },
+          precomputedEffectiveTokens: 128_000,
+          trigger: 'auto',
+        },
+      );
+
+      expect(compressSpy.mock.calls[0][1].originalTokenCount).toBe(128_000);
+      expect(info.originalTokenCountIsEstimated).toBe(true);
+    });
+
+    it('treats a provider-reported actualTokens override as authoritative', async () => {
+      // Reactive overflow whose error message reports the actual token
+      // count: only this override variant may drop the `~` marker.
+      const compressSpy = mockCompressionService('compressed');
+      chat.setHistory([userMsg('a'), modelMsg('b')]);
+      chat.seedResumeTokenCounts(5000, 0, false);
+
+      const info = await chat.tryCompress(
+        'p-override-actual-authoritative',
+        true,
+        undefined,
+        {
+          originalTokenCountOverride: { count: 135_000, isEstimated: false },
+          precomputedEffectiveTokens: 135_000,
+          trigger: 'auto',
+        },
+      );
+
+      expect(compressSpy.mock.calls[0][1].originalTokenCount).toBe(135_000);
       expect(info.originalTokenCountIsEstimated).toBe(false);
     });
   });
