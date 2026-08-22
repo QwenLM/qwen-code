@@ -1158,8 +1158,11 @@ export function registerSessionRoutes(
     const service = createWorkspaceRuntimeSessionService(runtime);
     for (const sessionId of sessionIds) {
       const location = await service.getSessionLocation(sessionId);
-      if (location === 'conflict') throw new SessionConflictError(sessionId);
-      if (
+      if (location === 'conflict') {
+        if (archiveState !== 'active') {
+          throw new SessionConflictError(sessionId);
+        }
+      } else if (
         location === undefined ||
         (archiveState !== 'any' && location !== archiveState)
       ) {
