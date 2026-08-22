@@ -239,6 +239,7 @@ task-oriented guides — what a maintainer types and what happens next — see:
 - [145. review-address · Report dry-run / failure — CUMULATIVE timeout breaker — the sibling of the consecutive one above, for the…](#af-145)
 - [146. review-address · Report dry-run / failure — The agent committed (verify recorded committed=true before any gate could fail),…](#af-146)
 - [147. review-address · Report dry-run / failure — Same byte-budget hygiene as the English excerpt above. 3000 bytes ≈ 1000 CJK…](#af-147)
+- [148. review-address · Repair deterministic rejection — Budget the repair pass so it can finish, and keep its exhaustions out of…](#af-148)
 
 ---
 

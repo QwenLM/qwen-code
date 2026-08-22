@@ -102,7 +102,7 @@ env:
   # Full rationale → qwen-autofix.md#af-002
   CRITICAL_ONLY_AFTER_ROUND: '5'
   # Per-author tail budget inside Critical-only mode.
-  # Full rationale → qwen-autofix.md#af-148
+  # Full rationale → qwen-autofix.md#af-074
   CRITICAL_ONLY_HUMAN_BATCHES: '2'
   # Net-diff growth budgets per counting window — the SIZE sibling of the
   # round brake above. CRITICAL_ONLY_AFTER_ROUND counts rounds, but one round
