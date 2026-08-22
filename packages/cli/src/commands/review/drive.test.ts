@@ -15,6 +15,7 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   writeFileSync,
   existsSync,
   rmSync,
@@ -33,6 +34,7 @@ import {
   extractCaptures,
   type ExecResult,
 } from './drive.js';
+import { BRIEFS } from './lib/agent-briefs.js';
 import {
   writeStdoutLine,
   writeStderrLineSafe,
@@ -896,6 +898,101 @@ describe('--capture and the head-trim are reconciled in the note', () => {
     expect(r.truncated).toBe(false);
     expect(r.note).not.toContain('--capture reads the untrimmed log');
   });
+});
+
+describe("the verify brief's bound-address recipe actually captures", () => {
+  // The recipe is what agents copy, and a recipe that cannot work is worse
+  // than none: measured on the first version of it, the service was redirected
+  // to a file of its own, so `captured.baseUrl` came back null on every
+  // faithful run while the miss note said the value "was never measured".
+  //
+  // So this runs the brief's OWN text rather than a retyped copy — the script
+  // body and the capture pattern are both extracted from it — under the same
+  // redirect contract runDrive imposes (`bash <script> > <log> 2>&1`). No tmux
+  // is involved: what broke was the shell, and the shell is what this drives.
+  const briefText = () =>
+    Object.values(BRIEFS.verify)
+      .filter((v): v is string => typeof v === 'string')
+      .join('\n\n');
+
+  const recipe = () => {
+    const text = briefText();
+    const start = text.indexOf("--capture 'baseUrl=");
+    expect(start).toBeGreaterThan(-1);
+    const fence = text.indexOf('```', start);
+    const body = text.slice(text.lastIndexOf('```bash', start), fence);
+    const pattern = /--capture '([^']+)'/.exec(body)?.[1];
+    const script = /--script '([\s\S]*?)'\s*$/m.exec(body)?.[1];
+    // If either is missing the brief no longer teaches the recipe at all,
+    // which is a change this test exists to make somebody notice.
+    expect(pattern).toBeTruthy();
+    expect(script).toBeTruthy();
+    return { pattern: pattern as string, script: script as string };
+  };
+
+  const have = (bin: string) =>
+    spawnSync('sh', ['-lc', `command -v ${bin}`]).status === 0;
+
+  it.skipIf(!have('curl') || !have('mktemp'))(
+    "puts the service's own address in the drive log, not the response body",
+    () => {
+      const { pattern, script } = recipe();
+      const dir = mkdtempSync(join(tmpdir(), 'drv-recipe-'));
+      // A service whose RESPONSE BODY also carries a listening-on line: if the
+      // capture came from the request rather than the service, this is the
+      // address it would report, and the assertion below would catch it.
+      const svc = join(dir, 'svc.mjs');
+      writeFileSync(
+        svc,
+        [
+          "import http from 'node:http';",
+          "const s=http.createServer((_q,r)=>{r.writeHead(200);r.end('listening on http://127.0.0.1:59999\\n')});",
+          "s.listen(0,'127.0.0.1',()=>console.log(`svc listening on http://127.0.0.1:${s.address().port}`));",
+          'setTimeout(()=>process.exit(0),20000);',
+        ].join('\n'),
+      );
+
+      const filled = script
+        .replace(
+          '<start the service; --port 0 wherever it allows one>',
+          `${JSON.stringify(process.execPath)} ${JSON.stringify(svc)}`,
+        )
+        .replace('<the endpoint the claim is about>', 'whatever');
+      const scriptPath = join(dir, 'recipe.sh');
+      writeFileSync(scriptPath, filled);
+      const logPath = join(dir, 'drive.log');
+
+      // Exactly what runDrive does with the script it is given.
+      const ran = spawnSync(
+        'bash',
+        ['-lc', `bash ${shellQuote(scriptPath)} > ${shellQuote(logPath)} 2>&1`],
+        { cwd: dir, timeout: 30_000, encoding: 'utf8' },
+      );
+      // Thrown rather than asserted so the shell's own stderr reaches the
+      // failure message — a recipe that dies takes its reason with it.
+      if (ran.status !== 0) {
+        throw new Error(`the recipe exited ${ran.status}: ${ran.stderr}`);
+      }
+
+      // `pattern` already carries its `name=` prefix, straight from the brief.
+      const parsed = parseCaptureSpecs([pattern]);
+      if (!('specs' in parsed)) throw new Error(parsed.error);
+      const captured = extractCaptures(
+        readFileSync(logPath, 'utf8'),
+        parsed.specs,
+      );
+
+      // The whole point: a value, and the SERVICE's value.
+      expect(captured['baseUrl']).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+      expect(captured['baseUrl']).not.toContain('59999');
+      // ...and the recipe left nothing behind in the working directory.
+      expect(
+        readdirSync(dir).filter((f) => f.endsWith('.log') && f !== 'drive.log'),
+      ).toEqual([]);
+
+      rmSync(dir, { recursive: true, force: true });
+    },
+  );
 });
 
 describe('--capture reaches runDrive through the real CLI seam', () => {
