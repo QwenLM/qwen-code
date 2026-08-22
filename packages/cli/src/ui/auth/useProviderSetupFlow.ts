@@ -4,21 +4,27 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import {
   AuthType,
   shouldShowStep,
   resolveBaseUrl,
   getDefaultBaseUrlForProtocol,
   getDefaultModelIds,
+  fetchProviderModelIds,
+  mergeDiscoveredModels,
+  createDebugLogger,
 } from '@qwen-code/qwen-code-core';
 import type {
   InputModalities,
+  ModelSpec,
   ProviderConfig,
   ProviderSetupInputs,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 import { normalizeModelIds, maskApiKey } from './useAuth.js';
+
+const debugLogger = createDebugLogger('PROVIDER_SETUP');
 
 // ---------------------------------------------------------------------------
 // Setup step names (generic, config-driven)
@@ -40,6 +46,20 @@ const STEP_ORDER: SetupStep[] = [
   'advancedConfig',
   'review',
 ];
+
+/**
+ * Lifecycle of the optional `GET {baseUrl}/models` lookup that backs the
+ * recommendation list. `failed` covers every reason the endpoint did not
+ * answer usefully — the wizard treats them all the same way, by showing the
+ * built-in list — and is never fatal to the flow.
+ */
+export type ModelDiscoveryStatus = 'idle' | 'loading' | 'success' | 'failed';
+
+export interface ModelIdsEditContext {
+  customModelIds: string[];
+  activeCustomModelId?: string;
+  removedRecommendationId?: string;
+}
 
 function getVisibleSteps(config: ProviderConfig): SetupStep[] {
   return STEP_ORDER.filter((step) => {
@@ -74,6 +94,18 @@ export interface ProviderSetupState {
   // Model IDs
   modelIds: string;
   modelIdsError: string | null;
+
+  /**
+   * Models to offer as recommendations — the live list when discovery
+   * succeeded, the provider's built-in list otherwise.
+   */
+  recommendedModels: ModelSpec[];
+  discoveryStatus: ModelDiscoveryStatus;
+  /**
+   * Bumped whenever `recommendedModels` is replaced, so the model step can
+   * re-derive its local checkbox state from the new list.
+   */
+  recommendedModelsRevision: number;
 
   // Advanced config
   thinkingEnabled: boolean;
@@ -120,8 +152,348 @@ export function useProviderSetupFlow(
   const [modalityPdf, setModalityPdf] = useState(false);
   const [contextWindowSize, setContextWindowSize] = useState('');
   const [focusedConfigIndex, setFocusedConfigIndex] = useState(0);
+  const [discoveredModels, setDiscoveredModels] = useState<ModelSpec[] | null>(
+    null,
+  );
+  const [discoveryStatus, setDiscoveryStatus] =
+    useState<ModelDiscoveryStatus>('idle');
+  const [recommendedModelsRevision, setRecommendedModelsRevision] = useState(0);
+  // Discovery runs once per (baseUrl, apiKey) pair per wizard session: the
+  // model step is cheap to re-enter (Esc, then Enter) and the answer cannot
+  // change in between.
+  const discoveryCacheRef = useRef(new Map<string, ModelSpec[]>());
+  const discoveryKeyRef = useRef<string | null>(null);
+  const discoveryAbortRef = useRef<AbortController | null>(null);
+  // The selection as the user authored it: the defaults `start()` checked plus
+  // every later edit on the model step. Discovery derives what is checked from
+  // this rather than from its own previous output — the prune can only remove
+  // ids, so pruning an already-pruned value makes the result depend on which
+  // pairs the session visited instead of on the pair in force.
+  const authoredModelIdsRef = useRef('');
+  // Mirrors `discoveredModels` so the discovery effect can tell whether the
+  // displayed list actually changes without taking the state as a dependency
+  // (which would re-run the effect on its own result).
+  const discoveredModelsRef = useRef<ModelSpec[] | null>(null);
+  // The last selection the FLOW installed — start's defaults, discovery's
+  // prune, a pair-change restore. An edit arrives as the whole composed
+  // selection, so recording it as authored needs a reference point to tell the
+  // user's delta from what discovery had already done to it, and this is that
+  // point. Keystrokes deliberately do NOT move it: an edit is a delta against
+  // what the wizard last put on screen, not against the previous keystroke.
+  const displayedModelIdsRef = useRef('');
+  // The selection on screen right now, keystrokes included.
+  const liveModelIdsRef = useRef('');
+  const modelIdsEditInProgressRef = useRef(false);
+  const activeCustomModelIdRef = useRef<string | undefined>(undefined);
+  const customModelIdsRef = useRef<string[]>([]);
+  // The id `applyDiscoveredModels` checked on the user's behalf when the prune
+  // emptied the selection. It is the wizard's pick, so it is stripped back out
+  // of any edit before that edit becomes the authored baseline.
+  const injectedModelIdRef = useRef<string | null>(null);
+
+  const setDisplayedModelIds = useCallback((value: string) => {
+    displayedModelIdsRef.current = value;
+    liveModelIdsRef.current = value;
+    modelIdsEditInProgressRef.current = false;
+    activeCustomModelIdRef.current = undefined;
+    customModelIdsRef.current = [];
+    setModelIds(value);
+  }, []);
+
+  /** Move the on-screen selection without moving the authorship reference. */
+  const editModelIds = useCallback(
+    (value: string, context?: ModelIdsEditContext) => {
+      // Keep the injected-id marker until an edit is committed: a longer id can
+      // pass through the injected id as a transient prefix. The custom tokens
+      // at commit distinguish that from a genuine retype. An actual removal is
+      // still decisive immediately so unchecking and rechecking can endorse it.
+      const customModelIds = context?.customModelIds ?? [];
+      customModelIdsRef.current = customModelIds;
+      const injected = injectedModelIdRef.current;
+      if (injected !== null && !normalizeModelIds(value).includes(injected)) {
+        injectedModelIdRef.current = null;
+      }
+      const removed = context?.removedRecommendationId;
+      if (removed && !customModelIds.includes(removed)) {
+        authoredModelIdsRef.current = normalizeModelIds(
+          authoredModelIdsRef.current,
+        )
+          .filter((id) => id !== removed)
+          .join(', ');
+      }
+      modelIdsEditInProgressRef.current = true;
+      activeCustomModelIdRef.current = context?.activeCustomModelId;
+      liveModelIdsRef.current = value;
+      setModelIds(value);
+    },
+    [],
+  );
+
+  /**
+   * Fold the selection on screen into the authored baseline. The step composes
+   * the whole selection, which by then also carries discovery's own edits: ids
+   * the prune removed are absent and the fallback the wizard checked is
+   * present. Recording that verbatim would bake this pair's endpoint into the
+   * baseline, so it is applied as a delta against what the flow last put on
+   * screen instead — ids the user never saw stay untouched, and the wizard's
+   * fallback never reads as typed.
+   *
+   * R11-1: this is called when an edit is COMMITTED — submitted, or left
+   * behind by stepping off `models`, or overtaken by a discovery result — and
+   * deliberately not on every keystroke. A per-keystroke delta cannot tell a
+   * removal from a token still being typed: while the user types
+   * `qwen3.5-plus-latest`, the buffer passes through exactly `qwen3.5-plus`,
+   * so the very next keystroke saw that id leave the composed selection and
+   * deleted it from the baseline — although the user never saw or unchecked
+   * it. It is an unserved built-in, pruned from the display but still in the
+   * baseline, and the next pair change restored a selection missing it: a
+   * default the new endpoint serves came back unchecked. Judging keystrokes
+   * only by whether the vanished token was a strict prefix does not work
+   * either — the additions half of this delta accumulated every intermediate
+   * prefix into the baseline.
+   */
+  const recordAuthoredModelIds = useCallback((value?: string) => {
+    const committed = value ?? liveModelIdsRef.current;
+    const injected = injectedModelIdRef.current;
+    const injectedWasAuthored =
+      injected !== null && customModelIdsRef.current.includes(injected);
+    const strip = (ids: string[]) =>
+      injected === null || injectedWasAuthored
+        ? ids
+        : ids.filter((id) => id !== injected);
+    const before = strip(normalizeModelIds(displayedModelIdsRef.current));
+    const after = strip(normalizeModelIds(committed));
+    const removed = new Set(before.filter((id) => !after.includes(id)));
+    const authored = normalizeModelIds(authoredModelIdsRef.current).filter(
+      (id) => !removed.has(id),
+    );
+    for (const id of after) {
+      if (!authored.includes(id)) authored.push(id);
+    }
+    authoredModelIdsRef.current = authored.join(', ');
+    // The commit is the new reference point: recording it twice would read the
+    // second pass's `before` as ids the user had removed.
+    displayedModelIdsRef.current = committed;
+    liveModelIdsRef.current = committed;
+    modelIdsEditInProgressRef.current = false;
+    activeCustomModelIdRef.current = undefined;
+  }, []);
 
   const currentStep = visibleSteps[stepIndex] ?? null;
+
+  // -- Model discovery ------------------------------------------------------
+
+  const resetDiscovery = useCallback(() => {
+    discoveryAbortRef.current?.abort();
+    discoveryAbortRef.current = null;
+    discoveryKeyRef.current = null;
+    discoveredModelsRef.current = null;
+    injectedModelIdRef.current = null;
+    setDiscoveredModels(null);
+    setDiscoveryStatus('idle');
+  }, []);
+
+  /**
+   * Swap the recommendation list the model step renders. The revision bump is
+   * what remounts `ModelIdsStep` so its checkbox and custom-input state is
+   * re-derived; it is skipped when neither the list nor the selection changed,
+   * because a spurious remount would wipe the user's in-progress search and
+   * focus for nothing. A cache hit re-serves the same list yet can still prune
+   * the selection, and the step derives its checkboxes only at mount — so the
+   * caller passes `selectionChanged` for that case.
+   */
+  const replaceRecommendations = useCallback(
+    (models: ModelSpec[] | null, selectionChanged = false) => {
+      const previous = discoveredModelsRef.current;
+      discoveredModelsRef.current = models;
+      setDiscoveredModels(models);
+      if (previous !== models || selectionChanged) {
+        setRecommendedModelsRevision((revision) => revision + 1);
+      }
+    },
+    [],
+  );
+
+  // Abort an in-flight lookup when the dialog goes away — nothing is left to
+  // render its result into.
+  useEffect(() => () => discoveryAbortRef.current?.abort(), []);
+
+  const applyDiscoveredModels = useCallback(
+    (config: ProviderConfig, models: ModelSpec[]) => {
+      // Drop built-in ids the endpoint no longer serves from the pending
+      // selection — leaving them checked would install exactly the stale
+      // entries discovery exists to avoid. An unserved built-in id is dropped
+      // whether it was checked by default or typed: the step composes both
+      // into one string, so they are indistinguishable here. Ids outside the
+      // built-in list are left alone; they may be legitimately unlisted
+      // (private deployments, aliases).
+      // A lookup can resolve while the user is typing into the step it is
+      // about to replace, and an edit in progress is not a commit. R12-1:
+      // folding that buffer into the baseline re-opens the R11-1 hazard from
+      // the other side — while a longer custom id is typed the buffer passes
+      // through shorter ids as exact prefixes, so a transient token reads as
+      // BOTH halves of the delta. The user's uncheck never lands, the prune
+      // keeps the id, and the swap below hands the checkbox back ticked over
+      // the top of their half-typed text. Intermediate prefixes of an id that
+      // is not a built-in get banked as authored the same way.
+      const editInProgress = modelIdsEditInProgressRef.current;
+      if (!editInProgress) {
+        recordAuthoredModelIds();
+      }
+      const served = new Set(models.map((model) => model.id));
+      const builtIn = new Set(getDefaultModelIds(config));
+      // Prune whatever is on screen. With a settled buffer that IS the
+      // baseline — the pair-change release above puts it back — so the old
+      // guarantee holds: the result depends on the pair in force, not on which
+      // pairs the session visited. With an edit in flight it is the user's own
+      // text, and pruning that rather than the baseline is what keeps their
+      // keystrokes instead of overwriting them with a stale value. Either way
+      // the baseline is left for the step's next real commit to move, which
+      // sees the delta against the reference point set below.
+      const kept = normalizeModelIds(
+        editInProgress ? liveModelIdsRef.current : authoredModelIdsRef.current,
+      ).filter(
+        (id) =>
+          served.has(id) ||
+          !builtIn.has(id) ||
+          (editInProgress && id === activeCustomModelIdRef.current),
+      );
+      // Pruning everything would leave the step with nothing checked and no
+      // way to submit; fall back to the provider's first live model. That is
+      // the wizard's pick, not the user's, so it stays out of the authored
+      // baseline: carried into the next pair it would read as a typed id,
+      // survive a prune the endpoint does not serve it through, and suppress
+      // that pair's own fallback.
+      injectedModelIdRef.current = null;
+      if (kept.length === 0 && models[0]) {
+        injectedModelIdRef.current = models[0].id;
+        kept.push(models[0].id);
+      }
+      const next = kept.join(', ');
+      replaceRecommendations(models, next !== displayedModelIdsRef.current);
+      setDiscoveryStatus('success');
+      setDisplayedModelIds(next);
+    },
+    [recordAuthoredModelIds, replaceRecommendations, setDisplayedModelIds],
+  );
+
+  useEffect(() => {
+    if (!provider?.supportsModelDiscovery) return;
+
+    const resolvedBaseUrl = baseUrl.trim();
+    const resolvedApiKey = apiKey.trim();
+    // The cached list is merged against the fetching provider's built-in
+    // specs, so it is only an answer for that provider — two providers can
+    // share an endpoint and key within one dialog session.
+    const discoveryKey = resolvedBaseUrl
+      ? JSON.stringify([provider.id, resolvedBaseUrl, resolvedApiKey])
+      : null;
+
+    // Pair-change detection sits above the step guard on purpose. Changing the
+    // key one step back (Esc off the model step, then retype) re-runs this
+    // effect only while the user is off-step, so detecting it below the guard
+    // would leave the abandoned lookup running with its key still claimed —
+    // and both continuation guards would then pass when it resolved, applying
+    // the pair the user moved off.
+    if (
+      discoveryKeyRef.current !== null &&
+      discoveryKeyRef.current !== discoveryKey
+    ) {
+      if (currentStep === 'models') {
+        // The run below claims the new pair in the same effect and installs
+        // its own list, notice and selection, so only the key is released
+        // here — replacing the display state twice would remount the step for
+        // nothing.
+        discoveryAbortRef.current?.abort();
+        discoveryAbortRef.current = null;
+        discoveryKeyRef.current = null;
+      } else {
+        // D4-1/D7-9: off-step there is no such run — this effect returns at
+        // the guard below and does not come back until the user does. So the
+        // list, the notice and the pruned selection would sit there still
+        // describing the pair the user left, and `ModelIdsStep` reads them as
+        // it mounts, one committed render before the re-entry can replace
+        // them. A base-url change after a successful lookup therefore
+        // re-entered the step showing the OLD endpoint's catalog under a
+        // "success" notice, and a checkbox ticked in that render submitted an
+        // id the new endpoint was never asked about. Release the display
+        // state with the key, and put the selection back to what the user
+        // authored — the previous pair's prune is not an answer for this one.
+        resetDiscovery();
+        setDisplayedModelIds(authoredModelIdsRef.current);
+      }
+    }
+
+    if (currentStep !== 'models') return;
+    if (!discoveryKey) return;
+    if (discoveryKeyRef.current === discoveryKey) return;
+    discoveryKeyRef.current = discoveryKey;
+
+    const cached = discoveryCacheRef.current.get(discoveryKey);
+    if (cached) {
+      applyDiscoveredModels(provider, cached);
+      return;
+    }
+
+    const controller = new AbortController();
+    discoveryAbortRef.current = controller;
+    // Until this pair answers, the previous pair's list is not an answer for
+    // it — keep the notice ("fetching…") honest by falling back to the
+    // built-ins, and bump the revision so the mounted step re-derives its
+    // checkbox state against what is actually on screen.
+    replaceRecommendations(null);
+    // The selection goes back with the list. Leaving the previous pair's
+    // prune in place would show the full built-in list over a selection
+    // missing ids from it — and if this pair's lookup fails, nothing else
+    // ever re-derives the selection.
+    injectedModelIdRef.current = null;
+    setDisplayedModelIds(authoredModelIdsRef.current);
+    setDiscoveryStatus('loading');
+
+    void (async () => {
+      const result = await fetchProviderModelIds({
+        baseUrl: resolvedBaseUrl,
+        apiKey: resolvedApiKey,
+        signal: controller.signal,
+      });
+      // `aborted` covers unmount; the key check covers a pair change that
+      // raced this continuation — the release above happens on the next effect
+      // run, which can land after this await resolved.
+      if (controller.signal.aborted) return;
+      if (discoveryKeyRef.current !== discoveryKey) return;
+      if (!result.ok) {
+        // Every failure mode lands here on purpose: the built-in list is a
+        // working answer, so the step stays usable and says so quietly.
+        // Quietly for the user, not for the log — the notice cannot say which
+        // of six reasons applied without turning a non-event into an error.
+        debugLogger.debug(
+          `Model discovery failed (${result.reason}): ${result.message}`,
+        );
+        // The list on screen changes back to the built-ins, so the mounted
+        // step must re-derive rather than keep checkbox state pointing at ids
+        // the built-in list does not offer.
+        replaceRecommendations(null);
+        setDiscoveryStatus('failed');
+        // A failure caches nothing, so releasing the pair key lets a later
+        // re-entry retry it. Claiming the key for the session would freeze a
+        // transient 429/timeout into "built-ins only" with no way back.
+        discoveryKeyRef.current = null;
+        return;
+      }
+      const merged = mergeDiscoveredModels(provider.models, result.ids);
+      discoveryCacheRef.current.set(discoveryKey, merged);
+      applyDiscoveredModels(provider, merged);
+    })();
+  }, [
+    currentStep,
+    provider,
+    baseUrl,
+    apiKey,
+    applyDiscoveredModels,
+    replaceRecommendations,
+    resetDiscovery,
+    setDisplayedModelIds,
+  ]);
 
   // -- Lifecycle ------------------------------------------------------------
 
@@ -166,7 +538,10 @@ export function useProviderSetupFlow(
       // flow.state.modelIds automatically based on config.models.
       const defaultIds = getDefaultModelIds(config);
       const customIds = existingModelIds ?? [];
-      setModelIds([...defaultIds, ...customIds].join(', '));
+      const initialModelIds = [...defaultIds, ...customIds].join(', ');
+      authoredModelIdsRef.current = initialModelIds;
+      injectedModelIdRef.current = null;
+      setDisplayedModelIds(initialModelIds);
       setModelIdsError(null);
       setThinkingEnabled(false);
       setModalityEnabled(false);
@@ -176,24 +551,30 @@ export function useProviderSetupFlow(
       setModalityPdf(false);
       setContextWindowSize('');
       setFocusedConfigIndex(0);
+      resetDiscovery();
     },
-    [],
+    [resetDiscovery, setDisplayedModelIds],
   );
 
   const reset = useCallback(() => {
     setProvider(null);
     setVisibleSteps([]);
     setStepIndex(0);
-  }, []);
+    resetDiscovery();
+  }, [resetDiscovery]);
 
   const goBack = useCallback((): boolean => {
+    // Stepping off `models` commits whatever was typed there: the pair change
+    // this Esc usually precedes restores the selection FROM the baseline, so
+    // an edit still sitting only on screen would be silently dropped.
+    if (currentStep === 'models') recordAuthoredModelIds();
     if (stepIndex > 0) {
       setStepIndex((i) => i - 1);
       return true;
     }
     reset();
     return false;
-  }, [stepIndex, reset]);
+  }, [currentStep, recordAuthoredModelIds, stepIndex, reset]);
 
   const goNext = useCallback(() => {
     setStepIndex((i) => Math.min(i + 1, visibleSteps.length - 1));
@@ -309,9 +690,16 @@ export function useProviderSetupFlow(
     [provider],
   );
 
-  const changeModelIds = useCallback((value: string) => {
-    setModelIds(value);
-    setModelIdsError(null);
+  const changeModelIds = useCallback(
+    (value: string, context?: ModelIdsEditContext) => {
+      editModelIds(value, context);
+      setModelIdsError(null);
+    },
+    [editModelIds],
+  );
+
+  const changeActiveCustomModelId = useCallback((value?: string) => {
+    activeCustomModelIdRef.current = value;
   }, []);
 
   const submitModelIds = useCallback(
@@ -321,12 +709,16 @@ export function useProviderSetupFlow(
         setModelIdsError(t('Model IDs cannot be empty.'));
         return false;
       }
-      setModelIds(normalized.join(', '));
+      const submitted = normalized.join(', ');
+      recordAuthoredModelIds(submitted);
+      // What is installed is the selection on screen, pruned; the baseline
+      // above only decides what a later pair change restores.
+      setDisplayedModelIds(submitted);
       setModelIdsError(null);
       submitOrNext({ ...overrides, modelIds: normalized });
       return true;
     },
-    [modelIds, submitOrNext],
+    [modelIds, recordAuthoredModelIds, setDisplayedModelIds, submitOrNext],
   );
 
   const advancedOptionCount = modalityEnabled ? 7 : 3;
@@ -488,6 +880,9 @@ export function useProviderSetupFlow(
     apiKeyError,
     modelIds,
     modelIdsError,
+    recommendedModels: discoveredModels ?? provider?.models ?? [],
+    discoveryStatus,
+    recommendedModelsRevision,
     thinkingEnabled,
     modalityEnabled,
     modalityImage,
@@ -512,6 +907,7 @@ export function useProviderSetupFlow(
     changeApiKey,
     submitApiKey,
     changeModelIds,
+    changeActiveCustomModelId,
     submitModelIds,
     moveAdvancedFocusUp,
     moveAdvancedFocusDown,

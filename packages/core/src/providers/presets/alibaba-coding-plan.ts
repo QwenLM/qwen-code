@@ -77,6 +77,8 @@ export const codingPlanProvider: ProviderConfig = {
   envKey: CODING_PLAN_ENV_KEY,
   models: MODELSTUDIO_MODELS,
   modelsEditable: true,
+  // Both regional endpoints serve `GET /v1/models`.
+  supportsModelDiscovery: true,
   modelNamePrefix: (baseUrl) =>
     baseUrl === CODING_PLAN_GLOBAL_BASE_URL
       ? 'ModelStudio Coding Plan for Global/Intl'

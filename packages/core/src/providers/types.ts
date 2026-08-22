@@ -78,6 +78,16 @@ export interface ProviderConfig {
   /** Show advanced config step (thinking, modalities). */
   showAdvancedConfig?: boolean;
 
+  /**
+   * Whether the setup wizard may ask the endpoint which models it currently
+   * serves (`GET {baseUrl}/models`) and recommend those instead of the
+   * built-in list. Only set this for providers whose endpoint is known to
+   * implement the OpenAI-compatible listing — everything else pays a request
+   * and a timeout to learn nothing. Metadata still comes from `models`, so
+   * the built-in list stays authoritative for anything discovery returns.
+   */
+  supportsModelDiscovery?: boolean;
+
   /** Validate the API key before submission. */
   validateApiKey?: (key: string, baseUrl: string) => string | null;
 

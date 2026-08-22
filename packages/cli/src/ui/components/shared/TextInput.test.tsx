@@ -9,6 +9,7 @@ import { render } from 'ink-testing-library';
 import { TextInput } from './TextInput.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import type { Key } from '../../hooks/useKeypress.js';
+import { act, useCallback, useState } from 'react';
 
 vi.mock('../../hooks/useKeypress.js', () => ({
   useKeypress: vi.fn(),
@@ -155,5 +156,37 @@ describe('TextInput', () => {
 
       expect(lastFrame()).toContain('sk-token-...23456789');
     });
+  });
+
+  it('does not overwrite a text change with a stale cursor report', async () => {
+    let activeText = '';
+
+    function Harness() {
+      const [value, setValue] = useState('ab');
+      const handleCursorChange = useCallback(() => {
+        activeText = value;
+      }, [value]);
+      const handleChange = useCallback((text: string) => {
+        activeText = text;
+        setValue(text);
+      }, []);
+
+      return (
+        <TextInput
+          value={value}
+          initialCursorOffset={2}
+          onCursorChange={handleCursorChange}
+          onChange={handleChange}
+        />
+      );
+    }
+
+    render(<Harness />);
+    const handler = captureKeypressHandler();
+    await act(async () => {
+      handler(makeKey({ name: 'c', sequence: 'c' }));
+    });
+
+    expect(activeText).toBe('abc');
   });
 });

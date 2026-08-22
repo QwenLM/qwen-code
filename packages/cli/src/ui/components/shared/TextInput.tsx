@@ -14,7 +14,7 @@ import { cpSlice, cpLen } from '../../utils/textUtils.js';
 import { theme } from '../../semantic-colors.js';
 import { Colors } from '../../colors.js';
 import type { Key } from '../../hooks/useKeypress.js';
-import { useCallback, useRef, useEffect, useState } from 'react';
+import { useCallback, useMemo, useRef, useEffect, useState } from 'react';
 import { renderSoftwareCursor } from '../../utils/software-cursor.js';
 
 export interface TextInputProps {
@@ -33,7 +33,23 @@ export interface TextInputProps {
   validationErrors?: string[];
   inputWidth?: number;
   initialCursorOffset?: number;
+  /**
+   * Reports the live caret as a flat code-point offset, in the same units
+   * `initialCursorOffset` takes. The buffer is uncontrolled and seeds itself
+   * at mount only, so a caller that has to remount the input needs this to
+   * hand the caret back instead of guessing where it was.
+   */
+  onCursorChange?: (offset: number) => void;
   ellipsizeOverflow?: boolean;
+}
+
+/** Inverse of the buffer's own offset -> [row, col] seeding. */
+function cursorOffsetOf(lines: string[], row: number, col: number): number {
+  let offset = 0;
+  for (let i = 0; i < row && i < lines.length; i++) {
+    offset += cpLen(lines[i]) + 1; // + the newline that ends the line
+  }
+  return offset + col;
 }
 
 function ellipsizeMiddle(text: string, width: number): string {
@@ -63,6 +79,7 @@ export function TextInput({
   validationErrors = [],
   inputWidth = 80,
   initialCursorOffset,
+  onCursorChange,
   ellipsizeOverflow = false,
 }: TextInputProps) {
   const allowMultiline = height > 1;
@@ -73,7 +90,18 @@ export function TextInput({
   useEffect(() => {
     onChangeRef.current = onChange;
   }, [onChange]);
+  const onCursorChangeRef = useRef(onCursorChange);
+  useEffect(() => {
+    onCursorChangeRef.current = onCursorChange;
+  }, [onCursorChange]);
+  const latestCursorOffsetRef = useRef(
+    initialCursorOffset ?? cpLen(value || ''),
+  );
+  const textChangeCursorOffsetRef = useRef<number | undefined>(undefined);
   const stableOnChange = useCallback((text: string) => {
+    const cursorOffset = latestCursorOffsetRef.current;
+    textChangeCursorOffsetRef.current = cursorOffset;
+    onCursorChangeRef.current?.(cursorOffset);
     onChangeRef.current?.(text);
   }, []);
 
@@ -90,6 +118,22 @@ export function TextInput({
     onChange: stableOnChange,
     preferredEditor,
   });
+
+  const [cursorRow, cursorCol] = buffer.cursor;
+  const bufferLines = buffer.lines;
+  const cursorOffset = useMemo(
+    () => cursorOffsetOf(bufferLines, cursorRow, cursorCol),
+    [bufferLines, cursorRow, cursorCol],
+  );
+  latestCursorOffsetRef.current = cursorOffset;
+  useEffect(() => {
+    if (textChangeCursorOffsetRef.current === cursorOffset) {
+      textChangeCursorOffsetRef.current = undefined;
+      return;
+    }
+    textChangeCursorOffsetRef.current = undefined;
+    onCursorChangeRef.current?.(cursorOffset);
+  }, [cursorOffset]);
 
   useEffect(() => {
     if (!isActive) {

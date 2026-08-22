@@ -16,6 +16,25 @@ import { UIActionsContext } from '../contexts/UIActionsContext.js';
 import type { UIState } from '../contexts/UIStateContext.js';
 import type { UIActions } from '../contexts/UIActionsContext.js';
 
+// Presets that have opted into model discovery fire `GET {baseUrl}/models`
+// the moment the wizard reaches the model step. Every full-wizard test below
+// walks through it, so without this the suite makes a real outbound request
+// per run against a live endpoint and only passes because discovery falls
+// back on failure.
+const fetchProviderModelIdsMock = vi.hoisted(() =>
+  vi.fn(async () => ({
+    ok: false as const,
+    reason: 'network' as const,
+    message: 'discovery disabled in tests',
+  })),
+);
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  return { ...actual, fetchProviderModelIds: fetchProviderModelIdsMock };
+});
+
 type UIStateOverrides = Partial<UIState> & Partial<UIState['auth']>;
 
 type UIActionsOverrides = Partial<UIActions> & Partial<UIActions['auth']>;
@@ -1333,6 +1352,9 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       // The Model IDs input is pre-filled with the saved custom model id
       // (which only exists in settings, never among the built-in defaults).
       expect(lastFrame()).toContain('my-custom-token-model');
+      // Token Plan has opted into discovery, so reaching this step fires the
+      // lookup — through the mock, not the live ModelStudio endpoint.
+      expect(fetchProviderModelIdsMock).toHaveBeenCalled();
 
       unmount();
     },
