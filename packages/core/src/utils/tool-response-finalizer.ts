@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
 import type { Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import type { ToolArtifact } from '../tools/tools.js';
@@ -16,6 +17,7 @@ import {
   type ToolResultBoundaryStage,
 } from './tool-result-boundary-diagnostics.js';
 import {
+  FULL_OUTPUT_DIGEST_LABEL,
   normalizeToolResultCallId,
   persistAndTruncateToolResult,
 } from './truncation.js';
@@ -215,14 +217,25 @@ function fitText(
   if (text.length <= maxChars) return text;
   if (maxChars <= 0) return '';
 
-  const header =
+  // sha256 of the full pre-fit text (FULL_OUTPUT_DIGEST_LABEL). The header
+  // embeds a per-call artifact path, so hashing the fitted output would
+  // fingerprint every call uniquely and silently disable the result-aware
+  // loop guards for exactly these oversized batch-budget results (issue
+  // #9450). The digest sits right after the constant prefix so it survives
+  // even when a tiny allocation slices the header.
+  const digest = createHash('sha256').update(text).digest('hex');
+  const digestLine = `${FULL_OUTPUT_DIGEST_LABEL}${digest}`;
+  const artifactNote =
     persistedOutputFiles && persistedOutputFiles.length > 0
       ? persistedOutputFiles.length === 1
-        ? `Tool output truncated. Persisted tool-output artifact: ${persistedOutputFiles[0]}`
-        : `Tool output truncated. Persisted tool-output artifacts:\n${persistedOutputFiles
+        ? `Persisted tool-output artifact: ${persistedOutputFiles[0]}`
+        : `Persisted tool-output artifacts:\n${persistedOutputFiles
             .map((file) => `- ${file}`)
             .join('\n')}`
-      : 'Tool output truncated.';
+      : undefined;
+  const header = artifactNote
+    ? `Tool output truncated.\n${digestLine}\n${artifactNote}`
+    : `Tool output truncated.\n${digestLine}`;
   if (header.length >= maxChars) {
     return sliceStartWithoutBrokenSurrogate(header, maxChars);
   }

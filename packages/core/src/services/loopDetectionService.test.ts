@@ -19,6 +19,7 @@ import type {
 import { GeminiEventType } from '../core/turn.js';
 import * as loggers from '../telemetry/loggers.js';
 import { LoopType } from '../telemetry/types.js';
+import { enforceFunctionResponseBudget } from '../utils/tool-response-finalizer.js';
 import {
   buildStub,
   PREVIEW_SIZE_CHARS,
@@ -2900,6 +2901,73 @@ describe('LoopDetectionService', () => {
         } finally {
           await fs.rm(spillDir, { recursive: true, force: true });
         }
+      });
+
+      // The batch-budget finalizer (fitText) rewrites oversized results into
+      // a header embedding a per-call artifact path plus a head/tail fit.
+      // Built through the real budget enforcer so the guard is tested
+      // against the producer's actual shape.
+      const batchBudgetResult = (callId: string, board: string): Part[] => {
+        const fitted = enforceFunctionResponseBudget(
+          [
+            {
+              callId,
+              toolName: 'task_list',
+              responseParts: [
+                {
+                  functionResponse: {
+                    id: callId,
+                    name: 'task_list',
+                    response: { output: board },
+                  },
+                },
+              ],
+              persistedOutputFiles: [`/tmp/qwen/tool-results/${callId}.txt`],
+            },
+          ],
+          1500,
+        );
+        return fitted[0].responseParts;
+      };
+
+      it('halts on a frozen batch-budget result despite per-call unique artifact paths', () => {
+        // Without the full-output digest in the fitText header, the unique
+        // artifact path fingerprints every poll uniquely and the guard
+        // never sees the frozen board.
+        let fired = false;
+        for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD; i++) {
+          fired = service.checkAlwaysOnSafeties(taskListEvent(`poll_${i}`));
+          if (fired) break;
+          service.recordToolResult(
+            { name: 'task_list', args: TASK_LIST_ARGS },
+            batchBudgetResult(`poll_${i}`, FROZEN_BOARD),
+          );
+        }
+        expect(fired).toBe(true);
+        expect(service.getLastLoopType()).toBe(
+          LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+        );
+      });
+
+      it('keeps batch-budget polling alive when the board changes beyond the fitted window', () => {
+        // fitText retains a head and a tail and drops the middle band, so a
+        // board mutating there fits to an identical head+tail on every
+        // poll. The digest must cover the FULL pre-fit text (not the
+        // fitted payload), or the guard halts this productive poller.
+        const head = 'task row head line\n'.repeat(30);
+        const tail = 'task row tail line\n'.repeat(80);
+        let fired = false;
+        for (let i = 0; i < 4 * TOOL_CALL_LOOP_THRESHOLD; i++) {
+          fired = service.checkAlwaysOnSafeties(taskListEvent(`poll_${i}`));
+          if (fired) break;
+          const middle = `middle band state v${i}\n`.repeat(800);
+          service.recordToolResult(
+            { name: 'task_list', args: TASK_LIST_ARGS },
+            batchBudgetResult(`poll_${i}`, `${head}${middle}${tail}`),
+          );
+        }
+        expect(fired).toBe(false);
+        expect(loggers.logLoopDetected).not.toHaveBeenCalled();
       });
     });
   });
