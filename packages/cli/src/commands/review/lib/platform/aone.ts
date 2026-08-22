@@ -14,7 +14,13 @@ import { git, gitRaw } from '../git.js';
 import { isOwnerRepo } from '../gh.js';
 import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from '../diff-flags.js';
 import { isAoneHostFamily } from '../remote-match.js';
-import { a1Json, ensureAoneAuthenticated } from './aone-client.js';
+import {
+  a1Json,
+  a1JsonOnce,
+  a1Once,
+  ensureAoneAuthenticated,
+  execErrorCause,
+} from './aone-client.js';
 import type {
   ClosingIssueRef,
   CommentKind,
@@ -216,6 +222,44 @@ function mrHeadRefSpec(prNumber: number): string {
   return `refs/merge-requests/${prNumber}/head`;
 }
 
+/** The MR's live head SHA: under AGit-Flow `sourceBranch` IS the head.
+ *  Stated ONCE for the provider — every read site (presubmit facts,
+ *  getPrMeta, getFetchMeta, submit's pre-write drift gate, the
+ *  head-moved-during-post re-read) routes through here. Hand-derived
+ *  copies had already diverged on normalization (two of the five read
+ *  untrimmed), and a padded server value then drifted against the
+ *  trimmed reads — a phantom "PR head advanced during review" for an MR
+ *  that never moved (#9629 review). */
+function aoneHeadSha(view: NonNullable<AoneMrView['mergeRequest']>): string {
+  return (view.sourceBranch ?? '').trim();
+}
+
+/**
+ * The two MR facts presubmit's gate compares, from ONE `mr view` fetch:
+ * the author's account name (self-PR detection — compared against the
+ * gate's whoami account) and the live head SHA (the drift
+ * check — under AGit-Flow `sourceBranch` IS the head). A missing author
+ * (deleted account) reports '', which fails the comparison soft, like the
+ * GitHub path's `author: null`. `username` is server-controlled, so it is
+ * type-guarded to a string and trimmed exactly like the gate's whoami
+ * account — a non-string reaching `.toLowerCase()` would crash the command
+ * outside presubmit's fetch try/catch instead of failing soft.
+ */
+export function mrPresubmitFacts(
+  prNumber: number,
+  ownerRepo: string,
+): { author: string; headSha: string } {
+  checkOwnerRepo(ownerRepo);
+  const view = mrView(prNumber, ownerRepo);
+  return {
+    author:
+      typeof view.author?.username === 'string'
+        ? view.author.username.trim()
+        : '',
+    headSha: aoneHeadSha(view),
+  };
+}
+
 /**
  * Allowlist shape for a server-controlled branch name reaching git's argv:
  * a plain branch name and nothing else — no option spellings, no refspec
@@ -276,16 +320,7 @@ export const aoneReader: ReviewPlatformReader = {
     try {
       url = git('remote', 'get-url', 'origin').trim();
     } catch (err) {
-      // execFileSync failure messages BEGIN with the fixed preamble
-      // "Command failed: git remote get-url origin"; git's actual error is
-      // the first NON-empty line after it (same pitfall aone-client
-      // documents). `.split('\n')[0]` would render only the preamble.
-      const cause =
-        (err as Error).message
-          .split('\n')
-          .slice(1)
-          .map((l) => l.trim())
-          .find(Boolean) ?? '';
+      const cause = execErrorCause(err);
       throw new Error(
         `cannot resolve the repository: no \`origin\` remote` +
           (cause ? ` (${cause})` : ''),
@@ -321,7 +356,7 @@ export const aoneReader: ReviewPlatformReader = {
     const view = mrView(prNumber, ownerRepo);
     return {
       number: prNumber,
-      headSha: view.sourceBranch ?? '',
+      headSha: aoneHeadSha(view),
       webUrl: view.detailUrl ?? '',
     };
   },
@@ -584,7 +619,7 @@ export const aoneReader: ReviewPlatformReader = {
     checkOwnerRepo(ownerRepo);
     const view = mrView(prNumber, ownerRepo);
     return {
-      headRefOid: view.sourceBranch ?? '',
+      headRefOid: aoneHeadSha(view),
       baseRefName: view.targetBranch ?? 'master',
       // The reviewer clones the repo the CR lives in — never cross-repo.
       isCrossRepository: false,
@@ -592,4 +627,394 @@ export const aoneReader: ReviewPlatformReader = {
       // Aone does not report diff stats; fetch-pr computes them locally.
     };
   },
+
+  composeUrl(prNumber: number, ownerRepo: string): string {
+    checkOwnerRepo(ownerRepo);
+    // Reader-backed by construction: an Aone MR link can NEVER be assembled
+    // from owner/repo — the collapse to the last two segments names a
+    // different (possibly nonexistent) repo for a nested-group project —
+    // so the only source is the platform's own detailUrl. A fetch failure
+    // degrades to '' — a missing link must not fail a consumer that owns
+    // the post's fate — but NOT silently: every other fail-open in this
+    // provider discloses on stderr, and a failing re-query (auth expiry,
+    // a network blip past the retry budget) must stay distinguishable
+    // from the designed coordinates-relay case.
+    try {
+      return mrView(prNumber, ownerRepo).detailUrl ?? '';
+    } catch (err) {
+      const cause = execErrorCause(err);
+      process.stderr.write(
+        `WARNING: the Aone MR-link lookup failed` +
+          (cause ? ` (${JSON.stringify(cause.slice(0, 80))})` : '') +
+          `; the Posted line degrades to the target's coordinates.\n`,
+      );
+      return '';
+    }
+  },
 };
+
+// ---------------------------------------------------------------------------
+// Write path — the Aone half of `qwen review submit` (Phase 3 of
+// docs/design/2026-08-13-review-platform-provider-abstraction.md).
+//
+// Aone has no Create-Review batch API: a review is N+1 calls — one
+// `a1 repo mr comment create` per inline finding, one for the summary,
+// plus `a1 repo mr approve` on an APPROVE. The order is the design's Q5
+// policy: inline first, summary LAST (the summary never references
+// something not yet posted), so a mid-batch failure leaves a state the
+// terminal report can describe exactly.
+// ---------------------------------------------------------------------------
+
+/** One inline finding as it lands on the MR. */
+export interface AoneInlineComment {
+  path: string;
+  /** The new-side line — a multi-line range posts on its END line. */
+  line: number;
+  body: string;
+}
+
+export interface AoneSubmitRequest {
+  prNumber: number;
+  ownerRepo: string;
+  /** The head SHA the review was composed against (GitHub's commit_id). */
+  commitId: string;
+  event: 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
+  /** The composed summary body. */
+  body: string;
+  comments: AoneInlineComment[];
+}
+
+export interface AoneSubmitResult {
+  /** Ids of the inline comments created (only the ones a1 reported). */
+  inlineCommentIds: number[];
+  /** How many inline comments were created — ids are best-effort. */
+  postedInline: number;
+  summaryCommentId?: number;
+  summaryPosted: boolean;
+  /** False only when the event was APPROVE and the approve call failed. */
+  approved: boolean;
+  approveError?: string;
+  /** True when the head moved DURING the posting batch — the pre-write
+   *  drift gate is check-then-post, so an amend pushed mid-batch orphans
+   *  every inline comment; the post stands but the pins may not. */
+  headMovedDuringPost?: boolean;
+  webUrl: string;
+}
+
+/**
+ * A write that FAILED MID-BATCH. The MR already carries part of the
+ * review; the structured counts keep submit's report exact, and its
+ * do-not-re-run advice keeps a retry from double-posting what landed.
+ *
+ * `ambiguous` says the FAILED write itself may have reached the server:
+ * an exec error cannot tell "refused" from "accepted, then the transport
+ * died" — a1 killed by the deadline AFTER the POST committed, a
+ * connection reset mid-response, an HTTP 5xx after the server wrote. The
+ * comment is then live on the MR while the count says it never landed,
+ * and a retry posts it twice. So an ambiguous failure is counted as
+ * LANDED for the do-not-re-run advisory — overcounting by one is a
+ * cosmetic lie; undercounting is a duplicate post.
+ *
+ * `headMovedDuringPost` carries the mid-batch drift disclosure the
+ * success path re-reads for: a batch runs minutes of sequential execs,
+ * and an AGit-Flow amend pushed mid-batch orphans the landed pins at
+ * code the author already replaced. Undefined when the re-read itself
+ * failed — "could not verify" is not "verified stable", but it also
+ * must not mask the post failure.
+ */
+export class AonePartialPostError extends Error {
+  constructor(
+    message: string,
+    readonly postedInline: number,
+    readonly inlineCommentIds: number[],
+    readonly summaryPosted: boolean,
+    readonly ambiguous: boolean = false,
+    readonly headMovedDuringPost?: boolean,
+  ) {
+    super(message);
+    this.name = 'AonePartialPostError';
+  }
+}
+
+/** The created comment's id, read back best-effort — shapes tolerated:
+ *  `{id}`, or one level nested (`{comment|note|result|data: {id}}`). The
+ *  id feeds the failure report and tomorrow's audit; a miss degrades to
+ *  "posted, id unknown", never to a failed submit. */
+function createdCommentId(out: unknown): number | undefined {
+  if (out === null || typeof out !== 'object') return undefined;
+  const o = out as Record<string, unknown>;
+  if (typeof o['id'] === 'number') return o['id'];
+  for (const key of ['comment', 'note', 'result', 'data']) {
+    const nested = o[key];
+    if (nested !== null && typeof nested === 'object') {
+      const id = (nested as Record<string, unknown>)['id'];
+      if (typeof id === 'number') return id;
+    }
+  }
+  return undefined;
+}
+
+function createMrComment(
+  prNumber: number,
+  ownerRepo: string,
+  message: string,
+  inline?: { path: string; line: number },
+): number | undefined {
+  // No AI-comment marking here, BY PLATFORM CONSTRAINT: probed 2026-08-21
+  // on a scratch CR (issue #9614) — `comment create` does NOT auto-set
+  // `isAiComment` for the posting identity (both a general and an inline
+  // probe read back false, re-checked minutes later against an async
+  // classifier), and a1 v0.1.90 exposes no flag to request it. Created
+  // comments therefore sit in the generic discussion gate, never the
+  // dedicated ai_comment merge gate; submit's REQUEST_CHANGES note
+  // discloses that. When a1 ships a marking flag, THIS call is where it
+  // gets passed.
+  // a1JsonOnce is the tolerant read-back: an exec FAILURE propagates (a real
+  // post failure — the partial-post path counts what landed before it), but a
+  // SUCCEEDED exec whose answer does not parse is "accepted, id unknown", not
+  // a failure. Throwing on the parse miss would undercount the partial-post
+  // report by exactly this comment and, if it was the first, suppress the
+  // do-not-re-run advisory altogether (see aone-client.ts).
+  const out = a1JsonOnce<unknown>(
+    'repo',
+    'mr',
+    'comment',
+    'create',
+    '--mr',
+    String(prNumber),
+    '--repo',
+    ownerRepo,
+    ...(inline ? ['--file', inline.path, '--line', String(inline.line)] : []),
+    '--message',
+    message,
+  );
+  return createdCommentId(out);
+}
+
+/** The cause of an a1 failure for a terminal report — the one line the
+ *  user reads, capped so a kilobyte stack trace never lands there. */
+function a1Cause(err: unknown): string {
+  const e = err as Error & {
+    stderr?: Buffer | string;
+    status?: number;
+    signal?: string;
+  };
+  const firstLine = (text: string): string | undefined =>
+    text
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .find(Boolean);
+  // The message an execFileSync failure raises is NEVER a text source
+  // here: its first line is the "Command failed: a1 …" preamble, and Node
+  // embeds the FULL argv in that preamble — for a comment create, the
+  // ENTIRE multi-line comment body. a1's real error rides the captured
+  // `stderr` property. An empty-stderr failure (the 120 s deadline kill
+  // — aone-client's own note: "usually no stderr" — SIGKILL/OOM, an a1
+  // crash before writing) has no trustworthy text source at all, so the
+  // fallback reports the EXIT FACTS, never the message: parsing it would
+  // quote a line of the operator's own review text as the "cause".
+  const stderr = e.stderr === undefined ? undefined : String(e.stderr);
+  const cause =
+    (stderr === undefined ? undefined : firstLine(stderr)) ??
+    `a1 failed without stderr` +
+      (typeof e.status === 'number' ? ` (exit ${e.status})` : '') +
+      (e.signal ? ` (signal ${e.signal})` : '');
+  return cause.length > 300 ? `${cause.slice(0, 300)}…` : cause;
+}
+
+/** The post-batch head re-read, stated ONCE for both disclosure paths:
+ *  did the MR head move away from the composed `commitId`? Undefined when
+ *  the re-read itself failed OR came back without a head to compare —
+ *  "could not verify" is not "verified stable", and either shape
+ *  degrades to unknown; it never masks the outcome it reports on (the
+ *  post failure on the partial path, the post itself on the success
+ *  path). */
+function headMovedSinceCompose(
+  prNumber: number,
+  ownerRepo: string,
+  commitId: string,
+): boolean | undefined {
+  try {
+    const afterHead = aoneHeadSha(mrView(prNumber, ownerRepo));
+    if (afterHead === '') return undefined;
+    return afterHead !== commitId;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Post a composed review to an Aone MR. The verdict mapping is the
+ * design's D6: APPROVE runs the native `mr approve` AFTER the summary
+ * lands; COMMENT is the summary alone; REQUEST_CHANGES has NO native
+ * equivalent — the summary carries an explicit blocking header, and the
+ * unresolved inline Criticals carry the blocking semantics through the
+ * discussion merge gate (NEVER the ai_comment gate: a1 cannot mark a
+ * comment as AI — see createMrComment).
+ *
+ * Throws BEFORE writing when the head drifted (the commit_id check
+ * GitHub's API performs server-side). Throws AonePartialPostError when
+ * a write fails mid-batch; an approve failure alone does NOT throw —
+ * the review is fully posted, only the native approval is missing, and
+ * the result says so.
+ */
+export function submitAoneReview(req: AoneSubmitRequest): AoneSubmitResult {
+  checkOwnerRepo(req.ownerRepo);
+  ensureAoneAuthenticated();
+
+  const view = mrView(req.prNumber, req.ownerRepo);
+  // a1 comments carry no commit anchor — the drift gate GitHub's Create
+  // Review API enforces server-side (422 on a moved commit_id) lives
+  // here. Under AGit-Flow an update AMENDS the single commit: posting a
+  // review composed against the orphaned head would pin every inline
+  // comment at code the author already replaced. An empty sourceBranch
+  // cannot gate — nothing to compare against — and posts unanchored.
+  const liveHead = aoneHeadSha(view);
+  if (liveHead !== '' && liveHead !== req.commitId) {
+    throw new Error(
+      `refusing to post: the MR head moved — the review was composed ` +
+        `against ${req.commitId}, but the live head is ${liveHead}. ` +
+        `Re-review the new head before posting.`,
+    );
+  }
+
+  // a1 takes the whole comment body as ONE argv element, and Linux caps a
+  // single element at MAX_ARG_STRLEN = 131072 BYTES (not characters).
+  // compose-review's BODY_MAX_CHARS is 65536 *characters* — a limit written
+  // for GitHub and counted in chars — a CJK character is 3 bytes in UTF-8,
+  // and a bilingual body folds the full Chinese copy in again. A long
+  // Chinese review therefore sits comfortably inside the composer's cap and
+  // outside the OS argv limit: the summary create — deliberately LAST —
+  // would die with E2BIG only after every inline comment already landed,
+  // stranding the MR with blockers and no verdict. Guard every message up
+  // front so the batch refuses WHOLE, before anything posts. (The GitHub
+  // branch streams over stdin precisely to dodge this; a1 has no stdin or
+  // file input for `--message`, so a size gate is the honest substitute.)
+  const A1_ARG_MAX_BYTES = 131072;
+  const summaryMessage =
+    req.event === 'REQUEST_CHANGES'
+      ? `**Request changes**\n\n${req.body}`
+      : req.body;
+  const oversized = [
+    ...req.comments.map((c, i) => ({
+      what: `inline comment ${i + 1} (${c.path}:${c.line})`,
+      text: c.body,
+    })),
+    { what: 'the summary comment', text: summaryMessage },
+  ].find((m) => Buffer.byteLength(m.text, 'utf8') >= A1_ARG_MAX_BYTES);
+  if (oversized) {
+    throw new Error(
+      `refusing to post: ${oversized.what} is ` +
+        `${Buffer.byteLength(oversized.text, 'utf8')} bytes — over the ` +
+        `${A1_ARG_MAX_BYTES}-byte single-argument limit a1 must pass it ` +
+        `as. Nothing was written; the findings are in the terminal ` +
+        `output and the saved report, and the USER can post them by ` +
+        `hand — hand-posting is never an agent action.`,
+    );
+  }
+
+  const postedIds: Array<number | undefined> = [];
+  let summaryPosted = false;
+  let summaryCommentId: number | undefined;
+  try {
+    for (const c of req.comments) {
+      postedIds.push(
+        createMrComment(req.prNumber, req.ownerRepo, c.body, {
+          path: c.path,
+          line: c.line,
+        }),
+      );
+    }
+    // An empty summary posts nothing: `-m ''` is refused by a1, and an
+    // empty summary comment would be noise. Guard on the MESSAGE actually
+    // posted (`summaryMessage`), not the raw body — on REQUEST_CHANGES the
+    // blocking header is prepended, so a header-only summary still posts
+    // even when the composed body is empty (which compose-review produces
+    // today: C≥1 with inline-only Criticals → RC with body ''). The same
+    // `summaryMessage` is what the size gate above measures — one view of
+    // the decision, not two. (For COMMENT/APPROVE, summaryMessage ===
+    // req.body, so an empty body still skips.)
+    if (summaryMessage.trim() !== '') {
+      summaryCommentId = createMrComment(
+        req.prNumber,
+        req.ownerRepo,
+        summaryMessage,
+      );
+      summaryPosted = true;
+    }
+  } catch (err) {
+    // Every error that reaches here is a write's EXEC failure — parse
+    // misses are tolerated one layer down and never throw. An exec
+    // failure cannot distinguish "refused" from "accepted, then the
+    // transport died", so the failing write may ALREADY be live on the
+    // MR even though the count never saw it: mark the failure ambiguous
+    // so submit's do-not-re-run advisory fires regardless of the count.
+    const ids = postedIds.filter((n): n is number => typeof n === 'number');
+    // State the summary's fate explicitly when it was the write that died:
+    // "N of N inline comment(s) landed" alone reads as a complete review,
+    // but the verdict carrier (the blocking header on a Request changes)
+    // is then absent from the MR — the one fact remainder-completion needs.
+    const summaryFate =
+      !summaryPosted && postedIds.length === req.comments.length
+        ? `; the summary did NOT land`
+        : '';
+    // The same mid-batch drift disclosure the success path carries: an
+    // amend pushed during the batch orphans the landed pins, and a write
+    // failure must not silently drop the warning.
+    throw new AonePartialPostError(
+      `posting to MR ${req.prNumber} of ${req.ownerRepo} failed after ` +
+        `${postedIds.length} of ${req.comments.length} inline comment(s)` +
+        `${summaryPosted ? ' and the summary' : ''} landed` +
+        `${summaryFate}: ` +
+        a1Cause(err),
+      postedIds.length,
+      ids,
+      summaryPosted,
+      true,
+      headMovedSinceCompose(req.prNumber, req.ownerRepo, req.commitId),
+    );
+  }
+
+  let approved = false;
+  let approveError: string | undefined;
+  if (req.event === 'APPROVE') {
+    try {
+      a1Once(
+        'repo',
+        'mr',
+        'approve',
+        String(req.prNumber),
+        '--repo',
+        req.ownerRepo,
+      );
+      approved = true;
+    } catch (err) {
+      // Not a failed review — inline + summary are posted; only the
+      // native approval is missing. Report it and let the user re-run
+      // the one missing command.
+      approveError = a1Cause(err);
+    }
+  }
+
+  return {
+    inlineCommentIds: postedIds.filter(
+      (n): n is number => typeof n === 'number',
+    ),
+    postedInline: postedIds.length,
+    summaryCommentId,
+    summaryPosted,
+    approved,
+    approveError,
+    // The drift gate above is check-then-post; the batch is N+1 sequential
+    // execs (minutes for a long review), so a head that moves DURING it
+    // slips the gate — re-read once and disclose; the success report must
+    // not claim the pins held, and a read failure must not fail the post.
+    headMovedDuringPost: headMovedSinceCompose(
+      req.prNumber,
+      req.ownerRepo,
+      req.commitId,
+    ),
+    webUrl: view.detailUrl ?? '',
+  };
+}

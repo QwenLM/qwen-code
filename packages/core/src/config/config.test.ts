@@ -3202,6 +3202,51 @@ describe('Server Config (config.ts)', () => {
       },
     );
 
+    it('adopts the active transcript when writer activation sees both states', async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440099';
+      const sessionData = {
+        conversation: {
+          sessionId,
+          projectHash: 'test',
+          startTime: new Date(0).toISOString(),
+          lastUpdated: new Date(0).toISOString(),
+          messages: [],
+        },
+        filePath: `/tmp/${sessionId}.jsonl`,
+        lastCompletedUuid: null,
+      } as ResumedSessionData;
+      const config = new Config({
+        ...baseParams,
+        sessionId,
+        chatRecording: true,
+        experimentalZedIntegration: true,
+        sessionWriterLeaseEnabled: true,
+      });
+      const service = config.getSessionService();
+      vi.spyOn(service, 'getSessionLocation').mockResolvedValue('conflict');
+      const loadSession = vi
+        .spyOn(service, 'loadSession')
+        .mockResolvedValue(sessionData);
+      const lease = {
+        sessionId,
+        transcriptExistedAtAcquire: true,
+        isReleased: false,
+        assertOwnedAndUnchanged: vi.fn().mockResolvedValue(undefined),
+        release: vi.fn().mockResolvedValue(undefined),
+      } as unknown as SessionWriterLease;
+      const acquire = vi
+        .spyOn(SessionWriterLease, 'acquire')
+        .mockResolvedValue(lease);
+
+      await (
+        config as unknown as { activateChatRecording(): Promise<void> }
+      ).activateChatRecording();
+
+      expect(loadSession).toHaveBeenCalledWith(sessionId);
+      expect(config.hasSessionWriteOwnership()).toBe(true);
+      acquire.mockRestore();
+    });
+
     it('releases a pending lease while a real baseline read is gated', async () => {
       const root = await mkdtemp(path.join(os.tmpdir(), 'qwen-config-writer-'));
       const runtimeBaseDir = path.join(root, 'runtime');
@@ -6343,6 +6388,7 @@ describe('Server Config (config.ts)', () => {
       oldChatsDir,
       `${sessionId}.worktree.json`,
     );
+    const oldPrSessionPath = path.join(oldChatsDir, `${sessionId}.pr.json`);
     const newTranscriptPath = path.join(newChatsDir, `${sessionId}.jsonl`);
     const newRuntimeStatusPath = path.join(
       newChatsDir,
@@ -6352,6 +6398,7 @@ describe('Server Config (config.ts)', () => {
       newChatsDir,
       `${sessionId}.worktree.json`,
     );
+    const newPrSessionPath = path.join(newChatsDir, `${sessionId}.pr.json`);
     const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
       // Keep the test process in its original directory.
     });
@@ -6360,6 +6407,7 @@ describe('Server Config (config.ts)', () => {
       oldTranscriptPath,
       oldRuntimeStatusPath,
       oldWorktreeSessionPath,
+      oldPrSessionPath,
     ];
     vi.mocked(fs.existsSync).mockImplementation((pathToCheck) => {
       const checked = pathToCheck.toString();
@@ -6382,6 +6430,10 @@ describe('Server Config (config.ts)', () => {
     expect(fs.renameSync).toHaveBeenCalledWith(
       oldWorktreeSessionPath,
       newWorktreeSessionPath,
+    );
+    expect(fs.renameSync).toHaveBeenCalledWith(
+      oldPrSessionPath,
+      newPrSessionPath,
     );
     expect(config.getTranscriptPath()).toBe(newTranscriptPath);
 
@@ -7665,6 +7717,58 @@ describe('Server Config (config.ts)', () => {
         (registerToolMock as Mock).mock.calls.map((call) => call[0]),
       ).toContain(ToolNames.ZOOM_IMAGE);
     });
+
+    it('does not register list_directory by default (opt-in tool)', async () => {
+      const config = new Config(baseParams);
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).not.toContain(ToolNames.LS);
+    });
+
+    it('registers list_directory when lsToolEnabled is true', async () => {
+      const config = new Config({ ...baseParams, lsToolEnabled: true });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).toContain(ToolNames.LS);
+    });
+
+    it.each([
+      { label: 'the canonical name', entry: ToolNames.LS },
+      { label: 'an alias', entry: 'ListFiles' },
+      { label: 'a path specifier', entry: `${ToolNames.LS}(/src)` },
+    ])(
+      'registers list_directory when listed in coreTools via $label',
+      async ({ entry }) => {
+        const config = new Config({
+          ...baseParams,
+          coreTools: [ToolNames.READ_FILE, entry],
+        });
+        await config.initialize();
+
+        const registerToolMock = (
+          (await vi.importMock('../tools/tool-registry')) as {
+            ToolRegistry: { prototype: { registerFactory: Mock } };
+          }
+        ).ToolRegistry.prototype.registerFactory;
+        expect(
+          (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+        ).toContain(ToolNames.LS);
+      },
+    );
 
     it('should ignore coreTools overrides in bare mode', async () => {
       const config = new Config({

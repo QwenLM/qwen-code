@@ -86,6 +86,8 @@ import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
 import { DialogShell } from '../dialogs/DialogShell';
 import { WorkspaceSection, isAbsolutePath } from './WorkspaceSection';
+import { sessionMatchesGitQuery } from './sessionSearch';
+import { SessionPrBadge } from '../SessionPrBadge';
 import {
   hasWorkspaceExpansionPreference,
   migrateWorkspaceExpansionPreference,
@@ -3300,7 +3302,8 @@ export function WebShellSidebar({
           const label = getSessionLabel(session).toLowerCase();
           return (
             label.includes(query) ||
-            session.sessionId.toLowerCase().includes(query)
+            session.sessionId.toLowerCase().includes(query) ||
+            sessionMatchesGitQuery(session, query)
           );
         })
       : unpinnedSessions.slice();
@@ -3617,6 +3620,7 @@ export function WebShellSidebar({
       ) : session.branch ? (
         <GitBranchIcon aria-label={session.branch.name} />
       ) : null;
+      const prBadge = <SessionPrBadge prs={session.prs ?? []} />;
       const withDetails = (row: ReactElement) => (
         <Fragment key={sessionIdentity}>
           {sessionActionItems.has('details') ? (
@@ -3689,6 +3693,7 @@ export function WebShellSidebar({
                 <span className={styles.sessionTextInner}>{label}</span>
               </span>
             )}
+            {prBadge}
             <div
               className={styles.sessionMetaSlot}
               style={
@@ -3865,6 +3870,7 @@ export function WebShellSidebar({
               <span className={styles.sessionText} data-web-shell-session-title>
                 <span className={styles.sessionTextInner}>{label}</span>
               </span>
+              {prBadge}
               <div
                 className={styles.sessionMetaSlot}
                 style={
@@ -5171,6 +5177,7 @@ export function WebShellSidebar({
                                       <button
                                         className={styles.workspaceHeaderAction}
                                         type="button"
+                                        title={t('sidebar.groupCreate')}
                                         aria-label={t('sidebar.groupCreate')}
                                         onClick={(event) => {
                                           event.preventDefault();
