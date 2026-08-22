@@ -36,7 +36,7 @@ import {
   type Finding,
   type FindingsReport,
   holdCriticalsFailingOnBase,
-  holdUnwitnessedCriticals,
+  holdUnwitnessedFindings,
   sharedFailingFilesOf,
 } from './findings.js';
 
@@ -690,7 +690,7 @@ describe('findings (command boundary)', () => {
   }
 
   it('demotes an unwitnessed Critical through the whole handler, and says so on stderr', () => {
-    // The unit tests pin holdUnwitnessedCriticals in isolation; this pins the
+    // The unit tests pin holdUnwitnessedFindings in isolation; this pins the
     // WIRING — the call sits in the handler before buildReport, so removing
     // it, or moving it after the report is built, fails here, not silently.
     const input = join(dir, 'in.json');
@@ -1526,7 +1526,7 @@ describe('findings (command boundary)', () => {
   });
 });
 
-describe('holdUnwitnessedCriticals — the witness rule has a machine half', () => {
+describe('holdUnwitnessedFindings — the witness rule has a machine half', () => {
   const critical = {
     id: 'w1',
     severity: 'Critical' as const,
@@ -1542,7 +1542,7 @@ describe('holdUnwitnessedCriticals — the witness rule has a machine half', () 
     // The demotion the SKILL promises as mechanical: without this, the sort
     // exists only as Step 4 prose, and an omitted `confidence` even defaults
     // to `high` — the fail-open direction (dogfood review of the witness PR).
-    const { findings, unwitnessed } = holdUnwitnessedCriticals([critical]);
+    const { findings, unwitnessed } = holdUnwitnessedFindings([critical]);
     expect(findings[0].confidence).toBe('low');
     expect(findings[0].severity).toBe('Critical');
     expect(findings[0].failureScenario).toContain('witness rule');
@@ -1556,7 +1556,7 @@ describe('holdUnwitnessedCriticals — the witness rule has a machine half', () 
       'BASE: 2 calls / PR: 1 call — probe flipped',
       'not run — needs a live OAuth endpoint this harness lacks',
     ]) {
-      const { findings, unwitnessed } = holdUnwitnessedCriticals([
+      const { findings, unwitnessed } = holdUnwitnessedFindings([
         { ...critical, witness },
       ]);
       expect(findings[0].confidence).toBe('high');
@@ -1568,7 +1568,7 @@ describe('holdUnwitnessedCriticals — the witness rule has a machine half', () 
     // A [build]/[test]/[probe] finding IS a run's output; demanding a second
     // witness would demote findings the pipeline treats as pre-confirmed.
     for (const source of ['build', 'test', 'probe', 'lint'] as const) {
-      const { unwitnessed } = holdUnwitnessedCriticals([
+      const { unwitnessed } = holdUnwitnessedFindings([
         { ...critical, source },
       ]);
       expect(unwitnessed).toEqual([]);
@@ -1576,15 +1576,42 @@ describe('holdUnwitnessedCriticals — the witness rule has a machine half', () 
   });
 
   it('is idempotent — a demoted finding re-fed is not touched again', () => {
-    const once = holdUnwitnessedCriticals([critical]).findings[0];
-    const twice = holdUnwitnessedCriticals([once]).findings[0];
+    const once = holdUnwitnessedFindings([critical]).findings[0];
+    const twice = holdUnwitnessedFindings([once]).findings[0];
     expect(twice).toEqual(once);
-    // Suggestions are never judged: the rule targets the severity that posts
-    // as a blocker.
+  });
+
+  it('judges Suggestions on the same terms — they post to the PR too', () => {
+    // The rule originally targeted Criticals only; an unexecuted claim rides
+    // onto the author's screen through the Suggestion door on exactly the
+    // same terms, so both postable severities are judged. `Nice to have` is
+    // terminal-only by construction and stays exempt.
+    const { findings, unwitnessed } = holdUnwitnessedFindings([
+      { ...critical, severity: 'Suggestion' },
+    ]);
+    expect(findings[0].confidence).toBe('low');
+    expect(findings[0].failureScenario).toContain('witness rule');
+    expect(unwitnessed).toEqual(['w1']);
     expect(
-      holdUnwitnessedCriticals([{ ...critical, severity: 'Suggestion' }])
+      holdUnwitnessedFindings([{ ...critical, severity: 'Nice to have' }])
         .unwitnessed,
     ).toEqual([]);
+  });
+
+  it('treats a reason-less `not run` line as no witness at all', () => {
+    // The escape hatch is the REASON, not the phrase: `not run —` with
+    // nothing after the dash names nothing a human can weigh, so it counts
+    // as absent. A real reason of any length stands.
+    for (const witness of ['not run', 'not run —', 'witness: not run - ']) {
+      const { unwitnessed } = holdUnwitnessedFindings([
+        { ...critical, witness },
+      ]);
+      expect(unwitnessed).toEqual(['w1']);
+    }
+    const { unwitnessed } = holdUnwitnessedFindings([
+      { ...critical, witness: 'not run — timing window no probe can pin' },
+    ]);
+    expect(unwitnessed).toEqual([]);
   });
 });
 
