@@ -1815,31 +1815,37 @@ export const useGeminiStream = (
   // exact-routed to the override and silently placeholder-substituted by the
   // route's slimming (the model answers about media it never received). Detect
   // that here and fail the unsupported modality closed visibly instead.
+  // Full-turn vision selectors are no exception: they are NUL-terminated and
+  // installed without any capability probe (only the establishing modality is
+  // implied — audio in a later tool result is never validated), so their
+  // continuations run through the same fail-closed resolution with the NUL
+  // marker stripped.
   const applyToolResultMediaGate = useCallback(
-    async (
-      query: PartListUnion,
-      timestamp: number,
-    ): Promise<PartListUnion> => {
+    async (query: PartListUnion, timestamp: number): Promise<PartListUnion> => {
       const nested = detectNestedFunctionResponseMedia(query);
       if (!nested.hasImage && !nested.hasAudio) return query;
-      // Only a media-routed inline override exact-routes this continuation: a
-      // full-turn selector already ends with the NUL marker and owns the whole
-      // turn, and without a media-routed override the send goes to the session
-      // model where normal bridging/slimming applies.
+      // Only a media-routed override exact-routes this continuation; without
+      // one the send goes to the session model where normal bridging/slimming
+      // applies. The NUL marker is NOT a bypass: full-turn vision selectors
+      // are NUL-terminated by construction and installed without a capability
+      // probe, so strip the marker and fail-close-resolve the underlying
+      // selector exactly like the bridge capability checks above.
       const activeOverride = modelOverrideRef.current;
       if (
         activeOverride === undefined ||
-        activeOverride.endsWith('\0') ||
         mediaRoutedOverrideRef.current !== activeOverride
       ) {
         return query;
       }
+      const routeSelector = activeOverride.endsWith('\0')
+        ? activeOverride.slice(0, -1)
+        : activeOverride;
       let supportsImage = false;
       let supportsAudio = false;
       try {
         const runtimeView = await config
           .getBaseLlmClient()
-          .resolveForModel(activeOverride, { failClosed: true });
+          .resolveForModel(routeSelector, { failClosed: true });
         supportsImage =
           runtimeView.contentGeneratorConfig.modalities?.image === true;
         supportsAudio =
@@ -1849,7 +1855,7 @@ export const useGeminiStream = (
         // media silently, so treat it as supporting nothing and surface the
         // omission below.
         debugLogger.warn(
-          `tool-result media gate could not resolve override '${activeOverride}': ${
+          `tool-result media gate could not resolve override '${routeSelector}': ${
             error instanceof Error ? error.message : String(error)
           }`,
         );
@@ -4225,13 +4231,26 @@ export const useGeminiStream = (
                       userMessageTimestamp,
                       abortSignal,
                     ).then(
-                      ({
+                      async ({
                         parts,
                         shouldProceed,
                         preOverrideParts,
                         mediaRouted,
                       }) => ({
-                        queryToSend: parts,
+                        // A stored retry payload can also nest tool-result
+                        // media in functionResponse.parts (invisible to the
+                        // top-level has* checks above); gate it exactly like
+                        // the non-Retry function-response branch so a still
+                        // active media-routed override never exact-routes
+                        // unvalidated nested media into silent route
+                        // slimming.
+                        queryToSend:
+                          shouldProceed && parts !== null
+                            ? await applyToolResultMediaGate(
+                                parts,
+                                userMessageTimestamp,
+                              )
+                            : parts,
                         shouldProceed,
                         // Carry the fresh pre-override parts so a retry whose
                         // re-bridge fails again stores the original media in
@@ -4241,7 +4260,13 @@ export const useGeminiStream = (
                         mediaRouted,
                       }),
                     )
-                  : { queryToSend: query, shouldProceed: true }
+                  : {
+                      queryToSend: await applyToolResultMediaGate(
+                        query,
+                        userMessageTimestamp,
+                      ),
+                      shouldProceed: true,
+                    }
                 : await prepareQueryForGemini(
                     query,
                     userMessageTimestamp,
@@ -4842,6 +4867,7 @@ export const useGeminiStream = (
       streamingState,
       setModelSwitchedFromQuotaError,
       applyBridgeConversionsIfNeeded,
+      applyToolResultMediaGate,
       prepareQueryForGemini,
       processGeminiStreamEvents,
       pendingHistoryItemRef,

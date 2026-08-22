@@ -1999,6 +1999,146 @@ describe('useGeminiStream', () => {
       ).toBeUndefined();
     });
 
+    it('fails closed a tool-result audio a full-turn vision selector cannot hear', async () => {
+      enableBridge();
+      mockHandleSlashCommand.mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'describe' }, imagePart],
+      });
+      mockConfig.getDefaultVisionBridgeModel = vi.fn(() => ({
+        id: 'vision-agent',
+        baseUrl: 'https://vision.example.com/v1',
+        agentCapable: true,
+      }));
+      // The full-turn selector is installed without any capability probe —
+      // only the establishing modality (images) is implied. Resolve reports an
+      // image-only model so a tool result nesting audio is the unvalidated
+      // modality.
+      const resolveForModel = vi.fn().mockResolvedValue({
+        contentGeneratorConfig: { modalities: { image: true } },
+      });
+      mockConfig.getBaseLlmClient = vi.fn(() => ({ resolveForModel }) as never);
+      const selector = 'vision-agent\0https://vision.example.com/v1\0';
+      const { result, mockSendMessageStream } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('/inspect-image');
+      });
+      expect(mockSendMessageStream.mock.calls[0]?.[3]).toMatchObject({
+        modelOverride: selector,
+      });
+
+      // The agent-capable vision model ran a tool whose result nests audio in
+      // functionResponse.parts. The NUL-terminated selector exact-routes the
+      // continuation, so the gate must fail the unvalidated audio closed
+      // visibly instead of letting route slimming placeholder-substitute it.
+      await act(async () => {
+        await result.current.submitQuery(
+          [
+            {
+              functionResponse: {
+                id: 'tool-call',
+                name: 'read_file',
+                response: { output: 'recording attached' },
+                parts: [
+                  { inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' } },
+                ],
+              },
+            } as never,
+          ],
+          SendMessageType.ToolResult,
+        );
+      });
+
+      const sent = JSON.stringify(mockSendMessageStream.mock.calls[1]?.[0]);
+      expect(sent).not.toContain('audio/wav');
+      expect(sent).not.toContain('UklGRg==');
+      expect(sent).toContain('was not sent');
+      // The continuation stays on the exact route; only the media is gated.
+      expect(mockSendMessageStream.mock.calls[1]?.[3]).toMatchObject({
+        modelOverride: selector,
+      });
+      expect(resolveForModel).toHaveBeenCalledWith(
+        'vision-agent\0https://vision.example.com/v1',
+        { failClosed: true },
+      );
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.ERROR,
+          text: expect.stringContaining(
+            'Audio returned by a tool was not sent',
+          ),
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('gates nested tool-result media re-submitted through the Retry branch', async () => {
+      enableBridge();
+      mockHandleSlashCommand.mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'describe' }, imagePart],
+      });
+      mockConfig.getDefaultVisionBridgeModel = vi.fn(() => ({
+        id: 'vision-agent',
+        baseUrl: 'https://vision.example.com/v1',
+        agentCapable: true,
+      }));
+      const resolveForModel = vi.fn().mockResolvedValue({
+        contentGeneratorConfig: { modalities: { image: true } },
+      });
+      mockConfig.getBaseLlmClient = vi.fn(() => ({ resolveForModel }) as never);
+      const selector = 'vision-agent\0https://vision.example.com/v1\0';
+      const { result, mockSendMessageStream } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('/inspect-image');
+      });
+      expect(mockSendMessageStream.mock.calls[0]?.[3]).toMatchObject({
+        modelOverride: selector,
+      });
+
+      // A stored retry payload (e.g. built from the ungated tool responses of
+      // a failed steer drain) is re-submitted via Ctrl+Y. Its nested media is
+      // invisible to the branch's top-level has* checks, so the branch itself
+      // must run the gate: the full-turn selector survives Retry and would
+      // exact-route the unvalidated audio into silent route slimming.
+      await act(async () => {
+        await result.current.submitQuery(
+          [
+            {
+              functionResponse: {
+                id: 'tool-call',
+                name: 'read_file',
+                response: { output: 'recording attached' },
+                parts: [
+                  { inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' } },
+                ],
+              },
+            } as never,
+          ],
+          SendMessageType.Retry,
+        );
+      });
+
+      const sent = JSON.stringify(mockSendMessageStream.mock.calls[1]?.[0]);
+      expect(sent).not.toContain('audio/wav');
+      expect(sent).not.toContain('UklGRg==');
+      expect(sent).toContain('was not sent');
+      expect(mockSendMessageStream.mock.calls[1]?.[3]).toMatchObject({
+        modelOverride: selector,
+      });
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.ERROR,
+          text: expect.stringContaining(
+            'Audio returned by a tool was not sent',
+          ),
+        }),
+        expect.any(Number),
+      );
+    });
+
     it('clamps oversized agent-capable image routes before applying a full-turn override', async () => {
       vi.stubEnv('QWEN_CODE_MAX_INLINE_MEDIA_BYTES', '1');
       enableBridge();
