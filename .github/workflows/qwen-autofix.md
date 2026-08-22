@@ -32,8 +32,8 @@ reached again.
 
 ### Steps that moved out, not just their prose
 
-`review-address` · `Push and report` was 626 lines of inline shell — the single
-largest block in the file — and its body now lives in
+`review-address` · `Push and report` was 626 lines of inline shell — one of
+the three largest blocks in the file — and its body now lives in
 `.github/scripts/autofix-push-and-report.sh`. The YAML keeps the step's `if:`
 and `env:` (when it runs, and what reaches it) and invokes the script.
 
@@ -41,10 +41,13 @@ Moving a step out moves its trust problem with it. By the time this step runs,
 the agent and the verification gate have executed branch code on this host, so
 the copy under `${GITHUB_WORKSPACE}` is branch-controlled. The step therefore
 runs the trusted-base copy staged in `${RUNNER_TEMP}` before any of that, after
-checking that its digest — recorded in `GITHUB_OUTPUT`, which a disk write
-cannot reach — still matches, that the staged path is a regular file, and with
-both reads bounded so a planted FIFO is a refusal rather than a hang. The same
-pattern already guards `resanitize-git-config.sh` and the gate runner.
+checking that its digest — recorded in `GITHUB_OUTPUT` before any branch code
+runs, so a disk write after staging cannot reach it — still matches, that the
+staged path is a regular file, and with both reads bounded so a planted FIFO is
+a refusal rather than a hang. The resanitize consumers and the gate runner
+verify a digest recorded in `GITHUB_OUTPUT` before executing — but with two
+opens (check, then execute) and no bounded reads yet, not the single-open,
+type-checked shape above.
 
 `docs/design/autofix-gate-runner-isolation.md` removes that staging entirely:
 once the step is its own `publish` job, it checks out the trusted base and

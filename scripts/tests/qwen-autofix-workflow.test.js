@@ -10432,6 +10432,76 @@ exit 1
       "bash --norc <<'AUTOFIX_PUSH_REPORT_GATE'",
     );
     expect(pushAndReportStepYaml).toMatch(/^\s*AUTOFIX_PUSH_REPORT_GATE\s*$/m);
+    // R2-3: the child runs without -u and its whole environment is this
+    // allow-list — a dropped pass-through line expands empty and silently
+    // disables the feature reading it (a missing TAKEOVER_MAX_ROUNDS makes
+    // the takeover milestone digest never post, on exactly the failure-heavy
+    // takeover PRs it exists for). Contains-only pins accept a symmetric
+    // addition too, so enumerate the actual assignments and compare the
+    // sorted multiset against the sanctioned set — same discipline as the
+    // upsert children's R9-10 pin.
+    const gateArgStart = pushAndReportStepYaml.indexOf('LD_PRELOAD= LD_AUDIT=');
+    expect(gateArgStart).toBeGreaterThan(-1);
+    const gateArgList = pushAndReportStepYaml.slice(
+      gateArgStart,
+      pushAndReportStepYaml.indexOf('bash --norc <<', gateArgStart),
+    );
+    const gateAssignments = (
+      gateArgList.match(/[A-Z_][A-Z0-9_]*=(?:"[^"]*"|[^\s\\]*)/g) ?? []
+    ).map((m) => m.trim());
+    expect(gateAssignments.map((m) => m.split('=')[0]).sort()).toEqual(
+      [
+        // the LD_* command-prefix assignments lead the launch line
+        'LD_PRELOAD',
+        'LD_AUDIT',
+        'LD_LIBRARY_PATH',
+        'PATH',
+        // runner defaults the body reads directly
+        'HOME',
+        'RUNNER_TEMP',
+        'GITHUB_RUN_ID',
+        'GITHUB_STEP_SUMMARY',
+        // the digest the stage step parked in GITHUB_OUTPUT
+        'PUSH_REPORT_SHA256',
+        // the script's documented env contract (step-output values)
+        'GITHUB_TOKEN',
+        'OUTCOME',
+        'CONFLICT',
+        'NEWEST',
+        'EFFECTIVE_ROUND',
+        'ROUND_START',
+        'MODEL',
+        'CHECKED_OUT_HEAD',
+        'VERIFIED_HEAD',
+        'RESANITIZE_SHA256',
+        'UPSERT_SRC',
+        'TRUSTED_PATH',
+        'GROWTH_BASE_NEW',
+        'GROWTH_BASE_SRC',
+        'GROWTH_BASE_TEST',
+        'GROWTH_BASE_WIN',
+        'GROWTH_SRC',
+        'GROWTH_TEST',
+        'CRITICAL_ONLY_GROWTH',
+        'KISS_AUDIT',
+        'AUDIT_VERDICT',
+        'MEASURED_AT',
+        // job-level and workflow-level values
+        'REPO',
+        'WORKDIR',
+        'PR',
+        'BRANCH',
+        'ISSUE',
+        'ROUND',
+        'MAX_ROUNDS',
+        'WINDOW',
+        'HEAD_REPO',
+        'AUTOFIX_BOT',
+        'TAKEOVER_LABEL',
+        'TAKEOVER_COMMAND',
+        'TAKEOVER_MAX_ROUNDS',
+      ].sort(),
+    );
     // R3-1: this child is the file's only env -i launch with neither the
     // upsert children's liveness sentinel nor downstream detection. An
     // LD_TRACE_LOADED_OBJECTS plant is presence-tested by the loader (even
@@ -10469,6 +10539,16 @@ exit 1
     expect(pushAndReportStepYaml).toMatch(
       /if \[\[ "\$\{GATE_STATUS\}" == 0 \]\]; then\n\s*echo 'round_reported=true' >> "\$\{GITHUB_OUTPUT\}"/,
     );
+    // …and the refusal comes BEFORE the write, not merely alongside it in
+    // shape: reordered, a gate child that never started still reports the
+    // round (probe-verified mutant), defeating the demotion the output
+    // exists for. The block already pins lesser orderings (digest before
+    // call, stat before call, sentinel before the digest check).
+    expect(
+      pushAndReportStepYaml.indexOf(
+        'the push-and-report gate child never started',
+      ),
+    ).toBeLessThan(pushAndReportStepYaml.indexOf("echo 'round_reported=true'"));
 
     // Single open: the staged path is type-checked, then read ONCE; the
     // digest is computed over the captured bytes and those same bytes
@@ -10537,13 +10617,15 @@ exit 1
     // The workspace copy must never be what runs — in ANY execution spelling
     // (R10-8 precedent), and on BOTH halves: a digest-verified staged copy
     // delegating to the branch-controlled workspace copy would execute
-    // branch bytes in the PAT-bearing step.
+    // branch bytes in the PAT-bearing step. Line-continuation spellings
+    // count too: bash joins `\<newline>` before tokenizing, so the bans
+    // treat `\<newline>` as part of the line.
     for (const half of [pushAndReportStepYaml, pushAndReportScript]) {
       expect(half).not.toMatch(
-        /(?:^|\s)(?:exec\s+)?(?:ba|da|k|z)?sh\b[^\n|]*\.github\/scripts\/autofix-push-and-report\.sh/m,
+        /(?:^|\s)(?:exec\s+)?(?:ba|da|k|z)?sh\b(?:[^\n|]|\\\n)*\.github\/scripts\/autofix-push-and-report\.sh/m,
       );
       expect(half).not.toMatch(
-        /(?:^|\s)(?:source|\.)\s+"?\.github\/scripts\/autofix-push-and-report\.sh/m,
+        /(?:^|\s)(?:source|\.)\s+(?:\\\n\s*)*"?\.github\/scripts\/autofix-push-and-report\.sh/m,
       );
       // …and the staged path: a second execution of it re-opens the
       // branch-writable copy after the gate's one-time verify-and-run, so
@@ -10551,10 +10633,10 @@ exit 1
       // execution runs them with the bot PAT. Both spellings — the
       // single-open count above is scoped to this step's YAML half alone.
       expect(half).not.toMatch(
-        /(?:^|\s)(?:exec\s+)?(?:ba|da|k|z)?sh\b[^\n|]*\$\{?RUNNER_TEMP\}?\/autofix-push-and-report\.sh/m,
+        /(?:^|\s)(?:exec\s+)?(?:ba|da|k|z)?sh\b(?:[^\n|]|\\\n)*\$\{?RUNNER_TEMP\}?\/autofix-push-and-report\.sh/m,
       );
       expect(half).not.toMatch(
-        /(?:^|\s)(?:source|\.)\s+"?\$\{?RUNNER_TEMP\}?\/autofix-push-and-report\.sh/m,
+        /(?:^|\s)(?:source|\.)\s+(?:\\\n\s*)*"?\$\{?RUNNER_TEMP\}?\/autofix-push-and-report\.sh/m,
       );
     }
     // GitHub runs `run:` blocks as `bash --noprofile --norc -eo pipefail`. The
@@ -12958,11 +13040,13 @@ exit 1
     ).toBe(2);
     // R10-8: bound EVERY execution of the staged path, not one spelling —
     // `sh …`, `bash -- …`, `source …`, `. …`, `exec bash …` all re-open it.
-    expect(workflow).not.toMatch(
-      /(?:^|\s)(?:exec\s+)?(?:ba|da|k|z)?sh\b[^\n|]*\$\{RUNNER_TEMP\}\/upsert-deferred-issue\.sh/m,
+    // Both halves, matching the positive censuses above: an extraction that
+    // moves the last path-opening site into the script must still fail here.
+    expect(workflowWithScripts).not.toMatch(
+      /(?:^|\s)(?:exec\s+)?(?:ba|da|k|z)?sh\b(?:[^\n|]|\\\n)*\$\{RUNNER_TEMP\}\/upsert-deferred-issue\.sh/m,
     );
-    expect(workflow).not.toMatch(
-      /(?:^|\s)(?:source|\.)\s+"?\$\{RUNNER_TEMP\}\/upsert-deferred-issue\.sh/m,
+    expect(workflowWithScripts).not.toMatch(
+      /(?:^|\s)(?:source|\.)\s+(?:\\\n\s*)*"?\$\{RUNNER_TEMP\}\/upsert-deferred-issue\.sh/m,
     );
     // Placement, not just counts: the digest-gated invocation is a step-local
     // function defined ONCE in 'Push and report' and called immediately after

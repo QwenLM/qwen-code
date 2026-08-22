@@ -3,7 +3,7 @@
 #
 # Extracted verbatim from the 'Push and report' step of review-address in
 # .github/workflows/qwen-autofix.yml, which had grown to 626 lines of inline
-# shell inside a workflow file already at 462,656 bytes — 90% of GitHub's
+# shell inside a workflow file already at 463,004 bytes — 90% of GitHub's
 # 500 KB start-runs limit and 98% of the repo's own 470,000-byte gate (see
 # .github/scripts/check-workflow-size.sh — past GitHub's limit runs silently
 # stop starting). It is also the step that
