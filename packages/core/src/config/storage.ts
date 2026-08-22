@@ -335,6 +335,54 @@ export class Storage {
     return path.join(Storage.getGlobalQwenDir(), ARENA_DIR_NAME);
   }
 
+  /**
+   * Outside-repo landing for /audit reports and sidecars when the audited
+   * repository's ignore state cannot keep them out of version control.
+   * Per-user and per-project, honoring the QWEN_HOME override; 0700 so the
+   * quoted (possibly exploitable) module content stays private to the user.
+   */
+  static getAuditFallbackDir(projectRoot: string): string {
+    // Resolve symlinks before hashing so the fallback root is stable across
+    // spellings of the same directory (macOS `/var` → `/private/var`):
+    // plan-files, guard-check, and the SKILL relocation must all agree on
+    // one root, or the relocation-containment check spuriously fails.
+    let resolved = projectRoot;
+    try {
+      const real = fs.realpathSync(projectRoot);
+      // A non-string/empty result (e.g. a mocked fs) keeps the raw path.
+      if (typeof real === 'string' && real.length > 0) resolved = real;
+    } catch {
+      // Unresolvable (e.g. not yet created): hash the raw path.
+    }
+    const dir = path.join(
+      Storage.getGlobalQwenDir(),
+      'audits',
+      getProjectHash(resolved),
+    );
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    // mkdirSync's mode applies only to directories it CREATES, and this leaf
+    // is at a path the audited agent can predict exactly (the project hash is
+    // a pure function of the root). A leaf planted ahead of the run —
+    // a symlink pointing at a directory of the planter's choosing, or a
+    // world-writable directory — would otherwise be adopted silently: the
+    // landing is where the relocation puts artifacts precisely BECAUSE they
+    // must stay private. Validate what is actually there, and tighten a
+    // permissive one.
+    const stat = fs.lstatSync(dir);
+    if (!stat.isDirectory()) {
+      throw new Error(
+        `audit: the fallback landing ${dir} is not a directory (it may be a ` +
+          `symlink planted ahead of the run) — remove it and re-run.`,
+      );
+    }
+    // Windows reports a mode that does not carry POSIX group/other bits;
+    // chmod there is a no-op, and the check would fire on every run.
+    if (process.platform !== 'win32' && (stat.mode & 0o077) !== 0) {
+      fs.chmodSync(dir, 0o700);
+    }
+    return dir;
+  }
+
   getQwenDir(): string {
     return path.join(this.targetDir, QWEN_DIR);
   }

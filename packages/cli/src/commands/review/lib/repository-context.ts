@@ -12,10 +12,10 @@ export const REPOSITORY_CONTEXT_VERSION = 1 as const;
 // Shared bounds for the context contract and every provider that produces one:
 // a provider validator must emit exactly what validateRepositoryContext accepts,
 // so both read the same constants instead of keeping lockstep copies that can
-// drift. MAX_ARRAY_ITEMS carries headroom over this repository's committed
-// review-context manifest, whose merged relatedPaths expansion already
-// resolves more files than the old 128 bound allowed — a calibration sitting
-// exactly at the repository's own worst case breaks on the next landed file.
+// drift. MAX_ARRAY_ITEMS carries headroom over the files this repository's
+// own review-context manifest resolves: the count grows with the repo (skill
+// and hook files are legitimate context), so a calibration sitting exactly at
+// today's worst case breaks on the next landed file.
 export const MAX_ARRAY_ITEMS = 256;
 const MAX_PROVIDER_LENGTH = 64;
 export const MAX_LABEL_LENGTH = 120;

@@ -71,6 +71,7 @@ import { mcpCommand } from '../commands/mcp.js';
 import { channelCommand } from '../commands/channel.js';
 import { authCommand } from '../commands/auth.js';
 import { reviewCommand } from '../commands/review.js';
+import { auditCommand } from '../commands/audit.js';
 import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
 import { updateCommand } from '../commands/update.js';
@@ -544,6 +545,11 @@ function normalizeOutputFormat(
   }
   return OutputFormat.TEXT;
 }
+
+/** Bound on the subcommand output flush before `process.exit`: long enough
+ *  for a live consumer to drain the pipe, short enough that a consumer that
+ *  only reads after exit cannot wedge the process. */
+const SUBCOMMAND_FLUSH_TIMEOUT_MS = 2_000;
 
 export async function parseArguments(): Promise<CliArgs> {
   let rawArgv = hideBin(process.argv);
@@ -1096,6 +1102,8 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(channelCommand)
     // Register /review skill helpers (presubmit checks, cleanup)
     .command(reviewCommand)
+    // Register /audit skill helpers (audit planning, brief printing)
+    .command(auditCommand)
     // Register `qwen serve` (Stage 1 daemon)
     .command(serveCommand)
     // Register sessions subcommands
@@ -1126,6 +1134,7 @@ export async function parseArguments(): Promise<CliArgs> {
       result._[0] === 'hooks' ||
       result._[0] === 'channel' ||
       result._[0] === 'review' ||
+      result._[0] === 'audit' ||
       result._[0] === 'sessions' ||
       result._[0] === 'update')
   ) {
@@ -1136,6 +1145,34 @@ export async function parseArguments(): Promise<CliArgs> {
     // execution and exit. Returning here would let the main interactive
     // flow run, which would prompt for stdin input despite the user
     // having already invoked a subcommand.
+    //
+    // The handlers above wrote through async pipe writes; a synchronous
+    // exit here truncates large payloads (the audit plan/verdict JSON) at
+    // the 64 KiB pipe buffer. The empty-write callback runs only after
+    // every queued write has flushed. Two guards keep the flush from
+    // breaking the exit contract it serves: the EPIPE handlers, because
+    // yielding to the event loop lets a downstream-closed pipe (`| head`)
+    // surface its queued writes as an uncaught 'error' where the old
+    // synchronous exit surfaced nothing; and the deadline, because a
+    // parent that reads the child's stdout only after the child exits
+    // would otherwise wait on this await forever.
+    const swallowEpipe = (stream: NodeJS.WriteStream): void => {
+      stream.on('error', (err: Error) => {
+        if ((err as NodeJS.ErrnoException).code !== 'EPIPE') throw err;
+      });
+    };
+    swallowEpipe(process.stdout);
+    swallowEpipe(process.stderr);
+    await Promise.race([
+      new Promise<void>((resolve) => {
+        process.stdout.write('', () => {
+          process.stderr.write('', () => resolve());
+        });
+      }),
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, SUBCOMMAND_FLUSH_TIMEOUT_MS).unref();
+      }),
+    ]);
     process.exit(process.exitCode ?? 0);
   }
 

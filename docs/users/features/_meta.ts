@@ -1,6 +1,7 @@
 export default {
   commands: 'Commands',
   'code-review': 'Code Review',
+  'legacy-audit': 'Legacy Code Audit',
   'followup-suggestions': 'Followup Suggestions',
   'tool-use-summaries': 'Tool-Use Summaries',
   'markdown-rendering': 'Markdown Rendering',
