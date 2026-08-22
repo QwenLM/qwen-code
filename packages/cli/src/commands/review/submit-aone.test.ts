@@ -19,7 +19,14 @@ import {
   it,
   vi,
 } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -30,6 +37,7 @@ const {
   getPlatformReaderMock,
   gitOptMock,
   authMock,
+  floorMock,
   submitAoneMock,
   composeMock,
   stdoutMock,
@@ -41,6 +49,7 @@ const {
   getPlatformReaderMock: vi.fn(),
   gitOptMock: vi.fn(),
   authMock: vi.fn(),
+  floorMock: vi.fn(() => undefined),
   submitAoneMock: vi.fn(),
   composeMock: vi.fn(),
   stdoutMock: vi.fn(),
@@ -93,10 +102,12 @@ vi.mock('./lib/platform/aone.js', async (importOriginal) => {
 
 // Steer the authorisation gate (incl. the recordedHost it surfaces) — the
 // real gate needs a session-scoped args file that does not exist under
-// vitest. `recordedSeverityFloor` yields nothing: the state's floor stands.
+// vitest. `recordedSeverityFloor` yields nothing by default (the state's
+// floor stands); a named mock so the floor's callerHost wiring can be
+// pinned (an anonymous vi.fn left it unobservable).
 vi.mock('./lib/authorization.js', () => ({
   reviewWriteAuthorization: authMock,
-  recordedSeverityFloor: vi.fn(() => undefined),
+  recordedSeverityFloor: floorMock,
 }));
 
 // The verdict event is compose-review's business (its decision table is
@@ -174,6 +185,9 @@ const AONE_RESULT = {
   summaryCommentId: 12,
   summaryPosted: true,
   approved: false,
+  // Verified stable — the ordinary success shape. The re-read-failure
+  // (undefined) and moved (true) states have their own tests below.
+  headMovedDuringPost: false,
   webUrl: 'https://code.alibaba-inc.com/maxcompute/odps_src/codereview/1',
 };
 
@@ -185,6 +199,8 @@ interface PostedJson {
   event?: string;
   cappedBy?: string[];
   inlineComments?: number;
+  postedCommentIds?: number[];
+  summaryCommentId?: number;
   summaryPosted?: boolean;
   approved?: boolean;
   url?: string;
@@ -201,6 +217,18 @@ beforeAll(() => {
 
 afterAll(() => {
   rmSync(tmp, { recursive: true, force: true });
+});
+
+// A successful Aone post writes its bypass-audit receipt under
+// `.qwen/tmp` of the CWD — run from the fixture dir so the relative path
+// lands there instead of polluting the repository checkout.
+let savedCwd: string;
+beforeEach(() => {
+  savedCwd = process.cwd();
+  process.chdir(tmp);
+});
+afterEach(() => {
+  process.chdir(savedCwd);
 });
 
 describe('submit posts an authorised Aone target through a1', () => {
@@ -267,12 +295,21 @@ describe('submit posts an authorised Aone target through a1', () => {
     ]);
     expect(ghMock).not.toHaveBeenCalled();
     expect(ghWithInputMock).not.toHaveBeenCalled();
+    // The a1 path never touches the gh host state — deleting the
+    // `if (!aoneWrite)` guard around setGhHost would leave the gh
+    // routing host set to an Aone hostname for any gh call added later.
+    expect(setGhHostMock).not.toHaveBeenCalled();
     const out = postedJson();
     expect(out.posted).toBe(true);
     expect(out.event).toBe('REQUEST_CHANGES');
     // The success JSON reads `postedInline` (2), NOT the id list (1) —
     // the fixture diverges the two on purpose.
     expect(out.inlineComments).toBe(2);
+    // ...but the id list still RIDES the JSON — the audit reconciling
+    // "what did this run post" against the MR needs it on the success
+    // path exactly as the partial shape carries it.
+    expect(out.postedCommentIds).toEqual([11]);
+    expect(out.summaryCommentId).toBe(12);
     expect(out.summaryPosted).toBe(true);
     expect(out.url).toBe(AONE_RESULT.webUrl);
     // The D6 semantic difference is named in the terminal — conditional
@@ -282,6 +319,15 @@ describe('submit posts an authorised Aone target through a1', () => {
     );
     expect(stderrMock).toHaveBeenCalledWith(
       expect.stringContaining('1 inline Critical(s) block the merge'),
+    );
+    // The verified-stable success (headMovedDuringPost false) prints
+    // NEITHER drift warning — a truthiness mutation of the tri-state
+    // condition would print one of them for the ordinary success shape.
+    expect(stderrMock).not.toHaveBeenCalledWith(
+      expect.stringContaining('MOVED during posting'),
+    );
+    expect(stderrMock).not.toHaveBeenCalledWith(
+      expect.stringContaining('could not re-verify the MR head'),
     );
     // The Q4 probe outcome (issue #9614) is disclosed in the same note:
     // a1 cannot mark a comment as AI, so the posted Criticals join the
@@ -391,6 +437,13 @@ describe('submit posts an authorised Aone target through a1', () => {
     expect(submitAoneMock).not.toHaveBeenCalled();
     expect(ghWithInputMock).toHaveBeenCalledTimes(1);
     expect(setGhHostMock).toHaveBeenCalledWith('ghe.alibaba-inc.com');
+    // Ordering is the point of the bind: a late-binding refactor moving
+    // setGhHost below the gh write leaves toHaveBeenCalledWith green
+    // while gh runs with the module host unset and inherits the ambient
+    // env — posting past the host this test names.
+    expect(setGhHostMock.mock.invocationCallOrder[0]).toBeLessThan(
+      ghWithInputMock.mock.invocationCallOrder[0],
+    );
   });
 
   it('a RECORDED family-but-non-canonical host binds the gh write at the recorded host', () => {
@@ -411,6 +464,9 @@ describe('submit posts an authorised Aone target through a1', () => {
     expect(submitAoneMock).not.toHaveBeenCalled();
     expect(ghWithInputMock).toHaveBeenCalledTimes(1);
     expect(setGhHostMock).toHaveBeenCalledWith('ghe.alibaba-inc.com');
+    expect(setGhHostMock.mock.invocationCallOrder[0]).toBeLessThan(
+      ghWithInputMock.mock.invocationCallOrder[0],
+    );
   });
 
   it('an explicit --host that CONTRADICTS the recorded host refuses — in BOTH directions', () => {
@@ -509,13 +565,17 @@ describe('submit posts an authorised Aone target through a1', () => {
   it('a RECORDED non-Aone host is not vetoed by an Aone cwd probe', () => {
     // The recorded pr-url binding is the explicit signal the registry's
     // precedence documents — a github.com review run from inside an
-    // Aone-origin clone must still post to GitHub.
+    // Aone-origin clone must still post to GitHub. The probe is driven
+    // through gitOpt (submit's real cwd seam — it no longer reads
+    // getPlatformReader), so the conflict this test names is actually
+    // exercised: a recorded-binding-outranks-probe regression routing
+    // the github-recorded review at a1 reddens here.
     authMock.mockReturnValue({
       ok: true,
       why: '`--comment` was in the review arguments for #1',
       recordedHost: 'github.com',
     });
-    getPlatformReaderMock.mockReturnValue({ kind: 'aone' });
+    gitOptMock.mockReturnValue('git@gitlab.alibaba-inc.com:g/p.git');
     ghWithInputMock.mockReturnValue('');
     expect(() =>
       runSubmit(base(), 'unknown', { defaultComment: false }),
@@ -539,11 +599,15 @@ describe('submit posts an authorised Aone target through a1', () => {
     // No recording (recordedHost undefined, no recordedUnbound) is a
     // documented degraded state: writeSkillArgs never throws, recordings
     // are cwd-relative. With no `--host` the cwd probe alone would pick
-    // the platform of an irreversible write — fail closed instead.
+    // the platform of an irreversible write — fail closed instead. The
+    // probe is LIVE here (a canonical Aone origin): a null origin gives
+    // the probe no opinion to override, and the override — refusal
+    // preceding the probe — is exactly the property under test.
     authMock.mockReturnValue({
       ok: true,
       why: 'the user asked for this review to be published',
     });
+    gitOptMock.mockReturnValue('git@gitlab.alibaba-inc.com:g/p.git');
     expect(() =>
       runSubmit(base(), 'unknown', { defaultComment: false }),
     ).not.toThrow();
@@ -577,6 +641,424 @@ describe('submit posts an authorised Aone target through a1', () => {
     expect(process.exitCode).toBeUndefined();
     expect(submitAoneMock).toHaveBeenCalledTimes(1);
     expect(ghWithInputMock).not.toHaveBeenCalled();
+  });
+
+  it('an explicit --host OUTRANKS a live cwd probe pointing the other way', () => {
+    // The probe must not veto the operator's platform proof: re-running
+    // a publish with an explicit github.com from an Aone-origin clone
+    // posts at GitHub — the documented precedence, and the remedy the
+    // unbound refusal names. A mutant making the cwd arm additive
+    // (probing beside the explicit flag instead of after it) routes the
+    // irreversible write at a1 and leaves every prior test green.
+    authMock.mockReturnValue({
+      ok: true,
+      why: '`--comment` was in the review arguments for #1',
+    });
+    gitOptMock.mockReturnValue('git@gitlab.alibaba-inc.com:g/p.git');
+    ghWithInputMock.mockReturnValue('');
+    expect(() =>
+      runSubmit(
+        base({ userAuthorized: false, host: 'github.com' }),
+        'unknown',
+        {
+          defaultComment: false,
+        },
+      ),
+    ).not.toThrow();
+    expect(process.exitCode).toBeUndefined();
+    expect(submitAoneMock).not.toHaveBeenCalled();
+    expect(ghWithInputMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('the unbound refusal OUTRANKS a live canonical cwd probe', () => {
+    // A recorded-but-hostless target refuses even when the probe could
+    // name a platform: a mutant letting the probe lift the refusal
+    // (`&& !isAoneCanonicalHost(cwdOriginHost)` on the guard) posts a
+    // bare-MR target at whichever canonical-Aone clone submit happens
+    // to run in — the probe names submit's cwd, not the review's.
+    authMock.mockReturnValue({
+      ok: true,
+      why: 'the user asked for this review to be published',
+      recordedUnbound: true,
+    });
+    gitOptMock.mockReturnValue('git@gitlab.alibaba-inc.com:g/p.git');
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    expect(process.exitCode).toBe(3);
+    expect(postedJson()).toEqual({
+      posted: false,
+      reason: 'target-platform-unbound',
+    });
+    expect(submitAoneMock).not.toHaveBeenCalled();
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+  });
+
+  it('a canonical-Aone ambient GH_HOST with NO other host evidence refuses — gh cannot post there', () => {
+    // No origin (zip/bundle worktree, `git remote remove origin`), no
+    // recorded host, no flag: the gh child would inherit the ambient
+    // GH_HOST export. Pointing at a canonical Aone host that is a write
+    // gh cannot perform — pre-PR this shape refused actionably, so
+    // refuse actionably instead of failing opaquely after compose ran.
+    authMock.mockReturnValue({
+      ok: true,
+      why: '`--comment` was in the review arguments for #1',
+    });
+    gitOptMock.mockReturnValue(null);
+    process.env['GH_HOST'] = 'gitlab.alibaba-inc.com';
+    expect(() =>
+      runSubmit(base({ userAuthorized: false }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    expect(process.exitCode).toBe(3);
+    expect(postedJson()).toEqual({
+      posted: false,
+      reason: 'ambient-gh-host-aone',
+    });
+    expect(stderrMock).toHaveBeenCalledWith(expect.stringContaining('GH_HOST'));
+    expect(submitAoneMock).not.toHaveBeenCalled();
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+
+    // The family-wildcard twin is a GitHub Enterprise instance gh CAN
+    // post to — no refusal there; the write proceeds.
+    process.exitCode = undefined;
+    stdoutMock.mockClear();
+    ghWithInputMock.mockClear();
+    process.env['GH_HOST'] = 'ghe.alibaba-inc.com';
+    ghWithInputMock.mockReturnValue('');
+    expect(() =>
+      runSubmit(base({ userAuthorized: false }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    expect(process.exitCode).toBeUndefined();
+    expect(submitAoneMock).not.toHaveBeenCalled();
+    expect(ghWithInputMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('a WELL-FORMED contextUnavailable: true passes through on the gh path', () => {
+    // The gh path hands the state's claim through raw. A mutation
+    // dropping the passthrough (forcing `aoneWrite` alone) ships green
+    // against the sibling fixture that carries NO claim, and silently
+    // loses the context-unavailable verdict cap on a GitHub submission
+    // that legitimately earned it.
+    authMock.mockReturnValue({
+      ok: true,
+      why: '`--comment` was in the review arguments for #1',
+      recordedHost: 'github.com',
+    });
+    ghWithInputMock.mockReturnValue('');
+    expect(() =>
+      runSubmit(
+        base({
+          review: writeReview({
+            ...REVIEW,
+            state: { modelId: 'test-model', contextUnavailable: true },
+          }),
+        }),
+        'unknown',
+        { defaultComment: false },
+      ),
+    ).not.toThrow();
+    expect(
+      (composeMock.mock.calls[0][0] as Record<string, unknown>)[
+        'contextUnavailable'
+      ],
+    ).toBe(true);
+  });
+
+  it('the floor recovery binds the RECORDED Aone host, not the gh fallback', () => {
+    // A flagless Aone post routed via the recorded binding must resolve
+    // the operator's floor against the RECORDED host. Wiring callerHost
+    // to resolveGhHost alone (github.com/ambient) would bind the floor
+    // to github.com, hostsEquivalent would fail the Aone CR-URL record,
+    // and the operator's recorded floor would be silently dropped — a
+    // model-written lower floor composing the verdict instead.
+    authMock.mockReturnValue({
+      ok: true,
+      why: 'the user asked for this review to be published',
+      recordedHost: 'code.alibaba-inc.com',
+    });
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    expect(floorMock).toHaveBeenCalledWith(
+      expect.objectContaining({ callerHost: 'code.alibaba-inc.com' }),
+    );
+  });
+
+  it('an EMPTY --host flag refuses distinctly — an empty flag is not an absent one', () => {
+    // Agent-built commands interpolate the host (`--host "$REVIEW_HOST"`
+    // with the variable unset/empty hands through ''); collapsing that
+    // to "no flag" would fire the very refusal the flag was the remedy
+    // for, byte-identically, and the re-runner loops. Refuse it with
+    // its own shape.
+    for (const host of ['', ' ']) {
+      process.exitCode = undefined;
+      stdoutMock.mockClear();
+      stderrMock.mockClear();
+      expect(() =>
+        runSubmit(base({ host }), 'unknown', { defaultComment: false }),
+      ).not.toThrow();
+      expect(process.exitCode).toBe(3);
+      expect(postedJson()).toEqual({
+        posted: false,
+        reason: 'host-flag-empty',
+      });
+      expect(stderrMock).toHaveBeenCalledWith(expect.stringContaining('EMPTY'));
+    }
+    expect(submitAoneMock).not.toHaveBeenCalled();
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+  });
+
+  it('an INVALID recorded host refuses in the exit-3 shape, not a setGhHost TypeError', () => {
+    // parse-args records --host VERBATIM; a recorded `https://ghe.corp`
+    // used to throw setGhHost's TypeError straight out of runSubmit —
+    // exit 1, stack text, no stdout JSON — instead of the refusal shape
+    // Step 7 treats as a complete, correct outcome.
+    authMock.mockReturnValue({
+      ok: true,
+      why: 'the user asked for this review to be published',
+      recordedHost: 'https://ghe.corp',
+    });
+    ghWithInputMock.mockReturnValue('');
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    expect(process.exitCode).toBe(3);
+    expect(postedJson()).toEqual({ posted: false, reason: 'invalid-host' });
+    expect(stderrMock).toHaveBeenCalledWith(
+      expect.stringContaining('the recorded review'),
+    );
+    expect(stderrMock).toHaveBeenCalledWith(
+      expect.stringContaining('re-record the review with a valid'),
+    );
+    // The recorded arm gets NO flag remedy: a valid flag contradicts
+    // the invalid recorded host (hostsEquivalent cannot match a value
+    // that fails HOSTNAME_RE) and an equivalent flag fails HOSTNAME_RE
+    // itself — "re-run with --host" ping-pongs between the two
+    // refusals, so the refusal must lead with the re-recording escape.
+    expect(
+      stderrMock.mock.calls.map((c) => String(c[0])).join(''),
+    ).not.toContain('Re-run with');
+    expect(submitAoneMock).not.toHaveBeenCalled();
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+
+    // The explicit-flag arm names the flag as the offender.
+    process.exitCode = undefined;
+    stdoutMock.mockClear();
+    stderrMock.mockClear();
+    authMock.mockReturnValue({
+      ok: true,
+      why: 'the user asked for this review to be published',
+    });
+    expect(() =>
+      runSubmit(base({ host: 'https://ghe.corp' }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    expect(process.exitCode).toBe(3);
+    expect(postedJson()).toEqual({ posted: false, reason: 'invalid-host' });
+    expect(stderrMock).toHaveBeenCalledWith(
+      expect.stringContaining('`--host` flag'),
+    );
+    // The flag arm has NO recorded host — its remedy is the re-run with a
+    // valid flag. Pin it positively: a mutant collapsing the remedy
+    // ternary to the recorded arm's re-record text ships green against
+    // the offender naming alone.
+    expect(stderrMock).toHaveBeenCalledWith(
+      expect.stringContaining('Re-run with a valid'),
+    );
+  });
+
+  it('a whitespace-PADDED recorded host posts — the gate trims like setGhHost', () => {
+    // parse-args records --host VERBATIM, but every read path trims —
+    // padded hosts are a known-good input class (registry.ts) because
+    // setGhHost trims internally before its own HOSTNAME_RE check. The
+    // pre-validation must test the TRIMMED value, or a padded recorded
+    // host that posted fine pre-PR refuses as invalid-host with the
+    // re-record remedy — the costliest fix for stray whitespace.
+    authMock.mockReturnValue({
+      ok: true,
+      why: 'the user asked for this review to be published',
+      recordedHost: ' ghe.alibaba-inc.com ',
+    });
+    getPlatformReaderMock.mockReturnValue({ kind: 'github' });
+    ghWithInputMock.mockReturnValue('');
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    expect(process.exitCode).toBeUndefined();
+    expect(submitAoneMock).not.toHaveBeenCalled();
+    expect(ghWithInputMock).toHaveBeenCalledTimes(1);
+    expect(setGhHostMock).toHaveBeenCalledTimes(1);
+    expect(postedJson().posted).toBe(true);
+
+    // All-whitespace is NOT a padded host: it trims to '' which fails
+    // HOSTNAME_RE, so the structured refusal stands. Pin it so the trim
+    // fix cannot go further and normalize this shape into an absent
+    // host (which would restore setGhHost's raw TypeError exit-1, or
+    // worse, post unbound).
+    process.exitCode = undefined;
+    stdoutMock.mockClear();
+    stderrMock.mockClear();
+    authMock.mockReturnValue({
+      ok: true,
+      why: 'the user asked for this review to be published',
+      recordedHost: '   ',
+    });
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    expect(process.exitCode).toBe(3);
+    expect(postedJson()).toEqual({ posted: false, reason: 'invalid-host' });
+    expect(submitAoneMock).not.toHaveBeenCalled();
+    expect(ghWithInputMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('a padded RECORDED canonical Aone host still selects the a1 path', () => {
+    // The platform selector reads the recorded host through the same
+    // one-time trim as the gh arm: parse-args records verbatim, and a
+    // padded canonical host the gh arm accepts as a known-good input
+    // class must also be RECOGNISED as Aone — read untrimmed, the
+    // selector misses it and routes the authorised Aone write down the
+    // gh path at a host gh cannot post to.
+    authMock.mockReturnValue({
+      ok: true,
+      why: 'the user asked for this review to be published',
+      recordedHost: ' code.alibaba-inc.com ',
+    });
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    expect(process.exitCode).toBeUndefined();
+    expect(submitAoneMock).toHaveBeenCalledTimes(1);
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+    expect(setGhHostMock).not.toHaveBeenCalled();
+  });
+
+  it('a padded recorded host and its trim-equivalent --host post — one platform', () => {
+    // The conflict gate compares the trimmed flag against the recorded
+    // host through hostsEquivalent; the recorded side must reach that
+    // comparison trimmed, or two spellings of ONE platform refuse as
+    // target-platform-conflict while the same recording posts fine the
+    // moment the flag is dropped.
+    authMock.mockReturnValue({
+      ok: true,
+      why: '`--comment` was in the review arguments for #1',
+      recordedHost: ' gitlab.alibaba-inc.com ',
+    });
+    expect(() =>
+      runSubmit(base({ host: 'gitlab.alibaba-inc.com' }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    expect(process.exitCode).toBeUndefined();
+    expect(postedJson().posted).toBe(true);
+    expect(submitAoneMock).toHaveBeenCalledTimes(1);
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+  });
+
+  it('an INVALID cwd-origin host refuses naming the origin arm', () => {
+    // The third provenance arm: no flag, no recorded host — the bound
+    // host is the origin of the clone the cwd probe ran on.
+    // parseRemoteUrl does not validate the hostname (an underscore
+    // host parses intact), so the refusal must happen here and name
+    // THIS arm — a misattribution mutant passes every other cell.
+    authMock.mockReturnValue({
+      ok: true,
+      why: '`--comment` was in the review arguments for #1',
+    });
+    gitOptMock.mockReturnValue('git@ghe_corp.example.com:o/r.git');
+    expect(() =>
+      runSubmit(base({ userAuthorized: false }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    expect(process.exitCode).toBe(3);
+    expect(postedJson()).toEqual({ posted: false, reason: 'invalid-host' });
+    expect(stderrMock).toHaveBeenCalledWith(
+      expect.stringContaining(`this clone's origin remote`),
+    );
+    // The same positive remedy pin as the flag arm: the origin arm has no
+    // recorded host either — a ternary-collapse mutant would print the
+    // re-record text here.
+    expect(stderrMock).toHaveBeenCalledWith(
+      expect.stringContaining('Re-run with a valid'),
+    );
+    expect(submitAoneMock).not.toHaveBeenCalled();
+    expect(ghWithInputMock).not.toHaveBeenCalled();
+  });
+
+  it('a mid-batch failure discloses a head that moved during posting', () => {
+    // The drift disclosure rides the partial shape too — adding a write
+    // failure must not silently remove the warning the success path
+    // prints for the identical drift.
+    submitAoneMock.mockImplementation(() => {
+      throw new AonePartialPostError(
+        'boom after 1 of 3 landed',
+        1,
+        [11],
+        false,
+        false,
+        true,
+      );
+    });
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    expect(process.exitCode).toBe(3);
+    expect(stderrMock).toHaveBeenCalledWith(
+      expect.stringContaining('the MR head MOVED during posting'),
+    );
+    expect(stderrMock).not.toHaveBeenCalledWith(
+      expect.stringContaining('could not re-verify the MR head'),
+    );
+  });
+
+  it('a mid-batch failure whose head re-read VERIFIED STABLE prints neither drift warning', () => {
+    // Absence pin for the false state: a truthiness mutation of the
+    // disclosure condition (`!== undefined`, or `true`) prints MOVED —
+    // or the re-read warning — for a partial post whose drift state is
+    // verified stable, and only these absence assertions catch it.
+    submitAoneMock.mockImplementation(() => {
+      throw new AonePartialPostError(
+        'boom after 1 of 3 landed',
+        1,
+        [11],
+        false,
+        false,
+        false,
+      );
+    });
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    expect(process.exitCode).toBe(3);
+    expect(stderrMock).not.toHaveBeenCalledWith(
+      expect.stringContaining('MOVED during posting'),
+    );
+    expect(stderrMock).not.toHaveBeenCalledWith(
+      expect.stringContaining('could not re-verify the MR head'),
+    );
+  });
+
+  it('a successful post whose head re-read FAILED discloses the unknown state', () => {
+    // "Could not verify" is not "verified stable": the tri-state field
+    // stays undefined on a re-read failure and submit says so, instead
+    // of the false all-clear a boolean fold would print.
+    submitAoneMock.mockReturnValue({
+      ...AONE_RESULT,
+      headMovedDuringPost: undefined,
+    });
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    expect(process.exitCode).toBeUndefined();
+    expect(stderrMock).toHaveBeenCalledWith(
+      expect.stringContaining('could not re-verify the MR head'),
+    );
   });
 
   it('a HOSTLESS recording from the --skill-args override refuses — the submission cwd must not stand in for the record of another cwd', () => {
@@ -770,6 +1252,17 @@ describe('submit posts an authorised Aone target through a1', () => {
     expect(stderrMock).toHaveBeenCalledWith(
       expect.stringContaining('do NOT re-run submit'),
     );
+    // The undefined drift state is the ordinary partial shape — the
+    // re-read dies in the same outage that killed the batch — so
+    // disclose the unknown anchoring instead of letting silence read
+    // as "the landed pins were verified", and never print MOVED for a
+    // merely unknown state.
+    expect(stderrMock).toHaveBeenCalledWith(
+      expect.stringContaining('could not re-verify the MR head'),
+    );
+    expect(stderrMock).not.toHaveBeenCalledWith(
+      expect.stringContaining('MOVED during posting'),
+    );
     expect(ghWithInputMock).not.toHaveBeenCalled();
   });
 
@@ -823,6 +1316,9 @@ describe('submit posts an authorised Aone target through a1', () => {
     });
     const stderr = stderrMock.mock.calls.map((c) => String(c[0])).join('');
     expect(stderr).toContain('the MR head moved');
+    // The refusal speaks the same prefix as the other refusal paths — the
+    // earlier "REFUSED to post the review to" broke the uniform shape.
+    expect(stderr).toContain('REFUSED to post to ');
     expect(stderr).not.toContain('do NOT re-run submit');
   });
 
@@ -953,15 +1449,33 @@ describe('submit posts an authorised Aone target through a1', () => {
     );
   });
 
-  it('the Aone success JSON carries NO url key when a1 answered without detailUrl', () => {
-    // The url-ABSENCE arm is what SKILL.md Step 7's fallback keys on —
-    // emitting `"url": ""` would not satisfy "has no url".
+  it('the Aone success JSON carries NO url key when the pre-write read served no detailUrl — and pays no re-query', () => {
+    // The receipt's webUrl IS the pre-write drift-gate read's detailUrl, a
+    // stable MR attribute — a re-fetch through the reader could not return
+    // a link that read lacked, so submit takes the receipt as-is (it would
+    // only pay a blocking a1 call on the flaky state that lost the field).
+    // The url-ABSENCE arm is what SKILL.md Step 7's coordinates-relay keys
+    // on — emitting `"url": ""` would not satisfy "has no url".
     submitAoneMock.mockReturnValue({ ...AONE_RESULT, webUrl: '' });
     expect(() =>
       runSubmit(base(), 'unknown', { defaultComment: false }),
     ).not.toThrow();
     expect(postedJson().posted).toBe(true);
     expect('url' in postedJson()).toBe(false);
+    // The pre-write read happened inside submitAoneReview (mocked here);
+    // submit itself made no further platform call for the link.
+    expect(submitAoneMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('relays the receipt webUrl in the stdout JSON and the Posted line', () => {
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    expect(postedJson().url).toBe(AONE_RESULT.webUrl);
+    const postedLine = stderrMock.mock.calls
+      .map((c) => String(c[0]))
+      .find((l) => l.startsWith('Posted '));
+    expect(postedLine).toContain(AONE_RESULT.webUrl);
   });
 
   it('a REQUEST_CHANGES with zero inline Criticals says nothing mechanically blocks', () => {
@@ -992,5 +1506,122 @@ describe('submit posts an authorised Aone target through a1', () => {
     expect(stderrMock).not.toHaveBeenCalledWith(
       expect.stringContaining('does not track them'),
     );
+  });
+});
+
+// The Aone receipt is the WRITE half of cleanup's Aone bypass-audit
+// contract, the sibling of the gh receipt suite in submit.test.ts: on Aone
+// submit posts COMMENTS (Aone has no review object), so the audit's
+// sanctioned-vs-bypass ruling keys on the ids recorded here.
+describe('the Aone submit receipt (producer half of the audit contract)', () => {
+  const receiptPath = () =>
+    join(tmp, '.qwen', 'tmp', 'qwen-review-pr-1-submit-receipt.json');
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.exitCode = undefined;
+    // EVERY successful Aone post writes the receipt — the posting tests
+    // above all leave one behind in the shared per-file tmp dir. Start
+    // each receipt test from no receipt, or the accumulation assertions
+    // read a prior test's ids.
+    rmSync(join(tmp, '.qwen'), { recursive: true, force: true });
+    authMock.mockReturnValue({
+      ok: true,
+      why: 'the user asked for this review to be published',
+      recordedHost: 'gitlab.alibaba-inc.com',
+    });
+    getPlatformReaderMock.mockReturnValue({ kind: 'aone' });
+    gitOptMock.mockReturnValue(null);
+    submitAoneMock.mockReturnValue({ ...AONE_RESULT });
+    composeMock.mockReturnValue({
+      event: 'REQUEST_CHANGES',
+      body: 'One confirmed blocker blocks the merge.',
+      cappedBy: [],
+      floorEnforced: [],
+    });
+  });
+
+  afterEach(() => {
+    process.exitCode = undefined;
+  });
+
+  it('vouches for every posted comment id, including the summary', () => {
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    const receipt = JSON.parse(readFileSync(receiptPath(), 'utf8'));
+    // AONE_RESULT carries inlineCommentIds [11] with postedInline 2 — the
+    // second inline comment posted without a readable id has nothing to
+    // vouch for it (fail-safe toward over-flagging), and the summary id
+    // rides the receipt too.
+    expect(receipt.commentIds).toEqual([11, 12]);
+    expect(receipt.event).toBe('REQUEST_CHANGES');
+    expect(typeof receipt.postedAt).toBe('string');
+  });
+
+  it('accumulates ids across two submits in the same window (drift restart)', () => {
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    submitAoneMock.mockReturnValue({
+      ...AONE_RESULT,
+      inlineCommentIds: [21],
+      summaryCommentId: 22,
+    });
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    const receipt = JSON.parse(readFileSync(receiptPath(), 'utf8'));
+    expect(receipt.commentIds).toEqual([11, 12, 21, 22]);
+  });
+
+  it('vouches for the LANDED ids on a mid-batch failure — cleanup audits that window too', () => {
+    submitAoneMock.mockImplementation(() => {
+      throw new AonePartialPostError('died mid-batch', 1, [31], false, true);
+    });
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    expect(process.exitCode).toBe(3);
+    const receipt = JSON.parse(readFileSync(receiptPath(), 'utf8'));
+    expect(receipt.commentIds).toEqual([31]);
+  });
+
+  it('writes no receipt when nothing has an id to vouch for', () => {
+    // A first-write failure: zero landed ids, ambiguous or not. An empty
+    // receipt vouches for nothing anyway — writing one would only claim a
+    // submit happened where none is provable.
+    submitAoneMock.mockImplementation(() => {
+      throw new AonePartialPostError(
+        'died on the first write',
+        0,
+        [],
+        false,
+        true,
+      );
+    });
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    expect(process.exitCode).toBe(3);
+    expect(existsSync(receiptPath())).toBe(false);
+  });
+
+  it('preserves the review-id axis a gh submit vouched for the same PR number', () => {
+    // The receipt file is keyed by PR number alone but carries an axis per
+    // platform; an Aone rewrite that kept only its own axis would un-vouch
+    // a same-numbered gh submit's own reviews — the audit would then flag
+    // submit's sanctioned writes as bypasses.
+    mkdirSync(join(tmp, '.qwen', 'tmp'), { recursive: true });
+    writeFileSync(
+      receiptPath(),
+      JSON.stringify({ reviewIds: [500], event: 'COMMENT', postedAt: 'x' }),
+    );
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    const receipt = JSON.parse(readFileSync(receiptPath(), 'utf8'));
+    expect(receipt.commentIds).toEqual([11, 12]);
+    expect(receipt.reviewIds).toEqual([500]);
   });
 });

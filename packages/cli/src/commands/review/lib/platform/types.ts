@@ -140,4 +140,20 @@ export interface ReviewPlatformReader {
 
   /** The metadata fetch-pr records when it pulls the PR head. */
   getFetchMeta(prNumber: number, ownerRepo: string): FetchMeta;
+
+  /**
+   * The canonical web URL of the PR/MR. GitHub COMPOSES it — the URL
+   * grammar is deterministic, no API call; `submit` fills a receipt that
+   * carries no `html_url` through it. Aone is reader-backed — the
+   * platform's own `detailUrl`, never ASSEMBLED: the owner/repo collapse
+   * to the last two segments is non-injective on nested-group platforms
+   * and an assembled link could name a different repo. Aone's `submit`
+   * does not re-query through it: the pre-write drift-gate read already
+   * carries the same stable field, so a second fetch cannot add a link —
+   * when that receipt comes up empty, the skill relays the target's
+   * coordinates. `''` when the platform cannot serve one — and for
+   * GitHub when the routing host is not knowable, since a composed link
+   * there could name a host the write did not take.
+   */
+  composeUrl(prNumber: number, ownerRepo: string): string;
 }
