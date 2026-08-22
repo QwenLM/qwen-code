@@ -9545,9 +9545,10 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     expect(r.body).not.toContain('9999');
   });
 
-  it('leaves a terminal copy of the paragraph the ladder sheds first', () => {
-    // Rank 0 goes first, and the trim notice tells the author the trimmed
-    // sections "still hold — read them in the terminal report". Unlike the
+  it('leaves a terminal copy of the paragraph the ladder can shed', () => {
+    // The paragraph is the LAST rank the ladder sheds, and the trim notice
+    // tells the author the trimmed sections "still hold — read them in the
+    // terminal report" whichever rank went. Unlike the
     // deferral list (findings artifact) and the not-reviewed disclosures
     // (the model's own inputs), a diagnosis derived from the side file has
     // no other copy anywhere unless the composed result carries one.
@@ -9641,6 +9642,13 @@ describe('convergence diagnosis reaches the POSTED body', () => {
     // The promise the trim notice makes is about a body that DROPPED the
     // paragraph. A test that asserts the body still contains it never
     // reaches the case the copy exists for.
+    //
+    // Sized like the two order tests above, and for the same reason: the
+    // paragraph is the last rank the ladder sheds, so reaching a body that
+    // dropped it means sizing past every other rank. The window here runs
+    // 55,825–56,350 — this constant sat at 55,850, twenty-five characters
+    // above its own floor. To retune after a body-copy change: raise it
+    // until `Convergence:` disappears, and stop before `TRUNCATED` appears.
     sideFile({
       round: 4,
       posted: 9,
@@ -9652,13 +9660,14 @@ describe('convergence diagnosis reaches the POSTED body', () => {
       modelId: 'm',
       criticalsInline: 0,
       suggestionsInline: 1,
-      bodyCriticals: ['B'.repeat(55_850)],
+      bodyCriticals: ['B'.repeat(56_100)],
       unreviewedDimensions: ['security'],
       draftedComments: [
         { path: 'src/a.ts', line: 1, body: '**[Suggestion]** again' },
       ],
     });
     expect(r.body).not.toContain('Convergence:');
+    expect(r.body).not.toContain('TRUNCATED');
     expect(r.convergence?.en).toContain('Convergence:');
   });
 
