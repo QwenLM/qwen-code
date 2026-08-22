@@ -283,7 +283,8 @@ const TEAM_AGENT_PLAN_REQUIRED_PROPERTY = {
   description:
     'When true, the named teammate starts in plan mode and must call ' +
     'exit_plan_mode to request leader approval before executing. Only valid ' +
-    'with a named teammate in an active team.',
+    'with a named teammate in an active team. Cannot be combined with ' +
+    'read_only.',
 };
 
 const TEAM_AGENT_READ_ONLY_PROPERTY = {
@@ -291,7 +292,9 @@ const TEAM_AGENT_READ_ONLY_PROPERTY = {
   description:
     'When true, the named teammate can only inspect the checkout and use ' +
     'team coordination tools. Shell, file writes, memory, schedules, and ' +
-    'nested agents are blocked by an execution allowlist.',
+    'nested agents are blocked by an execution allowlist. Only valid with a ' +
+    'named teammate in an active team. Cannot be combined with ' +
+    'plan_mode_required.',
 };
 
 /**
@@ -738,7 +741,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
           type: 'boolean',
           default: true,
           description:
-            'Defaults to true for top-level regular subagents. Set to false to run a regular agent in the foreground and return its result inline. Set to true for an interactive fork to receive its completion notification; headless forks always run in the background. Nested agents run in the foreground unless run_in_background is explicitly true, which is rejected because they cannot receive background completion notifications. Unnamed caller-owned working_dir launches default to foreground. Named teammates are always concurrent and report through team messaging: omit run_in_background when spawning one — an explicit false is rejected; for an inline blocking result, omit "name" and run a regular agent with run_in_background: false. A teammate pinned to a caller-owned worktree must be shut down before that worktree is removed.',
+            'Defaults to true for top-level regular subagents. Set to false to run a regular agent in the foreground and return its result inline. Set to true for an interactive fork to receive its completion notification; headless forks always run in the background. Nested agents run in the foreground unless run_in_background is explicitly true, which is rejected because they cannot receive background completion notifications. Unnamed caller-owned working_dir launches run in the foreground; explicit run_in_background: true is rejected, while a configured background default is rejected at the top level and downgraded to the foreground for nested launches because the caller owns the worktree lifecycle. A configured default comes from a subagent definition with background: true. Named teammates are always concurrent and report through team messaging: omit run_in_background when spawning one — an explicit false is rejected; for an inline blocking result, omit "name" and run a regular agent with run_in_background: false. A teammate pinned to a caller-owned worktree must be shut down before that worktree is removed.',
         },
         ...(config.isAgentTeamEnabled()
           ? {
@@ -860,7 +863,7 @@ Usage notes:
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
 - If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
 - If the user asks for agents "in parallel", group independent launches in a single message with multiple Agent tool use content blocks. Do not parallelize overlapping code changes.
-- Top-level regular subagents run in the background by default. Set \`run_in_background: false\` when the current turn must wait for the result before continuing. Nested agent launches run in the foreground and return to their direct parent; an explicit \`run_in_background: true\` request is rejected because nested agents cannot receive background completion notifications. Unnamed caller-owned \`working_dir\` launches default to foreground and cannot run in the background; named teammates may use one, but must be shut down before it is removed.
+- Top-level regular subagents run in the background by default. Set \`run_in_background: false\` when the current turn must wait for the result before continuing. Nested agent launches run in the foreground and return to their direct parent; an explicit \`run_in_background: true\` request is rejected because nested agents cannot receive background completion notifications. Unnamed caller-owned \`working_dir\` launches run in the foreground: an explicit \`run_in_background: true\` request is rejected, while a configured background default (\`background: true\` in a subagent definition) is rejected at the top level and downgraded to the foreground for nested launches; named teammates may use one, but must be shut down before it is removed.
 - You can optionally set \`isolation: "worktree"\` to run the agent in a temporary git worktree, giving it an isolated copy of the repository. The worktree is automatically cleaned up if the agent makes no changes; if changes are made, the worktree path and branch are returned in the result so you can review or merge them.
 ## When to fork
 
