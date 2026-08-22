@@ -410,6 +410,41 @@ describe('InputForm model selector positioning (issue #8617)', () => {
     expect(rendered.onSelectModel).not.toHaveBeenCalled();
   });
 
+  it('does not let the Escape that closes the selector keep propagating to the composer', () => {
+    const rendered = renderInputForm({
+      showModelSelector: true,
+      availableModels: models,
+      currentModelId: null,
+    });
+    root = rendered.root;
+    container = rendered.container;
+
+    // A bubble-phase listener stands in for every downstream keydown handler
+    // (the webui composer's Escape branch → onCancel sits behind exactly
+    // this gate). The selector's capture-phase handler must stop the event,
+    // or the same Escape that closes the selector also cancels the
+    // in-flight generation.
+    const bubbleSpy = vi.fn();
+    document.addEventListener('keydown', bubbleSpy);
+
+    try {
+      act(() => {
+        document.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'Escape',
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
+      });
+    } finally {
+      document.removeEventListener('keydown', bubbleSpy);
+    }
+
+    expect(rendered.onCloseModelSelector).toHaveBeenCalledTimes(1);
+    expect(bubbleSpy).not.toHaveBeenCalled();
+  });
+
   it('reports the open dropdown height for messages scroll clearance', () => {
     const observers: Array<{
       callback: ResizeObserverCallback;

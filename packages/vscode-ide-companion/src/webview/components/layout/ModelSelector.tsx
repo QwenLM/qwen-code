@@ -108,7 +108,13 @@ export const ModelSelector: FC<ModelSelectorProps> = ({
           break;
         }
         case 'Escape':
+          // stopPropagation matches the Enter case above: the selector owns
+          // the keyboard while open. Without it this Escape keeps
+          // propagating into the composer's Escape branch (webui InputForm
+          // handleKeyDown → onCancel) and cancels the in-flight generation
+          // the user never asked to stop.
           event.preventDefault();
+          event.stopPropagation();
           onClose();
           break;
         default:
