@@ -16,6 +16,8 @@ from .errors import ProcessExitError
 from .json_lines import parse_json_line
 from .types import QueryOptions
 
+_PROCESS_STREAM_LIMIT = 4 * 1024 * 1024
+
 
 @dataclass(frozen=True)
 class SpawnInfo:
@@ -83,6 +85,7 @@ class ProcessTransport:
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=stderr_target,
+            limit=_PROCESS_STREAM_LIMIT,
         )
 
         if self._options.debug or self._options.stderr is not None:
