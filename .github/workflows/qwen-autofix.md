@@ -30,6 +30,36 @@ So: **prose belongs here, long steps belong in `.github/scripts/`.**
 `.github/scripts/check-workflow-size.sh` fails CI before the limit can be
 reached again.
 
+### Steps that moved out, not just their prose
+
+`review-address` · `Push and report` was 626 lines of inline shell — ~41 KB,
+the third-largest `run:` body in the file after
+`Scan for PRs with new feedback` and `Prepare branch and feedback` — and its
+body now lives in `.github/scripts/autofix-push-and-report.sh`. The YAML keeps
+the step's `if:` and `env:`: when it runs, and what reaches it.
+
+**The file is never executed from disk.** The stage step reads it from the
+trusted-base checkout, before any branch code has run, and passes the text
+through step output; the step runs those bytes. That is the delivery the inline
+block already had — the workflow file's own bytes, chosen by GitHub, not by
+anything on the runner — and the one `upsert-deferred-issue.sh` uses.
+
+This matters because `Push and report` holds the PAT and runs _after_ the agent
+and the verification gate have executed branch code on this host. A copy staged
+under `${RUNNER_TEMP}` would be theirs to swap, which is why the staged scripts
+that do live on disk (`resanitize-git-config.sh`, the gate runner) each carry a
+digest the invoking step re-checks. Content delivery removes the object those
+digests exist to protect: nothing to stage, nothing to digest, nothing to type
+check, no second open, and no check→use window between the steps. The
+qualifier that makes it hold is that a step output is fixed when its step ends
+— later steps read the recorded value, so a disk write after staging cannot
+change what arrives here. It is not a claim that the value is unreachable
+while the stage step is still running.
+
+`docs/design/autofix-gate-runner-isolation.md` finishes the job: once this step
+is its own `publish` job, checking out the trusted base and never executing
+branch code, the script can simply be run from the checkout.
+
 ## How the pointers work
 
 Where a block of commentary used to sit, the workflow keeps its opening lines
@@ -45,6 +75,12 @@ Each section below is the **verbatim** text of the block that pointer replaced,
 titled with the job and step it belongs to. Editing rules: keep the pointer and
 the section id in sync, put new long-form reasoning here rather than in the
 YAML, and never delete a section without deleting its pointer.
+
+This file records _why the code is the way it is_, indexed by code site. For
+task-oriented guides — what a maintainer types and what happens next — see:
+
+- [`qwen-autofix-round-seed.md`](./qwen-autofix-round-seed.md) — seeding the
+  round counter with `@qwen-code /takeover from N`.
 
 ## Contents
 
@@ -93,8 +129,6 @@ YAML, and never delete a section without deleting its pointer.
 - [43. review-address · Prepare branch and feedback — Growth brake: measure the PR's net size (insertions minus deletions vs the merge base),…](#af-043)
 - [44. review-address · Prepare branch and feedback — An orphan-history branch (fork takeover / adoption admits one — nothing on this job's…](#af-044)
 - [45. review-address · Prepare branch and feedback — The marker's window field is spelled `key=`, NOT `win=`: this marker can legitimately…](#af-045)
-- [46. review-address · Prepare branch and feedback — Divergence: Critical-only only trims non-Criticals, so when the GROWTH that trips the…](#af-046)
-- [47. review-address · Prepare branch and feedback — Count runs whenever the net is measured (not only over budget), so the trajectory clause…](#af-047)
 - [48. review-address · Prepare branch and feedback — Which trusted humans have exhausted their per-window regular feedback budget (see…](#af-048)
 - [49. review-address · Prepare branch and feedback — Time-budget exhaustions SINCE THE LAST SUCCESSFUL ROUND mean the standard…](#af-049)
 - [50. review-address · Triage and address — Bound the agent below the job timeout so a runaway agent fails THIS step (not the whole…](#af-050)
@@ -120,6 +154,7 @@ YAML, and never delete a section without deleting its pointer.
 - [70. review-address · Report dry-run / failure — -c drops any partial multi-byte sequence a byte-level head -c may have split, so the…](#af-070)
 - [71. review-address · Report dry-run / failure — Bilingual companion. Repo convention is English first, Chinese in a collapsed <details>.…](#af-071)
 - [72. review-address · Report dry-run / failure — Flip the status comment out of "working" so a finished round never leaves a live-looking…](#af-072)
+- [73. review-address · Report dry-run / failure — Idle (silent-sandbox) timeouts are EXCLUDED from the cumulative timeout cap.…](#af-073)
 
 ---
 
@@ -879,9 +914,27 @@ same PRs and the per-PR address groups accumulate duplicates that
 later replay stale watermarks. The status filter is SERVER-side: a
 client-side filter over the N newest runs loses a long-lived
 fanned-out run once cron traffic pushes it past the window, and
-its queued PRs silently stop looking busy. Filtered this way the
-limit applies to LIVE runs only (at most a handful), and one
-jobs-view per live run stays cheap.
+its queued PRs silently stop looking busy. The union covers THREE
+statuses — in_progress, queued, AND pending: GitHub reports a run
+'pending' while its remaining jobs wait on concurrency groups
+(neither 'queued' nor 'in_progress'), and the run-level status
+trails the job-level flip by minutes, so the two-status union
+loses legs that are already running. Measured 2026-08-21 (#9596):
+a run whose four legs had been running for several minutes still
+listed 'pending', the scan re-dispatched all four, and every
+duplicate burned one build-cli (~5 min) before queueing behind
+the per-PR group it should have skipped. Pending runs cost one
+extra jobs-view each and match nothing until their matrix
+materialises. Filtered this way the limit applies to LIVE runs
+only (at most a handful), and one jobs-view per live run stays
+cheap. The enumeration calls the runs API directly, not `gh run
+list --status`: gh validates --status against a client-side
+allow-list that only accepts 'pending' from 2.65.0 onward, while
+the self-hosted ecs-qwen pool (already used by the issue-autofix,
+build-cli, and review-address sibling jobs) lags the hosted
+images — an older gh exits 1 on the flag and FAIL-CLOSED below
+then silently empties every scan. The API's status filter is
+server-side on every gh version.
 
 FAIL-CLOSED: any enumeration failure (the run list, or one run's
 jobs view) empties THIS scan's candidate set. Measured 2026-08-16
@@ -1395,87 +1448,6 @@ anchor recorded before the latest base update is not comparable
 any more — ignore it, so the next round re-anchors at the
 post-update size. (A conflict round's own merge of main is the
 narrower residual; its delta is bounded by the overlap.)
-```
-
-<a id="af-046"></a>
-
-### 46. review-address · Prepare branch and feedback — Divergence: Critical-only only trims non-Criticals, so when the GROWTH that trips the…
-
-In `review-address` · `Prepare branch and feedback`.
-
-```text
-Divergence: Critical-only only trims non-Criticals, so when the
-GROWTH that trips the brake is Critical-driven the diff keeps
-climbing anyway. Read this window's prior per-round growth markers
-(written by the report step): count the rounds that were over
-budget, and take the MOST RECENT prior over-budget run's growth
-SUM (latest measured= — see below; NOT the window-wide max, which a
-one-off spike would raise forever). The round is DIVERGING when it
-is over budget now, the brake has already fired for
->= GROWTH_DIVERGENCE_ROUNDS prior rounds, and the diff has NOT
-shrunk from that most-recent sum — the fixes are not converging, so
-the round must escalate to a human decision instead of patching
-again. A diff that is over budget but SHRINKING (agent removing
-code) or a one-off overshoot stays in ordinary Critical-only.
-```
-
-<a id="af-047"></a>
-
-### 47. review-address · Prepare branch and feedback — Count runs whenever the net is measured (not only over budget), so the trajectory clause…
-
-In `review-address` · `Prepare branch and feedback`.
-
-```text
-Count runs whenever the net is measured (not only over budget), so
-the trajectory clause below is accurate even on a round that pulled
-back under budget. markers:
-<!-- autofix-growth-now src=N test=N over=BOOL round=N run=ID measured=TS key=W -->
-Deduped by run=GITHUB_RUN_ID (the per-workflow-run id) and ORDERED
-by measured=: the report post's bounded retry re-posts one run's
-marker, and a failed job's re-run keeps the same run_id, so a run
-collapses to its LATEST measurement — and that collapse happens
-BEFORE the over/window/cutoff filters, or a re-run that came back
-under budget would still be represented by its stale over=true
-attempt. Within the collapse an explicit measured= beats the
-created_at fallback: a re-run attempt that crashed BEFORE prepare
-— or whose measurement failed — posts an inert over=false marker
-with no measured=, whose fallback (post-run) timestamp would
-otherwise outdate and erase the same run's real prepare-time
-measurement. Every distinct address run has a fresh run_id.
-KNOWN RESIDUAL (#9114): during the one-time deploy transition a
-run whose FIRST attempt posted a legacy (no measured=) over=true
-marker and whose re-run crashes before prepare still collapses
-fallback-vs-fallback on created_at — the later inert marker wins
-and erases the count. Self-limiting: once deployed, every real
-measurement carries measured= and beats any inert marker.
-round=/eval-watermark are NOT a safe identity — a state-triggered
-lane (a persistent merge conflict selects the PR every scan with no
-new evaluable feedback) freezes both NEWEST and ROUND, so distinct
-over-budget runs would share them and collapse, stalling the count.
-Filtered on measured= (the prepare-time measurement instant, NOT
-the comment's post-agent created_at) after GROWTH_NOW_CUTOFF, so a
-prior sum measured against a pre-base-update tree is dropped rather
-than compared to this round's. KNOWN RESIDUAL (#9114): the tree is
-fixed at the branch fetch/checkout while the cutoff comes from
-ic.json fetched afterwards, so a base update landing between the
-fetch and the measured_at stamp admits a pre-update marker;
-self-heals at the next re-arm/base update. measured= is OPTIONAL in
-the scan:
-markers posted before it existed fall back to their comment's
-created_at, so deploying this does not blank the census of a window
-that is already in flight. KNOWN RESIDUAL (#9114): during that
-transition the sort mixes two clocks — a legacy marker's fallback
-is its POST-RUN created_at while a new marker stamps prepare time —
-so PREV_SUM can briefly come from an older measurement; the count
-is unaffected and it self-heals at the next re-arm/base update.
-The "not shrinking" test compares against the MOST RECENT prior
-over-budget run's sum (latest measured=), not the window-wide max: a
-single transient spike would otherwise raise the bar forever and a
-genuine plateau-over-budget runaway (the exact case to escalate)
-would never clear it. The CURRENT run's own markers are excluded
-(run != GITHUB_RUN_ID): a re-run of a failed job keeps the same run
-id and its failed attempt already posted a marker, so counting it
-would over-report the round's own attempt as a PRIOR one.
 ```
 
 <a id="af-048"></a>
@@ -2148,4 +2120,69 @@ overwrite that round's "finished" with its own "ended without
 publishing" and report a successful round as a failed one. An empty
 'stale' (prepare itself crashed) still finalises — that IS this job's
 round, and it is exactly the case that must not stay "working".
+```
+
+<a id="af-073"></a>
+
+### 73. review-address · Report dry-run / failure — Idle (silent-sandbox) timeouts are EXCLUDED from the cumulative timeout cap.
+
+In `review-address` · `Report dry-run / failure`.
+
+```text
+TIMEOUT_WINDOW_CAP exists to stop a PR that is too big to finish a
+round inside the agent's time budget; its remedy says so ("split or
+reduce the PR, or raise the agent time budget AND its step backstop").
+An idle timeout is a different failure entirely: run-agent.mjs's idle
+watchdog kills the round after QWEN_IDLE_TIMEOUT_MS (20m) because the
+sandbox produced no output at all — the four observed hangs (#8663 x2,
+#8761 r3, #8763 r4) each printed their last byte at docker container
+entry and then sat silent. Nothing about the PR caused it, and the
+breaker's own headline already told the reader that "no budget increase
+can cure" it. Counting a failure whose prescribed remedy is
+inapplicable is what parked healthy PRs.
+
+Measured on 2026-08-21, over the preceding 14 days: 119 timeouts, of
+which 58 (49%) were idle. 51 windows tripped this cap, every one of
+them at exactly N=3. Of the 12 open PRs then carrying
+autofix/needs-human, 9 had been stopped here — #8332 at 24 rounds,
+#8368 at 28, #8276 at 16, all still producing pushed rounds when they
+were parked. With idle rounds counted, the fleet timeout rate was
+8.5% per round, so a window accumulated three of them in ~35 rounds by
+arithmetic alone, independent of whether the PR was stuck. Excluding
+idle drops the rate to 4.3%, which needs ~69 rounds — beyond the
+deepest window ever observed (22/100).
+
+The escape hatch that makes the exclusion safe: an idle round pushes
+nothing and matches none of CONSEC_FAIL's streak-reset needles
+("Addressed the latest review feedback", "no changes needed", "AutoFix
+could not start", "updated a stale base"), so a persistently wedged
+sandbox still terminates the PR at CONSECUTIVE_FAILURE_CAP. What no
+longer terminates it is idle rounds INTERLEAVED with real progress —
+which is the intended change: that PR is not stuck, the runner is.
+
+Two consequences inside the block. IDLE_N's needle became the full
+emitted headline prefix ('AutoFix ran out of time before finishing
+(idle-timeout') rather than a bare 'idle-timeout' substring: IDLE_N is
+now subtracted from TIMEOUT_N, so it MUST be a subset of it, and a
+loose needle could otherwise match provider error text that
+API_ERROR_DETAIL puts on the same first line and drive the difference
+negative. And the all-idle remedy branch is gone as unreachable: the
+guard now fires only when BUDGET_TIMEOUT_N alone reaches the cap, so a
+tripped window always holds at least TIMEOUT_WINDOW_CAP genuine budget
+timeouts — idle rounds can outnumber budget ones in it, but the budget
+remedy applies because those budget timeouts exist, not because they
+are the majority.
+
+Idle rounds stay visible through a job-log ::warning:: rather than a PR
+comment — the signal belongs to whoever owns the runners, and infra
+noise should not spend a comment on someone's PR. The census and its
+warning run outside the cap's terminal guard: the all-idle shape stops
+via the consecutive breaker with that breaker's headline, and the
+terminal run's log is exactly where the wedged runner must be named.
+
+The same exclusion applies to the prepare step's PRIOR_TIMEOUTS census
+(af-049): its budget warning tells the agent to narrow scope — the
+budget remedy again — and an idle round never exhausted any budget, so
+it must not steer the narrowing. Idle rounds are excluded there with
+the same needle the cap census uses.
 ```

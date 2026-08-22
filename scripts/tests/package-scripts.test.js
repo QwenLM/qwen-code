@@ -402,14 +402,23 @@ describe('package scripts', () => {
 
   it('skips release install-time prepare and builds before publish bundling', () => {
     const workflow = readWorkflow('.github/workflows/release.yml');
+    expect(workflow.slice(0, workflow.indexOf('jobs:'))).not.toContain(
+      'CI_BOT_PAT',
+    );
     const installSteps =
       workflow.match(
-        / {6}- name: 'Install Dependencies'[\s\S]*? {10}npm ci --no-audit --progress=false/g,
+        / {6}- name: 'Install Dependencies'[\s\S]*?(?=\n {6}- name: '|\n {4}[A-Za-z0-9_-]+:|$)/g,
       ) || [];
 
-    expect(installSteps.length).toBeGreaterThanOrEqual(5);
+    expect(installSteps.length).toBe(5);
     for (const installStep of installSteps) {
-      expect(installStep).toContain("QWEN_SKIP_PREPARE: '1'");
+      expect(installStep).toContain(
+        'npm ci --ignore-scripts --no-audit --progress=false',
+      );
+      expect(installStep).toContain('npm run postinstall');
+      expect(installStep).toContain('npm run generate');
+      expect(installStep).not.toContain('QWEN_SKIP_PREPARE');
+      expect(installStep).not.toContain('CI_BOT_PAT');
     }
 
     for (const jobName of ['integration_none', 'integration_docker']) {
@@ -419,6 +428,10 @@ describe('package scripts', () => {
     }
 
     const publishJob = getWorkflowJob(workflow, 'publish');
+    expect(publishJob.slice(0, publishJob.indexOf('steps:'))).not.toContain(
+      'CI_BOT_PAT',
+    );
+    const checkoutStep = getWorkflowStep(publishJob, 'Checkout');
     const gitConfigStep = getWorkflowStep(publishJob, 'Configure Git User');
     const commitStep = getWorkflowStep(
       publishJob,
@@ -429,9 +442,21 @@ describe('package scripts', () => {
       'Build Bundle and Prepare Package',
     );
 
+    expect(checkoutStep).toContain('persist-credentials: false');
     expect(gitConfigStep).toContain('git config core.hooksPath .husky');
     expect(publishJob.indexOf(gitConfigStep)).toBeLessThan(
       publishJob.indexOf(commitStep),
+    );
+    expect(commitStep).toContain("CI_BOT_PAT: '${{ secrets.CI_BOT_PAT }}'");
+    expect(commitStep).toContain('export GH_TOKEN="${CI_BOT_PAT}"');
+    expect(commitStep).toContain('gh auth setup-git');
+    const exportTokenIdx = commitStep.indexOf(
+      'export GH_TOKEN="${CI_BOT_PAT}"',
+    );
+    const setupGitIdx = commitStep.indexOf('gh auth setup-git', exportTokenIdx);
+    expect(setupGitIdx).toBeGreaterThan(exportTokenIdx);
+    expect(setupGitIdx).toBeLessThan(
+      commitStep.indexOf('git push --force --set-upstream'),
     );
     expect(buildStep).toContain('npm run build\n          npm run bundle');
   });
@@ -603,7 +628,7 @@ describe('package scripts', () => {
     }
 
     expect(getWorkflowStep(reviewJob, 'Verification gate')).toContain(
-      'bash "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
+      'bash --norc "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
     );
   });
 });

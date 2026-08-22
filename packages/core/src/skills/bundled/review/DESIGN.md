@@ -548,6 +548,14 @@ So `--resume` is three small mechanisms over existing state. `fetch-pr --resume`
 
 The refusal directions all point the same way: anything that no longer matches or cannot be read (missing report, worktree moved or dirty, diff-hash mismatch, head moved, unreadable ledger) reads as "start fresh" — never as a silent continuation of stale work. The resume cap reads two counters — the resume marker's count, cross-capped by the session ledger's resume count — so deleting `resume.json` alone does not reset it. An in-run drift restart is recorded when its Step 1 re-entry refuses with `head-moved` and falls through to the fresh fetch the restart wants. And budget round stamps are deliberately dropped on resume because a span across the death gap would price a round at hours — the gate falls back to its conservative constant, whose failure direction is an early stop with a disclosure; a round-cap stop, being the CLI's own record of an exhausted cap rather than a stale time-budget stop, is kept.
 
+## Why the incremental scope widens by one import hop
+
+The narrowing publishes the PR's own sections for the files a round touched, and `narrow-diff.ts` carries the argument for building the scope that way rather than checking a separately captured one. This is the other half, and it goes the opposite direction: the narrowing is sound only for files the delta can see.
+
+The widening exists because "clean" is a verdict about the code as it stood. The previous round cleared a caller against the callee it imported THEN; the fix under review moves the callee, and a scope that holds only the interdiff never re-opens the caller — the breakage retires silently, permanently, because the next clean round re-anchors past it. So every still-clean source file one import hop from a changed file re-enters the scope with its full-range hunks, and the plan records why (`incremental.interaction[]`), so the chunk brief can direct its agent at the seam — "do your uses of what changed still hold" — instead of a from-scratch re-review that re-reports what round 1 already ruled on. One hop, dependents only, source files only: the callee-side risk lives in the changed file's own chunk (its agent reads callees from the worktree), test dependents are `build-test`'s job, and a barrel re-export between caller and callee hides the edge — a documented miss that leaves exactly the floor incremental review had before widening existed. The specifier scan is a regex heuristic on purpose, and its error directions are chosen: a false positive reviews a file once more than needed, a false negative never drops below the unwidened floor. A round that only REVERTS needs none of this: the undone file is gone from the PR's own diff, so the narrowing refuses to narrow at all and the round reviews the full range — over-review, which is the direction every refusal here leans.
+
+It cannot be folded into the narrowing, because the file it adds is one the delta capture provably does not contain — an importer of a changed file is unchanged by definition. So it runs on the narrowing's own selection, after its guards have passed, and it only ever adds: with no edge to follow the widened round publishes exactly what the unwidened one would, which makes the narrowing the floor rather than a second path that could disagree with it.
+
 ## Why three more mutation operators, and why each is shaped the way it is
 
 Statement deletion with a safety-verb filter was the first operator because it has the cleanest survivor semantics. But a live maintainer re-verification produced a survivor list the deletion operator cannot express — and every entry mapped to one of three shapes, each with equally crisp semantics:
@@ -1073,3 +1081,72 @@ A maintainer-dogfood round-1 finding asserted head-comment leakage against the t
 ### The mirrored oracle's false positives (PR #8225)
 
 Two sweeps in the same dogfood series manufactured findings out of their own bugs: a round-2 sweep unconditionally filtered `set -e` lines and reported four leaks that were not there, and a round-7 differential oracle misread a shell continuation line as a command position and reported one miss that was not one. Both oracles were reimplementations of the logic under test — a mirror of the implementation shares its blind spots. The round-7 fix handed adjudication to bash itself, and the false red vanished; that is why a sweep's oracle must be an external authority, and why a nonzero count is spot-checked by reading one hit before it is quoted.
+
+### The inherited tool surface
+
+`AgentCore.prepareTools` has two branches. A subagent type that declares a `tools` list is built with `getFunctionDeclarationsFiltered(allowedNames)`; a type that declares none inherits everything — `getFunctionDeclarations({ includeDeferred: true })`, deferred tools included. The comment above that branch states the reasoning: subagents are one-shot, so they "don't have the same 'save tokens' lifecycle as the main chat."
+
+That premise does not hold for a review. A review names 13-14 subagents, each runs several turns, and a tool block is re-declared on every one of them. `general-purpose` — the type the skill mandated — is the only builtin that declares no `tools`; `Explore` declares seven and `statusline-setup` three.
+
+Measured with a recording endpoint, on a 6-file / 115-line diff, driving one real dimension agent (1a) end to end through its four turns — read brief, read diff page 1, read diff page 2, report. The three arms differ only in `subagent_type`; same fixture, same launch prompt, same isolated `QWEN_HOME`, and the orchestrator's own turns are identical across all three:
+
+| `subagent_type`                        | tools declared | tokens/turn | delivered |
+| -------------------------------------- | -------------- | ----------- | --------- |
+| `general-purpose` (inherit everything) | 51             | 21,178      | 139,013   |
+| deferral applied to subagents          | 10             | 7,758       | 84,537    |
+| `review-agent` (explicit list)         | 6              | 3,447       | 55,897    |
+
+Of the 51, thirty-five were `computer_use__*` desktop-automation schemas, 11,011 tokens per turn on their own. Across a 13-agent roster the difference between the first and last row is ~1.08M prompt tokens on a 115-line change.
+
+The per-turn record behind the first and last rows, so the totals above can be re-derived rather than taken on trust — `system` + `messages` + `tools` is that turn's whole prompt:
+
+| turn | what the agent did | `general-purpose` sys / msgs / tools | `review-agent` sys / msgs / tools |
+| ---- | ------------------ | ------------------------------------ | --------------------------------- |
+| 1    | read the brief     | 5,286 / 3,623 / 21,178               | 5,357 / 504 / 3,447               |
+| 2    | read diff page 1   | 5,286 / 6,349 / 21,178               | 5,357 / 3,230 / 3,447             |
+| 3    | read diff page 2   | 5,286 / 10,609 / 21,178              | 5,357 / 7,490 / 3,447             |
+| 4    | report             | 5,286 / 12,576 / 21,178              | 5,357 / 9,457 / 3,447             |
+
+The 83,116-token gap decomposes exactly: tool declarations 4 × 17,731 = **70,924**, the skills catalogue 4 × 3,119 = **12,476**, and the system prompt −284 (this agent's is marginally longer than `general-purpose`'s).
+
+The middle row is the alternative that was measured and rejected: making the deferral that trims the orchestrator apply to subagents too. It saves less, because deferral is not designed to go below the core tool set — it holds back MCP and low-frequency built-ins and declares the ~14 core tools regardless, so a subagent would still carry `skill`, `tool_search`, `notebook_edit` and the rest. An explicit list goes under that floor.
+
+The catalogue line above is the second-order half, and it is **15%** of the gap — a sixth, not the 3.7% a per-turn-against-a-four-turn-total reading gives. Omitting `SKILL` means `willHaveSkillTool()` no longer injects the skills catalogue into the agent's first user message; that message is 3,119 tokens lighter (504 against 3,623), and because the first message is re-sent on every subsequent turn the saving is charged four times, not once. Any per-turn figure in this section is charged per turn.
+
+It is also the smaller change: applying deferral to subagents would alter every `tools: ['*']` config in the way that branch's own comment warns about, while a review-specific type touches nothing outside the review.
+
+One argument for that ordering was checked and does **not** hold, and is recorded here because it appeared in an earlier draft of this section: a subagent revealing a deferred tool does not pollute the orchestrator. `rebuildToolRegistryOnOverride` builds a fresh registry per launch and rebinds `getToolRegistry` on the override config, so `revealDeferredTool` mutates a launch-scoped registry that cannot reach the parent's declarations or its prompt-cache prefix. The rejection rests on the measurement and the blast radius, not on cache pollution.
+
+What the closed list gives up, since the numbers above are only the saving side. `getFunctionDeclarationsFiltered` drops unknown names silently and declares any name it does resolve, so nothing here is free either way — naming a deferred tool would cost its schema, not zero. Against the inherited surface a review part loses: `agent` (`prepareTools` special-cases it and nesting is allowed by default, so this is a real removal — review parts are leaf workers, and a nested fan-out is findings the orchestrator never collects); `web_fetch`, 652 tokens/turn, which the verifier brief's "corroborate via the vendor's own tracker" used directly and now reaches only through what `run_shell_command` can call; and every discovered MCP tool, which matters when a project's own `## Code Review` rules name one. `lsp` is not in the list of losses — it was not in the inherited surface measured here either. Restoring any of them is a per-role question, and a per-role type would add its own description line to the Agent tool declaration in every session, so it is not free at the other end.
+
+Two adjacent findings, neither introduced here and neither fixed here, both surfaced because this is the first shipped type with a restricted list. `coreToolScheduler`'s skill-activation reminder means to gate on whether the model can actually invoke a skill — its own comment says so — but it reads `toolRegistry.getTool(SKILL)`, and SKILL is registered unconditionally, so the gate is always true. A review part therefore still gets a reminder naming a tool it was never declared, and the announcement is marked consumed in the shared Config, so the orchestrator that does hold the Skill tool never learns the skill activated. Separately, `buildMcpServerInstructionsReminder` has no gate at all, beside a skills reminder and a deferred-tools reminder that both have one, so an MCP server's own `instructions` prose still rides in every part's first message and is re-sent every turn. Fixing either means changing what every subagent receives, not only a review's, so each belongs in its own change.
+
+The capability that goes with the second-order saving should be named with it: dropping SKILL means a review part can no longer invoke a project skill at all — this repository ships 25 of them — so the 12,476 tokens are bought with that, not for free.
+
+One consequence of the name. `SubagentManager.loadSubagent` resolves session > project > user > extension > builtin and builtin names are not reserved (`validation.ts` reserves only `self/system/user/model/tool/config/default/main`), so a user-authored `.qwen/agents/review-agent.md` shadows this entry for every launch a review makes. If theirs declares no `tools` the whole saving is gone with no diagnostic, and — because `deleteSubagent` checks `isBuiltinAgent(name)` before it checks level — their own file can no longer be removed through `/agents`. That precedence is deliberate and is how any builtin is customised; it is recorded here because `review-agent` is a likelier name for a user to have chosen than `Explore` or `statusline-setup`.
+
+**How to re-run this measurement.** Every figure above is reproducible with commands this repository already ships — no private script, which is why none is committed. Two arms differ only in `subagent_type`; build the second by reverting the review-path sources to the merge base and bundling separately:
+
+```bash
+git checkout <merge-base> -- packages/core/src/subagents/ \
+  packages/core/src/skills/bundled/review/ \
+  packages/cli/src/commands/review/agent-prompt.ts \
+  packages/cli/src/commands/review/agent-prompt.test.ts
+npm run build:packages && npm run bundle && cp -R dist /tmp/ab/dist-base
+git reset --hard HEAD && npm run build:packages && npm run bundle && cp -R dist /tmp/ab/dist-head
+```
+
+The test file is on that list for a reason that is easy to miss: it imports `REVIEW_BUILTIN_SUBAGENT_TYPE`, which the reverted core no longer exports, so leaving it at HEAD fails `build:packages` with TS2724 — and the `&&` then swallows the bundle step, leaving whatever `dist/` happened to be there before. Reverting the sources alone is not enough; anything that _references_ them has to go back too.
+
+**Per-turn token counts** (the 21,178 / 3,447 / 55,897 figures) come from pointing the product at a recording OpenAI-compatible endpoint and tokenising each captured request body with cl100k. `qwen review agent-prompt --plan <plan> --roster` builds the launch prompt; one orchestrator turn launches one dimension agent, and the endpoint answers with that agent's own scripted `read_file` calls so it walks all four turns. What matters is that the record keeps the request **whole**: `qwen review mock-provider` truncates its record at 8 KB, which is smaller than a single tool block, so its log cannot be the source for these numbers.
+
+**The environment is part of the measurement.** The 51-tool arm is the product default, not a local quirk: 35 of the 51 are `computer_use__*`, and `tools.computerUse.enabled` defaults to true. Run each arm under its own `QWEN_HOME` so a stray extension or skill cannot differ between them.
+
+**Run-level figures** (688 vs 542 calls, 59.5M vs 29.5M input, the 95%/93% cache rates) need no harness at all — they are two real reviews of one PR, read back from the product's own ledger:
+
+```bash
+QWEN_HOME=/tmp/ab/home-<arm> QWEN_CODE_CLI=/tmp/ab/dist-<arm>/cli.js \
+  qwen review run <pr> --json --approval-mode yolo
+```
+
+Give each arm a **fresh working tree and `QWEN_HOME`**. This is the step that is easy to skip and fatal to skip: `.qwen/review-cache/pr-<n>.json` makes a second run of the same PR an incremental re-review, so it would reuse the first arm's findings and the comparison would measure nothing. The cache file is also where each run records the `lastModelId` it actually used — worth reading back rather than trusting the settings that were meant to apply.

@@ -7,7 +7,7 @@ import {
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall, Message } from '../../adapters/types';
 import { WEB_SHELL_MAX_TRANSCRIPT_BLOCKS } from '../../constants/sessions';
-import { useAnimationFrameTranscriptBlocks } from '../../hooks/useAnimationFrameTranscriptBlocks';
+import { useAnimationFrameTranscriptSnapshot } from '../../hooks/useAnimationFrameTranscriptBlocks';
 import { useMessagesFromBlocks } from '../../hooks/useMessages';
 import { useSessionArtifacts } from '../../hooks/useSessionArtifacts';
 import { useI18n } from '../../i18n';
@@ -95,17 +95,6 @@ export function findSubagentRootTool(
   return undefined;
 }
 
-export function getSubagentPrompt(
-  messages: readonly Message[],
-  rootTool: ACPToolCall,
-): string {
-  const firstUserMessage = messages.find((message) => message.role === 'user');
-  return (
-    (firstUserMessage?.role === 'user' ? firstUserMessage.content : '') ||
-    (typeof rootTool.args?.prompt === 'string' ? rootTool.args.prompt : '')
-  );
-}
-
 function statusLabel(status: string, t: ReturnType<typeof useI18n>['t']) {
   switch (status) {
     case 'completed':
@@ -144,8 +133,8 @@ function SubagentDetailContent({
 }) {
   const { t } = useI18n();
   const connection = useConnection();
-  const blocks = useAnimationFrameTranscriptBlocks();
-  const messages = useMessagesFromBlocks(t, blocks);
+  const { blocks, blockChangeSummary } = useAnimationFrameTranscriptSnapshot();
+  const messages = useMessagesFromBlocks(t, blocks, blockChangeSummary);
   const { artifacts } = useSessionArtifacts();
   const artifactsByTurn = useMemo(
     () =>
@@ -162,7 +151,6 @@ function SubagentDetailContent({
     [artifactsByTurn, connection.workspaceCwd, messages],
   );
   const description = getAgentDescription(rootTool);
-  const prompt = getSubagentPrompt(messages, rootTool);
   const metrics = useMemo(
     () => getSubagentMetrics(rootTool, resolution),
     [resolution, rootTool],
@@ -237,7 +225,6 @@ function SubagentDetailContent({
           </div>
         </div>
         {stopError && <div className={styles.stopError}>{stopError}</div>}
-        {prompt && <pre className={styles.prompt}>{prompt}</pre>}
       </div>
       <div className={styles.transcript}>
         <MessageList
@@ -249,7 +236,6 @@ function SubagentDetailContent({
           activeTurnStartedAt={isRunning ? rootTool.startTime : undefined}
           workspaceCwd={connection.workspaceCwd || ''}
           hideSessionTimeline
-          hideFirstUserMessage
           firstTurnMetrics={metrics}
           includeSubagentToolUsageInMetrics={false}
           turnFileChanges={fileChangesByTurn}
@@ -285,8 +271,13 @@ export function SubagentDetail({
   const { t } = useI18n();
   const workspace = useWorkspace();
   const parentConnection = useConnection();
-  const parentBlocks = useAnimationFrameTranscriptBlocks();
-  const parentMessages = useMessagesFromBlocks(t, parentBlocks);
+  const { blocks: parentBlocks, blockChangeSummary: parentBlockChangeSummary } =
+    useAnimationFrameTranscriptSnapshot();
+  const parentMessages = useMessagesFromBlocks(
+    t,
+    parentBlocks,
+    parentBlockChangeSummary,
+  );
   const rootTool =
     (parentConnection.sessionId === sessionId
       ? findSubagentRootTool(parentMessages, rootToolCallId)

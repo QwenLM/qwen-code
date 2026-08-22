@@ -8,6 +8,10 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import {
+  BuiltinAgentRegistry,
+  REVIEW_BUILTIN_SUBAGENT_TYPE,
+} from '../../../subagents/builtin-agents.js';
 
 const skillDir = path.dirname(fileURLToPath(import.meta.url));
 
@@ -647,5 +651,86 @@ describe('bundled review skill', () => {
     expect(body).toContain(
       'the URL a `pr-url` target carried, or else assemble',
     );
+  });
+
+  it('runs presubmit on Aone targets — self-PR backing, not the skip list', () => {
+    // Revert guard (#9616): presubmit used to sit on the Aone skip list and
+    // the skill carried the "self-PR detection has no Aone backing" caveat —
+    // a review of the user's own MR silently got no downgrade. The command
+    // is now backed for self-PR detection and head drift; restoring either
+    // the skip or the caveat must fail here, not slip through.
+    const body = skillBody();
+    expect(body).toContain('`presubmit` **runs on Aone targets too**');
+    expect(body).toContain('the `a1 auth whoami` account vs the MR author');
+    expect(body).toContain('self-PR detection and head drift are a1-backed');
+    expect(body).not.toContain('self-PR detection has no Aone backing');
+    expect(body).not.toContain('`pr-context`, `comment-status`, `presubmit`');
+  });
+
+  it('mandates the review-agent subagent type, never general-purpose', () => {
+    // This literal is the whole delivery mechanism for the explicit tool list.
+    // `general-purpose` declares no `tools`, so it takes prepareTools'
+    // inherit-everything branch and every agent re-declares 51 schemas on
+    // every turn — measured at ~1.08M extra prompt tokens across one
+    // 13-agent roster (DESIGN.md — The inherited tool surface). A revert to
+    // the old literal is silent: the review still runs, just six times
+    // dearer per agent.
+    const body = skillBody();
+    expect(body).toContain(
+      `set \`subagent_type: "${REVIEW_BUILTIN_SUBAGENT_TYPE}"\` and \`run_in_background: false\``,
+    );
+    // The type must exist, or every launch fails outright: an unknown
+    // `subagent_type` is not substituted with the default — only an omitted
+    // one is — so the review would die on `Subagent "…" not found` rather
+    // than quietly run under `general-purpose`. `not.toBeNull()`, because
+    // `getBuiltinAgent` returns `null` on a miss and `toBeDefined()` accepts
+    // it: under `toBeDefined` a renamed or deleted entry sailed through.
+    expect(
+      BuiltinAgentRegistry.getBuiltinAgent(REVIEW_BUILTIN_SUBAGENT_TYPE),
+    ).not.toBeNull();
+    // Every `subagent_type` the skill names, as a set — the positive form,
+    // because a ban on literals only catches the spellings it enumerates: a
+    // reworded "Each is a general-purpose subagent" (no backticks) passed one.
+    // `fork` appears only as the type the rule forbids.
+    //
+    // A set, not `toEqual` on the array: pinning count and order would freeze
+    // the document's shape, so restating the rule at Steps 4 and 5 — a
+    // strictly more correct change, since those launch paths sit furthest
+    // from this line — would turn this red. Every tooth survives: a
+    // reintroduced `general-purpose` still fails.
+    const namedTypes = [...body.matchAll(/subagent_type: "([^"]+)"/g)].map(
+      (m) => m[1],
+    );
+    expect(namedTypes.length).toBeGreaterThan(0);
+    expect(new Set(namedTypes)).toEqual(
+      new Set([REVIEW_BUILTIN_SUBAGENT_TYPE, 'fork']),
+    );
+    // Step 3B names the type in prose rather than as a `subagent_type:`
+    // literal, so it needs its own positive pin — one missed site sends a
+    // whole topology down the expensive branch.
+    expect(body).toContain(`\`${REVIEW_BUILTIN_SUBAGENT_TYPE}\` subagent`);
+    expect(body).not.toContain('general-purpose` subagent');
+    expect(body).not.toContain('a general-purpose subagent');
+
+    // The tool set the skill quotes must be the registry's, spelled the way a
+    // caller would have to spell it. The first draft said "read, grep, glob,
+    // shell, write, edit" — four labels matching no registered name, against
+    // which the very next sentence asks the orchestrator to judge whether a
+    // part needs something outside the set.
+    const declared =
+      BuiltinAgentRegistry.getBuiltinAgent(REVIEW_BUILTIN_SUBAGENT_TYPE)
+        ?.tools ?? [];
+    expect(declared.length).toBeGreaterThan(0);
+    // BOTH directions, against the sentence itself rather than the whole
+    // document. A registry-⊆-body pin cannot see SKILL.md advertising a tool
+    // the registry no longer declares: shrinking the list would leave the
+    // skill promising a capability the agent lacks, and the very next
+    // sentence asks the orchestrator to judge against what is advertised.
+    const carries = body.match(/`review-agent` carries ([^.]+)\./);
+    expect(carries).not.toBeNull();
+    const advertised = [...carries![1].matchAll(/`([a-z_]+)`/g)].map(
+      (m) => m[1],
+    );
+    expect(new Set(advertised)).toEqual(new Set(declared));
   });
 });

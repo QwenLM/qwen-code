@@ -117,15 +117,18 @@ env:
   # Full rationale → qwen-autofix.md#af-003
   GROWTH_BUDGET_SRC_LINES: '${{ vars.QWEN_AUTOFIX_GROWTH_BUDGET_SRC_LINES || 400 }}'
   GROWTH_BUDGET_TEST_LINES: '${{ vars.QWEN_AUTOFIX_GROWTH_BUDGET_TEST_LINES || 400 }}'
-  # Non-convergence handoff: once the growth brake has been over budget for
-  # this many PRIOR rounds in the window AND the diff has not shrunk from the
-  # most recent over-budget round, the round is DIVERGING (the fixes keep
-  # growing the diff, so
-  # Critical-only — which only trims non-Criticals — cannot help). At that
-  # point the round escalates to a maintainer-decision handoff (split / accept
-  # core + track the tail / redesign) instead of patching again. Same tunable
-  # contract as the budgets above (malformed → default at the read site).
-  GROWTH_DIVERGENCE_ROUNDS: '${{ vars.QWEN_AUTOFIX_GROWTH_DIVERGENCE_ROUNDS || 2 }}'
+  # Growth audit: a budget breach engages Critical-only AND makes the round a
+  # growth-audit round. The agent audits the PR's approach on two axes — KISS
+  # (name a structurally simpler alternative or prove each piece load-bearing)
+  # and minimal change (every changed hunk traces to the PR's problem, an
+  # accepted finding, or a failing check) — and records a machine-readable
+  # verdict (sound/drift/conflict) in growth-audit.json, which the
+  # verification gate requires in audit rounds. sound re-arms the window at
+  # the current size (audit-gated /retry) and the loop continues; drift
+  # simplifies first, then continues; conflict is the ONLY growth path to a
+  # human, and it idles subsequent scans until a trusted human responds. A
+  # size signal triggers a JUDGMENT, never a stop: solving the problem is
+  # primary, growth control secondary. See docs/design/autofix-growth-audit.md.
   # An auth/access model error (401/402/403, "no access"/"does not exist")
   # never self-heals - only a maintainer can fix the key - and every retry
   # costs an agent run AND a PR comment. Cap those attempts far below
@@ -242,7 +245,9 @@ env:
   # pushed rounds in between, so the consecutive cap never fired and the PR
   # kept walking into the same wall; #7846 the same, twice. Counted over the
   # current counting window (window-scoped like every other census), so a
-  # re-arm clears it along with the round counter.
+  # re-arm clears it along with the round counter. Counts BUDGET timeouts
+  # only: silent-sandbox (idle) timeouts are infra, not PR size, and are
+  # excluded — see qwen-autofix.md#af-073.
   TIMEOUT_WINDOW_CAP: '3'
   # Do not claim more issues when too many existing autofix PRs are still open.
   MAX_OPEN_AUTOFIX_PRS: '5'
@@ -428,6 +433,7 @@ jobs:
                 # '<cmd> from N' — the ONE parameterized form, and the only
                 # place this workflow reads a value out of a comment body.
                 # Full rationale → qwen-autofix.md#af-007
+                # Operator guide → qwen-autofix-round-seed.md
                 if [[ "${BODY_TRIMMED}" =~ ^(.*)\ from\ ([0-9]{1,2})$ ]]; then
                   # Two statements, not one `[[ ... && ... ]]`: BASH_REMATCH is
                   # only guaranteed populated once the =~ test has completed,
@@ -1096,8 +1102,16 @@ jobs:
           echo "has_candidates=$([[ "${COUNT}" -gt 0 ]] && echo true || echo false)" >> "${GITHUB_OUTPUT}"
 
       - name: 'Resolve sandbox image'
+        id: 'sandbox_image'
         if: |-
           ${{ steps.scan.outputs.has_candidates == 'true' }}
+        env:
+          # The export is derived from this binary's stdout, so step env
+          # pins it the way the DOCKER_HOST pins do: step env outranks an
+          # appended $GITHUB_ENV value, and the absolute path cannot be
+          # shadowed by a '${RUNNER_TEMP}/qwen-bin' or $GITHUB_PATH plant
+          # (#9527 review).
+          SANDBOX_COMMAND: '/usr/bin/docker'
         run: |-
           node .github/scripts/resolve-sandbox-image.mjs \
             "$(node -p "require('./package.json').config.sandboxImageUri")"
@@ -1134,6 +1148,15 @@ jobs:
         if: |-
           ${{ steps.scan.outputs.has_candidates == 'true' && steps.fasttrack.outputs.fast_tracked != 'true' }}
         env:
+          # Step-level env outranks $GITHUB_ENV: bind the resolver's pinned
+          # digest output, not the appendable env value it also writes.
+          QWEN_SANDBOX_IMAGE: '${{ steps.sandbox_image.outputs.image }}'
+          # Pin the daemon endpoint for the sandbox this step spawns, the
+          # same way the resolver pins its own spawns: an empty DOCKER_HOST
+          # is skipped by the docker CLI, and step env outranks both the
+          # appendable $GITHUB_ENV and the pool-shared currentContext.
+          DOCKER_HOST: ''
+          DOCKER_CONTEXT: 'default'
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.AUTOFIX_OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}'
@@ -1293,6 +1316,9 @@ jobs:
         if: |-
           ${{ steps.decision.outputs.go_issue != '' }}
         env:
+          QWEN_SANDBOX_IMAGE: '${{ steps.sandbox_image.outputs.image }}'
+          DOCKER_HOST: ''
+          DOCKER_CONTEXT: 'default'
           ISSUE: '${{ steps.decision.outputs.go_issue }}'
           OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.AUTOFIX_OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}'
@@ -2520,10 +2546,13 @@ jobs:
           BUSY_ENUM_OK=1
           LIVE_RUNS=''
           BUSY_ENUM_ERR="$(mktemp)"
-          for LIVE_STATUS in in_progress queued; do
-            if ! PART="$(gh run list --repo "${REPO}" --workflow qwen-autofix.yml \
-              --status "${LIVE_STATUS}" --limit 50 --json databaseId \
-              --jq '.[].databaseId' 2>> "${BUSY_ENUM_ERR}")"; then
+          for LIVE_STATUS in in_progress queued pending; do
+            # Runs API, not `gh run list --status`: gh validates --status
+            # against a client-side allow-list that rejects 'pending' before
+            # 2.65.0; the API filter is server-side on every gh version.
+            # The REST envelope's field is `id`, NOT the gh-CLI `databaseId`.
+            if ! PART="$(gh api "repos/${REPO}/actions/workflows/qwen-autofix.yml/runs?status=${LIVE_STATUS}&per_page=50" \
+              --jq '.workflow_runs[].id' 2>> "${BUSY_ENUM_ERR}")"; then
               BUSY_ENUM_OK=0
               break
             fi
@@ -3151,6 +3180,64 @@ jobs:
             if [[ "${REVIEW_PR_LIVE}" == "true" ]]; then
               continue
             fi
+            # Conflict-park gate for the loop's OWN head move: while a
+            # conflict handoff pends in the live window, an update-branch
+            # merge re-fires every synchronize-triggered workflow on the new
+            # head, and those loop-generated checks complete after both
+            # park clocks — lifting the park with zero human activity, and
+            # every woken round feeds CONSEC_FAIL toward a terminal lockout
+            # on the exact PR a human is settling. Mirrors prepare's
+            # conflict-handoff idempotence block (same marker scan, same
+            # wake legs, same fail-closed fallbacks); a base that goes
+            # stale during a park is re-handled by the address gate's own
+            # stale-base retry once a human wakes a round.
+            CONFLICT_PARKED='false'
+            CONFLICT_SINCE_SCAN="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${REARM_KEY}" '
+              [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
+                | [ scan("<!-- autofix-growth-audit verdict=conflict win=([^ ]+) -->") ] | .[]
+                | select(.[0] == $key) | ($c.created_at // "") ]
+              | max // ""' "${WORKDIR}/ic.json" 2> /dev/null || echo "")"
+            if [[ -n "${CONFLICT_SINCE_SCAN}" ]]; then
+              gh api "repos/${REPO}/pulls/${PR}/reviews" --paginate 2> /dev/null \
+                | jq -s 'add // []' > "${WORKDIR}/rv.scan.json" || echo '[]' > "${WORKDIR}/rv.scan.json"
+              gh api "repos/${REPO}/pulls/${PR}/comments" --paginate 2> /dev/null \
+                | jq -s 'add // []' > "${WORKDIR}/rc.scan.json" || echo '[]' > "${WORKDIR}/rc.scan.json"
+              printf '%s' "${CHECKS_JSON}" > "${WORKDIR}/checks.scan.json"
+              BASE_UPD_AT_SCAN="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+                [ .[] | select((.user.login // "") == $ab)
+                  | select((.body // "") | contains("<!-- autofix-base-updated"))
+                  | (.created_at // "") ] | max // ""' "${WORKDIR}/ic.json" 2> /dev/null || echo "")"
+              CONFLICT_WAKE_SCAN="$(jq -rs \
+                --arg since "${CONFLICT_SINCE_SCAN}" --arg baseupd "${BASE_UPD_AT_SCAN}" \
+                --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
+                --argjson trust "${TRUSTED_ASSOC}" '
+                (.[0] | map(select((.submitted_at // "") > $since)
+                  | select((.user.login // "") != $ab and (.user.login // "") != $rb)
+                  | select(((.author_association // "") | IN($trust[])))
+                  | select((.state // "") | IN("CHANGES_REQUESTED", "COMMENTED"))) | length)
+                + (.[1] | map(select((.created_at // "") > $since)
+                  | select((.user.login // "") != $ab and (.user.login // "") != $rb)
+                  | select(((.author_association // "") | IN($trust[])))) | length)
+                + (.[2] | map(select((.created_at // "") > $since)
+                  | select((.user.login // "") != $ab and (.user.login // "") != $rb)
+                  | select(((.author_association // "") | IN($trust[])))
+                  | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+                  | select((.body // "") | test("^\\s*@qwen-code /") | not)) | length)
+                + (.[3] | map(select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED"))
+                  | select(((.workflowName // "") | IN("Qwen Autofix", "🧐 Qwen Pull Request Review", "Qwen CI Failure Patrol", "Qwen Autofix Fork Bridge", "Qwen Autofix Fork Signal")) | not)
+                  | select((.completedAt // .updatedAt // "") > $since)
+                  | select((.completedAt // .updatedAt // "") > $baseupd)) | length)' \
+                "${WORKDIR}/rv.scan.json" "${WORKDIR}/rc.scan.json" "${WORKDIR}/ic.json" "${WORKDIR}/checks.scan.json" 2> /dev/null || echo 0)"
+              [[ "${CONFLICT_WAKE_SCAN}" =~ ^[0-9]+$ ]] || CONFLICT_WAKE_SCAN=0
+              if [[ "${CONFLICT_WAKE_SCAN}" == "0" ]]; then
+                CONFLICT_PARKED='true'
+              fi
+              rm -f "${WORKDIR}/rv.scan.json" "${WORKDIR}/rc.scan.json" "${WORKDIR}/checks.scan.json"
+            fi
+            if [[ "${CONFLICT_PARKED}" == 'true' ]]; then
+              echo "🫥 #${PR}: conflict handoff pending in the live window — skipping the stale-base update (the loop does not move the head while parked)"
+              fleet_row "${PR}" 'conflict-parked' 'conflict handoff pending — no stale-base head move while parked'
+            fi
             # Auto-update a PR that is red ONLY because of a stale base (see the
             # MAIN_GREEN_CHECKS rationale above). The gate: the failing check also
             # passed for the PR that produced current main (a necessary-but-NOT-
@@ -3159,7 +3246,7 @@ jobs:
             # round cap and pending-checks gates but before the feedback logic,
             # because a stuck-on-stale-base PR often has no NEW feedback at all (it
             # just sits red), which is exactly #7490's case.
-            if [[ -n "${MAIN_HEAD}" && -n "${PR_HEAD_OID}" ]]; then
+            if [[ -n "${MAIN_HEAD}" && -n "${PR_HEAD_OID}" && "${CONFLICT_PARKED}" != 'true' ]]; then
               # STALE_BASE_REDS is pure jq over data already in memory
               # (CHECKS_JSON, MAIN_GREEN_CHECKS) — free, and far more selective
               # than the compare round-trip. Compute it FIRST and skip the network
@@ -3774,6 +3861,20 @@ jobs:
             cat .github/scripts/upsert-deferred-issue.sh 2> /dev/null || true
             echo "${_upsert_delim}"
           } >> "${GITHUB_OUTPUT}"
+          # 'Push and report' travels the same way and for the same reason: it
+          # is the PAT-bearing step, it runs after the agent and the gate have
+          # executed branch code on this host, and a copy staged on disk would
+          # be theirs to swap. As content there is nothing to stage, digest,
+          # type-check or re-open, and no check→use window between those steps.
+          _push_report_delim="EOF_$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+          {
+            echo "push_report_src<<${_push_report_delim}"
+            # Absent from the trusted base until this PR merges; same rule as
+            # the upsert capture above — an empty value reaches the consumer's
+            # own `-z` guard, which fails closed with a message.
+            cat .github/scripts/autofix-push-and-report.sh 2> /dev/null || true
+            echo "${_push_report_delim}"
+          } >> "${GITHUB_OUTPUT}"
           echo "trusted_path=${PATH}" >> "${GITHUB_OUTPUT}"
           # The agent step runs AFTER prepare checks out the PR branch, so
           # invoking the runner from the working tree would execute
@@ -3912,6 +4013,14 @@ jobs:
           qwen --version
 
       - name: 'Resolve sandbox image'
+        id: 'sandbox_image'
+        env:
+          # The export is derived from this binary's stdout, so step env
+          # pins it the way the DOCKER_HOST pins do: step env outranks an
+          # appended $GITHUB_ENV value, and the absolute path cannot be
+          # shadowed by a '${RUNNER_TEMP}/qwen-bin' or $GITHUB_PATH plant
+          # (#9527 review).
+          SANDBOX_COMMAND: '/usr/bin/docker'
         run: |-
           node .github/scripts/resolve-sandbox-image.mjs \
             "$(node -p "require('./package.json').config.sandboxImageUri")"
@@ -4333,7 +4442,7 @@ jobs:
               | select((.body // "") | contains("<!-- autofix-base-updated"))
               | .created_at ] | max // ""' "${WORKDIR}/ic.json")"
           # The instant THIS round's net was measured. Stamped into the
-          # growth-now marker so the divergence read filters on measurement
+          # growth-now marker so the census filters on measurement
           # time, not the marker comment's created_at — the report posts the
           # marker only after the agent's ~120-minute run, so a round in
           # flight when a concurrent base update lands would otherwise pass a
@@ -4399,7 +4508,7 @@ jobs:
             echo "growth_base_win=${LIVE_REARM_KEY}"
             # The round's own growth + over-budget flag, so the report step can
             # write this round's autofix-growth-now marker (the per-round
-            # history the divergence read above consumes).
+            # history the census above consumes).
             echo "growth_src=${GROWTH_SRC}"
             echo "growth_test=${GROWTH_TEST}"
           } >> "${GITHUB_OUTPUT}"
@@ -4416,45 +4525,153 @@ jobs:
             CRITICAL_ONLY='true'
             CRITICAL_ONLY_GROWTH='true'
           fi
-          # Divergence: Critical-only only trims non-Criticals, so when the
-          # GROWTH that trips the brake is Critical-driven the diff keeps
-          # Full rationale → qwen-autofix.md#af-046
-          if [[ ! "${GROWTH_DIVERGENCE_ROUNDS}" =~ ^([1-9][0-9]{0,3})$ ]]; then
-            echo "::warning::GROWTH_DIVERGENCE_ROUNDS='${GROWTH_DIVERGENCE_ROUNDS}' is not a positive count; using 2"
-            GROWTH_DIVERGENCE_ROUNDS=2
-          fi
-          # Count runs whenever the net is measured (not only over budget), so
-          # the trajectory clause below is accurate even on a round that pulled
-          # back under budget. markers:
-          # Full rationale → qwen-autofix.md#af-047
-          GROWTH_DIVERGED='false'
+          # Growth audit: a budget breach engages Critical-only AND makes the
+          # round a growth-audit round — a size signal triggers a JUDGMENT,
+          # never a stop. The agent audits the approach (KISS + minimal
+          # change, burden of proof inverted) and records a machine-readable
+          # verdict the verification gate requires: sound re-arms the window
+          # at the current size and the loop continues, drift simplifies
+          # first, conflict is the only growth path to a human. Count this
+          # window's prior per-round over-budget rounds for the audit's
+          # context (the trajectory clause in feedback.md uses the same
+          # number). Read this window's prior per-round growth markers
+          # (written by the report step):
+          # <!-- autofix-growth-now src=N test=N over=BOOL round=N run=ID measured=TS key=W -->
+          # Deduped by run=GITHUB_RUN_ID (the per-workflow-run id) and ORDERED
+          # by measured=: the report post's bounded retry re-posts one run's
+          # marker, and a failed job's re-run keeps the same run_id, so a run
+          # collapses to its LATEST measurement — and that collapse happens
+          # BEFORE the over/window/cutoff filters, or a re-run that came back
+          # under budget would still be represented by its stale over=true
+          # attempt. Within the collapse an explicit measured= beats the
+          # created_at fallback: a re-run attempt that crashed BEFORE prepare
+          # — or whose measurement failed — posts an inert over=false marker
+          # with no measured=, whose fallback (post-run) timestamp would
+          # otherwise outdate and erase the same run's real prepare-time
+          # measurement. Every distinct address run has a fresh run_id.
+          # KNOWN RESIDUAL (#9114): during the one-time deploy transition a
+          # run whose FIRST attempt posted a legacy (no measured=) over=true
+          # marker and whose re-run crashes before prepare still collapses
+          # fallback-vs-fallback on created_at — the later inert marker wins
+          # and erases the count. Self-limiting: once deployed, every real
+          # measurement carries measured= and beats any inert marker.
+          # round=/eval-watermark are NOT a safe identity — a state-triggered
+          # lane (a persistent merge conflict selects the PR every scan with no
+          # new evaluable feedback) freezes both NEWEST and ROUND, so distinct
+          # over-budget runs would share them and collapse, stalling the count.
+          # Filtered on measured= (the prepare-time measurement instant, NOT
+          # the comment's post-agent created_at) after GROWTH_NOW_CUTOFF, so a
+          # round measured against a pre-base-update tree is dropped rather
+          # than counted in this window's census. KNOWN RESIDUAL (#9114): the
+          # tree is fixed at the branch fetch/checkout while the cutoff comes
+          # from ic.json fetched afterwards, so a base update landing between
+          # the fetch and the measured_at stamp admits a pre-update marker;
+          # self-heals at the next re-arm/base update. measured= is OPTIONAL
+          # in the scan: markers posted before it existed fall back to their
+          # comment's created_at, so deploying this does not blank the census
+          # of a window that is already in flight.
+          # The CURRENT run's own markers are excluded (run != GITHUB_RUN_ID):
+          # a re-run of a failed job keeps the same run id and its failed
+          # attempt already posted a marker, so counting it would over-report
+          # the round's own attempt as a PRIOR one.
           OVER_ROUNDS_PRIOR=0
-          PREV_SUM=0
+          KISS_AUDIT='false'
           if [[ "${NET_MEASURED}" == 'true' ]]; then
-            read -r OVER_ROUNDS_PRIOR PREV_SUM < <(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${LIVE_REARM_KEY}" --arg cutoff "${GROWTH_NOW_CUTOFF}" --arg curr "${GITHUB_RUN_ID}" '
+            OVER_ROUNDS_PRIOR="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${LIVE_REARM_KEY}" --arg cutoff "${GROWTH_NOW_CUTOFF}" --arg curr "${GITHUB_RUN_ID}" '
               [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
                 | [ scan("<!-- autofix-growth-now src=(-?[0-9]+) test=(-?[0-9]+) over=([a-z]+) round=([0-9]+) run=([0-9]+) (?:measured=([^ ]+) )?key=([^ ]+) -->") ] | .[]
-                | {sum: ((.[0] | tonumber) + (.[1] | tonumber)), over: .[2], round: (.[3] | tonumber), run: (.[4] | tonumber), measured: (.[5] // ($c.created_at // "")), explicit: (.[5] != null), win: .[6]} ]
+                | {over: .[2], run: (.[4] | tonumber), measured: (.[5] // ($c.created_at // "")), explicit: (.[5] != null), win: .[6]} ]
               | group_by(.run) | map(max_by([.explicit, .measured]))
               | map(select(.win == $key and .over == "true"))
               | map(select(.run != ($curr | tonumber)))
               | map(select($cutoff == "" or (.measured > $cutoff)))
-              | sort_by(.measured)
-              | "\(length) \((last.sum) // 0)"' "${WORKDIR}/ic.json" 2> /dev/null || echo "0 0")
+              | length' "${WORKDIR}/ic.json" 2> /dev/null || echo 0)"
             [[ "${OVER_ROUNDS_PRIOR}" =~ ^[0-9]+$ ]] || OVER_ROUNDS_PRIOR=0
-            [[ "${PREV_SUM}" =~ ^-?[0-9]+$ ]] || PREV_SUM=0
-            if [[ "${CRITICAL_ONLY_GROWTH}" == 'true' \
-                  && "${OVER_ROUNDS_PRIOR}" -ge "${GROWTH_DIVERGENCE_ROUNDS}" \
-                  && $(( GROWTH_SRC + GROWTH_TEST )) -ge "${PREV_SUM}" ]]; then
-              GROWTH_DIVERGED='true'
-            fi
+          fi
+          # Audit on the FIRST breach, not after spending more rounds proving
+          # non-convergence: the judgment is what a budget breach means now.
+          if [[ "${CRITICAL_ONLY_GROWTH}" == 'true' ]]; then
+            KISS_AUDIT='true'
           fi
           # The over-budget flag feeds the report's per-round marker; the
-          # handoff itself is enforced by the feedback.md text below, so
-          # GROWTH_DIVERGED needs no step output.
+          # audit itself is enforced by the feedback.md section below plus
+          # the verification gate's verdict requirement.
           echo "critical_only_growth=${CRITICAL_ONLY_GROWTH}" >> "${GITHUB_OUTPUT}"
-          [[ "${GROWTH_DIVERGED}" == 'true' ]] &&
-            echo "🛑 diff not converging: over budget now, ${OVER_ROUNDS_PRIOR} prior over-budget round(s) in this window, growth not shrinking — escalating to a maintainer decision instead of patching."
+          echo "kiss_audit=${KISS_AUDIT}" >> "${GITHUB_OUTPUT}"
+          [[ "${KISS_AUDIT}" == 'true' ]] &&
+            echo "🔍 growth budget breached (source ${GROWTH_SRC} / test ${GROWTH_TEST} vs budgets ${GROWTH_BUDGET_SRC_LINES}/${GROWTH_BUDGET_TEST_LINES}; ${OVER_ROUNDS_PRIOR} prior over-budget round(s) this window) — this round is a growth-audit round."
+          # Conflict-handoff idempotence: a conflict verdict parks the PR at
+          # a genuinely human call. Until a trusted human responds, scans
+          # must not launch agents or post comments — review-bot regeneration
+          # alone (an update-branch merge re-reviews every new head) would
+          # otherwise churn one identical handoff after another. Wake only on
+          # feedback the loop cannot produce itself: trusted-human
+          # reviews/comments, or a failing check from OUTSIDE the Qwen Autofix
+          # workflow (a CI build/test the loop did not run). The Qwen Autofix
+          # workflow's OWN check runs are excluded wholesale: under a park no
+          # address round can legitimately run, so any review-address check
+          # newer than the marker is necessarily the conflict round's own
+          # failed check (posted after the handoff) — counting it would let
+          # the loop's own output unpark the very round it came from, and the
+          # resulting wasted failure rounds feed CONSEC_FAIL toward a terminal
+          # lockout on the exact PR a human is trying to settle. A manual
+          # job re-run reaches prepare and parks green (no failed check), and
+          # /retry remains the sanctioned lift. A /retry re-arm moves
+          # LIVE_REARM_KEY past the marker's win= and lifts the park on its
+          # own.
+          # Two more loop-generated events must not wake: a stale-base
+          # auto-update is the loop's OWN head move — the red checks it
+          # REACTS to completed before its marker (they are the condition it
+          # handles, not human feedback), so the checks leg counts only
+          # failures completing after BOTH the conflict marker and the
+          # latest base update; and CANCELLED never wakes — an
+          # update-branch push cancels in-flight runs on the old head (and a
+          # close/reopen does the same), which the loop produces without any
+          # human.
+          # The exclusion set is wider than the loop's own workflow: the
+          # loop's SIBLING machinery produces check events too — the review
+          # workflow re-fires on every head the loop's own base-update merge
+          # creates, the CI-failure patrol re-runs flaky failures on the
+          # UNCHANGED head by cron, and the fork lanes carry the loop's own
+          # checks for fork PRs. All of it completes after both clocks with
+          # no human anywhere in the input, so all of it is excluded by
+          # name; and while a handoff pends, the loop performs NO head
+          # moves at all (the scan's stale-base auto-update and the
+          # conflict round's own stale-base retry both skip parked PRs),
+          # so any check newer than both clocks is human-caused.
+          CONFLICT_SINCE="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${LIVE_REARM_KEY}" '
+            [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
+              | [ scan("<!-- autofix-growth-audit verdict=conflict win=([^ ]+) -->") ] | .[]
+              | select(.[0] == $key) | ($c.created_at // "") ]
+            | max // ""' "${WORKDIR}/ic.json" 2> /dev/null || echo "")"
+          if [[ -n "${CONFLICT_SINCE}" && "${STALE}" != 'true' ]]; then
+            CONFLICT_WAKE="$(jq -rs \
+              --arg since "${CONFLICT_SINCE}" --arg baseupd "${BASE_UPD_AT}" \
+              --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
+              --argjson trust "${TRUSTED_ASSOC}" '
+              (.[0] | map(select((.submitted_at // "") > $since)
+                | select((.user.login // "") != $ab and (.user.login // "") != $rb)
+                | select(((.author_association // "") | IN($trust[])))
+                | select((.state // "") | IN("CHANGES_REQUESTED", "COMMENTED"))) | length)
+              + (.[1] | map(select((.created_at // "") > $since)
+                | select((.user.login // "") != $ab and (.user.login // "") != $rb)
+                | select(((.author_association // "") | IN($trust[])))) | length)
+              + (.[2] | map(select((.created_at // "") > $since)
+                | select((.user.login // "") != $ab and (.user.login // "") != $rb)
+                | select(((.author_association // "") | IN($trust[])))
+                | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+                | select((.body // "") | test("^\\s*@qwen-code /") | not)) | length)
+              + (.[3] | map(select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED"))
+                | select(((.workflowName // "") | IN("Qwen Autofix", "🧐 Qwen Pull Request Review", "Qwen CI Failure Patrol", "Qwen Autofix Fork Bridge", "Qwen Autofix Fork Signal")) | not)
+                | select((.completedAt // .updatedAt // "") > $since)
+                | select((.completedAt // .updatedAt // "") > $baseupd)) | length)' \
+              "${WORKDIR}/rv.json" "${WORKDIR}/rc.json" "${WORKDIR}/ic.json" "${WORKDIR}/checks.json" 2> /dev/null || echo 0)"
+            [[ "${CONFLICT_WAKE}" =~ ^[0-9]+$ ]] || CONFLICT_WAKE=0
+            if [[ "${CONFLICT_WAKE}" == "0" ]]; then
+              STALE='true'
+              echo "🫥 conflict handoff pending: a growth audit returned conflict in this window and no trusted human has responded since — idling without an agent run or comment"
+            fi
+          fi
           # Which trusted humans have exhausted their per-window regular
           # feedback budget (see CRITICAL_ONLY_HUMAN_BATCHES). A batch is
           # COUNTED only when a Critical-only round actually consumed it:
@@ -4651,17 +4868,35 @@ jobs:
             if [[ "${NET_MEASURED}" == 'true' ]]; then
               echo "## Diff growth this window"
               echo
-              echo "Net diff vs this counting window's baseline: source ${GROWTH_SRC} / test ${GROWTH_TEST} lines (budgets ${GROWTH_BUDGET_SRC_LINES}/${GROWTH_BUDGET_TEST_LINES}; ${OVER_ROUNDS_PRIOR} prior round(s) already over budget). Prefer minimal, root-cause, subtractive fixes. If closing a finding would grow the diff materially AND the same class of gap keeps reappearing on code earlier rounds added, that is a signal to escalate for a split — not to keep adding guards."
+              echo "Net diff vs this counting window's baseline: source ${GROWTH_SRC} / test ${GROWTH_TEST} lines (budgets ${GROWTH_BUDGET_SRC_LINES}/${GROWTH_BUDGET_TEST_LINES}; ${OVER_ROUNDS_PRIOR} prior round(s) already over budget). Prefer minimal, root-cause, subtractive fixes. If closing a finding would grow the diff materially AND the same class of gap keeps reappearing on code earlier rounds added, consolidate or subtract — do not keep adding guards."
               echo
             fi
-            # Non-convergence handoff (the diff keeps growing past budget across
-            # rounds): a maintainer-decision item the agent must NOT settle by
-            # patching. Framed as defer-to-human so the address run stops with a
-            # handoff (SKILL: "Stop BLOCKED when any defer-to-human item remains").
-            if [[ "${GROWTH_DIVERGED}" == 'true' ]]; then
-              echo "## Needs a maintainer's decision — this PR is not converging"
+            # Growth audit (a size signal triggers a JUDGMENT, never a stop):
+            # the window is over its growth budget, so before any other work
+            # the round audits the approach — two axes, burden of proof
+            # inverted — and records a machine-readable verdict the
+            # verification gate requires. sound re-arms the window and the
+            # loop continues, drift simplifies first, conflict is the only
+            # growth path to a human. The section carries the numbers and the
+            # window's audit trail so a re-audit after a prior verdict must
+            # bring new evidence to repeat it.
+            if [[ "${KISS_AUDIT}" == 'true' ]]; then
+              echo "## Growth audit required — this window is over its growth budget"
               echo
-              echo "This PR's diff has stayed over the growth budget for ${OVER_ROUNDS_PRIOR}+ rounds in this window and is still not shrinking (source ${GROWTH_SRC} / test ${GROWTH_TEST} net lines vs budgets ${GROWTH_BUDGET_SRC_LINES}/${GROWTH_BUDGET_TEST_LINES}). The review findings are themselves driving the growth, so continuing to patch will not converge — Critical-only mode cannot help because the Criticals are the growth. Do NOT apply more code fixes this round. Treat this as a \`defer-to-human\` item: STOP with a handoff that names the decision and lays out the options — split the PR (land the core, track the remaining findings as follow-up issues), redesign the approach, or accept the current state with the tail deferred — plus your recommendation. Leave the call to the maintainer; declining or implementing one direction yourself IS deciding."
+              echo "Window growth: source ${GROWTH_SRC} / test ${GROWTH_TEST} net lines vs budgets ${GROWTH_BUDGET_SRC_LINES}/${GROWTH_BUDGET_TEST_LINES} (${OVER_ROUNDS_PRIOR} prior round(s) already over budget this window). Before any other work this round, run the growth audit (SKILL: growth-audit mode) and write \`${WORKDIR}/growth-audit.json\` — the round cannot push without a valid verdict. A size signal triggers a judgment, never a stop: the audit decides whether to continue as-is (sound), simplify first (drift), or hand a genuinely contested choice to a human (conflict)."
+              echo
+              PRIOR_AUDITS="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${LIVE_REARM_KEY}" '
+                [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
+                  | [ scan("<!-- autofix-growth-audit verdict=([a-z]+) win=([^ ]+) -->") ] | .[]
+                  | select(.[1] == $key) | "- \($c.created_at // "?"): verdict=\(.[0])" ]
+                | .[]' "${WORKDIR}/ic.json" 2> /dev/null || true)"
+              if [[ -n "${PRIOR_AUDITS}" ]]; then
+                echo "Prior growth audits this window — a repeated verdict needs new evidence:"
+                echo
+                printf '%s\n' "${PRIOR_AUDITS}"
+              else
+                echo "No prior growth audit this window."
+              fi
               echo
             fi
             echo "## Reviews"
@@ -4772,6 +5007,9 @@ jobs:
             # Time-budget exhaustions SINCE THE LAST SUCCESSFUL ROUND mean
             # the standard address-everything prompt is not converging at
             # Full rationale → qwen-autofix.md#af-049
+            # Idle (silent-sandbox) timeouts are excluded like in the cap
+            # census: the narrowing advice targets budget exhaustion, and an
+            # infra-killed round never had any budget to exhaust (af-073).
             PRIOR_TIMEOUTS="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${LIVE_REARM_KEY}" '
               [ .[] | select((.user.login // "") == $ab)
                 | select((.body // "") | contains("<!-- autofix-eval "))
@@ -4780,7 +5018,7 @@ jobs:
               ] | sort_by(.created_at)
               | map((.body | gsub("\r"; "") | split("\n")[0]))
               | (map(test("Addressed the latest review feedback|no changes needed")) | rindex(true) // -1) as $lastok
-              | [ .[($lastok + 1):][] | select(contains("AutoFix ran out of time before finishing")) ] | length' "${WORKDIR}/ic.json" 2> /dev/null || true)"
+              | [ .[($lastok + 1):][] | select(contains("AutoFix ran out of time before finishing") and (contains("AutoFix ran out of time before finishing (idle-timeout") | not)) ] | length' "${WORKDIR}/ic.json" 2> /dev/null || true)"
             if [[ "${PRIOR_TIMEOUTS}" -ge 1 ]]; then
               echo
               echo '## Budget warning: previous round(s) ran out of time'
@@ -4853,6 +5091,9 @@ jobs:
         # Full rationale → qwen-autofix.md#af-050
         timeout-minutes: 130
         env:
+          QWEN_SANDBOX_IMAGE: '${{ steps.sandbox_image.outputs.image }}'
+          DOCKER_HOST: ''
+          DOCKER_CONTEXT: 'default'
           PR: '${{ env.PR }}'
           ISSUE: '${{ env.ISSUE }}'
           OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
@@ -4959,12 +5200,23 @@ jobs:
         # its case to exit 1, and the always() report step posts.
         timeout-minutes: 60
         env:
+          # BASH_ENV is sourced by bash at process STARTUP, before line 1 of
+          # the body below — a body-side unset is one hop late. Pinning it
+          # empty at step level outranks any $GITHUB_ENV plant (same
+          # doctrine as FOOTPRINT_ENFORCE below); SHELLOPTS is the sibling
+          # option-import channel. The gate then launches through an env -i
+          # clean child, so its bash inherits nothing at all.
+          BASH_ENV: ''
+          SHELLOPTS: ''
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
           VERIFY_RUNNER_SHA256: '${{ steps.stage.outputs.verify_runner_sha256 }}'
           # Step-level env outranks $GITHUB_ENV: an earlier shell-capable
           # step (the agent runs branch code on the host) must not be able
           # to downgrade a repo-variable 'reject' back to 'advisory'.
           FOOTPRINT_ENFORCE: "${{ vars.QWEN_AUTOFIX_FOOTPRINT_ENFORCE || 'advisory' }}"
+          # Growth-audit rounds must carry a valid growth-audit.json verdict;
+          # the gate enforces presence + shape before any push decision.
+          KISS_AUDIT: '${{ steps.prepare.outputs.kiss_audit }}'
         run: |-
           # The gate decides whether the PAT push runs, and the first pass
           # executes the branch's own build/test on the host before the
@@ -4975,14 +5227,36 @@ jobs:
           export PATH="${TRUSTED_PATH}"
           unset LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH
           echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | sha256sum -c - > /dev/null
-          bash "${RUNNER_TEMP}/run-autofix-review-verification.sh"
+          # Launch the gate through the workflow's env -i clean-child
+          # pattern: the step environment inherits every $GITHUB_ENV plant
+          # earlier steps left (verdict-variable plants, BITE_RUNNER
+          # overrides, whatever is next), and enumeration is the failure
+          # mode this design keeps hitting — an allowlisted child drops the
+          # whole class. The gate re-declares the variables it needs.
+          LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \
+            /usr/bin/env -i \
+            PATH="${TRUSTED_PATH}" \
+            HOME="${HOME}" \
+            RUNNER_TEMP="${RUNNER_TEMP}" \
+            WORKDIR="${WORKDIR}" \
+            BRANCH="${BRANCH}" \
+            GITHUB_OUTPUT="${GITHUB_OUTPUT}" \
+            KISS_AUDIT="${KISS_AUDIT:-false}" \
+            FOOTPRINT_ENFORCE="${FOOTPRINT_ENFORCE:-advisory}" \
+            bash --norc "${RUNNER_TEMP}/run-autofix-review-verification.sh"
 
       - name: 'Repair deterministic rejection'
         id: 'repair'
+        # The outcome check fails closed: a FAILED resolver leaves the image
+        # binding below empty, and an empty QWEN_SANDBOX_IMAGE relaunches
+        # the CLI without any sandbox (#9527 review).
         if: |-
-          ${{ always() && steps.verify.outputs.retryable == 'true' }}
+          ${{ always() && steps.verify.outputs.retryable == 'true' && steps.sandbox_image.outcome == 'success' }}
         timeout-minutes: 20
         env:
+          QWEN_SANDBOX_IMAGE: '${{ steps.sandbox_image.outputs.image }}'
+          DOCKER_HOST: ''
+          DOCKER_CONTEXT: 'default'
           PR: '${{ env.PR }}'
           ISSUE: '${{ env.ISSUE }}'
           OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
@@ -5133,12 +5407,25 @@ jobs:
         # Same bound as the first pass, for the same reason.
         timeout-minutes: 60
         env:
+          # BASH_ENV is sourced by bash at process STARTUP, before line 1 of
+          # the body below — a body-side unset is one hop late. Pinning it
+          # empty at step level outranks any $GITHUB_ENV plant (same
+          # doctrine as FOOTPRINT_ENFORCE below); SHELLOPTS is the sibling
+          # option-import channel. The gate then launches through an env -i
+          # clean child, so its bash inherits nothing at all.
+          BASH_ENV: ''
+          SHELLOPTS: ''
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
           VERIFY_RUNNER_SHA256: '${{ steps.stage.outputs.verify_runner_sha256 }}'
           # Step-level env outranks $GITHUB_ENV: an earlier shell-capable
           # step (the agent runs branch code on the host) must not be able
           # to downgrade a repo-variable 'reject' back to 'advisory'.
           FOOTPRINT_ENFORCE: "${{ vars.QWEN_AUTOFIX_FOOTPRINT_ENFORCE || 'advisory' }}"
+          # The control bit arrives through the FIRST gate's defended
+          # output (recorded before any check ran, re-appended at every
+          # exit); the prepare copy is only the fallback for a first pass
+          # that died before recording it.
+          KISS_AUDIT: '${{ steps.verify.outputs.kiss_audit || steps.prepare.outputs.kiss_audit }}'
         run: |-
           # The gate decides whether the PAT push runs, and the first pass
           # executes the branch's own build/test on the host before the
@@ -5149,7 +5436,23 @@ jobs:
           export PATH="${TRUSTED_PATH}"
           unset LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH
           echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | sha256sum -c - > /dev/null
-          bash "${RUNNER_TEMP}/run-autofix-review-verification.sh"
+          # Launch the gate through the workflow's env -i clean-child
+          # pattern: the step environment inherits every $GITHUB_ENV plant
+          # earlier steps left (verdict-variable plants, BITE_RUNNER
+          # overrides, whatever is next), and enumeration is the failure
+          # mode this design keeps hitting — an allowlisted child drops the
+          # whole class. The gate re-declares the variables it needs.
+          LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \
+            /usr/bin/env -i \
+            PATH="${TRUSTED_PATH}" \
+            HOME="${HOME}" \
+            RUNNER_TEMP="${RUNNER_TEMP}" \
+            WORKDIR="${WORKDIR}" \
+            BRANCH="${BRANCH}" \
+            GITHUB_OUTPUT="${GITHUB_OUTPUT}" \
+            KISS_AUDIT="${KISS_AUDIT:-false}" \
+            FOOTPRINT_ENFORCE="${FOOTPRINT_ENFORCE:-advisory}" \
+            bash --norc "${RUNNER_TEMP}/run-autofix-review-verification.sh"
 
       - name: 'Finalize verification'
         id: 'final_verify'
@@ -5165,10 +5468,23 @@ jobs:
           REPAIR_VERIFIED_HEAD: '${{ steps.verify_repair.outputs.verified_head }}'
           FIRST_PREEXISTING: '${{ steps.verify.outputs.preexisting }}'
           REPAIR_PREEXISTING: '${{ steps.verify_repair.outputs.preexisting }}'
+          FIRST_AUDIT_VERDICT: '${{ steps.verify.outputs.audit_verdict }}'
+          REPAIR_AUDIT_VERDICT: '${{ steps.verify_repair.outputs.audit_verdict }}'
+          # The pass conclusions are the tamper-evident seal on the output
+          # claims below: a gate that reached fixed/noop EXITED 0, and a
+          # step killed mid-check (whose output file stays discoverable and
+          # appendable under $RUNNER_TEMP) never concludes success.
+          FIRST_CONCLUSION: '${{ steps.verify.conclusion }}'
+          REPAIR_CONCLUSION: '${{ steps.verify_repair.conclusion }}'
+          FIRST_KISS_AUDIT: '${{ steps.verify.outputs.kiss_audit || steps.prepare.outputs.kiss_audit }}'
+          REPAIR_KISS_AUDIT: '${{ steps.verify_repair.outputs.kiss_audit }}'
         run: |-
           OUTCOME="${FIRST_OUTCOME}"
           COMMITTED="${FIRST_COMMITTED}"
           VERIFIED_HEAD="${FIRST_VERIFIED_HEAD}"
+          AUDIT_VERDICT="${FIRST_AUDIT_VERDICT}"
+          KISS_AUDIT="${FIRST_KISS_AUDIT}"
+          PASS_CONCLUSION="${FIRST_CONCLUSION}"
           # The flag travels WITH the attempt whose outcome is selected: the
           # first pass can fail a round-caused check, the repair fixes it, and
           # the repair verification can then hit a pre-existing failure — that
@@ -5186,6 +5502,35 @@ jobs:
             OUTCOME="${REPAIR_OUTCOME}"
             COMMITTED="${REPAIR_COMMITTED:-${FIRST_COMMITTED}}"
             VERIFIED_HEAD="${REPAIR_VERIFIED_HEAD}"
+            # The verdict travels WITH the attempt whose outcome is
+            # selected: a repair pass legitimately re-audits (its feedback
+            # rebuild keeps the audit section; the SKILL mandates
+            # audit-first), and the verdict its gate validated is the one
+            # the round's code was judged by — binding the first pass
+            # unconditionally dropped it. The :- fallback mirrors COMMITTED:
+            # a repair that validated nothing leaves the first pass's
+            # validated verdict as the record.
+            AUDIT_VERDICT="${REPAIR_AUDIT_VERDICT:-${FIRST_AUDIT_VERDICT}}"
+            KISS_AUDIT="${REPAIR_KISS_AUDIT:-${FIRST_KISS_AUDIT}}"
+            PASS_CONCLUSION="${REPAIR_CONCLUSION}"
+          fi
+          # Conclusion gate: fixed/noop are the ONLY outcomes that release
+          # the PAT push. A silent gate death (the step killed mid-check)
+          # concludes failure, yet its step-output file stays discoverable
+          # under $RUNNER_TEMP and appendable — a forged outcome=fixed +
+          # verified_head must not flow to the push condition. Accept
+          # fixed/noop only from a pass whose step concluded success;
+          # anything else reads as a crashed gate (empty outcome → the
+          # report's retry path), never as a verdict, and the audit bit
+          # riding the tainted outputs is discarded with it.
+          if [[ "${OUTCOME}" == 'fixed' || "${OUTCOME}" == 'noop' ]] &&
+            [[ "${PASS_CONCLUSION}" != 'success' ]]; then
+            echo "::error::verify pass claims outcome=${OUTCOME} but concluded '${PASS_CONCLUSION:-<none>}' — discarding the claim (forged or crashed-gate outputs); NOT pushing"
+            OUTCOME=''
+            COMMITTED=''
+            VERIFIED_HEAD=''
+            AUDIT_VERDICT=''
+            KISS_AUDIT=''
           fi
           echo "outcome=${OUTCOME}" >> "${GITHUB_OUTPUT}"
           if [[ -n "${COMMITTED}" ]]; then
@@ -5193,6 +5538,12 @@ jobs:
           fi
           if [[ -n "${VERIFIED_HEAD}" ]]; then
             echo "verified_head=${VERIFIED_HEAD}" >> "${GITHUB_OUTPUT}"
+          fi
+          if [[ -n "${AUDIT_VERDICT}" ]]; then
+            echo "audit_verdict=${AUDIT_VERDICT}" >> "${GITHUB_OUTPUT}"
+          fi
+          if [[ -n "${KISS_AUDIT}" ]]; then
+            echo "kiss_audit=${KISS_AUDIT}" >> "${GITHUB_OUTPUT}"
           fi
           case "${OUTCOME}" in
             # handoff and the two brake-violation rejections are
@@ -5218,7 +5569,7 @@ jobs:
           if git rev-parse --verify "${BRANCH}" > /dev/null 2>&1; then
             git diff "origin/main...${BRANCH}" > "${WORKDIR}/pr.diff" || true
           fi
-          for f in feedback.md address-summary.md no-action.md failure.md failure.zh.md handoff.md gate-rejection.md gate-advisories.md agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt comment-replies.json deferred-findings.json deferred-findings.carry.json deferred-findings.unmerged.json pr.diff; do
+          for f in feedback.md address-summary.md no-action.md failure.md failure.zh.md handoff.md gate-rejection.md gate-advisories.md growth-audit.json agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt comment-replies.json deferred-findings.json deferred-findings.carry.json deferred-findings.unmerged.json pr.diff; do
             if [[ -f "${WORKDIR}/${f}" ]]; then
               echo "=============== ${f} ==============="
               # Agent-written content: a line-start `::` would be parsed as a
@@ -5239,6 +5590,7 @@ jobs:
           if-no-files-found: 'ignore'
 
       - name: 'Push and report'
+        id: 'push_report'
         if: |-
           ${{ always() && needs.route.outputs.dry_run != 'true' && (steps.final_verify.outputs.outcome == 'fixed' || steps.final_verify.outputs.outcome == 'noop') }}
         env:
@@ -5276,612 +5628,48 @@ jobs:
           GROWTH_BASE_WIN: '${{ steps.prepare.outputs.growth_base_win }}'
           # This round's own growth + over-budget flag, written as the
           # per-round autofix-growth-now marker so later rounds can measure
-          # divergence (growth still climbing over budget = not converging).
+          # the growth trajectory (the audit's context reads the prior
+          # over-budget count).
           GROWTH_SRC: '${{ steps.prepare.outputs.growth_src }}'
           GROWTH_TEST: '${{ steps.prepare.outputs.growth_test }}'
           CRITICAL_ONLY_GROWTH: '${{ steps.prepare.outputs.critical_only_growth }}'
+          # Whether this round was a growth-audit round; when it was, the
+          # report carries the audit's verdict marker (and a sound verdict
+          # additionally re-arms the window at the current size). The bit
+          # rides Finalize verification's copy — the gates' defended output
+          # chain, never steps.prepare's raw copy.
+          KISS_AUDIT: '${{ steps.final_verify.outputs.kiss_audit }}'
+          # The verdict Finalize verification selected WITH the outcome —
+          # never a re-read of the branch-writable growth-audit.json. The
+          # pass whose outcome was selected wins (a repair pass legitimately
+          # re-audits, and its gate-validated verdict is the one the round's
+          # code was judged by); a repair that validated nothing falls back
+          # to the first pass's validated verdict. Empty when no gate
+          # validated a verdict; the marker then stays absent.
+          AUDIT_VERDICT: '${{ steps.final_verify.outputs.audit_verdict }}'
           MEASURED_AT: '${{ steps.prepare.outputs.measured_at }}'
+          PUSH_REPORT_SRC: '${{ steps.stage.outputs.push_report_src }}'
         run: |-
-          # gh has its own $GITHUB_ENV-injectable channels: pin the host and
-          # drop any planted token BEFORE the identity check below, so a
-          # GH_HOST reroute cannot spoof `gh api user` and a planted GH_TOKEN
-          # cannot outrank the inline GITHUB_TOKEN. (git's channels are
-          # stripped in the hermetic preamble further down.)
-          export GH_HOST=github.com
-          unset GH_ENTERPRISE_TOKEN GH_TOKEN
-          # Point gh at a fresh empty config dir, not the default
-          # ~/.config/gh on the shared attacker-writable HOME — its
-          # config.yml can carry http_unix_socket and other transport
-          # reroutes no sweep here touches. mktemp -d gives an
-          # unpredictable path a watcher cannot pre-seed.
-          export GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"
-          # The head the agent actually evaluated — captured in prepare before
-          # any mutation, not the report-time remote head (which can move
-          # during the run). Empty when prepare exited early, which matches
-          # no marker and keeps reds visible — fail-open.
-          REPORT_HEAD="${CHECKED_OUT_HEAD}"
-          # Prepare may have adopted a sibling's live round; the matrix value
-          # would double-write that round's marker.
-          ROUND="${EFFECTIVE_ROUND:-${ROUND}}"
-          MODEL_DISPLAY="${MODEL:-default}"
-          if [[ -z "${GITHUB_TOKEN}" ]]; then
-            echo '::error::CI_DEV_BOT_PAT is required to push and report as qwen-code-dev-bot.'
+          # The body travels as CONTENT, not as a file on disk: the stage step
+          # captured it from the trusted-base checkout before any branch code
+          # ran, and it arrives here through step output — expression context,
+          # which a disk write on this shared host cannot reach. That is the
+          # same delivery the inline block this replaced had, and the same one
+          # upsert-deferred-issue.sh uses. With no agent-writable copy there is
+          # nothing to stage, digest, type-check or re-open, and no check→use
+          # window for a co-resident watcher to race.
+          if [[ -z "${PUSH_REPORT_SRC}" ]]; then
+            echo '::error::the stage step captured no push-and-report body — refusing to push or report.'
             exit 1
           fi
-          api_error_file="$(mktemp)"
-          if ! bot_actor="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq '.login' 2>"${api_error_file}")"; then
-            api_error="$(tr '\r\n' ' ' < "${api_error_file}")"
-            rm -f "${api_error_file}"
-            echo "::error::Failed to verify CI_DEV_BOT_PAT identity with gh api user: ${api_error:-unknown error}."
-            exit 1
-          fi
-          rm -f "${api_error_file}"
-          echo "CI_DEV_BOT_PAT authenticates as ${bot_actor}"
-          if [[ "${bot_actor}" != "${AUTOFIX_BOT}" ]]; then
-            echo "::error::CI_DEV_BOT_PAT authenticates as ${bot_actor}; expected ${AUTOFIX_BOT}."
-            exit 1
-          fi
-
-          # Shared by the pushed and no-op outcomes: a no-op round may
-          # resolve re-verified findings (verified_head is the unchanged,
-          # previously verified origin head) and must post its declines'
-          # replies — silence in still-open threads was a no-op-only gap.
-          resolve_and_reply_threads() {
-            CAN_RESOLVE_THREADS='false'
-            if [[ -s "${WORKDIR}/resolved-comments.txt" ]]; then
-              LOCAL_PUSHED_HEAD="$(git rev-parse HEAD)"
-              if [[ "${PUSH_RACE_MERGED}" == 'true' ]]; then
-                echo "::warning::skipping review-thread resolution because the pushed head includes commits merged after deterministic verification"
-              elif [[ -z "${VERIFIED_HEAD}" || "${LOCAL_PUSHED_HEAD}" != "${VERIFIED_HEAD}" ]]; then
-                echo "::warning::skipping review-thread resolution because the pushed head is not the exact deterministically verified commit"
-              elif LIVE_PR_HEAD="$(gh pr view "${PR}" --repo "${REPO}" --json headRefOid --jq '.headRefOid // ""' 2> /dev/null)" &&
-                [[ -n "${LIVE_PR_HEAD}" && "${LIVE_PR_HEAD}" == "${VERIFIED_HEAD}" ]]; then
-                CAN_RESOLVE_THREADS='true'
-              else
-                echo "::warning::skipping review-thread resolution because the live PR head could not be proven equal to the deterministically verified commit"
-              fi
-            fi
-            # Resolve the review threads whose findings the agent actually
-            # IMPLEMENTED, so a human re-reviewing sees only what is still open
-            # instead of re-reading every thread to work out what was handled.
-            # Full rationale → qwen-autofix.md#af-052
-            if [[ -s "${WORKDIR}/resolved-comments.txt" || -s "${WORKDIR}/comment-replies.json" ]]; then
-              THREADS_FETCH_OK='true'
-              # gh's stderr goes to a fresh mktemp regular file, never a named
-              # WORKDIR path: WORKDIR is bind-mounted read-write into the agent
-              # Full rationale → qwen-autofix.md#af-053
-              threads_err_file="$(mktemp)"
-              THREADS_RAW="$(gh api graphql --paginate -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F pr="${PR}" -f query='
-                query($owner:String!,$name:String!,$pr:Int!,$endCursor:String){
-                  repository(owner:$owner,name:$name){
-                    pullRequest(number:$pr){
-                      reviewThreads(first:100, after:$endCursor){
-                        nodes{id isResolved comments(first:100){nodes{databaseId author{login} body} pageInfo{hasNextPage}}}
-                        pageInfo{hasNextPage endCursor}
-                      }
-                    }
-                  }
-                }' --jq '.data.repository.pullRequest.reviewThreads.nodes[]' 2> "${threads_err_file}")" || THREADS_FETCH_OK='false'
-              # gh emits one node per line across every page; slurp them
-              # into the flat array both blocks below already expect. The
-              # Full rationale → qwen-autofix.md#af-054
-              THREADS_JSON="$(jq -s '[.[] | select(type == "object" and has("id") and has("comments"))]' <<< "${THREADS_RAW}" 2> /dev/null)" || THREADS_JSON='[]'
-              [[ -n "${THREADS_JSON}" ]] || THREADS_JSON='[]'
-              if [[ "${THREADS_FETCH_OK}" != 'true' ]]; then
-                # Fold in gh's stderr: the warning announces THAT pagination
-                # stopped, and only this says WHY — a transient rate limit
-                # (back off) reads identically to an expired PAT (rotate) or a
-                # network failure without it.
-                echo "::warning::review-thread pagination did not complete; $(jq 'length' <<< "${THREADS_JSON}") thread(s) fetched, and any thread past them will not be resolved or answered in-thread: $(tail -c 300 "${threads_err_file}" 2> /dev/null | tr '\r\n' '  ')"
-              fi
-              rm -f "${threads_err_file}"
-              if [[ "$(jq -r 'map(select(.comments.pageInfo.hasNextPage)) | length' <<< "${THREADS_JSON}")" != "0" ]]; then
-                echo "::warning::a review thread carries more than 100 comments; a comment past that page is not mapped to its thread"
-              fi
-            fi
-            if [[ "${CAN_RESOLVE_THREADS}" == 'true' ]]; then
-              CONFIRMED_RESOLVED_N=0
-              read_thread_guard() {
-                gh api graphql -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F pr="${PR}" -f threadId="${1}" -f query='
-                  query($owner:String!,$name:String!,$pr:Int!,$threadId:ID!){
-                    repository(owner:$owner,name:$name){pullRequest(number:$pr){headRefOid}}
-                    node(id:$threadId){... on PullRequestReviewThread{isResolved}}
-                  }' --jq '[.data.repository.pullRequest.headRefOid // "", .data.node.isResolved] | @tsv'
-              }
-              while IFS= read -r rc_id || [[ -n "${rc_id}" ]]; do
-                rc_id="${rc_id%$'\r'}"
-                rc_id="${rc_id#rc:}"
-                [[ "${rc_id}" =~ ^[0-9]+$ ]] || continue
-                thread_id="$(jq -r --argjson id "${rc_id}" \
-                  'map(select(.isResolved | not)
-                     | select(any(.comments.nodes[]; .databaseId == $id)))
-                   | .[0].id // ""' <<< "${THREADS_JSON}")"
-                if [[ -z "${thread_id}" ]]; then
-                  echo "::warning::comment ${rc_id} matched no open review thread"
-                  continue
-                fi
-                if ! IFS=$'\t' read -r LIVE_PR_HEAD THREAD_IS_RESOLVED < <(read_thread_guard "${thread_id}" 2> /dev/null) ||
-                  [[ -z "${LIVE_PR_HEAD}" || "${LIVE_PR_HEAD}" != "${VERIFIED_HEAD}" ]]; then
-                  echo "::warning::stopping review-thread resolution because the live PR head moved before resolving comment ${rc_id}"
-                  break
-                elif [[ "${THREAD_IS_RESOLVED}" == 'true' ]]; then
-                  echo "::warning::comment ${rc_id} was resolved by another actor before this round could resolve it"
-                  continue
-                elif [[ "${THREAD_IS_RESOLVED}" != 'false' ]]; then
-                  echo "::warning::stopping review-thread resolution because the state of comment ${rc_id} could not be proven"
-                  break
-                fi
-                RESOLVE_SUCCEEDED='false'
-                if gh api graphql -f threadId="${thread_id}" -f query='
-                  mutation($threadId:ID!){
-                    resolveReviewThread(input:{threadId:$threadId}){thread{isResolved}}
-                  }' > /dev/null 2>&1; then
-                  RESOLVE_SUCCEEDED='true'
-                fi
-                POST_GUARD_OK='false'
-                if IFS=$'\t' read -r LIVE_PR_HEAD THREAD_IS_RESOLVED < <(read_thread_guard "${thread_id}" 2> /dev/null); then
-                  POST_GUARD_OK='true'
-                fi
-                if [[ "${POST_GUARD_OK}" == 'true' && "${LIVE_PR_HEAD}" == "${VERIFIED_HEAD}" && "${THREAD_IS_RESOLVED}" == 'true' ]]; then
-                  if [[ "${RESOLVE_SUCCEEDED}" != 'true' ]]; then
-                    echo "::warning::comment ${rc_id} is resolved after an unsuccessful mutation command; another actor or a lost response may be responsible"
-                  fi
-                  CONFIRMED_RESOLVED_N=$(( CONFIRMED_RESOLVED_N + 1 ))
-                elif [[ "${POST_GUARD_OK}" == 'true' && "${LIVE_PR_HEAD}" == "${VERIFIED_HEAD}" && "${THREAD_IS_RESOLVED}" == 'false' && "${RESOLVE_SUCCEEDED}" == 'false' ]]; then
-                  echo "::warning::could not resolve the review thread for comment ${rc_id}"
-                else
-                  echo "::warning::the live PR head or thread state could not be proven after resolving comment ${rc_id}; stopping review-thread resolution"
-                  break
-                fi
-              done < "${WORKDIR}/resolved-comments.txt"
-              echo "🧵 confirmed ${CONFIRMED_RESOLVED_N} selected review thread(s) resolved while the verified head remained live"
-            fi
-            # The mirror of the resolve above: a finding the agent did NOT
-            # resolve keeps its thread open, and this answers it IN that thread.
-            # Without it the reason sits only in the round summary, so the
-            # reviewer who opens the still-open thread sees silence and cannot
-            # tell their finding was read. Same neutralisation as the summary
-            # body — a reply is model output posted verbatim under the bot
-            # identity, so it could otherwise smuggle a forged control marker.
-            # Best-effort: a reply failure must never fail a good push.
-            if [[ -s "${WORKDIR}/comment-replies.json" ]] &&
-              jq -e 'type == "array"' "${WORKDIR}/comment-replies.json" > /dev/null 2>&1; then
-              REPLIED_N=0
-              while IFS=$'\t' read -r rc_id reply_b64; do
-                [[ "${rc_id}" =~ ^[0-9]+$ && -n "${reply_b64}" ]] || continue
-                # A finding cannot be both resolved and replied to; the resolve
-                # block above already closed anything in resolved-comments.txt,
-                # so skip it here rather than answer a thread we just resolved.
-                # Match tolerates the rc: prefix and a trailing CR, as the
-                # resolve block's own parsing does.
-                if [[ -f "${WORKDIR}/resolved-comments.txt" ]] &&
-                  tr -d '\r' < "${WORKDIR}/resolved-comments.txt" |
-                  grep -qxE "(rc:)?${rc_id}"; then
-                  continue
-                fi
-                REPLY_BODY="$(base64 -d <<< "${reply_b64}" | sed 's/<!--/<!\\-\\-/g')"
-                [[ -n "${REPLY_BODY}" ]] || continue
-                # GitHub rejects a reply aimed at another reply ("Replies to
-                # replies are not supported"), and rc_id can itself be a reply
-                # id — the feedback step lists every review comment, replies
-                # included. Map to the thread's top-level comment (the one
-                # valid target), falling back to rc_id when the comment is
-                # absent from THREADS_JSON — a thread past a partial fetch, or
-                # a comment past its own thread's first-100 comment page.
-                root_id="$(jq -r --argjson id "${rc_id}" \
-                  'map(select(any(.comments.nodes[]; .databaseId == $id)))
-                   | .[0].comments.nodes[0].databaseId // $id' <<< "${THREADS_JSON}")"
-                # Idempotence gate: a crash-and-rerun of this round, a
-                # same-run repair that regenerates the dispositions, or a
-                # later round whose agent rewrites an unchanged declination
-                # must not post the same bot reply twice on one thread
-                # (observed 2026-08-16: an identical reply posted three
-                # times, #9296). Skip when the thread already carries a
-                # comment by the bot whose body EQUALS the neutralised body
-                # about to be posted; a changed body — a new reason in a
-                # later round — still posts. Best-effort like the rest: with
-                # a stale or empty threads view this degrades to the old
-                # post-always behavior.
-                if jq -e --argjson id "${root_id}" --arg bot "${AUTOFIX_BOT}" \
-                  --arg body "${REPLY_BODY}" '
-                    map(select(any(.comments.nodes[]; .databaseId == $id)))
-                    | .[0].comments.nodes // []
-                    | any(.[]; (.author.login // "") == $bot
-                             and (.body // "") == $body)' \
-                  <<< "${THREADS_JSON}" > /dev/null 2>&1; then
-                  echo "⏭️ reply to review comment ${rc_id} skipped — identical bot reply already on the thread"
-                  continue
-                fi
-                if gh api "repos/${REPO}/pulls/${PR}/comments/${root_id}/replies" \
-                  -f body="${REPLY_BODY}" > /dev/null 2>&1; then
-                  REPLIED_N=$(( REPLIED_N + 1 ))
-                else
-                  echo "::warning::could not reply to review comment ${rc_id}"
-                fi
-              done < <(jq -r '.[] | select(.id != null and .body != null)
-                | [(.id | tostring), (.body | @base64)] | @tsv' \
-                "${WORKDIR}/comment-replies.json" 2> /dev/null || true)
-              echo "🧵 replied on ${REPLIED_N} thread(s) the agent left open"
-            fi
-          }
-          # Deferred-findings persistence, shared by both arms below.
-          # Full rationale → qwen-autofix.md#af-055
-          run_deferred_upsert() {
-            if [[ -z "${UPSERT_SRC:-}" ]]; then
-              # Stage never ran: nothing was deferred either.
-              echo 'deferred-findings upsert skipped: stage step never ran'
-              return 0
-            fi
-            UPSERT_OUT="$( { LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \
-              LD_PROFILE= LD_PROFILE_OUTPUT= LD_DEBUG= LD_DEBUG_OUTPUT= \
-              /usr/bin/env -i \
-              PATH="${TRUSTED_PATH}" \
-              GITHUB_TOKEN="${GITHUB_TOKEN}" \
-              GH_HOST=github.com \
-              RUNNER_TEMP="${RUNNER_TEMP}" \
-              WORKDIR="${WORKDIR}" \
-              PR="${PR}" \
-              REPO="${REPO}" \
-              AUTOFIX_BOT="${AUTOFIX_BOT}" \
-              UPSERT_SRC="${UPSERT_SRC}" \
-              bash --norc -c '
-                set -uo pipefail
-                exec >&3
-                printf "%s\n" "__upsert_child_live__"
-                if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/autofix-gh-config.XXXXXX")"; then
-                  echo "__upsert_trusted__::warning::could not create a gh config dir; deferred findings NOT persisted this round"
-                  exit 0
-                fi
-                export GH_CONFIG_DIR
-                bash -c "${UPSERT_SRC}" ||
-                  echo "__upsert_trusted__::warning::deferred-findings upsert failed; continuing"
-              ' > /dev/null 2>&1 ; } 3>&1 )" || true
-            # INSPECTION uses bash builtins only ([[ ]], read, printf — no
-            # exec): under loader trace mode every external binary, grep
-            # included, would itself print-and-exit-0, so a grep-based check
-            # would be neutered by the very condition it must detect.
-            if [[ "${UPSERT_OUT}" != *'__upsert_child_live__'* ]]; then
-              echo "::warning::deferred-findings upsert child never started (loader trace mode or exec failure); NOT persisted this round"
-            fi
-            # The child's output is agent-reachable content, so a line-start
-            # `::` is neutralized before it reaches this step's stdout.
-            while IFS= read -r _upsert_line; do
-              # Wrapper-authored lines carry a marker and are emitted
-              # VERBATIM so they still render as GitHub annotations; the
-              # script's own output is agent-reachable and stays neutralized.
-              if [[ "${_upsert_line}" == '__upsert_child_live__' ]]; then
-                :
-              elif [[ "${_upsert_line}" == __upsert_trusted__* ]]; then
-                printf '%s\n' "${_upsert_line#__upsert_trusted__}"
-              else
-                printf '%s\n' "${_upsert_line//::/;;}"
-              fi
-            done <<< "${UPSERT_OUT}"
-          }
-
-                    # Take this PAT-bearing step off every mutable host git surface —
-          # both the shared config FILES and git's ENV channels — keep this
-                    # Full rationale → qwen-autofix.md#af-056
-          export PATH="${TRUSTED_PATH}"
-          unset LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH \
-            GIT_CONFIG_PARAMETERS GIT_ALLOW_PROTOCOL GIT_PROXY_COMMAND \
-            GIT_SSL_NO_VERIFY GIT_SSL_CAINFO GIT_EXEC_PATH GIT_DIR \
-            GIT_WORK_TREE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY \
-            GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_SHALLOW_FILE \
-            GIT_ASKPASS GIT_SSH GIT_SSH_COMMAND
-          export GIT_CONFIG_COUNT=0
-          export GIT_TERMINAL_PROMPT=0
-          export GIT_CONFIG_SYSTEM=/dev/null
-          export GIT_CONFIG_GLOBAL="$(mktemp "${RUNNER_TEMP}/autofix-pat-gitconfig.XXXXXX")"
-          git config --file "${GIT_CONFIG_GLOBAL}" safe.directory "$(pwd)"
-          # Host hygiene + LOCAL .git/config scrub (the throwaway global above
-          # covers only the global scope, not the highest-precedence local
-          # file the branch/agent can plant). The staged copy's trusted-base
-          # provenance holds at cp time only — RUNNER_TEMP is writable by that
-          # same branch code — so verify the digest the staging step recorded
-          # in GITHUB_OUTPUT (unreachable from a disk write) before executing.
-          # Never run the script from the working tree; it holds the branch.
-          echo "${RESANITIZE_SHA256}  ${RUNNER_TEMP}/resanitize-git-config.sh" | sha256sum -c - > /dev/null
-          bash "${RUNNER_TEMP}/resanitize-git-config.sh"
-
-          if [[ "${OUTCOME}" == "fixed" ]]; then
-            NEXT_ROUND="$(( ROUND + 1 ))"
-            # The tree the gate verified is what gets pushed: assert HEAD is
-            # the gate's verified_head before touching credentials. A repo
-            # redirect (a planted .git/commondir/GIT_DIR — the first defused
-            # by resanitize, the second by the env strip) would otherwise let
-            # `git rev-parse HEAD` and the push read an attacker repo whose
-            # HEAD differs; this compares against the value the gate recorded
-            # in GITHUB_OUTPUT (unreachable from a disk write). Empty
-            # verified_head only on a noop, which does not reach this push.
-            HEAD_NOW="$(git rev-parse HEAD)"
-            if [[ -z "${VERIFIED_HEAD}" || "${HEAD_NOW}" != "${VERIFIED_HEAD}" ]]; then
-              echo "::error::HEAD ${HEAD_NOW} is not the gate's verified head ${VERIFIED_HEAD:-<empty>} — refusing to push"
-              exit 1
-            fi
-            # Push the exact verified COMMIT OBJECT, never the symbolic
-            # HEAD: `HEAD:branch` would re-resolve at push time, re-opening
-            # the check-then-use race the guard above just closed (a watcher
-            # moving HEAD between the check and the push). PUSH_SHA is
-            # re-pinned to the concrete object after each salvage merge below.
-            PUSH_SHA="${VERIFIED_HEAD}"
-            git config --local --unset-all http.https://github.com/.extraheader || true
-            # This step carries the PAT; the branch carries PR-controlled
-            # .husky hooks (hooksPath was pointed there so the AGENT's
-            # commits get checked). A pre-push hook would execute that code
-            # with the PAT in env — sever hooks entirely before pushing.
-            git config core.hooksPath /dev/null
-            # Authenticate push/fetch with a one-shot, host-scoped credential
-            # helper via a git_auth wrapper (see Publish PR) — nothing lands
-            # Full rationale → qwen-autofix.md#af-057
-            git_auth() { git -c http.sslVerify=true -c fetch.recurseSubmodules=false -c protocol.ext.allow=never -c credential.helper= -c credential."https://github.com".helper='!f(){ echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; };f' "$@"; }
-            if [[ "${HEAD_REPO:-${REPO}}" != "${REPO}" ]]; then
-              # Push back to the FORK branch via allow-edits (PAT has push
-              # rights on the upstream, which GitHub extends to the fork's
-              # PR branch when the author ticked the box).
-              PUSH_URL="https://github.com/${HEAD_REPO}.git"
-            else
-              PUSH_URL="https://github.com/${REPO}.git"
-            fi
-            # Salvage a race-lost push instead of discarding the run. The
-            # per-PR head-write concurrency group serialises THIS repo's
-            # Full rationale → qwen-autofix.md#af-058
-            PUSH_RACE_MERGED='false'
-            for push_attempt in 1 2 3; do
-              if git_auth push --no-verify "${PUSH_URL}" "${PUSH_SHA}:refs/heads/${BRANCH}"; then
-                break
-              fi
-              if [[ "${push_attempt}" == 3 ]]; then
-                echo "::error::push rejected ${push_attempt} times; giving up"
-                exit 1
-              fi
-              echo "⚠️ push rejected (attempt ${push_attempt}) — branch moved during the run; merging the new head and retrying"
-              if ! git_auth fetch "${PUSH_URL}" "refs/heads/${BRANCH}"; then
-                echo "::error::could not fetch the moved head (attempt ${push_attempt}) — cannot salvage this push"
-                exit 1
-              fi
-              # The disclosure flag keys on HEAD actually advancing: a push
-              # can fail transiently (upload timeout, 503) with the branch
-              # unmoved, and the merge then no-ops "Already up to date" —
-              # flagging that would tell the reviewer to re-check mid-run
-              # commits that never existed.
-              PRE_MERGE_HEAD="$(git rev-parse HEAD)"
-              # commit.gpgsign=false: this real merge commit would otherwise
-              # read the signing knob from config and, with no key on the
-              # runner, exit 128 ("gpg: signing failed") — misread below as a
-              # content conflict, discarding a verified round. The throwaway
-              # global above already hides a polluted ~/.gitconfig; this makes
-              # the merge independent of it regardless.
-              if ! git -c commit.gpgsign=false \
-                -c user.name="${AUTOFIX_BOT}" \
-                -c user.email="${AUTOFIX_BOT}@users.noreply.github.com" \
-                merge --no-edit FETCH_HEAD; then
-                git merge --abort || true
-                echo "::error::the commits pushed during the run conflict with this fix — handing off instead of overwriting either side"
-                exit 1
-              fi
-              # Re-pin the exact object the next attempt pushes to the
-              # merge result, captured here under control — not a symbolic
-              # HEAD the push would re-resolve.
-              PUSH_SHA="$(git rev-parse HEAD)"
-              if [[ "${PUSH_SHA}" != "${PRE_MERGE_HEAD}" ]]; then
-                PUSH_RACE_MERGED='true'
-              fi
-            done
-            resolve_and_reply_threads
-            # Best-effort: verified out-of-footprint findings persist into
-            # the per-PR tracking issue (script content from expression
-            # context; append-only comment design — see the script).
-            run_deferred_upsert
-            {
-              echo "🤖 Addressed the latest review feedback (round ${NEXT_ROUND}/${MAX_ROUNDS}). What changed, and what I pushed back on: · 已处理最新评审反馈（第 ${NEXT_ROUND}/${MAX_ROUNDS} 轮）。改动内容与我反驳保留之处如下："
-              echo
-              # Neutralize the comment-opening token itself: model output
-              # posted verbatim under the bot identity could smuggle a forged
-              # control marker ('<!-- autofix-eval …') the scanners would
-              # trust. Token-breaking is LINE-INDEPENDENT — a strip like
-              # 's/<!--[^>]*-->//' misses a marker whose --> sits on another
-              # line, and jq scan() matches across newlines. The backslashes
-              # render away in markdown, so the visible text is unchanged.
-              sed 's/<!--/<!\\-\\-/g' "${WORKDIR}/address-summary.md"
-              # Gate-authored advisories (e.g. "test coverage shrank") render
-              # AFTER the agent's summary: the summary carries the agent's
-              # justification, the advisory carries the machine measurement a
-              # maintainer checks it against. Escaped like every other
-              # embedded file — the advisory quotes file paths from the
-              # branch, which are model-influenced content.
-              if [[ -s "${WORKDIR}/gate-advisories.md" ]]; then
-                echo
-                sed 's/<!--/<!\\-\\-/g' "${WORKDIR}/gate-advisories.md"
-              fi
-              if [[ -s "${WORKDIR}/deferred-feedback.md" ]]; then
-                echo
-                sed 's/<!--/<!\\-\\-/g' "${WORKDIR}/deferred-feedback.md"
-              fi
-              echo
-              echo "Base-conflict check · 基分支冲突检查: $([[ "${CONFLICT}" == "true" ]] && echo 'conflicted with main — resolved in this push. · 与 main 有冲突——已在本次推送中解决。' || echo 'no conflict with main. · 与 main 无冲突。')"
-              if [[ "${PUSH_RACE_MERGED}" == 'true' ]]; then
-                echo
-                echo "⚠️ The branch received new commits while this round ran; they were merged into this push, but this round's verification predates that merge — re-check anything that landed mid-run. · 本轮运行期间分支收到了新的提交；本次推送已将其合并，但本轮验证在合并之前完成——请复查运行期间落地的改动。"
-              fi
-              echo
-              echo "Re-review when you have a moment. After round ${MAX_ROUNDS} this bot stops and leaves the PR for a human. · 有空请复审；第 ${MAX_ROUNDS} 轮后本 bot 停止并将 PR 交给人工。"
-              echo
-              echo "---"
-              echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`"
-              echo
-              echo "<!-- autofix-eval ts=${NEWEST} acted=true round=${NEXT_ROUND} win=${WINDOW:-none} -->"
-              echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"
-              if [[ "${GROWTH_BASE_NEW}" == 'true' ]]; then
-                echo "<!-- autofix-growth-base src=${GROWTH_BASE_SRC} test=${GROWTH_BASE_TEST} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
-              fi
-              # Per-round growth history the next round's divergence read
-              # counts; run=GITHUB_RUN_ID is the DEDUP identity (a retry or a
-              # job re-run re-posts the same run; measured= orders and picks
-              # that run's latest attempt).
-              echo "<!-- autofix-growth-now src=${GROWTH_SRC:-0} test=${GROWTH_TEST:-0} over=${CRITICAL_ONLY_GROWTH:-false} round=${NEXT_ROUND} run=${GITHUB_RUN_ID}${MEASURED_AT:+ measured=${MEASURED_AT}} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
-            } > "${WORKDIR}/report.md"
-            STATUS="pushed (round ${NEXT_ROUND}/${MAX_ROUNDS})"
-          else
-            # No push happened, so the verified head is the unchanged
-            # origin head; resolution's own live-head guards still apply.
-            PUSH_RACE_MERGED='false'
-            resolve_and_reply_threads
-            # Best-effort: verified out-of-footprint findings persist into
-            # the per-PR tracking issue (script content from expression
-            # context; append-only comment design — see the script).
-            run_deferred_upsert
-            # noop: evaluated, nothing worth doing. Report once and advance the
-            # watermark so the next scan does not re-evaluate the same feedback.
-            {
-              echo "🤖 Reviewed the latest feedback — no changes needed. Why, point by point: · 已审阅最新反馈——无需改动。逐点说明原因如下："
-              echo
-              sed 's/<!--/<!\\-\\-/g' "${WORKDIR}/no-action.md"
-              if [[ -s "${WORKDIR}/deferred-feedback.md" ]]; then
-                echo
-                sed 's/<!--/<!\\-\\-/g' "${WORKDIR}/deferred-feedback.md"
-              fi
-              echo
-              echo "Base-conflict check · 基分支冲突检查: $([[ "${CONFLICT}" == "true" ]] && echo 'conflicts with main (no review fix needed, but a rebase/merge is required before merge). · 与 main 有冲突（无需评审修复，但合并前需 rebase/merge）。' || echo 'no conflict with main. · 与 main 无冲突。')"
-              echo
-              echo "---"
-              echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`"
-              echo
-              echo "<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} win=${WINDOW:-none} -->"
-              echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"
-              if [[ "${GROWTH_BASE_NEW}" == 'true' ]]; then
-                echo "<!-- autofix-growth-base src=${GROWTH_BASE_SRC} test=${GROWTH_BASE_TEST} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
-              fi
-              # Per-round growth history the next round's divergence read
-              # counts; run=GITHUB_RUN_ID is the DEDUP identity (a retry or a
-              # job re-run re-posts the same run; measured= orders and picks
-              # that run's latest attempt).
-              echo "<!-- autofix-growth-now src=${GROWTH_SRC:-0} test=${GROWTH_TEST:-0} over=${CRITICAL_ONLY_GROWTH:-false} round=${ROUND} run=${GITHUB_RUN_ID}${MEASURED_AT:+ measured=${MEASURED_AT}} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
-            } > "${WORKDIR}/report.md"
-            STATUS="no action needed"
-          fi
-
-          # Bounded retry on the report post: this one comment carries the
-          # round's ENTIRE persisted state (autofix-eval watermark/round,
-          # redcheck head, growth baseline). The push has already landed, so
-          # a transient API failure here loses the marker while keeping the
-          # growth — the retry scan would re-anchor the baseline at the
-          # post-push size and re-evaluate feedback it already addressed.
-          # Three attempts bound that to genuine outages; the final failure
-          # keeps today's semantics (step fails, no marker, next scan
-          # retries the round).
-          REPORT_POSTED='false'
-          for attempt in 1 2 3; do
-            if gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/report.md"; then
-              REPORT_POSTED='true'
-              break
-            fi
-            if [[ "${attempt}" == 3 ]]; then
-              echo "::error::report post failed ${attempt} times for PR #${PR}; giving up"
-            else
-              echo "::warning::report post attempt ${attempt} failed for PR #${PR}; retrying"
-              sleep 10
-            fi
-          done
-          [[ "${REPORT_POSTED}" == 'true' ]] || exit 1
-
-          # Takeover milestone digest — roughly every 10 rounds. The takeover
-          # cap (100) bounds runaway but says nothing about when a human
-          # Full rationale → qwen-autofix.md#af-059
-          if [[ "${OUTCOME}" == "fixed" && "${MAX_ROUNDS}" == "${TAKEOVER_MAX_ROUNDS}" ]] \
-            && [[ "${NEXT_ROUND}" -ge 10 && -f "${WORKDIR}/ic.json" ]]; then
-            # Crossing trigger, not an equality test: failure rounds also
-            # advance the round counter, so `push@9, crash@10, push@11`
-            # would skip an exact %10 check forever — and a failure-heavy
-            # PR is the very PR the digest exists for. Post on the first
-            # PUSHED round once 10+ rounds have accumulated since the last
-            # digest in THIS window (or since the window opened). The
-            # window opens at the round SEED, not at zero: a '/takeover
-            # from 60' counter starts at 60, so the no-digest-yet baseline
-            # is the seed — otherwise the seed-inflated counter digests on
-            # the window's first push with a 1-2 round census.
-            MS_LAST="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg win "${WINDOW:-none}" --argjson start "${ROUND_START:-0}" '
-              [ .[] | select((.user.login // "") == $ab) | (.body // "")
-                | [ scan("<!-- autofix-milestone round=([0-9]+) win=([^ ]+) -->") ] | .[]
-                | select(.[1] == $win) | (.[0] | tonumber) ]
-              | max // $start' "${WORKDIR}/ic.json" 2> /dev/null || echo "${ROUND_START:-0}")"
-            if [[ "$(( NEXT_ROUND - MS_LAST ))" -ge 10 ]]; then
-              WIN_HEADS="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg win "${WINDOW:-none}" '
-                [.[] | select((.user.login // "") == $ab)
-                     | select((.body // "") | contains("<!-- autofix-eval "))
-                     | select(
-                         ([ ((.body // "") | scan("<!-- autofix-eval ts=[^ ]+ acted=[^ ]+ round=[0-9]+(?: win=([^ ]+))? -->")) ] | map(.[0] // "none")) as $wins
-                         | ($wins | length) > 0 and (($wins | last) == $win))]
-                | sort_by(.created_at) | .[]
-                | (.body | gsub("\r"; "") | split("\n")[0])' "${WORKDIR}/ic.json" 2> /dev/null || true)"
-              if [[ -z "${WIN_HEADS}" ]]; then
-                # Reaching round 10+ with zero window markers means the
-                # parse failed (prior markers must exist to be here) — a
-                # fabricated all-zero census is worse than no digest.
-                echo "::warning::milestone census found no window markers on #${PR}; skipping the digest"
-              else
-                N_PUSHED="$(grep -c 'Addressed the latest review feedback' <<< "${WIN_HEADS}" || true)"
-                # This round's own marker was posted just above but ic.json
-                # predates it — count it in by hand.
-                N_PUSHED=$(( N_PUSHED + 1 ))
-                N_NOOP="$(grep -c 'no changes needed' <<< "${WIN_HEADS}" || true)"
-                # Needle matches the emitted headline verbatim — first
-                # lines can embed provider error text.
-                N_TIMEOUT="$(grep -c 'AutoFix ran out of time before finishing' <<< "${WIN_HEADS}" || true)"
-                # Both wordings of the gate-rejection handoff, past and
-                # present, plus both handoff brake violations, dirty and
-                # committed (the gate rejects each under its own outcome)
-                # — the census must not silently zero when the headline is
-                # reworded.
-                N_REJECTED="$(grep -cE 'Could not (address the latest feedback|produce a passing fix)|wrote a handoff but (left a dirty workspace|the round HAS a commit)' <<< "${WIN_HEADS}" || true)"
-                # The brake's deliberate stop — its own bucket, not the
-                # residual crash bucket: it tells the maintainer a human
-                # decision is already waiting on this PR.
-                N_HANDOFF="$(grep -c 'deferred this item to a human under instruction' <<< "${WIN_HEADS}" || true)"
-                # Every other outcome (crash, model error, gate error,
-                # infra) lands in a residual bucket: a window that burned
-                # 80% of its budget on crashes must be the LOUDEST line in
-                # the digest, not four zeros quieter than a healthy one.
-                N_TOTAL=$(( $(grep -c . <<< "${WIN_HEADS}" || true) + 1 ))
-                N_OTHER=$(( N_TOTAL - N_PUSHED - N_NOOP - N_TIMEOUT - N_REJECTED - N_HANDOFF ))
-                (( N_OTHER < 0 )) && N_OTHER=0
-                # Base updates carry their own marker with no win= field;
-                # their window is recovered by timestamp (the window key IS
-                # the engage ack's created_at — 'none' means count all,
-                # and the header says so).
-                N_BASE="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg win "${WINDOW:-none}" '
-                  [.[] | select((.user.login // "") == $ab)
-                       | select((.body // "") | contains("<!-- autofix-base-updated -->"))
-                       | select($win == "none" or ((.created_at // "") > $win))]
-                  | length' "${WORKDIR}/ic.json" 2> /dev/null || echo 0)"
-                WIN_DESC='in the current window'
-                WIN_DESC_ZH='当前窗口'
-                if [[ "${WINDOW:-none}" == 'none' ]]; then
-                  WIN_DESC='since the PR opened (no counting window yet)'
-                  WIN_DESC_ZH='自 PR 创建以来（尚无计数窗口）'
-                fi
-                if gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '📊 Takeover milestone — round %s/%s, %s. Census: %s pushed fix(es), %s no-change review(s), %s timeout(s), %s rejected attempt(s), %s deliberate stop(s) under instruction (deferred to a human), %s other round(s) (crash / model error / gate error / infra), %s base update(s).\n\nThis many rounds deserves a human look. Options: keep going (fine — nothing changes), split or reduce the PR if rounds keep accumulating, or release takeover (remove the `%s` label or comment `%s stop`). Management continues unchanged unless you act.\n\n<details>\n<summary>中文说明</summary>\n\n📊 接管里程碑 —— 第 %s/%s 轮（%s）。统计：推送修复 %s 次、审阅无需改动 %s 次、超时 %s 次、验证拒绝 %s 次、按指示有意停止（移交人工）%s 次、其他轮次（崩溃/模型错误/门错误/infra）%s 次、base 更新 %s 次。\n\n轮次到这个量值得人工看一眼。可选：继续（无需操作）；若轮次持续累积，考虑拆分或缩减 PR；或释放接管（移除 `%s` 标签或评论 `%s stop`）。不操作则托管照常继续。\n\n</details>\n\n<!-- autofix-milestone round=%s win=%s -->' "${NEXT_ROUND}" "${MAX_ROUNDS}" "${WIN_DESC}" "${N_PUSHED}" "${N_NOOP}" "${N_TIMEOUT}" "${N_REJECTED}" "${N_HANDOFF}" "${N_OTHER}" "${N_BASE}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${NEXT_ROUND}" "${MAX_ROUNDS}" "${WIN_DESC_ZH}" "${N_PUSHED}" "${N_NOOP}" "${N_TIMEOUT}" "${N_REJECTED}" "${N_HANDOFF}" "${N_OTHER}" "${N_BASE}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${NEXT_ROUND}" "${WINDOW:-none}")"; then
-                  echo "📊 milestone digest posted on #${PR} (round ${NEXT_ROUND})"
-                else
-                  echo "::warning::milestone digest failed to post on PR #${PR}; the round report above already landed"
-                fi
-              fi
-            fi
-          fi
-
-          {
-            ISSUE_REF=""
-            [[ "${ISSUE}" != "${PR}" ]] && ISSUE_REF=" (issue #${ISSUE})"
-            echo "### PR #${PR}${ISSUE_REF} — ${STATUS}"
-            echo "- Base conflict: ${CONFLICT}"
-            echo
-            if [[ "${OUTCOME}" == "fixed" ]]; then
-              cat "${WORKDIR}/address-summary.md"
-            else
-              cat "${WORKDIR}/no-action.md"
-            fi
-          } >> "${GITHUB_STEP_SUMMARY}"
-          echo "💬 PR #${PR}: ${STATUS}"
+          bash --norc -c "${PUSH_REPORT_SRC}"
+          # Written last and only on success. 'Finalize autofix status comment'
+          # reads it to tell "this round published its report" from "the step
+          # no-oped": a loader plant that kills this shell at execve exits 0
+          # with nothing written, and the finalize step must not then claim a
+          # report that never posted. The step shell runs under -eo pipefail,
+          # so a failing body never reaches this line.
+          echo 'round_reported=true' >> "${GITHUB_OUTPUT}"
 
       - name: 'Report dry-run / failure'
         if: |-
@@ -5907,7 +5695,7 @@ jobs:
           # This step also posts a round report (timeout / gate-rejection /
           # abort), so it writes the per-round growth-now marker too — else an
           # over-budget round that never reaches 'Push and report' leaves a
-          # history gap and the divergence count under-reports. Empty outputs
+          # history gap and the census under-reports. Empty outputs
           # (prepare never ran) fall through the :-0/:-false marker fallbacks
           # to an inert over=false entry — measured= then OMITS itself (an
           # EMPTY measured= value matches no scan and would silently drop the
@@ -5918,6 +5706,13 @@ jobs:
           CRITICAL_ONLY_GROWTH: '${{ steps.prepare.outputs.critical_only_growth }}'
           MEASURED_AT: '${{ steps.prepare.outputs.measured_at }}'
           GROWTH_BASE_WIN: '${{ steps.prepare.outputs.growth_base_win }}'
+          # Same selection chain as AUDIT_VERDICT below — the gates'
+          # defended output, never steps.prepare's raw copy.
+          KISS_AUDIT: '${{ steps.final_verify.outputs.kiss_audit }}'
+          # The verdict Finalize verification selected WITH the outcome —
+          # see 'Push and report' for the selection rule. Never a re-read of
+          # the branch-writable file.
+          AUDIT_VERDICT: '${{ steps.final_verify.outputs.audit_verdict }}'
           UPSERT_SRC: '${{ steps.stage.outputs.upsert_src }}'
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
         run: |-
@@ -5927,6 +5722,23 @@ jobs:
           REPORT_HEAD="${CHECKED_OUT_HEAD}"
           ROUND="${EFFECTIVE_ROUND:-${ROUND}}"
           MODEL_DISPLAY="${MODEL:-default}"
+          # Same helper as 'Push and report' (each step is its own shell, so
+          # the definition does not carry over). The verdict is the one the
+          # verification GATE validated (AUDIT_VERDICT step output), never a
+          # re-read of the branch-writable file. Failure rounds record the
+          # verdict for a complete trail but never re-arm the window.
+          emit_growth_audit_marker() {
+            local allow_rearm="${1:-false}"
+            [[ "${KISS_AUDIT}" == 'true' ]] || return 0
+            case "${AUDIT_VERDICT:-}" in
+              sound | drift | conflict) ;;
+              *) return 0 ;;
+            esac
+            echo "<!-- autofix-growth-audit verdict=${AUDIT_VERDICT} win=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
+            if [[ "${AUDIT_VERDICT}" == 'sound' && "${allow_rearm}" == 'true' ]]; then
+              echo "<!-- autofix-rearm -->"
+            fi
+          }
           SUFFIX=''
           [[ "${DRY_RUN}" == "true" ]] && SUFFIX=' (dry-run, nothing pushed)'
           {
@@ -6151,12 +5963,22 @@ jobs:
                 # failure). Before handing to a human, check whether the PR is
                 # Full rationale → qwen-autofix.md#af-065
                 STALE_BASE_RETRY=false
-                MAIN_HEAD_R="$(gh api "repos/${REPO}/commits/${DEFAULT_BRANCH:-main}" --jq '.sha' 2> /dev/null || echo '')"
-                if [[ -n "${MAIN_HEAD_R}" && -n "${REPORT_HEAD}" ]]; then
-                  CMP_R="$(gh api "repos/${REPO}/compare/${MAIN_HEAD_R}...${REPORT_HEAD}" --jq '.status' 2> /dev/null || echo '')"
-                  if [[ "${CMP_R}" == 'behind' || "${CMP_R}" == 'diverged' ]] \
-                    && gh api -X PUT "repos/${REPO}/pulls/${PR}/update-branch" -f expected_head_sha="${REPORT_HEAD}" > /dev/null 2>&1; then
-                    STALE_BASE_RETRY=true
+                # A conflict round must PARK quietly at the human call: its
+                # own stale-base merge would re-fire every synchronize-
+                # triggered workflow on the new head, and those loop-
+                # generated checks complete after the conflict marker this
+                # same report posts — waking the very park it establishes.
+                # The scan's stale-base auto-update carries the matching
+                # gate; base staleness is re-handled by this retry once a
+                # human wakes.
+                if [[ "${AUDIT_VERDICT:-}" != 'conflict' ]]; then
+                  MAIN_HEAD_R="$(gh api "repos/${REPO}/commits/${DEFAULT_BRANCH:-main}" --jq '.sha' 2> /dev/null || echo '')"
+                  if [[ -n "${MAIN_HEAD_R}" && -n "${REPORT_HEAD}" ]]; then
+                    CMP_R="$(gh api "repos/${REPO}/compare/${MAIN_HEAD_R}...${REPORT_HEAD}" --jq '.status' 2> /dev/null || echo '')"
+                    if [[ "${CMP_R}" == 'behind' || "${CMP_R}" == 'diverged' ]] \
+                      && gh api -X PUT "repos/${REPO}/pulls/${PR}/update-branch" -f expected_head_sha="${REPORT_HEAD}" > /dev/null 2>&1; then
+                      STALE_BASE_RETRY=true
+                    fi
                   fi
                 fi
                 if [[ "${STALE_BASE_RETRY}" == 'true' ]]; then
@@ -6267,9 +6089,31 @@ jobs:
               # full agent budget with nothing to show (observed on #7929:
               # three timeouts with successes in between; #7846 twice). The
               # census reuses PRIOR_HEADS, so it is window-scoped exactly
-              # like the consecutive one and a re-arm clears it. Only
-              # overrides a would-be RETRY: a round already terminal keeps
-              # its own headline (the consecutive breaker included).
+              # like the consecutive one and a re-arm clears it. Only the
+              # cap gate below overrides a would-be RETRY: a round already
+              # terminal keeps its own headline (the consecutive breaker
+              # included). The idle census and its warning run OUTSIDE that
+              # guard: the all-idle shape terminates via the consecutive
+              # breaker above, and that terminal run's job log is exactly
+              # where the wedged runner must be named.
+              # Idle (silent-sandbox) timeouts are EXCLUDED from this cap:
+              # a wedged runner/docker is not this PR being too big, an idle
+              # round dies at QWEN_IDLE_TIMEOUT_MS having produced no byte
+              # (a fraction of a real round), and no budget increase cures
+              # one — so this breaker's remedy does not apply to them. A
+              # persistently wedged sandbox stays bounded by
+              # CONSECUTIVE_FAILURE_CAP, which an idle round DOES feed.
+              # Full rationale → qwen-autofix.md#af-073
+              IDLE_N="$(grep -c 'AutoFix ran out of time before finishing (idle-timeout' <<< "${PRIOR_HEADS}" || true)"
+              if [[ "${AGENT_TIMEOUT:-}" == 'idle-timeout'* ]]; then
+                IDLE_N=$(( IDLE_N + 1 ))
+              fi
+              # Excluding idle from the cap must not hide it. The job log is
+              # the right surface: it reaches the operator without spending a
+              # PR comment on infra noise.
+              if [[ "${IDLE_N}" -gt 0 ]]; then
+                echo "::warning::#${PR}: ${IDLE_N} silent-sandbox (idle) timeout(s) this counting window — excluded from the ${TIMEOUT_WINDOW_CAP}-timeout cap; check the sandbox image and the runner docker daemon"
+              fi
               if [[ "${MARK_ROUND}" != "${MAX_ROUNDS}" ]]; then
                 # Needle matches the emitted headline verbatim — first lines
                 # can embed provider error text (API_ERROR_DETAIL puts up to
@@ -6279,14 +6123,12 @@ jobs:
                 if [[ -n "${AGENT_TIMEOUT:-}" ]]; then
                   TIMEOUT_N=$(( TIMEOUT_N + 1 ))
                 fi
-                # Idle (silent-sandbox) timeouts share the census — they burn
-                # the same full budget — but no budget increase cures them, so
-                # when the window contains any, the breaker says so.
-                IDLE_N="$(grep -c 'idle-timeout' <<< "${PRIOR_HEADS}" || true)"
-                if [[ "${AGENT_TIMEOUT:-}" == 'idle-timeout'* ]]; then
-                  IDLE_N=$(( IDLE_N + 1 ))
-                fi
-                if [[ "${TIMEOUT_N}" -ge "${TIMEOUT_WINDOW_CAP}" ]]; then
+                # IDLE_N's needle is TIMEOUT_N's needle extended with the
+                # idle cause's opening token — every line matching it also
+                # matches TIMEOUT_N's, so IDLE_N can never exceed TIMEOUT_N
+                # and the subtraction below can never go negative.
+                BUDGET_TIMEOUT_N=$(( TIMEOUT_N - IDLE_N ))
+                if [[ "${BUDGET_TIMEOUT_N}" -ge "${TIMEOUT_WINDOW_CAP}" ]]; then
                   MARK_ROUND="${MAX_ROUNDS}"
                   # The headline states what the census MEASURED — the
                   # window's cumulative count — not "stopped after N
@@ -6294,23 +6136,19 @@ jobs:
                   # failed differently (a gate rejection landing on a window
                   # that already carries the cap — the exact rollout state
                   # of #7929/#7846).
+                  # No all-idle branch here: the guard above only fires when
+                  # BUDGET_TIMEOUT_N alone reaches the cap, so a tripped
+                  # window always holds at least TIMEOUT_WINDOW_CAP genuine
+                  # budget timeouts — idle rounds can outnumber budget ones
+                  # in it, but the budget remedy is always the right one.
                   IDLE_CLAUSE=''
                   IDLE_CLAUSE_ZH=''
                   if [[ "${IDLE_N}" -gt 0 ]]; then
-                    IDLE_CLAUSE=" ${IDLE_N} of those were silent-sandbox (idle) timeouts that no budget increase can cure — investigate the sandbox image and runner docker daemon for those."
-                    IDLE_CLAUSE_ZH="其中 ${IDLE_N} 次是静默 sandbox（idle）超时，提高预算也治不了 —— 请针对这些排查 sandbox 镜像与 runner 的 docker daemon。"
+                    IDLE_CLAUSE=" The window also holds ${IDLE_N} silent-sandbox (idle) timeout(s), which no budget increase can cure and which do NOT count toward this cap — investigate the sandbox image and runner docker daemon separately."
+                    IDLE_CLAUSE_ZH="本窗口另有 ${IDLE_N} 次静默 sandbox（idle）超时，提高预算也治不了，且不计入本上限 —— 请另行排查 sandbox 镜像与 runner 的 docker daemon。"
                   fi
-                  # Mirror the round-level split: when EVERY counted timeout
-                  # was idle, the closing remedy must not prescribe the
-                  # budget increase the clause above just declared useless.
-                  REMEDY='split or reduce the PR (or raise the agent time budget AND its step backstop together)'
-                  REMEDY_ZH='拆分或缩减该 PR（或同时提高 agent 时间预算与其步骤兜底）'
-                  if [[ "${IDLE_N}" -ge "${TIMEOUT_N}" ]]; then
-                    REMEDY='investigate the sandbox image and runner docker daemon'
-                    REMEDY_ZH='排查 sandbox 镜像与 runner 的 docker daemon'
-                  fi
-                  HEADLINE="🤖 AutoFix stopped: this counting window now contains ${TIMEOUT_N} time-budget exhaustions (pushed rounds in between included; this round itself may have failed differently). That is ${TIMEOUT_N} full agent runs that pushed nothing.${IDLE_CLAUSE} A human should ${REMEDY}, then comment \`${RETRY_COMMAND}\` to re-arm. Until then future scans will skip this PR."
-                  HEADLINE_ZH="🤖 AutoFix 已停止：当前计数窗口内已累计 ${TIMEOUT_N} 次时间预算耗尽（含其间推送过的轮次；本轮本身可能以别的方式失败）。即 ${TIMEOUT_N} 次完整 agent 运行没有推送任何内容。${IDLE_CLAUSE_ZH}应由人工${REMEDY_ZH}，然后评论 \`${RETRY_COMMAND}\` 重新武装。在此之前，后续扫描将跳过本 PR。"
+                  HEADLINE="🤖 AutoFix stopped: this counting window now contains ${BUDGET_TIMEOUT_N} agent time-budget exhaustions (pushed rounds in between included; this round itself may have failed differently). That is ${BUDGET_TIMEOUT_N} full agent runs that pushed nothing.${IDLE_CLAUSE} A human should split or reduce the PR (or raise the agent time budget AND its step backstop together), then comment \`${RETRY_COMMAND}\` to re-arm. Until then future scans will skip this PR."
+                  HEADLINE_ZH="🤖 AutoFix 已停止：当前计数窗口内已累计 ${BUDGET_TIMEOUT_N} 次时间预算耗尽（含其间推送过的轮次；本轮本身可能以别的方式失败）。即 ${BUDGET_TIMEOUT_N} 次完整 agent 运行没有推送任何内容。${IDLE_CLAUSE_ZH}应由人工拆分或缩减该 PR（或同时提高 agent 时间预算与其步骤兜底），然后评论 \`${RETRY_COMMAND}\` 重新武装。在此之前，后续扫描将跳过本 PR。"
                 fi
               fi
             fi
@@ -6407,11 +6245,15 @@ jobs:
               echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`"
               echo
               echo "<!-- autofix-eval ts=${MARK_TS} acted=false round=${MARK_ROUND} win=${WINDOW:-none} -->"
-              # Per-round growth history the divergence read counts — same
-              # marker the push/no-op report paths write, so an over-budget
+              # Per-round growth history the census counts — same marker
+              # the push/no-op report paths write, so an over-budget
               # round that timed out or was gate-rejected is not a gap. run=
               # (per-workflow-run) is the DEDUP identity; measured= orders.
               echo "<!-- autofix-growth-now src=${GROWTH_SRC:-0} test=${GROWTH_TEST:-0} over=${CRITICAL_ONLY_GROWTH:-false} round=${MARK_ROUND} run=${GITHUB_RUN_ID}${MEASURED_AT:+ measured=${MEASURED_AT}} key=${GROWTH_BASE_WIN:-${WINDOW:-none}} -->"
+              # The verdict still rides the failure report (the trail must be
+              # complete), but a round that FAILED does not get to re-arm the
+              # window — the failure path re-measures under the same window.
+              emit_growth_audit_marker false
               # A sentinel ts means the agent evaluated NOTHING (crash, API
               # error, gate crash) and the next scan must retry. Recording a
               # judged head here would make RED_HEAD == LIVE_HEAD, so the
@@ -6503,6 +6345,11 @@ jobs:
           # flip and no reason to scan for one. A previous round's comment is
           # already terminal, and the next round's announcement re-PATCHes it.
           STATUS_ID: '${{ steps.post_status.outputs.comment_id }}'
+          # 'Push and report' writes this only after its sentinel-verified
+          # gate child exits 0; empty means the step no-oped (an env plant
+          # can kill its shell at execve, silent exit 0) — the success text
+          # must not assert a report that never posted.
+          PUSH_REPORTED: '${{ steps.push_report.outputs.round_reported }}'
         run: |-
           set -uo pipefail
           MARKER='<!-- autofix-status -->'
@@ -6521,8 +6368,15 @@ jobs:
           # the outcomes that published a round report — handoff and the two
           # brake-violation rejections post their note + eval marker from the
           # report step; anything else means the round stopped before
-          # publishing one.
-          if [[ "${OUTCOME:-}" == 'fixed' || "${OUTCOME:-}" == 'noop' || "${OUTCOME:-}" == 'handoff' || "${OUTCOME:-}" == 'dirty_handoff' || "${OUTCOME:-}" == 'committed_handoff' ]]; then
+          # publishing one. fixed/noop additionally condition on the push
+          # step's own success output: an env plant can kill that step's
+          # shell at execve (silent exit 0, gate body never ran), and the
+          # success text would otherwise assert a report that never posted.
+          PUBLISHED=true
+          if [[ "${OUTCOME:-}" == 'fixed' || "${OUTCOME:-}" == 'noop' ]] && [[ "${PUSH_REPORTED:-}" != 'true' ]]; then
+            PUBLISHED=false
+          fi
+          if [[ "${PUBLISHED}" == 'true' && ( "${OUTCOME:-}" == 'fixed' || "${OUTCOME:-}" == 'noop' || "${OUTCOME:-}" == 'handoff' || "${OUTCOME:-}" == 'dirty_handoff' || "${OUTCOME:-}" == 'committed_handoff' ) ]]; then
             EN="$(printf '✅ **AutoFix round %s finished** — [view run](%s). See this round'"'"'s report below.' "${ROUND_DISPLAY}" "${RUN_URL}")"
             ZH="$(printf '✅ **AutoFix 第 %s 轮已完成** —— [查看运行](%s)。本轮报告见下方。' "${ROUND_DISPLAY}" "${RUN_URL}")"
           else
