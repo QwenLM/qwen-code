@@ -1665,18 +1665,33 @@ export function convertOpenAIChunkToGemini(
     // sequence: equality is an exact replay, while a prefix-extending chunk is
     // a cumulative superset whose already-accepted prefix must be stripped.
     // Never infer replay from suffix equality — genuine adjacent deltas can
-    // repeat the same character or tag-like fragment.
+    // repeat the same character or tag-like fragment. Compare
+    // trimStart()-aligned in both branches: a whitespace-only content delta
+    // can be emitted before any reasoning_content arrives (it cannot be held
+    // — no structured reasoning yet — and /\S/ keeps it from setting
+    // hasVisibleContent), so the provider's cumulative replay can carry
+    // leading whitespace the demotion-seeded baseline excludes; the mirror
+    // polarity (baseline seeded from a held candidate carrying whitespace the
+    // replay lacks) must be recognized too.
     if (
       requestContext.inlineThinkingBlockDemoted === true &&
       visibleText &&
       requestContext.postDemotionReplayText !== undefined
     ) {
-      const replayText = requestContext.postDemotionReplayText;
-      if (visibleText === replayText) {
+      const alignedVisibleText = visibleText.trimStart();
+      const alignedReplayText =
+        requestContext.postDemotionReplayText.trimStart();
+      if (alignedVisibleText === alignedReplayText) {
         parts = parts.filter((part) => !getVisibleText(part));
         visibleText = '';
-      } else if (visibleText.startsWith(replayText)) {
-        visibleText = visibleText.slice(replayText.length);
+      } else if (
+        alignedReplayText.length > 0 &&
+        alignedVisibleText.startsWith(alignedReplayText)
+      ) {
+        const leadingLength = visibleText.length - alignedVisibleText.length;
+        visibleText = visibleText.slice(
+          leadingLength + alignedReplayText.length,
+        );
         parts = parts.filter((part) => !getVisibleText(part));
         if (visibleText) parts.push({ text: visibleText });
       }

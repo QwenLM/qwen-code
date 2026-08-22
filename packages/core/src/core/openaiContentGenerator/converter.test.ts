@@ -1281,6 +1281,94 @@ describe('OpenAIContentConverter', () => {
       expect(stream.pendingPostDemotionTagTail).toBeUndefined();
     });
 
+    it('drops a cumulative replay whose leading whitespace was emitted before demotion (issue #9348)', () => {
+      // A whitespace-only content delta arriving before any reasoning_content
+      // cannot be held (no structured reasoning yet) and does not set
+      // hasVisibleContent (/\S/ is false), so it is emitted verbatim and
+      // excluded from the demotion-seeded replay baseline. The provider's
+      // cumulative re-send includes it, and inside the normalizer's short
+      // exact-repeat window the replay passes through verbatim — equality and
+      // startsWith against the unaligned baseline both miss, so the
+      // post-demotion tag-tail defense would fail-closed a legitimate demoted
+      // turn with PROTOCOL_TAG_LEAK.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      const pre = converter.convertOpenAIChunkToGemini(
+        streamChunk('pre', { content: ' ' }),
+        stream,
+      );
+      expect(pre.candidates?.[0]?.content?.parts).toEqual([{ text: ' ' }]);
+      expect(stream.hasVisibleContent).toBeUndefined();
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const demoted = converter.convertOpenAIChunkToGemini(
+        streamChunk('block', { content: '<thinking>x</thinking>Ok' }),
+        stream,
+      );
+      expect(demoted.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'x' },
+        { text: 'Ok' },
+      ]);
+
+      const replay = converter.convertOpenAIChunkToGemini(
+        streamChunk('replay', { content: ' <thinking>x</thinking>Ok' }, 'stop'),
+        stream,
+      );
+
+      expect(replay.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingThinkingTagCandidate).toBeUndefined();
+      expect(stream.pendingPostDemotionTagTail).toBeUndefined();
+    });
+
+    it('strips the accepted prefix from a cumulative superset carrying pre-demotion whitespace (issue #9348)', () => {
+      // startsWith twin of the leading-whitespace replay: the baseline lacks
+      // the replay's leading whitespace, so the slice offset must account for
+      // it or the remainder is sliced from the wrong position. A diverged
+      // normalizer baseline makes the normalizer's exit-cumulative path emit
+      // the replay verbatim so the converter branch actually runs.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('pre', { content: ' ' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const demoted = converter.convertOpenAIChunkToGemini(
+        streamChunk('block', { content: '<thinking>x</thinking>Ok' }),
+        stream,
+      );
+      expect(demoted.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'x' },
+        { text: 'Ok' },
+      ]);
+
+      stream.textDeltaState = {
+        emittedText: '<diverged-baseline>',
+        emittedLength: 19,
+        cumulativeMode: true,
+      };
+      const replay = converter.convertOpenAIChunkToGemini(
+        streamChunk(
+          'cumulative-replay',
+          { content: ' <thinking>x</thinking>OkMore' },
+          'stop',
+        ),
+        stream,
+      );
+
+      expect(replay.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'More' },
+      ]);
+    });
+
     it('preserves a genuine delta equal to the held tag tail after a demotion (issue #9348)', () => {
       // Tail equality alone is not replay evidence: adjacent genuine deltas
       // may carry identical tag-like text and both must survive.
