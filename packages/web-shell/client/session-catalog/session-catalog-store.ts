@@ -537,6 +537,88 @@ export class SessionCatalogStore {
     }
   }
 
+  /**
+   * Apply a pin toggle optimistically to every loaded page of the workspace,
+   * so the store owns the optimistic state's lifetime (the R5-1 fix
+   * direction). Pinned-view pages gain or lose the row; every other page
+   * patches it in place. Because the toggle lands in the page data itself,
+   * later local writes (`patchSession`, `applyLiveState`) churn around it
+   * without dropping it, and only an authoritative refetch replaces it.
+   * Rolling back is the same operation with the opposite target.
+   */
+  applySessionPinToggle(
+    workspaceCwd: string,
+    session: DaemonSessionSummary,
+    toggle: { pinned: boolean; pinnedAt?: string },
+  ): void {
+    for (const entry of this.entries.values()) {
+      if (entry.query.workspaceCwd !== workspaceCwd || !entry.snapshot.page) {
+        continue;
+      }
+      const page = entry.snapshot.page;
+      const carriesRow = (candidate: DaemonSessionSummary): boolean =>
+        candidate.workspaceCwd === workspaceCwd &&
+        candidate.sessionId === session.sessionId;
+      if (entry.query.options.group === 'pinned') {
+        if (toggle.pinned) {
+          const pinnedSession: DaemonSessionSummary = {
+            ...session,
+            workspaceCwd,
+            isPinned: true,
+            ...(toggle.pinnedAt !== undefined
+              ? { pinnedAt: toggle.pinnedAt }
+              : {}),
+          };
+          const exists = page.sessions.some(carriesRow);
+          this.setSnapshot(entry, {
+            ...entry.snapshot,
+            page: {
+              ...page,
+              sessions: exists
+                ? page.sessions.map((candidate) =>
+                    carriesRow(candidate) ? pinnedSession : candidate,
+                  )
+                : [...page.sessions, pinnedSession],
+            },
+          });
+        } else if (page.sessions.some(carriesRow)) {
+          this.setSnapshot(entry, {
+            ...entry.snapshot,
+            page: {
+              ...page,
+              sessions: page.sessions.filter(
+                (candidate) => !carriesRow(candidate),
+              ),
+            },
+          });
+        }
+        continue;
+      }
+      if (!page.sessions.some(carriesRow)) continue;
+      this.setSnapshot(entry, {
+        ...entry.snapshot,
+        page: {
+          ...page,
+          sessions: page.sessions.map((candidate) => {
+            if (!carriesRow(candidate)) return candidate;
+            const next: DaemonSessionSummary = {
+              ...candidate,
+              isPinned: toggle.pinned,
+            };
+            if (toggle.pinned) {
+              if (toggle.pinnedAt !== undefined) {
+                next.pinnedAt = toggle.pinnedAt;
+              }
+            } else {
+              delete next.pinnedAt;
+            }
+            return next;
+          }),
+        },
+      });
+    }
+  }
+
   getLiveSession(
     workspaceCwd: string,
     sessionId: string,
