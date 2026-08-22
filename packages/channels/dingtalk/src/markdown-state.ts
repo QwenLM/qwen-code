@@ -62,8 +62,20 @@ function normalise(source: string): NormalisedText {
   return { text: out.join(''), toSource };
 }
 
-function lex(text: string): Token[] {
-  return marked.lexer(text) as Token[];
+/**
+ * R14-1: `marked.lexer` recurses per blockquote-nesting level, and a deep
+ * `> > > …` run throws `RangeError: Maximum call stack size exceeded` from
+ * a few thousand characters of ordinary (or prompt-injected) model output —
+ * well inside CONTENT_LIMIT. Callers fail in the documented safe direction
+ * on `undefined` instead of letting the throw take down the card flush or
+ * the final-answer preparation.
+ */
+function lex(text: string): Token[] | undefined {
+  try {
+    return marked.lexer(text) as Token[];
+  } catch {
+    return undefined;
+  }
 }
 
 /** Line starts and bodies (newline excluded) of `text`. */
@@ -163,8 +175,13 @@ function markCode(tokens: Token[], map: OffsetMap, codeFlags: boolean[]): void {
 export function maskCode(text: string): string {
   if (!text) return text;
   const { text: normalised, toSource } = normalise(text);
+  const tokens = lex(normalised);
+  // R14-1: on lexer overflow return the text UNCHANGED — markers stay
+  // visible to the finder, the R1-9 fail-safe direction (a quoted file may
+  // be delivered, but no path ships as literal text and the flush survives).
+  if (!tokens) return text;
   const flags = new Array<boolean>(normalised.length).fill(false);
-  markCode(lex(normalised), (offset) => offset, flags);
+  markCode(tokens, (offset) => offset, flags);
 
   const masked = text.split('');
   for (let i = 0; i < flags.length; i++) {
@@ -236,5 +253,9 @@ export function openFenceAt(
   if (offset <= 0) return undefined;
   const prefix = text.slice(0, offset);
   const { text: normalised } = normalise(prefix);
-  return trailingOpenFence(lex(normalised), false);
+  // R14-1: on lexer overflow fall back to the pre-diff raw cut — no
+  // re-opener — instead of throwing.
+  const tokens = lex(normalised);
+  if (!tokens) return undefined;
+  return trailingOpenFence(tokens, false);
 }

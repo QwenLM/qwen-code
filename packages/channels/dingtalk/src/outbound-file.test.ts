@@ -395,9 +395,14 @@ describe('sanitizeFileMarkersToFixedPoint depth', () => {
     // the event loop for hundreds of ms at CONTENT_LIMIT (the round-7 probe
     // measured ~170 ms here). The index-based sweep lands an order of
     // magnitude under that.
-    const startedAt = performance.now();
+    // R14-2: assert CPU time, not wall time — the wall-clock budget failed
+    // intermittently under parallel full-suite load on shared CI hardware
+    // while passing solo. The mutation check is unchanged: the unbounded
+    // loop burns seconds of CPU and still trips vitest's timeout.
+    const startedCpu = process.cpuUsage();
     const sanitized = sanitizeFileMarkersToFixedPoint(text);
-    expect(performance.now() - startedAt).toBeLessThan(80);
+    const elapsedCpu = process.cpuUsage(startedCpu);
+    expect((elapsedCpu.user + elapsedCpu.system) / 1000).toBeLessThan(80);
 
     expect(sanitized).not.toContain('[FILE:');
     expect(sanitized).not.toContain('/x.pdf');

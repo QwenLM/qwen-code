@@ -774,3 +774,41 @@ describe('R7 round-7 Critical regressions', () => {
     expect(truncated).toContain('bbb');
   });
 });
+
+describe('deep blockquote nesting (R14-1)', () => {
+  // `marked.lexer` recurses per blockquote-nesting level; a few thousand
+  // levels overflow the stack from a few thousand characters — well inside
+  // CONTENT_LIMIT and reachable by ordinary (or prompt-injected) model
+  // output. The lexer is guarded: the finder keeps markers VISIBLE (the
+  // R1-9 fail-safe direction — delivered, never shipped as a literal path)
+  // and truncation falls back to the raw cut, instead of the throw taking
+  // down the card flush or the final-answer preparation.
+  const deep = '> '.repeat(4000) + 'x';
+
+  it('keeps markers visible to the finder instead of throwing', () => {
+    const text = `${deep}\n[FILE: /workspace/a.pdf]`;
+    expect(findOutboundMediaMarkers(text, 'FILE')).toEqual([
+      {
+        start: deep.length + 1,
+        end: deep.length + 1 + '[FILE: /workspace/a.pdf]'.length,
+        path: '/workspace/a.pdf',
+      },
+    ]);
+  });
+
+  it('strips a cutoff marker after the nesting instead of throwing', () => {
+    const sanitized = sanitizeFileMarkersToFixedPoint(
+      `${deep}\n[FILE: /workspace/a.pdf`,
+    );
+    expect(sanitized).not.toContain('/workspace/a.pdf');
+  });
+
+  it('truncates over the nesting instead of throwing', () => {
+    // The retained-window budget puts the cut DEEP enough into the nesting
+    // (prefix depth ~2500) that the prefix lex itself overflows the stack.
+    const text = `${deep}\n${'y'.repeat(17000)}`;
+    const truncated = truncateOutboundMediaText(text, 20000, TRUNCATION_MARKER);
+    expect(truncated.startsWith(TRUNCATION_MARKER)).toBe(true);
+    expect(truncated.length).toBeLessThanOrEqual(20000);
+  });
+});

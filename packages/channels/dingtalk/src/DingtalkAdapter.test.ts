@@ -4235,6 +4235,18 @@ describe('DingtalkChannel mention target lifecycle', () => {
       ).toBe(false);
     });
     expect(bridge.prompt).not.toHaveBeenCalled();
+    // Flush the /help response delivery before restoring the mock — a send
+    // still in flight would escape onto the real network and its failure
+    // chain would leak into later tests' fetch spies.
+    await vi.waitFor(() => {
+      expect(
+        fetchSpy.mock.calls.some((call) =>
+          String((call[1] as RequestInit | undefined)?.body ?? '').includes(
+            'Send any text to chat with the agent.',
+          ),
+        ),
+      ).toBe(true);
+    });
     fetchSpy.mockRestore();
   });
 
@@ -4825,6 +4837,79 @@ describe('DingtalkChannel outbound file delivery', () => {
     }
   });
 
+  it('rewrites the baked receipt, not a quoted echo earlier in the prose', async () => {
+    // R13-1: the rewrite located the receipt by an `indexOf` over the model
+    // text, so a literal `[File sent: …]` quoted EARLIER in the prose (docs,
+    // a prior turn's receipt, injection) took the failure splice while the
+    // real baked receipt shipped for the failed file. The rewrite splices at
+    // the offset `prepareOutgoingContent` recorded when it baked the
+    // receipt; the quoted echo is ordinary prose and survives untouched.
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid123');
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      const { fileCalls, markdownCalls } = stubFileReplyFetch({
+        fileHandler: () =>
+          new Response(JSON.stringify({ errcode: 310000 }), { status: 200 }),
+      });
+
+      await channel.sendMessage(
+        'cid123',
+        `Example receipt: [File sent: report.txt] shown\n[FILE: ${file.path}]`,
+      );
+
+      expect(fileCalls()).toHaveLength(1);
+      // The notice and the rewritten text.
+      expect(markdownCalls()).toHaveLength(2);
+      const text = JSON.parse(
+        String((markdownCalls()[1]![1] as RequestInit).body),
+      ) as { markdown: { text: string } };
+      expect(text.markdown.text).toBe(
+        'Example receipt: [File sent: report.txt] shown\n' +
+          '[File delivery failed: report.txt]',
+      );
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rewrites every failed receipt when several files fail', async () => {
+    // R13-1: each rewrite shifts the text by the receipt/notice length
+    // difference, so the second splice must land at the recorded offset
+    // PLUS the accumulated delta — a stale offset corrupts the text.
+    const first = createTempFile('first.txt');
+    const secondPath = join(first.dir, 'second.txt');
+    writeFileSync(secondPath, 'second');
+    try {
+      const channel = createChannel({ cwd: first.dir });
+      seedWebhook(channel, 'cid123');
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      const { fileCalls, markdownCalls } = stubFileReplyFetch({
+        fileHandler: () =>
+          new Response(JSON.stringify({ errcode: 310000 }), { status: 200 }),
+      });
+
+      await channel.sendMessage(
+        'cid123',
+        `a [FILE: ${first.path}] b [FILE: ${secondPath}] c`,
+      );
+
+      expect(fileCalls()).toHaveLength(2);
+      // Two notices plus the rewritten text.
+      expect(markdownCalls()).toHaveLength(3);
+      const text = JSON.parse(
+        String((markdownCalls()[2]![1] as RequestInit).body),
+      ) as { markdown: { text: string } };
+      expect(text.markdown.text).toBe(
+        'a [File delivery failed: first.txt] b ' +
+          '[File delivery failed: second.txt] c',
+      );
+    } finally {
+      rmSync(first.dir, { recursive: true, force: true });
+    }
+  });
+
   it('uploads and sends a native file after path-free Markdown', async () => {
     const file = createTempFile('周报 final.PDF');
     try {
@@ -4991,11 +5076,14 @@ describe('DingtalkChannel outbound file delivery', () => {
       // card. R12-2: the delivery throw now closes the display with EMPTY
       // text before rethrowing, so the answer finalizes display-sanitized
       // with receipts off instead of being replaced by the failed-terminal
-      // branch — the R5-1 throw remains the turn's outcome.
+      // branch — the R5-1 throw remains the turn's outcome. R13-2: the
+      // close is a FAILED one — a 'completed' close latches the card into
+      // `terminalSegmentIds` and the lifecycle failed event can never fail
+      // it again.
       expect(closeOutput).toHaveBeenCalledWith(
         'segment-1',
         '',
-        'completed',
+        'failed',
         segment,
       );
       expect(uploadCalls()).toHaveLength(1);
@@ -5005,13 +5093,15 @@ describe('DingtalkChannel outbound file delivery', () => {
     }
   });
 
-  it('finalizes the completed display when card-path file delivery fails', async () => {
+  it('finalizes the corrected display when card-path file delivery fails', async () => {
     // R12-2: `onResponseComplete`'s card path called `sendReplyFiles` with
     // no try/catch — a throw exited before `closeOutput`, and ChannelBase's
     // failed close then replaced the completed final answer with the generic
     // failure card even though the robot/card API was still alive. Mirrors
-    // R10-1: close the display with empty text (the fallback sanitizer
-    // strips the markers, so no receipt survives) before rethrowing.
+    // R10-1: close the display before the turn fails. R14-3: the card path
+    // now passes the baked text as the receipt carrier, so a failure whose
+    // notice also dies finalizes the CORRECTED text (the receipt rewritten
+    // into the failure marker) and fails the turn after delivery.
     const file = createTempFile();
     try {
       const channel = createChannel({ cwd: file.dir });
@@ -5054,7 +5144,62 @@ describe('DingtalkChannel outbound file delivery', () => {
 
       expect(closeOutput).toHaveBeenCalledWith(
         'segment-1',
-        '',
+        '[File delivery failed: report.txt]',
+        'completed',
+        segment,
+      );
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rewrites the card receipt when the failure notice lands', async () => {
+    // R14-3: the card paths called `sendReplyFiles` with no receipt carrier
+    // and finalized the display with the ORIGINAL `prepared.text` — a failed
+    // delivery whose notice POST landed resolved silently, and `closeOutput`
+    // baked the false `[File sent: …]` receipt into the permanent card
+    // alongside the correction. The card path now passes the baked text and
+    // finalizes the rewritten one.
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid-1');
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      stubFileReplyFetch({
+        fileHandler: () =>
+          new Response(JSON.stringify({ errcode: 310000 }), { status: 200 }),
+      });
+      const closeOutput = vi.fn().mockResolvedValue(true);
+      (
+        channel as unknown as {
+          interactionPresenter: { closeOutput: typeof closeOutput };
+        }
+      ).interactionPresenter = { closeOutput };
+      const segment = {
+        channelName: 'dingtalk',
+        sessionId: 'session-1',
+        runId: 'run-1',
+        segmentId: 'segment-1',
+        owner: { kind: 'channel_user', id: 'owner-1' },
+        target: {
+          channelName: 'dingtalk',
+          chatId: 'cid-1',
+          senderId: 'owner-1',
+          isGroup: true,
+        },
+      } as ChannelOutputSegmentContext;
+
+      // The notice lands, so the turn resolves — with the receipt rewritten.
+      await getCompleteHook(channel)(
+        'cid-1',
+        `report body [FILE: ${file.path}]`,
+        'session-1',
+        segment,
+      );
+
+      expect(closeOutput).toHaveBeenCalledWith(
+        'segment-1',
+        'report body [File delivery failed: report.txt]',
         'completed',
         segment,
       );
@@ -5534,6 +5679,41 @@ describe('DingtalkChannel outbound file delivery', () => {
     expect(apologyPosts).toHaveLength(1);
   });
 
+  it('restores the apology for a delivery failure without status cards', async () => {
+    // R13-3: the R12-1 skip presumed "the lifecycle failed event and the
+    // status card's failure state" as the delivery failure's user-facing
+    // signal — but a card-less deployment (`interactiveCards` disabled, or
+    // `statusCard.enabled=false`) renders neither, and the recipient's
+    // message died with zero feedback. The skip now applies only when a
+    // status card exists to show the failure.
+    const channel = createChannel({
+      interactiveCards: { enabled: false },
+    });
+    seedWebhook(channel, 'cid123');
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ errcode: 130101, errmsg: 'flow' }), {
+        status: 200,
+      }),
+    );
+    const deliveryError: unknown = await channel
+      .sendMessage('cid123', 'the answer')
+      .catch((error: unknown) => error);
+    (
+      channel as unknown as { handleInbound: ReturnType<typeof vi.fn> }
+    ).handleInbound.mockRejectedValueOnce(deliveryError);
+
+    driveRobotMessage(channel, 'cid123');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const apologyPosts = fetchSpy.mock.calls.filter((call) =>
+      String((call[1] as RequestInit | undefined)?.body ?? '').includes(
+        'Sorry, something went wrong processing your message.',
+      ),
+    );
+    expect(apologyPosts).toHaveLength(1);
+  });
+
   it('opens and uploads at most five files from one response', async () => {
     const file = createTempFile('file-1.txt');
     try {
@@ -5918,6 +6098,73 @@ describe('DingtalkChannel outbound file delivery', () => {
       expect(closeOutput).toHaveBeenCalledWith(
         'segment-1',
         '[File sent: report.txt]',
+        'response_boundary',
+        segment,
+      );
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('rewrites the boundary receipt when the failure notice lands', async () => {
+    // R14-3 (boundary mirror): `closeSegmentWithFiles` finalized the
+    // display with the ORIGINAL `prepared.text` after a failed delivery
+    // whose notice landed — the surface kept both the false receipt and the
+    // correction. It now passes the baked text and finalizes the rewritten
+    // one.
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid-1');
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      stubFileReplyFetch({
+        fileHandler: () =>
+          new Response(JSON.stringify({ errcode: 310000 }), { status: 200 }),
+      });
+      const closeOutput = vi.fn().mockResolvedValue(true);
+      const segmentContent = vi
+        .fn()
+        .mockReturnValue(`report body [FILE: ${file.path}]`);
+      const acceptsLateDelivery = vi.fn().mockReturnValue(true);
+      (
+        channel as unknown as {
+          interactionPresenter: {
+            closeOutput: typeof closeOutput;
+            segmentContent: typeof segmentContent;
+            acceptsLateDelivery: typeof acceptsLateDelivery;
+          };
+        }
+      ).interactionPresenter = {
+        closeOutput,
+        segmentContent,
+        acceptsLateDelivery,
+      };
+      const segment = {
+        channelName: 'dingtalk',
+        sessionId: 'session-1',
+        runId: 'run-1',
+        segmentId: 'segment-1',
+        owner: { kind: 'channel_user', id: 'owner-1' },
+        target: {
+          channelName: 'dingtalk',
+          chatId: 'cid-1',
+          senderId: 'owner-1',
+          isGroup: true,
+        },
+      } as ChannelOutputSegmentContext;
+
+      // The notice lands, so the boundary resolves — with the receipt
+      // rewritten.
+      await getOutputSegmentEndHook(channel)(
+        'cid-1',
+        'session-1',
+        segment,
+        'response_boundary',
+      );
+
+      expect(closeOutput).toHaveBeenCalledWith(
+        'segment-1',
+        'report body [File delivery failed: report.txt]',
         'response_boundary',
         segment,
       );
@@ -7263,6 +7510,50 @@ describe('DingtalkChannel proactive send', () => {
       );
     } finally {
       rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('rewrites the baked proactive receipt, not a quoted echo in the prose', async () => {
+    // R13-1 (proactive mirror): the loop located the receipt by an
+    // `indexOf` over the model text, so a literal `[File sent: …]` quoted
+    // earlier in the prose took the failure splice while the real baked
+    // receipt shipped for the failed file. The splice now lands at the
+    // recorded bake offset; the quoted echo survives untouched.
+    const file = createTempFile();
+    try {
+      const channel = proactive(createChannel({ cwd: file.dir }));
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      // call 0 = file POST -> no processQueryKey (fails); call 1 = failure
+      // notice -> 403 (dies on the just-failed endpoint); call 2 = text
+      // chunk.
+      const { sendCalls } = stubProactiveFetch((sendCall) =>
+        sendCall === 1
+          ? new Response('denied', { status: 403 })
+          : new Response(JSON.stringify({}), { status: 200 }),
+      );
+
+      await expect(
+        channel.pushProactive(
+          groupTarget,
+          `Example: [File sent: report.txt]\n[FILE: ${file.path}]`,
+        ),
+      ).rejects.toThrow('missing processQueryKey');
+
+      const bodies = sendCalls().map((call) =>
+        JSON.parse(String((call[1] as RequestInit).body)),
+      );
+      const markdownBodies = bodies.filter(
+        (body) => body.msgKey === 'sampleMarkdown',
+      );
+      const chunkParam = JSON.parse(markdownBodies.at(-1)!.msgParam) as {
+        text: string;
+      };
+      expect(chunkParam.text).toBe(
+        'Example: [File sent: report.txt]\n' +
+          '[File delivery failed: report.txt]',
+      );
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
     }
   });
 
