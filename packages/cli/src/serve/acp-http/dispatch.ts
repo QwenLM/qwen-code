@@ -61,7 +61,7 @@ import {
   isReservedLiveSessionSource,
   isReservedStandaloneSessionSource,
   readLoadableLiveConversationMetadata,
-} from '../conversations/session-source.js';
+} from '../../runtime/live-session-source.js';
 import {
   translateAndCheckAbsoluteWorkspacePath,
   canonicalizeWorkspace,

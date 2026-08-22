@@ -434,10 +434,14 @@ describe('<Footer />', () => {
         expect(lines).toHaveLength(1);
         // On win32 the auto-accept indicator renders '(tab to cycle)'
         // instead of '(shift + tab to cycle)'; the 8 columns it gives back
-        // shift Yoga's proportional shrink by one column, so the hint
-        // truncates one character earlier there. The one-line height
-        // regression — the point of this test — is asserted above.
-        if (process.platform !== 'win32') {
+        // shift Yoga's proportional shrink by one column, truncating the
+        // hint one character earlier. Pin each platform's deterministic
+        // rendering so any further truncation fails its lane (the win32
+        // spelling stays a substring of the POSIX one, so a future change
+        // that restores the full hint does not fail this assertion).
+        if (process.platform === 'win32') {
+          expect(lines[0]).toContain('Enter to steer · Ctrl+Q to queu');
+        } else {
           expect(lines[0]).toContain('Enter to steer · Ctrl+Q to queue');
         }
         expect(lines[0]).toContain('⏳ 1');

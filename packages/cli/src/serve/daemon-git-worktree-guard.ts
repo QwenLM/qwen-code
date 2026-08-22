@@ -407,10 +407,30 @@ interface TokenizedSegment {
 // executes commands through cmd.exe (or a shell handed Windows paths), so
 // `git -C C:\repo\sub` must reach the analysis with its separators intact.
 // POSIX tokenisation would consume each unquoted `\x` as an escape for `x`,
-// mangling the path into a relative word. Rewrite each unquoted `\x` to
-// `\\\x`, which POSIX rules read back as the literal pair `\x`. Both quoted
-// forms already keep backslashes literal under POSIX rules, so they are left
-// alone; a `$'…'` body starts with `$`, marking its token dynamic either way.
+// mangling the path into a relative word. Escape the backslash itself and
+// let the following character keep its ordinary role — whitespace still
+// separates words and operators still delimit, exactly as cmd.exe splits the
+// executed argv. Escaping the following character along with the backslash
+// would glue the next word into the path (`C:\repo\ status` as one token),
+// letting a `-C`/`--git-dir`/`-c` placed after a trailing separator hide
+// inside the first relocation's value. A backslash quoted in double quotes
+// is the one spelling the tokenizer reads back as a literal backslash
+// WITHOUT swallowing the next character; before any other character a plain
+// escaped backslash suffices. Both quoted forms already keep backslashes
+// literal under POSIX rules, so they are left alone; a `$'…'` body starts
+// with `$`, marking its token dynamic either way.
+const WINDOWS_CMD_BOUNDARY_CHARS = new Set([
+  ' ',
+  '\t',
+  ';',
+  '|',
+  '&',
+  '<',
+  '>',
+  '(',
+  ')',
+]);
+
 function preserveWindowsPathSeparators(segment: string): string {
   if (process.platform !== 'win32') return segment;
   let single = false;
@@ -443,9 +463,12 @@ function preserveWindowsPathSeparators(segment: string): string {
       out += character;
       continue;
     }
-    if (character === '\\' && index + 1 < segment.length) {
-      out += '\\\\\\' + segment[index + 1];
-      index++;
+    if (character === '\\') {
+      const next = segment[index + 1];
+      out +=
+        next !== undefined && WINDOWS_CMD_BOUNDARY_CHARS.has(next)
+          ? '"\\\\"'
+          : '\\\\';
       continue;
     }
     out += character;

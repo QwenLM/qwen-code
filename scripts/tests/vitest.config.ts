@@ -47,7 +47,8 @@ export default defineConfig({
     // timeout and surface as an unhandled error — with every test in the
     // suite green, yet the run exiting 1 (observed deterministic on the
     // macOS runners). Test failures still fail the run; only unhandled
-    // errors stop being fatal.
-    dangerouslyIgnoreUnhandledErrors: true,
+    // errors stop being fatal, and only off Linux — the ubuntu lane and
+    // Linux local runs keep the unhandled-error signal.
+    dangerouslyIgnoreUnhandledErrors: process.platform !== 'linux',
   },
 });
