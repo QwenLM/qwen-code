@@ -156,7 +156,9 @@ import {
   ConversationFinishedEvent,
   GLOBAL_DUPLICATE_THRESHOLD,
   canonicalToolName,
+  fingerprintToolResult,
   getToolCallRepeatKey,
+  isStatefulReadTool,
   shouldHaltOnTurnToolCallCap,
   logLoopDetected,
   logRepeatedToolFailureGuard,
@@ -653,6 +655,26 @@ export type DaemonToolLoopState = {
   toolCallKeyCounts: Map<string, number>;
   /** Highest repeat count of any single (tool, args) pair this turn. */
   maxToolCallKeyRepeat: number;
+  /**
+   * Result-aware evidence for stateful read tools (issue #9450), keyed by
+   * repeat key — mirrors core's LoopDetectionService.statefulRepeatState.
+   * `consecutiveIdenticalResults` counts executed results that repeat the
+   * key's immediately preceding result and restarts at 1 on a changed
+   * result; `lastFingerprint` is the preceding result's fingerprint.
+   */
+  statefulResultStreaks: Map<
+    string,
+    {
+      consecutiveIdenticalResults: number;
+      lastFingerprint: string | undefined;
+    }
+  >;
+  /**
+   * Running max of the CURRENT stateful result streaks — the cap's stuck
+   * signal for stateful reads (mirrors core's statefulCapKeyRepeat).
+   * Disarmed when a result changes, so a thawed board releases the cap.
+   */
+  statefulMaxResultRepeat: number;
   loopDetected: boolean;
   loopType?: LoopType;
   repeatedToolFailureMode: RepeatedToolFailureGuardMode;
@@ -681,6 +703,8 @@ function createDaemonToolLoopState(
     invalidToolParamErrors: new Map(),
     toolCallKeyCounts: new Map(),
     maxToolCallKeyRepeat: 0,
+    statefulResultStreaks: new Map(),
+    statefulMaxResultRepeat: 0,
     loopDetected: false,
     repeatedToolFailureMode,
     repeatedToolFailureState: createRepeatedToolFailureGuardState(),
@@ -831,6 +855,13 @@ function recordDaemonToolCalls(
     return loopState?.loopDetected ?? false;
   loopState.totalToolCalls += calls.length;
   for (const call of calls) {
+    // Stateful read tools are counted post-execution in
+    // recordDaemonToolResult, keyed on (call, result fingerprint) instead
+    // of args alone (issue #9450) — identical arguments to task_list do
+    // not imply an identical result while peers keep mutating the board.
+    // Mirrors core's checkAlwaysOnSafeties exemption; the two runtimes
+    // must not drift (requirement #6).
+    if (isStatefulReadTool(call.name ?? '')) continue;
     const key = getToolCallRepeatKey(call.name ?? '', call.args ?? {});
     const count = (loopState.toolCallKeyCounts.get(key) ?? 0) + 1;
     loopState.toolCallKeyCounts.set(key, count);
@@ -857,7 +888,14 @@ function recordDaemonToolCalls(
   if (
     shouldHaltOnTurnToolCallCap(
       loopState.totalToolCalls,
-      loopState.maxToolCallKeyRepeat,
+      // Request-time evidence (deterministic tools) and result-time
+      // evidence (stateful reads) feed the same stuck signal, exactly as
+      // core's checkTurnToolCallCap. The stateful half disarms when
+      // results change (recordDaemonToolResult).
+      Math.max(
+        loopState.maxToolCallKeyRepeat,
+        loopState.statefulMaxResultRepeat,
+      ),
       config.getMaxToolCallsPerTurn(),
       config.isMaxToolCallsPerTurnExplicit(),
     )
@@ -880,7 +918,9 @@ function recordDaemonToolCalls(
   // always-on regardless. "Off by default" depends on the CLI layer: core's
   // Config defaults skipLoopDetection to false and loadCliConfig applies
   // `?? true` (cli config.ts), so a Config constructed without that layer
-  // would ship this halt on.
+  // would ship this halt on. Stateful read tools are counted
+  // post-execution in recordDaemonToolResult instead (their repetition is
+  // only meaningful when the results are unchanged too).
   if (
     !config.getSkipLoopDetection() &&
     loopState.maxToolCallKeyRepeat >= GLOBAL_DUPLICATE_THRESHOLD
@@ -890,6 +930,82 @@ function recordDaemonToolCalls(
       promptId,
       LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
       `Stopping ACP turn after the same tool call repeated ${loopState.maxToolCallKeyRepeat} times.`,
+      loopState,
+    );
+  }
+  return false;
+}
+
+/**
+ * Result-aware mirror of core's LoopDetectionService.recordToolResult for
+ * the daemon/ACP runtime (issue #9450 requirement #6). Records the executed
+ * result of a stateful read tool so identical arguments whose results keep
+ * changing are treated as productive polling, not a loop. Feeds both the
+ * adaptive cap's stuck signal (statefulMaxResultRepeat, which disarms on a
+ * changed result) and the result-time global-duplicate count (gated on
+ * skipLoopDetection, exactly as in core). Call once per executed call.
+ */
+function recordDaemonToolResult(
+  config: Config,
+  promptId: string,
+  loopState: DaemonToolLoopState | undefined,
+  toolCall: { name: string; args: object },
+  responseParts: readonly Part[],
+): boolean {
+  if (!loopState || loopState.loopDetected)
+    return loopState?.loopDetected ?? false;
+  if (!isStatefulReadTool(toolCall.name)) return false;
+
+  const fingerprint = fingerprintToolResult(responseParts);
+  if (fingerprint === null) return false;
+  const key = getToolCallRepeatKey(toolCall.name, toolCall.args);
+
+  let state = loopState.statefulResultStreaks.get(key);
+  if (!state) {
+    state = { consecutiveIdenticalResults: 0, lastFingerprint: undefined };
+    loopState.statefulResultStreaks.set(key, state);
+  }
+  const firstResult = state.lastFingerprint === undefined;
+  const fingerprintChanged =
+    !firstResult && state.lastFingerprint !== fingerprint;
+
+  // Consecutive identical-result counting (mirrors core): a result that
+  // differs from the key's predecessor restarts the count, so an
+  // oscillating board never accumulates toward either halt.
+  const consecutiveIdentical = fingerprintChanged
+    ? 1
+    : state.consecutiveIdenticalResults + 1;
+  state.consecutiveIdenticalResults = consecutiveIdentical;
+  state.lastFingerprint = fingerprint;
+
+  // Cap stuck signal from result evidence. A raised peak must NOT latch:
+  // when a result changes, recompute the peak from the keys' CURRENT
+  // streaks so a thawed board disarms the adaptive cap exactly as it
+  // disarms the result-time global-duplicate count. Mirrors core's
+  // statefulCapKeyRepeat.
+  if (consecutiveIdentical > loopState.statefulMaxResultRepeat) {
+    loopState.statefulMaxResultRepeat = consecutiveIdentical;
+  } else if (fingerprintChanged) {
+    let peak = consecutiveIdentical;
+    for (const other of loopState.statefulResultStreaks.values()) {
+      if (other.consecutiveIdenticalResults > peak) {
+        peak = other.consecutiveIdenticalResults;
+      }
+    }
+    loopState.statefulMaxResultRepeat = peak;
+  }
+
+  // The result-time global-duplicate detector is gated on skipLoopDetection
+  // exactly as its core counterpart in recordToolResult.
+  if (
+    !config.getSkipLoopDetection() &&
+    consecutiveIdentical >= GLOBAL_DUPLICATE_THRESHOLD
+  ) {
+    return recordDaemonLoopDetected(
+      config,
+      promptId,
+      LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+      `Stopping ACP turn after the same ${toolCall.name} result repeated ${consecutiveIdentical} times.`,
       loopState,
     );
   }
@@ -9119,6 +9235,29 @@ export class Session implements SessionContext {
         ordinal: dedupedFunctionCalls.indexOf(fc),
         sequence: toolResultRecordSequence++,
       });
+      // Result-aware loop guards (issue #9450): feed EXECUTED stateful-read
+      // results to the daemon guard so identical task_list arguments whose
+      // results keep changing stay productive. Skipped/duplicate records
+      // (executionStatus 'not_started', providerDuplicate) never executed,
+      // so they carry no result evidence. A detection sets
+      // loopState.loopDetected; the batch loops and runTool entry checks
+      // below observe it and stop the turn.
+      if (
+        toolLoopState &&
+        !record.providerDuplicate &&
+        record.metadata.executionStatus !== 'not_started'
+      ) {
+        recordDaemonToolResult(
+          this.config,
+          promptId,
+          toolLoopState,
+          {
+            name: record.toolName,
+            args: (fc.args ?? {}) as object,
+          },
+          record.responseParts,
+        );
+      }
     };
     const finalizeRunToolResult = async (
       result: RunToolResult,
@@ -9579,7 +9718,13 @@ export class Session implements SessionContext {
         executing.add(p);
         if (executing.size >= maxConcurrency) {
           await Promise.race(executing);
-          if (results.some((result) => result?.loopDetected)) {
+          // toolLoopState.loopDetected also covers result-time detections
+          // (recordDaemonToolResult) that the settled result object does
+          // not carry.
+          if (
+            results.some((result) => result?.loopDetected) ||
+            toolLoopState?.loopDetected
+          ) {
             await Promise.all(executing);
             await fillLoopSkippedFrom(idx + 1);
             return results;
@@ -9591,7 +9736,10 @@ export class Session implements SessionContext {
             );
           if (invalidToolErrorNearThreshold && executing.size > 0) {
             await Promise.all(executing);
-            if (results.some((result) => result?.loopDetected)) {
+            if (
+              results.some((result) => result?.loopDetected) ||
+              toolLoopState?.loopDetected
+            ) {
               await fillLoopSkippedFrom(idx + 1);
               return results;
             }
@@ -9662,6 +9810,9 @@ export class Session implements SessionContext {
             shouldStop ||= r.stopAfterPermissionCancel;
             shouldStopForLoop ||= r.loopDetected === true;
           }
+          // Result-time detections (recordDaemonToolResult) land on the
+          // shared loop state, not on an individual result object.
+          shouldStopForLoop ||= toolLoopState?.loopDetected === true;
           if (shouldStopForLoop) {
             await appendSkippedAfter(
               parts,
@@ -9702,7 +9853,10 @@ export class Session implements SessionContext {
             );
             parts.push(...r.parts);
             collectMemoryWriteCandidates(r);
-            if (r.loopDetected) {
+            // toolLoopState.loopDetected also covers result-time detections
+            // (recordDaemonToolResult) fired while this call's result was
+            // queued — the result object itself does not carry them.
+            if (r.loopDetected || toolLoopState?.loopDetected) {
               await appendSkippedAfter(
                 parts,
                 fc,
@@ -9730,6 +9884,9 @@ export class Session implements SessionContext {
       return await finalizeRunToolResult({
         parts,
         stopAfterPermissionCancel: false,
+        // A result-time detection on the LAST executed call leaves no later
+        // call to observe it; surface it so the turn loop still stops.
+        ...(toolLoopState?.loopDetected ? { loopDetected: true } : {}),
         memoryWriteCandidates,
       });
     } finally {
