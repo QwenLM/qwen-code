@@ -6343,6 +6343,7 @@ describe('Server Config (config.ts)', () => {
       oldChatsDir,
       `${sessionId}.worktree.json`,
     );
+    const oldPrSessionPath = path.join(oldChatsDir, `${sessionId}.pr.json`);
     const newTranscriptPath = path.join(newChatsDir, `${sessionId}.jsonl`);
     const newRuntimeStatusPath = path.join(
       newChatsDir,
@@ -6352,6 +6353,7 @@ describe('Server Config (config.ts)', () => {
       newChatsDir,
       `${sessionId}.worktree.json`,
     );
+    const newPrSessionPath = path.join(newChatsDir, `${sessionId}.pr.json`);
     const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
       // Keep the test process in its original directory.
     });
@@ -6360,6 +6362,7 @@ describe('Server Config (config.ts)', () => {
       oldTranscriptPath,
       oldRuntimeStatusPath,
       oldWorktreeSessionPath,
+      oldPrSessionPath,
     ];
     vi.mocked(fs.existsSync).mockImplementation((pathToCheck) => {
       const checked = pathToCheck.toString();
@@ -6382,6 +6385,10 @@ describe('Server Config (config.ts)', () => {
     expect(fs.renameSync).toHaveBeenCalledWith(
       oldWorktreeSessionPath,
       newWorktreeSessionPath,
+    );
+    expect(fs.renameSync).toHaveBeenCalledWith(
+      oldPrSessionPath,
+      newPrSessionPath,
     );
     expect(config.getTranscriptPath()).toBe(newTranscriptPath);
 
