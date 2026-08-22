@@ -131,6 +131,7 @@ describe('ChatRecordingService - recordCustomTitle', () => {
 
   function activateRecording(
     service: ChatRecordingService,
+    persistedTitleInfo?: { title?: string; source?: 'manual' | 'auto' },
   ): ChatRecordingService {
     const resumed = mockConfig.getResumedSessionData();
     service.activate(
@@ -141,6 +142,7 @@ describe('ChatRecordingService - recordCustomTitle', () => {
             lastCompletedUuid: resumed.lastCompletedUuid,
           }
         : resumed,
+      persistedTitleInfo,
     );
     return service;
   }
@@ -714,6 +716,170 @@ describe('ChatRecordingService - recordCustomTitle', () => {
           return r.type === 'system' && r.subtype === 'custom_title';
         });
       expect(titleAppends).toHaveLength(0);
+    });
+  });
+
+  describe('clear-tombstone re-anchor invariant', () => {
+    // A cleared title persists as an empty-string custom_title record
+    // (the tombstone). It must stay inside the picker's 64KB tail window
+    // exactly like a named title — if it falls out, the head-window
+    // fallback resurrects the deleted name (#8977).
+
+    function titleRecord(
+      uuid: string,
+      parentUuid: string | null,
+      customTitle: string,
+      titleSource?: 'manual' | 'auto',
+    ): ChatRecord {
+      return {
+        uuid,
+        parentUuid,
+        sessionId: 'test-session-id',
+        timestamp: '2026-01-01T00:00:00.000Z',
+        type: 'system',
+        subtype: 'custom_title',
+        cwd: '/test/project/root',
+        version: '1.0.0',
+        systemPayload: {
+          customTitle,
+          ...(titleSource ? { titleSource } : {}),
+        },
+      } as ChatRecord;
+    }
+
+    function resumedSessionWithClearedTitle(): NonNullable<
+      ReturnType<Config['getResumedSessionData']>
+    > {
+      return {
+        conversation: {
+          sessionId: 'test-session-id',
+          projectHash: 'test-project',
+          startTime: '2026-01-01T00:00:00.000Z',
+          lastUpdated: '2026-01-01T00:00:00.000Z',
+          messages: [
+            titleRecord('title-uuid', null, 'Deleted Name', 'manual'),
+            titleRecord('tombstone-uuid', 'title-uuid', '', 'manual'),
+          ],
+        },
+        filePath: '/test/session.jsonl',
+        lastCompletedUuid: 'tombstone-uuid',
+      };
+    }
+
+    function writtenTitlePayloads(): Array<
+      { customTitle?: string; titleSource?: string } | undefined
+    > {
+      return vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.map(([, record]) => record as ChatRecord)
+        .filter(
+          (record) =>
+            record.type === 'system' && record.subtype === 'custom_title',
+        )
+        .map(
+          (record) =>
+            record.systemPayload as
+              | { customTitle?: string; titleSource?: string }
+              | undefined,
+        );
+    }
+
+    it('re-anchors the empty tombstone like a named title', async () => {
+      await chatRecordingService.recordCustomTitle('doomed-name');
+      // The /clear persistence path writes the empty-string tombstone.
+      await chatRecordingService.recordCustomTitle('');
+      vi.mocked(jsonl.writeLine).mockClear();
+
+      const bulkText = 'x'.repeat(2000);
+      for (let i = 0; i < 20; i++) {
+        chatRecordingService.recordUserMessage([{ text: bulkText }]);
+      }
+      await chatRecordingService.flush();
+
+      const payloads = writtenTitlePayloads();
+      // The falsy-gate code writes nothing after the clear — the
+      // tombstone would be stranded mid-file and the deleted name would
+      // resurrect out of the head window.
+      expect(payloads.length).toBeGreaterThanOrEqual(1);
+      for (const payload of payloads) {
+        expect(payload).toEqual({ customTitle: '', titleSource: 'manual' });
+      }
+    });
+
+    it('re-appends the tombstone on finalize after new content', async () => {
+      await chatRecordingService.recordCustomTitle('doomed-name');
+      await chatRecordingService.recordCustomTitle('');
+      chatRecordingService.recordUserMessage([{ text: 'after clear' }]);
+      await chatRecordingService.flush();
+      vi.mocked(jsonl.writeLine).mockClear();
+
+      chatRecordingService.finalize();
+      await chatRecordingService.flush();
+
+      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.type).toBe('system');
+      expect(record.subtype).toBe('custom_title');
+      expect(record.systemPayload).toEqual({
+        customTitle: '',
+        titleSource: 'manual',
+      });
+    });
+
+    it('keeps the replayed tombstone over a stale persisted title on resume', async () => {
+      // The windowed persisted-title reader can still see the deleted
+      // name (head-window fallback) after the tombstone fell out of the
+      // tail window. The replayed transcript is the authoritative view:
+      // its newest title record is the tombstone, so the recorder must
+      // restore the empty-but-present state and re-anchor the tombstone
+      // — never the deleted name.
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue(
+        resumedSessionWithClearedTitle(),
+      );
+
+      const svc = activateRecording(new ChatRecordingService(mockConfig), {
+        title: 'Deleted Name',
+        source: 'manual',
+      });
+      expect(svc.getCurrentCustomTitle()).toBe('');
+      expect(svc.getCurrentTitleSource()).toBe('manual');
+
+      const bulkText = 'x'.repeat(2000);
+      for (let i = 0; i < 20; i++) {
+        svc.recordUserMessage([{ text: bulkText }]);
+      }
+      await svc.flush();
+
+      const payloads = writtenTitlePayloads();
+      expect(payloads.length).toBeGreaterThanOrEqual(1);
+      for (const payload of payloads) {
+        expect(payload).toEqual({ customTitle: '', titleSource: 'manual' });
+      }
+    });
+
+    it('re-anchors a tombstone restored through the projected state', async () => {
+      // Daemon cold restore seeds the recorder from the projected state,
+      // which carries the tombstone as an empty-but-present customTitle.
+      // The restored anchor counter must make the first post-restore
+      // append re-pin the tombstone at EOF.
+      const service = new ChatRecordingService(mockConfig, undefined, false, {
+        lastCompletedUuid: 'projected-parent',
+        turnParentUuids: [],
+        customTitle: '',
+        titleSource: 'manual',
+      });
+
+      const bulkText = 'x'.repeat(2000);
+      for (let i = 0; i < 20; i++) {
+        service.recordUserMessage([{ text: bulkText }]);
+      }
+      await service.flush();
+
+      const payloads = writtenTitlePayloads();
+      expect(payloads.length).toBeGreaterThanOrEqual(1);
+      for (const payload of payloads) {
+        expect(payload).toEqual({ customTitle: '', titleSource: 'manual' });
+      }
     });
   });
 });

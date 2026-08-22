@@ -1096,6 +1096,12 @@ export class ChatRecordingService {
     this.userDisplayTextsForTitle.length = 0;
     if (!sessionData) return;
     this.rebuildTurnBoundaries(sessionData.conversation.messages);
+    // The last `custom_title` record seen while replaying the transcript.
+    // Presence matters even when the value is `''` — that is the
+    // clear-tombstone, and the replay (a full scan) is the only view of
+    // it when the windowed persisted-title reader has lost it.
+    let replayedTitle: string | undefined;
+    let replayedTitleSource: TitleSource | undefined;
     for (const record of sessionData.conversation.messages) {
       if (record.type === 'user' && record.subtype === undefined) {
         this.trackUserDisplayTextForTitle(
@@ -1108,6 +1114,8 @@ export class ChatRecordingService {
         const payload = record.systemPayload as
           | CustomTitleRecordPayload
           | undefined;
+        replayedTitle = payload?.customTitle;
+        replayedTitleSource = payload?.titleSource;
         this.currentCustomTitle = payload?.customTitle;
         this.currentTitleSource = payload?.titleSource;
       } else if (record.subtype === 'parent_session') {
@@ -1126,7 +1134,18 @@ export class ChatRecordingService {
       this.currentCustomTitle = persistedTitleInfo.title;
       this.currentTitleSource = persistedTitleInfo.source;
     }
-    if (this.currentCustomTitle) {
+    // A replayed tombstone is the newest title record in the file, so it
+    // outranks whatever the windowed persisted-title reader still sees:
+    // either a stale truthy title (the tombstone fell out of the reader's
+    // tail window while the deleted name lingered in its head-window
+    // fallback) or nothing at all (both windows missed). Restore the
+    // empty-but-present state so the re-anchor invariant keeps the
+    // tombstone inside the reader window from here on.
+    if (replayedTitle === '' && this.currentCustomTitle !== '') {
+      this.currentCustomTitle = '';
+      this.currentTitleSource = replayedTitleSource;
+    }
+    if (this.currentCustomTitle !== undefined) {
       this.bytesSinceTitleAnchor = TITLE_REANCHOR_BYTES;
     }
   }
@@ -1148,7 +1167,12 @@ export class ChatRecordingService {
     this.currentParentSessionId = state.parentSessionId;
     this.currentSourceType = state.sourceType;
     this.currentSourceId = state.sourceId;
-    if (this.currentCustomTitle) {
+    // Presence, not truthiness: an empty-string projected title is the
+    // clear-tombstone, and seeding the counter re-anchors it on the first
+    // append after restore — without that, a restored session that keeps
+    // writing eventually pushes the tombstone out of the reader's tail
+    // window and resurrects the deleted name on the next cold restore.
+    if (this.currentCustomTitle !== undefined) {
       this.bytesSinceTitleAnchor = TITLE_REANCHOR_BYTES;
     }
   }
@@ -1403,6 +1427,10 @@ export class ChatRecordingService {
    *
    * - A `custom_title` record IS the new anchor — reset the counter.
    * - Without a current or pending title, the counter is irrelevant.
+   *   "Current" is presence-based: an empty-string title is the
+   *   clear-tombstone (an explicitly cleared title) and must stay
+   *   anchored exactly like a named title, otherwise the windowed
+   *   title reader loses it and resurrects the pre-clear name.
    * - Otherwise accumulate this record's serialized size; if the
    *   running total breaches the threshold, re-append a fresh
    *   `custom_title` to EOF. The recursive `appendRecord` call will
@@ -1427,7 +1455,10 @@ export class ChatRecordingService {
       this.hasNonTitleContentSinceTitleAnchor = false;
       return;
     }
-    if (!this.currentCustomTitle && this.pendingTitleWrites === 0) return;
+    // Presence, not truthiness: the empty-string clear-tombstone must
+    // keep accumulating toward a re-anchor just like a named title.
+    if (this.currentCustomTitle === undefined && this.pendingTitleWrites === 0)
+      return;
     this.hasNonTitleContentSinceTitleAnchor = true;
     let serializedRecord: string;
     try {
@@ -1454,9 +1485,14 @@ export class ChatRecordingService {
    * mid-session (every 32KB of other writes) so the picker's
    * tail-window scan never has to fall back to
    * scanning the middle of the file.
+   *
+   * Presence-gated, not truthiness-gated: an empty-string cached title
+   * is the clear-tombstone, and re-appending it is what keeps the
+   * windowed reader from falling back to the head window and
+   * resurrecting the deleted name.
    */
   private reanchorTitle(): void {
-    if (!this.currentCustomTitle) return;
+    if (this.currentCustomTitle === undefined) return;
     try {
       const record: ChatRecord = {
         ...this.createBaseRecord('system'),
@@ -2050,7 +2086,11 @@ export class ChatRecordingService {
           const onDisk = sessionService.getSessionTitleInfo(
             this.config.getSessionId(),
           );
-          if (onDisk.source === 'manual') {
+          // Truthiness matters here: an empty-string title is the
+          // clear-tombstone, which means "no title" — generating a fresh
+          // auto title is exactly what a cleared session expects, so only
+          // a non-empty manual title on disk aborts this attempt.
+          if (onDisk.source === 'manual' && onDisk.title) {
             // Sync in-memory state with what landed on disk so subsequent
             // turns don't retry against a stale cache.
             this.currentCustomTitle = onDisk.title;
@@ -2541,7 +2581,10 @@ export class ChatRecordingService {
     if (this.pendingExplicitTitleWrites > 0) {
       return;
     }
-    if (!this.currentCustomTitle) {
+    // Presence, not truthiness: the empty-string clear-tombstone must be
+    // re-appended on lifecycle events exactly like a named title, or the
+    // windowed reader loses it and resurrects the deleted name.
+    if (this.currentCustomTitle === undefined) {
       return;
     }
     if (!this.hasNonTitleContentSinceTitleAnchor) {
