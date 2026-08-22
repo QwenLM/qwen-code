@@ -83,6 +83,7 @@ import {
   submitAoneReview,
   type AoneSubmitResult,
 } from './lib/platform/aone.js';
+import { githubReader } from './lib/platform/github.js';
 import {
   CRITICAL_PREFIX,
   SUGGESTION_PREFIX,
@@ -1182,11 +1183,21 @@ function submit(
       process.exitCode = 3;
       return;
     }
+    // URL for the Posted line: the receipt's webUrl is the MR's own
+    // detailUrl, captured by submitAoneReview's pre-write drift-gate read.
+    // detailUrl is a stable attribute of the MR, so a re-query through the
+    // reader's composeUrl cannot return a link that read lacked — it would
+    // only pay a blocking a1 call (120 s deadline, transient retries) on
+    // exactly the flaky-platform state that lost the field. '' stays '':
+    // the skill relays the target's coordinates (and never assembles a
+    // link — the nested-group owner/repo collapse could name a different
+    // repo).
+    const postedUrl = result.webUrl;
     writeStderrLine(
       `Posted ${event} to ${args.repo}#${args.pr} — ${auth.why}` +
         (cappedBy.length ? ` (capped by ${cappedBy.join(', ')})` : '') +
         '.' +
-        (result.webUrl ? ` ${result.webUrl}` : ''),
+        (postedUrl ? ` ${postedUrl}` : ''),
     );
     if (event === 'REQUEST_CHANGES') {
       // D6: no native reject exists on Aone — the blocking header and any
@@ -1286,7 +1297,7 @@ function submit(
           floorEnforced: floorEnforced.length,
           summaryPosted: result.summaryPosted,
           ...(event === 'APPROVE' ? { approved: result.approved } : {}),
-          ...(result.webUrl ? { url: result.webUrl } : {}),
+          ...(postedUrl ? { url: postedUrl } : {}),
         },
         null,
         2,
@@ -1323,6 +1334,14 @@ function submit(
   } catch {
     /* response metadata only — the post itself succeeded */
   }
+  // No deep link in GitHub's answer (or an unparseable one): the provider
+  // COMPOSES the PR-page URL — deterministic grammar, no API call, and the
+  // host axis binds to the routing the write just took. This used to be a
+  // prose assembly in the skill; the receipt carries it now. A hostless
+  // corner fails CLOSED: the compose yields '' and this receipt stays
+  // linkless rather than affirming a host the write may not have taken
+  // (gh's own hosts.yml default is not visible here).
+  reviewUrl ??= githubReader.composeUrl(args.pr, args.repo);
   // Receipt for cleanup's bypass audit: EVERY review this session was
   // authorised to create, by id. The audit lists reviews by the reviewing
   // account inside the window and flags any the receipt does not vouch for —

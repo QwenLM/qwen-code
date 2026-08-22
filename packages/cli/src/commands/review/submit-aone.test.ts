@@ -1449,15 +1449,33 @@ describe('submit posts an authorised Aone target through a1', () => {
     );
   });
 
-  it('the Aone success JSON carries NO url key when a1 answered without detailUrl', () => {
-    // The url-ABSENCE arm is what SKILL.md Step 7's fallback keys on —
-    // emitting `"url": ""` would not satisfy "has no url".
+  it('the Aone success JSON carries NO url key when the pre-write read served no detailUrl — and pays no re-query', () => {
+    // The receipt's webUrl IS the pre-write drift-gate read's detailUrl, a
+    // stable MR attribute — a re-fetch through the reader could not return
+    // a link that read lacked, so submit takes the receipt as-is (it would
+    // only pay a blocking a1 call on the flaky state that lost the field).
+    // The url-ABSENCE arm is what SKILL.md Step 7's coordinates-relay keys
+    // on — emitting `"url": ""` would not satisfy "has no url".
     submitAoneMock.mockReturnValue({ ...AONE_RESULT, webUrl: '' });
     expect(() =>
       runSubmit(base(), 'unknown', { defaultComment: false }),
     ).not.toThrow();
     expect(postedJson().posted).toBe(true);
     expect('url' in postedJson()).toBe(false);
+    // The pre-write read happened inside submitAoneReview (mocked here);
+    // submit itself made no further platform call for the link.
+    expect(submitAoneMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('relays the receipt webUrl in the stdout JSON and the Posted line', () => {
+    expect(() =>
+      runSubmit(base(), 'unknown', { defaultComment: false }),
+    ).not.toThrow();
+    expect(postedJson().url).toBe(AONE_RESULT.webUrl);
+    const postedLine = stderrMock.mock.calls
+      .map((c) => String(c[0]))
+      .find((l) => l.startsWith('Posted '));
+    expect(postedLine).toContain(AONE_RESULT.webUrl);
   });
 
   it('a REQUEST_CHANGES with zero inline Criticals says nothing mechanically blocks', () => {

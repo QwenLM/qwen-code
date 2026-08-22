@@ -13,7 +13,7 @@ import {
   readLoadableLiveConversationMetadata,
   type ConversationSessionMetadataStore,
   type LiveSessionCreationMetadata,
-} from './session-source.js';
+} from './live-session-source.js';
 
 const LIVE_ID = '550e8400-e29b-41d4-a716-446655440000';
 const LIVE_CHILD_ID = '550e8400-e29b-41d4-a716-446655440001';
