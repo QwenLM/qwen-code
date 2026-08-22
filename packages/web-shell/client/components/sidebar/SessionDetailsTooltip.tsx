@@ -168,6 +168,13 @@ export function SessionDetailsTooltip({
                 }}
               >
                 {t('sidebar.sessionPr', { number: pr.number })}
+                {pr.state === 'merged' || pr.state === 'closed'
+                  ? ` · ${
+                      pr.state === 'merged'
+                        ? t('sidebar.sessionPrStateMerged')
+                        : t('sidebar.sessionPrStateClosed')
+                    }`
+                  : ''}
               </a>
             </div>
           ))}
