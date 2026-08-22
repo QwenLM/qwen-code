@@ -570,6 +570,16 @@ export const useGeminiStream = (
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const activeInteractionPromptIdRef = useRef<string | undefined>(undefined);
+  // Atomic prompt_id mint sequence. The render-scoped stats counter
+  // (getPromptCount) advances only inside the async submission
+  // (startNewPrompt, after awaits) and only for some submit types, so two
+  // concurrent submissions (?btw during Responding) can read the same value
+  // and mint identical prompt_ids — indistinguishable to everything keyed on
+  // them (deferral ownership, completion guards, interaction spans). This ref
+  // is read-and-incremented synchronously at mint time and never mints below
+  // the stats counter, so ids stay unique while resumed/seeded sessions keep
+  // their numbering.
+  const promptIdSequenceRef = useRef(-1);
   const activeInteractionOwnerRef = useRef<
     NonNullable<ReturnType<typeof getActiveInteractionSpan>> | undefined
   >(undefined);
@@ -1624,7 +1634,22 @@ export const useGeminiStream = (
     // Committing here also keeps the baseline ordering (thought above the
     // cancelled content / "Request cancelled." info) when a scheduled batch
     // completes asynchronously afterwards.
-    abortThoughtMergeDeferral(Date.now());
+    //
+    // Owner-aware (settleThoughtMergeDeferral, NOT the unconditional abort):
+    // the foreground-only abort above leaves a concurrent ?btw stream alive
+    // (its controller sits in detachedToolContinuationAbortControllersRef and
+    // is aborted only in the else branch), and its scheduled tools run to
+    // completion on their own signal. If that surviving stream owns the armed
+    // deferral, resolving it here would re-home its frozen thought under the
+    // cancelled turn and strand its batch without the fold. Settle with the
+    // foreground turn's prompt identity: owned deferrals resolve exactly as
+    // before, foreign ones stay armed for their own batch completion (and the
+    // cancelling turn's OWN thought in the shared slot still commits via
+    // commitOwnPendingThought).
+    settleThoughtMergeDeferral(
+      Date.now(),
+      activeInteractionPromptIdRef.current,
+    );
     if (pendingHistoryItemRef.current) {
       commitItemInOrder(pendingHistoryItemRef.current, Date.now());
     }
@@ -1678,7 +1703,7 @@ export const useGeminiStream = (
     streamingState,
     addItem,
     commitItemInOrder,
-    abortThoughtMergeDeferral,
+    settleThoughtMergeDeferral,
     setPendingHistoryItem,
     onCancelSubmit,
     pendingHistoryItemRef,
@@ -2425,14 +2450,21 @@ export const useGeminiStream = (
   );
 
   const handleUserCancelledEvent = useCallback(
-    (userMessageTimestamp: number) => {
+    (userMessageTimestamp: number, streamPromptId?: string) => {
       if (turnCancelledRef.current) {
         return;
       }
 
       lastPromptErroredRef.current = false;
       // Persist any streamed reasoning (collapsed) above the cancelled answer.
-      abortThoughtMergeDeferral(userMessageTimestamp);
+      // Owner-aware: this event fires per-stream (the yielding turn's own
+      // signal was aborted), and a concurrent stream's abort can race a
+      // newer submission's turnCancelledRef reset — resolving ANOTHER
+      // invocation's armed deferral here would re-home its frozen thought
+      // under this cancelled stream. Settle with this stream's prompt
+      // identity: owned deferrals resolve exactly as before, foreign ones
+      // stay armed for their own batch completion.
+      settleThoughtMergeDeferral(userMessageTimestamp, streamPromptId);
       if (pendingHistoryItemRef.current) {
         if (pendingHistoryItemRef.current.type === 'tool_group') {
           const updatedTools = pendingHistoryItemRef.current.tools.map(
@@ -2466,7 +2498,7 @@ export const useGeminiStream = (
     },
     [
       addItem,
-      abortThoughtMergeDeferral,
+      settleThoughtMergeDeferral,
       commitItemInOrder,
       pendingHistoryItemRef,
       setPendingHistoryItem,
@@ -3020,7 +3052,7 @@ export const useGeminiStream = (
             case ServerGeminiEventType.UserCancelled:
               flushBufferedStreamEvents();
               toolCallRequests.length = 0;
-              handleUserCancelledEvent(userMessageTimestamp);
+              handleUserCancelledEvent(userMessageTimestamp, promptId);
               return {
                 status: StreamProcessingStatus.UserCancelled,
                 scheduledToolContinuation: false,
@@ -3894,7 +3926,11 @@ export const useGeminiStream = (
       // PREVIOUS turn and must land above the new prompt. Committing it
       // after the user item (in the new-prompt reset below) would attribute
       // it to the new turn's region and misgroup findLastUserItemIndex-keyed
-      // turn slicing (rewind selector, ESC auto-restore).
+      // turn slicing (rewind selector, ESC auto-restore). A concurrent ?btw
+      // submit also resolves here (pinned by the mid-deferral second-query
+      // test): the thought commits as-is ABOVE the side question's user item
+      // — the pre-PR placement — trading the fold for keeping the thought in
+      // its own turn's region; the owner's batch then completes unmerged.
       if (
         (submitType === SendMessageType.UserQuery ||
           submitType === SendMessageType.Cron ||
@@ -3988,7 +4024,16 @@ export const useGeminiStream = (
       }
 
       if (!prompt_id) {
-        prompt_id = config.getSessionId() + '########' + getPromptCount();
+        // Atomic mint-and-increment (see promptIdSequenceRef): the
+        // render-scoped stats counter alone collides for concurrent
+        // submissions, and Goal/Notification/ToolResult submits read it
+        // without ever incrementing it.
+        const next = Math.max(
+          promptIdSequenceRef.current + 1,
+          getPromptCount(),
+        );
+        promptIdSequenceRef.current = next;
+        prompt_id = config.getSessionId() + '########' + next;
       }
       if (!allowConcurrentBtwDuringResponse) {
         activeInteractionPromptIdRef.current = prompt_id;

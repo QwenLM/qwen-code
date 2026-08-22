@@ -1026,6 +1026,74 @@ describe('<MainContent />', () => {
           | undefined;
         expect(lastData).toContain(restoreArg?.item);
       });
+
+      it('restores a non-merged tool_group to its top on toggle-OFF (no depth overshoot)', () => {
+        scrollableListRefMock.scrollToItem.mockClear();
+        scrollableListPropsSpy.mockClear();
+        // tool_group rows do NOT keep their height on toggle-OFF: fullDetail
+        // force-expands every tool (forceExpandAll), un-truncates results,
+        // and expands memory-only/parallel-agent groups; toggle-OFF
+        // re-collapses all of it. Any committed group is a VP data row, and
+        // anchors inside one routinely carry a non-zero within-item offset.
+        const groupToggleHistory = [
+          { id: 1, type: 'user' as const, text: 'run ls' },
+          {
+            id: 2,
+            type: 'tool_group' as const,
+            tools: [
+              {
+                callId: 'g1',
+                name: 'bash',
+                description: 'run ls',
+                status: ToolCallStatus.Success,
+                resultDisplay: undefined,
+                confirmationDetails: undefined,
+              },
+            ],
+          },
+          { id: 3, type: 'gemini' as const, text: 'answer' },
+        ];
+        // fullDetail ON: [banner, 1, 2(group), 3]; the user is anchored
+        // partway into the tall expanded group (index 2, non-zero offset).
+        const { rerender } = renderWithThoughtExpanded(
+          groupToggleHistory,
+          true,
+          {
+            useTerminalBuffer: true,
+          },
+        );
+        scrollableListRefMock.getScrollState.mockReturnValueOnce({
+          scrollTop: 10,
+          scrollHeight: 140,
+          innerHeight: 20,
+        });
+        scrollableListRefMock.getScrollAnchor.mockReturnValueOnce({
+          index: 2,
+          offset: 7,
+        });
+
+        // Ctrl+O flips OFF: the group re-collapses. Re-applying the
+        // pre-toggle offset (7) would land the group's top 7px above the
+        // viewport — the whole group scrolls off above it (or the maxScroll
+        // clamp lands at the bottom on a short transcript). Restore to the
+        // group's TOP (offset 0). The merged-group remap only covers MERGED
+        // groups; this pins the non-merged sibling.
+        rerender(
+          thoughtExpandedTree(groupToggleHistory, false, {
+            useTerminalBuffer: true,
+          }),
+        );
+
+        expect(scrollableListRefMock.scrollToItem).toHaveBeenCalledTimes(1);
+        const restoreArg =
+          scrollableListRefMock.scrollToItem.mock.calls[0]?.[0];
+        expect(restoreArg?.viewOffset).toBe(0);
+        expect(restoreArg?.item).toBe(groupToggleHistory[1]);
+        const lastData = scrollableListPropsSpy.mock.calls.at(-1)?.[0]?.data as
+          | Array<{ id: number }>
+          | undefined;
+        expect(lastData).toContain(restoreArg?.item);
+      });
     });
   });
 
@@ -1545,6 +1613,82 @@ describe('<MainContent />', () => {
       );
       expect(pendingBatchGroups).toHaveLength(0);
       // The merged thought line itself still renders (committed history).
+      expect(
+        rendered.some(
+          (p) => !p.isPending && (p.item as { id?: number }).id === 2,
+        ),
+      ).toBe(true);
+    });
+
+    it('suppresses the merged batch live pending copy on the Static path under fullDetail too', () => {
+      historyItemDisplayPropsSpy.mockClear();
+
+      // fullDetail ON re-admits the committed merged group into
+      // visibleHistory. The #9420 collapse that eats one of the two copies
+      // exists ONLY in allVirtualItems — the VP path — which the legacy
+      // Static path never consumes, so the Static pending region must keep
+      // suppressing the live copy (fullDetail-agnostic mergedBatchIdsAll),
+      // or the batch renders TWICE for the whole submission window:
+      // committed group in the Static region + live copy in the pending
+      // region.
+      render(
+        <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
+          <UIActionsContext.Provider value={createUIActions()}>
+            <UIStateContext.Provider
+              value={createUIState({
+                useTerminalBuffer: false,
+                history: [
+                  { id: 1, type: 'user' as const, text: 'read /foo' },
+                  {
+                    id: 2,
+                    type: 'gemini_thought' as const,
+                    text: 'thinking',
+                    durationMs: 9000,
+                    toolSummary: 'Read /foo',
+                  },
+                  {
+                    id: 3,
+                    ...batched('batch-1', 'call-A'),
+                    display: { mergedIntoThought: true },
+                  },
+                ],
+                pendingHistoryItems: [batched('batch-1', 'call-A')],
+              })}
+            >
+              <OverflowProvider>
+                <ThoughtExpandedProvider
+                  value={{
+                    allExpanded: true,
+                    expandedHeadIds: new Set<number>(),
+                    toggle: () => {},
+                  }}
+                >
+                  <MainContent />
+                </ThoughtExpandedProvider>
+              </OverflowProvider>
+            </UIStateContext.Provider>
+          </UIActionsContext.Provider>
+        </AppContext.Provider>,
+      );
+
+      const rendered = historyItemDisplayPropsSpy.mock.calls.map((c) => c[0]);
+      // The live pending copy of batch-1 is suppressed even under
+      // fullDetail...
+      const pendingBatchGroups = rendered.filter(
+        (p) =>
+          p.isPending &&
+          (p.item as { type?: string; batchId?: string }).type ===
+            'tool_group' &&
+          (p.item as { batchId?: string }).batchId === 'batch-1',
+      );
+      expect(pendingBatchGroups).toHaveLength(0);
+      // ...while fullDetail re-admits the committed merged group: the batch
+      // renders exactly once, via the committed copy (id 3).
+      const committedBatchGroups = rendered.filter(
+        (p) => !p.isPending && (p.item as { id?: number }).id === 3,
+      );
+      expect(committedBatchGroups).toHaveLength(1);
+      // The merged thought line still renders alongside it.
       expect(
         rendered.some(
           (p) => !p.isPending && (p.item as { id?: number }).id === 2,

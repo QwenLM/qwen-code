@@ -301,16 +301,17 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
       : historyItemsWithSourceCopyOffsets.slice(0, replayCount);
 
   // batchIds of committed tool_groups folded into a thought line
-  // (display.mergedIntoThought). The committed copy is filtered out of
-  // visibleHistory when fullDetail is off, but the scheduler keeps its LIVE
-  // pending display copy until onComplete's await (tool-response submission)
-  // returns. BOTH render paths must suppress that live copy by batchId
-  // identity for that window, or the user sees the merged thought line PLUS a
-  // duplicate group line. Empty when fullDetail is on: the committed copy
-  // re-renders then, and the live copy is collapsed by the #9420 dedup.
-  const mergedBatchIds = useMemo(() => {
+  // (display.mergedIntoThought), fullDetail-agnostic. The scheduler keeps its
+  // LIVE pending display copy until onComplete's await (tool-response
+  // submission) returns, so BOTH render paths must suppress that live copy
+  // by batchId identity for that window, or the user sees the merged thought
+  // line PLUS a duplicate group row — in BOTH fullDetail states: fullDetail
+  // OFF filters the committed copy out of visibleHistory (the live copy is
+  // the duplicate); fullDetail ON re-admits the committed copy, and the
+  // #9420 collapse only exists in allVirtualItems — the VP path — so on the
+  // legacy Static path the live copy is the duplicate again.
+  const mergedBatchIdsAll = useMemo(() => {
     const ids = new Set<string>();
-    if (fullDetail) return ids;
     for (const item of history) {
       if (
         item.type === 'tool_group' &&
@@ -321,25 +322,35 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
       }
     }
     return ids;
-  }, [history, fullDetail]);
+  }, [history]);
+
+  // The VP path's suppression set, gated on fullDetail: under fullDetail ON
+  // the committed copy re-renders and allVirtualItems' #9420 collapse keeps
+  // the LIVE copy (it still updates), so the VP path must NOT suppress it
+  // there (it suppresses the committed copy instead). The legacy Static path
+  // never consumes allVirtualItems and uses the ungated set below.
+  const mergedBatchIds = useMemo(
+    () => (fullDetail ? new Set<string>() : mergedBatchIdsAll),
+    [fullDetail, mergedBatchIdsAll],
+  );
 
   // The legacy Static path renders the pending region unfiltered; suppress a
-  // merged batch's live pending copy there too (parity with the VP path's
-  // allVirtualItems), so the default (useTerminalBuffer=false) renderer does
-  // not show the merged thought line PLUS a duplicate group line.
+  // merged batch's live pending copy there regardless of fullDetail (see
+  // mergedBatchIdsAll), so the default (useTerminalBuffer=false) renderer
+  // does not show the merged thought line PLUS a duplicate group row.
   const staticPendingItems = useMemo(
     () =>
-      mergedBatchIds.size === 0
+      mergedBatchIdsAll.size === 0
         ? pendingHistoryItemsWithSourceCopyOffsets
         : pendingHistoryItemsWithSourceCopyOffsets.filter(
             ({ item }) =>
               !(
                 item.type === 'tool_group' &&
                 item.batchId !== undefined &&
-                mergedBatchIds.has(item.batchId)
+                mergedBatchIdsAll.has(item.batchId)
               ),
           ),
-    [pendingHistoryItemsWithSourceCopyOffsets, mergedBatchIds],
+    [pendingHistoryItemsWithSourceCopyOffsets, mergedBatchIdsAll],
   );
 
   // Combine completed history + live pending items for the virtualized list.
@@ -394,7 +405,8 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
     // A MERGED batch's committed copy is filtered out of visibleHistory
     // above (fullDetail off), so the collapse loop never sees it — suppress
     // its live pending copy by the shared mergedBatchIds identity (see the
-    // memo above; the legacy Static path applies the same filter).
+    // memo above; the legacy Static path filters via the ungated
+    // mergedBatchIdsAll set in staticPendingItems).
     if (mergedBatchIds.size > 0) {
       for (const item of combined) {
         if (
@@ -476,17 +488,21 @@ export const MainContent = ({ footerRef }: MainContentProps) => {
           // forces them open; ThinkBody returns null when collapsed, so a
           // tall expanded thought becomes a 1-line label, and the
           // merged-group → preceding-thought remap above targets that same
-          // 1-line thought); re-applying the pre-toggle offset then lands N
+          // 1-line thought), AND tool_group rows: fullDetail force-expands
+          // every tool (forceExpandAll), un-truncates results, and expands
+          // memory-only/parallel-agent groups, all of which toggle-OFF
+          // re-collapses. Re-applying the pre-toggle offset then lands N
           // rows PAST the top of the now-short item, scrolling it off above
           // the viewport (and, on a short transcript, the maxScroll clamp
-          // lands the restore at the bottom). Non-thought items (answers,
-          // user rows) keep their height on toggle-OFF, so their offset is
-          // preserved. Restore to a thought's top on toggle-OFF.
+          // lands the restore at the bottom). Items that keep their height
+          // on toggle-OFF (answers, user rows) preserve their offset.
+          // Restore to a shrinking item's top on toggle-OFF.
           anchorRestoreOffsetRef.current =
             anchor.offset === SCROLL_TO_ITEM_END ||
             (!fullDetail &&
               (item.type === 'gemini_thought' ||
-                item.type === 'gemini_thought_content'))
+                item.type === 'gemini_thought_content' ||
+                item.type === 'tool_group'))
               ? 0
               : anchor.offset;
         }

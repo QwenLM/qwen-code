@@ -12781,6 +12781,161 @@ describe('useGeminiStream', () => {
       releaseStream?.();
     });
 
+    it('leaves a concurrent ?btw deferral armed on local cancel and folds it when its own batch completes', async () => {
+      const getOnComplete = captureSchedulerOnComplete();
+
+      let releaseMainEnd: (() => void) | undefined;
+      const holdMainEnd = new Promise<void>((resolve) => {
+        releaseMainEnd = resolve;
+      });
+      let releaseBtwTcr: (() => void) | undefined;
+      const holdBtwTcr = new Promise<void>((resolve) => {
+        releaseBtwTcr = resolve;
+      });
+      let releaseBtwEnd: (() => void) | undefined;
+      const holdBtwEnd = new Promise<void>((resolve) => {
+        releaseBtwEnd = resolve;
+      });
+
+      let streamCallCount = 0;
+      mockSendMessageStream.mockImplementation(() => {
+        streamCallCount += 1;
+        if (streamCallCount === 1) {
+          return (async function* () {
+            yield {
+              type: ServerGeminiEventType.Content,
+              value: 'main answer',
+            };
+            await holdMainEnd;
+            yield {
+              type: ServerGeminiEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            };
+          })();
+        }
+        return (async function* () {
+          yield {
+            type: ServerGeminiEventType.Thought,
+            value: { subject: '', description: 'btw thinking' },
+          };
+          await holdBtwTcr;
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'btw-tc',
+              name: 'read_file',
+              args: { path: '/foo' },
+              isClientInitiated: false,
+              // turn.ts stamps the stream's own prompt_id into its requests
+              // — the ?btw submit's MINTED id (no explicit promptId), read
+              // back from the captured stream call.
+              prompt_id: mockSendMessageStream.mock.calls[1]?.[2],
+            },
+          };
+          await holdBtwEnd;
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })();
+      });
+
+      const { result } = renderDeferredTestHook();
+
+      await act(async () => {
+        void result.current.submitQuery(
+          'main query',
+          SendMessageType.UserQuery,
+          'main-prompt',
+          { submittedPrompt: 'main query' },
+        );
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitFor(() =>
+        expect(result.current.streamingState).toBe(StreamingState.Responding),
+      );
+
+      // The concurrent ?btw stream arms the deferral (owner = its minted id)
+      // while the foreground main turn keeps running.
+      await act(async () => {
+        void result.current.submitQuery(
+          '?btw side question',
+          SendMessageType.UserQuery,
+          undefined,
+          { submittedPrompt: '?btw side question' },
+        );
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitFor(() =>
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2),
+      );
+      const btwPromptId = mockSendMessageStream.mock.calls[1]?.[2] as string;
+      expect(btwPromptId).toBeDefined();
+
+      await act(async () => {
+        releaseBtwTcr?.();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitForDeferralEstablished(result);
+
+      // Local cancel aborts ONLY the foreground controller — the ?btw stream
+      // survives on its own signal and its scheduled tools still complete.
+      // The cancel's settlement must therefore be owner-aware: resolving the
+      // btw-owned deferral here would re-home its frozen thought under the
+      // cancelled turn and strand the surviving batch without its fold.
+      await act(async () => {
+        result.current.cancelOngoingRequest();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(
+        mockAddItem.mock.calls.filter(
+          ([item]) => item.type === 'gemini_thought',
+        ),
+      ).toHaveLength(0);
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'info',
+          text: 'Request cancelled.',
+        }),
+        expect.any(Number),
+      );
+      // The deferral stays armed: the finalized thought remains pending for
+      // the surviving stream's batch.
+      expect(result.current.pendingHistoryItems).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'gemini_thought', finalized: true }),
+        ]),
+      );
+
+      // The surviving ?btw batch completes and folds its own thought.
+      await act(async () => {
+        await getOnComplete()?.([
+          successfulReadToolCall(btwPromptId, 'btw-tc'),
+        ]);
+      });
+      const thoughtCommits = mockAddItem.mock.calls.filter(
+        ([item]) => item.type === 'gemini_thought',
+      );
+      expect(thoughtCommits).toHaveLength(1);
+      expect(thoughtCommits[0][0].text).toContain('btw thinking');
+      expect(thoughtCommits[0][0].toolSummary).toBe('Read /foo');
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'tool_group',
+          display: expect.objectContaining({ mergedIntoThought: true }),
+        }),
+        expect.any(Number),
+      );
+
+      releaseBtwEnd?.();
+      releaseMainEnd?.();
+    });
+
     // Deferral-ACTIVE resolution tests: with no deferral active,
     // abortThoughtMergeDeferral behaves identically to the old
     // commitPendingThought, so every site below must be exercised with a
@@ -13426,6 +13581,261 @@ describe('useGeminiStream', () => {
       );
       expect(mergedGroupCommit).toBeDefined();
 
+      releaseMainEnd?.();
+    });
+
+    it('mints collision-free prompt_ids for concurrent ?btw submissions', async () => {
+      let streamCallCount = 0;
+      const releasers: Array<() => void> = [];
+      mockSendMessageStream.mockImplementation(() => {
+        streamCallCount += 1;
+        const isMain = streamCallCount === 1;
+        let release!: () => void;
+        const hold = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        releasers.push(release);
+        return (async function* () {
+          if (isMain) {
+            yield {
+              type: ServerGeminiEventType.Content,
+              value: 'main answer',
+            };
+          }
+          await hold;
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })();
+      });
+
+      const { result } = renderDeferredTestHook();
+
+      await act(async () => {
+        void result.current.submitQuery(
+          'main query',
+          SendMessageType.UserQuery,
+        );
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitFor(() =>
+        expect(result.current.streamingState).toBe(StreamingState.Responding),
+      );
+
+      // Two back-to-back ?btw submissions, both admitted while Responding,
+      // neither passing an explicit promptId — both mint.
+      await act(async () => {
+        void result.current.submitQuery('?btw one', SendMessageType.UserQuery);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await act(async () => {
+        void result.current.submitQuery('?btw two', SendMessageType.UserQuery);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitFor(() =>
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(3),
+      );
+
+      // The render-scoped stats counter (getPromptCount) advances only
+      // inside the async submission (startNewPrompt, after awaits) and only
+      // for some submit types — read alone, both ?btw streams mint the SAME
+      // id and are indistinguishable to the ownership layer keyed on it
+      // (deferral settle/defer/supersede, completion guards). The mint must
+      // be an atomic read-and-increment: three submissions, three unique,
+      // numerically-suffixed ids.
+      const mintedIds = [0, 1, 2].map(
+        (i) => mockSendMessageStream.mock.calls[i]?.[2] as string,
+      );
+      for (const id of mintedIds) {
+        expect(id).toMatch(/^test-session-id########\d+$/);
+      }
+      expect(new Set(mintedIds).size).toBe(3);
+
+      releasers.forEach((release) => release());
+    });
+
+    it('keeps an armed ?btw deferral when a second ?btw stream settles (ownership under minted ids)', async () => {
+      const getOnComplete = captureSchedulerOnComplete();
+
+      let releaseMainEnd: (() => void) | undefined;
+      const holdMainEnd = new Promise<void>((resolve) => {
+        releaseMainEnd = resolve;
+      });
+      let releaseBtw1Thought: (() => void) | undefined;
+      const holdBtw1Thought = new Promise<void>((resolve) => {
+        releaseBtw1Thought = resolve;
+      });
+      let releaseBtw1Tcr: (() => void) | undefined;
+      const holdBtw1Tcr = new Promise<void>((resolve) => {
+        releaseBtw1Tcr = resolve;
+      });
+      let releaseBtw1End: (() => void) | undefined;
+      const holdBtw1End = new Promise<void>((resolve) => {
+        releaseBtw1End = resolve;
+      });
+      let releaseBtw2Content: (() => void) | undefined;
+      const holdBtw2Content = new Promise<void>((resolve) => {
+        releaseBtw2Content = resolve;
+      });
+
+      let streamCallCount = 0;
+      mockSendMessageStream.mockImplementation(() => {
+        streamCallCount += 1;
+        if (streamCallCount === 1) {
+          return (async function* () {
+            yield {
+              type: ServerGeminiEventType.Content,
+              value: 'main answer',
+            };
+            await holdMainEnd;
+            yield {
+              type: ServerGeminiEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            };
+          })();
+        }
+        if (streamCallCount === 2) {
+          return (async function* () {
+            // Hold everything until BOTH btws are admitted: a ?btw submit
+            // mid-deferral resolves it by design (the thought lands above
+            // the new user item), so the arms-after-submit window is the
+            // only interleaving where btw2's settlement meets btw1's armed
+            // deferral.
+            await holdBtw1Thought;
+            yield {
+              type: ServerGeminiEventType.Thought,
+              value: { subject: '', description: 'btw one thinking' },
+            };
+            await holdBtw1Tcr;
+            yield {
+              type: ServerGeminiEventType.ToolCallRequest,
+              value: {
+                callId: 'btw1-tc',
+                name: 'read_file',
+                args: { path: '/foo' },
+                isClientInitiated: false,
+                // turn.ts stamps the stream's own prompt_id into its
+                // requests — btw1's MINTED id (no explicit promptId).
+                prompt_id: mockSendMessageStream.mock.calls[1]?.[2],
+              },
+            };
+            await holdBtw1End;
+            yield {
+              type: ServerGeminiEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            };
+          })();
+        }
+        return (async function* () {
+          await holdBtw2Content;
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'btw two answer',
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })();
+      });
+
+      const { result } = renderDeferredTestHook();
+
+      await act(async () => {
+        void result.current.submitQuery(
+          'main query',
+          SendMessageType.UserQuery,
+          'main-prompt',
+          { submittedPrompt: 'main query' },
+        );
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitFor(() =>
+        expect(result.current.streamingState).toBe(StreamingState.Responding),
+      );
+
+      // Admit BOTH ?btw submissions while the deferral is still unarmed;
+      // each mints its own prompt_id.
+      await act(async () => {
+        void result.current.submitQuery('?btw one', SendMessageType.UserQuery);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitFor(() =>
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2),
+      );
+      const btw1PromptId = mockSendMessageStream.mock.calls[1]?.[2] as string;
+      expect(btw1PromptId).toBeDefined();
+      await act(async () => {
+        void result.current.submitQuery('?btw two', SendMessageType.UserQuery);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitFor(() =>
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(3),
+      );
+      const btw2PromptId = mockSendMessageStream.mock.calls[2]?.[2] as string;
+      // With the render-scoped counter alone both btws minted the SAME id
+      // (getPromptCount advances only inside the async submission, after
+      // awaits) — the ownership layer could not tell them apart.
+      expect(btw2PromptId).not.toBe(btw1PromptId);
+
+      // btw1 arms the deferral (owner = its minted id).
+      await act(async () => {
+        releaseBtw1Thought?.();
+        releaseBtw1Tcr?.();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await waitForDeferralEstablished(result);
+
+      // btw2 settles via Content: with unique minted ids it is a FOREIGN
+      // stream and must not resolve btw1's armed deferral; under the
+      // collision this settlement re-homed btw1's frozen thought.
+      await act(async () => {
+        releaseBtw2Content?.();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      // btw2 settles without touching the armed deferral: no thought commit,
+      // the finalized thought still pending for btw1's batch.
+      expect(
+        mockAddItem.mock.calls.filter(
+          ([item]) => item.type === 'gemini_thought',
+        ),
+      ).toHaveLength(0);
+      expect(result.current.pendingHistoryItems).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'gemini_thought', finalized: true }),
+        ]),
+      );
+
+      // btw1's own batch completes and folds the thought.
+      await act(async () => {
+        await getOnComplete()?.([
+          successfulReadToolCall(btw1PromptId, 'btw1-tc'),
+        ]);
+      });
+      const thoughtCommits = mockAddItem.mock.calls.filter(
+        ([item]) => item.type === 'gemini_thought',
+      );
+      expect(thoughtCommits).toHaveLength(1);
+      expect(thoughtCommits[0][0].text).toContain('btw one thinking');
+      expect(thoughtCommits[0][0].toolSummary).toBe('Read /foo');
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'tool_group',
+          display: expect.objectContaining({ mergedIntoThought: true }),
+        }),
+        expect.any(Number),
+      );
+
+      releaseBtw1End?.();
       releaseMainEnd?.();
     });
 
