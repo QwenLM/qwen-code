@@ -812,3 +812,26 @@ describe('deep blockquote nesting (R14-1)', () => {
     expect(truncated.length).toBeLessThanOrEqual(20000);
   });
 });
+
+describe('R16 round-16 Critical regressions', () => {
+  // R16-3: `markerSafeTruncationStart` paid a slice + uppercase copy of the
+  // retained window PER BRACKET still unclosed at the cut, plus a fresh
+  // close scan each — quadratic on a single-line run of unclosed brackets,
+  // reachable through `boundContent` on prompt-injected/echoed content
+  // (round-16 probe: 15,000 brackets / 80k → ~1.4 s synchronous CPU). The
+  // shape probe now walks the ORIGINAL text by index with a name-length
+  // cap, and the cut-to-close probes hoist out of the per-bracket loop.
+  it('truncates a run of unclosed brackets in bounded time', () => {
+    const text = '[a '.repeat(30000) + 'x'.repeat(70000);
+    // R14-2 convention: assert CPU, not wall time — wall-clock budgets flake
+    // under parallel full-suite load on shared CI hardware. 800 ms stays an
+    // order of magnitude under the measured pre-fix cost at this size
+    // (~2.5 s and superlinear) while clearing hardware variance.
+    const startedCpu = process.cpuUsage();
+    const truncated = truncateOutboundMediaText(text, 20000, TRUNCATION_MARKER);
+    const elapsedCpu = process.cpuUsage(startedCpu);
+    expect((elapsedCpu.user + elapsedCpu.system) / 1000).toBeLessThan(800);
+    expect(truncated.length).toBeLessThanOrEqual(20000);
+    expect(truncated.startsWith(TRUNCATION_MARKER)).toBe(true);
+  });
+});

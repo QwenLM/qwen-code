@@ -20,6 +20,7 @@ import {
   sanitizeMediaMarkersToStable,
   sanitizeStreamingFileMarkers,
   stripPartialFileMarker,
+  stripPartialFileMarkerBeforeBake,
   uploadDingTalkFile,
 } from './outbound-file.js';
 
@@ -445,5 +446,34 @@ describe('sanitizeMediaMarkersToStable exhaustion', () => {
 
     expect(findFileMarkers(sanitized)).toHaveLength(0);
     expect(sanitized).not.toContain('/pf9.pdf');
+  });
+});
+
+describe('stripPartialFileMarkerBeforeBake (R16-5)', () => {
+  // The residue sweep extends an ill-formed `[FILE:` opening to END OF
+  // LINE; run after images bake it deletes an already-uploaded image's
+  // baked markdown. Stripping before the bake must keep the R9-3
+  // confinement: residue shares its line with a deliverable marker only
+  // ever inside its own gap.
+  it('confines the strip to the gaps between deliverable markers', () => {
+    expect(stripPartialFileMarkerBeforeBake('[FILE: /a [FILE: /b.pdf]')).toBe(
+      '[FILE: /b.pdf]',
+    );
+    expect(stripPartialFileMarkerBeforeBake('[FILE: /b.pdf] [FILE: /a')).toBe(
+      '[FILE: /b.pdf] ',
+    );
+  });
+
+  it('strips a residue span carrying an image marker whole', () => {
+    expect(
+      stripPartialFileMarkerBeforeBake(
+        'Here is the chart: [FILE: /ws/notes.txt [IMAGE: /ws/chart.png] done',
+      ),
+    ).toBe('Here is the chart: ');
+  });
+
+  it('leaves clean text and complete markers untouched', () => {
+    const clean = 'intro [FILE: /ws/a.pdf] mid [FILE: /ws/b.pdf] outro';
+    expect(stripPartialFileMarkerBeforeBake(clean)).toBe(clean);
   });
 });

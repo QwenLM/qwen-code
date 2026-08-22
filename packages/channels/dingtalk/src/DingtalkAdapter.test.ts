@@ -914,6 +914,30 @@ function seedMentionTarget(
   ).mentionTargets.set(messageId, staffId);
 }
 
+/** R16-2: seed the delivery-scoped segment text the boundary close reads. */
+function seedSegmentDeliveryText(
+  channel: DingtalkChannelInstance,
+  sessionId: string,
+  segmentId: string,
+  text: string,
+): void {
+  (
+    channel as unknown as {
+      segmentDeliveryText: Map<string, Map<string, string>>;
+    }
+  ).segmentDeliveryText.set(sessionId, new Map([[segmentId, text]]));
+}
+
+/** R16-4: record the status-card surface a registered run leaves. */
+function seedCardSurface(
+  channel: DingtalkChannelInstance,
+  messageId: string,
+): void {
+  (
+    channel as unknown as { cardSurfaceInboundMessages: Map<string, true> }
+  ).cardSurfaceInboundMessages.set(messageId, true);
+}
+
 /** Drives a group robot message through `onMessage` for the given chat. */
 function driveRobotMessage(
   channel: DingtalkChannelInstance,
@@ -5645,6 +5669,10 @@ describe('DingtalkChannel outbound file delivery', () => {
     (
       channel as unknown as { handleInbound: ReturnType<typeof vi.fn> }
     ).handleInbound.mockRejectedValueOnce(deliveryError);
+    // The turn's run registered its status-card surface — the failure has a
+    // card to render on, so the apology stays skipped (R16-4 keys the gate
+    // on this per-run record).
+    seedCardSurface(channel, 'msg-cid123');
 
     driveRobotMessage(channel, 'cid123');
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -5677,6 +5705,105 @@ describe('DingtalkChannel outbound file delivery', () => {
       ),
     );
     expect(apologyPosts).toHaveLength(1);
+  });
+
+  it('restores the apology for an unregistered run with cards enabled', async () => {
+    // R16-4: the gate used to read the controller's existence as a feature
+    // flag — but a run the presenter never registered (its inbound
+    // correlation missing or evicted before `started`) ensures no card even
+    // with cards enabled: `closeOutput('failed')` is a no-op and
+    // `terminalizeRun` has no record. Suppressing the apology there left
+    // the recipient nothing at all. Only a run that actually got a surface
+    // skips the apology.
+    const channel = createChannel();
+    seedWebhook(channel, 'cid123');
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ errcode: 130101, errmsg: 'flow' }), {
+        status: 200,
+      }),
+    );
+    const deliveryError: unknown = await channel
+      .sendMessage('cid123', 'the answer')
+      .catch((error: unknown) => error);
+    (
+      channel as unknown as { handleInbound: ReturnType<typeof vi.fn> }
+    ).handleInbound.mockRejectedValueOnce(deliveryError);
+    // No seedCardSurface: the run never registered.
+
+    driveRobotMessage(channel, 'cid123');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const apologyPosts = fetchSpy.mock.calls.filter((call) =>
+      String((call[1] as RequestInit | undefined)?.body ?? '').includes(
+        'Sorry, something went wrong processing your message.',
+      ),
+    );
+    expect(apologyPosts).toHaveLength(1);
+  });
+
+  it('records the card surface through the started lifecycle (R16-4)', async () => {
+    // End-to-end half of the per-run gate: the 'started' lifecycle
+    // correlates the inbound message with the run and records the card
+    // surface — that lifecycle-produced record (not a seeded one) keeps
+    // the apology suppressed for a delivery failure.
+    const channel = createChannel();
+    seedWebhook(channel, 'cid123');
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ errcode: 130101, errmsg: 'flow' }), {
+          status: 200,
+        }),
+      ),
+    );
+    // Correlate exactly like production: inboundCardOwners seeded before
+    // 'started', consumed by the lifecycle.
+    (
+      channel as unknown as {
+        inboundCardOwners: Map<
+          string,
+          { ownerId: string; target: { chatId: string; isGroup: boolean } }
+        >;
+      }
+    ).inboundCardOwners.set('msg-cid123', {
+      ownerId: 'owner-1',
+      target: { chatId: 'cid123', isGroup: true },
+    });
+    const lifecycle = getLifecycleHook(channel);
+    lifecycle({
+      channelName: 'dingtalk',
+      chatId: 'cid123',
+      sessionId: 'session-1',
+      messageId: 'msg-cid123',
+      runId: 'run-1',
+      owner: { kind: 'channel_user', id: 'owner-1' },
+      target: {
+        channelName: 'dingtalk',
+        chatId: 'cid123',
+        senderId: 'owner-1',
+        isGroup: true,
+      },
+      type: 'started',
+    });
+
+    const deliveryError: unknown = await channel
+      .sendMessage('cid123', 'the answer')
+      .catch((error: unknown) => error);
+    (
+      channel as unknown as { handleInbound: ReturnType<typeof vi.fn> }
+    ).handleInbound.mockRejectedValueOnce(deliveryError);
+
+    driveRobotMessage(channel, 'cid123');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    // The lifecycle recorded the surface — no apology rides the webhook.
+    const apologyPosts = fetchSpy.mock.calls.filter((call) =>
+      String((call[1] as RequestInit | undefined)?.body ?? '').includes(
+        'Sorry, something went wrong processing your message.',
+      ),
+    );
+    expect(apologyPosts).toHaveLength(0);
   });
 
   it('restores the apology for a delivery failure without status cards', async () => {
@@ -5766,21 +5893,24 @@ describe('DingtalkChannel outbound file delivery', () => {
         events.push('card');
         return Promise.resolve(true);
       });
-      const segmentContent = vi.fn().mockReturnValue(`[FILE: ${file.path}]`);
+      seedSegmentDeliveryText(
+        channel,
+        'session-1',
+        'segment-1',
+        `[FILE: ${file.path}]`,
+      );
       const acceptsLateDelivery = vi.fn().mockReturnValue(true);
       const terminalSettled = vi.fn().mockResolvedValue(undefined);
       (
         channel as unknown as {
           interactionPresenter: {
             closeOutput: typeof closeOutput;
-            segmentContent: typeof segmentContent;
             acceptsLateDelivery: typeof acceptsLateDelivery;
             terminalSettled: typeof terminalSettled;
           };
         }
       ).interactionPresenter = {
         closeOutput,
-        segmentContent,
         acceptsLateDelivery,
         terminalSettled,
       };
@@ -5804,8 +5934,6 @@ describe('DingtalkChannel outbound file delivery', () => {
         segment,
         'response_boundary',
       );
-
-      expect(segmentContent).toHaveBeenCalledWith('segment-1');
       expect(uploadCalls()).toHaveLength(1);
       expect(fileCalls()).toHaveLength(1);
       expect(closeOutput).toHaveBeenCalledWith(
@@ -5824,15 +5952,19 @@ describe('DingtalkChannel outbound file delivery', () => {
     seedWebhook(channel, 'cid-1');
     const { uploadCalls } = stubFileReplyFetch();
     const closeOutput = vi.fn().mockResolvedValue(true);
-    const segmentContent = vi.fn().mockReturnValue('plain prose only');
+    seedSegmentDeliveryText(
+      channel,
+      'session-1',
+      'segment-1',
+      'plain prose only',
+    );
     (
       channel as unknown as {
         interactionPresenter: {
           closeOutput: typeof closeOutput;
-          segmentContent: typeof segmentContent;
         };
       }
-    ).interactionPresenter = { closeOutput, segmentContent };
+    ).interactionPresenter = { closeOutput };
     const segment = {
       channelName: 'dingtalk',
       sessionId: 'session-1',
@@ -5875,15 +6007,19 @@ describe('DingtalkChannel outbound file delivery', () => {
       seedWebhook(channel, 'cid-1');
       const { fileCalls, markdownCalls, uploadCalls } = stubFileReplyFetch();
       const closeOutput = vi.fn().mockResolvedValue(false);
-      const segmentContent = vi.fn().mockReturnValue(`[FILE: ${file.path}]`);
+      seedSegmentDeliveryText(
+        channel,
+        'session-1',
+        'segment-1',
+        `[FILE: ${file.path}]`,
+      );
       (
         channel as unknown as {
           interactionPresenter: {
             closeOutput: typeof closeOutput;
-            segmentContent: typeof segmentContent;
           };
         }
-      ).interactionPresenter = { closeOutput, segmentContent };
+      ).interactionPresenter = { closeOutput };
       const segment = {
         channelName: 'dingtalk',
         sessionId: 'session-1',
@@ -5932,19 +6068,22 @@ describe('DingtalkChannel outbound file delivery', () => {
       seedWebhook(channel, 'cid-1');
       const { fileCalls, markdownCalls, uploadCalls } = stubFileReplyFetch();
       const closeOutput = vi.fn().mockResolvedValue(false);
-      const segmentContent = vi.fn().mockReturnValue(`[FILE: ${file.path}]`);
+      seedSegmentDeliveryText(
+        channel,
+        'session-1',
+        'segment-1',
+        `[FILE: ${file.path}]`,
+      );
       const acceptsLateDelivery = vi.fn().mockReturnValue(false);
       (
         channel as unknown as {
           interactionPresenter: {
             closeOutput: typeof closeOutput;
-            segmentContent: typeof segmentContent;
             acceptsLateDelivery: typeof acceptsLateDelivery;
           };
         }
       ).interactionPresenter = {
         closeOutput,
-        segmentContent,
         acceptsLateDelivery,
       };
       const segment = {
@@ -5988,7 +6127,12 @@ describe('DingtalkChannel outbound file delivery', () => {
       seedWebhook(channel, 'cid-1');
       const { fileCalls, markdownCalls } = stubFileReplyFetch();
       const closeOutput = vi.fn().mockResolvedValue(false);
-      const segmentContent = vi.fn().mockReturnValue(`[FILE: ${file.path}]`);
+      seedSegmentDeliveryText(
+        channel,
+        'session-1',
+        'segment-1',
+        `[FILE: ${file.path}]`,
+      );
       const acceptsLateDelivery = vi.fn().mockReturnValue(true);
       // R10-3: a live run's card retained nothing — the fallback delivers.
       const terminalCardRetained = vi.fn().mockReturnValue(false);
@@ -5997,7 +6141,6 @@ describe('DingtalkChannel outbound file delivery', () => {
         channel as unknown as {
           interactionPresenter: {
             closeOutput: typeof closeOutput;
-            segmentContent: typeof segmentContent;
             acceptsLateDelivery: typeof acceptsLateDelivery;
             terminalSettled: typeof terminalSettled;
             terminalCardRetained: typeof terminalCardRetained;
@@ -6005,7 +6148,6 @@ describe('DingtalkChannel outbound file delivery', () => {
         }
       ).interactionPresenter = {
         closeOutput,
-        segmentContent,
         acceptsLateDelivery,
         terminalSettled,
         terminalCardRetained,
@@ -6053,21 +6195,24 @@ describe('DingtalkChannel outbound file delivery', () => {
         events.push('card');
         return Promise.resolve(true);
       });
-      const segmentContent = vi.fn().mockReturnValue(`[FILE: ${file.path}]`);
+      seedSegmentDeliveryText(
+        channel,
+        'session-1',
+        'segment-1',
+        `[FILE: ${file.path}]`,
+      );
       const acceptsLateDelivery = vi.fn().mockReturnValue(true);
       const terminalSettled = vi.fn().mockResolvedValue(undefined);
       (
         channel as unknown as {
           interactionPresenter: {
             closeOutput: typeof closeOutput;
-            segmentContent: typeof segmentContent;
             acceptsLateDelivery: typeof acceptsLateDelivery;
             terminalSettled: typeof terminalSettled;
           };
         }
       ).interactionPresenter = {
         closeOutput,
-        segmentContent,
         acceptsLateDelivery,
         terminalSettled,
       };
@@ -6122,21 +6267,22 @@ describe('DingtalkChannel outbound file delivery', () => {
           new Response(JSON.stringify({ errcode: 310000 }), { status: 200 }),
       });
       const closeOutput = vi.fn().mockResolvedValue(true);
-      const segmentContent = vi
-        .fn()
-        .mockReturnValue(`report body [FILE: ${file.path}]`);
+      seedSegmentDeliveryText(
+        channel,
+        'session-1',
+        'segment-1',
+        `report body [FILE: ${file.path}]`,
+      );
       const acceptsLateDelivery = vi.fn().mockReturnValue(true);
       (
         channel as unknown as {
           interactionPresenter: {
             closeOutput: typeof closeOutput;
-            segmentContent: typeof segmentContent;
             acceptsLateDelivery: typeof acceptsLateDelivery;
           };
         }
       ).interactionPresenter = {
         closeOutput,
-        segmentContent,
         acceptsLateDelivery,
       };
       const segment = {
@@ -6189,21 +6335,24 @@ describe('DingtalkChannel outbound file delivery', () => {
       // No webhook seeded: uploads succeed, delivery has no endpoint.
       const { uploadCalls } = stubFileReplyFetch();
       const closeOutput = vi.fn().mockResolvedValue(true);
-      const segmentContent = vi.fn().mockReturnValue(`[FILE: ${file.path}]`);
+      seedSegmentDeliveryText(
+        channel,
+        'session-1',
+        'segment-1',
+        `[FILE: ${file.path}]`,
+      );
       const acceptsLateDelivery = vi.fn().mockReturnValue(true);
       const terminalSettled = vi.fn().mockResolvedValue(undefined);
       (
         channel as unknown as {
           interactionPresenter: {
             closeOutput: typeof closeOutput;
-            segmentContent: typeof segmentContent;
             acceptsLateDelivery: typeof acceptsLateDelivery;
             terminalSettled: typeof terminalSettled;
           };
         }
       ).interactionPresenter = {
         closeOutput,
-        segmentContent,
         acceptsLateDelivery,
         terminalSettled,
       };
@@ -6262,21 +6411,24 @@ describe('DingtalkChannel outbound file delivery', () => {
           new Response(JSON.stringify({ errcode: 130101 }), { status: 200 }),
       });
       const closeOutput = vi.fn().mockResolvedValue(true);
-      const segmentContent = vi.fn().mockReturnValue(`[FILE: ${file.path}]`);
+      seedSegmentDeliveryText(
+        channel,
+        'session-1',
+        'segment-1',
+        `[FILE: ${file.path}]`,
+      );
       const acceptsLateDelivery = vi.fn().mockReturnValue(true);
       const terminalSettled = vi.fn().mockResolvedValue(undefined);
       (
         channel as unknown as {
           interactionPresenter: {
             closeOutput: typeof closeOutput;
-            segmentContent: typeof segmentContent;
             acceptsLateDelivery: typeof acceptsLateDelivery;
             terminalSettled: typeof terminalSettled;
           };
         }
       ).interactionPresenter = {
         closeOutput,
-        segmentContent,
         acceptsLateDelivery,
         terminalSettled,
       };
@@ -6334,7 +6486,12 @@ describe('DingtalkChannel outbound file delivery', () => {
       // gate answered false too — the reason-aware gate accepts the late
       // delivery anyway.
       const closeOutput = vi.fn().mockResolvedValue(false);
-      const segmentContent = vi.fn().mockReturnValue(`[FILE: ${file.path}]`);
+      seedSegmentDeliveryText(
+        channel,
+        'session-1',
+        'segment-1',
+        `[FILE: ${file.path}]`,
+      );
       const isRunActive = vi.fn().mockReturnValue(false);
       const acceptsLateDelivery = vi.fn().mockReturnValue(true);
       const terminalSettled = vi.fn().mockResolvedValue(undefined);
@@ -6344,7 +6501,6 @@ describe('DingtalkChannel outbound file delivery', () => {
         channel as unknown as {
           interactionPresenter: {
             closeOutput: typeof closeOutput;
-            segmentContent: typeof segmentContent;
             isRunActive: typeof isRunActive;
             acceptsLateDelivery: typeof acceptsLateDelivery;
             terminalSettled: typeof terminalSettled;
@@ -6353,7 +6509,6 @@ describe('DingtalkChannel outbound file delivery', () => {
         }
       ).interactionPresenter = {
         closeOutput,
-        segmentContent,
         isRunActive,
         acceptsLateDelivery,
         terminalSettled,
@@ -6406,7 +6561,12 @@ describe('DingtalkChannel outbound file delivery', () => {
       seedWebhook(channel, 'cid-1');
       const { fileCalls, markdownCalls } = stubFileReplyFetch();
       const closeOutput = vi.fn().mockResolvedValue(false);
-      const segmentContent = vi.fn().mockReturnValue(`[FILE: ${file.path}]`);
+      seedSegmentDeliveryText(
+        channel,
+        'session-1',
+        'segment-1',
+        `[FILE: ${file.path}]`,
+      );
       const acceptsLateDelivery = vi.fn().mockReturnValue(true);
       const terminalSettled = vi.fn().mockResolvedValue(undefined);
       const terminalCardRetained = vi.fn().mockReturnValue(true);
@@ -6414,7 +6574,6 @@ describe('DingtalkChannel outbound file delivery', () => {
         channel as unknown as {
           interactionPresenter: {
             closeOutput: typeof closeOutput;
-            segmentContent: typeof segmentContent;
             acceptsLateDelivery: typeof acceptsLateDelivery;
             terminalSettled: typeof terminalSettled;
             terminalCardRetained: typeof terminalCardRetained;
@@ -6422,7 +6581,6 @@ describe('DingtalkChannel outbound file delivery', () => {
         }
       ).interactionPresenter = {
         closeOutput,
-        segmentContent,
         acceptsLateDelivery,
         terminalSettled,
         terminalCardRetained,
@@ -6498,12 +6656,17 @@ describe('DingtalkChannel outbound file delivery', () => {
           isGroup: true,
         },
       } as ChannelOutputSegmentContext;
-      presenter.appendOutput(segment, `[FILE: ${file.path}]`);
       (
         channel as unknown as {
           interactionPresenter: DingtalkInteractionPresenter;
         }
       ).interactionPresenter = presenter;
+      getChunkHook(channel)(
+        'cid-1',
+        `[FILE: ${file.path}]`,
+        'session-1',
+        segment,
+      );
 
       const boundary = getOutputSegmentEndHook(channel)(
         'cid-1',
@@ -6546,7 +6709,12 @@ describe('DingtalkChannel outbound file delivery', () => {
       seedWebhook(channel, 'cid-1');
       const { fileCalls, markdownCalls } = stubFileReplyFetch();
       const closeOutput = vi.fn().mockResolvedValue(false);
-      const segmentContent = vi.fn().mockReturnValue(`[FILE: ${file.path}]`);
+      seedSegmentDeliveryText(
+        channel,
+        'session-1',
+        'segment-1',
+        `[FILE: ${file.path}]`,
+      );
       // Live at the pre-delivery gate, terminal by the fallback's turn.
       const acceptsLateDelivery = vi
         .fn()
@@ -6556,13 +6724,11 @@ describe('DingtalkChannel outbound file delivery', () => {
         channel as unknown as {
           interactionPresenter: {
             closeOutput: typeof closeOutput;
-            segmentContent: typeof segmentContent;
             acceptsLateDelivery: typeof acceptsLateDelivery;
           };
         }
       ).interactionPresenter = {
         closeOutput,
-        segmentContent,
         acceptsLateDelivery,
       };
       const segment = {
@@ -6699,19 +6865,22 @@ describe('DingtalkChannel outbound file delivery', () => {
       seedWebhook(channel, 'cid-1');
       const { fileCalls, markdownCalls, uploadCalls } = stubFileReplyFetch();
       const closeOutput = vi.fn().mockResolvedValue(false);
-      const segmentContent = vi.fn().mockReturnValue(`[FILE: ${file.path}]`);
+      seedSegmentDeliveryText(
+        channel,
+        'session-1',
+        'segment-1',
+        `[FILE: ${file.path}]`,
+      );
       const acceptsLateDelivery = vi.fn().mockReturnValue(false);
       (
         channel as unknown as {
           interactionPresenter: {
             closeOutput: typeof closeOutput;
-            segmentContent: typeof segmentContent;
             acceptsLateDelivery: typeof acceptsLateDelivery;
           };
         }
       ).interactionPresenter = {
         closeOutput,
-        segmentContent,
         acceptsLateDelivery,
       };
       const segment = {
@@ -6804,6 +6973,39 @@ describe('DingtalkChannel outbound file delivery', () => {
       expect(body.markdown?.text).not.toContain(join(file.dir, 'b'));
     } finally {
       rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
+  it('never bills an image that shares a line with FILE residue (R16-5)', async () => {
+    // R16-5: the FILE residue sweep ran AFTER images baked, so an
+    // abandoned `[FILE:` opening stripped to end of line and deleted the
+    // baked `![image](mediaId)` markdown — the image uploaded and billed
+    // against quota but never rendered, with no receipt or failure notice.
+    // Residue now strips before the bake: an image marker inside a genuine
+    // residue span shares the span's fail-closed removal and is never
+    // uploaded.
+    const image = createTempPng();
+    try {
+      const channel = createChannel({ cwd: image.dir });
+      seedWebhook(channel, 'cid123');
+      const { uploadCalls, markdownCalls } = stubFileReplyFetch();
+
+      await channel.sendMessage(
+        'cid123',
+        `Here is the chart: [FILE: ${join(image.dir, 'notes.txt')} [IMAGE: ${image.path}] done`,
+      );
+
+      // The image never uploaded — nothing to bill, nothing to lose.
+      expect(uploadCalls()).toHaveLength(0);
+      expect(markdownCalls()).toHaveLength(1);
+      const body = JSON.parse(
+        String((markdownCalls()[0]![1] as RequestInit).body),
+      ) as { markdown?: { text?: string } };
+      expect(body.markdown?.text).toContain('Here is the chart:');
+      expect(body.markdown?.text).not.toContain('![image]');
+      expect(body.markdown?.text).not.toContain(image.path);
+    } finally {
+      rmSync(image.dir, { recursive: true, force: true });
     }
   });
 

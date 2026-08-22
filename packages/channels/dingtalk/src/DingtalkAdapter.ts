@@ -32,6 +32,7 @@ import {
   readValidatedFile,
   safeFileName,
   sanitizeMediaMarkersToStable,
+  stripPartialFileMarkerBeforeBake,
   uploadDingTalkFile,
 } from './outbound-file.js';
 import {
@@ -316,6 +317,23 @@ export class DingtalkChannel extends ChannelBase {
    * next awaited hook, and `onPromptEnd`/`onSessionDied` sweep leftovers.
    */
   private readonly pendingBoundaryFailures = new Map<string, unknown>();
+  /**
+   * R15-1: ChannelBase dispatches boundary closes fire-and-forget, so one
+   * can still be in flight when `onResponseComplete` consults
+   * `pendingBoundaryFailures` — a failure recorded after the consultation
+   * is swept by `onPromptEnd` and lost, or poisons the next turn. Each
+   * session's in-flight close settles through this chain; the consultation
+   * drains it first.
+   */
+  private readonly boundaryClosesInFlight = new Map<string, Promise<void>>();
+  /**
+   * R16-2: delivery-scoped copy of every segment's raw chunks. The
+   * presenter bounds its copy for display (tail-kept at CONTENT_LIMIT), so
+   * a `[FILE: …]` emitted early in a longer segment falls out of the head
+   * there; boundary delivery sources its markers from this accumulation
+   * instead. Reclaimed when the segment closes or the session dies.
+   */
+  private readonly segmentDeliveryText = new Map<string, Map<string, string>>();
   private bufferedMentionTargets = new Set<string>();
   private bufferedMentionTargetsBySession = new Map<string, Set<string>>();
   private dedupTimer?: ReturnType<typeof setInterval>;
@@ -345,6 +363,14 @@ export class DingtalkChannel extends ChannelBase {
   private questionCardController?: QuestionCardController;
   private interactionPresenter?: DingtalkInteractionPresenter;
   private readonly inboundCardOwners = new Map<string, CardRunCorrelation>();
+  /**
+   * R16-4: inbound message ids whose run actually got a status-card
+   * surface (registered correlation + card ensured). The apology gate keys
+   * on this per-run surface, not on the controller existing as a feature —
+   * an unregistered run renders no failure card, and the apology is the
+   * recipient's only feedback there.
+   */
+  private readonly cardSurfaceInboundMessages = new Map<string, true>();
   private readonly cardRunBySession = new Map<string, string>();
   private readonly cardRuns = new Map<string, CardRunCorrelation>();
 
@@ -755,7 +781,16 @@ export class DingtalkChannel extends ChannelBase {
   private async prepareOutgoingContent(
     text: string,
   ): Promise<PreparedDingTalkOutput> {
-    const imageText = await this.prepareOutgoingImages(text);
+    // R16-5: strip FILE residue off the MODEL text before images bake. The
+    // sweep extends an ill-formed `[FILE:` opening to end of line; run
+    // over baked text it deleted an already-uploaded image's
+    // `![image](mediaId)` markdown sharing the line — quota billed, never
+    // rendered, no receipt or notice. Pre-bake, an image marker inside a
+    // genuine residue span simply shares the span's fail-closed removal and
+    // is never uploaded.
+    const imageText = await this.prepareOutgoingImages(
+      stripPartialFileMarkerBeforeBake(text),
+    );
     const markers = findFileMarkers(imageText);
     const files: PreparedDingTalkFile[] = [];
     let outgoingText = imageText;
@@ -827,8 +862,9 @@ export class DingtalkChannel extends ChannelBase {
       // END OF LINE, and running it over the whole text after the receipts
       // were baked ate any receipt or failure notice sharing a line with
       // residue — a failed delivery resolved as a fully successful turn with
-      // no output. A gap never contains a baked artifact, and no artifact
-      // can splice across one into a new marker shape.
+      // no output. R16-5: the pre-bake residue strip removed every
+      // ill-formed `[FILE:` opening from the model text, so the sweep below
+      // cannot extend one across a baked image artifact in a gap either.
       let assembled = '';
       let previousEnd = 0;
       for (const [index, marker] of markers.entries()) {
@@ -1790,6 +1826,7 @@ export class DingtalkChannel extends ChannelBase {
     }
     this.sessionMentionTargets.delete(sessionId);
     this.pendingBoundaryFailures.delete(sessionId);
+    this.segmentDeliveryText.delete(sessionId);
     const cardRunId = this.cardRunBySession.get(sessionId);
     if (cardRunId) {
       this.cardRunBySession.delete(sessionId);
@@ -1832,6 +1869,14 @@ export class DingtalkChannel extends ChannelBase {
           inboundOwner.sender,
         );
         this.interactionPresenter?.startStatusCard(event.runId);
+        if (this.statusCardController && event.messageId) {
+          this.cardSurfaceInboundMessages.set(event.messageId, true);
+          while (this.cardSurfaceInboundMessages.size > 1000) {
+            const oldest = this.cardSurfaceInboundMessages.keys().next().value;
+            if (oldest === undefined) break;
+            this.cardSurfaceInboundMessages.delete(oldest);
+          }
+        }
       }
       return;
     }
@@ -2039,7 +2084,12 @@ export class DingtalkChannel extends ChannelBase {
   ): Promise<void> {
     // R15-1: rethrow a boundary close whose corrective notice never landed —
     // recorded there because `notifyOutputSegmentEnd` swallows hook errors.
-    // This is the turn's next awaited hook, so the turn books failed.
+    // This is the turn's next awaited hook, so the turn books failed. Drain
+    // the session's in-flight boundary close FIRST — ChannelBase dispatches
+    // it fire-and-forget, and a failure recorded after the consultation
+    // below is swept by `onPromptEnd` and lost, or poisons the next turn.
+    const boundaryClose = this.boundaryClosesInFlight.get(sessionId);
+    if (boundaryClose) await boundaryClose;
     const boundaryFailure = this.pendingBoundaryFailures.get(sessionId);
     if (boundaryFailure !== undefined) {
       this.pendingBoundaryFailures.delete(sessionId);
@@ -2121,14 +2171,55 @@ export class DingtalkChannel extends ChannelBase {
   ): Promise<void> {
     if (!this.interactionPresenter) return;
     if (reason === 'response_boundary' || reason === 'input_requested') {
-      await this.closeSegmentWithFiles(chatId, sessionId, segment, reason);
+      const close = this.closeSegmentWithFiles(
+        chatId,
+        sessionId,
+        segment,
+        reason,
+      );
+      this.trackBoundaryClose(sessionId, close);
+      await close;
       return;
     }
+    this.segmentDeliveryText.get(sessionId)?.delete(segment.segmentId);
     await this.interactionPresenter.closeOutput(
       segment.segmentId,
       '',
       reason,
       segment,
+    );
+  }
+
+  /**
+   * R15-1: chain a boundary close into the session's in-flight tracker so
+   * `onResponseComplete` can drain it before consulting
+   * `pendingBoundaryFailures`. Swallows the close's own outcome — its
+   * failures are the map's business, and ChannelBase swallows hook errors
+   * anyway.
+   */
+  private trackBoundaryClose(sessionId: string, close: Promise<void>): void {
+    const settled = close.then(
+      () => undefined,
+      () => undefined,
+    );
+    const tracked = Promise.all([
+      this.boundaryClosesInFlight.get(sessionId),
+      settled,
+    ]).then(() => undefined);
+    this.boundaryClosesInFlight.set(sessionId, tracked);
+    void tracked.then(() => {
+      if (this.boundaryClosesInFlight.get(sessionId) === tracked) {
+        this.boundaryClosesInFlight.delete(sessionId);
+      }
+    });
+  }
+
+  private logBoundaryCloseFailure(error: unknown): void {
+    process.stderr.write(
+      `[DingTalk:${this.name}] boundary display close failed: ${sanitizeLogText(
+        error instanceof Error ? error.message : String(error),
+        300,
+      )}\n`,
     );
   }
 
@@ -2148,118 +2239,167 @@ export class DingtalkChannel extends ChannelBase {
     reason: ChannelOutputSegmentEndReason,
   ): Promise<void> {
     const presenter = this.interactionPresenter!;
-    // R7-1: with block streaming on, every block of this segment was already
-    // delivered (and its markers uploaded) through `sendResponseMessage`. The
-    // constructor withholds `sendFallback` and status cards in this mode, so
-    // `closeOutput` below answers false and the plain-delivery fallback would
-    // re-upload and re-send the whole accumulated segment on top of the
-    // streamed copy. Mirror the constructor gating: display-close only.
-    if (this.config.blockStreaming === 'on') {
-      await presenter.closeOutput(segment.segmentId, '', reason, segment);
-      return;
-    }
-    const content = presenter.segmentContent(segment.segmentId);
-    if (!content || findFileMarkers(content).length === 0) {
-      await presenter.closeOutput(segment.segmentId, '', reason, segment);
-      return;
-    }
-    let prepared: PreparedDingTalkOutput;
     try {
-      prepared = await this.prepareOutgoingContent(content);
-    } catch (error) {
-      // A failed token fetch or unreadable image must not strand the
-      // segment's text — deliver it display-sanitized, as before.
-      process.stderr.write(
-        `[DingTalk:${this.name}] boundary segment preparation failed: ${sanitizeLogText(
-          error instanceof Error ? error.message : String(error),
-          300,
-        )}\n`,
-      );
-      await presenter.closeOutput(segment.segmentId, '', reason, segment);
-      return;
-    }
-    // R7-3: a run terminated as cancelled or failed while the upload was in
-    // flight must not be delivered after its terminal card. R8-4: gate on the
-    // terminal REASON, not bare terminality — a run COMPLETING mid-upload is
-    // still a valid delivery target, and the bare gate dropped its files.
-    if (!presenter.acceptsLateDelivery(segment.runId)) {
-      // R9-2: still hand the segment to `closeOutput` — the bare return
-      // leaked its presentation in the presenter's `segments` map forever.
-      await presenter.closeOutput(segment.segmentId, '', reason, segment);
-      return;
-    }
-    // R8-1 (mirrors R2-5): deliver BEFORE the display finalizes. `closeOutput`
-    // bakes `prepared.text` — receipts included — into a surface it can no
-    // longer amend, so a `sendReplyFiles` failure landing after it left a
-    // permanent receipt for a file that never arrives, with no correction.
-    let outgoingText = prepared.text;
-    let deliveryError: DingTalkDeliveryError | undefined;
-    try {
-      // R14-3: pass the baked text as the receipt carrier so a failure
-      // whose notice LANDS rewrites the receipt before `closeOutput`
-      // finalizes it into the surface.
-      ({ text: outgoingText, deliveryError } = await this.sendReplyFiles(
-        chatId,
-        prepared.files,
-        prepared.text,
-      ));
-    } catch (error) {
-      // R10-1: the throw used to exit before `closeOutput`, leaking the
-      // segment's presentation in the presenter's `segments` map forever
-      // and never delivering even the display-sanitized text. The empty
-      // text keeps R8-1's intent — the fallback sanitizer strips markers,
-      // so no receipt survives the failed delivery.
-      await presenter.closeOutput(segment.segmentId, '', reason, segment);
-      // R15-1: throwing here cannot fail the turn — the only production
-      // caller swallows hook errors. Record it for `onResponseComplete`.
-      this.pendingBoundaryFailures.set(sessionId, error);
-      return;
-    }
-    const delivered = await presenter.closeOutput(
-      segment.segmentId,
-      outgoingText,
-      reason,
-      segment,
-    );
-    if (!delivered) {
-      // R9-1: the run can still terminalize as cancelled or failed DURING
-      // the delivery above; `closeOutput` then answers false on
-      // terminality, and the fallback would POST the baked receipts after
-      // the terminal card.
-      if (presenter.acceptsLateDelivery(segment.runId)) {
-        // R10-3: a run COMPLETING during the prepare finalizes the
-        // continuity card retaining this segment's content; the fallback
-        // would deliver the same content a second time. Files already went
-        // out above. The retained flag settles only when that finalization
-        // resolves, so await the settlement instead of racing it.
-        await presenter.terminalSettled(segment.runId);
-        if (!presenter.terminalCardRetained(segment.runId, segment.segmentId)) {
-          // The files already went out above — the fallback must not resend
-          // them.
-          await this.sendPreparedResponse(
-            chatId,
-            { ...prepared, text: outgoingText, files: [] },
-            sessionId,
-          );
+      // R7-1: with block streaming on, every block of this segment was already
+      // delivered (and its markers uploaded) through `sendResponseMessage`. The
+      // constructor withholds `sendFallback` and status cards in this mode, so
+      // `closeOutput` below answers false and the plain-delivery fallback would
+      // re-upload and re-send the whole accumulated segment on top of the
+      // streamed copy. Mirror the constructor gating: display-close only.
+      if (this.config.blockStreaming === 'on') {
+        await presenter.closeOutput(segment.segmentId, '', reason, segment);
+        return;
+      }
+      // R16-2: source the markers from the unbounded delivery accumulation,
+      // not the presenter's `segmentContent` — that is tail-kept at
+      // CONTENT_LIMIT for display, so a marker emitted early in a longer
+      // segment falls out of the head there: the file silently never ships,
+      // with no receipt and no failure notice.
+      const content = this.segmentDeliveryText
+        .get(sessionId)
+        ?.get(segment.segmentId);
+      if (!content || findFileMarkers(content).length === 0) {
+        await presenter.closeOutput(segment.segmentId, '', reason, segment);
+        return;
+      }
+      let prepared: PreparedDingTalkOutput;
+      try {
+        prepared = await this.prepareOutgoingContent(content);
+      } catch (error) {
+        // A failed token fetch or unreadable image must not strand the
+        // segment's text — deliver it display-sanitized, as before.
+        process.stderr.write(
+          `[DingTalk:${this.name}] boundary segment preparation failed: ${sanitizeLogText(
+            error instanceof Error ? error.message : String(error),
+            300,
+          )}\n`,
+        );
+        await presenter.closeOutput(segment.segmentId, '', reason, segment);
+        return;
+      }
+      // R7-3: a run terminated as cancelled or failed while the upload was in
+      // flight must not be delivered after its terminal card. R8-4: gate on the
+      // terminal REASON, not bare terminality — a run COMPLETING mid-upload is
+      // still a valid delivery target, and the bare gate dropped its files.
+      if (!presenter.acceptsLateDelivery(segment.runId)) {
+        // R9-2: still hand the segment to `closeOutput` — the bare return
+        // leaked its presentation in the presenter's `segments` map forever.
+        await presenter.closeOutput(segment.segmentId, '', reason, segment);
+        return;
+      }
+      // R8-1 (mirrors R2-5): deliver BEFORE the display finalizes. `closeOutput`
+      // bakes `prepared.text` — receipts included — into a surface it can no
+      // longer amend, so a `sendReplyFiles` failure landing after it left a
+      // permanent receipt for a file that never arrives, with no correction.
+      let outgoingText = prepared.text;
+      let deliveryError: DingTalkDeliveryError | undefined;
+      try {
+        // R14-3: pass the baked text as the receipt carrier so a failure
+        // whose notice LANDS rewrites the receipt before `closeOutput`
+        // finalizes it into the surface.
+        ({ text: outgoingText, deliveryError } = await this.sendReplyFiles(
+          chatId,
+          prepared.files,
+          prepared.text,
+        ));
+      } catch (error) {
+        // R10-1: the throw used to exit before `closeOutput`, leaking the
+        // segment's presentation in the presenter's `segments` map forever
+        // and never delivering even the display-sanitized text. The empty
+        // text keeps R8-1's intent — the fallback sanitizer strips markers,
+        // so no receipt survives the failed delivery.
+        // R15-1: throwing here cannot fail the turn — the only production
+        // caller swallows hook errors. Record it for `onResponseComplete`.
+        // R16-1: record BEFORE the display close — `closeOutput` can reject
+        // when no card is live (its fallback POSTs over the same webhook),
+        // and a rejection escaping there is swallowed by ChannelBase's
+        // catch-and-log: the turn would book completed with the file and
+        // the notice both lost.
+        this.pendingBoundaryFailures.set(sessionId, error);
+        try {
+          await presenter.closeOutput(segment.segmentId, '', reason, segment);
+        } catch (closeError) {
+          this.logBoundaryCloseFailure(closeError);
+        }
+        return;
+      }
+      // R16-1: record as soon as the notice is known lost, before the
+      // throwable display-close and fallback awaits below — the same
+      // masking hazard as the catch arm.
+      if (deliveryError) {
+        this.pendingBoundaryFailures.set(sessionId, deliveryError);
+      }
+      let delivered = false;
+      try {
+        delivered = await presenter.closeOutput(
+          segment.segmentId,
+          outgoingText,
+          reason,
+          segment,
+        );
+      } catch (closeError) {
+        this.logBoundaryCloseFailure(closeError);
+      }
+      if (!delivered) {
+        // R9-1: the run can still terminalize as cancelled or failed DURING
+        // the delivery above; `closeOutput` then answers false on
+        // terminality, and the fallback would POST the baked receipts after
+        // the terminal card.
+        if (presenter.acceptsLateDelivery(segment.runId)) {
+          // R10-3: a run COMPLETING during the prepare finalizes the
+          // continuity card retaining this segment's content; the fallback
+          // would deliver the same content a second time. Files already went
+          // out above. The retained flag settles only when that finalization
+          // resolves, so await the settlement instead of racing it.
+          await presenter.terminalSettled(segment.runId);
+          if (
+            !presenter.terminalCardRetained(segment.runId, segment.segmentId)
+          ) {
+            // The files already went out above — the fallback must not resend
+            // them.
+            try {
+              await this.sendPreparedResponse(
+                chatId,
+                { ...prepared, text: outgoingText, files: [] },
+                sessionId,
+              );
+            } catch (fallbackError) {
+              this.logBoundaryCloseFailure(fallbackError);
+            }
+          }
         }
       }
-    }
-    // Mirror `deliverPreparedReply`: deliver the corrected text first,
-    // then fail the turn when the corrective notice itself never landed —
-    // recorded, not thrown (R15-1), because the production caller swallows
-    // hook errors; `onResponseComplete` rethrows it.
-    if (deliveryError) {
-      this.pendingBoundaryFailures.set(sessionId, deliveryError);
+      // Mirror `deliverPreparedReply`: deliver the corrected text first,
+      // then fail the turn when the corrective notice itself never landed —
+      // recorded, not thrown (R15-1), because the production caller swallows
+      // hook errors; `onResponseComplete` rethrows it.
+    } finally {
+      this.segmentDeliveryText.get(sessionId)?.delete(segment.segmentId);
     }
   }
 
   protected override onResponseChunk(
     _chatId: string,
     chunk: string,
-    _sessionId: string,
+    sessionId: string,
     segment?: ChannelOutputSegmentContext,
   ): void {
-    if (segment) this.interactionPresenter?.appendOutput(segment, chunk);
+    if (!segment) return;
+    this.interactionPresenter?.appendOutput(segment, chunk);
+    // R16-2: keep the delivery-scoped copy the boundary close sources its
+    // markers from — the presenter's copy is display-bounded.
+    const segments = this.segmentDeliveryText.get(sessionId);
+    if (segments) {
+      segments.set(
+        segment.segmentId,
+        (segments.get(segment.segmentId) ?? '') + chunk,
+      );
+    } else {
+      this.segmentDeliveryText.set(
+        sessionId,
+        new Map([[segment.segmentId, chunk]]),
+      );
+    }
   }
 
   protected override async presentUserInputRequest(
@@ -2767,8 +2907,16 @@ export class DingtalkChannel extends ChannelBase {
         // render that failure state — the default card-less deployment and
         // `statusCard.enabled=false` have no other surface, and the apology
         // is the recipient's only feedback there (and whenever the rejection
-        // is content-specific rather than a dead webhook).
-        if (err instanceof DingTalkDeliveryError && this.statusCardController)
+        // is content-specific rather than a dead webhook). R16-4: existence
+        // is a PER-RUN question — a run the presenter never registered
+        // (missing or evicted inbound correlation) ensures no card even
+        // with the controller enabled, so the gate reads the surface record
+        // the registered runs leave instead of the feature flag.
+        if (
+          err instanceof DingTalkDeliveryError &&
+          msgId !== undefined &&
+          this.cardSurfaceInboundMessages.delete(msgId)
+        )
           return;
         this.sendMessage(
           chatId,

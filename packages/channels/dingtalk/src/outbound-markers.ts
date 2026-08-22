@@ -29,11 +29,20 @@ const MARKER_NAME_GROUP = `(?:${MEDIA_MARKER_PREFIXES.join('|')})`;
  * construction.
  */
 function opensMediaMarker(text: string, open: number): boolean {
-  const rest = text.slice(open + 1);
-  const eol = rest.search(/[\r\n]/u);
-  const line = (eol === -1 ? rest : rest.slice(0, eol)).toUpperCase();
-  const trimmed = line.replace(/^[^\S\r\n]+/u, '');
-  return MEDIA_MARKER_PREFIXES.some((prefix) => trimmed.startsWith(prefix));
+  let index = open + 1;
+  while (index < text.length && /[^\S\r\n]/u.test(text[index]!)) index++;
+  let upper = '';
+  while (index < text.length) {
+    const char = text[index]!;
+    if (char === '\r' || char === '\n') return false;
+    upper += char.toUpperCase();
+    index++;
+    if (MEDIA_MARKER_PREFIXES.includes(upper)) return true;
+    if (!MEDIA_MARKER_PREFIXES.some((prefix) => prefix.startsWith(upper))) {
+      return false;
+    }
+  }
+  return false;
 }
 
 /**
@@ -222,6 +231,49 @@ function balancedMarkerEnd(text: string, open: number): number {
 }
 
 /**
+ * The marker shape of the span opening at `open`, classified against the cut
+ * at `start` by one capped index walk over the ORIGINAL text (R16-3): the
+ * per-bracket slice/uppercase copies of the retained window were the
+ * truncation guard's quadratic factor on a single-line run of unclosed
+ * brackets. A `same-line-*` verdict carries no newline between the bracket
+ * and the cut; `cross-line-named` means the cut sits on a later line but the
+ * span's own line still starts with a full marker name; `undefined` means
+ * the span is not marker-shaped. Case folds one source character at a time
+ * exactly as the recognition gates do (R6-2).
+ */
+function markerSpanShape(
+  text: string,
+  open: number,
+  start: number,
+): 'same-line-prefix' | 'same-line-named' | 'cross-line-named' | undefined {
+  let index = open + 1;
+  while (index < start && /[^\S\r\n]/u.test(text[index]!)) index++;
+  let upper = '';
+  while (index < start) {
+    const char = text[index]!;
+    if (char === '\r' || char === '\n') {
+      return MEDIA_MARKER_PREFIXES.includes(upper)
+        ? 'cross-line-named'
+        : undefined;
+    }
+    upper += char.toUpperCase();
+    index++;
+    if (MEDIA_MARKER_PREFIXES.includes(upper)) {
+      for (let rest = index; rest < start; rest++) {
+        if (text[rest] === '\r' || text[rest] === '\n') {
+          return 'cross-line-named';
+        }
+      }
+      return 'same-line-named';
+    }
+    if (!MEDIA_MARKER_PREFIXES.some((prefix) => prefix.startsWith(upper))) {
+      return undefined;
+    }
+  }
+  return 'same-line-prefix';
+}
+
+/**
  * Marker openings are recognised only when the whole marker fits on one line,
  * matching {@link mediaMarkerPattern}. An empty candidate (the cut landing
  * between `[` and `FILE:`) is a valid prefix of every marker name and must
@@ -229,115 +281,103 @@ function balancedMarkerEnd(text: string, open: number): number {
  * `FILE: /abs/path]` fragment that no downstream sanitizer can recognise.
  */
 function markerSafeTruncationStart(text: string, start: number): number {
-  const before = text.slice(0, start);
-  // R4-5/R4-6: examine EVERY bracket still unclosed at the cut, rightmost
-  // first — not just the brackets after the last `]` before it. A nested `]`
-  // anywhere before the cut used to stop the walk (the `open > lastClose`
-  // gate), and a walk that hit a non-marker span used to settle for the raw
-  // cut — both left the cut inside an enclosing bracketed marker, retaining
-  // a bracket-less path fragment no sanitizer recognises. Only brackets still
-  // OPEN at the cut can contain it, so pair brackets forward and walk the
-  // survivors; a genuine prose bracket contributes nothing and the walk
-  // simply passes it, so the bare-`[` collapse the old `return start` guarded
-  // against cannot reappear.
   const unclosed: number[] = [];
   for (let i = 0; i < start; i++) {
     const char = text[i];
     if (char === '[') unclosed.push(i);
     else if (char === ']' && unclosed.length > 0) unclosed.pop();
   }
-  while (unclosed.length > 0) {
-    const open = unclosed.pop()!;
-    const candidate = before.slice(open + 1);
-    const candidateNewline = candidate.search(/[\r\n]/u);
-    if (candidateNewline === -1) {
-      // Trim leading whitespace: a spaced opening (`[ FILE: …`) is still
-      // marker-shaped, and a cut inside its name must not leave a
-      // bracket-less ` FILE: /abs/path]` tail no sanitizer recognises.
-      const normalized = candidate.toUpperCase().replace(/^[^\S\r\n]+/u, '');
-      if (
-        MEDIA_MARKER_PREFIXES.some(
-          (prefix) =>
-            prefix.startsWith(normalized) || normalized.startsWith(prefix),
-        )
-      ) {
-        const close = text.indexOf(']', start);
-        const newline = text
-          .slice(start, close === -1 ? undefined : close)
-          .search(/[\r\n]/u);
-        if (close === -1 || newline !== -1) {
-          // R1-7: no same-line close, so the cut sits inside an UNCLOSED
-          // marker. Returning raw `start` dropped the opening `[` and left a
-          // bare `FILE: /abs/path` fragment that no sanitizer recognises —
-          // truncation defeating the stripper and leaking the full path.
-          //
-          // Only for a span that really opens a marker, though. An empty
-          // candidate (the cut landing right after a `[`) prefix-matches
-          // every marker name vacuously, so a prose bracket would take this
-          // branch too and discard the whole retained window — the bare-`[`
-          // collapse that turned a 28k answer into the truncation marker
-          // alone. A span that is not marker-shaped keeps the walk moving
-          // left instead (R4-6).
-          //
-          // R2-7: advance exactly as far as the display stripper strips —
-          // including a path line on the next line — so a cross-line marker
-          // never deposits a bare path at the head of the retained tail.
-          if (!opensMediaMarker(text, open)) continue;
-          return partialMarkerResidueEnd(text, open);
-        }
-        // R1-11: only skip when the span really completes a marker. A prose
-        // bracket like `[IMAGE [FILE: /p]` prefix-matches too, and jumping to
-        // the next `]` swallowed an intact marker that was fully inside the
-        // retained window — the file then silently never shipped. A spaced
-        // opening completes for this purpose even though the finder never
-        // delivers it: keeping the raw cut can leave ` FILE: /abs/path]` —
-        // no leading bracket for any sanitizer to recognise.
-        const completed = `[${candidate}${text.slice(start, close)}]`;
-        if (!COMPLETED_MARKER_PATTERN.test(completed)) {
-          // R2-12: a bracketed path (`[FILE: /etc/passwd [b] c]`) fails the
-          // strict completed regex above, yet it still genuinely opens a
-          // marker. Returning the raw cut here dropped the opening bracket
-          // and retained a bracket-less `FILE: /abs/path …` fragment that no
-          // downstream sanitizer recognises. A span that is not marker-shaped
-          // keeps the walk moving left instead (R4-6).
-          if (!opensMediaMarker(text, open)) continue;
-          // R3-8: advance past the span's balanced bracket extent so the
-          // content after a bracketed marker survives. R4-4 — unless the
-          // residue continues past that extent on the same line: for shapes
-          // like `[FILE: /a [b]] /secret/c.pdf]` the balanced close is the
-          // EARLY close of a nested extent, and everything after it up to
-          // end-of-line is the bracket-less path fragment the display
-          // stripper removes. A dangling `]` there is the tell — with one,
-          // advance exactly as far as the stripper strips (R2-7); without
-          // one, the tail is bracket-free prose the stripper also keeps.
-          const balanced = balancedMarkerEnd(text, open);
-          const restAfter = text.slice(balanced);
-          const lineBreak = restAfter.search(/[\r\n]/u);
-          const sameLineTail =
-            lineBreak === -1 ? restAfter : restAfter.slice(0, lineBreak);
-          if (sameLineTail.includes(']')) {
-            return partialMarkerResidueEnd(text, open);
-          }
-          return balanced;
-        }
-        return close + 1;
-      }
-    } else {
-      // R2-7: the cut sits on a later line of a marker whose first line never
-      // closed (`[FILE:\n/path…`). The stripper consumes that shape through
-      // the path line; mirror it, or a bare path fragment starts the tail.
-      const firstLine = candidate.slice(0, candidateNewline).toUpperCase();
-      const trimmedFirst = firstLine.replace(/^[^\S\r\n]+/u, '');
-      if (
-        MEDIA_MARKER_PREFIXES.some((prefix) => trimmedFirst.startsWith(prefix))
-      ) {
-        const end = partialMarkerResidueEnd(text, open);
-        // The residue can stop at the marker's own line, which precedes a cut
-        // already past it; the prose tail from `start` is safe, and moving
-        // backwards would break the `<= limit` guarantee.
-        return Math.max(start, end);
+  // R16-3: hoisted out of the per-bracket walk — the first close after the
+  // cut and the cut-to-close newline probe are the same for every bracket,
+  // and {@link markerSpanShape} reads the ORIGINAL text by index with a
+  // name-length cap instead of copying the retained window per bracket.
+  const close = text.indexOf(']', start);
+  let cutToCloseCrossesLine = false;
+  if (close !== -1) {
+    for (let i = start; i < close; i++) {
+      if (text[i] === '\r' || text[i] === '\n') {
+        cutToCloseCrossesLine = true;
+        break;
       }
     }
+  }
+  // R4-5/R4-6: examine EVERY bracket still unclosed at the cut, rightmost
+  // first — not just the brackets after the last `]` before it. Only
+  // brackets still OPEN at the cut can contain it, so pair brackets forward
+  // and walk the survivors; a genuine prose bracket contributes nothing and
+  // the walk simply passes it, so the bare-`[` collapse the old
+  // `return start` guarded against cannot reappear.
+  while (unclosed.length > 0) {
+    const open = unclosed.pop()!;
+    const shape = markerSpanShape(text, open, start);
+    if (shape === undefined) continue;
+    if (shape === 'cross-line-named') {
+      // R2-7: the cut sits on a later line of a marker whose first line
+      // never closed (`[FILE:\n/path…`). The stripper consumes that shape
+      // through the path line; mirror it, or a bare path fragment starts the
+      // tail.
+      const end = partialMarkerResidueEnd(text, open);
+      // The residue can stop at the marker's own line, which precedes a cut
+      // already past it; the prose tail from `start` is safe, and moving
+      // backwards would break the `<= limit` guarantee.
+      return Math.max(start, end);
+    }
+    if (close === -1 || cutToCloseCrossesLine) {
+      // R1-7: no same-line close, so the cut sits inside an UNCLOSED
+      // marker. Returning raw `start` dropped the opening `[` and left a
+      // bare `FILE: /abs/path` fragment that no sanitizer recognises —
+      // truncation defeating the stripper and leaking the full path.
+      //
+      // Only for a span that really opens a marker, though. An empty
+      // candidate (the cut landing right after a `[`) prefix-matches every
+      // marker name vacuously, so a prose bracket would take this branch
+      // too and discard the whole retained window — the bare-`[` collapse
+      // that turned a 28k answer into the truncation marker alone. A span
+      // that is not marker-shaped keeps the walk moving left instead
+      // (R4-6).
+      //
+      // R2-7: advance exactly as far as the display stripper strips —
+      // including a path line on the next line — so a cross-line marker
+      // never deposits a bare path at the head of the retained tail.
+      if (!opensMediaMarker(text, open)) continue;
+      return partialMarkerResidueEnd(text, open);
+    }
+    // R1-11: only skip when the span really completes a marker. A prose
+    // bracket like `[IMAGE [FILE: /p]` prefix-matches too, and jumping to
+    // the next `]` swallowed an intact marker that was fully inside the
+    // retained window — the file then silently never shipped. A spaced
+    // opening completes for this purpose even though the finder never
+    // delivers it: keeping the raw cut can leave ` FILE: /abs/path]` — no
+    // leading bracket for any sanitizer to recognise.
+    const completed = `[${text.slice(open + 1, close)}]`;
+    if (!COMPLETED_MARKER_PATTERN.test(completed)) {
+      // R2-12: a bracketed path (`[FILE: /etc/passwd [b] c]`) fails the
+      // strict completed regex above, yet it still genuinely opens a
+      // marker. Returning the raw cut here dropped the opening bracket and
+      // retained a bracket-less `FILE: /abs/path …` fragment that no
+      // downstream sanitizer recognises. A span that is not marker-shaped
+      // keeps the walk moving left instead (R4-6).
+      if (!opensMediaMarker(text, open)) continue;
+      // R3-8: advance past the span's balanced bracket extent so the
+      // content after a bracketed marker survives. R4-4 — unless the
+      // residue continues past that extent on the same line: for shapes
+      // like `[FILE: /a [b]] /secret/c.pdf]` the balanced close is the
+      // EARLY close of a nested extent, and everything after it up to
+      // end-of-line is the bracket-less path fragment the display stripper
+      // removes. A dangling `]` there is the tell — with one, advance
+      // exactly as far as the stripper strips (R2-7); without one, the
+      // tail is bracket-free prose the stripper also keeps.
+      const balanced = balancedMarkerEnd(text, open);
+      const restAfter = text.slice(balanced);
+      const lineBreak = restAfter.search(/[\r\n]/u);
+      const sameLineTail =
+        lineBreak === -1 ? restAfter : restAfter.slice(0, lineBreak);
+      if (sameLineTail.includes(']')) {
+        return partialMarkerResidueEnd(text, open);
+      }
+      return balanced;
+    }
+    return close + 1;
   }
   return start;
 }

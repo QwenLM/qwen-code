@@ -165,6 +165,29 @@ export function sanitizeMediaMarkersToStable(
   return sanitizeFileMarkersToFixedPoint(sanitized);
 }
 
+/**
+ * R16-5: strip FILE residue off the MODEL text, before images bake. Residue
+ * stripping extends an ill-formed `[FILE:` opening to END OF LINE; run over
+ * baked text it deletes an already-uploaded image's `![image](mediaId)`
+ * markdown sharing the line — quota billed, never rendered, no receipt or
+ * notice. Confined to the gaps between deliverable markers exactly like the
+ * R9-3 receipt pass, so a residue line that also carries a deliverable
+ * marker keeps it; an image marker inside a genuine residue span simply
+ * shares the span's fail-closed removal and is never uploaded.
+ */
+export function stripPartialFileMarkerBeforeBake(text: string): string {
+  const markers = findFileMarkers(text);
+  if (markers.length === 0) return stripPartialFileMarker(text);
+  let sanitized = '';
+  let previousEnd = 0;
+  for (const marker of markers) {
+    sanitized += stripPartialFileMarker(text.slice(previousEnd, marker.start));
+    sanitized += text.slice(marker.start, marker.end);
+    previousEnd = marker.end;
+  }
+  return sanitized + stripPartialFileMarker(text.slice(previousEnd));
+}
+
 export function safeFileName(filePath: string): string {
   const sanitized = basename(filePath)
     // `\p{Cf}` covers the enumerated bidi overrides and isolates along with the
