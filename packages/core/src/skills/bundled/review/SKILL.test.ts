@@ -681,6 +681,38 @@ describe('bundled review skill', () => {
     expect(body).not.toContain('`pr-context`, `comment-status`, `presubmit`');
   });
 
+  it('keeps the corrected Aone --comment contract, not merge residue', () => {
+    // The merge that became this PR's head committed conflict markers and a
+    // STALE variant of the `--comment` bullet back-to-back with the corrected
+    // one (R8-1). The stale variant claims a blanket verdict cap and orders
+    // an unbounded drift re-review — contradicting the implementation:
+    // compose-review caps only APPROVE, submit's drift re-review stops at the
+    // once-per-review restart bound, and submit prints the could-not-re-verify
+    // warning the relay names. Re-resolving the merge against the stale side
+    // must fail here, not slip through.
+    const body = skillBody();
+    // No merge-conflict residue anywhere: a bare `=======` under a bullet
+    // list parses as a setext-heading underline and `>>>>>>>` renders as a
+    // blockquote, silently restructuring the instructions a review runs on.
+    expect(body).not.toMatch(/^(<{7}|={7}|>{7})/m);
+    // The cap keeps an Approve at Comment; a Request-changes verdict still
+    // posts its blocking summary — not the stale bullet's blanket cap.
+    expect(body).toContain(
+      'the context-unavailable cap keeps an **Approve** verdict at Comment (a Request-changes verdict still posts its blocking summary)',
+    );
+    expect(body).not.toContain('which caps the verdict at');
+    // The drift re-review is bounded by the once-per-review restart bound;
+    // the stale variant ordered it unconditionally.
+    expect(body).toContain(
+      'but ONLY while the per-review head-movement restart bound is unspent',
+    );
+    // The could-not-re-verify relay the corrected variant adds: submit
+    // prints the warning on both the success and the mid-batch-failure path.
+    expect(body).toContain(
+      'WARNING: could not re-verify the MR head after posting',
+    );
+  });
+
   it('mandates the review-agent subagent type, never general-purpose', () => {
     // This literal is the whole delivery mechanism for the explicit tool list.
     // `general-purpose` declares no `tools`, so it takes prepareTools'
