@@ -3156,6 +3156,34 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(p).toContain('fixes, closes, resolves, or implements');
   });
 
+  it('pins the goal-mechanism lenses — the incident replay in Agent 0, the TIME axis in 1c', () => {
+    // Lens prose lives only in agent-briefs.ts: a deletion ships green unless
+    // the load-bearing clauses are pinned literally (the enumeration-trap
+    // precedent above; this file's own comments record deletions that shipped
+    // green). Both lenses exist because of a replay nobody ran (#9655) — a
+    // silently deleted lens is the same failure one level up.
+    const planPath = join(resolve('/x'), 'qwen-review-pr-6766-fetch.json');
+    const p0 = buildRoleBrief(PR_PLAN, '0', { planPath });
+    // The duty and its subject: the incident is replayed against the
+    // post-change workflow, not re-narrated.
+    expect(p0).toContain('replay it against the post-change workflow');
+    // The un-gating: closing-keyword formality does not void the duty.
+    expect(p0).toContain('does not empty the replay duty');
+    // The return contract that makes a skipped replay distinguishable from a
+    // performed one — the empty-scope return must carry the replay's outcome.
+    expect(p0).toContain('the step that changes, or the reason none does');
+    const p1c = buildRoleBrief(PR_PLAN, '1c');
+    expect(p1c).toContain('Reachability has a TIME axis too');
+    // The finding format is the whole trace; drop it and the lens degrades to
+    // a vibe about ordering.
+    expect(p1c).toContain('produced at X, needed at Y, Y precedes X');
+    // The verifier side of the same weld: a replay finding must not be
+    // downgraded for lacking issue evidence — without this clause the lens's
+    // product is terminal-only in the exact case it was written for.
+    const pv = buildRoleBrief(PR_PLAN, 'verify');
+    expect(pv).toContain("replay finding grounds in the PR's own narrative");
+  });
+
   it('welds --host into the Agent 0 command when the plan carries an Enterprise host', () => {
     const planPath = join(resolve('/x'), 'qwen-review-pr-6766-fetch.json');
     const p = buildRoleBrief({ ...PR_PLAN, host: 'ghe.example.com' }, '0', {
