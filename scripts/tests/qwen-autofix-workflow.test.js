@@ -499,11 +499,29 @@ describe('qwen-autofix workflow', () => {
       'review-address already in flight or queued — skipping',
     );
     // The live-run listing filters status SERVER-side (in_progress + queued
-    // union): a client-side filter over the N newest runs loses a long-lived
-    // fanned-out run once cron traffic pushes it past the window, and its
-    // queued PRs silently stop looking busy.
-    expect(reviewScanJob).toContain('for LIVE_STATUS in in_progress queued');
-    expect(reviewScanJob).toContain('--status "${LIVE_STATUS}" --limit 50');
+    // + pending union): a client-side filter over the N newest runs loses a
+    // long-lived fanned-out run once cron traffic pushes it past the window,
+    // and its queued PRs silently stop looking busy. 'pending' is part of the
+    // union because GitHub reports a run neither queued nor in_progress while
+    // its jobs wait on concurrency groups (#9596).
+    expect(reviewScanJob).toContain(
+      'for LIVE_STATUS in in_progress queued pending',
+    );
+    // The union calls the runs API directly, not `gh run list --status`: gh
+    // validates that flag against a client-side allow-list that rejects
+    // 'pending' before 2.65.0, so a runner whose gh lags the hosted images
+    // would exit 1 and silently fail-close EVERY scan; the API filter is
+    // server-side on every gh version. The jq filter must read the REST
+    // envelope's `id` — the gh-CLI `databaseId` field does not exist in the
+    // API payload, and an empty read would silently un-busy every scan.
+    expect(reviewScanJob).toContain(
+      'gh api "repos/${REPO}/actions/workflows/qwen-autofix.yml/runs?status=${LIVE_STATUS}&per_page=50"',
+    );
+    expect(reviewScanJob).toContain("--jq '.workflow_runs[].id'");
+    expect(reviewScanJob).not.toContain('.workflow_runs[].databaseId');
+    expect(reviewScanJob).not.toContain(
+      'gh run list --repo "${REPO}" --workflow qwen-autofix.yml',
+    );
     expect(reviewScanJob).not.toContain('--limit 15');
     // The busy-set cannot see a sibling scan that has not yet emitted its
     // matrix, so review-address REVALIDATES the watermark against LIVE
@@ -3967,7 +3985,7 @@ describe('qwen-autofix workflow', () => {
             '  esac',
             'done',
             'set -- "${positional[@]}"',
-            'if [[ "$1" == "run" && "$2" == "list" ]]; then',
+            'if [[ "$1" == "api" ]]; then',
             '  if [[ -n "${ENUM_LIST_ERROR}" ]]; then printf \'%s\' "${ENUM_LIST_ERROR}" >&2; exit 1; fi',
             '  payload="${ENUM_LIST_ANSWER}"',
             'elif [[ "$1" == "run" && "$2" == "view" ]]; then',
@@ -4032,7 +4050,7 @@ describe('qwen-autofix workflow', () => {
     expect(listFailed.fleet).toContain('HTTP 502: bad gateway');
     // A jobs-view failure mid-enumeration fails closed the same way.
     const viewFailed = runEnum({
-      listAnswer: JSON.stringify([{ databaseId: 101 }]),
+      listAnswer: JSON.stringify({ workflow_runs: [{ id: 101 }] }),
       viewError: 'HTTP 500',
     });
     expect(viewFailed.candidates).toBe('');
@@ -4040,7 +4058,7 @@ describe('qwen-autofix workflow', () => {
     expect(viewFailed.fleet).toContain('HTTP 500');
     // A healthy enumeration accumulates the busy set and keeps candidates.
     const ok = runEnum({
-      listAnswer: JSON.stringify([{ databaseId: 101 }]),
+      listAnswer: JSON.stringify({ workflow_runs: [{ id: 101 }] }),
       viewAnswer: JSON.stringify({
         jobs: [
           { name: 'review-address (101, round 2)', status: 'in_progress' },
@@ -11871,18 +11889,22 @@ exit 1
       'GHCR returned at least 1000 tags',
     );
     expect(sandboxImageResolverScript).toContain('latestSemverTag(tags)');
+    // The pull and the inspect share ONE spawn guard (#9527 review): these
+    // pin the shared helper's wiring — endpoint pin, timeout, start-failure
+    // and exit reporting — plus the pull's label, not per-callsite copies.
     expect(sandboxImageResolverScript).toContain(
-      "spawn(command, ['pull', image]",
+      "spawnDockerCapture(command, ['pull', image]",
     );
-    expect(sandboxImageResolverScript).toContain('Timed out pulling ${image}');
+    expect(sandboxImageResolverScript).toContain('env: sandboxSpawnEnv(),');
+    expect(sandboxImageResolverScript).toContain('pulling ${image}');
     expect(sandboxImageResolverScript).toContain(
-      '::error::Timed out pulling ${image}',
+      '::error::Timed out ${label} after ${timeoutMs / 1000}s.',
     );
     expect(sandboxImageResolverScript).toContain(
-      "Failed to start '${command} pull ${image}'",
+      "::error::Failed to start '${command} ${args.join(' ')}': ${error.message}",
     );
     expect(sandboxImageResolverScript).toContain(
-      "::error::'${command} pull ${image}' exited with code ${code}",
+      "::error::'${command} ${args.join(' ')}' exited with code ${code}.",
     );
     expect(sandboxImageResolverScript).toContain(
       '::warning::Falling back from ${requestedImage} to latest GHCR semver ${fallbackImage}',
