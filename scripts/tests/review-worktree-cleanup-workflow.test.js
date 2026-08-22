@@ -181,6 +181,17 @@ describe('review worktree cleanup steps', () => {
     expect(reviewCleanStep).toContain(
       `rm -f ${toPosix(REVIEW_TMP_DIR)}/${LEASE_PREFIX}pr-*.json`,
     );
+    // A failed rm must not be left to poison the next job's checkout: the
+    // sweep owns its own permission repair — chmod, then passwordless sudo
+    // chown/chmod where the pool member has it — and retries the removal per
+    // leftover entry (measured, run 32577821716 / PR #9718: a foreign-owned
+    // scratch-verify tree killed the next review at checkout with EACCES).
+    // Pin the ladder so a rewrite cannot silently drop it back to
+    // warn-and-leave.
+    const reviewCleanCode = stripComments(reviewCleanStep);
+    expect(reviewCleanCode).toContain('chmod -R u+rwX');
+    expect(reviewCleanCode).toContain('sudo -n chown -R');
+    expect(reviewCleanCode).toContain('remove_review_tree "$leftover"');
   });
 
   it('keeps the pre-checkout agent-state sweep pinned to paths.ts', () => {

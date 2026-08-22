@@ -1842,6 +1842,20 @@ jobs:
       # the next job on this reused runner can delete qwen-review/* branches.
       # The sweep deletes all review artifacts, not just this PR's: safe because
       # a runner executes one job at a time.
+      #
+      # The removal owns its own permission repair. A containerised job on this
+      # shared pool can leave a review worktree owned by another uid and
+      # read-only (measured, run 32577821716 / PR #9718: a leftover
+      # scratch-verify tree held files this job's user could not unlink, and
+      # the NEXT review's checkout died on them with EACCES — both the
+      # pre-checkout ownership restore and the checkout's own wipe degraded
+      # because the runner had no passwordless sudo). A removal that gives up
+      # on the first EACCES re-poisons the next job, so a failed rm gets a
+      # repair ladder instead: chmod what this user owns, then passwordless
+      # sudo chown/chmod where the pool member has it, each followed by a
+      # retry. Members without sudo still degrade to a named warning —
+      # nothing unprivileged can remove a foreign-owned tree — but the heal
+      # chain must never fail the job.
       - name: 'Clean review worktrees'
         if: 'always()'
         timeout-minutes: 5
@@ -1853,6 +1867,45 @@ jobs:
           fi
 
           GIT_SAFE=(git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$GITHUB_WORKSPACE")
+
+          # The repair ladder for one leftover tree (see the step comment).
+          # A path that resolves through symlinks is refused rather than
+          # repaired: the sudo leg escalates to root, and a planted link
+          # would aim a chown/chmod -R outside the workspace.
+          remove_review_tree() {
+            local abs="$1"
+            case "$abs" in
+              /*) : ;;
+              *) abs="$GITHUB_WORKSPACE/$abs" ;;
+            esac
+            [ -e "$abs" ] || [ -L "$abs" ] || return 0
+            rm -rf "$abs" 2>/dev/null && return 0
+            # Refuse a path that resolves through symlinks, but compare
+            # against the workspace's OWN resolved path: an ancestor the
+            # workspace itself sits under (a macOS /tmp -> /private/tmp
+            # local run) is legitimate and must not read as a redirect —
+            # only a symlink planted BELOW the workspace does.
+            local ws_real rel
+            ws_real="$(realpath -- "$GITHUB_WORKSPACE" 2>/dev/null)" ||
+              ws_real="$GITHUB_WORKSPACE"
+            case "$abs" in
+              "$GITHUB_WORKSPACE"/*) rel="${abs#"$GITHUB_WORKSPACE/"}" ;;
+              *) rel='' ;;
+            esac
+            if [ -z "$rel" ] || [ -L "$abs" ] ||
+              [ "$(realpath -- "$abs" 2>/dev/null)" != "$ws_real/$rel" ]; then
+              echo "::warning::refusing to repair a review worktree path that resolves through symlinks: $abs"
+              return 0
+            fi
+            chmod -R u+rwX "$abs" 2>/dev/null || true
+            if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+              sudo -n chown -R "$(id -u):$(id -g)" "$abs" 2>/dev/null || true
+              sudo -n chmod -R u+rwX "$abs" 2>/dev/null || true
+            fi
+            rm -rf "$abs" 2>/dev/null && return 0
+            echo "::warning::could not remove review worktree: $abs (permission repair failed)"
+          }
+
           "${GIT_SAFE[@]}" worktree prune -v || true
           "${GIT_SAFE[@]}" worktree list --porcelain \
             | awk '$1 == "worktree" && index($0, "/.qwen/tmp/review-pr-") > 0 { sub(/^worktree /, ""); print }' \
@@ -1873,10 +1926,21 @@ jobs:
                     continue
                     ;;
                 esac
+                # `git worktree remove` unlinks entries the same way rm does,
+                # so a foreign-owned entry defeats it too; the repair ladder
+                # retries it, and whatever git still leaves behind goes through
+                # the same ladder below (registrations are pruned afterwards).
                 "${GIT_SAFE[@]}" worktree remove --force "$worktree" ||
-                  echo "::warning::could not remove review worktree: $worktree"
+                  remove_review_tree "$worktree"
               done || true
           rm -rf .qwen/tmp/review-pr-* 2>/dev/null || true
+          # Survivors of the glob are exactly the permission-poisoned trees;
+          # run each through the repair ladder individually so one poisoned
+          # entry cannot mask its siblings.
+          for leftover in .qwen/tmp/review-pr-*; do
+            [ -e "$leftover" ] || [ -L "$leftover" ] || continue
+            remove_review_tree "$leftover"
+          done
           "${GIT_SAFE[@]}" worktree prune -v || true
           "${GIT_SAFE[@]}" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
             | while read -r review_ref; do
