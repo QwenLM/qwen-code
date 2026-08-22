@@ -21,6 +21,7 @@ import {
   a1Once,
   a1VersionAtLeast,
   A1_MIN_VERSION,
+  aoneWhoamiAccount,
   ensureAoneAuthenticated,
   execErrorCause,
   parseA1Version,
@@ -261,6 +262,51 @@ describe("execErrorCause — the transport's ONE cause extraction", () => {
       'Unexpected token \'<\', "<html>502 "... is not valid JSON',
     );
     expect(execErrorCause(syntax)).toBe(syntax.message);
+  });
+});
+
+describe('aoneWhoamiAccount', () => {
+  // cleanup's Aone audit filters the comment list by this account. The
+  // tripwire invariant: an unreadable account THROWS — returning a blank
+  // would match no comment, and an audit that matches nothing reads
+  // exactly like a clean window (off state indistinguishable from
+  // all-clear). Every caller mock in cleanup.test.ts stubs this module, so
+  // the throw semantics are pinned HERE, at the seam that owns them.
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('returns the account field and rides the shared JSON seam', () => {
+    mockExecFileSync.mockReturnValue('{"account": "bob"}\n');
+    expect(aoneWhoamiAccount()).toBe('bob');
+    const args = mockExecFileSync.mock.calls[0][1] as string[];
+    expect(args).toEqual(['auth', 'whoami', '--format', 'json']);
+  });
+
+  it.each([
+    ['{}', 'no account field'],
+    ['{"account": ""}', 'empty account'],
+    ['{"account": "  "}', 'blank account'],
+    ['{"account": 5}', 'non-string account'],
+    // A literal null PARSES, so it clears the SyntaxError arm; property
+    // access on it then threw an untagged TypeError outside the shape
+    // check — every accountless answer must throw the command-tagged
+    // error, or the skip note names no command.
+    ['null', 'a literal null answer'],
+  ])('throws the named error on %s (%s)', (raw) => {
+    mockExecFileSync.mockReturnValue(raw);
+    expect(() => aoneWhoamiAccount()).toThrow(
+      'a1 auth whoami returned no account',
+    );
+  });
+
+  it('throws the command-tagged shape error when the answer is unparseable', () => {
+    // The raw SyntaxError named no command; the skip note must say WHAT
+    // failed, mirroring a1CommentList's unexpected-shape standard.
+    mockExecFileSync.mockReturnValue('not json');
+    expect(() => aoneWhoamiAccount()).toThrow(
+      'a1 auth whoami returned an unexpected shape',
+    );
   });
 });
 
