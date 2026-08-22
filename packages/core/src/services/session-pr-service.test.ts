@@ -317,15 +317,34 @@ describe('detectGhPrCreateBinding', () => {
     ).toEqual({ number: 9729, url });
   });
 
-  it('matches wrapped commands and the gh.exe spelling', () => {
+  it('matches wrapped commands, env prefixes, and pipes', () => {
     expect(
-      detectGhPrCreateBinding('bash -c "gh.exe pr create --fill"', url),
+      detectGhPrCreateBinding('cd /w && gh.exe pr create --fill', url),
+    ).toEqual({ number: 9729, url });
+    expect(
+      detectGhPrCreateBinding('GH_TOKEN=x gh pr create --fill | tee log', url),
     ).toEqual({ number: 9729, url });
   });
 
   it('returns undefined when the command is not gh pr create', () => {
     expect(detectGhPrCreateBinding('gh pr view 1', url)).toBeUndefined();
     expect(detectGhPrCreateBinding('git commit -m gh', url)).toBeUndefined();
+    // The phrase as a search argument is not an execution.
+    expect(
+      detectGhPrCreateBinding(`grep -rn 'gh pr create' .`, url),
+    ).toBeUndefined();
+  });
+
+  it('returns undefined for elided placeholder URLs', () => {
+    expect(
+      detectGhPrCreateBinding(
+        'gh pr create --fill',
+        'https://github.com/.../pull/8388',
+      ),
+    ).toBeUndefined();
+    expect(
+      detectGhPrCreateBinding('gh pr create --fill', 'https://.../pull/8388'),
+    ).toBeUndefined();
   });
 
   it('returns undefined for dry runs and failed creates (no URL)', () => {

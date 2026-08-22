@@ -126,22 +126,38 @@ export async function writeSessionPrs(
   await atomicWriteJSON(filePath, { prs } satisfies SessionPrList);
 }
 
-const GH_PR_CREATE_COMMAND_PATTERN = /\bgh(?:\.exe)?\s+pr\s+create\b/;
-const GH_PR_CREATE_URL_PATTERN = /https?:\/\/[^\s"'<>)]+\/pull\/(\d+)/;
+// `gh pr create` must START a command segment: a search like
+// `grep -rn 'gh pr create'` mentions the phrase as an argument and must not
+// count, while `cd /w && gh pr create` or `FOO=bar gh pr create | tee log`
+// do.
+const GH_PR_CREATE_SEGMENT_PATTERN =
+  /^\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*gh(?:\.exe)?\s+pr\s+create\b/;
+// The host must start with an alphanumeric so placeholder hosts never bind.
+const GH_PR_CREATE_URL_PATTERN =
+  /https?:\/\/[A-Za-z0-9][^\s"'<>)]*\/pull\/(\d+)/;
+
+function commandRunsGhPrCreate(command: string): boolean {
+  return command
+    .split(/&&|\|\||[;|]/)
+    .some((segment) => GH_PR_CREATE_SEGMENT_PATTERN.test(segment));
+}
 
 /**
- * Recognizes a `gh pr create` run from the shell tool: the command names the
- * action and gh prints the new PR's URL on success. Failed or `--dry-run`
- * runs print no URL, which is the false-positive gate.
+ * Recognizes a `gh pr create` run from the shell tool: some command segment
+ * executes the action and gh prints the new PR's URL on success. Failed or
+ * `--dry-run` runs print no URL, which is the false-positive gate.
  */
 export function detectGhPrCreateBinding(
   command: string,
   output: string,
 ): { number: number; url: string } | undefined {
-  if (!GH_PR_CREATE_COMMAND_PATTERN.test(command)) return undefined;
+  if (!commandRunsGhPrCreate(command)) return undefined;
   if (command.includes('--dry-run')) return undefined;
   const match = GH_PR_CREATE_URL_PATTERN.exec(output);
   if (!match) return undefined;
+  // Summarized output elides owner/repo (`https://github.com/.../pull/N`);
+  // such a URL is not a usable link target.
+  if (match[0].includes('...')) return undefined;
   return { number: Number(match[1]), url: match[0] };
 }
 
