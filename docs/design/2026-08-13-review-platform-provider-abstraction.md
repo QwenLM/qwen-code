@@ -446,6 +446,39 @@ Enterprise paragraph.
     open: dedup backing for Aone, `composeUrl`, the
     ai_comment marking flag (a1-side), the render-adjudication
     carve-out.
+  - **Residuals closed (2026-08-21, #9619):** three small gaps, one pass.
+    (a) `composeUrl` joined the reader interface — in the spirit of the
+    sketch's provider-owned URL composition, scoped to the `Posted:`
+    line (`(prNumber, ownerRepo)` → the PR/MR page URL; the sketch's
+    deeper comment-anchor variant stays future work): GitHub COMPOSES
+    the PR-page URL from the routed host (deterministic grammar, no API
+    call), normalised through the ONE host-spelling helper the comment
+    anchors use (`normalizeGhHostForUrl`), and `submit` fills a GitHub
+    receipt that carries no `html_url` through it. Aone is reader-backed
+    — the platform's own `detailUrl`, never assembled, because the
+    owner/repo collapse to the last two segments names a different repo
+    for a nested-group project — but Aone's `submit` does NOT re-query
+    through it: the pre-write drift-gate read already carries the same
+    stable field, so a second fetch cannot add a link (round-2 review
+    R1-4), and an empty receipt rides the coordinates relay. (b)
+    `test-plan`'s body fetch routes through the platform reader — the
+    MR description on Aone, already carried by the reader's fetch
+    metadata, so the check runs on Aone targets instead of being
+    skipped, and no new API surface landed; the Aone arm runs the same
+    `ensureAuthenticated` gate every other a1-backed flow runs first
+    (round-2 review R1-5), and the handler wiring is pinned by a
+    handler-level test (R1-6). (c) Q1's version floor is enforced in
+    `ensureAoneAuthenticated` — resolved to 0.1.90, the version the
+    platform facts were probed against (nothing older was verified);
+    presence → floor → auth, each with its own remedy; both fail-open
+    arms (failed probe, unparseable output) disclose on stderr with the
+    CAUSE extracted past the execFileSync preamble (R1-1), and the
+    composeUrl failure arm discloses too (R1-2). The floor check shares
+    the gate #9616's self-PR read passes through: `ensureAoneAuthenticated`
+    now returns the whoami account (`--format json`, one spawn), so the
+    version floor applies to the presubmit seam as well. Still open:
+    dedup backing for Aone, the ai_comment marking flag
+    (a1-side), the render-adjudication carve-out.
   - **Landed (2026-08-21, #9627): the dedup backing for Aone** —
     `comment-status` and `presubmit` route an Aone target at the a1 reads
     (`mr view` author+head, `mr status` gates, `mr comment list`,
@@ -458,8 +491,8 @@ Enterprise paragraph.
     NO commit anchor (code facts degrade to `unknown`; nothing is stale by
     commit), and drift has no compare API (anchorsAtRisk fails safe). The
     context-unavailable cap stays until `pr-context` lands. Still open:
-    pr-context Aone backing, `composeUrl`, cleanup audit, the ai_comment
-    marking flag (a1-side), the render-adjudication carve-out.
+    pr-context Aone backing, the ai_comment marking flag (a1-side), the
+    render-adjudication carve-out.
 - **Phase 4 — semantic gaps.** Incremental-cache ancestry fallback, build-test
   repo-config escape hatch, publish-assets gating polish, generic-GitLab
   (glab) evaluation.
@@ -507,8 +540,15 @@ Enterprise paragraph.
 
 ## Open questions
 
-1. **Q1 — a1 minimum version.** Which `a1` version introduced `mr comment
-create --file/--line` and `-f json` stability? Provider version floor TBD.
+1. **Q1 — a1 minimum version.** ~~Which `a1` version introduced `mr comment
+create --file/--line` and `-f json` stability? Provider version floor TBD.~~
+   Resolved (2026-08-21, #9619): the floor is **0.1.90** — the version the
+   platform facts above were probed against; nothing older was verified, and
+   the exact introducing version is not recoverable from outside Alibaba.
+   `ensureAoneAuthenticated` enforces it (presence → floor → auth) with an
+   actionable upgrade message; an unparseable `--version` and a failed
+   probe alike are disclosed on stderr and fail OPEN, never refusing an
+   a1 the check merely cannot read.
 2. **Q2 — Inline anchor semantics.** Does `--line` accept only new-side lines?
    How are removed-line (`side: left`) comments posted? Needs a controlled
    experiment on a scratch CR.

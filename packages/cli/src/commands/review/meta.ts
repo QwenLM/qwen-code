@@ -158,7 +158,7 @@ export const metaCommand: CommandModule = {
       .option('host', {
         type: 'string',
         describe:
-          "The host the target lives on. An Aone host (*.alibaba-inc.com) selects the a1 backend; omitted: detected from the clone's origin, else GitHub (GH_HOST, then github.com).",
+          "The host the target lives on. The canonical Aone hosts (code.alibaba-inc.com / gitlab.alibaba-inc.com) select the a1 backend — a non-canonical *.alibaba-inc.com host is a GitHub Enterprise instance and stays on gh; omitted: detected from the clone's origin, else GitHub (GH_HOST, then github.com).",
       }),
   handler: (argv) => {
     const prNumber = argv['pr_number'] as number | undefined;
