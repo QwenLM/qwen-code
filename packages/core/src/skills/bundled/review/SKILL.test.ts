@@ -461,7 +461,7 @@ describe('bundled review skill', () => {
     // taking the skill at its word placed the advisory and the observation
     // wherever seemed reasonable — and the ranks are the policy.
     expect(body).toContain(
-      'then the convergence observation, then the deferral display, then the residual-risk advisory, then the not-reviewed disclosures',
+      'then the mechanism-health note, then the convergence observation, then the deferral display, then the residual-risk advisory, then the not-reviewed disclosures',
     );
     // The other half of the policy. A "simplify the prose" edit turning
     // `never` into `last` would leave every prefix pin matching while the
@@ -497,7 +497,7 @@ describe('bundled review skill', () => {
     // the composed verdict and on stderr, which is why the trim line names
     // WHICH of the dropped kinds the summary is the only copy of.
     expect(body).toContain(
-      'both the observation and the residual-risk advisory ride the composed verdict',
+      'the mechanism-health note, the observation and the residual-risk advisory all ride the composed verdict',
     );
     expect(body).toContain(
       '**say in your Step 6 terminal summary what was trimmed and what it said.**',
@@ -658,5 +658,19 @@ describe('bundled review skill', () => {
     expect(body).toContain(
       'the URL a `pr-url` target carried, or else assemble',
     );
+  });
+
+  it('runs presubmit on Aone targets — self-PR backing, not the skip list', () => {
+    // Revert guard (#9616): presubmit used to sit on the Aone skip list and
+    // the skill carried the "self-PR detection has no Aone backing" caveat —
+    // a review of the user's own MR silently got no downgrade. The command
+    // is now backed for self-PR detection and head drift; restoring either
+    // the skip or the caveat must fail here, not slip through.
+    const body = skillBody();
+    expect(body).toContain('`presubmit` **runs on Aone targets too**');
+    expect(body).toContain('the `a1 auth whoami` account vs the MR author');
+    expect(body).toContain('self-PR detection and head drift are a1-backed');
+    expect(body).not.toContain('self-PR detection has no Aone backing');
+    expect(body).not.toContain('`pr-context`, `comment-status`, `presubmit`');
   });
 });

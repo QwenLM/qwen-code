@@ -345,6 +345,16 @@ function runDevelopIssue(dir, stub) {
   ]);
 }
 
+// The idle-timeout sentinel detail exactly as run-agent.mjs's template
+// emits it (with the observed 20-minute window filled in), and the retry
+// headline the report step builds from it via
+// CAUSE="ran out of time before finishing (${AGENT_TIMEOUT})".
+// Single-sourced so the composition test can tie the runner's emission to
+// these fixtures and to the workflow's classification needles.
+const IDLE_NOW =
+  'idle-timeout (no output for 1200000ms — the sandbox likely hung at startup)';
+const IDLE_HEAD = `🤖 AutoFix ran out of time before finishing (${IDLE_NOW}) (attempt 2/100) — it will retry on the next scan.`;
+
 describe('qwen-autofix workflow', () => {
   it('keeps ECS issue autofix limited to forced and ready-for-agent issues', () => {
     expect(workflow).toContain('autofixTier');
@@ -486,11 +496,29 @@ describe('qwen-autofix workflow', () => {
       'review-address already in flight or queued — skipping',
     );
     // The live-run listing filters status SERVER-side (in_progress + queued
-    // union): a client-side filter over the N newest runs loses a long-lived
-    // fanned-out run once cron traffic pushes it past the window, and its
-    // queued PRs silently stop looking busy.
-    expect(reviewScanJob).toContain('for LIVE_STATUS in in_progress queued');
-    expect(reviewScanJob).toContain('--status "${LIVE_STATUS}" --limit 50');
+    // + pending union): a client-side filter over the N newest runs loses a
+    // long-lived fanned-out run once cron traffic pushes it past the window,
+    // and its queued PRs silently stop looking busy. 'pending' is part of the
+    // union because GitHub reports a run neither queued nor in_progress while
+    // its jobs wait on concurrency groups (#9596).
+    expect(reviewScanJob).toContain(
+      'for LIVE_STATUS in in_progress queued pending',
+    );
+    // The union calls the runs API directly, not `gh run list --status`: gh
+    // validates that flag against a client-side allow-list that rejects
+    // 'pending' before 2.65.0, so a runner whose gh lags the hosted images
+    // would exit 1 and silently fail-close EVERY scan; the API filter is
+    // server-side on every gh version. The jq filter must read the REST
+    // envelope's `id` — the gh-CLI `databaseId` field does not exist in the
+    // API payload, and an empty read would silently un-busy every scan.
+    expect(reviewScanJob).toContain(
+      'gh api "repos/${REPO}/actions/workflows/qwen-autofix.yml/runs?status=${LIVE_STATUS}&per_page=50"',
+    );
+    expect(reviewScanJob).toContain("--jq '.workflow_runs[].id'");
+    expect(reviewScanJob).not.toContain('.workflow_runs[].databaseId');
+    expect(reviewScanJob).not.toContain(
+      'gh run list --repo "${REPO}" --workflow qwen-autofix.yml',
+    );
     expect(reviewScanJob).not.toContain('--limit 15');
     // The busy-set cannot see a sibling scan that has not yet emitted its
     // matrix, so review-address REVALIDATES the watermark against LIVE
@@ -3954,7 +3982,7 @@ describe('qwen-autofix workflow', () => {
             '  esac',
             'done',
             'set -- "${positional[@]}"',
-            'if [[ "$1" == "run" && "$2" == "list" ]]; then',
+            'if [[ "$1" == "api" ]]; then',
             '  if [[ -n "${ENUM_LIST_ERROR}" ]]; then printf \'%s\' "${ENUM_LIST_ERROR}" >&2; exit 1; fi',
             '  payload="${ENUM_LIST_ANSWER}"',
             'elif [[ "$1" == "run" && "$2" == "view" ]]; then',
@@ -4019,7 +4047,7 @@ describe('qwen-autofix workflow', () => {
     expect(listFailed.fleet).toContain('HTTP 502: bad gateway');
     // A jobs-view failure mid-enumeration fails closed the same way.
     const viewFailed = runEnum({
-      listAnswer: JSON.stringify([{ databaseId: 101 }]),
+      listAnswer: JSON.stringify({ workflow_runs: [{ id: 101 }] }),
       viewError: 'HTTP 500',
     });
     expect(viewFailed.candidates).toBe('');
@@ -4027,7 +4055,7 @@ describe('qwen-autofix workflow', () => {
     expect(viewFailed.fleet).toContain('HTTP 500');
     // A healthy enumeration accumulates the busy set and keeps candidates.
     const ok = runEnum({
-      listAnswer: JSON.stringify([{ databaseId: 101 }]),
+      listAnswer: JSON.stringify({ workflow_runs: [{ id: 101 }] }),
       viewAnswer: JSON.stringify({
         jobs: [
           { name: 'review-address (101, round 2)', status: 'in_progress' },
@@ -6774,6 +6802,44 @@ exit 1
         K,
       ),
     ).toBe('2');
+    // Idle (silent-sandbox) rounds are EXCLUDED from this census exactly
+    // like from the cap: the narrowing advice targets budget exhaustion,
+    // and the idle watchdog killed the round before any budget was
+    // exhausted (af-073). One pushed round plus one pure idle round must
+    // count zero — pre-fix the census reported 1 and told the agent to
+    // narrow scope for a wedged runner. Deleting the exclusion's jq clause
+    // flips both back to counting idle rounds and must fail here.
+    expect(
+      runCensus(
+        [
+          mk(PUSH_HEADLINE, K, '2026-07-29T04:00:00Z'),
+          mk(IDLE_HEAD, K, '2026-07-29T05:00:00Z'),
+        ],
+        K,
+      ),
+    ).toBe('0');
+    expect(
+      runCensus(
+        [
+          mk(PUSH_HEADLINE, K, '2026-07-29T04:00:00Z'),
+          mk(IDLE_HEAD, K, '2026-07-29T05:00:00Z'),
+          mk(IDLE_HEAD, K, '2026-07-29T06:00:00Z'),
+        ],
+        K,
+      ),
+    ).toBe('0');
+    // ...but budget timeouts still count beside idle rounds, and an idle
+    // round between two budget ones is not a success, so it resets nothing.
+    expect(
+      runCensus(
+        [
+          mk(TIMEOUT_HEADLINE, K, '2026-07-29T04:00:00Z'),
+          mk(IDLE_HEAD, K, '2026-07-29T05:00:00Z'),
+          mk(TIMEOUT_HEADLINE, K, '2026-07-29T06:00:00Z'),
+        ],
+        K,
+      ),
+    ).toBe('2');
     // Legacy pre-takeover markers (no win= field) count under key 'none' —
     // the common real case: a PR that timed out before any re-arm.
     expect(
@@ -6813,6 +6879,21 @@ exit 1
     expect(prepareBranchAndFeedbackStep).toContain(
       'contains("AutoFix ran out of time before finishing")',
     );
+    // The idle exclusion reuses the cap census's IDLE_N needle VERBATIM —
+    // a divergent token would classify the same headline differently in
+    // the two censuses.
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'and (contains("AutoFix ran out of time before finishing (idle-timeout") | not)',
+    );
+    const prepareIdleNeedle = prepareBranchAndFeedbackStep.match(
+      /and \(contains\("([^"]+)"\) \| not\)/,
+    )?.[1];
+    const capIdleNeedle = reviewAddressReportStep.match(
+      /IDLE_N="\$\(grep -c '([^']+)'/,
+    )?.[1];
+    expect(prepareIdleNeedle).toBeTruthy();
+    expect(capIdleNeedle).toBeTruthy();
+    expect(prepareIdleNeedle).toBe(capIdleNeedle);
     expect(reviewAddressReportStep).toContain(
       'CAUSE="ran out of time before finishing (${AGENT_TIMEOUT})"',
     );
@@ -14974,13 +15055,7 @@ exit 1
       reviewAddressReportStep.match(/^\s*HEADLINE_ZH="/gm) ?? [];
     expect(headlineAssignments.length).toBeGreaterThan(0);
     expect(headlineZhAssignments).toHaveLength(headlineAssignments.length);
-    for (const name of [
-      'CAUSE',
-      'LAST_FIX',
-      'GATE_CLAUSE',
-      'IDLE_CLAUSE',
-      'REMEDY',
-    ]) {
+    for (const name of ['CAUSE', 'LAST_FIX', 'GATE_CLAUSE', 'IDLE_CLAUSE']) {
       const en =
         reviewAddressReportStep.match(new RegExp(`^\\s*${name}=`, 'gm')) ?? [];
       const zh =
@@ -15019,6 +15094,9 @@ exit 1
         '轮未能推送任何内容',
       ],
       ['HEADLINE', 'time-budget exhaustions', '次时间预算耗尽'],
+      // The cap remedy is inlined in HEADLINE/HEADLINE_ZH (the REMEDY
+      // variables are gone) — its EN/ZH pairing stays pinned here.
+      ['HEADLINE', 'split or reduce the PR', '拆分或缩减该 PR'],
       [
         'HEADLINE',
         'deferred this item to a human under instruction',
@@ -15080,8 +15158,12 @@ exit 1
         '自身本轮之前的代码需要处理',
       ],
       ['IDLE_CLAUSE', 'no budget increase can cure', '提高预算也治不了'],
-      ['REMEDY', 'split or reduce the PR', '拆分或缩减该 PR'],
-      ['REMEDY', 'investigate the sandbox image', '排查 sandbox 镜像'],
+      ['IDLE_CLAUSE', 'do NOT count toward this cap', '不计入本上限'],
+      [
+        'IDLE_CLAUSE',
+        'investigate the sandbox image and runner docker daemon separately',
+        '请另行排查 sandbox 镜像与 runner 的 docker daemon',
+      ],
     ]) {
       expect(
         reviewAddressReportStep,
@@ -15625,8 +15707,7 @@ exit 1
     // advice: more minutes cannot cure a sandbox that produced nothing.
     const idleCapped = run({
       OUTCOME: 'failed',
-      AGENT_TIMEOUT:
-        'idle-timeout (no output for 1200000ms — the sandbox likely hung at startup)',
+      AGENT_TIMEOUT: IDLE_NOW,
       ROUND: '4',
     });
     expect(idleCapped).toContain('this was the last automatic attempt');
@@ -15863,7 +15944,7 @@ exit 1
         'bash',
         [
           '-c',
-          `set -uo pipefail\nWORKDIR='${dir}'\nMARK_ROUND=${markRound}\nMAX_ROUNDS=100\nCONSECUTIVE_FAILURE_CAP=${cap}\nTIMEOUT_WINDOW_CAP=${timeoutCap}\nAGENT_TIMEOUT='${agentTimeout}'\nCONSEC_FAIL=0\nREPO=o/r\nPR=1\nAUTOFIX_BOT=qwen-code-dev-bot\nRETRY_COMMAND='@qwen-code /retry'\nAPI_ERROR_DETAIL='${apiErrorDetail}'\nAPI_ERROR_KIND='${apiErrorKind}'\nPREPARE_OUTCOME='${prepareOutcome}'\nSTALE_BASE_RETRY='${staleBaseRetry}'\n${window !== undefined ? `WINDOW='${window}'\n` : ''}HEADLINE=orig\n${script}\nprintf '%s|%s|%s' "$MARK_ROUND" "${'${CONSEC_FAIL}'}" "$HEADLINE"`,
+          `set -uo pipefail\nWORKDIR='${dir}'\nMARK_ROUND=${markRound}\nMAX_ROUNDS=100\nCONSECUTIVE_FAILURE_CAP=${cap}\nTIMEOUT_WINDOW_CAP=${timeoutCap}\nAGENT_TIMEOUT='${agentTimeout}'\nCONSEC_FAIL=0\nREPO=o/r\nPR=1\nAUTOFIX_BOT=qwen-code-dev-bot\nRETRY_COMMAND='@qwen-code /retry'\nAPI_ERROR_DETAIL='${apiErrorDetail}'\nAPI_ERROR_KIND='${apiErrorKind}'\nPREPARE_OUTCOME='${prepareOutcome}'\nSTALE_BASE_RETRY='${staleBaseRetry}'\n${window !== undefined ? `WINDOW='${window}'\n` : ''}HEADLINE=orig\nHEADLINE_ZH=orig\n${script}\nprintf '\\n@@R@@%s|%s|%s|%s' "$MARK_ROUND" "${'${CONSEC_FAIL}'}" "$HEADLINE" "$HEADLINE_ZH"`,
         ],
         {
           env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
@@ -15871,12 +15952,21 @@ exit 1
         },
       );
       rmSync(dir, { recursive: true, force: true });
-      const [mark, consec, headline] = out.split('|');
+      // The block echoes ::warning:: log lines (the idle-timeout census), so
+      // read the result off its sentinel — job-log noise must never be
+      // parsed as a field. The pre-sentinel half is the job-log surface the
+      // census warning targets; return it so tests can pin it.
+      const sentinelAt = out.lastIndexOf('@@R@@');
+      const [mark, consec, headline, headlineZh] = out
+        .slice(sentinelAt + 5)
+        .split('|');
       return {
         mark,
         consec: Number(consec),
         terminal: mark === '100',
         headline,
+        headlineZh,
+        log: out.slice(0, sentinelAt),
       };
     };
 
@@ -15986,50 +16076,112 @@ exit 1
     expect(interleaved.terminal).toBe(true);
     expect(interleaved.headline).toContain('time-budget exhaustions');
     expect(interleaved.headline).toContain('/retry');
-    // Idle (silent-sandbox) timeouts share the census — each burns a full
-    // budget — and when the window contains any, the breaker's advice says
-    // a budget increase cannot cure them.
-    const IDLE_HEAD =
-      '🤖 AutoFix ran out of time before finishing (idle-timeout (no output for 1200000ms — the sandbox likely hung at startup)) (attempt 2/100) — it will retry on the next scan.';
-    const idleMixed = run([IDLE_HEAD, PUSH, IDLE_HEAD, PUSH], {
-      agentTimeout:
-        'idle-timeout (no output for 1200000ms — the sandbox likely hung at startup)',
+    // Idle (silent-sandbox) timeouts are EXCLUDED from this cap: the remedy
+    // it prescribes (split the PR / raise the budget) cannot cure a runner
+    // that produced no output at all, and counting them parked healthy PRs
+    // (af-073). Interleaved with pushes they must never terminate — this is
+    // the shape that stopped #8332 at 24 rounds and #8368 at 28 while both
+    // were still pushing.
+    const allIdle = run([IDLE_HEAD, PUSH, IDLE_HEAD, PUSH, IDLE_HEAD, PUSH], {
+      agentTimeout: IDLE_NOW,
     });
-    expect(idleMixed.terminal).toBe(true);
-    expect(idleMixed.headline).toContain('time-budget exhaustions');
-    expect(idleMixed.headline).toContain(
-      'silent-sandbox (idle) timeouts that no budget increase can cure',
-    );
-    // An ALL-idle window swaps the closing remedy for the sandbox
-    // investigation — mirroring the round-level split — instead of
-    // prescribing the budget increase the clause above declared useless.
-    expect(idleMixed.headline).toContain(
-      'A human should investigate the sandbox image and runner docker daemon',
-    );
-    expect(idleMixed.headline).not.toContain('raise the agent time budget');
-    // A MIXED window (any real budget timeout) keeps the budget remedy.
-    const idleSome = run([TIMEOUT_HEAD, PUSH, IDLE_HEAD, PUSH], {
-      agentTimeout:
-        'idle-timeout (no output for 1200000ms — the sandbox likely hung at startup)',
+    expect(allIdle.terminal).toBe(false);
+    expect(allIdle.headline).toBe('orig');
+    // Idle rounds do not become budget timeouts by piling up: no count of
+    // them alone reaches the cap.
+    expect(
+      run(
+        Array(timeoutCap * 3)
+          .fill(IDLE_HEAD)
+          .flatMap((h) => [h, PUSH]),
+        {
+          agentTimeout: IDLE_NOW,
+        },
+      ).terminal,
+    ).toBe(false);
+    // The escape hatch that makes the exclusion safe: an idle round pushes
+    // nothing and matches no streak-reset needle, so a PERSISTENTLY wedged
+    // sandbox still terminates — at the CONSECUTIVE cap, with its own
+    // headline. Without this the exclusion would let a dead runner loop
+    // forever.
+    const idleStreak = run(Array(cap - 1).fill(IDLE_HEAD), {
+      agentTimeout: IDLE_NOW,
     });
-    expect(idleSome.terminal).toBe(true);
-    expect(idleSome.headline).toContain('2 of those were silent-sandbox');
-    expect(idleSome.headline).toContain('raise the agent time budget');
-    // The CURRENT round's idle timeout is counted by the increment, not
-    // the grep: cap-1 budget priors plus an idle current round render
-    // "1 of those were silent-sandbox". Deleting the IDLE_N increment
-    // suppresses the clause entirely (the grep sees no idle prior) and
-    // must fail here.
+    expect(idleStreak).toMatchObject({ consec: cap, terminal: true });
+    expect(idleStreak.headline).toContain(
+      'consecutive rounds that pushed nothing',
+    );
+    // ...and the TERMINAL run's job log still names the wedged runner: the
+    // census warning runs outside the cap's terminal guard precisely so an
+    // all-idle stop — which lands on the consecutive breaker's headline —
+    // keeps its only infra signal. Moving the echo back under the guard
+    // suppresses the warning here and must fail.
+    expect(idleStreak.log).toContain(`::warning::#1: ${cap} silent-sandbox`);
+    // A window whose BUDGET timeouts alone reach the cap still trips, and
+    // the count it reports is the budget one — not the total, which would
+    // re-inflate the number the exclusion just corrected.
+    const mixedTrips = run(
+      [TIMEOUT_HEAD, PUSH, TIMEOUT_HEAD, PUSH, IDLE_HEAD, PUSH],
+      { agentTimeout: 'timeout (3000000ms)' },
+    );
+    expect(mixedTrips.terminal).toBe(true);
+    expect(mixedTrips.headline).toContain(
+      `${timeoutCap} agent time-budget exhaustions`,
+    );
+    // ...and it names the idle rounds as excluded, so the operator still
+    // learns the runner misbehaved on a PR stopped for an unrelated reason.
+    expect(mixedTrips.headline).toContain('do NOT count toward this cap');
+    expect(mixedTrips.headline).toContain('raise the agent time budget');
+    // The idle clause's COUNT is pinned numerically in both languages —
+    // mixedTrips holds exactly one idle round while TIMEOUT_N is
+    // timeoutCap + 1, so an ${IDLE_N} → ${TIMEOUT_N} swap would inflate
+    // the reported fleet problem and must fail here.
+    expect(mixedTrips.headline).toContain('also holds 1 silent-sandbox');
+    expect(mixedTrips.headlineZh).toContain('本窗口另有 1 次静默');
+    // The ZH headline interpolates the same budget-only count — pin both
+    // halves, or a ${BUDGET_TIMEOUT_N} → ${TIMEOUT_N} mutation on the ZH
+    // line alone ships green while the comment's Chinese half re-inflates
+    // the number the exclusion just corrected.
+    expect(mixedTrips.headlineZh).toContain(`${timeoutCap} 次时间预算耗尽`);
+    expect(mixedTrips.headlineZh).not.toContain(
+      `${timeoutCap + 1} 次时间预算耗尽`,
+    );
+    // The headline interpolates BUDGET_TIMEOUT_N TWICE; the second
+    // sentence ("That is … full agent runs") needs its own pins in both
+    // languages, or the same swap mutant re-inflates exactly the count the
+    // exclusion corrected — and calls an idle round a "full agent run".
+    expect(mixedTrips.headline).toContain(
+      `That is ${timeoutCap} full agent runs`,
+    );
+    expect(mixedTrips.headline).not.toContain(
+      `That is ${timeoutCap + 1} full agent runs`,
+    );
+    expect(mixedTrips.headlineZh).toContain(`即 ${timeoutCap} 次完整`);
+    // The idle census ::warning:: is the only observability left for
+    // excluded idle timeouts — one idle round in this window warns exactly
+    // once (deleting the echo, flipping -gt 0, or swapping the count each
+    // fail here).
+    expect(mixedTrips.log).toContain('::warning::#1: 1 silent-sandbox');
+    // ...and its CAP interpolation and guidance tail are pinned too: a
+    // ${TIMEOUT_WINDOW_CAP} → ${CONSECUTIVE_FAILURE_CAP} swap would
+    // misstate the cap on the very channel designated the idle signal,
+    // and a reworded tail would drop the operator guidance.
+    expect(mixedTrips.log).toContain(
+      `excluded from the ${timeoutCap}-timeout cap; check the sandbox image and the runner docker daemon`,
+    );
+    // One idle round is enough to hold a would-be-capped window open: cap-1
+    // budget priors plus an idle current round is cap-1 budget timeouts, not
+    // cap. Deleting the IDLE_N increment (or the subtraction) terminates
+    // here and must fail.
     const idleCurrentOnly = run(Array(timeoutCap - 1).fill(TIMEOUT_HEAD), {
-      agentTimeout:
-        'idle-timeout (no output for 1200000ms — the sandbox likely hung at startup)',
+      agentTimeout: IDLE_NOW,
     });
-    expect(idleCurrentOnly.terminal).toBe(true);
-    expect(idleCurrentOnly.headline).toContain(
-      '1 of those were silent-sandbox (idle) timeouts',
-    );
-    // A window WITHOUT idle rounds keeps today's advice untouched.
+    expect(idleCurrentOnly.terminal).toBe(false);
+    expect(idleCurrentOnly.headline).toBe('orig');
+    // A window WITHOUT idle rounds says nothing about the sandbox — in the
+    // headline or the job log.
     expect(interleaved.headline).not.toContain('silent-sandbox');
+    expect(interleaved.log).not.toContain('::warning');
     // One short of the cap keeps retrying (current round not a timeout).
     expect(run([TIMEOUT_HEAD, PUSH, TIMEOUT_HEAD])).toMatchObject({
       terminal: false,
@@ -16092,8 +16244,31 @@ exit 1
     expect(reviewAddressReportStep).toContain(
       'TIMEOUT_N="$(grep -c \'AutoFix ran out of time before finishing\' <<< "${PRIOR_HEADS}" || true)"',
     );
+    // IDLE_N is SUBTRACTED from TIMEOUT_N, so its needle must be a strict
+    // extension of TIMEOUT_N's — a bare 'idle-timeout' substring could match
+    // provider error text that API_ERROR_DETAIL puts on the same first line
+    // and drive the difference negative.
     expect(reviewAddressReportStep).toContain(
-      'IDLE_N="$(grep -c \'idle-timeout\' <<< "${PRIOR_HEADS}" || true)"',
+      'IDLE_N="$(grep -c \'AutoFix ran out of time before finishing (idle-timeout\' <<< "${PRIOR_HEADS}" || true)"',
+    );
+    // ...checked on the needles extracted from the workflow pins above,
+    // not on literals — a literal-vs-literal comparison is true by
+    // construction and would stay green whatever the workflow says.
+    const timeoutNeedle = reviewAddressReportStep.match(
+      /TIMEOUT_N="\$\(grep -c '([^']+)'/,
+    )?.[1];
+    const idleNeedle = reviewAddressReportStep.match(
+      /IDLE_N="\$\(grep -c '([^']+)'/,
+    )?.[1];
+    expect(timeoutNeedle).toBeTruthy();
+    expect(idleNeedle).toBeTruthy();
+    expect(idleNeedle).toContain(timeoutNeedle);
+    // The cap gates on the budget-only count, never the total.
+    expect(reviewAddressReportStep).toContain(
+      'BUDGET_TIMEOUT_N=$(( TIMEOUT_N - IDLE_N ))',
+    );
+    expect(reviewAddressReportStep).toContain(
+      'if [[ "${BUDGET_TIMEOUT_N}" -ge "${TIMEOUT_WINDOW_CAP}" ]]; then',
     );
     // The reset detector keys on literal substrings; pin them to the actual
     // "Push and report" emit lines so a reword breaks this test, not silently
@@ -16137,6 +16312,61 @@ exit 1
         { window: 'current-window' },
       ),
     ).toMatchObject({ consec: 2, terminal: false });
+  });
+
+  it('ties the run-agent idle sentinel to the workflow classification and the replay fixture', () => {
+    // The idle classification lives in three independently-pinned places:
+    // run-agent.mjs's detail template (the EMITTER), the workflow's
+    // current-round glob and census needles (the CONSUMERS), and this
+    // file's replay fixture (the WITNESS). A format change on the emitter
+    // side must break this test — not silently stop the workflow
+    // classifying idle rounds while the fixture keeps replaying the old
+    // shape. Extract the REAL template and check every consumer against it.
+    const runner = readFileSync(autofixRunnerScriptPath, 'utf8');
+    const idleDetailTemplate = runner.match(
+      /result\.idleTimedOut\s*\?\s*`([^`]+)`/,
+    )?.[1];
+    expect(idleDetailTemplate).toBeTruthy();
+    // The static prefix — emitted before any interpolation — is what the
+    // workflow's current-round classification keys on.
+    const detailPrefix = idleDetailTemplate.split('${')[0];
+    const globTokens = [
+      ...reviewAddressReportStep.matchAll(
+        /\[\[ "\$\{AGENT_TIMEOUT(?::-)?\}" == '([^']+)'\* \]\]/g,
+      ),
+    ].map((m) => m[1]);
+    expect(globTokens.length).toBeGreaterThanOrEqual(2);
+    for (const token of globTokens) {
+      expect(detailPrefix.startsWith(token)).toBe(true);
+    }
+    // The census needles, extracted as in the breaker test: IDLE_N's must
+    // be TIMEOUT_N's plus ' (' plus that same opening token.
+    const timeoutNeedle = reviewAddressReportStep.match(
+      /TIMEOUT_N="\$\(grep -c '([^']+)'/,
+    )?.[1];
+    const idleNeedle = reviewAddressReportStep.match(
+      /IDLE_N="\$\(grep -c '([^']+)'/,
+    )?.[1];
+    expect(timeoutNeedle).toBeTruthy();
+    expect(idleNeedle).toBeTruthy();
+    for (const token of new Set(globTokens)) {
+      expect(idleNeedle).toBe(`${timeoutNeedle} (${token}`);
+    }
+    // The replay fixture embeds the CAUSE-shaped headline with a concrete
+    // ms value — derive it from the template so a reworded sentinel fails
+    // here instead of shipping a fixture that replays a fantasy shape.
+    const detail = idleDetailTemplate.replace(
+      /\$\{QWEN_IDLE_TIMEOUT_MS\}/g,
+      '1200000',
+    );
+    expect(detail).toBe(IDLE_NOW);
+    const causeTemplate = reviewAddressReportStep.match(
+      /CAUSE="(ran out of time before finishing \(\$\{AGENT_TIMEOUT\}\))"/,
+    )?.[1];
+    expect(causeTemplate).toBeTruthy();
+    expect(IDLE_HEAD).toContain(
+      causeTemplate.replace('${AGENT_TIMEOUT}', detail),
+    );
   });
 
   it('posts the review-address report wrapper lines bilingually', () => {

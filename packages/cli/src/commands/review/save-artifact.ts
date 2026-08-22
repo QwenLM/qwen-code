@@ -35,7 +35,9 @@ import { isSameFile } from './lib/same-file.js';
 import { volumeOf } from './lib/ledger.js';
 import {
   LAND_WITH_RESIDUAL_RISK,
+  RECOMMENDATION_CODES,
   type ConvergenceAssessment,
+  type Recommendation,
 } from './lib/convergence.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 
@@ -228,6 +230,24 @@ function event(value: unknown, label: string): ReviewEvent {
   return value;
 }
 
+/**
+ * A recommendation code, checked against the closed set rather than cast
+ * into it. The set is a contract a caller wires actions to, and a cast
+ * writes whatever string it was handed into the durable record under a type
+ * that says otherwise — the shape every sibling closed vocabulary in this
+ * validator refuses.
+ */
+function recommendationCode(
+  value: unknown,
+  label: string,
+): Recommendation['code'] {
+  const code = string(value, label);
+  if (!(RECOMMENDATION_CODES as readonly string[]).includes(code)) {
+    throw new Error(`${label} must be one of the known recommendation codes.`);
+  }
+  return code as Recommendation['code'];
+}
+
 function validateVerdict(value: unknown): PersistedVerdict {
   const verdict = object(value, 'Composed verdict');
   const downgradedFrom = verdict['downgradedFrom'];
@@ -308,7 +328,6 @@ function validateVerdict(value: unknown): PersistedVerdict {
       'Composed verdict.postedInline must be a non-negative integer.',
     );
   }
-  // The fresh count reads by the same rules as the total it is part of.
   // The convergence paragraph is the ONE clause the overflow ladder sheds
   // first, and the artifact is where a trimmed round's record lives. Dropped
   // by this allow-list, the durable record of a round whose body shed it
@@ -320,6 +339,40 @@ function validateVerdict(value: unknown): PersistedVerdict {
     convergence = {
       en: string(c['en'], 'Composed verdict.convergence.en'),
       zh: string(c['zh'], 'Composed verdict.convergence.zh'),
+    };
+  }
+  // The machine-readable half of the observation. Dropped by this
+  // allow-list, a caller reading the durable record sees the prose and not
+  // the codes it would key on.
+  const rawRecs = verdict['recommendations'];
+  let recommendations: Recommendation[] | undefined;
+  if (rawRecs !== undefined && rawRecs !== null) {
+    if (!Array.isArray(rawRecs)) {
+      throw new Error('Composed verdict.recommendations must be an array.');
+    }
+    recommendations = rawRecs.map((entry, i) => {
+      const r = object(entry, `Composed verdict.recommendations[${i}]`);
+      return {
+        code: recommendationCode(
+          r['code'],
+          `Composed verdict.recommendations[${i}].code`,
+        ),
+        basis: string(
+          r['basis'],
+          `Composed verdict.recommendations[${i}].basis`,
+        ),
+      };
+    });
+  }
+  // Same reasoning as the paragraph above, and more so: this block is the
+  // FIRST thing the ladder sheds.
+  const rawHealth = verdict['health'];
+  let health: { en: string; zh: string } | undefined;
+  if (rawHealth !== undefined && rawHealth !== null) {
+    const h = object(rawHealth, 'Composed verdict.health');
+    health = {
+      en: string(h['en'], 'Composed verdict.health.en'),
+      zh: string(h['zh'], 'Composed verdict.health.zh'),
     };
   }
   // The residual-risk advisory, carried for the same reason its sibling
@@ -435,6 +488,8 @@ function validateVerdict(value: unknown): PersistedVerdict {
     ...(postedInline === undefined ? {} : { postedInline }),
     ...(postedFresh === undefined ? {} : { postedFresh }),
     ...(convergence === undefined ? {} : { convergence }),
+    ...(recommendations === undefined ? {} : { recommendations }),
+    ...(health === undefined ? {} : { health }),
     ...(residualRisk === undefined ? {} : { residualRisk }),
     lowSignal:
       lowSignal === null

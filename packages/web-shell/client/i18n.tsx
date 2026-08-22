@@ -1369,6 +1369,9 @@ const EN: Messages = {
   'sidebar.clients': (v) => `${v?.count ?? 0} client(s)`,
   'sidebar.running': 'Running',
   'sidebar.waitingForApproval': 'Waiting for approval',
+  'sidebar.sessionPr': (v) => `Pull Request #${v?.number ?? ''}`,
+  'sidebar.sessionPrMultiple': (v) =>
+    `Pull Request #${v?.number ?? ''} (${v?.count ?? 0} total)`,
   'sidebar.userInputNeeded': 'User input needed',
   'sidebar.completedUnread': 'Finished',
   'sidebar.pin': 'Pin',
@@ -4370,6 +4373,9 @@ const ZH: Messages = {
   'sidebar.clients': (v) => `${v?.count ?? 0} 个客户端`,
   'sidebar.running': '运行中',
   'sidebar.waitingForApproval': '等待批准',
+  'sidebar.sessionPr': (v) => `合并请求 #${v?.number ?? ''}`,
+  'sidebar.sessionPrMultiple': (v) =>
+    `合并请求 #${v?.number ?? ''}（共 ${v?.count ?? 0} 个）`,
   'sidebar.userInputNeeded': '需要用户输入',
   'sidebar.completedUnread': '刚完成',
   'sidebar.pin': '置顶',
