@@ -383,15 +383,38 @@ describe('useGeminiStream', () => {
     const setToolCalls = (newToolCalls: TrackedToolCall[]) => {
       currentToolCalls = newToolCalls;
     };
+    // Capture the scheduler's onComplete callback so tests can drive the
+    // real tool-round boundary (`handleCompletedTools`) without
+    // re-implementing this harness. The mock returns the production
+    // 3-tuple shape of `useReactToolScheduler`.
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | undefined;
 
-    mockUseReactToolScheduler.mockImplementation(() => [
-      currentToolCalls,
-      mockScheduleToolCalls,
-      mockCancelAllToolCalls,
-      mockMarkToolsAsSubmitted,
-    ]);
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [
+        currentToolCalls,
+        mockScheduleToolCalls,
+        mockMarkToolsAsSubmitted,
+      ];
+    });
 
     const client = geminiClient || mockConfig.getGeminiClient();
+
+    const baseProps = {
+      client,
+      history: [] as HistoryItem[],
+      addItem: mockAddItem as unknown as UseHistoryManagerReturn['addItem'],
+      config: mockConfig,
+      onDebugMessage: mockOnDebugMessage,
+      handleSlashCommand: mockHandleSlashCommand as unknown as (
+        cmd: PartListUnion,
+      ) => Promise<SlashCommandProcessorResult | false>,
+      shellModeActive: false,
+      loadedSettings: mockLoadedSettings,
+      toolCalls: initialToolCalls as TrackedToolCall[] | undefined,
+    };
 
     const { result, rerender } = renderHook(
       (props: {
@@ -440,19 +463,7 @@ describe('useGeminiStream', () => {
         );
       },
       {
-        initialProps: {
-          client,
-          history: [],
-          addItem: mockAddItem as unknown as UseHistoryManagerReturn['addItem'],
-          config: mockConfig,
-          onDebugMessage: mockOnDebugMessage,
-          handleSlashCommand: mockHandleSlashCommand as unknown as (
-            cmd: PartListUnion,
-          ) => Promise<SlashCommandProcessorResult | false>,
-          shellModeActive: false,
-          loadedSettings: mockLoadedSettings,
-          toolCalls: initialToolCalls,
-        },
+        initialProps: baseProps,
       },
     );
     return {
@@ -461,6 +472,20 @@ describe('useGeminiStream', () => {
       mockMarkToolsAsSubmitted,
       mockSendMessageStream,
       client,
+      // The scheduler's onComplete as captured at the last render; driving
+      // this is what drives the real tool-round boundary submission.
+      getLastOnComplete: () => capturedOnComplete,
+      completeToolRound: async (completed: TrackedToolCall[]) => {
+        expect(
+          capturedOnComplete,
+          'useReactToolScheduler onComplete was never registered',
+        ).toBeDefined();
+        await act(async () => {
+          await capturedOnComplete?.(completed);
+        });
+      },
+      rerenderWithToolCalls: (toolCalls: TrackedToolCall[]) =>
+        rerender({ ...baseProps, toolCalls }),
     };
   };
 
@@ -1491,6 +1516,928 @@ describe('useGeminiStream', () => {
       type: SendMessageType.Teammate,
     });
     expect(capturedRuntimeView).toBeUndefined();
+  });
+
+  // ─── Teammate delivery at tool-round boundaries (#8172) ───────────────
+  // In a multi-round agentic task, streamingState never reaches Idle
+  // between rounds (tool calls are continuously scheduled/executing or
+  // terminal-but-unsubmitted), so teammate messages must be injected at
+  // the tool-round boundary (next ToolResult submission) instead of
+  // waiting for the whole task to finish.
+  describe('teammate messages during multi-round tool tasks (#8172)', () => {
+    const teammateModelText =
+      '<teammate_message_abcdef0123456789 from="scout-cli">\n' +
+      'found a blocker, stop and check this\n' +
+      '</teammate_message_abcdef0123456789>';
+    const teammateDisplay = '**scout-cli** reported back';
+
+    const createExecutingToolCall = (): TrackedExecutingToolCall =>
+      ({
+        request: {
+          callId: 'call-long-task-1',
+          name: 'run_long_task',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-teammate-rounds',
+        },
+        status: 'executing',
+        responseSubmittedToGemini: false,
+        tool: {
+          name: 'run_long_task',
+          displayName: 'run_long_task',
+          description: 'long task',
+          build: vi.fn(),
+        } as any,
+        invocation: {
+          getDescription: () => 'Mock description',
+        } as unknown as AnyToolInvocation,
+        startTime: Date.now(),
+        liveOutput: '...',
+      }) as TrackedExecutingToolCall;
+
+    const createCompletedToolCall = (
+      callId = 'call-long-task-1',
+    ): TrackedCompletedToolCall => ({
+      request: {
+        callId,
+        name: 'run_long_task',
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'prompt-id-teammate-rounds',
+      },
+      status: 'success',
+      responseSubmittedToGemini: false,
+      response: {
+        callId,
+        responseParts: [
+          {
+            functionResponse: {
+              id: callId,
+              name: 'run_long_task',
+              response: { result: 'round done' },
+            },
+          },
+        ],
+        error: undefined,
+        errorType: undefined,
+        resultDisplay: 'round done',
+      },
+      tool: {
+        name: 'run_long_task',
+        displayName: 'run_long_task',
+        description: 'long task',
+        build: vi.fn(),
+      } as any,
+      invocation: {
+        getDescription: () => 'Mock description',
+      } as unknown as AnyToolInvocation,
+      startTime: Date.now(),
+      endTime: Date.now(),
+    });
+
+    // Thin wrapper over the file-level `renderTestHook` harness (which
+    // captures the scheduler's onComplete and can rerender with new
+    // tool calls): adds the team-manager mock, the `leaderCallback()`
+    // accessor used to queue teammate messages, and a client-side
+    // settlement shim for the `steerInput` carrier. The shim mirrors
+    // GeminiClient's contract in miniature: any send that provably never
+    // pushed — a UserPromptSubmitBlocked event, or a stream that throws
+    // BEFORE its first event (every pre-push exit of the real client
+    // settles by restore; a post-event failure already accepted on the
+    // first event) — restores the carrier; otherwise it accepts. Keep
+    // this single shim
+    // aligned with the real client; a second miniature drifting from it
+    // would silently assert acceptance the real client does not produce.
+    // These tests do NOT observe GeminiChat's push counter — acceptance
+    // semantics of the real client-side settlement (push-site snapshot,
+    // concurrent pushes) are pinned in core's client.test.ts.
+    function renderBusyMultiRoundTask(
+      initialToolCalls: TrackedToolCall[],
+      goalQueueRef?: Parameters<typeof useGeminiStream>[24],
+    ) {
+      const mockManager = { setLeaderMessageCallback: vi.fn() };
+      (mockConfig.getTeamManager as unknown as Mock).mockReturnValue(
+        mockManager,
+      );
+
+      const client = new MockedGeminiClientClass(mockConfig);
+      client.sendMessageStream = (...args: any[]) => {
+        const stream = mockSendMessageStream(...args);
+        const settlement = args[3]?.steerInput as SteerInput | undefined;
+        return (async function* () {
+          let blocked = false;
+          let sawEvent = false;
+          let threwBeforePush = false;
+          try {
+            for await (const event of stream) {
+              sawEvent = true;
+              blocked ||=
+                event.type === ServerGeminiEventType.UserPromptSubmitBlocked;
+              yield event;
+            }
+          } catch (error) {
+            // The real client restores on any PRE-push exit; a throw after
+            // the first event already accepted at that event.
+            threwBeforePush = !sawEvent;
+            throw error;
+          } finally {
+            // Miniature of the real client's settlement contract: blocked
+            // sends and pre-push throws restore; anything that completes
+            // (or survives the first event) accepted — the harness
+            // convention for "the push landed" is a send that did not
+            // throw before its first event.
+            if (blocked || threwBeforePush) settlement?.restore();
+            else settlement?.accept();
+          }
+        })();
+      };
+      const utils = renderTestHook(
+        initialToolCalls,
+        client,
+        undefined,
+        undefined,
+        undefined,
+        goalQueueRef,
+      );
+
+      const leaderCallback = () => {
+        const callback = (
+          mockManager.setLeaderMessageCallback as Mock
+        ).mock.calls.at(-1)?.[0] as
+          | ((modelText: string, display: string) => void)
+          | undefined;
+        expect(callback).toBeDefined();
+        return callback!;
+      };
+
+      return {
+        result: utils.result,
+        rerenderWithToolCalls: utils.rerenderWithToolCalls,
+        leaderCallback,
+        completeToolRound: utils.completeToolRound,
+      };
+    }
+
+    it('injects queued teammate messages into the next tool-round submission instead of waiting for the whole task', async () => {
+      const { rerenderWithToolCalls, leaderCallback, completeToolRound } =
+        renderBusyMultiRoundTask([createExecutingToolCall()]);
+
+      // A teammate message arrives while the round's tools are executing.
+      act(() => {
+        leaderCallback()(teammateModelText, teammateDisplay);
+      });
+
+      // streamingState is Responding, so the message queues instead of
+      // interrupting the round — no immediate submission.
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+
+      // The round completes. The calls stay terminal-but-unsubmitted in
+      // the display state (the next round is pending), so streamingState
+      // never reaches Idle between rounds.
+      const completed = createCompletedToolCall();
+      rerenderWithToolCalls([completed]);
+      await completeToolRound([completed]);
+
+      // The ToolResult round submission carries the queued teammate
+      // envelope appended after the tool-response parts (tool_result
+      // blocks must lead the user message).
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledWith(
+        [...completed.response.responseParts, { text: teammateModelText }],
+        expect.any(AbortSignal),
+        'prompt-id-teammate-rounds',
+        expect.objectContaining({ type: SendMessageType.ToolResult }),
+      );
+
+      // The compact `● …` notification line renders at delivery time.
+      expect(mockAddItem).toHaveBeenCalledWith(
+        { type: 'notification', text: teammateDisplay },
+        expect.any(Number),
+      );
+
+      // When the task finally ends and the state reaches Idle, nothing
+      // is delivered a second time.
+      rerenderWithToolCalls([]);
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+
+    it('still delivers queued teammate messages at Idle when the task ends without another tool round', async () => {
+      const { rerenderWithToolCalls, leaderCallback } =
+        renderBusyMultiRoundTask([createExecutingToolCall()]);
+
+      act(() => {
+        leaderCallback()(teammateModelText, teammateDisplay);
+      });
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+
+      // The task ends without scheduling another tool round.
+      rerenderWithToolCalls([]);
+
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledWith(
+          teammateModelText,
+          expect.any(AbortSignal),
+          expect.any(String),
+          expect.objectContaining({
+            type: SendMessageType.Teammate,
+            notificationDisplayText: teammateDisplay,
+          }),
+        );
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not lose queued teammate messages when the round boundary was cancelled', async () => {
+      const {
+        result,
+        rerenderWithToolCalls,
+        leaderCallback,
+        completeToolRound,
+      } = renderBusyMultiRoundTask([createExecutingToolCall()]);
+
+      act(() => {
+        leaderCallback()(teammateModelText, teammateDisplay);
+      });
+
+      // The user cancels the turn mid-task before the round completes.
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
+
+      const completed = createCompletedToolCall();
+      rerenderWithToolCalls([completed]);
+      await completeToolRound([completed]);
+
+      // The cancelled boundary must not carry the queued message away in
+      // a tool-result submission.
+      for (const call of mockSendMessageStream.mock.calls) {
+        const query = call[0];
+        if (Array.isArray(query)) {
+          expect(
+            query.some(
+              (part) =>
+                typeof part === 'object' &&
+                part !== null &&
+                (part as Part).text === teammateModelText,
+            ),
+          ).toBe(false);
+        }
+      }
+
+      // The message still reaches the leader once the state settles.
+      rerenderWithToolCalls([]);
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledWith(
+          teammateModelText,
+          expect.any(AbortSignal),
+          expect.any(String),
+          expect.objectContaining({ type: SendMessageType.Teammate }),
+        );
+      });
+    });
+
+    it('delivers later teammate messages after an earlier round-boundary delivery', async () => {
+      const { rerenderWithToolCalls, leaderCallback, completeToolRound } =
+        renderBusyMultiRoundTask([createExecutingToolCall()]);
+
+      act(() => {
+        leaderCallback()(teammateModelText, teammateDisplay);
+      });
+
+      const completed = createCompletedToolCall();
+      rerenderWithToolCalls([completed]);
+      await completeToolRound([completed]);
+
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      });
+
+      // A second message arrives while the task is still busy; the
+      // boundary drain above must not have swallowed it.
+      const secondModelText =
+        '<teammate_message>second update</teammate_message>';
+      const secondDisplay = 'second update';
+      act(() => {
+        leaderCallback()(secondModelText, secondDisplay);
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+
+      // The task ends; the Idle fallback delivers the second message.
+      rerenderWithToolCalls([]);
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      expect(mockSendMessageStream.mock.calls[1][0]).toBe(secondModelText);
+    });
+
+    it('does not deliver a boundary-drained envelope twice when the accepted submission then fails mid-stream', async () => {
+      const { rerenderWithToolCalls, leaderCallback, completeToolRound } =
+        renderBusyMultiRoundTask([createExecutingToolCall()]);
+
+      act(() => {
+        leaderCallback()(teammateModelText, teammateDisplay);
+      });
+
+      // The round submission is ACCEPTED — the mocked stream yields no
+      // UserPromptSubmitBlocked event, so the settlement wrapper accepts
+      // the carrier — and only then hits a terminal API error mid-stream.
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Error,
+            value: { error: { message: 'model overloaded' } },
+          };
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+      const completed = createCompletedToolCall();
+      rerenderWithToolCalls([completed]);
+      await completeToolRound([completed]);
+
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      });
+
+      // The failure fires onDeliveryFailed AFTER acceptance, so the
+      // envelope must NOT be requeued — it already reached the model
+      // with the accepted submission, and a redelivery would hand the
+      // leader the same report twice. The Idle fallback therefore has
+      // nothing left to deliver once the task ends.
+      rerenderWithToolCalls([]);
+      await act(async () => {
+        await Promise.resolve();
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+
+    it('restores a boundary-drained envelope when a UserPromptSubmit hook blocks the round submission', async () => {
+      const { rerenderWithToolCalls, leaderCallback, completeToolRound } =
+        renderBusyMultiRoundTask([createExecutingToolCall()]);
+
+      act(() => {
+        leaderCallback()(teammateModelText, teammateDisplay);
+      });
+
+      // A user-configured UserPromptSubmit hook blocks the boundary
+      // submission: the client yields UserPromptSubmitBlocked and
+      // returns without any model call, so the push counter never
+      // advances. ToolResult is not in the hook's exclusion list, so
+      // this is reachable with any user hook installed.
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.UserPromptSubmitBlocked,
+            value: {
+              reason: 'blocked by hook',
+              originalPrompt: 'tool results',
+            },
+          };
+        })(),
+      );
+
+      const completed = createCompletedToolCall();
+      rerenderWithToolCalls([completed]);
+      await completeToolRound([completed]);
+
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      });
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'user_prompt_submit_blocked' }),
+        expect.any(Number),
+      );
+
+      // The block counts as a delivery failure for the drained batch:
+      // the envelope is restored and the hook-exempt Teammate fallback
+      // delivers it exactly once once the state settles to Idle.
+      rerenderWithToolCalls([]);
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      expect(mockSendMessageStream).toHaveBeenLastCalledWith(
+        teammateModelText,
+        expect.any(AbortSignal),
+        expect.any(String),
+        expect.objectContaining({
+          type: SendMessageType.Teammate,
+          notificationDisplayText: teammateDisplay,
+        }),
+      );
+    });
+
+    it('does not re-send the restored envelope when retrying a failed boundary submission (Ctrl+Y)', async () => {
+      // Hold the Idle drain behind the goal gate (queued user messages)
+      // so Ctrl+Y can fire before the restored batch is redelivered —
+      // the reported scenario: the Idle drain is goal-gated while a user
+      // message is queued, but Retry is admissible.
+      let queuedUserMessages = true;
+      let pendingSubmissionCount = 0;
+      const goalQueueRef = {
+        current: {
+          hasQueuedUserMessages: vi.fn(() => queuedUserMessages),
+          getPendingSubmissionCount: vi.fn(() => pendingSubmissionCount),
+          claimGoalTurn: vi.fn(),
+        },
+      };
+
+      // Shared harness: its settlement shim now matches the real client
+      // (blocked or pre-push throw restores, otherwise accept), so this
+      // test no longer rebuilds it inline.
+      const {
+        result,
+        rerenderWithToolCalls,
+        leaderCallback,
+        completeToolRound,
+      } = renderBusyMultiRoundTask(
+        [createExecutingToolCall()],
+        goalQueueRef as never,
+      );
+
+      act(() => {
+        leaderCallback()(teammateModelText, teammateDisplay);
+      });
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+
+      // The boundary submission throws before the history push (e.g. a
+      // UserPromptSubmit hook that throws on the ToolResult prompt —
+      // ToolResult is not hook-exempt). The batch is restored and the
+      // failed prompt becomes retryable (lastPromptErroredRef).
+      const normalStream = () =>
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })();
+      // The first (boundary) send throws before the history push; the
+      // throw propagates out of sendMessageStream into submitQuery's
+      // catch, which restores the carrier and sets lastPromptErroredRef.
+      mockSendMessageStream
+        .mockImplementation(normalStream)
+        .mockImplementationOnce(() => {
+          throw new Error('UserPromptSubmit hook failed');
+        });
+
+      const completed = createCompletedToolCall();
+      rerenderWithToolCalls([completed]);
+      await completeToolRound([completed]);
+
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      });
+      // The first (failed) attempt carried the envelope.
+      expect(mockSendMessageStream.mock.calls[0][0]).toEqual([
+        ...completed.response.responseParts,
+        { text: teammateModelText },
+      ]);
+
+      // Clear the tool calls so streamingState settles to Idle (the
+      // mocked scheduler's markToolsAsSubmitted is a no-op, so the
+      // completed-but-unsubmitted call would otherwise hold the state at
+      // Responding and block Ctrl+Y). The goal gate still holds the Idle
+      // drain, so the restored batch stays queued.
+      rerenderWithToolCalls([]);
+      await waitFor(() => {
+        expect(result.current.streamingState).toBe(StreamingState.Idle);
+      });
+
+      // Ctrl+Y retry of the failed continuation. The envelope is back in
+      // the queue, so the retry payload must NOT carry it again.
+      await act(async () => {
+        await result.current.retryLastPrompt();
+      });
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      expect(mockSendMessageStream.mock.calls[1][0]).toEqual(
+        completed.response.responseParts,
+      );
+
+      // Release the goal gate (and change the pending count so the Idle
+      // drain effect's `goalQueuePendingCount` dep re-runs it): the
+      // restored envelope is delivered exactly once by the Idle fallback.
+      queuedUserMessages = false;
+      pendingSubmissionCount = 1;
+      rerenderWithToolCalls([]);
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(3);
+      });
+      expect(mockSendMessageStream).toHaveBeenLastCalledWith(
+        teammateModelText,
+        expect.any(AbortSignal),
+        expect.any(String),
+        expect.objectContaining({
+          type: SendMessageType.Teammate,
+          notificationDisplayText: teammateDisplay,
+        }),
+      );
+    });
+
+    it('keeps the previous retry payload intact when a preempted goal round restores its envelope before storing its own payload', async () => {
+      // Pin for the trailing-match guard in settleDrainedTeammates: a
+      // restore that fires BEFORE submitQuery stores this round's payload
+      // (goal controller aborted mid-round) looks at lastPromptRef while
+      // it still holds the PREVIOUS turn's payload. The guard must keep
+      // the strip a no-op there — the previous payload's trailing entries
+      // do not match the batch — or an unconditional strip truncates the
+      // retry payload by the batch size.
+      const permit: GoalTurnPermit = {
+        goalId: 'goal-preempt-strip',
+        revision: 1,
+        turnId: 'turn-preempt-strip',
+      };
+      mockConfig.getGoalRuntimeReady = vi.fn().mockResolvedValue({
+        permitForTurn: vi.fn().mockReturnValue(undefined),
+        getSnapshot: vi.fn().mockReturnValue({ goal: null }),
+      } as never);
+
+      // Hold the Idle drain behind the goal gate so Ctrl+Y can fire while
+      // the restored batch is still queued (a Retry is admissible; an Idle
+      // drain would overwrite lastPromptRef before the retry).
+      let queuedUserMessages = true;
+      let pendingSubmissionCount = 0;
+      const goalQueueRef = {
+        current: {
+          hasQueuedUserMessages: vi.fn(() => queuedUserMessages),
+          getPendingSubmissionCount: vi.fn(() => pendingSubmissionCount),
+          claimGoalTurn: vi.fn(),
+        },
+      };
+
+      const {
+        result,
+        rerenderWithToolCalls,
+        leaderCallback,
+        completeToolRound,
+      } = renderBusyMultiRoundTask(
+        [createExecutingToolCall('call-r1')],
+        goalQueueRef as never,
+      );
+
+      const normalStream = () =>
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })();
+      // Round 1: the boundary send FAILS after lastPromptRef stored this
+      // round's payload, so the previous-turn retry payload becomes the
+      // two tool-response parts below (retryable via lastPromptErroredRef).
+      mockSendMessageStream
+        .mockImplementation(normalStream)
+        .mockImplementationOnce(() => {
+          throw new Error('round one delivery failed');
+        });
+      const roundOneCompleted: TrackedCompletedToolCall = {
+        ...createCompletedToolCall('call-r1'),
+        response: {
+          ...createCompletedToolCall('call-r1').response,
+          responseParts: [{ text: 'call-r1' }, { text: 'call-r1-extra' }],
+        },
+      };
+      rerenderWithToolCalls([roundOneCompleted]);
+      await completeToolRound([roundOneCompleted]);
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      });
+
+      // A teammate message queues for the next boundary.
+      act(() => {
+        leaderCallback()(teammateModelText, teammateDisplay);
+      });
+
+      // Round 2 is goal-owned. Hang the flow after the goal binding is
+      // created (refreshMemoryAfterManagedWrite is awaited right past the
+      // bind), abort the goal controller mid-round, then release it: the
+      // preempt check settles the drained batch by restore BEFORE
+      // submitQuery stores round 2's payload.
+      let releaseRefresh: (() => void) | undefined;
+      mockRefreshMemoryAfterManagedWrite.mockImplementationOnce(
+        () =>
+          new Promise<boolean>((resolve) => {
+            releaseRefresh = () => resolve(false);
+          }),
+      );
+      const roundTwoCompleted: TrackedCompletedToolCall = {
+        ...createCompletedToolCall('call-r2'),
+        request: {
+          ...createCompletedToolCall('call-r2').request,
+          goalContext: permit,
+        },
+      };
+      rerenderWithToolCalls([roundTwoCompleted]);
+      const roundTwo = completeToolRound([roundTwoCompleted]);
+      await waitFor(() => {
+        expect(mockRefreshMemoryAfterManagedWrite).toHaveBeenCalledTimes(2);
+      });
+      act(() => {
+        result.current.preemptGoalTurn('preempted by test');
+      });
+      releaseRefresh?.();
+      await roundTwo;
+
+      // The preempted round never submitted: still only the failed round 1
+      // attempt reached the client.
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+
+      // Settle to Idle; the goal gate still holds the Idle drain, so the
+      // restored batch stays queued while Ctrl+Y fires.
+      rerenderWithToolCalls([]);
+      await waitFor(() => {
+        expect(result.current.streamingState).toBe(StreamingState.Idle);
+      });
+
+      // Ctrl+Y re-sends round 1's payload INTACT — the trailing-match
+      // guard kept the restore from stripping a non-matching tail.
+      await act(async () => {
+        await result.current.retryLastPrompt();
+      });
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      expect(mockSendMessageStream.mock.calls[1][0]).toEqual([
+        { text: 'call-r1' },
+        { text: 'call-r1-extra' },
+      ]);
+
+      // Release the goal gate (and change the pending count so the Idle
+      // drain effect's dep re-runs it): the restored envelope proves it
+      // was requeued by being delivered exactly once here.
+      queuedUserMessages = false;
+      pendingSubmissionCount = 1;
+      rerenderWithToolCalls([]);
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(3);
+      });
+      expect(mockSendMessageStream).toHaveBeenLastCalledWith(
+        teammateModelText,
+        expect.any(AbortSignal),
+        expect.any(String),
+        expect.objectContaining({
+          type: SendMessageType.Teammate,
+          notificationDisplayText: teammateDisplay,
+        }),
+      );
+    });
+
+    it('delivers and records every envelope in a boundary batch', async () => {
+      const recordNotification = vi.fn();
+      mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
+        recordThought: vi.fn(),
+        initialize: vi.fn(),
+        recordMessage: vi.fn(),
+        recordMessageTokens: vi.fn(),
+        recordToolCalls: vi.fn(),
+        getConversationFile: vi.fn(),
+        recordNotification,
+      });
+
+      const { rerenderWithToolCalls, leaderCallback, completeToolRound } =
+        renderBusyMultiRoundTask([createExecutingToolCall()]);
+      const secondModelText =
+        '<teammate_message>second update</teammate_message>';
+      const secondDisplay = '**scout-tests** reported back';
+
+      act(() => {
+        leaderCallback()(teammateModelText, teammateDisplay);
+        leaderCallback()(secondModelText, secondDisplay);
+      });
+
+      const completed = createCompletedToolCall();
+      rerenderWithToolCalls([completed]);
+      await completeToolRound([completed]);
+
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledWith(
+        [
+          ...completed.response.responseParts,
+          { text: teammateModelText },
+          { text: secondModelText },
+        ],
+        expect.any(AbortSignal),
+        'prompt-id-teammate-rounds',
+        expect.objectContaining({ type: SendMessageType.ToolResult }),
+      );
+      expect(mockAddItem).toHaveBeenCalledWith(
+        { type: 'notification', text: teammateDisplay },
+        expect.any(Number),
+      );
+      expect(mockAddItem).toHaveBeenCalledWith(
+        { type: 'notification', text: secondDisplay },
+        expect.any(Number),
+      );
+
+      // The ToolResult submission never reaches the Teammate-keyed
+      // recordNotification branch in client.ts, so the boundary
+      // settlement journals the complete batch explicitly.
+      expect(recordNotification).toHaveBeenCalledWith(
+        [{ text: teammateModelText }, { text: secondModelText }],
+        `${teammateDisplay}; ${secondDisplay}`,
+        undefined,
+        undefined,
+      );
+
+      // Recorded-and-delivered envelopes are not requeued: the task
+      // ends without a second delivery.
+      rerenderWithToolCalls([]);
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps queued teammate messages out of continuations that survive generation change', async () => {
+      const {
+        result,
+        rerenderWithToolCalls,
+        leaderCallback,
+        completeToolRound,
+      } = renderBusyMultiRoundTask([createExecutingToolCall()]);
+
+      act(() => {
+        leaderCallback()(teammateModelText, teammateDisplay);
+      });
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+
+      // Schedule the next round through a continuation whose owner
+      // survives generation change (the shape detached tool
+      // continuations use): its round submission must NOT drain the
+      // teammate queue, because nothing on that path would restore a
+      // consumed envelope to the right generation.
+      const survivingController = new AbortController();
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.ToolCallRequest,
+            value: { callId: 'surviving-tool', name: 'testTool', args: {} },
+          };
+        })(),
+      );
+      await act(async () => {
+        await result.current.submitQuery(
+          [
+            {
+              functionResponse: {
+                id: 'setup-tool',
+                name: 'testTool',
+                response: { output: 'done' },
+              },
+            },
+          ],
+          SendMessageType.ToolResult,
+          'prompt-id-surviving',
+          {
+            toolContinuationOwner: {
+              promptId: 'prompt-id-surviving',
+              signal: survivingController.signal,
+              survivesGenerationChange: true,
+              detachedAbortController: survivingController,
+            },
+          },
+        );
+      });
+      await waitFor(() => {
+        expect(mockScheduleToolCalls).toHaveBeenCalled();
+      });
+
+      const survivingCompleted = createCompletedToolCall('surviving-tool');
+      rerenderWithToolCalls([survivingCompleted]);
+      await completeToolRound([survivingCompleted]);
+
+      // The round submission carries only the tool-response parts —
+      // the envelope stayed queued.
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      expect(mockSendMessageStream.mock.calls[1][0]).toEqual(
+        survivingCompleted.response.responseParts,
+      );
+
+      // Once the task ends, the Idle fallback delivers the envelope.
+      rerenderWithToolCalls([]);
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(3);
+      });
+      expect(mockSendMessageStream).toHaveBeenLastCalledWith(
+        teammateModelText,
+        expect.any(AbortSignal),
+        expect.any(String),
+        expect.objectContaining({ type: SendMessageType.Teammate }),
+      );
+    });
+
+    it('defers the Idle teammate drain while a Goal owns the turn, then delivers the envelope exactly once', async () => {
+      // Goal gate state: while user messages are queued for an active
+      // Goal, `claimSystemGoalTurn` reports not-ready and the drain must
+      // not even splice the queue.
+      let queuedUserMessages = true;
+      let pendingSubmissionCount = 2;
+      const claimGoalTurn = vi.fn().mockImplementation(() => {
+        // The first claim collides with a racing user-message queue and
+        // defers; the collision clears itself before the re-armed retry.
+        queuedUserMessages = true;
+        return undefined;
+      });
+      const goalQueueRef = {
+        current: {
+          hasQueuedUserMessages: vi.fn(() => queuedUserMessages),
+          getPendingSubmissionCount: vi.fn(() => pendingSubmissionCount),
+          claimGoalTurn,
+        },
+      };
+      let snapshot: { goal: { status: string } | null; activity: string } = {
+        goal: { status: 'active' },
+        activity: 'running',
+      };
+      const runtime = {
+        getSnapshot: vi.fn(() => snapshot),
+        subscribe: vi.fn(() => vi.fn()),
+      } as unknown as ReturnType<Config['getGoalRuntime']>;
+      mockConfig.getGoalRuntime = vi.fn(() => runtime);
+
+      const { rerenderWithToolCalls, leaderCallback } =
+        renderBusyMultiRoundTask([], goalQueueRef as never);
+
+      // Phase 1: the gate reports not-ready, so the teammate message
+      // stays queued — neither submitted nor rendered as drained.
+      act(() => {
+        leaderCallback()(teammateModelText, teammateDisplay);
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+
+      // Phase 2: the user-message queue clears, so the gate admits the
+      // drain — but the goal-turn claim itself collides and defers
+      // (`onGoalClaimDeferred`). The already-spliced batch must be
+      // restored (requeued and the Idle drain re-armed), not dropped.
+      queuedUserMessages = false;
+      pendingSubmissionCount = 1;
+      rerenderWithToolCalls([]);
+      await waitFor(() => {
+        expect(claimGoalTurn).toHaveBeenCalledTimes(1);
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+      // The deferral restored the batch instead of submitting it.
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+      // The restore re-armed the Idle drain: the effect re-ran and
+      // re-checked the gate without any external state change (checks:
+      // phase-1 effect, phase-2 effect, the claim closure inside
+      // submitQuery, and the re-armed re-run). Dropping the re-arm would
+      // leave the gate checked only three times.
+      expect(goalQueueRef.current.hasQueuedUserMessages).toHaveBeenCalledTimes(
+        4,
+      );
+
+      // Phase 3: the Goal completes and the gate admits the drain; the
+      // restored envelope is delivered exactly once (a double requeue in
+      // restore would arrive as a joined two-envelope payload).
+      snapshot = { goal: null, activity: 'idle' };
+      queuedUserMessages = false;
+      pendingSubmissionCount = 0;
+      rerenderWithToolCalls([]);
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      });
+      expect(mockSendMessageStream).toHaveBeenCalledWith(
+        teammateModelText,
+        expect.any(AbortSignal),
+        expect.any(String),
+        expect.objectContaining({
+          type: SendMessageType.Teammate,
+          notificationDisplayText: teammateDisplay,
+        }),
+      );
+      // The `● …` notification renders exactly once even though the
+      // batch was drained twice (deferral drain + delivery drain).
+      const notificationRenders = mockAddItem.mock.calls.filter(
+        (args) =>
+          (args[0] as { type?: string }).type === 'notification' &&
+          (args[0] as { text?: string }).text === teammateDisplay,
+      );
+      expect(notificationRenders).toHaveLength(1);
+    });
   });
 
   it('should not submit tool responses if not all tool calls are completed', () => {
