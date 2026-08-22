@@ -57,7 +57,7 @@ import { shellQuotePath } from './lib/shell-quote.js';
 import {
   discardWorktree,
   exposeDependencies,
-  localFilterCommands,
+  localFilterRefusal,
   redirectedAncestor,
   sanitizedGitEnv,
   worktreeCreateFailureDetail,
@@ -134,7 +134,7 @@ export interface ScratchTreeArgs {
  * `filter.<name>.smudge|clean` commands are config-driven, and a checkout runs
  * whichever ones an attributes file selects. `runScratchTree` detects that
  * surface in the repository's own config and refuses rather than run it (see
- * `localFilterCommands`). What a probe does with its own shell is the probe's
+ * `localFilterRefusal`). What a probe does with its own shell is the probe's
  * business, and the report says plainly that the common dir is shared rather
  * than isolated.
  */
@@ -385,17 +385,17 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
 
   // BEFORE any checkout runs — the reuse path's reset and the rebuild path's
   // `worktree add` both execute configured content filters.
-  const filters = localFilterCommands(worktree);
-  if (filters.length > 0) {
+  const filterRefusal = localFilterRefusal(
+    worktree,
+    'the checkouts this command runs',
+  );
+  if (filterRefusal) {
     return unavailable(
-      `the repository's local config defines content filter(s) ${filters
-        .map(inertPath)
-        .join(', ')} — ` +
-        'the checkouts this command runs would EXECUTE them (hooks are disabled, ' +
-        'filters are config-driven), and two plain writes into the common dir are ' +
-        'enough to plant both the filter and the attributes that select it. Remove ' +
-        'the filter config — or the attributes file that uses it — if it is not ' +
-        'yours; until then no scratch tree is safe to create or reset.',
+      `${filterRefusal} (hooks are disabled, filters are config-driven), and ` +
+        'two plain writes into the common dir are enough to plant both the filter ' +
+        'and the attributes that select it. Remove the filter config — or the ' +
+        'attributes file that uses it — if it is not yours; until then no scratch ' +
+        'tree is safe to create or reset.',
     );
   }
 

@@ -18,6 +18,8 @@
 
 import { spawnSync } from 'node:child_process';
 import {
+  accessSync,
+  constants,
   existsSync,
   lstatSync,
   mkdtempSync,
@@ -34,6 +36,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { inertPath } from './paths.js';
 import { readWorkspacePackages } from './workspaces.js';
 
 export type SweepResult = ReturnType<typeof spawnSync>;
@@ -558,32 +561,44 @@ function trackedIgnoreSources(cwd: string, sources: Set<string>): Set<string> {
 }
 
 /**
- * The repo-local `filter.<name>` COMMANDS, when any are defined.
+ * The refusal for a checkout about to run through a repo-local content filter —
+ * or through a repo-local config file the screen could not read — and null
+ * when the screen came back clean. `checkout` is the noun phrase naming the
+ * checkout being authorised ("this tree's restore", "the revert checkout"); it
+ * lands in the message verbatim.
  *
- * Every checkout in this pipeline EXECUTES these — the scratch tree's reset and
- * rebuild, and the probe tree's per-run restore — hooks being disabled covers
- * hooks and not filters. The planting surface is two plain writes a probe can
- * make into the COMMON dir this command's report calls shared:
- * `git config filter.evil.smudge CMD` and one line appended to
- * `$(git rev-parse --git-path info/attributes)`. discard and cleanup never
- * wipe the common dir, so a filter planted while reviewing one PR fires on
- * every later matching checkout of the user's OWN repository — persistence
- * planted by reviewing a malicious PR, measured live. The two local config
- * files are checked with `--file` rather than merged config because filters
- * in the user's global config (git-lfs is the common one) are the user's own
- * contract, exactly like any git command they run — while a probe's planting
- * surface is the repo-local files. The state cannot be told apart from a
- * filter the user set deliberately, and cannot be safely wiped, so a hit is a
- * refusal upstream, not a cleanup here.
+ * Every checkout in this pipeline EXECUTES these filters — the scratch tree's
+ * reset and rebuild, the probe tree's creation, per-run restore and revert
+ * checkouts — hooks being disabled covers hooks and not filters. The planting
+ * surface is two plain writes a probe can make into the COMMON dir this
+ * command's report calls shared: `git config filter.evil.smudge CMD` and one
+ * line appended to `$(git rev-parse --git-path info/attributes)`. discard and
+ * cleanup never wipe the common dir, so a filter planted while reviewing one
+ * PR fires on every later matching checkout of the user's OWN repository —
+ * persistence planted by reviewing a malicious PR, measured live. The local
+ * config files are checked with `--file` rather than merged config because
+ * filters in the user's global config (git-lfs is the common one) are the
+ * user's own contract, exactly like any git command they run — while a probe's
+ * planting surface is the repo-local files. `--file` likewise does not expand
+ * `include.path`/`includeIf.*.path`, so a filter planted behind an include is
+ * invisible here; the origin-scoped follow-up tracked on this PR closes that —
+ * `--includes` or merged config would follow the include into the user's
+ * global config and re-import `filter.lfs.clean`, the permanent-refusal
+ * failure. The state cannot be told apart from a filter the user set
+ * deliberately, and cannot be safely wiped, so a hit is a refusal upstream,
+ * not a cleanup here.
  */
-export function localFilterCommands(worktree: string): string[] {
+export function localFilterRefusal(
+  worktree: string,
+  checkout: string,
+): string | null {
   const files = spawnSync(
     'git',
     ['rev-parse', '--git-common-dir', '--git-dir'],
     { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
   );
   if (files.error || files.status !== 0 || typeof files.stdout !== 'string') {
-    return [];
+    return null;
   }
   const [commonDir, gitDir] = files.stdout.trim().split('\n');
   const common = resolve(worktree, commonDir);
@@ -592,9 +607,10 @@ export function localFilterCommands(worktree: string): string[] {
     join(resolve(worktree, gitDir), 'config.worktree'),
   ];
   // Every OTHER worktree's per-worktree config too. This screen runs against
-  // the review worktree, but the checkout it authorises runs in the SCRATCH
-  // tree, whose own `<common>/worktrees/<label>/config.worktree` is honored
-  // once `extensions.worktreeConfig` is on and was never read here — a filter
+  // the review worktree, but the checkout it authorises can run in ANOTHER
+  // tree — the SCRATCH tree, the probe tree — whose own
+  // `<common>/worktrees/<label>/config.worktree` is honored once
+  // `extensions.worktreeConfig` is on and was never read here: a filter
   // planted there executed during the reset while this function reported the
   // repository clean. The admin directory is one `readdir`, and a filter in
   // any of these is a plant whichever tree carries it.
@@ -605,9 +621,27 @@ export function localFilterCommands(worktree: string): string[] {
   } catch {
     // No linked worktrees registered: the two candidates above are all of it.
   }
-  const found: string[] = [];
+  const filters: Array<{ key: string; file: string }> = [];
+  // Neither a config key nor a path can carry NUL, so the pair separator is
+  // unambiguous — and an O(1) dedup, because a padded config can hand this
+  // loop tens of thousands of keys.
+  const seen = new Set<string>();
+  const unreadable: Array<{ file: string; detail: string }> = [];
   for (const file of candidates) {
     if (!existsSync(file)) continue;
+    // An unreadable file fails the screen CLOSED, asked directly: git answers
+    // an unreadable `--file` with the SAME exit 1 as "no keys matched" (and a
+    // warning on stderr), so the exit code cannot tell the two apart — and a
+    // screen that could not read a file cannot certify the checkout that will.
+    try {
+      accessSync(file, constants.R_OK);
+    } catch (e) {
+      unreadable.push({
+        file,
+        detail: e instanceof Error ? e.message : String(e),
+      });
+      continue;
+    }
     const r = spawnSync(
       'git',
       [
@@ -620,15 +654,68 @@ export function localFilterCommands(worktree: string): string[] {
         // of three is how the first cut of this screen read as complete.
         '^filter\\..*\\.(smudge|clean|process)$',
       ],
-      { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
+      {
+        cwd: worktree,
+        encoding: 'utf8',
+        // Padding beside a planted key pushes the output past spawnSync's
+        // 1 MiB default: ENOBUFS, and the `continue` that used to follow
+        // certified — and ran — a checkout the screen had never read. The
+        // 64 MiB ceiling the other readers in these files already use.
+        maxBuffer: 64 * 1024 * 1024,
+        env: sanitizedGitEnv(),
+      },
     );
-    if (r.error || r.status !== 0 || typeof r.stdout !== 'string') continue;
+    // Exit 1 is the legitimate "no keys matched"; every other failure on a
+    // file that EXISTS and was readable — a spawn error, a malformed config
+    // git exits 128 on — is a read the screen cannot vouch for.
+    if (r.status === 1) continue;
+    if (r.error || r.status !== 0 || typeof r.stdout !== 'string') {
+      unreadable.push({
+        file,
+        detail: r.error
+          ? r.error.message
+          : (r.stderr ?? '').toString().trim() ||
+            `git config exited ${r.status}`,
+      });
+      continue;
+    }
     for (const line of r.stdout.split('\n')) {
       const key = line.split(/\s+/)[0];
-      if (key && !found.includes(key)) found.push(key);
+      const pair = `${file}\u0000${key}`;
+      if (key && !seen.has(pair)) {
+        // The defining file rides along: with `extensions.worktreeConfig` a
+        // filter can live only in a SIBLING worktree's config.worktree, and a
+        // refusal that lists keys alone points at nothing the oncall's first
+        // move — `git config --local --get-regexp '^filter\.'` in the review
+        // worktree — can see.
+        seen.add(pair);
+        filters.push({ key, file });
+      }
     }
   }
-  return found;
+  if (filters.length === 0 && unreadable.length === 0) return null;
+  // Keys and paths arrive from config files a probe can write, so both go
+  // through `inertPath` the way `scratch-tree`'s note always has: a caught
+  // attacker still controls the bytes naming the catch, and they reach the
+  // terminal and the report the next agent treats as authoritative.
+  const parts: string[] = [];
+  if (filters.length > 0) {
+    parts.push(
+      `the repository's local config defines content filter(s) ${filters
+        .map((f) => `${inertPath(f.key)} (in ${inertPath(f.file)})`)
+        .join(', ')} — ${checkout} would EXECUTE them`,
+    );
+  }
+  if (unreadable.length > 0) {
+    parts.push(
+      `the repository's local config could not be read (${unreadable
+        .map((u) => `${inertPath(u.file)}: ${inertPath(u.detail)}`)
+        .join(
+          '; ',
+        )}), so the screen cannot certify that ${checkout} would not EXECUTE a content filter`,
+    );
+  }
+  return parts.join('; ');
 }
 
 /**

@@ -532,18 +532,29 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
     // The restore rewrites every tracked file in this tree, and a checkout
     // EXECUTES `filter.<name>.smudge` whenever it does — the same surface
     // `scratch-tree` refuses to reset through, run twice per probe run one
-    // directory over with no screen at all.
+    // directory over with no screen at all. The plant is ARMED the way the
+    // docstring's planting surface arms it — the config key plus one
+    // attributes line — and the smudge points at a path unique to this run,
+    // so the property the screen exists for (the command never EXECUTES) is
+    // asserted, not implied: a screen moved below the checkout spawns would
+    // create the marker and fail here.
     const dir = mkdtempSync(join(tmpdir(), 'qwen-filter-'));
     const isolation = isolateHostGitConfig();
+    const marker = join(dir, 'smudge-never-ran');
     try {
       writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
       writeFileSync(join(dir, 'b.ts'), 'export const b = 1;\n');
       asCheckout(dir);
-      execFileSync(
-        'git',
-        ['config', 'filter.evil.smudge', 'touch /tmp/qwen-should-never-run'],
-        { cwd: dir },
-      );
+      execFileSync('git', ['config', 'filter.evil.smudge', `touch ${marker}`], {
+        cwd: dir,
+      });
+      const infoDir = join(dir, '.git', 'info');
+      mkdirSync(infoDir, { recursive: true });
+      writeFileSync(join(infoDir, 'attributes'), '* filter=evil\n');
+      // Dirty a tracked file so the refused checkout genuinely would have had
+      // to rewrite it: git may skip rewriting an unchanged file, which would
+      // let a mis-placed screen pass without ever facing the filter.
+      writeFileSync(join(dir, 'a.ts'), 'mutant dirt\n');
 
       const r = runOneMutant(
         dir,
@@ -553,14 +564,18 @@ describe('restoreProbeTreeTracked, through runOneMutant', () => {
 
       expect(r.verdict).toBe('inconclusive');
       expect(r.detail).toContain('filter.evil.smudge');
+      expect(existsSync(marker)).toBe(false);
 
       // ...and a filter in the user's GLOBAL config is their own contract, the
       // way it is for any git command they run. `git lfs install` writes one
       // there, so refusing on it would put every contributor with git-lfs into
-      // permanent refusal — the failure mode a blanket rule reproduces.
+      // permanent refusal — the failure mode a blanket rule reproduces. Drop
+      // the whole plant first — attributes line included — so only that
+      // exemption is under test.
       execFileSync('git', ['config', '--unset', 'filter.evil.smudge'], {
         cwd: dir,
       });
+      rmSync(join(infoDir, 'attributes'));
       execFileSync(
         'git',
         ['config', '--global', 'filter.lfs.clean', 'git-lfs clean -- %f'],

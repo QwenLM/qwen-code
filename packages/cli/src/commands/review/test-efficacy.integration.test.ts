@@ -14,6 +14,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
+  appendFileSync,
   mkdtempSync,
   mkdirSync,
   writeFileSync,
@@ -309,6 +310,138 @@ describe('test-efficacy probe isolation (#6832)', () => {
       'packages/lib/src/f.test.ts',
     );
     expect(out.cleanupFailure).toBeUndefined();
+  });
+
+  it('screens the probe tree CREATION checkout — the pipeline’s FIRST checkout', async () => {
+    // A filter planted in the common dir before the run EXECUTES during
+    // `git worktree add --detach` — before any restore's screen gets a turn,
+    // and again on every later review until something wipes the common dir.
+    // The creation is screened now and a hit is handled like a creation
+    // failure: inconclusive probes, no tree, and above all no executed filter.
+    const { wt, base } = scaffoldModifiedPr();
+    const pwned = join(outside, 'PWNED-create');
+    appendFileSync(
+      join(repo, '.git', 'config'),
+      `[filter "evil"]\n\tsmudge = touch ${pwned}\n`,
+    );
+    mkdirSync(join(repo, '.git', 'info'), { recursive: true });
+    writeFileSync(join(repo, '.git', 'info', 'attributes'), '* filter=evil\n');
+
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    expect(existsSync(pwned)).toBe(false);
+    expect(existsSync(join(repo, 'wt-probe'))).toBe(false);
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    expect(out.probed).toHaveLength(1);
+    expect(out.probed[0].verdict).toBe('inconclusive');
+    expect(out.probed[0].detail).toContain('content filter');
+  });
+
+  it('screens the REVERT checkout — a filter planted during the baseline is refused there', async () => {
+    // The exact execution the screen exists to prevent: the suite plants the
+    // filter (config key plus one attributes line into the shared common dir)
+    // while the baseline runs; every restore then correctly refuses; and the
+    // revert's `git checkout base -- <modified>` — unscreened — rewrote every
+    // PR-modified file through the planted smudge. The revert is re-screened
+    // now, beside the probeTargetEscapes re-check.
+    const { wt, base } = scaffoldModifiedPr();
+    const pwned = join(outside, 'PWNED-revert');
+    writeFileSync(
+      vitestScript(),
+      String.raw`#!/usr/bin/env node
+import { execSync } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+const common = execSync('git rev-parse --path-format=absolute --git-common-dir', { encoding: 'utf8' }).trim();
+const config = path.join(common, 'config');
+if (!fs.readFileSync(config, 'utf8').includes('[filter "evil"]')) {
+  fs.appendFileSync(config, '[filter "evil"]\n\tsmudge = touch ${pwned}\n');
+}
+fs.mkdirSync(path.join(common, 'info'), { recursive: true });
+fs.writeFileSync(path.join(common, 'info', 'attributes'), '* filter=evil\n');
+const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+process.stdout.write(JSON.stringify({
+  numPassedTests: files.length,
+  numFailedTests: 0,
+  testResults: files.map((f) => ({
+    name: path.resolve(f),
+    assertionResults: [{ status: 'passed' }],
+  })),
+}));
+`,
+    );
+
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    expect(existsSync(pwned)).toBe(false);
+    expect(existsSync(join(repo, 'wt-probe'))).toBe(false);
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    expect(
+      out.probed.every(
+        (p: { verdict: string }) => p.verdict === 'inconclusive',
+      ),
+    ).toBe(true);
+    expect(
+      out.probed.map((p: { detail: string }) => p.detail).join('\n'),
+    ).toContain('content filter');
+  });
+
+  it('kills the suite’s whole process group — no survivor outlives a run', async () => {
+    // The suite's timeout signals only the runner itself: a child the suite
+    // spawned into its process group survives the deadline — and a normal
+    // exit — outlives every screen, and can swap config between one of them
+    // and the checkout it authorised. The runner leads its own group now and
+    // the whole group dies when a run returns. The fake suite spawns a child
+    // that marks a file after a delay: a survivor would leave the mark.
+    const { wt, base } = scaffoldModifiedPr();
+    const marker = join(outside, 'survivor-marker');
+    writeFileSync(
+      vitestScript(),
+      String.raw`#!/usr/bin/env node
+import { spawn } from 'node:child_process';
+import path from 'node:path';
+const child = spawn(
+  process.execPath,
+  [
+    '-e',
+    "setTimeout(() => { try { require('fs').writeFileSync(process.argv[1], 'x'); } catch {} }, 1200);",
+    ${JSON.stringify(marker)},
+  ],
+  { stdio: 'ignore' },
+);
+child.unref();
+const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+process.stdout.write(JSON.stringify({
+  numPassedTests: files.length,
+  numFailedTests: 0,
+  testResults: files.map((f) => ({
+    name: path.resolve(f),
+    assertionResults: [{ status: 'passed' }],
+  })),
+}));
+`,
+    );
+
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    // Longer than the sleeper's delay: any survivor had time to leave its mark.
+    await new Promise((res) => setTimeout(res, 2500));
+    expect(existsSync(marker)).toBe(false);
   });
 
   it('a PR-controlled symlink cannot delete outside the tree — by isolation, not the guard', async () => {

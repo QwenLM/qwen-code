@@ -48,7 +48,10 @@
 // `killed`.
 
 import type { CommandModule } from 'yargs';
-import { spawnSync } from 'node:child_process';
+import {
+  spawnSync,
+  type SpawnSyncOptionsWithStringEncoding,
+} from 'node:child_process';
 import {
   mkdirSync,
   writeFileSync,
@@ -69,7 +72,7 @@ import { probeWorktreePath } from './lib/paths.js';
 import {
   discardWorktree,
   exposeDependencies,
-  localFilterCommands,
+  localFilterRefusal,
   redirectedAncestor,
   sanitizedGitEnv,
   worktreeCreateFailureDetail,
@@ -1598,10 +1601,8 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
   // `filter.lfs.clean` into the user's GLOBAL config, and refusing on that
   // would put every contributor with git-lfs into permanent refusal — the same
   // failure as a tripwire that fires on every healthy run.
-  const filters = localFilterCommands(probeTree);
-  if (filters.length > 0) {
-    return `the repository's local config defines content filter(s) ${filters.join(', ')}, which this tree's restore would EXECUTE`;
-  }
+  const filterRefusal = localFilterRefusal(probeTree, "this tree's restore");
+  if (filterRefusal) return filterRefusal;
   // `core.fsmonitor` runs a command on BOTH of these, and the config that sets
   // it lives in the tree they are cleaning: the residue probe empties it for
   // exactly this reason and these two spawns were the ones still steerable.
@@ -1698,19 +1699,41 @@ function runProbeSuite(
   const exposed = exposeDependencies(probeTree, dependencyRoot, {
     rebuild: true,
   });
+  // Node honours `detached` here — it reaches the same `spawn()` the async
+  // API uses — but @types/node declares it only on the async `SpawnOptions`,
+  // so the option is named in an intersection instead of at the call site.
+  const runnerOptions: SpawnSyncOptionsWithStringEncoding & {
+    detached: boolean;
+  } = {
+    cwd: probeTree,
+    encoding: 'utf8',
+    timeout,
+    // Vitest's JSON reporter on a large suite easily exceeds spawnSync's
+    // 1 MiB default stdout buffer, which returns ENOBUFS and turns every
+    // probe `inconclusive`. Match the 64 MiB ceiling the gh wrapper uses.
+    maxBuffer: 64 * 1024 * 1024,
+    // The timeout above signals only the runner itself: a child the suite
+    // spawned into its process group survives the deadline — and a normal
+    // exit — outlives every screen, and can swap config between one of them
+    // and the checkout it authorised. The runner leads its own group, so
+    // the kill below takes every such survivor with it.
+    detached: true,
+  };
   const r = spawnSync(
     process.execPath,
     [findVitestBin(dependencyRoot), 'run', '--reporter=json', ...probes],
-    {
-      cwd: probeTree,
-      encoding: 'utf8',
-      timeout,
-      // Vitest's JSON reporter on a large suite easily exceeds spawnSync's
-      // 1 MiB default stdout buffer, which returns ENOBUFS and turns every
-      // probe `inconclusive`. Match the 64 MiB ceiling the gh wrapper uses.
-      maxBuffer: 64 * 1024 * 1024,
-    },
+    runnerOptions,
   );
+  // Best effort, after EVERY outcome including the timeout: on a clean exit
+  // the group is already gone. Negative-pid kills are POSIX-only; on Windows
+  // this throws and the behaviour stays as it was.
+  if (r.pid) {
+    try {
+      process.kill(-r.pid, 'SIGKILL');
+    } catch {
+      // Nothing left in the group to kill.
+    }
+  }
   // `r.error` is set — and `r.status` is null — when the process never ran
   // (vitest entry missing or unresolvable) or was killed (the timeout above
   // fires SIGTERM). Ignoring it reports those as "the runner produced no
@@ -2535,6 +2558,16 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
     let created = false;
     let sweep: SweepResult | undefined;
     try {
+      // The creation checkout rewrites every file the head commit carries,
+      // which EXECUTES a planted filter — and it is the pipeline's FIRST
+      // checkout, before any restore's screen runs. Refuse it the way the
+      // per-restore screens refuse theirs; the catch below treats a hit like
+      // any other creation failure.
+      const creationRefusal = localFilterRefusal(
+        worktree,
+        "the probe tree's creation checkout",
+      );
+      if (creationRefusal) throw new Error(creationRefusal);
       // Clear a stale probe tree left by a crashed run — it would fail `add`.
       // Its stderr is kept to explain a subsequent `add` failure.
       sweep = discardWorktree(worktree, probeTree);
@@ -2853,6 +2886,15 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
               'root), so the revert would run against whatever it points at',
           );
         }
+        // Re-screen beside that re-check: the suite that ran between the entry
+        // screen and this checkout has a shell in this repository and can plant
+        // a filter after one and before the other — the per-restore screens
+        // each catch their own checkout; the revert's had none.
+        const revertRefusal = localFilterRefusal(
+          probeTree,
+          'the revert checkout',
+        );
+        if (revertRefusal) throw new Error(revertRefusal);
         // "Revert to base" is two operations, confined to the throwaway tree. A
         // file the PR MODIFIED is checked out from base; a file the PR ADDED did
         // not exist at base, so it is removed — through `safeRmWithin`, which

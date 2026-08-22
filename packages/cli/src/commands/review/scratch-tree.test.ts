@@ -23,6 +23,7 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { execFileSync } from 'node:child_process';
 import {
+  appendFileSync,
   chmodSync,
   existsSync,
   mkdirSync,
@@ -117,9 +118,20 @@ describe('runScratchTree', () => {
     expect(viaProcess.note).toContain('filter.evil.process');
     expect(existsSync(pwned)).toBe(false);
 
+    // `clean` completes the executable trio: with it unnamed in the regex a
+    // repo-local `filter.evil.clean` passed the screen at BOTH call sites
+    // while the whole suite stayed green — the "enumerate two of three" shape
+    // the comment above warns about, one token over.
+    git(worktree, 'config', '--unset', 'filter.evil.process');
+    git(worktree, 'config', 'filter.evil.clean', `touch ${pwned}`);
+    const viaClean = run();
+    expect(viaClean.available).toBe(false);
+    expect(viaClean.note).toContain('filter.evil.clean');
+    expect(existsSync(pwned)).toBe(false);
+
     // A repo WITHOUT the filter still gets a tree (the global-config filters
     // a user's own git-lfs install carries are not this surface).
-    git(worktree, 'config', '--unset', 'filter.evil.process');
+    git(worktree, 'config', '--unset', 'filter.evil.clean');
     expect(run().available).toBe(true);
   });
 
@@ -150,7 +162,7 @@ describe('runScratchTree', () => {
     });
     writeFileSync(
       scratchAdmin,
-      '[filter "planted"]\n\tsmudge = touch /tmp/qwen-should-never-run\n',
+      `[filter "planted"]\n\tsmudge = touch ${join(repo, 'planted-never-ran')}\n`,
     );
 
     const r = run();
@@ -158,6 +170,74 @@ describe('runScratchTree', () => {
     expect(r.available).toBe(false);
     expect(r.note).toContain('filter.planted.smudge');
   });
+
+  it('refuses when filter keys pad the config past the old 1 MiB buffer — never fails open', () => {
+    // Padding beside a planted key pushed `--get-regexp`'s output past
+    // spawnSync's 1 MiB default: ENOBUFS, and the `continue` that followed
+    // certified — and ran — a checkout the screen had never read. Padding is
+    // one larger write to the same common-dir file the docstring documents,
+    // and the common dir is never wiped, so the defeat persisted at both call
+    // sites.
+    const pwned = join(repo, 'PWNED-padded');
+    const padding = Array.from(
+      { length: 50000 },
+      (_, i) => `[filter "pad${i}"]\n\tsmudge = x`,
+    ).join('\n');
+    appendFileSync(
+      join(repo, '.git', 'config'),
+      `${padding}\n[filter "evil"]\n\tsmudge = touch ${pwned}\n`,
+    );
+    mkdirSync(join(repo, '.git', 'info'), { recursive: true });
+    writeFileSync(join(repo, '.git', 'info', 'attributes'), '* filter=evil\n');
+
+    const r = run();
+
+    expect(r.available).toBe(false);
+    expect(r.note).toContain('filter.evil.smudge');
+    expect(existsSync(pwned)).toBe(false);
+  });
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'refuses when a candidate config cannot be read or parsed — never certifies it',
+    () => {
+      // git answers an unreadable `--file` with the SAME exit 1 as "no keys
+      // matched" (a warning on stderr), so the exit code cannot tell the two
+      // apart — and a screen that could not read a file cannot certify the
+      // checkout that will parse it. Both shapes fail the screen closed.
+      const first = run();
+      expect(first.available).toBe(true);
+      const common = execFileSync(
+        'git',
+        ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+        { cwd: worktree, encoding: 'utf8' },
+      ).trim();
+      const scratchConfig = join(
+        common,
+        'worktrees',
+        basename(first.path!),
+        'config.worktree',
+      );
+
+      writeFileSync(scratchConfig, '');
+      chmodSync(scratchConfig, 0o000);
+      try {
+        const unreadable = run();
+        expect(unreadable.available).toBe(false);
+        expect(unreadable.note).toContain('could not be read');
+        expect(unreadable.note).toContain(scratchConfig);
+      } finally {
+        chmodSync(scratchConfig, 0o644);
+      }
+
+      // A file git can open but not parse exits 128 — not the "no keys
+      // matched" 1 — and is the same uncertifiable read.
+      writeFileSync(scratchConfig, '[filter "evil"\n\tsmudge = x\n');
+      const malformed = run();
+      expect(malformed.available).toBe(false);
+      expect(malformed.note).toContain('could not be read');
+      expect(malformed.note).toContain(scratchConfig);
+    },
+  );
 
   it('places it BESIDE the review worktree, never inside it', () => {
     // Nested, every probe file would land in the tree this command exists to
