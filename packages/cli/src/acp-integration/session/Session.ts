@@ -9574,6 +9574,24 @@ export class Session implements SessionContext {
         logContext: `ACP session ${this.sessionId} context-file memory tool batch`,
       });
     };
+    // R23-30 / R24-1: release the admission-time replay record for a
+    // gate-rejected wrapper call. Shared by both execution paths below:
+    // the bounded-concurrency runner AND the sequential lap. Every wrapper
+    // call admitted by runToolCalls is recorded for duplicate-provider-id
+    // replay detection before the gate runs; nothing executes for a
+    // rejected call, and the rejection text instructs the model to re-issue
+    // it, so the record must go to keep the instructed retry from being
+    // suppressed as a replay on providers that reuse tool-call ids.
+    const releaseRejectedCallReplayRecord = (rejectedFc: FunctionCall) => {
+      const pid = getProviderToolCallId(rejectedFc) ?? rejectedFc.id;
+      if (!pid) return;
+      if (
+        handledToolCallFingerprints.get(pid) ===
+        getFunctionCallFingerprint(rejectedFc)
+      ) {
+        handledToolCallFingerprints.delete(pid);
+      }
+    };
     // Bounded-concurrency runner: matches core's `runConcurrently`
     // behaviour (`coreToolScheduler.ts:1506`), capped by
     // `QWEN_CODE_MAX_TOOL_CONCURRENCY` (default 10). Results are returned
@@ -9642,18 +9660,7 @@ export class Session implements SessionContext {
           onFullTurnModel,
           presentationSnapshot,
           pendingPresentationsInBatch,
-          (rejectedFc) => {
-            // R23-30: release the admission-time replay record for a
-            // gate-rejected wrapper call — see runTool's parameter doc.
-            const pid = getProviderToolCallId(rejectedFc) ?? rejectedFc.id;
-            if (!pid) return;
-            if (
-              handledToolCallFingerprints.get(pid) ===
-              getFunctionCallFingerprint(rejectedFc)
-            ) {
-              handledToolCallFingerprints.delete(pid);
-            }
-          },
+          releaseRejectedCallReplayRecord,
         )
           .then((r) => {
             results[idx] = r;
@@ -9798,6 +9805,11 @@ export class Session implements SessionContext {
               onFullTurnModel,
               presentationSnapshot,
               pendingPresentationsInBatch,
+              // R24-1: the sequential lap executes every non-agent wrapper
+              // call; it needs the same release as the concurrent path
+              // (without it a gate-rejected call's admission record would
+              // survive within this turn's map).
+              releaseRejectedCallReplayRecord,
             );
             parts.push(...r.parts);
             collectMemoryWriteCandidates(r);
