@@ -298,8 +298,8 @@ describe('capture-local — incremental local rounds', () => {
     git('config', 'diff.mydrv.binary', 'true');
     const cachePath = promoteCandidate(capture(), 'model-a');
 
-    // Only the CONFIG changes: no file in the tree moves, and `check-attr`
-    //答案 is identical before and after.
+    // Only the CONFIG changes: no file in the tree moves, and `check-attr`'s
+    // answer is identical before and after.
     git('config', 'diff.mydrv.binary', 'false');
     const plan = capture({ cache: cachePath, model: 'model-a' });
     expect(plan.incremental!.scope!.deltaFiles).toContain(CHANGED);
@@ -649,6 +649,10 @@ describe('capture-local — the cache key is the SOURCE path, not the token', ()
     });
     expect(other['target']).toBe('src_foo.ts');
     expect(other.incremental).toBeUndefined();
+    // …and SAID, like every sibling gate's reason: a refactor relocating the
+    // check into the reader (fail-quiet null) would surface "the cache is
+    // missing or unreadable" — a false diagnosis for exactly this collision.
+    expect(stderrLines.join('\n')).toContain('belongs to source path');
 
     // …and the file the cache actually belongs to still scopes.
     write('src/foo.ts', 'export const real = 2;\n');
@@ -658,6 +662,30 @@ describe('capture-local — the cache key is the SOURCE path, not the token', ()
       model: 'model-a',
     });
     expect(same.incremental).toBeDefined();
+  });
+
+  it('a hostile source path reaches stderr escaped, never raw', () => {
+    // Mirrors the hostile-lastModelId pin: the refusal interpolates the
+    // cache's recorded source through `display()`, so a crafted value cannot
+    // forge warning lines or emit terminal escapes.
+    seedDirtyTree();
+    write('src_foo.ts', 'export const collide = 1;\n');
+    const cachePath = promoteCandidate(
+      capture({ file: 'src_foo.ts', model: 'model-a' }),
+      'model-a',
+    );
+    const cache = JSON.parse(readFileSync(cachePath, 'utf8')) as Record<
+      string,
+      unknown
+    >;
+    cache['source'] = 'evil\nWARNING: forged line \u001b[31m';
+    writeFileSync(cachePath, JSON.stringify(cache));
+    stderrLines.length = 0;
+    write('src/foo.ts', 'export const real = 1;\n');
+    capture({ file: 'src/foo.ts', cache: cachePath, model: 'model-a' });
+    const err = stderrLines.join('|');
+    expect(err).not.toContain('\u001b'); // no raw ESC byte at the terminal
+    expect(err).toContain('\\n'); // the newline arrives as an escape, quoted
   });
 });
 
@@ -699,6 +727,21 @@ describe('capture-local — the local same-model gate', () => {
     // …and the same provider still scopes.
     const same = capture({ cache: cachePath, model: A });
     expect(same.incremental?.scope?.deltaFiles).toEqual([CHANGED]);
+  });
+
+  it('names the fallback when the CACHED identity is empty too', () => {
+    // `roundModelIdFrom` records `''` when the runtime published nothing —
+    // reachable in normal operation, not an error state. The refusal must
+    // print the fallback on the cached side as well; a blank certifier name
+    // ("reviewed by , not …") reads as a recorded-but-different identity
+    // when both sides are unrecorded.
+    seedDirtyTree();
+    const cachePath = promoteCandidate(capture(), '');
+    write(CHANGED, 'export const v = 2;\n');
+    capture({ cache: cachePath, model: 'model-b' });
+    expect(stderrLines.join('\n')).toContain(
+      'reviewed by an unrecorded model, not model-b',
+    );
   });
 
   it('treats a runtime that published NO identity as a mismatch', () => {
@@ -862,6 +905,13 @@ describe('capture-local — identity soundness and refusal contract', () => {
     capture({ cache: cachePath, model: 'model-a' });
     expect(stderrLines.join('\n')).toContain(
       'HEAD moved since the last local round',
+    );
+
+    stderrLines.length = 0;
+    writeFileSync(cachePath, 'not json');
+    capture({ cache: cachePath, model: 'model-a' });
+    expect(stderrLines.join('\n')).toContain(
+      'the cache is missing or unreadable',
     );
   });
 

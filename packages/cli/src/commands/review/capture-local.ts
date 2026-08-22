@@ -164,7 +164,7 @@ function anchorRefusalReason(
     // missing, and an unverifiable contract is a failed one — which is what
     // `certifierMatchesRound` answers for an empty running identity too.
     return `the previous local round was reviewed by ${display(
-      (cache.lastModelId ?? 'an unrecorded model').slice(0, 64),
+      (cache.lastModelId || 'an unrecorded model').slice(0, 64),
     )}, not ${display(model || 'an unrecorded model')}`;
   }
   if (cache.target !== target) {
@@ -201,9 +201,11 @@ function anchorRefusalReason(
 }
 
 /**
- * The cache file `--cache` names: the path itself, or `<dir>/<target>.json`
- * when it names a directory. Null when a directory holds no cache for this
- * target, which every caller already treats as "no anchor".
+ * The cache file `--cache` names: the path itself, or — when it names a
+ * directory — the same spelling `cachePathFor` writes (`<dir>/<target>.json`
+ * for the whole tree, `<dir>/file-<target>-<digest>.json` for a file
+ * review). Null when a directory holds no cache for this target, which
+ * every caller already treats as "no anchor".
  */
 function resolveCachePath(
   given: string,
@@ -857,8 +859,9 @@ export const captureLocalCommand: CommandModule = {
         describe:
           "The previous local round's review cache — the file, or the " +
           'DIRECTORY holding it (`.qwen/review-cache`), in which case this ' +
-          'command resolves `<dir>/<target>.json` from the target IT ' +
-          'derives. Prefer the directory for a file review: the target is ' +
+          "command resolves this target's cache file — the same spelling " +
+          'the plan publishes as `cachePath` — from the target IT derives. ' +
+          'Prefer the directory for a file review: the target is ' +
           "this command's to compute, and a caller that predicts the name " +
           'gets it wrong for any non-canonical spelling. When the anchor ' +
           'validates — same identity, same HEAD — the capture is scoped to ' +

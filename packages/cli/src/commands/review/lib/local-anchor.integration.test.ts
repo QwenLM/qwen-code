@@ -96,4 +96,29 @@ describe('hashWorktreeFiles — the attributes probe is byte-faithful', () => {
     // probe ran at all rather than falling back wholesale.
     expect(out['plain.ts']).toContain('diff=unspecified');
   });
+
+  it("folds a driver's binary flag only into the paths naming THAT driver", () => {
+    // The fold used to match the record string by substring, so a driver
+    // whose name is a PREFIX of another (`md` / `mdbook`) folded its config
+    // into the other's paths: toggling `diff.md.binary` then re-reviewed
+    // every `mdbook` file each round although its bytes, mode and own driver
+    // never moved — the wasted re-review the attribute component exists to
+    // prevent.
+    writeFileSync(join(repo, 'a.md'), '# a\n');
+    writeFileSync(join(repo, 'book.md'), '# book\n');
+    writeFileSync(
+      join(repo, '.gitattributes'),
+      'a.md diff=md\nbook.md diff=mdbook\n',
+    );
+    git('config', 'diff.md.binary', 'true');
+
+    const out = hashWorktreeFiles(repo, ['a.md', 'book.md']);
+
+    // The fold lands on the path naming the driver…
+    expect(out['a.md']).toContain('diff=md');
+    expect(out['a.md']).toContain('md.binary=true');
+    // …and the PREFIXED driver's path keeps its identity clean of it.
+    expect(out['book.md']).toContain('diff=mdbook');
+    expect(out['book.md']).not.toContain('md.binary');
+  });
 });

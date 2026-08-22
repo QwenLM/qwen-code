@@ -291,7 +291,7 @@ function renderingAttributes(
     );
     if (binary === null) continue;
     for (const [path, attrs] of Object.entries(out)) {
-      if (attrs.includes(`diff=${driver}`)) {
+      if (attrs.split(',').includes(`diff=${driver}`)) {
         out[path] = `${attrs},${driver}.binary=${binary}`;
       }
     }
