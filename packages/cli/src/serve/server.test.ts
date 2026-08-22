@@ -15484,6 +15484,64 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it('prefers the sidecar state over the live bind-time state on merge', async () => {
+      // The refresh timer rewrites `state` in the sidecar while the live
+      // entry keeps the bind-time snapshot — otherwise a live session's PR
+      // would never show as merged until daemon restart.
+      const id = '550e8400-e29b-41d4-a716-44665544a005';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('2026-05-17T12:00:05.000Z'),
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 9517,
+        url: 'https://github.com/o/r/pull/9517',
+        state: 'merged',
+      });
+      // The TTL cache would otherwise keep serving a scan taken before this
+      // test's sidecar write.
+      invalidateWorkspaceSessionListCache({
+        runtimeBaseDir: new Storage(WS_BOUND).getRuntimeBaseDir(),
+        workspaceCwd: WS_BOUND,
+        archiveStates: ['active'],
+      });
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            prs: [
+              {
+                number: 9517,
+                url: 'https://github.com/o/r/pull/9517',
+                state: 'open' as const,
+              },
+            ],
+          },
+        ],
+      });
+
+      const result = await listWorkspaceSessionsForResponse(bridge, WS_BOUND);
+
+      const merged = result.sessions.find((s) => s.sessionId === id);
+      expect(merged?.prs).toEqual([
+        {
+          number: 9517,
+          url: 'https://github.com/o/r/pull/9517',
+          state: 'merged',
+        },
+      ]);
+    });
+
     it('survives PR sidecars on the organized listing path', async () => {
       const id = '550e8400-e29b-41d4-a716-446655440005';
       await writeStoredSession({

@@ -725,6 +725,8 @@ export interface BridgeSessionGoal {
 export interface SessionPrInfo {
   number: number;
   url: string;
+  /** Snapshot of the PR's state at last bind/refresh; optional. */
+  state?: 'open' | 'merged' | 'closed';
 }
 
 export interface SessionMetadataUpdate {

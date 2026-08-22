@@ -42,7 +42,11 @@ export function SessionPrBadge({ prs, tabIndex }: SessionPrBadgeProps) {
     : t('sidebar.sessionPr', { number: latest.number });
   return (
     <a
-      className={styles.sessionPrBadge}
+      className={
+        latest.state === 'merged'
+          ? `${styles.sessionPrBadge} ${styles.sessionPrBadgeMerged}`
+          : styles.sessionPrBadge
+      }
       href={latest.url}
       target="_blank"
       rel="noreferrer"

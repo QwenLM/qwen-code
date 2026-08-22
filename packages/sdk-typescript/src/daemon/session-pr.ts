@@ -36,6 +36,10 @@ export function isDaemonSessionPrInfo(
     /^https?:\/\//i.test(v['url']) &&
     // The daemon interpolates the url into a stderr audit line — control
     // characters would forge log lines downstream of this gate.
-    !hasControlCharacter(v['url'])
+    !hasControlCharacter(v['url']) &&
+    (v['state'] === undefined ||
+      v['state'] === 'open' ||
+      v['state'] === 'merged' ||
+      v['state'] === 'closed')
   );
 }

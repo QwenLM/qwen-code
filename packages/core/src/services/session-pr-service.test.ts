@@ -12,6 +12,7 @@ import {
   SESSION_PR_LIST_LIMIT,
   mergeSessionPrLists,
   readSessionPrs,
+  updateSessionPrStates,
   upsertSessionPr,
   writeSessionPrs,
   type SessionPr,
@@ -181,6 +182,78 @@ describe('upsertSessionPr failure handling', () => {
     } finally {
       process.off('unhandledRejection', onUnhandledRejection);
     }
+  });
+});
+
+describe('upsertSessionPr state', () => {
+  it('persists an explicit state', async () => {
+    const prs = await upsertSessionPr(filePath, {
+      number: 100,
+      url: entry(100).url,
+      state: 'open',
+    });
+    expect(prs[0]?.state).toBe('open');
+    expect(await readSessionPrs(filePath)).toEqual(prs);
+  });
+
+  it('preserves the known state on a stateless re-bind', async () => {
+    await upsertSessionPr(filePath, {
+      number: 100,
+      url: entry(100).url,
+      state: 'merged',
+    });
+    const prs = await upsertSessionPr(filePath, {
+      number: 100,
+      url: entry(100).url,
+    });
+    expect(prs).toHaveLength(1);
+    expect(prs[0]?.state).toBe('merged');
+  });
+});
+
+describe('updateSessionPrStates', () => {
+  it('rewrites states in place without touching order or createdAt', async () => {
+    await writeSessionPrs(filePath, [
+      { ...entry(100), state: 'open' },
+      { ...entry(101), state: 'open' },
+    ]);
+    const updated = await updateSessionPrStates(
+      filePath,
+      new Map([[100, 'merged']]),
+    );
+    expect(updated?.map((p) => p.number)).toEqual([100, 101]);
+    expect(updated?.[0]?.state).toBe('merged');
+    expect(updated?.[0]?.createdAt).toBe(entry(100).createdAt);
+    expect(updated?.[1]?.state).toBe('open');
+  });
+
+  it('returns null without writing when nothing changes', async () => {
+    await writeSessionPrs(filePath, [{ ...entry(100), state: 'merged' }]);
+    const before = await fs.readFile(filePath, 'utf-8');
+    expect(
+      await updateSessionPrStates(filePath, new Map([[100, 'merged']])),
+    ).toBeNull();
+    expect(await fs.readFile(filePath, 'utf-8')).toBe(before);
+  });
+
+  it('returns null when the sidecar is absent', async () => {
+    expect(
+      await updateSessionPrStates(filePath, new Map([[100, 'merged']])),
+    ).toBeNull();
+  });
+
+  it('serializes against a concurrent upsert on the same sidecar', async () => {
+    await writeSessionPrs(filePath, [{ ...entry(100), state: 'open' }]);
+    const [updated, prs] = await Promise.all([
+      updateSessionPrStates(filePath, new Map([[100, 'merged']])),
+      upsertSessionPr(filePath, { number: 101, url: entry(101).url }),
+    ]);
+    expect(updated?.[0]?.state).toBe('merged');
+    expect(prs?.map((p) => p.number)).toEqual([100, 101]);
+    // Whichever ran second read the first's write — nothing was clobbered.
+    const persisted = await readSessionPrs(filePath);
+    expect(persisted?.find((p) => p.number === 100)?.state).toBe('merged');
+    expect(persisted?.find((p) => p.number === 101)).toBeDefined();
   });
 });
 

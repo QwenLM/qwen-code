@@ -9678,7 +9678,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           // The url is interpolated into the stderr audit line — control
           // characters would let a client forge log lines (the displayName
           // branch rejects them for the same reason).
-          hasControlCharacter((pr as SessionPrInfo).url)
+          hasControlCharacter((pr as SessionPrInfo).url) ||
+          ((pr as SessionPrInfo).state !== undefined &&
+            (pr as SessionPrInfo).state !== 'open' &&
+            (pr as SessionPrInfo).state !== 'merged' &&
+            (pr as SessionPrInfo).state !== 'closed')
         ) {
           throw new InvalidSessionMetadataError(
             'pr',
@@ -9760,10 +9764,21 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         if (latest?.number === bound.number && latest.url === bound.url) {
           // Same binding repeated — no change, no event.
         } else {
-          // Re-binding a number refreshes it and moves it to latest.
+          // Re-binding a number refreshes it and moves it to latest; an
+          // omitted state preserves the known one (mirrors the sidecar).
+          const known = existing.find((p) => p.number === bound.number);
           entry.prs = [
             ...existing.filter((p) => p.number !== bound.number),
-            { number: bound.number, url: bound.url },
+            {
+              number: bound.number,
+              url: bound.url,
+              ...((bound.state ?? known?.state)
+                ? {
+                    state: (bound.state ??
+                      known?.state) as SessionPrInfo['state'],
+                  }
+                : {}),
+            },
           ].slice(-SESSION_PR_LIST_LIMIT);
           markSessionCatalogChanged();
           writeStderrLine(
@@ -9804,7 +9819,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const entry = byId.get(sessionId);
       if (!entry || (entry.prs && entry.prs.length > 0)) return;
       entry.prs = prs
-        .map(({ number, url }) => ({ number, url }))
+        .map(({ number, url, state }) => ({
+          number,
+          url,
+          ...(state ? { state } : {}),
+        }))
         .slice(-SESSION_PR_LIST_LIMIT);
     },
 
