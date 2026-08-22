@@ -1100,6 +1100,25 @@ describe('the never-content-read and never-walk invariants', () => {
     ).toMatchObject({ reason: 'secret-shaped', lines: 0 });
   });
 
+  it('keeps a source file that merely QUOTES key armor as a subject', () => {
+    // A secret scanner, a test fixture, or the detector's own source
+    // legitimately carries the armor string mid-file. Dropping those from
+    // the audit is a silent coverage loss — and this repository has
+    // several, which is how the looser "anywhere in the prefix" spelling
+    // was caught.
+    writeFileSync(
+      join(dir, 'src', 'scanner.ts'),
+      [
+        'export const PEM_HEADERS = [',
+        "  '-----BEGIN OPENSSH PRIVATE KEY-----',",
+        "  '-----BEGIN RSA PRIVATE KEY-----',",
+        '];',
+      ].join('\n'),
+    );
+    const collection = collectAuditFiles(dir);
+    expect(collection.subjects.map((f) => f.path)).toContain('src/scanner.ts');
+  });
+
   it('records a secret-shaped name carrying a trailing newline', () => {
     // Filesystem names are byte strings, and every name clause is
     // `$`-anchored: a trailing CR/LF slips the lot and the file becomes a
