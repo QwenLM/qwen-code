@@ -766,6 +766,7 @@ describe('Session', () => {
       // that care override via `mockConfig.getApprovalMode = vi.fn()...`.
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       getApprovalModeRevision: vi.fn().mockReturnValue(0),
+      getPlanModeReadOnlyRoots: vi.fn().mockReturnValue(new Set<string>()),
       switchModel: switchModelSpy,
       getModel: vi.fn().mockImplementation(() => currentModel),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
