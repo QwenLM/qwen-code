@@ -2129,8 +2129,11 @@ describe('the Aone submit receipt (producer half of the audit contract)', () => 
     // EVERY successful Aone post writes the receipt — the posting tests
     // above all leave one behind in the shared per-file tmp dir. Start
     // each receipt test from no receipt, or the accumulation assertions
-    // read a prior test's ids.
-    rmSync(join(tmp, '.qwen'), { recursive: true, force: true });
+    // read a prior test's ids. Remove ONLY the receipt: the anchor gate
+    // refuses a post whose captured diff is missing, and wiping the whole
+    // `.qwen` tree deletes the diff the beforeAll seeded — the post then
+    // dies at the gate and no receipt is ever written.
+    rmSync(receiptPath(), { force: true });
     authMock.mockReturnValue({
       ok: true,
       why: 'the user asked for this review to be published',
@@ -2231,4 +2234,3 @@ describe('the Aone submit receipt (producer half of the audit contract)', () => 
     expect(receipt.reviewIds).toEqual([500]);
   });
 });
-
