@@ -5,14 +5,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 
-/** What cleanup reads from an lstat result, for both of its readers: the
- * capture sweep's entry guard and post-kill identity re-check, and the
+/** Everything cleanup reads from an lstat result, across both of its readers:
+ * the capture sweep's entry guard and post-kill identity re-check, and the
  * worktree-family symlink guard with the ancestor walk beside it.
- * `isDirectory` is OPTIONAL, and that is what lets one mock serve both — as a
- * required field (or an `& { isDirectory }` on the mock's return type) every
- * fixture that answers only the sweep's half stops type-checking. No cleanup
- * path reads it; the family fixtures set it to say what the entry beside the
- * link is. */
+ * `isDirectory` is optional because no cleanup path reads it — the family
+ * fixtures set it to say what the entry beside the link is.
+ *
+ * The MOCK below returns `Partial<>` of this, and that is load-bearing. A
+ * `beforeEach` that only has to say "nothing here is a symlink" is boilerplate
+ * every `runCleanup` describe carries and main keeps adding more of; requiring
+ * the sweep's four fields there breaks each new one at `tsc` with nothing
+ * about the sweep at fault. Measured: CI went red on this branch the round a
+ * fourth such describe landed (#9633), on a line no capture code touches. A
+ * fixture that DOES speak for the sweep annotates the full type and keeps the
+ * strict check. */
 type SweepEntryStat = {
   isSymbolicLink: () => boolean;
   isSocket: () => boolean;
@@ -33,7 +39,7 @@ const mocks = vi.hoisted(() => ({
   // name-matched fixtures reach the pid probe and kill while no ancestor
   // looks redirected.
   lstatSync: vi.fn(
-    (_path: string): SweepEntryStat => ({
+    (_path: string): Partial<SweepEntryStat> => ({
       isSymbolicLink: () => false,
       isDirectory: () => true,
       isSocket: () => true,
@@ -1385,11 +1391,11 @@ describe('runCleanup', () => {
       'review-pr-123-scratch-verify--round-1--aaa',
     ] as unknown as []);
     mocks.existsSync.mockReturnValue(false);
-    mocks.lstatSync.mockImplementation(((p: string) => ({
+    mocks.lstatSync.mockImplementation((p: string) => ({
       // Only the family entry is a link; its parent directory is a directory.
       isSymbolicLink: () => String(p).includes('-scratch-'),
       isDirectory: () => !String(p).includes('-scratch-'),
-    })) as unknown as (path: string) => SweepEntryStat);
+    }));
 
     runCleanup('pr-123');
 
@@ -1414,10 +1420,10 @@ describe('runCleanup', () => {
     // The family paths are links; their ANCESTORS are ordinary directories —
     // a symlink above the temp dir refuses the whole clean, which is a
     // different test.
-    mocks.lstatSync.mockImplementation(((p: string) => ({
+    mocks.lstatSync.mockImplementation((p: string) => ({
       isSymbolicLink: () => String(p).includes('review-pr-'),
       isDirectory: () => !String(p).includes('review-pr-'),
-    })) as unknown as (path: string) => SweepEntryStat);
+    }));
 
     runCleanup('pr-123');
 
@@ -1478,10 +1484,10 @@ describe('runCleanup', () => {
     // the same function kept deleting under it — the base-tree lock and every
     // side file, all resolved through the same redirected ancestor.
     mocks.execFileSync.mockReturnValue(Buffer.from(''));
-    mocks.lstatSync.mockImplementation(((p: string) => ({
+    mocks.lstatSync.mockImplementation((p: string) => ({
       isSymbolicLink: () => String(p) === '/repo/.qwen',
       isDirectory: () => String(p) !== '/repo/.qwen',
-    })) as unknown as (path: string) => SweepEntryStat);
+    }));
 
     runCleanup('pr-123');
 
@@ -1885,16 +1891,10 @@ describe('runCleanup — bypass-write audit', () => {
     // the other describe would otherwise decide what this one's directory
     // sweep sees — the same drift the sibling beforeEach pins against.
     mocks.readdirSync.mockReturnValue([]);
-    mocks.lstatSync.mockImplementation(
-      (_path: string): SweepEntryStat => ({
-        isSymbolicLink: () => false,
-        isDirectory: () => true,
-        isSocket: () => true,
-        nlink: 1,
-        ino: 1,
-        mode: 0o140700,
-      }),
-    );
+    mocks.lstatSync.mockReturnValue({
+      isSymbolicLink: () => false,
+      isDirectory: () => true,
+    });
     mocks.existsSync.mockReturnValue(false);
     mocks.execFileSync.mockReturnValue(Buffer.from(''));
     mocks.readFileSync.mockImplementation(() => {
