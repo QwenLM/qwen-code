@@ -6,6 +6,7 @@
 
 import type {
   ChatRecord,
+  Config,
   GoalRecord,
   GoalSnapshotV2,
   SessionTranscriptCursorState,
@@ -204,6 +205,86 @@ afterEach(() => {
 });
 
 describe('history replay page', () => {
+  it('does not probe getChat on an uninitialized client for the restore skip', async () => {
+    // Bootstrap configs for non-live sessions are never chat-initialized;
+    // getChat() THROWS there. The skip probe must guard on isInitialized().
+    const config = {
+      getRestoreAskUserQuestion: () => true,
+      getGeminiClient: () => ({
+        isInitialized: () => false,
+        getChat: () => {
+          throw new Error('Chat not initialized');
+        },
+      }),
+    } as unknown as Config;
+    const result = await collectHistoryReplayUpdates({
+      sessionId: SESSION_ID,
+      config,
+      records: [userRecord(), toolCallRecord()],
+      cumulativeUsage: createReplayCumulativeUsage(),
+    });
+
+    expect(result.replayError).toBeUndefined();
+    // No skip without an initialized chat: the dangling call finalizes.
+    expect(
+      result.updates.some(
+        (update) =>
+          update.sessionUpdate === 'tool_call_update' &&
+          (update as { status?: string }).status === 'failed',
+      ),
+    ).toBe(true);
+  });
+
+  it('skips finalize for a trailing restorable ask_user_question', async () => {
+    const lastEntry = {
+      role: 'model',
+      parts: [
+        {
+          functionCall: {
+            id: 'call-auq',
+            name: 'ask_user_question',
+            args: {
+              questions: [
+                {
+                  question: 'Pick?',
+                  header: 'H',
+                  options: [
+                    { label: 'A', description: 'a' },
+                    { label: 'B', description: 'b' },
+                  ],
+                },
+              ],
+            },
+          },
+        },
+      ],
+    };
+    const config = {
+      getRestoreAskUserQuestion: () => true,
+      getGeminiClient: () => ({
+        isInitialized: () => true,
+        getChat: () => ({ peekLastHistoryEntry: () => lastEntry }),
+      }),
+    } as unknown as Config;
+    const auqRecord: ChatRecord = {
+      ...toolCallRecord(),
+      message: lastEntry,
+    };
+    const result = await collectHistoryReplayUpdates({
+      sessionId: SESSION_ID,
+      config,
+      records: [userRecord(), auqRecord],
+      cumulativeUsage: createReplayCumulativeUsage(),
+    });
+
+    expect(result.replayError).toBeUndefined();
+    expect(
+      result.updates.some(
+        (update) => update.sessionUpdate === 'tool_call_update',
+      ),
+    ).toBe(false);
+  });
+
   it('bounds textual tool results collected for bulk replay', async () => {
     const source = 'x'.repeat(499_999);
     const result = await collectHistoryReplayUpdates({

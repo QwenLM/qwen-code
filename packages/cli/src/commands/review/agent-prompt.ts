@@ -41,6 +41,7 @@ import type { CommandModule } from 'yargs';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { REVIEW_BUILTIN_SUBAGENT_TYPE } from '@qwen-code/qwen-code-core';
 import {
   writeStdoutLine,
   writeStderrLine,
@@ -2410,6 +2411,27 @@ function rosterLabel(req: RequiredAgent): string {
  * the list it builds is the same one `check-coverage` will hold the run to,
  * because both come from `requiredAgents(plan)`.
  */
+/**
+ * The launch parameters every review agent needs, on every emission path.
+ *
+ * It lived inside `runRoster`'s worktree-only note because that block began as
+ * a `working_dir` reminder — so three review modes were told nothing, and then
+ * so were Step 4's verify shards and Step 5's audit rounds, which are the most
+ * numerous agents a high-effort review launches and the ones furthest from
+ * SKILL.md's own statement of the rule. Omitting the type is not a no-op:
+ * `AgentTool.execute` resolves an omitted `subagent_type` to `general-purpose`,
+ * which declares no `tools` and so takes `prepareTools`' inherit-everything
+ * branch — the entire cost `review-agent` exists to remove, spent silently.
+ * Before the review had its own type, forgetting the parameter was harmless
+ * because the default WAS the right answer.
+ */
+const TYPE_NOTE =
+  `\n\n**Set \`subagent_type: "${REVIEW_BUILTIN_SUBAGENT_TYPE}"\` and ` +
+  `\`run_in_background: false\` on EVERY agent call below**, in every review ` +
+  `mode and at every step. An omitted \`subagent_type\` is not left blank — it ` +
+  `resolves to the general-purpose default, which inherits every tool in the ` +
+  `session and re-declares them on each agent's every turn.`;
+
 function runRoster(
   report: PlanReport,
   planPath: string,
@@ -2454,12 +2476,20 @@ function runRoster(
   const paramNote =
     typeof wt === 'string' && wt
       ? `\n\n**Agent tool parameters (worktree mode):** Set ` +
-        `\`working_dir: "${wt}"\` and ` +
-        `\`subagent_type: "general-purpose"\`, \`run_in_background: false\` ` +
-        `on EVERY agent call below. Do NOT set \`isolation\` — the worktree ` +
-        `already exists; \`isolation\` creates a new copy and is mutually ` +
-        `exclusive with \`working_dir\`.`
+        `\`working_dir: "${wt}"\` on EVERY agent call below. Do NOT set ` +
+        `\`isolation\` — the worktree already exists; \`isolation\` creates a ` +
+        `new copy and is mutually exclusive with \`working_dir\`.`
       : '';
+  // The type belongs OUTSIDE that gate. It was written inside it because the
+  // block began as a `working_dir` reminder, and worktrees are the only mode
+  // that needs one — but the type is needed by all four (local diff, file
+  // path and cross-repo lightweight reviews have no worktree and were
+  // therefore told nothing). Omitting it is not a no-op: `AgentTool.execute`
+  // substitutes `general-purpose` for an omitted `subagent_type`, which
+  // declares no `tools` and so takes prepareTools' inherit-everything branch —
+  // 13 agents × 4 turns × ~17.7k tokens of tool declarations, the entire cost
+  // this type exists to remove. Before the review had its own type, forgetting
+  // the parameter was harmless because the default WAS the right answer.
   // The Agent tool's `description` is the task name the user watches in the
   // TUI while the agent runs, and nothing downstream reads it — the delivery
   // check compares prompts, coverage reads transcripts. So it is the one part
@@ -2486,6 +2516,7 @@ function runRoster(
         `--chunk <id>, or --role <r> (--file <path> for an invariant agent), ` +
         `plus the same --rules this call was given.` +
         descNote +
+        TYPE_NOTE +
         paramNote,
       ...blocks,
       `───── end of roster — ${roster.length} agents ─────`,
@@ -2918,7 +2949,8 @@ function runAllChunks(
         `rebuild just the missing chunks with --chunk <id>. Write each ` +
         `Agent call's \`description\` (the task ` +
         `name the user watches) in your output language, translating the ` +
-        `separator label — display only; the prompt stays the block VERBATIM.`,
+        `separator label — display only; the prompt stays the block VERBATIM.` +
+        TYPE_NOTE,
       ...blocks,
       `───── end of round — ${dueChunks.length} auditors ─────`,
       ...retirementNote,
@@ -3483,6 +3515,21 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       ? foldFindings(args.role as RoleId, findingsContent, prompt, findingsFile)
       : prompt;
   recordPrompt(args.plan, key, printed);
+  // The whole output of this path IS the block the orchestrator pastes
+  // verbatim, and the delivery check compares that paste against the record.
+  // So the launch note gets NO channel here, and the second-best channel is
+  // not stderr: `ShellExecutionService` builds its result as
+  // `stdout + separator + stderr`, and `ShellToolInvocation` hands that
+  // combined string back, so a note on stderr arrives inside the very text
+  // the caller is told to copy. It fails the same equality as stdout would,
+  // only invisibly — the five tests that catch the stdout version see
+  // nothing. Removing it by hand is the edit the delivery gate forbids, so
+  // the launch would enter drift/relaunch repair.
+  //
+  // The rule still reaches these launches: SKILL.md states it for every
+  // `agent` call, and the two paths that CAN carry a note — the roster
+  // header and the audit-round header — do, because there the note sits
+  // outside the ───── blocks that get pasted.
   writeStdoutLine(printed);
   // Admitted AND built — the single-build twin of the all-chunks stamp in
   // `runAllChunks`. A `--chunk <id>` build lands here too: the first chunk
