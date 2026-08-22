@@ -766,11 +766,15 @@ function mapAvailableCommandsUpdate(
       },
     ];
   });
-  const skills = Array.isArray(update['availableSkills'])
-    ? update['availableSkills'].filter(
-        (skill): skill is string => typeof skill === 'string',
-      )
-    : [];
+  const nestedSkills = getRecord(update['_meta'])?.['availableSkills'];
+  const rawSkills = Array.isArray(update['availableSkills'])
+    ? update['availableSkills']
+    : Array.isArray(nestedSkills)
+      ? nestedSkills
+      : [];
+  const skills = rawSkills.filter(
+    (skill): skill is string => typeof skill === 'string',
+  );
   const skillCommands = skills.map((skill) => ({
     name: skill,
     description: '',
