@@ -312,6 +312,17 @@ describe('AskUserQuestion accessibility', () => {
     );
   });
 
+  it('yields focus when the question appears while the user is typing', () => {
+    const editor = document.createElement('textarea');
+    document.body.appendChild(editor);
+    editor.focus();
+
+    render(undefined);
+
+    expect(document.activeElement).toBe(editor);
+    editor.remove();
+  });
+
   it('moves focus between options with arrow keys', () => {
     render(undefined);
     const opts = optionButtons();
