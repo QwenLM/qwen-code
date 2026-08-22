@@ -1,0 +1,7 @@
+{
+  "0.20.1": [
+    "Fork subagents with the context of the current conversation.",
+    "Plan mode now routes shell commands based on safety.",
+    "Inspect saved conversation branches."
+  ]
+}
