@@ -3082,6 +3082,13 @@ describe('fallback comment resilience (PR #8894 incident class)', () => {
         "  needs.authorize.result != 'cancelled' &&\n" +
         "  needs.delay-automatic-review.result != 'cancelled') ||",
     );
+    // ...and the bare disjunct must be ABSENT, not just the compound one
+    // present: a merge-conflict resolution keeping both sides re-adds
+    // `== 'cancelled' ||` beside the intact compound clause, the gate opens
+    // on every cancelled review-pr again, and the pin above stays green.
+    // (Inside the compound clause the substring is followed by ` &&`, so
+    // this negation holds on the intended gate.)
+    expect(job.if).not.toContain("needs.review-pr.result == 'cancelled' ||");
     expect(job.if).toContain("needs.authorize.result == 'failure'");
     expect(job.if).toContain("needs.review-config.result == 'failure'");
     expect(job.if).toContain(
