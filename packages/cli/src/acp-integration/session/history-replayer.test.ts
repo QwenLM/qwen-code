@@ -402,6 +402,33 @@ describe('HistoryReplayer', () => {
       });
     });
 
+    it('does not fail a skipped ask_user_question dangling call', async () => {
+      const record: ChatRecord = {
+        ...createAssistantRecord(''),
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-auq',
+                name: 'ask_user_question',
+                args: {},
+              },
+            },
+          ],
+        },
+      };
+
+      await replayer.replay([record], undefined, {
+        skipFinalizeCallIds: new Set(['call-auq']),
+      });
+
+      const updates = sentUpdates();
+      expect(updates.map((update) => update['sessionUpdate'])).toEqual([
+        'tool_call',
+      ]);
+    });
+
     it('should carry dangling function calls across replay pages', async () => {
       const record: ChatRecord = {
         ...createAssistantRecord(''),

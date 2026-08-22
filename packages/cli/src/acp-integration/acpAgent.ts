@@ -366,6 +366,8 @@ import {
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_MODEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
+  DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY,
+  DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY,
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_HIDE_INHERITED_META_KEY,
   LOAD_REPLAY_MAX_BYTES,
@@ -4675,6 +4677,26 @@ class QwenAgent implements Agent {
     return `${path.resolve(runtimeBaseDir)}\0${sessionId}`;
   }
 
+  private withAskUserQuestionRestoreHint<
+    T extends { _meta?: Record<string, unknown> | null },
+  >(session: Session | undefined, response: T): T {
+    if (this.argv.restoreAskUserQuestion !== true) {
+      return response;
+    }
+    if (!session?.shouldHintAskUserQuestionRestore()) {
+      return response;
+    }
+    return {
+      ...response,
+      _meta: {
+        ...(response._meta && typeof response._meta === 'object'
+          ? response._meta
+          : {}),
+        [DAEMON_RESTORE_ASK_USER_QUESTION_META_KEY]: true,
+      },
+    };
+  }
+
   private async retryPendingConfigCleanup(
     runtimeBaseDir: string,
     requiredSessionId?: string,
@@ -5323,6 +5345,23 @@ class QwenAgent implements Agent {
     let sessionId = initialSessionId;
     const sessionSource = getSessionSource(params);
     const restoreOptions = loadRestoreOptions(params);
+    // The daemon already knows it will decline the re-hang (no attached
+    // client, fork restore): emit no hint and don't skip finalizing the
+    // trailing ask_user_question during replay, so skip and re-hang stay
+    // in lockstep.
+    const suppressRestoreAskUserQuestion =
+      (params._meta as Record<string, unknown> | null | undefined)?.[
+        DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY
+      ] === true;
+    const withRestoreHint = <
+      T extends { _meta?: Record<string, unknown> | null },
+    >(
+      session: Session | undefined,
+      response: T,
+    ): T =>
+      suppressRestoreAskUserQuestion
+        ? response
+        : this.withAskUserQuestionRestoreHint(session, response);
     const liveSession = this.sessions.get(sessionId);
     if (liveSession) {
       const settings = profiler.timeSync('settings_load', () =>
@@ -5349,7 +5388,9 @@ class QwenAgent implements Agent {
                 }) as LoadSessionResponse,
             );
             const replayPage = projection?.replay;
-            if (!replayPage || replayPage.records.length === 0) return response;
+            if (!replayPage || replayPage.records.length === 0) {
+              return withRestoreHint(liveSession, response);
+            }
 
             const bulkReplay = isBulkLoadReplayRequest(params);
             const replay = await profiler.time('history_replay', () =>
@@ -5361,6 +5402,7 @@ class QwenAgent implements Agent {
                 cumulativeUsage: createReplayCumulativeUsage(),
                 replayState: replayPage.replay,
                 goalBootstrap: replayGoalBootstrap(projection),
+                suppressRestoreAskUserQuestion,
                 ...(restoreOptions.replay.kind === 'recent'
                   ? {
                       limits: {
@@ -5393,7 +5435,7 @@ class QwenAgent implements Agent {
               if (replay.replayError !== undefined) {
                 throw RequestError.internalError(undefined, replay.replayError);
               }
-              return response;
+              return withRestoreHint(liveSession, response);
             }
 
             const envelope: BridgeLoadReplayEnvelope = {
@@ -5415,12 +5457,12 @@ class QwenAgent implements Agent {
               envelope,
               restoreOptions.replay.kind === 'recent',
             );
-            return {
+            return withRestoreHint(liveSession, {
               ...response,
               _meta: {
                 [LOAD_REPLAY_META_KEY]: envelope,
               },
-            };
+            });
           },
         );
       });
@@ -5516,6 +5558,7 @@ class QwenAgent implements Agent {
                     cumulativeUsage: replayUsage,
                     replayState: projection.replay!.replay,
                     goalBootstrap: replayGoalBootstrap(projection),
+                    suppressRestoreAskUserQuestion,
                     ...(restoreOptions.replay.kind === 'recent'
                       ? {
                           limits: {
@@ -5632,7 +5675,16 @@ class QwenAgent implements Agent {
                       {
                         ...(goalBootstrap ? { goalBootstrap } : {}),
                         ...initialGoalState,
+                        ...(suppressRestoreAskUserQuestion
+                          ? { skipFinalizeCallIds: undefined }
+                          : {}),
                       },
+                    );
+                  } else if (suppressRestoreAskUserQuestion) {
+                    await createdSession.replayHistory(
+                      projection.replay!.records,
+                      projection.replay!.gaps,
+                      { skipFinalizeCallIds: undefined },
                     );
                   } else {
                     await createdSession.replayHistory(
@@ -5678,7 +5730,10 @@ class QwenAgent implements Agent {
           sessionId,
         );
       }
-      return response!;
+      return withRestoreHint(
+        this.sessions.get(normalizeSessionIdForLookup(sessionId)),
+        response!,
+      );
     } finally {
       releaseStartingSessionId();
     }
@@ -5713,6 +5768,21 @@ class QwenAgent implements Agent {
   ): Promise<ResumeSessionResponse> {
     let sessionId = initialSessionId;
     const sessionSource = getSessionSource(params);
+    // Same daemon-decline suppression as loadSessionWithProfiler: no hint,
+    // and the replay finalize-skip stays aligned with the re-hang decision.
+    const suppressRestoreAskUserQuestion =
+      (params._meta as Record<string, unknown> | null | undefined)?.[
+        DAEMON_SUPPRESS_RESTORE_ASK_USER_QUESTION_META_KEY
+      ] === true;
+    const withRestoreHint = <
+      T extends { _meta?: Record<string, unknown> | null },
+    >(
+      session: Session | undefined,
+      response: T,
+    ): T =>
+      suppressRestoreAskUserQuestion
+        ? response
+        : this.withAskUserQuestionRestoreHint(session, response);
     const liveSession = this.sessions.get(sessionId);
     if (liveSession) {
       const settings = profiler.timeSync('settings_load', () =>
@@ -5726,17 +5796,20 @@ class QwenAgent implements Agent {
           liveSession,
           RESUME_RESTORE_OPTIONS,
           async (config, projection) =>
-            profiler.timeSync(
-              'response_build',
-              () =>
-                ({
-                  modes: this.buildModesData(config),
-                  models: this.buildAvailableModels(config),
-                  configOptions: this.buildConfigOptions(config),
-                  ...(projection?.artifactSnapshot
-                    ? { artifactSnapshot: projection.artifactSnapshot }
-                    : {}),
-                }) as ResumeSessionResponse,
+            withRestoreHint(
+              liveSession,
+              profiler.timeSync(
+                'response_build',
+                () =>
+                  ({
+                    modes: this.buildModesData(config),
+                    models: this.buildAvailableModels(config),
+                    configOptions: this.buildConfigOptions(config),
+                    ...(projection?.artifactSnapshot
+                      ? { artifactSnapshot: projection.artifactSnapshot }
+                      : {}),
+                  }) as ResumeSessionResponse,
+              ),
             ),
         );
       });
@@ -5833,7 +5906,10 @@ class QwenAgent implements Agent {
         );
       }
 
-      return response!;
+      return withRestoreHint(
+        this.sessions.get(normalizeSessionIdForLookup(sessionId)),
+        response!,
+      );
     } finally {
       releaseStartingSessionId();
     }
