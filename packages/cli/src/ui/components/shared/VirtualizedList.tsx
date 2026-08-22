@@ -407,17 +407,23 @@ function VirtualizedList<T>(
   const prevScrollTop = useRef(actualScrollTop);
   const prevContainerHeight = useRef(scrollableContainerHeight);
   // Set by the re-anchor branch when it clamps a scrolled-away viewport to
-  // the new bottom, holding the anchor the clamp installed plus the key of
-  // the item parked there. While the current anchor still sits where the
-  // clamp parked it, that position is content-driven, so the re-stick gate
-  // must not read it as the user having scrolled to the bottom. Any scroll
-  // moves the anchor, and the mismatch clears the mark; a wholesale dataset
-  // swap (/resume — ScrollableList carries no key) changes the key at the
-  // mark's index and clears it the same way (#9305 review R17-3).
+  // the new bottom, holding the anchor the clamp installed. While the
+  // current anchor still sits where the clamp parked it, that position is
+  // content-driven, so the re-stick gate must not read it as the user
+  // having scrolled to the bottom. Any scroll moves the anchor, and the
+  // mismatch clears the mark. The mark deliberately carries no item key:
+  // pending items re-key on commit and the banner key is constant, so a
+  // key comparison cleared (or kept) the mark for the wrong reasons while
+  // the user still sat at the parked position (#9305 review R18-1).
+  // Dataset swaps (/clear, /resume) never reach the mark because
+  // MainContent keys the list by session and remounts it. `allowFollow`
+  // records whether the park landed in a live multi-item conversation,
+  // where growth may re-engage follow from a live-bottom park; a
+  // banner-only remnant must stay released (#9305 reviews R6-2, R17-1).
   const reAnchorClampMark = useRef<{
     index: number;
     offset: number;
-    key: string;
+    allowFollow: boolean;
   } | null>(null);
 
   useLayoutEffect(() => {
@@ -440,13 +446,11 @@ function VirtualizedList<T>(
     // clamp is not a user-driven bottom either (#9305): suppress the flip
     // while the anchor still matches the clamp mark.
     const clampMark = reAnchorClampMark.current;
-    const clampMarkItem = clampMark ? data[clampMark.index] : undefined;
     const clampParked =
       clampMark !== null &&
-      clampMarkItem !== undefined &&
+      data[clampMark.index] !== undefined &&
       scrollAnchor.index === clampMark.index &&
-      scrollAnchor.offset === clampMark.offset &&
-      keyExtractor(clampMarkItem, clampMark.index) === clampMark.key;
+      scrollAnchor.offset === clampMark.offset;
     if (clampMark !== null && !clampParked) {
       reAnchorClampMark.current = null;
     }
@@ -475,15 +479,22 @@ function VirtualizedList<T>(
       // overflow by any shape: length growth, in-place height growth, or a
       // container shrink. While the content fit, the user could see
       // everything, so follow must come back once it overflows instead of
-      // content rendering below the fold (#9305 reviews R11-6, R14-1).
+      // content rendering below the fold (#9305 reviews R11-6, R14-1). A
+      // park at the live bottom of a multi-item remnant re-engages on
+      // growth too: it IS the bottom of a live conversation, and the mark
+      // would otherwise suppress follow forever (#9305 review R18-1).
       // Banner-only remnants never cross back: there is no conversation to
-      // follow, and the surviving banner carries the park mark across the
-      // collapse (#9305 review R17-1).
+      // follow (#9305 review R17-1).
       ((listGrew && (isStickingToBottom || (wasAtBottom && !clampParked))) ||
         (clampParked &&
           contentPreviouslyFit &&
           data.length > 1 &&
           totalHeight > scrollableContainerHeight) ||
+        (clampMark !== null &&
+          clampParked &&
+          clampMark.allowFollow &&
+          wasScrolledToBottomPixels &&
+          totalHeight > prevTotalHeight.current) ||
         // A shrink landing in the same render must reach the drop/re-anchor
         // branch below, not be preempted here on the stale render-time
         // sticking flag (#9305 review R11-1).
@@ -537,11 +548,10 @@ function VirtualizedList<T>(
         // growth auto-follow, defending nothing — the re-stick gate is
         // already blocked by `!contentPreviouslyFit` (#9305 reviews R8-1,
         // R10-1). An out-of-range carried anchor with a multi-item remnant
-        // is a wholesale dataset swap (/resume — ScrollableList carries no
-        // key) or a truncation below the anchor: the park lands on content
-        // the user never scrolled, and a mark there would keep follow dead
-        // in the new dataset; the banner-only collapse keeps its mark
-        // (#9305 review R17-2).
+        // is a truncation below the anchor (dataset swaps remount the list
+        // by session key, #9305 review R18-1): the park lands on content
+        // the user never scrolled, and a mark there would keep follow dead;
+        // the banner-only collapse keeps its mark (#9305 review R17-2).
         const swapEntry = scrollAnchor.index >= data.length && data.length > 1;
         const markItem = data[newAnchor.index];
         if (
@@ -552,7 +562,7 @@ function VirtualizedList<T>(
           reAnchorClampMark.current = {
             index: newAnchor.index,
             offset: newAnchor.offset,
-            key: keyExtractor(markItem, newAnchor.index),
+            allowFollow: data.length > 1,
           };
         }
         setScrollAnchor(newAnchor);
@@ -569,7 +579,6 @@ function VirtualizedList<T>(
     prevContainerHeight.current = scrollableContainerHeight;
   }, [
     data,
-    keyExtractor,
     totalHeight,
     actualScrollTop,
     scrollableContainerHeight,

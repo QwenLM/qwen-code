@@ -1263,12 +1263,13 @@ describe('<VirtualizedList />', () => {
     );
   });
 
-  it('invalidates the clamp mark when a dataset swap keeps the anchor in range', async () => {
-    // The mark identifies the parked item, not just coordinates: a /resume
-    // swap whose carried anchor stays in range and inside the new max
-    // scroll bypasses the drop branch entirely, and a coordinate-only mark
-    // would survive the swap and suppress follow in the new session
-    // (#9305 review R17-3).
+  it('keeps follow alive when a replacement lands under the carried anchor', async () => {
+    // A wholesale replacement whose items sit under the carried anchor
+    // bypasses the drop branch entirely. In production this shape remounts
+    // by session key (MainContent), but the component must still hold: the
+    // park mark — now positional, no item key — must not suppress follow
+    // in the replaced dataset; growth from a live-bottom park re-engages
+    // (#9305 reviews R17-3, R18-1).
     type RefShape = VirtualizedListRef<Item>;
     let listRef: RefShape | null = null;
     let items = makeItems(20);
@@ -1312,9 +1313,10 @@ describe('<VirtualizedList />', () => {
       Array.from({ length: 10 }, (_, i) => `item-${i + 2}`),
     );
 
-    // In-place session switch whose items sit under the carried anchor:
-    // the anchor stays in range inside the new max scroll, so no drop
-    // render fires. The stale mark must not survive the swap.
+    // Replacement whose items sit under the carried anchor: the anchor
+    // stays in range, so no drop render fires. The park sat at the live
+    // bottom of a multi-item remnant, so the arrival of the taller dataset
+    // re-engages follow (not the old gate latch from a key-cleared mark).
     items = Array.from({ length: 20 }, (_, i) => ({
       id: 100 + i,
       label: `it-${100 + i}`,
@@ -2287,6 +2289,175 @@ describe('<VirtualizedList />', () => {
       rerender(<Wrapper />);
       expect(listRef!.getScrollIndex()).toBe(24);
     });
+  });
+
+  it('keeps the park mark across a re-key of the parked item (R18-1 F2)', async () => {
+    // The park mark must survive a key transition of the item it sits on:
+    // pending items re-key on commit (p-N → h-N), and the old key-based
+    // validation cleared the mark while the user still sat at the parked
+    // position. With the mark gone, the fit→overflow crossing arm (which
+    // requires the parked signal) dies and the shrunken content clips
+    // instead of re-engaging follow (#9305 review R18-1).
+    type RefShape = VirtualizedListRef<Item>;
+    let listRef: RefShape | null = null;
+    let items = makeItems(20);
+    let height = 10;
+
+    function Wrapper() {
+      const ref = useRef<RefShape>(null);
+      if (ref.current) listRef = ref.current;
+      return (
+        <VirtualizedList<Item>
+          ref={ref}
+          data={items}
+          renderItem={renderItem}
+          estimatedItemHeight={estimatedItemHeight}
+          keyExtractor={keyExtractor}
+          initialScrollIndex={SCROLL_TO_ITEM_END}
+          containerHeight={height}
+          width={40}
+          showScrollbar={false}
+        />
+      );
+    }
+
+    const { lastFrame, rerender } = render(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    act(() => {
+      listRef!.scrollBy(-5);
+    });
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    // Shrink in place until the remnant fits: the released park at {0,0}
+    // installs the positional mark.
+    items = makeItems(8);
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual(
+      Array.from({ length: 8 }, (_, i) => `item-${i}`),
+    );
+
+    // Re-key the parked item (pending → commit re-key keeps the position).
+    items = [{ id: 900, label: 'item-0' }, ...makeItems(8).slice(1)];
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual(
+      Array.from({ length: 8 }, (_, i) => `item-${i}`),
+    );
+
+    // The container shrink crosses the fitting remnant into overflow: the
+    // parked signal must survive the re-key so follow re-engages.
+    height = 6;
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual(
+      Array.from({ length: 6 }, (_, i) => `item-${i + 2}`),
+    );
+  });
+
+  it('re-engages follow when growth lands on a live-bottom park (R18-1 F7)', async () => {
+    // An in-place shrink of a scrolled-away (bottom-pixels) viewport parks
+    // it at the live bottom and installs the park mark. The park is not a
+    // user scroll, so the very next render must not latch sticking — but
+    // once new content arrives the park is the bottom of a live multi-item
+    // conversation, and follow must come back. The old mark suppressed
+    // every re-follow path forever: the whole next reply streamed below the
+    // fold until a manual scroll (#9305 review R18-1).
+    type RefShape = VirtualizedListRef<Item>;
+    let listRef: RefShape | null = null;
+    const tall = (n: number, from = 0): Item[] =>
+      Array.from({ length: n }, (_, i) => ({
+        id: from + i,
+        label: `X${from + i}-0\nX${from + i}-1\nX${from + i}-2`,
+      }));
+    let items = tall(12);
+
+    function Wrapper() {
+      const ref = useRef<RefShape>(null);
+      if (ref.current) listRef = ref.current;
+      return (
+        <VirtualizedList<Item>
+          ref={ref}
+          data={items}
+          renderItem={renderItem}
+          estimatedItemHeight={estimatedItemHeight}
+          keyExtractor={keyExtractor}
+          initialScrollIndex={SCROLL_TO_ITEM_END}
+          containerHeight={10}
+          width={40}
+          showScrollbar={false}
+        />
+      );
+    }
+
+    const { lastFrame, rerender } = render(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    act(() => {
+      listRef!.scrollBy(-1);
+    });
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    // In-place shrink below the viewport (new keys: cached heights do not
+    // shrink under a stable key): the re-anchor clamp parks the viewport
+    // at the live bottom of the remnant.
+    items = [
+      ...Array.from({ length: 8 }, (_, i) => ({
+        id: 100 + i,
+        label: `x${i}`,
+      })),
+      ...tall(1, 8),
+      ...Array.from({ length: 3 }, (_, i) => ({
+        id: 109 + i,
+        label: `x${9 + i}`,
+      })),
+    ];
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      'x4',
+      'x5',
+      'x6',
+      'x7',
+      'X8-0',
+      'X8-1',
+      'X8-2',
+      'x9',
+      'x10',
+      'x11',
+    ]);
+
+    // Growth must re-engage follow from the live-bottom park.
+    items = [...items, { id: 120, label: 'g0' }];
+    rerender(<Wrapper />);
+    rerender(<Wrapper />);
+    await act(async () => {});
+
+    expect((lastFrame() ?? '').split('\n')).toEqual([
+      'x5',
+      'x6',
+      'x7',
+      'X8-0',
+      'X8-1',
+      'X8-2',
+      'x9',
+      'x10',
+      'x11',
+      'g0',
+    ]);
   });
 });
 
