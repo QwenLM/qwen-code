@@ -3692,6 +3692,24 @@ export class Session implements SessionContext {
       } else {
         survivingSnapshots = [];
       }
+    } else if (
+      mode === 'legacy' &&
+      fileHistoryService.isEnabled() &&
+      legacySnapshotsAligned
+    ) {
+      // Conversation-only rewind (the Web Shell RewindDialog's only rewind
+      // action) truncates the conversation while files stay forward — but
+      // the snapshot store must truncate WITH the conversation: the
+      // surviving conversation keeps target.turnIndex turns, so leaving the
+      // boundary and every later snapshot in place permanently installs
+      // the exact surplus the alignment gate above treats as unrecoverable
+      // (every later file rewind fails closed and no targets are advertised
+      // until /clear or an undo). Cutting to the surviving prefix keeps
+      // snapshot-i <-> turn-i pairing sound; file contents are not rolled
+      // back. Only sound when the stores are exactly aligned today — a
+      // pre-existing misalignment is left for the gate to refuse, not
+      // reinterpreted here.
+      survivingSnapshots = snapshots.slice(0, target.turnIndex);
     }
 
     this.rewindCheckpoint = {
@@ -3712,10 +3730,12 @@ export class Session implements SessionContext {
     this.todoStopGuard.blockUntilOrdinaryPromptStarts();
 
     if (survivingSnapshots) {
-      // The live store keeps the target's boundary snapshot: the file
-      // rewind that runs after this method (FileHistoryService.rewind via
-      // the agent / TUI restore paths) must still find it to apply it, and
-      // the agent drops it once the files sit AT it.
+      // File rewinds keep the target's boundary snapshot in the live
+      // store: the file rewind that runs after this method
+      // (FileHistoryService.rewind via the agent / TUI restore paths) must
+      // still find it to apply it, and the agent drops it once the files
+      // sit AT it. Conversation-only legacy rewinds settle the store
+      // directly at the truncated prefix (boundary already excluded).
       fileHistoryService.restoreFromSnapshots(survivingSnapshots);
     }
 
@@ -3727,12 +3747,14 @@ export class Session implements SessionContext {
           apiHistory.length - target.apiTruncateIndex,
         ),
       },
-      // Re-record the surviving snapshots WITHOUT the target's boundary
-      // snapshot: the conversation keeps one fewer turn than the surviving
-      // snapshot prefix holds, and a resume that rebuilds the store from
-      // this batch must see the same aligned shape the live store settles
-      // into once the boundary is dropped.
-      survivingSnapshots?.slice(0, -1),
+      // Re-record the surviving snapshots so a resume rebuilding the store
+      // from this batch sees the same shape the live store settles into.
+      // File rewinds keep the target's boundary snapshot live until the
+      // agent drops it, so the batch excludes it — the conversation keeps
+      // one fewer turn than the surviving prefix holds. Conversation-only
+      // legacy rewinds already settle at the boundary-less prefix, so
+      // their batch is the prefix itself.
+      rewindFiles ? survivingSnapshots?.slice(0, -1) : survivingSnapshots,
     );
 
     if (shouldDrainAutomaticQueues) {

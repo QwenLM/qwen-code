@@ -3230,6 +3230,69 @@ describe('Session', () => {
       );
     });
 
+    it('truncates an aligned legacy snapshot store with a conversation-only rewind', () => {
+      // The Web Shell RewindDialog's only rewind action is conversation-only
+      // (rewindFiles: false). Leaving the truncated turns' snapshots behind
+      // would permanently install the exact surplus the alignment gate
+      // treats as unrecoverable: every later file rewind throws and
+      // getRewindableSnapshotTargets returns [] until /clear or an undo.
+      // The store must truncate to the surviving prefix with the
+      // conversation (file contents are not rolled back), keeping
+      // snapshot-i <-> turn-i pairing sound and the next rewind reachable.
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+        { role: 'user', parts: [{ text: 'second' }] },
+        { role: 'model', parts: [{ text: 'second reply' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      mockFileHistoryService.isEnabled.mockReturnValue(true);
+      const snap = (promptId: string, minutes: number) => ({
+        promptId,
+        timestamp: new Date(`2026-06-13T00:0${minutes}:00.000Z`),
+        trackedFileBackups: {},
+      });
+      mockFileHistoryService.getSnapshots.mockReturnValue([
+        snap('snap-0', 0),
+        snap('snap-1', 1),
+      ]);
+
+      expect(session.rewindToTurn(1, { rewindFiles: false })).toEqual({
+        targetTurnIndex: 1,
+        apiTruncateIndex: 2,
+        promptId: 'snap-1',
+      });
+      expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
+      // Files are NOT rolled back (no FileHistoryService.rewind here), but
+      // the store settles at the surviving 1-turn prefix, boundary dropped,
+      // and the transcript re-records that same settled batch.
+      expect(mockFileHistoryService.restoreFromSnapshots).toHaveBeenCalledWith([
+        snap('snap-0', 0),
+      ]);
+      expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
+        1,
+        { truncatedCount: 2 },
+        [snap('snap-0', 0)],
+      );
+
+      // Terminal state: 1 snapshot <-> 1 surviving turn — the next rewind
+      // is reachable again instead of failing closed forever.
+      const truncatedHistory = history.slice(0, 2);
+      vi.mocked(mockChat.getHistory).mockReturnValue(truncatedHistory);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(truncatedHistory);
+      mockFileHistoryService.getSnapshots.mockReturnValue([snap('snap-0', 0)]);
+
+      expect(session.getRewindableSnapshotTargets()).toEqual([
+        { promptId: 'snap-0', turnIndex: 0 },
+      ]);
+      expect(session.rewindToTurn(0)).toEqual({
+        targetTurnIndex: 0,
+        apiTruncateIndex: 0,
+        promptId: 'snap-0',
+      });
+    });
+
     it('preserves startup context when rewinding to the first user turn', () => {
       const history: Content[] = [
         {
