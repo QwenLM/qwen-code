@@ -1243,6 +1243,21 @@ function toCount(value: unknown, field: string): number {
   return value;
 }
 
+/**
+ * `toCount`'s acceptance as a total function: the count when `toCount`
+ * accepts the value, undefined when it would throw. A caller OUTSIDE this
+ * boundary that merges into a count without owning the refusal — submit's
+ * Aone anchor gate — decides "merge or leave for compose" through the SAME
+ * acceptance table, so the two reads can never drift.
+ */
+export function tryToCount(value: unknown): number | undefined {
+  try {
+    return toCount(value, '');
+  } catch {
+    return undefined;
+  }
+}
+
 function toStringList(value: unknown, field: string): string[] {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value) || value.some((v) => typeof v !== 'string')) {
@@ -2076,7 +2091,7 @@ function collapseEntry(entry: string): string {
 }
 
 /** A line that is a code-fence delimiter: a ``` or ~~~ run, any info string. */
-const ENTRY_FENCE_DELIMITER_RE = /^(?:`{3,}|~{3,})/;
+export const ENTRY_FENCE_DELIMITER_RE = /^(?:`{3,}|~{3,})/;
 
 /**
  * A model-written entry list as EVERY consumer sees it: one line per entry,
@@ -2123,6 +2138,50 @@ function ingestEntryList(value: unknown, field: string): string[] {
   // the renders-nothing gates and fail the draft, not vanish — see the
   // invariant at the gates below.
   return raw.map(collapseEntry).map(stripReviewFooter);
+}
+
+/**
+ * `bodyCriticals` through EVERY refusal compose applies to it: the shape
+ * and fence gates of `ingestEntryList`, then the renders-nothing gate.
+ * One statement of the field's acceptance, so composeReviewBody and any
+ * outside caller read the same table.
+ */
+function ingestBodyCriticals(value: unknown): string[] {
+  const entries = ingestEntryList(value, 'bodyCriticals');
+  // A body Critical that is nothing but scaffolding renders nothing yet
+  // would still count toward REQUEST_CHANGES — the inline-comment path
+  // refuses this shape at submit's gate; refuse it here too, while the
+  // draft is still cheap to fix. The gate checks the shape the render legs
+  // post: strip the trailing forged footer BEFORE the emptiness projection
+  // (mirroring `submit`'s gate) — otherwise a footer past the strip's caps
+  // passes as ballast, the render legs strip it entirely, and a bare-marker
+  // entry posts and counts.
+  for (const entry of entries) {
+    if (rendersAsNothing(stripReviewFooter(stripForUnattributedPost(entry)))) {
+      throw new Error(
+        'compose-review: a body Critical renders as nothing (marker-only, ' +
+          'empty comment, or otherwise invisible) — redraft it with the ' +
+          "finding's description",
+      );
+    }
+  }
+  return entries;
+}
+
+/**
+ * `ingestBodyCriticals`'s acceptance as a total function: the ingested
+ * entries when compose would take the field, undefined when it would
+ * refuse it. A caller OUTSIDE this boundary that merges into the field
+ * without owning the refusal — submit's Aone anchor gate — decides "merge
+ * or leave for compose" through the SAME acceptance table, so the two
+ * reads can never drift.
+ */
+export function tryIngestBodyCriticals(value: unknown): string[] | undefined {
+  try {
+    return ingestBodyCriticals(value);
+  } catch {
+    return undefined;
+  }
 }
 
 function composeReviewBody(
@@ -2175,24 +2234,7 @@ function composeReviewBody(
     input.suggestionsInline,
     'suggestionsInline',
   );
-  const bodyCriticals = ingestEntryList(input.bodyCriticals, 'bodyCriticals');
-  // A body Critical that is nothing but scaffolding renders nothing yet
-  // would still count toward REQUEST_CHANGES — the inline-comment path
-  // refuses this shape at submit's gate; refuse it here too, while the
-  // draft is still cheap to fix. The gate checks the shape the render legs
-  // post: strip the trailing forged footer BEFORE the emptiness projection
-  // (mirroring `submit`'s gate) — otherwise a footer past the strip's caps
-  // passes as ballast, the render legs strip it entirely, and a bare-marker
-  // entry posts and counts.
-  for (const entry of bodyCriticals) {
-    if (rendersAsNothing(stripReviewFooter(stripForUnattributedPost(entry)))) {
-      throw new Error(
-        'compose-review: a body Critical renders as nothing (marker-only, ' +
-          'empty comment, or otherwise invisible) — redraft it with the ' +
-          "finding's description",
-      );
-    }
-  }
+  const bodyCriticals = ingestBodyCriticals(input.bodyCriticals);
   const suggestionsDiscarded = toCount(
     input.suggestionsDiscarded,
     'suggestionsDiscarded',
