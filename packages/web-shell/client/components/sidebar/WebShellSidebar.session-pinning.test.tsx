@@ -299,7 +299,6 @@ afterEach(() => {
   act(() => root.unmount());
   container.remove();
   window.localStorage.clear();
-  vi.restoreAllMocks();
 });
 
 describe('WebShellSidebar session pinning (issue #9465)', () => {
