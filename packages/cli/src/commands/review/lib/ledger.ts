@@ -168,8 +168,11 @@ export interface Ledger {
    * first-time — and nothing parts an old-rule marker from a new one, on
    * purpose. A loop in flight at the change compares one round counted under
    * each rule for exactly one round; the old rule UNDERCOUNTED (it dropped
-   * the marked re-reports), so the mixed comparison can only fire the volume
-   * advisory spuriously, never mask a genuine one — and the advisory decides
+   * the marked re-reports), so the mixed comparison can fire the volume
+   * advisory spuriously — and, when the undercount reaches 0 because the
+   * predecessor's whole new output was re-reports the old rule dropped, the
+   * `prev.fresh > 0` restart guard suppresses the comparison, masking the
+   * advisory for that one round. Either way the advisory decides
    * nothing, names itself an observation, and heals the round after, when
    * both points are counted under the new rule. A marker version was not
    * paid for that: `parseLedger` refuses any `v` it does not know, so
