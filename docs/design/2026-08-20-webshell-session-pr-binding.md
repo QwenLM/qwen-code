@@ -36,7 +36,7 @@ Web Shell 同时运行 20+ 会话时，侧栏信息不足以回答"哪个会话�
 - bridge `updateSessionMetadata`（`packages/acp-bridge/src/bridge.ts`）先做全部校验再变更（组合请求不允许部分生效）；upsert 进 live entry.prs（去重按 number，上限 10），`session_metadata_updated` SSE 事件 data 带完整 `prs`。
 - ACP `session/update_metadata`（`acp-http/dispatch.ts`）同样把最新绑定 upsert 进 sidecar。
 - `GitDialog.doCreatePr` 成功后：仅用 dialog 已有的 `sessionId`（`sessionIdRef.current`，即连接会话或 dialog 已为提交信息生成等操作解析出的会话）调用 `updateSessionMetadata(sessionId, { pr })`。**不调 `resolveSessionForWorkspace`**——它可能创建幽灵会话或误绑"最近会话"。写入失败仅降级为 console 警告，不影响 PR 创建成功的状态展示。
-- **shell 工具 post-hook**：`run_shell_command` 完成且未中止时，`detectGhPrCreateBinding(command, output)`（core `session-pr-service.ts`）识别 `gh pr create`（排除 `--dry-run`）并从 stdout 提取首个 `/pull/<N>` URL——gh 失败/dry-run 不打印 URL，天然防误报；命中则直接 `upsertSessionPr(..., state:'open')` 直写 sidecar（复刻 worktree sidecar 的"工具进程直写"模式，CLI/daemon 双模生效，daemon 列表 ~2s 内展示）。best-effort，失败不影响工具结果。
+- **shell 工具 post-hook**：`run_shell_command` 完成、未中止且退出码为 0 时，`detectGhPrCreateBinding(command, output, repoKey)`（core `session-pr-service.ts`）识别 `gh pr create`（排除 `--dry-run`）并绑定 stdout 里**最后一个** `/pull/<N>` URL——gh 成功时把新建 PR 的 URL 打在输出末尾，而复合命令里被 echo 的文本通常出现在它之前；该 URL 还必须与 workspace 自身仓库一致（`host/owner/repo` 比对 git origin remote），跨仓库/伪造 URL 一律不绑。命中则直接 `upsertSessionPr(..., state:'open')` 直写 sidecar（复刻 worktree sidecar 的"工具进程直写"模式，CLI/daemon 双模生效，daemon 列表 ~2s 内展示）。best-effort，失败不影响工具结果。
 
 ### 持久化
 
@@ -61,7 +61,7 @@ Web Shell 同时运行 20+ 会话时，侧栏信息不足以回答"哪个会话�
 - 遍历 registry 中所有 trusted workspace runtime；每个 workspace 扫描 persisted 会话（active + archived），候选分支 = worktree sidecar branch ∪ transcript 各记录的 `gitBranch`（正则提取，distinct 上限 64），解析三源：
   1. **约定**：slug `pr-<N>` / branch `worktree-pr-<N>` 直接给出 PR 号（零网络）；
   2. **gh 批量**：每 workspace 一次 `fetchGitHubPullRequests({state:'all', limit:500, slim:true})`，把候选分支与 headRefName 交集映射到 number + url。实测存量里 `pr-<N>` slug 与 worktree branch 几乎零命中（PR 基本不从 worktree 分支提交），`gitBranch` 是主力来源（主 workspace 342 会话命中 272）；
-  3. **transcript `gh pr create` 痕迹**：按 part id 配对 `run_shell_command` 的 functionCall/functionResponse，复用 `detectGhPrCreateBinding` 提取创建时打印的 URL——gh 不可用时也能绑（URL 兜底链：gh 映射 → 创建时打印的 URL → remote 推导仅约定号）。
+  3. **transcript `gh pr create` 痕迹**：按 part id 配对 `run_shell_command` 的 functionCall/functionResponse，复用 `detectGhPrCreateBinding` 提取创建时打印的 URL（同样要求 URL 属于 workspace 自身仓库）——gh 不可用时也能绑（URL 兜底链：gh 映射 → 创建时打印的 URL → remote 推导仅约定号）。
 - `slim` 只取 number/url/headRefName：带 CI rollup 的全字段查询在 `--state all --limit 500` 下触发 GitHub GraphQL 504；slim 约 4s/60KB。
 - URL 优先取 gh 映射；gh 不可用时由 git remote web URL 推导 `<repo>/pull/<N>`（支持 https / scp 风格 ssh / `ssh://` 与 enterprise host，仅约定号）；解析不到号的会话原样跳过。
 - 已知副作用：曾 checkout/review 他人 PR 分支的会话也会被绑定（多 PR 列表可容纳，搜索语义上属于"相关会话"）。

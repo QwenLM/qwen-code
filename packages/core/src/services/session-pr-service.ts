@@ -8,6 +8,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { isNodeError } from '../utils/errors.js';
 import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
+import { repoKeyFromWebUrl } from '../utils/github-prs.js';
 
 /**
  * Persisted GitHub pull request binding for a session. Written by the daemon
@@ -134,7 +135,7 @@ const GH_PR_CREATE_SEGMENT_PATTERN =
   /^\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*gh(?:\.exe)?\s+pr\s+create\b/;
 // The host must start with an alphanumeric so placeholder hosts never bind.
 const GH_PR_CREATE_URL_PATTERN =
-  /https?:\/\/[A-Za-z0-9][^\s"'<>)]*\/pull\/(\d+)/;
+  /https?:\/\/[A-Za-z0-9][^\s"'<>)]*\/pull\/(\d+)/g;
 
 function commandRunsGhPrCreate(command: string): boolean {
   return command
@@ -145,20 +146,35 @@ function commandRunsGhPrCreate(command: string): boolean {
 /**
  * Recognizes a `gh pr create` run from the shell tool: some command segment
  * executes the action and gh prints the new PR's URL on success. Failed or
- * `--dry-run` runs print no URL, which is the false-positive gate.
+ * `--dry-run` runs print no URL, which is the base false-positive gate.
+ *
+ * A compound command can still print foreign URLs, so two more gates apply:
+ * the LAST matching URL wins (gh prints the new PR's URL at the end of its
+ * own output, while echoed text typically precedes it), and when
+ * `expectedRepoKey` is given the URL must belong to that repository
+ * (`host/owner/repo`) — URLs from other hosts or repos never bind.
  */
 export function detectGhPrCreateBinding(
   command: string,
   output: string,
+  expectedRepoKey?: string,
 ): { number: number; url: string } | undefined {
   if (!commandRunsGhPrCreate(command)) return undefined;
   if (command.includes('--dry-run')) return undefined;
-  const match = GH_PR_CREATE_URL_PATTERN.exec(output);
-  if (!match) return undefined;
-  // Summarized output elides owner/repo (`https://github.com/.../pull/N`);
-  // such a URL is not a usable link target.
-  if (match[0].includes('...')) return undefined;
-  return { number: Number(match[1]), url: match[0] };
+  let binding: { number: number; url: string } | undefined;
+  for (const match of output.matchAll(GH_PR_CREATE_URL_PATTERN)) {
+    // Summarized output elides owner/repo (`https://github.com/.../pull/N`);
+    // such a URL is not a usable link target.
+    if (match[0].includes('...')) continue;
+    if (
+      expectedRepoKey !== undefined &&
+      repoKeyFromWebUrl(match[0]) !== expectedRepoKey
+    ) {
+      continue;
+    }
+    binding = { number: Number(match[1]), url: match[0] };
+  }
+  return binding;
 }
 
 /**
@@ -239,25 +255,26 @@ export function upsertSessionPr(
 
 /**
  * Rewrites bound PR states in place — order and createdAt are preserved, so
- * a refresh sweep never reshuffles the badge's "latest" entry. Returns null
- * when the sidecar is absent/invalid or nothing changed (no write then).
+ * a refresh sweep never reshuffles the badge's "latest" entry. Returns the
+ * number of entries actually rewritten; 0 when the sidecar is absent/invalid
+ * or nothing changed (no write then).
  */
 export function updateSessionPrStates(
   filePath: string,
   states: ReadonlyMap<number, SessionPrState>,
-): Promise<SessionPr[] | null> {
+): Promise<number> {
   return enqueuePrMutation(filePath, async () => {
     const existing = await readSessionPrs(filePath);
-    if (!existing) return null;
-    let changed = false;
+    if (!existing) return 0;
+    let changed = 0;
     const next = existing.map((entry) => {
       const state = states.get(entry.number);
       if (state === undefined || state === entry.state) return entry;
-      changed = true;
+      changed += 1;
       return { ...entry, state };
     });
-    if (!changed) return null;
+    if (changed === 0) return 0;
     await writeSessionPrs(filePath, next);
-    return next;
+    return changed;
   });
 }

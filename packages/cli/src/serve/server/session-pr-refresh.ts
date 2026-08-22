@@ -13,7 +13,9 @@
 // static barrel importer (ACP agent included).
 import {
   fetchGitHubPullRequests,
+  fetchRemoteWebUrl,
   readSessionPrs,
+  repoKeyFromWebUrl,
   updateSessionPrStates,
   type SessionPrState,
 } from '@qwen-code/qwen-code-core';
@@ -60,9 +62,14 @@ export interface SessionPrRefreshResult {
 export async function refreshWorkspaceSessionPrStates(
   runtime: WorkspaceRuntime,
   fetchPullRequests: typeof fetchGitHubPullRequests = fetchGitHubPullRequests,
+  resolveRemoteWebUrl: (cwd: string) => Promise<string | undefined> = (cwd) =>
+    fetchRemoteWebUrl(cwd, runtime.env.effectiveEnv),
 ): Promise<SessionPrRefreshResult> {
   const sessionService = createWorkspaceRuntimeSessionService(runtime);
-  const pendingNumbers: Array<{ prPath: string; numbers: number[] }> = [];
+  const pendingBindings: Array<{
+    prPath: string;
+    bindings: Array<{ number: number; url: string }>;
+  }> = [];
   let scanned = 0;
   for (const archiveState of ['active', 'archived'] as const) {
     let cursor: number | undefined;
@@ -85,19 +92,32 @@ export async function refreshWorkspaceSessionPrStates(
         }
         if (!prs) continue;
         scanned += 1;
-        const numbers = prs
+        const bindings = prs
           // Only merged is terminal: closed PRs can be reopened, so they
           // keep participating in the sweep.
           .filter((p) => p.state !== 'merged')
-          .map((p) => p.number);
-        if (numbers.length > 0) {
-          pendingNumbers.push({ prPath, numbers });
+          .map((p) => ({ number: p.number, url: p.url }));
+        if (bindings.length > 0) {
+          pendingBindings.push({ prPath, bindings });
         }
       }
       cursor = page.nextCursor;
     } while (cursor !== undefined);
   }
-  if (pendingNumbers.length === 0) return { scanned, updated: 0 };
+  if (pendingBindings.length === 0) return { scanned, updated: 0 };
+
+  // The sweep queries exactly one repository (the workspace's), but PR
+  // numbers are dense small integers — stamping states by bare number would
+  // hit a same-numbered PR of another repository whenever a binding's URL
+  // points elsewhere. Each binding's own URL names its repository, so only
+  // bindings belonging to the queried repo are updated; an unresolvable
+  // workspace remote cannot vouch for any binding, and the round updates
+  // nothing.
+  const remoteWebUrl = await resolveRemoteWebUrl(runtime.workspaceCwd);
+  const workspaceRepoKey = remoteWebUrl
+    ? repoKeyFromWebUrl(remoteWebUrl)
+    : undefined;
+  if (!workspaceRepoKey) return { scanned, updated: 0 };
 
   const result = await fetchPullRequests(
     runtime.workspaceCwd,
@@ -112,19 +132,18 @@ export async function refreshWorkspaceSessionPrStates(
   }
 
   let updated = 0;
-  for (const target of pendingNumbers) {
+  for (const target of pendingBindings) {
     const states = new Map<number, SessionPrState>();
-    for (const number of target.numbers) {
-      const state = numberToState.get(number);
+    for (const binding of target.bindings) {
+      if (repoKeyFromWebUrl(binding.url) !== workspaceRepoKey) continue;
+      const state = numberToState.get(binding.number);
       // Only a number ABSENT from gh's page is skipped (out of the limit
       // window); a present one is authoritative — including an 'open' that
       // supersedes a stale 'closed' after a reopen.
-      if (state !== undefined) states.set(number, state);
+      if (state !== undefined) states.set(binding.number, state);
     }
     if (states.size === 0) continue;
-    if (await updateSessionPrStates(target.prPath, states)) {
-      updated += states.size;
-    }
+    updated += await updateSessionPrStates(target.prPath, states);
   }
   return { scanned, updated };
 }

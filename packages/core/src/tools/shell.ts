@@ -40,6 +40,7 @@ import {
   detectGhPrCreateBinding,
   upsertSessionPr,
 } from '../services/session-pr-service.js';
+import { fetchRemoteWebUrl, repoKeyFromWebUrl } from '../utils/github-prs.js';
 import type {
   ShellExecutionConfig,
   ShellExecutionResult,
@@ -2721,7 +2722,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       return promotedToolResult;
     }
 
-    if (!result.aborted) {
+    if (!result.aborted && result.exitCode === 0) {
       this.bindGhPrCreate(commandToExecute, result.output);
     }
 
@@ -3065,21 +3066,33 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * Best-effort PR binding for agents that create PRs via `gh pr create` in
    * the shell (the GitDialog binds at creation; this covers the shell path).
    * Writes the session's PR sidecar directly, mirroring the worktree sidecar
-   * pattern; a failure must never shadow the tool result.
+   * pattern; a failure must never shadow the tool result. The URL must
+   * belong to the workspace's own repository — a compound command can print
+   * foreign URLs that must not bind.
    */
   private bindGhPrCreate(command: string, output: string): void {
-    const binding = detectGhPrCreateBinding(command, output);
-    if (!binding) return;
-    try {
-      const prPath = this.config
-        .getSessionService()
-        .getPrSessionPathForArchiveState(this.config.getSessionId(), 'active');
-      void upsertSessionPr(prPath, { ...binding, state: 'open' }).catch(() => {
+    void (async () => {
+      try {
+        const remoteWebUrl = await fetchRemoteWebUrl(
+          this.config.getTargetDir(),
+        );
+        const repoKey = remoteWebUrl
+          ? repoKeyFromWebUrl(remoteWebUrl)
+          : undefined;
+        if (!repoKey) return;
+        const binding = detectGhPrCreateBinding(command, output, repoKey);
+        if (!binding) return;
+        const prPath = this.config
+          .getSessionService()
+          .getPrSessionPathForArchiveState(
+            this.config.getSessionId(),
+            'active',
+          );
+        await upsertSessionPr(prPath, { ...binding, state: 'open' });
+      } catch {
         /* best-effort binding */
-      });
-    } catch {
-      /* best-effort binding */
-    }
+      }
+    })();
   }
 
   /**

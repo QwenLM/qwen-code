@@ -43,6 +43,10 @@ vi.mock('../services/session-pr-service.js', async (importOriginal) => ({
   >()),
   upsertSessionPr: vi.fn().mockResolvedValue([]),
 }));
+vi.mock('../utils/github-prs.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../utils/github-prs.js')>()),
+  fetchRemoteWebUrl: vi.fn().mockResolvedValue('https://github.com/o/r'),
+}));
 
 import { isCommandAllowed } from '../utils/shell-utils.js';
 import {
@@ -52,6 +56,7 @@ import {
 } from './shell.js';
 import { detectBlockedSleepPattern } from './shell.js';
 import { upsertSessionPr } from '../services/session-pr-service.js';
+import { fetchRemoteWebUrl } from '../utils/github-prs.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
 import { ApprovalMode, type Config } from '../config/config.js';
 import {
@@ -234,9 +239,12 @@ describe('ShellTool', () => {
   });
 
   describe('gh pr create binding', () => {
-    it('writes the PR sidecar when gh pr create prints a URL', async () => {
+    async function runShell(
+      command: string,
+      result: Partial<ShellExecutionResult>,
+    ): Promise<void> {
       const invocation = shellTool.build({
-        command: 'gh pr create --title x --body y',
+        command,
         directory: '/test/dir',
         is_background: false,
       });
@@ -244,12 +252,20 @@ describe('ShellTool', () => {
       await vi.waitFor(() =>
         expect(mockShellExecutionService).toHaveBeenCalled(),
       );
-      resolveExecutionPromise({
+      resolveExecutionPromise(result as ShellExecutionResult);
+      await resultPromise;
+      // The binding hook is fire-and-forget; give its async remote lookup a
+      // beat so negative assertions cannot pass merely because the hook has
+      // not scheduled yet.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+
+    it('writes the PR sidecar when gh pr create prints a URL', async () => {
+      await runShell('gh pr create --title x --body y', {
         output: 'noise\nhttps://github.com/o/r/pull/77\n',
         exitCode: 0,
         aborted: false,
-      } as ShellExecutionResult);
-      await resultPromise;
+      });
 
       expect(vi.mocked(upsertSessionPr)).toHaveBeenCalledWith(
         '/test/proj/chats/test-session.pr.json',
@@ -262,21 +278,44 @@ describe('ShellTool', () => {
     });
 
     it('does not bind when the create fails without a URL', async () => {
-      const invocation = shellTool.build({
-        command: 'gh pr create --title x',
-        directory: '/test/dir',
-        is_background: false,
-      });
-      const resultPromise = invocation.execute(new AbortController().signal);
-      await vi.waitFor(() =>
-        expect(mockShellExecutionService).toHaveBeenCalled(),
-      );
-      resolveExecutionPromise({
+      await runShell('gh pr create --title x', {
         output: 'error: not logged in',
         exitCode: 1,
         aborted: false,
-      } as ShellExecutionResult);
-      await resultPromise;
+      });
+
+      expect(vi.mocked(upsertSessionPr)).not.toHaveBeenCalled();
+    });
+
+    it('does not bind a non-zero exit even when the output carries a URL', async () => {
+      // A compound command can exit non-zero after another segment printed a
+      // PR URL; only a fully successful run may bind.
+      await runShell('gh pr create --fill; cat notes.txt', {
+        output: 'https://github.com/o/r/pull/1234\n',
+        exitCode: 1,
+        aborted: false,
+      });
+
+      expect(vi.mocked(upsertSessionPr)).not.toHaveBeenCalled();
+    });
+
+    it('does not bind a URL from another repository', async () => {
+      await runShell('gh pr create --fill', {
+        output: 'https://github.com/other/repo/pull/666\n',
+        exitCode: 0,
+        aborted: false,
+      });
+
+      expect(vi.mocked(upsertSessionPr)).not.toHaveBeenCalled();
+    });
+
+    it('does not bind when the workspace remote cannot be resolved', async () => {
+      (vi.mocked(fetchRemoteWebUrl) as Mock).mockResolvedValueOnce(undefined);
+      await runShell('gh pr create --fill', {
+        output: 'https://github.com/o/r/pull/5\n',
+        exitCode: 0,
+        aborted: false,
+      });
 
       expect(vi.mocked(upsertSessionPr)).not.toHaveBeenCalled();
     });

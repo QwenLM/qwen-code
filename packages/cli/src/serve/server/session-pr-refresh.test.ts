@@ -32,6 +32,11 @@ const fetchGitHubPullRequestsMock = vi.mocked(fetchGitHubPullRequests);
 const SESSION_A = '00000000-0000-4000-8000-000000000001';
 const SESSION_B = '00000000-0000-4000-8000-000000000002';
 
+// The sweep only updates bindings whose URL belongs to the workspace repo;
+// tests seed github.com/o/r URLs, so resolve the workspace remote to it.
+const resolveRemote = async (): Promise<string | undefined> =>
+  'https://github.com/o/r';
+
 function pr(number: number, state: string) {
   return {
     number,
@@ -142,7 +147,11 @@ describe('refreshWorkspaceSessionPrStates', () => {
       pullRequests: [pr(42, 'merged')],
     });
 
-    const result = await refreshWorkspaceSessionPrStates(runtime);
+    const result = await refreshWorkspaceSessionPrStates(
+      runtime,
+      undefined,
+      resolveRemote,
+    );
 
     expect(result).toEqual({ scanned: 1, updated: 1 });
     const persisted = await readSessionPrs(prPath);
@@ -189,7 +198,11 @@ describe('refreshWorkspaceSessionPrStates', () => {
       pullRequests: [pr(42, 'open')],
     });
 
-    const result = await refreshWorkspaceSessionPrStates(runtime);
+    const result = await refreshWorkspaceSessionPrStates(
+      runtime,
+      undefined,
+      resolveRemote,
+    );
 
     expect(result).toEqual({ scanned: 1, updated: 1 });
     expect((await readSessionPrs(prPath))?.[0]?.state).toBe('open');
@@ -210,7 +223,11 @@ describe('refreshWorkspaceSessionPrStates', () => {
       kind: 'cli_unavailable',
     });
 
-    const result = await refreshWorkspaceSessionPrStates(runtime);
+    const result = await refreshWorkspaceSessionPrStates(
+      runtime,
+      undefined,
+      resolveRemote,
+    );
 
     expect(result).toEqual({ scanned: 1, updated: 0 });
     expect((await readSessionPrs(prPath))?.[0]?.state).toBe('open');
@@ -232,9 +249,105 @@ describe('refreshWorkspaceSessionPrStates', () => {
       pullRequests: [pr(42, 'merged')],
     });
 
-    const result = await refreshWorkspaceSessionPrStates(runtime);
+    const result = await refreshWorkspaceSessionPrStates(
+      runtime,
+      undefined,
+      resolveRemote,
+    );
 
     expect(result).toEqual({ scanned: 1, updated: 0 });
     expect((await readSessionPrs(prPath))?.[0]?.state).toBe('open');
+  });
+
+  it('updates nothing when the workspace remote cannot be resolved', async () => {
+    await seedSession(SESSION_A);
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await upsertSessionPr(prPath, {
+      number: 42,
+      url: 'https://github.com/o/r/pull/42',
+      state: 'open',
+    });
+
+    const result = await refreshWorkspaceSessionPrStates(
+      runtime,
+      undefined,
+      async () => undefined,
+    );
+
+    // Without a repo identity there is no way to verify a binding belongs
+    // to the queried repository, so the round must not stamp any state.
+    expect(result).toEqual({ scanned: 1, updated: 0 });
+    expect((await readSessionPrs(prPath))?.[0]?.state).toBe('open');
+    expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
+  });
+
+  it('never stamps a same-number PR of another repository', async () => {
+    await seedSession(SESSION_A);
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    // A binding whose URL points at an upstream repository; the sweep only
+    // queries the workspace repo, so a number collision there must not
+    // rewrite this entry.
+    await upsertSessionPr(prPath, {
+      number: 500,
+      url: 'https://github.com/upstream/repo/pull/500',
+      state: 'open',
+    });
+    await upsertSessionPr(prPath, {
+      number: 42,
+      url: 'https://github.com/o/r/pull/42',
+      state: 'open',
+    });
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(500, 'merged'), pr(42, 'merged')],
+    });
+
+    const result = await refreshWorkspaceSessionPrStates(
+      runtime,
+      undefined,
+      resolveRemote,
+    );
+
+    expect(result).toEqual({ scanned: 1, updated: 1 });
+    const persisted = await readSessionPrs(prPath);
+    expect(persisted?.find((p) => p.number === 500)?.state).toBe('open');
+    expect(persisted?.find((p) => p.number === 42)?.state).toBe('merged');
+  });
+
+  it('counts only bindings whose state was actually rewritten', async () => {
+    await seedSession(SESSION_A);
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await upsertSessionPr(prPath, {
+      number: 10,
+      url: 'https://github.com/o/r/pull/10',
+      state: 'open',
+    });
+    await upsertSessionPr(prPath, {
+      number: 11,
+      url: 'https://github.com/o/r/pull/11',
+      state: 'open',
+    });
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      // gh confirms both numbers, but only one changed state.
+      pullRequests: [pr(10, 'merged'), pr(11, 'open')],
+    });
+
+    const result = await refreshWorkspaceSessionPrStates(
+      runtime,
+      undefined,
+      resolveRemote,
+    );
+
+    expect(result).toEqual({ scanned: 1, updated: 1 });
   });
 });

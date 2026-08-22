@@ -4,15 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execSync } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { Application, RequestHandler } from 'express';
 import {
   detectGhPrCreateBinding,
   fetchGitHubPullRequests,
+  fetchRemoteWebUrl,
   readSessionPrs,
   readWorktreeSession,
+  repoKeyFromWebUrl,
   upsertSessionPr,
   type SessionArchiveState,
 } from '@qwen-code/qwen-code-core';
@@ -26,8 +27,11 @@ import type {
 // `--worktree=#<N>` launches persist slug `pr-<N>` with branch
 // `worktree-pr-<N>` (see worktreeStartup / worktreeBranchForSlug); the
 // sidecars survive restarts, so they are the zero-network backfill source.
-const SLUG_PR_PATTERN = /^pr-(\d{1,9})$/;
-const BRANCH_PR_PATTERN = /^worktree-pr-(\d{1,9})$/;
+// `[1-9]` mirrors parsePRReference's n > 0 invariant: `pr-0` is a legal
+// user-chosen slug but PR 0 does not exist, and a persisted number 0 poisons
+// the whole sidecar read; leading zeros stay out for unambiguous round-trips.
+const SLUG_PR_PATTERN = /^pr-([1-9]\d{0,8})$/;
+const BRANCH_PR_PATTERN = /^worktree-pr-([1-9]\d{0,8})$/;
 
 /**
  * Extracts the PR number a worktree sidecar's slug/branch convention names.
@@ -43,44 +47,6 @@ export function parsePrNumberFromWorktree(
   const branchMatch = BRANCH_PR_PATTERN.exec(branch ?? '');
   if (branchMatch) return Number(branchMatch[1]);
   return undefined;
-}
-
-/**
- * Converts a git remote URL (https / ssh / scp-style) to the repository's
- * web URL, used to build `<repo>/pull/<N>` when `gh` is unavailable.
- */
-export function normalizeRemoteToWebUrl(remote: string): string | undefined {
-  const trimmed = remote.trim();
-  if (!trimmed) return undefined;
-  let input = trimmed;
-  if (input.startsWith('git@')) {
-    input = `https://${input.slice('git@'.length).replace(':', '/')}`;
-  } else if (input.startsWith('ssh://')) {
-    input = `https://${input.slice('ssh://'.length)}`;
-  }
-  let url: URL;
-  try {
-    url = new URL(input);
-  } catch {
-    return undefined;
-  }
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') return undefined;
-  const pathname = url.pathname.replace(/\.git\/?$/, '');
-  if (!pathname || pathname === '/') return undefined;
-  return `${url.protocol}//${url.host}${pathname}`.replace(/\/$/, '');
-}
-
-function getRemoteWebUrl(cwd: string): string | undefined {
-  try {
-    const remote = execSync('git remote get-url origin', {
-      cwd,
-      encoding: 'utf8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim();
-    return normalizeRemoteToWebUrl(remote);
-  } catch {
-    return undefined;
-  }
 }
 
 export interface SessionPrBackfillWorkspaceResult {
@@ -279,24 +245,62 @@ export async function backfillWorkspaceSessionPrs(
       numberToUrl.set(pr.number, pr.url);
       // The sidecar snapshot has no 'draft' variant — a draft is still open.
       numberToState.set(pr.number, pr.state === 'draft' ? 'open' : pr.state);
-      if (pr.headRefName) branchToNumber.set(pr.headRefName, pr.number);
+      // First wins: the list is newest-updatedAt-first, so a head branch
+      // shared by two PRs maps to the newer one (a last-write `.set()` would
+      // resolve to the oldest, making the current PR unreachable).
+      if (pr.headRefName && !branchToNumber.has(pr.headRefName)) {
+        branchToNumber.set(pr.headRefName, pr.number);
+      }
     }
   }
 
+  // One remote lookup per backfill run, cached by ATTEMPT (a failed lookup
+  // must not re-spawn git for every candidate); async so the daemon event
+  // loop is never blocked by it.
   let remoteWebUrl: string | undefined;
-  for (const candidate of candidates) {
-    const numbers: number[] = [];
-    if (candidate.conventionNumber !== undefined) {
-      numbers.push(candidate.conventionNumber);
+  let remoteAttempted = false;
+  const resolveRemoteWebUrl = async (): Promise<string | undefined> => {
+    if (!remoteAttempted) {
+      remoteAttempted = true;
+      remoteWebUrl = await fetchRemoteWebUrl(
+        runtime.workspaceCwd,
+        runtime.env.effectiveEnv,
+      );
     }
+    return remoteWebUrl;
+  };
+
+  for (const candidate of candidates) {
+    // Insert in ASCENDING authority so the strongest bindings survive the
+    // sidecar's tail-10 cap: branch-mapped first (a head-branch name
+    // collision is the weakest signal), then `gh pr create` evidence, and
+    // the worktree slug/branch convention last (the session exists FOR that
+    // PR, so it must never be evicted by weaker numbers).
+    const numbers: number[] = [];
     for (const branch of candidate.branches) {
       const mapped = branchToNumber.get(branch);
       if (mapped !== undefined && !numbers.includes(mapped)) {
         numbers.push(mapped);
       }
     }
-    for (const directNumber of candidate.direct.keys()) {
+    let repoKey: string | undefined;
+    if (candidate.direct.size > 0) {
+      const remote = await resolveRemoteWebUrl();
+      repoKey = remote ? repoKeyFromWebUrl(remote) : undefined;
+    }
+    for (const [directNumber, directUrl] of candidate.direct) {
+      // A transcript URL from another repository must not bind this
+      // session; an unresolvable workspace remote cannot vouch for it.
+      if (repoKey === undefined || repoKeyFromWebUrl(directUrl) !== repoKey) {
+        continue;
+      }
       if (!numbers.includes(directNumber)) numbers.push(directNumber);
+    }
+    if (candidate.conventionNumber !== undefined) {
+      const conventionNumber = candidate.conventionNumber;
+      const rest = numbers.filter((n) => n !== conventionNumber);
+      numbers.length = 0;
+      numbers.push(...rest, conventionNumber);
     }
     if (numbers.length === 0) continue;
     const prPath = sessionService.getPrSessionPathForArchiveState(
@@ -317,8 +321,8 @@ export async function backfillWorkspaceSessionPrs(
       }
       let url = numberToUrl.get(number) ?? candidate.direct.get(number);
       if (url === undefined && number === candidate.conventionNumber) {
-        remoteWebUrl ??= getRemoteWebUrl(runtime.workspaceCwd);
-        if (remoteWebUrl !== undefined) url = `${remoteWebUrl}/pull/${number}`;
+        const remote = await resolveRemoteWebUrl();
+        if (remote !== undefined) url = `${remote}/pull/${number}`;
       }
       if (url === undefined) {
         result.unresolved += 1;

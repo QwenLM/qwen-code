@@ -17,7 +17,10 @@ import { execFile } from 'node:child_process';
 import {
   createGitHubPullRequest,
   fetchGitHubPullRequests,
+  fetchRemoteWebUrl,
+  normalizeRemoteToWebUrl,
   parseGhPrList,
+  repoKeyFromWebUrl,
   GITHUB_PR_LIST_LIMIT,
 } from './github-prs.js';
 
@@ -260,7 +263,7 @@ describe('fetchGitHubPullRequests', () => {
         '--limit',
         '500',
         '--json',
-        'number,url,headRefName,state',
+        'number,url,headRefName,state,updatedAt',
       ],
       expect.objectContaining({ cwd: dir }),
       expect.any(Function),
@@ -410,5 +413,117 @@ describe('createGitHubPullRequest', () => {
     expect(seenEnv).toBeDefined();
     expect(seenEnv?.['GH_TOKEN']).toBe('ws-token');
     expect(seenEnv).not.toHaveProperty('GH_REPO');
+  });
+});
+
+describe('normalizeRemoteToWebUrl', () => {
+  it('normalizes https remotes, stripping .git', () => {
+    expect(normalizeRemoteToWebUrl('https://github.com/o/r.git')).toBe(
+      'https://github.com/o/r',
+    );
+  });
+
+  it('normalizes scp-style ssh remotes', () => {
+    expect(normalizeRemoteToWebUrl('git@github.com:o/r.git')).toBe(
+      'https://github.com/o/r',
+    );
+  });
+
+  it('normalizes ssh:// remotes', () => {
+    expect(normalizeRemoteToWebUrl('ssh://git@github.com/o/r')).toBe(
+      'https://github.com/o/r',
+    );
+  });
+
+  it('keeps enterprise hosts', () => {
+    expect(normalizeRemoteToWebUrl('git@code.example.com:team/repo.git')).toBe(
+      'https://code.example.com/team/repo',
+    );
+  });
+
+  it('drops the port an ssh:// remote carries', () => {
+    expect(
+      normalizeRemoteToWebUrl('ssh://git@host.example.com:2222/team/repo.git'),
+    ).toBe('https://host.example.com/team/repo');
+  });
+
+  it('accepts any scp-style user, not only git@', () => {
+    expect(normalizeRemoteToWebUrl('jdoe@gitlab.corp:team/repo.git')).toBe(
+      'https://gitlab.corp/team/repo',
+    );
+  });
+
+  it('rejects garbage and non-http protocols', () => {
+    expect(normalizeRemoteToWebUrl('not a url')).toBeUndefined();
+    expect(normalizeRemoteToWebUrl('git://github.com/o/r')).toBeUndefined();
+    expect(normalizeRemoteToWebUrl('')).toBeUndefined();
+  });
+});
+
+describe('repoKeyFromWebUrl', () => {
+  it('extracts host/owner/repo from web and PR URLs', () => {
+    expect(repoKeyFromWebUrl('https://github.com/o/r')).toBe('github.com/o/r');
+    expect(repoKeyFromWebUrl('https://github.com/o/r/pull/42')).toBe(
+      'github.com/o/r',
+    );
+  });
+
+  it('lowercases host, owner, and repo', () => {
+    expect(repoKeyFromWebUrl('https://GitHub.com/Owner/Repo/pull/1')).toBe(
+      'github.com/owner/repo',
+    );
+  });
+
+  it('returns undefined for non-http URLs and missing path segments', () => {
+    expect(repoKeyFromWebUrl('javascript:alert(1)')).toBeUndefined();
+    expect(repoKeyFromWebUrl('https://github.com/o')).toBeUndefined();
+    expect(repoKeyFromWebUrl('not a url')).toBeUndefined();
+  });
+});
+
+describe('fetchRemoteWebUrl', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'github-prs-remote-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('resolves and normalizes the origin remote', async () => {
+    fs.mkdirSync(path.join(dir, '.git'));
+    mockExecFile.mockImplementation(
+      (_cmd: unknown, args: unknown, _opts: unknown, cb: unknown) => {
+        expect(args).toEqual(['remote', 'get-url', 'origin']);
+        (cb as ExecCallback)(null, 'git@github.com:o/r.git\n', '');
+        return {} as ReturnType<typeof execFile>;
+      },
+    );
+
+    expect(await fetchRemoteWebUrl(dir)).toBe('https://github.com/o/r');
+  });
+
+  it('returns undefined outside a git repository without spawning git', async () => {
+    expect(await fetchRemoteWebUrl(dir)).toBeUndefined();
+    expect(mockExecFile).not.toHaveBeenCalled();
+  });
+
+  it('returns undefined when git fails (no origin)', async () => {
+    fs.mkdirSync(path.join(dir, '.git'));
+    mockExecFile.mockImplementation(
+      (_cmd: unknown, _args: unknown, _opts: unknown, cb: unknown) => {
+        (cb as ExecCallback)(
+          new Error('fatal: no remote named origin'),
+          '',
+          '',
+        );
+        return {} as ReturnType<typeof execFile>;
+      },
+    );
+
+    expect(await fetchRemoteWebUrl(dir)).toBeUndefined();
   });
 });

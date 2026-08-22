@@ -218,38 +218,44 @@ describe('updateSessionPrStates', () => {
       { ...entry(100), state: 'open' },
       { ...entry(101), state: 'open' },
     ]);
-    const updated = await updateSessionPrStates(
+    const changed = await updateSessionPrStates(
       filePath,
-      new Map([[100, 'merged']]),
+      new Map([
+        [100, 'merged'],
+        [101, 'open'],
+      ]),
     );
-    expect(updated?.map((p) => p.number)).toEqual([100, 101]);
-    expect(updated?.[0]?.state).toBe('merged');
-    expect(updated?.[0]?.createdAt).toBe(entry(100).createdAt);
-    expect(updated?.[1]?.state).toBe('open');
+    // Only the entry whose state actually differs counts as rewritten.
+    expect(changed).toBe(1);
+    const persisted = await readSessionPrs(filePath);
+    expect(persisted?.map((p) => p.number)).toEqual([100, 101]);
+    expect(persisted?.[0]?.state).toBe('merged');
+    expect(persisted?.[0]?.createdAt).toBe(entry(100).createdAt);
+    expect(persisted?.[1]?.state).toBe('open');
   });
 
-  it('returns null without writing when nothing changes', async () => {
+  it('returns 0 without writing when nothing changes', async () => {
     await writeSessionPrs(filePath, [{ ...entry(100), state: 'merged' }]);
     const before = await fs.readFile(filePath, 'utf-8');
     expect(
       await updateSessionPrStates(filePath, new Map([[100, 'merged']])),
-    ).toBeNull();
+    ).toBe(0);
     expect(await fs.readFile(filePath, 'utf-8')).toBe(before);
   });
 
-  it('returns null when the sidecar is absent', async () => {
+  it('returns 0 when the sidecar is absent', async () => {
     expect(
       await updateSessionPrStates(filePath, new Map([[100, 'merged']])),
-    ).toBeNull();
+    ).toBe(0);
   });
 
   it('serializes against a concurrent upsert on the same sidecar', async () => {
     await writeSessionPrs(filePath, [{ ...entry(100), state: 'open' }]);
-    const [updated, prs] = await Promise.all([
+    const [changed, prs] = await Promise.all([
       updateSessionPrStates(filePath, new Map([[100, 'merged']])),
       upsertSessionPr(filePath, { number: 101, url: entry(101).url }),
     ]);
-    expect(updated?.[0]?.state).toBe('merged');
+    expect(changed).toBe(1);
     expect(prs?.map((p) => p.number)).toEqual([100, 101]);
     // Whichever ran second read the first's write — nothing was clobbered.
     const persisted = await readSessionPrs(filePath);
@@ -354,5 +360,55 @@ describe('detectGhPrCreateBinding', () => {
     expect(
       detectGhPrCreateBinding('gh pr create --title x', 'error: not logged in'),
     ).toBeUndefined();
+  });
+
+  it('binds the LAST URL when the output carries several', () => {
+    // gh prints the created PR's URL at the end of its own output; a URL
+    // echoed by an earlier command segment must not win.
+    expect(
+      detectGhPrCreateBinding(
+        'echo https://github.com/o/r/pull/1 && gh pr create --fill',
+        'https://github.com/o/r/pull/1\nhttps://github.com/o/r/pull/2\n',
+      ),
+    ).toEqual({ number: 2, url: 'https://github.com/o/r/pull/2' });
+  });
+
+  it('rejects URLs from another repository when a repo key is expected', () => {
+    // A compound command can print a same-shaped foreign URL — including an
+    // attacker-chosen one — which must never persist as this session's PR.
+    expect(
+      detectGhPrCreateBinding(
+        'gh pr create --fill',
+        'https://evil.example/pull/666',
+        'github.com/o/r',
+      ),
+    ).toBeUndefined();
+    expect(
+      detectGhPrCreateBinding(
+        'gh pr create --fill',
+        'https://github.com/other/repo/pull/666',
+        'github.com/o/r',
+      ),
+    ).toBeUndefined();
+  });
+
+  it('binds the matching URL when a repo key is expected', () => {
+    expect(
+      detectGhPrCreateBinding(
+        'gh pr create --fill',
+        'noise\nhttps://github.com/O/R/pull/7\n',
+        'github.com/o/r',
+      ),
+    ).toEqual({ number: 7, url: 'https://github.com/O/R/pull/7' });
+  });
+
+  it('skips foreign URLs but binds a later matching one', () => {
+    expect(
+      detectGhPrCreateBinding(
+        'gh pr create --fill',
+        'https://evil.example/pull/666\nhttps://github.com/o/r/pull/9\n',
+        'github.com/o/r',
+      ),
+    ).toEqual({ number: 9, url: 'https://github.com/o/r/pull/9' });
   });
 });
