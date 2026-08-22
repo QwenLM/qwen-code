@@ -41,6 +41,19 @@ vi.mock('vscode', () => ({
   },
 }));
 
+vi.mock('node:url', async () => {
+  const actual = await vi.importActual<typeof import('node:url')>('node:url');
+  return {
+    ...actual,
+    pathToFileURL: (filePath: string) => {
+      if (process.platform !== 'win32' && /^[a-zA-Z]:\\/.test(filePath)) {
+        return actual.pathToFileURL(filePath, { windows: true });
+      }
+      return actual.pathToFileURL(filePath);
+    },
+  };
+});
+
 vi.mock('../utils/imageHandler.js', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('../utils/imageHandler.js')>();
@@ -1224,7 +1237,7 @@ describe('SessionMessageHandler', () => {
       data: expect.objectContaining({
         role: 'assistant',
         content:
-          'Session exported to HTML: [export (#1).html](file:///workspace/export%20(%231).html)',
+          'Session exported to HTML: [export (#1).html](file:///workspace/export%20%28%231%29.html)',
       }),
     });
   });
@@ -1314,6 +1327,50 @@ describe('SessionMessageHandler', () => {
 
       expect(setModelFromUi).toHaveBeenCalledWith('gpt-4(openai)');
       expect(mockShowErrorMessage).not.toHaveBeenCalled();
+    });
+  });
+  it('preserves the drive-letter colon in Windows exported file links', async () => {
+    mockExportSessionToFile.mockResolvedValue({
+      filename: 'file.md',
+      uri: { fsPath: 'D:\\aplikacja\\file.md' },
+    });
+
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      getSessionList: vi
+        .fn()
+        .mockResolvedValue([{ sessionId: 'session-1', cwd: '/workspace' }]),
+      sendMessage: vi.fn(),
+    };
+    const conversationStore = {
+      createConversation: vi.fn(),
+      getConversation: vi.fn(),
+      addMessage: vi.fn(),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'session-1',
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: {
+        text: '/export md',
+      },
+    });
+
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'message',
+      data: expect.objectContaining({
+        role: 'assistant',
+        content:
+          'Session exported to MD: [file.md](file:///D:/aplikacja/file.md)',
+      }),
     });
   });
 });
