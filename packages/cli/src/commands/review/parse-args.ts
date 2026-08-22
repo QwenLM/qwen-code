@@ -177,7 +177,10 @@ const PR_URL_RE =
 // constrained to a REAL Aone subdomain: `(?:[A-Za-z0-9-]+\.)+alibaba-inc.com`
 // requires a dot boundary, so lookalikes (`evilalibaba-inc.com`,
 // `notalibaba-inc.com`) hit the fail-closed invalid-url refusal instead of
-// becoming live targets — matching isAoneHost's dot-boundary semantics.
+// becoming live targets. The family capture is shape-first only — the
+// classifier additionally gates the match on the CANONICAL pair
+// (isAoneCanonicalHost), so a family-only GHE host's `/codereview/` URL
+// stays `invalid-url` instead of becoming a misrouted live target.
 const AONE_CR_URL_RE =
   /^(https?):\/\/((?:[A-Za-z0-9-]+\.)+alibaba-inc\.com(?::\d+)?)\/((?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+)\/codereview\/(\d+)(?=$|[/?#])/i;
 
@@ -262,6 +265,14 @@ function classifyToken(token: string): ReviewTarget | 'invalid-url' | null {
   if (aoneMatch) {
     const [, scheme, host, groupPath, num] = aoneMatch;
     const lowerHost = host.toLowerCase();
+    // A `/codereview/` page exists only on the CANONICAL Aone pair. The
+    // grammar above deliberately captures the whole family (shape-first),
+    // but a family-only host is a GHE instance: accepting its
+    // `/codereview/` URL as a live target would let detection route the
+    // explicit GHE host to GitHub and aim fetch/submit at GHE PR #<id> —
+    // a target the supplied URL never named as a valid GHE resource.
+    // Fail closed, mirroring the `/pull/`-on-Aone refusal above.
+    if (!isAoneCanonicalHost(lowerHost)) return 'invalid-url';
     // Nested-group repos collapse to the last two segments (mirroring
     // aone.parseRemoteUrl), so `…/sub/maxcompute/odps_src/codereview/N`
     // yields owner `maxcompute`, repo `odps_src`.
