@@ -119,6 +119,52 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => ({
     invalidateWorkspace: vi.fn(),
     refreshWorkspace: vi.fn(),
     renamed: vi.fn(),
+    // Emulates SessionCatalogStore.applySessionPinToggle on the fixtures:
+    // the pinned page gains or loses the row, the all-sessions page patches
+    // it in place, unloaded pages stay untouched.
+    toggleSessionPinned: (
+      _workspaceCwd: string,
+      session: DaemonSessionSummary,
+      toggle: { pinned: boolean; pinnedAt?: string },
+    ) => {
+      const applyPinState = (
+        row: DaemonSessionSummary,
+      ): DaemonSessionSummary => {
+        const next: DaemonSessionSummary = { ...row, isPinned: toggle.pinned };
+        if (toggle.pinned) {
+          if (toggle.pinnedAt !== undefined) next.pinnedAt = toggle.pinnedAt;
+        } else {
+          delete next.pinnedAt;
+        }
+        return next;
+      };
+      if (pinned.data !== undefined) {
+        const present = pinned.sessions.some(
+          (row) => row.sessionId === session.sessionId,
+        );
+        if (toggle.pinned) {
+          pinned.sessions = present
+            ? pinned.sessions.map((row) =>
+                row.sessionId === session.sessionId ? applyPinState(row) : row,
+              )
+            : [...pinned.sessions, applyPinState(session)];
+        } else if (present) {
+          pinned.sessions = pinned.sessions.filter(
+            (row) => row.sessionId !== session.sessionId,
+          );
+        }
+        pinned.data = pinned.sessions;
+      }
+      if (
+        active.data !== undefined &&
+        active.sessions.some((row) => row.sessionId === session.sessionId)
+      ) {
+        active.sessions = active.sessions.map((row) =>
+          row.sessionId === session.sessionId ? applyPinState(row) : row,
+        );
+        active.data = active.sessions;
+      }
+    },
   }),
   useSessionCatalogPolling: () => undefined,
   useSessionCatalogQuery: (
@@ -552,7 +598,7 @@ describe('WebShellSidebar session pinning (issue #9465)', () => {
     expect(sessionTitleCount('Plain session')).toBe(1);
   });
 
-  it('keeps an optimistic unpin until all loaded pages corroborate it', async () => {
+  it('keeps an unpin cleared across staggered page refetches', async () => {
     const row = makeSession('pinned-session', {
       displayName: 'Pinned session',
       isPinned: true,
@@ -568,9 +614,11 @@ describe('WebShellSidebar session pinning (issue #9465)', () => {
     await flushSidebar();
     act(() => click(findSessionPinButton('Pinned session')));
     await flushSidebar();
+    expect(pinnedListTitles()).toEqual([]);
 
-    // The all-sessions page settles first, while the pinned page still has
-    // stale data. The optimistic unpin must continue masking that stale row.
+    // The store cleared every loaded page at toggle time; the authoritative
+    // refetches then land one page at a time and must never re-expose the
+    // row in the pinned section.
     active.sessions = [
       makeSession('pinned-session', {
         displayName: 'Pinned session',
@@ -591,7 +639,7 @@ describe('WebShellSidebar session pinning (issue #9465)', () => {
     expect(sessionTitleCount('Pinned session')).toBe(1);
   });
 
-  it('uses the settle-time catalog baseline after an in-flight page change', async () => {
+  it('keeps an optimistic pin when a page churns while the RPC is in flight', async () => {
     active.sessions = [makeSession('plain', { displayName: 'Plain session' })];
     active.data = active.sessions;
     let resolvePin: (() => void) | undefined;
@@ -607,12 +655,13 @@ describe('WebShellSidebar session pinning (issue #9465)', () => {
     await flushSidebar();
     expect(pinnedListTitles()).toEqual(['Plain session']);
 
-    // A catalog update swaps the tracked page while the RPC is pending. The
-    // settle-time baseline must capture this new page, rather than the page
-    // from the click-time closure.
+    // Churn swaps the all-sessions page while the RPC is pending. The store
+    // owns the optimistic toggle in the page data, so churned pages carry
+    // the pin state forward — here modeled by the store-patched row.
     active.sessions = [
       makeSession('plain', {
         displayName: 'Plain session',
+        isPinned: true,
         updatedAt: '2026-01-02T00:00:00.000Z',
       }),
     ];
@@ -660,9 +709,9 @@ describe('WebShellSidebar session pinning (issue #9465)', () => {
 
   it('keeps a settled pin when churn refreshes only the row-carrying page', async () => {
     // patchSession (prompt admission, rename) and live-state ticks recreate
-    // only the pages carrying the touched row and never touch isPinned. Such
-    // churn is not the post-toggle refresh: the pinned page keeps its
-    // reference, so the settled entry must survive it.
+    // only the pages carrying the touched row and never touch isPinned. The
+    // store owns the optimistic toggle in the page data, so the churned page
+    // still carries the pin state and the settled pin must survive it.
     active.sessions = [makeSession('plain', { displayName: 'Plain session' })];
     active.data = active.sessions;
     workspaceActions.updateSessionOrganization.mockResolvedValue({});
@@ -676,7 +725,7 @@ describe('WebShellSidebar session pinning (issue #9465)', () => {
     active.sessions = [
       makeSession('plain', {
         displayName: 'Plain session',
-        isPinned: false,
+        isPinned: true,
         hasActivePrompt: true,
       }),
     ];
@@ -685,6 +734,64 @@ describe('WebShellSidebar session pinning (issue #9465)', () => {
     await flushSidebar();
 
     expect(pinnedListTitles()).toEqual(['Plain session']);
+    expect(sessionTitleCount('Plain session')).toBe(1);
+  });
+
+  it('keeps a settled pin when an unrelated pinned row churns (R5-1)', async () => {
+    // The R5-1 regression: churn of ANOTHER pinned row (rename, prompt
+    // admission, live-state tick) must not drop a successful optimistic pin
+    // before its authoritative refetch lands. With store-owned pages the
+    // churned pinned page still carries the pinned row.
+    pinned.sessions = [
+      makeSession('other', {
+        displayName: 'Existing pin renamed',
+        isPinned: true,
+        pinnedAt: '2026-01-01T00:00:00.000Z',
+      }),
+    ];
+    pinned.data = pinned.sessions;
+    active.sessions = [
+      makeSession('other', {
+        displayName: 'Existing pin renamed',
+        isPinned: true,
+        pinnedAt: '2026-01-01T00:00:00.000Z',
+      }),
+      makeSession('plain', { displayName: 'Plain session' }),
+    ];
+    active.data = active.sessions;
+    workspaceActions.updateSessionOrganization.mockResolvedValue({});
+
+    renderSidebar();
+    await flushSidebar();
+    act(() => click(findSessionPinButton('Plain session')));
+    await flushSidebar();
+    expect(pinnedListTitles()).toEqual([
+      'Existing pin renamed',
+      'Plain session',
+    ]);
+
+    // patchSession-style churn of the other pinned row: a fresh pinned-page
+    // reference that never touches the toggled row's pin state.
+    pinned.sessions = [
+      makeSession('other', {
+        displayName: 'Existing pin renamed',
+        isPinned: true,
+        pinnedAt: '2026-01-01T00:00:00.000Z',
+        hasActivePrompt: true,
+      }),
+      makeSession('plain', {
+        displayName: 'Plain session',
+        isPinned: true,
+      }),
+    ];
+    pinned.data = pinned.sessions;
+    renderSidebar();
+    await flushSidebar();
+
+    expect(pinnedListTitles()).toEqual([
+      'Existing pin renamed',
+      'Plain session',
+    ]);
     expect(sessionTitleCount('Plain session')).toBe(1);
   });
 
@@ -722,19 +829,17 @@ describe('WebShellSidebar session pinning (issue #9465)', () => {
 
   it('keeps a settled unpin across a scope shift and does not re-expose stale pages', async () => {
     // Switching scopes disables the pinned query (page becomes undefined) and
-    // reshapes the all-sessions page into one that cannot carry the row. That
-    // absence is not evidence: the entry must survive, and switching back to
-    // the still-stale baseline pages must not unpin the row again.
+    // reshapes the all-sessions page into one that cannot carry the row. The
+    // store-owned toggle already cleared the row from the store's pages, so
+    // switching back to those pages must not re-expose the pinned row.
     const row = makeSession('plain', {
       displayName: 'Plain session',
       isPinned: true,
       pinnedAt: '2026-01-01T00:00:00.000Z',
     });
-    const pinnedRows = [row];
-    const activeRows = [row];
-    pinned.sessions = pinnedRows;
+    pinned.sessions = [row];
     pinned.data = pinned.sessions;
-    active.sessions = activeRows;
+    active.sessions = [row];
     active.data = active.sessions;
     workspaceActions.updateSessionOrganization.mockResolvedValue({});
 
@@ -744,6 +849,10 @@ describe('WebShellSidebar session pinning (issue #9465)', () => {
     await flushSidebar();
     expect(pinnedListTitles()).toEqual([]);
 
+    // The store applied the unpin to its pages: capture that state.
+    const pinnedAfterToggle = pinned.sessions;
+    const activeAfterToggle = active.sessions;
+
     // Scope shift: pinned query disabled, reshaped all-page drops the row.
     pinned.data = undefined;
     active.sessions = [];
@@ -752,22 +861,24 @@ describe('WebShellSidebar session pinning (issue #9465)', () => {
     await flushSidebar();
     expect(pinnedListTitles()).toEqual([]);
 
-    // Switching back re-exposes the stale baseline pages (same references).
-    pinned.sessions = pinnedRows;
+    // Switching back re-exposes the store-owned pages, still toggled.
+    pinned.sessions = pinnedAfterToggle;
     pinned.data = pinned.sessions;
-    active.sessions = activeRows;
+    active.sessions = activeAfterToggle;
     active.data = active.sessions;
     renderSidebar();
     await flushSidebar();
 
     expect(pinnedListTitles()).toEqual([]);
+    expect(sessionTitleCount('Plain session')).toBe(1);
   });
 
   it('reconciles an unpin whose row leaves every list, and never hides a later re-pin', async () => {
     // Rows that exist only in the pinned page (e.g. secondary-workspace rows
-    // are absent from the primary all-sessions page): once unpinned, the
-    // refresh drops them from the pinned page and no list carries them, so
-    // absence is the only reconciliation signal.
+    // are absent from the primary all-sessions page): the store-owned unpin
+    // drops them from the pinned page at toggle time. A later cross-client
+    // re-pin landing in the authoritative page must never be masked by the
+    // settled overlay entry.
     const row = makeSession('only-pinned', {
       displayName: 'Only pinned',
       isPinned: true,

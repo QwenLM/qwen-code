@@ -115,10 +115,7 @@ import {
   useSessionCatalogQueries,
   useWebShellSessions,
 } from '../../session-catalog/session-catalog-hooks';
-import {
-  getSessionCatalogQueryKey,
-  type SessionCatalogQuery,
-} from '../../session-catalog/session-catalog-store';
+import { type SessionCatalogQuery } from '../../session-catalog/session-catalog-store';
 import { useWorkspaceSessionLiveState } from '../../session-catalog/workspace-session-live-state';
 
 const SIDEBAR_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-sidebar-width';
@@ -164,25 +161,9 @@ function getSessionIdentity(
   return `${workspaceCwd ?? ''}\0${sessionId}`;
 }
 
-/** A tracked catalog page the pin reconciliation evaluates. */
-interface PinCatalogSlot {
-  /** Catalog query key identifying the page across renders and scope shifts. */
-  key: string;
-  /** Loaded page rows; undefined while the query is disabled or unloaded. */
-  page: DaemonSessionSummary[] | undefined;
-  /** True for pinned-group pages, where a successful pin's row lands. */
-  pinnedPage: boolean;
-}
-
-/** Settle-time snapshot of the tracked catalog pages for one pin entry. */
-interface PinReconciliationBaseline {
-  /** Query key -> page reference for every tracked slot at settle time. */
-  pages: ReadonlyMap<string, DaemonSessionSummary[] | undefined>;
-  /** Query keys of the pages carrying the toggled row at settle time. */
-  carriers: ReadonlySet<string>;
-  /** Query keys of the pinned-group pages tracked at settle time. */
-  pinnedPages: ReadonlySet<string>;
-}
+/** A catalog page the pin overlay drop check reads; undefined while the
+ * query is disabled or unloaded. */
+type PinCatalogPage = DaemonSessionSummary[] | undefined;
 
 /** A pin toggle applied optimistically before the daemon RPC settles. */
 interface OptimisticPinEntry {
@@ -192,8 +173,6 @@ interface OptimisticPinEntry {
   /** Pin timestamp assigned optimistically (present when pinning). */
   pinnedAt?: string;
   rpcSettled: boolean;
-  /** Settle-time catalog baseline the reconciliation compares against. */
-  baseline?: PinReconciliationBaseline;
 }
 
 function getPinnedSectionOrderTime(session: DaemonSessionSummary): number {
@@ -1082,27 +1061,25 @@ export function WebShellSidebar({
   }, [sessionsPage, sessionSource]);
   const loadPinnedSessions =
     organizationEnabled && selectedSessionSource !== 'channel';
-  const {
-    sessions: primaryPinnedSessions,
-    data: primaryPinnedSessionsPage,
-    catalogQuery: primaryPinnedCatalogQuery,
-  } = useWebShellSessions({
-    autoLoad:
-      sessionCatalogRequestsEnabled &&
-      loadPinnedSessions &&
-      !primaryWorkspaceSessionLiveStateEnabled,
-    enabled: loadPinnedSessions && includePrimaryWorkspaceSessions,
-    pageSize: SESSION_LIST_PAGE_SIZE,
-    archiveState: 'active',
-    ...(selectedSessionSource ? { sourceType: selectedSessionSource } : {}),
-    view: 'organized',
-    group: 'pinned',
-  });
+  const { sessions: primaryPinnedSessions, data: primaryPinnedSessionsPage } =
+    useWebShellSessions({
+      autoLoad:
+        sessionCatalogRequestsEnabled &&
+        loadPinnedSessions &&
+        !primaryWorkspaceSessionLiveStateEnabled,
+      enabled: loadPinnedSessions && includePrimaryWorkspaceSessions,
+      pageSize: SESSION_LIST_PAGE_SIZE,
+      archiveState: 'active',
+      ...(selectedSessionSource ? { sourceType: selectedSessionSource } : {}),
+      view: 'organized',
+      group: 'pinned',
+    });
   const [archivedExpanded, setArchivedExpanded] = useState(false);
   const [pinnedExpanded, setPinnedExpanded] = useState(true);
-  // Pin toggles applied optimistically while the daemon organization RPC
-  // is in flight; entries are dropped once the authoritative catalog reflects
-  // the target state, or rolled back when the RPC fails.
+  // Pin toggles applied optimistically while the daemon organization RPC is
+  // in flight. The catalog store mirrors each toggle into its loaded pages
+  // (applySessionPinToggle); these entries only render rows no loaded page
+  // carries yet, and are dropped once one does or rolled back on RPC failure.
   const [optimisticPins, setOptimisticPins] = useState<
     ReadonlyMap<string, OptimisticPinEntry>
   >(() => new Map());
@@ -1413,65 +1390,30 @@ export function WebShellSidebar({
       ),
     [secondaryPinnedSnapshots],
   );
-  // The tracked catalog pages the pin reconciliation evaluates, keyed by
-  // catalog query identity so scope/composition changes cannot be mistaken
-  // for page refreshes (and vice versa).
-  const optimisticCatalogSlots = useMemo<PinCatalogSlot[]>(() => {
-    const slots: PinCatalogSlot[] = [];
+  // Every catalog page the sidebar renders pin state from. The pin overlay
+  // drop check only asks whether a loaded page carries the toggled row —
+  // never which page reference a refresh minted — so churn that recreates
+  // pages without touching pin state cannot be mistaken for a refresh.
+  const pinCatalogPages = useMemo<PinCatalogPage[]>(() => {
+    const pages: PinCatalogPage[] = [];
     if (includePrimaryWorkspaceSessions) {
-      slots.push({
-        key: primaryPinnedCatalogQuery
-          ? getSessionCatalogQueryKey(primaryPinnedCatalogQuery)
-          : 'primary-pinned',
-        page: primaryPinnedSessionsPage,
-        pinnedPage: true,
-      });
+      pages.push(primaryPinnedSessionsPage);
     }
-    secondaryPinnedSnapshots.forEach((snapshot, index) => {
-      const query = secondaryPinnedQueries[index];
-      slots.push({
-        key: query
-          ? getSessionCatalogQueryKey(query)
-          : `secondary-pinned:${index}`,
-        page: snapshot.page?.sessions,
-        pinnedPage: true,
-      });
-    });
-    slots.push({
-      key: catalogQuery
-        ? getSessionCatalogQueryKey(catalogQuery)
-        : 'primary-all',
-      page: sessionsPage,
-      pinnedPage: false,
-    });
-    secondaryActiveSnapshots.forEach((snapshot, index) => {
-      const query = secondaryActiveQueries[index];
-      slots.push({
-        key: query
-          ? getSessionCatalogQueryKey(query)
-          : `secondary-active:${index}`,
-        page: snapshot.page?.sessions,
-        pinnedPage: false,
-      });
-    });
-    return slots;
+    for (const snapshot of secondaryPinnedSnapshots) {
+      pages.push(snapshot.page?.sessions);
+    }
+    pages.push(sessionsPage);
+    for (const snapshot of secondaryActiveSnapshots) {
+      pages.push(snapshot.page?.sessions);
+    }
+    return pages;
   }, [
-    catalogQuery,
     includePrimaryWorkspaceSessions,
-    primaryPinnedCatalogQuery,
     primaryPinnedSessionsPage,
-    secondaryActiveQueries,
     secondaryActiveSnapshots,
-    secondaryPinnedQueries,
     secondaryPinnedSnapshots,
     sessionsPage,
   ]);
-  // Settle-time baseline source for the reconciliation effect. A page swap
-  // caused by polling or live ticks while the RPC is in flight must not drop
-  // the entry the moment it settles; snapshot the slots when the RPC settles,
-  // not from the click-time closure.
-  const optimisticCatalogSlotsRef = useRef(optimisticCatalogSlots);
-  optimisticCatalogSlotsRef.current = optimisticCatalogSlots;
   const secondaryArchivedEnabled =
     archivedExpanded &&
     sessionArchiveEnabled &&
@@ -1643,106 +1585,28 @@ export function WebShellSidebar({
     },
     [optimisticPins, getIdentityForSession],
   );
-  const capturePinBaseline = useCallback(
-    (identity: string): PinReconciliationBaseline => {
-      const pages = new Map<string, DaemonSessionSummary[] | undefined>();
-      const carriers = new Set<string>();
-      const pinnedPages = new Set<string>();
-      for (const slot of optimisticCatalogSlotsRef.current) {
-        pages.set(slot.key, slot.page);
-        if (slot.pinnedPage) pinnedPages.add(slot.key);
-        if (
-          slot.page?.some(
-            (candidate) => getIdentityForSession(candidate) === identity,
-          )
-        ) {
-          carriers.add(slot.key);
-        }
-      }
-      return { pages, carriers, pinnedPages };
-    },
-    [getIdentityForSession],
-  );
-  // Drop optimistic entries only after the RPC has settled and post-settle
-  // catalog page changes corroborate the toggle's outcome. Evidence is keyed
-  // by catalog query identity, not array position: a page counts as changed
-  // only when the same query's loaded page reference differs from the
-  // settle-time baseline. Churn that recreates a row-carrying page without
-  // touching pin state (patchSession, live-state ticks) also changes the
-  // reference, so churned pages DO enter the evidence set below; only pages
-  // reshaped by a scope shift (new keys) and disabled/unloaded pages
-  // (undefined) never do. The outcome checks neutralize churn, but
-  // asymmetrically: an unpinned entry corroborates only when no evidence
-  // page shows the row pinned, and churn preserves the pre-toggle pin state,
-  // so churn alone cannot corroborate it; a pinned entry's success arm
-  // likewise needs a page that actually shows the row pinned, but its
-  // absence arm counts a churned pinned-group page as refreshed — the
-  // residual churn-drop entrance tracked in the R5-1 review thread. A
-  // pinned entry drops once any refreshed page shows the row pinned, or
-  // once every tracked pinned-group page refreshed without the row pinned
-  // anywhere — the settled catalog wins then, even when it contradicts the
-  // toggle. An unpinned entry drops only once every page that carried the
-  // row at settle time refreshed and no refreshed page shows it pinned, so
-  // a partial refresh never exposes a stale sibling page; refreshed pages
-  // still showing it pinned keep the mask until a later refresh settles the
-  // identity.
+  // Drop a settled overlay entry once any loaded page carries its row. The
+  // store owns the optimistic pin state in the pages themselves
+  // (applySessionPinToggle), so a carried row is correct whether the page
+  // holds the store-applied toggle or an authoritative refetch — either way
+  // the overlay has nothing left to contribute. Carriage is a pin-state
+  // question, and churn (patchSession, live-state ticks) recreates page
+  // references without touching pin state, so churn can neither drop an
+  // entry early nor strand one: the R5-1 entrances keyed on page-reference
+  // freshness no longer exist. An entry whose row no loaded page carries
+  // stays until it does (or the RPC fails), rendering the row from its
+  // snapshot in the pinned section meanwhile.
   useEffect(() => {
     if (optimisticPins.size === 0) return;
-    const slots = optimisticCatalogSlots;
     const staleIdentities: string[] = [];
     for (const [identity, entry] of optimisticPins) {
-      if (!entry.rpcSettled || !entry.baseline) continue;
-      const { pages: baselinePages, carriers, pinnedPages } = entry.baseline;
-      // Evidence: settle-time-tracked slots whose loaded page changed.
-      const evidencePages: (DaemonSessionSummary[] | undefined)[] = [];
-      const evidencedKeys = new Set<string>();
-      const trackedKeys = new Set<string>();
-      for (const slot of slots) {
-        if (!baselinePages.has(slot.key)) continue;
-        trackedKeys.add(slot.key);
-        if (
-          slot.page !== undefined &&
-          slot.page !== baselinePages.get(slot.key)
-        ) {
-          evidencePages.push(slot.page);
-          evidencedKeys.add(slot.key);
-        }
-      }
-      if (evidencePages.length === 0) continue;
-      const showsIdentityPinned = (
-        page: DaemonSessionSummary[] | undefined,
-      ): boolean =>
-        (page ?? []).some(
-          (candidate) =>
-            getIdentityForSession(candidate) === identity &&
-            candidate.isPinned === true,
-        );
-      let corroborated: boolean;
-      if (entry.pinned) {
-        const success = evidencePages.some(showsIdentityPinned);
-        const trackedPinnedKeys = [...pinnedPages].filter((key) =>
-          trackedKeys.has(key),
-        );
-        const pinnedHomeRefreshed =
-          trackedPinnedKeys.length > 0 &&
-          trackedPinnedKeys.every((key) => evidencedKeys.has(key));
-        corroborated =
-          success ||
-          (pinnedHomeRefreshed &&
-            !slots.some(
-              (slot) =>
-                slot.page !== undefined && showsIdentityPinned(slot.page),
-            ));
-      } else {
-        const trackedCarriers = [...carriers].filter((key) =>
-          trackedKeys.has(key),
-        );
-        corroborated =
-          trackedCarriers.length > 0 &&
-          trackedCarriers.every((key) => evidencedKeys.has(key)) &&
-          !evidencePages.some(showsIdentityPinned);
-      }
-      if (corroborated) staleIdentities.push(identity);
+      if (!entry.rpcSettled) continue;
+      const carried = pinCatalogPages.some((page) =>
+        page?.some(
+          (candidate) => getIdentityForSession(candidate) === identity,
+        ),
+      );
+      if (carried) staleIdentities.push(identity);
     }
     if (staleIdentities.length === 0) return;
     setOptimisticPins((previous) => {
@@ -1750,7 +1614,7 @@ export function WebShellSidebar({
       for (const identity of staleIdentities) next.delete(identity);
       return next;
     });
-  }, [getIdentityForSession, optimisticPins, optimisticCatalogSlots]);
+  }, [getIdentityForSession, optimisticPins, pinCatalogPages]);
   const pinnedSessions = useMemo(() => {
     const byId = new Map<string, DaemonSessionSummary>();
     const addCandidate = (
@@ -3269,17 +3133,22 @@ export function WebShellSidebar({
         return;
       }
       const targetPinned = !session.isPinned;
+      const workspaceCwd = session.workspaceCwd ?? primaryWorkspaceCwd;
+      const optimisticPinnedAt = new Date().toISOString();
+      const storeToggle = (pinned: boolean, pinnedAt?: string): void => {
+        if (!workspaceCwd) return;
+        sessionCatalogController.toggleSessionPinned(workspaceCwd, session, {
+          pinned,
+          ...(pinned && pinnedAt !== undefined ? { pinnedAt } : {}),
+        });
+      };
       let rpcSucceeded = false;
       const markRpcSettled = (): void => {
         setOptimisticPins((previous) => {
           const entry = previous.get(sessionIdentity);
           if (!entry) return previous;
           const next = new Map(previous);
-          next.set(sessionIdentity, {
-            ...entry,
-            rpcSettled: true,
-            baseline: capturePinBaseline(sessionIdentity),
-          });
+          next.set(sessionIdentity, { ...entry, rpcSettled: true });
           return next;
         });
       };
@@ -3290,7 +3159,7 @@ export function WebShellSidebar({
             session,
             pinned: targetPinned,
             rpcSettled: false,
-            ...(targetPinned ? { pinnedAt: new Date().toISOString() } : {}),
+            ...(targetPinned ? { pinnedAt: optimisticPinnedAt } : {}),
           });
           return next;
         });
@@ -3303,13 +3172,16 @@ export function WebShellSidebar({
           return next;
         });
       };
-      // Reflect the toggle immediately; the catalog refresh below reconciles
-      // authoritative state when it lands.
+      // Reflect the toggle immediately. The catalog store applies it to
+      // every loaded page so churn cannot drop it, and the refresh below
+      // replaces those pages with authoritative state when it lands.
       applyOptimistic();
+      storeToggle(targetPinned, optimisticPinnedAt);
       setSessionBusy(sessionId, true, session.workspaceCwd);
       const sessionActions = getSessionWorkspaceActions(session);
       if (!sessionActions) {
         rollbackOptimistic();
+        storeToggle(!targetPinned, session.pinnedAt);
         setSessionBusy(sessionId, false, session.workspaceCwd);
         return;
       }
@@ -3323,10 +3195,10 @@ export function WebShellSidebar({
         })
         .catch((err: unknown) => {
           rollbackOptimistic();
+          storeToggle(!targetPinned, session.pinnedAt);
           onError(err, t('sidebar.organizationFailed'));
         })
         .finally(() => {
-          const workspaceCwd = session.workspaceCwd ?? primaryWorkspaceCwd;
           if (workspaceCwd) {
             sessionCatalogController.refreshWorkspace(workspaceCwd);
           }
@@ -3336,7 +3208,6 @@ export function WebShellSidebar({
     },
     [
       bumpWorkspaceReload,
-      capturePinBaseline,
       getIdentityForSession,
       getSessionWorkspaceActions,
       onError,
