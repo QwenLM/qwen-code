@@ -401,9 +401,55 @@ export class LoopDetectionService {
     for (const part of responseParts) {
       const functionResponse = part.functionResponse;
       if (!functionResponse) continue;
-      chunks.push(JSON.stringify(functionResponse.response ?? {}));
+      // Oversized results arrive as persistence stubs whose envelope embeds
+      // a per-call unique file path; fingerprint the semantic payload only
+      // (see stripPersistenceEnvelope) so identical underlying results stay
+      // identical no matter where they were persisted.
+      chunks.push(
+        JSON.stringify(functionResponse.response ?? {}, (_key, value) =>
+          typeof value === 'string'
+            ? LoopDetectionService.stripPersistenceEnvelope(value)
+            : value,
+        ),
+      );
     }
     return chunks.length > 0 ? chunks.join('\n') : null;
+  }
+
+  /**
+   * Oversized tool results are rewritten by the response finalizer into
+   * truncation stubs (see utils/truncation.ts): a `<persisted-output>`
+   * envelope embedding the unique `<toolResultsDir>/<callId>.txt` path, an
+   * unwrapped `Output too large (...)` envelope whose session-dependent note
+   * can also vary between calls, or the `truncateAndSaveToFile` fallback
+   * embedding a random temp-file name. Hashing the envelope would make every
+   * fingerprint unique per call — silently disabling every result-aware
+   * guard for exactly the largest results — so reduce a stub to its
+   * semantic payload: the preview/truncated content that follows the stable
+   * marker. The `<persisted-stub>` sentinel keeps a stub fingerprint from
+   * ever colliding with a small literal output that matches the payload.
+   */
+  private static stripPersistenceEnvelope(value: string): string {
+    const isPreviewStub =
+      value.includes('<persisted-output>') ||
+      value.startsWith('Output too large (');
+    if (isPreviewStub) {
+      const marker = /Preview \(up to \d+ chars\):\n/.exec(value);
+      if (marker) {
+        return `<persisted-stub>${value.slice(
+          marker.index + marker[0].length,
+        )}`;
+      }
+      return value;
+    }
+    if (value.startsWith('Tool output was too large and has been truncated')) {
+      const marker = '\nTruncated part of the output:\n';
+      const index = value.indexOf(marker);
+      if (index >= 0) {
+        return `<persisted-stub>${value.slice(index + marker.length)}`;
+      }
+    }
+    return value;
   }
 
   private getToolCallKey(toolCall: { name: string; args: object }): string {

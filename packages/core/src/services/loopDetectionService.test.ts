@@ -2639,5 +2639,135 @@ describe('LoopDetectionService', () => {
         LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
       );
     });
+
+    describe('persisted oversized results (issue #9450 follow-up)', () => {
+      // Results over the response-finalizer budget are rewritten into
+      // persistence stubs (utils/truncation.ts buildStub) whose envelope
+      // embeds a per-call unique file path (`<callId>.txt`). The guards
+      // fingerprint the model-visible finalized parts, so hashing the
+      // envelope would make every fingerprint unique and silently disable
+      // every result-aware guard for exactly the largest results. These
+      // tests mirror buildStub's file-path shape with a unique path per
+      // poll.
+      const FROZEN_BOARD = 'task row for a frozen board\n'.repeat(1500); // ~41KB
+
+      const persistedStub = (callId: string, board: string): string =>
+        `<persisted-output>
+Output too large (40 KB). Full output saved to: /tmp/qwen/tool-results/${callId}.txt
+Note: this file may be cleaned up after 24 hours.
+To read the complete output, use the read_file tool with the absolute file path above.
+
+Preview (up to 2000 chars):
+${board}
+</persisted-output>`;
+
+      const stubResult = (callId: string, board: string): Part[] =>
+        taskListResult(persistedStub(callId, board), callId);
+
+      it('halts on a frozen oversized board despite per-call unique stub paths', () => {
+        let fired = false;
+        for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD; i++) {
+          fired = service.checkAlwaysOnSafeties(taskListEvent(`poll_${i}`));
+          if (fired) break;
+          service.recordToolResult(
+            { name: 'task_list', args: TASK_LIST_ARGS },
+            stubResult(`poll_${i}`, FROZEN_BOARD),
+          );
+        }
+        expect(fired).toBe(true);
+        expect(service.getLastLoopType()).toBe(
+          LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+        );
+      });
+
+      it('keeps oversized polling alive while the board keeps changing', () => {
+        // Guards against over-collapsing: the envelope must be stripped, not
+        // the preview — changed boards inside unique-path stubs are still
+        // observable progress.
+        let fired = false;
+        for (let i = 0; i < 4 * TOOL_CALL_LOOP_THRESHOLD; i++) {
+          fired = service.checkAlwaysOnSafeties(taskListEvent(`poll_${i}`));
+          if (fired) break;
+          service.recordToolResult(
+            { name: 'task_list', args: TASK_LIST_ARGS },
+            stubResult(`poll_${i}`, `board state v${i}`),
+          );
+        }
+        expect(fired).toBe(false);
+        expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+      });
+
+      it('counts global duplicates on frozen oversized results when heuristics run', () => {
+        const heuristicService = new LoopDetectionService(
+          makeConfig(DEFAULT_MAX_TOOL_CALLS_PER_TURN, false, false),
+        );
+        heuristicService.reset('global-dup-persisted');
+
+        const interleaved = ['task_list', 'tool_b', 'tool_c'];
+        let detected = false;
+        for (
+          let round = 0;
+          round < GLOBAL_DUPLICATE_THRESHOLD && !detected;
+          round++
+        ) {
+          for (const name of interleaved) {
+            const args =
+              name === 'task_list' ? TASK_LIST_ARGS : { step: round };
+            if (
+              heuristicService.addAndCheck(
+                createToolCallRequestEvent(name, args),
+              )
+            ) {
+              detected = true;
+              break;
+            }
+            if (name === 'task_list') {
+              detected = heuristicService.recordToolResult(
+                { name, args },
+                stubResult(`poll_${round}`, FROZEN_BOARD),
+              );
+              if (detected) break;
+            }
+          }
+        }
+        expect(detected).toBe(true);
+        expect(heuristicService.getLastLoopType()).toBe(
+          LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+        );
+      });
+
+      it('halts an interleaved frozen oversized poller just past the adaptive soft cap', () => {
+        // CLI default: skipLoopDetection=true. The cap's stuck signal fed by
+        // recordToolResult pair counts is then the only live halt path for
+        // an interleaved frozen poller; unique stub paths must not keep it
+        // judging the turn productive until the hard backstop.
+        const capService = new LoopDetectionService(makeConfig(20));
+        capService.reset('cap-frozen-persisted');
+
+        let fired = false;
+        let totalCalls = 0;
+        for (let round = 0; round < 40 && !fired; round++) {
+          fired = capService.checkAlwaysOnSafeties(
+            taskListEvent(`tl-${round}`),
+          );
+          totalCalls++;
+          if (fired) break;
+          fired = capService.checkAlwaysOnSafeties(
+            createToolCallRequestEvent('tool_b', { step: round }),
+          );
+          totalCalls++;
+          if (fired) break;
+          capService.recordToolResult(
+            { name: 'task_list', args: TASK_LIST_ARGS },
+            stubResult(`tl-${round}`, FROZEN_BOARD),
+          );
+        }
+        expect(fired).toBe(true);
+        expect(capService.getLastLoopType()).toBe(LoopType.TURN_TOOL_CALL_CAP);
+        // Halts just past the soft cap (20) once the stuck signal is armed,
+        // far below the hard backstop (20 * 10).
+        expect(totalCalls).toBeLessThanOrEqual(22);
+      });
+    });
   });
 });
