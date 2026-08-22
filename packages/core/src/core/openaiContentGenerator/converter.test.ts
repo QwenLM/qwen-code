@@ -571,6 +571,1864 @@ describe('OpenAIContentConverter', () => {
       );
     });
 
+    // issue #9348: hybrid-thinking models (qwen3-class via OpenAI-compatible
+    // proxies) stream a first thinking phase through reasoning_content and may
+    // then emit a second, properly balanced <thinking>...</thinking> block
+    // inside content. The balanced block is legitimate — rejecting it
+    // hard-fails the whole turn (retries regenerate the same shape), which
+    // surfaced to users as "[API Error: Model response leaked thinking tags.]".
+    it('demotes a balanced inline thinking block to the thought channel when reasoning is present (issue #9348)', () => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      const reasoning = converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const opening = converter.convertOpenAIChunkToGemini(
+        streamChunk('opening', { content: '<thinking>' }),
+        stream,
+      );
+      const closing = converter.convertOpenAIChunkToGemini(
+        streamChunk('closing', { content: 'user asked X</thinking>' }),
+        stream,
+      );
+      const answer = converter.convertOpenAIChunkToGemini(
+        streamChunk('answer', { content: 'Answer here.' }, 'stop'),
+        stream,
+      );
+
+      expect(reasoning.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'Let me think.' },
+      ]);
+      expect(opening.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(closing.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'user asked X' },
+      ]);
+      const answerParts = answer.candidates?.[0]?.content?.parts ?? [];
+      expect(answerParts).toEqual([{ text: 'Answer here.' }]);
+      expect(stream.pendingThinkingTagCandidate).toBeUndefined();
+    });
+
+    it('demotes a balanced inline thinking block split across chunks (issue #9348)', () => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'phase one' }),
+        stream,
+      );
+      const first = converter.convertOpenAIChunkToGemini(
+        streamChunk('tag-start', { content: '<thi' }),
+        stream,
+      );
+      const second = converter.convertOpenAIChunkToGemini(
+        streamChunk('tag-body', { content: 'nking>recheck</thi' }),
+        stream,
+      );
+      const third = converter.convertOpenAIChunkToGemini(
+        streamChunk('tag-close', { content: 'nking>Done.' }, 'stop'),
+        stream,
+      );
+
+      expect(first.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(second.candidates?.[0]?.content?.parts).toEqual([]);
+      const parts = third.candidates?.[0]?.content?.parts ?? [];
+      expect(parts).toEqual([
+        { thought: true, text: 'recheck' },
+        { text: 'Done.' },
+      ]);
+      expect(stream.pendingThinkingTagCandidate).toBeUndefined();
+    });
+
+    it('demotes a balanced inline thinking block that arrives in a single content chunk (issue #9348)', () => {
+      // Chunking-dependent shape: the first content delta already carries the
+      // complete balanced block, so no pending tag candidate exists yet when
+      // the inline parser first sees the opening tag.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const block = converter.convertOpenAIChunkToGemini(
+        streamChunk('block', {
+          content: '<thinking>user asked X</thinking>',
+        }),
+        stream,
+      );
+      const answer = converter.convertOpenAIChunkToGemini(
+        streamChunk('answer', { content: 'Answer here.' }, 'stop'),
+        stream,
+      );
+
+      expect(block.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'user asked X' },
+      ]);
+      expect(answer.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'Answer here.' },
+      ]);
+      expect(stream.pendingThinkingTagCandidate).toBeUndefined();
+    });
+
+    it('holds an unclosed inline thinking block that starts in the first content chunk (issue #9348)', () => {
+      // Same initial-delta path, but the block does not balance mid-stream:
+      // it must be held for a closing tag, then rejected at stream end.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const opening = converter.convertOpenAIChunkToGemini(
+        streamChunk('opening', { content: '<thinking>user asked X' }),
+        stream,
+      );
+
+      expect(opening.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingThinkingTagCandidate).toEqual({
+        text: '<thinking>user asked X',
+      });
+      expect(() => finishStream(stream, 'stop')).toThrowError(
+        expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
+      );
+    });
+
+    it('still rejects an unclosed inline thinking block after reasoning (issue #9348 regression guard)', () => {
+      // The fix must not weaken real leak detection: an opening tag that is
+      // never balanced by a closing tag remains a PROTOCOL_TAG_LEAK.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('opening', { content: '<thinking>' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('body', { content: 'user asked X' }),
+        stream,
+      );
+
+      expect(() => finishStream(stream, 'stop')).toThrowError(
+        expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
+      );
+    });
+
+    it('demotes an empty balanced inline thinking block instead of failing the turn (issue #9348)', () => {
+      // An empty (whitespace-only) balanced block still balances. Treating it
+      // as "no block balanced" re-held the opener and hard-failed at finish
+      // with the exact PROTOCOL_TAG_LEAK error this fix removes.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const answer = converter.convertOpenAIChunkToGemini(
+        streamChunk(
+          'block',
+          { content: '<thinking></thinking>Answer here.' },
+          'stop',
+        ),
+        stream,
+      );
+
+      expect(answer.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'Answer here.' },
+      ]);
+      expect(stream.pendingThinkingTagCandidate).toBeUndefined();
+    });
+
+    it('demotes a whitespace-only balanced inline thinking block split across chunks (issue #9348)', () => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const opening = converter.convertOpenAIChunkToGemini(
+        streamChunk('opening', { content: '<thinking>\n' }),
+        stream,
+      );
+      const answer = converter.convertOpenAIChunkToGemini(
+        streamChunk('closing', { content: '</thinking>Answer here.' }, 'stop'),
+        stream,
+      );
+
+      expect(opening.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(answer.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'Answer here.' },
+      ]);
+    });
+
+    it('demotes consecutive balanced inline thinking blocks (issue #9348)', () => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const blocks = converter.convertOpenAIChunkToGemini(
+        streamChunk(
+          'blocks',
+          { content: '<thinking>a</thinking><thinking>b</thinking>Done.' },
+          'stop',
+        ),
+        stream,
+      );
+
+      expect(blocks.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'a' },
+        { thought: true, text: 'b' },
+        { text: 'Done.' },
+      ]);
+    });
+
+    it('holds a trailing tag prefix after a demoted block until it balances (issue #9348)', () => {
+      // The only branch that keeps a trailing partial tag held after a
+      // successful demotion: it must stay held mid-stream and demote once the
+      // second block balances.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const first = converter.convertOpenAIChunkToGemini(
+        streamChunk('first-block', { content: '<thinking>a</thinking><thi' }),
+        stream,
+      );
+
+      expect(first.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingThinkingTagCandidate).toEqual({ text: '<thi' });
+
+      const second = converter.convertOpenAIChunkToGemini(
+        streamChunk(
+          'second-block',
+          { content: 'nking>b</thinking>Done.' },
+          'stop',
+        ),
+        stream,
+      );
+
+      expect(second.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'a' },
+        { thought: true, text: 'b' },
+        { text: 'Done.' },
+      ]);
+    });
+
+    it('rejects an embedded thinking block after a demoted leading block (issue #9348 fail-closed)', () => {
+      // The demotion mechanism exists to stop raw thinking tags from reaching
+      // visible output: a complete tag inside the tail released after a
+      // demotion is embedded/stray and must fail closed like pre-PR.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk(
+            'embedded',
+            {
+              content:
+                '<thinking>a</thinking>Answer <thinking>b</thinking> done',
+            },
+            'stop',
+          ),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('rejects embedded thinking tags arriving after visible content was already emitted (issue #9348 fail-closed)', () => {
+      // Chunk-split twin of the interleaved shape: once visible content
+      // exists the candidate machinery no longer applies, so the later chunk
+      // needs its own fail-closed gate.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const first = converter.convertOpenAIChunkToGemini(
+        streamChunk('leading-block', {
+          content: '<thinking>a</thinking>Answer ',
+        }),
+        stream,
+      );
+
+      expect(first.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'a' },
+        { text: 'Answer ' },
+      ]);
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk(
+            'embedded',
+            { content: '<thinking>b</thinking> done' },
+            'stop',
+          ),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('rejects an embedded thinking tag assembled across chunk boundaries after a demotion (issue #9348 fail-closed)', () => {
+      // Chunk-split twin of the test above: no single chunk contains a
+      // complete tag, so the per-chunk gate alone never fires. The demoted
+      // turn must keep holding the trailing potential-tag suffix of emitted
+      // text and gate on tail + next chunk together.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const leading = converter.convertOpenAIChunkToGemini(
+        streamChunk('leading-block', {
+          content: '<thinking>a</thinking>Answer ',
+        }),
+        stream,
+      );
+
+      expect(leading.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'a' },
+        { text: 'Answer ' },
+      ]);
+
+      const fragment = converter.convertOpenAIChunkToGemini(
+        streamChunk('tag-fragment', { content: '<thi' }),
+        stream,
+      );
+
+      expect(fragment.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingPostDemotionTagTail).toBe('<thi');
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('tag-completes', { content: 'nking>b</thi' }),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('rejects a thinking tag assembled across many chunks after a demotion (issue #9348 fail-closed)', () => {
+      // The rolling tail must survive multiple fragment chunks before the
+      // completed tag trips the gate.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('leading-block', {
+          content: '<thinking>a</thinking>Answer ',
+        }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('fragment-1', { content: '<thi' }),
+        stream,
+      );
+      const middle = converter.convertOpenAIChunkToGemini(
+        streamChunk('fragment-2', { content: 'nki' }),
+        stream,
+      );
+
+      expect(middle.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingPostDemotionTagTail).toBe('<thinki');
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk(
+            'fragment-3',
+            { content: 'ng>b</thinking> done' },
+            'stop',
+          ),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('fails closed at finish on an unresolved held tag tail after a demotion (issue #9348 fail-closed)', () => {
+      // The held trailing suffix contains a full tag word ('<thinking'
+      // truncated before '>') and never resolves before the stream ends: it
+      // must fail closed instead of being released as literal text, because
+      // the chunk-split twin throws via the gate once the tag completes.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('leading-block', {
+          content: '<thinking>a</thinking>Answer ',
+        }),
+        stream,
+      );
+      const fragment = converter.convertOpenAIChunkToGemini(
+        streamChunk('tag-fragment', { content: '<thinking' }),
+        stream,
+      );
+
+      expect(fragment.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingPostDemotionTagTail).toBe('<thinking');
+      expect(() => finishStream(stream, 'stop')).toThrowError(
+        expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
+      );
+    });
+
+    it('fails closed at finish on a held closing tag tail after a demotion (issue #9348 fail-closed)', () => {
+      // Closing-tag twin of the test above: the held tail '</thinking'
+      // contains a full closing tag word truncated before '>'. It pins the
+      // closing branch (`\/?`) of the finish-time full-tag-word regex —
+      // without that branch the tail would be released as literal text.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('leading-block', {
+          content: '<thinking>a</thinking>Answer ',
+        }),
+        stream,
+      );
+      const fragment = converter.convertOpenAIChunkToGemini(
+        streamChunk('tag-fragment', { content: '</thinking' }),
+        stream,
+      );
+
+      expect(fragment.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingPostDemotionTagTail).toBe('</thinking');
+      expect(() => finishStream(stream, 'stop')).toThrowError(
+        expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
+      );
+    });
+
+    it('fails closed when the demotion chunk itself ends in a tag prefix at finish (issue #9348 fail-closed)', () => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk(
+            'demote-and-fragment',
+            { content: '<thinking>a</thinking>Answer <thinking' },
+            'stop',
+          ),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('releases a sub-word tag fragment held at stream finish after a demotion (issue #9348)', () => {
+      // max_tokens can truncate visible text on a tag-prefix boundary (e.g.
+      // a generic type 'Supplier<T' cut to '<T'). A sub-word fragment cannot
+      // become a tag once the stream has ended, so failing closed here would
+      // hard-fail a legitimate demoted turn with the exact error the
+      // demotion route exists to remove — and the tag-leak retry budget
+      // would regenerate the same truncation.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('leading-block', {
+          content: '<thinking>a</thinking>Answer ',
+        }),
+        stream,
+      );
+      const truncated = converter.convertOpenAIChunkToGemini(
+        streamChunk('truncated', { content: 'Supplier<T' }, 'length'),
+        stream,
+      );
+
+      expect(truncated.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'Supplier<T' },
+      ]);
+      expect(stream.pendingPostDemotionTagTail).toBeUndefined();
+    });
+
+    it('fails closed on an over-cap still-completable tag tail after a demotion (issue #9348 fail-closed)', () => {
+      // A whitespace-padded tag assembled across chunks: the tag grammar
+      // allows unbounded whitespace inside a tag, so '<thinking' + 200
+      // spaces can still complete into one. Releasing the suffix once it
+      // outgrows the candidate cap would let the padded tag slip past the
+      // fail-closed gate, so the overflow fails closed like the candidate
+      // machinery's isPossibleTag overflow branch.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('leading-block', {
+          content: '<thinking>a</thinking>Answer ',
+        }),
+        stream,
+      );
+
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('padded-tag', {
+            content: `<thinking${' '.repeat(200)}`,
+          }),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('fails closed when a held tag tail grows past the cap on padding alone (issue #9348 fail-closed)', () => {
+      // The over-cap check must also fire when the still-completable tail
+      // was held under the cap and only later padding pushes it over.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('leading-block', {
+          content: '<thinking>a</thinking>Answer ',
+        }),
+        stream,
+      );
+      const held = converter.convertOpenAIChunkToGemini(
+        streamChunk('tag-fragment', {
+          content: `<thinking${' '.repeat(100)}`,
+        }),
+        stream,
+      );
+
+      expect(held.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('padding', { content: ' '.repeat(100) }),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('demotes a nested balanced inline thinking block (issue #9348)', () => {
+      // The demotion split must count depth: returning at the first closer
+      // would leave ' end</thinking>Answer' as rest, which the post-demotion
+      // gate then hard-fails as a stray tag.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const block = converter.convertOpenAIChunkToGemini(
+        streamChunk(
+          'nested-block',
+          {
+            content:
+              '<thinking>outer <thinking>inner</thinking> end</thinking>Answer',
+          },
+          'stop',
+        ),
+        stream,
+      );
+
+      expect(block.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'outer <thinking>inner</thinking> end' },
+        { text: 'Answer' },
+      ]);
+    });
+
+    it('demotes a nested balanced inline thinking block split across chunks (issue #9348)', () => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const first = converter.convertOpenAIChunkToGemini(
+        streamChunk('nested-start', {
+          content: '<thinking>outer <thinking>in',
+        }),
+        stream,
+      );
+      const second = converter.convertOpenAIChunkToGemini(
+        streamChunk(
+          'nested-rest',
+          { content: 'ner</thinking> end</thinking>Answer' },
+          'stop',
+        ),
+        stream,
+      );
+
+      expect(first.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(second.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'outer <thinking>inner</thinking> end' },
+        { text: 'Answer' },
+      ]);
+    });
+
+    it('demotes an uppercase inline thinking block after reasoning (issue #9348)', () => {
+      // The demotion grammar is declared case-insensitive; pin it so
+      // stripping the `i` flag cannot silently regress the route.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const block = converter.convertOpenAIChunkToGemini(
+        streamChunk(
+          'uppercase-block',
+          { content: '<THINKING>x</THINKING>Answer' },
+          'stop',
+        ),
+        stream,
+      );
+
+      expect(block.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'x' },
+        { text: 'Answer' },
+      ]);
+    });
+
+    it('demotes an inline thinking block with whitespace inside the tags (issue #9348)', () => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const block = converter.convertOpenAIChunkToGemini(
+        streamChunk(
+          'spaced-block',
+          { content: '<thinking >x</thinking >Answer' },
+          'stop',
+        ),
+        stream,
+      );
+
+      expect(block.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'x' },
+        { text: 'Answer' },
+      ]);
+    });
+
+    it('drops an exact replay of the demotion chunk instead of failing closed (issue #9348)', () => {
+      // Providers re-send deltas (see normalizeStreamingTextDelta), and a
+      // replay shorter than the normalizer's exact-repeat window passes
+      // through verbatim. Re-entering the gate with the already-consumed
+      // tags would hard-fail a legitimate demoted turn with
+      // PROTOCOL_TAG_LEAK — the exact error the demotion route removes.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const demoted = converter.convertOpenAIChunkToGemini(
+        streamChunk('block', { content: '<thinking>x</thinking>Ok' }),
+        stream,
+      );
+      expect(demoted.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'x' },
+        { text: 'Ok' },
+      ]);
+
+      const replay = converter.convertOpenAIChunkToGemini(
+        streamChunk('replay', { content: '<thinking>x</thinking>Ok' }, 'stop'),
+        stream,
+      );
+
+      expect(replay.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingThinkingTagCandidate).toBeUndefined();
+      expect(stream.pendingPostDemotionTagTail).toBeUndefined();
+    });
+
+    it('drops a cumulative replay whose leading whitespace was emitted before demotion (issue #9348)', () => {
+      // A whitespace-only content delta arriving before any reasoning_content
+      // cannot be held (no structured reasoning yet) and does not set
+      // hasVisibleContent (/\S/ is false), so it is emitted verbatim and
+      // excluded from the demotion-seeded replay baseline. The provider's
+      // cumulative re-send includes it, and inside the normalizer's short
+      // exact-repeat window the replay passes through verbatim — equality and
+      // startsWith against the unaligned baseline both miss, so the
+      // post-demotion tag-tail defense would fail-closed a legitimate demoted
+      // turn with PROTOCOL_TAG_LEAK.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      const pre = converter.convertOpenAIChunkToGemini(
+        streamChunk('pre', { content: ' ' }),
+        stream,
+      );
+      expect(pre.candidates?.[0]?.content?.parts).toEqual([{ text: ' ' }]);
+      expect(stream.hasVisibleContent).toBeUndefined();
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const demoted = converter.convertOpenAIChunkToGemini(
+        streamChunk('block', { content: '<thinking>x</thinking>Ok' }),
+        stream,
+      );
+      expect(demoted.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'x' },
+        { text: 'Ok' },
+      ]);
+
+      const replay = converter.convertOpenAIChunkToGemini(
+        streamChunk('replay', { content: ' <thinking>x</thinking>Ok' }, 'stop'),
+        stream,
+      );
+
+      expect(replay.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingThinkingTagCandidate).toBeUndefined();
+      expect(stream.pendingPostDemotionTagTail).toBeUndefined();
+    });
+
+    it('strips the accepted prefix from a cumulative superset carrying pre-demotion whitespace (issue #9348)', () => {
+      // startsWith twin of the leading-whitespace replay: the baseline lacks
+      // the replay's leading whitespace, so the slice offset must account for
+      // it or the remainder is sliced from the wrong position. A diverged
+      // normalizer baseline makes the normalizer's exit-cumulative path emit
+      // the replay verbatim so the converter branch actually runs.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('pre', { content: ' ' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const demoted = converter.convertOpenAIChunkToGemini(
+        streamChunk('block', { content: '<thinking>x</thinking>Ok' }),
+        stream,
+      );
+      expect(demoted.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'x' },
+        { text: 'Ok' },
+      ]);
+
+      stream.textDeltaState = {
+        emittedText: '<diverged-baseline>',
+        emittedLength: 19,
+        cumulativeMode: true,
+      };
+      const replay = converter.convertOpenAIChunkToGemini(
+        streamChunk(
+          'cumulative-replay',
+          { content: ' <thinking>x</thinking>OkMore' },
+          'stop',
+        ),
+        stream,
+      );
+
+      expect(replay.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'More' },
+      ]);
+    });
+
+    it('strips the held candidate prefix from a renormalized cumulative superset replay before demotion (issue #9348)', () => {
+      // Pre-demotion twin of the post-demotion replay alignment: while the
+      // opening block is still held as a candidate, a cumulative provider
+      // replay renormalized against the delta history — here the
+      // renormalization stripped the leading whitespace the held candidate
+      // carries — passes through normalizeStreamingTextDelta unsliced.
+      // Concatenating it onto the pending candidate duplicated the held
+      // prefix, guaranteed the block never balanced, and the finish chunk
+      // threw PROTOCOL_TAG_LEAK on a legitimate turn — the exact error the
+      // demotion route exists to remove.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const whitespace = converter.convertOpenAIChunkToGemini(
+        streamChunk('whitespace', { content: ' ' }),
+        stream,
+      );
+      const opening = converter.convertOpenAIChunkToGemini(
+        streamChunk('opening', { content: '<thinking>x' }),
+        stream,
+      );
+
+      expect(whitespace.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(opening.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingThinkingTagCandidate).toEqual({
+        text: ' <thinking>x',
+      });
+
+      const replay = converter.convertOpenAIChunkToGemini(
+        streamChunk('cumulative-replay', {
+          content: '<thinking>xyz</thinking>Answer',
+        }),
+        stream,
+      );
+
+      expect(replay.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'xyz' },
+        { text: 'Answer' },
+      ]);
+      expect(stream.pendingThinkingTagCandidate).toBeUndefined();
+      expect(stream.inlineThinkingBlockDemoted).toBe(true);
+
+      // The finish chunk must complete cleanly instead of throwing
+      // PROTOCOL_TAG_LEAK on the balanced turn.
+      const finish = converter.convertOpenAIChunkToGemini(
+        streamChunk('finish', {}, 'stop'),
+        stream,
+      );
+      expect(finish.candidates?.[0]?.content?.parts ?? []).toEqual([]);
+    });
+
+    it('preserves a genuine delta equal to the held tag tail after a demotion (issue #9348)', () => {
+      // Tail equality alone is not replay evidence: adjacent genuine deltas
+      // may carry identical tag-like text and both must survive.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('leading-block', {
+          content: '<thinking>a</thinking>Answer ',
+        }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('tag-fragment', { content: '<thi' }),
+        stream,
+      );
+      const repeated = converter.convertOpenAIChunkToGemini(
+        streamChunk('repeated', { content: '<thi' }),
+        stream,
+      );
+
+      expect(repeated.candidates?.[0]?.content?.parts).toEqual([
+        { text: '<thi' },
+      ]);
+      expect(stream.pendingPostDemotionTagTail).toBe('<thi');
+
+      const resolved = converter.convertOpenAIChunkToGemini(
+        streamChunk('resolved', { content: 's is not a tag.' }, 'stop'),
+        stream,
+      );
+      expect(resolved.candidates?.[0]?.content?.parts).toEqual([
+        { text: '<this is not a tag.' },
+      ]);
+    });
+
+    it('drops an exact replay while a demotion rest is still held (issue #9348)', () => {
+      // While the rest of a demotion chunk is held as a pending candidate, a
+      // replayed chunk equals neither the candidate nor emitted text, so the
+      // pre-demotion replay guards never fire — dropping it needs the
+      // consumed-content tracking.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const demoted = converter.convertOpenAIChunkToGemini(
+        streamChunk('block', {
+          content: '<thinking>x</thinking><thinking>y',
+        }),
+        stream,
+      );
+      // The demoted thought is buffered behind the held rest (the standard
+      // pending-candidate parts hold), not emitted yet.
+      expect(demoted.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingThinkingTagCandidate).toEqual({
+        text: '<thinking>y',
+      });
+
+      const replay = converter.convertOpenAIChunkToGemini(
+        streamChunk('replay', {
+          content: '<thinking>x</thinking><thinking>y',
+        }),
+        stream,
+      );
+      expect(replay.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingThinkingTagCandidate).toEqual({
+        text: '<thinking>y',
+      });
+
+      const rest = converter.convertOpenAIChunkToGemini(
+        streamChunk('rest', { content: ' inner</thinking>Answer' }, 'stop'),
+        stream,
+      );
+      expect(rest.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'x' },
+        { thought: true, text: 'y inner' },
+        { text: 'Answer' },
+      ]);
+    });
+
+    it('drops an exact replay of a demotion chunk with a whitespace-only rest (issue #9348)', () => {
+      // A whitespace-only rest releases as visible text, so the replayed
+      // chunk would demote a second time and duplicate the thought part.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const demoted = converter.convertOpenAIChunkToGemini(
+        streamChunk('block', { content: '<thinking>x</thinking>  ' }),
+        stream,
+      );
+      expect(demoted.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'x' },
+        { text: '  ' },
+      ]);
+
+      const replay = converter.convertOpenAIChunkToGemini(
+        streamChunk('replay', { content: '<thinking>x</thinking>  ' }, 'stop'),
+        stream,
+      );
+      expect(replay.candidates?.[0]?.content?.parts).toEqual([]);
+    });
+
+    it('preserves genuine repeated deltas and rejects genuine tag chunks after demotion (issue #9348)', () => {
+      const repeated = withStreamParser();
+      repeated.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        repeated,
+      );
+      const first = converter.convertOpenAIChunkToGemini(
+        streamChunk('block', {
+          content: '<thinking>a</thinking>x = a <',
+        }),
+        repeated,
+      );
+      const second = converter.convertOpenAIChunkToGemini(
+        streamChunk('repeat', { content: '<' }),
+        repeated,
+      );
+      const third = converter.convertOpenAIChunkToGemini(
+        streamChunk('rest', { content: ' b' }, 'stop'),
+        repeated,
+      );
+      expect(
+        [first, second, third]
+          .flatMap((response) => response.candidates?.[0]?.content?.parts ?? [])
+          .filter((part) => part.thought !== true)
+          .map((part) => part.text ?? '')
+          .join(''),
+      ).toBe('x = a << b');
+
+      const stray = withStreamParser();
+      stray.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stray,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('block', { content: '<thinking>x</thinking>' }),
+        stray,
+      );
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('stray', { content: '</thinking>' }, 'stop'),
+          stray,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('strips the accepted prefix from cumulative supersets after demotion (issue #9348)', () => {
+      // The leading ' ' content delta keeps textDeltaState.emittedText from
+      // prefixing the cumulative replay, so the replay passes through
+      // normalizeStreamingTextDelta unsliced and actually reaches the
+      // converter's startsWith strip branch. Without it the normalizer
+      // enters cumulative mode and slices the prefix before the converter
+      // ever sees it, leaving the branch unexecuted.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('pre', { content: ' ' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const first = converter.convertOpenAIChunkToGemini(
+        streamChunk('block', { content: '<thinking>x</thinking>Ok' }),
+        stream,
+      );
+      const second = converter.convertOpenAIChunkToGemini(
+        streamChunk('more', { content: 'More' }),
+        stream,
+      );
+      const replay = converter.convertOpenAIChunkToGemini(
+        streamChunk(
+          'cumulative-replay',
+          { content: '<thinking>x</thinking>OkMoreDone' },
+          'stop',
+        ),
+        stream,
+      );
+
+      expect(
+        [first, second, replay]
+          .flatMap((response) => response.candidates?.[0]?.content?.parts ?? [])
+          .filter((part) => part.thought !== true)
+          .map((part) => part.text ?? '')
+          .join(''),
+      ).toBe('OkMoreDone');
+      expect(replay.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'Done' },
+      ]);
+    });
+
+    it('drops a cumulative replay spanning multiple demotions (issue #9348)', () => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('first', { content: '<thinking>a</thinking> ' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('second', { content: '<thinking>b</thinking> ' }),
+        stream,
+      );
+      const replay = converter.convertOpenAIChunkToGemini(
+        streamChunk(
+          'replay',
+          { content: '<thinking>a</thinking> <thinking>b</thinking> ' },
+          'stop',
+        ),
+        stream,
+      );
+
+      expect(replay.candidates?.[0]?.content?.parts).toEqual([]);
+    });
+
+    it('fails closed on a tag-carrying prefix re-send after visible content instead of dropping it (issue #9348 inverted direction)', () => {
+      // Inverted failure direction: a proper-prefix re-send of the baseline
+      // carrying a full tag is no longer dropped, because content comparison
+      // cannot tell a provider rewind apart from a genuine consecutive block
+      // opener — every demotion-seeded baseline starts with '<thinking>',
+      // so any genuine new block opener prefixes the baseline and the old
+      // rewind drop corrupted genuine consecutive blocks (the lone
+      // '<thinking>' probe). Once visible content exists the candidate
+      // machinery is disengaged, so the appended complete tag fails closed
+      // mid-stream — chunking-consistent with the single-chunk twin, which
+      // also fails closed on a complete tag after a demotion.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const demoted = converter.convertOpenAIChunkToGemini(
+        streamChunk('block', { content: '<thinking>x</thinking>OkMore' }),
+        stream,
+      );
+      expect(demoted.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'x' },
+        { text: 'OkMore' },
+      ]);
+
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('rewind-replay', {
+            content: '<thinking>x</thinking>Ok',
+          }),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('demotes a genuine nested opening tag arriving as its own delta (issue #9348 inverted direction)', () => {
+      // Entrance A: a genuine nested opening tag arriving as its own delta —
+      // chunks '<thinking>a' / '<thinking>' / 'b</thinking></thinking>Answer'
+      // + stop. The lone '<thinking>' delta prefixes the held candidate, so
+      // the old rewind-replay disjunct dropped it; the balance walk then
+      // closed at the first closer and the leftover rest threw
+      // PROTOCOL_TAG_LEAK on the legitimate turn, while the identical bytes
+      // in one chunk demoted cleanly. Prefix re-sends are appended instead,
+      // so the depth-counting scanner absorbs the nested block and the
+      // outcome matches the single-chunk twin.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const opening = converter.convertOpenAIChunkToGemini(
+        streamChunk('opening', { content: '<thinking>a' }),
+        stream,
+      );
+      expect(opening.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingThinkingTagCandidate).toEqual({
+        text: '<thinking>a',
+      });
+
+      const nested = converter.convertOpenAIChunkToGemini(
+        streamChunk('nested-opening', { content: '<thinking>' }),
+        stream,
+      );
+      expect(nested.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingThinkingTagCandidate).toEqual({
+        text: '<thinking>a<thinking>',
+      });
+
+      const rest = converter.convertOpenAIChunkToGemini(
+        streamChunk(
+          'rest',
+          { content: 'b</thinking></thinking>Answer' },
+          'stop',
+        ),
+        stream,
+      );
+      expect(rest.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'a<thinking>b</thinking>' },
+        { text: 'Answer' },
+      ]);
+    });
+
+    it('fails closed when an appended prefix re-send never re-balances (issue #9348 inverted direction)', () => {
+      // Degradation side of the inversion: when the appended prefix re-send
+      // is a true rewind (chunks '<thinking>x' / '<thinking>' /
+      // '</thinking>Answer'), the combined candidate re-held as
+      // '<thinking>x<thinking>' never balances and the finish chunk fails
+      // closed instead of the old silent drop. Accepted trade: the genuine
+      // nested shape above must not be dropped, and the two shapes are
+      // undecidable against content comparison.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('opening', { content: '<thinking>x' }),
+        stream,
+      );
+      const replay = converter.convertOpenAIChunkToGemini(
+        streamChunk('rewind-replay', { content: '<thinking>' }),
+        stream,
+      );
+      expect(replay.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingThinkingTagCandidate).toEqual({
+        text: '<thinking>x<thinking>',
+      });
+
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('rest', { content: '</thinking>Answer' }, 'stop'),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('appends a demoted-block replay arriving while a sub-word rest is held and fails closed when the rest never recombines (issue #9348 inverted direction)', () => {
+      // Inverted failure direction: the replay re-sending the demoted block
+      // is a proper prefix of the baseline carrying a full tag. It is no
+      // longer dropped (a genuine consecutive block opener is
+      // indistinguishable from it); the held-candidate strip reassembles it
+      // against the sub-word rest and the block re-demotes, duplicating the
+      // thought inside the hidden channel. When the provider's continuation
+      // then fails to recombine the sub-word rest, the complete tag fails
+      // closed instead of leaking — accepted trade for keeping genuine
+      // consecutive blocks intact.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const demoted = converter.convertOpenAIChunkToGemini(
+        streamChunk('block', { content: '<thinking>p1</thinking><think' }),
+        stream,
+      );
+      expect(demoted.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingThinkingTagCandidate).toEqual({ text: '<think' });
+
+      const replay = converter.convertOpenAIChunkToGemini(
+        streamChunk('replay', { content: '<thinking>p1</thinking>' }),
+        stream,
+      );
+      expect(replay.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'p1' },
+        { thought: true, text: 'p1' },
+      ]);
+      // The baseline accumulates the post-strip reassembled content, not the
+      // raw replay.
+      expect(stream.postDemotionReplayText).toBe(
+        '<thinking>p1</thinking><thinking>p1</thinking>',
+      );
+
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('rest', { content: 'ing>p2</thinking>' }, 'stop'),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('keeps the baseline intact when a superset resend arrives while a post-demotion rest is held (issue #9348 R9-3)', () => {
+      // The baseline accumulation must run AFTER the held-candidate superset
+      // strip: chunks '<thinking>a</thinking><thinking>b' demote block 1 and
+      // hold rest '<thinking>b'; the renormalized resend
+      // '<thinking>b</thinking>X' (the exact anomaly the strip was built
+      // for) used to be appended unstripped, double-counting '<thinking>b'
+      // into the baseline, so a later genuine cumulative redelivery matched
+      // no branch and threw PROTOCOL_TAG_LEAK. With post-strip accumulation
+      // the baseline stays the accepted sequence and step 3 strips cleanly.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const demoted = converter.convertOpenAIChunkToGemini(
+        streamChunk('block', {
+          content: '<thinking>a</thinking><thinking>b',
+        }),
+        stream,
+      );
+      expect(demoted.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingThinkingTagCandidate).toEqual({
+        text: '<thinking>b',
+      });
+
+      const resend = converter.convertOpenAIChunkToGemini(
+        streamChunk('superset-resend', {
+          content: '<thinking>b</thinking>X',
+        }),
+        stream,
+      );
+      expect(resend.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'a' },
+        { thought: true, text: 'b' },
+        { text: 'X' },
+      ]);
+      expect(stream.postDemotionReplayText).toBe(
+        '<thinking>a</thinking><thinking>b</thinking>X',
+      );
+
+      const redelivery = converter.convertOpenAIChunkToGemini(
+        streamChunk(
+          'cumulative-redelivery',
+          { content: '<thinking>a</thinking><thinking>b</thinking>XY' },
+          'stop',
+        ),
+        stream,
+      );
+      expect(redelivery.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'Y' },
+      ]);
+      expect(stream.postDemotionReplayText).toBe(
+        '<thinking>a</thinking><thinking>b</thinking>XY',
+      );
+    });
+
+    it('demotes genuine consecutive inline thinking blocks split one opener per chunk (issue #9348 inverted direction)', () => {
+      // Entrance B: after a demotion the baseline always starts with
+      // '<thinking>', so a lone genuine consecutive opener used to match the
+      // post-demotion rewind drop and vanish; the following body then threw
+      // PROTOCOL_TAG_LEAK. Appended instead, the opener re-enters the
+      // candidate machinery and the second block demotes — matching the
+      // single-chunk twin [{thought:'a'},{thought:'b'},{text:'Done'}].
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const first = converter.convertOpenAIChunkToGemini(
+        streamChunk('first', { content: '<thinking>a</thinking>' }),
+        stream,
+      );
+      expect(first.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'a' },
+      ]);
+
+      const opener = converter.convertOpenAIChunkToGemini(
+        streamChunk('second-opening', { content: '<thinking>' }),
+        stream,
+      );
+      expect(opener.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingThinkingTagCandidate).toEqual({
+        text: '<thinking>',
+      });
+
+      const second = converter.convertOpenAIChunkToGemini(
+        streamChunk('second-rest', { content: 'b</thinking>Done' }, 'stop'),
+        stream,
+      );
+      expect(second.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'b' },
+        { text: 'Done' },
+      ]);
+      expect(stream.postDemotionReplayText).toBe(
+        '<thinking>a</thinking><thinking>b</thinking>Done',
+      );
+    });
+
+    it('fails closed on an unclosed block opened after visible content, chunk-consistent with the single-chunk twin (issue #9348 inverted direction)', () => {
+      // Entrance B witness: '<thinking>a</thinking>Answer ' / '<thinking>' /
+      // 'raw thought body' + stop. The lone opener after visible content is
+      // appended (not dropped), so the post-demotion tag-tail gate fails
+      // closed on the complete tag — the same outcome as the single-chunk
+      // twin, which demotes block a and rejects the unclosed rest. The old
+      // rewind drop leaked the unclosed block body as visible text instead.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const first = converter.convertOpenAIChunkToGemini(
+        streamChunk('first', {
+          content: '<thinking>a</thinking>Answer ',
+        }),
+        stream,
+      );
+      expect(first.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'a' },
+        { text: 'Answer ' },
+      ]);
+
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('second-opening', { content: '<thinking>' }),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('does not strip a net-closing superset delta that restarts with the held candidate (issue #9348 inverted direction)', () => {
+      // Entrance C: a genuine nested continuation whose prefix coincidentally
+      // equals the held candidate (chunks '<thinking>a' /
+      // '<thinking>a</thinking></thinking>Answer' + stop) used to be
+      // stripped into the early-balancing '<thinking>a</thinking>' whose
+      // leftover stray closer threw mid-stream. The delta net-closes the
+      // held depth (more closers than openers), which a renormalized resend
+      // of the candidate never does, so the strip skips it and the
+      // depth-counting scanner absorbs the nested block. The diverged
+      // normalizer baseline makes the delta reach the converter unsliced.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const opening = converter.convertOpenAIChunkToGemini(
+        streamChunk('opening', { content: '<thinking>a' }),
+        stream,
+      );
+      expect(opening.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingThinkingTagCandidate).toEqual({
+        text: '<thinking>a',
+      });
+
+      stream.textDeltaState = {
+        emittedText: '<diverged-baseline>',
+        emittedLength: 19,
+        cumulativeMode: true,
+      };
+      const nested = converter.convertOpenAIChunkToGemini(
+        streamChunk(
+          'nested-continuation',
+          { content: '<thinking>a</thinking></thinking>Answer' },
+          'stop',
+        ),
+        stream,
+      );
+      expect(nested.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'a<thinking>a</thinking>' },
+        { text: 'Answer' },
+      ]);
+    });
+
+    it('keeps genuine content intact when a sub-word "<" candidate is held (issue #9348)', () => {
+      // The held-candidate prefix strip fired on sub-word candidates too:
+      // with a lone '<' held, a genuine '<EOF' delta lost its leading '<'
+      // because the strip consumed the candidate as if the delta re-sent
+      // it. The strip is gated on the candidate already carrying a full
+      // tag word; a sub-word candidate recombines with its genuine
+      // continuation without the strip.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      const pre = converter.convertOpenAIChunkToGemini(
+        streamChunk('pre', { content: ' ' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const opening = converter.convertOpenAIChunkToGemini(
+        streamChunk('opening', { content: '<' }),
+        stream,
+      );
+
+      expect(pre.candidates?.[0]?.content?.parts).toEqual([{ text: ' ' }]);
+      expect(opening.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingThinkingTagCandidate).toEqual({ text: '<' });
+
+      const continuation = converter.convertOpenAIChunkToGemini(
+        streamChunk('continuation', { content: '<EOF' }, 'stop'),
+        stream,
+      );
+      expect(continuation.candidates?.[0]?.content?.parts).toEqual([
+        { text: '<<EOF' },
+      ]);
+    });
+
+    it('does not demote literal "<<" content through a held sub-word candidate (issue #9348)', () => {
+      // With a lone '<' held, the strip also reassembled a genuine
+      // '<thinking>x</thinking>' delta into a balanced block and demoted
+      // literal '<<thinking>…' content into the hidden thought channel. A
+      // diverged normalizer baseline makes the normalizer's exit-cumulative
+      // path emit the delta verbatim so the converter branch actually runs.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('opening', { content: '<' }),
+        stream,
+      );
+
+      stream.textDeltaState = {
+        emittedText: '<diverged-baseline>',
+        emittedLength: 19,
+        cumulativeMode: true,
+      };
+      const continuation = converter.convertOpenAIChunkToGemini(
+        streamChunk('continuation', { content: '<thinking>x</thinking>' }),
+        stream,
+      );
+      expect(continuation.candidates?.[0]?.content?.parts).toEqual([
+        { text: '<<thinking>x</thinking>' },
+      ]);
+      expect(stream.inlineThinkingBlockDemoted).toBeUndefined();
+    });
+
+    it('drops post-finish redelivery instead of failing the completed turn (issue #9348)', () => {
+      // A post-finish redelivery carrying the demoted block missed the
+      // replay guards and threw PROTOCOL_TAG_LEAK after the finish response
+      // was already converted, rolling back the completed turn. The
+      // whitespace-renormalized shape below misses every replay branch
+      // (equality, superset and rewind), so only the finish-state gate
+      // closes it: the pipeline treats post-finish content as droppable,
+      // and the converter aligns by recording the finish state and dropping
+      // later visible content instead of failing closed on it.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('block', { content: '<thinking>x</thinking>Ok' }),
+        stream,
+      );
+      const finish = converter.convertOpenAIChunkToGemini(
+        streamChunk('finish', {}, 'stop'),
+        stream,
+      );
+      expect(finish.candidates?.[0]?.finishReason).toBeDefined();
+      expect(stream.finishChunkConverted).toBe(true);
+
+      const renormalizedRedelivery = converter.convertOpenAIChunkToGemini(
+        streamChunk('redelivery', {
+          content: ' <thinking>x</thinking> Ok',
+        }),
+        stream,
+      );
+      expect(renormalizedRedelivery.candidates?.[0]?.content?.parts).toEqual(
+        [],
+      );
+
+      const redelivery = converter.convertOpenAIChunkToGemini(
+        streamChunk('prefix-redelivery', {
+          content: '<thinking>x</thinking>O',
+        }),
+        stream,
+      );
+      expect(redelivery.candidates?.[0]?.content?.parts).toEqual([]);
+
+      const fullRedelivery = converter.convertOpenAIChunkToGemini(
+        streamChunk('full-redelivery', {
+          content: '<thinking>x</thinking>Ok',
+        }),
+        stream,
+      );
+      expect(fullRedelivery.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.postDemotionReplayText).toBe('<thinking>x</thinking>Ok');
+    });
+
+    it('drops reasoning-only post-finish redelivery, including thought parts (issue #9348 R9-4)', () => {
+      // The finish-state gate used to drop only visible-text parts, and only
+      // when visible text existed: thought parts created from redelivered
+      // reasoning_content pass getVisibleText (it returns '' for thought
+      // parts), and a reasoning-only redelivery has no visible text at all,
+      // so the gate never fired. Any surviving part trips the pipeline's
+      // pendingFinishProtocolTagSanitized latch ('Model response continued
+      // after a finish reason.', PROTOCOL_TAG_LEAK) on sanitized turns,
+      // hard-failing the completed turn. The gate must drop every part.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('block', { content: '<thinking>x</thinking>Ok' }),
+        stream,
+      );
+      const finish = converter.convertOpenAIChunkToGemini(
+        streamChunk('finish', {}, 'stop'),
+        stream,
+      );
+      expect(finish.candidates?.[0]?.finishReason).toBeDefined();
+      expect(stream.finishChunkConverted).toBe(true);
+
+      const reasoningRedelivery = converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning-redelivery', {
+          reasoning_content: 'Let me think.',
+        }),
+        stream,
+      );
+      expect(reasoningRedelivery.candidates?.[0]?.content?.parts).toEqual([]);
+
+      const mixedRedelivery = converter.convertOpenAIChunkToGemini(
+        streamChunk('mixed-redelivery', {
+          reasoning_content: 'More reasoning.',
+          content: 'More text.',
+        }),
+        stream,
+      );
+      expect(mixedRedelivery.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.postDemotionReplayText).toBe('<thinking>x</thinking>Ok');
+    });
+
+    it('releases a held tag-like tail once it resolves into ordinary text after a demotion (issue #9348)', () => {
+      // The hold must not swallow or corrupt ordinary text: a held suffix
+      // that turns out not to be a tag is emitted verbatim and the turn
+      // succeeds.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('leading-block', {
+          content: '<thinking>a</thinking>Answer ',
+        }),
+        stream,
+      );
+      const fragment = converter.convertOpenAIChunkToGemini(
+        streamChunk('tag-fragment', { content: '<thi' }),
+        stream,
+      );
+
+      expect(fragment.candidates?.[0]?.content?.parts).toEqual([]);
+
+      const resolved = converter.convertOpenAIChunkToGemini(
+        streamChunk('resolved', { content: 's is not a tag.' }, 'stop'),
+        stream,
+      );
+
+      expect(resolved.candidates?.[0]?.content?.parts).toEqual([
+        { text: '<this is not a tag.' },
+      ]);
+      expect(stream.pendingPostDemotionTagTail).toBeUndefined();
+    });
+
+    it('fails closed when a split tag prefix follows a benign < in the same chunk (issue #9348 fail-closed)', () => {
+      // The held suffix must start at the LAST '<' of the emitted text:
+      // selecting from the first '<' would make the suffix '<T> and <thi',
+      // which cannot be a tag prefix, so nothing is held, the '<thi'
+      // fragment leaks into visible output, and the next chunk (carrying no
+      // '<') never trips the gate — the turn would succeed with an assembled
+      // raw '<thinking>' in user-visible output.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('leading-block', {
+          content: '<thinking>a</thinking>Answer ',
+        }),
+        stream,
+      );
+      const fragment = converter.convertOpenAIChunkToGemini(
+        streamChunk('mixed-fragment', { content: 'Supplier<T> and <thi' }),
+        stream,
+      );
+
+      expect(fragment.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'Supplier<T> and ' },
+      ]);
+      expect(stream.pendingPostDemotionTagTail).toBe('<thi');
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('tag-completes', { content: 'nking> done' }, 'stop'),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('keeps a benign < when a split tag-like tail resolves into ordinary text after a demotion (issue #9348)', () => {
+      // Twin of the test above: the same chunking where the held tail turns
+      // out not to be a tag must release verbatim, preserving the earlier
+      // benign '<'.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('leading-block', {
+          content: '<thinking>a</thinking>Answer ',
+        }),
+        stream,
+      );
+      const fragment = converter.convertOpenAIChunkToGemini(
+        streamChunk('mixed-fragment', { content: 'Supplier<T> and <thi' }),
+        stream,
+      );
+      const resolved = converter.convertOpenAIChunkToGemini(
+        streamChunk('resolved', { content: 's plain text' }, 'stop'),
+        stream,
+      );
+
+      expect(fragment.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'Supplier<T> and ' },
+      ]);
+      expect(resolved.candidates?.[0]?.content?.parts).toEqual([
+        { text: '<this plain text' },
+      ]);
+      expect(stream.pendingPostDemotionTagTail).toBeUndefined();
+    });
+
+    it('rejects a stray closing tag after a demoted leading block (issue #9348 fail-closed)', () => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk(
+            'stray-closer',
+            { content: '<thinking>a</thinking>b</thinking>' },
+            'stop',
+          ),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('releases a sub-word tag fragment after a balanced block at stream finish (issue #9348)', () => {
+      // '<thi' is one visible char short of the '<think' tag word, so it can
+      // no longer become a tag once the stream has ended. The post-demotion
+      // tag-tail finish release and the pipeline EOF backstop already release
+      // the identical fragment (e.g. one visible char later, 'A<thi'), so the
+      // demotion-rest finish check must agree instead of hard-failing a
+      // truncated turn that the tag-leak retry would regenerate verbatim.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+
+      const truncated = converter.convertOpenAIChunkToGemini(
+        streamChunk(
+          'truncated-prefix',
+          { content: '<thinking>a</thinking><thi' },
+          'stop',
+        ),
+        stream,
+      );
+
+      expect(truncated.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'a' },
+        { text: '<thi' },
+      ]);
+      expect(stream.pendingPostDemotionTagTail).toBeUndefined();
+    });
+
+    it('releases a split sub-word tag fragment held at stream finish (issue #9348)', () => {
+      // Chunk-split twin of the test above: the sub-word fragment is re-held
+      // after the demotion and the stream then finishes. The held candidate
+      // contains no full tag word, so the finish-time candidate check must
+      // release it as literal text like the single-chunk shape.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const first = converter.convertOpenAIChunkToGemini(
+        streamChunk('first-block', { content: '<thinking>a</thinking><thi' }),
+        stream,
+      );
+
+      expect(first.candidates?.[0]?.content?.parts).toEqual([]);
+      const finish = finishStream(stream, 'stop');
+      expect(finish.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'a' },
+        { text: '<thi' },
+      ]);
+      expect(stream.pendingThinkingTagCandidate).toBeUndefined();
+    });
+
+    it('still fails closed on a split full tag word held at stream finish (issue #9348 fail-closed)', () => {
+      // Regression guard for the sub-word release: a held fragment containing
+      // a full tag word ('<think') must keep failing closed at finish,
+      // because its chunk-split twin throws via the hold path once the tag
+      // completes.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const first = converter.convertOpenAIChunkToGemini(
+        streamChunk('first-block', {
+          content: '<thinking>a</thinking><think',
+        }),
+        stream,
+      );
+
+      expect(first.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(() => finishStream(stream, 'stop')).toThrowError(
+        expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
+      );
+    });
+
+    it('releases a sub-word tag candidate at finish before any demotion (issue #9348)', () => {
+      // A structured-reasoning turn truncated by max_tokens before any
+      // complete tag: the held candidate is a sub-word fragment that can no
+      // longer become a tag, so finish releases it as literal text — aligned
+      // with the demotion-rest, tag-tail, and EOF-backstop paths.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const fragment = converter.convertOpenAIChunkToGemini(
+        streamChunk('fragment', { content: '<thi' }),
+        stream,
+      );
+
+      expect(fragment.candidates?.[0]?.content?.parts).toEqual([]);
+      const finish = finishStream(stream, 'length');
+      expect(finish.candidates?.[0]?.content?.parts).toEqual([
+        { text: '<thi' },
+      ]);
+      expect(stream.pendingThinkingTagCandidate).toBeUndefined();
+    });
+
+    it('still fails closed on a full tag word candidate at finish before any demotion (issue #9348 fail-closed)', () => {
+      // Twin of the test above with a full tag word: '<think' can still
+      // complete into a tag in the chunk-split twin, so it stays fail-closed.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('fragment', { content: '<think' }),
+        stream,
+      );
+
+      expect(() => finishStream(stream, 'length')).toThrowError(
+        expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
+      );
+    });
+
     it('holds a long confirmed opening tag until its closing tag arrives', () => {
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
