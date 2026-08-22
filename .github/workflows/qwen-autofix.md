@@ -2149,4 +2149,10 @@ noise should not spend a comment on someone's PR. The census and its
 warning run outside the cap's terminal guard: the all-idle shape stops
 via the consecutive breaker with that breaker's headline, and the
 terminal run's log is exactly where the wedged runner must be named.
+
+The same exclusion applies to the prepare step's PRIOR_TIMEOUTS census
+(af-049): its budget warning tells the agent to narrow scope — the
+budget remedy again — and an idle round never exhausted any budget, so
+it must not steer the narrowing. Idle rounds are excluded there with
+the same needle the cap census uses.
 ```

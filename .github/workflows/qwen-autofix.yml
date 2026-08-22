@@ -4993,6 +4993,9 @@ jobs:
             # Time-budget exhaustions SINCE THE LAST SUCCESSFUL ROUND mean
             # the standard address-everything prompt is not converging at
             # Full rationale → qwen-autofix.md#af-049
+            # Idle (silent-sandbox) timeouts are excluded like in the cap
+            # census: the narrowing advice targets budget exhaustion, and an
+            # infra-killed round never had any budget to exhaust (af-073).
             PRIOR_TIMEOUTS="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg key "${LIVE_REARM_KEY}" '
               [ .[] | select((.user.login // "") == $ab)
                 | select((.body // "") | contains("<!-- autofix-eval "))
@@ -5001,7 +5004,7 @@ jobs:
               ] | sort_by(.created_at)
               | map((.body | gsub("\r"; "") | split("\n")[0]))
               | (map(test("Addressed the latest review feedback|no changes needed")) | rindex(true) // -1) as $lastok
-              | [ .[($lastok + 1):][] | select(contains("AutoFix ran out of time before finishing")) ] | length' "${WORKDIR}/ic.json" 2> /dev/null || true)"
+              | [ .[($lastok + 1):][] | select(contains("AutoFix ran out of time before finishing") and (contains("AutoFix ran out of time before finishing (idle-timeout") | not)) ] | length' "${WORKDIR}/ic.json" 2> /dev/null || true)"
             if [[ "${PRIOR_TIMEOUTS}" -ge 1 ]]; then
               echo
               echo '## Budget warning: previous round(s) ran out of time'
