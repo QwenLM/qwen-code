@@ -1883,6 +1883,12 @@ describe('runNonInteractive', () => {
     ).getAvailableModelsForAuthType = vi
       .fn()
       .mockReturnValue([{ id: 'image-model', authType: AuthType.QWEN_OAUTH }]);
+    const resolveForModel = vi.fn().mockResolvedValue({
+      contentGeneratorConfig: { modalities: { image: true } },
+    });
+    (mockConfig as unknown as { getBaseLlmClient: Mock }).getBaseLlmClient = vi
+      .fn()
+      .mockReturnValue({ resolveForModel });
     mockGeminiClient.sendMessageStream.mockReturnValue(
       createStreamFromEvents(finishedEvents),
     );
@@ -1898,12 +1904,206 @@ describe('runNonInteractive', () => {
       vi.unstubAllEnvs();
     }
 
+    expect(resolveForModel).toHaveBeenCalledWith('image-model', {
+      failClosed: true,
+    });
     const sent = JSON.stringify(
       mockGeminiClient.sendMessageStream.mock.calls[0]?.[0],
     );
     expect(sent).toContain('Media omitted');
     expect(sent).not.toContain('inlineData');
   });
+
+  it('exact-routes image-capable slash prompt overrides and keeps images raw', async () => {
+    setupMetricsMock();
+    const imagePart: Part = {
+      inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' },
+    };
+    const mockCommand = {
+      name: 'image-model',
+      description: 'submit an image to another model',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'inspect this image' }, imagePart],
+        modelOverride: 'image-model',
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockCommand]);
+    (mockConfig.getContentGeneratorConfig as Mock).mockReturnValue({
+      authType: AuthType.QWEN_OAUTH,
+    });
+    (
+      mockConfig as unknown as { getAvailableModelsForAuthType: Mock }
+    ).getAvailableModelsForAuthType = vi
+      .fn()
+      .mockReturnValue([{ id: 'image-model', authType: AuthType.QWEN_OAUTH }]);
+    const resolveForModel = vi.fn().mockResolvedValue({
+      contentGeneratorConfig: { modalities: { image: true } },
+    });
+    (mockConfig as unknown as { getBaseLlmClient: Mock }).getBaseLlmClient = vi
+      .fn()
+      .mockReturnValue({ resolveForModel });
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/image-model',
+      'prompt-image-model-exact-route',
+    );
+
+    // The capability check passed, so the raw image rides the exact route
+    // (trailing-NUL selector) and the target's own modalities apply.
+    expect(
+      mockGeminiClient.sendMessageStream.mock.calls[0]?.[0],
+    ).toEqual([{ text: 'inspect this image' }, imagePart]);
+    expect(
+      mockGeminiClient.sendMessageStream.mock.calls[0]?.[3]?.modelOverride,
+    ).toBe('image-model\0');
+    expect(runVisionBridgeSpy).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when a slash prompt routes images to a text-only model', async () => {
+    setupMetricsMock();
+    const imagePart: Part = {
+      inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' },
+    };
+    const mockCommand = {
+      name: 'text-model',
+      description: 'submit an image to a text-only model',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'inspect this image' }, imagePart],
+        modelOverride: 'text-model',
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockCommand]);
+    (mockConfig.getContentGeneratorConfig as Mock).mockReturnValue({
+      authType: AuthType.QWEN_OAUTH,
+    });
+    (
+      mockConfig as unknown as { getAvailableModelsForAuthType: Mock }
+    ).getAvailableModelsForAuthType = vi
+      .fn()
+      .mockReturnValue([{ id: 'text-model', authType: AuthType.QWEN_OAUTH }]);
+    const resolveForModel = vi.fn().mockResolvedValue({
+      contentGeneratorConfig: { modalities: {} },
+    });
+    (mockConfig as unknown as { getBaseLlmClient: Mock }).getBaseLlmClient = vi
+      .fn()
+      .mockReturnValue({ resolveForModel });
+    // No vision bridge available: the images must fail closed with a visible
+    // notice instead of riding the exact route into silent placeholder
+    // substitution.
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: vi.fn().mockReturnValue({}),
+      getDefaultVisionBridgeModel: vi.fn().mockReturnValue(undefined),
+    });
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/text-model',
+      'prompt-image-text-only',
+    );
+
+    expect(resolveForModel).toHaveBeenCalledWith('text-model', {
+      failClosed: true,
+    });
+    expect(runVisionBridgeSpy).not.toHaveBeenCalled();
+    const sentParts = mockGeminiClient.sendMessageStream.mock.calls[0]?.[0];
+    expect(sentParts).toEqual([{ text: 'inspect this image' }]);
+    expect(JSON.stringify(sentParts)).not.toContain('inlineData');
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Image was not sent'),
+    );
+    expect(
+      mockGeminiClient.sendMessageStream.mock.calls[0]?.[3]?.modelOverride,
+    ).toBe('text-model');
+  });
+
+  it('vision-bridges images when a slash prompt routes them to a text-only model', async () => {
+    setupMetricsMock();
+    const imagePart: Part = {
+      inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' },
+    };
+    const mockCommand = {
+      name: 'text-model',
+      description: 'submit an image to a text-only model',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'inspect this image' }, imagePart],
+        modelOverride: 'text-model',
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockCommand]);
+    (mockConfig.getContentGeneratorConfig as Mock).mockReturnValue({
+      authType: AuthType.QWEN_OAUTH,
+    });
+    (
+      mockConfig as unknown as { getAvailableModelsForAuthType: Mock }
+    ).getAvailableModelsForAuthType = vi
+      .fn()
+      .mockReturnValue([{ id: 'text-model', authType: AuthType.QWEN_OAUTH }]);
+    const resolveForModel = vi.fn().mockResolvedValue({
+      contentGeneratorConfig: { modalities: {} },
+    });
+    (mockConfig as unknown as { getBaseLlmClient: Mock }).getBaseLlmClient = vi
+      .fn()
+      .mockReturnValue({ resolveForModel });
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: vi.fn().mockReturnValue({}),
+      getDefaultVisionBridgeModel: vi.fn().mockReturnValue({
+        id: 'vision-agent',
+        baseUrl: 'https://vision.example.com/v1',
+        agentCapable: true,
+      }),
+    });
+    runVisionBridgeSpy.mockResolvedValue({
+      status: 'ok',
+      applied: true,
+      parts: [
+        { text: 'inspect this image' },
+        { text: '[vision bridge description]' },
+      ],
+      convertedCount: 1,
+      omittedCount: 0,
+      modelId: 'vision-agent',
+      egressOccurred: true,
+    });
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(finishedEvents),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/text-model',
+      'prompt-image-bridged-for-override',
+    );
+
+    expect(runVisionBridgeSpy).toHaveBeenCalledWith({
+      config: mockConfig,
+      parts: [{ text: 'inspect this image' }, imagePart],
+      signal: expect.any(AbortSignal),
+    });
+    const sentParts = mockGeminiClient.sendMessageStream.mock.calls[0]?.[0];
+    expect(JSON.stringify(sentParts)).toContain('vision bridge description');
+    expect(JSON.stringify(sentParts)).not.toContain('inlineData');
+    // The override stays in charge of the (now text-only) payload.
+    expect(
+      mockGeminiClient.sendMessageStream.mock.calls[0]?.[3]?.modelOverride,
+    ).toBe('text-model');
+  });
+
 
   it('fails closed when a slash prompt selects a text-only model', async () => {
     setupMetricsMock();

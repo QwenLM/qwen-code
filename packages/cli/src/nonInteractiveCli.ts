@@ -1362,8 +1362,55 @@ export async function runNonInteractive(
         }
       };
       let inlineModelOverrideResolutionFailed = false;
-      if (inlineModelOverride !== undefined && hasAudioParts(initialParts)) {
+      // Capability-check ANY media against the inline override, not only
+      // audio: raw images exact-routed to a target that cannot see them are
+      // placeholder-substituted by the route's slimming — the model would
+      // answer about an image it never received, with nothing on stderr.
+      const bridgeImagesForInlineOverride = async (
+        parts: Part[],
+      ): Promise<Part[]> => {
+        if (!shouldRunVisionBridge(config)) {
+          const reason = 'the active model override does not support images';
+          emitBridgeNotice('vision_bridge', `Image was not sent: ${reason}.`);
+          return splitImageParts(parts).nonImageParts;
+        }
+        try {
+          const bridgeResult = await runVisionBridge({
+            config,
+            parts,
+            signal: abortController.signal,
+          });
+          if (
+            bridgeResult.status !== 'skipped' ||
+            bridgeResult.egressOccurred
+          ) {
+            emitBridgeNotice(
+              'vision_bridge',
+              formatVisionBridgeNotice(bridgeResult),
+            );
+          }
+          return bridgeResult.applied && bridgeResult.parts != null
+            ? normalizePartList(bridgeResult.parts)
+            : splitImageParts(parts).nonImageParts;
+        } catch (error) {
+          debugLogger.debug(
+            `vision bridge: failed before replacement; falling back to text-only parts error=${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+          emitBridgeNotice(
+            'vision_bridge_failed',
+            'Vision bridge failed; proceeding without the image(s).',
+          );
+          return splitImageParts(parts).nonImageParts;
+        }
+      };
+      if (
+        inlineModelOverride !== undefined &&
+        (hasAudioParts(initialParts) || hasImageParts(initialParts))
+      ) {
         let supportsAudio = false;
+        let supportsImage = false;
         let routeResolutionFailed = false;
         try {
           const runtimeView = await config
@@ -1371,30 +1418,44 @@ export async function runNonInteractive(
             .resolveForModel(inlineModelOverride, { failClosed: true });
           supportsAudio =
             runtimeView.contentGeneratorConfig.modalities?.audio === true;
+          supportsImage =
+            runtimeView.contentGeneratorConfig.modalities?.image === true;
         } catch (error) {
           routeResolutionFailed = true;
           debugLogger.warn(
-            `audio route capability check failed for '${inlineModelOverride}': ${
+            `media route capability check failed for '${inlineModelOverride}': ${
               error instanceof Error ? error.message : String(error)
             }`,
           );
         }
-        if (!supportsAudio) {
-          if (routeResolutionFailed) {
-            inlineModelOverrideResolutionFailed = true;
-            inlineModelOverride = undefined;
-          } else {
-            const reason = 'the active model override does not support audio';
-            initialParts = replaceAudioPartsWithUnavailable(
-              initialParts,
-              reason,
-            );
-            emitBridgeNotice('audio_bridge', `Audio was not sent: ${reason}.`);
-          }
+        if (routeResolutionFailed) {
+          // The route cannot be capability-checked: drop the override so
+          // audio is bridged on the primary route and images flow through
+          // the clamp + vision-bridge path below (fail-closed either way).
+          inlineModelOverrideResolutionFailed = true;
+          inlineModelOverride = undefined;
         } else {
-          initialParts = initialParts.map((part) =>
-            hasAudioParts([part]) ? clampInlineMediaPart(part) : part,
-          );
+          if (hasAudioParts(initialParts)) {
+            if (!supportsAudio) {
+              const reason =
+                'the active model override does not support audio';
+              initialParts = replaceAudioPartsWithUnavailable(
+                initialParts,
+                reason,
+              );
+              emitBridgeNotice(
+                'audio_bridge',
+                `Audio was not sent: ${reason}.`,
+              );
+            } else {
+              initialParts = initialParts.map((part) =>
+                hasAudioParts([part]) ? clampInlineMediaPart(part) : part,
+              );
+            }
+          }
+          if (hasImageParts(initialParts) && !supportsImage) {
+            initialParts = await bridgeImagesForInlineOverride(initialParts);
+          }
         }
       }
       if (inlineModelOverride === undefined && hasAudioParts(initialParts)) {

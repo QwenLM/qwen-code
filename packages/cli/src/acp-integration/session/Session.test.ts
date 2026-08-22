@@ -7740,6 +7740,66 @@ describe('Session', () => {
       );
     });
 
+    it('persists the fail-closed marker, not raw audio, when cancelled during the audio bridge', async () => {
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      Object.assign(mockSettings.merged as Record<string, unknown>, {
+        voiceModel: 'qwen3-asr-flash',
+        env: { OPENAI_API_KEY: 'test-key' },
+      });
+      let releaseTranscription!: () => void;
+      const transcriptionGate = new Promise<void>((resolve) => {
+        releaseTranscription = resolve;
+      });
+      transcribeVoiceAudioSpy.mockImplementation(async () => {
+        await transcriptionGate;
+        return 'late transcript';
+      });
+
+      try {
+        const prompt = session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'listen to this' },
+            {
+              type: 'audio',
+              mimeType: 'audio/wav',
+              data: 'UklGRgPROBE==',
+            },
+          ],
+        });
+        await vi.waitFor(() =>
+          expect(transcribeVoiceAudioSpy).toHaveBeenCalledTimes(1),
+        );
+        // Cancel while the transcription is still in flight, then let it
+        // settle: the bridge observes the abort and fail-closes.
+        await session.cancelPendingPrompt();
+        releaseTranscription();
+        await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+      } finally {
+        releaseTranscription();
+      }
+
+      // The cancelled turn must persist the fail-closed cancellation marker —
+      // never the raw audio. An `interrupted_prompt` continuation re-sends
+      // persisted parts without re-bridging, so persisted raw audio would be
+      // placeholder-substituted into silence on a text-only route (and bloat
+      // the saved session).
+      const preservedUserEntries = vi
+        .mocked(mockChat.addHistory)
+        .mock.calls.map(([entry]) => entry)
+        .filter(
+          (entry) => (entry as { role?: string }).role === 'user',
+        );
+      expect(preservedUserEntries.length).toBeGreaterThan(0);
+      const preservedJson = JSON.stringify(preservedUserEntries);
+      expect(preservedJson).not.toContain('UklGRgPROBE==');
+      expect(preservedJson).not.toContain('audio/wav');
+      expect(preservedJson).toContain('transcription was cancelled');
+    });
+
     it('fails closed oversized ACP audio in an embedded resource block', async () => {
       const ENV_KEY = 'QWEN_CODE_MAX_INLINE_MEDIA_BYTES';
       const original = process.env[ENV_KEY];
@@ -12414,6 +12474,87 @@ describe('Session', () => {
         );
       });
 
+      it('preserves dequeued mid-turn messages when a cancellation races their resolution', async () => {
+        const executeSpy = vi.fn().mockResolvedValue({
+          llmContent: 'file contents',
+          returnDisplay: 'file contents',
+        });
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: executeSpy,
+          }),
+        };
+
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        // The cancellation lands while the drained message is being resolved.
+        // The drain already dequeued it from the host queue, so dropping it on
+        // the abort break would lose it from both queues; it must fall back to
+        // its display text and be preserved with the cancelled turn.
+        mockClient.extMethod = vi.fn().mockImplementation(async () => {
+          void session.cancelPendingPrompt();
+          return {
+            items: [
+              {
+                content: [{ type: 'text', text: 'late steer text' }],
+                displayText: 'late steer',
+              },
+            ],
+          };
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read file' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'cancelled' });
+
+        expect(
+          mockChatRecordingService.recordMidTurnUserMessage,
+        ).toHaveBeenCalledWith(
+          [
+            {
+              text: '\n[User message received during tool execution]: late steer',
+            },
+          ],
+          'late steer',
+        );
+        expect(mockChat.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: expect.arrayContaining([
+            expect.objectContaining({
+              text: expect.stringContaining('late steer'),
+            }),
+          ]),
+        });
+      });
+
       it('bridges drained audio for the active full-turn model', async () => {
         const executeSpy = vi.fn().mockResolvedValue({
           llmContent: [
@@ -13899,7 +14040,7 @@ describe('Session', () => {
         );
       });
 
-      it('stops draining mid-turn messages when structured resolution is aborted', async () => {
+      it('falls back to display text for mid-turn messages when structured resolution is aborted', async () => {
         let promptSignalAborted = false;
         const clampSpy = vi
           .spyOn(core, 'clampInlineMediaPart')
@@ -13948,8 +14089,8 @@ describe('Session', () => {
               displayText: 'inspect this image',
             },
             {
-              content: [{ type: 'text', text: 'should not be processed' }],
-              displayText: 'should not be processed',
+              content: [{ type: 'text', text: 'still dequeued' }],
+              displayText: 'still dequeued',
             },
           ],
         });
@@ -13982,8 +14123,8 @@ describe('Session', () => {
           const abortedMidTurnPart = {
             text: '\n[User message received during tool execution]: inspect this image',
           };
-          const skippedMidTurnPart = {
-            text: '\n[User message received during tool execution]: should not be processed',
+          const laterMidTurnPart = {
+            text: '\n[User message received during tool execution]: still dequeued',
           };
           const preservedMessage = vi.mocked(mockChat.addHistory).mock
             .calls[0]?.[0] as Content | undefined;
@@ -13991,24 +14132,28 @@ describe('Session', () => {
           expect(promptSignalAborted).toBe(true);
           expect(clampSpy).toHaveBeenCalledTimes(1);
           expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+          // The drain had already dequeued every message from the host queue,
+          // so the abort must not drop the in-flight or remaining ones: they
+          // fall back to their display text and are preserved + recorded.
           expect(preservedMessage?.parts).toEqual(
-            expect.arrayContaining([retainedMidTurnPart]),
-          );
-          expect(preservedMessage?.parts).not.toEqual(
-            expect.arrayContaining([abortedMidTurnPart]),
-          );
-          expect(preservedMessage?.parts).not.toEqual(
-            expect.arrayContaining([skippedMidTurnPart]),
+            expect.arrayContaining([
+              retainedMidTurnPart,
+              abortedMidTurnPart,
+              laterMidTurnPart,
+            ]),
           );
           expect(
             mockChatRecordingService.recordMidTurnUserMessage,
           ).toHaveBeenCalledWith([retainedMidTurnPart], 'already queued');
           expect(
             mockChatRecordingService.recordMidTurnUserMessage,
-          ).not.toHaveBeenCalledWith(
-            [skippedMidTurnPart],
-            'should not be processed',
+          ).toHaveBeenCalledWith(
+            [abortedMidTurnPart, { text: '[Attachment could not be processed]' }],
+            'inspect this image',
           );
+          expect(
+            mockChatRecordingService.recordMidTurnUserMessage,
+          ).toHaveBeenCalledWith([laterMidTurnPart], 'still dequeued');
         } finally {
           clampSpy.mockRestore();
         }
@@ -33277,10 +33422,9 @@ describe('Session', () => {
         .mockResolvedValue(createEmptyStream());
 
       await expect(runGuardPrompt()).resolves.toEqual({
-        stopReason: 'end_turn',
+        stopReason: 'cancelled',
       });
 
-      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
       const preserved = vi
         .mocked(mockChat.addHistory)
         .mock.calls.map(([message]) => message)
@@ -33301,6 +33445,27 @@ describe('Session', () => {
       );
       expect(JSON.stringify(preserved)).not.toContain('audio/wav');
       expect(fullTurnSelections).toEqual([true]);
+      // The drain had already dequeued the audio message when the
+      // cancellation landed mid-resolution: it must not be dropped. It falls
+      // back to its display text (the abort wins the resolution race) and is
+      // preserved alongside the staged tool response — never as raw audio.
+      const preservedAll = JSON.stringify(
+        vi.mocked(mockChat.addHistory).mock.calls.map(([message]) => message),
+      );
+      expect(preservedAll).toContain('audio before the nested Guard send');
+      expect(preservedAll).toContain('[Attachment could not be processed]');
+      expect(preservedAll).not.toContain('audio/wav');
+      expect(
+        mockChatRecordingService.recordMidTurnUserMessage,
+      ).toHaveBeenCalledWith(
+        [
+          {
+            text: '\n[User message received during tool execution]: audio before the nested Guard send',
+          },
+          { text: '[Attachment could not be processed]' },
+        ],
+        'audio before the nested Guard send',
+      );
     });
 
     it('keeps the external Stop hook count when nested Guard work yields to the user', async () => {

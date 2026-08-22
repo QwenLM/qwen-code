@@ -203,6 +203,13 @@ export interface SendMessageOptions {
   getSteerInput?: (signal: AbortSignal) => Promise<SteerInput | undefined>;
   /** Steer lease already appended to this request, settled after history push. */
   steerInput?: SteerInput;
+  /**
+   * Notified when a client-driven boundary drain is about to send a steer
+   * input, before the Steer send starts. Lets the CLI store the input's
+   * pristine retry payload for Ctrl+Y the same way the hook path stores
+   * `preOverrideParts` (the core drain consumes `parts` only).
+   */
+  onSteerResolved?: (steerInput: SteerInput) => void;
   /** Track stop hook iterations to prevent infinite loops and display loop info */
   stopHookState?: {
     iterationCount: number;
@@ -236,6 +243,13 @@ export interface SteerInput {
   retryParts?: Part[];
   /** True when this drain routed raw media to the active model override. */
   mediaRouted?: boolean;
+  /**
+   * Invoked when `restore` settles this input (the message goes back to the
+   * queue, so the re-drain — not a stored retry payload — owns recovery).
+   * The CLI uses this to strip the steer segment from the stored Ctrl+Y
+   * payload so the two recovery channels stay mutually exclusive.
+   */
+  onRestore?: () => void;
   /** Commits UI/recording side effects after the request accepts the input. */
   accept: () => void;
   /** Restores the input when the next model request never accepts it. */
@@ -3137,6 +3151,21 @@ export class GeminiClient {
         return steerInput;
       };
 
+      // A boundary-drained steer that routed raw media to the active override
+      // must keep the exact route for its own send: the drain runs after the
+      // original send options were built, so the inherited selector is still
+      // bare. Mirrors the hook path, which stamps the trailing-NUL marker on
+      // the media-routed prompt's sends.
+      const steerRouteOverride = (
+        override: string | undefined,
+        steerInput: SteerInput | undefined,
+      ): string | undefined =>
+        steerInput?.mediaRouted === true &&
+        override !== undefined &&
+        !override.endsWith('\0')
+          ? `${override}\0`
+          : override;
+
       // Auto-compaction happens inside GeminiChat.sendMessageStream and surfaces
       // via the `compressed → ChatCompressed` bridge in turn.ts. Manual /compress
       // still calls tryCompressChat directly for the full reset (env refresh +
@@ -3660,6 +3689,7 @@ export class GeminiClient {
         const steerTurnBudget = boundedTurns - 1;
         const steerInput = await takeSteerInput(steerTurnBudget);
         if (steerInput) {
+          options?.onSteerResolved?.(steerInput);
           const pushCountBefore = currentPushCount();
           let steeredTurn: Turn;
           try {
@@ -3672,6 +3702,10 @@ export class GeminiClient {
                 type: SendMessageType.Steer,
                 submittedPrompt: undefined,
                 steerInput,
+                modelOverride: steerRouteOverride(
+                  options?.modelOverride,
+                  steerInput,
+                ),
               },
               steerTurnBudget,
             );
@@ -3818,6 +3852,7 @@ export class GeminiClient {
             }
             const continueRequest: Part[] = [{ text: continueReason }];
             if (pendingSteer) {
+              options?.onSteerResolved?.(pendingSteer);
               continueRequest.push({ text: '\n\n' }, ...pendingSteer.parts);
             }
             const pushCountBefore = currentPushCount();
@@ -3832,6 +3867,10 @@ export class GeminiClient {
                   type: SendMessageType.Hook,
                   submittedPrompt: undefined,
                   steerInput: pendingSteer,
+                  modelOverride: steerRouteOverride(
+                    options?.modelOverride,
+                    pendingSteer,
+                  ),
                   stopHookState: {
                     iterationCount: currentIterationCount,
                     reasons: currentReasons,
@@ -3977,6 +4016,7 @@ export class GeminiClient {
             ? [{ text: continuationReasonAfterSteer }]
             : [];
           if (pendingSteer) {
+            options?.onSteerResolved?.(pendingSteer);
             if (continueRequest.length > 0) {
               continueRequest.push({ text: '\n\n' });
             }
@@ -3991,8 +4031,12 @@ export class GeminiClient {
               prompt_id,
               {
                 type: SendMessageType.Hook,
-                modelOverride: options?.modelOverride,
+                modelOverride: steerRouteOverride(
+                  options?.modelOverride,
+                  pendingSteer,
+                ),
                 getSteerInput: options?.getSteerInput,
+                onSteerResolved: options?.onSteerResolved,
                 steerInput: pendingSteer,
                 stopHookState: discardGoalContinuation
                   ? undefined
@@ -4109,6 +4153,9 @@ export class GeminiClient {
         if (nextSpeakerCheck?.next_speaker === 'model') {
           const continueTurnBudget = boundedTurns - 1;
           const pendingSteer = await takeSteerInput(continueTurnBudget);
+          if (pendingSteer) {
+            options?.onSteerResolved?.(pendingSteer);
+          }
           const nextRequest: Part[] = pendingSteer
             ? pendingSteer.parts
             : [{ text: 'Please continue.' }];
@@ -4126,6 +4173,10 @@ export class GeminiClient {
                   : SendMessageType.Hook,
                 submittedPrompt: undefined,
                 steerInput: pendingSteer,
+                modelOverride: steerRouteOverride(
+                  options?.modelOverride,
+                  pendingSteer,
+                ),
               },
               continueTurnBudget,
             );

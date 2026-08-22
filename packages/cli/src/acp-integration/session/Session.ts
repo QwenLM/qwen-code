@@ -237,6 +237,7 @@ import {
 import {
   formatAudioBridgeNotice,
   hasAudioParts,
+  replaceAudioPartsWithUnavailable,
   runAudioBridge,
 } from '../../services/audio-bridge-service.js';
 import {
@@ -5227,6 +5228,18 @@ export class Session implements SessionContext {
           onModelOverrideResolutionFailed: onFullTurnModelResolutionFailed,
         });
         if (drained.parts.length > 0) {
+          if (pendingSend.signal.aborted) {
+            // Cancellation raced this drain: the dequeued messages must not
+            // be lost (the drain already took them from the host queue), but
+            // an aborted turn must not start a continuation either. Persist
+            // them for replay and settle as cancelled.
+            this.todoStopGuard.suspend();
+            this.#preserveUnsentMessageHistory(
+              { role: 'user', parts: drained.parts },
+              true,
+            );
+            return { stopReason: 'cancelled' };
+          }
           if (drained.hasQueuedPrompt) {
             const claim = await this.#claimTodoStopGuardContinuation(
               pendingSend.signal,
@@ -5330,6 +5343,17 @@ export class Session implements SessionContext {
             onModelOverrideResolutionFailed: onFullTurnModelResolutionFailed,
           });
           if (drained.parts.length > 0) {
+            if (pendingSend.signal.aborted) {
+              // Cancellation raced this drain: preserve the dequeued
+              // messages for replay and settle as cancelled (see the
+              // matching pre-hook drain branch above).
+              this.todoStopGuard.suspend();
+              this.#preserveUnsentMessageHistory(
+                { role: 'user', parts: drained.parts },
+                true,
+              );
+              return { stopReason: 'cancelled' };
+            }
             if (drained.hasQueuedPrompt) {
               const claim = await this.#claimTodoStopGuardContinuation(
                 pendingSend.signal,
@@ -6641,7 +6665,6 @@ export class Session implements SessionContext {
       ? await this.#buildMidTurnParts(
           this.#takeRecoveredMidTurnMessages(),
           abortSignal,
-          { preserveFallbackOnAbort: true },
         )
       : await this.#drainMidTurnUserMessages(abortSignal);
     this.#preserveUnsentMessageHistory(
@@ -7136,7 +7159,6 @@ export class Session implements SessionContext {
       onFullTurnModel?: (model: string) => boolean;
       getModelOverride?: () => string | undefined;
       onModelOverrideResolutionFailed?: () => void;
-      preserveFallbackOnAbort?: boolean;
     } = {},
   ): Promise<Part[]> {
     let modelOverrideResolutionFailed = false;
@@ -7170,9 +7192,11 @@ export class Session implements SessionContext {
                   }),
               );
       } catch (messageError) {
-        if (abortSignal.aborted && !options.preserveFallbackOnAbort) {
-          break;
-        }
+        // An abort landing during resolution must not drop the message: the
+        // drain already dequeued it from the host queue, so nothing would
+        // re-queue a message skipped here. Fall back to the display text and
+        // let the caller persist it with the preserved unsent history — the
+        // same guarantee the recovered-message path has always had.
         if (!abortSignal.aborted) {
           const errorMessage = this.#formatError(messageError);
           debugLogger.warn(
@@ -7192,14 +7216,13 @@ export class Session implements SessionContext {
     }
     const audioCheckedMessages: Array<{
       parts: Part[];
-      originalParts: Part[];
       displayText: string;
       message: DrainedMidTurnMessage;
     }> = [];
     for (const resolved of resolvedMessages) {
-      // A cancelled drain must keep queued media intact: bridging after the
-      // abort would rewrite it into cancellation markers that then persist
-      // into session history via the recording and the abort-branch message.
+      // A cancelled drain skips the bridge here; the finalize loop below then
+      // fail-closes any still-raw audio so a cancelled turn never persists or
+      // replays unbridged media.
       const audioChecked =
         !abortSignal.aborted && options.getModelOverride
           ? await this.#applyAudioBridgeIfNeeded(
@@ -7211,10 +7234,6 @@ export class Session implements SessionContext {
           : resolved.parts;
       audioCheckedMessages.push({
         parts: audioChecked,
-        // Keep the untouched parts: an abort arriving DURING the awaited
-        // bridge makes `audioChecked` marker-substituted, and the abort
-        // fallback below must restore the pristine media, not the markers.
-        originalParts: resolved.parts,
         displayText: resolved.displayText,
         message: resolved.message,
       });
@@ -7230,10 +7249,15 @@ export class Session implements SessionContext {
               abortSignal,
             )
           : resolved.parts;
-      // Abort arriving during the awaited bridge/conversion: fall back to
-      // the untouched parts so no marker text is recorded or sent.
+      // Abort arriving during the awaited bridge/conversion: substitute the
+      // fail-closed cancellation marker for any still-raw audio (mirrors
+      // #applyBridgeConversionsIfNeeded) so the preserved history never
+      // carries unbridged media.
       if (abortSignal.aborted) {
-        finalized = resolved.originalParts;
+        finalized = replaceAudioPartsWithUnavailable(
+          resolved.parts,
+          'transcription was cancelled',
+        );
       }
       const recorder = this.config.getChatRecordingService();
       if (
@@ -12184,11 +12208,18 @@ export class Session implements SessionContext {
         targetSupportsImage = supportsImage;
       },
     );
-    // Abort arriving during the audio bridge: runAudioBridge returns
-    // marker-substituted parts on cancellation. Return the untouched media
-    // so cancellation markers never persist into session history.
+    // Abort arriving during/after the audio bridge: never persist or replay
+    // unbridged raw media. An `interrupted_prompt` continuation re-sends the
+    // persisted parts without re-bridging, so raw audio would either be
+    // placeholder-substituted on a text-only route (silent content loss) or
+    // bloat the saved session (up to ~53 MB of base64 per cancelled turn).
+    // Substitute the fail-closed cancellation marker instead, keeping any
+    // transcripts the bridge already completed.
     if (abortSignal.aborted) {
-      return originalParts;
+      return replaceAudioPartsWithUnavailable(
+        parts,
+        'transcription was cancelled',
+      );
     }
     if (targetSupportsImage && hasImageParts(parts)) {
       return parts.map((part) =>

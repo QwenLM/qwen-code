@@ -6671,6 +6671,83 @@ hello
       );
     });
 
+    it('exact-routes a media-routed boundary steer and surfaces it for retry', async () => {
+      mockTurnRunFn.mockImplementation(() =>
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'response' };
+        })(),
+      );
+      const steerInput: SteerInput = {
+        parts: [{ text: 'steer with routed media' }],
+        retryParts: [{ text: 'pristine steer media' }],
+        mediaRouted: true,
+        accept: vi.fn(),
+        restore: vi.fn(),
+      };
+      const getSteerInput = vi
+        .fn<() => Promise<SteerInput | undefined>>()
+        .mockResolvedValueOnce(steerInput)
+        .mockResolvedValue(undefined);
+      const onSteerResolved = vi.fn();
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'initial prompt' }],
+          new AbortController().signal,
+          'prompt-steer-exact-route',
+          {
+            type: SendMessageType.UserQuery,
+            getSteerInput,
+            onSteerResolved,
+            modelOverride: 'skill-model',
+          },
+        ),
+      );
+
+      // The CLI is notified of the resolved steer before the Steer send so it
+      // can store the pristine retry payload for Ctrl+Y.
+      expect(onSteerResolved).toHaveBeenCalledWith(steerInput);
+      // The original turn keeps the bare selector; the Steer send that
+      // carries the routed media gets the trailing-NUL exact-route marker.
+      expect(mockTurnRunFn).toHaveBeenCalledTimes(2);
+      expect(mockTurnRunFn.mock.calls[0]?.[0]).toBe('skill-model');
+      expect(mockTurnRunFn.mock.calls[1]?.[0]).toBe('skill-model\0');
+    });
+
+    it('keeps the bare selector for a boundary steer that did not route media', async () => {
+      mockTurnRunFn.mockImplementation(() =>
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'response' };
+        })(),
+      );
+      const steerInput: SteerInput = {
+        parts: [{ text: 'plain steer' }],
+        accept: vi.fn(),
+        restore: vi.fn(),
+      };
+      const getSteerInput = vi
+        .fn<() => Promise<SteerInput | undefined>>()
+        .mockResolvedValueOnce(steerInput)
+        .mockResolvedValue(undefined);
+
+      await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'initial prompt' }],
+          new AbortController().signal,
+          'prompt-steer-bare-route',
+          {
+            type: SendMessageType.UserQuery,
+            getSteerInput,
+            modelOverride: 'skill-model',
+          },
+        ),
+      );
+
+      expect(mockTurnRunFn).toHaveBeenCalledTimes(2);
+      expect(mockTurnRunFn.mock.calls[0]?.[0]).toBe('skill-model');
+      expect(mockTurnRunFn.mock.calls[1]?.[0]).toBe('skill-model');
+    });
+
     it('marks a JSON Schema invocation as failed when no structured output is produced', async () => {
       vi.mocked(mockConfig.getJsonSchema).mockReturnValue({
         type: 'object',

@@ -1351,10 +1351,31 @@ export const useGeminiStream = (
       if (modelOverrideRef.current?.endsWith('\0')) {
         return { parts, shouldProceed: true };
       }
-      if (inlineModelOverrideActiveRef.current) {
-        return { parts, shouldProceed: true };
-      }
       if (!shouldRunVisionBridge(config)) {
+        if (inlineModelOverrideActiveRef.current) {
+          // Reaching this gate with an active inline override means the
+          // capability probe rejected the images (unsupported or unresolvable
+          // target). With no vision bridge to describe them, fail closed
+          // visibly instead of exact-routing raw images that the route's
+          // slimming would silently placeholder-substitute.
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: 'Image was not sent: the active model override does not support images.',
+            },
+            timestamp,
+          );
+          const textOnly = splitImageParts(parts).nonImageParts;
+          return {
+            parts: [
+              ...textOnly,
+              {
+                text: '[Image was not sent: the active model override does not support images, and no vision bridge is available to describe it.]',
+              },
+            ],
+            shouldProceed: true,
+          };
+        }
         return { parts, shouldProceed: true };
       }
       if (signal.aborted) {
@@ -1365,6 +1386,7 @@ export const useGeminiStream = (
       const fullTurnModel = config.getDefaultVisionBridgeModel();
       if (
         allowFullTurnModel &&
+        !inlineModelOverrideActiveRef.current &&
         fullTurnModel?.agentCapable &&
         !hasAudioParts(parts)
       ) {
@@ -1564,14 +1586,43 @@ export const useGeminiStream = (
           nextParts = result.parts;
         }
       }
-      // An active inline override keeps images raw (the vision bridge is skipped
-      // for it), so the size clamp has to run here regardless of whether the
-      // turn also carried audio. This branch early-returns because the active
-      // override route owns the images — they must not also be bridged.
+      // An inline override owning an image-bearing payload needs the same
+      // capability probe the audio branch runs: raw images exact-routed to a
+      // target that cannot see them are placeholder-substituted by the route's
+      // slimming — the model would answer about an image it never received.
+      // The audio probe above already resolved the route when audio was
+      // present (targetSupportsImage / modelOverrideResolutionFailed set).
       if (
         nextParts !== null &&
-        (targetSupportsImage || inlineModelOverrideActiveRef.current)
+        hasImageParts(nextParts) &&
+        inlineModelOverrideActiveRef.current &&
+        modelOverrideRef.current !== undefined &&
+        !targetSupportsImage &&
+        !modelOverrideResolutionFailed
       ) {
+        const routeSelector = modelOverrideRef.current.endsWith('\0')
+          ? modelOverrideRef.current.slice(0, -1)
+          : modelOverrideRef.current;
+        try {
+          const runtimeView = await config
+            .getBaseLlmClient()
+            .resolveForModel(routeSelector, { failClosed: true });
+          targetSupportsImage =
+            runtimeView.contentGeneratorConfig.modalities?.image === true;
+        } catch (error) {
+          modelOverrideResolutionFailed = true;
+          debugLogger.warn(
+            `image route capability check failed for '${routeSelector}': ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+      }
+      // When the active override's target supports images, the route owns them:
+      // clamp for size and early-return (they must not also be bridged). The
+      // vision bridge below handles the unsupported/fail-closed states instead
+      // of receiving raw images it can never deliver.
+      if (nextParts !== null && targetSupportsImage) {
         const clampedParts = (
           Array.isArray(nextParts) ? nextParts : [nextParts]
         ).map((part) =>
@@ -3578,7 +3629,7 @@ export const useGeminiStream = (
         }
         if (resolved.parts.length === 0) return undefined;
         let settled = false;
-        return {
+        const input: SteerInput = {
           parts: resolved.parts,
           retryParts: resolved.retryParts,
           mediaRouted: resolved.mediaRouted,
@@ -3590,11 +3641,15 @@ export const useGeminiStream = (
           restore: () => {
             if (settled) return;
             settled = true;
+            // The re-queue now owns recovery: tell whoever stored a retry
+            // payload for this input to invalidate it (exactly-once).
+            input.onRestore?.();
             if (resolved.restoreMessages.length > 0) {
               midTurnRestoreRef?.current?.(resolved.restoreMessages);
             }
           },
         };
+        return input;
       } catch (error) {
         midTurnRestoreRef?.current?.(messages);
         onDebugMessage(
@@ -3618,6 +3673,24 @@ export const useGeminiStream = (
     },
     [midTurnDrainRef, resolveDrainedSteerMessages],
   );
+
+  // A client-driven boundary drain resolves inside core, which consumes only
+  // `parts`. Surface the drain's pristine retry payload back to the retry
+  // store so a failed Steer send stays Ctrl+Y-retryable exactly like the hook
+  // path (which stores it via metadata.preOverrideParts).
+  const handleResolvedSteer = useCallback((steerInput: SteerInput) => {
+    if (!steerInput.retryParts || steerInput.retryParts.length === 0) return;
+    const stored = normalizePartList(steerInput.retryParts);
+    lastPromptRef.current = stored;
+    steerInput.onRestore = () => {
+      // The re-queue owns recovery once restore settles the input: drop the
+      // stored payload so Ctrl+Y neither re-delivers the steer alongside the
+      // re-drain nor duplicates the already-delivered original turn.
+      if (lastPromptRef.current === stored) {
+        lastPromptRef.current = null;
+      }
+    };
+  }, []);
 
   const submitQuery = useCallback(
     async (
@@ -4108,6 +4181,29 @@ export const useGeminiStream = (
           lastPromptRef.current =
             preOverrideParts ?? metadata?.preOverrideParts ?? finalQueryToSend;
           lastPromptErroredRef.current = false;
+          const steerInput = metadata?.steerInput;
+          if (steerInput) {
+            // A failed send recovers through exactly one channel. If the steer
+            // is re-queued (restore settles it — here via onDeliveryFailed or
+            // in core via settleSteerInput when the push never landed), the
+            // re-drain owns the steer: strip its trailing segment from the
+            // stored retry payload so Ctrl+Y re-sends only the tool responses
+            // and the content cannot reach the model twice.
+            const storedPayload = lastPromptRef.current;
+            const suffixLength =
+              metadata?.preOverrideParts !== undefined && steerInput.retryParts
+                ? steerInput.retryParts.length
+                : steerInput.parts.length;
+            steerInput.onRestore = () => {
+              if (lastPromptRef.current !== storedPayload) return;
+              const stored = normalizePartList(storedPayload);
+              const trimmed = stored.slice(
+                0,
+                Math.max(0, stored.length - suffixLength),
+              );
+              lastPromptRef.current = trimmed.length > 0 ? trimmed : null;
+            };
+          }
         }
 
         if (
@@ -4198,7 +4294,10 @@ export const useGeminiStream = (
             ...(!allowConcurrentBtwDuringResponse &&
             !isDetachedToolContinuation &&
             midTurnDrainRef
-              ? { getSteerInput: drainSteerAtBoundary }
+              ? {
+                  getSteerInput: drainSteerAtBoundary,
+                  onSteerResolved: handleResolvedSteer,
+                }
               : {}),
           };
           const providerSignal = inheritedToolContinuationOwner
@@ -4535,6 +4634,7 @@ export const useGeminiStream = (
       setPendingThoughtItem,
       dualOutput,
       drainSteerAtBoundary,
+      handleResolvedSteer,
       midTurnDrainRef,
       goalQueueRef,
       bindGoalTurn,
@@ -5580,9 +5680,12 @@ export const useGeminiStream = (
               Boolean(activeGoalAdmissionRef.current),
             ) ?? []);
       let drainedSteer: SteerInput | undefined;
-      // The payload Retry (Ctrl+Y) must store when the drain's bridge failed:
+      // The payload Retry (Ctrl+Y) stores when the drain's bridge failed:
       // identical to responsesToSend except the marker-substituted steer
-      // segment is replaced with the pristine media, so the retry re-bridges.
+      // segment is replaced with the pristine media, so a retry re-bridges.
+      // If the failed send re-queues the steer instead (restore settles it),
+      // submitQuery's onRestore hook strips the steer segment back out so the
+      // content still recovers exactly once (via the re-drain).
       let steerRetryQuery: PartListUnion | undefined;
       if (drained.length > 0) {
         const midTurnAbort =
@@ -5647,13 +5750,14 @@ export const useGeminiStream = (
           );
         },
         onDeliveryFailed: () => {
-          // A failed drained continuation must recover through exactly one path.
-          // When the drain's bridge failed, the pristine media was already
-          // stored for Ctrl+Y in steerRetryQuery (passed as preOverrideParts
-          // above); re-queueing the same message via restore() here would
-          // deliver it twice — once via the retry payload and again when the
-          // queue re-drains. Only re-queue when nothing was stored for retry.
-          if (!steerRetryQuery) drainedSteer?.restore();
+          // A failed drained continuation recovers through exactly one
+          // channel per payload. restore() re-queues the steer; when it
+          // settles, the onRestore hook installed by submitQuery strips the
+          // steer segment from the stored retry payload, so Ctrl+Y re-sends
+          // only the tool responses and the re-drain owns the steer. When
+          // the push landed instead (settle accepted), restore() is a no-op
+          // and the retry payload keeps the pristine media for Ctrl+Y.
+          drainedSteer?.restore();
           endToolInteraction(
             'error',
             'tool continuation delivery failed',
