@@ -19,6 +19,7 @@ import {
   hasUnsafeMonitorBackgroundOperator,
   isCommandAllowed,
   isCommandNeedsPermission,
+  needsVerbatimArguments,
   normalizeMonitorCommand,
   splitCommands,
   stripTrailingBackgroundAmp,
@@ -1187,6 +1188,22 @@ describe('getShellConfiguration', () => {
         expect(config.argsPrefix).toEqual(['-c']);
         expect(config.shell).toBe('bash');
       });
+    });
+  });
+
+  describe('needsVerbatimArguments', () => {
+    it('is true only for cmd.exe on Windows', () => {
+      mockPlatform.mockReturnValue('win32');
+      expect(needsVerbatimArguments('cmd')).toBe(true);
+      expect(needsVerbatimArguments('powershell')).toBe(false);
+      expect(needsVerbatimArguments('bash')).toBe(false);
+    });
+
+    it('is false on non-Windows for every shell', () => {
+      mockPlatform.mockReturnValue('linux');
+      expect(needsVerbatimArguments('cmd')).toBe(false);
+      expect(needsVerbatimArguments('powershell')).toBe(false);
+      expect(needsVerbatimArguments('bash')).toBe(false);
     });
   });
 });

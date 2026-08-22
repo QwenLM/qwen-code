@@ -22,6 +22,7 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   escapeShellArg,
   getShellConfiguration,
+  needsVerbatimArguments,
   type ShellType,
   type ShellConfiguration,
 } from '../utils/shell-utils.js';
@@ -606,6 +607,9 @@ export class HookRunner {
           cwd: input.cwd,
           stdio: ['pipe', 'pipe', 'pipe'],
           shell: false,
+          // cmd.exe needs verbatim arguments (Node's MSVC CRT escaping mangles
+          // quoted paths); PowerShell keeps the default escaping. #8649.
+          windowsVerbatimArguments: needsVerbatimArguments(shellConfig.shell),
         },
       );
 
