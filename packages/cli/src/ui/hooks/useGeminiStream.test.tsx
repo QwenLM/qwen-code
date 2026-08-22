@@ -1600,12 +1600,17 @@ describe('useGeminiStream', () => {
     // tool calls): adds the team-manager mock, the `leaderCallback()`
     // accessor used to queue teammate messages, and a client-side
     // settlement shim for the `steerInput` carrier. The shim mirrors
-    // GeminiClient's contract in miniature: it accepts the carrier unless
-    // the stream yields UserPromptSubmitBlocked (a blocked send provably
-    // never pushed), in which case it restores. These tests therefore do
-    // NOT observe GeminiChat's push counter — acceptance semantics of the
-    // real client-side settlement (snapshot placement, concurrent pushes
-    // inside the hook window) are pinned in core's client.test.ts.
+    // GeminiClient's contract in miniature: any send that provably never
+    // pushed — a UserPromptSubmitBlocked event, or a stream that throws
+    // BEFORE its first event (every pre-push exit of the real client
+    // settles by restore; a post-event failure already accepted on the
+    // first event) — restores the carrier; otherwise it accepts. Keep
+    // this single shim
+    // aligned with the real client; a second miniature drifting from it
+    // would silently assert acceptance the real client does not produce.
+    // These tests do NOT observe GeminiChat's push counter — acceptance
+    // semantics of the real client-side settlement (push-site snapshot,
+    // concurrent pushes) are pinned in core's client.test.ts.
     function renderBusyMultiRoundTask(
       initialToolCalls: TrackedToolCall[],
       goalQueueRef?: Parameters<typeof useGeminiStream>[24],
@@ -1621,14 +1626,27 @@ describe('useGeminiStream', () => {
         const settlement = args[3]?.steerInput as SteerInput | undefined;
         return (async function* () {
           let blocked = false;
+          let sawEvent = false;
+          let threwBeforePush = false;
           try {
             for await (const event of stream) {
+              sawEvent = true;
               blocked ||=
                 event.type === ServerGeminiEventType.UserPromptSubmitBlocked;
               yield event;
             }
+          } catch (error) {
+            // The real client restores on any PRE-push exit; a throw after
+            // the first event already accepted at that event.
+            threwBeforePush = !sawEvent;
+            throw error;
           } finally {
-            if (blocked) settlement?.restore();
+            // Miniature of the real client's settlement contract: blocked
+            // sends and pre-push throws restore; anything that completes
+            // (or survives the first event) accepted — the harness
+            // convention for "the push landed" is a send that did not
+            // throw before its first event.
+            if (blocked || threwBeforePush) settlement?.restore();
             else settlement?.accept();
           }
         })();
@@ -1934,52 +1952,18 @@ describe('useGeminiStream', () => {
         },
       };
 
-      const mockManager = { setLeaderMessageCallback: vi.fn() };
-      (mockConfig.getTeamManager as unknown as Mock).mockReturnValue(
-        mockManager,
-      );
-
-      const client = new MockedGeminiClientClass(mockConfig);
-      // Settlement shim matching the real client: a send that provably
-      // never pushed (blocked, or threw before the history push) is
-      // settled by restore; otherwise accept.
-      client.sendMessageStream = (...args: any[]) => {
-        const stream = mockSendMessageStream(...args);
-        const settlement = args[3]?.steerInput as SteerInput | undefined;
-        return (async function* () {
-          let blocked = false;
-          try {
-            for await (const event of stream) {
-              blocked ||=
-                event.type === ServerGeminiEventType.UserPromptSubmitBlocked;
-              yield event;
-            }
-          } catch (error) {
-            settlement?.restore();
-            throw error;
-          }
-          if (blocked) settlement?.restore();
-          else settlement?.accept();
-        })();
-      };
-
-      const utils = renderTestHook(
+      // Shared harness: its settlement shim now matches the real client
+      // (blocked or pre-push throw restores, otherwise accept), so this
+      // test no longer rebuilds it inline.
+      const {
+        result,
+        rerenderWithToolCalls,
+        leaderCallback,
+        completeToolRound,
+      } = renderBusyMultiRoundTask(
         [createExecutingToolCall()],
-        client,
-        undefined,
-        undefined,
-        undefined,
         goalQueueRef as never,
       );
-      const leaderCallback = () => {
-        const callback = (
-          mockManager.setLeaderMessageCallback as Mock
-        ).mock.calls.at(-1)?.[0] as
-          | ((modelText: string, display: string) => void)
-          | undefined;
-        expect(callback).toBeDefined();
-        return callback!;
-      };
 
       act(() => {
         leaderCallback()(teammateModelText, teammateDisplay);
@@ -2007,8 +1991,8 @@ describe('useGeminiStream', () => {
         });
 
       const completed = createCompletedToolCall();
-      utils.rerenderWithToolCalls([completed]);
-      await utils.completeToolRound([completed]);
+      rerenderWithToolCalls([completed]);
+      await completeToolRound([completed]);
 
       await waitFor(() => {
         expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
@@ -2024,15 +2008,15 @@ describe('useGeminiStream', () => {
       // completed-but-unsubmitted call would otherwise hold the state at
       // Responding and block Ctrl+Y). The goal gate still holds the Idle
       // drain, so the restored batch stays queued.
-      utils.rerenderWithToolCalls([]);
+      rerenderWithToolCalls([]);
       await waitFor(() => {
-        expect(utils.result.current.streamingState).toBe(StreamingState.Idle);
+        expect(result.current.streamingState).toBe(StreamingState.Idle);
       });
 
       // Ctrl+Y retry of the failed continuation. The envelope is back in
       // the queue, so the retry payload must NOT carry it again.
       await act(async () => {
-        await utils.result.current.retryLastPrompt();
+        await result.current.retryLastPrompt();
       });
       await waitFor(() => {
         expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
@@ -2046,7 +2030,7 @@ describe('useGeminiStream', () => {
       // restored envelope is delivered exactly once by the Idle fallback.
       queuedUserMessages = false;
       pendingSubmissionCount = 1;
-      utils.rerenderWithToolCalls([]);
+      rerenderWithToolCalls([]);
       await waitFor(() => {
         expect(mockSendMessageStream).toHaveBeenCalledTimes(3);
       });
