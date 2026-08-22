@@ -218,6 +218,7 @@ import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
 import { isTempDirPath, sanitizeCwd } from '../utils/paths.js';
 import {
   clearRuntimeStatus,
+  readRuntimeStatus,
   writeRuntimeStatus,
 } from '../utils/runtimeStatus.js';
 import {
@@ -5499,11 +5500,16 @@ export class Config {
       // ACP child) the pid stays alive for the next sessions, and the
       // sweep's windowless pid re-check would otherwise protect this
       // closed session's entry forever. A handoff keeps the sidecar:
-      // the successor resumes from this very entry.
+      // the successor resumes from this very entry. Release only the
+      // claim THIS process established: a sibling serving the same
+      // session id (concurrent --resume, writer lease off) may hold
+      // the sidecar, and unlinking it would destroy the sibling's
+      // only liveness evidence.
       if (this.runtimeStatusEnabled && !this.sessionWriterHandoffRequested) {
-        await clearRuntimeStatus(
-          this.storage.getRuntimeStatusPath(this.sessionId),
-        );
+        const sidecarPath = this.storage.getRuntimeStatusPath(this.sessionId);
+        if ((await readRuntimeStatus(sidecarPath))?.pid === process.pid) {
+          await clearRuntimeStatus(sidecarPath);
+        }
       }
 
       if (Object.hasOwn(this, 'goalRuntime')) {
@@ -5563,10 +5569,18 @@ export class Config {
               Storage.collectRecordedCwds(projectDir);
             // Incomplete evidence (an unreadable or oversized artifact)
             // may omit a non-temp cwd — fail closed, like the sweep.
+            // The windowless liveness re-check mirrors the sweep-side
+            // removeEntry: a sibling may serve this very session id
+            // concurrently (concurrent --resume, writer lease off), and
+            // the release above unlinked only our own claim — a
+            // surviving sidecar records the sibling, so never delete
+            // out from under it. Salvaging first would double-count a
+            // session still accruing usage.
             const disposable =
               !incomplete &&
               recordedCwds.length > 0 &&
-              recordedCwds.every((cwd) => isTempDirPath(cwd));
+              recordedCwds.every((cwd) => isTempDirPath(cwd)) &&
+              !Storage.hasLiveSession(projectDir, false);
             if (disposable) {
               try {
                 await this.salvageSessionUsage(projectDir);

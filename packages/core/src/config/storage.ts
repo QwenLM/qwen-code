@@ -867,10 +867,11 @@ export class Storage {
    * True when the entry holds a runtime sidecar whose pid is still alive
    * — i.e. a session is running from this entry right now. With
    * `distrustStaleSidecars` off, a sidecar's pid is trusted regardless
-   * of its age: the deletion-gate re-check, where a false "live" can
-   * only leak the entry, never delete a live session's records.
+   * of its age: the deletion-gate re-checks (the sweep's removeEntry
+   * and the shutdown deletion leg), where a false "live" can only leak
+   * the entry, never delete a live session's records.
    */
-  private static hasLiveSession(
+  static hasLiveSession(
     entryPath: string,
     distrustStaleSidecars = true,
   ): boolean {

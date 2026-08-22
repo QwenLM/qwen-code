@@ -1706,12 +1706,28 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('shutdown() runtime sidecar release', () => {
+    const sidecarOf = (
+      config: Config,
+      pid: number,
+    ): runtimeStatus.RuntimeStatus => ({
+      schemaVersion: 1,
+      pid,
+      sessionId: config.getSessionId(),
+      workDir: '/work',
+      hostname: 'host',
+      startedAt: 0,
+      qwenVersion: null,
+    });
+
     it('clears the sidecar so a closed session stops claiming a live pid', async () => {
       // In multi-session processes (the `qwen serve` ACP child) the pid
       // outlives the session; a leftover sidecar would shield the closed
       // session's entry from the sweep forever.
       const config = new Config(baseParams);
       config.markRuntimeStatusEnabled(); // models the successful claim
+      const readSpy = vi
+        .spyOn(runtimeStatus, 'readRuntimeStatus')
+        .mockResolvedValue(sidecarOf(config, process.pid));
       const clearSpy = vi
         .spyOn(runtimeStatus, 'clearRuntimeStatus')
         .mockResolvedValue(undefined);
@@ -1722,6 +1738,28 @@ describe('Server Config (config.ts)', () => {
         config.storage.getRuntimeStatusPath(config.getSessionId()),
       );
 
+      readSpy.mockRestore();
+      clearSpy.mockRestore();
+    });
+
+    it('keeps a sidecar recorded by a sibling process (R14-1)', async () => {
+      // Concurrent --resume (writer lease off) lets two processes serve
+      // one session id; unlinking the sibling's claim would destroy its
+      // only liveness evidence.
+      const config = new Config(baseParams);
+      config.markRuntimeStatusEnabled();
+      const readSpy = vi
+        .spyOn(runtimeStatus, 'readRuntimeStatus')
+        .mockResolvedValue(sidecarOf(config, process.pid + 12345));
+      const clearSpy = vi
+        .spyOn(runtimeStatus, 'clearRuntimeStatus')
+        .mockResolvedValue(undefined);
+
+      await config.shutdown();
+
+      expect(clearSpy).not.toHaveBeenCalled();
+
+      readSpy.mockRestore();
       clearSpy.mockRestore();
     });
 
@@ -7287,6 +7325,9 @@ describe('Server Config (config.ts)', () => {
       const listSpy = vi
         .spyOn(Storage, 'listTranscriptPaths')
         .mockReturnValue(['/entry/chats/sess.jsonl']);
+      const liveSpy = vi
+        .spyOn(Storage, 'hasLiveSession')
+        .mockReturnValue(false);
       try {
         const tmpCwd = path.join(os.tmpdir(), 'qwen-enter-sess-test');
         const config = new Config({
@@ -7314,6 +7355,47 @@ describe('Server Config (config.ts)', () => {
       } finally {
         cwdSpy.mockRestore();
         listSpy.mockRestore();
+        liveSpy.mockRestore();
+      }
+    });
+
+    it('keeps the project dir when a sibling still serves this session id (R14-1)', async () => {
+      // Concurrent --resume (writer lease off) lets two processes serve
+      // one session id. The release unlinked only our own claim, so a
+      // surviving sidecar records the sibling; the windowless liveness
+      // re-check — mirroring the sweep-side removeEntry — must abort
+      // before the irreversible step.
+      const guardSpy = vi
+        .spyOn(Storage, 'containsOnlySessionArtifacts')
+        .mockReturnValue(true);
+      const cwdSpy = vi.spyOn(Storage, 'collectRecordedCwds').mockReturnValue({
+        cwds: [path.join(os.tmpdir(), 'qwen-sess-cwd')],
+        incomplete: false,
+      });
+      const liveSpy = vi.spyOn(Storage, 'hasLiveSession').mockReturnValue(true);
+      try {
+        const tmpCwd = path.join(os.tmpdir(), 'qwen-sibling-entry');
+        const config = new Config({
+          ...baseParams,
+          cwd: tmpCwd,
+          targetDir: tmpCwd,
+        });
+        config['initialized'] = true;
+
+        await config.shutdown();
+
+        expect(liveSpy).toHaveBeenCalledWith(
+          config.storage.getProjectDir(),
+          false,
+        );
+        expect(rmSpy).not.toHaveBeenCalledWith(
+          config.storage.getProjectDir(),
+          expect.anything(),
+        );
+      } finally {
+        guardSpy.mockRestore();
+        cwdSpy.mockRestore();
+        liveSpy.mockRestore();
       }
     });
 
