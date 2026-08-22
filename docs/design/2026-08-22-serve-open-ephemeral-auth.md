@@ -2,6 +2,7 @@
 
 - Status: Proposed
 - Baseline: `main` at `ea872a4621` (2026-08-22)
+- Revalidated: `main` at `2172721405` (2026-08-23)
 - Related tracking issue:
   [#4514](https://github.com/QwenLM/qwen-code/issues/4514)
 - Implementation plan: [2026-08-22-serve-open-ephemeral-auth.md](../plans/2026-08-22-serve-open-ephemeral-auth.md)
@@ -48,13 +49,23 @@ visible URL, and sends the token in `Authorization: Bearer ...` headers.
 Refresh therefore works, while closing the tab intentionally discards the
 credential.
 
+The Desktop Shell already uses a related per-launch pattern: it creates a
+256-bit token, passes it to a child daemon through `QWEN_SERVER_TOKEN`, starts
+that daemon with `--require-auth`, and hands the credential to the Web Shell in
+a URL fragment. This proposal deliberately reuses the fragment and bearer
+semantics while differing at the CLI boundary: the token is base64url-encoded,
+is assigned to `ServeOptions.token` without mutating `process.env`, and leaves
+loopback `/health` pre-authentication unless the operator passes
+`--require-auth`. See
+[Desktop Web Shell release](./2026-07-31-desktop-web-shell-release.md).
+
 ## Decision
 
 The CLI will automatically create an ephemeral bearer token for a bare
 `qwen serve --open` invocation only when all of these conditions hold:
 
 1. `--open` is enabled.
-2. The primary listener is bound to loopback.
+2. `isLoopbackBind()` classifies the primary listener as loopback.
 3. Web Shell serving is enabled and built assets are available.
 4. The current environment is eligible for browser launch.
 5. The existing token resolution produces no non-empty token.
@@ -90,12 +101,23 @@ property of the two CLI entry paths that own `--open`, not a daemon API default.
 | `qwen serve --open` in CI, SSH without a display, or another headless environment | No                                         | Existing browser-launch no-op and loopback auth default                             |
 | `qwen serve --hostname 0.0.0.0 --open` without a token                            | No                                         | Existing non-loopback boot refusal                                                  |
 | `qwen serve --open --local-control`                                               | Yes for the primary listener when eligible | Primary uses the ephemeral runtime token; LAN keeps its separate pairing credential |
-| `qwen serve --open --allow-origin '*'` on eligible loopback                       | Yes, if no configured token exists         | Generated bearer satisfies the existing wildcard-origin boot guard                  |
+| `qwen serve --open --enable-session-shell` on eligible loopback                   | Yes, if no configured token exists         | The explicit shell opt-in becomes active and remains bearer-gated                   |
+| `qwen serve --open --allow-origin '*'` on eligible loopback                       | Yes, if no configured token exists         | Generated bearer intentionally satisfies the existing wildcard-origin boot guard    |
+| `qwen serve --open --allow-origin chrome-extension://<id>`                        | Yes, if no configured token exists         | Opened tab works; the extension does not receive or discover the generated token    |
 
 Static Web Shell assets remain mounted before bearer authentication because
 address-bar navigation and script loading cannot attach an Authorization
 header. Normal API routes require the generated bearer. Loopback `/health`
 remains pre-authentication unless `--require-auth` is present.
+
+Automatically satisfying the `--allow-origin '*'` boot guard is intentional.
+The operator still has to pass the wildcard flag explicitly, and the generated
+bearer prevents an unrelated page from calling protected API routes without
+the credential. It does not change the residual pre-authentication surfaces:
+static Web Shell assets remain readable, and loopback `/health` remains
+pre-authentication unless `--require-auth` is present. Operators who do not
+want those surfaces should combine `--require-auth` and, where appropriate,
+`--no-web` with an explicitly managed token.
 
 ## Lifecycle and recovery
 
@@ -115,6 +137,12 @@ Consequences of this intentionally short lifetime are:
 - Refreshing the opened tab keeps working.
 - Closing the only tab loses the browser copy. Restarting
   `qwen serve --open` creates a new token and opens a new authenticated tab.
+- Opening a bookmark, pasting the cleaned URL into another tab, restoring a tab
+  after the browser process exits, or refreshing after `sessionStorage` was
+  unavailable loads the static shell without the credential. API requests then
+  receive plain `401 Unauthorized`. The current Web Shell has no global
+  authentication-recovery screen; restart `qwen serve --open`, or use an
+  explicitly managed token for a workflow that must be reopened or shared.
 - A browser launcher failure follows the existing recovery path, which may
   print the secret-bearing fragment URL for manual opening.
 - A long-running or multi-client workflow should configure
@@ -146,10 +174,24 @@ migrations:
 2. Start plain `qwen serve` without `--open` when the token-less loopback
    developer contract is desired.
 
-On eligible loopback launches, automatic generation also means combinations
-that already require a configured bearer, such as `--allow-origin '*'` or an
-explicit `--enable-session-shell`, can use the generated credential. Their
-existing independent safety checks and opt-in flags remain unchanged.
+This compatibility change also reaches first-party clients. Daemon-backed
+`qwen channel set` and `qwen channel reload`, plus the `--daemon-url` forms of
+`qwen channel status` and `qwen channel stop`, cannot discover the ephemeral
+token. Use a shared `QWEN_SERVER_TOKEN` or pass the same stable `--token` to
+those commands. The Chrome extension's documented command remains plain
+`qwen serve --allow-origin chrome-extension://<id>` without `--open`. Combining
+that command with `--open` protects the primary API but does not deliver the
+generated credential to the extension, so the extension cannot authenticate;
+omit `--open` for the existing extension flow. Automatic extension credential
+delivery is not part of this proposal. No extension default or prompt change is
+needed because both already recommend the plain command without `--open`.
+
+An explicit `--enable-session-shell` has a separate posture change. Without a
+configured token today, the daemon ignores the flag with a warning. On an
+eligible `--open` launch, generation supplies that token and the explicit flag
+therefore enables direct session shell execution. The operator opt-in and
+bearer gate remain unchanged, but the formerly inert combination becomes live
+and must be called out in user documentation and tests.
 
 The generated token is not browser-scoped. Possession grants the same daemon
 authority as an explicitly configured runtime token. Per-client credentials,
@@ -169,7 +211,10 @@ store work tracked by #4514.
   browser launcher retains its manual-URL fallback. No persistent recovery
   credential is added.
 - Runtime startup failure keeps the existing daemon shutdown/error behavior;
-  the ephemeral token does not create a second lifecycle.
+  the ephemeral token does not create a second lifecycle. The ordinary yargs
+  path uses the default `runQwenServe()` contract, which does not return a
+  `RunHandle` before runtime readiness. The listen-first fast path already
+  closes the handle and exits when `runtimeReady` rejects.
 
 ## Alternatives considered
 
@@ -186,6 +231,15 @@ An opt-in flag preserves the exact semantics of bare `--open`, but leaves the
 common command with the same manual token requirement. The selected product
 contract treats `--open` as the browser-owned interactive mode and accepts the
 documented compatibility change.
+
+### Add `--no-ephemeral-auth`
+
+An opt-out would preserve browser auto-launch for the old token-less loopback
+contract, but the resulting Web Shell would still fail every strict route. It
+would add a second `--open` contract, two CLI parsing paths, documentation, and
+tests for a deliberately partial UI. Plain `qwen serve` preserves the old
+contract cleanly, while an explicit shared token supports a complete
+multi-client Web Shell, so no opt-out flag is added.
 
 ### Persist a generated token
 
@@ -212,6 +266,8 @@ all daemon transports.
 - Pair tokens, per-client identity, audit ownership, or independent revocation
 - Automatic credentials for non-loopback binds
 - Changes to SDK token discovery
+- Chrome extension token discovery or automatic credential delivery
+- A new global Web Shell 401 or credential-recovery screen
 - Changes to Local Control's listener-scoped pairing credential
 
 ## Acceptance criteria
@@ -222,7 +278,8 @@ all daemon transports.
   that daemon.
 - Plain `qwen serve`, direct `runQwenServe()` callers, headless `--open`,
   API-only mode, and non-loopback boot checks preserve their existing behavior.
-- Explicit CLI and environment tokens retain precedence and are never replaced.
+- Non-empty explicit CLI and environment tokens retain precedence and are never
+  replaced. An empty or whitespace-only selected value is treated as absent.
 - The generated token is not persisted by the daemon or printed during a
   successful browser launch.
 - Refresh works through the existing per-tab Web Shell storage; closing the tab
