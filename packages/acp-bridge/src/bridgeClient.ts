@@ -2352,6 +2352,13 @@ export class BridgeClient implements Client {
   ): Promise<void> {
     try {
       const result = await entry.artifacts.upsertMany(artifacts, options);
+      for (const warning of result.warnings ?? []) {
+        writeStderrLine(
+          `[artifacts] session=${entry.sessionId} action=warning reason=${JSON.stringify(
+            warning,
+          )}`,
+        );
+      }
       this.publishArtifactChanges(entry, result.changes, turn);
     } catch (error) {
       writeStderrLine(

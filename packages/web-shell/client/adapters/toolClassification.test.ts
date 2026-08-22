@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ACPToolCall } from './types';
 import {
+  backgroundShellTaskId,
   isActiveToolStatus,
   isBackgroundSubAgentToolCall,
 } from './toolClassification';
@@ -93,5 +94,55 @@ describe('isBackgroundSubAgentToolCall', () => {
         rawOutput: { type: 'task_execution', status: 'background' },
       }),
     ).toBe(true);
+  });
+});
+
+describe('backgroundShellTaskId', () => {
+  it.each([
+    ['Background shell bg_1234abcd started.', 'bg_1234abcd'],
+    ['background shell bg_1234abcd started.', 'bg_1234abcd'],
+    ['Promoted to background: bg_abcd-1234', 'bg_abcd-1234'],
+  ])('extracts the task id from %s', (rawOutput, taskId) => {
+    expect(
+      backgroundShellTaskId({
+        callId: 'shell-1',
+        toolName: 'shell',
+        status: 'completed',
+        rawOutput,
+      }),
+    ).toBe(taskId);
+  });
+
+  it('ignores failed shell calls', () => {
+    expect(
+      backgroundShellTaskId({
+        callId: 'shell-1',
+        toolName: 'shell',
+        status: 'failed',
+        rawOutput: 'Background shell bg_1234abcd started.',
+      }),
+    ).toBeUndefined();
+  });
+
+  it('ignores non-shell tool names', () => {
+    expect(
+      backgroundShellTaskId({
+        callId: 'read-1',
+        toolName: 'Read',
+        status: 'completed',
+        rawOutput: 'Background shell bg_1234abcd started.',
+      }),
+    ).toBeUndefined();
+  });
+
+  it('ignores non-string rawOutput', () => {
+    expect(
+      backgroundShellTaskId({
+        callId: 'shell-1',
+        toolName: 'shell',
+        status: 'completed',
+        rawOutput: { taskId: 'bg_1234abcd' },
+      }),
+    ).toBeUndefined();
   });
 });
