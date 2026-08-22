@@ -1065,11 +1065,18 @@ export const App: React.FC = () => {
         };
 
         // Client-side commands that trigger extension actions directly
-        // instead of being sent to the agent as messages.
-        const clientActions: Record<string, () => void> = {
-          auth: () => vscode.postMessage({ type: 'auth', data: {} }),
-          account: () =>
-            vscode.postMessage({ type: 'getAccountInfo', data: {} }),
+        // instead of being sent to the agent as messages. Each returns
+        // false when it declines, in which case the caller leaves the typed
+        // trigger text and the completion menu untouched.
+        const clientActions: Record<string, () => boolean> = {
+          auth: () => {
+            vscode.postMessage({ type: 'auth', data: {} });
+            return true;
+          },
+          account: () => {
+            vscode.postMessage({ type: 'getAccountInfo', data: {} });
+            return true;
+          },
           // Never arm the selector underneath an active overlay: its
           // capture-phase document keydown listener would steal keys from
           // the visible topmost layer. Same isOverlayActive predicate as the
@@ -1077,16 +1084,23 @@ export const App: React.FC = () => {
           // one derived boolean instead of re-listing overlays here.
           model: () => {
             if (isOverlayActive) {
-              return;
+              return false;
             }
             setShowModelSelector(true);
+            return true;
           },
         };
 
         const clientAction = clientActions[itemId];
         if (clientAction) {
+          // Run the action before mutating the composer: a declined action
+          // (the /model overlay gate) must keep the typed trigger text and
+          // the completion menu, so the user can retry the selection once
+          // the overlay clears instead of retyping the command.
+          if (!clientAction()) {
+            return;
+          }
           clearTriggerText();
-          clientAction();
           closeCompletion();
           return;
         }
@@ -1322,6 +1336,14 @@ export const App: React.FC = () => {
   // reaches YOLO) underneath it.
   const handleInputKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
+      if (e.key === 'Tab' && !e.shiftKey && showModelSelector) {
+        // The selector never takes DOM focus, so an unhandled Tab would
+        // move focus to the next tabbable element while the dropdown stays
+        // open, leaving subsequent typing nowhere to go. Swallow it, like
+        // the mode-cycle branch below did before the guard existed.
+        e.preventDefault();
+        return;
+      }
       if (
         e.key === 'Tab' &&
         !e.shiftKey &&
