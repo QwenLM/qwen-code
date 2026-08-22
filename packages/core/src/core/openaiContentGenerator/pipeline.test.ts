@@ -2911,6 +2911,174 @@ describe('ContentGenerationPipeline', () => {
       ]);
     });
 
+    it('does not yield post-finish redelivered content from the tail backstop after a yielded finish response', async () => {
+      // On hasThinkingTagInReasoning turns, content the gateway redelivers
+      // AFTER the finish chunk is still held by shouldHoldParts (its
+      // condition is !choice.finish_reason). The converter already flushed
+      // the held parts into the finish response, so the EOF backstops must
+      // not release the post-finish held state as an extra response —
+      // before the gate, the tail backstop appended a duplicated
+      // [{text:'Answer '},{text:'<thi'}] response after the finish response
+      // and the turn was accepted with duplicated visible text.
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'chunk-1',
+            choices: [{ delta: { content: 'Answer ' }, finish_reason: null }],
+          } as OpenAI.Chat.ChatCompletionChunk;
+          yield {
+            id: 'chunk-2',
+            choices: [{ delta: {}, finish_reason: 'stop' }],
+          } as OpenAI.Chat.ChatCompletionChunk;
+          // Post-finish redelivery of already-delivered content.
+          yield {
+            id: 'chunk-3',
+            choices: [
+              { delta: { content: 'Answer <thi' }, finish_reason: null },
+            ],
+          } as OpenAI.Chat.ChatCompletionChunk;
+        },
+      };
+      const emptyResponse = new GenerateContentResponse();
+      emptyResponse.candidates = [
+        { content: { parts: [], role: 'model' }, index: 0 },
+      ];
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToGemini as Mock).mockImplementation(
+        (chunk: OpenAI.Chat.ChatCompletionChunk, context) => {
+          const choice = chunk.choices?.[0];
+          if (choice?.finish_reason) {
+            // The real converter flushes held parts into the finish
+            // response and clears the held state on a finish chunk.
+            const finishResponse = new GenerateContentResponse();
+            finishResponse.candidates = [
+              {
+                content: {
+                  parts: context.pendingUntrustedResponseParts ?? [],
+                  role: 'model',
+                },
+                finishReason: FinishReason.STOP,
+                index: 0,
+              },
+            ];
+            context.pendingUntrustedResponseParts = undefined;
+            return finishResponse;
+          }
+          // Non-finish chunks are held by shouldHoldParts; the post-finish
+          // redelivery additionally leaves a demoted tag tail pending.
+          context.pendingUntrustedResponseParts = [
+            { text: choice?.delta?.content ?? '' },
+          ];
+          if (chunk.id === 'chunk-3') {
+            context.pendingUntrustedResponseParts = [{ text: 'Answer ' }];
+            context.pendingPostDemotionTagTail = '<thi';
+          }
+          return emptyResponse;
+        },
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        'test-prompt-id',
+      );
+      const results = [];
+      for await (const result of resultGenerator) results.push(result);
+
+      // Exactly the finish response — no extra backstop response after it.
+      expect(results).toHaveLength(1);
+      expect(results[0]?.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
+      expect(results[0]?.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'Answer ' },
+      ]);
+    });
+
+    it('does not yield post-finish redelivered content from the root-level flush after a yielded finish response', async () => {
+      // Root-level flush twin of the tail backstop witness: a full-content
+      // post-finish redelivery held by shouldHoldParts must not be yielded
+      // again at EOF once the finish chunk was converted — the merge logic
+      // intentionally drops post-finish content (the merge base discarded
+      // it), and yielding it duplicated the visible turn text.
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const mockStream = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            id: 'chunk-1',
+            choices: [
+              { delta: { content: 'Answer here.' }, finish_reason: null },
+            ],
+          } as OpenAI.Chat.ChatCompletionChunk;
+          yield {
+            id: 'chunk-2',
+            choices: [{ delta: {}, finish_reason: 'stop' }],
+          } as OpenAI.Chat.ChatCompletionChunk;
+          // Post-finish full-content redelivery.
+          yield {
+            id: 'chunk-3',
+            choices: [
+              { delta: { content: 'Answer here.' }, finish_reason: null },
+            ],
+          } as OpenAI.Chat.ChatCompletionChunk;
+        },
+      };
+      const emptyResponse = new GenerateContentResponse();
+      emptyResponse.candidates = [
+        { content: { parts: [], role: 'model' }, index: 0 },
+      ];
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIChunkToGemini as Mock).mockImplementation(
+        (chunk: OpenAI.Chat.ChatCompletionChunk, context) => {
+          const choice = chunk.choices?.[0];
+          if (choice?.finish_reason) {
+            const finishResponse = new GenerateContentResponse();
+            finishResponse.candidates = [
+              {
+                content: {
+                  parts: context.pendingUntrustedResponseParts ?? [],
+                  role: 'model',
+                },
+                finishReason: FinishReason.STOP,
+                index: 0,
+              },
+            ];
+            context.pendingUntrustedResponseParts = undefined;
+            return finishResponse;
+          }
+          context.pendingUntrustedResponseParts = [
+            { text: choice?.delta?.content ?? '' },
+          ];
+          return emptyResponse;
+        },
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockStream,
+      );
+
+      const resultGenerator = await pipeline.executeStream(
+        request,
+        'test-prompt-id',
+      );
+      const results = [];
+      for await (const result of resultGenerator) results.push(result);
+
+      expect(results).toHaveLength(1);
+      expect(results[0]?.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
+      expect(results[0]?.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'Answer here.' },
+      ]);
+    });
+
     it('rejects a held post-demotion closing tag tail at clean stream EOF', async () => {
       // Closing-tag twin of the full-tag-word EOF backstop: pins the closing
       // branch (`\/?`) of the backstop regex — a held '</think' must fail

@@ -878,7 +878,17 @@ export class ContentGenerationPipeline {
         }
       }
 
+      // Clean-EOF backstops: run only when no finish chunk was ever
+      // converted (neither yielded nor still pending). Once a finish chunk
+      // has been seen, the converter has already flushed the held parts into
+      // the finish response, so anything still held at EOF is post-finish
+      // redelivered content the merge logic intentionally drops (the merge
+      // base discarded it too) — yielding it here would append a duplicated
+      // or stray response after the finish response on
+      // hasThinkingTagInReasoning turns.
       if (
+        !finishYielded &&
+        !pendingFinishResponse &&
         context.pendingThinkingTagCandidate &&
         !context.pendingThinkingTagCandidate.closingTagName &&
         !/\S/.test(context.pendingThinkingTagCandidate.text)
@@ -896,7 +906,11 @@ export class ContentGenerationPipeline {
           ];
           yield response;
         }
-      } else if (context.pendingThinkingTagCandidate) {
+      } else if (
+        !finishYielded &&
+        !pendingFinishResponse &&
+        context.pendingThinkingTagCandidate
+      ) {
         const heldCandidateText = context.pendingThinkingTagCandidate.text;
         context.pendingThinkingTagCandidate = undefined;
         if (/<\/?think(?:ing)?/i.test(heldCandidateText)) {
@@ -924,7 +938,11 @@ export class ContentGenerationPipeline {
         yield response;
       }
 
-      if (context.pendingPostDemotionTagTail) {
+      if (
+        !finishYielded &&
+        !pendingFinishResponse &&
+        context.pendingPostDemotionTagTail
+      ) {
         const tail = context.pendingPostDemotionTagTail;
         context.pendingPostDemotionTagTail = undefined;
         if (/<\/?think(?:ing)?/i.test(tail)) {
@@ -961,7 +979,11 @@ export class ContentGenerationPipeline {
       // shouldHoldParts and the converter's finish-time flush never executed
       // because no finish chunk arrived. Completing with zero responses would
       // silently discard the held content; yield it instead.
-      if (context.pendingUntrustedResponseParts?.length) {
+      if (
+        !finishYielded &&
+        !pendingFinishResponse &&
+        context.pendingUntrustedResponseParts?.length
+      ) {
         const pendingParts = context.pendingUntrustedResponseParts;
         context.pendingUntrustedResponseParts = undefined;
         const response = new GenerateContentResponse();
