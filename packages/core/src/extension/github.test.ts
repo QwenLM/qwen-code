@@ -819,6 +819,44 @@ describe('git extension helpers', () => {
       expect(mockHttpsGet).toHaveBeenCalledTimes(1);
     });
 
+    it('aborts the commit SHA resolution when the signal aborts mid-request', async () => {
+      vi.stubEnv('GITHUB_TOKEN', 'must-not-be-sent');
+      vi.spyOn(dns, 'lookup').mockResolvedValue([
+        { address: '8.8.8.8', family: 4 },
+      ] as never);
+      const controller = new AbortController();
+      const reason = new Error('download cancelled');
+      // A response body that never completes: only the abort wiring can
+      // settle this request, so a dropped signal hangs instead of aborting.
+      const hangingResponse = Object.assign(new Readable({ read() {} }), {
+        statusCode: 200,
+        headers: {},
+      }) as IncomingMessage;
+      const request = createRequestMock();
+      mockHttpsGet.mockImplementationOnce(((_url, options, callback) => {
+        expect(String(_url)).toContain('/commits/HEAD');
+        callResponseCallback(options, callback, hangingResponse);
+        // Abort while the commit SHA request is still in flight.
+        controller.abort(reason);
+        return request;
+      }) as typeof https.get);
+
+      await expect(
+        downloadPublicGitHubArchiveFallback(
+          {
+            type: 'git',
+            source: 'https://github.com/owner/repo',
+            networkPolicy: 'public',
+          },
+          '/dest',
+          controller.signal,
+        ),
+      ).rejects.toBe(reason);
+      expect(request.destroy).toHaveBeenCalled();
+      // The archive download and every later request must be skipped.
+      expect(mockHttpsGet).toHaveBeenCalledTimes(1);
+    });
+
     it.each([
       'http://github.com/owner/repo',
       'https://gitlab.com/owner/repo',
