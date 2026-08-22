@@ -163,6 +163,20 @@ export interface Ledger {
    * which leaves the trend unevaluable rather than measured on the wrong
    * number.
    *
+   * One accepted seam: the counting RULE changed once — a fix-induced
+   * re-report (a carried id fronting a NEW defect) moved from re-post to
+   * first-time — and nothing parts an old-rule marker from a new one, on
+   * purpose. A loop in flight at the change compares one round counted under
+   * each rule for exactly one round; the old rule UNDERCOUNTED (it dropped
+   * the marked re-reports), so the mixed comparison can only fire the volume
+   * advisory spuriously, never mask a genuine one — and the advisory decides
+   * nothing, names itself an observation, and heals the round after, when
+   * both points are counted under the new rule. A marker version was not
+   * paid for that: `parseLedger` refuses any `v` it does not know, so
+   * bumping it for a count no gate reads would cost an old reader the WHOLE
+   * marker — work list, anchor, streak — the same reason every field added
+   * since has degraded by absence instead.
+   *
    * Rides and sheds with `posted`, which it qualifies.
    */
   fresh?: number;

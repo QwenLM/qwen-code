@@ -5278,20 +5278,6 @@ export const composeReviewCommand: CommandModule = {
 };
 
 /**
- * The first line of what follows the severity marker, minus any carried id.
- * A carried-forward finding names its ORIGINAL id right after the marker —
- * `**[Critical]** R1-2: the same claim, re-reported` — and reading it back
- * here is what makes the machine ledger agree with the report it rides in,
- * instead of renumbering the entry to a fresh `R<round>-<n>` the report
- * never used.
- *
- * Module-level rather than a closure inside the ledger builder, because the
- * builder is no longer its only consumer: the convergence diagnosis reads the
- * same id to tell a re-posted still-standing finding from fresh activity, and
- * a second restatement would let one end call a comment carried while the
- * other calls it new.
- */
-/**
  * The fix-induced marking, read from the head of the CLAIM — after the id and
  * its separator, never inside the id grammar.
  *
@@ -5321,6 +5307,12 @@ const FIX_INDUCED_READBACK = /^\(\s*fix-induced\s*\)[:.,-]?\s*/i;
  * trend counts comments posted for the first time, and reading the id alone
  * called both of them re-posts, so the trend's baseline fell on exactly the
  * churning pull requests where new work was not falling at all.
+ *
+ * Module-level rather than a closure inside the ledger builder, because the
+ * builder is no longer its only consumer: the convergence diagnosis reads the
+ * same id to tell a re-posted still-standing finding from fresh activity, and
+ * a second restatement would let one end call a comment carried while the
+ * other calls it new.
  */
 function readClaim(rest: string): {
   id?: string;
