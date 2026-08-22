@@ -56,8 +56,8 @@ import * as audioBridgeService from '../../services/audio-bridge-service.js';
 import { CommandKind } from '../../ui/commands/types.js';
 import { buildAcpModelOptions } from '../../utils/acpModelUtils.js';
 import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
-import { CAPTURE_SCREEN_CONTEXT_TOOL_NAME } from '../../serve/live/capture-screen-context.js';
-import { SPEAK_TO_USER_TOOL_NAME } from '../../serve/live/live-speak-to-user.js';
+import { CAPTURE_SCREEN_CONTEXT_TOOL_NAME } from '../live/capture-screen-context.js';
+import { SPEAK_TO_USER_TOOL_NAME } from '../live/live-speak-to-user.js';
 import {
   collectHistoryReplayUpdates,
   createReplayCumulativeUsage,

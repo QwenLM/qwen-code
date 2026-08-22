@@ -7,7 +7,7 @@
 import {
   isValidSessionId,
   normalizeSessionIdForLookup,
-} from '../../config/session-id.js';
+} from '../config/session-id.js';
 
 export const LIVE_SESSION_SOURCE_PREFIX = 'realtime_voice:';
 export const STANDALONE_SESSION_SOURCE_TYPE = 'standalone';

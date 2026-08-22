@@ -57,7 +57,11 @@ import {
   setGhHost,
 } from './lib/gh.js';
 import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
-import { parseReceiptIds } from './lib/receipt.js';
+import {
+  parseReceiptCommentIds,
+  parseReceiptIds,
+  parseReceiptObject,
+} from './lib/receipt.js';
 import {
   composeReview,
   normalizeSeverityFloor,
@@ -78,6 +82,7 @@ import {
   submitAoneReview,
   type AoneSubmitResult,
 } from './lib/platform/aone.js';
+import { githubReader } from './lib/platform/github.js';
 import {
   CRITICAL_PREFIX,
   SUGGESTION_PREFIX,
@@ -99,16 +104,67 @@ import {
 const EVENTS = new Set(['APPROVE', 'REQUEST_CHANGES', 'COMMENT']);
 
 /**
- * Review ids a prior submit in this window already recorded. Best-effort: an
- * absent or unreadable receipt is an empty list, never a throw — the caller
- * adds the current id regardless. The shape parse is shared with cleanup's
- * reader (`lib/receipt.ts`) so the two halves cannot drift.
+ * Ids a prior submit in this window already recorded, through one axis
+ * parse. Best-effort: an absent or unreadable receipt is an empty list,
+ * never a throw — the caller adds the current ids regardless. The shape
+ * parse is shared with cleanup's reader (`lib/receipt.ts`) so the two
+ * halves cannot drift.
  */
-function readReceiptIds(receiptPath: string): number[] {
+function readReceiptIds(
+  receiptPath: string,
+  parse: (raw: string) => number[],
+): number[] {
   try {
-    return parseReceiptIds(readFileSync(receiptPath, 'utf8'));
+    return parse(readFileSync(receiptPath, 'utf8'));
   } catch {
     return [];
+  }
+}
+
+/**
+ * The whole prior receipt object — the merge source for a rewrite. The
+ * receipt file is keyed by PR number alone but carries an axis per
+ * platform (review ids on GitHub, comment ids on Aone), so a writer that
+ * rebuilt it from only its own axis would un-vouch the other platform's
+ * sanctioned writes for a same-numbered target. Absent or unreadable is
+ * an empty object, never a throw — best-effort like every receipt read.
+ */
+function readReceiptObject(receiptPath: string): Record<string, unknown> {
+  try {
+    return parseReceiptObject(readFileSync(receiptPath, 'utf8')) ?? {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Receipt for cleanup's Aone bypass audit: EVERY comment this session was
+ * authorised to post, by id — the Aone twin of the gh receipt below. There
+ * submit posts a *review* and the audit flags issue comments it never
+ * posts; on Aone submit POSTS COMMENTS (inline findings + summary), so
+ * sanctioned-vs-bypass keys on comment ids instead. Accumulates prior ids
+ * for the same reason the gh half does (the window spans drift restarts).
+ * Best-effort: a receipt failure must never fail a review that DID post,
+ * and zero landed ids write nothing (nothing to vouch for).
+ */
+function recordAoneReceipt(pr: number, newIds: number[], event: string): void {
+  if (newIds.length === 0) return;
+  try {
+    const receiptPath = tmpFile(`pr-${pr}`, 'submit-receipt.json');
+    const priorIds = readReceiptIds(receiptPath, parseReceiptCommentIds);
+    const commentIds = [...new Set([...priorIds, ...newIds])];
+    mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+    atomicWriteFileSync(
+      receiptPath,
+      `${JSON.stringify({
+        ...readReceiptObject(receiptPath),
+        commentIds,
+        event,
+        postedAt: new Date().toISOString(),
+      })}\n`,
+    );
+  } catch {
+    /* audit metadata only — the post itself succeeded */
   }
 }
 
@@ -961,6 +1017,12 @@ export function runSubmit(
       // JSON too: all-zero counts with a silent ambiguous flag read as a
       // clean total failure, and a user hand-posting the "remainder"
       // double-posts the comment the count never saw.
+      // Vouch for the writes that DID land: cleanup still runs after this
+      // failure (Step 9), and without the ids the tripwire would flag
+      // submit's own partial post as a bypass. The ambiguous write has no
+      // id to vouch with — it stays unvouched, and any flag it draws is
+      // the "inspect the MR" this report asks for.
+      recordAoneReceipt(args.pr, partial.inlineCommentIds, event);
       const landed =
         partial.postedInline > 0 || partial.summaryPosted || partial.ambiguous;
       writeStderrLine(
@@ -991,11 +1053,21 @@ export function runSubmit(
       process.exitCode = 3;
       return;
     }
+    // URL for the Posted line: the receipt's webUrl is the MR's own
+    // detailUrl, captured by submitAoneReview's pre-write drift-gate read.
+    // detailUrl is a stable attribute of the MR, so a re-query through the
+    // reader's composeUrl cannot return a link that read lacked — it would
+    // only pay a blocking a1 call (120 s deadline, transient retries) on
+    // exactly the flaky-platform state that lost the field. '' stays '':
+    // the skill relays the target's coordinates (and never assembles a
+    // link — the nested-group owner/repo collapse could name a different
+    // repo).
+    const postedUrl = result.webUrl;
     writeStderrLine(
       `Posted ${event} to ${args.repo}#${args.pr} — ${auth.why}` +
         (cappedBy.length ? ` (capped by ${cappedBy.join(', ')})` : '') +
         '.' +
-        (result.webUrl ? ` ${result.webUrl}` : ''),
+        (postedUrl ? ` ${postedUrl}` : ''),
     );
     if (event === 'REQUEST_CHANGES') {
       // D6: no native reject exists on Aone — the blocking header and any
@@ -1053,6 +1125,21 @@ export function runSubmit(
           `new head before relying on the posted pins.`,
       );
     }
+    // Receipt for cleanup's Aone bypass audit — see recordAoneReceipt. An
+    // accepted-but-unreadable comment carries no id (inlineCommentIds holds
+    // only the ids a1 reported); it cannot be vouched for and may draw a
+    // flag — the same trade-off the gh half makes on an unreadable review
+    // id, fail-safe toward over-flagging.
+    recordAoneReceipt(
+      args.pr,
+      [
+        ...result.inlineCommentIds,
+        ...(typeof result.summaryCommentId === 'number'
+          ? [result.summaryCommentId]
+          : []),
+      ],
+      event,
+    );
     writeStdoutLine(
       JSON.stringify(
         {
@@ -1063,7 +1150,7 @@ export function runSubmit(
           floorEnforced: floorEnforced.length,
           summaryPosted: result.summaryPosted,
           ...(event === 'APPROVE' ? { approved: result.approved } : {}),
-          ...(result.webUrl ? { url: result.webUrl } : {}),
+          ...(postedUrl ? { url: postedUrl } : {}),
         },
         null,
         2,
@@ -1100,6 +1187,14 @@ export function runSubmit(
   } catch {
     /* response metadata only — the post itself succeeded */
   }
+  // No deep link in GitHub's answer (or an unparseable one): the provider
+  // COMPOSES the PR-page URL — deterministic grammar, no API call, and the
+  // host axis binds to the routing the write just took. This used to be a
+  // prose assembly in the skill; the receipt carries it now. A hostless
+  // corner fails CLOSED: the compose yields '' and this receipt stays
+  // linkless rather than affirming a host the write may not have taken
+  // (gh's own hosts.yml default is not visible here).
+  reviewUrl ??= githubReader.composeUrl(args.pr, args.repo);
   // Receipt for cleanup's bypass audit: EVERY review this session was
   // authorised to create, by id. The audit lists reviews by the reviewing
   // account inside the window and flags any the receipt does not vouch for —
@@ -1116,12 +1211,17 @@ export function runSubmit(
   try {
     if (typeof reviewId === 'number') {
       const receiptPath = tmpFile(`pr-${args.pr}`, 'submit-receipt.json');
-      const priorIds = readReceiptIds(receiptPath);
+      const priorIds = readReceiptIds(receiptPath, parseReceiptIds);
       const reviewIds = [...new Set([...priorIds, reviewId])];
       mkdirSync(REVIEW_TMP_DIR, { recursive: true });
       atomicWriteFileSync(
         receiptPath,
-        `${JSON.stringify({ reviewIds, event, postedAt: new Date().toISOString() })}\n`,
+        `${JSON.stringify({
+          ...readReceiptObject(receiptPath),
+          reviewIds,
+          event,
+          postedAt: new Date().toISOString(),
+        })}\n`,
       );
     }
   } catch {
