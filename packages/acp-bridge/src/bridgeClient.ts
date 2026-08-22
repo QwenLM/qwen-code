@@ -671,6 +671,12 @@ export interface BridgeClientSessionEntry {
   /** Current session name and its provenance, mirrored from child updates. */
   displayName?: string;
   titleSource?: 'manual' | 'auto';
+  /**
+   * Outstanding daemon-initiated `sessionTitle` persists. Owned by the full
+   * `SessionEntry` in `bridge.ts`; surfaced here so the `title-update` echo
+   * mirror can skip re-applying a title the daemon already applied (#8977).
+   */
+  pendingTitlePersistCount?: number;
 }
 
 interface PreparedSessionUpdateFrames {
@@ -2181,6 +2187,13 @@ export class BridgeClient implements Client {
         return;
       const entry = this.resolveEntry(sessionId);
       if (!entry) return;
+      // Echo suppression: a daemon-initiated rename/clear already applied the
+      // change to the entry and dispatched a `sessionTitle` persist; the child
+      // echoes that persist back here. While the persist is outstanding the
+      // echo must not re-apply, or a stale echo (an old name after a clear, or
+      // a delayed auto-title after a manual rename) would overwrite the
+      // authoritative entry state (#8977).
+      if ((entry.pendingTitlePersistCount ?? 0) > 0) return;
       const rawTitleSource = params['titleSource'];
       const titleSource =
         rawTitleSource === 'manual' || rawTitleSource === 'auto'

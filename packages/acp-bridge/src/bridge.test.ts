@@ -26597,6 +26597,80 @@ describe('createAcpSessionBridge', () => {
       await coldBridge.shutdown();
     });
 
+    it('suppresses stale child title echoes while a daemon rename/clear persist is outstanding (#8977)', async () => {
+      // The daemon applies a rename/clear to the entry and dispatches a
+      // sessionTitle persist; the child echoes every persist back as a
+      // `title-update`. Hold the persist responses open so the echoes land
+      // while the persists are still outstanding, then prove a stale rename
+      // echo cannot resurrect a just-cleared name. Without the outstanding-
+      // persist suppression the delayed 'Foo' echo below re-sets the entry
+      // and the cleared name comes back.
+      const pendingPersists: Array<{
+        resolve: (value: { persisted: boolean }) => void;
+      }> = [];
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionTitle) {
+            const d = deferred<{ persisted: boolean }>();
+            pendingPersists.push(d);
+            return await d.promise;
+          }
+          return { persisted: true };
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      // Rename to 'Foo', then clear — two daemon-initiated persists.
+      bridge.updateSessionMetadata(session.sessionId, {
+        displayName: 'Foo',
+        titleSource: 'manual',
+      });
+      bridge.updateSessionMetadata(session.sessionId, { displayName: '' });
+      expect(
+        bridge.getSessionSummary(session.sessionId).displayName,
+      ).toBeUndefined();
+
+      // Delayed child echoes: the rename ('Foo') then the clear (''), both
+      // arriving while their persists are still outstanding.
+      await handle.agentConnection.extNotification(
+        'qwen/notify/session/title-update',
+        {
+          v: 1,
+          sessionId: session.sessionId,
+          title: 'Foo',
+          titleSource: 'manual',
+        },
+      );
+      await handle.agentConnection.extNotification(
+        'qwen/notify/session/title-update',
+        {
+          v: 1,
+          sessionId: session.sessionId,
+          title: '',
+          titleSource: 'manual',
+        },
+      );
+      // Give any (wrongly) applied echo time to land — a regression that
+      // re-applies the stale 'Foo' must not hide behind an early assertion.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(
+        bridge.getSessionSummary(session.sessionId).displayName,
+      ).toBeUndefined();
+
+      // Settle the outstanding persists; the cleared state must still hold.
+      for (const persist of pendingPersists) {
+        persist.resolve({ persisted: true });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(
+        bridge.getSessionSummary(session.sessionId).displayName,
+      ).toBeUndefined();
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
     it('persists a manual source when the name matches an auto title (#8977)', async () => {
       const titleUpdates: unknown[] = [];
       const bridge = makeBridge({

@@ -975,6 +975,16 @@ interface SessionEntry {
   createdAt: string;
   displayName?: string;
   titleSource?: 'manual' | 'auto';
+  /**
+   * Number of daemon-initiated `sessionTitle` persists that have been
+   * dispatched but not yet settled. The child echoes every persisted title
+   * back as a `qwen/notify/session/title-update` notification; while this is
+   * non-zero the echo mirror in `BridgeClient` must skip re-applying the
+   * title, otherwise a stale echo can resurrect a just-cleared name (or
+   * downgrade a manual title to auto) after the daemon already applied the
+   * authoritative change (#8977).
+   */
+  pendingTitlePersistCount?: number;
   /** Id of the session that spawned this one (via `create_sub_session`).
    * Immutable — written once at creation, never on attach. Absent for a
    * top-level session. */
@@ -9913,6 +9923,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 ? ` by client ${JSON.stringify(context.clientId)}`
                 : ''),
           );
+          // Echo suppression bookkeeping: the child echoes every persisted
+          // title back as a `title-update` notification. Mark the persist
+          // outstanding before dispatch so the echo mirror skips it, and
+          // clear the mark when the persist settles (#8977).
+          entry.pendingTitlePersistCount =
+            (entry.pendingTitlePersistCount ?? 0) + 1;
           entry.connection
             .extMethod(SERVE_CONTROL_EXT_METHODS.sessionTitle, {
               sessionId,
@@ -9926,6 +9942,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               titleSource: nextTitleSource,
             })
             .then((res: unknown) => {
+              entry.pendingTitlePersistCount = Math.max(
+                0,
+                (entry.pendingTitlePersistCount ?? 0) - 1,
+              );
               const r = res as { persisted?: boolean } | undefined;
               if (r && r.persisted === false) {
                 writeStderrLine(
@@ -9934,6 +9954,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               }
             })
             .catch((err: unknown) => {
+              entry.pendingTitlePersistCount = Math.max(
+                0,
+                (entry.pendingTitlePersistCount ?? 0) - 1,
+              );
               writeStderrLine(
                 `qwen serve: failed to persist displayName for ${sessionId}: ${
                   err instanceof Error ? err.message : String(err)
