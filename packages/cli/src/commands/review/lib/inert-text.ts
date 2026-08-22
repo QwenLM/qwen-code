@@ -21,9 +21,25 @@
 // the hole; this module is that rule, extracted, so the newer sinks cannot
 // each re-derive it (and re-forget it).
 
-/** Control characters, including DEL — the forgery and escape-sequence set. */
+/**
+ * Everything the rule this module extracted swept — no less.
+ *
+ * `\p{Cc}` is C0, DEL **and the ECMA-48 C1 range** U+0080–U+009F, whose
+ * members are the 8-bit CSI/OSC/DCS/ST introducers: a terminal acts on those
+ * exactly as it acts on `ESC [`. `\p{Cf}` is the INVISIBLE formatting class —
+ * bidi overrides and isolates can reverse the rendering of the rest of the
+ * line, and zero-width joiners and the BOM hide characters inside a value the
+ * operator is being asked to judge. `\p{Zl}`/`\p{Zp}` are U+2028/U+2029,
+ * which open a new line wherever this text is rendered, so a forged second
+ * line needs no `\n`.
+ *
+ * The extraction had kept C0 and DEL alone, which let all three through
+ * verbatim and unquoted — through the very sinks it was extracted to protect:
+ * `cache-commit`'s refusals over a candidate its own intake comment calls
+ * tamperable, `capture-local`'s warnings, and the symlink guards.
+ */
 // eslint-disable-next-line no-control-regex
-const CONTROL = /[\u0000-\u001f\u007f]/;
+const CONTROL = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
 
 /**
  * Render untrusted text inert for a terminal: quoted-and-escaped when it
