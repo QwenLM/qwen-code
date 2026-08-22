@@ -2850,4 +2850,22 @@ export default {
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     "Els canvis del gestor d'habilitats automàtiques només estan disponibles en espais de treball de confiança. Marca aquesta carpeta com a fiable amb `/trust` i torna-ho a provar.",
   'Kept model as {{model}}': 'Model mantingut com a {{model}}',
+  // === reload-env command ===
+  'Reload environment variables and API keys from settings.json and .env files without restarting':
+    "Recarrega les variables d'entorn i les claus API de settings.json i els fitxers .env sense reiniciar",
+  'Warning: Failed to parse settings file. Check for JSON syntax errors.':
+    "Avís: no s'ha pogut analitzar el fitxer de settings. Comproveu els errors de sintaxi JSON.",
+  'Updated keys':
+    'Claus actualitzades',
+  'Removed keys':
+    'Claus eliminades',
+  'No environment changes detected.':
+    "No s'han detectat canvis d'entorn.",
+  'Environment reloaded and API client refreshed. New keys are live.':
+    'Entorn recarregat i client API actualitzat. Les noves claus ja estan actives.',
+  'Environment reloaded, but API client refresh failed. Restart the CLI to pick up new keys.':
+    "Entorn recarregat, però l'actualització del client API ha fallat. Reinicieu el CLI per utilitzar les noves claus.",
+  'Environment reloaded. New API keys will take effect on the next request.':
+    'Entorn recarregat. Les noves claus API tindran efecte a la propera sol·licitud.',
+
 };

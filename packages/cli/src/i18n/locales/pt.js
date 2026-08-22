@@ -2314,4 +2314,22 @@ export default {
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     'As alterações do gerenciador de habilidades automáticas estão disponíveis apenas em espaços de trabalho confiáveis. Marque esta pasta como confiável usando `/trust` e tente novamente.',
   'Kept model as {{model}}': 'Modelo mantido como {{model}}',
+  // === reload-env command ===
+  'Reload environment variables and API keys from settings.json and .env files without restarting':
+    'Recarregar variáveis de ambiente e chaves de API de settings.json e arquivos .env sem reiniciar',
+  'Warning: Failed to parse settings file. Check for JSON syntax errors.':
+    'Aviso: falha ao analisar o arquivo de settings. Verifique erros de sintaxe JSON.',
+  'Updated keys':
+    'Chaves atualizadas',
+  'Removed keys':
+    'Chaves removidas',
+  'No environment changes detected.':
+    'Nenhuma alteração de ambiente detectada.',
+  'Environment reloaded and API client refreshed. New keys are live.':
+    'Ambiente recarregado e cliente de API atualizado. As novas chaves estão ativas.',
+  'Environment reloaded, but API client refresh failed. Restart the CLI to pick up new keys.':
+    'Ambiente recarregado, mas a atualização do cliente de API falhou. Reinicie o CLI para usar as novas chaves.',
+  'Environment reloaded. New API keys will take effect on the next request.':
+    'Ambiente recarregado. As novas chaves de API terão efeito na próxima requisição.',
+
 };

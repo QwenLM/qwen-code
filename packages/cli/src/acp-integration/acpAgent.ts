@@ -12404,6 +12404,15 @@ class QwenAgent implements Agent {
               }
             } else if ((providersChanged || envChanged) && authType) {
               try {
+                // Mirror /reload-env: syncAfterAuthRefresh's credential
+                // preservation can skip env re-reads for non-registry
+                // models, so put fresh env values into the config before
+                // rebuilding the ContentGenerator. ACP sessions are
+                // long-lived and never restart, which makes the stale-key
+                // path permanent without this.
+                config
+                  .getModelsConfig()
+                  .refreshEnvSourcedCredentials(authType);
                 await config.refreshAuth(authType);
               } catch (err) {
                 debugLogger.warn(

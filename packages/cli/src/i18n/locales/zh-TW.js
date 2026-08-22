@@ -2419,4 +2419,22 @@ export default {
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     '只有受信任的工作區可以變更自動技能管理器。請透過 `/trust` 信任此資料夾後再試一次。',
   'Kept model as {{model}}': '模型保持為 {{model}}',
+  // === reload-env command ===
+  'Reload environment variables and API keys from settings.json and .env files without restarting':
+    '在不重啟的情況下從 settings.json 和 .env 檔案重新載入環境變數與 API 金鑰',
+  'Warning: Failed to parse settings file. Check for JSON syntax errors.':
+    '警告：settings 檔案解析失敗。請檢查 JSON 語法錯誤。',
+  'Updated keys':
+    '已更新的金鑰',
+  'Removed keys':
+    '已移除的金鑰',
+  'No environment changes detected.':
+    '未偵測到環境變數變化。',
+  'Environment reloaded and API client refreshed. New keys are live.':
+    '環境已重新載入，API 用戶端已重新整理。新金鑰已生效。',
+  'Environment reloaded, but API client refresh failed. Restart the CLI to pick up new keys.':
+    '環境已重新載入，但 API 用戶端重新整理失敗。請重新啟動 CLI 以使用新金鑰。',
+  'Environment reloaded. New API keys will take effect on the next request.':
+    '環境已重新載入。新 API 金鑰將於下次請求時生效。',
+
 };

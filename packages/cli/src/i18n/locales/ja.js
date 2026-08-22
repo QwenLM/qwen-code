@@ -2097,4 +2097,22 @@ export default {
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     '自動スキル管理による変更は信頼済みのワークスペースでのみ利用できます。`/trust` でこのフォルダーを信頼してから、もう一度お試しください。',
   'Kept model as {{model}}': 'モデルは {{model}} のままです',
+  // === reload-env command ===
+  'Reload environment variables and API keys from settings.json and .env files without restarting':
+    '再起動せずに settings.json と .env ファイルから環境変数と API キーを再読み込みします',
+  'Warning: Failed to parse settings file. Check for JSON syntax errors.':
+    '警告：settings ファイルの解析に失敗しました。JSON 構文エラーを確認してください。',
+  'Updated keys':
+    '更新されたキー',
+  'Removed keys':
+    '削除されたキー',
+  'No environment changes detected.':
+    '環境変数の変更は検出されませんでした。',
+  'Environment reloaded and API client refreshed. New keys are live.':
+    '環境を再読み込みし、API クライアントを更新しました。新しいキーが有効になりました。',
+  'Environment reloaded, but API client refresh failed. Restart the CLI to pick up new keys.':
+    '環境は再読み込みされましたが、API クライアントの更新に失敗しました。新しいキーを適用するには CLI を再起動してください。',
+  'Environment reloaded. New API keys will take effect on the next request.':
+    '環境を再読み込みしました。新しい API キーは次回リクエスト時に有効になります。',
+
 };

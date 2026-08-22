@@ -28,6 +28,7 @@ import {
   MODEL_GENERATION_CONFIG_FIELDS,
   CREDENTIAL_FIELDS,
   PROVIDER_SOURCED_FIELDS,
+  AUTH_ENV_MAPPINGS,
 } from './constants.js';
 
 export {
@@ -1179,6 +1180,135 @@ export class ModelsConfig {
         };
       }
     }
+  }
+
+  /**
+   * Re-read env-sourced credential fields (apiKey, baseUrl, model) from
+   * process.env for the given auth type and update _generationConfig.
+   * Called by /reload-env after process.env is refreshed.
+   *
+   * syncAfterAuthRefresh's credential preservation can skip env re-reads for
+   * non-registry models (e.g. bare OPENAI_API_KEY without modelProviders
+   * config). This method puts fresh env values into _generationConfig before
+   * refreshAuth rebuilds the ContentGenerator.
+   *
+   * Adoption only: when an env var no longer has a value, the existing config
+   * value is preserved. Clearing here would defeat syncAfterAuthRefresh's
+   * saved-key restoration (it captures the key after this mutation), turning
+   * a key removal into a broken credential state instead of the documented
+   * "restore the previous key" behaviour. Removals are surfaced to the user
+   * by the command output instead.
+   *
+   * Unlike updateCredentials, this does NOT set hasManualCredentials or clear
+   * provider-sourced config.
+   *
+   * @returns true if any field was changed.
+   */
+  refreshEnvSourcedCredentials(authType: AuthType): boolean {
+    let changed = false;
+
+    // First-non-empty-wins scan, matching the env tier of
+    // resolveCredentialField so both implementations agree on precedence.
+    const adopt = (
+      field: 'apiKey' | 'baseUrl' | 'model',
+      envKeys: readonly string[],
+    ): void => {
+      for (const envKey of envKeys) {
+        const freshValue = process.env[envKey];
+        if (freshValue && freshValue !== this._generationConfig[field]) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          (this._generationConfig as any)[field] = freshValue;
+          this.generationConfigSources[field] = { kind: 'env', envKey };
+          changed = true;
+          return;
+        }
+      }
+    };
+
+    // apiKeyEnvKey is set when the model came from modelProviders; it is the
+    // authoritative env source for the key and takes precedence over the
+    // auth-type mapping.
+    const directEnvKey = this._generationConfig.apiKeyEnvKey;
+    if (directEnvKey) {
+      const freshKey = process.env[directEnvKey];
+      if (freshKey && freshKey !== this._generationConfig.apiKey) {
+        this._generationConfig.apiKey = freshKey;
+        this.generationConfigSources['apiKey'] = {
+          kind: 'env',
+          envKey: directEnvKey,
+        };
+        return true;
+      }
+      return false;
+    }
+
+    // An empty apiKey mapping (qwen-oauth) means this authType has no
+    // env-sourced credentials; its key is a computed placeholder
+    // (QWEN_OAUTH_DYNAMIC_TOKEN) that must not be touched here.
+    const envMapping = AUTH_ENV_MAPPINGS[authType];
+    if (!envMapping || envMapping.apiKey.length === 0) return false;
+
+    adopt('apiKey', envMapping.apiKey);
+    adopt('baseUrl', envMapping.baseUrl);
+    adopt('model', envMapping.model);
+    return changed;
+  }
+
+  /**
+   * Re-read settings-sourced credential fields after settings scopes have
+   * been reloaded from disk (reloadScopeFromDisk). Called by /reload-env so
+   * rotating the key in settings.json (security.auth.apiKey) is picked up
+   * without a restart, mirroring the env-var path handled by
+   * refreshEnvSourcedCredentials.
+   *
+   * Precedence rules:
+   * - A field currently sourced from a live env var (kind 'env' whose envKey
+   *   still has a value) is left untouched — env wins over settings.
+   * - A field with a programmatic source (manual entry via /auth) is left
+   *   untouched — manual credentials win over settings.
+   * - qwen-oauth holds a computed token placeholder, never settings
+   *   credentials — nothing to refresh.
+   * - Adoption only: absent settings values never clear an existing value.
+   *
+   * @returns true if any field was changed.
+   */
+  refreshSettingsSourcedCredentials(settings: {
+    apiKey?: string;
+    baseUrl?: string;
+    model?: string;
+  }): boolean {
+    if (this.currentAuthType === 'qwen-oauth') return false;
+
+    let changed = false;
+
+    const adopt = (
+      field: 'apiKey' | 'baseUrl' | 'model',
+      value: string | undefined,
+      detail: string,
+    ): void => {
+      if (!value) return;
+      if (value === this._generationConfig[field]) return;
+
+      const source = this.generationConfigSources[field];
+      if (source?.kind === 'programmatic') return;
+      if (
+        source?.kind === 'env' &&
+        source.envKey &&
+        process.env[source.envKey]
+      ) {
+        return;
+      }
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (this._generationConfig as any)[field] = value;
+      this.generationConfigSources[field] = { kind: 'settings', detail };
+      changed = true;
+    };
+
+    adopt('apiKey', settings.apiKey, 'security.auth.apiKey');
+    adopt('baseUrl', settings.baseUrl, 'security.auth.baseUrl');
+    adopt('model', settings.model, 'settings.model.name');
+    return changed;
   }
 
   /**
