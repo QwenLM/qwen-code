@@ -59,7 +59,7 @@ const MANIFEST = new Set(['package.json', 'package-lock.json']);
 // every change to one of this repository's largest packages. Nor inside a
 // longer word: `Shellfish.tsx`, `plateauDetector.ts`, `cryptic.ts`.
 const SUBSYSTEMS =
-  'pty|tty|sandbox|seatbelt|shell|terminal|clipboard|platform|posix|darwin|macos|windows|win32|linux|keychain|codesign|installer|filesystem';
+  'pty|tty|sandbox|seatbelt|shell|terminal|clipboard|platform|posix|darwin|macos|windows|win32|linux|keychain|codesign|installer|filesystem|audio';
 // A directory or file segment that IS the keyword (optionally with an
 // extension): `sandbox/`, `shell.ts`, `win32.test.ts`.
 const SUBSYSTEM_SEGMENT = new RegExp(

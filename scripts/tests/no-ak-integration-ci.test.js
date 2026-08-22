@@ -340,15 +340,17 @@ describe('no-AK integration CI wiring', () => {
     const windowsJob = getWorkflowJob(workflow, 'test_windows');
 
     // The runs-on expression is the Windows gate's escape hatch and its fork
-    // trust routing. Pin the whole line so a variable typo, a quoting
-    // regression in the nested ''true'' escapes, or an && / || regrouping
-    // fails here instead of surfacing only when the switch is flipped — or
-    // when a fork PR finds the persistent pool.
+    // trust policy: pull requests never reach the pool, because a
+    // pull_request run executes the PR's own YAML and could rewrite runs-on
+    // itself. Pin the whole line so a variable typo, a quoting regression in
+    // the nested ''true'' escapes, or an && / || regrouping fails here
+    // instead of surfacing only when the switch is flipped — or when a fork
+    // PR finds the persistent pool.
     const windowsRunsOn = windowsJob
       .split('\n')
       .find((line) => line.startsWith('    runs-on:'));
     expect(windowsRunsOn).toBe(
-      `    runs-on: '\${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association)) && fromJSON(''["self-hosted", "Windows", "X64", "ecs-win"]'') || fromJSON(''["windows-2022"]'') }}'`,
+      `    runs-on: '\${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && github.event_name != ''pull_request'' && fromJSON(''["self-hosted", "Windows", "X64", "ecs-win"]'') || fromJSON(''["windows-2022"]'') }}'`,
     );
     expect(windowsJob.split('\n')).toContain('    timeout-minutes: 60');
 

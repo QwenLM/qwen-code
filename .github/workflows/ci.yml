@@ -71,8 +71,11 @@ jobs:
     # else a busy hosted pool delays it and blocks the ECS-bound jobs. The
     # kill-switch is read here, so flipping it reverts everything to hosted.
     # This runs-on and the pick_runner step below are the canonical home of
-    # the association routing; sdk-java.yml, serve-ab.yml and test_windows
-    # mirror it (the routing tests hold the mirrors to it).
+    # the association routing; sdk-java.yml and serve-ab.yml mirror it (the
+    # routing tests hold the mirrors to it). test_windows deliberately does
+    # not: a pull_request run executes the PR's own YAML, so no runs-on trust
+    # clause is enforceable there and its lane never admits pull requests to
+    # the pool.
     runs-on: '${{ (vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association) || github.event_name == ''merge_group'')) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     continue-on-error: true
     outputs:
@@ -972,12 +975,14 @@ jobs:
   # Windows counterpart of test_macos (see that job's note). ECS is the default
   # with a windows-2022 kill-switch fallback; the check name stays unchanged so
   # it matches the required-status-check context. The lane now runs on pull
-  # requests too, so the runs-on mirrors classify_pr's trust routing: same-repo
-  # branches and write-access authors (OWNER/MEMBER/COLLABORATOR) run on ECS,
-  # every other fork PR runs on hosted windows-2022, where its code cannot
-  # reach the persistent pool's cache and workspace. ECS-only tuning is gated
-  # on runner.environment; the hosted fallback is the pre-ECS job plus the
-  # checkout guard and a job-level timeout-minutes.
+  # requests too, but every pull request runs on hosted windows-2022: a
+  # pull_request run executes the workflow YAML from the PR's own merge commit,
+  # so any PR this lane admits could rewrite `runs-on` in the same diff that
+  # reaches it. A gate the gated tree controls is no gate; the pool is reached
+  # only by triggers an unreviewed PR cannot open — the post-approval merge
+  # queue, schedule and dispatch. ECS-only tuning is gated on runner.environment;
+  # the hosted fallback is the pre-ECS job plus the checkout guard and a
+  # job-level timeout-minutes.
   test_windows:
     name: 'Test (windows-latest, Node 22.x)'
     needs:
@@ -993,7 +998,7 @@ jobs:
             needs.classify_platform.outputs.platform_sensitive != 'false')
         )
       }}
-    runs-on: '${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association)) && fromJSON(''["self-hosted", "Windows", "X64", "ecs-win"]'') || fromJSON(''["windows-2022"]'') }}'
+    runs-on: '${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && github.event_name != ''pull_request'' && fromJSON(''["self-hosted", "Windows", "X64", "ecs-win"]'') || fromJSON(''["windows-2022"]'') }}'
     timeout-minutes: 60
     permissions:
       contents: 'read'

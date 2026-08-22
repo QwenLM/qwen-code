@@ -7,10 +7,12 @@
 // evaluate BOTH against the same event matrix — including the negative
 // associations that must stay hosted — and assert they agree.
 //
-// test_windows carries the same ECS trust policy a third time, in denial
-// form. The matrix evaluates the real expression text and asserts its
-// pull_request trust decision agrees with classify's allowlist, or fork code
-// reaches the persistent Windows pool through the stale copy.
+// test_windows carries a deliberately different policy. A pull_request run
+// executes the workflow YAML from the PR's own merge commit, so any trust
+// clause a PR can read it can also rewrite. The matrix evaluates the real
+// expression text and asserts the only enforceable shape: every pull request
+// stays hosted, and only the merge queue, schedule and dispatch reach the
+// persistent pool.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -228,30 +230,23 @@ describe('ci.yml classify_pr runner routing', () => {
 });
 
 describe('ci.yml test_windows runner routing', () => {
-  it('admits exactly the pull requests classify_pr routes to ECS', () => {
-    // The two encodings of the trust policy must admit the same pull
-    // requests to a persistent pool: a future policy edit (dropping an
-    // association, admitting FIRST_TIME_CONTRIBUTOR) applied to only one
-    // form fails here instead of silently routing fork code onto ecs-win.
+  it('keeps every pull request hosted, whoever opens it', () => {
+    // A pull_request run executes the workflow YAML from the PR's own merge
+    // commit: any PR this lane admits could rewrite `runs-on` in the same
+    // diff (editing this file is what classifies it platform-sensitive), so
+    // no trust clause evaluated on that event is enforceable. The enforceable
+    // shape is unconditional — pull requests never reach the persistent pool.
     for (const sameRepo of [true, false]) {
       for (const assoc of ASSOCIATIONS) {
-        const classifyTrusted =
-          simulateRunsOn({
+        assert.deepEqual(
+          evalRunsOn(windowsRunsOn, {
             ecsDisabled: false,
+            eventName: 'pull_request',
             sameRepo,
             assoc,
-            mergeGroup: false,
-          }) === ECS;
-        const windows = evalRunsOn(windowsRunsOn, {
-          ecsDisabled: false,
-          eventName: 'pull_request',
-          sameRepo,
-          assoc,
-        });
-        assert.equal(
-          JSON.stringify(windows) === JSON.stringify(WIN_ECS),
-          classifyTrusted,
-          `trust drift for sameRepo=${sameRepo} assoc='${assoc}'`,
+          }),
+          WIN_HOSTED,
+          `pull_request sameRepo=${sameRepo} assoc='${assoc}' must stay hosted`,
         );
       }
     }

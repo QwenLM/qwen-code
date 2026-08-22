@@ -122,6 +122,30 @@ test('platform-coupled subsystems match on segments, not substrings', () => {
   }
 });
 
+test('native build workspaces are caught by the subsystem they name', () => {
+  // packages/audio-capture is a node-gyp module compiled per-host on exactly
+  // the two lanes this gate feeds: its native sources carry no shell
+  // extension, `mac_permission` names `mac` and not the keyword `macos`, and
+  // the workspace manifest is not the root one — so the subsystem rule is the
+  // only net under it. The keyword names the workspace directory, so every
+  // file below it counts.
+  for (const file of [
+    'packages/audio-capture/native/mac_permission.mm',
+    'packages/audio-capture/native/audio_capture.cc',
+    'packages/audio-capture/native/miniaudio.h',
+    'packages/audio-capture/install.js',
+    'packages/audio-capture/binding.gyp',
+  ]) {
+    assert.equal(classifyChangedFiles([file]), PLATFORM_SENSITIVE, file);
+  }
+  // The keyword names a subsystem, not a file extension: an ordinary `.cc`
+  // elsewhere is still ordinary source.
+  assert.equal(
+    classifyChangedFiles(['packages/core/src/utils/parser.cc']),
+    PLATFORM_INSENSITIVE,
+  );
+});
+
 test('a rename is judged on both of its names', () => {
   // A script moved out of the script layer is still a script change on the
   // lane that used to run it — and one moved in is a new one to run.
