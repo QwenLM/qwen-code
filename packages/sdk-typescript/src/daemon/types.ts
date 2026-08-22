@@ -1024,6 +1024,12 @@ export interface DaemonBranchInfo {
   baseBranch: string;
 }
 
+/** GitHub pull request bound to a session (e.g. created from the Web Shell Git dialog). */
+export interface DaemonSessionPrInfo {
+  number: number;
+  url: string;
+}
+
 /** Returned from `POST /session`. */
 export interface DaemonSession {
   sessionId: string;
@@ -1267,6 +1273,8 @@ export interface DaemonSessionSummary {
   worktree?: DaemonWorktreeInfo;
   /** Present when the session was created with a new branch. */
   branch?: DaemonBranchInfo;
+  /** Present when GitHub PRs have been bound to the session (last = latest). */
+  prs?: DaemonSessionPrInfo[];
 }
 
 export type DaemonSessionExportFormat = 'html' | 'md' | 'json' | 'jsonl';
@@ -1456,6 +1464,7 @@ export interface DaemonUnarchiveSessionsResult {
 /** Effective mutable metadata returned from `PATCH /session/:id/metadata`. */
 export interface SessionMetadataResult {
   displayName?: string;
+  prs?: DaemonSessionPrInfo[];
 }
 
 type OpenStringUnion<T extends string> = T | (string & {});
