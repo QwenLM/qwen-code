@@ -45,20 +45,9 @@ export class WebViewContent {
     const safeExtensionUri = escapeHtml(extensionUriForWebview.toString());
     const safeScriptUri = escapeHtml(scriptUri.toString());
 
-    const webShellTranscriptEnabled = vscode.workspace
-      .getConfiguration('qwen-code')
-      .get<boolean>('experimental.webShellTranscript', false);
-    const webShellTranscriptAttr = webShellTranscriptEnabled
-      ? ' data-web-shell-transcript="true"'
-      : '';
-
     // The WebShell transcript bundles Shiki, whose Oniguruma engine compiles
-    // WASM at runtime. `script-src` must therefore grant 'wasm-unsafe-eval'
-    // when the transcript is enabled; the flag-off path keeps the original CSP
-    // untouched so legacy users get no widened permission.
-    const csp = webShellTranscriptEnabled
-      ? `default-src 'none'; img-src ${webview.cspSource} data:; script-src ${webview.cspSource} 'wasm-unsafe-eval'; style-src ${webview.cspSource} 'unsafe-inline';`
-      : `default-src 'none'; img-src ${webview.cspSource} data:; script-src ${webview.cspSource}; style-src ${webview.cspSource} 'unsafe-inline';`;
+    // WASM at runtime, so script-src grants 'wasm-unsafe-eval'.
+    const csp = `default-src 'none'; img-src ${webview.cspSource} data:; script-src ${webview.cspSource} 'wasm-unsafe-eval'; style-src ${webview.cspSource} 'unsafe-inline';`;
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -68,7 +57,7 @@ export class WebViewContent {
   <meta http-equiv="Content-Security-Policy" content="${csp}">
   <title>Qwen Code</title>
 </head>
-<body data-extension-uri="${safeExtensionUri}"${webShellTranscriptAttr}>
+<body data-extension-uri="${safeExtensionUri}">
   <div id="root"></div>
   <script type="module" src="${safeScriptUri}"></script>
 </body>

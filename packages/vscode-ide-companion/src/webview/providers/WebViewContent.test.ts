@@ -4,33 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { WebViewContent } from './WebViewContent.js';
-
-const { getWebShellTranscriptFlag, setWebShellTranscriptFlag } = vi.hoisted(
-  () => {
-    let enabled = false;
-    return {
-      getWebShellTranscriptFlag: () => enabled,
-      setWebShellTranscriptFlag: (value: boolean) => {
-        enabled = value;
-      },
-    };
-  },
-);
 
 vi.mock('vscode', () => ({
   Uri: {
     joinPath: vi.fn((_base: unknown, ...parts: string[]) => ({
       fsPath: `/ext/${parts.join('/')}`,
-    })),
-  },
-  workspace: {
-    getConfiguration: vi.fn(() => ({
-      get: (key: string, fallback: unknown) =>
-        key === 'experimental.webShellTranscript'
-          ? getWebShellTranscriptFlag()
-          : fallback,
     })),
   },
 }));
@@ -49,9 +29,6 @@ function createMockWebview() {
 
 describe('WebViewContent', () => {
   const fakeExtensionUri = { fsPath: '/ext' } as never;
-  beforeEach(() => {
-    setWebShellTranscriptFlag(false);
-  });
 
   it('generates HTML when given a raw Webview', () => {
     const webview = createMockWebview();
@@ -97,40 +74,18 @@ describe('WebViewContent', () => {
 
     expect(html).toContain('data-extension-uri=');
   });
-  it('omits data-web-shell-transcript when the flag is off', () => {
-    setWebShellTranscriptFlag(false);
+
+  it('grants wasm-unsafe-eval to script-src unconditionally', () => {
     const webview = createMockWebview();
-
-    const html = WebViewContent.generate(webview as never, fakeExtensionUri);
-
-    expect(html).not.toContain('data-web-shell-transcript');
-  });
-
-  it('sets data-web-shell-transcript="true" when the flag is on', () => {
-    setWebShellTranscriptFlag(true);
-    const webview = createMockWebview();
-
-    const html = WebViewContent.generate(webview as never, fakeExtensionUri);
-
-    expect(html).toContain('data-web-shell-transcript="true"');
-  });
-
-  it('keeps script-src without wasm-unsafe-eval when the flag is off', () => {
-    setWebShellTranscriptFlag(false);
-    const webview = createMockWebview();
-
-    const html = WebViewContent.generate(webview as never, fakeExtensionUri);
-
-    expect(html).toContain('script-src https://csp.source;');
-    expect(html).not.toContain('wasm-unsafe-eval');
-  });
-
-  it('grants wasm-unsafe-eval to script-src when the flag is on', () => {
-    setWebShellTranscriptFlag(true);
-    const webview = createMockWebview();
-
     const html = WebViewContent.generate(webview as never, fakeExtensionUri);
 
     expect(html).toContain("script-src https://csp.source 'wasm-unsafe-eval';");
+  });
+
+  it('does not set data-web-shell-transcript on the body', () => {
+    const webview = createMockWebview();
+    const html = WebViewContent.generate(webview as never, fakeExtensionUri);
+
+    expect(html).not.toContain('data-web-shell-transcript');
   });
 });

@@ -252,6 +252,7 @@ vi.mock('../../services/qwenAgentManager.js', () => ({
         askUserQuestionCallbackRef.current = callback;
       },
     );
+    onTranscriptUpdate = vi.fn();
     onDisconnected = vi.fn();
     permissionRequestCallback?: (request: unknown) => Promise<string>;
     cancelCurrentPrompt = vi.fn();
