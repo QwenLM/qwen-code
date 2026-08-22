@@ -10672,6 +10672,15 @@ class QwenAgent implements Agent {
             'Invalid or missing Session Workflow setting',
           );
         }
+        // Same-value guard: the settings POST routes push the post-write
+        // *effective* value, and a system-scope settings file can shadow a
+        // workspace write, so the effective value can equal the override
+        // already pinned here. Re-applying would clear every live session's
+        // active plan revision even though the gate never changed (the
+        // workspaceReload twin above guards its no-op case the same way).
+        if (this.sessionWorkflowEnabledOverride === enabled) {
+          return { enabled, sessionsUpdated: 0 };
+        }
         this.sessionWorkflowEnabledOverride = enabled;
         this.applySessionWorkflowOverrideToLiveSessions();
         return { enabled, sessionsUpdated: this.sessions.size };
