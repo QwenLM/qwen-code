@@ -556,6 +556,51 @@ describe('AgentViewApp', () => {
     expect(answerSession).not.toHaveBeenCalled();
   });
 
+  it('does not queue another reply behind a pending soft-question prompt', async () => {
+    const sendToSession = vi.fn();
+    const { stdin, lastFrame } = render(
+      <AgentViewApp
+        rows={[
+          row('session-1', {
+            state: 'needs_input',
+            stateGroup: 'needs_input',
+            taskState: 'waiting',
+            inputState: 'soft_question',
+            waitingFor: 'question',
+            inputKind: 'soft',
+            queuedPromptCount: 1,
+            queuedPromptPreview: 'continue',
+            actions: {
+              ...row('session-1').actions,
+              canReply: true,
+              needsBlockingAnswer: false,
+            },
+          }),
+        ]}
+        actions={actions({
+          sendToSession,
+          peekSelected: async () =>
+            sessionPanel('session-1', ['Result: What next?']),
+        })}
+        onExit={vi.fn()}
+      />,
+    );
+
+    stdin.write(' ');
+    await waitForFrame(lastFrame, 'Waiting for response: continue');
+
+    expect(lastFrame()).not.toContain('> reply');
+    for (const char of 'again') {
+      stdin.write(char);
+      await Promise.resolve();
+    }
+    stdin.write('\r');
+    await flushInk();
+
+    expect(sendToSession).not.toHaveBeenCalled();
+    expect(lastFrame()).not.toContain('again');
+  });
+
   it('sends a follow-up to a completed session from an open peek', async () => {
     const sendToSession = vi.fn(async () => ({ sent: true }));
     const loadRows = vi.fn(async () => [

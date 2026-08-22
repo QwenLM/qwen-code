@@ -2954,6 +2954,51 @@ describe('AppContainer State Management', () => {
       },
     );
 
+    it.each(['exit', 'quit'])(
+      'delivers roster control prompt "%s" as message content',
+      (prompt) => {
+        const mockHandleSlashCommand = vi.fn();
+        const mockQueueMessage = vi.fn();
+
+        mockedUseSlashCommandProcessor.mockReturnValue({
+          handleSlashCommand: mockHandleSlashCommand,
+          slashCommands: [],
+          pendingHistoryItems: [],
+          commandContext: {},
+          shellConfirmationRequest: null,
+          confirmationRequest: null,
+        });
+        mockedUseMessageQueue.mockReturnValue({
+          removeGoalTurns: vi.fn().mockReturnValue([]),
+          messageQueue: [],
+          addMessage: mockQueueMessage,
+          clearQueue: vi.fn(),
+          getQueuedMessagesText: vi.fn().mockReturnValue(''),
+          popAllMessages: vi.fn().mockReturnValue(null),
+          drainQueue: vi.fn().mockReturnValue([]),
+          popNextTurn: vi.fn().mockReturnValue(null),
+        });
+
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+
+        const controlPromptOptions = {
+          deferUntilIdle: false,
+          bypassAgentTabRouting: true,
+        };
+        capturedUIActions.handleFinalSubmit(prompt, controlPromptOptions);
+
+        expect(mockQueueMessage).toHaveBeenCalledWith(prompt, false, undefined);
+        expect(mockHandleSlashCommand).not.toHaveBeenCalled();
+      },
+    );
+
     it.each(['/quit', '/exit'])(
       'routes "%s" immediately while responding',
       (command) => {

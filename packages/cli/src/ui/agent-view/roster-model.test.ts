@@ -5,7 +5,10 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { buildAgentRosterRows } from './roster-model.js';
+import {
+  buildAgentRosterRows,
+  isAgentRosterBlockingWait,
+} from './roster-model.js';
 import type {
   AgentViewActivityFile,
   AgentViewLaunchFile,
@@ -64,6 +67,30 @@ describe('buildAgentRosterRows', () => {
         lastHeartbeatAt: '2026-07-17T09:59:59.000Z',
       }),
     ]);
+  });
+
+  it('does not classify soft questions as blocking waits', () => {
+    const rows = buildAgentRosterRows({
+      sessions: [
+        session('explicit-soft', { sessionState: 'needs_input' }),
+        session('response-soft', { sessionState: 'needs_input' }),
+      ],
+      activities: {
+        'explicit-soft': activity({
+          waitingFor: 'question',
+          inputKind: 'soft',
+        }),
+        'response-soft': activity({ waitingFor: 'Response' }),
+      },
+      now,
+    });
+
+    expect(rows).toHaveLength(2);
+    for (const row of rows) {
+      expect(row.inputState).toBe('soft_question');
+      expect(row.actions.needsBlockingAnswer).toBe(false);
+      expect(isAgentRosterBlockingWait(row)).toBe(false);
+    }
   });
 
   it('sorts rows by state groups, then newest first within a group', () => {

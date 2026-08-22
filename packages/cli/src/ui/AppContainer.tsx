@@ -2618,6 +2618,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // Quit must bypass reminders and the message queue so it can stop an
       // active stream without consuming one-shot session state.
       if (
+        !options?.bypassAgentTabRouting &&
         ['/quit', '/exit', 'exit', 'quit', ':q', ':q!', ':wq', ':wq!'].includes(
           userPromptText.trim(),
         )

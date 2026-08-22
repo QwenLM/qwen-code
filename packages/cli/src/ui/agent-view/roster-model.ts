@@ -77,7 +77,11 @@ export interface AgentRosterRow {
 export function isAgentRosterBlockingWait(row: AgentRosterRow): boolean {
   return (
     row.actions.needsBlockingAnswer ||
-    Boolean(row.waitingFor && row.waitingFor !== 'response')
+    Boolean(
+      row.waitingFor &&
+        row.waitingFor.toLowerCase() !== 'response' &&
+        row.inputKind !== 'soft',
+    )
   );
 }
 

@@ -810,8 +810,8 @@ describe('AgentViewRoster', () => {
     const { lastFrame } = renderRoster({
       rows: [
         row('alpha', {
-          displayName: 'first\nsecond',
-          waitingFor: '\u001b]0;spoof\u0007Edit\nfile',
+          displayName: 'first\u202e\nsecond',
+          waitingFor: '\u001b]0;spoof\u0007Edit\u2066\nfile',
         }),
       ],
       peekPanel: sessionPanel(),
@@ -821,6 +821,7 @@ describe('AgentViewRoster', () => {
     expect(output).toContain('first second');
     expect(output).toContain('Waiting: Edit file');
     expect(output).not.toContain('spoof');
+    expect(output).not.toMatch(/[\u202e\u2066]/);
   });
 
   it('renders notices without hiding the dispatch input', () => {

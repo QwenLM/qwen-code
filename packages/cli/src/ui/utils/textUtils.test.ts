@@ -16,6 +16,7 @@ import {
   sanitizeMultilineForDisplay,
   sanitizeSensitiveText,
   sliceTextByVisualHeight,
+  stripUnsafeCharacters,
   truncateToWidth,
 } from './textUtils.js';
 
@@ -25,6 +26,14 @@ describe('textUtils', () => {
       expect(
         cleanSingleLineText('\u001b]0;spoof\u0007first\nsecond\tline'),
       ).toBe('first second line');
+    });
+
+    it('strips Unicode bidi controls from terminal text', () => {
+      const text =
+        'a\u200eb\u200fc\u202ad\u202be\u202cf\u202dg\u202eh\u2066i\u2067j\u2068k\u2069l';
+
+      expect(stripUnsafeCharacters(text)).toBe('abcdefghijkl');
+      expect(cleanSingleLineText(text)).toBe('abcdefghijkl');
     });
   });
 
