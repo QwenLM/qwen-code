@@ -44,10 +44,12 @@ import { join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   containerCommand,
+  containerPathFor,
   mountRootFor,
   refuseUnsandboxedPhase,
   reviewSandboxImage,
   runtimeClientEnv,
+  sandboxPolicy,
   sandboxVerdict,
   type CommandKind,
 } from './lib/sandboxed-exec.js';
@@ -347,8 +349,13 @@ function containerised(
   if (verdict.kind !== 'container') return null;
   const tmpDir = mountRootFor(cwd);
   if (tmpDir === null) return null;
+  // The CANONICAL spelling, matching the mount: the bind mount is created from
+  // the root's realpath, so a lexical `--workdir` names a directory the
+  // container does not have and every command fails before it starts.
+  const workdir = containerPathFor(cwd);
+  if (workdir === null) return null;
   return containerCommand(command, {
-    cwd: resolve(cwd),
+    cwd: workdir,
     tmpDir,
     kind,
     runtime: verdict.runtime,
@@ -811,6 +818,27 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   // reaches a spawn at all: a repo this adapter cannot scope is handed to the
   // AGENT's own shell (`unsupportedReport`), which would otherwise run the
   // install and the suite with nothing consulted.
+  const refusedReport = (why: string): BuildTestReport => ({
+    toolchain: 'refused',
+    affected: [],
+    buildSet: [],
+    widenedWith: [],
+    install: null,
+    build: [],
+    test: [],
+    timedOut: [],
+    // NOT `ok: true`. `unsupportedReport`'s hand-off is `ok` because nothing
+    // was found wrong; here something WAS — the phase could not be run under
+    // the policy in force — and a reader that treats this as a clean hand-off
+    // would go do by hand exactly what the policy just refused.
+    ok: false,
+    note:
+      `no build or test evidence: ${why}. This phase would have had to run ` +
+      `the reviewed repository's own commands, which is what the policy ` +
+      `forbids — so it ran nothing rather than running them unsandboxed. Do ` +
+      `not read this as a passing build, and do not run the commands by hand ` +
+      `to fill the gap.`,
+  });
   const refusal = refuseUnsandboxedPhase(root);
   if (refusal && args.resume) {
     // THROW on a continuation, never return. The handler writes whatever this
@@ -829,32 +857,26 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     );
   }
   if (refusal) {
-    return {
-      toolchain: 'refused',
-      affected: [],
-      buildSet: [],
-      widenedWith: [],
-      install: null,
-      build: [],
-      test: [],
-      timedOut: [],
-      // NOT `ok: true`. `unsupportedReport`'s hand-off is `ok` because nothing
-      // was found wrong; here something WAS — the phase could not be run under
-      // the policy in force — and a reader that treats this as a clean
-      // hand-off would go do by hand exactly what the policy just refused.
-      ok: false,
-      note:
-        `no build or test evidence: ${refusal}. This phase would have had to ` +
-        `run the reviewed repository's own commands, which is what the policy ` +
-        `forbids — so it ran nothing rather than running them unsandboxed. ` +
-        `Do not read this as a passing build, and do not run the commands by ` +
-        `hand to fill the gap.`,
-    };
+    return refusedReport(refusal);
   }
   const { adapter, applicable } = selectToolchainAdapter(
     root,
     toolchainAdapters,
   );
+  // The hand-off is an EXECUTION too, and it is the one that leaves this
+  // process. `unsupportedReport` tells the agent to install and build with its
+  // own shell — see the `toolchain: "unsupported"` rule in the brief — and
+  // that shell is not contained by anything here. Under `required` the phase
+  // gate above passes whenever a runtime answers and the tree is mountable,
+  // which is exactly when a yarn/pnpm/bun repo still reaches this branch. So
+  // an inapplicable adapter is a refusal under that policy, not a hand-off.
+  if (!applicable && sandboxPolicy() === 'required') {
+    return refusedReport(
+      `review.sandbox is "required" and no toolchain adapter can scope this ` +
+        `repository, so the only remaining route is to hand its install, build ` +
+        `and test commands to an agent shell this policy cannot contain`,
+    );
+  }
   if (!adapter) {
     // A continuation must never answer with a FRESH report. The handler writes
     // whatever this returns to `--out`, which for a resume is the very file

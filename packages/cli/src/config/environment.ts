@@ -190,7 +190,24 @@ export function resetEnvironmentTrackingForTesting(): void {
  * variable and not file-sourced.
  */
 export function isFileSourcedEnvKey(key: string): boolean {
-  return dotEnvSourcedKeys.has(key) || settingsEnvSourcedKeys.has(key);
+  if (dotEnvSourcedKeys.has(key) || settingsEnvSourcedKeys.has(key)) {
+    return true;
+  }
+  // Case-INSENSITIVELY on Windows, where env lookup is: a `.env` committed as
+  // `docker_host=…` writes that spelling into the tracking set and reaches the
+  // child exactly as `DOCKER_HOST` would, so an exact-case membership test
+  // answers "not from a file" about a value that is. `config/shared-env-keys.ts`
+  // folds case for the same reason, and this file's own callers ask a security
+  // question rather than a bookkeeping one.
+  if (process.platform !== 'win32') return false;
+  const lower = key.toLowerCase();
+  for (const tracked of dotEnvSourcedKeys) {
+    if (tracked.toLowerCase() === lower) return true;
+  }
+  for (const tracked of settingsEnvSourcedKeys) {
+    if (tracked.toLowerCase() === lower) return true;
+  }
+  return false;
 }
 
 /**

@@ -69,6 +69,7 @@ import { probeWorktreePath } from './lib/paths.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import {
   containerCommand,
+  containerPathFor,
   mountRootFor,
   refuseUnsandboxedPhase,
   reviewSandboxImage,
@@ -1540,8 +1541,11 @@ function probeContainer(
   if (verdict.kind !== 'container') return null;
   const tmpDir = mountRootFor(probeTree);
   if (tmpDir === null) return null;
+  // Canonical, matching the mount — see the twin in `build-test.ts`.
+  const workdir = containerPathFor(probeTree);
+  if (workdir === null) return null;
   return containerCommand(command, {
-    cwd: resolve(probeTree),
+    cwd: workdir,
     tmpDir,
     kind: 'test',
     runtime: verdict.runtime,

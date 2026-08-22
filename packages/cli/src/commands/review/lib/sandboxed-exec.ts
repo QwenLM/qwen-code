@@ -47,7 +47,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
-import { dirname, join, resolve, sep } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { operatorReviewSettings } from './review-settings.js';
 import { REVIEW_TMP_DIR } from './paths.js';
 import { redirectedAncestor } from './worktree.js';
@@ -251,9 +251,17 @@ export function refuseUnsandboxedPhase(
   root: string,
   verdict: SandboxVerdict = sandboxVerdict(),
   mountRoot: (cwd: string) => string | null = mountRootFor,
+  policy: SandboxPolicy = sandboxPolicy(),
 ): string | null {
   if (verdict.kind === 'refused') return verdict.reason;
   if (verdict.kind === 'direct') return null;
+  // Only `required` turns an unmountable tree into a refusal. Under `auto` the
+  // contract is "contain it when that is possible" — a `/review` of a local
+  // checkout has no layout to mount, and refusing there would take the
+  // build/test and efficacy evidence away from every local review the moment a
+  // daemon happened to be running. The first cut of this branch refused
+  // regardless of policy and said "required" in a message `auto` could reach.
+  if (policy !== 'required') return null;
   // A runtime answering is not containment. The first cut asked only whether
   // one did, and every route the container cannot actually serve still ran the
   // reviewed code with the full environment under `required`: a `/review` of a
@@ -357,6 +365,32 @@ export function mountRootFor(cwd: string): string | null {
     return realpathSync(root);
   } catch {
     return null;
+  }
+}
+
+/**
+ * The path a tree has INSIDE the container.
+ *
+ * The bind mount is created from the root's realpath, so a tree named by a
+ * path that differs from its canonical spelling — `/var` against
+ * `/private/var` on macOS is the everyday case — is present in the container
+ * under the canonical name only. Handing `--workdir` the lexical spelling
+ * then names a directory the container does not have, and every command
+ * fails before it starts. Null when the tree is not under a mountable root.
+ */
+export function containerPathFor(cwd: string): string | null {
+  const resolved = resolve(cwd);
+  try {
+    return realpathSync(resolved);
+  } catch {
+    // Not created yet — a probe tree named before it is built. Its PARENT is,
+    // and the mount uses the parent's canonical spelling, so canonicalise that
+    // and re-attach the leaf.
+    try {
+      return join(realpathSync(dirname(resolved)), basename(resolved));
+    } catch {
+      return null;
+    }
   }
 }
 
@@ -483,6 +517,13 @@ export function runtimeClientEnv(
     'DOCKER_TLS_VERIFY',
     'DOCKER_CONTEXT',
     'CONTAINER_HOST',
+    // Indirection counts as selection: these name a config FILE that in turn
+    // names the daemon, the registries and the runtime. Scrubbing the direct
+    // selectors and leaving these would move the same steering one level down.
+    'DOCKER_CONFIG',
+    'CONTAINERS_CONF',
+    'CONTAINERS_REGISTRIES_CONF',
+    'CONTAINERS_STORAGE_CONF',
   ]) {
     if (isFileSourcedEnvKey(key)) delete scrubbed[key];
   }

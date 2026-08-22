@@ -103,12 +103,28 @@ describe('values a repository must not be able to set', () => {
     // availability probe and every `docker run` at a daemon it controls, so
     // `required` reads as satisfied and whatever that daemon returns is scored
     // as build, test and probe evidence.
-    vi.stubEnv('DOCKER_HOST', 'tcp://attacker.example:2375');
+    // The whole set, not one key: the finding this pins was that the direct
+    // selectors were scrubbed and the config-INDIRECTION ones were not, which
+    // moves the same steering one level down — a `DOCKER_CONFIG` naming a
+    // config file that names the daemon.
+    const selectors = [
+      'DOCKER_HOST',
+      'DOCKER_CERT_PATH',
+      'DOCKER_TLS_VERIFY',
+      'DOCKER_CONTEXT',
+      'CONTAINER_HOST',
+      'DOCKER_CONFIG',
+      'CONTAINERS_CONF',
+      'CONTAINERS_REGISTRIES_CONF',
+      'CONTAINERS_STORAGE_CONF',
+    ];
+    for (const key of selectors) vi.stubEnv(key, 'from-the-repo');
     const spy = vi
       .spyOn(environment, 'isFileSourcedEnvKey')
-      .mockImplementation((k) => k === 'DOCKER_HOST');
+      .mockImplementation((k) => selectors.includes(k));
     try {
-      expect(runtimeClientEnv()['DOCKER_HOST']).toBeUndefined();
+      const scrubbed = runtimeClientEnv();
+      for (const key of selectors) expect(scrubbed[key]).toBeUndefined();
     } finally {
       spy.mockRestore();
       vi.unstubAllEnvs();
@@ -124,6 +140,29 @@ describe('values a repository must not be able to set', () => {
       vi.unstubAllEnvs();
     }
   });
+});
+
+describe('the operator opt-out still works', () => {
+  it.skipIf(process.getuid === undefined)(
+    'honours SANDBOX_SET_UID_GID=false when it is the operator’s own',
+    () => {
+      // Both uid tests assert `--user` is PRESENT; without this one the
+      // documented opt-out could stop working and nothing would say so.
+      vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
+      try {
+        const { args } = containerCommand('npm ci', {
+          cwd: join(sep, 'repo', '.qwen', 'tmp', 'review-pr-9'),
+          tmpDir: join(sep, 'repo', '.qwen', 'tmp'),
+          kind: 'install',
+          runtime: 'docker',
+          image: 'example/image:tag',
+        });
+        expect(args).not.toContain('--user');
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
 });
 
 describe('sandboxVerdict', () => {
@@ -152,9 +191,9 @@ describe('sandboxVerdict', () => {
     const tree = join(sep, 'repo', '.qwen', 'tmp', 'review-pr-9');
     const mounted = () => tree;
     const verdict = sandboxVerdict('required', {}, () => null);
-    expect(refuseUnsandboxedPhase(tree, verdict, mounted)).toContain(
-      'no container runtime',
-    );
+    expect(
+      refuseUnsandboxedPhase(tree, verdict, mounted, 'required'),
+    ).toContain('no container runtime');
     // ...and a verdict that is not a refusal never stops one.
     expect(
       refuseUnsandboxedPhase(
@@ -168,6 +207,7 @@ describe('sandboxVerdict', () => {
         tree,
         sandboxVerdict('auto', {}, () => 'docker'),
         mounted,
+        'auto',
       ),
     ).toBe(null);
   });
@@ -180,12 +220,18 @@ describe('sandboxVerdict', () => {
     // contained, and the mount is the half that fails while the daemon is fine.
     const contained = sandboxVerdict('required', {}, () => 'docker');
     expect(contained.kind).toBe('container');
-    const refusal = refuseUnsandboxedPhase(
-      join(sep, 'home', 'me', 'myrepo'),
-      contained,
-      () => null,
+    const local = join(sep, 'home', 'me', 'myrepo');
+    expect(
+      refuseUnsandboxedPhase(local, contained, () => null, 'required'),
+    ).toContain('cannot be mounted');
+
+    // ...and ONLY under `required`. Under `auto` the contract is "contain it
+    // when that is possible", so an unmountable tree falls back to the direct
+    // spawn — refusing there would take the build/test and efficacy evidence
+    // away from every local review the moment a daemon happened to be running.
+    expect(refuseUnsandboxedPhase(local, contained, () => null, 'auto')).toBe(
+      null,
     );
-    expect(refusal).toContain('cannot be mounted');
   });
 
   it('discloses rather than hides that the reviewed code ran as you', () => {
