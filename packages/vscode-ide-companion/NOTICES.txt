@@ -2902,7 +2902,7 @@ Felix Geisendörfer (felix@debuggable.com)
 
 
 ============================================================
-protobufjs@7.6.4
+protobufjs@7.6.5
 (No repository found)
 
 This license applies to all parts of protobuf.js except those files
@@ -3443,7 +3443,7 @@ long@5.3.2
 
 
 ============================================================
-ws@8.21.0
+ws@8.21.3
 (git+https://github.com/websockets/ws.git)
 
 Copyright (c) 2011 Einar Otto Stangvik <einaros@gmail.com>
@@ -5917,7 +5917,7 @@ THE SOFTWARE.
 
 
 ============================================================
-hono@4.12.27
+hono@4.13.3
 (git+https://github.com/honojs/hono.git)
 
 MIT License
@@ -15870,7 +15870,7 @@ License text not found.
 License text not found.
 
 ============================================================
-tar@7.5.19
+tar@7.5.22
 (https://github.com/isaacs/node-tar.git)
 
 # Blue Oak Model License
