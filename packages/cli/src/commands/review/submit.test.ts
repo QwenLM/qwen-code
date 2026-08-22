@@ -64,6 +64,19 @@ vi.mock('./lib/platform/registry.js', async (importOriginal) => {
   return { ...actual, getPlatformReader: () => ({ kind: 'github' }) };
 });
 
+// The routing's cwd probe is a direct gitOpt('remote','get-url','origin')
+// from ./lib/git.js — the registry reader above is NOT consulted by
+// submit. Pin the probe to "no origin" so these tests spawn no real
+// `git` in the vitest cwd and never couple to the machine's actual clone
+// origin (on a checkout whose origin is a canonical Aone host the
+// unpinned probe would flip `aoneWrite` under tests whose code under
+// test is correct). Cells that need a live probe steer this mock.
+const gitOptMock = vi.hoisted(() => vi.fn(() => null));
+vi.mock('./lib/git.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/git.js')>();
+  return { ...actual, gitOpt: gitOptMock };
+});
+
 const writeStdoutSpy = vi.hoisted(() => vi.fn((_line: string) => {}));
 const writeStderrSpy = vi.hoisted(() => vi.fn((_line: string) => {}));
 vi.mock('../../utils/stdioHelpers.js', () => ({
@@ -110,6 +123,7 @@ vi.mock('../../config/settings.js', async (importOriginal) => {
 const { runSubmit, submitCommand } = await import('./submit.js');
 
 let dir: string;
+let savedCwd: string;
 let savedSessionId: string | undefined;
 let savedGhHost: string | undefined;
 
@@ -127,6 +141,35 @@ const REVIEW = {
   comments: [] as unknown[],
   state: { suggestionsDiscarded: 1, modelId: 'qwen3.7-max' },
 };
+
+/**
+ * The Aone anchor gate refuses an Aone post whose captured diff is absent
+ * (the platform validates nothing, so the write path must hold the diff —
+ * docs/design/2026-08-21-review-aone-removed-line-anchoring.md). Routing
+ * tests below post through the gate, so each supplies the convention file
+ * for its target number. The content is minimal — these payloads carry no
+ * comments — but real, so the gate parses it.
+ */
+const CAPTURED_DIFF_FIXTURE = [
+  'diff --git a/src/route.ts b/src/route.ts',
+  'index 1111111..2222222 100644',
+  '--- a/src/route.ts',
+  '+++ b/src/route.ts',
+  '@@ -1,3 +1,3 @@',
+  ' a',
+  '-b',
+  '+c',
+  ' d',
+  '',
+].join('\n');
+
+function writeCapturedDiff(pr: number): string {
+  const dirPath = join('.qwen', 'tmp');
+  mkdirSync(dirPath, { recursive: true });
+  const p = join(dirPath, `qwen-review-pr-${pr}-diff.txt`);
+  writeFileSync(p, CAPTURED_DIFF_FIXTURE, 'utf8');
+  return p;
+}
 
 /** Write a file under the fixture dir and return its path. */
 function file(name: string, content: unknown): string {
@@ -163,6 +206,12 @@ function args(over: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'review-submit-'));
+  // Run from the per-test fixture dir: the anchor gate's captured diff
+  // and the slow-path recordings are seeded at cwd-relative convention
+  // paths, and seeding them in the REAL vitest cwd would overwrite (and
+  // cleanup-delete) a same-numbered live capture sitting there.
+  savedCwd = process.cwd();
+  process.chdir(dir);
   ghMock.mockClear();
   ghViewMock.mockClear();
   aoneSubmitMock.mockClear();
@@ -171,6 +220,9 @@ beforeEach(() => {
     postedInline: 0,
     summaryPosted: true,
     approved: false,
+    // Verified stable — the ordinary success shape (undefined would mean
+    // "re-read failed" and trip the could-not-re-verify disclosure).
+    headMovedDuringPost: false,
     webUrl: '',
   });
   writeStdoutSpy.mockClear();
@@ -181,13 +233,15 @@ beforeEach(() => {
   delete process.env['QWEN_CODE_SESSION_ID'];
   // Belt and braces: the write routing never consults the ambient GH_HOST
   // (submit's platform gate documents this, and the registry reader above
-  // is pinned to github) — but `resolveGhHost` still falls back to it for
-  // the gate's host BINDING, so keep the org's standard Aone-family
-  // intranet export out of these tests anyway.
+  // is pinned to github) — but the platform gate's ambient-env arm still
+  // reads it (refusing a flagless gh post when it names a canonical Aone
+  // host), so keep the org's standard Aone-family intranet export out of
+  // these tests anyway.
   savedGhHost = process.env['GH_HOST'];
   delete process.env['GH_HOST'];
 });
 afterEach(() => {
+  process.chdir(savedCwd);
   rmSync(dir, { recursive: true, force: true });
   process.exitCode = undefined;
   if (savedSessionId === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
@@ -663,13 +717,16 @@ describe('the user-authorized fast path binds a recorded Aone target (round-6 wi
   // at the a1 seam — the wrong-host leak class is unchanged, only the
   // platform the correct post lands on moved.
   let savedGhHost: string | undefined;
+  let capturedDiff: string | undefined;
   beforeEach(() => {
     savedGhHost = process.env['GH_HOST'];
     delete process.env['GH_HOST'];
+    capturedDiff = writeCapturedDiff(123);
   });
   afterEach(() => {
     if (savedGhHost === undefined) delete process.env['GH_HOST'];
     else process.env['GH_HOST'] = savedGhHost;
+    if (capturedDiff) rmSync(capturedDiff, { force: true });
   });
 
   it('posts a recorded Aone target through a1, never gh', () => {
@@ -703,16 +760,34 @@ describe('the user-authorized fast path binds the recorded host cross-session', 
   // exit 0, COMMENT review filed at repos/maxcompute/odps_src/pulls/42).
   const siblingDir = join('.qwen', 'tmp', 's-r11-cross-session');
   const siblingFile = join(siblingDir, 'qwen-skill-args-review.txt');
+  let capturedDiff: string | undefined;
+  let savedCwd: string;
   beforeEach(() => {
+    // Isolate the recording store: it is cwd-relative, and the scan
+    // reads EVERY s-* session recording plus the root one. An ambient
+    // leftover under the vitest cwd naming a fixture target WITH a host
+    // (e.g. a real /review of that number) would bind that host and
+    // redden correct code; a HOSTLESS leftover leaves the observable
+    // output byte-identical (both refusal arms print the same JSON) and
+    // lets a reverted fix pass through the wrong arm. Chdir into the
+    // per-test tmpdir the way the sibling suites do, so the scan sees
+    // only this suite's records.
+    savedCwd = process.cwd();
+    process.chdir(dir);
     mkdirSync(siblingDir, { recursive: true });
     writeFileSync(
       siblingFile,
       'https://code.alibaba-inc.com/maxcompute/odps_src/codereview/42 --comment\n',
       'utf8',
     );
+    capturedDiff = writeCapturedDiff(42);
   });
   afterEach(() => {
     rmSync(siblingDir, { recursive: true, force: true });
+    // The captured-diff path is cwd-relative — remove it before restoring
+    // the cwd.
+    if (capturedDiff) rmSync(capturedDiff, { force: true });
+    process.chdir(savedCwd);
   });
 
   it('routes at a1 when a SIBLING session recorded the same PR on Aone', () => {
@@ -1029,6 +1104,8 @@ describe('the user-authorized fast path binds the recorded host cross-session', 
     const newFile = join(newDir, 'qwen-skill-args-review.txt');
     mkdirSync(oldDir, { recursive: true });
     mkdirSync(newDir, { recursive: true });
+    // The reversed arm posts this target through the anchor gate.
+    const capturedDiff = writeCapturedDiff(7);
     try {
       const now = Math.floor(Date.now() / 1000);
       // OLDER session carried a host; NEWER session recorded a bare number.
@@ -1075,6 +1152,7 @@ describe('the user-authorized fast path binds the recorded host cross-session', 
     } finally {
       rmSync(oldDir, { recursive: true, force: true });
       rmSync(newDir, { recursive: true, force: true });
+      rmSync(capturedDiff, { force: true });
     }
   });
 
@@ -1137,6 +1215,95 @@ describe('the user-authorized fast path binds the recorded host cross-session', 
       rmSync(rootFile, { force: true });
       rmSync(siblingDir, { recursive: true, force: true });
     }
+  });
+
+  it('two recordings of the SAME PR with DIFFERENT hosts — the newest decides, whichever session it lives in', () => {
+    // A session-scoped-first scan binds the publishing session's STALE
+    // host when a sibling recorded the same number more recently; a
+    // root-pinned-last scan loses the other way. Newest-wins is the
+    // only ordering that reads the record the way writeSkillArgs
+    // writes it (last-writer-wins), or a stale host routes an
+    // irreversible write at the wrong platform's same-named repo.
+    const rootFile = join('.qwen', 'tmp', 'qwen-skill-args-review.txt');
+    const now = Math.floor(Date.now() / 1000);
+    writeFileSync(rootFile, '42 --host github.com --comment\n');
+    writeFileSync(
+      siblingFile,
+      'https://code.alibaba-inc.com/maxcompute/odps_src/codereview/42 --comment\n',
+    );
+    try {
+      // Root (github) OLDER, sibling (Aone) NEWER → the Aone recording
+      // decides; the stale github host must not bind.
+      utimesSync(rootFile, now - 3600, now - 3600);
+      utimesSync(siblingFile, now, now);
+      expect(() =>
+        runSubmit(
+          args({ userAuthorized: true, pr: 42, repo: 'maxcompute/odps_src' }),
+          'unknown',
+          { defaultComment: false },
+        ),
+      ).not.toThrow();
+      expect(process.exitCode).toBeUndefined();
+      expect(aoneSubmitMock).toHaveBeenCalledTimes(1);
+      expect(ghMock).not.toHaveBeenCalled();
+
+      // Reverse: the github recording is newest, so it decides — the
+      // root record must not veto from a pinned position.
+      process.exitCode = undefined;
+      aoneSubmitMock.mockClear();
+      ghMock.mockClear();
+      utimesSync(rootFile, now, now);
+      utimesSync(siblingFile, now - 3600, now - 3600);
+      expect(() =>
+        runSubmit(
+          args({ userAuthorized: true, pr: 42, repo: 'maxcompute/odps_src' }),
+          'unknown',
+          { defaultComment: false },
+        ),
+      ).not.toThrow();
+      expect(process.exitCode).toBeUndefined();
+      expect(aoneSubmitMock).not.toHaveBeenCalled();
+      expect(ghMock).toHaveBeenCalled();
+    } finally {
+      rmSync(rootFile, { force: true });
+    }
+  });
+
+  it('a FLAGLESS publish of a GHE-recorded review posts where the review ran — absence is not a github.com claim', () => {
+    // submit routes an un-flagged write at the recorded binding, so the
+    // recording cannot contradict the routing it supplies. The gate's
+    // host check used to read an absent --host as "targets github.com"
+    // and refuse `authorise ghe.corp.example, but this submission
+    // targets github.com` — an over-refusal of the ordinary hand-run
+    // publish after the whole review ran.
+    const rec = file(
+      'ghe-flagless.txt',
+      'https://ghe.corp.example/o/r/pull/123 --comment',
+    );
+    expect(() =>
+      runSubmit(args({ skillArgs: rec, pr: 123, repo: 'o/r' }), 'unknown', {
+        defaultComment: false,
+      }),
+    ).not.toThrow();
+    expect(process.exitCode).toBeUndefined();
+    expect(ghMock).toHaveBeenCalled();
+    expect(aoneSubmitMock).not.toHaveBeenCalled();
+
+    // A CONTRADICTING explicit flag still refuses — the exemption is
+    // for ABSENCE, not a blanket waiver of the host binding.
+    process.exitCode = undefined;
+    ghMock.mockClear();
+    writeStdoutSpy.mockClear();
+    expect(() =>
+      runSubmit(
+        args({ skillArgs: rec, pr: 123, repo: 'o/r', host: 'github.com' }),
+        'unknown',
+        { defaultComment: false },
+      ),
+    ).not.toThrow();
+    expect(process.exitCode).toBe(3);
+    expect(ghMock).not.toHaveBeenCalled();
+    expect(aoneSubmitMock).not.toHaveBeenCalled();
   });
 
   it('a HOSTLESS recording read via the --skill-args seam refuses — the cwd probe must not stand in for the record of another cwd', () => {
@@ -3361,8 +3528,11 @@ describe('submit receipt (producer half of the audit contract)', () => {
 // carries `html_url` — the deep link to the review — and submit relays it in
 // both channels, because a summary without it leaves the user to reassemble
 // the PR address by hand. Best-effort like the receipt: a response without it
-// (or an unparseable one) must never fail a review that DID post, and never
-// invents a link either.
+// (or an unparseable one) must never fail a review that DID post — the
+// provider composes the PR-page URL instead when the routing host is
+// knowable; when it is NOT (gh's own hosts.yml default is not visible here),
+// the receipt stays linkless rather than affirm a host the write may not
+// have taken.
 describe('the posted-review link', () => {
   const authorizedPost = (over: Record<string, unknown> = {}) =>
     args({ userAuthorized: true, ...over });
@@ -3390,18 +3560,54 @@ describe('the posted-review link', () => {
     expect(postedLine).toContain(url);
   });
 
-  it('omits url when the response carries none — a link is relayed, never built', () => {
+  it('composes the PR-page url when the response carries no deep link', () => {
+    // A response without html_url used to leave the receipt linkless and the
+    // skill prose assembled the URL by hand. That assembly is code now: the
+    // provider composes the PR page from the knowable host and the target
+    // the post took. The exported GH_HOST supplies it here — setGhHost is
+    // mocked out, so the routing bind at submit time cannot.
+    process.env['GH_HOST'] = 'github.com';
     ghMock.mockImplementationOnce(() => JSON.stringify({ id: 42 }));
     runSubmit(authorizedPost());
-    expect(stdoutJson().posted).toBe(true);
-    expect('url' in stdoutJson()).toBe(false);
+    expect(stdoutJson()).toMatchObject({
+      posted: true,
+      url: 'https://github.com/QwenLM/qwen-code/pull/6771',
+    });
+    const postedLine = writeStderrSpy.mock.calls
+      .map((c) => c[0] as string)
+      .find((l) => l.startsWith('Posted '));
+    expect(postedLine).toContain(
+      'https://github.com/QwenLM/qwen-code/pull/6771',
+    );
   });
 
   it('still reports posted:true when the response is unparseable', () => {
-    // ghMock's default return is '' — JSON.parse throws, and both the receipt
-    // and the link ride the same best-effort read of a post that succeeded.
+    // ghMock's default return is '' — JSON.parse throws, and the receipt and
+    // the link ride the same best-effort read of a post that succeeded; the
+    // composed fallback still lands in the JSON.
+    process.env['GH_HOST'] = 'github.com';
     runSubmit(authorizedPost());
     expect(stdoutJson().posted).toBe(true);
-    expect('url' in stdoutJson()).toBe(false);
+    expect(stdoutJson().url).toBe(
+      'https://github.com/QwenLM/qwen-code/pull/6771',
+    );
+  });
+
+  it('keeps the receipt linkless when the routing host is not knowable', () => {
+    // No routed host (setGhHost is a no-op here) and no exported GH_HOST (the
+    // file-level beforeEach deletes it): gh's own third fallback — hosts.yml's
+    // authenticated default — decides where the write lands, and a composed
+    // github.com link could resolve to a real, unrelated PR of a same-named
+    // repo. The post still stands; only the link is dropped.
+    ghMock.mockImplementationOnce(() => JSON.stringify({ id: 42 }));
+    runSubmit(authorizedPost());
+    const out = stdoutJson();
+    expect(out.posted).toBe(true);
+    expect(out.url).toBeUndefined();
+    const postedLine = writeStderrSpy.mock.calls
+      .map((c) => c[0] as string)
+      .find((l) => l.startsWith('Posted '));
+    expect(postedLine).toBeDefined();
+    expect(postedLine).not.toContain('https://');
   });
 });

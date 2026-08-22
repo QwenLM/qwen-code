@@ -368,6 +368,19 @@ Enterprise paragraph.
     documented for the user. Still open: dedup/self-PR backing for Aone,
     `composeUrl`, AI-comment marking (Q4), the
     render-adjudication carve-out.
+  - **Anchored (2026-08-21, issue #9615):** Q2's controlled probe
+    (scratch MR 29427547 of base-biz/sqlt, a1 v0.2.51) proved the
+    platform posts ANY `--line` unvalidated and cannot express the old
+    side — an old-side number silently becomes the same-numbered
+    new-side line. `submit`'s Aone branch now validates every inline
+    anchor against the review's captured diff BEFORE posting: an
+    unanchorable Critical is relocated into the summary body, an
+    unanchorable Suggestion discarded and counted (the GitHub
+    422-recovery dispose, performed in code), each disclosed in the
+    terminal; a missing captured diff refuses the whole post. Probe
+    evidence and pinned semantics:
+    `docs/design/2026-08-21-review-aone-removed-line-anchoring.md`.
+
   - **Landed (2026-08-21, #9617):** the cleanup bypass audit — D8's
     "`comment list` filtered by author within the audit window". `cleanup`
     selects the audit backend from the fetch report's recorded host, with
@@ -446,6 +459,40 @@ Enterprise paragraph.
     open: dedup backing for Aone, `composeUrl`, the
     ai_comment marking flag (a1-side), the render-adjudication
     carve-out.
+  - **Residuals closed (2026-08-21, #9619):** three small gaps, one pass.
+    (a) `composeUrl` joined the reader interface — in the spirit of the
+    sketch's provider-owned URL composition, scoped to the `Posted:`
+    line (`(prNumber, ownerRepo)` → the PR/MR page URL; the sketch's
+    deeper comment-anchor variant stays future work): GitHub COMPOSES
+    the PR-page URL from the routed host (deterministic grammar, no API
+    call), normalised through the ONE host-spelling helper the comment
+    anchors use (`normalizeGhHostForUrl`), and `submit` fills a GitHub
+    receipt that carries no `html_url` through it. Aone is reader-backed
+    — the platform's own `detailUrl`, never assembled, because the
+    owner/repo collapse to the last two segments names a different repo
+    for a nested-group project — but Aone's `submit` does NOT re-query
+    through it: the pre-write drift-gate read already carries the same
+    stable field, so a second fetch cannot add a link (round-2 review
+    R1-4), and an empty receipt rides the coordinates relay. (b)
+    `test-plan`'s body fetch routes through the platform reader — the
+    MR description on Aone, already carried by the reader's fetch
+    metadata, so the check runs on Aone targets instead of being
+    skipped, and no new API surface landed; the Aone arm runs the same
+    `ensureAuthenticated` gate every other a1-backed flow runs first
+    (round-2 review R1-5), and the handler wiring is pinned by a
+    handler-level test (R1-6). (c) Q1's version floor is enforced in
+    `ensureAoneAuthenticated` — resolved to 0.1.90, the version the
+    platform facts were probed against (nothing older was verified);
+    presence → floor → auth, each with its own remedy; both fail-open
+    arms (failed probe, unparseable output) disclose on stderr with the
+    CAUSE extracted past the execFileSync preamble (R1-1), and the
+    composeUrl failure arm discloses too (R1-2). The floor check shares
+    the gate #9616's self-PR read passes through: `ensureAoneAuthenticated`
+    now returns the whoami account (`--format json`, one spawn), so the
+    version floor applies to the presubmit seam as well. Still open:
+    dedup backing for Aone, cleanup audit, the ai_comment marking flag
+    (a1-side), the render-adjudication carve-out.
+
 - **Phase 4 — semantic gaps.** Incremental-cache ancestry fallback, build-test
   repo-config escape hatch, publish-assets gating polish, generic-GitLab
   (glab) evaluation.
@@ -493,11 +540,25 @@ Enterprise paragraph.
 
 ## Open questions
 
-1. **Q1 — a1 minimum version.** Which `a1` version introduced `mr comment
-create --file/--line` and `-f json` stability? Provider version floor TBD.
-2. **Q2 — Inline anchor semantics.** Does `--line` accept only new-side lines?
-   How are removed-line (`side: left`) comments posted? Needs a controlled
-   experiment on a scratch CR.
+1. **Q1 — a1 minimum version.** ~~Which `a1` version introduced `mr comment
+create --file/--line` and `-f json` stability? Provider version floor TBD.~~
+   Resolved (2026-08-21, #9619): the floor is **0.1.90** — the version the
+   platform facts above were probed against; nothing older was verified, and
+   the exact introducing version is not recoverable from outside Alibaba.
+   `ensureAoneAuthenticated` enforces it (presence → floor → auth) with an
+   actionable upgrade message; an unparseable `--version` and a failed
+   probe alike are disclosed on stderr and fail OPEN, never refusing an
+   a1 the check merely cannot read.
+2. **Q2 — Inline anchor semantics. RESOLVED (2026-08-21).** The controlled
+   probe (scratch MR 29427547 of base-biz/sqlt, a1 v0.2.51) proved: `--line`
+   is new-side only (no `--side` flag exists; an old-side number silently
+   becomes the same-numbered new-side line), the server performs ZERO anchor
+   validation (even beyond-EOF lines post), and `--file` without `--line`
+   drops the path entirely (file-level is MR-level in disguise). Semantics
+   pinned in `docs/design/2026-08-21-review-aone-removed-line-anchoring.md`:
+   client-side hunk validation in submit's Aone branch, with the GitHub
+   422-recovery degrade (Critical → body, Suggestion → discarded) performed
+   in code and disclosed in the terminal.
 3. **Q3 — REQUEST_CHANGES.** ~~Confirm no native reject/unapprove API
    exists.~~ **Re-confirmed 2026-08-21 on a1 v0.1.90:** the `repo mr` surface
    (approve/close/comment/cr/create/diff/edit/list/merge/remind/reopen/
