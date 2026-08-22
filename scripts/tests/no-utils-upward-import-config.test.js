@@ -18,6 +18,7 @@ describe('utils upward-import flat-config integration', () => {
       prodTypeOnly,
       prodExportTypeOnly,
       prodInlineType,
+      prodTypeQuery,
       prodDynamic,
       testStatic,
     ] = await Promise.all([
@@ -32,6 +33,12 @@ describe('utils upward-import flat-config integration', () => {
       ),
       eslint.lintText(
         "export type { Settings } from '../config/settings.js';",
+        {
+          filePath: 'packages/cli/src/utils/fixture-boundary.ts',
+        },
+      ),
+      eslint.lintText(
+        "import { type Settings } from '../config/settings.js';",
         {
           filePath: 'packages/cli/src/utils/fixture-boundary.ts',
         },
@@ -64,6 +71,7 @@ describe('utils upward-import flat-config integration', () => {
     expect(hasViolation(prodTypeOnly)).toBe(false);
     expect(hasViolation(prodExportTypeOnly)).toBe(false);
     expect(hasViolation(prodInlineType)).toBe(false);
+    expect(hasViolation(prodTypeQuery)).toBe(false);
     // test files stay exempt via the rule's own test/fixture exemption
     expect(hasViolation(testStatic)).toBe(false);
   });
