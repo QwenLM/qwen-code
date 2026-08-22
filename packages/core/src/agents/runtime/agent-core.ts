@@ -716,64 +716,17 @@ export class AgentCore {
     // Apply disallowedTools blocklist (supports MCP server-level patterns).
     if (this.toolConfig?.disallowedTools?.length) {
       const disallowed = this.toolConfig.disallowedTools;
-      return this.rememberDeclared(
-        toolsList.filter((t) => {
-          if (!t.name) return true;
-          return !disallowed.some((pattern) =>
-            t.name!.startsWith('mcp__')
-              ? matchesMcpPattern(pattern, t.name!)
-              : pattern === t.name,
-          );
-        }),
-      );
+      return toolsList.filter((t) => {
+        if (!t.name) return true;
+        return !disallowed.some((pattern) =>
+          t.name!.startsWith('mcp__')
+            ? matchesMcpPattern(pattern, t.name!)
+            : pattern === t.name,
+        );
+      });
     }
 
-    return this.rememberDeclared(toolsList);
-  }
-
-  /**
-   * Names of the declarations this agent last sent to the model.
-   *
-   * Anything answering "can the model invoke tool X" reads THIS rather than
-   * re-deriving it, because every re-derivation is a copy of `prepareTools`'
-   * filters that can fall behind them — which is the shape of the defect this
-   * gate exists for. `willHaveSkillTool()` is one such copy: it reads
-   * `toolConfig.tools`, so it cannot see the `disallowedTools` blocklist, an
-   * inline-only declaration set, or a tool the permission layer kept out of
-   * the registry. It stays (the startup snapshot runs before any
-   * `prepareTools()` and has nothing better to consult) but it is an
-   * approximation, and must not be used where the exact answer exists.
-   */
-  private declaredToolNames?: ReadonlySet<string>;
-
-  /**
-   * Whether the model was DECLARED the Skill tool — the answer the
-   * skill-activation gate needs.
-   *
-   * A named method rather than an inline closure so a test can read the
-   * answer rather than the record it reads from: asserting only on
-   * `declaredToolNames` leaves the gate free to consult something else, which
-   * is precisely the revert this is guarding.
-   *
-   * Before the first `prepareTools()` there are no declarations to consult,
-   * and `willHaveSkillTool()` is the best answer available — the same one the
-   * startup snapshot uses.
-   */
-  private hasSkillToolForGate(): boolean {
-    return this.declaredToolNames
-      ? this.declaredToolNames.has(ToolNames.SKILL)
-      : this.willHaveSkillTool();
-  }
-
-  private rememberDeclared(
-    declarations: FunctionDeclaration[],
-  ): FunctionDeclaration[] {
-    this.declaredToolNames = new Set(
-      declarations
-        .map((d) => d.name)
-        .filter((n): n is string => typeof n === 'string' && n.length > 0),
-    );
-    return declarations;
+    return toolsList;
   }
 
   // ─── Reasoning Loop ───────────────────────────────────────
@@ -1525,6 +1478,25 @@ export class AgentCore {
     );
   }
 
+  /**
+   * Whether the model can actually invoke a skill: declared AND executable.
+   *
+   * Takes the declaration set rather than reading one, so the caller passes
+   * the list it just sent to the model and no second copy exists. A named
+   * method rather than an inline closure so a test can read the ANSWER — a
+   * test that only checks the two inputs separately stays green when the gate
+   * stops combining them, which is how the first version of these tests
+   * missed both mutations.
+   */
+  private canInvokeSkill(
+    declaredToolNames: ReadonlySet<string | undefined>,
+  ): boolean {
+    return (
+      declaredToolNames.has(ToolNames.SKILL) &&
+      this.isToolExecutionAllowed(ToolNames.SKILL)
+    );
+  }
+
   private isToolExecutionAllowed(toolName: string): boolean {
     if (this.executionAllowedTools === undefined) {
       return true;
@@ -1790,7 +1762,14 @@ export class AgentCore {
       // The fallback covers the window before the first `prepareTools()`:
       // `willHaveSkillTool()` is the best answer available then, and it is
       // the one the startup snapshot already uses.
-      hasSkillTool: () => this.hasSkillToolForGate(),
+      // Answered from `declaredToolNames` above — the very list sent to the
+      // model — and from the execution allowlist, because the two are
+      // separate: a fork keeps the parent's declaration prefix for cache
+      // sharing while narrowing what may actually run. Announcing a skill the
+      // model may see but not execute is the same wasted turn, and it still
+      // consumes the announcement on the shared Config, hiding the activation
+      // from the session that can act on it.
+      hasSkillTool: () => this.canInvokeSkill(declaredToolNames),
       outputUpdateHandler: (callId, outputChunk) => {
         // Shell liveness heartbeats have no subagent consumer; broadcasting
         // one would overwrite the live output view kept in liveOutputs.

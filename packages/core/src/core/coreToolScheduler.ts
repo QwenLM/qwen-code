@@ -1224,11 +1224,19 @@ interface CoreToolSchedulerOptions {
    * The skill-activation reminder must not announce a skill to a model that
    * cannot invoke one, and the registry cannot answer that: `SKILL` is
    * registered unconditionally, including for subagents, while a subagent
-   * running an explicit `tools` list may never have it declared. An owner
-   * that filters its declarations passes its own predicate here — the same
-   * one it used for the startup `<available_skills>` snapshot, so the two
-   * cannot disagree. Omitted, the scheduler falls back to the registry,
-   * which is correct for an owner that declares whatever it registers.
+   * running an explicit `tools` list may never have it declared — nor is
+   * being declared sufficient, since a fork can keep a declaration it is
+   * forbidden to execute. An owner that filters either passes its own
+   * predicate here.
+   *
+   * It is NOT necessarily the predicate behind the startup
+   * `<available_skills>` snapshot, and for subagents it is not: the snapshot
+   * is decided before any declarations exist, so it answers from
+   * configuration. The relation is one-directional — this predicate refines
+   * the snapshot's answer and is never more permissive, but the snapshot can
+   * say yes where this says no. Omitted, the scheduler falls back to the
+   * registry, which is correct for an owner that declares whatever it
+   * registers.
    */
   hasSkillTool?: () => boolean;
 }
@@ -5273,8 +5281,10 @@ export class CoreToolScheduler {
             // does hold the tool — never learns the skill activated.
             //
             // An owner that filters its declarations therefore supplies the
-            // predicate, and supplies the same one it used for the startup
-            // snapshot so the two views cannot drift apart.
+            // predicate. It is not necessarily the one behind the startup
+            // snapshot: that runs before any declarations exist and answers
+            // from configuration, so it can announce where this gate refuses.
+            // The refinement goes one way — this is never more permissive.
             const hasSkillTool = this.hasSkillToolOverride
               ? this.hasSkillToolOverride()
               : !!this.toolRegistry.getTool(ToolNames.SKILL);
