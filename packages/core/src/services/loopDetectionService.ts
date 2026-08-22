@@ -46,6 +46,18 @@ const CONTENT_CHUNK_SIZE = 50;
 // accumulate even three in-window occurrences and remain out of reach.
 const MAX_HISTORY_LENGTH = 4000;
 
+// Truncation hysteresis slack. Once the history saturates, the physical
+// trim (which walks the whole contentStats map to re-base stored indices)
+// runs only when the length exceeds MAX_HISTORY_LENGTH by this margin,
+// slicing back to exactly MAX_HISTORY_LENGTH — amortizing the walk over
+// ~TRUNCATION_SLACK appended chars instead of paying it on every streamed
+// event. Purely a memory/mechanics optimization: the detection logic always
+// operates on the logical window of the last MAX_HISTORY_LENGTH chars (see
+// windowStart), so detection decisions are identical regardless of how
+// rarely the physical trim runs. Peak memory is bounded at
+// MAX_HISTORY_LENGTH + TRUNCATION_SLACK chars.
+const TRUNCATION_SLACK = 1000;
+
 // Long-period verbatim repetition detection (issue #1775). A unit repeated
 // verbatim spaces identical CONTENT_CHUNK_SIZE-grams exactly one unit-length
 // apart, which the clustered rule cannot see: its average-distance bound
@@ -687,11 +699,34 @@ export class LoopDetectionService {
   }
 
   /**
+   * Start of the logical detection window inside streamContentHistory: the
+   * detection rules may only see the last MAX_HISTORY_LENGTH chars, even
+   * while the physical trim's hysteresis (see truncateAndUpdate) lets the
+   * buffer temporarily hold up to MAX_HISTORY_LENGTH + TRUNCATION_SLACK.
+   * Everything before this offset is treated as already truncated away.
+   */
+  private windowStart(): number {
+    return Math.max(0, this.streamContentHistory.length - MAX_HISTORY_LENGTH);
+  }
+
+  /**
    * Truncates the content history to prevent unbounded memory growth.
    * When truncating, adjusts all stored indices to maintain their relative positions.
+   *
+   * Runs with hysteresis: once saturated, trims only when the length
+   * exceeds the window by TRUNCATION_SLACK, then slices back to exactly
+   * MAX_HISTORY_LENGTH. The index-rebase walk below is Θ(map size), and at
+   * saturation the stride-1 sliding window keeps one entry per position, so
+   * running it per streamed event cost Θ(window) synchronous CPU on the
+   * token-streaming path; the slack amortizes it over appended chars.
+   * Detection semantics are unaffected: the rules only ever see the logical
+   * window (windowStart), which is identical with or without the slack.
    */
   private truncateAndUpdate(): void {
-    if (this.streamContentHistory.length <= MAX_HISTORY_LENGTH) {
+    if (
+      this.streamContentHistory.length <=
+      MAX_HISTORY_LENGTH + TRUNCATION_SLACK
+    ) {
       return;
     }
 
@@ -774,9 +809,29 @@ export class LoopDetectionService {
    *    within a small average distance (≤ 1.5 * chunk size)
    */
   private isLoopDetectedForChunk(chunk: string, hash: string): boolean {
-    const existingIndices = this.contentStats.get(hash);
+    let existingIndices = this.contentStats.get(hash);
 
-    if (!existingIndices) {
+    if (existingIndices) {
+      // The physical truncation runs with hysteresis, so occurrences the
+      // logical window has already passed can linger in the map between
+      // trims. Drop them here — exactly the set a per-event truncation
+      // would have removed — so detection decisions never depend on how
+      // rarely the physical trim runs.
+      const start = this.windowStart();
+      if (existingIndices[0] < start) {
+        let firstKept = 1;
+        while (
+          firstKept < existingIndices.length &&
+          existingIndices[firstKept] < start
+        ) {
+          firstKept++;
+        }
+        existingIndices = existingIndices.slice(firstKept);
+        this.contentStats.set(hash, existingIndices);
+      }
+    }
+
+    if (!existingIndices || existingIndices.length === 0) {
       this.contentStats.set(hash, [this.lastContentIndex]);
       return false;
     }
@@ -833,9 +888,10 @@ export class LoopDetectionService {
    *
    * Once the history saturates, earlier occurrences can be truncated away,
    * so a shorter run (>= PERIODIC_MIN_TRUNCATED_OCCURRENCES) is accepted
-   * when the whole retained region — back to the start of the history — is
-   * verified periodic with the candidate stride. Without that escape valve,
-   * units of ~1 KB or more could never accumulate
+   * when the whole retained region — back to the start of the logical
+   * window (windowStart), i.e. exactly the content a fully-trimmed history
+   * retains — is verified periodic with the candidate stride. Without that
+   * escape valve, units of ~1 KB or more could never accumulate
    * PERIODIC_OCCURRENCES_REQUIRED occurrences inside the window and a
    * full-paragraph chant would spin the turn forever.
    */
@@ -872,7 +928,7 @@ export class LoopDetectionService {
       this.streamContentHistory.length >= MAX_HISTORY_LENGTH
     ) {
       return this.isRegionPeriodicWithStride(
-        0,
+        this.windowStart(),
         indices[last] + CONTENT_CHUNK_SIZE,
         stride,
       );

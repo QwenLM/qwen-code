@@ -1663,6 +1663,139 @@ describe('LoopDetectionService', () => {
     });
   });
 
+  describe('Truncation hysteresis', () => {
+    // The physical trim walks the whole contentStats map, which at
+    // saturation holds one entry per window position — Θ(window)
+    // synchronous CPU per streamed event. The trim now runs with hysteresis
+    // (a TRUNCATION_SLACK margin), and these tests pin that the change is
+    // behavior-neutral: the fire offsets below were recorded on the
+    // pre-hysteresis implementation and must not drift.
+    const MAX_HISTORY_LENGTH = 4000;
+    const TRUNCATION_SLACK = 1000;
+    const DELTA = 17;
+
+    const variedText = (len: number, seed: number): string => {
+      let out = '';
+      let x = seed + 1;
+      const words = [
+        'alpha',
+        'bravo',
+        'charlie',
+        'delta',
+        'echo',
+        'foxtrot',
+        'golf',
+        'hotel',
+        'india',
+        'juliet',
+        'kilo',
+        'lima',
+        'mike',
+        'november',
+        'oscar',
+        'papa',
+        'quebec',
+        'romeo',
+        'sierra',
+        'tango',
+      ];
+      while (out.length < len) {
+        x = (x * 1103515245 + 12345) % 2147483648;
+        out += words[x % words.length] + String(x % 97) + ' ';
+      }
+      return out.slice(0, len);
+    };
+
+    const U300 =
+      'The issue might be that the API call is not being made properly ' +
+      'when the switch is toggled. Let me make sure the fetchPublicRecipes ' +
+      'function is called correctly with the right parameters. The issue ' +
+      'might be that the API call is not being made with the correct ' +
+      'parameters when the switch is toggled.';
+    const U1200 = variedText(1200, 7);
+    const U1350 = variedText(1350, 9);
+
+    const historyLength = (): number =>
+      (service as unknown as { streamContentHistory: string })
+        .streamContentHistory.length;
+
+    // Streams as Content deltas of DELTA chars and returns the number of
+    // chars streamed when detection fired (-1 when it never fired).
+    const fireOffset = (text: string): number => {
+      service.reset('');
+      let streamed = 0;
+      for (let i = 0; i < text.length; i += DELTA) {
+        const piece = text.slice(i, i + DELTA);
+        streamed += piece.length;
+        if (
+          service.addAndCheck({
+            type: GeminiEventType.Content,
+            value: piece,
+          })
+        ) {
+          return streamed;
+        }
+      }
+      return -1;
+    };
+
+    it('unit shape sanity', () => {
+      expect(U300.length).toBe(298);
+      expect(U1200.length).toBe(1200);
+      expect(U1350.length).toBe(1350);
+    });
+
+    it('defers physical truncation until the slack margin, then trims to the window', () => {
+      service.reset('');
+      const text = variedText(5100, 1);
+      // Delta-aligned stream positions: one inside the slack band (past
+      // the window, before the margin) and the first event crossing it.
+      const insideSlackBand =
+        DELTA * Math.floor((MAX_HISTORY_LENGTH + TRUNCATION_SLACK / 2) / DELTA);
+      const trimPoint =
+        DELTA * Math.ceil((MAX_HISTORY_LENGTH + TRUNCATION_SLACK + 1) / DELTA);
+      let streamed = 0;
+      for (let i = 0; i < text.length; i += DELTA) {
+        const piece = text.slice(i, i + DELTA);
+        streamed += piece.length;
+        expect(
+          service.addAndCheck({ type: GeminiEventType.Content, value: piece }),
+        ).toBe(false);
+        if (streamed === insideSlackBand) {
+          // Past the window, inside the slack band: no physical trim yet —
+          // the per-event trim would have pinned the length to the window.
+          expect(historyLength()).toBe(insideSlackBand);
+        }
+        if (streamed === trimPoint) {
+          // Crossing the margin trims back to exactly the window.
+          expect(historyLength()).toBe(MAX_HISTORY_LENGTH);
+        }
+      }
+      expect(historyLength()).toBeLessThanOrEqual(
+        MAX_HISTORY_LENGTH + TRUNCATION_SLACK,
+      );
+    });
+
+    it('keeps detection fire offsets identical to the pre-hysteresis baseline', () => {
+      // Recorded on the per-event-trim implementation. Shapes chosen to
+      // fire before saturation (S1), right at it (S2, S4, S7), and after
+      // several physical trims with a non-periodic prefix still inside the
+      // slack band (S3, S5, S6) — the cases where a lazy trim could change
+      // what the escape valve and occurrence runs see.
+      expect(fireOffset(U300.repeat(60))).toBe(1258);
+      expect(fireOffset(U1200.repeat(12))).toBe(4012);
+      expect(fireOffset(variedText(3000, 3) + U1200.repeat(12))).toBe(7004);
+      expect(fireOffset(U1350.repeat(12))).toBe(4012);
+      expect(fireOffset(variedText(4500, 5) + U300.repeat(60))).toBe(5763);
+      expect(fireOffset(variedText(200, 11) + U1200.repeat(12))).toBe(4216);
+      expect(fireOffset(U1200.repeat(4))).toBe(4012);
+    });
+
+    it('never fires on a long varied stream across many trims', () => {
+      expect(fireOffset(variedText(30000, 13))).toBe(-1);
+    });
+  });
+
   describe('Read File Loop Detection', () => {
     // Cold-start exemption: a prompt that has not yet fired any non-read-like
     // tool is still in its opening-exploration phase, so the detector gives
