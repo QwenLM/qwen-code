@@ -1307,6 +1307,128 @@ describe('UiTelemetryService', () => {
       expect(global2.models['m']?.tokens.prompt).toBe(350);
     });
 
+    it('snapshotForReplay/restoreFromReplaySnapshot undo an abandoned replay', () => {
+      // Session A is live; the user runs /resume B and the swap fails after
+      // the replay but before the UI commits.
+      service.addEvent(makeApiEvent('m', 100), SESSION_A);
+      const snapshot = service.snapshotForReplay(SESSION_B);
+
+      service.resetSession(SESSION_B);
+      service.addEvent(makeApiEvent('m', 300), SESSION_B);
+      expect(service.getMetrics().models['m']?.tokens.prompt).toBe(400);
+
+      service.restoreFromReplaySnapshot(snapshot);
+
+      // The abandoned session's contribution is gone from the aggregate...
+      expect(service.getMetrics().models['m']?.tokens.prompt).toBe(100);
+      // ...the surviving session's live data is untouched...
+      expect(
+        service.getMetricsForSession(SESSION_A).models['m']?.tokens.prompt,
+      ).toBe(100);
+      // ...and the bucket the replay created is gone rather than left empty.
+      expect(service.getMetricsForSession(SESSION_B).models).toEqual({});
+    });
+
+    it('emits an update after restoring a replay snapshot', () => {
+      const snapshot = service.snapshotForReplay(SESSION_B);
+      const onUpdate = vi.fn();
+      service.on('update', onUpdate);
+
+      service.restoreFromReplaySnapshot(snapshot);
+
+      expect(onUpdate).toHaveBeenCalledOnce();
+    });
+
+    it('keeps bySource prototype-free across a snapshot/restore round trip', () => {
+      // R5-1: `structuredClone` copies own properties onto a fresh object with
+      // `Object.prototype`, so a plain clone silently re-arms the crash the
+      // prototype-free map exists to prevent — permanently, for the rest of
+      // the process. `constructor` is a valid subagent name per the naming
+      // regex, and after a rollback the truthiness check in
+      // #getOrCreateSourceMetrics would hand back `Object.prototype.constructor`
+      // as the "bucket", so `bucket.api.totalRequests++` throws.
+      const constructorEvent = (inputTokens: number) =>
+        ({
+          'event.name': EVENT_API_RESPONSE,
+          model: 'm',
+          duration_ms: 100,
+          input_token_count: inputTokens,
+          output_token_count: 10,
+          total_token_count: inputTokens + 10,
+          cached_content_token_count: 0,
+          thoughts_token_count: 0,
+          subagent_name: 'constructor',
+        }) as ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE };
+
+      service.addEvent(constructorEvent(10), SESSION_A);
+      const snapshot = service.snapshotForReplay(SESSION_B);
+      service.resetSession(SESSION_B);
+      service.addEvent(constructorEvent(300), SESSION_B);
+
+      service.restoreFromReplaySnapshot(snapshot);
+
+      // The guard has to survive the round trip, in both the aggregate...
+      expect(
+        Object.getPrototypeOf(service.getMetrics().models['m']!.bySource),
+      ).toBeNull();
+      // ...and the restored session bucket.
+      expect(
+        Object.getPrototypeOf(
+          service.getMetricsForSession(SESSION_A).models['m']!.bySource,
+        ),
+      ).toBeNull();
+
+      // And the next colliding event still accumulates instead of throwing.
+      expect(() =>
+        service.addEvent(constructorEvent(5), SESSION_A),
+      ).not.toThrow();
+      const bucket = service.getMetrics().models['m']!.bySource['constructor']!;
+      expect(typeof bucket).toBe('object');
+      expect(bucket.api.totalRequests).toBe(2);
+      expect(bucket.tokens.prompt).toBe(15);
+    });
+
+    it('restoreFromReplaySnapshot puts back a pre-existing bucket, not an empty one', () => {
+      service.addEvent(makeApiEvent('m', 40), SESSION_B);
+      const snapshot = service.snapshotForReplay(SESSION_B);
+
+      service.resetSession(SESSION_B);
+      service.addEvent(makeApiEvent('m', 300), SESSION_B);
+      service.restoreFromReplaySnapshot(snapshot);
+
+      expect(
+        service.getMetricsForSession(SESSION_B).models['m']?.tokens.prompt,
+      ).toBe(40);
+      expect(service.getMetrics().models['m']?.tokens.prompt).toBe(40);
+    });
+
+    it('restoreFromReplaySnapshot restores closed-session state and prompt counts', () => {
+      service.addEvent(makeApiEvent('m', 10), SESSION_B);
+      service.removeSession(SESSION_B);
+      service.setLastPromptTokenCount(7);
+      // R5-3: the cached-token field rides the same snapshot and had no
+      // assertion anywhere, so deleting its capture/restore pair shipped green
+      // while its sibling stayed guarded. `geminiChat` writes it on every live
+      // API response, so an in-flight response from the OUTGOING session
+      // landing inside a swap window is exactly what the rollback undoes.
+      service.setLastCachedContentTokenCount(42);
+      const snapshot = service.snapshotForReplay(SESSION_B);
+
+      // A replay re-opens the closed session and moves both counts.
+      service.resetSession(SESSION_B);
+      service.addEvent(makeApiEvent('m', 300), SESSION_B);
+      service.setLastPromptTokenCount(999);
+      service.setLastCachedContentTokenCount(1234);
+
+      service.restoreFromReplaySnapshot(snapshot);
+
+      expect(service.getLastPromptTokenCount()).toBe(7);
+      expect(service.getLastCachedContentTokenCount()).toBe(42);
+      // Closed again: a late event must not resurrect the bucket.
+      service.addEvent(makeApiEvent('m', 5), SESSION_B);
+      expect(service.getMetricsForSession(SESSION_B).models).toEqual({});
+    });
+
     it('#closedSessions should be bounded', () => {
       // Add more than MAX_CLOSED_SESSIONS
       for (let i = 0; i < 1005; i++) {
