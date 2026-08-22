@@ -222,11 +222,26 @@ jobs:
     outputs:
       should_review: '${{ steps.pr_state.outputs.should_review }}'
     steps:
+      # Base branch only, and credentials dropped: this job runs on
+      # `pull_request_target`, so the PR head is untrusted code with a token
+      # in scope. Nothing here reads the PR's tree — the two scripts below
+      # are this repository's own, and the evidence comes from the API.
+      - name: 'Checkout base branch'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ github.event.repository.default_branch }}'
+          fetch-depth: 1
+          persist-credentials: false
+
       - name: 'Re-check PR state'
         id: 'pr_state'
         env:
           GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           PR_NUMBER: '${{ github.event.pull_request.number }}'
+          # The caller's number, and the caller's off switch. Defaults live in
+          # the decision module; an unset variable takes them.
+          AUTO_STOP_WINDOW: '${{ vars.REVIEW_AUTO_STOP_WINDOW }}'
+          AUTO_STOP_DISABLED: '${{ vars.REVIEW_AUTO_STOP_DISABLED }}'
         run: |-
           set -euo pipefail
           pr_data="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state,isDraft --jq '[.state, .isDraft] | @tsv')"
@@ -242,7 +257,81 @@ jobs:
             echo "should_review=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          echo "should_review=true" >> "$GITHUB_OUTPUT"
+
+          # The caller's half of issue #9278's rule: the pipeline measures
+          # whether a loop is settling and owns no threshold; THIS repository
+          # owns the number and decides only whether the AUTOMATIC trigger
+          # keeps firing. It runs here and nowhere else on purpose — this job
+          # is reached only by `opened`/`synchronize`, so `@qwen-code /review`
+          # and a review_requested go around it. Stopping the treadmill is
+          # never refusing to review.
+          #
+          # Author-scoped on purpose: the evidence is the ledger marker a
+          # posted review carries, and reading markers from ANY author would
+          # let a stranger's forged marker silence this repository's automatic
+          # reviews. KEEP IN SYNC with the bot_login constant in
+          # review-config (that job runs only on review_requested, so it
+          # cannot be a `needs` here).
+          if [ "${AUTO_STOP_DISABLED}" = "true" ]; then
+            echo "Convergence auto-stop disabled by repository variable." >> "$GITHUB_STEP_SUMMARY"
+            echo "should_review=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          bodies="${RUNNER_TEMP}/bot-review-bodies.json"
+          # Never fail the gate over the read: a listing that errors must
+          # leave the trigger alone, which is what the empty array does.
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" --paginate \
+            --jq '[.[] | select(.user.login == "qwen-code-ci-bot") | .body]' \
+            > "$bodies" 2>/dev/null || echo '[]' > "$bodies"
+          decision="$(node -e '
+            import("./.github/scripts/review-auto-stop.mjs").then(async (m) => {
+              const { readFileSync } = await import("node:fs");
+              let bodies = [];
+              try {
+                bodies = JSON.parse(readFileSync(process.argv[1], "utf8"));
+                if (!Array.isArray(bodies)) bodies = [];
+              } catch { bodies = []; }
+              const w = Number.parseInt(process.env.AUTO_STOP_WINDOW ?? "", 10);
+              const d = m.decideAutoStop(bodies.reverse(), Number.isInteger(w) ? { window: w } : {});
+              process.stdout.write(JSON.stringify({ stop: d.stop, reason: d.reason }));
+            }).catch(() => process.stdout.write("{\"stop\":false,\"reason\":\"decision script failed\"}"));
+          ' "$bodies")" || decision='{"stop":false,"reason":"decision script failed"}'
+          stop="$(printf '%s' "$decision" | jq -r '.stop')"
+          reason="$(printf '%s' "$decision" | jq -r '.reason')"
+          if [ "$stop" != "true" ]; then
+            echo "Convergence auto-stop not engaged: ${reason}" >> "$GITHUB_STEP_SUMMARY"
+            echo "should_review=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Automatic review skipped — ${reason}" >> "$GITHUB_STEP_SUMMARY"
+          echo "should_review=false" >> "$GITHUB_OUTPUT"
+          # A silent stop is indistinguishable from a pipeline that broke, so
+          # the PR says what happened, on what evidence, and how to resume.
+          # Upserted, so a run per push does not mint a comment per push.
+          body_file="${RUNNER_TEMP}/auto-stop-body.md"
+          {
+            printf '%s\n\n' '### Automatic review paused'
+            printf '%s\n\n' "This repository stops auto-triggering reviews when a pull request's own review history shows the loop is not settling — ${reason}."
+            printf '%s\n\n' 'Nothing is blocked and nothing was withheld: the reviews already posted stand, and a review on request still runs. What stops is the review that fires on every push.'
+            printf '%s\n' '- Comment `@qwen-code /review` for a review now.'
+            printf '%s\n' '- Or batch the remaining fixes, verify them, and push once — the next round the trend falls, this pause lifts by itself.'
+            printf '\n%s\n' '<details><summary>中文说明</summary>'
+            printf '\n%s\n\n' "### 自动评审已暂停"
+            printf '%s\n\n' "当一个 PR 自身的评审历史显示回路没有收敛时，本仓库会停止在每次推送上自动触发评审——${reason}。"
+            printf '%s\n\n' '没有任何东西被阻断或扣留：已发布的评审依然有效，按请求的评审也照常运行。停下的只是"每次推送都跑一轮"。'
+            printf '%s\n' '- 评论 `@qwen-code /review` 可立即获得一轮评审。'
+            printf '%s\n' '- 或把剩余修复攒成一批、验证后推送一次——下一轮趋势下降时，该暂停会自行解除。'
+            printf '\n%s\n' '</details>'
+          } > "$body_file"
+          if .github/scripts/upsert-bot-comment.sh \
+            "${GITHUB_REPOSITORY}" "${PR_NUMBER}" \
+            '<!-- qwen-review-auto-stop -->' \
+            "$body_file"; then
+            echo "Auto-stop notice relayed to PR #${PR_NUMBER}."
+          else
+            echo "::warning::Auto-stop notice could not be posted; the skip itself stands. Reason: ${reason}"
+          fi
 
   authorize:
     needs: ['precheck-pr']
