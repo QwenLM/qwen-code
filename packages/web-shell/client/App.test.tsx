@@ -10934,6 +10934,39 @@ describe('App session callbacks', () => {
     );
   });
 
+  it.each([
+    [
+      'hidden command',
+      '/internal deploy',
+      { hiddenSlashCommands: ['internal'] },
+    ],
+    ['fast model command', '/model --fast qwen-max', {}],
+    ['skill command', '/skills deployer', {}],
+    ['delegated rename', '/rename --auto', {}],
+  ])(
+    'refuses an enqueue-style %s while a Goal owns the session',
+    async (_label, command, props) => {
+      const onToast = vi.fn();
+      mockConnection.goalState = activeGoalSnapshot('keep working');
+      renderApp({ ...props, onToast });
+      await flush();
+
+      let accepted: boolean | undefined;
+      await act(async () => {
+        accepted = testState.latestChatEditorProps?.onSubmit(command);
+        await flush();
+      });
+
+      expect(accepted).toBe(false);
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+      expect(rawEnqueuePrompt).not.toHaveBeenCalled();
+      expect(onToast).toHaveBeenCalledWith(
+        'error',
+        'Slash commands are unavailable while a Goal owns the session or its state is loading.',
+      );
+    },
+  );
+
   it.each(['idle', 'responding'] as const)(
     'does not enqueue a forwarded command while Goal state is hydrating (%s)',
     async (streamingState) => {
@@ -17978,6 +18011,37 @@ describe('App session callbacks', () => {
     expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
     expect(settingsReload).toHaveBeenCalled();
   });
+
+  it.each([
+    ['fast-model selection', ['open-fast-model', 'model-select']],
+    ['settings language change', ['change-language-workspace']],
+  ])(
+    'shows the Goal-specific rejection for a blocked %s',
+    async (_label, actions) => {
+      const onToast = vi.fn();
+      mockConnection.goalState = activeGoalSnapshot('keep working');
+      const { container } = renderApp({ onToast });
+      await flush();
+      testState.prompt = '/settings';
+      await clickSubmit(container);
+      await flush();
+
+      for (const action of actions) {
+        await act(async () => {
+          container
+            .querySelector<HTMLButtonElement>(`[data-testid="${action}"]`)
+            ?.click();
+          await Promise.resolve();
+        });
+      }
+
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+      expect(onToast).toHaveBeenCalledWith(
+        'error',
+        'Slash commands are unavailable while a Goal owns the session or its state is loading.',
+      );
+    },
+  );
 
   it('clears model selection busy state after a same-session reattach', async () => {
     const selection = deferred<void>();

@@ -6658,10 +6658,17 @@ export function App({
     [store, resumeChatBottomFollow],
   );
 
-  const blockLocalCommandDuringTurn = useCallback((): false => {
-    pushToast('error', t('queue.commandBlocked'));
+  const blockCommand = useCallback((): false => {
+    pushToast(
+      'error',
+      t(
+        isGoalGateBlocked()
+          ? 'queue.commandGoalBlocked'
+          : 'queue.commandBlocked',
+      ),
+    );
     return false;
-  }, [pushToast, t]);
+  }, [isGoalGateBlocked, pushToast, t]);
 
   const handleThemeChange = useCallback(
     (nextTheme: WebShellTheme) => {
@@ -7081,7 +7088,7 @@ export function App({
       };
       if (streamingStateRef.current !== 'idle' || isGoalGateBlocked()) {
         handleLanguageChange(previousLanguage);
-        blockLocalCommandDuringTurn();
+        blockCommand();
         return;
       }
       sendPrompt(command, undefined, undefined, { ownerRef: owner })
@@ -7093,7 +7100,7 @@ export function App({
         });
     },
     [
-      blockLocalCommandDuringTurn,
+      blockCommand,
       handleLanguageChange,
       reloadWorkspaceSettings,
       reportError,
@@ -8915,13 +8922,6 @@ export function App({
       const goalBlocked = isGoalGateBlocked();
       const commandBlocked =
         streamingStateRef.current !== 'idle' || goalBlocked;
-      const blockCommand = () => {
-        if (goalBlocked) {
-          pushToast('error', t('queue.commandGoalBlocked'));
-          return false;
-        }
-        return blockLocalCommandDuringTurn();
-      };
       const enqueueBlockedCommand = (commandText: string) => {
         if (goalBlocked) return blockCommand();
         return enqueuePrompt(
@@ -10010,7 +10010,7 @@ export function App({
       handleThemeChange,
       handleSetMode,
       handleLanguageChange,
-      blockLocalCommandDuringTurn,
+      blockCommand,
       createSideTask,
       sideTasksAvailable,
       openEnvironmentTasksPanel,
@@ -10747,7 +10747,7 @@ export function App({
   const handleFastModelSelect = useCallback(
     (modelId: string) => {
       if (streamingState !== 'idle' || isGoalGateBlocked()) {
-        blockLocalCommandDuringTurn();
+        blockCommand();
         return;
       }
       // Model IDs from the picker arrive as bare model IDs (baseModelId), not
@@ -10794,7 +10794,7 @@ export function App({
         });
     },
     [
-      blockLocalCommandDuringTurn,
+      blockCommand,
       closePanel,
       sendPrompt,
       streamingState,
