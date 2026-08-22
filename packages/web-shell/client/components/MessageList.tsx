@@ -21,6 +21,7 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import type {
   ToolGroupMessage as DaemonToolGroupMessage,
+  ThinkingMessage as DaemonThinkingMessage,
   Message,
   ACPToolCall,
   TurnCollapseHead,
@@ -68,7 +69,7 @@ import { WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS } from '../constants/sessions';
 import type { AttachmentPreviewRequest } from '../adapters/messageTypes';
 
 const noopTurnOutputAction = () => undefined;
-const RELOAD_TRANSCRIPT_DELAY_MS = 120_000;
+const RELOAD_TRANSCRIPT_DELAY_MS = 15_000;
 const TURN_LAYOUT_ANIMATION_MS = 180;
 const AGENT_SUMMARY_COLLAPSE_DELAY_MS = 400;
 // A reconciled-terminal sibling whose completion notification is delayed (not
@@ -101,6 +102,7 @@ interface MessageListProps {
     subscribe(listener: () => void): () => void;
   };
   onReloadTranscript?: (signal: AbortSignal) => Promise<void>;
+  transcriptReloadPaused?: boolean;
   /**
    * True while the agent is still answering. The newest turn then stays
    * expanded and un-collapsible so streaming output is never hidden.
@@ -393,6 +395,36 @@ function mergeCompactToolGroups(
   return result;
 }
 
+function updateCompactStreamingThinkingTail(
+  messages: readonly Message[],
+  tail: DaemonThinkingMessage,
+): Message[] | undefined {
+  const group = messages[messages.length - 1];
+  if (
+    group?.role !== 'tool_group' ||
+    !group.id.startsWith('summary-') ||
+    !group.thoughts?.length
+  ) {
+    return undefined;
+  }
+  const thought = group.thoughts[group.thoughts.length - 1];
+  if (thought?.isStreaming !== true) return undefined;
+
+  const thoughts = group.thoughts.slice();
+  thoughts[thoughts.length - 1] = {
+    ...thought,
+    content: tail.content,
+    isStreaming: true,
+  };
+  const result = messages.slice();
+  result[result.length - 1] = {
+    ...group,
+    thoughts,
+    ...(group.id === `summary-${tail.id}` ? { timestamp: tail.timestamp } : {}),
+  };
+  return result;
+}
+
 export { groupParallelAgents };
 
 export function getDisplayItemVirtualKey(item: DisplayItem): string {
@@ -514,6 +546,13 @@ export interface ApplyTurnCollapseOptions {
    * so a lost notification cannot pin the turn expanded forever.
    */
   waitForUnmatchedAgentCompletions?: boolean;
+  /**
+   * Bound the matched-notification ordering wait (final answer already on
+   * screen before the completion landed, summary narration still expected).
+   * Pass false once the caller's grace window expires so a summary that never
+   * arrives cannot pin the turn (and its parallel-agents group) open forever.
+   */
+  waitForOrderedNarration?: boolean;
   terminalBackgroundShellTaskIds?: ReadonlySet<string>;
   automaticallyExpandedAgentKeys?: ReadonlySet<string>;
   /**
@@ -1600,6 +1639,7 @@ function turnAwaitsBackgroundSummary(
   end: number,
   agentNotificationsOnly = false,
   waitForUnmatchedAgentCompletions = true,
+  waitForOrderedNarration = true,
 ): boolean {
   const state = backgroundAgentSummaryState(
     items,
@@ -1610,7 +1650,10 @@ function turnAwaitsBackgroundSummary(
   if (!state) return false;
   // A lost completion may hold the turn only for the caller's grace window;
   // the ordering rule below is reserved for matched notifications whose
-  // summary narration is still expected.
+  // summary narration is still expected. It is bounded the same way: when the
+  // model already delivered its final answer before the notification and no
+  // narration follows within the caller's grace window, the wait releases so
+  // the turn (and its parallel-agents group) can collapse.
   if (state.sawAgentCompletion && state.unmatchedAgentCallIds.size > 0) {
     return waitForUnmatchedAgentCompletions;
   }
@@ -1621,6 +1664,7 @@ function turnAwaitsBackgroundSummary(
     }
   }
   return (
+    waitForOrderedNarration &&
     findFinalAnswerIndex(items, start, end, false) < state.lastNotificationIndex
   );
 }
@@ -1633,6 +1677,7 @@ export function applyTurnCollapse(
     activeTurnStartedAt,
     backgroundSummaryGraceActive = true,
     waitForUnmatchedAgentCompletions = true,
+    waitForOrderedNarration = true,
     terminalBackgroundShellTaskIds,
     automaticallyExpandedAgentKeys,
     pendingApprovalCallId,
@@ -1691,6 +1736,7 @@ export function applyTurnCollapse(
         end,
         false,
         waitForUnmatchedAgentCompletions,
+        waitForOrderedNarration,
       );
     const hasPendingApproval = turnOwnsCallId(
       items,
@@ -2587,6 +2633,7 @@ export const MessageList = memo(
       transcriptActivity,
       onReloadTranscript,
       isResponding = false,
+      transcriptReloadPaused = isResponding,
       activeTurnStartedAt,
       welcomeHeader,
       centerWelcomeHeader = false,
@@ -2644,22 +2691,28 @@ export const MessageList = memo(
     const mergedMessages = useMemo(() => {
       const cached = mergedMessagesCache.current;
       const tail = messages[messages.length - 1];
-      let value: Message[];
+      let value: Message[] | undefined;
       if (
         streamingTailContentOnly &&
-        tail?.role === 'assistant' &&
         cached?.sourceMessages === previousMessagesRef.current &&
         cached?.compactMode === compactMode &&
-        cached.pendingApproval === pendingApproval &&
-        cached.value[cached.value.length - 1]?.id === tail.id
+        cached.pendingApproval === pendingApproval
       ) {
-        value = cached.value.slice();
-        value[value.length - 1] = tail;
-      } else {
-        value = compactMode
-          ? mergeCompactToolGroups(messages, pendingApproval)
-          : messages;
+        if (
+          tail?.role === 'assistant' &&
+          cached.value[cached.value.length - 1]?.id === tail.id
+        ) {
+          value = cached.value.slice();
+          value[value.length - 1] = tail;
+        } else if (tail?.role === 'thinking') {
+          value = compactMode
+            ? updateCompactStreamingThinkingTail(cached.value, tail)
+            : messages;
+        }
       }
+      value ??= compactMode
+        ? mergeCompactToolGroups(messages, pendingApproval)
+        : messages;
       mergedMessagesCache.current = {
         sourceMessages: messages,
         compactMode,
@@ -2694,7 +2747,6 @@ export const MessageList = memo(
       if (
         streamingTailContentOnly &&
         isResponding &&
-        tail?.role === 'assistant' &&
         cached?.sourceMessages === previousMessagesRef.current &&
         cached?.compactMode === compactMode &&
         cached.pendingApproval === pendingApproval &&
@@ -2868,6 +2920,65 @@ export const MessageList = memo(
       latestTurnStartIndex,
       isResponding,
     ]);
+    // The ordering rule (the final answer already on screen before a matched
+    // completion notification, summary narration still expected) has no
+    // natural expiry: a model that finished before its background agents
+    // reconciled would pin the turn — and its parallel-agents group — open
+    // forever. Bound it with the same grace window as unmatched completions.
+    const latestTurnHoldsOrderedSummary = useMemo(
+      () =>
+        backgroundSummaryGraceActive &&
+        !latestTurnHasActiveBackgroundAgent &&
+        !isResponding &&
+        (latestTurnBackgroundSummaryState?.sawAgentCompletion ?? false) &&
+        (latestTurnBackgroundSummaryState?.unmatchedAgentCallIds.size ?? 0) ===
+          0 &&
+        turnAwaitsBackgroundSummary(
+          displayItems,
+          latestTurnStartIndex,
+          displayItems.length - 1,
+          true,
+          true,
+          true,
+        ),
+      [
+        backgroundSummaryGraceActive,
+        displayItems,
+        isResponding,
+        latestTurnBackgroundSummaryState,
+        latestTurnHasActiveBackgroundAgent,
+        latestTurnStartIndex,
+      ],
+    );
+    const [orderedSummaryGraceExpired, setOrderedSummaryGraceExpired] =
+      useState(false);
+    // Key the grace on the latest turn's own agent-completion notification,
+    // not the global latest background notification: a monitor/shell-task
+    // banner landing mid-wait must neither restart the bound nor re-arm an
+    // expired one (the same rule the unmatched latch follows), or an active
+    // background task could pin the waiting turn open indefinitely.
+    const latestTurnOrderedNotificationId = useMemo(() => {
+      const state = latestTurnBackgroundSummaryState;
+      if (!state || state.lastNotificationIndex < 0) return '';
+      const item = displayItems[state.lastNotificationIndex];
+      return item?.type === 'message' ? item.message.id : '';
+    }, [displayItems, latestTurnBackgroundSummaryState]);
+    useEffect(() => {
+      setOrderedSummaryGraceExpired(false);
+    }, [latestTurnOrderedNotificationId, latestTurnStartIndex, isResponding]);
+    useEffect(() => {
+      if (!latestTurnHoldsOrderedSummary) return;
+      const timer = setTimeout(
+        () => setOrderedSummaryGraceExpired(true),
+        UNMATCHED_AGENT_COMPLETION_GRACE_MS,
+      );
+      return () => clearTimeout(timer);
+    }, [
+      latestTurnHoldsOrderedSummary,
+      latestTurnOrderedNotificationId,
+      latestTurnStartIndex,
+      isResponding,
+    ]);
     const latestTurnAwaitsAgentSummary = useMemo(
       () =>
         backgroundSummaryGraceActive &&
@@ -2878,12 +2989,14 @@ export const MessageList = memo(
           true,
           latestTurnHasActiveBackgroundAgent ||
             !unmatchedCompletionGraceExpired,
+          !orderedSummaryGraceExpired,
         ),
       [
         backgroundSummaryGraceActive,
         displayItems,
         latestTurnHasActiveBackgroundAgent,
         latestTurnStartIndex,
+        orderedSummaryGraceExpired,
         unmatchedCompletionGraceExpired,
       ],
     );
@@ -2897,13 +3010,8 @@ export const MessageList = memo(
     }, [displayItems, latestTurnStartIndex]);
     const backgroundSummaryAgentContext = useMemo(() => {
       if (!backgroundSummaryGraceActive) {
-        return {
-          key: null,
-          agentNotificationIsLatestBackground: false,
-          latestBackgroundNotificationInLatestTurn: false,
-        };
+        return { key: null };
       }
-      let latestBackgroundNotificationIndex = -1;
       let notificationIndex = -1;
       let callId: string | undefined;
       for (let i = displayItems.length - 1; i >= 0; i -= 1) {
@@ -2915,9 +3023,6 @@ export const MessageList = memo(
         ) {
           continue;
         }
-        if (latestBackgroundNotificationIndex < 0) {
-          latestBackgroundNotificationIndex = i;
-        }
         const completion = backgroundAgentCompletion(item);
         if (!completion) continue;
         notificationIndex = i;
@@ -2928,22 +3033,11 @@ export const MessageList = memo(
         const item = displayItems[i];
         if (item.type !== 'parallel_agents') continue;
         if (!callId || item.agents.some((agent) => agent.callId === callId)) {
-          return {
-            key: item.key,
-            agentNotificationIsLatestBackground:
-              notificationIndex === latestBackgroundNotificationIndex,
-            latestBackgroundNotificationInLatestTurn:
-              notificationIndex > latestTurnStartIndex,
-          };
+          return { key: item.key };
         }
       }
-      return {
-        key: null,
-        agentNotificationIsLatestBackground: false,
-        latestBackgroundNotificationInLatestTurn:
-          notificationIndex > latestTurnStartIndex,
-      };
-    }, [backgroundSummaryGraceActive, displayItems, latestTurnStartIndex]);
+      return { key: null };
+    }, [backgroundSummaryGraceActive, displayItems]);
     const [isSessionTimelineVisible, setIsSessionTimelineVisible] =
       useState(false);
     const [automaticallyExpandedAgentKeys, setAutomaticallyExpandedAgentKeys] =
@@ -3106,14 +3200,13 @@ export const MessageList = memo(
     const transcriptReloadBaseline = useRef<
       | {
           lastEventId?: number;
-          blockCount: number;
         }
       | undefined
     >(undefined);
     const transcriptBlockCountRef = useRef(transcriptBlockCount);
-    const isRespondingRef = useRef(isResponding);
+    const transcriptReloadPausedRef = useRef(transcriptReloadPaused);
     transcriptBlockCountRef.current = transcriptBlockCount;
-    isRespondingRef.current = isResponding;
+    transcriptReloadPausedRef.current = transcriptReloadPaused;
     const lastUnderfillAutoLoad = useRef<{
       loader: typeof onLoadOlderHistory;
       totalVirtualSize: number;
@@ -3194,6 +3287,7 @@ export const MessageList = memo(
         backgroundSummaryGraceActive,
         latestTurnHasActiveBackgroundAgent,
         unmatchedCompletionGraceExpired,
+        orderedSummaryGraceExpired,
         collapseEnabled,
         hideFirstUserMessage,
         firstTurnMetrics,
@@ -3251,6 +3345,7 @@ export const MessageList = memo(
         waitForUnmatchedAgentCompletions:
           latestTurnHasActiveBackgroundAgent ||
           !unmatchedCompletionGraceExpired,
+        waitForOrderedNarration: !orderedSummaryGraceExpired,
         automaticallyExpandedAgentKeys,
         pendingApprovalCallId: pendingApproval?.toolCallId ?? null,
         includeSubagentToolUsageInMetrics,
@@ -3321,6 +3416,7 @@ export const MessageList = memo(
       backgroundSummaryGraceActive,
       latestTurnHasActiveBackgroundAgent,
       unmatchedCompletionGraceExpired,
+      orderedSummaryGraceExpired,
       collapseEnabled,
       hideFirstUserMessage,
       firstTurnMetrics,
@@ -3486,25 +3582,27 @@ export const MessageList = memo(
       const baseline = transcriptReloadBaseline.current;
       if (baseline) {
         const lastEventId = transcriptActivity?.getSnapshot().lastEventId;
-        if (
-          lastEventId === baseline.lastEventId &&
-          transcriptBlockCountRef.current <= baseline.blockCount
-        ) {
-          return;
-        }
+        if (lastEventId === baseline.lastEventId) return;
         transcriptReloadBaseline.current = undefined;
       }
       if (
         !onReloadTranscript ||
         reloadTranscriptAbort.current !== undefined ||
         followPausedByUserRef.current ||
-        isRespondingRef.current ||
+        transcriptReloadPausedRef.current ||
         transcriptBlockCountRef.current <= WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS
       ) {
         return;
       }
       reloadTranscriptTimer.current = window.setTimeout(() => {
         reloadTranscriptTimer.current = undefined;
+        if (
+          transcriptReloadPausedRef.current ||
+          followPausedByUserRef.current ||
+          transcriptBlockCountRef.current <= WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS
+        ) {
+          return;
+        }
         const el = containerRef.current;
         if (!el) return;
         const distanceFromBottom =
@@ -3520,8 +3618,6 @@ export const MessageList = memo(
               ...(snapshot?.lastEventId !== undefined
                 ? { lastEventId: snapshot.lastEventId }
                 : {}),
-              blockCount:
-                snapshot?.blocks?.length ?? transcriptBlockCountRef.current,
             };
           })
           .catch((error: unknown) => {
@@ -3557,8 +3653,17 @@ export const MessageList = memo(
     }, [transcriptActivity, scheduleTranscriptReload, cancelTranscriptReload]);
 
     useEffect(() => {
+      if (transcriptReloadPaused) {
+        cancelTranscriptReload();
+        return;
+      }
       scheduleTranscriptReload();
-    }, [isResponding, scheduleTranscriptReload, transcriptBlockCount]);
+    }, [
+      cancelTranscriptReload,
+      transcriptReloadPaused,
+      scheduleTranscriptReload,
+      transcriptBlockCount,
+    ]);
 
     const scheduleFollowRecheck = useCallback(() => {
       pendingFollowRecheck.current = true;
@@ -4816,13 +4921,13 @@ export const MessageList = memo(
                         : undefined
                     }
                     deferAutomaticCollapse={
-                      (latestTurnParallelAgentKeys.has(displayItem.key) &&
-                        isResponding &&
-                        (!backgroundSummaryAgentContext.latestBackgroundNotificationInLatestTurn ||
-                          (backgroundSummaryAgentContext.agentNotificationIsLatestBackground &&
-                            latestTurnAwaitsAgentSummary))) ||
-                      (backgroundSummaryAgentContext.key === displayItem.key &&
-                        latestTurnAwaitsAgentSummary)
+                      // Defer only while the completion narration is still
+                      // expected after the group's last agent notification.
+                      // A group whose agents are all terminal otherwise
+                      // collapses — and returns to its chronological
+                      // position — even while the main agent keeps working.
+                      backgroundSummaryAgentContext.key === displayItem.key &&
+                      latestTurnAwaitsAgentSummary
                     }
                     expandActiveWhenLive={
                       isResponding &&
@@ -4987,6 +5092,9 @@ export const MessageList = memo(
         item ? getChatRowClassName(item) : undefined,
       [],
     );
+    const autoScrollContentSignal = useVirtualScroll
+      ? totalVirtualSize
+      : messages;
 
     // ── Single auto-scroll driver (rules 1, 5, 6) ──────────────────────
     // Fires whenever the virtualizer's total content height changes —
@@ -5023,8 +5131,7 @@ export const MessageList = memo(
         pendingNewUserSmoothScroll.current = false;
       }
     }, [
-      totalVirtualSize,
-      messages,
+      autoScrollContentSignal,
       totalCount,
       catchingUp,
       scrollToBottom,
@@ -5033,7 +5140,7 @@ export const MessageList = memo(
 
     useLayoutEffect(() => {
       scheduleScrollOverflowReport();
-    }, [messages, scheduleScrollOverflowReport, totalCount, totalVirtualSize]);
+    }, [autoScrollContentSignal, scheduleScrollOverflowReport, totalCount]);
 
     return (
       <div

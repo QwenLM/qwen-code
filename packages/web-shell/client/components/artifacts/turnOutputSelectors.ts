@@ -4,7 +4,7 @@ import type {
   TurnOutputFileChange,
   TurnOutputScheduledTask,
 } from './TurnOutputs';
-import { isSamePath, normalizePath } from './artifactUtils';
+import { isSamePath, normalizePath, stripWorkspacePath } from './artifactUtils';
 
 function getToolCallIds(tool: ACPToolCall): string[] {
   const ids = new Set<string>();
@@ -18,6 +18,7 @@ function getToolCallIds(tool: ACPToolCall): string[] {
 
 interface RecordArtifactReference {
   turnId: string;
+  callId?: string;
   workspacePath?: string;
   managedId?: string;
   url?: string;
@@ -78,9 +79,13 @@ function collectRecordArtifactReferences(
   turnId: string,
   references: RecordArtifactReference[],
 ) {
-  if (tool.toolName.toLowerCase() === 'record_artifact') {
+  if (
+    tool.toolName.toLowerCase() === 'record_artifact' &&
+    (!tool.status || tool.status === 'completed')
+  ) {
     references.push({
       turnId,
+      callId: tool.callId,
       workspacePath: getStringField(tool.args, 'workspacePath'),
       managedId: getStringField(tool.args, 'managedId'),
       url: getStringField(tool.args, 'url'),
@@ -98,17 +103,28 @@ function getRecordArtifactTurnIds(
 ) {
   const turnIds = new Set<string>();
   for (const reference of references) {
-    if (
-      reference.workspacePath &&
-      artifact.workspacePath &&
-      isSameWorkspacePath(
-        reference.workspacePath,
-        artifact.workspacePath,
-        workspaceCwd,
-      )
-    ) {
-      turnIds.add(reference.turnId);
-      continue;
+    if (reference.workspacePath && artifact.workspacePath) {
+      if (
+        isSameWorkspacePath(
+          reference.workspacePath,
+          artifact.workspacePath,
+          workspaceCwd,
+        )
+      ) {
+        turnIds.add(reference.turnId);
+        continue;
+      }
+      if (
+        isSameWorkspacePathOrChild(
+          reference.workspacePath,
+          artifact.workspacePath,
+          workspaceCwd,
+        ) &&
+        (!artifact.toolCallId || artifact.toolCallId === reference.callId)
+      ) {
+        turnIds.add(reference.turnId);
+        continue;
+      }
     }
     if (reference.managedId && reference.managedId === artifact.managedId) {
       turnIds.add(reference.turnId);
@@ -495,4 +511,20 @@ function isSameWorkspacePath(
   workspaceCwd?: string,
 ) {
   return isSamePath(left, right, workspaceCwd);
+}
+
+function isSameWorkspacePathOrChild(
+  parent: string,
+  child: string,
+  workspaceCwd?: string,
+) {
+  if (isSamePath(parent, child, workspaceCwd)) {
+    return true;
+  }
+  const normalizedParent = stripWorkspacePath(parent, workspaceCwd);
+  const normalizedChild = stripWorkspacePath(child, workspaceCwd);
+  return (
+    Boolean(normalizedParent) &&
+    normalizedChild.startsWith(`${normalizedParent}/`)
+  );
 }

@@ -1172,6 +1172,32 @@ describe('loadCliConfig', () => {
     expect(process.env['QWEN_DEBUG_LOG_FILE']).toBe('1');
   });
 
+  it('maps --restore-ask-user-question only in ACP mode', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--acp',
+      '--restore-ask-user-question',
+    ];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv);
+    expect(config.getRestoreAskUserQuestion()).toBe(true);
+  });
+
+  it('ignores --restore-ask-user-question outside ACP mode', async () => {
+    process.argv = ['node', 'script.js', '--restore-ask-user-question'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv);
+    expect(config.getRestoreAskUserQuestion()).toBe(false);
+  });
+
+  it('defaults restoreAskUserQuestion to false', async () => {
+    process.argv = ['node', 'script.js', '--acp'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv);
+    expect(config.getRestoreAskUserQuestion()).toBe(false);
+  });
+
   it('preserves explicit opt-out when --debug is used', async () => {
     process.env['QWEN_DEBUG_LOG_FILE'] = '0';
     process.argv = ['node', 'script.js', '--debug'];
@@ -2779,6 +2805,23 @@ describe('mergeExcludeTools', () => {
     const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.getToolSearchThreshold()).toBe(10);
+  });
+
+  it('should default tools.listDirectory.enabled to false', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+    expect(config.isLsToolEnabled()).toBe(false);
+  });
+
+  it('should enable list_directory when tools.listDirectory.enabled is true', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: { listDirectory: { enabled: true } },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.isLsToolEnabled()).toBe(true);
   });
 
   it('should force tools.toolSearch.threshold to 0 in safe mode', async () => {

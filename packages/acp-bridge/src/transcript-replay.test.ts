@@ -1191,6 +1191,93 @@ describe('createTranscriptReplayMachine', () => {
     expect([...machine.finalize()]).toEqual([]);
   });
 
+  it('skips finalize for selected ask_user_question call ids', () => {
+    const machine = createTranscriptReplayMachine({
+      skipFinalizeCallIds: new Set(['call-auq']),
+    });
+    updates(
+      machine,
+      record('assistant-1', 'assistant', {
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-auq',
+                name: 'ask_user_question',
+                args: {},
+              },
+            },
+            {
+              functionCall: {
+                id: 'call-bash',
+                name: 'run_shell_command',
+                args: { command: 'ls' },
+              },
+            },
+          ],
+        },
+      }),
+    );
+
+    const finalized = [...machine.finalize()].map((item) => item.update);
+    expect(finalized).toHaveLength(1);
+    expect(finalized[0]).toMatchObject({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'call-bash',
+      status: 'failed',
+    });
+    expect(machine.snapshot().pendingToolCalls).toEqual([
+      expect.objectContaining({ callId: 'call-auq' }),
+    ]);
+  });
+
+  it('matches the skip set against raw transcript ids after dedup renames', () => {
+    const machine = createTranscriptReplayMachine({
+      skipFinalizeCallIds: new Set(['call-auq']),
+    });
+    // Two dangling calls with the SAME transcript id: the second is renamed
+    // to `call-auq:2`, but the skip set (derived from chat history) holds
+    // the raw id, so both must stay pending.
+    updates(
+      machine,
+      record('assistant-1', 'assistant', {
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-auq',
+                name: 'ask_user_question',
+                args: {},
+              },
+            },
+          ],
+        },
+      }),
+    );
+    updates(
+      machine,
+      record('assistant-2', 'assistant', {
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-auq',
+                name: 'ask_user_question',
+                args: {},
+              },
+            },
+          ],
+        },
+      }),
+    );
+
+    expect([...machine.finalize()]).toEqual([]);
+    expect(machine.snapshot().pendingToolCalls).toHaveLength(2);
+  });
+
   it('correlates an id-less result only to one same-name pending call', () => {
     const machine = createTranscriptReplayMachine();
     updates(

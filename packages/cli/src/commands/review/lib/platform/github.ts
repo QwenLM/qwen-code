@@ -9,7 +9,16 @@
 // this module owns the GitHub API *shapes* so the subcommands and the skill
 // prose never name an endpoint.
 
-import { ensureAuthenticated, gh, ghApi, ghRaw, isOwnerRepo } from '../gh.js';
+import {
+  ensureAuthenticated,
+  getGhHost,
+  gh,
+  ghApi,
+  ghRaw,
+  isOwnerRepo,
+  normalizeGhHostForUrl,
+  resolveGhHost,
+} from '../gh.js';
 import type {
   ClosingIssueRef,
   CommentKind,
@@ -261,5 +270,29 @@ export const githubReader: ReviewPlatformReader = {
       deletions: view.deletions,
       changedFiles: view.changedFiles,
     };
+  },
+
+  composeUrl(prNumber: number, ownerRepo: string): string {
+    checkOwnerRepo(ownerRepo);
+    // The PR-page grammar is deterministic — no API call. The host is the
+    // one gh calls are currently routed at (a subcommand's setGhHost), else
+    // the operator-exported GH_HOST a gh child would inherit — the routing
+    // this codebase applies, so the composed link lands where the review
+    // ran. When NEITHER names a host, fail CLOSED with '': gh's own third
+    // fallback is hosts.yml's authenticated default (a single recorded host
+    // wins — go-gh's defaultHost), which this process cannot see, so
+    // composing github.com there affirms a host the write may not have
+    // taken — the link can resolve to a real, unrelated PR of a
+    // same-named github.com repo while the review sits on a GHE host. ''
+    // leaves the receipt linkless — submit's truthy checks drop the url,
+    // and the skill relays the target's coordinates instead. The spelling
+    // rides the shared PR-page helper — the SAME normalization
+    // compose-review's comment anchors apply, so one run cannot print two
+    // textual spellings of the same page (`--host GHE.Corp:443` lands on
+    // `https://ghe.corp/…` in both).
+    const routed = getGhHost() ?? resolveGhHost(undefined);
+    if (!routed) return '';
+    const host = normalizeGhHostForUrl(routed);
+    return `https://${host}/${ownerRepo}/pull/${prNumber}`;
   },
 };

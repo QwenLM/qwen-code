@@ -90,6 +90,7 @@ export type {
   DaemonTranscriptTodoItem,
   DaemonToolTranscriptBlock,
   DaemonTranscriptBlock,
+  DaemonTranscriptBlockChangeSummary,
   DaemonTranscriptBlockKind,
   DaemonTranscriptQuestion,
   DaemonTranscriptQuestionOption,

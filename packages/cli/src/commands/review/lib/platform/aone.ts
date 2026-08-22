@@ -19,6 +19,7 @@ import {
   a1JsonOnce,
   a1Once,
   ensureAoneAuthenticated,
+  execErrorCause,
 } from './aone-client.js';
 import type {
   ClosingIssueRef,
@@ -221,6 +222,44 @@ function mrHeadRefSpec(prNumber: number): string {
   return `refs/merge-requests/${prNumber}/head`;
 }
 
+/** The MR's live head SHA: under AGit-Flow `sourceBranch` IS the head.
+ *  Stated ONCE for the provider — every read site (presubmit facts,
+ *  getPrMeta, getFetchMeta, submit's pre-write drift gate, the
+ *  head-moved-during-post re-read) routes through here. Hand-derived
+ *  copies had already diverged on normalization (two of the five read
+ *  untrimmed), and a padded server value then drifted against the
+ *  trimmed reads — a phantom "PR head advanced during review" for an MR
+ *  that never moved (#9629 review). */
+function aoneHeadSha(view: NonNullable<AoneMrView['mergeRequest']>): string {
+  return (view.sourceBranch ?? '').trim();
+}
+
+/**
+ * The two MR facts presubmit's gate compares, from ONE `mr view` fetch:
+ * the author's account name (self-PR detection — compared against the
+ * gate's whoami account) and the live head SHA (the drift
+ * check — under AGit-Flow `sourceBranch` IS the head). A missing author
+ * (deleted account) reports '', which fails the comparison soft, like the
+ * GitHub path's `author: null`. `username` is server-controlled, so it is
+ * type-guarded to a string and trimmed exactly like the gate's whoami
+ * account — a non-string reaching `.toLowerCase()` would crash the command
+ * outside presubmit's fetch try/catch instead of failing soft.
+ */
+export function mrPresubmitFacts(
+  prNumber: number,
+  ownerRepo: string,
+): { author: string; headSha: string } {
+  checkOwnerRepo(ownerRepo);
+  const view = mrView(prNumber, ownerRepo);
+  return {
+    author:
+      typeof view.author?.username === 'string'
+        ? view.author.username.trim()
+        : '',
+    headSha: aoneHeadSha(view),
+  };
+}
+
 /**
  * Allowlist shape for a server-controlled branch name reaching git's argv:
  * a plain branch name and nothing else — no option spellings, no refspec
@@ -281,16 +320,7 @@ export const aoneReader: ReviewPlatformReader = {
     try {
       url = git('remote', 'get-url', 'origin').trim();
     } catch (err) {
-      // execFileSync failure messages BEGIN with the fixed preamble
-      // "Command failed: git remote get-url origin"; git's actual error is
-      // the first NON-empty line after it (same pitfall aone-client
-      // documents). `.split('\n')[0]` would render only the preamble.
-      const cause =
-        (err as Error).message
-          .split('\n')
-          .slice(1)
-          .map((l) => l.trim())
-          .find(Boolean) ?? '';
+      const cause = execErrorCause(err);
       throw new Error(
         `cannot resolve the repository: no \`origin\` remote` +
           (cause ? ` (${cause})` : ''),
@@ -326,7 +356,7 @@ export const aoneReader: ReviewPlatformReader = {
     const view = mrView(prNumber, ownerRepo);
     return {
       number: prNumber,
-      headSha: view.sourceBranch ?? '',
+      headSha: aoneHeadSha(view),
       webUrl: view.detailUrl ?? '',
     };
   },
@@ -589,13 +619,37 @@ export const aoneReader: ReviewPlatformReader = {
     checkOwnerRepo(ownerRepo);
     const view = mrView(prNumber, ownerRepo);
     return {
-      headRefOid: view.sourceBranch ?? '',
+      headRefOid: aoneHeadSha(view),
       baseRefName: view.targetBranch ?? 'master',
       // The reviewer clones the repo the CR lives in — never cross-repo.
       isCrossRepository: false,
       body: view.description,
       // Aone does not report diff stats; fetch-pr computes them locally.
     };
+  },
+
+  composeUrl(prNumber: number, ownerRepo: string): string {
+    checkOwnerRepo(ownerRepo);
+    // Reader-backed by construction: an Aone MR link can NEVER be assembled
+    // from owner/repo — the collapse to the last two segments names a
+    // different (possibly nonexistent) repo for a nested-group project —
+    // so the only source is the platform's own detailUrl. A fetch failure
+    // degrades to '' — a missing link must not fail a consumer that owns
+    // the post's fate — but NOT silently: every other fail-open in this
+    // provider discloses on stderr, and a failing re-query (auth expiry,
+    // a network blip past the retry budget) must stay distinguishable
+    // from the designed coordinates-relay case.
+    try {
+      return mrView(prNumber, ownerRepo).detailUrl ?? '';
+    } catch (err) {
+      const cause = execErrorCause(err);
+      process.stderr.write(
+        `WARNING: the Aone MR-link lookup failed` +
+          (cause ? ` (${JSON.stringify(cause.slice(0, 80))})` : '') +
+          `; the Posted line degrades to the target's coordinates.\n`,
+      );
+      return '';
+    }
   },
 };
 
@@ -660,6 +714,13 @@ export interface AoneSubmitResult {
  * and a retry posts it twice. So an ambiguous failure is counted as
  * LANDED for the do-not-re-run advisory — overcounting by one is a
  * cosmetic lie; undercounting is a duplicate post.
+ *
+ * `headMovedDuringPost` carries the mid-batch drift disclosure the
+ * success path re-reads for: a batch runs minutes of sequential execs,
+ * and an AGit-Flow amend pushed mid-batch orphans the landed pins at
+ * code the author already replaced. Undefined when the re-read itself
+ * failed — "could not verify" is not "verified stable", but it also
+ * must not mask the post failure.
  */
 export class AonePartialPostError extends Error {
   constructor(
@@ -668,6 +729,7 @@ export class AonePartialPostError extends Error {
     readonly inlineCommentIds: number[],
     readonly summaryPosted: boolean,
     readonly ambiguous: boolean = false,
+    readonly headMovedDuringPost?: boolean,
   ) {
     super(message);
     this.name = 'AonePartialPostError';
@@ -698,6 +760,15 @@ function createMrComment(
   message: string,
   inline?: { path: string; line: number },
 ): number | undefined {
+  // No AI-comment marking here, BY PLATFORM CONSTRAINT: probed 2026-08-21
+  // on a scratch CR (issue #9614) — `comment create` does NOT auto-set
+  // `isAiComment` for the posting identity (both a general and an inline
+  // probe read back false, re-checked minutes later against an async
+  // classifier), and a1 v0.1.90 exposes no flag to request it. Created
+  // comments therefore sit in the generic discussion gate, never the
+  // dedicated ai_comment merge gate; submit's REQUEST_CHANGES note
+  // discloses that. When a1 ships a marking flag, THIS call is where it
+  // gets passed.
   // a1JsonOnce is the tolerant read-back: an exec FAILURE propagates (a real
   // post failure — the partial-post path counts what landed before it), but a
   // SUCCEEDED exec whose answer does not parse is "accepted, id unknown", not
@@ -752,13 +823,35 @@ function a1Cause(err: unknown): string {
   return cause.length > 300 ? `${cause.slice(0, 300)}…` : cause;
 }
 
+/** The post-batch head re-read, stated ONCE for both disclosure paths:
+ *  did the MR head move away from the composed `commitId`? Undefined when
+ *  the re-read itself failed OR came back without a head to compare —
+ *  "could not verify" is not "verified stable", and either shape
+ *  degrades to unknown; it never masks the outcome it reports on (the
+ *  post failure on the partial path, the post itself on the success
+ *  path). */
+function headMovedSinceCompose(
+  prNumber: number,
+  ownerRepo: string,
+  commitId: string,
+): boolean | undefined {
+  try {
+    const afterHead = aoneHeadSha(mrView(prNumber, ownerRepo));
+    if (afterHead === '') return undefined;
+    return afterHead !== commitId;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Post a composed review to an Aone MR. The verdict mapping is the
  * design's D6: APPROVE runs the native `mr approve` AFTER the summary
  * lands; COMMENT is the summary alone; REQUEST_CHANGES has NO native
  * equivalent — the summary carries an explicit blocking header, and the
  * unresolved inline Criticals carry the blocking semantics through the
- * discussion merge gate.
+ * discussion merge gate (NEVER the ai_comment gate: a1 cannot mark a
+ * comment as AI — see createMrComment).
  *
  * Throws BEFORE writing when the head drifted (the commit_id check
  * GitHub's API performs server-side). Throws AonePartialPostError when
@@ -777,7 +870,7 @@ export function submitAoneReview(req: AoneSubmitRequest): AoneSubmitResult {
   // review composed against the orphaned head would pin every inline
   // comment at code the author already replaced. An empty sourceBranch
   // cannot gate — nothing to compare against — and posts unanchored.
-  const liveHead = (view.sourceBranch ?? '').trim();
+  const liveHead = aoneHeadSha(view);
   if (liveHead !== '' && liveHead !== req.commitId) {
     throw new Error(
       `refusing to post: the MR head moved — the review was composed ` +
@@ -866,6 +959,9 @@ export function submitAoneReview(req: AoneSubmitRequest): AoneSubmitResult {
       !summaryPosted && postedIds.length === req.comments.length
         ? `; the summary did NOT land`
         : '';
+    // The same mid-batch drift disclosure the success path carries: an
+    // amend pushed during the batch orphans the landed pins, and a write
+    // failure must not silently drop the warning.
     throw new AonePartialPostError(
       `posting to MR ${req.prNumber} of ${req.ownerRepo} failed after ` +
         `${postedIds.length} of ${req.comments.length} inline comment(s)` +
@@ -876,6 +972,7 @@ export function submitAoneReview(req: AoneSubmitRequest): AoneSubmitResult {
       ids,
       summaryPosted,
       true,
+      headMovedSinceCompose(req.prNumber, req.ownerRepo, req.commitId),
     );
   }
 
@@ -911,18 +1008,13 @@ export function submitAoneReview(req: AoneSubmitRequest): AoneSubmitResult {
     approveError,
     // The drift gate above is check-then-post; the batch is N+1 sequential
     // execs (minutes for a long review), so a head that moves DURING it
-    // slips the gate. Re-read once and disclose — the success report must
-    // not claim the pins held. A read failure after a successful post must
-    // not fail the post.
-    headMovedDuringPost: (() => {
-      try {
-        const after = mrView(req.prNumber, req.ownerRepo);
-        const afterHead = (after.sourceBranch ?? '').trim();
-        return afterHead !== '' && afterHead !== req.commitId;
-      } catch {
-        return false;
-      }
-    })(),
+    // slips the gate — re-read once and disclose; the success report must
+    // not claim the pins held, and a read failure must not fail the post.
+    headMovedDuringPost: headMovedSinceCompose(
+      req.prNumber,
+      req.ownerRepo,
+      req.commitId,
+    ),
     webUrl: view.detailUrl ?? '',
   };
 }

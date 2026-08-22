@@ -17,7 +17,7 @@ import type {
   WorkspaceRuntime,
 } from '../workspace-registry.js';
 import { isLiveTaskToolName, LiveTaskService } from './live-task-service.js';
-import { LIVE_SESSION_SOURCE_PREFIX } from '../conversations/session-source.js';
+import { LIVE_SESSION_SOURCE_PREFIX } from '../../runtime/live-session-source.js';
 
 const persistedSessions = vi.hoisted(() => new Map<string, unknown>());
 const persistedSessionOwners = vi.hoisted(() => new Map<string, string>());

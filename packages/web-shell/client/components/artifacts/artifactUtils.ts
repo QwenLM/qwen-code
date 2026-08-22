@@ -4,7 +4,34 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import type { DaemonWorkspaceActions } from '@qwen-code/webui/daemon-react-sdk';
 
-export function artifactKindLabel(kind: string): string {
+export function artifactKindLabel(
+  kind: string,
+  workspacePath?: string,
+): string {
+  const ext = pathExtension(workspacePath);
+  switch (ext) {
+    case '.doc':
+    case '.docx':
+    case '.docm':
+    case '.dotx':
+    case '.odt':
+      return 'Word';
+    case '.xls':
+    case '.xlsx':
+    case '.xlsm':
+    case '.xlsb':
+    case '.ods':
+      return 'Excel';
+    case '.ppt':
+    case '.pptx':
+    case '.pptm':
+    case '.odp':
+      return 'PowerPoint';
+    case '.csv':
+      return 'CSV';
+    default:
+      break;
+  }
   switch (kind) {
     case 'html':
       return 'HTML';
@@ -12,16 +39,78 @@ export function artifactKindLabel(kind: string): string {
       return 'PDF';
     case 'notebook':
       return 'Notebook';
+    case 'document':
+      return 'Document';
     default:
       return kind || 'artifact';
   }
+}
+
+// Keep in sync with OFFICE_DOCUMENT_EXTENSIONS in
+// packages/core/src/utils/workspace-artifact-directory.ts
+const OFFICE_DOCUMENT_EXTENSIONS = new Set([
+  '.doc',
+  '.docx',
+  '.docm',
+  '.dotx',
+  '.xls',
+  '.xlsx',
+  '.xlsm',
+  '.xlsb',
+  '.ppt',
+  '.pptx',
+  '.pptm',
+  '.odt',
+  '.ods',
+  '.odp',
+]);
+
+const DOWNLOAD_ONLY_EXTENSIONS = new Set([
+  ...OFFICE_DOCUMENT_EXTENSIONS,
+  '.pdf',
+  '.mp4',
+  '.mov',
+  '.webm',
+  '.mp3',
+  '.wav',
+  '.m4a',
+  '.ogg',
+]);
+
+export function isOfficeDocumentPath(workspacePath?: string): boolean {
+  return OFFICE_DOCUMENT_EXTENSIONS.has(pathExtension(workspacePath));
+}
+
+export function isDownloadOnlyWorkspaceArtifact(artifact: {
+  kind?: string;
+  workspacePath?: string;
+}): boolean {
+  if (artifact.kind === 'image') {
+    return false;
+  }
+  if (
+    artifact.kind === 'document' ||
+    artifact.kind === 'pdf' ||
+    artifact.kind === 'video' ||
+    artifact.kind === 'audio' ||
+    isOfficeDocumentPath(artifact.workspacePath)
+  ) {
+    return true;
+  }
+  return DOWNLOAD_ONLY_EXTENSIONS.has(pathExtension(artifact.workspacePath));
+}
+
+function pathExtension(workspacePath?: string): string {
+  const name = (workspacePath ?? '').split(/[/\\]/).pop() ?? '';
+  const dot = name.lastIndexOf('.');
+  return dot >= 0 ? name.slice(dot).toLowerCase() : '';
 }
 
 export function getArtifactTypeLabel(artifact: DaemonSessionArtifact): string {
   const artifactType = artifact.metadata?.['artifactType'];
   return typeof artifactType === 'string' && artifactType
     ? artifactType
-    : artifactKindLabel(artifact.kind);
+    : artifactKindLabel(artifact.kind, artifact.workspacePath);
 }
 
 export function formatArtifactSize(sizeBytes: number | undefined): string {
@@ -85,7 +174,7 @@ export async function readWorkspaceFileAsBlob(
   options: {
     statFile: (
       filePath: string,
-    ) => Promise<{ sizeBytes: number; modifiedMs: number }>;
+    ) => Promise<{ sizeBytes: number; modifiedMs: number; type?: string }>;
     isCancelled?: () => boolean;
     maxBytes?: number;
   },
@@ -95,6 +184,9 @@ export async function readWorkspaceFileAsBlob(
   const initialStat = await options.statFile(filePath);
   if (options.isCancelled?.()) {
     throw new Error('File loading was cancelled.');
+  }
+  if (initialStat.type === 'directory') {
+    throw new Error('Directories cannot be opened or downloaded as artifacts.');
   }
   if (initialStat.sizeBytes > maxBytes) {
     throw new Error('File is too large to preview or download.');
