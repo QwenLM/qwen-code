@@ -25,6 +25,7 @@ import {
   DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+  OutputFormat,
   SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
 } from '@qwen-code/qwen-code-core';
 import type { CustomTheme } from '../ui/themes/theme.js';
@@ -795,11 +796,22 @@ const SETTINGS_SCHEMA = {
         category: 'General',
         requiresRestart: false,
         default: 'text',
-        description: 'The format of the CLI output.',
+        description:
+          'The format of the CLI output. With `stream-json`, runs started ' +
+          'with a prompt behave as non-interactive (headless), matching ' +
+          '`--output-format stream-json`. Flags validated at argv parse ' +
+          'time (`--include-partial-messages`, `--input-format ' +
+          'stream-json`) still require the explicit `--output-format ' +
+          'stream-json` flag.',
         showInDialog: false,
+        // The values are the runtime's `OutputFormat` enum members, and the
+        // settingsSchema test pins these options against
+        // `Object.values(OutputFormat)`, so a format added in core fails
+        // that test until this list and the regenerated JSON follow.
         options: [
-          { value: 'text', label: 'Text' },
-          { value: 'json', label: 'JSON' },
+          { value: OutputFormat.TEXT, label: 'Text' },
+          { value: OutputFormat.JSON, label: 'JSON' },
+          { value: OutputFormat.STREAM_JSON, label: 'Stream JSON' },
         ],
       },
       showTimestamps: {
