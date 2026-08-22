@@ -23,6 +23,7 @@ import {
 } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   rmSync,
@@ -1538,14 +1539,18 @@ describe('--roster — every prompt the plan requires, in one call', () => {
     }
   });
 
-  it('says UNMEASURED instead of clean when the plan records another admin entry', () => {
+  it('refuses the whole wave when the anchored identity check refuses the tree', () => {
     // fetch-pr records the tree's own admin entry, and the probe refuses a
     // tree whose gitfile names any other — a gitfile swapped during the
     // review names a foreign repository or a forge under the same common
-    // dir, and a probe that measured it would certify the forge instead of
-    // the tree. The plan field is the out-of-band half of that gate, and
-    // this is its wiring: a plan recording the wrong entry turns a dirty
-    // tree's verdict from dirty into unmeasured, never clean.
+    // dir. An anchored refusal used to degrade to an UNMEASURED warning in
+    // every brief, but the briefs still directed agents to inspect and
+    // build the tree the gate had just refused, and the `git show HEAD:`
+    // arbitration guidance resolves through that very repository — so an
+    // anchored refusal now aborts prompt generation: the wave is refused,
+    // not briefed. Unanchored plans (no record to refuse against) keep the
+    // warning path.
+    (writeStdoutLine as unknown as Mock).mockClear();
     const dir = mkdtempSync(join(tmpdir(), 'ap-anchor-'));
     const gitIsolation = isolateHostGitConfig();
     try {
@@ -1576,18 +1581,132 @@ describe('--roster — every prompt the plan requires, in one call', () => {
           ownerRepo: 'QwenLM/qwen-code',
         }),
       );
+      expect(() =>
+        (agentPromptCommand.handler as (a: unknown) => void)({
+          plan,
+          roster: true,
+        }),
+      ).toThrow(/anchored identity check/);
+
+      // No brief exists and nothing was printed: the refusal precedes
+      // every output this command produces.
+      expect(existsSync(briefPath(plan, '1a'))).toBe(false);
+      expect(writeStdoutLine).not.toHaveBeenCalled();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      gitIsolation.dispose();
+    }
+  });
+
+  it('refuses the wave when the worktree HEAD moved away from the fetched sha', () => {
+    // The identity gate binds WHICH repository answers, not its content:
+    // the refs inside the verified repository are same-user-writable, and
+    // a worktree reset to another commit passes every identity check while
+    // `status` measures clean relative to the moved HEAD — every reading
+    // brief then judges the wrong commit, and the scratch tree's late
+    // `--expected-head-sha` refusal cannot undo briefs already built
+    // (measured end-to-end: residue answered clean and all briefs were
+    // written before the late gate fired). The wave is gated here, before
+    // the roster, reading HEAD under the verified identity.
+    (writeStdoutLine as unknown as Mock).mockClear();
+    const dir = mkdtempSync(join(tmpdir(), 'ap-headmoved-'));
+    const gitIsolation = isolateHostGitConfig();
+    try {
+      const git = (...args: string[]) =>
+        execFileSync('git', args, { cwd: dir, encoding: 'utf8' }).trim();
+      git('init', '-q', '-b', 'main');
+      git('config', 'user.email', 't@t.t');
+      git('config', 'user.name', 't');
+      writeFileSync(join(dir, 'a.ts'), 'export const x = 1;\n');
+      git('add', '-A');
+      git('commit', '-qm', 'A');
+      writeFileSync(join(dir, 'a.ts'), 'export const x = 2;\n');
+      git('commit', '-aqm', 'B');
+      // The pipeline fetched A; afterwards the tree moved to B under an
+      // unchanged identity (rewritten entry HEAD + forced checkout).
+      const fetchedSha = git('rev-parse', 'HEAD~1');
+      const wt = join(dir, '.qwen', 'tmp', 'review-pr-9207');
+      git('worktree', 'add', '--detach', '-q', wt, 'HEAD');
+      const adminDir = execFileSync(
+        'git',
+        ['-C', wt, 'rev-parse', '--path-format=absolute', '--git-dir'],
+        { encoding: 'utf8' },
+      ).trim();
+
+      const plan = join(dir, 'plan.json');
+      writeFileSync(
+        plan,
+        JSON.stringify({
+          ...PLAN,
+          worktreePath: wt,
+          worktreeAdminDir: adminDir,
+          fetchedSha,
+          prNumber: '9207',
+          ownerRepo: 'QwenLM/qwen-code',
+        }),
+      );
+      expect(() =>
+        (agentPromptCommand.handler as (a: unknown) => void)({
+          plan,
+          roster: true,
+        }),
+      ).toThrow(/the pipeline recorded/);
+
+      expect(existsSync(briefPath(plan, '1a'))).toBe(false);
+      expect(writeStdoutLine).not.toHaveBeenCalled();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      gitIsolation.dispose();
+    }
+  });
+
+  it('builds the wave when the anchored identity and the fetched sha both hold', () => {
+    // The healthy twin of the two refusals above: the recorded entry
+    // agrees, HEAD still is the fetched sha, and the gates stay silent —
+    // a gate that fired on the healthy path would refuse every anchored
+    // review.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-anchored-ok-'));
+    const gitIsolation = isolateHostGitConfig();
+    try {
+      const git = (...args: string[]) =>
+        execFileSync('git', args, { cwd: dir, encoding: 'utf8' }).trim();
+      git('init', '-q', '-b', 'main');
+      git('config', 'user.email', 't@t.t');
+      git('config', 'user.name', 't');
+      writeFileSync(join(dir, 'a.ts'), 'export const x = 1;\n');
+      git('add', '-A');
+      git('commit', '-qm', 'head');
+      const fetchedSha = git('rev-parse', 'HEAD');
+      const wt = join(dir, '.qwen', 'tmp', 'review-pr-9207');
+      git('worktree', 'add', '--detach', '-q', wt, 'HEAD');
+      const adminDir = execFileSync(
+        'git',
+        ['-C', wt, 'rev-parse', '--path-format=absolute', '--git-dir'],
+        { encoding: 'utf8' },
+      ).trim();
+
+      const plan = join(dir, 'plan.json');
+      writeFileSync(
+        plan,
+        JSON.stringify({
+          ...PLAN,
+          worktreePath: wt,
+          worktreeAdminDir: adminDir,
+          fetchedSha,
+          prNumber: '9207',
+          ownerRepo: 'QwenLM/qwen-code',
+        }),
+      );
       (agentPromptCommand.handler as (a: unknown) => void)({
         plan,
         roster: true,
       });
 
       const brief = readFileSync(briefPath(plan, '1a'), 'utf8');
-      expect(brief).toContain('Whether it is clean could not be measured');
-      expect(brief).toContain('other than the one recorded');
-      expect(brief).not.toContain('And right now it is not clean');
-      expect(writeStderrLine).toHaveBeenCalledWith(
-        expect.stringContaining('could not measure'),
+      expect(brief).toContain(
+        'Your working directory is a SHARED review worktree',
       );
+      expect(brief).not.toContain('Whether it is clean could not be measured');
     } finally {
       rmSync(dir, { recursive: true, force: true });
       gitIsolation.dispose();

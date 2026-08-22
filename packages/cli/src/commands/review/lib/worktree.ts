@@ -293,8 +293,15 @@ export function localFilterCommands(
     for (const entry of readdirSync(join(common, 'worktrees'))) {
       candidates.push(join(common, 'worktrees', entry, 'config.worktree'));
     }
-  } catch {
-    // No linked worktrees registered: the candidates above are all of it.
+  } catch (err) {
+    // ABSENT means no linked worktrees registered: the candidates above are
+    // all of it. Any other failure — a no-read directory git's checkout
+    // still reaches by direct path, since traversal needs execute, not read
+    // — leaves the whole per-entry candidate class unscreened, an
+    // unmeasured execution surface: refuse like every other unreadable
+    // shape (measured: the pre-fix catch swept it to a clean verdict while
+    // the authorised checkout fired the plant).
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') return null;
   }
   const found: string[] = [];
   for (const file of [...new Set(candidates)]) {

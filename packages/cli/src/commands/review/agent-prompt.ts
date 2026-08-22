@@ -38,6 +38,7 @@
 // remember.
 
 import type { CommandModule } from 'yargs';
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -94,11 +95,13 @@ import {
   type RepositoryContext,
 } from './lib/repository-context.js';
 import { HOSTNAME_RE, isOwnerRepo } from './lib/gh.js';
+import { GIT_TIMEOUT_MS } from './lib/git.js';
 import { SHA_RE } from './lib/ledger.js';
 import { pathRulesFor } from './lib/path-rules.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import { inertPath, scratchLabel } from './lib/paths.js';
 import {
+  sanitizedGitEnv,
   worktreeResidue,
   type ResidueAnchor,
   type WorktreeResidue,
@@ -3235,6 +3238,71 @@ function runAgentPrompt(args: AgentPromptArgs): void {
   // think it is. Cheap enough to do unconditionally (one `git status` per call,
   // not per agent) and silent on a clean tree, which is every healthy run.
   const residue = worktreeResidueOf(report);
+  // An anchored identity refusal is not a warning to render into the briefs:
+  // the gate verified that the repository answering at this path is NOT the
+  // one the pipeline created, and every brief built here directs agents to
+  // inspect and build that tree — the `git show HEAD:` arbitration guidance
+  // resolves through the very repository the gate refused. The wave is
+  // refused, not briefed. Unanchored plans (local or legacy, no record to
+  // refuse against) keep the warning path below.
+  if (recordedAnchorOf(report) !== undefined && residue.identityRefused) {
+    throw new Error(
+      'agent-prompt: the review worktree failed its anchored identity check (' +
+        `${inertPath(residue.unmeasured ?? 'identity refused')}). Every ` +
+        'brief this call builds would send its agents into the repository ' +
+        'the gate refused, so no prompt is emitted. Re-run fetch-pr to ' +
+        'recreate the worktree, or inspect the tree before relaunching ' +
+        'this wave.',
+    );
+  }
+  // The CONTENT half of the out-of-band record: the identity gate binds
+  // which repository answers here, but the refs inside it are same-user-
+  // writable, and a worktree whose HEAD moved passes every identity check
+  // while every read answers a commit the pipeline never fetched — status
+  // measures clean relative to the moved HEAD, and the scratch tree's late
+  // `--expected-head-sha` refusal cannot undo briefs that were already
+  // built. Gate the wave here, before the roster or any role brief, reading
+  // HEAD under the identity the gate just VERIFIED — re-discovery through
+  // the writable gitfile is the shape this pipeline exists to stop
+  // trusting. Skipped when the plan carries no sha (a local or legacy plan)
+  // or the probe verified no identity to read under.
+  const fetchedSha = report.fetchedSha;
+  if (
+    residue.verifiedGitDir !== undefined &&
+    typeof fetchedSha === 'string' &&
+    fetchedSha !== ''
+  ) {
+    const head = spawnSync(
+      'git',
+      [`--git-dir=${residue.verifiedGitDir}`, 'rev-parse', 'HEAD'],
+      {
+        encoding: 'utf8',
+        env: sanitizedGitEnv(),
+        timeout: GIT_TIMEOUT_MS,
+      },
+    );
+    const headSha =
+      !head.error && head.status === 0 && typeof head.stdout === 'string'
+        ? head.stdout.trim()
+        : null;
+    if (headSha === null) {
+      throw new Error(
+        'agent-prompt: the review worktree HEAD could not be read under ' +
+          'its verified identity, so the tree cannot be checked against ' +
+          'the commit the pipeline fetched — no prompt is built until it ' +
+          'can.',
+      );
+    }
+    if (headSha !== fetchedSha) {
+      throw new Error(
+        `agent-prompt: the review worktree resolves to ${headSha} but the ` +
+          `pipeline recorded ${fetchedSha} at fetch time — the tree's HEAD ` +
+          'moved under an unchanged identity, so every brief this call ' +
+          'builds would judge the wrong commit. Re-run fetch-pr to ' +
+          'restore the tree, then rebuild this wave.',
+      );
+    }
+  }
   if (residue.unmeasured) {
     writeStderrLine(
       `warning: could not measure whether the review worktree is clean (git status failed: ` +

@@ -609,10 +609,15 @@ describe('fetch-pr report assembly', () => {
       if (String(path) !== '/repo/.git/worktrees') return undefined;
       return (reads++ === 0 ? entriesBefore : entriesAfter).slice();
     });
+    // git writes a BARE path into the admin entry's `gitdir` file — the
+    // `gitdir: ` prefix appears only in the other direction (the tree's
+    // `.git` file naming the entry). Planting the prefixed shape here made
+    // the suite green while the recording never matched real git and every
+    // production review degraded to the unanchored gate (R7-5).
     const backTarget = join(process.cwd(), worktreePath('42'), '.git');
     producerMocks.readFileSync.mockImplementation((path?: unknown) => {
       if (path === `/repo/.git/worktrees/${entryName}/gitdir`) {
-        return `gitdir: ${backTarget}\n`;
+        return `${backTarget}\n`;
       }
       throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
     });

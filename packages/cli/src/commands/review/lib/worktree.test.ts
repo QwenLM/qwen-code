@@ -29,7 +29,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { isolateHostGitConfig } from './test-utils.js';
 
 // Every spawnSync argv + options, recorded: the pinned discard's spawns must
@@ -66,6 +66,7 @@ import {
   discardWorktree,
   exposeDependencies,
   localFilterCommands,
+  samePath,
   sanitizedGitEnv,
   worktreeCreateFailureDetail,
   worktreeResidue,
@@ -2244,4 +2245,70 @@ describe('localFilterCommands', () => {
       }
     },
   );
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'answers unmeasurable — not clean — when the worktrees dir cannot be listed',
+    () => {
+      // A no-read directory (mode w+x) makes readdirSync throw EACCES while
+      // git's checkout still reaches the entries' config.worktree files by
+      // direct path — traversal needs execute, not read. The pre-fix catch
+      // read ABSENT and UNREADABLE alike, so the screen lost its only
+      // per-entry candidate class to a clean verdict while the authorised
+      // checkout honored the plant (measured live: the screen answered
+      // clean before and after a chmod that direct-path reads survived).
+      const entry = join(repo, '.git', 'worktrees', 'evil');
+      mkdirSync(entry, { recursive: true });
+      writeFileSync(
+        join(entry, 'config.worktree'),
+        '[filter "evil"]\n\tsmudge = touch /tmp/qwen-never\n',
+      );
+      const worktreesDir = join(repo, '.git', 'worktrees');
+      chmodSync(worktreesDir, 0o311);
+      try {
+        expect(localFilterCommands(repo)).toBeNull();
+      } finally {
+        chmodSync(worktreesDir, 0o755);
+      }
+    },
+  );
+});
+
+describe('admin entry backpointer format', () => {
+  // The identity machinery reads the admin entry's `gitdir` file in four
+  // places — the probe's points-back check, the leftover sweep, the cleanup
+  // round-trip and fetch-pr's anchor recording. git writes a BARE path
+  // there; the `gitdir: ` prefix belongs to the other direction, the tree's
+  // `.git` file naming the entry. The recording once demanded the prefix
+  // while the fixture planted it, so the suite stayed green while every
+  // production fetch degraded to the unanchored gate (R7-5). This oracle
+  // pins the shape real `git worktree add` writes, so the two formats
+  // cannot be confused again.
+  it('git writes the admin-entry gitdir file as a bare path — the prefix rides the other direction', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-backptr-'));
+    const gitIsolation = isolateHostGitConfig();
+    try {
+      const run = (...args: string[]) =>
+        execFileSync('git', args, { cwd: dir, encoding: 'utf8' }).trim();
+      run('init', '-q', '-b', 'main');
+      run('config', 'user.email', 't@t.t');
+      run('config', 'user.name', 't');
+      writeFileSync(join(dir, 'a.ts'), 'x\n');
+      run('add', '-A');
+      run('commit', '-qm', 'head');
+      const wt = join(dir, 'wt');
+      run('worktree', 'add', '--detach', '-q', wt, 'HEAD');
+      const entry = join(dir, '.git', 'worktrees', 'wt');
+      const raw = readFileSync(join(entry, 'gitdir'), 'utf8').trim();
+      expect(raw.startsWith('gitdir:')).toBe(false);
+      // And the bare content is the round-trip's operand: resolved relative
+      // to the entry it lands on the tree's `.git` file, the way pointsBack
+      // and the recording's cross-check consume it.
+      expect(samePath(dirname(resolve(entry, raw)))).toBe(samePath(wt));
+      const pointer = readFileSync(join(wt, '.git'), 'utf8').trim();
+      expect(pointer.startsWith('gitdir: ')).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      gitIsolation.dispose();
+    }
+  });
 });

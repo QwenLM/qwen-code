@@ -1122,12 +1122,17 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
           // file should be degrades the recording — it does not hang it in
           // open().
           if (lstatSync(backPath).isFile()) {
-            const raw = readFileSync(backPath, 'utf8').trim();
-            const match = /^gitdir:\s*(.+)$/.exec(raw);
+            // git writes a BARE path into the admin entry's `gitdir` file —
+            // the `gitdir: ` prefix belongs to the other direction only, the
+            // tree's `.git` file naming this entry. Reading the prefixed
+            // shape here never matches what git writes (measured against
+            // real git), the cross-check never passes, and every review
+            // degrades to the unanchored gate with the warning below. Read
+            // it the way the probe's points-back check does.
+            const back = readFileSync(backPath, 'utf8').trim();
             if (
-              match !== null &&
-              samePath(dirname(resolve(candidate, match[1].trim()))) ===
-                samePath(wt)
+              back !== '' &&
+              samePath(dirname(resolve(candidate, back))) === samePath(wt)
             ) {
               worktreeAdminDir = candidate;
             }
