@@ -4,12 +4,47 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { randomBytes } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as tar from 'tar';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { assertTarArchiveHasNoLinks } from './archive-safety.js';
+
+// Passthrough wrapper around `fs.createReadStream` that tests can hook to
+// observe how much of the archive the scan actually reads.
+const streamProbe = vi.hoisted(() => ({
+  onReadStream: undefined as
+    | ((
+        filePath: unknown,
+        options: unknown,
+        original: (
+          filePath: unknown,
+          options: unknown,
+        ) => NodeJS.ReadableStream,
+      ) => NodeJS.ReadableStream)
+    | undefined,
+}));
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    createReadStream: (filePath: unknown, options: unknown) => {
+      const original = (
+        actual.createReadStream as (
+          filePath: unknown,
+          options: unknown,
+        ) => NodeJS.ReadableStream
+      ).bind(actual);
+      if (streamProbe.onReadStream) {
+        return streamProbe.onReadStream(filePath, options, original);
+      }
+      return original(filePath, options);
+    },
+  };
+});
 
 const MAX_ARCHIVE_ENTRIES = 100_000;
 const MAX_ARCHIVE_EXPANDED_BYTES = 1024 * 1024 * 1024;
@@ -74,6 +109,44 @@ describe('assertTarArchiveHasNoLinks', () => {
       await expect(assertTarArchiveHasNoLinks(archive)).rejects.toThrow(
         'more than 100 unsupported link entries',
       );
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'stops reading the archive as soon as validation fails',
+    async () => {
+      const links = Array.from({ length: 101 }, (_, index) => `link-${index}`);
+      await Promise.all(
+        links.map(async (link) => {
+          await fs.symlink('missing-target', path.join(root, link));
+        }),
+      );
+      // A large trailing entry that a scan-to-end implementation would still
+      // consume after the link limit trips; an early abort never reaches it.
+      const tailBytes = 20 * 1024 * 1024;
+      await fs.writeFile(path.join(root, 'tail.bin'), randomBytes(tailBytes));
+      const archive = path.join(root, 'abort-links.tar');
+      await tar.c({ cwd: root, file: archive }, [...links, 'tail.bin']);
+
+      let bytesRead = 0;
+      streamProbe.onReadStream = (filePath, options, original) => {
+        const stream = original(filePath, options);
+        stream.on('data', (chunk) => {
+          bytesRead += chunk.length;
+        });
+        return stream;
+      };
+
+      try {
+        await expect(assertTarArchiveHasNoLinks(archive)).rejects.toThrow(
+          'more than 100 unsupported link entries',
+        );
+      } finally {
+        streamProbe.onReadStream = undefined;
+      }
+
+      // Without the early abort the scan would read the whole ~20 MB tail.
+      expect(bytesRead).toBeLessThan(tailBytes / 2);
     },
   );
 
