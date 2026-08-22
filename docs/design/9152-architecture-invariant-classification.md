@@ -10,11 +10,11 @@ architecture issue.
 
 ## Classification scheme
 
-| Category | Meaning | Failure mode if unguarded |
-| --- | --- | --- |
-| **Mechanically enforced** | A guard fails the build, lint, or test suite. No human judgment needed. | Drift reintroduced silently by a merged PR. |
-| **Review-only** | Requires judgment no lint rule can approximate. Enforced by the two-tier gate and reviewer checklist. | Missed in review; no mechanical backstop. |
-| **Not worth enforcing** | The cost of a guard exceeds the cost of occasional violations. | Acceptable — the invariant is a preference, not a load-bearing constraint. |
+| Category                  | Meaning                                                                                               | Failure mode if unguarded                                                  |
+| ------------------------- | ----------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| **Mechanically enforced** | A guard fails the build, lint, or test suite. No human judgment needed.                               | Drift reintroduced silently by a merged PR.                                |
+| **Review-only**           | Requires judgment no lint rule can approximate. Enforced by the two-tier gate and reviewer checklist. | Missed in review; no mechanical backstop.                                  |
+| **Not worth enforcing**   | The cost of a guard exceeds the cost of occasional violations.                                        | Acceptable — the invariant is a preference, not a load-bearing constraint. |
 
 A guard is **gap** if the invariant is classified as mechanically enforced but
 no guard exists yet, or the existing guard is partial.
@@ -56,6 +56,7 @@ as an error in `eslint.config.js`.
 ### 6. No relative imports between packages
 
 **Mechanically enforced.** Two guards:
+
 - `eslint-rules/no-relative-cross-package-imports.js` (custom ESLint rule)
 - `import/no-relative-packages` (built-in)
 
@@ -132,6 +133,7 @@ call; the reviewer checklist covers this.
 ### #8084: acp-integration must not import serve/ internals
 
 **Mechanically enforced — gap.** PR #9144 is still **open** and contains:
+
 - A `no-restricted-imports` entry blocking `**/serve/*` and `**/serve/**` from
   `packages/cli/src/acp-integration/**`
 - A `scripts/tests/acp-serve-boundary-guard.test.js` source-level boundary test
@@ -146,13 +148,13 @@ direction but not the acp-integration direction. **Action: merge #9144.**
 asserts that `DAEMON_APPROVAL_MODES` (SDK) mirrors `APPROVAL_MODES` (core)
 exactly, including order. This covers the SDK ↔ core drift.
 
-**Gap:** the issue also identifies drift in Python and Java SDKs, and in
-desktop's `cyclablePermissionModes`. PR #9003 (in progress) addresses Python
-and Java. Desktop is simply not covered by the drift test — it asserts
-`DAEMON_APPROVAL_MODES` is sequence-equal to core's `APPROVAL_MODES` and
-never mentions desktop or `cyclablePermissionModes`. That is the correct
-decision: desktop's `cyclablePermissionModes` is an intentionally different
-domain (allow-all/safe/ask/auto-edit), so there is no shared contract to
+**Gap:** the issue identifies drift in the Python and Java SDKs, which PR
+#9003 (in progress) addresses. The remaining item worth naming is desktop's
+`cyclablePermissionModes` — an intentionally different domain
+(allow-all/safe/ask/auto-edit). The drift test does not cover desktop — it
+asserts `DAEMON_APPROVAL_MODES` is sequence-equal to core's
+`APPROVAL_MODES` and never mentions desktop or `cyclablePermissionModes` —
+nor should it: there is no shared contract with the core domain to
 drift-check. **No further guard needed for desktop.** The Python/Java gap
 closes when #9003 merges.
 
@@ -176,6 +178,7 @@ before the code is moved.
 ### #9151: cross-package constants and contracts must agree
 
 **Mechanically enforced.** Issue is **closed**. Merged PR #9497 added:
+
 - `scripts/tests/cross-package-contracts.test.js` — a table-driven source test
   that pins the single owner file and import path for `LIVE_TASK_TOOL_NAMES`,
   `LiveTaskToolName`, and `MAX_SUB_SESSION_PROMPT_CHARS`.
@@ -238,10 +241,10 @@ they do not need one.
 
 **Decision: do not extract a reusable mechanism.** The two drift guards that
 now exist — `cross-package-contracts.test.js` and
-`approval-mode-drift.test.ts` — are each 40-60 lines of table-driven test
-code, purpose-built for their contracts. They share a *pattern* (assert
-single owner, assert import path, assert value equality) but not enough
-structure to justify a shared abstraction:
+`approval-mode-drift.test.ts` — are 114 and 44 lines of table-driven test
+code respectively, purpose-built for their contracts. They share a
+_pattern_ (assert single owner, assert import path, assert value equality)
+but not enough structure to justify a shared abstraction:
 
 1. **The contracts differ in shape.** Cross-package constants use source-grep
    (symbol → file). Approval-mode uses runtime value equality (import both
@@ -258,7 +261,7 @@ structure to justify a shared abstraction:
    users is speculative abstraction — exactly what AGENTS.md's Simplicity
    First principle prohibits.
 
-The *pattern* is documented here. When a new cross-package drift case arises,
+The _pattern_ is documented here. When a new cross-package drift case arises,
 copy the `cross-package-contracts.test.js` structure: declare a `definitions`
 array mapping symbol → owner file, assert single owner via `git grep`, assert
 import paths. If a third case needs runtime value comparison, copy
@@ -275,30 +278,30 @@ the guard goes with it, and the pattern survives only in the two tests above.
 
 ## Summary table
 
-| Invariant | Source | Classification | Guard | Status |
-| --- | --- | --- | --- | --- |
-| ESM only | AGENTS.md | Mechanical | `package.json` `"type": "module"` | ✅ |
-| TS strict mode | AGENTS.md | Mechanical | `tsconfig.json` | ✅ |
-| Prettier formatting | AGENTS.md | Mechanical | `lint-staged` / pre-commit | ✅ |
-| No `any` types | AGENTS.md | Mechanical | `@typescript-eslint/no-explicit-any` | ✅ |
-| Consistent type imports | AGENTS.md | Mechanical | `@typescript-eslint/consistent-type-imports` | ✅ |
-| No relative cross-package imports | AGENTS.md | Mechanical | `no-relative-cross-package-imports.js` + `import/no-relative-packages` | ✅ |
-| Tests collocated | AGENTS.md | Review-only | — | ✅ (by design) |
-| kebab-case `.ts` filenames | AGENTS.md | Mechanical | `check-file/filename-naming-convention` | ✅ |
-| PascalCase `.tsx` filenames | AGENTS.md | Mechanical | — | ⚠️ Gap (low priority) |
-| No comments by default | AGENTS.md | Review-only | — | ✅ (by design) |
-| Conventional Commits | AGENTS.md | Not worth enforcing | — | ✅ (by design) |
-| Node ≥22 | AGENTS.md | Mechanical | `package.json` `"engines"` | ✅ |
-| Core modules maintainer-only | AGENTS.md | Review-only | Two-tier gate | ✅ (by design) |
-| Daemon routes classified by ownership | AGENTS.md (Code Review) | Review-only | Reviewer checklist | ✅ (by design) |
-| Workspace-scoped routes never fall back to primary | AGENTS.md (Code Review) | Review-only | Reviewer checklist | ✅ (by design) |
-| acp-integration off serve/ | #8084 | Mechanical | `no-restricted-imports` + boundary test | ❌ PR #9144 open |
-| Approval-mode SDK ↔ core drift | #9145 | Mechanical | `approval-mode-drift.test.ts` | ⚠️ Partial (Python/Java in #9003) |
-| utils/ is a leaf layer | #9146 | Mechanical (partial) | `no-restricted-imports` (serve/ only) | ⚠️ Intentionally incremental |
-| Cross-package constants agree | #9151 | Mechanical | `cross-package-contracts.test.js` | ✅ Closed |
-| Desktop workspace stays excluded | #9152 inventory | Mechanical | `scripts/check-desktop-isolation.js` (CI) | ✅ |
-| No core root barrel self-import | #4063 | Mechanical | `no-core-root-barrel-import.js` | ❌ In open PRs #8139/#9635, not merged |
-| Config god-object | #4063 | Review-only | Two-tier gate | ✅ (by design) |
+| Invariant                                          | Source                  | Classification       | Guard                                                                  | Status                                 |
+| -------------------------------------------------- | ----------------------- | -------------------- | ---------------------------------------------------------------------- | -------------------------------------- |
+| ESM only                                           | AGENTS.md               | Mechanical           | `package.json` `"type": "module"`                                      | ✅                                     |
+| TS strict mode                                     | AGENTS.md               | Mechanical           | `tsconfig.json`                                                        | ✅                                     |
+| Prettier formatting                                | AGENTS.md               | Mechanical           | `lint-staged` / pre-commit                                             | ✅                                     |
+| No `any` types                                     | AGENTS.md               | Mechanical           | `@typescript-eslint/no-explicit-any`                                   | ✅                                     |
+| Consistent type imports                            | AGENTS.md               | Mechanical           | `@typescript-eslint/consistent-type-imports`                           | ✅                                     |
+| No relative cross-package imports                  | AGENTS.md               | Mechanical           | `no-relative-cross-package-imports.js` + `import/no-relative-packages` | ✅                                     |
+| Tests collocated                                   | AGENTS.md               | Review-only          | —                                                                      | ✅ (by design)                         |
+| kebab-case `.ts` filenames                         | AGENTS.md               | Mechanical           | `check-file/filename-naming-convention`                                | ✅                                     |
+| PascalCase `.tsx` filenames                        | AGENTS.md               | Mechanical           | —                                                                      | ⚠️ Gap (low priority)                  |
+| No comments by default                             | AGENTS.md               | Review-only          | —                                                                      | ✅ (by design)                         |
+| Conventional Commits                               | AGENTS.md               | Not worth enforcing  | —                                                                      | ✅ (by design)                         |
+| Node ≥22                                           | AGENTS.md               | Mechanical           | `package.json` `"engines"`                                             | ✅                                     |
+| Core modules maintainer-only                       | AGENTS.md               | Review-only          | Two-tier gate                                                          | ✅ (by design)                         |
+| Daemon routes classified by ownership              | AGENTS.md (Code Review) | Review-only          | Reviewer checklist                                                     | ✅ (by design)                         |
+| Workspace-scoped routes never fall back to primary | AGENTS.md (Code Review) | Review-only          | Reviewer checklist                                                     | ✅ (by design)                         |
+| acp-integration off serve/                         | #8084                   | Mechanical           | `no-restricted-imports` + boundary test                                | ❌ PR #9144 open                       |
+| Approval-mode SDK ↔ core drift                    | #9145                   | Mechanical           | `approval-mode-drift.test.ts`                                          | ⚠️ Partial (Python/Java in #9003)      |
+| utils/ is a leaf layer                             | #9146                   | Mechanical (partial) | `no-restricted-imports` (serve/ only)                                  | ⚠️ Intentionally incremental           |
+| Cross-package constants agree                      | #9151                   | Mechanical           | `cross-package-contracts.test.js`                                      | ✅ Closed                              |
+| Desktop workspace stays excluded                   | #9152 inventory         | Mechanical           | `scripts/check-desktop-isolation.js` (CI)                              | ✅                                     |
+| No core root barrel self-import                    | #4063                   | Mechanical           | `no-core-root-barrel-import.js`                                        | ❌ In open PRs #8139/#9635, not merged |
+| Config god-object                                  | #4063                   | Review-only          | Two-tier gate                                                          | ✅ (by design)                         |
 
 ## Open actions
 
