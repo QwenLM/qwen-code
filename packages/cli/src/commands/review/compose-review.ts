@@ -828,12 +828,15 @@ export interface ComposeReviewResult {
    * The convergence paragraph, when a signal fired — the SAME text the body
    * carries, returned so a terminal copy exists.
    *
-   * The overflow ladder sheds this paragraph first, and its notice tells the
+   * The overflow ladder can shed this paragraph — last of its ranks, and
+   * see the convergence block below for why last — and its notice tells the
    * author the trimmed sections "still hold — read them in the terminal
    * report". That was a false record while this text lived only inside the
    * body composer: unlike the deferral list (findings artifact) and the
    * not-reviewed disclosures (the model's own inputs), a diagnosis derived
-   * from the side file has no other copy anywhere.
+   * from the side file has no other copy anywhere. Ranking it last does not
+   * retire this copy — it makes it the one that matters, because the rounds
+   * that reach rank 3 are the rounds that shed everything.
    */
   convergence?: { en: string; zh: string };
   /**
@@ -3743,8 +3746,10 @@ function composeReviewBody(
         ...floorEnforcedNote,
         {
           // Rank 1: the display of findings the review deliberately did NOT
-          // request is the first thing to yield when the body overflows —
-          // the artifact and the terminal report keep every entry whole.
+          // request is the first CONTENT rank to yield when the body
+          // overflows — only the operator-facing mechanism-health note
+          // (rank -1) goes before it — and the artifact and the terminal
+          // report keep every entry whole.
           trim: 1,
           en: `Deferred under the convergence posture (round ${deferredRound}, not a blocker) — recorded, not requested in this round:\n\n${deferredShown
             .map((entry) => `- ${mdField(entry)}`)
@@ -3757,10 +3762,10 @@ function composeReviewBody(
     : [];
 
   // The not-reviewed disclosures yield after the deferral display and before
-  // nothing else: they say what the review could not certify, which the
-  // verdict's own cap already carries, so trimming them costs detail rather
-  // than the claim. (`notReviewedParts` itself stays untagged — the length
-  // checks below ask about presence, not about rank.)
+  // the convergence observation: they say what the review could not certify,
+  // which the verdict's own cap already carries, so trimming them costs
+  // detail rather than the claim. (`notReviewedParts` itself stays untagged
+  // — the length checks below ask about presence, not about rank.)
   const notReviewedForBody: Bi[] = notReviewedParts.map((p) => ({
     ...p,
     trim: 2,
@@ -4946,11 +4951,12 @@ export const composeReviewCommand: CommandModule = {
           : ` (previous round: ${result.prevPostedInline})`),
     );
     // The terminal copy the body's own trim notice promises. The convergence
-    // paragraph is the first thing the overflow ladder sheds, and unlike the
-    // deferral list (findings artifact) or the not-reviewed disclosures (the
-    // model's own inputs) it has no other copy anywhere — so the notice's
-    // "read them in the terminal report" was a false record until this line
-    // existed.
+    // paragraph is the ladder's LAST rank, and unlike the deferral list
+    // (findings artifact) or the not-reviewed disclosures (the model's own
+    // inputs) it has no other copy anywhere — so the notice's "read them in
+    // the terminal report" was a false record until this line existed. Last
+    // does not mean safe: a body that reaches rank 3 has already shed every
+    // other rank, which is exactly when this line is the only copy left.
     if (result.convergence) {
       writeStderrLine(`CONVERGENCE: ${result.convergence.en}`);
     }

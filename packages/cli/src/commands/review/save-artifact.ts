@@ -314,10 +314,11 @@ function validateVerdict(value: unknown): PersistedVerdict {
       'Composed verdict.postedInline must be a non-negative integer.',
     );
   }
-  // The convergence paragraph is the ONE clause the overflow ladder sheds
-  // first, and the artifact is where a trimmed round's record lives. Dropped
-  // by this allow-list, the durable record of a round whose body shed it
-  // held neither copy.
+  // The convergence paragraph is a clause the overflow ladder can shed —
+  // its last rank, so a body that shed it shed every other rank too — and
+  // the artifact is where a trimmed round's record lives. Dropped by this
+  // allow-list, the durable record of a round whose body shed it held
+  // neither copy.
   const rawConvergence = verdict['convergence'];
   let convergence: { en: string; zh: string } | undefined;
   if (rawConvergence !== undefined && rawConvergence !== null) {

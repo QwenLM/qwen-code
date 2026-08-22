@@ -6911,8 +6911,9 @@ describe('composeReview — convergence-posture deferrals (typed channel; disclo
 describe("composeReview — the composed body fits GitHub's limit", () => {
   // A POST over 65,536 characters is rejected WHOLE — the review's blockers
   // included — so the body carries its own budget. What it may drop, and in
-  // what order, is the policy under test: the deferral display yields first,
-  // the not-reviewed disclosures second, the blockers and the caps never.
+  // what order, is the policy under test: the mechanism-health note yields
+  // first, then the deferral display, then the not-reviewed disclosures,
+  // then the convergence observation, and the blockers and the caps never.
   const LIMIT = 65536;
   /** An unpaired half in EITHER direction — the oracle was one-sided. */
   const LONE_SURROGATE =
