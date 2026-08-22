@@ -1169,6 +1169,7 @@ export class GeminiClient {
           this.config.getModel(),
           undefined,
           resolveInteractionMode(this.config),
+          this.config.getOutputStyle(),
         );
     const stableLayers = {
       base,

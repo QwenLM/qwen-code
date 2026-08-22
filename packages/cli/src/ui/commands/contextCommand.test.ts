@@ -8,6 +8,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Config } from '@qwen-code/qwen-code-core';
+import {
+  getBuiltInOutputStyle,
+  getCoreSystemPrompt,
+  resolveInteractionMode,
+} from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 import {
   collectContextData,
@@ -50,6 +55,7 @@ function makeMockConfig(contextWindowSize = 32_000): Config {
     }),
     getVisibleTools: vi.fn().mockReturnValue(new Set()),
     getUserMemory: vi.fn().mockReturnValue(''),
+    getOutputStyle: vi.fn().mockReturnValue(undefined),
     getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
     getSkillManager: vi.fn().mockReturnValue({
       listSkills: vi.fn().mockResolvedValue([]),
@@ -83,6 +89,7 @@ describe('collectContextData (contextCommand)', () => {
       }),
       getVisibleTools: vi.fn().mockReturnValue(new Set()),
       getUserMemory: vi.fn().mockReturnValue(''),
+      getOutputStyle: vi.fn().mockReturnValue(undefined),
       getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getSkillManager: vi.fn().mockReturnValue({
         listSkills: vi.fn().mockResolvedValue([]),
@@ -207,6 +214,7 @@ describe('collectContextData (contextCommand)', () => {
       }),
       getVisibleTools: vi.fn().mockReturnValue(new Set()),
       getUserMemory: vi.fn().mockReturnValue(''),
+      getOutputStyle: vi.fn().mockReturnValue(undefined),
       getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getSkillManager: vi.fn().mockReturnValue({
         listSkills: vi.fn().mockResolvedValue([]),
@@ -254,6 +262,7 @@ describe('collectContextData (contextCommand)', () => {
       }),
       getVisibleTools: vi.fn().mockReturnValue(new Set(['web_fetch'])),
       getUserMemory: vi.fn().mockReturnValue(''),
+      getOutputStyle: vi.fn().mockReturnValue(undefined),
       getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getSkillManager: vi.fn().mockReturnValue({
         listSkills: vi.fn().mockResolvedValue([]),
@@ -280,6 +289,7 @@ describe('collectContextData (contextCommand)', () => {
     const config = {
       ...makeMockConfig(),
       getUserMemory: vi.fn().mockReturnValue(''),
+      getOutputStyle: vi.fn().mockReturnValue(undefined),
       getAutoMemoryPrompt: vi
         .fn()
         .mockReturnValue('# auto memory\nMEMORY_INDEX_MARKER'),
@@ -306,6 +316,7 @@ describe('collectContextData (contextCommand)', () => {
     const config = {
       ...makeMockConfig(),
       getUserMemory: vi.fn().mockReturnValue(memory),
+      getOutputStyle: vi.fn().mockReturnValue(undefined),
       getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getWorkingDir: vi.fn().mockReturnValue(workingDir),
     } as unknown as Config;
@@ -331,6 +342,7 @@ describe('collectContextData (contextCommand)', () => {
     const config = {
       ...makeMockConfig(),
       getUserMemory: vi.fn().mockReturnValue(memory),
+      getOutputStyle: vi.fn().mockReturnValue(undefined),
       getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getWorkingDir: vi.fn().mockReturnValue(workingDir),
     } as unknown as Config;
@@ -444,6 +456,35 @@ describe('/context shows three-tier thresholds', () => {
     expect(data.breakdown.thresholds.auto).toBe(167_000);
     const text = formatContextUsageText(data);
     expect(text).not.toMatch(/Compaction thresholds/);
+  });
+
+  it('bills the active output style into the system-prompt estimate', async () => {
+    const concise = getBuiltInOutputStyle('Concise')!;
+    const plainConfig = makeMockConfig(200_000);
+    const styledConfig = {
+      ...makeMockConfig(200_000),
+      getOutputStyle: vi.fn().mockReturnValue(concise),
+    } as unknown as Config;
+
+    // No API token count, so breakdown.systemPrompt is the raw estimate
+    // rather than a scaled share — the style section shows up undiluted.
+    const plain = await collectContextData(plainConfig, false);
+    const styled = await collectContextData(styledConfig, false);
+
+    const tokenDelta =
+      styled.breakdown.systemPrompt - plain.breakdown.systemPrompt;
+    expect(tokenDelta).toBeGreaterThan(0);
+
+    // ...and the delta has to be the style layer itself, not incidental
+    // drift: estimateTokens bills ASCII at ~4 chars/token.
+    const mode = resolveInteractionMode(styledConfig);
+    const charDelta =
+      getCoreSystemPrompt(undefined, 'test-model', undefined, mode, concise)
+        .length -
+      getCoreSystemPrompt(undefined, 'test-model', undefined, mode, undefined)
+        .length;
+    expect(tokenDelta).toBeGreaterThan(charDelta / 4 - 5);
+    expect(tokenDelta).toBeLessThan(charDelta / 4 + 5);
   });
 
   it('propagates custom autoCompactThreshold through to /context thresholds', async () => {
