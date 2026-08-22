@@ -40,19 +40,27 @@ function identityOfAbsent(path: string): string {
 }
 
 /**
- * True when two paths name the same file. Where both exist, filesystem
- * identity (dev/ino) decides: hard links and case-variant spellings are one
- * file under names no string compare sees through, and statSync follows a
- * symlinked directory component on the way to the file. Where a side is
- * absent, the deepest existing ancestor is canonicalised instead, keeping
- * the comparison honest for files a command is about to create.
+ * True when two paths name the same file. Where both exist and the
+ * filesystem exposes inode numbers, filesystem identity (dev/ino) decides:
+ * hard links and case-variant spellings are one file under names no string
+ * compare sees through, and statSync follows a symlinked directory component
+ * on the way to the file. FAT/exFAT and some Windows volumes report
+ * `ino === 0` for every file; dev/ino would then collapse unrelated files
+ * onto one identity, so zero is treated as "unverifiable" and the
+ * comparison falls back to canonical spellings — losing hard-link identity
+ * there, but never equating distinct files. Where a side is absent, the
+ * deepest existing ancestor is canonicalised instead, keeping the
+ * comparison honest for files a command is about to create.
  */
 export function isSameFile(left: string, right: string): boolean {
   if (left === right) return true;
   const leftStat = tryStat(left);
   const rightStat = tryStat(right);
   if (leftStat !== undefined && rightStat !== undefined) {
-    return leftStat.dev === rightStat.dev && leftStat.ino === rightStat.ino;
+    if (Number(leftStat.ino) !== 0 && Number(rightStat.ino) !== 0) {
+      return leftStat.dev === rightStat.dev && leftStat.ino === rightStat.ino;
+    }
+    return realpathSync(left) === realpathSync(right);
   }
   const leftIdentity =
     leftStat !== undefined ? realpathSync(left) : identityOfAbsent(left);

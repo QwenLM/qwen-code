@@ -403,13 +403,86 @@ interface TokenizedSegment {
   readonly endDepth: number;
 }
 
+// On Windows a backslash is a path separator, not a shell escape: the daemon
+// executes commands through cmd.exe (or a shell handed Windows paths), so
+// `git -C C:\repo\sub` must reach the analysis with its separators intact.
+// POSIX tokenisation would consume each unquoted `\x` as an escape for `x`,
+// mangling the path into a relative word. Escape the backslash itself and
+// let the following character keep its ordinary role — whitespace still
+// separates words and operators still delimit, exactly as cmd.exe splits the
+// executed argv. Escaping the following character along with the backslash
+// would glue the next word into the path (`C:\repo\ status` as one token),
+// letting a `-C`/`--git-dir`/`-c` placed after a trailing separator hide
+// inside the first relocation's value. A backslash quoted in double quotes
+// is the one spelling the tokenizer reads back as a literal backslash
+// WITHOUT swallowing the next character; before any other character a plain
+// escaped backslash suffices. Both quoted forms already keep backslashes
+// literal under POSIX rules, so they are left alone; a `$'…'` body starts
+// with `$`, marking its token dynamic either way.
+const WINDOWS_CMD_BOUNDARY_CHARS = new Set([
+  ' ',
+  '\t',
+  ';',
+  '|',
+  '&',
+  '<',
+  '>',
+  '(',
+  ')',
+]);
+
+function preserveWindowsPathSeparators(segment: string): string {
+  if (process.platform !== 'win32') return segment;
+  let single = false;
+  let double = false;
+  let out = '';
+  for (let index = 0; index < segment.length; index++) {
+    const character = segment[index]!;
+    if (single) {
+      if (character === "'") single = false;
+      out += character;
+      continue;
+    }
+    if (double) {
+      if (character === '\\' && index + 1 < segment.length) {
+        out += character + segment[index + 1];
+        index++;
+        continue;
+      }
+      if (character === '"') double = false;
+      out += character;
+      continue;
+    }
+    if (character === "'") {
+      single = true;
+      out += character;
+      continue;
+    }
+    if (character === '"') {
+      double = true;
+      out += character;
+      continue;
+    }
+    if (character === '\\') {
+      const next = segment[index + 1];
+      out +=
+        next !== undefined && WINDOWS_CMD_BOUNDARY_CHARS.has(next)
+          ? '"\\\\"'
+          : '\\\\';
+      continue;
+    }
+    out += character;
+  }
+  return out;
+}
+
 function tokenizeSegment(
   segment: string,
   startDepth: number,
 ): TokenizedSegment | null {
   let parsed: ReturnType<typeof parse>;
   try {
-    parsed = parse(segment, (key) => `$${key}`);
+    parsed = parse(preserveWindowsPathSeparators(segment), (key) => `$${key}`);
   } catch {
     return null;
   }
@@ -1449,9 +1522,15 @@ async function resolvePhysicalPath(
   base: string,
   target: string,
 ): Promise<string> {
-  let current = path.isAbsolute(target) ? path.parse(target).root : base;
+  // Splitting an absolute Windows path includes the drive as a segment
+  // (`C:`), which `path.join` would glue back onto the root as `C:\C:`;
+  // walk only the part past the root instead.
+  const parsed = path.parse(target);
+  const absolute = path.isAbsolute(target);
+  let current = absolute ? parsed.root : base;
+  const walkable = absolute ? target.slice(parsed.root.length) : target;
   const separators = path.sep === '\\' ? /[\\/]+/ : /\/+/;
-  for (const segment of target.split(separators)) {
+  for (const segment of walkable.split(separators)) {
     if (segment === '' || segment === '.') continue;
     if (segment === '..') {
       current = path.dirname(await realpathNearestExistingAsync(current));
