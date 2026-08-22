@@ -15,9 +15,7 @@ import { reduceSessionNotification } from '../adapters/acpTranscriptAdapter.js';
 
 /**
  * Reduce `transcriptUpdate` webview messages into a shared-SDK transcript
- * state and expose the rendered blocks. The WebViewProvider only emits these
- * messages when the experimental WebShell transcript flag is enabled, so this
- * hook is inert (zero messages) in the default configuration.
+ * state and expose the rendered blocks.
  */
 export function useAcpTranscript() {
   const stateRef = useRef<DaemonTranscriptState | null>(null);
