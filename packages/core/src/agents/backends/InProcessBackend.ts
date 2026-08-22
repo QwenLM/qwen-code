@@ -35,6 +35,7 @@ import type {
   InProcessSpawnConfig,
 } from './types.js';
 import { DISPLAY_MODE } from './types.js';
+import { rebuildToolRegistryOnOverride } from '../../tools/agent/agent.js';
 import type { AnsiOutput } from '../../utils/terminalSerializer.js';
 
 const debugLogger = createDebugLogger('IN_PROCESS_BACKEND');
@@ -534,13 +535,16 @@ async function createPerAgentConfig(
     );
     override.getFileService = () => agentFileService;
 
-    const registry = await override.createToolRegistry(undefined, {
-      skipDiscovery: true,
-      forSubAgent: true,
-    });
-    agentRegistry = registry;
-    registry.copyDiscoveredToolsFrom(base.getToolRegistry());
-    override.getToolRegistry = () => registry;
+    // Delegated rather than re-enacted. The three steps below used to be
+    // inlined here, identical to the shared helper — and a second copy is a
+    // second place for an invariant to be broken: a change sharing the
+    // parent's `McpClientManager`, or propagating server instructions during
+    // the copy, would leak them into every in-process-spawned agent's first
+    // message while the tests covering the other spawn path stayed green.
+    // Delegating also sets the rebuilt marker, so a wrapper-of-wrapper spawn
+    // downstream can skip a redundant rebuild.
+    await rebuildToolRegistryOnOverride(override as Config, base);
+    agentRegistry = override.getToolRegistry();
 
     if (authOverrides?.authType) {
       try {
