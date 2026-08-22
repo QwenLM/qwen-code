@@ -61,11 +61,17 @@ import {
 import { createRequire } from 'node:module';
 import { dirname, join, isAbsolute, resolve, sep } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import { probeWorktreePath } from './lib/paths.js';
+import { probeWorktreePath, REVIEW_TMP_DIR } from './lib/paths.js';
 // `discardWorktree` moved to `lib/worktree.ts` when `base-tree` needed the same
 // stale-sweep-then-remove step (its rationale lives there, with the helper), and
 // `exposeDependencies` followed it when `scratch-tree` needed the same
 // dependency farm for the verifier's own probe tree.
+import { shellQuotePath } from './lib/shell-quote.js';
+import {
+  containerCommand,
+  reviewSandboxImage,
+  sandboxVerdict,
+} from './lib/sandboxed-exec.js';
 import {
   discardWorktree,
   exposeDependencies,
@@ -1516,6 +1522,34 @@ export function probeCleanupFailureDetail(
  * repository out into the tree, which is the hazard the residue probe's
  * identity gate exists for. Refusing is the only answer that is neither.
  */
+/**
+ * The container argv for one probe-suite run, or null to spawn it directly.
+ *
+ * Same three null cases as `build-test`'s: policy off, no runtime under
+ * `auto`, or a tree that is not under a review temp dir (a `/review` of a
+ * local checkout, where there is no `.qwen/tmp` layout to mount).
+ */
+function probeContainer(
+  command: string,
+  probeTree: string,
+): { file: string; args: string[] } | null {
+  const verdict = sandboxVerdict();
+  if (verdict.kind !== 'container') return null;
+  const resolved = resolve(probeTree);
+  const marker = `${sep}${REVIEW_TMP_DIR}${sep}`;
+  const at = resolved.indexOf(marker);
+  if (at < 0) return null;
+  return containerCommand(command, {
+    cwd: resolved,
+    // The mount is the temp dir, not the probe tree: the dependency farm's
+    // links point out of it, into the review worktree's `node_modules`.
+    tmpDir: resolved.slice(0, at + marker.length - 1),
+    kind: 'test',
+    runtime: verdict.runtime,
+    image: reviewSandboxImage(),
+  });
+}
+
 function restoreProbeTreeTracked(probeTree: string): string | null {
   if (!existsSync(join(probeTree, '.git'))) {
     return `${probeTree} carries no .git, so there is no commit to put it back to`;
@@ -1685,19 +1719,36 @@ function runProbeSuite(
   const exposed = exposeDependencies(probeTree, dependencyRoot, {
     rebuild: true,
   });
-  const r = spawnSync(
-    process.execPath,
-    [findVitestBin(dependencyRoot), 'run', '--reporter=json', ...probes],
-    {
-      cwd: probeTree,
-      encoding: 'utf8',
-      timeout,
-      // Vitest's JSON reporter on a large suite easily exceeds spawnSync's
-      // 1 MiB default stdout buffer, which returns ENOBUFS and turns every
-      // probe `inconclusive`. Match the 64 MiB ceiling the gh wrapper uses.
-      maxBuffer: 64 * 1024 * 1024,
-    },
-  );
+  // The reviewed repository's own suite, run once per baseline / control /
+  // mutant / hunk probe / revert — the second of the two places a review
+  // executes the code it is reviewing (#9556). Sandboxed it is a container
+  // per run, offline, with an env allowlist instead of this process's own;
+  // unsandboxed it is the direct spawn this has always been, and the caller
+  // has already disclosed that.
+  const suite = `${shellQuotePath(process.execPath)} ${shellQuotePath(
+    findVitestBin(dependencyRoot),
+  )} run --reporter=json ${probes.map(shellQuotePath).join(' ')}`;
+  const boxed = probeContainer(suite, probeTree);
+  const r = boxed
+    ? spawnSync(boxed.file, boxed.args, {
+        cwd: probeTree,
+        encoding: 'utf8',
+        timeout,
+        maxBuffer: 64 * 1024 * 1024,
+      })
+    : spawnSync(
+        process.execPath,
+        [findVitestBin(dependencyRoot), 'run', '--reporter=json', ...probes],
+        {
+          cwd: probeTree,
+          encoding: 'utf8',
+          timeout,
+          // Vitest's JSON reporter on a large suite easily exceeds spawnSync's
+          // 1 MiB default stdout buffer, which returns ENOBUFS and turns every
+          // probe `inconclusive`. Match the 64 MiB ceiling the gh wrapper uses.
+          maxBuffer: 64 * 1024 * 1024,
+        },
+      );
   // `r.error` is set — and `r.status` is null — when the process never ran
   // (vitest entry missing or unresolvable) or was killed (the timeout above
   // fires SIGTERM). Ignoring it reports those as "the runner produced no

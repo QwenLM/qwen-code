@@ -40,8 +40,15 @@
 import type { CommandModule } from 'yargs';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  containerCommand,
+  reviewSandboxImage,
+  sandboxVerdict,
+  type CommandKind,
+} from './lib/sandboxed-exec.js';
+import { REVIEW_TMP_DIR } from './lib/paths.js';
 import {
   DEFAULT_COMMAND_TIMEOUT_S,
   DEFAULT_WHOLE_CALL_BUDGET_S,
@@ -310,10 +317,47 @@ export function buildRunEnv(
  * set is measured HERE, off the raw text, and survives a trim that drops the
  * FAIL lines it was parsed from.
  */
+/**
+ * The container argv for one reviewed-repository command, or null to run it
+ * directly.
+ *
+ * Null covers three cases and they are not the same thing: the policy is off
+ * (today's behaviour), no runtime answered under `auto`, or this command's cwd
+ * is not inside a review temp dir — which is the case for a `/review` of a
+ * local checkout, where the tree under test IS the user's own working copy and
+ * there is no `.qwen/tmp` sibling layout to mount. The `required` policy is
+ * NOT handled here: refusing is the caller's decision, because only the caller
+ * knows what evidence it is about to mark unavailable.
+ */
+function containerised(
+  command: string,
+  cwd: string,
+  kind: CommandKind,
+): { file: string; args: string[] } | null {
+  const verdict = sandboxVerdict();
+  if (verdict.kind !== 'container') return null;
+  // The mount is the review temp dir, not this tree: the dependency farm links
+  // out of every tree into the review worktree's `node_modules`, and mounting
+  // one tree alone would leave every one of those links dangling.
+  const resolved = resolve(cwd);
+  const marker = `${sep}${REVIEW_TMP_DIR}${sep}`;
+  const at = resolved.indexOf(marker);
+  if (at < 0) return null;
+  const tmpDir = resolved.slice(0, at + marker.length - 1);
+  return containerCommand(command, {
+    cwd: resolved,
+    tmpDir,
+    kind,
+    runtime: verdict.runtime,
+    image: reviewSandboxImage(),
+  });
+}
+
 export function run(
   command: string,
   cwd: string,
   timeoutMs: number,
+  kind: CommandKind = 'test',
 ): CommandResult {
   const started = Date.now();
   // spawnSync validates `timeout` as an unsigned integer: the adapters'
@@ -322,16 +366,33 @@ export function run(
   // with no report, or zero, which arms no kill timer at all. Coerce once
   // at the one boundary every command crosses.
   const deadlineMs = Math.max(1, Math.round(timeoutMs));
-  const r = spawnSync(command, {
-    cwd,
-    shell: true,
-    encoding: 'utf8',
-    timeout: deadlineMs,
-    maxBuffer: 64 * 1024 * 1024,
-    // A build that asks a question is a build that hangs until the deadline.
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: buildRunEnv(),
-  });
+  // This is the reviewed repository's own command — `npm ci` with whatever
+  // install scripts the PR committed, its build, its suite — so it is the
+  // thing #9556 is about. `containerised` returns null when the run is not
+  // sandboxed, and the direct spawn below is unchanged for that case.
+  const boxed = containerised(command, cwd, kind);
+  const r = boxed
+    ? spawnSync(boxed.file, boxed.args, {
+        cwd,
+        encoding: 'utf8',
+        timeout: deadlineMs,
+        maxBuffer: 64 * 1024 * 1024,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        // NOT `buildRunEnv()`: the container gets an allowlist instead (see
+        // `containerEnv`), and this env is the RUNTIME client's, which needs
+        // the caller's PATH and nothing from the review.
+        env: process.env,
+      })
+    : spawnSync(command, {
+        cwd,
+        shell: true,
+        encoding: 'utf8',
+        timeout: deadlineMs,
+        maxBuffer: 64 * 1024 * 1024,
+        // A build that asks a question is a build that hangs until the deadline.
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: buildRunEnv(),
+      });
   // `spawnSync` sets `error.code === 'ETIMEDOUT'` when the deadline fired — that is
   // the authoritative signal. The `SIGTERM`/null-status pair is only a fallback: it
   // also matches an external SIGTERM (a container stop), and it misses a non-default
