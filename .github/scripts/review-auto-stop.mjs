@@ -64,14 +64,21 @@ export function readMarker(body) {
  * `bodies` is every review body this account posted on the PR, newest first.
  * Returns `{ stop, reason, evidence }` — `reason` is rendered to the operator
  * and to the PR, so it states the measurement, never a verdict about the work.
+ *
+ * `evidence.rounds` is present on BOTH answers, oldest first, and is the
+ * readable rounds this call actually saw. The caller reads its length to
+ * decide whether a stale pause notice could exist at all: a PR with no
+ * readable round has never been paused, because a pause needs `window + 1`
+ * of them.
  */
 export function decideAutoStop(bodies, options = {}) {
   const window = Number.isInteger(options.window) && options.window > 0
     ? options.window
     : DEFAULT_WINDOW;
-  const cont = (reason) => ({ stop: false, reason, evidence: null });
-
   const rounds = [];
+  const evidence = () => ({ window, rounds: rounds.slice().reverse() });
+  const cont = (reason) => ({ stop: false, reason, evidence: evidence() });
+
   for (const body of Array.isArray(bodies) ? bodies : []) {
     const m = readMarker(body);
     if (m) rounds.push(m);
@@ -125,6 +132,6 @@ export function decideAutoStop(bodies, options = {}) {
   return {
     stop: true,
     reason: `first-time findings did not fall across ${window} consecutive round(s): ${counts}`,
-    evidence: { window, rounds: rounds.slice().reverse() },
+    evidence: evidence(),
   };
 }

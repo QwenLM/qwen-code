@@ -44,7 +44,28 @@ Every clause mirrors a reading the pipeline itself refuses to call
 divergence. The only thing this repository adds is `W`.
 
 When it stops, the PR gets one upserted comment naming the measurement, the
-evidence, and both ways to resume.
+evidence, and how to resume.
+
+## How a pause lifts
+
+Not by pushing. While the pause holds, `review-pr` never runs for
+`opened`/`synchronize`, so no round is posted, so no new marker joins the
+window — the evidence the rule measures is frozen, and every later push
+re-decides the identical stop. The only thing that moves it is a review on a
+path the gate cannot reach: `@qwen-code /review`, a requested review,
+`ready_for_review`, `reopened`. Once such a round posts a marker whose
+first-time count falls, the window is no longer flat and the pushes after it
+are automatic again.
+
+The notice says exactly this, because an author who reads "push once and it
+lifts by itself" waits forever — which is the same silent-stop confusion the
+notice exists to prevent.
+
+When the pause does lift, the same comment is superseded in place (the
+`--update-only` upsert, which mints nothing where no notice exists): a
+recovered pull request must not keep advertising a pause that is over. The
+supersede is skipped when the listing produced no readable round, because a
+pause needs `W + 1` of them and such a pull request has never been paused.
 
 ## Configuration
 
@@ -65,12 +86,11 @@ completion (#9461 and #9623) each took nine rounds, and #9461's rounds 6 and
 7 still produced 5 and 2 Critical findings. A round-count bar would have cut
 those off. The trend is the signal; the count is not.
 
-## Two runtime traps, both fail-open, both silent
+## Three runtime traps, all fail-open, all silent
 
-The first round of this feature was green everywhere and broken in two
-places, and both were invisible for the same reason: fail-open failures leave
-no mark. They are pinned by tests now, and they are the two things to check
-before editing the step.
+Every round of this feature has shipped green and broken, and always for the
+same reason: fail-open failures leave no mark. They are pinned by tests now,
+and they are the things to check before editing the step.
 
 1. **The listing must not use `--paginate --jq`.** `gh` applies the filter
    per page and concatenates the outputs, so a pull request past 100 reviews
@@ -80,7 +100,14 @@ before editing the step.
    exists for, while working on every pull request short enough that the
    treadmill is still bearable. Use `--paginate` alone and slurp with
    `jq -s`, this repository's convention everywhere else.
-2. **The notice must be posted with `CI_BOT_PAT`.** It is an issue comment,
+2. **The notice body must contain the marker it is looked up by.**
+   `upsert-bot-comment.sh` finds a prior comment only through
+   `contains($marker)`. A body without the marker never matches, so every
+   stop POSTs a new comment — and a paused pull request re-decides the same
+   stop on every push, so the duplicates are unbounded, on exactly the
+   long-diverging loops this rule targets. The marker is one shell variable
+   used for both the body and the lookup key, so the two cannot drift.
+3. **The notice must be posted with `CI_BOT_PAT`.** It is an issue comment,
    the job holds no `issues: write`, and `upsert-bot-comment.sh` opens by
    resolving its author scope through `gh api user` — an endpoint a
    `GITHUB_TOKEN` cannot call at all. Under the job token every stop was
@@ -92,6 +119,12 @@ before editing the step.
 - `.github/scripts/review-auto-stop.mjs` — the decision, as a pure function.
 - `.github/scripts/review-auto-stop.test.mjs` — its tests, registered in
   `HELPER_TESTS`. The later half of the file replays the shipped `run:` block
-  against a stubbed `gh` that paginates the way the real one does; a unit
-  test over the decision alone cannot see either trap above.
+  against a stubbed `gh` that paginates the way the real one does and keeps a
+  comment store across runs; a unit test over the decision alone cannot see
+  any of the traps above.
+- `packages/cli/src/commands/review/lib/ledger-auto-stop-contract.test.ts` —
+  the only coupling between the marker this pipeline writes and the second,
+  hand-copied reader that consumes it. It feeds real `serializeLedger` output
+  through the real gate, so a producer-side format change cannot leave the
+  gate silently reading zero rounds.
 - `.github/workflows/qwen-code-pr-review.yml` — the gate that calls it.

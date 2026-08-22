@@ -293,8 +293,19 @@ jobs:
             exit 0
           fi
           bodies="${RUNNER_TEMP}/bot-review-bodies.json"
+          # The marker is BOTH the lookup key and the first line of every body
+          # written below. upsert-bot-comment.sh finds a prior notice only by
+          # `contains($marker)`, so a body without it makes every stop POST a
+          # brand-new comment — unbounded duplicates on exactly the paused,
+          # long-diverging PRs this rule targets. One variable, so the two can
+          # never drift apart.
+          notice_marker='<!-- qwen-review-auto-stop -->'
           # Never fail the gate over the read: a listing that errors must
-          # leave the trigger alone, which is what the empty array does.
+          # leave the trigger alone, which is what the empty array does. But
+          # it must leave a MARK — under `2>/dev/null` a listing that COULD
+          # NOT BE READ was byte-identical to a PR with no reviews yet, and a
+          # paginated listing is likeliest to fail on precisely the long-lived
+          # PRs this rule exists for.
           #
           # `--paginate` WITHOUT `--jq`, then `jq -s` — this repository's
           # convention everywhere else, and here the convention IS the
@@ -306,9 +317,13 @@ jobs:
           # diverging loops this rule exists for, while working on every PR
           # short enough that the treadmill is still bearable. `jq -s` slurps
           # every page into one document before the filter runs.
-          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" --paginate 2>/dev/null \
+          listing_err="${RUNNER_TEMP}/bot-review-listing.err"
+          if ! gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" --paginate 2>"$listing_err" \
             | jq -s '[add // [] | .[] | select(.user.login == "qwen-code-ci-bot") | .body]' \
-            > "$bodies" || echo '[]' > "$bodies"
+            > "$bodies"; then
+            echo "::warning::Review listing failed; the convergence auto-stop skipped this run: $(head -c 500 "$listing_err" 2>/dev/null | tr '\n' ' ')"
+            echo '[]' > "$bodies"
+          fi
           decision="$(node -e '
             import("./.github/scripts/review-auto-stop.mjs").then(async (m) => {
               const { readFileSync } = await import("node:fs");
@@ -319,14 +334,40 @@ jobs:
               } catch { bodies = []; }
               const w = Number.parseInt(process.env.AUTO_STOP_WINDOW ?? "", 10);
               const d = m.decideAutoStop(bodies.reverse(), Number.isInteger(w) ? { window: w } : {});
-              process.stdout.write(JSON.stringify({ stop: d.stop, reason: d.reason }));
-            }).catch(() => process.stdout.write("{\"stop\":false,\"reason\":\"decision script failed\"}"));
-          ' "$bodies")" || decision='{"stop":false,"reason":"decision script failed"}'
+              process.stdout.write(JSON.stringify({ stop: d.stop, reason: d.reason, readable: d.evidence?.rounds?.length ?? 0 }));
+            }).catch(() => process.stdout.write("{\"stop\":false,\"reason\":\"decision script failed\",\"readable\":0}"));
+          ' "$bodies")" || decision='{"stop":false,"reason":"decision script failed","readable":0}'
           stop="$(printf '%s' "$decision" | jq -r '.stop')"
           reason="$(printf '%s' "$decision" | jq -r '.reason')"
+          readable="$(printf '%s' "$decision" | jq -r '.readable // 0')"
           if [ "$stop" != "true" ]; then
             echo "Convergence auto-stop not engaged: ${reason}" >> "$GITHUB_STEP_SUMMARY"
             echo "should_review=true" >> "$GITHUB_OUTPUT"
+            # A pause that lifted must stop advertising itself, or a recovered
+            # PR keeps a "paused" banner that contradicts what the pipeline is
+            # doing. `--update-only` PATCHes an existing notice and no-ops
+            # when there is none, so this mints nothing. Skipped when no round
+            # is readable: a pause needs `window + 1` of them, so such a PR has
+            # never been paused and the listing would be pure cost. The body
+            # is static, so a PR that stays resumed is re-PATCHed with the
+            # same bytes rather than churning an edit per push.
+            if [ "${readable}" != "0" ] && [ -n "${NOTICE_TOKEN:-}" ]; then
+              lifted_file="${RUNNER_TEMP}/auto-stop-lifted.md"
+              {
+                printf '%s\n\n' "${notice_marker}"
+                printf '%s\n\n' '### Automatic review resumed'
+                printf '%s\n' 'The pause on this pull request has lifted: its review history is settling again, so reviews fire on every push as usual.'
+                printf '\n%s\n' '<details><summary>中文说明</summary>'
+                printf '\n%s\n\n' '### 自动评审已恢复'
+                printf '%s\n' '本 PR 的暂停已解除：评审历史重新呈现收敛，每次推送会照常自动触发评审。'
+                printf '\n%s\n' '</details>'
+              } > "$lifted_file"
+              GH_TOKEN="${NOTICE_TOKEN}" .github/scripts/upsert-bot-comment.sh \
+                "${GITHUB_REPOSITORY}" "${PR_NUMBER}" \
+                "${notice_marker}" \
+                "$lifted_file" --update-only \
+                || echo "::warning::Could not supersede the auto-stop notice; it may still read as paused."
+            fi
             exit 0
           fi
 
@@ -337,17 +378,20 @@ jobs:
           # Upserted, so a run per push does not mint a comment per push.
           body_file="${RUNNER_TEMP}/auto-stop-body.md"
           {
+            printf '%s\n\n' "${notice_marker}"
             printf '%s\n\n' '### Automatic review paused'
             printf '%s\n\n' "This repository stops auto-triggering reviews when a pull request's own review history shows the loop is not settling — ${reason}."
             printf '%s\n\n' 'Nothing is blocked and nothing was withheld: the reviews already posted stand, and a review on request still runs. What stops is the review that fires on every push.'
+            printf '%s\n\n' 'While the pause holds no round is posted, so a push alone cannot change the evidence it is measured on. An explicit review is what moves it:'
             printf '%s\n' '- Comment `@qwen-code /review` for a review now.'
-            printf '%s\n' '- Or batch the remaining fixes, verify them, and push once — the next round the trend falls, this pause lifts by itself.'
+            printf '%s\n' '- Or batch the remaining fixes, verify them, then comment `@qwen-code /review` — once that round is settling, this pause lifts by itself for the pushes after it.'
             printf '\n%s\n' '<details><summary>中文说明</summary>'
             printf '\n%s\n\n' "### 自动评审已暂停"
             printf '%s\n\n' "当一个 PR 自身的评审历史显示回路没有收敛时，本仓库会停止在每次推送上自动触发评审——${reason}。"
             printf '%s\n\n' '没有任何东西被阻断或扣留：已发布的评审依然有效，按请求的评审也照常运行。停下的只是"每次推送都跑一轮"。'
+            printf '%s\n\n' '暂停期间不会发布新的轮次，所以只推送无法改变它所依据的证据。推动它的是一次显式评审：'
             printf '%s\n' '- 评论 `@qwen-code /review` 可立即获得一轮评审。'
-            printf '%s\n' '- 或把剩余修复攒成一批、验证后推送一次——下一轮趋势下降时，该暂停会自行解除。'
+            printf '%s\n' '- 或把剩余修复攒成一批、验证后评论 `@qwen-code /review`——当那一轮呈现收敛，此后的推送该暂停会自行解除。'
             printf '\n%s\n' '</details>'
           } > "$body_file"
           # An absent PAT (a fork of this repository) posts nothing rather
@@ -356,7 +400,7 @@ jobs:
           if [ -n "${NOTICE_TOKEN:-}" ] && GH_TOKEN="${NOTICE_TOKEN}" \
             .github/scripts/upsert-bot-comment.sh \
             "${GITHUB_REPOSITORY}" "${PR_NUMBER}" \
-            '<!-- qwen-review-auto-stop -->' \
+            "${notice_marker}" \
             "$body_file"; then
             echo "Auto-stop notice relayed to PR #${PR_NUMBER}."
           else
