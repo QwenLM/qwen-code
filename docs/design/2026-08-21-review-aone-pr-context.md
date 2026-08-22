@@ -27,7 +27,8 @@ ledger lives in the posted comments this subcommand would now read.
 
 Out of scope (tracked): comment-status/presubmit backing and cross-round
 dedup (#9613), AI-comment marking (#9614), removed-line anchors (#9615),
-self-PR detection (#9616), cleanup audit (#9617), incremental cache under
+self-PR detection (#9616 — landed via #9629 and merged into this branch
+while it was in flight), cleanup audit (#9617), incremental cache under
 AGit-Flow (#9618 — landed via #9630 and merged into this branch while it was
 in flight; see D6), test-plan routing / composeUrl / a1 version floor (#9619).
 
