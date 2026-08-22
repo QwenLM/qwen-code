@@ -412,6 +412,32 @@ describe('parseReviewArgs', () => {
     expect(got.warnings[0]).toContain('not a PR/CR URL');
   });
 
+  it('a /codereview/ URL on a family-only (GHE) host is refused — fail closed', () => {
+    // `ghe.alibaba-inc.com` serves no /codereview/ grammar; accepting it
+    // as a live target would let detection route the explicit GHE host to
+    // GitHub and aim fetch/submit at GHE PR #123 — a target the supplied
+    // URL never named as a valid GHE resource.
+    const got = parseReviewArgs(
+      'https://ghe.alibaba-inc.com/group/repo/codereview/123',
+    );
+    expect(got.target).toEqual({ type: 'local' });
+    expect(got.warnings[0]).toContain('not a PR/CR URL');
+  });
+
+  it('a /pull/ URL on a family-only (GHE) host is a real GHE PR target', () => {
+    // The mirror arm: GHE instances legitimately serve /pull/ pages, so
+    // the family host must parse as a pr-url (and its explicit host then
+    // routes to the GitHub reader — pinned in registry.test.ts).
+    const got = parseReviewArgs(
+      'https://ghe.alibaba-inc.com/group/repo/pull/123',
+    );
+    expect(got.target).toMatchObject({
+      type: 'pr-url',
+      host: 'ghe.alibaba-inc.com',
+      number: 123,
+    });
+  });
+
   it('refuses a junk PR URL instead of guessing (never a file path, never PR 42)', () => {
     const got = parseReviewArgs(
       'https://github.com/QwenLM/qwen-code/pull/42oops',

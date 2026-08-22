@@ -1172,6 +1172,32 @@ describe('loadCliConfig', () => {
     expect(process.env['QWEN_DEBUG_LOG_FILE']).toBe('1');
   });
 
+  it('maps --restore-ask-user-question only in ACP mode', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--acp',
+      '--restore-ask-user-question',
+    ];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv);
+    expect(config.getRestoreAskUserQuestion()).toBe(true);
+  });
+
+  it('ignores --restore-ask-user-question outside ACP mode', async () => {
+    process.argv = ['node', 'script.js', '--restore-ask-user-question'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv);
+    expect(config.getRestoreAskUserQuestion()).toBe(false);
+  });
+
+  it('defaults restoreAskUserQuestion to false', async () => {
+    process.argv = ['node', 'script.js', '--acp'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv);
+    expect(config.getRestoreAskUserQuestion()).toBe(false);
+  });
+
   it('preserves explicit opt-out when --debug is used', async () => {
     process.env['QWEN_DEBUG_LOG_FILE'] = '0';
     process.argv = ['node', 'script.js', '--debug'];
