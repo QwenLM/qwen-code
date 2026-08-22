@@ -299,8 +299,8 @@ Guidelines:
       // An explicit list takes the getFunctionDeclarationsFiltered branch
       // instead, which is what `Explore` and `statusline-setup` already do.
       // Measured on the same diff, same launch prompt: 3,447 tokens per turn,
-      // and one agent's delivered prompt fell from 139,013 to 55,789 (-59.9%).
-      // 12,476 of that 83,224-token saving — 15%, a sixth — is second-order:
+      // and one agent's delivered prompt fell from 139,013 to 55,897 (-59.8%).
+      // 12,476 of that 83,116-token saving — 15%, a sixth — is second-order:
       // without SKILL the startup skills catalogue is not injected into the
       // agent's first user message, which is 3,119 tokens lighter and is
       // re-sent on every one of the four turns. That is the catalogue only;
