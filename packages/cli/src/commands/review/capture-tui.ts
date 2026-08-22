@@ -93,7 +93,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { createContext, runInContext, type Context } from 'node:vm';
 import {
   writeStdoutLine,
@@ -165,7 +165,17 @@ type ProbeResult =
  * binary is `hung`, NEVER `absent`: an operator told "not installed" for a
  * wedged binary goes to fix an installation that exists. */
 function probeOutput(bin: string, flag: string): ProbeResult {
-  const r = spawnSync(bin, [flag], {
+  // Resolved, never bare: execvp honours the empty-PATH-element → cwd rule
+  // that `resolveOnPath` refuses, and the cwd here is the reviewed worktree.
+  // A `tmux` planted there would answer this probe AND every control call
+  // that follows it — the attacker would BE the tmux, and every `-L` scoping
+  // defence in this file is downstream of a binary it no longer chose.
+  // Unresolvable reads as absent, which is the same answer execve's ENOENT
+  // produces below and the same refusal wording: the binary is not reachable
+  // at an absolute PATH element, which is the only place this command looks.
+  const resolved = resolveOnPath(bin);
+  if (resolved === undefined) return { status: 'absent' };
+  const r = spawnSync(resolved, [flag], {
     encoding: 'utf8',
     timeout: probeBudget.timeoutMs,
     // SIGKILL, not the default SIGTERM: a TERM-immune child (trap '' TERM)
@@ -225,18 +235,28 @@ export const freezeRender = { bin: 'freeze', timeoutMs: 30_000 };
  * exactly where `describe.skipIf(!hasTmux)` skips the real-tmux tests, so
  * without this seam that path is untestable in the one environment where it
  * matters. Tests override a probe and restore it; production never does. */
-/** The first executable `bin` on this process's PATH, or undefined.
+/** The first executable `bin` on an ABSOLUTE element of this process's PATH,
+ * or undefined.
  *
  * In-process rather than a spawn, because the answer needed is the PATH
- * lookup itself — the absolute path — not an exit code. An EMPTY PATH
- * element means "the current directory" to POSIX, and that rule is NOT
- * honoured here: the capture runs with the reviewed tree as its cwd, so
- * honouring it would let the PR under review supply the binary the holder
- * runs.
+ * lookup itself — a path this file hands to `spawnSync` and embeds in the
+ * holder script — not an exit code.
+ *
+ * Deliberately narrower than execvp, in one respect: a PATH element that is
+ * not absolute is SKIPPED. POSIX reads an empty element as the current
+ * directory and honours relative ones against it, and the capture's cwd is
+ * the reviewed worktree — so either rule lets the PR under review supply the
+ * binary. Two things follow from skipping them, and both are load-bearing:
+ * the answer is absolute by CONSTRUCTION, which is what the holder script
+ * needs (a relative path there is re-resolved against the PANE's `--cwd`,
+ * putting the lookup back where this function exists to take it from), and
+ * the reviewed tree cannot supply it. A host whose only `sleep` sits on a
+ * relative element gets a refusal that names the cause, which is the right
+ * end for an evidence tool.
  */
 function resolveOnPath(bin: string): string | undefined {
   for (const dir of (process.env['PATH'] ?? '').split(':')) {
-    if (dir === '') continue;
+    if (!isAbsolute(dir)) continue;
     const candidate = join(dir, bin);
     try {
       accessSync(candidate, fsConstants.X_OK);
@@ -285,7 +305,24 @@ export const REAP_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'] as const;
 export const tmuxControl = { timeoutMs: 15_000 };
 
 function tmux(argv: string[], env?: NodeJS.ProcessEnv): string {
-  return execFileSync('tmux', argv, {
+  // Same reason as the probe above, and this is the site that matters most:
+  // every control call — start, capture, send-keys, kill — flows through
+  // here, so a cwd-planted `tmux` would author the `.ans` bytes and the
+  // manifest that the verdict machinery consumes as rendering evidence.
+  // Resolved per call rather than cached: PATH is a test seam here, and a
+  // cache would make the first capture in a process decide the rest.
+  // Unresolvable throws rather than falling back to the bare name — the
+  // fallback IS the hole — and it is nearly unreachable in practice, since
+  // the availability probe refuses the run before any control call when
+  // tmux cannot be resolved.
+  const bin = resolveOnPath('tmux');
+  if (bin === undefined) {
+    throw new Error(
+      'tmux is not reachable at any absolute PATH element — refusing to ' +
+        'resolve it through the current directory',
+    );
+  }
+  return execFileSync(bin, argv, {
     // The reap pins each kill to a candidate socket base (see there): tmux
     // resolves the base from the CLIENT's environment, and the server lives
     // where the first USABLE base was at start time — not necessarily where
@@ -1378,9 +1415,19 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
             // server binds ONE socket, and only there does a differing
             // inode mean the entry was swapped rather than that this base
             // never held it.
+            //
+            // FAIL-CLOSED on a missing stamp, because the stamp is absent in
+            // two states and one of them is the attack: a start that bound
+            // under the other base leaves no entry here at all (the lstat
+            // above throws and nothing is refused), while a stamp that
+            // FAILED after a successful start leaves the check with nothing
+            // to compare — and a plain foreign socket bound at this run's
+            // own name then passed all three tests and took the pinned
+            // kill. An entry standing here that this run cannot show is its
+            // own is not connected to; the WARNING carries the manual
+            // command, which is the disclosed cost of that choice.
             (resolve(base) === startBase &&
-              socketStampIno !== undefined &&
-              entry.ino !== socketStampIno);
+              (socketStampIno === undefined || entry.ino !== socketStampIno));
         } catch {
           // Absent or unstattable: there is nothing planted to connect
           // through, and the kill's own goal-state wordings already answer
@@ -1465,8 +1512,19 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
           const onStartBase = resolve(base) === startBase;
           baseDead =
             (isNothingToKill(stderrText) ||
-              (isSocketPathAbsent(stderrText) &&
-                socketStampIno === undefined)) &&
+              // `startThrew`, not an absent stamp: the comment above says
+              // this class establishes death only where start never bound a
+              // socket, and an absent stamp cannot carry that — it is also
+              // absent when the stamp FAILED after a successful start (this
+              // file's own `startThrew` declaration says so). In that state
+              // the ENOENT wording was credited while the server stood, and
+              // both bases credited it, so the run exited 0 with no WARNING
+              // and orphaned server and holder for the holder's whole
+              // window. Nothing is lost where start bound under the other
+              // base: that base's own kill succeeds and its confirmed death
+              // is global, so the uncredited verdict here raises no warning
+              // of its own.
+              (isSocketPathAbsent(stderrText) && startThrew)) &&
             verdictExaminedBase(stderrText, base) &&
             !(
               isSocketDirNeverCreated(stderrText) &&
@@ -1929,6 +1987,17 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // would otherwise be staged intact and feed the victim's bytes to the
     // render. rename() lands the OUTPUT: it replaces a symlink planted at
     // pngPath instead of following it out of the --out base.
+    // Resolved on the same rule as the probe and the control calls: freeze
+    // follows the names it is given and AUTHORS the image this run publishes
+    // as evidence, so a cwd-planted `freeze` would author it. An absolute
+    // `bin` — the test seam above, and any operator override — is taken as
+    // given; only the bare default is looked up. Unresolvable at this point
+    // means it went missing between the availability probe and here, which
+    // degrades the ladder like any other failed render rather than refusing
+    // a capture whose text rung already succeeded.
+    const freezeBin = isAbsolute(freezeRender.bin)
+      ? freezeRender.bin
+      : resolveOnPath(freezeRender.bin);
     const renderNonce = randomBytes(6).toString('hex');
     const ansStage = `${ansPath}.render-${renderNonce}`;
     const pngStage = `${pngPath}.render-${renderNonce}`;
@@ -1963,9 +2032,20 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
           '.ans text captured, no image rendered',
       );
     }
-    if (renderInputStaged) {
+    if (renderInputStaged && freezeBin === undefined) {
+      degradations.push(
+        `${freezeRender.bin} is not reachable at any absolute PATH element ` +
+          '— .ans text captured, no image rendered',
+      );
       try {
-        const r = spawnSync(freezeRender.bin, freezePlan(ansStage, pngStage), {
+        rmSync(ansStage, { force: true });
+      } catch {
+        // Litter is cosmetic; never let cleanup mask the capture's result.
+      }
+    }
+    if (renderInputStaged && freezeBin !== undefined) {
+      try {
+        const r = spawnSync(freezeBin, freezePlan(ansStage, pngStage), {
           encoding: 'utf8',
           timeout: freezeRender.timeoutMs,
           killSignal: 'SIGKILL',

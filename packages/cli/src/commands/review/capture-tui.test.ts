@@ -629,15 +629,99 @@ exit 0
     );
   }
 
-  it('resolves sleep to an absolute executable path', () => {
-    // The plan embeds whatever this answers, so a walker that returns a bare
-    // name or a directory would put one back in the pane's hands — silently,
-    // because the holder only fails under a PATH that lacks sleep.
-    const resolved = probes.sleepBin();
-    expect(resolved).toBeDefined();
-    expect(resolved?.startsWith('/')).toBe(true);
-    expect(statSync(resolved as string).isFile()).toBe(true);
-  });
+  // win32: `resolveOnPath` splits PATH on ':' and requires an absolute POSIX
+  // element, which no Windows PATH satisfies — the whole command refuses on
+  // the tmux probe long before that matters in production, but this test
+  // drives the resolver directly and would fail red on the Windows lane.
+  it.skipIf(process.platform === 'win32')(
+    'resolves sleep to an absolute executable path',
+    () => {
+      // The plan embeds whatever this answers, so a walker that returns a bare
+      // name or a directory would put one back in the pane's hands — silently,
+      // because the holder only fails under a PATH that lacks sleep.
+      const resolved = probes.sleepBin();
+      expect(resolved).toBeDefined();
+      expect(resolved?.startsWith('/')).toBe(true);
+      expect(statSync(resolved as string).isFile()).toBe(true);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'skips PATH elements that are not absolute — the answer cannot depend on cwd',
+    () => {
+      // POSIX reads an EMPTY element as the current directory and resolves
+      // relative ones against it; execvp honours both. The capture's cwd is
+      // the REVIEWED WORKTREE, so either rule lets the PR under review
+      // supply the binary the holder runs. A relative answer is also
+      // re-resolved against the PANE's own `--cwd`, which puts the lookup
+      // back exactly where resolving it here exists to take it from.
+      const root = mkdtempSync(join(tmpdir(), 'capture-tui-pathrel-'));
+      const before = process.cwd();
+      const realPath = process.env['PATH'];
+      try {
+        mkdirSync(join(root, 'rel'), { recursive: true });
+        writeFileSync(join(root, 'rel', 'sleep'), '#!/bin/sh\nexit 0\n', {
+          mode: 0o755,
+        });
+        process.chdir(root);
+        // Both non-absolute shapes, and a `sleep` execvp would find through
+        // either of them.
+        process.env['PATH'] = ':rel';
+        expect(probes.sleepBin()).toBeUndefined();
+        // The SAME directory named absolutely is taken — so this pins the
+        // element's shape, not the planted file.
+        process.env['PATH'] = join(root, 'rel');
+        expect(probes.sleepBin()).toBe(join(root, 'rel', 'sleep'));
+      } finally {
+        process.chdir(before);
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'never probes a tmux the reviewed tree put in the way',
+    () => {
+      // The probe used to spawn a BARE name, and execvp honours the
+      // empty-element rule the resolver refuses: an executable named `tmux`
+      // committed to the PR would answer this probe and then every control
+      // call after it — the attacker would BE the tmux, authoring the .ans
+      // bytes and the manifest that the verdict machinery reads as
+      // rendering evidence, with every `-L` scoping defence downstream of a
+      // binary this command no longer chose.
+      const root = mkdtempSync(join(tmpdir(), 'capture-tui-pathplant-'));
+      const before = process.cwd();
+      const realPath = process.env['PATH'];
+      try {
+        writeFileSync(
+          join(root, 'tmux'),
+          '#!/bin/sh\necho "tmux 9.9-PLANTED"\nexit 0\n',
+          { mode: 0o755 },
+        );
+        mkdirSync(join(root, 'empty'), { recursive: true });
+        process.chdir(root);
+        // A legal PATH carrying an empty element, and nothing on it that
+        // holds tmux.
+        process.env['PATH'] = `:${join(root, 'empty')}`;
+        expect(probes.tmux()).toEqual({ status: 'absent' });
+        // Control: the same plant reached through an ABSOLUTE element still
+        // answers — which is what every fake-tmux fixture in this file is —
+        // so the refusal above is about the element, not the file.
+        process.env['PATH'] = root;
+        expect(probes.tmux()).toEqual({
+          status: 'ok',
+          out: 'tmux 9.9-PLANTED',
+        });
+      } finally {
+        process.chdir(before);
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('refuses a capture whose holder would have no sleep to run', async () => {
     // The holder's watchdog (`sleep 10800`) and bounded hold loop
@@ -682,6 +766,166 @@ exit 0
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'does not credit an ENOENT verdict when the STAMP merely failed',
+    async () => {
+      // An absent stamp is TWO states and only one of them is "start never
+      // bound a socket": it is also absent when the stamp failed after a
+      // SUCCESSFUL start (this file's own `startThrew` declaration says so,
+      // and the captured command can produce it by unlinking the socket it
+      // reaches through `$TMUX`). Crediting the ENOENT wording there read a
+      // live server as reaped — exit 0, no WARNING, server and holder
+      // orphaned for the holder's whole window and invisible to the
+      // readdir-based sweep, which discovers orphans by the socket that
+      // this state has already lost. `startThrew` separates the two.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const dir = mkdtempSync(join('/tmp', 'capture-tui-stampfail-'));
+      const envBase = join(dir, 'scratch');
+      mkdirSync(envBase);
+      const binDir = join(dir, 'fakebin');
+      mkdirSync(binDir, { recursive: true });
+      // Starts fine and binds NOTHING the stamp can see, then answers every
+      // kill with the ENOENT class — the shape of a server whose socket is
+      // gone while the server itself stands.
+      writeFileSync(
+        join(binDir, 'tmux'),
+        `#!/bin/sh
+[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
+for a in "$@"; do
+  if [ "$a" = "new-session" ]; then
+    s=$(printf '%s\n' "$@" | grep -o "/[^']*qwen-capture-ready-[0-9a-f-]*" | head -1)
+    [ -n "$s" ] && : > "$s"
+    exit 0
+  fi
+  if [ "$a" = "kill-server" ]; then
+    SRV=""; prev=""
+    for x in "$@"; do [ "$prev" = "-L" ] && SRV="$x"; prev="$x"; done
+    echo "error connecting to \${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$SRV (No such file or directory)" >&2
+    exit 1
+  fi
+done
+printf 'MARK\n'
+exit 0
+`,
+        { mode: 0o755 },
+      );
+      const realPath = process.env['PATH'];
+      const realTmuxTmpdir = process.env['TMUX_TMPDIR'];
+      process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
+      process.env['TMUX_TMPDIR'] = envBase;
+      try {
+        const { stderr } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 10_000,
+          } as never),
+        );
+        // The capture itself still succeeds — this is about what the reap
+        // is entitled to claim afterwards, not about failing the run.
+        expect(process.exitCode).toBeUndefined();
+        expect(existsSync(join(dir, 'cap.json'))).toBe(true);
+        expect(stderr).toContain('WARNING');
+        expect(stderr).toContain('kill-server failed twice');
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        if (realTmuxTmpdir === undefined) delete process.env['TMUX_TMPDIR'];
+        else process.env['TMUX_TMPDIR'] = realTmuxTmpdir;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses to connect to an entry it has no recorded identity for',
+    async () => {
+      // The identity half of the entry guard compares against the stamp, so
+      // an ABSENT stamp silently disabled it: a plain foreign socket bound
+      // at this run's own unique name passed "not a symlink" and "one link"
+      // and took the pinned kill. Absent-stamp is reachable without any
+      // race — a start that bound under the other base, or a stamp lstat
+      // that failed — so the check fails closed: an entry standing on the
+      // start base that this run cannot show is its own is not connected
+      // to, and the WARNING carries the manual reap command.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const dir = mkdtempSync(join('/tmp', 'capture-tui-nostamp-'));
+      const envBase = join(dir, 'scratch');
+      mkdirSync(envBase);
+      const binDir = join(dir, 'fakebin');
+      mkdirSync(binDir, { recursive: true });
+      const killLog = join(dir, 'kills');
+      // Binds nothing at start (so the stamp finds nothing), then an entry
+      // APPEARS at the start base while the capture runs.
+      writeFileSync(
+        join(binDir, 'tmux'),
+        `#!/bin/sh
+[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
+SRV=""; prev=""
+for x in "$@"; do [ "$prev" = "-L" ] && SRV="$x"; prev="$x"; done
+for a in "$@"; do
+  if [ "$a" = "new-session" ]; then
+    s=$(printf '%s\n' "$@" | grep -o "/[^']*qwen-capture-ready-[0-9a-f-]*" | head -1)
+    [ -n "$s" ] && : > "$s"
+    exit 0
+  fi
+  if [ "$a" = "kill-server" ]; then
+    printf '%s\n' "$TMUX_TMPDIR" >> '${killLog}'
+    echo "error connecting to \${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$SRV (No such file or directory)" >&2
+    exit 1
+  fi
+done
+mkdir -p "\${TMUX_TMPDIR}/tmux-$(id -u)"
+: > "\${TMUX_TMPDIR}/tmux-$(id -u)/$SRV"
+printf 'MARK\n'
+exit 0
+`,
+        { mode: 0o755 },
+      );
+      const realPath = process.env['PATH'];
+      const realTmuxTmpdir = process.env['TMUX_TMPDIR'];
+      process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
+      process.env['TMUX_TMPDIR'] = envBase;
+      try {
+        const { stderr } = await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: dir,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 10_000,
+          } as never),
+        );
+        const killedBases = existsSync(killLog)
+          ? readFileSync(killLog, 'utf8').trim().split('\n')
+          : [];
+        // The start base carries an entry with no recorded identity: never
+        // connected to...
+        expect(killedBases).not.toContain(envBase);
+        // ...while the base that carries no entry at all is still killed,
+        // which is what separates a refusal from a reap that never ran.
+        expect(killedBases).toContain('/tmp');
+        expect(stderr).toContain('the reap refused to connect');
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        if (realTmuxTmpdir === undefined) delete process.env['TMUX_TMPDIR'];
+        else process.env['TMUX_TMPDIR'] = realTmuxTmpdir;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it.skipIf(process.platform === 'win32')(
     'never connects a kill through an entry this capture did not bind',
