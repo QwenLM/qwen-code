@@ -481,7 +481,7 @@ export function getDisplayValue(
     value = getDefaultValue(key);
   }
 
-  let valueString = String(value);
+  let valueString = value === undefined ? t('Unset') : String(value);
 
   // Special handling for outputLanguage 'auto' value
   if (key === 'general.outputLanguage' && isAutoLanguage(value as string)) {
@@ -491,7 +491,7 @@ export function getDisplayValue(
     if (option?.label) {
       valueString = t(option.label) || option.label;
     } else {
-      valueString = `${value}`;
+      valueString = value === undefined ? t('Unset') : `${value}`;
     }
   }
 

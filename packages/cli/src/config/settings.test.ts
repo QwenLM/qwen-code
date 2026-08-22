@@ -3612,6 +3612,47 @@ describe('Settings Loading and Merging', () => {
   });
 
   describe('setValue persistence', () => {
+    it('removes unset values from memory so lower-priority scopes apply immediately', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) =>
+          p === USER_SETTINGS_PATH || p === MOCK_WORKSPACE_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) {
+            return JSON.stringify({
+              [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+              ui: { enableFollowupSuggestions: true },
+            });
+          }
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH) {
+            return JSON.stringify({
+              [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+              ui: { enableFollowupSuggestions: false },
+            });
+          }
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.ui?.enableFollowupSuggestions).toBe(false);
+
+      settings.setValue(
+        SettingScope.Workspace,
+        'ui.enableFollowupSuggestions',
+        undefined,
+      );
+
+      expect(settings.workspace.settings.ui).not.toHaveProperty(
+        'enableFollowupSuggestions',
+      );
+      expect(settings.merged.ui?.enableFollowupSuggestions).toBe(true);
+      const writeCall = (fs.writeFileSync as Mock).mock.calls.at(-1);
+      const writtenContent = JSON.parse(String(writeCall?.[1]));
+      expect(writtenContent.ui).not.toHaveProperty('enableFollowupSuggestions');
+    });
+
     it('preserves models added to settings.json after startup when updating model.name', () => {
       (mockFsExistsSync as Mock).mockReturnValue(true);
 

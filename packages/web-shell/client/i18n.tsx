@@ -5951,7 +5951,7 @@ const ZH: Messages = {
     '对话结束后显示可选反馈对话框，帮助改进 Qwen 表现。',
   'settings.label.ui.enableFollowupSuggestions': '启用后续建议',
   'settings.description.ui.enableFollowupSuggestions':
-    '任务完成后显示上下文相关的后续建议。按 Tab 或右方向键接受，按 Enter 接受并提交。',
+    '任务完成后显示上下文相关的后续建议。按 Tab、右方向键或 Enter 将建议填入输入框。本地 OpenAI 兼容后端默认关闭，除非显式启用。',
   'settings.label.ui.compactMode': '紧凑模式',
   'settings.description.ui.compactMode':
     '隐藏工具输出和思考内容，显示更简洁的视图（可用 Ctrl+O 切换）。',

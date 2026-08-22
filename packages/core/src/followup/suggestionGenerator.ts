@@ -17,6 +17,11 @@ import {
   runForkedAgent,
   type CacheSafeParams,
 } from '../utils/forkedAgent.js';
+import {
+  buildModelIdContext,
+  resolveModelId,
+  type ResolvedModelId,
+} from '../utils/modelId.js';
 import { runSideQuery } from '../utils/sideQuery.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
@@ -81,6 +86,33 @@ const SUGGESTION_SCHEMA: Record<string, unknown> = {
 
 /** Minimum assistant turns before generating suggestions */
 const MIN_ASSISTANT_TURNS = 2;
+
+export interface PromptSuggestionModelTarget {
+  model: string;
+  selector: ResolvedModelId | undefined;
+  usesPrimary: boolean;
+  crossProvider: boolean;
+}
+
+export function resolvePromptSuggestionModelTarget(
+  config: Config,
+  modelOverride?: string,
+): PromptSuggestionModelTarget {
+  const model = modelOverride ?? config.getFastModel() ?? config.getModel();
+  const selector = resolveModelId(model, buildModelIdContext(config));
+  const primaryAuthType = config.getContentGeneratorConfig?.()?.authType;
+  const usesPrimary =
+    selector?.modelId === config.getModel() &&
+    (!selector.authType || selector.authType === primaryAuthType);
+
+  return {
+    model,
+    selector,
+    usesPrimary,
+    crossProvider:
+      selector?.authType !== undefined && selector.authType !== primaryAuthType,
+  };
+}
 
 /**
  * Generate a prompt suggestion using an LLM call.
@@ -176,7 +208,10 @@ async function generateViaForkedQuery(
   abortSignal: AbortSignal,
   modelOverride?: string,
 ): Promise<string | null> {
-  const model = modelOverride ?? config.getFastModel() ?? cacheSafeParams.model;
+  const model = resolvePromptSuggestionModelTarget(
+    config,
+    modelOverride ?? config.getFastModel() ?? cacheSafeParams.model,
+  ).model;
   const result = await runForkedAgent({
     config,
     userMessage: SUGGESTION_PROMPT,
@@ -214,7 +249,8 @@ async function generateViaBaseLlm(
   abortSignal: AbortSignal,
   modelOverride?: string,
 ): Promise<string | null> {
-  const model = modelOverride ?? config.getFastModel() ?? config.getModel();
+  const target = resolvePromptSuggestionModelTarget(config, modelOverride);
+  const model = target.model;
   const contents: Content[] = [
     ...conversationHistory,
     { role: 'user', parts: [{ text: SUGGESTION_PROMPT }] },
@@ -225,6 +261,8 @@ async function generateViaBaseLlm(
     contents,
     abortSignal,
     model,
+    // A broken cross-provider fast model must not fall back to the primary.
+    failClosed: target.crossProvider,
     // Suggestions are best-effort UI hints; if the model is unavailable,
     // the user shouldn't pay 7× the latency for a hint they may ignore.
     maxAttempts: 1,

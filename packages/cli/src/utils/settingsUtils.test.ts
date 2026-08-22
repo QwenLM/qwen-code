@@ -19,6 +19,7 @@ import {
   settingExistsInScope,
   setPendingSettingValue,
   getRestartRequiredFromModified,
+  saveModifiedSettings,
   getDisplayValue,
   isDefaultValue,
   setNestedPropertySafe,
@@ -32,6 +33,7 @@ import {
   type SettingsSchema,
   type SettingsSchemaType,
 } from '../config/settingsSchema.js';
+import { type LoadedSettings, SettingScope } from '../config/settings.js';
 
 vi.mock('../config/settingsSchema.js', async (importOriginal) => {
   const original =
@@ -588,6 +590,48 @@ describe('SettingsUtils', () => {
       });
     });
 
+    describe('saveModifiedSettings', () => {
+      it('removes an unset value that exists in the selected scope', () => {
+        const setValue = vi.fn();
+        const loadedSettings = {
+          forScope: () => ({
+            settings: { ui: { enableFollowupSuggestions: true } },
+          }),
+          setValue,
+        } as unknown as LoadedSettings;
+
+        saveModifiedSettings(
+          new Set(['ui.enableFollowupSuggestions']),
+          makeMockSettings({}),
+          loadedSettings,
+          SettingScope.User,
+        );
+
+        expect(setValue).toHaveBeenCalledWith(
+          SettingScope.User,
+          'ui.enableFollowupSuggestions',
+          undefined,
+        );
+      });
+
+      it('does not write an unset value that was already absent', () => {
+        const setValue = vi.fn();
+        const loadedSettings = {
+          forScope: () => ({ settings: {} }),
+          setValue,
+        } as unknown as LoadedSettings;
+
+        saveModifiedSettings(
+          new Set(['ui.enableFollowupSuggestions']),
+          makeMockSettings({}),
+          loadedSettings,
+          SettingScope.User,
+        );
+
+        expect(setValue).not.toHaveBeenCalled();
+      });
+    });
+
     describe('getDisplayValue', () => {
       describe('enum behavior', () => {
         enum StringEnum {
@@ -763,6 +807,25 @@ describe('SettingsUtils', () => {
           );
           expect(result).toBe('Bar');
         });
+
+        it('shows unset for enum settings with an undefined default', () => {
+          vi.mocked(getSettingsSchema).mockReturnValue({
+            model: {
+              properties: {
+                reasoningEffort: { ...SETTING, default: undefined },
+              },
+            },
+          } as unknown as SettingsSchemaType);
+
+          expect(
+            getDisplayValue(
+              'model.reasoningEffort',
+              makeMockSettings({}),
+              makeMockSettings({}),
+              new Set<string>(),
+            ),
+          ).toBe('Unset');
+        });
       });
 
       it('should show value without * when setting matches default', () => {
@@ -797,6 +860,32 @@ describe('SettingsUtils', () => {
           modifiedSettings,
         );
         expect(result).toBe('false'); // shows default value
+      });
+
+      it('should show unset when the schema default is undefined', () => {
+        vi.mocked(getSettingsSchema).mockReturnValue({
+          ui: {
+            properties: {
+              enableFollowupSuggestions: {
+                type: 'boolean',
+                label: 'Enable Follow-up Suggestions',
+                category: 'UI',
+                requiresRestart: false,
+                default: undefined as boolean | undefined,
+                showInDialog: true,
+              },
+            },
+          },
+        } as unknown as SettingsSchemaType);
+
+        const result = getDisplayValue(
+          'ui.enableFollowupSuggestions',
+          makeMockSettings({}),
+          makeMockSettings({}),
+          new Set<string>(),
+        );
+
+        expect(result).toBe('Unset');
       });
 
       it('should show value with * when changed from default', () => {

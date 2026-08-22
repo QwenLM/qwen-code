@@ -7,6 +7,7 @@
 import type { Content } from '@google/genai';
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 import type { Config } from '../config/config.js';
+import { AuthType } from '../core/contentGenerator.js';
 
 const {
   mockGetCacheSafeParams,
@@ -184,7 +185,7 @@ describe('generatePromptSuggestion', () => {
     expect(result.suggestion).toBe('from base llm');
   });
 
-  it('does not use the cache-safe fork when cache sharing is disabled', async () => {
+  it('does not fail closed for the primary model', async () => {
     mockGetCacheSafeParams.mockReturnValue({
       generationConfig: {},
       history: conversationHistory,
@@ -200,6 +201,9 @@ describe('generatePromptSuggestion', () => {
       getFastModel: vi.fn(() => undefined),
       getModel: vi.fn(() => 'main-model'),
       getSessionId: vi.fn(() => 'test-session'),
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_OPENAI,
+      })),
     } as unknown as Config;
 
     const result = await generatePromptSuggestion(
@@ -212,8 +216,74 @@ describe('generatePromptSuggestion', () => {
     expect(mockGetCacheSafeParamsSessionId).not.toHaveBeenCalled();
     expect(mockGetCacheSafeParams).not.toHaveBeenCalled();
     expect(mockRunForkedAgent).not.toHaveBeenCalled();
-    expect(mockRunSideQuery).toHaveBeenCalled();
+    expect(mockRunSideQuery).toHaveBeenCalledWith(
+      config,
+      expect.objectContaining({ failClosed: false }),
+    );
     expect(result.suggestion).toBe('from base llm');
+  });
+
+  it('does not fail closed for an unregistered same-provider fast model', async () => {
+    mockRunSideQuery.mockResolvedValue({
+      text: '{"suggestion":"from same provider"}',
+      usage: { inputTokens: 1, outputTokens: 1 },
+    });
+    const config = {
+      getFastModel: vi.fn(() => 'gpt-5-mini'),
+      getModel: vi.fn(() => 'gpt-5'),
+      getSessionId: vi.fn(() => 'test-session'),
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_OPENAI,
+      })),
+      getAllConfiguredModels: vi.fn(() => []),
+    } as unknown as Config;
+
+    const result = await generatePromptSuggestion(
+      config,
+      conversationHistory,
+      new AbortController().signal,
+      { enableCacheSharing: false },
+    );
+
+    expect(mockRunSideQuery).toHaveBeenCalledWith(
+      config,
+      expect.objectContaining({
+        model: 'gpt-5-mini',
+        failClosed: false,
+      }),
+    );
+    expect(result.suggestion).toBe('from same provider');
+  });
+
+  it('fails closed for an explicit cross-provider fast model', async () => {
+    mockRunSideQuery.mockResolvedValue({
+      text: '{"suggestion":"from fast provider"}',
+      usage: { inputTokens: 1, outputTokens: 1 },
+    });
+    const config = {
+      getFastModel: vi.fn(() => 'openai:fast-model'),
+      getModel: vi.fn(() => 'main-model'),
+      getSessionId: vi.fn(() => 'test-session'),
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.QWEN_OAUTH,
+      })),
+      getAllConfiguredModels: vi.fn(() => []),
+    } as unknown as Config;
+
+    await generatePromptSuggestion(
+      config,
+      conversationHistory,
+      new AbortController().signal,
+      { enableCacheSharing: false },
+    );
+
+    expect(mockRunSideQuery).toHaveBeenCalledWith(
+      config,
+      expect.objectContaining({
+        model: 'openai:fast-model',
+        failClosed: true,
+      }),
+    );
   });
 
   it('passes preserveTools: false when fast model differs from cache-safe model', async () => {

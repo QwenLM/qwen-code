@@ -26,6 +26,7 @@ import {
   getDefaultValue,
   setPendingSettingValueAny,
   getNestedValue,
+  deleteNestedPropertySafe,
   getEffectiveValue,
   validateSettingValue,
 } from '../../utils/settingsUtils.js';
@@ -971,15 +972,24 @@ export function SettingsDialog({
             const defaultValue = getDefaultValue(currentSetting.value);
             const defType = currentSetting.type;
             if (defType === 'boolean') {
-              const booleanDefaultValue =
-                typeof defaultValue === 'boolean' ? defaultValue : false;
-              setPendingSettings((prev) =>
-                setPendingSettingValue(
-                  currentSetting.value,
-                  booleanDefaultValue,
-                  prev,
-                ),
-              );
+              if (typeof defaultValue === 'boolean') {
+                setPendingSettings((prev) =>
+                  setPendingSettingValue(
+                    currentSetting.value,
+                    defaultValue,
+                    prev,
+                  ),
+                );
+              } else {
+                setPendingSettings((prev) => {
+                  const next = structuredClone(prev);
+                  deleteNestedPropertySafe(
+                    next as unknown as Record<string, unknown>,
+                    currentSetting.value,
+                  );
+                  return next;
+                });
+              }
             } else if (
               defType === 'number' ||
               defType === 'string' ||
@@ -1020,7 +1030,7 @@ export function SettingsDialog({
                 currentSetting.type === 'boolean'
                   ? typeof defaultValue === 'boolean'
                     ? defaultValue
-                    : false
+                    : undefined
                   : typeof defaultValue === 'number' ||
                       typeof defaultValue === 'string'
                     ? defaultValue

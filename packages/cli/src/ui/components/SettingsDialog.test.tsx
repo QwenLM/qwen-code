@@ -1102,6 +1102,44 @@ describe('SettingsDialog', () => {
       unmount();
     });
 
+    it('removes a boolean override when its default is unset', async () => {
+      const settings = createMockSettings({
+        ui: { enableFollowupSuggestions: true },
+      });
+      const { stdin, unmount, lastFrame } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SettingsDialog settings={settings} onSelect={() => {}} />
+        </KeypressProvider>,
+      );
+
+      const targetIndex = getDialogSettingKeys().indexOf(
+        'ui.enableFollowupSuggestions',
+      );
+      expect(targetIndex).toBeGreaterThanOrEqual(0);
+
+      for (let i = 0; i < targetIndex; i++) {
+        act(() => {
+          stdin.write(TerminalKeys.DOWN_ARROW as string);
+        });
+        await wait();
+      }
+      expect(lastFrame()).toContain('Enable Follow-up Suggestions');
+
+      act(() => {
+        stdin.write('\u0003');
+      });
+      await waitFor(() => {
+        expect(saveModifiedSettings).toHaveBeenCalledWith(
+          new Set(['ui.enableFollowupSuggestions']),
+          {},
+          settings,
+          SettingScope.User,
+        );
+      });
+
+      unmount();
+    });
+
     it('should handle navigation when only one setting exists', async () => {
       const settings = createMockSettings();
       const onSelect = vi.fn();

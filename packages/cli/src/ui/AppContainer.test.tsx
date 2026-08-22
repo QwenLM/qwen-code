@@ -822,6 +822,68 @@ describe('AppContainer State Management', () => {
       }).not.toThrow();
     });
 
+    it('fails closed without crashing when follow-up suggestion gate config lookup fails', async () => {
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      vi.spyOn(mockConfig, 'isInteractive').mockReturnValue(true);
+      const getHistoryTail = vi.fn().mockReturnValue([]);
+      vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue({
+        initialize: vi.fn().mockResolvedValue(undefined),
+        setTools: vi.fn().mockResolvedValue(undefined),
+        isInitialized: vi.fn().mockReturnValue(false),
+        getHistoryTail,
+      } as unknown as GeminiClient);
+      vi.spyOn(mockConfig, 'getModelsConfig').mockImplementation(() => {
+        throw new Error('models config unavailable');
+      });
+      mockedUseGeminiStream.mockReturnValue({
+        streamingState: StreamingState.Responding,
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+      });
+
+      let rerender!: ReturnType<typeof render>['rerender'];
+      expect(() => {
+        ({ rerender } = render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        ));
+      }).not.toThrow();
+
+      mockedUseGeminiStream.mockReturnValue({
+        streamingState: StreamingState.Idle,
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+      });
+      await act(async () => {
+        rerender(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+      });
+
+      expect(getHistoryTail).not.toHaveBeenCalled();
+    });
+
     it('renders with startup warnings', () => {
       const startupWarnings = ['Warning 1', 'Warning 2'];
 

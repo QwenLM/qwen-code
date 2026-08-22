@@ -31,7 +31,10 @@ import {
   getSettingsSchema,
 } from './settingsSchema.js';
 import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
-import { setNestedPropertySafe } from '../utils/settingsUtils.js';
+import {
+  deleteNestedPropertySafe,
+  setNestedPropertySafe,
+} from '../utils/settingsUtils.js';
 import { customDeepMerge } from '../utils/deepMerge.js';
 import { updateSettingsFilePreservingFormat } from '../utils/jsonc-editor.js';
 import { runMigrations, needsMigration } from './migration/index.js';
@@ -548,8 +551,13 @@ export class LoadedSettings {
         },
       );
     }
-    setNestedPropertySafe(settingsFile.settings, key, value);
-    setNestedPropertySafe(settingsFile.originalSettings, key, value);
+    if (value === undefined) {
+      deleteNestedPropertySafe(settingsFile.settings, key);
+      deleteNestedPropertySafe(settingsFile.originalSettings, key);
+    } else {
+      setNestedPropertySafe(settingsFile.settings, key, value);
+      setNestedPropertySafe(settingsFile.originalSettings, key, value);
+    }
     this._merged = this.computeMergedSettings();
     if (!opts.throwOnWriteFailure) {
       saveSettings(settingsFile, createSettingsUpdate(key, value), replacePath);
