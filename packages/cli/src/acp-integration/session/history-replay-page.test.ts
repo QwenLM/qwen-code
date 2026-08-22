@@ -28,10 +28,10 @@ import {
 
 const observeAcpProjectionMock = vi.hoisted(() => vi.fn());
 vi.mock(
-  '../../utils/tool-result-boundary-diagnostics.js',
+  '../../nonInteractive/tool-result-boundary-diagnostics.js',
   async (original) => ({
     ...(await original<
-      typeof import('../../utils/tool-result-boundary-diagnostics.js')
+      typeof import('../../nonInteractive/tool-result-boundary-diagnostics.js')
     >()),
     observeAcpToolResultProjection: observeAcpProjectionMock,
   }),

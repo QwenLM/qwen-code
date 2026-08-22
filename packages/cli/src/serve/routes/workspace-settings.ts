@@ -20,7 +20,7 @@ import {
   getNestedProperty,
   getSettingDefinition,
   validateSettingValue,
-} from '../../utils/settingsUtils.js';
+} from '../../config/settingsUtils.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { parseAndValidateWorkspaceClientId } from '../server/request-helpers.js';
 import {
