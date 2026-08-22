@@ -17561,6 +17561,7 @@ describe('CoreToolScheduler activation wiring', () => {
   }): {
     scheduler: CoreToolScheduler;
     onAllToolCallsComplete: ReturnType<typeof vi.fn>;
+    addInlineAnnouncedSkillKeys: ReturnType<typeof vi.fn>;
   } {
     // Exposed so the gate's SECOND effect is assertable. Consuming the
     // announcement is what starves the parent: the orchestrator's
