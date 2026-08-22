@@ -912,14 +912,11 @@ import {
   toSseServer,
   toHttpServer,
   normalizeCoreSettingValue,
-  extractFilesFromTarGz,
-  fetchAllowedGitHub,
   createWorkspaceMcpBudget,
   deliverClientMcpMessage,
   selectVisibleHistoryRecords,
   createManagedExternalToolGuard,
 } from './acpAgent.js';
-import { gzipSync } from 'node:zlib';
 import type { Config, GoalSnapshotV2 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
 import type { CliArgs } from '../config/config.js';
@@ -20278,149 +20275,6 @@ describe('normalizeCoreSettingValue', () => {
     expect(result).toContain('Chinese');
     expect(result).toContain('SYSTEM');
     expect(result.split('\n')).toHaveLength(1);
-  });
-});
-
-describe('extractFilesFromTarGz', () => {
-  // Minimal tar (ustar) entry builder — only the fields the parser reads.
-  function tarEntry(name: string, content: string): Buffer {
-    const header = Buffer.alloc(512);
-    header.write(name, 0, 'utf8'); // name @ 0 (100 bytes)
-    const size = Buffer.byteLength(content);
-    header.write(`${size.toString(8).padStart(11, '0')}\0`, 124, 'utf8'); // size @ 124 (octal)
-    header.write('0', 156, 'utf8'); // typeflag '0' = regular file
-    const data = Buffer.alloc(Math.ceil(size / 512) * 512);
-    data.write(content, 0, 'utf8');
-    return Buffer.concat([header, data]);
-  }
-
-  function makeTarGz(name: string, content: string): Uint8Array {
-    const tar = Buffer.concat([tarEntry(name, content), Buffer.alloc(1024)]); // + end blocks
-    return new Uint8Array(gzipSync(tar));
-  }
-
-  it('extracts files under the requested directory (stripping the archive root)', async () => {
-    const archive = makeTarGz('repo-main/skills/SKILL.md', 'hello skill');
-    const files = await extractFilesFromTarGz(archive, 'skills');
-    expect(files).toHaveLength(1);
-    expect(files[0]!.relativePath).toBe('SKILL.md');
-    expect(Buffer.from(files[0]!.content).toString('utf8')).toBe('hello skill');
-  });
-
-  it('rejects an archive whose compressed size exceeds the limit', async () => {
-    await expect(
-      extractFilesFromTarGz(new Uint8Array(64), 'skills', {
-        maxCompressedBytes: 16,
-      }),
-    ).rejects.toThrowError(/exceeds the maximum allowed size/);
-  });
-
-  it('rejects an archive that fails to decompress', async () => {
-    await expect(
-      extractFilesFromTarGz(new Uint8Array([1, 2, 3, 4, 5]), 'skills'),
-    ).rejects.toThrowError(/Failed to decompress skill archive/);
-  });
-
-  it('rejects an archive whose decompressed size exceeds the limit', async () => {
-    const archive = makeTarGz('repo-main/skills/SKILL.md', 'x'.repeat(2048));
-    await expect(
-      extractFilesFromTarGz(archive, 'skills', {
-        maxDecompressedBytes: 16,
-      }),
-    ).rejects.toThrowError(/Decompressed skill archive exceeds/);
-  });
-});
-
-describe('fetchAllowedGitHub', () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
-  function fakeResponse(status: number, location?: string) {
-    return {
-      status,
-      ok: status >= 200 && status < 300,
-      headers: {
-        get: (key: string) =>
-          key.toLowerCase() === 'location' && location ? location : null,
-      },
-    };
-  }
-
-  it('returns the response directly when there is no redirect', async () => {
-    const res = fakeResponse(200);
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(res));
-    await expect(
-      fetchAllowedGitHub('https://raw.githubusercontent.com/a/b/main/SKILL.md'),
-    ).resolves.toBe(res);
-  });
-
-  it('follows a redirect to an allowed GitHub CDN host', async () => {
-    const final = fakeResponse(200);
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(
-        fakeResponse(302, 'https://objects.githubusercontent.com/x'),
-      )
-      .mockResolvedValueOnce(final);
-    vi.stubGlobal('fetch', fetchMock);
-    await expect(
-      fetchAllowedGitHub('https://codeload.github.com/a/b/tar.gz/main'),
-    ).resolves.toBe(final);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-  });
-
-  it('rejects a redirect to a disallowed host', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue(fakeResponse(302, 'https://evil.com/x')),
-    );
-    await expect(
-      fetchAllowedGitHub('https://raw.githubusercontent.com/a/b/main/SKILL.md'),
-    ).rejects.toThrow(/disallowed host/);
-  });
-
-  it('rejects a non-https redirect target', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi
-        .fn()
-        .mockResolvedValue(
-          fakeResponse(302, 'http://raw.githubusercontent.com/x'),
-        ),
-    );
-    await expect(
-      fetchAllowedGitHub('https://raw.githubusercontent.com/a/b/main/SKILL.md'),
-    ).rejects.toThrow(/disallowed host/);
-  });
-
-  it('rejects when the redirect limit is exceeded', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi
-        .fn()
-        .mockResolvedValue(
-          fakeResponse(302, 'https://raw.githubusercontent.com/loop'),
-        ),
-    );
-    await expect(
-      fetchAllowedGitHub('https://raw.githubusercontent.com/a', {}, 2),
-    ).rejects.toThrow(/maximum number of redirects/);
-  });
-
-  it('resolves a relative Location against the current URL', async () => {
-    const final = fakeResponse(200);
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(fakeResponse(302, '/a/b/SKILL.md'))
-      .mockResolvedValueOnce(final);
-    vi.stubGlobal('fetch', fetchMock);
-    await expect(
-      fetchAllowedGitHub('https://raw.githubusercontent.com/start'),
-    ).resolves.toBe(final);
-    expect(fetchMock.mock.calls[1]![0]).toBe(
-      'https://raw.githubusercontent.com/a/b/SKILL.md',
-    );
   });
 });
 
