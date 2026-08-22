@@ -570,80 +570,6 @@ function trackedIgnoreSources(
 }
 
 /**
- * The repo-local `filter.<name>` COMMANDS, when any are defined.
- *
- * Every checkout in this pipeline EXECUTES these — the scratch tree's reset and
- * rebuild, and the probe tree's per-run restore — hooks being disabled covers
- * hooks and not filters. The planting surface is two plain writes a probe can
- * make into the COMMON dir this command's report calls shared:
- * `git config filter.evil.smudge CMD` and one line appended to
- * `$(git rev-parse --git-path info/attributes)`. discard and cleanup never
- * wipe the common dir, so a filter planted while reviewing one PR fires on
- * every later matching checkout of the user's OWN repository — persistence
- * planted by reviewing a malicious PR, measured live. The two local config
- * files are checked with `--file` rather than merged config because filters
- * in the user's global config (git-lfs is the common one) are the user's own
- * contract, exactly like any git command they run — while a probe's planting
- * surface is the repo-local files. The state cannot be told apart from a
- * filter the user set deliberately, and cannot be safely wiped, so a hit is a
- * refusal upstream, not a cleanup here.
- */
-export function localFilterCommands(worktree: string): string[] {
-  const files = spawnSync(
-    'git',
-    ['rev-parse', '--git-common-dir', '--git-dir'],
-    { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
-  );
-  if (files.error || files.status !== 0 || typeof files.stdout !== 'string') {
-    return [];
-  }
-  const [commonDir, gitDir] = files.stdout.trim().split('\n');
-  const common = resolve(worktree, commonDir);
-  const candidates = [
-    join(common, 'config'),
-    join(resolve(worktree, gitDir), 'config.worktree'),
-  ];
-  // Every OTHER worktree's per-worktree config too. This screen runs against
-  // the review worktree, but the checkout it authorises runs in the SCRATCH
-  // tree, whose own `<common>/worktrees/<label>/config.worktree` is honored
-  // once `extensions.worktreeConfig` is on and was never read here — a filter
-  // planted there executed during the reset while this function reported the
-  // repository clean. The admin directory is one `readdir`, and a filter in
-  // any of these is a plant whichever tree carries it.
-  try {
-    for (const entry of readdirSync(join(common, 'worktrees'))) {
-      candidates.push(join(common, 'worktrees', entry, 'config.worktree'));
-    }
-  } catch {
-    // No linked worktrees registered: the two candidates above are all of it.
-  }
-  const found: string[] = [];
-  for (const file of candidates) {
-    if (!existsSync(file)) continue;
-    const r = spawnSync(
-      'git',
-      [
-        'config',
-        '--file',
-        file,
-        '--get-regexp',
-        // `process` beside the pair: it is the third executable key (a
-        // long-running filter git speaks a protocol to), and enumerating two
-        // of three is how the first cut of this screen read as complete.
-        '^filter\\..*\\.(smudge|clean|process)$',
-      ],
-      { cwd: worktree, encoding: 'utf8', env: sanitizedGitEnv() },
-    );
-    if (r.error || r.status !== 0 || typeof r.stdout !== 'string') continue;
-    for (const line of r.stdout.split('\n')) {
-      const key = line.split(/\s+/)[0];
-      if (key && !found.includes(key)) found.push(key);
-    }
-  }
-  return found;
-}
-
-/**
  * The paths a tree carries that its HEAD commit does not — probe residue, seen
  * from the reading side (#9207).
  *
@@ -694,7 +620,18 @@ export function localFilterCommands(worktree: string): string[] {
  * contamination under a clean status — because no local check can tell a
  * planted repo from the tree it replaced: a genuine review worktree holds its
  * `.git` as a gitFILE naming its admin entry, and anything else is refused as
- * unmeasured rather than certified clean.
+ * unmeasured rather than certified clean. Two further shapes fail closed on
+ * the same principle. A symlink at the tree path or any ancestor below the
+ * checkout redirects every check into territory holding a completely genuine
+ * worktree pair with the contamination committed — all of it resolving
+ * through the link and agreeing with itself — so a path reached through a
+ * link is refused. And a FORGED admin entry — hand-written to name this tree
+ * back, which the round trip cannot tell from the entry `worktree add` wrote
+ * — is refused when the caller supplies the commit the tree must hold: a
+ * forge carrying the contamination as committed content cannot also reproduce
+ * the fetched head sha, so a pinned `rev-parse HEAD` disagreeing with the
+ * caller's record is a refusal. Callers without that record pass nothing and
+ * keep the local gate alone.
  *
  * One blind spot the identity checks cannot close: `git status` never looks
  * INSIDE a committed gitlink (mode 160000), and untracked content there does
@@ -710,7 +647,11 @@ export function localFilterCommands(worktree: string): string[] {
  * resolves on disk. No string form of it can — Node's fs API takes strings here
  * — so the name is disclosed as git rendered it rather than silently dropped.
  */
-export function worktreeResidue(cwd: string, cap = 12): WorktreeResidue {
+export function worktreeResidue(
+  cwd: string,
+  cap = 12,
+  expectedHeadSha?: string,
+): WorktreeResidue {
   // A genuine review worktree carries its `.git` as a FILE naming its admin
   // entry. A `.git` DIRECTORY at this path is a repository planted over the
   // contamination — `git init` + a commit answers a clean `git status` for a
@@ -740,19 +681,50 @@ export function worktreeResidue(cwd: string, cap = 12): WorktreeResidue {
   // one's. Fail closed the way a loud git failure below does.
   const top = spawnSync(
     'git',
-    ['rev-parse', '--path-format=absolute', '--show-toplevel', '--git-dir'],
+    [
+      'rev-parse',
+      '--path-format=absolute',
+      '--show-toplevel',
+      '--git-dir',
+      '--git-common-dir',
+    ],
     { cwd, encoding: 'utf8', env: sanitizedGitEnv() },
   );
   let isWorktree = false;
   let anchor: string[] = [];
   try {
-    const [toplevel, gitDir] = (top.stdout ?? '').trim().split('\n');
+    const [toplevel, gitDir, commonDir] = (top.stdout ?? '').trim().split('\n');
     isWorktree =
       !top.error &&
       top.status === 0 &&
       typeof top.stdout === 'string' &&
       realpathSync(toplevel) === realpathSync(cwd);
     if (isWorktree) {
+      // First, no component of the path below the checkout may be a symlink —
+      // the leaf included. A link planted at the tree path or any ancestor
+      // below the checkout redirects the chdir into territory holding a
+      // completely genuine `git init` + `worktree add` pair with the
+      // contamination COMMITTED — no forged admin entry needed, the round trip
+      // below is real git state — and every check here resolves THROUGH the
+      // link and agrees with itself: `--show-toplevel` answers the physical
+      // forge path and the self-equality above holds. The walk is the one
+      // every sibling identity gate applies, bounded at the repository the
+      // common dir belongs to — above that is the user's own layout, and
+      // `/var` is a symlink on every macOS box. Measured: both shapes
+      // certified a mutant clean before the walk.
+      const redirected = lstatSync(cwd).isSymbolicLink()
+        ? resolve(cwd)
+        : redirectedAncestor(dirname(resolve(cwd)), dirname(commonDir));
+      if (redirected !== null) {
+        return {
+          paths: [],
+          total: 0,
+          unmeasured:
+            `the path resolves through a symlink (${redirected}) — every ` +
+            'identity check resolves through it and agrees with itself, ' +
+            'while the commands below would measure wherever it points',
+        };
+      }
       // And the gitfile must name an admin entry that names this tree BACK.
       // The pin below closes the window between this gate and the commands
       // after it; it cannot help when the swap is already in place when the
@@ -760,21 +732,33 @@ export function worktreeResidue(cwd: string, cap = 12): WorktreeResidue {
       // repository whose `core.worktree` points here answers `--show-toplevel`
       // with this path. `scratch-tree` gates its own reset on the round-trip
       // for the same reason, and a planted standalone repo has no admin entry
-      // to round-trip at all.
+      // to round-trip at all. The two shapes get distinct reasons: the
+      // standalone repo has no `gitdir` file to "not point back", and whoever
+      // triages the refusal would otherwise hunt for one that does not exist.
       // Its own try: a plant has no `gitdir` file to read, and letting that
       // ENOENT fall into the outer catch reported it as "not a git worktree",
       // which is a different and much vaguer thing than what was found.
-      let pointsBack = false;
+      let backpointer: string | null = null;
       try {
-        const backpointer = readFileSync(join(gitDir, 'gitdir'), 'utf8').trim();
-        pointsBack =
-          realpathSync(dirname(resolve(gitDir, backpointer))) ===
-          realpathSync(cwd);
+        backpointer = readFileSync(join(gitDir, 'gitdir'), 'utf8').trim();
       } catch {
         // No admin entry at all — a standalone repository answering for this
         // path, which is exactly the shape being refused.
       }
-      if (!pointsBack) {
+      if (backpointer === null) {
+        return {
+          paths: [],
+          total: 0,
+          unmeasured:
+            'the .git gitfile names a repository with no admin entry for ' +
+            'this tree — a standalone repository answering for this path, ' +
+            'whose index the commands below would measure',
+        };
+      }
+      if (
+        realpathSync(dirname(resolve(gitDir, backpointer))) !==
+        realpathSync(cwd)
+      ) {
         return {
           paths: [],
           total: 0,
@@ -801,6 +785,45 @@ export function worktreeResidue(cwd: string, cap = 12): WorktreeResidue {
         `--git-dir=${realpathSync(gitDir)}`,
         `--work-tree=${realpathSync(toplevel)}`,
       ];
+      // And the pinned identity must hold the commit the caller fetched, when
+      // the caller brings that record. The round trip above proves only that
+      // the admin entry the gitfile names SAYS this tree is its worktree — a
+      // same-user planter writes both halves of the pair, so a forged entry
+      // beside a repo carrying the contamination as committed content passes
+      // every local check and measures clean. The one thing the forge cannot
+      // reproduce is the fetched head sha: committing the contamination moves
+      // its HEAD. Measured: through the forge the sha-less call certifies a
+      // mutant clean; pinned to the fetched sha, the same tree answers
+      // unmeasured.
+      if (expectedHeadSha !== undefined) {
+        const head = spawnSync('git', [...anchor, 'rev-parse', 'HEAD'], {
+          cwd,
+          encoding: 'utf8',
+          env: sanitizedGitEnv(),
+        });
+        const got =
+          head.error || head.status !== 0 || typeof head.stdout !== 'string'
+            ? null
+            : head.stdout.trim();
+        if (
+          got === null ||
+          got.toLowerCase() !== expectedHeadSha.toLowerCase()
+        ) {
+          return {
+            paths: [],
+            total: 0,
+            unmeasured:
+              got === null
+                ? 'the pinned identity could not read its own HEAD — the ' +
+                  'commands below would have measured a repository git ' +
+                  'cannot read'
+                : `the pinned identity is checked out at ${got}, not the ` +
+                  `fetched PR head ${expectedHeadSha} — the gitfile names ` +
+                  'a repository answering for this path, and its index is ' +
+                  'what the commands below would measure',
+          };
+        }
+      }
     }
   } catch {
     // A cwd that no longer resolves is not a tree this probe can measure.

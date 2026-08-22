@@ -151,6 +151,8 @@ interface PlanReport {
   prNumber?: unknown;
   ownerRepo?: unknown;
   worktreePath?: unknown;
+  /** The PR head sha fetch-pr recorded — the probe's identity anchor. */
+  fetchedSha?: unknown;
   mergeBaseSha?: unknown;
   host?: unknown;
   repositoryContext?: unknown;
@@ -1322,7 +1324,15 @@ function repositoryContextBlock(context: RepositoryContext): string[] {
 function worktreeResidueOf(report: PlanReport): WorktreeResidue {
   const wt = report.worktreePath;
   if (typeof wt !== 'string' || !wt) return { paths: [], total: 0 };
-  return worktreeResidue(resolve(wt));
+  // Hand over the sha fetch-pr recorded: it is the one identity element a
+  // forge planted at the worktree cannot reproduce, and with it the probe
+  // refuses a forged admin entry (see worktreeResidue).
+  const sha = report.fetchedSha;
+  return worktreeResidue(
+    resolve(wt),
+    12,
+    typeof sha === 'string' && /^[0-9a-f]{40}$/i.test(sha) ? sha : undefined,
+  );
 }
 
 /**

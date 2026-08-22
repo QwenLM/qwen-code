@@ -15,6 +15,7 @@ import { execFileSync } from 'node:child_process';
 import {
   appendFileSync,
   chmodSync,
+  copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -232,7 +233,231 @@ describe('worktreeResidue', () => {
     const got = worktreeResidue(tree);
 
     expect(got.paths).toEqual([]);
+    // The shape with NO admin entry gets its own reason: there is no
+    // `gitdir` file here to "not point back", and the triager hunting one
+    // is the confusion the distinct message exists to spare.
+    expect(got.unmeasured).toContain('no admin entry');
+  });
+
+  it('says UNMEASURED for a forged admin entry when the caller pins the expected head', () => {
+    // The round trip proves only that the admin entry the gitfile names SAYS
+    // this tree is its worktree — and a same-user planter writes both halves
+    // of the pair: a repo carrying the contamination as committed content,
+    // and an admin entry whose `gitdir` file is hand-written to name this
+    // tree (four small writes). The gate then passes end-to-end and the pin
+    // measures the forge's index. Measured: without the caller's anchor the
+    // swap below answers clean with the mutant on disk. The anchor is the
+    // one thing the forge cannot reproduce — committing the contamination
+    // moves its HEAD off the fetched sha.
+    writeFileSync(join(tree, 'a.ts'), 'export const x = 2; // MUTANT\n');
+    writeFileSync(join(tree, '__probe__.test.ts'), 'probe');
+    const expected = git('rev-parse', 'HEAD');
+    // A genuine tree with the right sha still measures: the anchor must not
+    // become a refusal of its own.
+    expect(worktreeResidue(tree, 12, expected).paths.sort()).toEqual([
+      '__probe__.test.ts',
+      'a.ts',
+    ]);
+
+    const forge = join(repo, 'forge');
+    mkdirSync(forge);
+    const fgit = (...args: string[]) =>
+      execFileSync(
+        'git',
+        [
+          '-c',
+          'user.email=t@t.t',
+          '-c',
+          'user.name=t',
+          '-c',
+          'commit.gpgsign=false',
+          ...args,
+        ],
+        { cwd: forge, encoding: 'utf8' },
+      );
+    fgit('init', '-q', '-b', 'main', '--template=', '.');
+    writeFileSync(join(forge, 'a.ts'), 'export const x = 2; // MUTANT\n');
+    writeFileSync(join(forge, '__probe__.test.ts'), 'probe');
+    fgit('add', '-A');
+    fgit(
+      'commit',
+      '-qm',
+      'the mutant, as if it were the commit',
+      '--no-verify',
+    );
+    const admin = join(forge, '.git', 'worktrees', 'evil');
+    mkdirSync(admin, { recursive: true });
+    writeFileSync(join(admin, 'gitdir'), `${join(tree, '.git')}\n`);
+    writeFileSync(join(admin, 'commondir'), '../..\n');
+    copyFileSync(join(forge, '.git', 'HEAD'), join(admin, 'HEAD'));
+    copyFileSync(join(forge, '.git', 'index'), join(admin, 'index'));
+    writeFileSync(join(tree, '.git'), `gitdir: ${admin}\n`);
+
+    const got = worktreeResidue(tree, 12, expected);
+
+    expect(got.paths).toEqual([]);
+    expect(got.unmeasured).toContain('not the fetched PR head');
+  });
+
+  it('says UNMEASURED for a gitfile borrowing a SIBLING worktree’s admin entry', () => {
+    // The mismatch arm of the round trip: a real admin entry — a sibling's —
+    // whose `gitdir` file names the sibling's `.git`, not this tree's.
+    // `--show-toplevel` prints the directory the gitfile sits in, so the
+    // self-equality passes while the round trip catches the borrow. The arm
+    // needs its own witness: negating the comparison ships green without this
+    // test — measured, the gate then passes and certifies a tree measured
+    // against the sibling's index.
+    const sibling = join(repo, '.qwen', 'tmp', 'sibling-wt');
+    gitRepo('worktree', 'add', '--detach', '-q', sibling, 'HEAD');
+    const admin = readFileSync(join(sibling, '.git'), 'utf8')
+      .trim()
+      .replace(/^gitdir:\s*/, '');
+    writeFileSync(join(tree, '.git'), `gitdir: ${admin}\n`);
+
+    const got = worktreeResidue(tree);
+
+    expect(got.paths).toEqual([]);
     expect(got.unmeasured).toContain('does not point back');
+  });
+
+  it('accepts a backpointer spelled through a link that resolves at this tree', () => {
+    // The round trip's LEFT side is attacker-written, so its normalisation is
+    // load-bearing: a `gitdir` file spelled through a link that RESOLVES at
+    // this tree's `.git` does point back at this tree, and refusing it would
+    // fail closed on a shape that names the right tree. Measured: removing
+    // the realpathSync from the comparison flips this probe from clean to
+    // unmeasured — the witness that a spelling and a resolution are being
+    // compared, not two spellings.
+    const alias = join(repo, 'alias');
+    symlinkSync(tree, alias);
+    const admin = readFileSync(join(tree, '.git'), 'utf8')
+      .trim()
+      .replace(/^gitdir:\s*/, '');
+    writeFileSync(join(admin, 'gitdir'), `${join(alias, '.git')}\n`);
+
+    writeFileSync(join(tree, '__probe__.test.ts'), 'probe');
+    const got = worktreeResidue(tree);
+
+    expect(got.unmeasured).toBeUndefined();
+    expect(got.paths).toEqual(['__probe__.test.ts']);
+  });
+
+  it('says UNMEASURED when an ancestor of the tree is a symlink into forge territory', () => {
+    // A link planted at any ancestor below the checkout — here `.qwen/tmp`,
+    // the directory the pipeline itself names — redirects the chdir into
+    // territory holding a completely genuine `git init` + `worktree add`
+    // pair with the contamination COMMITTED: no forged admin entry, the
+    // round trip is real git state, and every check resolves THROUGH the
+    // link and agrees with itself. Measured: the redirect certified the
+    // mutant clean before the walk.
+    writeFileSync(join(tree, 'a.ts'), 'export const x = 2; // MUTANT\n');
+    writeFileSync(join(tree, '__probe__.test.ts'), 'probe');
+    expect(worktreeResidue(tree).paths.sort()).toEqual([
+      '__probe__.test.ts',
+      'a.ts',
+    ]);
+
+    const outside = mkdtempSync(join(tmpdir(), 'qwen-redirect-'));
+    try {
+      const forgeRepo = join(outside, 'forge');
+      mkdirSync(forgeRepo);
+      const fgit = (...args: string[]) =>
+        execFileSync(
+          'git',
+          [
+            '-c',
+            'user.email=t@t.t',
+            '-c',
+            'user.name=t',
+            '-c',
+            'commit.gpgsign=false',
+            ...args,
+          ],
+          { cwd: forgeRepo, encoding: 'utf8' },
+        );
+      fgit('init', '-q', '-b', 'main', '--template=', '.');
+      writeFileSync(join(forgeRepo, 'a.ts'), 'export const x = 2; // MUTANT\n');
+      writeFileSync(join(forgeRepo, '__probe__.test.ts'), 'probe');
+      fgit('add', '-A');
+      fgit('commit', '-qm', 'the mutant, committed', '--no-verify');
+      fgit(
+        'worktree',
+        'add',
+        '--detach',
+        '-q',
+        join(outside, 'review-wt'),
+        'HEAD',
+      );
+
+      // The attack: the ancestor becomes a link into that territory.
+      rmSync(dirname(tree), { recursive: true, force: true });
+      symlinkSync(outside, dirname(tree));
+
+      const got = worktreeResidue(tree);
+
+      expect(got.paths).toEqual([]);
+      expect(got.unmeasured).toContain('resolves through a symlink');
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('says UNMEASURED when the tree path itself is a symlink into forge territory', () => {
+    // The same concealment one hop closer: the LEAF replaced by a link.
+    // `spawnSync` chdirs through it, `--show-toplevel` answers the physical
+    // forge path, and both sides of the self-equality resolve through the
+    // same link, while the pin would freeze the forge's identity. Measured:
+    // the redirect certified the mutant clean before the leaf check.
+    writeFileSync(join(tree, 'a.ts'), 'export const x = 2; // MUTANT\n');
+    writeFileSync(join(tree, '__probe__.test.ts'), 'probe');
+    expect(worktreeResidue(tree).paths.sort()).toEqual([
+      '__probe__.test.ts',
+      'a.ts',
+    ]);
+
+    const outside = mkdtempSync(join(tmpdir(), 'qwen-redirect-'));
+    try {
+      const forgeRepo = join(outside, 'forge');
+      mkdirSync(forgeRepo);
+      const fgit = (...args: string[]) =>
+        execFileSync(
+          'git',
+          [
+            '-c',
+            'user.email=t@t.t',
+            '-c',
+            'user.name=t',
+            '-c',
+            'commit.gpgsign=false',
+            ...args,
+          ],
+          { cwd: forgeRepo, encoding: 'utf8' },
+        );
+      fgit('init', '-q', '-b', 'main', '--template=', '.');
+      writeFileSync(join(forgeRepo, 'a.ts'), 'export const x = 2; // MUTANT\n');
+      writeFileSync(join(forgeRepo, '__probe__.test.ts'), 'probe');
+      fgit('add', '-A');
+      fgit('commit', '-qm', 'the mutant, committed', '--no-verify');
+      fgit(
+        'worktree',
+        'add',
+        '--detach',
+        '-q',
+        join(outside, 'leaf-wt'),
+        'HEAD',
+      );
+
+      // The attack: the leaf becomes a link into that territory.
+      rmSync(tree, { recursive: true, force: true });
+      symlinkSync(join(outside, 'leaf-wt'), tree);
+
+      const got = worktreeResidue(tree);
+
+      expect(got.paths).toEqual([]);
+      expect(got.unmeasured).toContain('resolves through a symlink');
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
   });
 
   it('says UNMEASURED, not clean, when a repository is planted at the path', () => {
