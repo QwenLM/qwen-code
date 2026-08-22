@@ -8,6 +8,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import type {
   ServerGeminiContentEvent,
+  ServerGeminiModelFallbackEvent,
+  ServerGeminiRetryEvent,
   ServerGeminiStreamEvent,
   ServerGeminiThoughtEvent,
   ServerGeminiToolCallRequestEvent,
@@ -1479,6 +1481,182 @@ describe('LoopDetectionService', () => {
 
       const detected = streamAsMisalignedThoughtDeltas(unit.repeat(60));
       expect(detected).toBe(true);
+      expect(service.getLastLoopType()).toBe(
+        LoopType.CHANTING_IDENTICAL_SENTENCES,
+      );
+    });
+  });
+
+  describe('Retry and ModelFallback stream-state resets', () => {
+    // The #7832 transport-replay gate admits thought-only cuts, so a
+    // replay retry re-streams the failed attempt's reasoning through the
+    // chunk detectors. With deterministic decoding the re-stream is
+    // verbatim; the accumulated identical copies must not read as a chant,
+    // or a healthy turn halts mid-attempt on a false positive.
+    const ATTEMPT_DELTA = 17;
+
+    // Deterministic pseudo-random non-repetitive text (LCG over a word
+    // list): no repeated 50-gram inside one attempt, so a single streamed
+    // attempt — or a replayed one after a reset — can never fire on its
+    // own.
+    const variedText = (len: number, seed: number): string => {
+      let out = '';
+      let x = seed + 1;
+      const words = [
+        'alpha',
+        'bravo',
+        'charlie',
+        'delta',
+        'echo',
+        'foxtrot',
+        'golf',
+        'hotel',
+        'india',
+        'juliet',
+        'kilo',
+        'lima',
+        'mike',
+        'november',
+        'oscar',
+        'papa',
+        'quebec',
+        'romeo',
+        'sierra',
+        'tango',
+      ];
+      while (out.length < len) {
+        x = (x * 1103515245 + 12345) % 2147483648;
+        out += words[x % words.length] + String(x % 97) + ' ';
+      }
+      return out.slice(0, len);
+    };
+
+    const createRetryEvent = (
+      isContinuation?: boolean,
+    ): ServerGeminiRetryEvent => ({
+      type: GeminiEventType.Retry,
+      ...(isContinuation !== undefined && { isContinuation }),
+    });
+
+    const createModelFallbackEvent = (): ServerGeminiModelFallbackEvent => ({
+      type: GeminiEventType.ModelFallback,
+      fromModel: 'primary-model',
+      toModel: 'fallback-model',
+      fallbackIndex: 1,
+    });
+
+    const streamAsThoughts = (text: string): boolean => {
+      let detected = false;
+      for (let i = 0; i < text.length && !detected; i += ATTEMPT_DELTA) {
+        detected = service.addAndCheck(
+          createThoughtEvent('', text.slice(i, i + ATTEMPT_DELTA)),
+        );
+      }
+      return detected;
+    };
+
+    const streamAsContent = (text: string): boolean => {
+      let detected = false;
+      for (let i = 0; i < text.length && !detected; i += ATTEMPT_DELTA) {
+        detected = service.addAndCheck(
+          createContentEvent(text.slice(i, i + ATTEMPT_DELTA)),
+        );
+      }
+      return detected;
+    };
+
+    it('does not halt a healthy turn when replay retries re-stream identical reasoning', () => {
+      service.reset('');
+      // The witness shape: a ~1.4 KB reasoning phase cut twice and
+      // re-streamed byte-identically. Three copies saturate the window;
+      // without the reset the third (healthy) attempt fires
+      // CHANTING_IDENTICAL_SENTENCES mid-stream.
+      const attempt = variedText(1400, 42);
+      expect(streamAsThoughts(attempt)).toBe(false);
+      service.addAndCheck(createRetryEvent());
+      expect(streamAsThoughts(attempt)).toBe(false);
+      service.addAndCheck(createRetryEvent());
+      expect(streamAsThoughts(attempt)).toBe(false);
+      expect(service.getLastLoopType()).toBeNull();
+    });
+
+    it('does not halt a healthy turn when replay retries re-stream identical content', () => {
+      service.reset('');
+      const attempt = variedText(1400, 43);
+      expect(streamAsContent(attempt)).toBe(false);
+      service.addAndCheck(createRetryEvent());
+      expect(streamAsContent(attempt)).toBe(false);
+      service.addAndCheck(createRetryEvent());
+      expect(streamAsContent(attempt)).toBe(false);
+      expect(service.getLastLoopType()).toBeNull();
+    });
+
+    it('does not halt when rate-limit retries replay five shorter identical copies', () => {
+      service.reset('');
+      // The rate-limit branch replays without a yielded-content guard; five
+      // ~300-char copies reach the five-occurrence path unsaturated.
+      const attempt = variedText(300, 7);
+      for (let copy = 0; copy < 5; copy++) {
+        if (copy > 0) {
+          service.addAndCheck(createRetryEvent());
+        }
+        expect(streamAsThoughts(attempt)).toBe(false);
+      }
+      expect(service.getLastLoopType()).toBeNull();
+    });
+
+    it('keeps accumulated evidence across a continuation retry', () => {
+      service.reset('');
+      // Continuation recovery (#7832) keeps the delivered text and appends
+      // genuinely new output — nothing is re-streamed, so the accumulated
+      // evidence must survive. An uninterrupted chant of this unit fires at
+      // ~1258 chars; streaming 1192, continuing, then 100 more must fire at
+      // the same point a continuous stream would.
+      const unit = variedText(298, 21);
+      const chant = unit.repeat(6);
+      expect(streamAsThoughts(chant.slice(0, 1192))).toBe(false);
+      service.addAndCheck(createRetryEvent(true));
+      expect(streamAsThoughts(chant.slice(1192, 1292))).toBe(true);
+      expect(service.getLastLoopType()).toBe(
+        LoopType.CHANTING_IDENTICAL_SENTENCES,
+      );
+    });
+
+    it('drops accumulated evidence on a replay retry at the same point', () => {
+      service.reset('');
+      // Contrast with the continuation test: a replay re-streams from the
+      // start, so the same partial chant must NOT be one short continuation
+      // away from firing after it.
+      const unit = variedText(298, 21);
+      const chant = unit.repeat(6);
+      expect(streamAsThoughts(chant.slice(0, 1192))).toBe(false);
+      service.addAndCheck(createRetryEvent());
+      expect(streamAsThoughts(chant.slice(1192, 1292))).toBe(false);
+      expect(service.getLastLoopType()).toBeNull();
+    });
+
+    it('drops the failed model stream state on ModelFallback', () => {
+      service.reset('');
+      // The fallback model restarts from scratch; with the failed model's
+      // state retained, its two copies plus two more from the fallback model
+      // would fire the long-period escape valve mid-way through the fourth
+      // copy.
+      const attempt = variedText(1400, 99);
+      expect(streamAsThoughts(attempt)).toBe(false);
+      expect(streamAsThoughts(attempt)).toBe(false);
+      service.addAndCheck(createModelFallbackEvent());
+      expect(streamAsThoughts(attempt)).toBe(false);
+      expect(streamAsThoughts(attempt)).toBe(false);
+      expect(service.getLastLoopType()).toBeNull();
+    });
+
+    it('still halts a genuine chant after a replay restart', () => {
+      service.reset('');
+      // The reset must not blind the detector: a real chant re-accumulates
+      // after the restart and still fires.
+      const unit = variedText(298, 21);
+      service.addAndCheck(createRetryEvent());
+      expect(streamAsThoughts(unit.repeat(40))).toBe(true);
       expect(service.getLastLoopType()).toBe(
         LoopType.CHANTING_IDENTICAL_SENTENCES,
       );

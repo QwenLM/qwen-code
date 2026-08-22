@@ -325,6 +325,34 @@ export class LoopDetectionService {
         // streak reset).
         this.globalToolCallCounts.clear();
         this.recentToolCallKeys = [];
+        // A replay (non-continuation) retry also re-streams the failed
+        // attempt's content and reasoning through the chunk detectors: the
+        // transport-replay gate admits thought-only cuts (#7832), and with
+        // deterministic decoding the re-stream is verbatim, so the
+        // accumulated identical copies would fire
+        // CHANTING_IDENTICAL_SENTENCES mid-way through an otherwise healthy
+        // attempt. Reset the stream state the replay duplicates. A
+        // continuation retry (isContinuation) keeps the delivered text and
+        // appends genuinely new output — nothing is re-streamed, so its
+        // state must stay. A genuine chant simply re-accumulates after the
+        // restart.
+        if (!event.isContinuation) {
+          this.resetContentTracking();
+          this.thoughtHistory = [];
+        }
+        break;
+      }
+      case GeminiEventType.ModelFallback: {
+        // The fallback model restarts the attempt from scratch: Turn clears
+        // pending tool calls and stream consumers discard the failed model's
+        // buffer, so the failed model's streamed content/thought text and
+        // tool-call keys would otherwise mix with the new model's stream and
+        // manufacture repetition runs across the boundary. Mirror the
+        // replay-retry resets.
+        this.globalToolCallCounts.clear();
+        this.recentToolCallKeys = [];
+        this.resetContentTracking();
+        this.thoughtHistory = [];
         break;
       }
       case GeminiEventType.Content: {
