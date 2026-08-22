@@ -39,7 +39,7 @@
  * tamperable, `capture-local`'s warnings, and the symlink guards.
  */
 // eslint-disable-next-line no-control-regex
-const CONTROL = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
+export const CONTROL = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
 
 /**
  * Render untrusted text inert for a terminal: quoted-and-escaped when it
@@ -53,15 +53,20 @@ const CONTROL = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
 export function inertText(value: string, maxChars = 200): string {
   const clipped = value.length > maxChars ? value.slice(0, maxChars) : value;
   // `JSON.stringify` alone is not enough: it escapes the familiar control
-  // characters but passes DEL (U+007F) through verbatim, and DEL is a
-  // terminal control code like any other. Every control character is
-  // replaced explicitly, then the whole value is quoted so it cannot be
-  // read as prose.
+  // characters and passes everything else through verbatim — DEL, the C1
+  // range, the invisible Cf class, U+2028/U+2029. Each of those is a terminal
+  // control code or a rendering attack like any other, so the replacement
+  // sweeps the SAME class the classifier does and the two cannot drift.
+  //
+  // They did drift, and that is why this reads as one expression now: an
+  // earlier fix widened `CONTROL` alone, so the value was correctly judged
+  // dangerous, correctly quoted — and still carried the raw bytes inside the
+  // quotes, while the comment here claimed every control character was
+  // replaced.
   const rendered = CONTROL.test(clipped)
     ? JSON.stringify(
-        // eslint-disable-next-line no-control-regex
-        clipped.replace(/[\u0000-\u001f\u007f]/g, (c) => {
-          const hex = c.charCodeAt(0).toString(16).padStart(4, '0');
+        clipped.replace(new RegExp(CONTROL.source, 'gu'), (c) => {
+          const hex = c.codePointAt(0)!.toString(16).padStart(4, '0');
           return `\\u${hex}`;
         }),
       )

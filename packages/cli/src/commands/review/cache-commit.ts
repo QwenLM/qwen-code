@@ -34,7 +34,7 @@ import { readFileSync, mkdirSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
-import { inertText } from './lib/inert-text.js';
+import { CONTROL, inertText } from './lib/inert-text.js';
 import { assertUnredirectedParent } from './lib/paths.js';
 
 interface CacheCommitArgs {
@@ -135,17 +135,15 @@ function runCacheCommit(args: CacheCommitArgs): void {
   // checked — the ledger's model id and each candidate-owned anchor field —
   // because the threat this command polices is a tampered candidate, and
   // policing one field of it is policing none.
+  // ONE class, imported rather than re-derived. Two sweeps of the same idea
+  // drifted twice already: this one was widened to C1 while `inertText`'s was
+  // not, then `inertText`'s classifier was widened while its own replacement
+  // was not — and each half-fix read as done. A value that passes here is
+  // persisted raw at a deterministic in-repo path and printed back through
+  // `inertText` on a refusal, so a gap in either sweep is a forged terminal
+  // line either way.
   const controlled = (v: unknown): boolean =>
-    // C1 (U+0080–U+009F) as well as C0 and DEL. A C0-only sweep let U+009B
-    // (8-bit CSI) and U+009D (8-bit OSC) through into the cache, which sits
-    // at a deterministic in-repo path this command's own threat model calls
-    // tamperable; the next round reads the value back and prints it on a
-    // refusal through escapers that share the same C0-only blind spot, so the
-    // sequence reaches the operator's terminal intact and xterm/VTE-class
-    // terminals act on it. House convention already sweeps C1 (`budget.ts`,
-    // `textUtils.ts`, `memory/indexer.ts`).
-    // eslint-disable-next-line no-control-regex
-    typeof v === 'string' && /[\u0000-\u001f\u007f-\u009f]/.test(v);
+    typeof v === 'string' && CONTROL.test(v);
   for (const key of CANDIDATE_FIELDS) {
     if (controlled(candidate[key])) {
       throw new Error(

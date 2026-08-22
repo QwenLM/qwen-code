@@ -129,6 +129,21 @@ describe('cache-commit', () => {
     expect(cache['source']).toBe('src/foo.ts');
   });
 
+  it('refuses the whole class — C1, Cf and the line separators', () => {
+    // The intake sweep and `inertText` share one class now, because two
+    // sweeps of the same idea drifted twice: a value that passes here is
+    // persisted raw at a deterministic in-repo path AND printed back through
+    // that escaper on a refusal, so a gap in either is a forged line.
+    for (const bad of ['\u2028', '\u202e', '\u200b']) {
+      const argv = seed(
+        { v: 1, target: 'pr-7', lastModelId: `m${bad}x` },
+        { round: 1 },
+      );
+      expect(() => run(argv)).toThrow(/carries control/);
+      expect(existsSync(argv['out'])).toBe(false);
+    }
+  });
+
   it('refuses C1 control characters, not just C0 and DEL', () => {
     // The cache sits at a deterministic in-repo path this command's own
     // threat model calls tamperable, and the next round prints these values
