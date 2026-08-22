@@ -7393,6 +7393,11 @@ class QwenAgent implements Agent {
         Boolean(process.env[name]),
       );
       let hasToken = Boolean(presentVar);
+      const hasKeylessVertexCredentials =
+        authType === AuthType.USE_VERTEX_AI &&
+        Boolean(
+          process.env['GOOGLE_CLOUD_PROJECT'] && process.env['GOOGLE_MODEL'],
+        );
       if (
         !hasToken &&
         !AUTH_PREFLIGHT_WAIVED_AUTH_TYPES.has(String(authType))
@@ -7404,6 +7409,7 @@ class QwenAgent implements Agent {
           hasToken = true;
         }
       }
+      const hasAuthSignal = hasToken || hasKeylessVertexCredentials;
       // No env-var registration → either OAuth-style auth (qwen-oauth) or
       // a custom provider whose key is sourced from settings rather than
       // env. If the resolved generation config already contains an apiKey
@@ -7425,8 +7431,12 @@ class QwenAgent implements Agent {
         });
       }
       return this.acpCell('auth', {
-        status: hasToken ? 'ok' : 'warning',
-        ...(hasToken
+        status: hasToken
+          ? 'ok'
+          : hasKeylessVertexCredentials
+            ? 'unknown'
+            : 'warning',
+        ...(hasAuthSignal
           ? {}
           : {
               errorKind: 'auth_env_error' as const,

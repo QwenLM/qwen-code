@@ -6580,6 +6580,76 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }
   });
 
+  it('extMethod preflight auth cell defers keyless Vertex validation', async () => {
+    const savedEnv = {
+      GOOGLE_API_KEY: process.env['GOOGLE_API_KEY'],
+      GOOGLE_CLOUD_PROJECT: process.env['GOOGLE_CLOUD_PROJECT'],
+      GOOGLE_MODEL: process.env['GOOGLE_MODEL'],
+    };
+    delete process.env['GOOGLE_API_KEY'];
+    process.env['GOOGLE_CLOUD_PROJECT'] = 'test-project';
+    process.env['GOOGLE_MODEL'] = 'vertex-model';
+    try {
+      mockConfig = {
+        ...mockConfig,
+        getTargetDir: vi.fn().mockReturnValue('/work/status'),
+        getMcpServers: vi.fn().mockReturnValue({}),
+        getAuthType: vi.fn().mockReturnValue(AuthType.USE_VERTEX_AI),
+        getModel: vi.fn().mockReturnValue('vertex-model'),
+        getModelsConfig: vi.fn().mockReturnValue({
+          getGenerationConfig: vi.fn().mockReturnValue({}),
+          getCurrentAuthType: vi.fn().mockReturnValue(AuthType.USE_VERTEX_AI),
+          syncAfterAuthRefresh: vi.fn(),
+        }),
+        getSkillManager: vi.fn().mockReturnValue({
+          listSkills: vi.fn().mockResolvedValue([]),
+        }),
+        getAllConfiguredModels: vi.fn().mockReturnValue([]),
+        getToolRegistry: vi.fn().mockReturnValue({ getAllTools: () => [] }),
+      } as unknown as Config;
+
+      const agentPromise = runAcpAgent(
+        mockConfig,
+        makeSessionSettings(),
+        mockArgv,
+      );
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+
+      const preflight = (await agent.extMethod(
+        SERVE_STATUS_EXT_METHODS.workspacePreflight,
+        {},
+      )) as {
+        cells: Array<{
+          kind: string;
+          status: string;
+          error?: string;
+          detail?: { hasToken: boolean };
+        }>;
+      };
+
+      const authCell = preflight.cells.find((c) => c.kind === 'auth');
+      expect(authCell?.status).toBe('unknown');
+      expect(authCell?.error).toBeUndefined();
+      expect(authCell?.detail?.hasToken).toBe(false);
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    } finally {
+      for (const [name, value] of Object.entries(savedEnv)) {
+        if (value === undefined) {
+          delete process.env[name];
+        } else {
+          process.env[name] = value;
+        }
+      }
+    }
+  });
+
   it('extMethod preflight auth cell reports ok for non-env-keyed auth when apiKey is in generationConfig', async () => {
     mockConfig = {
       ...mockConfig,
