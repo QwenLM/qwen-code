@@ -775,3 +775,4 @@ If you find no new gap in your scope, your WHOLE return is the receipt — exact
 export function readsDiff(role: RoleId): boolean {
   return BRIEFS[role].readsDiff;
 }
+

@@ -32,37 +32,29 @@
 // Capture such commands only when you are prepared to reap their daemons
 // yourself.
 //
-// WHAT THIS COMMAND GUARANTEES ABOUT FILES, and what it does not.
+// WHAT THIS COMMAND GUARANTEES ABOUT FILES.
 //
-// It guarantees, against ordinary conditions — a re-used --out, a stale
-// artifact from a previous run, an unrelated file that happens to hold one
-// of the names, a concurrent capture on a different --out, a host that runs
-// out of descriptors or disk mid-run:
+// Against ordinary conditions — a re-used --out, a stale artifact, an
+// unrelated file at one of the names, a host out of descriptors or disk —
+// it never writes over or deletes a file it cannot show a previous run of
+// THIS command wrote, never credits bytes it did not produce, and refuses
+// rather than hangs or half-writes.
 //
-//   · it never writes over, or deletes, a file it cannot show a previous
-//     run of THIS command wrote (manifest signature: the evidence rung, the
-//     absolute ansPath it recorded, and a settledBy from the closed set);
-//   · it never credits bytes it did not produce as this run's evidence;
-//   · it refuses rather than hangs, crashes, or half-writes — every refusal
-//     is exit 3, a reason on stderr, and machine-readable JSON on stdout;
-//   · it leaves no tmux server, session, or holder behind, for everything
-//     that stays in the capture's own session (see the reap comment for the
-//     one documented exception: commands that daemonize a descendant).
+// It ALSO defends, as far as this runtime allows, against an active
+// same-uid actor racing it during the capture window (which runs up to
+// --timeout-ms, an hour at the cap): occupancy is re-decided at write
+// time, the artifact opens are atomic and do not follow symlinks, the
+// manifest records the IDENTITY of the artifacts it wrote so a later run
+// can tell them from whatever holds the names now, and the directory
+// holding them is pinned by dev+ino and re-checked before every artifact
+// operation.
 //
-// It does NOT guarantee any of that against an ACTIVE adversary sharing the
-// uid — a process deliberately racing this one to swap files, symlinks, or
-// directories between a check and the syscall that follows it. Node exposes
-// no *at() syscalls (openat/unlinkat against a directory descriptor), so
-// every path here resolves BY NAME, and a name can be redirected in the
-// interval no userspace check can close. Hardening against that model is
-// real work with its own guarantees and its own tests; it is deliberately
-// NOT this file's claim, and a finding of that shape is a feature request
-// against a stated non-goal rather than a defect against this contract.
-//
-// The practical boundary: an actor able to win those races already shares
-// the uid, and can read the .ans, edit the source tree under review, or
-// replace the reviewing binary outright. This command is not the weak link
-// in that scenario, and pretending otherwise would buy a false guarantee.
+// The residue, stated rather than papered over: Node exposes no *at()
+// syscalls (openat/unlinkat against a directory descriptor), so every path
+// still resolves BY NAME and the interval between a check and the syscall
+// on its heels cannot be closed from here. What that leaves is a racer
+// fast enough to land inside that interval — not one with the whole
+// capture window to work in, which is what the guards above took away.
 //
 // Degradation is explicit, not silent: the manifest names which evidence rung
 // was reached (`png` or `ans-only`) and why, because a verifier must say
@@ -81,12 +73,9 @@ import {
   constants as fsConstants,
   existsSync,
   fstatSync,
-  linkSync,
   mkdirSync,
   openSync,
   readSync,
-  realpathSync,
-  renameSync,
   rmSync,
   lstatSync,
   statSync,
@@ -111,11 +100,9 @@ import {
   tmuxSupportsCaptureT,
   tmuxPadsWithCaptureN,
   isNothingToKill,
-  isSocketDirNeverCreated,
   isSocketDirUnusable,
-  isSocketPathAbsent,
-  verdictExaminedBase,
   validGeometry,
+  type ArtifactId,
   type CaptureManifest,
 } from './lib/tui-capture.js';
 
@@ -177,10 +164,6 @@ function probeOutput(bin: string, flag: string): ProbeResult {
   if (r.status === 0) return { status: 'ok', out: (r.stdout ?? '').trim() };
   const code = r.error && (r.error as NodeJS.ErrnoException).code;
   if (code === 'ETIMEDOUT') return { status: 'hung' };
-  // ENOBUFS is spawnSync's maxBuffer overrun — the binary RAN and spewed
-  // past the capture limit, so it answers like a non-zero exit, not like a
-  // spawn failure; the render degradation branch already discriminates it.
-  if (code === 'ENOBUFS') return { status: 'hung', code, spawned: true };
   // A spawn that could not even be attempted is NOT an absent binary: under
   // fd exhaustion (the transient condition this file names three times)
   // both probes reported 'not installed', and that false environment claim
@@ -256,13 +239,8 @@ export const REAP_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'] as const;
  * Tests shorten it; production never does. */
 export const tmuxControl = { timeoutMs: 15_000 };
 
-function tmux(argv: string[], env?: NodeJS.ProcessEnv): string {
+function tmux(argv: string[]): string {
   return execFileSync('tmux', argv, {
-    // The reap pins each kill to a candidate socket base (see there): tmux
-    // resolves the base from the CLIENT's environment, and the server lives
-    // where the first USABLE base was at start time — not necessarily where
-    // this process's env points now.
-    ...(env !== undefined ? { env } : {}),
     encoding: 'utf8',
     // A pane of text is small; a runaway TUI writing a scrollback is not our
     // problem — capture-pane returns the visible pane only.
@@ -343,22 +321,29 @@ let artifactsComplete = false;
 export function hostStateFor(code: string | undefined): string | null {
   switch (code) {
     case 'EMFILE':
-      return 'this process is out of file descriptors';
     case 'ENFILE':
-      return 'the system file table is full';
+      return 'this process is out of file descriptors';
     case 'ENOSPC':
       return 'the filesystem is full';
     case 'EDQUOT':
       return "this user's disk quota is exhausted";
     case 'EROFS':
       return 'the filesystem is read-only';
-    case 'EIO':
-      return 'the underlying storage is reporting I/O errors';
-    case 'ESTALE':
-      return 'the network filesystem handle is stale';
     default:
       return null;
   }
+}
+
+/** The identity triple, and the comparison a later run makes against it.
+ * `changed()` answers "did THIS run touch it"; this answers "is this the
+ * file some PREVIOUS run recorded", which is what makes a manifest's
+ * authority stop at the artifacts it actually produced. */
+export function idOf(st: {
+  size: number;
+  mtimeMs: number;
+  ino: number;
+}): ArtifactId {
+  return { ino: st.ino, size: st.size, mtimeMs: st.mtimeMs };
 }
 
 /** Thrown when an artifact path was claimed by something else DURING the
@@ -451,6 +436,44 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   const ansPath = `${outBase}.ans`;
   const pngPath = `${outBase}.png`;
   const manifestPath = `${outBase}.json`;
+  // Everything above resolves BY NAME. The final component is guarded
+  // (O_NOFOLLOW, O_EXCL, the stamps, the collision gates) — the DIRECTORY
+  // holding it was not, and the captured command runs as the same uid: a
+  // `mv dir dir.stolen && ln -s /victim dir` mid-window redirected all
+  // three artifacts out of the --out base while the manifest went on
+  // attesting the original paths (probe-reproduced on live tmux).
+  //
+  // Node exposes no *at() syscalls, so this cannot be made airtight from
+  // here: openat/unlinkat against a directory fd is the only construction
+  // that resolves a name against a pinned directory, and fs has no such
+  // binding. What IS available is identity — dev+ino of the directory, the
+  // same thing every artifact check uses for files. Sampled once up front
+  // and re-checked immediately before each artifact operation, it turns the
+  // reproduced attack (a swap anywhere in the capture window, up to 70
+  // minutes) into a refusal, and leaves only the window between the check
+  // and the syscall on its heels. That residue is stated here rather than
+  // papered over: a racer fast enough to land inside it is not excluded.
+  const outDir = dirname(outBase);
+  const dirIdOf = (): string => {
+    try {
+      const st = lstatSync(outDir);
+      return `${st.dev}:${st.ino}`;
+    } catch {
+      return 'gone';
+    }
+  };
+  let outDirId = dirIdOf();
+  /** Throws the collision error when the directory holding the artifacts is
+   * no longer the one this run measured. */
+  const assertSameOutDir = (): void => {
+    if (dirIdOf() !== outDirId) {
+      throw new ArtifactCollision(
+        `the directory holding --out was replaced during the capture: ` +
+          `${outDir} is no longer the one this run started with — refusing ` +
+          `to write evidence through it`,
+      );
+    }
+  };
   // NOT beside --out: the sentinel is this tool's plumbing, and putting it
   // in the user's chosen namespace meant unlinking a path we cannot verify
   // is ours — a `report.holder-ready` holding user data was removed before
@@ -492,6 +515,21 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       return { existed: false, size: 0, mtimeMs: 0, ino: 0 };
     }
   };
+  /** Whether the file at `path` right now is the one a previous run
+   * recorded in its manifest. Absent, replaced, or recorded by an older
+   * manifest that carried no identity at all: all "not the file that
+   * manifest describes", and none of them is permission to delete. */
+  const sameFile = (recorded: unknown, path: string): boolean => {
+    if (recorded === null || typeof recorded !== 'object') return false;
+    const r = recorded as { ino?: unknown; size?: unknown; mtimeMs?: unknown };
+    const st = stampOf(path);
+    return (
+      st.existed &&
+      st.ino === r.ino &&
+      st.size === r.size &&
+      st.mtimeMs === r.mtimeMs
+    );
+  };
   const changed = (path: string, stamp: Stamp): boolean => {
     // Never taken: nothing here is ours to credit or remove.
     if (stamp.size === UNSTAMPED && stamp.ino === UNSTAMPED) return false;
@@ -518,37 +556,40 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   // the window. So occupancy is decided AGAIN at write time, and the open
   // itself refuses to follow a link (O_NOFOLLOW closes the residual race
   // between that check and the write).
-  const writeArtifact = (path: string, stamp: Stamp, data: string): void => {
+  const writeArtifact = (
+    path: string,
+    stamp: Stamp,
+    data: string,
+  ): ArtifactId => {
+    assertSameOutDir();
     if (changed(path, stamp)) {
       throw new ArtifactCollision(
         `${path} was claimed during the capture window by something this ` +
           `capture did not write — refusing to replace it`,
       );
     }
-    // O_NOFOLLOW so a symlink at the path is never written THROUGH; the
-    // atomic create-or-fail form, and the identity guarantees that go with
-    // it, are the hardening PR's business.
+    // O_EXCL, not O_TRUNC: the check above is a check, and O_NOFOLLOW only
+    // closed the SYMLINK half of the race between it and this open — a
+    // REGULAR file planted in that window was truncated and replaced, with
+    // the run reporting success and the manifest crediting the path. By
+    // this point the path is always absent (the clear phase removed this
+    // run's own artifacts; anything else refused at the collision gate), so
+    // "create it, and fail if it already exists" is both the true intent
+    // and the only form the kernel decides atomically. O_NOFOLLOW stays for
+    // the Linux/macOS difference on a dangling symlink, where O_EXCL alone
+    // reports EEXIST rather than following it.
     let fd: number;
     try {
       fd = openSync(
         path,
         fsConstants.O_WRONLY |
           fsConstants.O_CREAT |
-          fsConstants.O_TRUNC |
+          fsConstants.O_EXCL |
           (fsConstants.O_NOFOLLOW ?? 0),
         0o666,
       );
     } catch (e) {
-      // EEXIST never fires without O_EXCL (the atomic create-or-fail form
-      // is the hardening PR's business): the raced shape this guard was
-      // written for — a symlink planted between changed() and the open —
-      // fails the O_NOFOLLOW open with ELOOP, and rethrowing that as a
-      // generic write failure let the write-failure catch delete the very
-      // occupant the collision path one syscall earlier explicitly spared
-      // (probe-verified: same occupant, one microsecond apart, one outcome
-      // deleted it). Both errnos are the collision.
-      const code = (e as NodeJS.ErrnoException).code;
-      if (code === 'EEXIST' || code === 'ELOOP') {
+      if ((e as NodeJS.ErrnoException).code === 'EEXIST') {
         throw new ArtifactCollision(
           `${path} was claimed during the capture window by something this ` +
             `capture did not write — refusing to replace it`,
@@ -558,6 +599,12 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     }
     try {
       writeFileSync(fd, data, 'utf8');
+      // Stamped through the SAME descriptor that wrote it: this is the
+      // identity of the file this run created, not of whatever holds the
+      // name later. The manifest records it, and the check before the
+      // manifest write proves the two are still the same file.
+      const st = fstatSync(fd);
+      return { ino: st.ino, size: st.size, mtimeMs: st.mtimeMs };
     } finally {
       closeSync(fd);
     }
@@ -586,9 +633,6 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       return false;
     }
   };
-  // What this run's own `.ans` write left on disk, by identity — the render
-  // stage pins its staged input against it.
-  let ansWritten: Stamp = untouched;
   let ansStamp: Stamp = untouched;
   let pngStamp: Stamp = untouched;
   let manifestStamp: Stamp = untouched;
@@ -700,19 +744,32 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
         (m.settledBy === 'until-match' ||
           m.settledBy === 'timeout' ||
           m.settledBy === 'fixed-delay');
-      // The png clear needs the manifest to have CLAIMED a png: the
-      // evidence rung AND a recorded pngPath naming THIS <out>.png. An
-      // ans-only manifest says this tool never wrote one, so whatever sits
-      // at <out>.png belongs to someone else — and clearing it on the next
-      // run against the same --out (the documented reuse shape) destroyed
-      // a foreign file the previous run had deliberately spared.
-      // The evidence rung ALONE is one signature rung short: every png-rung
-      // manifest this writer produces records that exact path, so a
-      // signature-passing manifest whose pngPath names ANOTHER file is
-      // internally inconsistent, and it deleted a foreign <out>.png its
-      // pngPath never named (probe-reproduced) — the same harm the
-      // ans-only half of this guard closes.
-      manifestHadPng = shaped && m.evidence === 'png' && m.pngPath === pngPath;
+      // The png clear needs the manifest to have CLAIMED a png: either the
+      // png rung itself or a recorded pngPath. An ans-only manifest says
+      // this tool never wrote one, so whatever sits at <out>.png belongs to
+      // someone else — and clearing it on the next run against the same
+      // --out (the documented reuse shape) destroyed a foreign file the
+      // previous run had deliberately spared.
+      // The evidence rung ALONE: this writer pairs `evidence: 'ans-only'`
+      // with `pngPath: null`, so the string-pngPath disjunct was
+      // unreachable for anything it produces — and where it did fire, on a
+      // signature-passing but internally inconsistent manifest, it cleared
+      // a foreign <out>.png on an ans-only rung (probe-reproduced),
+      // contradicting this guard's own invariant.
+      manifestHadPng = shaped && m.evidence === 'png';
+      // ...and the FILES have to be the ones that manifest describes. The
+      // signature authenticates the manifest; the files beside it are a
+      // separate question, and a genuine previous manifest was enough to
+      // authorize unlinking whatever had since taken the .ans name. A
+      // mismatch is simply not ours: the clear is skipped and the
+      // collision gate refuses, which is the fail-closed direction.
+      const ids = (m as { artifacts?: unknown }).artifacts as
+        | { ans?: unknown; png?: unknown }
+        | undefined;
+      if (shaped && !sameFile(ids?.ans, ansPath)) shaped = false;
+      if (manifestHadPng && !sameFile(ids?.png, pngPath)) {
+        manifestHadPng = false;
+      }
     } catch {
       // ANY read failure means the capture signature could not be verified —
       // including fd exhaustion (EMFILE/ENFILE), which is transient under
@@ -745,19 +802,9 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // name threw EISDIR (which `force` does not suppress) and refused the
     // run; and recursive removal destroyed that directory on every run,
     // successful ones included (all measured). Ordering still holds — after
-    // the clears, never before — so a removal that throws cannot strand the
-    // previous run's evidence:"png" manifest beside a refusal. The throw
-    // itself belongs to the dedicated TMPDIR gate below: `force` suppresses
-    // ENOENT only, so an existing-but-unusable TMPDIR threw HERE and reached
-    // the --out-attributing catch, shadowing the gate's naming refusal
-    // (probe-reproduced: a mode-0600 directory answered EACCES and a regular
-    // file ENOTDIR, both read as '--out is not writable', which no --out
-    // value can fix).
-    try {
-      rmSync(holderReadyPath, { force: true });
-    } catch {
-      // Belt only — the TMPDIR gate below owns the refusal wording.
-    }
+    // the clears, never before — so the one call here that can throw cannot
+    // strand the previous run's evidence:"png" manifest beside a refusal.
+    rmSync(holderReadyPath, { force: true });
     // Anything still sitting at an artifact path is something this run did
     // not write and did not clear (an unverifiable manifest, an unrelated
     // file the signature check spared). Stamp all three BY IDENTITY: the
@@ -771,6 +818,15 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     pngStamp = stampOf(pngPath);
     manifestStamp = stampOf(manifestPath);
     mkdirSync(dirname(outBase), { recursive: true });
+    // RE-BASELINE: the sample above ran before this mkdir, so an --out
+    // whose parent does not exist yet — the shape `recursive` is here for,
+    // and what the briefed --out template produces before the plan
+    // directory is made — baselined 'gone', and the first write then
+    // refused with "the directory holding --out was replaced" after paying
+    // the whole capture window. A directory this run just created is
+    // definitionally this run's, and the capture window opens only after
+    // this point, so nothing about the guard weakens.
+    outDirId = dirIdOf();
     // Probe the actual write target BEFORE any process starts: mkdirSync
     // with `recursive` does no permission check on a directory that already
     // exists, so an unwritable --out would otherwise run the full capture —
@@ -874,21 +930,11 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     }
   }
   if (args.keys !== undefined) {
-    if (!Array.isArray(args.keys)) {
-      refuse('--keys must be given exactly once, as strings.');
-      return;
-    }
-    if (args.keys.some((k) => typeof k !== 'string')) {
-      // yargs's default --no-X negation parses an array option to [false]
-      // (probed on this repo's yargs): the caller supplied no key tokens
-      // at all, so the refusal says THAT — the sibling flags' negation
-      // message — not "must be strings", which sends an agent consumer
-      // inspecting tokens it never passed.
-      refuse(
-        args.keys.every((k) => typeof k === 'boolean')
-          ? '--keys must be given exactly once, as strings.'
-          : '--keys must be strings.',
-      );
+    if (
+      !Array.isArray(args.keys) ||
+      args.keys.some((k) => typeof k !== 'string')
+    ) {
+      refuse('--keys must be strings.');
       return;
     }
     // An EXACTLY empty token types nothing (`send-keys ''` is a no-op), and
@@ -946,33 +992,15 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   // — the artifacts stop being clearable and every re-run refuses on the
   // collision instead. Measured from the arguments, before the window
   // opens, with room left for the fields this run adds later.
-  // In BYTES, not code units: the bound and the reader enforcing it count
-  // UTF-8 bytes, and `.length` counts UTF-16 code units — multibyte
-  // arguments between half the cap in characters and the cap in bytes
-  // passed this gate and were rejected by the reader on the next run
-  // (probe-reproduced with CJK --keys tokens).
-  // In the WRITER'S shape — JSON.stringify(manifest, null, 2) — not the
-  // dense one: pretty-printing an array of many small elements expands
-  // ~2.25x, and the dense measure passed manifests the reader cap then
-  // rejected on the next run (probe-reproduced with many one-char --keys
-  // tokens: the dense bytes passed the gate while the pretty bytes the
-  // writer emitted overflowed the cap and wedged the same--out reuse).
-  const embedded = Buffer.byteLength(
-    JSON.stringify(
-      {
-        command: args.command,
-        keys: args.keys,
-        ready: args.ready,
-        until: args.until,
-        cwd: args.cwd,
-        ansPath,
-        pngPath,
-      },
-      null,
-      2,
-    ),
-    'utf8',
-  );
+  const embedded = JSON.stringify({
+    command: args.command,
+    keys: args.keys,
+    ready: args.ready,
+    until: args.until,
+    cwd: args.cwd,
+    ansPath,
+    pngPath,
+  }).length;
   if (embedded > MAX_MANIFEST_BYTES / 2) {
     refuse(
       `the arguments would not fit a readable manifest: they serialize to ` +
@@ -983,18 +1011,22 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     return;
   }
 
-  // The base the server will ACTUALLY start under, by tmux's own rule:
-  // the first USABLE one. An unusable TMUX_TMPDIR (nonexistent,
-  // unwritable) is not where the socket lands — measuring the socket path
-  // against it anyway refused runs that were about to succeed under /tmp,
-  // which is how the length gate below was caught being wrong the first
-  // time. Remembered for the reap: whether a base COULD hold the server
-  // decides what a failed kill there establishes, and the reap cannot
-  // re-derive start-time state after a window in which the base itself
-  // can be destroyed.
-  let startBase = '/tmp';
-  {
+  // A unix socket path is bounded by sockaddr_un — 104 bytes on macOS, 108
+  // on Linux — and tmux builds this run's from the socket base, the uid
+  // directory and the private server name. Over the limit, the start
+  // SUCCEEDS and the first control call fails with `error connecting to …
+  // (File name too long)`: a mid-capture refusal, after paying for a
+  // server start, blaming tmux for a path this command chose. Measured
+  // with a TMUX_TMPDIR under a mkdtemp base — not an exotic shape at all,
+  // since that is where a CI job's scratch directory lives.
+  if (process.getuid) {
+    // The base tmux will ACTUALLY use, by tmux's own rule: the first
+    // USABLE one. An unusable TMUX_TMPDIR (nonexistent, unwritable) is not
+    // where the socket lands — measuring it anyway refused runs that were
+    // about to succeed under /tmp, which is how this gate was caught being
+    // wrong the first time.
     const envBase = process.env['TMUX_TMPDIR'];
+    let socketBase = '/tmp';
     if (envBase) {
       try {
         // Directoryness FIRST, like the --cwd gate: a regular file (or a
@@ -1007,37 +1039,13 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
         // the real socket path by the whole cwd — the same split-resolution
         // hazard this file already met one gate earlier with TMPDIR, where
         // the probe and the holder disagreed about what the path meant.
-        startBase = resolve(envBase);
+        socketBase = resolve(envBase);
       } catch {
         // Unusable — tmux falls back to /tmp, and so does this measurement.
       }
     }
-  }
-
-  // A unix socket path is bounded by sockaddr_un — 104 bytes on macOS, 108
-  // on Linux — and tmux builds this run's from the socket base, the uid
-  // directory and the private server name. Over the limit, the start
-  // SUCCEEDS and the first control call fails with `error connecting to …
-  // (File name too long)`: a mid-capture refusal, after paying for a
-  // server start, blaming tmux for a path this command chose. Measured
-  // with a TMUX_TMPDIR under a mkdtemp base — not an exotic shape at all,
-  // since that is where a CI job's scratch directory lives.
-  if (process.getuid) {
-    // Measure the CANONICAL base: tmux resolves a symlinked base before it
-    // binds, and the sockaddr_un bound applies to the canonical path — a
-    // lexical measure admitted runs whose real path was over the bound
-    // (then refused mid-capture, blaming tmux for a path this command
-    // chose) and refused runs whose real path fit. macOS meets this by
-    // default (/tmp -> /private/tmp). Lexical fallback when the base does
-    // not resolve — the same shape cleanup.ts's base dedup uses.
-    let measuredBase = startBase;
-    try {
-      measuredBase = realpathSync(startBase);
-    } catch {
-      // Unresolvable: the lexical measure is all there is.
-    }
     const socketPath = join(
-      measuredBase,
+      socketBase,
       `tmux-${process.getuid()}`,
       // The nonce is 8 hex chars for every run — its VALUE cannot change
       // the length, so measuring a representative one measures them all.
@@ -1063,17 +1071,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   // named nowhere (probe-verified driving the real command). Probed here,
   // before any server starts, so it refuses in milliseconds and says why.
   try {
-    // Directoryness FIRST, mirroring the TMUX_TMPDIR gate above: a regular
-    // file (or a symlink to one) passes W_OK|X_OK on some hosts, and a
-    // file-shaped TMPDIR then sailed through the very gate added to catch
-    // it — burning the full holder-init window before refusing with a
-    // wording that blamed the pane and named TMPDIR nowhere (probe-
-    // reproduced on a 0777 regular file).
-    const sentinelDir = dirname(holderReadyPath);
-    if (!statSync(sentinelDir).isDirectory()) {
-      throw new Error('not a directory');
-    }
-    accessSync(sentinelDir, fsConstants.W_OK | fsConstants.X_OK);
+    accessSync(dirname(holderReadyPath), fsConstants.W_OK | fsConstants.X_OK);
   } catch (e) {
     refuse(
       `the temporary directory is not usable for this capture's ready ` +
@@ -1205,7 +1203,6 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   // phantom spaces, and its tmux has no -T. Trailing spaces are dropped
   // there rather than fabricated, and the manifest says so.
   const capturePads = tmuxPadsWithCaptureN(tmuxVersion) === true;
-  const captureTrims = tmuxSupportsCaptureT(tmuxVersion) === true;
   const plan = tmuxPlan({
     server,
     session,
@@ -1214,7 +1211,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     command: args.command,
     cwd: resolvedCwd,
     // Only 3.4+ has the flag; older versions have nothing to trim.
-    captureTrim: captureTrims,
+    captureTrim: tmuxSupportsCaptureT(tmuxVersion) === true,
     // ...and 3.1-3.2.x invent trailing spaces with -N and cannot undo it.
     captureTrailing: !capturePads,
     readyFile: holderReadyPath,
@@ -1229,16 +1226,6 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   // installed sees the signal a second time; accepted for a leaf
   // subcommand, which this is.
   let serverStarted = false;
-  // The inode of the socket start bound under the start base, when start
-  // produced one: the reap trusts goal-state kill verdicts about that base
-  // only while this identity survives (see the reap below).
-  let socketStampIno: number | undefined;
-  // Whether the start call itself threw: the reap admits the
-  // socket-directory-never-created wording on the start base only under
-  // this flag (see the reap below) — the stamp cannot carry the
-  // distinction, since it is also absent when stamping fails after a
-  // successful start.
-  let startThrew = false;
   let reaped = false;
   const reap = (): void => {
     // serverStarted is set BEFORE the start call: the call forks the
@@ -1249,173 +1236,67 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // running" — the goal state below — so the attempt stays warning-free.
     if (reaped || !serverStarted) return;
     reaped = true;
-    // Unlink the socket ONLY when the server is known dead — and kill
-    // WHERE THE SERVER ACTUALLY LIVES: tmux resolves the socket base from
-    // the CLIENT's environment at kill time, while the server started under
-    // whichever base was USABLE at start, and the two can diverge inside
-    // one window (a stale TMUX_TMPDIR pointing at an unusable path puts the
-    // socket under /tmp; the env base becoming usable before the reap puts
-    // the CLIENT elsewhere — captures legally run up to an hour). A bare
-    // kill then answers tmux's "nothing to kill" wordings ABOUT THE WRONG
-    // BASE — the goal state, with the server alive under the other base —
-    // and the unlink that trusted the verdict orphaned it: socket gone, no
-    // WARNING, the holder alive up to three hours, invisible to the orphan
-    // sweep that discovers orphans by readdir of the very socket dirs the
-    // unlink just emptied (probe-reproduced on 3.4). Kill can ALSO throw
+    // Unlink the socket ONLY when the server is known dead: kill can throw
     // with the server alive (the tmux CLIENT failing to spawn — EMFILE, a
     // wedged server outlasting the 15s timeout), and unlinking then makes
     // the live server unreachable forever — nothing addressable by -L can
-    // ever kill it again, while it holds the pane holder (the bounded hold
-    // loop runs up to three hours). So: kill each candidate base with that
-    // base pinned in the environment — the shape cleanup.ts's sweep uses,
-    // "kill it where it was FOUND" — and unlink a base only when THAT
-    // base's own kill answered the goal state.
-    // One retry per base before giving up: a transient client-spawn failure
-    // is the named shape, and a second attempt reaps it (measured).
-    let unconfirmed = false;
-    let confirmedDead = false;
+    // ever kill it again, while it holds the pane holder (the bounded
+    // hold loop runs up to three hours).
+    // One retry before giving up: a transient client-spawn failure is the
+    // named shape, and a second attempt reaps it (measured).
+    let serverDead = false;
     let killSpawnFailed = false;
     let killDirUnusable = false;
-    const uid = process.getuid?.();
-    // Whether the socket start bound is still the one at its path: a
-    // goal-state verdict about the start base is about THIS run's server
-    // only while the stamped socket survives unchanged. Computed before the
-    // loop: a kill this loop credits unlinks the socket, and that removal
-    // is this reap's own, not a mid-window destruction.
-    let stampedSocketAlive = false;
-    if (socketStampIno !== undefined && uid !== undefined) {
-      try {
-        stampedSocketAlive =
-          lstatSync(join(startBase, `tmux-${uid}`, server)).ino ===
-          socketStampIno;
-      } catch {
-        stampedSocketAlive = false;
-      }
-    }
-    // Untrimmed, matching tmux (a padded value is used verbatim). Same
-    // candidate set as before: tmux takes the first USABLE base.
-    const envBase = process.env['TMUX_TMPDIR'];
-    for (const base of new Set([envBase || '/tmp', '/tmp'])) {
-      let baseDead = false;
-      for (let attempt = 0; attempt < 2 && !baseDead; attempt++) {
-        // Back-to-back, the second attempt was a copy of the first: under fd
-        // exhaustion — the condition the comment above names, and the one
-        // that makes the CLIENT fail rather than the server — both threw
-        // EMFILE in the same microsecond and the retry bought nothing
-        // (probe-verified). A pause cannot conjure a descriptor on its own,
-        // but it is the only thing that lets one this process is releasing
-        // elsewhere land before the last attempt. Synchronous by necessity:
-        // reap() runs from `finally` and from a signal handler, neither of
-        // which can await.
-        if (attempt > 0) {
-          try {
-            Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
-          } catch {
-            // Blocking waits are disallowed on some hosts; the retry still
-            // happens, just without the pause.
-          }
-        }
+    for (let attempt = 0; attempt < 2 && !serverDead; attempt++) {
+      // Back-to-back, the second attempt was a copy of the first: under fd
+      // exhaustion — the condition the comment above names, and the one
+      // that makes the CLIENT fail rather than the server — both threw
+      // EMFILE in the same microsecond and the retry bought nothing
+      // (probe-verified). A pause cannot conjure a descriptor on its own,
+      // but it is the only thing that lets one this process is releasing
+      // elsewhere land before the last attempt. Synchronous by necessity:
+      // reap() runs from `finally` and from a signal handler, neither of
+      // which can await.
+      if (attempt > 0) {
         try {
-          tmux(plan.kill, { ...process.env, TMUX_TMPDIR: base });
-          baseDead = true;
-          // Death established GLOBALLY: the server name is unique to this
-          // run, so a kill that succeeded reaped this server whichever
-          // base answered.
-          confirmedDead = true;
-        } catch (e) {
-          // A spawn that never ran says nothing about the server: the
-          // WARNING has to separate "tmux told us it failed" from "we could
-          // not run tmux at all", or an operator reads a wedged server where
-          // the real problem is this process's fd table.
-          const code = (e as NodeJS.ErrnoException).code;
-          if (code === 'EMFILE' || code === 'ENFILE' || code === 'EAGAIN') {
-            killSpawnFailed = true;
-          }
-          // A kill failing because there was nothing to kill is the goal
-          // state — in every wording tmux uses for it, including the
-          // socket-directory-never-created one a start that failed before the
-          // socket existed produces (measured with a mode-0555 TMUX_TMPDIR:
-          // both attempts answered `couldn't create directory …` and the
-          // one-wording test printed a false orphan WARNING).
-          const stderrText = String((e as { stderr?: unknown }).stderr ?? '');
-          // ...but a goal-state wording establishes death only about the
-          // base the client EXAMINED. Two shapes examine nothing here: a
-          // base destroyed mid-window sends the client to /tmp, whose path
-          // the wording then names while the kill was pinned elsewhere
-          // (probe-verified on 3.4 — the live server under the destroyed
-          // base read as reaped: no WARNING, and invisible to the sweep
-          // once the socket dir went with the base); and a base that HELD
-          // the server at start answers `couldn't create directory` once
-          // destroyed mid-window — the client never looked, and the
-          // server may still be alive. The same wording stays honest
-          // where the server started under the OTHER base: that base
-          // never held it — nor did one whose start THREW before binding
-          // a socket: there the directory never existed, so the wording
-          // is admitted on the start base under that flag (without it a
-          // false orphan WARNING printed for a server that never existed).
-          //
-          // The ENOENT class establishes death only where start never bound
-          // a socket: once stamped, it means the stamped socket was removed
-          // mid-window — possibly with a live server behind it (probed: rm
-          // the file under a running server and kill answers exactly this),
-          // so it is never credited once stamped, on any base. And on the
-          // START base, every goal-state wording is only as trustworthy as
-          // the stamped socket's identity: a base destroyed and recreated
-          // mid-window can answer about a socket this run never owned, and
-          // the live server behind the destroyed one would read as dead.
-          const onStartBase = resolve(base) === startBase;
-          baseDead =
-            (isNothingToKill(stderrText) ||
-              (isSocketPathAbsent(stderrText) &&
-                socketStampIno === undefined)) &&
-            verdictExaminedBase(stderrText, base) &&
-            !(
-              isSocketDirNeverCreated(stderrText) &&
-              onStartBase &&
-              !startThrew
-            ) &&
-            !(
-              onStartBase &&
-              socketStampIno !== undefined &&
-              !stampedSocketAlive
-            );
-          // ...and NOT for a refusal the client made before it looked. Those
-          // two wordings were briefly folded into isNothingToKill, which made
-          // a LIVE server read as reaped: no WARNING, exit 0, and its socket
-          // unlinked under both bases — unreachable forever (probe-verified
-          // by making the socket dir non-0700 after the start).
-          if (isSocketDirUnusable(stderrText)) killDirUnusable = true;
-        }
-      }
-      if (!baseDead) {
-        // A kill that threw establishes nothing about this base — the server
-        // may be alive under it — so nothing of its is unlinked.
-        unconfirmed = true;
-        continue;
-      }
-      if (uid !== undefined) {
-        try {
-          // tmux does not always unlink the socket of a killed server; a
-          // review that captures often would litter the socket dir with dead
-          // ones. tmux resolves that dir from TMUX_TMPDIR, falling back to
-          // /tmp — it does NOT consult TMPDIR, so neither do we. ONLY the
-          // base this kill answered about: the goal-state verdict that
-          // authorizes the removal is base-scoped, and removing a socket
-          // under a base the kill never established death on is exactly what
-          // orphaned a live server under the other one.
-          rmSync(join(base, `tmux-${uid}`, server), { force: true });
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
         } catch {
-          // Litter is cosmetic; never let cleanup mask the capture's result.
+          // Blocking waits are disallowed on some hosts; the retry still
+          // happens, just without the pause.
         }
       }
+      try {
+        tmux(plan.kill);
+        serverDead = true;
+      } catch (e) {
+        // A spawn that never ran says nothing about the server: the
+        // WARNING has to separate "tmux told us it failed" from "we could
+        // not run tmux at all", or an operator reads a wedged server where
+        // the real problem is this process's fd table.
+        const code = (e as NodeJS.ErrnoException).code;
+        if (code === 'EMFILE' || code === 'ENFILE' || code === 'EAGAIN') {
+          killSpawnFailed = true;
+        }
+        // A kill failing because there was nothing to kill is the goal
+        // state — in every wording tmux uses for it, including the
+        // socket-directory-never-created one a start that failed before the
+        // socket existed produces (measured with a mode-0555 TMUX_TMPDIR:
+        // both attempts answered `couldn't create directory …` and the
+        // one-wording test printed a false orphan WARNING).
+        const stderrText = String((e as { stderr?: unknown }).stderr ?? '');
+        serverDead = isNothingToKill(stderrText);
+        // ...but NOT for a refusal the client made before it looked. Those
+        // two wordings were briefly folded into isNothingToKill, which made
+        // a LIVE server read as reaped: no WARNING, exit 0, and its socket
+        // unlinked under both bases — unreachable forever (probe-verified
+        // by making the socket dir non-0700 after the start).
+        if (isSocketDirUnusable(stderrText)) killDirUnusable = true;
+      }
     }
-    if (unconfirmed && !confirmedDead) {
+    if (!serverDead) {
       // A presumed-alive private server is never a silent outcome: the
       // holder keeps it up for up to three hours, and the briefs encourage many
-      // captures per review — orphans would accumulate invisibly. Doubt
-      // stays quiet only when a kill SUCCEEDED: the server name is unique
-      // to this run, so that death is global and outranks a verdict that
-      // could not be placed.
+      // captures per review — orphans would accumulate invisibly.
       // SAFE, like refuse()'s writes: process.stderr.write throws
       // synchronously on a closed fd, and reap() runs BOTH from the finally
       // (where a throw turns the exit-3 refusal into an exit-1 stack trace
@@ -1434,6 +1315,26 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
         }; the private tmux server ${server} may still be running ` +
           `(tmux -L ${server} kill-server to reap it by hand).`,
       );
+      return;
+    }
+    // tmux does not always unlink the socket of a killed server; a review
+    // that captures often would litter the socket dir with dead sockets.
+    // tmux resolves that dir from TMUX_TMPDIR, falling back to /tmp — it
+    // does NOT consult TMPDIR, so neither do we. BOTH candidate bases,
+    // like the orphan sweep: tmux takes the first USABLE base, so a stale
+    // TMUX_TMPDIR pointing at an unusable path puts the socket under /tmp
+    // while a single-base unlink misses it.
+    try {
+      const uid = process.getuid?.();
+      if (uid !== undefined) {
+        // Untrimmed, matching tmux (a padded value is used verbatim).
+        const envBase = process.env['TMUX_TMPDIR'];
+        for (const base of new Set([envBase || '/tmp', '/tmp'])) {
+          rmSync(join(base, `tmux-${uid}`, server), { force: true });
+        }
+      }
+    } catch {
+      // Litter is cosmetic; never let cleanup mask the capture's own result.
     }
   };
   // (REAP_SIGNALS is module-level and exported so the signal tests iterate
@@ -1484,6 +1385,10 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   for (const s of REAP_SIGNALS) process.on(s, onSignal);
 
   let ansText = '';
+  // What the .ans write actually produced, by identity — see the manifest
+  // block, which refuses to describe a file that is no longer that one.
+  let ansWritten: ArtifactId | undefined;
+  let pngWritten: ArtifactId | undefined;
   let settledBy: CaptureManifest['settledBy'] = 'fixed-delay';
   let readyFailed = false;
   let keysSent: boolean | undefined;
@@ -1499,26 +1404,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // runners). kill-server against a server that never came up answers
     // the goal state, so the early flag adds no false warnings.
     serverStarted = true;
-    try {
-      tmux(plan.start);
-    } catch (e) {
-      startThrew = true;
-      throw e;
-    }
-    {
-      const uidAtStart = process.getuid?.();
-      if (uidAtStart !== undefined) {
-        try {
-          socketStampIno = lstatSync(
-            join(startBase, `tmux-${uidAtStart}`, server),
-          ).ino;
-        } catch {
-          // Start can bind under the OTHER base when the env base turns
-          // unusable between the gate and the start; the reap's per-base
-          // kills cover that shape, and its doubt is the fail-closed answer.
-        }
-      }
-    }
+    tmux(plan.start);
     // Before ANY key can be sent, wait for the holder's ready sentinel: the
     // pty's INTR fires the instant tmux writes 0x03 — a C-c racing the
     // holder's own `trap : INT` line killed pane, session and server
@@ -1654,11 +1540,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   }
 
   try {
-    writeArtifact(ansPath, ansStamp, ansText);
-    // Identity of the bytes THIS run just wrote, for the render stage to
-    // pin against. Taken here rather than derived at stage time: by then
-    // ansPath may already be the swap.
-    ansWritten = stampOf(ansPath);
+    ansWritten = writeArtifact(ansPath, ansStamp, ansText);
   } catch (e) {
     // The disk can fill (or the target turn hostile) during a long capture
     // window; the same principle as the mkdir guard — refusal contract, not
@@ -1676,7 +1558,11 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       // ...and NEVER on a collision: the thing at the path is precisely
       // what this run refused to replace, so removing it would be the
       // data loss the refusal exists to prevent.
-      if (!(e instanceof ArtifactCollision) && changed(ansPath, ansStamp))
+      if (
+        e instanceof ArtifactCollision
+          ? sameFile(ansWritten, ansPath)
+          : changed(ansPath, ansStamp)
+      )
         rmSync(ansPath, { force: true });
     } catch {
       // The refusal reason below is the primary signal either way.
@@ -1687,6 +1573,20 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     );
     return;
   }
+
+  // RE-STAMPED here, after the capture window closed — not reused from
+  // before it. The captured command had the entire window (70 minutes at
+  // the --timeout-ms cap) to claim this path, and the pre-window stamp
+  // says "absent" for anything it planted. That stale stamp made two
+  // separate claims false: freeze writing THROUGH a symlink planted at the
+  // path was credited as this run's `evidence: 'png'` while the bytes
+  // landed wherever the link pointed, outside --out entirely; and a FAILED
+  // render then deleted whatever the command had put there, the same harm
+  // the .ans/.json collision carve-outs exist to prevent. Every question
+  // below — render or degrade, credit or not, clean up or leave alone —
+  // asks this stamp instead, so "did THIS run produce the image" is decided
+  // against a closed window with only the render able to have changed it.
+  pngStamp = stampOf(pngPath);
 
   // .ans FIRST, then render: freeze has hung mid-render on this repo's own
   // workflows, and the text evidence must already be on disk when it does.
@@ -1738,21 +1638,6 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
         `a trailing-space or right-edge claim needs tmux 3.3+`,
     );
   }
-  if (captureTrims) {
-    degradations.push(
-      // The -T remedy is incomplete the way the pad case is: it trims only
-      // positions that NEVER held a character — cells written and later
-      // erased (CR + EL, the canonical TUI redraw) still capture as
-      // trailing spaces on the very versions that take the flag, and the
-      // joined marker-matching view carries them mid-line with and without
-      // -T (measured on 3.4). No capture-pane flag separates the two, so
-      // the caveat is the honest fix.
-      `${tmuxVersion} trims only never-written trailing positions under ` +
-        `-T — cells written and later erased still capture as trailing ` +
-        `spaces, and the joined marker view carries them mid-line; ` +
-        `trailing-space, right-edge and marker claims carry that caveat`,
-    );
-  }
   if (matchOverruns > 0) {
     // A budget cutoff is not the same as an absent marker: the match may
     // have been interrupted mid-backtrack, and the field's contract is that
@@ -1768,13 +1653,11 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     degradations.push(
       'pane captured empty — nothing to render, no image produced',
     );
-  } else if (pngStamp.existed || occupied(pngPath)) {
-    // Something this run did not write occupies the png path — sitting
-    // there since the pre-window stamp, or claimed DURING the window, the
-    // same mid-window escape writeArtifact's changed() closes for the .ans
-    // and the manifest. Rendering would replace it — the same silent
-    // destruction the .ans/.json collision refuses over — so the ladder
-    // stops at the text rung and says why.
+  } else if (pngStamp.existed) {
+    // Something this run did not write occupies the png path, and the clear
+    // phase spared it deliberately. Rendering would replace it — the same
+    // silent destruction the .ans/.json collision refuses over — so the
+    // ladder stops at the text rung and says why.
     degradations.push(
       `${pngPath} holds a file this capture did not write — no image ` +
         'rendered; clear it or pick another --out for a png rung',
@@ -1807,199 +1690,106 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // machine in one evening — the historical "freeze hangs" incidents on
     // this repo's workflows are this exact shape. The timeout stays as the
     // second belt.
-    // BOTH render paths ride per-run nonces: freeze opens whatever names it
-    // is given and follows symlinks on INPUT and OUTPUT alike (measured on
-    // freeze v0.2.2), and the captured command — the survivor class the
-    // kill-plan comment documents — runs while these names are decided.
-    // link() stages the INPUT under a name only this run knows, and the
-    // isFile() check on the stage pins the bytes this run wrote: link()
-    // clones a symlinked ansPath instead of refusing it with ELOOP
-    // (measured on Linux), so a symlink swapped in during the probe window
-    // would otherwise be staged intact and feed the victim's bytes to the
-    // render. rename() lands the OUTPUT: it replaces a symlink planted at
-    // pngPath instead of following it out of the --out base.
-    const renderNonce = randomBytes(6).toString('hex');
-    const ansStage = `${ansPath}.render-${renderNonce}`;
-    const pngStage = `${pngPath}.render-${renderNonce}`;
-    let renderInputStaged = false;
+    const r = spawnSync(freezeRender.bin, freezePlan(ansPath, pngPath), {
+      encoding: 'utf8',
+      timeout: freezeRender.timeoutMs,
+      killSignal: 'SIGKILL',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      maxBuffer: FREEZE_MAX_BUFFER,
+    });
+    // Read the size DEFENSIVELY: this was the only unguarded throwable fs
+    // call in the function. A png that disappears between the existsSync
+    // and the statSync — a concurrent actor on the same --out, the very
+    // shape the clear phase and collision gate exist to handle — threw an
+    // uncaught ENOENT: exit 1, no contract JSON on stdout, a stack trace on
+    // stderr, and .ans and .png both orphaned with no manifest
+    // (fault-injected). A gone png is simply not a png rung.
+    let pngSize = 0;
     try {
-      linkSync(ansPath, ansStage);
-      // lstat never follows: a cloned symlink is not a regular file. But
-      // "regular file" is the whole guard only where link() clones —
-      // darwin FOLLOWS a symlinked source (measured: the staged entry is a
-      // hard link to the victim's inode, isFile() true), so the type test
-      // alone let the same swap through on macOS and freeze rendered the
-      // victim's bytes as this capture's png. Identity is the portable
-      // question: the stage must be another name for the very inode this
-      // run's own .ans write produced.
-      const staged = lstatSync(ansStage);
-      if (!staged.isFile() || staged.ino !== ansWritten.ino) {
-        throw new Error('staged render input is not the .ans this run wrote');
-      }
-      renderInputStaged = true;
+      pngSize = statSync(pngPath).size;
     } catch {
-      // Swapped between this run's write and the render — degrade rather
-      // than attribute bytes this capture cannot show it produced. The
-      // stage exists when the link itself landed, and only this run names
-      // it, so it is this run's to remove.
-      try {
-        rmSync(ansStage, { force: true });
-      } catch {
-        // Litter is cosmetic; never let cleanup mask the capture's result.
-      }
-      degradations.push(
-        `${ansPath} was replaced while the render was being prepared — ` +
-          '.ans text captured, no image rendered',
-      );
+      // Gone or unstattable mid-check — the degradation branch below says so.
     }
-    if (renderInputStaged) {
+    // lstat, not stat: freeze writes this path by name during the render,
+    // so a symlink planted between the re-stamp and that write is followed
+    // by freeze and would otherwise be credited — `changed()` sees the
+    // symlink's own identity differ from "absent" and answers true. Only a
+    // regular file is a rendering this run produced.
+    let pngIsFile = false;
+    try {
+      pngIsFile = lstatSync(pngPath).isFile();
+    } catch {
+      // Gone or unstattable — not a png rung, same as size 0 below.
+    }
+    if (
+      r.status === 0 &&
+      pngIsFile &&
+      pngSize > 0 &&
+      // ...and THIS run is what put those bytes there. Existence alone
+      // credited a file the clear phase deliberately spared — an unrelated
+      // <out>.png with no capture manifest beside it — as this run's
+      // rendering evidence whenever freeze exited 0 without writing
+      // (measured end to end: success JSON with evidence 'png', pngPath
+      // pointing at the user's untouched file, no degradation recorded).
+      changed(pngPath, pngStamp)
+    ) {
+      // Exit code alone is not evidence: a freeze that exits 0 without
+      // writing the file — or leaving a 0-byte/truncated one (ENOSPC
+      // mid-write, the shape the .ans write guard's comment names) — would
+      // otherwise manifest a png rung with no pixels, and a verifier would
+      // publish it.
+      png = pngPath;
+      // Its identity at credit time: the cleanup above asks whether the
+      // file still IS this one before removing anything.
+      pngWritten = idOf(stampOf(pngPath));
+    } else {
+      // The stderr tail rides along: a bare exit code is undiagnosable from
+      // a manifest, and the whole point of recording degradation is that a
+      // reader can tell WHY the ladder stopped. A spawn that never ran
+      // (EMFILE, a binary vanishing between probe and render) has neither
+      // status nor signal — its reason lives in r.error.
+      const errTail = `${r.stderr ?? ''} ${r.stdout ?? ''}`
+        .trim()
+        .split('\n')
+        .slice(-2)
+        .join(' ');
+      const why =
+        r.status === 0
+          ? 'exited 0 but wrote no image'
+          : r.signal
+            ? // A belt kill carries BOTH signal and error (ETIMEDOUT); name
+              // the belt, or it reads as an unexplained external kill. The
+              // error CODE decides, not its mere presence: a maxBuffer
+              // overrun kills with the same SIGKILL and also sets an error
+              // (ENOBUFS — probe-measured for this exact spawn), and
+              // blaming the render belt for it is a false causal claim
+              // that sends a reader hunting a hang that never happened.
+              `signal ${r.signal}${
+                (r.error as NodeJS.ErrnoException | undefined)?.code ===
+                'ETIMEDOUT'
+                  ? ` after the ${freezeRender.timeoutMs}ms render belt`
+                  : (r.error as NodeJS.ErrnoException | undefined)?.code ===
+                      'ENOBUFS'
+                    ? ` — freeze wrote more than the ${FREEZE_MAX_BUFFER} bytes this spawn captures`
+                    : ''
+              }`
+            : r.status !== null
+              ? `exit ${String(r.status)}`
+              : `spawn failed: ${r.error ? r.error.message : 'unknown error'}`;
+      degradations.push(
+        `freeze failed (${why}${errTail ? `: ${errTail}` : ''}) — .ans text captured, no image rendered`,
+      );
+      // A failed render can leave a partial/0-byte png at the very path the
+      // manifest is about to deny — remove it (measured: a fake freeze that
+      // wrote bytes then exited 9 left a torn png behind). Only when the
+      // clear phase left nothing there: freeze can fail without its spawn
+      // ever opening the output (EMFILE, a belt kill), and this SUCCEEDING
+      // run then silently deleted a user's untouched png and reported
+      // ans-only (measured).
       try {
-        const r = spawnSync(freezeRender.bin, freezePlan(ansStage, pngStage), {
-          encoding: 'utf8',
-          timeout: freezeRender.timeoutMs,
-          killSignal: 'SIGKILL',
-          stdio: ['ignore', 'pipe', 'pipe'],
-          maxBuffer: FREEZE_MAX_BUFFER,
-        });
-        // Read the stage DEFENSIVELY: a concurrent actor on the same --out
-        // is the very shape the clear phase and collision gate exist to
-        // handle, and an uncaught ENOENT here meant exit 1, no contract
-        // JSON on stdout, a stack trace on stderr, and both artifacts
-        // orphaned with no manifest (fault-injected). lstat, and isFile:
-        // anything but a regular file at the stage is not a rung.
-        let pngSize = 0;
-        try {
-          const stageStat = lstatSync(pngStage);
-          if (stageStat.isFile()) pngSize = stageStat.size;
-        } catch {
-          // Gone or unstattable mid-check — the degradation branch below
-          // says so.
-        }
-        if (r.status === 0 && pngSize > 0) {
-          // Exit code alone is not evidence: a freeze that exits 0 without
-          // writing the file — or leaving a 0-byte/truncated one (ENOSPC
-          // mid-write, the shape the .ans write guard's comment names) —
-          // would otherwise manifest a png rung with no pixels, and a
-          // verifier would publish it.
-          if (occupied(pngPath)) {
-            // Claimed between the ladder's check and the landing: the same
-            // mid-window escape, degrade instead of replacing the claimant.
-            degradations.push(
-              `${pngPath} holds a file this capture did not write — the ` +
-                'rendered image was not landed; clear it or pick another ' +
-                '--out for a png rung',
-            );
-          } else {
-            try {
-              renameSync(pngStage, pngPath);
-              // lstat identity, never stat: a swap that lands a symlink at
-              // pngPath after the rename is not a rung either.
-              const landed = lstatSync(pngPath);
-              if (landed.isFile() && changed(pngPath, pngStamp)) {
-                png = pngPath;
-              } else {
-                degradations.push(
-                  `${pngPath} changed while the rendered image was being ` +
-                    'landed — .ans text captured, no image rendered',
-                );
-              }
-            } catch {
-              degradations.push(
-                `the rendered image could not be landed at ${pngPath} — ` +
-                  '.ans text captured, no image rendered',
-              );
-            }
-          }
-        } else {
-          // The stderr tail rides along: a bare exit code is undiagnosable from
-          // a manifest, and the whole point of recording degradation is that a
-          // reader can tell WHY the ladder stopped. A spawn that never ran
-          // (EMFILE, a binary vanishing between probe and render) has neither
-          // status nor signal — its reason lives in r.error.
-          // Bounded like everything else that rides into the manifest: a
-          // newline-free wall of freeze stderr (up to FREEZE_MAX_BUFFER of it)
-          // otherwise flowed into degradedBecause verbatim and pushed the
-          // manifest past the reader cap a successful run must stay under —
-          // probe-reproduced: the next run then refused to verify it.
-          const errTail = `${r.stderr ?? ''} ${r.stdout ?? ''}`
-            .trim()
-            .split('\n')
-            .slice(-2)
-            .join(' ')
-            .slice(0, 2048);
-          const why =
-            r.status === 0
-              ? 'exited 0 but wrote no image'
-              : r.signal
-                ? // A belt kill carries BOTH signal and error (ETIMEDOUT); name
-                  // the belt, or it reads as an unexplained external kill. The
-                  // error CODE decides, not its mere presence: a maxBuffer
-                  // overrun kills with the same SIGKILL and also sets an error
-                  // (ENOBUFS — probe-measured for this exact spawn), and
-                  // blaming the render belt for it is a false causal claim
-                  // that sends a reader hunting a hang that never happened.
-                  `signal ${r.signal}${
-                    (r.error as NodeJS.ErrnoException | undefined)?.code ===
-                    'ETIMEDOUT'
-                      ? ` after the ${freezeRender.timeoutMs}ms render belt`
-                      : (r.error as NodeJS.ErrnoException | undefined)?.code ===
-                          'ENOBUFS'
-                        ? ` — freeze wrote more than the ${FREEZE_MAX_BUFFER} bytes this spawn captures`
-                        : ''
-                  }`
-                : r.status !== null
-                  ? `exit ${String(r.status)}`
-                  : `spawn failed: ${r.error ? r.error.message : 'unknown error'}`;
-          degradations.push(
-            `freeze failed (${why}${errTail ? `: ${errTail}` : ''}) — .ans text captured, no image rendered`,
-          );
-          // A failed render's torn bytes sit at the STAGE and are this
-          // run's unambiguously (the nonce name): land them when the path
-          // is still free — a leftover is loud, not lost: this manifest
-          // denies the png rung, and the next run's ladder degrades on the
-          // occupant. An occupant that claimed the path meanwhile is
-          // spared, and the torn bytes go with the stage.
-          if (occupied(pngPath)) {
-            degradations.push(
-              `${pngPath} holds a file that appeared while the render ` +
-                "failed — left in place: this run's torn output was not " +
-                'landed beside it',
-            );
-          } else {
-            // Land the stage even at 0 bytes (the ENOSPC-truncated shape):
-            // the nonce makes it this run's unambiguously, and leaving it
-            // named keeps the next run's ladder loud about the occupant.
-            let stageIsFile = false;
-            try {
-              stageIsFile = lstatSync(pngStage).isFile();
-            } catch {
-              // Gone — nothing to land.
-            }
-            if (stageIsFile) {
-              try {
-                renameSync(pngStage, pngPath);
-                degradations.push(
-                  `${pngPath} holds this run's torn render output — left in ` +
-                    'place: the manifest denies the png rung',
-                );
-              } catch {
-                // Unlandable — the stage cleanup below removes it.
-              }
-            }
-          }
-        }
-      } finally {
-        try {
-          rmSync(ansStage, { force: true });
-        } catch {
-          // Litter is cosmetic; never let cleanup mask the capture's result.
-        }
-        // Gone already when the rename landed it.
-        try {
-          rmSync(pngStage, { force: true });
-        } catch {
-          // Same.
-        }
+        if (changed(pngPath, pngStamp)) rmSync(pngPath, { force: true });
+      } catch {
+        // The degradation entry above is the primary signal.
       }
     }
   }
@@ -2029,10 +1819,29 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     ansPath,
     pngPath: png,
     evidence: png ? 'png' : 'ans-only',
+    // Stamped AFTER the writes: this is what a later run compares against
+    // before it dares unlink anything at these names.
+    artifacts: {
+      // From the write, not from a fresh stat of the name: between the
+      // write and here sit the render and its probes, and re-stating the
+      // path would have the manifest describe whatever occupies it now.
+      ans: ansWritten as ArtifactId,
+      png: png ? idOf(stampOf(pngPath)) : null,
+    },
     ...(degradedBecause ? { degradedBecause } : {}),
     settledBy,
   };
   try {
+    // The .ans this manifest is about to describe must still BE the file
+    // this run wrote — the render window sits between the two, and a
+    // manifest attesting bytes it never produced is the wrong-evidence
+    // outcome this whole command exists to prevent.
+    if (!sameFile(ansWritten, ansPath)) {
+      throw new ArtifactCollision(
+        `${ansPath} was replaced after this capture wrote it — refusing to ` +
+          `describe a file this run did not produce`,
+      );
+    }
     writeArtifact(
       manifestPath,
       manifestStamp,
@@ -2060,17 +1869,31 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
         [pngPath, pngStamp],
         [manifestPath, manifestStamp],
       ] as const) {
-        // A collision names the ONE path this run refused to replace: the
-        // occupant is someone else's, and removing it here would be the
-        // data loss the refusal exists to prevent.
-        if (e instanceof ArtifactCollision && path === manifestPath) continue;
-        // The png is ours ONLY when the render actually produced one: a
-        // degraded ladder left the occupant untouched, and an owner who
-        // rewrote their own file during the window answers changed() —
-        // deleting it then destroyed a file this run never wrote, on a run
-        // that wrote and rendered nothing (probe-reproduced; no adversarial
-        // race — the window legally runs up to an hour).
-        if (png === null && path === pngPath) continue;
+        // On a collision, `changed()` is the WRONG question here: it
+        // compares against the pre-window stamps, which answer true for any
+        // mid-window occupant — so the cleanup deleted the very file the
+        // refusal was protecting. Skipping only manifestPath was not
+        // enough once this catch started receiving collisions that name
+        // the .ans (the identity re-check below) and the directory
+        // (assertSameOutDir): in those shapes this run's own bytes are
+        // already gone from the path, so an unlink can only destroy
+        // someone else's file (witnessed). Remove a path only while its
+        // CURRENT identity still proves it is this run's.
+        if (e instanceof ArtifactCollision) {
+          const mine =
+            path === ansPath
+              ? sameFile(ansWritten, ansPath)
+              : path === pngPath
+                ? sameFile(pngWritten, pngPath)
+                : false;
+          if (!mine) continue;
+          try {
+            rmSync(path, { force: true });
+          } catch {
+            // The refusal reason below is the primary signal either way.
+          }
+          continue;
+        }
         try {
           if (changed(path, stamp)) rmSync(path, { force: true });
         } catch {
@@ -2179,3 +2002,4 @@ export const captureTuiCommand: CommandModule = {
       timeoutMs: argv['timeout-ms'] as number,
     }),
 };
+

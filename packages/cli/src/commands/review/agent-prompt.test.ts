@@ -6645,3 +6645,4 @@ describe('incremental-scope briefs', () => {
     expect(p).toContain('src/caller.ts (imports src/changed.ts)');
   });
 });
+

@@ -42,8 +42,9 @@ const mocks = vi.hoisted(() => ({
       mode: 0o140700,
     }),
   ),
-  // The return type is declared so `mockReturnValue` can take string arrays —
-  // the sweep-retention tests hand it the tmp-dir listing.
+  // The path is taken because several tests dispatch on it, and the return
+  // type is declared so `mockReturnValue` can take string arrays — the
+  // sweep-retention tests hand it the tmp-dir listing.
   readdirSync: vi.fn((_path: string): string[] => []),
   readFileSync: vi.fn((_path: string): string => {
     throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
@@ -1349,6 +1350,7 @@ describe('runCleanup', () => {
       });
     },
   );
+
   it('sweeps every verifier scratch tree, which it can only find by prefix', () => {
     // One per verifier shard, named for the shard's record key — so unlike the
     // probe and base siblings, the sweeper cannot reconstruct the names and
@@ -2930,3 +2932,5 @@ describe('runCleanup — Aone bypass-write audit', () => {
     expect(notes.join('\n')).not.toContain('skipped ({)');
   });
 });
+
+
