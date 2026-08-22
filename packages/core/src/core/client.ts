@@ -81,7 +81,15 @@ import type { UserPromptRecordPayload } from '../services/chatRecordingService.j
 
 // Tools
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
-import { AUTO_SKILL_THRESHOLD } from '../memory/manager.js';
+import {
+  accumulateExperienceOutcome,
+  classifyToolExperienceOutcome,
+  didToolCallProduceWork,
+  isSubstantiveToolCall,
+  type CompletedToolCallOutcome,
+  type ExperienceSignalAccumulator,
+  type ToolExperienceOutcome,
+} from '../memory/experience-signals.js';
 import { buildRelevantAutoMemoryPrompt } from '../memory/recall.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
 import { isProjectSkillPath } from '../skills/skill-paths.js';
@@ -166,7 +174,7 @@ import { MessageDisplayDispatcher } from './message-display-dispatcher.js';
 
 // IDE integration
 import { ideContextStore } from '../ide/ideContext.js';
-import { type File, type IdeContext } from '../ide/types.js';
+import type { File, IdeContext } from '../ide/types.js';
 import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
 
 const MAX_TURNS = 100;
@@ -352,6 +360,17 @@ export class GeminiClient {
   private sessionTurnCount = 0;
   private toolCallCount = 0;
   private skillsModifiedInSession = false;
+  /** Whether a steer message arrived since the last dispatched skill review. */
+  private userSteeredSinceReview = false;
+  private experienceSignalsSinceReview: ExperienceSignalAccumulator = {
+    retryArc: false,
+    hasSubstantiveWork: false,
+    failedToolNames: new Set(),
+  };
+  private readonly pendingExperienceOutcomes = new Map<
+    string,
+    { toolName: string; outcome: ToolExperienceOutcome }
+  >();
   private cachedGitStatus: string | null | undefined;
   private readonly surfacedRelevantAutoMemoryPaths = new Set<string>();
   private shutdownRequested = false;
@@ -391,7 +410,7 @@ export class GeminiClient {
   private agentRemindersInitialized = false;
 
   private static skillEntryKey(e: AvailableSkillEntry): string {
-    return e.level !== undefined ? `skill:${e.name}` : `cmd:${e.name}`;
+    return e.level === undefined ? `cmd:${e.name}` : `skill:${e.name}`;
   }
 
   /**
@@ -461,6 +480,11 @@ export class GeminiClient {
       return;
     }
 
+    // Session switch (/resume, /branch) reuses this client: the review
+    // window belongs to the old session and must not leak into the new one.
+    this.resetSkillReviewWindow();
+    this.pendingExperienceOutcomes.clear();
+
     // Check if we're resuming from a previous session
     const resumedSessionData = this.config.getResumedSessionData();
     const restoreRuntime = this.config.getSessionRestoreRuntime?.();
@@ -518,12 +542,10 @@ export class GeminiClient {
 
       // Restore attribution state from the last snapshot in the session
       this.restoreAttributionFromSession(resumedSessionData.conversation);
+    } else if (sessionStartSource === undefined) {
+      await this.startChat();
     } else {
-      if (sessionStartSource !== undefined) {
-        await this.startChat(undefined, sessionStartSource);
-      } else {
-        await this.startChat();
-      }
+      await this.startChat(undefined, sessionStartSource);
     }
 
     this.initializedSessionId = sessionId;
@@ -564,6 +586,7 @@ export class GeminiClient {
 
   async addHistory(content: Content) {
     this.getChat().addHistory(content);
+    this.acceptCompletedToolCallOutcomes(content);
   }
 
   getChat(): GeminiChat {
@@ -1072,6 +1095,9 @@ export class GeminiClient {
     }
 
     this.initializedSessionId = undefined;
+    // /clear starts a fresh session; the skill-review window must not leak.
+    this.resetSkillReviewWindow();
+    this.pendingExperienceOutcomes.clear();
     this.surfacedRelevantAutoMemoryPaths.clear();
     this.cachedGitStatus = undefined;
     this.lastApiCompletionTimestamp = null;
@@ -2069,6 +2095,13 @@ export class GeminiClient {
       const autoSkillEnabled = this.config.getAutoSkillEnabled();
 
       if (autoSkillEnabled) {
+        const { retryArc, hasSubstantiveWork } =
+          this.experienceSignalsSinceReview;
+        const experienceSignals = {
+          retryArc,
+          hasSubstantiveWork,
+          userSteer: this.userSteeredSinceReview,
+        };
         const skillReviewResult = mgr.scheduleSkillReview({
           projectRoot,
           sessionId,
@@ -2077,13 +2110,11 @@ export class GeminiClient {
           toolCallCount: this.toolCallCount,
           skillsModified: this.skillsModifiedInSession,
           enabled: autoSkillEnabled,
-          threshold: AUTO_SKILL_THRESHOLD,
+          experienceSignals,
           confirmBeforePersist: this.config.getAutoSkillConfirmEnabled(),
         });
         if (skillReviewResult.status === 'scheduled') {
-          // Reset tool-call counter when a review is dispatched so the next
-          // review only fires after a full new threshold worth of tool calls.
-          this.toolCallCount = 0;
+          this.resetSkillReviewWindow();
           if (skillReviewResult.promise) {
             this.pendingMemoryTaskPromises.push(
               skillReviewResult.promise
@@ -2100,15 +2131,8 @@ export class GeminiClient {
                 }),
             );
           }
-        } else if (
-          skillReviewResult.status === 'skipped' &&
-          skillReviewResult.skippedReason === 'already_running' &&
-          this.toolCallCount >= AUTO_SKILL_THRESHOLD
-        ) {
-          // A review is already in-flight; reset the counter so that when the
-          // current review completes the next call doesn't immediately trigger
-          // another review without accumulating a fresh threshold of tool calls.
-          this.toolCallCount = 0;
+        } else if (skillReviewResult.skippedReason === 'already_running') {
+          this.resetSkillReviewWindow();
         }
         // Always reset the skills-modified flag after the scheduleSkillReview
         // check, regardless of whether a review was dispatched. This prevents
@@ -2189,10 +2213,25 @@ export class GeminiClient {
     return promises;
   }
 
+  private resetSkillReviewWindow(): void {
+    this.toolCallCount = 0;
+    this.skillsModifiedInSession = false;
+    this.userSteeredSinceReview = false;
+    this.experienceSignalsSinceReview = {
+      retryArc: false,
+      hasSubstantiveWork: false,
+      failedToolNames: new Set(),
+    };
+  }
+
   recordCompletedToolCall(
     toolName: string,
     args?: Record<string, unknown>,
+    outcome?: CompletedToolCallOutcome,
   ): void {
+    if (outcome && !didToolCallProduceWork(outcome)) {
+      return;
+    }
     this.rememberCompletedToolName(toolName);
 
     if (args && SKILL_WRITE_TOOL_NAMES.has(toolName)) {
@@ -2204,7 +2243,47 @@ export class GeminiClient {
         this.skillsModifiedInSession = true;
       }
     }
+    if (isSubstantiveToolCall(toolName)) {
+      this.experienceSignalsSinceReview.hasSubstantiveWork = true;
+    }
     this.toolCallCount += 1;
+
+    if (outcome) {
+      const experienceOutcome = classifyToolExperienceOutcome(
+        toolName,
+        outcome,
+      );
+      if (experienceOutcome && outcome.callId) {
+        this.pendingExperienceOutcomes.set(outcome.callId, {
+          toolName,
+          outcome: experienceOutcome,
+        });
+        if (
+          this.chat?.getHistoryFunctionResponseIds().has(outcome.callId) ===
+          true
+        ) {
+          this.acceptCompletedToolCallOutcome(outcome.callId);
+        }
+      }
+    }
+  }
+
+  private acceptCompletedToolCallOutcome(callId: string): void {
+    const pending = this.pendingExperienceOutcomes.get(callId);
+    if (!pending) return;
+    this.pendingExperienceOutcomes.delete(callId);
+    this.experienceSignalsSinceReview = accumulateExperienceOutcome(
+      this.experienceSignalsSinceReview,
+      pending.toolName,
+      pending.outcome,
+    );
+  }
+
+  private acceptCompletedToolCallOutcomes(content: Content): void {
+    for (const part of content.parts ?? []) {
+      const callId = part.functionResponse?.id;
+      if (callId) this.acceptCompletedToolCallOutcome(callId);
+    }
   }
 
   private rememberCompletedToolName(toolName: string): void {
@@ -2281,12 +2360,12 @@ export class GeminiClient {
         const virtualAfter =
           (m.toolResultCharsAfter ?? 0) + (m.pendingToolResultChars ?? 0);
         const targetNote =
-          m.toolResultsLowWatermark !== undefined
-            ? `, target ${m.toolResultsLowWatermark}` +
+          m.toolResultsLowWatermark === undefined
+            ? ''
+            : `, target ${m.toolResultsLowWatermark}` +
               (virtualAfter > m.toolResultsLowWatermark
                 ? ' (soft-exceeded)'
-                : '')
-            : '';
+                : '');
         debugLogger.info(
           `[TOOL-RESULT MC] tool result chars ${m.toolResultCharsBefore} > ` +
             `${m.toolResultsTotalCharsThreshold}, cleared ${m.toolsCleared} ` +
@@ -2402,7 +2481,7 @@ export class GeminiClient {
         pendingGoalStateEvents.push({
           type: GeminiEventType.GoalState,
           value,
-          ...(cause !== undefined ? { cause } : {}),
+          ...(cause === undefined ? {} : { cause }),
         });
       });
       pendingGoalStateEvents.push({
@@ -2525,8 +2604,9 @@ export class GeminiClient {
     ) => {
       if (!steerInput || this.settledSteerInputs.has(steerInput)) return;
       this.settledSteerInputs.add(steerInput);
+      const accepted = currentPushCount() > pushCountBefore;
       try {
-        if (currentPushCount() > pushCountBefore) {
+        if (accepted) {
           steerInput.accept();
         } else {
           steerInput.restore();
@@ -2534,10 +2614,32 @@ export class GeminiClient {
       } catch (error) {
         debugLogger.warn(`Failed to settle steer input: ${error}`);
       }
+      if (accepted) this.userSteeredSinceReview = true;
     };
 
     const attachedSteerInput = options?.steerInput;
     const attachedSteerPushCount = currentPushCount();
+    const recordAcceptedExperienceInput = () => {
+      const content =
+        messageType === SendMessageType.ToolResult ||
+        messageType === SendMessageType.Retry ||
+        messageType === SendMessageType.Teammate
+          ? createUserContent(request)
+          : undefined;
+      if (content?.parts?.some((part) => part.functionResponse)) {
+        this.acceptCompletedToolCallOutcomes(content);
+        // A steer attached to an accepted ToolResult submission counts as a
+        // user steer too: the CLI's mid-tool-loop steer flow submits steers
+        // under ToolResult, not SendMessageType.Steer.
+        if (attachedSteerInput) {
+          this.userSteeredSinceReview = true;
+        }
+      } else if (messageType === SendMessageType.Steer) {
+        this.userSteeredSinceReview = true;
+      } else {
+        return;
+      }
+    };
 
     const restoreStrippedRetryEntries = () => {
       if (strippedRetryEntries.length === 0) {
@@ -2653,9 +2755,9 @@ export class GeminiClient {
             eventName: 'UserPromptSubmit',
             input: {
               prompt: promptText,
-              ...(submittedPrompt !== undefined
-                ? { submitted_prompt: submittedPrompt }
-                : {}),
+              ...(submittedPrompt === undefined
+                ? {}
+                : { submitted_prompt: submittedPrompt }),
             },
           },
           MessageBusType.HOOK_EXECUTION_RESPONSE,
@@ -3438,6 +3540,9 @@ export class GeminiClient {
       try {
         for await (const event of resultStream) {
           if (!steerInputSettled) {
+            if (currentPushCount() > attachedSteerPushCount) {
+              recordAcceptedExperienceInput();
+            }
             // Settle the attached steer input as soon as the first stream
             // event arrives — the user-content push has landed by now.
             // Settling here (before model-response events are committed to
@@ -3602,9 +3707,9 @@ export class GeminiClient {
                     ? 'Rate limit exceeded'
                     : status !== undefined && status >= 500
                       ? 'Provider service unavailable'
-                      : status !== undefined
-                        ? `API request failed (${status})`
-                        : 'Provider request failed';
+                      : status === undefined
+                        ? 'Provider request failed'
+                        : `API request failed (${status})`;
               try {
                 await arenaAgentClient.reportError(arenaError);
               } catch {
@@ -3636,6 +3741,9 @@ export class GeminiClient {
       agentOutput.commitResponse(
         hasToolCalls || turn.pendingToolCalls.length > 0,
       );
+      if (currentPushCount() > attachedSteerPushCount) {
+        recordAcceptedExperienceInput();
+      }
       for (const goalEvent of signal.aborted
         ? await finalizeInterruptedGoalTurn()
         : takePendingGoalEvents()) {
@@ -4196,6 +4304,9 @@ export class GeminiClient {
         await releaseGoalPermitOnInterruptedExit();
       }
       closeGoalStateEvents();
+      if (currentPushCount() > attachedSteerPushCount) {
+        recordAcceptedExperienceInput();
+      }
       settleSteerInput(attachedSteerInput, attachedSteerPushCount);
       restoreStrippedRetryEntries();
       // Belt-and-suspenders: close out the MessageDisplay dispatcher on any

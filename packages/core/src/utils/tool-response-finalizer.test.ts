@@ -752,6 +752,28 @@ describe('tool response finalization', () => {
     expect((output as string).length).toBeLessThanOrEqual(100);
   });
 
+  it.each([1, 10])('keeps errors within a %i-character budget', (budget) => {
+    const result = enforceFunctionResponseBudget(
+      [
+        entry('error', [
+          {
+            functionResponse: {
+              id: 'error',
+              name: 'shell',
+              response: { error: 'permission denied' },
+            },
+          },
+        ]),
+      ],
+      budget,
+    );
+    const error = result[0].responseParts[0].functionResponse?.response?.[
+      'error'
+    ] as string;
+
+    expect(error.length).toBeLessThanOrEqual(budget);
+  });
+
   it('the send guard preserves an enter_plan_mode lifecycle response', () => {
     const reminder = getPlanModeSystemReminder(false);
     const entries: ToolResponseBudgetEntry[] = [

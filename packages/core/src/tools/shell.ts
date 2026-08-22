@@ -11,6 +11,7 @@ import crypto from 'node:crypto';
 import * as childProcess from 'node:child_process';
 import { ApprovalMode, type Config } from '../config/config.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
+import { formatShellExitCode } from './shell-exit-code.js';
 import { ToolErrorType } from './tool-error.js';
 import type {
   FileDiff,
@@ -2769,7 +2770,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         `Directory: ${this.params.directory || '(root)'}`,
         `Output: ${result.output || '(empty)'}`,
         `Error: ${finalError}`, // Use the cleaned error string.
-        `Exit Code: ${result.exitCode ?? '(none)'}`,
+        formatShellExitCode(result.exitCode),
         `Signal: ${result.signal ?? '(none)'}`,
         `Process Group PGID: ${result.pid ?? '(none)'}`,
       ].join('\n');

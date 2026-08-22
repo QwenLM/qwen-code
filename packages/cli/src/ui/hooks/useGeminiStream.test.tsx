@@ -5620,144 +5620,130 @@ describe('useGeminiStream', () => {
     // even though the wire-side submission is dropped. Regression guard:
     // an earlier version filtered deduped tools out of `geminiTools`
     // without recording, skipping the metric increment.
-    expect(client.recordCompletedToolCall).toHaveBeenCalledWith('read_file', {
-      path: '/tmp/x.txt',
-    });
+    expect(client.recordCompletedToolCall).toHaveBeenCalledWith(
+      'read_file',
+      {
+        path: '/tmp/x.txt',
+      },
+      expect.objectContaining({ callId: 'call_race_A' }),
+    );
 
     // No follow-up submission: the synthetic in history already closes
     // the tool_use ↔ tool_result pair.
     expect(mockSendMessageStream).not.toHaveBeenCalled();
   });
 
-  it('skips recordCompletedToolCall for deduped CANCELLED tools (telemetry parity)', async () => {
-    // A deduped tool with status='cancelled' never actually produced
-    // model-visible output — counting it via `recordCompletedToolCall`
-    // (which increments toolCallCount and can flip
-    // skillsModifiedInSession on a skill-write path) would inflate the
-    // metric for a call that never ran end-to-end. Dedup must skip
-    // BOTH client-initiated (already skipped) AND cancelled tools,
-    // while still calling `markToolsAsSubmitted` so the scheduler
-    // unblocks.
-    const cancelledDedupedTool = {
-      request: {
-        callId: 'call_dedup_cancelled',
-        name: 'write_file',
-        args: { path: '/tmp/cancelled.txt', content: 'x' },
-        isClientInitiated: false,
-        prompt_id: 'prompt-dedup-cancel',
-      },
-      status: 'cancelled',
-      responseSubmittedToGemini: false,
-      response: {
-        callId: 'call_dedup_cancelled',
-        responseParts: [
-          {
-            functionResponse: {
-              id: 'call_dedup_cancelled',
-              name: 'write_file',
-              response: { error: 'cancelled' },
+  it.each([
+    ['deduped cancellation', true, 'cancelled', 'cancelled'],
+    ['main-loop cancellation after completion', false, 'cancelled', 'success'],
+    ['never-started permission denial', false, 'error', 'not_started'],
+  ] as const)(
+    'forwards structured skill-review outcome for %s',
+    async (_name, deduped, status, executionStatus) => {
+      const callId = 'call_work_classification';
+      const args = { file_path: '/tmp/file.txt', content: 'x' };
+      const toolCall = {
+        request: {
+          callId,
+          name: 'write_file',
+          args,
+          isClientInitiated: false,
+          prompt_id: 'prompt-work-classification',
+        },
+        status,
+        responseSubmittedToGemini: false,
+        response: {
+          callId,
+          responseParts: [
+            {
+              functionResponse: {
+                id: callId,
+                name: 'write_file',
+                response: { error: 'result' },
+              },
             },
-          },
-        ],
-        resultDisplay: undefined,
-        error: undefined,
-        errorType: undefined,
-      },
-      tool: {
-        name: 'write_file',
-        displayName: 'WriteFile',
-        description: 'Write a file',
-        build: vi.fn(),
-      } as any,
-      invocation: {
-        getDescription: () => 'cancelled write',
-      } as unknown as AnyToolInvocation,
-    } as unknown as TrackedCancelledToolCall;
+          ],
+          resultDisplay: undefined,
+          error:
+            status === 'error' ? new Error('permission declined') : undefined,
+          errorType:
+            status === 'error' ? ToolErrorType.EXECUTION_DENIED : undefined,
+          executionStatus,
+        },
+        tool: {
+          name: 'write_file',
+          displayName: 'WriteFile',
+          description: 'Write a file',
+          build: vi.fn(),
+        } as any,
+        invocation: {
+          getDescription: () => 'write file',
+        } as unknown as AnyToolInvocation,
+      } as unknown as TrackedToolCall;
 
-    const client = new MockedGeminiClientClass(mockConfig);
-    // Pre-paired in history: dedup will fire for this callId. Wire
-    // the fast-path accessor so the dispatcher takes the
-    // `getHistoryFunctionResponseIds` branch (matches production
-    // path; see the default mock comment in MockedGeminiClientClass).
-    client.getHistoryFunctionResponseIds = vi
-      .fn()
-      .mockReturnValue(new Set(['call_dedup_cancelled']));
-    client.getHistory = vi.fn().mockReturnValue([
-      { role: 'user', parts: [{ text: 'cancelled write' }] },
-      {
-        role: 'model',
-        parts: [
-          {
-            functionCall: {
-              id: 'call_dedup_cancelled',
-              name: 'write_file',
-              args: { path: '/tmp/cancelled.txt', content: 'x' },
-            },
-          },
-        ],
-      },
-      {
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              id: 'call_dedup_cancelled',
-              name: 'write_file',
-              response: { error: 'synthetic' },
-            },
-          },
-        ],
-      },
-    ]);
+      const client = new MockedGeminiClientClass(mockConfig);
+      client.getHistoryFunctionResponseIds = vi
+        .fn()
+        .mockReturnValue(new Set(deduped ? [callId] : []));
 
-    let capturedOnComplete:
-      | ((completedTools: TrackedToolCall[]) => Promise<void>)
-      | null = null;
-    mockUseReactToolScheduler.mockImplementation((onComplete) => {
-      capturedOnComplete = onComplete;
-      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
-    });
+      let capturedOnComplete:
+        | ((completedTools: TrackedToolCall[]) => Promise<void>)
+        | null = null;
+      mockUseReactToolScheduler.mockImplementation((onComplete) => {
+        capturedOnComplete = onComplete;
+        return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+      });
 
-    renderHook(() =>
-      useGeminiStream(
-        client,
-        [],
-        mockAddItem,
-        mockConfig,
-        true,
-        mockLoadedSettings,
-        mockOnDebugMessage,
-        mockHandleSlashCommand,
-        false,
-        () => 'vscode' as EditorType,
-        () => {},
-        () => Promise.resolve(),
-        false,
-        () => {},
-        () => {},
-        () => {},
-        () => {},
-        80,
-        24,
-      ),
-    );
+      renderHook(() =>
+        useGeminiStream(
+          client,
+          [],
+          mockAddItem,
+          mockConfig,
+          true,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          () => {},
+          () => {},
+          () => {},
+          80,
+          24,
+        ),
+      );
 
-    await act(async () => {
-      if (capturedOnComplete) {
-        await capturedOnComplete([cancelledDedupedTool]);
+      await act(async () => {
+        if (capturedOnComplete) {
+          await capturedOnComplete([toolCall]);
+        }
+      });
+
+      if (deduped) {
+        await waitFor(() => {
+          expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith([callId]);
+        });
       }
-    });
-
-    // Scheduler still gets unblocked.
-    await waitFor(() => {
-      expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith([
-        'call_dedup_cancelled',
-      ]);
-    });
-
-    // Telemetry NOT incremented — the cancelled filter held.
-    expect(client.recordCompletedToolCall).not.toHaveBeenCalled();
-  });
+      expect(client.recordCompletedToolCall).toHaveBeenCalledOnce();
+      expect(client.recordCompletedToolCall).toHaveBeenCalledWith(
+        'write_file',
+        args,
+        expect.objectContaining({
+          callId,
+          status,
+          executionStatus,
+          errorType:
+            status === 'error' ? ToolErrorType.EXECUTION_DENIED : undefined,
+          responseParts: toolCall.response?.responseParts,
+        }),
+      );
+    },
+  );
 
   it('runs Race A dedup BEFORE the active-stream early-return (regression guard)', async () => {
     // The dedup block in handleCompletedTools is intentionally placed
@@ -5951,6 +5937,7 @@ describe('useGeminiStream', () => {
         resultDisplay: undefined,
         error: new Error('ENOENT: missing file'),
         errorType: ToolErrorType.UNHANDLED_EXCEPTION,
+        executionStatus: 'error',
       },
       tool: {
         name: 'read_file',
@@ -6046,6 +6033,14 @@ describe('useGeminiStream', () => {
     expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith([
       'call_fast_after_stream',
     ]);
+    expect(client.recordCompletedToolCall).toHaveBeenCalledOnce();
+    expect(client.recordCompletedToolCall).toHaveBeenCalledWith(
+      'read_file',
+      {
+        path: '/tmp/missing.txt',
+      },
+      expect.objectContaining({ callId: 'call_fast_after_stream' }),
+    );
   });
 
   it('drops a fast tool result after cancellation even if the stale callback runs later', async () => {
@@ -14127,6 +14122,14 @@ describe('useGeminiStream', () => {
         await mainRequest;
       });
 
+      expect(client.recordCompletedToolCall).toHaveBeenCalledWith(
+        'testTool',
+        {},
+        expect.objectContaining({
+          callId: 'btw-cancelled-tool',
+          status: 'cancelled',
+        }),
+      );
       expect(mockEndInteractionSpan).toHaveBeenCalledWith('cancelled', {
         promptId: btwPromptId,
       });

@@ -4979,11 +4979,10 @@ export class CoreToolScheduler {
             ? ToolErrorType.MCP_TOOL_ERROR
             : ToolErrorType.UNKNOWN))
         : undefined;
-      executionStatus = aborted
-        ? 'cancelled'
-        : toolResult.error
-          ? 'error'
-          : 'success';
+      const settledExecutionStatus: ToolExecutionStatus = toolResult.error
+        ? 'error'
+        : 'success';
+      executionStatus = aborted ? 'cancelled' : settledExecutionStatus;
       executionSettled = true;
       if (execSpan) {
         const completedExecSpan = execSpan;
@@ -5038,7 +5037,7 @@ export class CoreToolScheduler {
         const cancelledResponse = createCancelledResponse(
           scheduledCall.request,
           cancelMessage,
-          executionStatus,
+          settledExecutionStatus,
           failureHookArtifacts,
           toolResult.persistedOutputFiles,
         );

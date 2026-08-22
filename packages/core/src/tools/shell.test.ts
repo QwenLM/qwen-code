@@ -61,6 +61,7 @@ import * as os from 'node:os';
 import * as crypto from 'node:crypto';
 import path from 'node:path';
 import { ToolErrorType } from './tool-error.js';
+import { formatShellExitCode } from './shell-exit-code.js';
 import { OUTPUT_UPDATE_INTERVAL_MS, parseNumstat } from './shell.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
@@ -2878,7 +2879,7 @@ describe('ShellTool', () => {
 
       expect(result.returnDisplay).toContain('failed output');
       expect(result.error).toEqual({
-        message: expect.stringContaining('Exit Code: 3'),
+        message: expect.stringContaining(formatShellExitCode(3)),
         type: ToolErrorType.SHELL_EXECUTE_ERROR,
       });
       expect(result.error?.message).toContain('failed output');
@@ -2993,7 +2994,7 @@ describe('ShellTool', () => {
       const result = await promise;
 
       expect(result.error).toBeUndefined();
-      expect(result.llmContent).toContain('Exit Code: 1');
+      expect(result.llmContent).toContain(formatShellExitCode(1));
     });
 
     it('does not report exit 1 from a pipeline ending in grep as a tool error', async () => {
@@ -3011,7 +3012,7 @@ describe('ShellTool', () => {
       const result = await promise;
 
       expect(result.error).toBeUndefined();
-      expect(result.llmContent).toContain('Exit Code: 1');
+      expect(result.llmContent).toContain(formatShellExitCode(1));
     });
 
     it('reports exit 1 from find as a tool error', async () => {
@@ -3344,7 +3345,7 @@ describe('ShellTool', () => {
           error: null, // realistic shape: non-zero exit, no spawn error
         });
         const result = await promise;
-        expect(result.llmContent).toContain('Exit Code: 1');
+        expect(result.llmContent).toContain(formatShellExitCode(1));
         expect(result.llmContent).toContain(
           'this foreground command ran for 75s',
         );
