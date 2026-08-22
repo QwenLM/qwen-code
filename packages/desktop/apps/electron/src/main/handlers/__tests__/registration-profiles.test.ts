@@ -9,6 +9,7 @@ mock.module('electron', () => ({
     handle: () => {},
     on: () => {},
   },
+  clipboard: { writeText: () => {} },
   app: {
     isPackaged: false,
     getAppPath: () => '/',

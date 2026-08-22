@@ -22,7 +22,6 @@ export const CORE_HANDLED_CHANNELS = [
   RPC_CHANNELS.system.VERSIONS,
   RPC_CHANNELS.system.HOME_DIR,
   RPC_CHANNELS.system.IS_DEBUG_MODE,
-  RPC_CHANNELS.system.COPY_TO_CLIPBOARD,
   RPC_CHANNELS.debug.LOG,
   RPC_CHANNELS.shell.OPEN_URL,
   RPC_CHANNELS.shell.OPEN_FILE,
@@ -36,6 +35,7 @@ export const CORE_HANDLED_CHANNELS = [
 ] as const
 
 export const GUI_HANDLED_CHANNELS = [
+  RPC_CHANNELS.system.COPY_TO_CLIPBOARD,
   RPC_CHANNELS.update.CHECK,
   RPC_CHANNELS.update.GET_INFO,
   RPC_CHANNELS.update.INSTALL,
@@ -93,10 +93,6 @@ export function registerSystemCoreHandlers(server: RpcServer, deps: HandlerDeps)
   // Check if running in debug mode (from source)
   server.handle(RPC_CHANNELS.system.IS_DEBUG_MODE, async () => {
     return !deps.platform.isPackaged
-  })
-
-  server.handle(RPC_CHANNELS.system.COPY_TO_CLIPBOARD, async (_ctx, text: string) => {
-    clipboard.writeText(text)
   })
 
   // Release notes
@@ -274,6 +270,10 @@ export function registerSystemCoreHandlers(server: RpcServer, deps: HandlerDeps)
 export function registerSystemGuiHandlers(server: RpcServer, deps: HandlerDeps): void {
   const { sessionManager } = deps
   const windowManager = deps.windowManager
+
+  server.handle(RPC_CHANNELS.system.COPY_TO_CLIPBOARD, async (_ctx, text: string) => {
+    clipboard.writeText(text)
+  })
 
   // Auto-update handlers
   server.handle(RPC_CHANNELS.update.CHECK, async () => {
