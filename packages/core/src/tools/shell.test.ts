@@ -37,6 +37,12 @@ vi.mock('../utils/debugLogger.js', () => ({
 vi.mock('fs');
 vi.mock('os');
 vi.mock('crypto');
+vi.mock('../services/session-pr-service.js', async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import('../services/session-pr-service.js')
+  >()),
+  upsertSessionPr: vi.fn().mockResolvedValue([]),
+}));
 
 import { isCommandAllowed } from '../utils/shell-utils.js';
 import {
@@ -45,6 +51,7 @@ import {
   type ShellToolParams,
 } from './shell.js';
 import { detectBlockedSleepPattern } from './shell.js';
+import { upsertSessionPr } from '../services/session-pr-service.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
 import { ApprovalMode, type Config } from '../config/config.js';
 import {
@@ -162,6 +169,11 @@ describe('ShellTool', () => {
         complete: vi.fn(),
         fail: vi.fn(),
       }),
+      getSessionService: vi.fn().mockReturnValue({
+        getPrSessionPathForArchiveState: vi
+          .fn()
+          .mockReturnValue('/test/proj/chats/test-session.pr.json'),
+      }),
     } as unknown as Config;
 
     // executeBackground writes to disk; stub mkdirSync + createWriteStream.
@@ -219,6 +231,55 @@ describe('ShellTool', () => {
 
     // Ensure attribution singleton is clean between tests
     CommitAttributionService.resetInstance();
+  });
+
+  describe('gh pr create binding', () => {
+    it('writes the PR sidecar when gh pr create prints a URL', async () => {
+      const invocation = shellTool.build({
+        command: 'gh pr create --title x --body y',
+        directory: '/test/dir',
+        is_background: false,
+      });
+      const resultPromise = invocation.execute(new AbortController().signal);
+      await vi.waitFor(() =>
+        expect(mockShellExecutionService).toHaveBeenCalled(),
+      );
+      resolveExecutionPromise({
+        output: 'noise\nhttps://github.com/o/r/pull/77\n',
+        exitCode: 0,
+        aborted: false,
+      } as ShellExecutionResult);
+      await resultPromise;
+
+      expect(vi.mocked(upsertSessionPr)).toHaveBeenCalledWith(
+        '/test/proj/chats/test-session.pr.json',
+        {
+          number: 77,
+          url: 'https://github.com/o/r/pull/77',
+          state: 'open',
+        },
+      );
+    });
+
+    it('does not bind when the create fails without a URL', async () => {
+      const invocation = shellTool.build({
+        command: 'gh pr create --title x',
+        directory: '/test/dir',
+        is_background: false,
+      });
+      const resultPromise = invocation.execute(new AbortController().signal);
+      await vi.waitFor(() =>
+        expect(mockShellExecutionService).toHaveBeenCalled(),
+      );
+      resolveExecutionPromise({
+        output: 'error: not logged in',
+        exitCode: 1,
+        aborted: false,
+      } as ShellExecutionResult);
+      await resultPromise;
+
+      expect(vi.mocked(upsertSessionPr)).not.toHaveBeenCalled();
+    });
   });
 
   describe('isCommandAllowed', () => {

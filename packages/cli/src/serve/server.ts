@@ -120,6 +120,7 @@ import {
 } from './routes/workspace-trust.js';
 import { registerPermissionRoutes } from './routes/permission.js';
 import { registerSessionRoutes } from './routes/session.js';
+import { registerSessionPrBackfillRoutes } from './routes/session-pr-backfill.js';
 import { createRequestedSessionIdAdmission } from './session-id-admission.js';
 import {
   registerScheduledTasksRoutes,
@@ -2072,6 +2073,11 @@ export function createServeApp(
     mutate,
   });
   registerWorkspaceQualifiedGitHubPrsRoutes(app, {
+    workspaceRegistry,
+    sendBridgeError,
+    mutate,
+  });
+  registerSessionPrBackfillRoutes(app, {
     workspaceRegistry,
     sendBridgeError,
     mutate,

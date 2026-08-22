@@ -434,7 +434,11 @@ async function enrichPrSidecars(
     if (sidecar) {
       bySessionId.set(sessionId, {
         ...summary,
-        prs: sidecar.map(({ number, url }) => ({ number, url })),
+        prs: sidecar.map(({ number, url, state }) => ({
+          number,
+          url,
+          ...(state ? { state } : {}),
+        })),
       });
     }
   }
@@ -499,14 +503,24 @@ function mergeLiveSessionSummary(
   // The live entry only knows PR bindings from this daemon lifetime while the
   // sidecar-enriched persisted summary holds the full history — merge by PR
   // number (live url wins, live-only bindings sort latest) instead of letting
-  // the spread overwrite the history.
+  // the spread overwrite the history. For `state` the sidecar wins: the
+  // refresh timer rewrites it there, while the live entry is frozen at
+  // bind-time.
   if (existing.prs || live.prs) {
     const livePrs = live.prs ?? [];
+    const persistedByNumber = new Map(
+      (existing.prs ?? []).map((p) => [p.number, p]),
+    );
     merged.prs = [
       ...(existing.prs ?? []).filter(
         (p) => !livePrs.some((l) => l.number === p.number),
       ),
-      ...livePrs,
+      ...livePrs.map((l) => {
+        const persisted = persistedByNumber.get(l.number);
+        return persisted?.state !== undefined && persisted.state !== l.state
+          ? { ...l, state: persisted.state }
+          : l;
+      }),
     ];
   }
   return merged;
