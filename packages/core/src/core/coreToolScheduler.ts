@@ -1229,14 +1229,16 @@ interface CoreToolSchedulerOptions {
    * forbidden to execute. An owner that filters either passes its own
    * predicate here.
    *
-   * It is NOT necessarily the predicate behind the startup
-   * `<available_skills>` snapshot, and for subagents it is not: the snapshot
-   * is decided before any declarations exist, so it answers from
-   * configuration. The relation is one-directional — this predicate refines
-   * the snapshot's answer and is never more permissive, but the snapshot can
-   * say yes where this says no. Omitted, the scheduler falls back to the
-   * registry, which is correct for an owner that declares whatever it
-   * registers.
+   * It is NOT the predicate behind the startup `<available_skills>` snapshot,
+   * and the two are independent rather than ordered. The snapshot is decided
+   * before any declarations exist, so it answers from configuration; this
+   * answers from the declarations that were sent. Either can say yes where
+   * the other says no — `tools: ['*'], disallowedTools: ['skill']` announces
+   * at startup and is refused here, while a string list carrying an inline
+   * `skill` declaration is the reverse. Do not reason from one to the other.
+   *
+   * Omitted, the scheduler falls back to the registry, which is correct for
+   * an owner that declares whatever it registers.
    */
   hasSkillTool?: () => boolean;
 }
@@ -5263,28 +5265,9 @@ export class CoreToolScheduler {
           const activatedSkills =
             await skillManager?.matchAndActivateByPaths(candidatePaths);
           if (activatedSkills && activatedSkills.length > 0 && skillManager) {
-            // Subagents share the parent's SkillManager but may run with a
-            // restricted toolsList that excludes SkillTool. Announcing a skill
-            // such a context can't invoke wastes a turn, so gate on whether
-            // SkillTool was DECLARED to the model.
-            //
-            // The registry cannot answer that. `SKILL` is registered
-            // unconditionally — `registerLazy(ToolNames.SKILL, …)` carries no
-            // `forSubAgent` guard — and `prepareTools`' `warmAll()` loads it,
-            // so `getTool(SKILL)` is true even for a subagent whose explicit
-            // `tools` list never names it. Reading the registry made this gate
-            // unconditionally open, which is the state it was written to
-            // prevent: the agent gets a reminder naming a tool absent from its
-            // declarations, and burns a turn discovering that (the invocation
-            // answers `Tool "skill" not found`). Worse, the announcement is
-            // marked consumed on the SHARED Config, so the orchestrator — which
-            // does hold the tool — never learns the skill activated.
-            //
-            // An owner that filters its declarations therefore supplies the
-            // predicate. It is not necessarily the one behind the startup
-            // snapshot: that runs before any declarations exist and answers
-            // from configuration, so it can announce where this gate refuses.
-            // The refinement goes one way — this is never more permissive.
+            // Gate on whether SkillTool was DECLARED to the model — the
+            // registry cannot answer that. See `hasSkillTool` in
+            // `CoreToolSchedulerOptions` for the mechanism and the reason.
             const hasSkillTool = this.hasSkillToolOverride
               ? this.hasSkillToolOverride()
               : !!this.toolRegistry.getTool(ToolNames.SKILL);

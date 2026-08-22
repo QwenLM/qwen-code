@@ -147,6 +147,41 @@ describe('AgentCore skill-gate inputs', () => {
     });
   });
 
+  // The gate and the startup snapshot are INDEPENDENT, not ordered. Both
+  // directions are pinned because the option doc now claims both, and a claim
+  // in a comment with no test behind it is how this PR's earlier rounds went
+  // stale: an ordering was asserted, the mechanism changed, and the assertion
+  // outlived it.
+  describe('gate versus startup snapshot', () => {
+    function snapshot(core: AgentCore): boolean {
+      return (
+        core as unknown as { willHaveSkillTool: () => boolean }
+      ).willHaveSkillTool.call(core);
+    }
+
+    it('announces at startup and refuses at the gate', async () => {
+      // `toolConfig` says the agent inherits everything; the blocklist removes
+      // SKILL from the declarations afterwards.
+      const core = makeCore({
+        tools: ['*'],
+        disallowedTools: [ToolNames.SKILL],
+      });
+      expect(snapshot(core)).toBe(true);
+      expect(gate(core, await declaredNames(core))).toBe(false);
+    });
+
+    it('stays silent at startup and opens at the gate', async () => {
+      // The reverse: `willHaveSkillTool` reads only the STRING entries, so an
+      // inline declaration is invisible to it, while `prepareTools` passes it
+      // through. Neither predicate bounds the other.
+      const core = makeCore({
+        tools: [ToolNames.READ_FILE, { name: ToolNames.SKILL }],
+      });
+      expect(snapshot(core)).toBe(false);
+      expect(gate(core, await declaredNames(core))).toBe(true);
+    });
+  });
+
   describe('executable', () => {
     it('allows everything when no execution allowlist is set', () => {
       const core = makeCore({ tools: ['*'] });

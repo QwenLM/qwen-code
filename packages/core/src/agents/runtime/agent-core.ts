@@ -1751,24 +1751,9 @@ export class AgentCore {
     const scheduler = new CoreToolScheduler({
       config: this.runtimeContext,
       shouldObserveProducer: (callId) => !emittedCallIds.has(callId),
-      // Answered from the declarations actually sent to the model, so every
-      // filter `prepareTools` applies is already accounted for: the
-      // `disallowedTools` blocklist, an inline-only declaration set, and a
-      // tool the permission layer kept out of the registry all reach this
-      // through the same list the model saw. Deriving it from `toolConfig`
-      // instead would be a second copy of those filters, and a stale copy is
-      // exactly the defect this gate exists for.
-      //
-      // The fallback covers the window before the first `prepareTools()`:
-      // `willHaveSkillTool()` is the best answer available then, and it is
-      // the one the startup snapshot already uses.
-      // Answered from `declaredToolNames` above — the very list sent to the
-      // model — and from the execution allowlist, because the two are
-      // separate: a fork keeps the parent's declaration prefix for cache
-      // sharing while narrowing what may actually run. Announcing a skill the
-      // model may see but not execute is the same wasted turn, and it still
-      // consumes the announcement on the shared Config, hiding the activation
-      // from the session that can act on it.
+      // `declaredToolNames` is the batch's own list, computed above from the
+      // `toolsList` sent to the model. See `CoreToolSchedulerOptions.hasSkillTool`
+      // for why the registry cannot answer this and what the predicate owes.
       hasSkillTool: () => this.canInvokeSkill(declaredToolNames),
       outputUpdateHandler: (callId, outputChunk) => {
         // Shell liveness heartbeats have no subagent consumer; broadcasting
