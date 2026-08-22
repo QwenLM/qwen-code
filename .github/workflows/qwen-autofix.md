@@ -32,26 +32,33 @@ reached again.
 
 ### Steps that moved out, not just their prose
 
-`review-address` · `Push and report` was 626 lines of inline shell — one of
-the three largest blocks in the file — and its body now lives in
-`.github/scripts/autofix-push-and-report.sh`. The YAML keeps the step's `if:`
-and `env:` (when it runs, and what reaches it) and invokes the script.
+`review-address` · `Push and report` was 626 lines of inline shell — ~41 KB,
+the third-largest `run:` body in the file after
+`Scan for PRs with new feedback` and `Prepare branch and feedback` — and its
+body now lives in `.github/scripts/autofix-push-and-report.sh`. The YAML keeps
+the step's `if:` and `env:`: when it runs, and what reaches it.
 
-Moving a step out moves its trust problem with it. By the time this step runs,
-the agent and the verification gate have executed branch code on this host, so
-the copy under `${GITHUB_WORKSPACE}` is branch-controlled. The step therefore
-runs the trusted-base copy staged in `${RUNNER_TEMP}` before any of that, after
-checking that its digest — recorded in `GITHUB_OUTPUT` before any branch code
-runs, so a disk write after staging cannot reach it — still matches, that the
-staged path is a regular file, and with both reads bounded so a planted FIFO is
-a refusal rather than a hang. The resanitize consumers and the gate runner
-verify a digest recorded in `GITHUB_OUTPUT` before executing — but with two
-opens (check, then execute) and no bounded reads yet, not the single-open,
-type-checked shape above.
+**The file is never executed from disk.** The stage step reads it from the
+trusted-base checkout, before any branch code has run, and passes the text
+through step output; the step runs those bytes. That is the delivery the inline
+block already had — the workflow file's own bytes, chosen by GitHub, not by
+anything on the runner — and the one `upsert-deferred-issue.sh` uses.
 
-`docs/design/autofix-gate-runner-isolation.md` removes that staging entirely:
-once the step is its own `publish` job, it checks out the trusted base and
-never executes branch code, so the script is trustworthy where it lies.
+This matters because `Push and report` holds the PAT and runs _after_ the agent
+and the verification gate have executed branch code on this host. A copy staged
+under `${RUNNER_TEMP}` would be theirs to swap, which is why the staged scripts
+that do live on disk (`resanitize-git-config.sh`, the gate runner) each carry a
+digest the invoking step re-checks. Content delivery removes the object those
+digests exist to protect: nothing to stage, nothing to digest, nothing to type
+check, no second open, and no check→use window between the steps. The
+qualifier that makes it hold is that a step output is fixed when its step ends
+— later steps read the recorded value, so a disk write after staging cannot
+change what arrives here. It is not a claim that the value is unreachable
+while the stage step is still running.
+
+`docs/design/autofix-gate-runner-isolation.md` finishes the job: once this step
+is its own `publish` job, checking out the trusted base and never executing
+branch code, the script can simply be run from the checkout.
 
 ## How the pointers work
 

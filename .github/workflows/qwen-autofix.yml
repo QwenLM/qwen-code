@@ -3831,15 +3831,6 @@ jobs:
           cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"
           cp .github/scripts/run-autofix-review-verification.sh "${RUNNER_TEMP}/run-autofix-review-verification.sh"
           cp .github/scripts/resanitize-git-config.sh "${RUNNER_TEMP}/resanitize-git-config.sh"
-          # Absent from the trusted base until the PR that adds it merges, and
-          # this step runs under -e: tolerate the miss here and let the
-          # invoking step's empty-digest guard fail closed with a message,
-          # rather than killing the round at staging time. Any cp failure
-          # removes the destination, so a PARTIAL write (ENOSPC/EIO on the
-          # shared pool) is recorded as NO digest — fail closed — instead of
-          # a truncated body executing in the PAT-bearing step. Same rule as
-          # upsert-deferred-issue.sh below.
-          cp .github/scripts/autofix-push-and-report.sh "${RUNNER_TEMP}/autofix-push-and-report.sh" 2> /dev/null || rm -f "${RUNNER_TEMP}/autofix-push-and-report.sh"
           # The staged copies' trusted-base provenance holds at cp time only:
           # RUNNER_TEMP is writable by the branch/agent code later steps run
           # on this host, so record each digest in GITHUB_OUTPUT — expression
@@ -3853,7 +3844,6 @@ jobs:
           # gate itself).
           echo "resanitize_sha256=$(sha256sum "${RUNNER_TEMP}/resanitize-git-config.sh" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
           echo "verify_runner_sha256=$(sha256sum "${RUNNER_TEMP}/run-autofix-review-verification.sh" | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
-          echo "push_report_sha256=$(sha256sum "${RUNNER_TEMP}/autofix-push-and-report.sh" 2> /dev/null | cut -d' ' -f1)" >> "${GITHUB_OUTPUT}"
           # The upsert script travels as CONTENT, not as a staged copy: it
           # runs in a clean child that reads it from this expression-context
           # output, so there is no agent-writable copy to protect and no
@@ -3868,6 +3858,20 @@ jobs:
             # `-z` guard, which skips with "stage step never ran".
             cat .github/scripts/upsert-deferred-issue.sh 2> /dev/null || true
             echo "${_upsert_delim}"
+          } >> "${GITHUB_OUTPUT}"
+          # 'Push and report' travels the same way and for the same reason: it
+          # is the PAT-bearing step, it runs after the agent and the gate have
+          # executed branch code on this host, and a copy staged on disk would
+          # be theirs to swap. As content there is nothing to stage, digest,
+          # type-check or re-open, and no check→use window between those steps.
+          _push_report_delim="EOF_$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+          {
+            echo "push_report_src<<${_push_report_delim}"
+            # Absent from the trusted base until this PR merges; same rule as
+            # the upsert capture above — an empty value reaches the consumer's
+            # own `-z` guard, which fails closed with a message.
+            cat .github/scripts/autofix-push-and-report.sh 2> /dev/null || true
+            echo "${_push_report_delim}"
           } >> "${GITHUB_OUTPUT}"
           echo "trusted_path=${PATH}" >> "${GITHUB_OUTPUT}"
           # The agent step runs AFTER prepare checks out the PR branch, so
@@ -5639,117 +5643,28 @@ jobs:
           # validated a verdict; the marker then stays absent.
           AUDIT_VERDICT: '${{ steps.final_verify.outputs.audit_verdict }}'
           MEASURED_AT: '${{ steps.prepare.outputs.measured_at }}'
-          PUSH_REPORT_SHA256: '${{ steps.stage.outputs.push_report_sha256 }}'
+          PUSH_REPORT_SRC: '${{ steps.stage.outputs.push_report_src }}'
         run: |-
-          # The workspace copy of this script is branch-controlled by now —
-          # the agent and the verification gate have already executed branch
-          # code on this host. Run the trusted-base copy staged before any of
-          # that, and prove it is the same bytes first: the digest rides step
-          # output (expression context), which a disk write after staging
-          # cannot reach.
-          #
-          # The whole verify-and-run sequence lives in ONE env -i clean
-          # child (this file's pattern for privileged work): the step shell
-          # inherits every $GITHUB_ENV plant earlier steps left — including
-          # BASH_FUNC_* imports, which bash loads as functions before line 1,
-          # ahead of PATH — so no pinning in THIS shell can defend a bare
-          # word end to end (even `exit` is shadowable), while the clean
-          # child imports nothing. Inside it the staged path is opened
-          # ONCE: the digest is computed over the bytes read and those same
-          # bytes execute, so a cross-step watcher cannot swap the file
-          # between a check and a later execution read. The type check and
-          # bounded reads make a planted FIFO or directory a refusal rather
-          # than a hang until timeout-minutes.
-          #
-          # R6-8 liveness: LD_* cannot be enumerated — LD_TRACE_LOADED_OBJECTS
-          # is presence-tested by the loader (even an empty assignment leaves
-          # it on), and it fires at the execve of /usr/bin/env itself: ld.so
-          # prints the library list and exits 0 without ever running the
-          # heredoc body. This child has no downstream detector the other
-          # env -i launches have, so the plant would turn the round
-          # silent-green — nothing pushed, no report posted. The body prints
-          # a sentinel first; the step captures the child's merged output,
-          # re-emits it, and refuses loud when the sentinel is absent
-          # (builtins-only inspection, same rationale as the upsert twin),
-          # then propagates the child's exit status.
-          GATE_OUT="$(
-          LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH= \
-            /usr/bin/env -i \
-            PATH="${TRUSTED_PATH}" \
-            HOME="${HOME}" \
-            RUNNER_TEMP="${RUNNER_TEMP}" \
-            GITHUB_RUN_ID="${GITHUB_RUN_ID}" \
-            GITHUB_STEP_SUMMARY="${GITHUB_STEP_SUMMARY}" \
-            PUSH_REPORT_SHA256="${PUSH_REPORT_SHA256}" \
-            GITHUB_TOKEN="${GITHUB_TOKEN}" \
-            OUTCOME="${OUTCOME}" \
-            CONFLICT="${CONFLICT}" \
-            NEWEST="${NEWEST}" \
-            EFFECTIVE_ROUND="${EFFECTIVE_ROUND}" \
-            ROUND_START="${ROUND_START}" \
-            MODEL="${MODEL}" \
-            CHECKED_OUT_HEAD="${CHECKED_OUT_HEAD}" \
-            VERIFIED_HEAD="${VERIFIED_HEAD}" \
-            RESANITIZE_SHA256="${RESANITIZE_SHA256}" \
-            UPSERT_SRC="${UPSERT_SRC}" \
-            TRUSTED_PATH="${TRUSTED_PATH}" \
-            GROWTH_BASE_NEW="${GROWTH_BASE_NEW}" \
-            GROWTH_BASE_SRC="${GROWTH_BASE_SRC}" \
-            GROWTH_BASE_TEST="${GROWTH_BASE_TEST}" \
-            GROWTH_BASE_WIN="${GROWTH_BASE_WIN}" \
-            GROWTH_SRC="${GROWTH_SRC}" \
-            GROWTH_TEST="${GROWTH_TEST}" \
-            CRITICAL_ONLY_GROWTH="${CRITICAL_ONLY_GROWTH}" \
-            KISS_AUDIT="${KISS_AUDIT}" \
-            AUDIT_VERDICT="${AUDIT_VERDICT}" \
-            MEASURED_AT="${MEASURED_AT}" \
-            REPO="${REPO}" \
-            WORKDIR="${WORKDIR}" \
-            PR="${PR}" \
-            BRANCH="${BRANCH}" \
-            ISSUE="${ISSUE}" \
-            ROUND="${ROUND}" \
-            MAX_ROUNDS="${MAX_ROUNDS}" \
-            WINDOW="${WINDOW}" \
-            HEAD_REPO="${HEAD_REPO}" \
-            AUTOFIX_BOT="${AUTOFIX_BOT}" \
-            TAKEOVER_LABEL="${TAKEOVER_LABEL}" \
-            TAKEOVER_COMMAND="${TAKEOVER_COMMAND}" \
-            TAKEOVER_MAX_ROUNDS="${TAKEOVER_MAX_ROUNDS}" \
-            bash --norc <<'AUTOFIX_PUSH_REPORT_GATE' 2>&1
-          set -eo pipefail
-          printf '%s\n' "__push_gate_live__"
-          if [[ -z "${PUSH_REPORT_SHA256}" ]]; then
-            echo '::error::the stage step recorded no digest for autofix-push-and-report.sh — refusing to run it.'
+          # The body travels as CONTENT, not as a file on disk: the stage step
+          # captured it from the trusted-base checkout before any branch code
+          # ran, and it arrives here through step output — expression context,
+          # which a disk write on this shared host cannot reach. That is the
+          # same delivery the inline block this replaced had, and the same one
+          # upsert-deferred-issue.sh uses. With no agent-writable copy there is
+          # nothing to stage, digest, type-check or re-open, and no check→use
+          # window for a co-resident watcher to race.
+          if [[ -z "${PUSH_REPORT_SRC}" ]]; then
+            echo '::error::the stage step captured no push-and-report body — refusing to push or report.'
             exit 1
           fi
-          if [[ "$(timeout 10 stat -c '%F' "${RUNNER_TEMP}/autofix-push-and-report.sh" 2> /dev/null)" != 'regular file' ]]; then
-            echo '::error::the staged autofix-push-and-report.sh is not a regular file — refusing to run it.'
-            exit 1
-          fi
-          # Single open: capture the staged bytes once (the trailing-newline
-          # marker keeps them byte-identical), verify the digest of exactly
-          # those bytes, and run those same bytes — no second read-open for
-          # a watcher to race.
-          push_report_body="$(timeout 30 cat "${RUNNER_TEMP}/autofix-push-and-report.sh"; printf 'x')"
-          push_report_body="${push_report_body%x}"
-          push_report_digest="$(printf '%s' "${push_report_body}" | sha256sum | cut -d' ' -f1)"
-          if [[ "${push_report_digest}" != "${PUSH_REPORT_SHA256}" ]]; then
-            echo '::error::the staged autofix-push-and-report.sh does not match the digest the stage step recorded — refusing to run it.'
-            exit 1
-          fi
-          bash --norc -c "${push_report_body}"
-          AUTOFIX_PUSH_REPORT_GATE
-          )" && GATE_STATUS=0 || GATE_STATUS=$?
-          printf '%s\n' "${GATE_OUT}"
-          if [[ "${GATE_OUT}" != *'__push_gate_live__'* ]]; then
-            echo '::error::the push-and-report gate child never started (loader trace mode or exec failure) — the round neither pushed nor reported.'
-            exit 1
-          fi
-          if [[ "${GATE_STATUS}" == 0 ]]; then
-            echo 'round_reported=true' >> "${GITHUB_OUTPUT}"
-          fi
-          exit "${GATE_STATUS}"
+          bash --norc -c "${PUSH_REPORT_SRC}"
+          # Written last and only on success. 'Finalize autofix status comment'
+          # reads it to tell "this round published its report" from "the step
+          # no-oped": a loader plant that kills this shell at execve exits 0
+          # with nothing written, and the finalize step must not then claim a
+          # report that never posted. The step shell runs under -eo pipefail,
+          # so a failing body never reaches this line.
+          echo 'round_reported=true' >> "${GITHUB_OUTPUT}"
 
       - name: 'Report dry-run / failure'
         if: |-

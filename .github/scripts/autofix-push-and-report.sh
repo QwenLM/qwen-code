@@ -1,34 +1,44 @@
 #!/usr/bin/env bash
 # Push the round's commit to the PR head and post the round report.
 #
-# Extracted verbatim from the 'Push and report' step of review-address in
-# .github/workflows/qwen-autofix.yml, which had grown to 626 lines of inline
-# shell inside a workflow file already at 463,004 bytes — 90% of GitHub's
-# 500 KB start-runs limit and 98% of the repo's own 470,000-byte gate (see
-# .github/scripts/check-workflow-size.sh — past GitHub's limit runs silently
-# stop starting). It is also the step that
-# docs/design/autofix-gate-runner-isolation.md moves into its own credentialed
-# `publish` job; carrying it as a file is what makes that move a small diff
-# instead of a 626-line relocation.
+# The body below is the 'Push and report' step of review-address in
+# .github/workflows/qwen-autofix.yml, byte-identical to the inline block it
+# came from: 626 lines, ~41 KB. The file it left is within a few KB of the
+# repo's 470,000-byte gate, and GitHub stops starting runs past 512,000 without
+# saying so (.github/scripts/check-workflow-size.sh). No absolute size is
+# quoted here on purpose — main moves it every day, and a number that decays is
+# how this comment earned three review rounds. It is also
+# the step docs/design/autofix-gate-runner-isolation.md moves into its own
+# credentialed `publish` job — carrying it as a file makes that a small diff.
 #
-# TRUST: this runs in the same job as the agent and the verification gate,
-# i.e. after branch code has executed on this host, so the copy under
-# ${GITHUB_WORKSPACE} is branch-controlled by then. The caller must invoke the
-# trusted-base copy staged in ${RUNNER_TEMP} and verify its digest first — see
-# 'Stage trusted schema gate and agent runner'. When this step becomes the
-# `publish` job, that staging disappears: the job checks out the trusted base
-# and never executes branch code, so this file is trustworthy where it lies.
+# DELIVERY: this file is never staged, copied or executed from disk at run
+# time. The stage step reads it from the trusted-base checkout, before any
+# branch code has run, and passes the TEXT through step output; 'Push and
+# report' runs those bytes. That is the delivery the inline block had — the
+# workflow file's own bytes — and the one upsert-deferred-issue.sh uses. With
+# no agent-writable copy on this shared host there is nothing to digest, type
+# check or re-open, and no check→use window between those steps. Keep it that
+# way: `bash <path>` here would hand the PAT-bearing step to whatever the
+# branch left at that path.
+#
+# INPUTS: the body runs with the step's environment, exactly as the inline
+# block did — the `env:` bindings on 'Push and report' plus review-address's
+# job-level `env:`. There is deliberately no enumeration here: the previous one
+# went stale within a round (it omitted ISSUE, TAKEOVER_LABEL,
+# TAKEOVER_COMMAND and TAKEOVER_MAX_ROUNDS), and a list that can rot is worse
+# than the two places that cannot.
 #
 # GitHub runs `run:` blocks as `bash --noprofile --norc -eo pipefail`, so the
 # same flags are set here — deliberately without `-u`: the body reads optional
 # step outputs unguarded, and adding `-u` would change behaviour rather than
 # preserve it.
 #
-# The body below is byte-identical to the YAML block it came from. Embedded
-# shell in a workflow is not linted (actionlint does not map it), so moving it
-# into a file exposes it to `scripts/lint.js --shellcheck` for the first time.
-# The directive keeps the move faithful; each code is suppressed for a reason,
-# and none of them should be read as "this file is exempt from shellcheck":
+# SHELLCHECK: `scripts/lint.js --shellcheck` adds `--enable=all` on top of
+# `--severity=style`, which every script here trips (26 findings for
+# run-autofix-review-verification.sh, 9 for upsert-deferred-issue.sh, 32 here)
+# and which the lane cannot fail on — its pipeline ends in `sed`. This file is
+# clean at the lane's severity WITHOUT `--enable=all`, which is the bar its
+# siblings meet, and the three codes below are what that bar reports:
 #   SC1007 — the empty prefix assignments before the clean-child launches
 #            (`VAR= VAR= cmd`) clear those variables for one command. That is
 #            the intent, not a mistyped assignment. Spelled generically here
@@ -42,17 +52,6 @@
 #            a behaviour change rather than hiding inside a move.
 # shellcheck disable=SC1007,SC2016,SC2155
 set -eo pipefail
-
-# Required from the caller's env (all already step-output values, none read
-# from disk): GITHUB_TOKEN, OUTCOME, CONFLICT, NEWEST, EFFECTIVE_ROUND,
-# ROUND_START, MODEL, CHECKED_OUT_HEAD, VERIFIED_HEAD, RESANITIZE_SHA256,
-# UPSERT_SRC, TRUSTED_PATH, GROWTH_BASE_NEW, GROWTH_BASE_SRC,
-# GROWTH_BASE_TEST, GROWTH_BASE_WIN, GROWTH_SRC, GROWTH_TEST,
-# CRITICAL_ONLY_GROWTH, KISS_AUDIT, AUDIT_VERDICT, MEASURED_AT — plus the
-# job-level REPO, WORKDIR, PR, BRANCH, ISSUE, ROUND, WINDOW, MAX_ROUNDS,
-# HEAD_REPO, the workflow-level AUTOFIX_BOT, TAKEOVER_LABEL, TAKEOVER_COMMAND
-# and TAKEOVER_MAX_ROUNDS, and the runner defaults HOME, RUNNER_TEMP,
-# GITHUB_RUN_ID and GITHUB_STEP_SUMMARY.
 
 # gh has its own $GITHUB_ENV-injectable channels: pin the host and
 # drop any planted token BEFORE the identity check below, so a
