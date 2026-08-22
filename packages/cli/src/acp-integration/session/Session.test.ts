@@ -7790,13 +7790,79 @@ describe('Session', () => {
       const preservedUserEntries = vi
         .mocked(mockChat.addHistory)
         .mock.calls.map(([entry]) => entry)
-        .filter(
-          (entry) => (entry as { role?: string }).role === 'user',
-        );
+        .filter((entry) => (entry as { role?: string }).role === 'user');
       expect(preservedUserEntries.length).toBeGreaterThan(0);
       const preservedJson = JSON.stringify(preservedUserEntries);
       expect(preservedJson).not.toContain('UklGRgPROBE==');
       expect(preservedJson).not.toContain('audio/wav');
+      expect(preservedJson).toContain('transcription was cancelled');
+    });
+
+    it('strips raw images instead of persisting them when cancelled during the audio bridge', async () => {
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+        id: 'qwen3.7-plus',
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      Object.assign(mockSettings.merged as Record<string, unknown>, {
+        voiceModel: 'qwen3-asr-flash',
+        env: { OPENAI_API_KEY: 'test-key' },
+      });
+      let releaseTranscription!: () => void;
+      const transcriptionGate = new Promise<void>((resolve) => {
+        releaseTranscription = resolve;
+      });
+      transcribeVoiceAudioSpy.mockImplementation(async () => {
+        await transcriptionGate;
+        return 'late transcript';
+      });
+
+      try {
+        const prompt = session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'listen and look' },
+            {
+              type: 'audio',
+              mimeType: 'audio/wav',
+              data: 'UklGRgPROBE==',
+            },
+            {
+              type: 'image',
+              mimeType: 'image/png',
+              data: 'iVBORPROBE==',
+            },
+          ],
+        });
+        await vi.waitFor(() =>
+          expect(transcribeVoiceAudioSpy).toHaveBeenCalledTimes(1),
+        );
+        // Cancel while the transcription is still in flight: the abort return
+        // in #applyBridgeConversionsIfNeeded must fail-close BOTH media kinds
+        // — audio as the cancellation marker, images stripped exactly as the
+        // post-vision-bridge abort path does (they never reached the bridge
+        // or the targetSupportsImage clamp, so persisting them would bypass
+        // the inline-media budget and replay unbridged on a continuation).
+        await session.cancelPendingPrompt();
+        releaseTranscription();
+        await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+      } finally {
+        releaseTranscription();
+      }
+
+      expect(runVisionBridgeSpy).not.toHaveBeenCalled();
+      const preservedUserEntries = vi
+        .mocked(mockChat.addHistory)
+        .mock.calls.map(([entry]) => entry)
+        .filter((entry) => (entry as { role?: string }).role === 'user');
+      expect(preservedUserEntries.length).toBeGreaterThan(0);
+      const preservedJson = JSON.stringify(preservedUserEntries);
+      expect(preservedJson).not.toContain('UklGRgPROBE==');
+      expect(preservedJson).not.toContain('audio/wav');
+      expect(preservedJson).not.toContain('iVBORPROBE==');
+      expect(preservedJson).not.toContain('image/png');
       expect(preservedJson).toContain('transcription was cancelled');
     });
 
@@ -14148,7 +14214,10 @@ describe('Session', () => {
           expect(
             mockChatRecordingService.recordMidTurnUserMessage,
           ).toHaveBeenCalledWith(
-            [abortedMidTurnPart, { text: '[Attachment could not be processed]' }],
+            [
+              abortedMidTurnPart,
+              { text: '[Attachment could not be processed]' },
+            ],
             'inspect this image',
           );
           expect(

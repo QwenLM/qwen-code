@@ -1344,7 +1344,11 @@ export const useGeminiStream = (
       timestamp: number,
       signal: AbortSignal,
       allowFullTurnModel = true,
-    ): Promise<{ parts: PartListUnion | null; shouldProceed: boolean }> => {
+    ): Promise<{
+      parts: PartListUnion | null;
+      shouldProceed: boolean;
+      preOverrideParts?: PartListUnion;
+    }> => {
       if (parts === null || !hasImageParts(parts)) {
         return { parts, shouldProceed: true };
       }
@@ -1374,6 +1378,11 @@ export const useGeminiStream = (
               },
             ],
             shouldProceed: true,
+            // The images only fail closed because of this one-shot override.
+            // Retry drops the override, so it has to re-derive from these
+            // parts instead of resending the marker text forever (same
+            // invariant as the audio fail-closed branch).
+            preOverrideParts: parts,
           };
         }
         return { parts, shouldProceed: true };
@@ -1451,6 +1460,10 @@ export const useGeminiStream = (
           },
         ],
         shouldProceed: true,
+        // The bridge substituted marker text for the images; keep the
+        // originals so Retry (Ctrl+Y) can re-bridge once the vision bridge
+        // recovers (same invariant as the audio bridge-failure capture).
+        preOverrideParts: parts,
       };
     },
     [addItem, config],
@@ -1671,7 +1684,11 @@ export const useGeminiStream = (
       return {
         ...visionResult,
         modelOverrideResolutionFailed,
-        preOverrideParts,
+        // The audio capture (taken before any substitution) already holds the
+        // pristine media when present; otherwise a fail-closed vision branch
+        // supplies the pristine images so Retry re-derives from them instead
+        // of resending marker text.
+        preOverrideParts: preOverrideParts ?? visionResult.preOverrideParts,
         mediaRouted,
       };
     },
@@ -3989,7 +4006,12 @@ export const useGeminiStream = (
                   }
                 : { queryToSend: null, shouldProceed: false }
               : submitType === SendMessageType.Retry
-                ? hasAudioParts(query)
+                ? // Re-bridge any media the stored payload still carries: a
+                  // fail-closed retry drops the one-shot override, and pristine
+                  // media captured as preOverrideParts must flow through the
+                  // bridge again (audio re-transcribes, images re-route or
+                  // re-describe) instead of reaching the session model raw.
+                  hasAudioParts(query) || hasImageParts(query)
                   ? await applyBridgeConversionsIfNeeded(
                       query,
                       userMessageTimestamp,
@@ -4004,9 +4026,9 @@ export const useGeminiStream = (
                         queryToSend: parts,
                         shouldProceed,
                         // Carry the fresh pre-override parts so a retry whose
-                        // re-bridge fails again stores the original audio in
+                        // re-bridge fails again stores the original media in
                         // lastPromptRef (not the marker text), keeping the
-                        // recording retryable instead of stranded.
+                        // recording/image retryable instead of stranded.
                         preOverrideParts,
                         mediaRouted,
                       }),

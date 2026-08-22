@@ -1160,6 +1160,156 @@ describe('useGeminiStream', () => {
     ]);
   });
 
+  it('retries the original image after an inline override fails closed', async () => {
+    const imagePart = {
+      inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' },
+    };
+    mockConfig.getModel = vi.fn(() => 'session-model');
+    mockConfig.getContentGeneratorConfig = vi.fn(
+      () => ({ authType: AuthType.QWEN_OAUTH }) as never,
+    );
+    mockConfig.getAvailableModelsForAuthType = vi.fn(
+      () => [{ id: 'text-model', authType: AuthType.QWEN_OAUTH }] as never,
+    );
+    mockConfig.getBaseLlmClient = vi.fn(
+      () =>
+        ({
+          resolveForModel: vi.fn().mockResolvedValue({
+            contentGeneratorConfig: { modalities: {} },
+          }),
+        }) as never,
+    );
+    mockHandleSlashCommand.mockResolvedValue({
+      type: 'submit_prompt',
+      content: [{ text: 'describe' }, imagePart],
+      modelOverride: 'text-model',
+    });
+    const { result, mockSendMessageStream } = renderTestHook();
+    mockSendMessageStream
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'partial response',
+          };
+          throw new Error('stream failed');
+        })(),
+      )
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+    await act(async () => {
+      await result.current.submitQuery('/model text-model describe');
+    });
+    expect(JSON.stringify(mockSendMessageStream.mock.calls[0]?.[0])).toContain(
+      'Image was not sent',
+    );
+
+    await act(async () => {
+      await result.current.retryLastPrompt();
+    });
+
+    // The image only failed closed because of the one-shot override, and the
+    // retry drops it: the pristine image stored as preOverrideParts has to be
+    // re-derived (re-bridged/re-routed) instead of resending the marker text
+    // forever — the same invariant the audio fail-closed branch guarantees.
+    expect(mockRunVisionBridge).not.toHaveBeenCalled();
+    expect(mockSendMessageStream.mock.calls[1]?.[0]).toEqual([
+      { text: 'describe' },
+      imagePart,
+    ]);
+    expect(
+      JSON.stringify(mockSendMessageStream.mock.calls[1]?.[0]),
+    ).not.toContain('Image was not sent');
+    expect(
+      mockSendMessageStream.mock.calls[1]?.[3]?.modelOverride,
+    ).toBeUndefined();
+  });
+
+  it('re-bridges the pristine image when a vision-bridge failure is retried', async () => {
+    const imagePart = {
+      inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' },
+    };
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: vi.fn(() => ({})),
+      getDefaultVisionBridgeModel: () => ({ id: 'vision-model' }),
+    });
+    mockRunVisionBridge
+      .mockResolvedValueOnce({
+        applied: false,
+        status: 'failed',
+        convertedCount: 0,
+        omittedCount: 1,
+        modelId: 'vision-model',
+        egressOccurred: false,
+        error: 'bridge unavailable',
+      })
+      .mockResolvedValueOnce({
+        applied: true,
+        status: 'ok',
+        parts: [{ text: 'describe' }, { text: '[image description]' }],
+        transcript: '[image description]',
+        convertedCount: 1,
+        omittedCount: 0,
+        modelId: 'vision-model',
+        egressOccurred: true,
+      });
+    mockHandleSlashCommand.mockResolvedValue({
+      type: 'submit_prompt',
+      content: [{ text: 'describe' }, imagePart],
+    });
+    const { result, mockSendMessageStream } = renderTestHook();
+    mockSendMessageStream
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'partial response',
+          };
+          throw new Error('stream failed');
+        })(),
+      )
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+    await act(async () => {
+      await result.current.submitQuery('/describe describe');
+    });
+    expect(JSON.stringify(mockSendMessageStream.mock.calls[0]?.[0])).toContain(
+      'Vision bridge could not interpret',
+    );
+
+    await act(async () => {
+      await result.current.retryLastPrompt();
+    });
+
+    // The bridge failure stored the pristine image as preOverrideParts; the
+    // retry must re-bridge it (the bridge recovered here) instead of passing
+    // raw images to a session model whose route slimming would silently
+    // placeholder-substitute them.
+    expect(mockRunVisionBridge).toHaveBeenCalledTimes(2);
+    expect(mockRunVisionBridge.mock.calls[1]?.[0]?.parts).toEqual([
+      { text: 'describe' },
+      imagePart,
+    ]);
+    expect(mockSendMessageStream.mock.calls[1]?.[0]).toEqual([
+      { text: 'describe' },
+      { text: '[image description]' },
+    ]);
+  });
+
   it('rechecks retained audio after clearing an inline override on retry', async () => {
     const audioPart = {
       inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
@@ -5318,7 +5468,9 @@ describe('useGeminiStream', () => {
       .map(([item]) => item)
       .filter(
         (item) =>
-          item && typeof item === 'object' && (item as { type?: string }).type === 'user',
+          item &&
+          typeof item === 'object' &&
+          (item as { type?: string }).type === 'user',
       );
     expect(userItems.length).toBeGreaterThan(0);
   });
@@ -5840,7 +5992,6 @@ describe('useGeminiStream', () => {
     // The retry channel is inert now: nothing is re-sent.
     expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
   });
-
 
   it('rechecks earlier drained audio against a later full-turn vision route', async () => {
     const audioPrompt = 'listen @/tmp/recording.wav';
@@ -12335,7 +12486,9 @@ describe('useGeminiStream', () => {
             '<task-notification>completed</task-notification>',
             SendMessageType.Notification,
             'notification-turn-prompt-id',
-            { notificationDisplayText: 'Background shell "npm test" completed.' },
+            {
+              notificationDisplayText: 'Background shell "npm test" completed.',
+            },
           );
         });
 

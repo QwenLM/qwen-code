@@ -7250,12 +7250,12 @@ export class Session implements SessionContext {
             )
           : resolved.parts;
       // Abort arriving during the awaited bridge/conversion: substitute the
-      // fail-closed cancellation marker for any still-raw audio (mirrors
-      // #applyBridgeConversionsIfNeeded) so the preserved history never
-      // carries unbridged media.
+      // fail-closed cancellation marker for any still-raw audio and strip any
+      // still-raw images (mirrors #applyBridgeConversionsIfNeeded) so the
+      // preserved history never carries unbridged media.
       if (abortSignal.aborted) {
         finalized = replaceAudioPartsWithUnavailable(
-          resolved.parts,
+          splitImageParts(resolved.parts).nonImageParts,
           'transcription was cancelled',
         );
       }
@@ -12214,10 +12214,14 @@ export class Session implements SessionContext {
     // placeholder-substituted on a text-only route (silent content loss) or
     // bloat the saved session (up to ~53 MB of base64 per cancelled turn).
     // Substitute the fail-closed cancellation marker instead, keeping any
-    // transcripts the bridge already completed.
+    // transcripts the bridge already completed. Still-raw images are stripped
+    // exactly as the post-vision-bridge abort path does: they never reached
+    // the bridge or the `targetSupportsImage` clamp below, so persisting them
+    // would bypass the inline-media budget and replay unbridged on a
+    // continuation.
     if (abortSignal.aborted) {
       return replaceAudioPartsWithUnavailable(
-        parts,
+        splitImageParts(parts).nonImageParts,
         'transcription was cancelled',
       );
     }
