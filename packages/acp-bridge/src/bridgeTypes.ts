@@ -6,11 +6,16 @@
 
 import type {
   ApprovalMode,
+  GoalControlRequest,
   GoalSnapshotV2,
+  GoalStateResponse,
   SessionGroupPresetColor,
+  TurnResultCode,
+  TurnResultErrorPayload,
 } from '@qwen-code/qwen-code-core';
 import type {
   CancelNotification,
+  ContentBlock,
   LoadSessionResponse,
   PromptRequest,
   PromptResponse,
@@ -34,6 +39,7 @@ import type {
   SessionArtifactMutationResult,
   SessionArtifactsEnvelope,
 } from './sessionArtifacts.js';
+import type { SessionAttachmentReference } from './sessionAttachments.js';
 import type {
   ServeSessionContextStatus,
   ServeSessionHooksStatus,
@@ -55,6 +61,53 @@ export interface RewindSnapshotInfo {
   timestamp: string;
   diffStats: { filesChanged: number; insertions: number; deletions: number };
 }
+
+/**
+ * An ACP child's lifetime V8 old-generation high-water marks, self-reported
+ * through the `workspaceResource` extMethod.
+ *
+ * Observational. Nothing here sizes a child, refuses a spawn, or widens
+ * `limits.memory.enforced` — these exist so a future child-heap policy can be
+ * judged against real workloads instead of against a refusal count that cannot
+ * answer whether a child would survive a smaller ceiling.
+ *
+ * Every figure covers the **old generation**, the thing
+ * `--max-old-space-size` actually bounds, and not `old_space` alone: a child
+ * can OOM against its ceiling with `old_space` at 3 MB while
+ * `large_object_space` holds everything.
+ */
+export interface ChildHeapReport {
+  /** High-water committed old-generation bytes. Rises with the ceiling the
+   *  child was given, so read it as an upper bound on what the workload needs
+   *  rather than as its requirement. */
+  peakOldGenerationBytes: number;
+  /** High-water old-generation bytes still live after a major GC, i.e. what
+   *  the workload retains. Independent of the ceiling, which is what makes it
+   *  the figure able to say a child cannot fit one. An upper bound rather than
+   *  an exact live set: GC entries arrive asynchronously, so allocation
+   *  between the collection and the read is counted. 0 when no major GC has
+   *  been observed — not a measured zero. */
+  peakLiveSetBytes: number;
+  /** High-water `total_heap_size`. A cross-check needing no space name; it
+   *  includes the young generation, so it cannot localise a missing space. */
+  peakTotalHeapBytes: number;
+  /** Major collections over the child's lifetime. */
+  majorGcCount: number;
+  /** Total major-GC pause time in ms — the cost side of a smaller ceiling. */
+  majorGcMs: number;
+  /** Heap spaces the child could classify as neither old- nor young-
+   *  generation. Non-empty means the sums above are incomplete and must not be
+   *  read as a full measurement. */
+  unclassifiedSpaceNames: string[];
+}
+
+export type BridgePromptContentBlock =
+  | ContentBlock
+  | SessionAttachmentReference;
+
+export type BridgePromptRequest = Omit<PromptRequest, 'prompt'> & {
+  prompt: BridgePromptContentBlock[];
+};
 
 export interface RewindRequest {
   promptId: string;
@@ -644,6 +697,23 @@ export interface BridgeSessionSummary {
   worktree?: { slug: string; path: string; branch: string };
   /** Present when the session was created with a new branch. */
   branch?: { name: string; baseBranch: string };
+  /**
+   * GitHub PRs bound to the session, in binding order (last = latest). A
+   * session can produce several PRs (stacked or follow-up work).
+   */
+  prs?: SessionPrInfo[];
+}
+
+/**
+ * In-memory equality token for daemon-observed session-catalog changes.
+ * `generation` is unique to a bridge instance; `revision` increases
+ * monotonically within it. The only supported operation is equality over
+ * the whole pair — no revision arithmetic, no cross-generation comparison,
+ * and conservative extra increments are allowed.
+ */
+export interface BridgeSessionCatalogVersion {
+  readonly generation: string;
+  readonly revision: number;
 }
 
 /**
@@ -662,8 +732,16 @@ export interface BridgeSessionGoal {
   } | null;
 }
 
+export interface SessionPrInfo {
+  number: number;
+  url: string;
+}
+
 export interface SessionMetadataUpdate {
   displayName?: string;
+  pr?: SessionPrInfo;
+  /** Full binding list after the update (return value only; ignored on input). */
+  prs?: SessionPrInfo[];
 }
 
 export interface CloseSessionOpts {
@@ -765,6 +843,8 @@ export interface BridgeClientRequestContext {
 }
 
 export const DAEMON_MODEL_PROMPT_META_KEY = 'qwen.daemon.modelPrompt';
+export const DAEMON_ATTACHMENT_REFERENCES_META_KEY =
+  'qwen.daemon.attachmentReferences';
 export const MAX_TRUSTED_MODEL_PROMPT_CHARS = 64 * 1024;
 
 export function isValidTrustedModelPrompt(value: unknown): value is string {
@@ -890,6 +970,12 @@ export type ClientMcpOverWsRuntimeConfig = Record<string, unknown> & {
 export interface MidTurnQueueEntry {
   messageId: string;
   text: string;
+  /**
+   * Image content blocks attached to the message. The drain
+   * combines them with `text` into structured `items` for the ACP child;
+   * the promotion path sends them alongside the text block.
+   */
+  content?: BridgePromptContentBlock[];
   originatorClientId?: string;
   queueOnly?: boolean;
   onSettledWithoutDrain?: () => void;
@@ -901,7 +987,7 @@ export interface MidTurnQueueEntry {
  * running turn and messages promoted into the normal pending-prompt FIFO.
  */
 export interface BridgeMidTurnMessagesSnapshot {
-  messages: Array<Pick<MidTurnQueueEntry, 'messageId' | 'text'>>;
+  messages: Array<Pick<MidTurnQueueEntry, 'messageId' | 'text' | 'content'>>;
   settledMessageIds: string[];
   promotedMessageIds: string[];
 }
@@ -916,9 +1002,16 @@ export interface BridgeMidTurnMessagesSnapshot {
 export interface PendingPromptEntry {
   promptId: string;
   queuedAt: number;
+  startedAt?: number;
   originatorClientId?: string;
   promotedMidTurn?: true;
   text: string;
+  /**
+   * Image content blocks attached to this prompt. Used by
+   * `getPendingPrompts` so a refreshed client can restore the full payload
+   * (text + images) instead of just the text.
+   */
+  content?: BridgePromptContentBlock[];
   abortController: AbortController;
   state: 'queued' | 'running';
   /**
@@ -952,8 +1045,31 @@ export interface PendingPromptEntry {
 export interface PendingPromptSummary {
   promptId: string;
   text: string;
+  /**
+   * Image content blocks attached to this prompt, so a
+   * refreshed client can restore the full payload (text + images) instead
+   * of just the text.
+   */
+  content?: BridgePromptContentBlock[];
   queuedAt: number;
   state: 'queued' | 'running';
+  originatorClientId?: string;
+}
+
+export interface BridgeTurnStatus {
+  sessionId: string;
+  state: 'idle' | 'queued' | 'running' | 'completed' | 'cancelled' | 'error';
+  promptId?: string;
+  promptText?: string;
+  promptTextTruncated?: boolean;
+  queuedAt?: number;
+  startedAt?: number;
+  endedAt?: number;
+  stopReason?: string;
+  error?: TurnResultErrorPayload;
+  resultText?: string;
+  resultTruncated?: boolean;
+  resultCode?: TurnResultCode;
   originatorClientId?: string;
 }
 
@@ -1232,7 +1348,7 @@ export interface AcpSessionBridge {
    */
   sendPrompt(
     sessionId: string,
-    req: PromptRequest,
+    req: BridgePromptRequest,
     signal?: AbortSignal,
     context?: BridgeClientRequestContext,
   ): Promise<PromptResponse>;
@@ -1246,6 +1362,13 @@ export interface AcpSessionBridge {
     sessionId: string,
     context?: BridgeClientRequestContext,
   ): readonly PendingPromptSummary[];
+
+  /** Read an exact prompt, or the current/newest turn when omitted. */
+  getSessionTurnStatus(
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+    promptId?: string,
+  ): Promise<BridgeTurnStatus | undefined>;
 
   /**
    * Remove a specific prompt from the pending queue. For `queued` prompts,
@@ -1315,7 +1438,7 @@ export interface AcpSessionBridge {
   ): Promise<void>;
 
   /**
-   * Update mutable session metadata. Currently supports `displayName` only.
+   * Update mutable session metadata. Supports `displayName` and `pr`.
    * Throws `SessionNotFoundError` for unknown ids.
    */
   updateSessionMetadata(
@@ -1323,6 +1446,16 @@ export interface AcpSessionBridge {
     metadata: SessionMetadataUpdate,
     context?: BridgeClientRequestContext,
   ): SessionMetadataUpdate;
+
+  /**
+   * Re-hydrate the in-memory PR binding list of a live session from the
+   * persisted sidecar after the entry was re-created empty (daemon
+   * restart, close/reload, archive/restore). No-op when the entry is
+   * unknown or already holds bindings, so this-daemon-lifetime state
+   * always wins. Callers own sidecar I/O; the bridge stays
+   * storage-agnostic. Optional so lightweight fakes may omit it.
+   */
+  seedSessionPrs?(sessionId: string, prs: SessionPrInfo[]): void;
 
   /**
    * List the structured artifacts registered for a live session. Throws
@@ -1378,6 +1511,21 @@ export interface AcpSessionBridge {
    * supplied cwd. Empty array (not throw) when no sessions exist.
    */
   listWorkspaceSessions(workspaceCwd: string): BridgeSessionSummary[];
+
+  /**
+   * Read the current in-memory session-catalog version. The returned value
+   * is an immutable snapshot — a later {@link markSessionCatalogChanged}
+   * call never mutates a previously returned version.
+   */
+  getSessionCatalogVersion(): BridgeSessionCatalogVersion;
+
+  /**
+   * Advance the session-catalog revision. Marks daemon-observed catalog
+   * membership and static-metadata changes that the bridge does not track
+   * internally (e.g. persisted mutations performed by serve-layer helpers).
+   * Conservative extra increments are safe and preferred over a missed mark.
+   */
+  markSessionCatalogChanged(): void;
 
   /**
    * Live status summary for a single session by id — the same shape
@@ -1552,6 +1700,13 @@ export interface AcpSessionBridge {
   clearSessionGoal(
     sessionId: string,
   ): Promise<{ cleared: boolean; condition?: string }>;
+
+  /** Atomically apply a typed Goal lifecycle control in a live session. */
+  controlSessionGoal(
+    sessionId: string,
+    request: GoalControlRequest,
+    context?: BridgeClientRequestContext,
+  ): Promise<GoalStateResponse>;
 
   /**
    * Read a live session's Goal state. Throws `SessionNotFoundError` when the
@@ -1741,9 +1896,14 @@ export interface AcpSessionBridge {
    * authorized against the session like `/prompt` and `/btw` — throws
    * `InvalidClientIdError` when the id is not bound to the session, and
    * `SessionNotFoundError` for unknown ids. Ownership is session-wide.
-   * With `options.queueOnly` an idle session rejects instead of promoting. If
-   * a busy session settles before draining the message,
-   * `onSettledWithoutDrain` lets the caller drive the next turn itself.
+   * With `options.rejectIfIdle` an idle session rejects instead of taking
+   * ownership. A message accepted while busy keeps the ordinary public queue
+   * semantics: it is echoed when drained and promoted if the turn settles
+   * first. `options.queueOnly` is reserved for internal live steering; if a
+   * busy session settles before draining one of those messages,
+   * `onSettledWithoutDrain` lets that internal caller drive the next turn.
+   * `options.content` carries image blocks with the message;
+   * an empty `message` is admitted when media blocks are present.
    */
   enqueueMidTurnMessage(
     sessionId: string,
@@ -1751,10 +1911,35 @@ export interface AcpSessionBridge {
     context?: BridgeClientRequestContext,
     messageId?: string,
     options?: {
+      rejectIfIdle?: boolean;
       queueOnly?: boolean;
       onSettledWithoutDrain?: () => void;
+      content?: readonly BridgePromptContentBlock[];
     },
   ): { accepted: boolean; messageId?: string };
+
+  storeSessionAttachment(
+    sessionId: string,
+    data: Uint8Array,
+    mimeType: string,
+    context?: BridgeClientRequestContext,
+    name?: string,
+  ): Promise<SessionAttachmentReference>;
+
+  readSessionAttachment(
+    sessionId: string,
+    attachmentId: string,
+    context?: BridgeClientRequestContext,
+  ): Promise<{ data: Buffer; mimeType: string } | undefined>;
+
+  removeSessionAttachment(
+    sessionId: string,
+    attachmentId: string,
+    context?: BridgeClientRequestContext,
+  ): Promise<boolean>;
+
+  /** Delete all persisted attachments after the session itself is deleted. */
+  deleteSessionAttachments(sessionId: string): Promise<void>;
 
   /** Remove a queued or promoted mid-turn message. */
   removeMidTurnMessage(
@@ -1996,6 +2181,12 @@ export interface AcpSessionBridge {
          *  field — see {@link pendingPromptTotal} — so a caller aggregating
          *  several children must treat it as unknown rather than as fresh. */
         ageMs?: number;
+        /** The child's lifetime old-generation high-water marks. Absent when
+         *  the child does not report them — a child predating the fields, or
+         *  one spawned outside the daemon. Never substituted with zeros: a
+         *  measured zero and an unmeasured child are different claims, and
+         *  only the first may be read as "this child needed no heap". */
+        heap?: ChildHeapReport;
       }
     | undefined;
   /** Poll the live child's resource extMethod and refresh the cache that

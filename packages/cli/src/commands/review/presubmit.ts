@@ -8,7 +8,11 @@
 // gh-API queries and emits a single JSON report describing self-PR status,
 // CI / build status, existing Qwen Code comment classification, and the
 // downgrade decisions the LLM should apply when constructing the review
-// event.
+// event. On an Aone target the command routes at the `a1` CLI instead and
+// emits the SAME report shape with only the backed slice filled in:
+// self-PR detection (whoami account vs the MR author) and head drift
+// (`sourceBranch` is the live head); CI status and existing-comment
+// classification are unbacked there and report neutral/empty.
 
 import type { CommandModule } from 'yargs';
 import { writeFileSync, readFileSync } from 'node:fs';
@@ -19,10 +23,23 @@ import {
   ghApiAllNested,
   currentUser,
   ensureAuthenticated,
+  isOwnerRepo,
   setGhHost,
 } from './lib/gh.js';
-import { carriedClaimLine, severityOf } from './lib/inline-counts.js';
-import { LEDGER_ID_READBACK, LEDGER_ID_TOKEN } from './lib/ledger.js';
+import { detectPlatformKind } from './lib/platform/registry.js';
+import { ensureAoneAuthenticated } from './lib/platform/aone-client.js';
+import { mrPresubmitFacts } from './lib/platform/aone.js';
+import {
+  LEADING_INVISIBLE_RE,
+  carriedClaimLine,
+  severityOf,
+} from './lib/inline-counts.js';
+import { carriesCommentMarker } from './lib/review-footer.js';
+import {
+  LEDGER_ID_READBACK,
+  LEDGER_ID_SHAPE,
+  LEDGER_ID_TOKEN,
+} from './lib/ledger.js';
 
 interface FindingAnchor {
   path: string;
@@ -65,12 +82,23 @@ interface CommentSummary {
   matchedIds?: string[];
 }
 
-/** Exact-shape check for ids read from the --new-findings file. */
-const LEDGER_ID_SHAPE = new RegExp(`^${LEDGER_ID_TOKEN}$`);
 /** The carried id this comment's claim line leads with, if any. */
 function extractCarriedIds(body: string): string[] {
-  const line = carriedClaimLine(body) ?? '';
-  const carried = LEDGER_ID_READBACK.exec(line);
+  let line = carriedClaimLine(body);
+  if (line === null && carriesCommentMarker(body)) {
+    // The attribution-off POSTED shape: `submit` strips the severity
+    // prefix before posting, so the marker-less body carries the claim on
+    // its first line and the severity in the trailing invisible marker.
+    // Without reading the id back off that line, a carried re-post lands
+    // as a plain overlap and is dedup-dropped from round 3 onward, while
+    // the surviving id token bars the id-less fallback.
+    line = body
+      .trimStart()
+      .split(/\r\n?|\n/)[0]
+      .replace(LEADING_INVISIBLE_RE, '')
+      .trim();
+  }
+  const carried = LEDGER_ID_READBACK.exec(line ?? '');
   return carried ? [carried[1]] : [];
 }
 
@@ -576,6 +604,63 @@ function classifyExistingComments(
   return buckets;
 }
 
+/**
+ * The self-PR test both platform paths run: a case-insensitive match of the
+ * PR author against the reviewing account. The `author !== ''` guard is the
+ * load-bearing half — a deleted-author MR and an unreadable reviewer account
+ * are BOTH reachable, and without it the comparison computes '' === '' and
+ * downgrades a stranger's PR as a self-review (house-pinned on the GitHub
+ * path since #9212). Stated once so the next normalization rule cannot be
+ * applied to one platform's copy only and silently diverge the paths.
+ */
+function isSelfReview(author: string, me: string): boolean {
+  return author !== '' && author.toLowerCase() === me.toLowerCase();
+}
+
+/**
+ * The report envelope BOTH platform paths emit. Consumers read the file as
+ * untyped JSON (compose-review's downgrade flags via toBool), so a key
+ * missing from one path's literal degrades silently there — the boolean
+ * reads as false and a downgrade that should fire doesn't. Typing both
+ * literals against one interface makes a field added to the envelope a
+ * compile error on the path that forgot it: the "SAME report shape"
+ * invariant enforced by the compiler instead of convention. The bodies
+ * legitimately diverge in what they COMPUTE.
+ */
+interface PresubmitReport {
+  prNumber: string;
+  commitSha: string;
+  ownerRepo: string;
+  isSelfPr: boolean;
+  ciStatus: {
+    class: 'all_pass' | 'any_failure' | 'all_pending' | 'no_checks';
+    failedCheckNames: string[];
+    skippedCheckNames: string[];
+    totalChecks: number;
+  };
+  existingComments: {
+    total: number;
+    byBucket: {
+      stale: number;
+      resolved: number;
+      overlap: number;
+      repost: number;
+      noConflict: number;
+    };
+    overlap: CommentSummary[];
+    repost: CommentSummary[];
+    stale: CommentSummary[];
+    resolved: CommentSummary[];
+    noConflict: CommentSummary[];
+  };
+  downgradeApprove: boolean;
+  downgradeRequestChanges: boolean;
+  downgradeReasons: string[];
+  blockOnExistingComments: boolean;
+  findingsFileInvalid: boolean;
+  headDrift: HeadDrift;
+}
+
 async function runPresubmit(args: PresubmitArgs): Promise<void> {
   const {
     pr_number: prNumber,
@@ -619,7 +704,7 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
   const author = prMeta.author ?? '';
   const liveHeadSha = prMeta.headSha ?? '';
   const me = currentUser();
-  const isSelfPr = author !== '' && author.toLowerCase() === me.toLowerCase();
+  const isSelfPr = isSelfReview(author, me);
 
   // --- Head drift ---------------------------------------------------------
   // Detail is best-effort: the drift itself (and its downgrade) never
@@ -702,27 +787,33 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
   const allComments = ghApiAll(
     `repos/${owner}/${repo}/pulls/${prNumber}/comments`,
   ) as RawComment[];
-  // Footer match first — and NOT the only match: with `review.attribution`
-  // off, posted comments carry no footer, and a filter keyed on the footer
-  // alone goes blind to every earlier attribution-off post — the overlap and
-  // stale classification (and the `blockOnExistingComments` gate that exists
-  // to stop duplicate posting) silently stop seeing them. Fall back to
-  // authorship for the reviewing account's own top-level comments, gated on
-  // the finding shape through `severityOf` — the same trimmed predicate
-  // `submit` posts through (a body that leaves with leading whitespace must
-  // still be recognized here), while a hand-written comment by the same
-  // account is not a posted finding — admitting one lets a same-line hand
-  // comment trip the overlap gate into silently dropping a genuinely new
-  // finding. Replies stay excluded either way. Attribution-off posts from
-  // OTHER accounts still escape detection — no footer, no authorship signal
-  // — and the setting's description says so.
+  // Recognize a posted finding by any of the three signals it carries, at
+  // different trust levels. The visible footer is qwen's own provenance
+  // string — long, model- and version-stamped, not something a hand comment
+  // carries — so it matches regardless of account, even when the login is
+  // unknown (#9212 pins exactly this). The invisible marker and the finding
+  // shape are short and plantable, so they match only for the reviewing
+  // account's own top-level comments: an ungated match on either lets anyone
+  // plant one on the line they expect a blocker on and have the next round
+  // silently withhold that blocker as a duplicate — provenance the commenter
+  // cannot fake is the account, not the string. The marker disjunct catches
+  // attribution-off posts in the exact shape `submit` posts (marker trailing
+  // the body); the `severityOf` disjunct remains for this account's posts
+  // made before the marker existed, gated on the finding shape — the same
+  // trimmed predicate `submit` posts through (a body that leaves with leading
+  // whitespace must still be recognized here) — while a hand-written comment
+  // by the same account is not a posted finding: admitting one lets a
+  // same-line hand comment trip the overlap gate into silently dropping a
+  // genuinely new finding. Replies stay excluded either way. Attribution-off
+  // posts from OTHER accounts still escape detection — no footer, no
+  // authorship signal — and the setting's description says so.
   const qwenComments = allComments.filter(
     (c) =>
       /via Qwen Code \/review/.test(c.body ?? '') ||
       (!c.in_reply_to_id &&
         me !== '' &&
         (c.user?.login ?? '').toLowerCase() === me.toLowerCase() &&
-        severityOf(c) !== null),
+        (carriesCommentMarker(c.body ?? '') || severityOf(c) !== null)),
   );
 
   const repliedToIds = new Set<number>();
@@ -770,7 +861,7 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
     );
   }
 
-  const result = {
+  const result: PresubmitReport = {
     prNumber,
     commitSha,
     ownerRepo,
@@ -829,6 +920,135 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
   writeStdoutLine(`Wrote presubmit report to ${outPath}`);
 }
 
+/**
+ * The Aone path. Self-PR detection and head drift are backed — one
+ * `mr view` fetch plus `a1 auth whoami`; CI status and existing-comment
+ * classification have NO Aone backing and report the same neutral shape a
+ * GitHub repo with zero checks and zero prior comments produces, so the
+ * report's consumers (Step 7's apply-the-report rules, compose-review's
+ * downgrade fields) are unchanged. `--new-findings` is unused here: both
+ * of its consumers are unbacked (no dedup) or fail safe without it (no
+ * compare API exists on Aone, so a drifted head is always anchors-at-risk).
+ */
+async function runAonePresubmit(args: PresubmitArgs): Promise<void> {
+  const {
+    pr_number: prNumber,
+    commit_sha: commitSha,
+    owner_repo: ownerRepo,
+    out_path: outPath,
+  } = args;
+
+  // Usage errors surface BEFORE the auth gate and the platform-fetch
+  // try/catch: a malformed positional is a deterministic invocation
+  // problem, not a metadata blip — catching it below would emit a
+  // "metadata unavailable" downgrade report instead of failing the call.
+  // The id check matches the sibling subcommands (meta/fetch-pr/…); it is
+  // also an argv gate — the value reaches `a1 repo mr view` as a
+  // positional, and a `-1` would parse as a flag if it rode through.
+  if (
+    !/^[0-9]+$/.test(prNumber) ||
+    !Number.isInteger(Number(prNumber)) ||
+    Number(prNumber) <= 0
+  ) {
+    throw new TypeError(
+      `presubmit: pr_number must be a positive integer, got ${JSON.stringify(prNumber)}`,
+    );
+  }
+  // The same shape check the Aone reader seam applies (meta/fetch-pr
+  // already refused anything else before this command could run).
+  if (!isOwnerRepo(ownerRepo)) {
+    throw new TypeError(
+      `expected owner/repo, got ${JSON.stringify(ownerRepo)}`,
+    );
+  }
+
+  // The auth gate doubles as the account read: ONE whoami per run (the
+  // JSON spelling fully subsumes the plain gate), run BEFORE the MR fetch —
+  // a whoami failure aborts at the gate's actionable error, and there is no
+  // second a1 call after the fetch that could throw uncaught and orphan the
+  // graceful metaUnavailable report below.
+  const me = ensureAoneAuthenticated();
+
+  // --- Self-PR detection + live head (one fetch) -------------------------
+  // The same two failure classes as the GitHub path. A readable MR whose
+  // author is absent (deleted account) is fail-SOFT — isSelfPr false is the
+  // right answer. A THROWN mr view (auth expiry, a network blip, a bad id)
+  // is fail-CLOSED: with no head to compare, self-PR and drift are both
+  // undetectable, so the run must not silently proceed as if it had
+  // checked — it emits a downgrade reason and caps the Approve.
+  let author = '';
+  let liveHeadSha = '';
+  let metaUnavailable = false;
+  try {
+    ({ author, headSha: liveHeadSha } = mrPresubmitFacts(
+      Number(prNumber),
+      ownerRepo,
+    ));
+  } catch {
+    metaUnavailable = true;
+  }
+  const isSelfPr = isSelfReview(author, me);
+
+  // --- Head drift ---------------------------------------------------------
+  // Under AGit-Flow `sourceBranch` IS the head; Aone has no compare API, so
+  // the detail stays null and a drifted head rules anchors-at-risk
+  // fail-safe. submit's pre-write drift gate re-checks this at post time.
+  const { headDrift, downgradeReason: driftReason } = classifyHeadDrift(
+    commitSha,
+    liveHeadSha,
+    null,
+    null,
+  );
+
+  // --- Downgrade decisions ----------------------------------------------
+  const downgradeReasons: string[] = [];
+  if (isSelfPr) downgradeReasons.push('self-PR');
+  if (driftReason) downgradeReasons.push(driftReason);
+  if (metaUnavailable) {
+    downgradeReasons.push(
+      'MR metadata unavailable — could not verify self-PR status or head drift',
+    );
+  }
+
+  const noComments: CommentSummary[] = [];
+  const result: PresubmitReport = {
+    prNumber,
+    commitSha,
+    ownerRepo,
+    isSelfPr,
+    ciStatus: {
+      class: 'no_checks',
+      failedCheckNames: [],
+      skippedCheckNames: [],
+      totalChecks: 0,
+    },
+    existingComments: {
+      total: 0,
+      byBucket: {
+        stale: 0,
+        resolved: 0,
+        overlap: 0,
+        repost: 0,
+        noConflict: 0,
+      },
+      overlap: noComments,
+      repost: noComments,
+      stale: noComments,
+      resolved: noComments,
+      noConflict: noComments,
+    },
+    downgradeApprove: isSelfPr || headDrift.drifted || metaUnavailable,
+    downgradeRequestChanges: isSelfPr,
+    downgradeReasons,
+    blockOnExistingComments: false,
+    findingsFileInvalid: false,
+    headDrift,
+  };
+
+  writeFileSync(outPath, JSON.stringify(result, null, 2) + '\n', 'utf8');
+  writeStdoutLine(`Wrote presubmit report to ${outPath}`);
+}
+
 export const presubmitCommand: CommandModule = {
   command: 'presubmit <pr_number> <commit_sha> <owner_repo> <out_path>',
   describe:
@@ -848,7 +1068,8 @@ export const presubmitCommand: CommandModule = {
       .positional('owner_repo', {
         type: 'string',
         demandOption: true,
-        describe: 'GitHub "owner/repo"',
+        describe:
+          'Target coordinate: GitHub "owner/repo" or Aone "group/project"',
       })
       .positional('out_path', {
         type: 'string',
@@ -858,15 +1079,20 @@ export const presubmitCommand: CommandModule = {
       .option('host', {
         type: 'string',
         describe:
-          'GitHub host for this PR (GitHub Enterprise). Routes every gh call in this command via GH_HOST; omit for github.com.',
+          "The host the target lives on. SELECTS the platform: an Aone host routes the checks at the a1 CLI (self-PR detection and head drift; CI and existing-comment checks report neutral), anything else at gh (a GitHub Enterprise host routes gh via GH_HOST). Omitted: detected from the clone's origin, else GitHub.",
       })
       .option('new-findings', {
         type: 'string',
         describe:
-          "Path to a JSON file shaped as [{path, line, id?}, ...] — when provided, existing comments are checked for same-(path, line) overlap with the new findings. `id` is the finding's carried ledger id (`R<round>-<n>`) and belongs on CARRIED-forward findings only — omit it on fresh findings of this round: an id-matched own-account comment at the same location is additionally reported in `repost` so the drop rule can exempt the re-post, and a fresh id could only corrupt that match.",
+          "Path to a JSON file shaped as [{path, line, id?}, ...] — when provided, existing comments are checked for same-(path, line) overlap with the new findings. `id` is the finding's carried ledger id (`R<round>-<n>`) and belongs on CARRIED-forward findings only — omit it on fresh findings of this round: an id-matched own-account comment at the same location is additionally reported in `repost` so the drop rule can exempt the re-post, and a fresh id could only corrupt that match. Ignored on Aone targets (existing-comment classification has no Aone backing).",
       }),
   handler: async (argv) => {
-    setGhHost((argv as { host?: string }).host);
+    const host = (argv as { host?: string }).host;
+    if (detectPlatformKind({ host }) === 'aone') {
+      await runAonePresubmit(argv as unknown as PresubmitArgs);
+      return;
+    }
+    setGhHost(host);
     await runPresubmit(argv as unknown as PresubmitArgs);
   },
 };

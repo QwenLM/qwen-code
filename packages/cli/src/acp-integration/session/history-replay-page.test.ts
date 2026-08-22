@@ -25,6 +25,17 @@ import {
   replayTranscriptRecordPage,
 } from './history-replay-page.js';
 
+const observeAcpProjectionMock = vi.hoisted(() => vi.fn());
+vi.mock(
+  '../../utils/tool-result-boundary-diagnostics.js',
+  async (original) => ({
+    ...(await original<
+      typeof import('../../utils/tool-result-boundary-diagnostics.js')
+    >()),
+    observeAcpToolResultProjection: observeAcpProjectionMock,
+  }),
+);
+
 const SESSION_ID = '550e8400-e29b-41d4-a716-446655440000';
 const TIMESTAMP = '2026-07-12T00:00:00.000Z';
 const GOAL_STATE: GoalSnapshotV2 = {
@@ -241,6 +252,7 @@ describe('history replay page', () => {
   });
 
   it('lifts record timestamps for bulk replay callers', async () => {
+    observeAcpProjectionMock.mockClear();
     const result = await collectHistoryReplayUpdates({
       sessionId: SESSION_ID,
       records: [userRecord()],
@@ -253,6 +265,11 @@ describe('history replay page', () => {
         timestamp: Date.parse(TIMESTAMP),
       }),
     ]);
+    const deliveredUpdate = result.updates[0];
+    const projectionCall = observeAcpProjectionMock.mock.calls.find(
+      ([, , sessionId]) => sessionId === SESSION_ID,
+    );
+    expect(projectionCall?.[3]).toBe(deliveredUpdate);
   });
 
   it('attaches the checkpoint only to the final chunk of a multi-chunk Assistant record', async () => {
@@ -586,7 +603,11 @@ describe('history replay page', () => {
         return 'next-cursor';
       },
     });
-    expect(firstPage.updates).toHaveLength(2);
+    expect(firstPage.updates).toHaveLength(3);
+    expect(firstPage.updates[0]).toMatchObject({
+      sessionUpdate: 'user_message_chunk',
+      content: { type: 'text', text: `/goal ${goal.objective}` },
+    });
     expect(nextReplay).toMatchObject({ goalCause: 'verifier_reject' });
 
     const recommittedGoal = {

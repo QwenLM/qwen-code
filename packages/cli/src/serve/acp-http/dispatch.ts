@@ -12,6 +12,7 @@ import {
   GROUP_COLOR_OPTIONS,
   Storage,
   SessionService,
+  SessionIdCaseConflictError,
   SessionOrganizationError,
   SESSION_WRITER_RPC_CODES,
   type SessionGroupColor,
@@ -21,6 +22,8 @@ import {
   WorkspaceMemoryFileTooLargeError,
   WorkspaceMemoryWriteTimeoutError,
   writeWorkspaceContextFile,
+  readSessionPrs,
+  upsertSessionPr,
   type SessionArchiveState,
   type SubagentLevel,
   IMAGE_CAPABILITY,
@@ -34,6 +37,7 @@ import {
   PermissionForbiddenError,
   PermissionPolicyNotImplementedError,
   SessionArchivingError,
+  SessionConflictError,
 } from '../acp-session-bridge.js';
 import type {
   BridgeChannelQuarantinedError,
@@ -55,8 +59,9 @@ import { parseSessionSource } from '@qwen-code/acp-bridge';
 import { restoreRetryAfterSeconds } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 import {
   isReservedLiveSessionSource,
+  isReservedStandaloneSessionSource,
   readLoadableLiveConversationMetadata,
-} from '../conversations/session-source.js';
+} from '../../runtime/live-session-source.js';
 import {
   translateAndCheckAbsoluteWorkspacePath,
   canonicalizeWorkspace,
@@ -87,6 +92,7 @@ import {
 } from '../../config/permission-settings.js';
 import { loadSettings } from '../../config/settings.js';
 import {
+  isValidSessionId,
   normalizeSessionIdForLookup,
   parseCallerSuppliedSessionId,
 } from '../../config/session-id.js';
@@ -851,6 +857,15 @@ export function toRpcError(err: unknown): {
           sessionId: (err as { sessionId?: unknown }).sessionId,
         },
       };
+    case 'SessionIdCaseConflictError':
+      return {
+        code: RPC.INTERNAL_ERROR,
+        message: errMsg(err),
+        data: {
+          errorKind: 'session_conflict',
+          sessionId: (err as { sessionId?: unknown }).sessionId,
+        },
+      };
     case 'SessionArchivingError':
       return {
         code: RPC.INTERNAL_ERROR,
@@ -858,6 +873,16 @@ export function toRpcError(err: unknown): {
         data: {
           errorKind: 'session_archiving',
           sessionId: (err as { sessionId?: unknown }).sessionId,
+        },
+      };
+    case 'InvalidSessionMetadataError':
+      return {
+        code: RPC.INVALID_PARAMS,
+        message: errMsg(err),
+        data: {
+          httpStatus: 400,
+          errorKind: 'invalid_metadata',
+          field: (err as { field?: unknown }).field,
         },
       };
     case 'SessionNotFoundError':
@@ -989,6 +1014,18 @@ export class AcpDispatcher {
     });
   }
 
+  // Combined invalidate-and-mark for catalog mutations whose conservative
+  // finally-semantics match (delete/archive/unarchive). The revision advance
+  // always follows the cache invalidation so a newly exposed version never
+  // precedes it. Exact no-op paths (e.g. metadata rename) gate the mark on
+  // an actual change via the bridge instead of using this helper.
+  private invalidateSessionListsAndMarkCatalog(
+    archiveStates: readonly SessionArchiveState[],
+  ): void {
+    this.invalidateSessionLists(archiveStates);
+    this.bridge.markSessionCatalogChanged();
+  }
+
   private async runWithSessionListInvalidation<T>(
     archiveStates: readonly SessionArchiveState[],
     mutation: () => Promise<T>,
@@ -996,7 +1033,7 @@ export class AcpDispatcher {
     try {
       return await mutation();
     } finally {
-      this.invalidateSessionLists(archiveStates);
+      this.invalidateSessionListsAndMarkCatalog(archiveStates);
     }
   }
 
@@ -1633,6 +1670,24 @@ export class AcpDispatcher {
             return;
           }
           const sessionRuntime = this.getSessionRuntimeContext();
+          if (
+            isReservedStandaloneSessionSource({
+              sourceType:
+                typeof params['sourceType'] === 'string'
+                  ? params['sourceType']
+                  : undefined,
+            })
+          ) {
+            conn.sendConn(
+              error(
+                id,
+                RPC.INVALID_PARAMS,
+                'The requested session source is reserved for daemon-owned standalone sessions.',
+                { errorKind: 'reserved_session_source' },
+              ),
+            );
+            return;
+          }
           const source = parseSessionSource(
             params['sourceType'],
             params['sourceId'],
@@ -1796,31 +1851,86 @@ export class AcpDispatcher {
             },
           );
           try {
+            // The coordinator canonicalizes lock keys (every case variant
+            // of a caller id contends on one key), so the request spelling
+            // alone covers the raw-spelled batch delete/archive/unarchive
+            // locks (parity with the REST restore handler).
+            const guardSessionService = new SessionService(cwd, {
+              runtimeBaseDir: sessionRuntime.sessionRuntimeBaseDir,
+            });
+            let persistedGuardId: string | undefined;
+            try {
+              persistedGuardId =
+                await guardSessionService.findSessionIdIgnoringCase(sessionId);
+            } catch (error) {
+              if (
+                error instanceof SessionIdCaseConflictError &&
+                (await guardSessionService.getSessionLocation(
+                  error.candidateSessionId ?? sessionId,
+                )) === 'conflict'
+              ) {
+                throw new SessionConflictError(sessionId);
+              }
+              throw error;
+            }
             const restored = await this.archiveCoordinator.runSharedMany(
               [sessionId],
               async () => {
                 assertGenerationOpen?.();
+                const sessionService = new SessionService(cwd, {
+                  runtimeBaseDir: sessionRuntime.sessionRuntimeBaseDir,
+                });
+                let storageSessionId = persistedGuardId ?? sessionId;
+                let persistedSessionId: string | undefined;
+                try {
+                  persistedSessionId =
+                    await sessionService.findSessionIdIgnoringCase(sessionId);
+                } catch (error) {
+                  if (
+                    error instanceof SessionIdCaseConflictError &&
+                    (await sessionService.getSessionLocation(
+                      error.candidateSessionId ?? sessionId,
+                    )) === 'conflict'
+                  ) {
+                    throw new SessionConflictError(sessionId);
+                  }
+                  throw error;
+                }
+                if (persistedSessionId) {
+                  storageSessionId = persistedSessionId;
+                } else if (this.liveSessionIsolation) {
+                  throw new SessionNotFoundError(sessionId);
+                }
                 await assertSessionLoadable(
                   cwd,
-                  sessionId,
+                  storageSessionId,
                   sessionRuntime.sessionRuntimeBaseDir,
                 );
                 // Re-seed the persisted parent lineage so a restored sub-session
                 // still reports its parent over the ACP transport (parity with the
                 // REST restore handler); the bridge creates the entry without it.
-                const sessionService = new SessionService(cwd, {
-                  runtimeBaseDir: sessionRuntime.sessionRuntimeBaseDir,
-                });
                 const metadata = this.liveSessionIsolation
                   ? await readLoadableLiveConversationMetadata(
-                      sessionId,
-                      (candidateId) =>
-                        sessionService.readCreationMetadata(candidateId),
+                      storageSessionId,
+                      sessionService,
                     )
-                  : await sessionService.readCreationMetadata(sessionId);
-                if (metadata === undefined) {
+                  : await sessionService.readCreationMetadata(storageSessionId);
+                // The reserved standalone source is hidden only on the
+                // isolated Conversations surface (parity with the REST
+                // restore handler); generic restores keep loading legacy
+                // transcripts that carry the reserved source string.
+                if (
+                  metadata === undefined ||
+                  (this.liveSessionIsolation !== undefined &&
+                    isReservedStandaloneSessionSource(metadata))
+                ) {
                   throw new SessionNotFoundError(sessionId);
                 }
+                // The private directory belongs to the live entry, which the
+                // bridge registers under the canonical id, so every other
+                // materialize/discard call site keys it the same way. Hashing
+                // the persisted spelling here would strand a restored
+                // mixed-case session in a directory no later call can find.
                 const liveConversationCwd = this.liveSessionIsolation
                   ? await this.liveSessionIsolation.materializeConversationDirectory(
                       sessionId,
@@ -2798,10 +2908,39 @@ export class AcpDispatcher {
 
         case `${QWEN_METHOD_NS}session/update_metadata`: {
           const sessionId = String(params['sessionId'] ?? '');
+          // Same gate as the REST metadata routes: the id becomes a sidecar
+          // path component (upsertSessionPr's mkdir + JSON write), so reject
+          // separator-bearing spellings before any sidecar I/O.
+          if (!isValidSessionId(sessionId)) {
+            throw new AcpParamError('`sessionId` must be a valid session id');
+          }
           await this.withMutableOwned(conn, sessionId, id, async () => {
             const metadata = isObject(params['metadata'])
               ? (params['metadata'] as Record<string, unknown>)
               : {};
+            const service = new SessionService(this.boundWorkspace, {
+              runtimeBaseDir: this.sessionRuntimeBaseDir,
+            });
+            // Bridge entries are re-created without prs on daemon restart,
+            // close/reload, and archive/restore, and the bridge itself is
+            // storage-agnostic — so hydrate the persisted binding history
+            // before the mutation. Otherwise the reply AND the
+            // `session_metadata_updated` event echo only this daemon
+            // lifetime's bindings, silently dropping earlier ones. The read
+            // is best-effort: readSessionPrs rethrows non-ENOENT I/O errors
+            // (EISDIR/EACCES/EIO), and an unreadable sidecar must degrade the
+            // event's history, not block a pr-less rename.
+            let hydratedPrs: Awaited<ReturnType<typeof readSessionPrs>>;
+            try {
+              hydratedPrs = await readSessionPrs(
+                service.getPrSessionPathForArchiveState(sessionId, 'active'),
+              );
+            } catch {
+              hydratedPrs = null;
+            }
+            if (hydratedPrs && hydratedPrs.length > 0) {
+              this.bridge.seedSessionPrs?.(sessionId, hydratedPrs);
+            }
             let result: ReturnType<HttpAcpBridge['updateSessionMetadata']>;
             try {
               result = this.bridge.updateSessionMetadata(
@@ -2811,6 +2950,34 @@ export class AcpDispatcher {
                 >[1],
                 this.sessionCtx(conn, sessionId, loopback),
               );
+              // The bridge keeps the binding in live memory only; persist it
+              // as a sidecar so it survives daemon restarts, matching the
+              // REST metadata routes. Gate on this call actually binding a
+              // PR — the bridge echoes `prs` whenever any binding exists, so
+              // a displayName-only rename must not re-upsert (it would
+              // refresh createdAt and could evict an older entry early).
+              const boundPr = metadata['pr'];
+              if (
+                isObject(boundPr) &&
+                typeof boundPr['number'] === 'number' &&
+                typeof boundPr['url'] === 'string'
+              ) {
+                const persistedPrs = (
+                  await upsertSessionPr(
+                    service.getPrSessionPathForArchiveState(
+                      sessionId,
+                      'active',
+                    ),
+                    {
+                      number: boundPr['number'],
+                      url: boundPr['url'],
+                    },
+                  )
+                ).map(({ number, url }) => ({ number, url }));
+                // Reply with the authoritative persisted list, mirroring the
+                // REST metadata routes.
+                result = { ...result, prs: persistedPrs };
+              }
             } finally {
               this.invalidateSessionLists(['active']);
             }
@@ -2876,6 +3043,7 @@ export class AcpDispatcher {
                 ? { color: params['color'] as SessionGroupPresetColor | null }
                 : {}),
             });
+            this.invalidateSessionListsAndMarkCatalog(['active', 'archived']);
             this.replyConn(conn, id, { sessionId, ...organization });
           });
           return;
@@ -2897,6 +3065,7 @@ export class AcpDispatcher {
             name: params['name'] as string,
             color: params['color'] as SessionGroupColor,
           });
+          this.invalidateSessionListsAndMarkCatalog(['active', 'archived']);
           assertGenerationOpen?.();
           this.replyConn(conn, id, { group });
           return;
@@ -2917,6 +3086,7 @@ export class AcpDispatcher {
               : {}),
             ...('order' in params ? { order: params['order'] as number } : {}),
           });
+          this.invalidateSessionListsAndMarkCatalog(['active', 'archived']);
           assertGenerationOpen?.();
           this.replyConn(conn, id, { group });
           return;
@@ -2932,6 +3102,11 @@ export class AcpDispatcher {
             await createSessionOrganizationService(workspaceCwd).deleteGroup(
               groupId,
             );
+          // A delete that reports `deleted: false` changed nothing and must
+          // not advance the catalog version.
+          if (deleted) {
+            this.invalidateSessionListsAndMarkCatalog(['active', 'archived']);
+          }
           assertGenerationOpen?.();
           this.replyConn(conn, id, { deleted });
           return;
