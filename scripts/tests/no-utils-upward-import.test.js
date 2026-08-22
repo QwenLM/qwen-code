@@ -47,6 +47,11 @@ describe('no-utils-upward-import', () => {
     expect(
       runRule("export { value } from '../config/settings.js';", file),
     ).toHaveLength(1);
+    // a zero-specifier re-export is a runtime edge (`export {} from` survives
+    // emission), not a vacuous `[].every(...)` type-only exemption
+    expect(
+      runRule("export {} from '../config/settings.js';", file),
+    ).toHaveLength(1);
     expect(
       runRule("export * from '../config/settings.js';", file),
     ).toHaveLength(1);

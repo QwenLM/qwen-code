@@ -18,6 +18,7 @@ describe('utils upward-import flat-config integration', () => {
       prodTypeOnly,
       prodExportTypeOnly,
       prodInlineType,
+      prodMixedSpecifiers,
       prodTypeQuery,
       prodDynamic,
       testStatic,
@@ -39,6 +40,12 @@ describe('utils upward-import flat-config integration', () => {
       ),
       eslint.lintText(
         "import { type Settings } from '../config/settings.js';",
+        {
+          filePath: 'packages/cli/src/utils/fixture-boundary.ts',
+        },
+      ),
+      eslint.lintText(
+        "import { type Settings, loadSettings } from '../config/settings.js';",
         {
           filePath: 'packages/cli/src/utils/fixture-boundary.ts',
         },
@@ -76,6 +83,9 @@ describe('utils upward-import flat-config integration', () => {
     // `verbatimModuleSyntax`: tsc emits `import {} from ...`, a runtime edge
     // that evaluates the target module, so the rule reports them
     expect(hasViolation(prodInlineType)).toBe(true);
+    // a mixed value+type specifier list keeps the value edge, so it is
+    // reported too (guards an exemption that tested only the type specifiers)
+    expect(hasViolation(prodMixedSpecifiers)).toBe(true);
     // test files stay exempt via the rule's own test/fixture exemption
     expect(hasViolation(testStatic)).toBe(false);
   });
