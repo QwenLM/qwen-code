@@ -367,6 +367,8 @@ function runDevelopIssue(dir, stub) {
 const IDLE_NOW =
   'idle-timeout (no output for 1200000ms — the sandbox likely hung at startup)';
 const IDLE_HEAD = `🤖 AutoFix ran out of time before finishing (${IDLE_NOW}) (attempt 2/100) — it will retry on the next scan.`;
+const REPAIR_NOW = 'repair-timeout (2400000ms)';
+const REPAIR_HEAD = `🤖 AutoFix ran out of time before finishing (${REPAIR_NOW}) (attempt 2/100) — it will retry on the next scan.`;
 
 describe('qwen-autofix workflow', () => {
   it('keeps ECS issue autofix limited to forced and ready-for-agent issues', () => {
@@ -14672,9 +14674,26 @@ exit 1
     expect(repairDeterministicRejectionStep).toContain(
       "steps.verify.outputs.retryable == 'true'",
     );
-    expect(repairDeterministicRejectionStep).toContain('timeout-minutes: 20');
+    expect(repairDeterministicRejectionStep).toContain('timeout-minutes: 45');
     expect(repairDeterministicRejectionStep).toContain(
-      "QWEN_TIMEOUT_MS: '1080000'",
+      "QWEN_TIMEOUT_MS: '2400000'",
+    );
+    // The repair pass must be able to re-run the verification the gate just
+    // ran (6.6-10.6m measured) and still leave the model working time; the
+    // old 18m budget could not, and never once finished (af-148).
+    const repairBudgetMin =
+      Number(
+        repairDeterministicRejectionStep.match(/QWEN_TIMEOUT_MS: '(\d+)'/)?.[1],
+      ) / 60000;
+    expect(repairBudgetMin).toBeGreaterThanOrEqual(30);
+    // Its exhaustions are told apart from a primary-pass one by this label,
+    // and the cap's census greps the literal below. Pin them against each
+    // other: a typo in either silently returns repair timeouts to the cap.
+    expect(repairDeterministicRejectionStep).toContain(
+      "QWEN_TIMEOUT_LABEL: 'repair-timeout'",
+    );
+    expect(reviewAddressReportStep).toContain(
+      'REPAIR_N="$(grep -c \'AutoFix ran out of time before finishing (repair-timeout\' <<< "${PRIOR_HEADS}" || true)"',
     );
     const settingsJson = (step) =>
       step.match(/SETTINGS_JSON: \|-\n([\s\S]*?)\n {8}run: \|-/)?.[1] ?? '';
@@ -16444,9 +16463,58 @@ exit 1
     });
     expect(idleCurrentOnly.terminal).toBe(false);
     expect(idleCurrentOnly.headline).toBe('orig');
-    // A window WITHOUT idle rounds says nothing about the sandbox — in the
-    // headline or the job log.
+    // Repair-pass exhaustions are excluded on the same reasoning (af-148):
+    // the primary pass FINISHED and produced the commit the gate rejected,
+    // so the round was never too big for its budget. This is the shape that
+    // parked #9394, #9576 and #9340 hours after the idle exclusion landed.
+    const allRepair = run(
+      [REPAIR_HEAD, PUSH, REPAIR_HEAD, PUSH, REPAIR_HEAD, PUSH],
+      { agentTimeout: REPAIR_NOW },
+    );
+    expect(allRepair.terminal).toBe(false);
+    expect(allRepair.headline).toBe('orig');
+    expect(allRepair.log).toContain('::warning::#1: 4 repair-pass timeout(s)');
+    // Same escape hatch as idle: a PR that keeps losing rounds this way
+    // still terminates, at the CONSECUTIVE cap and under its own headline.
+    const repairStreak = run(Array(cap - 1).fill(REPAIR_HEAD), {
+      agentTimeout: REPAIR_NOW,
+    });
+    expect(repairStreak).toMatchObject({ consec: cap, terminal: true });
+    expect(repairStreak.headline).toContain(
+      'consecutive rounds that pushed nothing',
+    );
+    // Budget timeouts alone still trip the cap with a repair round present,
+    // and the count reported stays the budget one.
+    const repairMixed = run(
+      [TIMEOUT_HEAD, PUSH, TIMEOUT_HEAD, PUSH, REPAIR_HEAD, PUSH],
+      { agentTimeout: 'timeout (3000000ms)' },
+    );
+    expect(repairMixed.terminal).toBe(true);
+    expect(repairMixed.headline).toContain(
+      `${timeoutCap} agent time-budget exhaustions`,
+    );
+    expect(repairMixed.headline).toContain('also holds 1 repair-pass');
+    expect(repairMixed.headlineZh).toContain('另有 1 次 repair pass 超时');
+    // One repair round holds a would-be-capped window open, exactly like one
+    // idle round: deleting the REPAIR_N increment or its subtraction
+    // terminates here.
+    const repairCurrentOnly = run(Array(timeoutCap - 1).fill(TIMEOUT_HEAD), {
+      agentTimeout: REPAIR_NOW,
+    });
+    expect(repairCurrentOnly.terminal).toBe(false);
+    expect(repairCurrentOnly.headline).toBe('orig');
+    // The two excluded classes are counted separately, not merged: a window
+    // holding one of each still leaves cap-1 budget timeouts. Collapsing
+    // REPAIR_N into IDLE_N (or vice versa) double-counts and terminates.
+    const bothExcluded = run(
+      [TIMEOUT_HEAD, PUSH, IDLE_HEAD, PUSH, REPAIR_HEAD, PUSH],
+      { agentTimeout: 'timeout (3000000ms)' },
+    );
+    expect(bothExcluded.terminal).toBe(false);
+    // A window WITHOUT idle or repair rounds says nothing about either — in
+    // the headline or the job log.
     expect(interleaved.headline).not.toContain('silent-sandbox');
+    expect(interleaved.headline).not.toContain('repair-pass');
     expect(interleaved.log).not.toContain('::warning');
     // One short of the cap keeps retrying (current round not a timeout).
     expect(run([TIMEOUT_HEAD, PUSH, TIMEOUT_HEAD])).toMatchObject({
@@ -16526,12 +16594,22 @@ exit 1
     const idleNeedle = reviewAddressReportStep.match(
       /IDLE_N="\$\(grep -c '([^']+)'/,
     )?.[1];
+    const repairNeedle = reviewAddressReportStep.match(
+      /REPAIR_N="\$\(grep -c '([^']+)'/,
+    )?.[1];
     expect(timeoutNeedle).toBeTruthy();
     expect(idleNeedle).toBeTruthy();
+    expect(repairNeedle).toBeTruthy();
+    // Both excluded needles must EXTEND the total's, or the subtraction can
+    // go negative on a line that is excluded without being counted.
     expect(idleNeedle).toContain(timeoutNeedle);
+    expect(repairNeedle).toContain(timeoutNeedle);
+    // ...and they must not overlap, or one round is subtracted twice.
+    expect(idleNeedle).not.toContain(repairNeedle);
+    expect(repairNeedle).not.toContain(idleNeedle);
     // The cap gates on the budget-only count, never the total.
     expect(reviewAddressReportStep).toContain(
-      'BUDGET_TIMEOUT_N=$(( TIMEOUT_N - IDLE_N ))',
+      'BUDGET_TIMEOUT_N=$(( TIMEOUT_N - IDLE_N - REPAIR_N ))',
     );
     expect(reviewAddressReportStep).toContain(
       'if [[ "${BUDGET_TIMEOUT_N}" -ge "${TIMEOUT_WINDOW_CAP}" ]]; then',
@@ -16602,9 +16680,26 @@ exit 1
       ),
     ].map((m) => m[1]);
     expect(globTokens.length).toBeGreaterThanOrEqual(2);
+    // Two classes are classified this way now. Idle's token is a static
+    // prefix of the template above. Repair's IS the QWEN_TIMEOUT_LABEL the
+    // repair step sets: the absolute-timeout template leads with that
+    // interpolation, so it has no static prefix to read — which is also
+    // what makes the glob below a valid prefix match (af-148).
+    const repairLabel = repairDeterministicRejectionStep.match(
+      /QWEN_TIMEOUT_LABEL: '([^']+)'/,
+    )?.[1];
+    expect(repairLabel).toBeTruthy();
+    expect(runner).toContain('`${QWEN_TIMEOUT_LABEL} (${QWEN_TIMEOUT_MS}ms)`');
     for (const token of globTokens) {
+      if (token === repairLabel) continue;
       expect(detailPrefix.startsWith(token)).toBe(true);
     }
+    // Every token the workflow globs for must belong to one of those two
+    // emitters — a third one classifies nothing and would silently return
+    // its class to the cap.
+    const idleToken = globTokens.find((t) => t !== repairLabel);
+    expect(idleToken).toBeTruthy();
+    expect(new Set(globTokens)).toEqual(new Set([idleToken, repairLabel]));
     // The census needles, extracted as in the breaker test: IDLE_N's must
     // be TIMEOUT_N's plus ' (' plus that same opening token.
     const timeoutNeedle = reviewAddressReportStep.match(
@@ -16613,11 +16708,16 @@ exit 1
     const idleNeedle = reviewAddressReportStep.match(
       /IDLE_N="\$\(grep -c '([^']+)'/,
     )?.[1];
+    const repairNeedle = reviewAddressReportStep.match(
+      /REPAIR_N="\$\(grep -c '([^']+)'/,
+    )?.[1];
     expect(timeoutNeedle).toBeTruthy();
     expect(idleNeedle).toBeTruthy();
-    for (const token of new Set(globTokens)) {
-      expect(idleNeedle).toBe(`${timeoutNeedle} (${token}`);
-    }
+    expect(repairNeedle).toBeTruthy();
+    // Each census needle is the total's plus its own class token, so the
+    // current-round glob and the prior-round grep can never disagree.
+    expect(idleNeedle).toBe(`${timeoutNeedle} (${idleToken}`);
+    expect(repairNeedle).toBe(`${timeoutNeedle} (${repairLabel}`);
     // The replay fixture embeds the CAUSE-shaped headline with a concrete
     // ms value — derive it from the template so a reworded sentinel fails
     // here instead of shipping a fixture that replays a fantasy shape.

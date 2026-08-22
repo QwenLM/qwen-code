@@ -239,6 +239,7 @@ task-oriented guides — what a maintainer types and what happens next — see:
 - [145. review-address · Report dry-run / failure — CUMULATIVE timeout breaker — the sibling of the consecutive one above, for the…](#af-145)
 - [146. review-address · Report dry-run / failure — The agent committed (verify recorded committed=true before any gate could fail),…](#af-146)
 - [147. review-address · Report dry-run / failure — Same byte-budget hygiene as the English excerpt above. 3000 bytes ≈ 1000 CJK…](#af-147)
+- [148. review-address · Repair deterministic rejection — Budget the repair pass so it can finish, and keep its exhaustions out of…](#af-148)
 
 ---
 
@@ -3716,4 +3717,70 @@ wrapper: a translation quoting HTML is pathological (SKILL
 forbids HTML in failure.zh.md), but must not be able to open
 or close a <details>/<summary> that swallows the closing tag
 the workflow emits below.
+```
+
+<a id="af-148"></a>
+
+### 148. review-address · Repair deterministic rejection — Budget the repair pass so it can finish, and keep its exhaustions out of the timeout cap.
+
+In `review-address` · `Repair deterministic rejection` and `Report dry-run / failure`.
+
+```text
+Two defects, one cause. The repair pass ran on an 18-minute budget
+under a 20-minute step, and every exhaustion it produced was counted
+into TIMEOUT_WINDOW_CAP as though the ROUND had run out of time.
+
+The budget could not work. This pass has to re-run the same
+verification the gate just finished before its own verdict counts, and
+that verification measured 6.6-10.6 minutes across the sampled runs,
+leaving the model roughly 8 minutes to read the rejection, fix it, and
+land a commit — on a repository where the primary pass averages 41
+minutes of its 120. Measured 2026-08-22 across 5 PRs (#9394, #9576,
+#9340, #9602 and, unselected, #9474): 20 repair passes ran, 20 hit the
+wall at exactly 18.0 minutes, none succeeded. That sample is drawn
+from runs already known to contain a repair timeout, so read the rate
+as indicative rather than fleet-wide — but the arithmetic above does
+not depend on the sample. Raised to 40 minutes under a 45-minute
+backstop. That does not fit the old 300-minute job ceiling — the four
+long steps plus the 25-minute setup/report reserve now sum to 320 — so
+the job cap moved to 325, the largest value that stays under
+review-scan's PENDING_STALE_MIN of 330 while keeping the same
+5-minute slack the 295/300 pair had. Nothing else was squeezed to make
+room: the two verification gates keep their 60-minute caps even though
+they measured 6.6-10.6, because that headroom is their safety margin,
+not spare change. The real cost is bounded occupancy, not real time:
+the worst round actually observed spent 88 minutes end to end.
+
+Counting those exhaustions was the af-073 mistake in a second form.
+The cap's remedy is "split or reduce the PR (or raise the agent time
+budget AND its step backstop)", and none of it applies here: the
+primary pass FINISHED and produced the commit the gate rejected, so
+the round was not too big for its budget, and the repair sub-budget is
+pinned independently of the round budget the remedy names. Over the 14
+days to 2026-08-21 this class was 30 of the 119 timeouts (25%) and 30
+of the 61 non-idle ones (49%) — so after af-073 removed idle, it was
+what kept parking PRs: #9394, #9576 and #9340 were all stopped on it
+within hours of af-073 landing.
+
+The escape hatch is unchanged and is what makes the exclusion safe: a
+repair timeout pushes nothing and matches none of CONSEC_FAIL's
+streak-reset needles, so a PR that keeps failing this way still
+terminates at CONSECUTIVE_FAILURE_CAP. What no longer terminates is a
+PR that is making progress and occasionally loses a round to a
+sub-budget that is not the one the operator would raise.
+
+Telling the two apart needed a name. run-agent.mjs's timeout detail
+opened with a bare "timeout (Nms)" for every caller, so the census had
+only the millisecond count to go on — and pinning a census to a
+literal budget value breaks the moment anyone retunes it. It now emits
+QWEN_TIMEOUT_LABEL as that opening token (validated lowercase-dashed,
+defaulting to "timeout"), the repair step sets it to "repair-timeout",
+and the census greps that. A test pins the step's literal against the
+census needle: a typo in either silently returns repair timeouts to
+the cap, which is exactly the bug this entry removes.
+
+The same exclusion applies to the prompt-narrowing census (af-049),
+whose warning tells the agent it "ran out of time before finishing
+anything" — false for a repair timeout, where the primary pass
+finished.
 ```
