@@ -10735,7 +10735,7 @@ exit 1
     // runs its own build/test between them), with PATH pinned first.
     expect(
       workflow.match(
-        /echo "\$\{VERIFY_RUNNER_SHA256\} {2}\$\{RUNNER_TEMP\}\/run-autofix-review-verification\.sh" \| sha256sum -c - > \/dev\/null/g,
+        /\/usr\/bin\/echo "\$\{VERIFY_RUNNER_SHA256\} {2}\$\{RUNNER_TEMP\}\/run-autofix-review-verification\.sh" \| \/usr\/bin\/sha256sum -c - > \/dev\/null/g,
       ) ?? [],
     ).toHaveLength(2);
     expect(
@@ -11394,6 +11394,104 @@ exit 1
     expect(reviewVerificationGateStep).not.toContain(
       'bash .github/scripts/run-autofix-review-verification.sh',
     );
+    // The gate launches through an env -i clean child with a SANCTIONED
+    // allowlist (R5-1): every variable the gate's own build/test checks need
+    // must be passed, and the step-pinned CI=true is one of them — without
+    // it the gate's checks run with inverted CI semantics and the 18
+    // deliberately-skipped TUI-input tests un-skip inside the gate (one flakes
+    // ~5s, reject_fix fires retryable on a fix the PR's own CI passes green).
+    // Pin the launch STRUCTURALLY — one verbatim adjacency chain from the
+    // LD_* prefix through the digest-verified script, every entry in order
+    // with its exact value — not as text tokens: shell edits that preserve
+    // token text (a commented-out entry, a dropped `\`, an =-less operand, a
+    // quote suffix, an entry smuggled behind a `bash --norc` value, the
+    // launch head moved into a comment) each broke the child's isolation
+    // while every token-level pin stayed green (R2-1). Anchoring the chain
+    // on the LD_* prefix pins the one channel env -i cannot block; the
+    // body-side unset and PATH export are pinned with it (R3-1, R2-2). By
+    // themselves they do NOT protect the pre-launch digest check, which
+    // runs in this step's own bash: startup-time channels — an LD_*
+    // library mapped before line 1, a BASH_FUNC function import, a
+    // path-variable redirection of the checked file — are closed by the
+    // step-level env pins and the absolute digest path below (R6-2, R6-3,
+    // R6-4). The shapes AROUND the chain
+    // are closed by pinning the run body's whole statement list with
+    // comments stripped: a prefix command word that demotes the whole chain
+    // to one command's argv (the gate never executes and a forged outcome
+    // survives), a command appended or inserted around the launch, a
+    // demotion of the pinned block into a never-run arm, a commented-out or
+    // relocated statement — each adds, drops, reorders, or renames a
+    // statement here (R4-2, R4-3, R4-4). Within the chain, separators allow
+    // only bash whitespace — space/tab after the continuation newline: JS
+    // `\s` also matches a blank line, which splits the chain into two
+    // commands (the orphaned env -i prints and exits 0 while the rest runs
+    // with the FULL step environment), and NBSP/U+2028, which glue into the
+    // next operand and rename it. Blank lines filter out of the statement
+    // list too, so only this pin closes the blank-line split; lines that
+    // carry NBSP/U+2028 instead fail the statement list's exact match,
+    // whose ASCII-only strip keeps them visible (R4-1, R6-1).
+    const gateLaunchTokens = [
+      'LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH=',
+      '/usr/bin/env -i',
+      'PATH="${TRUSTED_PATH}"',
+      'HOME="${HOME}"',
+      'RUNNER_TEMP="${RUNNER_TEMP}"',
+      'WORKDIR="${WORKDIR}"',
+      'BRANCH="${BRANCH}"',
+      'GITHUB_OUTPUT="${GITHUB_OUTPUT}"',
+      'CI="${CI:-true}"',
+      'KISS_AUDIT="${KISS_AUDIT:-false}"',
+      'FOOTPRINT_ENFORCE="${FOOTPRINT_ENFORCE:-advisory}"',
+      'bash --norc "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
+    ];
+    const gateLaunchPin = new RegExp(
+      gateLaunchTokens
+        .map((token) => token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+        .join(' \\\\\n[ \\t]*'),
+    );
+    // The digest check executes in the PARENT shell before the clean child
+    // exists. Its binaries are absolute paths and its inputs step-level
+    // pins, because ANY bare command word in the body — echo, export, or
+    // unset alike — is shadowed by $GITHUB_ENV-planted BASH_FUNC functions
+    // imported at bash startup (R6-4), and a shadowed in-shell pin arms a
+    // DEBUG trap that swaps the staged runner AFTER the digest passes and
+    // BEFORE the launch executes it (R8-1): the body carries no pin
+    // statement of its own, so the pinned list is exactly the digest line
+    // and the launch. The digest line is pinned whole and per step — a
+    // workflow-wide count accepts relocation out of the gates, and
+    // `|| true` accepts a digest mismatch under bash -e (R4-3, the
+    // resanitize sibling's doctrine).
+    const gateDigestCheck =
+      '/usr/bin/echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | /usr/bin/sha256sum -c - > /dev/null';
+    const gateBodyStatements = [
+      gateDigestCheck,
+      ...gateLaunchTokens.map((token, index) =>
+        index < gateLaunchTokens.length - 1 ? `${token} \\` : token,
+      ),
+    ];
+    // Bash breaks words only on ASCII space/tab/newline: strip ASCII
+    // whitespace only, so a line carrying any other "whitespace" (NBSP,
+    // U+2000–U+200A, U+2028, ...) keeps it and fails the exact match.
+    // JS trim() stripped those too, classifying `\u00a0# x` as a comment
+    // while bash executed it — a smuggled statement invisible to
+    // every other pin here (R6-1).
+    const gateBodyStatementsOf = (stepText) =>
+      stepText
+        .slice(stepText.indexOf('run: |-') + 'run: |-'.length)
+        .split('\n')
+        .map((line) => line.replace(/^[ \t]+|[ \t]+$/g, ''))
+        .filter((line) => line !== '' && !line.startsWith('#'));
+    expect(gateBodyStatementsOf('run: |-\n  \u00a0# x')).toEqual(['\u00a0# x']);
+    for (const step of [
+      reviewVerificationGateStep,
+      repairVerificationGateStep,
+    ]) {
+      expect(step).toMatch(gateLaunchPin);
+      expect(gateBodyStatementsOf(step)).toEqual(gateBodyStatements);
+      // Exactly one launch per step: a second, unpinned `bash --norc` (the
+      // pinned block demoted into a never-run arm) must fail here (R2-1).
+      expect((step.match(/bash --norc/g) ?? []).length).toBe(1);
+    }
     expect(
       reviewVerifyGate.indexOf(
         'bash "${RUNNER_TEMP}/check-autofix-contracts.sh"',
@@ -13008,7 +13106,7 @@ exit 1
       // Delimited tokens, not substrings: match `NAME=value` up to the line
       // continuation, so a value swap or an extra entry is visible.
       const assignments = (
-        argList.match(/[A-Z_][A-Z0-9_]*=(?:"[^"]*"|[^\s\\]*)/g) ?? []
+        argList.match(/[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|[^\s\\]*)/g) ?? []
       ).map((m) => m.trim());
       const passed = assignments.map((m) => m.split('=')[0]);
       // Sorted multiset, not a Set: a symmetric duplicate entry is exactly
@@ -19701,10 +19799,34 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
     // level, which outranks any $GITHUB_ENV plant; the gate itself then
     // runs through the workflow's env -i clean-child pattern, so its bash
     // inherits nothing at all (enumerating plants is the failure mode the
-    // verdict pipeline kept hitting).
+    // verdict pipeline kept hitting). LD_* load at startup the same way, so
+    // they are pinned empty at step level too — an in-body unset cannot
+    // unload a library already mapped into the parent running the digest
+    // check, and a bare unset is itself a BASH_FUNC shadow target (R6-2,
+    // R8-1) — and RUNNER_TEMP/WORKDIR/BRANCH steer that digest check and
+    // the child's tree, so they are pinned from trusted expression context
+    // too (R6-3). CI reaches the child's `CI="${CI:-true}"` expansion from
+    // the step environment, and `:-true` only covers an UNSET CI — a
+    // $GITHUB_ENV plant of CI=false survives the expansion and inverts the
+    // gate's CI semantics — so CI is pinned at step level too (R1-1).
+    // HOME reaches the child's allowlist from the step environment, and
+    // npm resolves its userconfig from HOME — a planted HOME's .npmrc
+    // script-shell wraps every verdict-determining `npm run`, so a red
+    // branch reports green; HOME is pinned from the stage-time capture
+    // (R8-3).
     for (const step of [verificationGateSteps[1], repairVerificationGateStep]) {
       expect(step).toContain("BASH_ENV: ''");
       expect(step).toContain("SHELLOPTS: ''");
+      expect(step).toContain("LD_PRELOAD: ''");
+      expect(step).toContain("LD_AUDIT: ''");
+      expect(step).toContain("LD_LIBRARY_PATH: ''");
+      expect(step).toContain("RUNNER_TEMP: '${{ runner.temp }}'");
+      expect(step).toContain(
+        "WORKDIR: '/tmp/autofix-review-${{ matrix.target.pr }}'",
+      );
+      expect(step).toContain("BRANCH: '${{ matrix.target.branch }}'");
+      expect(step).toContain("CI: 'true'");
+      expect(step).toContain("HOME: '${{ steps.stage.outputs.trusted_home }}'");
       expect(step).toContain('/usr/bin/env -i');
       expect(step).toContain(
         'bash --norc "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
@@ -19715,6 +19837,10 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
         'FOOTPRINT_ENFORCE="${FOOTPRINT_ENFORCE:-advisory}"',
       );
     }
+    // The review stage step records HOME before any branch code runs — the
+    // trusted_path doctrine — and only it: the issue job's stage has no
+    // gate child re-injecting HOME.
+    expect(workflow.match(/trusted_home=\$\{HOME\}/g) ?? []).toHaveLength(1);
   });
 });
 
