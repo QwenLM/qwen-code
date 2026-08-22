@@ -132,20 +132,30 @@ call; the reviewer checklist covers this.
 
 ### 15. Web Shell UI conventions
 
-**Review-only.** AGENTS.md's Web Shell UI development section asserts four
-normative rules: prefer the shared primitives in
-`packages/web-shell/client/components/ui` instead of duplicating them;
-ref-accepting wrappers (including Radix `asChild`, `Slot`, `Presence`, and
-portal children) must use `React.forwardRef` so the package works under both
-React 18 and React 19; generated CSS stays scoped to the Web Shell root and
-portal root with semantic tokens, isolated from host-page styles; and portal
-components must use `useWebShellPortalRoot()` so themes, scoped CSS, and
-z-index variables keep applying. None of these has a mechanical guard — no
-lint rule or test detects a duplicated primitive, a missing `forwardRef`, a
-broken CSS scope, or a raw portal container — so they are enforced by
-reviewer judgment against `packages/web-shell/README.md`. Violations surface
-at integration time (host styles leak in, refs break under React 18), past
-the point any lint could see.
+**Review-only.** Every requirement in AGENTS.md's Web Shell UI development
+section falls in this category. The section covers: preferring the shared
+primitives in `packages/web-shell/client/components/ui` over duplicating
+them, and the shadcn workflow when a primitive is missing — run
+`npx shadcn@latest add` from `packages/web-shell`, review the generated
+diff, do not let the CLI overwrite the global CSS, semantic tokens, CSS
+scoping, or portal-root integration, and keep generated components internal
+unless a public package API is explicitly required; React 18/19
+compatibility — ref-accepting wrappers (including Radix `asChild`, `Slot`,
+`Presence`, and portal children) must use `React.forwardRef`, and any
+ref-sensitive component path gets a regression test; styling through
+unprefixed Tailwind classes and shadcn semantic color tokens, with the
+package build scoping generated CSS to the Web Shell root and portal root
+so changes preserve isolation from host-page styles; and portal components
+(dialogs, popovers, dropdowns, tooltips) using `useWebShellPortalRoot()` as
+the Radix portal container while preserving existing `data-web-shell-*`
+attributes and public `--web-shell-*` CSS variables. None of these has a
+mechanical guard — no lint rule or test detects a duplicated primitive, a
+missing `forwardRef`, an overwritten scoping integration, a broken CSS
+scope, or a raw portal container — so they are enforced by reviewer
+judgment against the AGENTS.md section and
+`packages/web-shell/README.md`, which carries the full conventions.
+Violations surface at integration time (host styles leak in, refs break
+under React 18), past the point any lint could see.
 
 ---
 
