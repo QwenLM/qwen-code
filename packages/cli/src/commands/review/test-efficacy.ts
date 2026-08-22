@@ -61,7 +61,7 @@ import {
 import { createRequire } from 'node:module';
 import { dirname, join, isAbsolute, resolve, sep } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import { probeWorktreePath, REVIEW_TMP_DIR } from './lib/paths.js';
+import { probeWorktreePath } from './lib/paths.js';
 // `discardWorktree` moved to `lib/worktree.ts` when `base-tree` needed the same
 // stale-sweep-then-remove step (its rationale lives there, with the helper), and
 // `exposeDependencies` followed it when `scratch-tree` needed the same
@@ -69,6 +69,8 @@ import { probeWorktreePath, REVIEW_TMP_DIR } from './lib/paths.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import {
   containerCommand,
+  mountRootFor,
+  refuseUnsandboxedPhase,
   reviewSandboxImage,
   sandboxVerdict,
 } from './lib/sandboxed-exec.js';
@@ -1535,15 +1537,11 @@ function probeContainer(
 ): { file: string; args: string[] } | null {
   const verdict = sandboxVerdict();
   if (verdict.kind !== 'container') return null;
-  const resolved = resolve(probeTree);
-  const marker = `${sep}${REVIEW_TMP_DIR}${sep}`;
-  const at = resolved.indexOf(marker);
-  if (at < 0) return null;
+  const tmpDir = mountRootFor(probeTree);
+  if (tmpDir === null) return null;
   return containerCommand(command, {
-    cwd: resolved,
-    // The mount is the temp dir, not the probe tree: the dependency farm's
-    // links point out of it, into the review worktree's `node_modules`.
-    tmpDir: resolved.slice(0, at + marker.length - 1),
+    cwd: resolve(probeTree),
+    tmpDir,
     kind: 'test',
     runtime: verdict.runtime,
     image: reviewSandboxImage(),
@@ -1725,7 +1723,13 @@ function runProbeSuite(
   // per run, offline, with an env allowlist instead of this process's own;
   // unsandboxed it is the direct spawn this has always been, and the caller
   // has already disclosed that.
-  const suite = `${shellQuotePath(process.execPath)} ${shellQuotePath(
+  // `node` off the IMAGE's PATH, not `process.execPath`: the host's interpreter
+  // path (`/usr/bin/node` here, `/opt/hostedtoolcache/…` on a GitHub runner) is
+  // neither mounted nor present in the image, so baking it in exits 127 and
+  // maps every probe — baseline, control, each mutant, each hunk, the revert —
+  // to inconclusive, blaming the runner's output for a wiring error. The vitest
+  // bin path DOES resolve, because it lives under the mounted temp dir.
+  const suite = `node ${shellQuotePath(
     findVitestBin(dependencyRoot),
   )} run --reporter=json ${probes.map(shellQuotePath).join(' ')}`;
   const boxed = probeContainer(suite, probeTree);
@@ -2475,7 +2479,20 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
     }
   };
 
-  if (probes.length > 0 && revert.length > 0) {
+  // BEFORE the probe tree is even created. Every run this phase makes executes
+  // the reviewed repository's suite, so under `review.sandbox: required` with no
+  // container runtime the honest outcome is no efficacy evidence — not evidence
+  // bought by running that suite unsandboxed. Refusing here rather than at the
+  // spawn keeps the report's vocabulary intact: the phase produced nothing, and
+  // says why, instead of a run of probes each blaming the runner.
+  const sandboxRefusal = refuseUnsandboxedPhase();
+  if (sandboxRefusal) {
+    noteMutants(
+      `mutation probes did not run: ${sandboxRefusal}. Every probe executes ` +
+        `the reviewed repository's own test suite, which is what the policy ` +
+        `forbids unsandboxed — read the absence as unmeasured, not as covered.`,
+    );
+  } else if (probes.length > 0 && revert.length > 0) {
     // The probe reverts the PR's source to base and runs the tests against it —
     // in its OWN disposable worktree, checked out at the PR head and discarded
     // wholesale when the probe finishes. The shared worktree the other review

@@ -46,8 +46,9 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { join } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import { operatorReviewSettings } from './review-settings.js';
+import { REVIEW_TMP_DIR } from './paths.js';
 import { CUSTOM_SANDBOX_IMAGE_ENV_VAR } from '../../../utils/processUtils.js';
 
 /**
@@ -150,14 +151,21 @@ export type SandboxVerdict =
 export function sandboxVerdict(
   policy: SandboxPolicy = sandboxPolicy(),
   env: NodeJS.ProcessEnv = process.env,
+  // Injected so a test's outcome does not depend on whether the machine
+  // running it happens to have a daemon — this decides whether the reviewed
+  // code is contained, and a test that answers differently on two machines
+  // pins nothing.
+  probe: () => ContainerRuntime | null = containerRuntime,
 ): SandboxVerdict {
-  if (env['SANDBOX']) {
-    return {
-      kind: 'direct',
-      disclose:
-        'the session is already sandboxed, so the PR’s commands run inside that boundary',
-    };
-  }
+  // NOTE: `SANDBOX` being set is NOT a shortcut past the policy. The first cut
+  // returned `direct` for it, reasoning that the outer boundary is the one the
+  // operator asked for — which is wrong for the property this module is about.
+  // The CLI's own sandbox constrains the filesystem and the network; it hands
+  // the child `process.env` entire, secrets included, and stripping those is
+  // half of what `required` promises. An already-sandboxed session that also
+  // wants an env allowlist gets it the same way everyone else does: the probe
+  // below finds a runtime or it does not, and `required` refuses if it does
+  // not. The disclosure survives on the direct path, where it is useful.
   if (policy === 'off') {
     return {
       kind: 'direct',
@@ -166,21 +174,53 @@ export function sandboxVerdict(
         'set review.sandbox to "auto" or "required" to run them in a container',
     };
   }
-  const runtime = containerRuntime();
+  const runtime = probe();
   if (runtime) return { kind: 'container', runtime };
   if (policy === 'required') {
     return {
       kind: 'refused',
       reason:
         'review.sandbox is "required" and no container runtime answered ' +
-        `(tried ${RUNTIMES.join(', ')})`,
+        `(tried ${RUNTIMES.join(', ')})` +
+        (env['SANDBOX']
+          ? ' — this session is itself sandboxed, which constrains the ' +
+            'filesystem but still hands the PR’s commands this process’s ' +
+            'environment, so it does not satisfy "required"'
+          : ''),
     };
   }
   return {
     kind: 'direct',
-    disclose:
-      'no container runtime answered, so the PR’s commands ran directly',
+    disclose: env['SANDBOX']
+      ? 'no container runtime answered; the PR’s commands ran inside this session’s own sandbox, which does not strip its environment'
+      : 'no container runtime answered, so the PR’s commands ran directly',
   };
+}
+
+/**
+ * The one place a `required` refusal becomes an outcome.
+ *
+ * `sandboxVerdict` can say `refused`, and the first cut left acting on it to
+ * "the caller" — where no caller acted, so `required` ran the reviewed code
+ * unsandboxed with the full environment and the policy meant nothing. It has
+ * to be decided ONCE, at the top of a phase, before anything executes:
+ *
+ * - the two spawn sites cannot refuse usefully — by the time they are reached
+ *   the phase has committed to producing a verdict, and a per-command refusal
+ *   would read as a build failure rather than as absent evidence;
+ * - one of them is not even on the path. When the toolchain cannot be scoped
+ *   (a yarn/pnpm/bun repo, no `package-lock.json` — `unsupportedReport`), the
+ *   pipeline hands the install/build/test to the AGENT's own shell, which
+ *   never passes through `run()` at all. A gate at the spawn would leave that
+ *   route wide open under the very policy that forbids it.
+ *
+ * Returns the reason when the phase must not execute the reviewed repository's
+ * code, or null when it may.
+ */
+export function refuseUnsandboxedPhase(
+  verdict: SandboxVerdict = sandboxVerdict(),
+): string | null {
+  return verdict.kind === 'refused' ? verdict.reason : null;
 }
 
 /** Whether one command needs the network. */
@@ -195,13 +235,47 @@ export type CommandKind = 'install' | 'build' | 'test';
  * the pipeline sets on purpose (`buildRunEnv`), so they are the ones that
  * cross.
  */
-export function containerEnv(cacheDir: string): string[] {
+export function containerEnv(homeDir: string): string[] {
   return [
     'CI=1',
     'npm_config_yes=true',
     'QWEN_SKIP_PREPARE=1',
-    `npm_config_cache=${cacheDir}`,
+    // `HOME` explicitly, and inside the mount. Forcing a uid resets `$HOME` to
+    // `/` in these images — `utils/sandbox.ts` copies the host's for the same
+    // reason — and `/` is not writable by the mapped user, so npm's first
+    // write fails before the install starts. Pointing it at the mount gives
+    // every tool that wants a home one it owns.
+    `HOME=${homeDir}`,
+    `npm_config_cache=${join(homeDir, '.npm')}`,
   ];
+}
+
+/**
+ * The directory to mount for a command running in `cwd`, or null when `cwd` is
+ * not one of the pipeline's trees.
+ *
+ * Not the tree: the dependency farm links out of every tree into the review
+ * worktree's `node_modules`, so a per-tree mount leaves every link dangling.
+ * Every tree the pipeline builds is a sibling under the review temp dir, so
+ * that directory covers both ends of every link while `<repo>/.git` stays
+ * outside it.
+ *
+ * `lastIndexOf`, because a review run from inside another review's worktree —
+ * this pipeline's own dogfood geometry — nests one `.qwen/tmp` inside another,
+ * and the FIRST occurrence would widen the mount to the outer temp dir,
+ * pulling `<repo>/.git` and every sibling checkout in with it. Tree names
+ * cannot contain a separator (scratch labels flatten to `[A-Za-z0-9._-]`), so
+ * the deepest occurrence is always the tree's own parent.
+ *
+ * Null for a cwd outside any temp dir — a `/review` of a local checkout, where
+ * the tree under test IS the user's working copy and there is no sibling
+ * layout to mount.
+ */
+export function mountRootFor(cwd: string): string | null {
+  const resolved = resolve(cwd);
+  const marker = `${sep}${REVIEW_TMP_DIR}${sep}`;
+  const at = resolved.lastIndexOf(marker);
+  return at < 0 ? null : resolved.slice(0, at + marker.length - 1);
 }
 
 export interface ContainerCommandOptions {
@@ -238,7 +312,31 @@ export function containerCommand(
     opts.cwd,
   ];
   if (opts.kind !== 'install') args.push('--network', 'none');
-  for (const entry of containerEnv(join(opts.tmpDir, '.npm-cache'))) {
+  // The container writes into a mount the HOST pipeline then has to clean up —
+  // `node_modules` after an install timeout, the tree itself at `discardWorktree`,
+  // the sweeps. The default image runs as root (`node:22-slim`, no `USER`), so
+  // without this every one of those hits EACCES and the residue accumulates
+  // across reviews: the cross-run-state class this pipeline has spent rounds
+  // closing. `utils/sandbox.ts` maps the same pair for the same hazard on the
+  // same image lineage, and honours the same opt-out.
+  //
+  // Known limit, stated rather than papered over: `--user` with a bare
+  // uid:gid leaves that uid absent from the container's `/etc/passwd`, so a
+  // tool that calls `getpwuid` (rather than reading `$HOME`) still sees an
+  // unknown user. `utils/sandbox.ts` avoids that by starting as root and
+  // `useradd`-ing the host's ids — machinery this does not need, because what
+  // runs here is a shell command, not the CLI whose `os.userInfo()` requires
+  // the entry. If a toolchain turns out to need it, that is the shape to copy.
+  const uid = process.getuid?.();
+  const gid = process.getgid?.();
+  if (
+    uid !== undefined &&
+    gid !== undefined &&
+    process.env['SANDBOX_SET_UID_GID']?.toLowerCase().trim() !== 'false'
+  ) {
+    args.push('--user', `${uid}:${gid}`);
+  }
+  for (const entry of containerEnv(join(opts.tmpDir, '.sandbox-home'))) {
     args.push('--env', entry);
   }
   args.push(opts.image, 'sh', '-lc', command);

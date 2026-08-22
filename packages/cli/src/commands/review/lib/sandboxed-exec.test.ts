@@ -15,6 +15,8 @@ import { join, sep } from 'node:path';
 import {
   containerCommand,
   containerEnv,
+  mountRootFor,
+  refuseUnsandboxedPhase,
   reviewSandboxImage,
   sandboxPolicy,
   sandboxVerdict,
@@ -42,18 +44,41 @@ describe('sandboxPolicy', () => {
 });
 
 describe('sandboxVerdict', () => {
-  it('does not nest: an already-sandboxed session runs direct', () => {
-    // `sandbox.ts` sets SANDBOX to the seatbelt profile or the container name.
-    // The outer boundary is the one the operator asked for.
-    const got = sandboxVerdict('required', { SANDBOX: 'qwen-code-abc123' });
-    expect(got.kind).toBe('direct');
-    expect(got.kind === 'direct' && got.disclose).toContain(
-      'already sandboxed',
+  it('does not let an already-sandboxed session satisfy `required`', () => {
+    // The first cut returned `direct` here, reasoning that the outer boundary
+    // is the one the operator asked for. That is wrong for the property this
+    // module is about: the CLI's own sandbox constrains the filesystem and the
+    // network and hands the child `process.env` ENTIRE — and stripping the
+    // secrets is half of what `required` promises. So `SANDBOX` is not a
+    // shortcut past the policy; the runtime probe still decides.
+    const got = sandboxVerdict(
+      'required',
+      { SANDBOX: 'qwen-code-abc123' },
+      () => null,
+    );
+    expect(got.kind).toBe('refused');
+    expect(got.kind === 'refused' && got.reason).toContain(
+      'does not satisfy "required"',
     );
   });
 
+  it('turns `required` with no runtime into a refusal a phase can act on', () => {
+    // The refusal has to reach something that stops the phase. Left to "the
+    // caller", no caller acted and `required` ran the reviewed code
+    // unsandboxed with the full environment — the policy meant nothing.
+    const verdict = sandboxVerdict('required', {}, () => null);
+    expect(refuseUnsandboxedPhase(verdict)).toContain('no container runtime');
+    // ...and a verdict that is not a refusal never stops one.
+    expect(refuseUnsandboxedPhase(sandboxVerdict('off', {}, () => null))).toBe(
+      null,
+    );
+    expect(
+      refuseUnsandboxedPhase(sandboxVerdict('auto', {}, () => 'docker')),
+    ).toBe(null);
+  });
+
   it('discloses rather than hides that the reviewed code ran as you', () => {
-    const got = sandboxVerdict('off', {});
+    const got = sandboxVerdict('off', {}, () => null);
     expect(got.kind).toBe('direct');
     expect(got.kind === 'direct' && got.disclose).toContain('ran as you');
   });
@@ -108,12 +133,15 @@ describe('containerCommand', () => {
     // This is the finding the design is built on: both call sites used to give
     // the PR's code `process.env`, which on CI carries the review's model and
     // GitHub credentials. A `postinstall` reading them is one line.
-    const env = containerEnv('/cache');
+    const env = containerEnv('/home-in-mount');
     expect(env).toEqual([
       'CI=1',
       'npm_config_yes=true',
       'QWEN_SKIP_PREPARE=1',
-      'npm_config_cache=/cache',
+      // HOME inside the mount: forcing a uid resets it to `/`, which the
+      // mapped user cannot write, and npm fails before the install starts.
+      'HOME=/home-in-mount',
+      'npm_config_cache=/home-in-mount/.npm',
     ]);
 
     const { args } = containerCommand('npm ci', {
@@ -125,6 +153,20 @@ describe('containerCommand', () => {
     expect(passed.some((e) => /TOKEN|KEY|SECRET|PASSWORD/i.test(e))).toBe(
       false,
     );
+  });
+
+  it('maps the host uid so its writes stay removable from the host', () => {
+    // The container writes into a mount the HOST then cleans up — `node_modules`
+    // after an install timeout, the tree at `discardWorktree`, the sweeps. Root
+    // in the container makes every one of those EACCES, and the residue
+    // accumulates across reviews: the cross-run-state class #9221 closed.
+    const { args } = containerCommand('npm ci', {
+      ...base,
+      cwd: join(tmpDir, 'review-pr-9'),
+      kind: 'install',
+    });
+    const user = args[args.indexOf('--user') + 1];
+    expect(user).toBe(`${process.getuid?.()}:${process.getgid?.()}`);
   });
 
   it('runs one ephemeral container per command', () => {
@@ -147,6 +189,40 @@ describe('containerCommand', () => {
       kind: 'install',
     });
     expect(args.slice(-3)).toEqual(['sh', '-lc', 'npm ci && npm test']);
+  });
+});
+
+describe('mountRootFor', () => {
+  it('takes the DEEPEST temp dir, not the first', () => {
+    // A review run from inside another review's worktree — this pipeline's own
+    // dogfood geometry — nests one `.qwen/tmp` inside another. First-occurrence
+    // search widens the mount to the OUTER temp dir, which pulls `<repo>/.git`
+    // and every sibling checkout into the container and defeats the one
+    // property the mount exists for.
+    const nested = join(
+      sep,
+      'srv',
+      '.qwen',
+      'tmp',
+      'checkouts',
+      'myrepo',
+      '.qwen',
+      'tmp',
+      'review-pr-1-probe',
+    );
+    expect(mountRootFor(nested)).toBe(
+      join(sep, 'srv', '.qwen', 'tmp', 'checkouts', 'myrepo', '.qwen', 'tmp'),
+    );
+    // The flat case — the one the other tests exercise — is unchanged.
+    expect(mountRootFor(join(sep, 'repo', '.qwen', 'tmp', 'review-pr-9'))).toBe(
+      join(sep, 'repo', '.qwen', 'tmp'),
+    );
+  });
+
+  it('is null outside a temp dir, so a local checkout is never mounted', () => {
+    // `/review` of a local checkout has no sibling layout: the tree under test
+    // IS the user's working copy.
+    expect(mountRootFor(join(sep, 'home', 'me', 'myrepo'))).toBe(null);
   });
 });
 

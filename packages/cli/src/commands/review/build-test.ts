@@ -40,15 +40,16 @@
 import type { CommandModule } from 'yargs';
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { join, resolve, sep } from 'node:path';
+import { join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   containerCommand,
+  mountRootFor,
+  refuseUnsandboxedPhase,
   reviewSandboxImage,
   sandboxVerdict,
   type CommandKind,
 } from './lib/sandboxed-exec.js';
-import { REVIEW_TMP_DIR } from './lib/paths.js';
 import {
   DEFAULT_COMMAND_TIMEOUT_S,
   DEFAULT_WHOLE_CALL_BUDGET_S,
@@ -117,7 +118,14 @@ export interface CommandResult {
 
 export interface BuildTestReport {
   /** The scoped toolchain that ran, or `unsupported` when selection was unsafe. */
-  toolchain: 'npm' | 'unsupported';
+  /**
+   * `refused` is not a kind of repository — it is the absence of a run.
+   * `unsupported` means "this command could not scope your repo, go run the
+   * build yourself", which is a real instruction the brief acts on; routing a
+   * sandbox refusal into it would send the agent to run the reviewed code by
+   * hand with its own shell, which is the exact thing the policy forbade.
+   */
+  toolchain: 'npm' | 'unsupported' | 'refused';
   /** Workspace dirs the diff changed. */
   affected: string[];
   /** What was built, dependencies first — after any widening. */
@@ -336,16 +344,10 @@ function containerised(
 ): { file: string; args: string[] } | null {
   const verdict = sandboxVerdict();
   if (verdict.kind !== 'container') return null;
-  // The mount is the review temp dir, not this tree: the dependency farm links
-  // out of every tree into the review worktree's `node_modules`, and mounting
-  // one tree alone would leave every one of those links dangling.
-  const resolved = resolve(cwd);
-  const marker = `${sep}${REVIEW_TMP_DIR}${sep}`;
-  const at = resolved.indexOf(marker);
-  if (at < 0) return null;
-  const tmpDir = resolved.slice(0, at + marker.length - 1);
+  const tmpDir = mountRootFor(cwd);
+  if (tmpDir === null) return null;
   return containerCommand(command, {
-    cwd: resolved,
+    cwd: resolve(cwd),
     tmpDir,
     kind,
     runtime: verdict.runtime,
@@ -800,6 +802,37 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     previous,
     exec: args.exec ?? run,
   };
+  // BEFORE anything is executed or handed off. Under `review.sandbox: required`
+  // with no container runtime answering, this phase must produce no build/test
+  // evidence rather than produce it by running the reviewed repository's code
+  // unsandboxed. It sits here and not at the spawn because one route never
+  // reaches a spawn at all: a repo this adapter cannot scope is handed to the
+  // AGENT's own shell (`unsupportedReport`), which would otherwise run the
+  // install and the suite with nothing consulted.
+  const refusal = refuseUnsandboxedPhase();
+  if (refusal) {
+    return {
+      toolchain: 'refused',
+      affected: [],
+      buildSet: [],
+      widenedWith: [],
+      install: null,
+      build: [],
+      test: [],
+      timedOut: [],
+      // NOT `ok: true`. `unsupportedReport`'s hand-off is `ok` because nothing
+      // was found wrong; here something WAS — the phase could not be run under
+      // the policy in force — and a reader that treats this as a clean
+      // hand-off would go do by hand exactly what the policy just refused.
+      ok: false,
+      note:
+        `no build or test evidence: ${refusal}. This phase would have had to ` +
+        `run the reviewed repository's own commands, which is what the policy ` +
+        `forbids — so it ran nothing rather than running them unsandboxed. ` +
+        `Do not read this as a passing build, and do not run the commands by ` +
+        `hand to fill the gap.`,
+    };
+  }
   const { adapter, applicable } = selectToolchainAdapter(
     root,
     toolchainAdapters,
