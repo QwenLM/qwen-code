@@ -2898,6 +2898,24 @@ function composeReviewBody(
   // reads, so the two features cannot disagree about what a round held.
   // Advisory only: it cannot move the event or cap the verdict; it only
   // surfaces, and every input degrades open to "no assessment".
+  // A PURE-FOREIGN work-list is a stranger's, not a shortened version of
+  // this account's. Recovery adopts the highest-round marker whoever posted
+  // it, and where that marker was NOT merged over this account's own
+  // findings, this account's entries are in no work list at all — the same
+  // state `openCriticals` above refuses to infer across, for the same
+  // reason. Every prev-round fact this signal reads comes off that list, so
+  // reading it there let a stranger's Criticals stand in for this account's:
+  // an own round-6 marker that was a clean LGTM, a foreign same-round marker
+  // carrying Criticals and no Suggestions winning recovery, and one Critical
+  // drafted this round were enough to publish "Criticals stood in the
+  // previous round's work-list and stand again this round —
+  // land-with-residual-risk" over this account's own LGTM (#9526).
+  //
+  // Merged foreign lists are NOT withheld: the union keeps this account's
+  // own certified entries under their own ids, which is exactly the part
+  // that makes the list speak for this account again.
+  const pureForeignPrev =
+    convergence?.prev.foreign === true && convergence?.prev.merged !== true;
   const residualRisk = convergenceAssessment({
     // The persistence half, read straight off the recovered work list rather
     // than off a flag derived beside it: `prev.findings` is already gated on
@@ -2908,7 +2926,9 @@ function composeReviewBody(
     // persistence — that costs a missed advisory, which is the fail-safe
     // direction and the direction every other conjunct degrades in too.
     prevHadCritical:
-      convergence?.prev.findings.some((f) => f.sev === 'C') || undefined,
+      pureForeignPrev || !convergence
+        ? undefined
+        : convergence.prev.findings.some((f) => f.sev === 'C') || undefined,
     // The floor-engagement conjunct is computed by the SAME predicate the
     // enforcement backstop keys on (#9410): the advisory's "the floor will
     // not converge it" claim is provable only where the floor is actually
@@ -2943,17 +2963,19 @@ function composeReviewBody(
     // fact the stamp cannot carry: enforcement moves drafted Suggestions out
     // of the posting set before the marker is built, so its presence means
     // the floor was not running (#9526).
-    prevPostedSuggestion: convergence
-      ? convergence.prev.findings.some((f) => f.sev === 'S')
-      : undefined,
+    prevPostedSuggestion:
+      convergence && !pureForeignPrev
+        ? convergence.prev.findings.some((f) => f.sev === 'S')
+        : undefined,
     // The standing backlog, counted off the same recovered work-list the
     // persistence half reads. It is what keeps the fresh window honest at
     // its blind spot: a round finding nothing new while the author clears
     // blockers sits at fresh 0 against fresh 0, and only the Critical count
     // falling says the loop is moving.
-    prevCriticals: convergence
-      ? convergence.prev.findings.filter((f) => f.sev === 'C').length
-      : undefined,
+    prevCriticals:
+      convergence && !pureForeignPrev
+        ? convergence.prev.findings.filter((f) => f.sev === 'C').length
+        : undefined,
   });
 
   let event: ReviewEvent = baseEvent;

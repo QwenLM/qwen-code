@@ -3714,6 +3714,123 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     }
   });
 
+  it("will not read a PURE-FOREIGN work-list as this account's history (#9526)", async () => {
+    // Recovery adopts the highest-round marker whoever posted it. Where that
+    // marker was not merged over this account's own findings, this account's
+    // entries are in no work list at all — the state `openCriticals` already
+    // refuses to infer across. Every prev-round fact this signal reads comes
+    // off that list, so an own round-6 marker that was a clean LGTM, plus a
+    // foreign same-round marker carrying Criticals and no Suggestions, was
+    // enough to publish `land-with-residual-risk` over this account's own
+    // LGTM. The two control arms are the point: the fix must withhold the
+    // stranger's list WITHOUT silencing a list this account can claim.
+    const arms = [
+      {
+        label: 'pure-foreign',
+        flags: { foreign: true, merged: false },
+        fires: false,
+      },
+      {
+        label: 'own list',
+        flags: { foreign: false, merged: false },
+        fires: true,
+      },
+      // A merged foreign list keeps this account's own certified entries
+      // under their own ids, which is what makes it speak for this account.
+      {
+        label: 'merged foreign',
+        flags: { foreign: true, merged: true },
+        fires: true,
+      },
+    ];
+    const observed: Array<{
+      arm: string;
+      recommendation: string | undefined;
+      terminalLines: number;
+    }> = [];
+    for (const arm of arms) {
+      const dir = mkdtempSync(join(tmpdir(), 'compose-converge-foreign-'));
+      const inputPath = join(dir, 'compose.json');
+      const commentsPath = join(dir, 'comments.json');
+      const planPath = join(dir, 'plan.json');
+      writeFileSync(planPath, JSON.stringify({ prNumber: 8255 }), 'utf8');
+      writeFileSync(
+        inputPath,
+        JSON.stringify({ modelId: MODEL, planPath, severityFloor: 'auto' }),
+        'utf8',
+      );
+      writeFileSync(
+        commentsPath,
+        JSON.stringify([
+          { path: 'a.ts', line: 1, body: '**[Critical]** our own new blocker' },
+        ]),
+        'utf8',
+      );
+      const stdoutJson = () =>
+        JSON.parse(
+          (writeStdoutLine as ReturnType<typeof vi.fn>).mock.calls
+            .map((c) => String(c[0]))
+            .join('\n'),
+        ) as { residualRisk?: unknown };
+      try {
+        (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+        (writeStdoutLine as ReturnType<typeof vi.fn>).mockClear();
+        writeFileSync(
+          join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+          JSON.stringify({
+            v: 1,
+            round: 6,
+            // This account's own round posted nothing — a clean LGTM.
+            posted: 0,
+            fresh: 0,
+            floor: 'c',
+            // ...while the list that won recovery holds a stranger's
+            // Critical and, notably, no Suggestion to give the posture away.
+            findings: [
+              { id: 'R6-1', sev: 'C', file: 'x.ts', title: 'their blocker' },
+            ],
+            ...arm.flags,
+          }),
+          'utf8',
+        );
+        await runComposeReviewCommand({
+          input: inputPath,
+          comments: commentsPath,
+        });
+        const composed = stdoutJson();
+        const rr = composed.residualRisk as
+          | { recommendation?: string }
+          | undefined;
+        // The arm label rides IN the assertion, so a failure names which arm
+        // moved rather than pointing at a line inside the loop.
+        observed.push({
+          arm: arm.label,
+          recommendation: rr?.recommendation,
+          terminalLines: (
+            writeStderrLine as ReturnType<typeof vi.fn>
+          ).mock.calls
+            .map((c) => String(c[0]))
+            .filter((l) => l.startsWith('RESIDUAL-RISK: ')).length,
+        });
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+    expect(observed).toEqual([
+      { arm: 'pure-foreign', recommendation: undefined, terminalLines: 0 },
+      {
+        arm: 'own list',
+        recommendation: 'land-with-residual-risk',
+        terminalLines: 1,
+      },
+      {
+        arm: 'merged foreign',
+        recommendation: 'land-with-residual-risk',
+        terminalLines: 1,
+      },
+    ]);
+  });
+
   it('counts a relocated Critical toward the advisory (#9410)', async () => {
     // This round's only Critical arrives through the deferral channel's
     // RELOCATED arm — a deferred entry with severity Critical is relocated
