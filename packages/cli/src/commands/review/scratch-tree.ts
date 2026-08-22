@@ -66,6 +66,7 @@ import {
   type ResidueAnchor,
   type SweepResult,
 } from './lib/worktree.js';
+import { GIT_TIMEOUT_MS } from './lib/git.js';
 
 export interface ScratchTreeReport {
   /** True when a tree stands at `path`, checked out at the commit under review. */
@@ -189,6 +190,15 @@ function gitOut(cwd: string, ...args: string[]): string {
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
     env: sanitizedGitEnv(),
+    // The same deadline every git wrapper in this pipeline carries — a hang
+    // must still end. The entry's admin files (its HEAD, its index, its
+    // commondir) are contaminator-writable, and a planted FIFO in one blocks
+    // the spawn in open() forever: the pre-fix reset hung end-to-end until
+    // a human removed the plant (measured). A timeout-killed spawn carries
+    // `r.error`, the throw below routes through the existing catches, and
+    // every one of them fails closed — measured refusal, rebuild, or the
+    // create-failure report.
+    timeout: GIT_TIMEOUT_MS,
   });
   if (r.error) throw r.error;
   if (r.status !== 0) {
@@ -293,10 +303,26 @@ function resetScratchTree(
     if (redirectedAncestor(dirname(resolve(tree)), dirname(trustedCommon))) {
       return false;
     }
-    const gitdir = realpathSync(
-      gitOut(tree, 'rev-parse', '--path-format=absolute', '--git-dir'),
-    );
+    // `--git-dir` and `--git-common-dir` in ONE spawn: the pin must bind the
+    // entry and the common dir read from the SAME state. Across two spawns a
+    // swap of `tree/.git` landing between the reads pinned a forge entry
+    // whose commondir named a forge repository — nothing bound the pin's
+    // TARGET to the trustedCommon verified above, the round-trip below read
+    // self-consistent over the forge, and the reset's mutations ran there
+    // under `available: true, reused: true` (measured).
+    const [gitdirRaw, pinCommonRaw] = gitOut(
+      tree,
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-dir',
+      '--git-common-dir',
+    ).split('\n');
+    const gitdir = realpathSync(gitdirRaw);
     if (gitdir === trustedCommon) return false;
+    // The entry the pin is about to bind must belong to the common dir this
+    // gate verified — the equality check above is on paths, not containment,
+    // and a forge entry with a forged backpointer round-trips fine.
+    if (realpathSync(pinCommonRaw) !== trustedCommon) return false;
     // The admin entry must point back at THIS tree. A planted gitfile naming
     // a SIBLING worktree's admin entry passes every check above — directory,
     // gitfile, toplevel resolving to itself, common dirs comparing equal,
@@ -311,10 +337,11 @@ function resetScratchTree(
     ) {
       return false;
     }
-    // The identity this gate just round-trip-verified, pinned onto every spawn
-    // below: a gitfile swapped between the check above and the mutations would
-    // aim `checkout --force` and `clean -ffdx` at whichever repository it
-    // names — the same post-gate window the creation's pin closes.
+    // The identity this gate just verified — entry and common dir bound to
+    // the trusted values above in one read — pinned onto every spawn below:
+    // a gitfile swapped between the check above and the mutations would aim
+    // `checkout --force` and `clean -ffdx` at whichever repository it names
+    // — the same post-gate window the creation's pin closes.
     pin = [`--git-dir=${gitdir}`, `--work-tree=${realpathSync(tree)}`];
   } catch {
     return false;

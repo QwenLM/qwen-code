@@ -34,13 +34,26 @@ const worktreeLib = vi.hoisted(() => ({
 // re-opens the post-gate window while every behavioural test stays green
 // (the swap shapes that would expose it are races no fixture stages). The
 // wrapper is a pure pass-through.
-const spawnLog = vi.hoisted(() => ({ calls: [] as string[][] }));
+const spawnLog = vi.hoisted(() => ({
+  calls: [] as string[][],
+  opts: [] as unknown[],
+  // One-shot hook run just BEFORE the matching spawn executes: the
+  // post-gate swap window is a race no fixture stages deterministically, so
+  // the witness stages the swap exactly at the spawn boundary the fix
+  // removes — the suite's own discipline for swap shapes.
+  onCall: undefined as ((args: string[], options: unknown) => void) | undefined,
+}));
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
   const realSpawnSync = actual.spawnSync;
   const wrapper = (...callArgs: Parameters<typeof realSpawnSync>) => {
     const args = callArgs[1];
-    if (Array.isArray(args)) spawnLog.calls.push(args.map(String));
+    if (Array.isArray(args)) {
+      const mapped = args.map(String);
+      spawnLog.calls.push(mapped);
+      spawnLog.opts.push(callArgs[2]);
+      spawnLog.onCall?.(mapped, callArgs[2]);
+    }
     return realSpawnSync(...callArgs);
   };
   return {
@@ -70,6 +83,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -98,6 +112,8 @@ describe('runScratchTree', () => {
   beforeEach(() => {
     gitIsolation = isolateHostGitConfig();
     spawnLog.calls.length = 0;
+    spawnLog.opts.length = 0;
+    spawnLog.onCall = undefined;
     repo = mkdtempSync(join(tmpdir(), 'qwen-scratch-tree-'));
     git(repo, 'init', '-q', '-b', 'main');
     git(repo, 'config', 'user.email', 't@t.t');
@@ -118,6 +134,7 @@ describe('runScratchTree', () => {
   afterEach(() => {
     rmSync(repo, { recursive: true, force: true });
     gitIsolation.dispose();
+    spawnLog.onCall = undefined;
     // The swap test queues a one-shot probe wrapper; an unconsumed one must
     // never leak into a later test.
     const realResidue = worktreeLib.realWorktreeResidue;
@@ -576,17 +593,18 @@ describe('runScratchTree', () => {
     // verified — dropping either re-opens the post-gate window silently.
     const first = run();
     expect(first.available).toBe(true);
-    const genuineAdmin = git(
-      worktree,
-      'rev-parse',
-      '--path-format=absolute',
-      '--git-dir',
+    // Normalised the way the argv is built — the pin carries
+    // `realpathSync`-ed paths, and raw `git rev-parse` output diverges from
+    // them: git emits POSIX-style forward slashes on Windows while
+    // `realpathSync` answers backslash paths (and canonicalises symlinked
+    // ancestors), so comparing the raw output fails every `toContain` below
+    // unconditionally on the Windows leg. The sibling suite normalises the
+    // same way (worktree.test.ts).
+    const genuineAdmin = realpathSync(
+      git(worktree, 'rev-parse', '--path-format=absolute', '--git-dir'),
     );
-    const scratchAdmin = git(
-      first.path!,
-      'rev-parse',
-      '--path-format=absolute',
-      '--git-dir',
+    const scratchAdmin = realpathSync(
+      git(first.path!, 'rev-parse', '--path-format=absolute', '--git-dir'),
     );
 
     // Reuse path: the reset's mutation spawns carry the scratch entry.
@@ -621,6 +639,95 @@ describe('runScratchTree', () => {
     for (const argv of adds) {
       expect(argv).toContain(`--git-dir=${genuineAdmin}`);
     }
+  });
+
+  it('every scratch-tree git spawn carries the pipeline deadline — a wedge must end', () => {
+    // `gitOut` — through which the pinned HEAD read and every reset/reuse
+    // spawn runs — used to spawnSync with NO timeout; a planted FIFO at the
+    // entry's HEAD blocked the read in open() forever and the whole command
+    // hung until a human removed the plant (measured end-to-end), while
+    // every other wrapper this PR touches carries `GIT_TIMEOUT_MS`. A
+    // timeout-killed spawn yields `r.error`, `gitOut` throws, and every
+    // caller fails closed — measured refusal, rebuild, or the create-failure
+    // report. The argv's options are the witness: no behavioural shape on an
+    // honest fixture tells a timed spawn from an untimed one.
+    const first = run();
+    expect(first.available).toBe(true);
+    const gitSpawns = spawnLog.calls
+      .map((args, i) => ({ args, opts: spawnLog.opts[i] }))
+      // The NO_HOOKS marker rides exactly this command's own spawns — the
+      // residue probe's and the screen's carry no hooksPath.
+      .filter((c) => c.args.includes('core.hooksPath=/dev/null/no-hooks'));
+    expect(gitSpawns.length).toBeGreaterThan(0);
+    for (const c of gitSpawns) {
+      expect(typeof (c.opts as { timeout?: unknown }).timeout).toBe('number');
+    }
+  });
+
+  it('never pins the reset at a re-discovered identity — the pin binds the common dir the gate verified', () => {
+    // The reset gate's pin used to sample `--git-dir` with a SECOND unpinned
+    // discovery through the writable gitfile, made AFTER the common-dir
+    // comparison — a swap of `tree/.git` landing between the two reads
+    // pinned a forge entry whose commondir named a forge repository, and
+    // nothing bound the pin's TARGET to the verified common dir: the
+    // round-trip read self-consistent over the forge, `checkout --force`
+    // and `clean -ffdx` ran there, and the report answered
+    // `available: true, reused: true` (measured). The gate reads the entry
+    // and its commondir in ONE spawn now and requires the commondir to be
+    // the verified one. The witness stages the swap at the exact spawn
+    // boundary the fix removes — pre-fix the second read saw the forge and
+    // reused it; post-fix the single read sees it and refuses, and the
+    // caller discards and rebuilds.
+    const first = run();
+    expect(first.available).toBe(true);
+    const tree = first.path!;
+
+    // The forge: a clone of the repository (it has headSha) plus one of its
+    // worktree entries, backpointer rewritten to name the scratch tree.
+    const forgeRepo = join(repo, 'forge');
+    execFileSync('git', ['clone', '-q', repo, forgeRepo]);
+    const forgeTree = join(repo, 'forge-tree');
+    execFileSync('git', [
+      '-C',
+      forgeRepo,
+      'worktree',
+      'add',
+      '--detach',
+      '-q',
+      forgeTree,
+      headSha,
+    ]);
+    const forgeEntry = readFileSync(join(forgeTree, '.git'), 'utf8')
+      .trim()
+      .replace(/^gitdir:\s*/, '');
+    writeFileSync(join(forgeEntry, 'gitdir'), `${tree}/.git\n`);
+
+    let swapped = false;
+    spawnLog.onCall = (args, options) => {
+      if (swapped) return;
+      const opts = options as { cwd?: string } | undefined;
+      if (
+        opts?.cwd === tree &&
+        args.includes('rev-parse') &&
+        args.includes('--git-dir') &&
+        !args.includes('--show-toplevel') &&
+        !args.some((a) => a.startsWith('--git-dir='))
+      ) {
+        writeFileSync(join(tree, '.git'), `gitdir: ${forgeEntry}\n`);
+        swapped = true;
+      }
+    };
+
+    const second = run();
+
+    expect(swapped).toBe(true);
+    // The swap never earns a reuse: the gate refuses the forge and the
+    // caller rebuilds — `reused: true` with the gitfile naming the forge is
+    // the measured pre-fix failure.
+    expect(second.available).toBe(true);
+    expect(second.reused).toBe(false);
+    expect(second.headSha).toBe(headSha);
+    expect(readFileSync(join(tree, '.git'), 'utf8')).not.toContain(forgeEntry);
   });
 
   it("screens ANOTHER worktree's per-worktree config, not just this one's", () => {

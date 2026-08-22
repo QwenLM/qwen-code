@@ -10,7 +10,7 @@
 // is everything a normal review leaves behind, which is why the build outputs
 // every review produces are gitignored.
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import {
@@ -31,6 +31,37 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { isolateHostGitConfig } from './test-utils.js';
+
+// Every spawnSync argv + options, recorded: the pinned discard's spawns must
+// carry the pipeline deadline, and a refactor that drops one re-opens the
+// wedge class this round closes while every behavioural shape stays green.
+// The wrapper is a pure pass-through.
+const spawnLog = vi.hoisted(() => ({
+  calls: [] as Array<{ args: string[]; options: unknown }>,
+}));
+// Child-process wedge probes resolve the module under test from the package
+// root, the way the screen's FIFO probe does.
+const moduleRequire = createRequire(import.meta.url);
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  const realSpawnSync = actual.spawnSync;
+  const wrapper = (...callArgs: Parameters<typeof realSpawnSync>) => {
+    const args = callArgs[1];
+    if (Array.isArray(args)) {
+      spawnLog.calls.push({ args: args.map(String), options: callArgs[2] });
+    }
+    return realSpawnSync(...callArgs);
+  };
+  return {
+    ...actual,
+    // `default` is load-bearing: CJS-interop imports of the builtin resolve
+    // through it (the same shape scratch-tree.test.ts uses), and without it
+    // the transitive modules silently keep the real spawnSync.
+    default: { ...actual, spawnSync: wrapper },
+    spawnSync: wrapper,
+  };
+});
 import {
   discardWorktree,
   exposeDependencies,
@@ -976,6 +1007,61 @@ printf 'gitdir: %s/.git\\n' "$bad" > '${tree}/.git'`,
       }
     },
   );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses — fast — when the entry backpointer is not a regular file; it does not hang',
+    () => {
+      // The gate round-trips through the entry's `gitdir` file — anchored
+      // and unanchored probes alike. A planted FIFO there blocks an
+      // unbounded readFileSync in open() forever, hanging EVERY residue
+      // probe until a human removes it (measured: both probes wedged at the
+      // deadline while the base arm answered instantly with the same plant).
+      // The bounded read refuses like any other entry that does not point
+      // back.
+      //
+      // The probe runs in a CHILD process under a hard deadline, because a
+      // synchronous wedge blocks the event loop — the pre-fix shape — and no
+      // in-process timer can fire while it does. The deadline turns "hangs"
+      // into "fails" on the pre-fix code and measures the bounded answer on
+      // the fixed one (the same discipline as the screen's FIFO test).
+      const entry = readFileSync(join(tree, '.git'), 'utf8')
+        .trim()
+        .replace(/^gitdir:\s*/, '');
+      const modulePath = join(
+        process.cwd(),
+        'src',
+        'commands',
+        'review',
+        'lib',
+        'worktree.js',
+      );
+      rmSync(join(entry, 'gitdir'));
+      execFileSync('mkfifo', [join(entry, 'gitdir')]);
+      const script = join(repo, 'backpointer-probe.mts');
+      writeFileSync(
+        script,
+        `import { worktreeResidue } from ${JSON.stringify(modulePath)};\n` +
+          'const got = worktreeResidue(process.argv[2]);\n' +
+          'process.stdout.write(JSON.stringify(got));\n',
+      );
+      const tsxCli = moduleRequire.resolve('tsx/cli');
+      let stdout = '';
+      try {
+        stdout = execFileSync(process.execPath, [tsxCli, script, tree], {
+          encoding: 'utf8',
+          timeout: 10_000,
+        });
+      } catch (err) {
+        // Killed at the deadline: the gate wedged instead of refusing.
+        throw new Error(
+          `the identity gate wedged instead of answering unmeasurable: ${(err as Error).message}`,
+        );
+      }
+      const got = JSON.parse(stdout) as ReturnType<typeof worktreeResidue>;
+      expect(got.identityRefused).toBe(true);
+      expect(got.unmeasured).toContain('does not point back');
+    },
+  );
 });
 
 describe('worktreeResidue — the blind sets', () => {
@@ -1735,6 +1821,152 @@ describe('discardWorktree', () => {
 
     expect(git(repo, 'worktree', 'list')).toContain(other);
   });
+
+  it('the pinned discard drops only the pinned entry — a rewritten backpointer never reaches a live sibling', () => {
+    // The pinned branch used to sweep the pinned common dir for entries whose
+    // backpointer CONTENT names the discarded path, liveness-checking the
+    // name the backpointer itself claims — so an entry whose backpointer was
+    // rewritten to name the just-discarded path was deleted while its REAL
+    // worktree was alive: its gitfile left dangling, every git command in it
+    // failing until a human repairs it (measured live through this very
+    // function). The pinned discard drops the pinned entry alone — a foreign
+    // entry survives and is loud at the next add.
+    const mine = join(repo, 'mine');
+    const victim = join(repo, 'victim');
+    git(repo, 'worktree', 'add', '--detach', '-q', mine, 'HEAD');
+    git(repo, 'worktree', 'add', '--detach', '-q', victim, 'HEAD');
+    const common = git(
+      repo,
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-common-dir',
+    );
+    // mine's entry — the pin the caller's gate verified — and the
+    // victim's, whose survival is asserted on the DIRECTORY and on git
+    // still working in the tree: with the tamper in place the entry's own
+    // backpointer claims mine's path, so `worktree list` no longer names
+    // the victim either way.
+    const mineEntry = readFileSync(join(mine, '.git'), 'utf8')
+      .trim()
+      .replace(/^gitdir:\s*/, '');
+    const victimEntry = readFileSync(join(victim, '.git'), 'utf8')
+      .trim()
+      .replace(/^gitdir:\s*/, '');
+    // Rewrite the VICTIM's backpointer to name mine's path, the tamper shape.
+    for (const id of readdirSync(join(common, 'worktrees'))) {
+      const gitdirFile = join(common, 'worktrees', id, 'gitdir');
+      if (readFileSync(gitdirFile, 'utf8').includes('victim')) {
+        writeFileSync(gitdirFile, `${mine}/.git\n`);
+      }
+    }
+    // Corrupt mine's gitfile so `worktree remove` fails and the registration
+    // drop actually runs — the shape the sweep existed for.
+    rmSync(join(mine, '.git'));
+
+    discardWorktree(repo, mine, mineEntry);
+
+    // mine is gone — path and registration both.
+    expect(existsSync(mine)).toBe(false);
+    // The victim's registration SURVIVED the tampering: its entry still
+    // stands and git still works in the tree, which neither does with a
+    // deleted entry and a dangling gitfile.
+    expect(existsSync(victimEntry)).toBe(true);
+    expect(git(victim, 'rev-parse', 'HEAD')).toBeTruthy();
+  });
+
+  it('the pinned discard spawns carry the pipeline deadline — a wedge must end', () => {
+    // The pinned discard's spawns read admin files the contaminator writes; a
+    // planted FIFO in one blocks them in open() forever, and a spawn without
+    // a timeout hangs the whole review CLI until a human removes the plant —
+    // the wedge class this PR's own `localFilterCommands` deadline closed
+    // elsewhere. Every pinned spawn must carry the deadline.
+    const mine = join(repo, 'mine');
+    git(repo, 'worktree', 'add', '--detach', '-q', mine, 'HEAD');
+    const mineEntry = readFileSync(join(mine, '.git'), 'utf8')
+      .trim()
+      .replace(/^gitdir:\s*/, '');
+    spawnLog.calls.length = 0;
+
+    discardWorktree(repo, mine, mineEntry);
+
+    const pinned = spawnLog.calls.filter((c) =>
+      c.args.includes(`--git-dir=${mineEntry}`),
+    );
+    expect(pinned.length).toBeGreaterThan(0);
+    for (const call of pinned) {
+      expect(typeof (call.options as { timeout?: unknown }).timeout).toBe(
+        'number',
+      );
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'the registration sweep skips a backpointer that is not a regular file — it does not hang on it',
+    () => {
+      // The sweep reads every entry's `gitdir` backpointer — one planted
+      // FIFO blocks an unbounded readFileSync in open() forever (measured:
+      // the FIFO arm killed at the deadline, the control instant). A
+      // backpointer that is not a regular file is an unreadable entry:
+      // skipped, left for the next add to name. Witnessed directly rather
+      // than through `discardWorktree`: reaching the sweep through it first
+      // drives git's own `worktree remove` past the same plant — git reads
+      // every backpointer resolving a corrupt gitfile — spending the spawn
+      // deadline three times over before the sweep even runs.
+      const mine = join(repo, 'mine');
+      git(repo, 'worktree', 'add', '--detach', '-q', mine, 'HEAD');
+      const common = git(
+        repo,
+        'rev-parse',
+        '--path-format=absolute',
+        '--git-common-dir',
+      );
+      const worktreesDir = join(common, 'worktrees');
+      const entries = readdirSync(worktreesDir);
+      expect(entries.length).toBeGreaterThan(0);
+      for (const id of entries) {
+        const gitdirFile = join(worktreesDir, id, 'gitdir');
+        rmSync(gitdirFile);
+        execFileSync('mkfifo', [gitdirFile]);
+      }
+      // Child process under a hard deadline, the same discipline as the
+      // screen's FIFO test: the pre-fix readFileSync wedges the event loop,
+      // so no in-process timer can fire while it blocks.
+      const modulePath = join(
+        process.cwd(),
+        'src',
+        'commands',
+        'review',
+        'lib',
+        'worktree.js',
+      );
+      const script = join(repo, 'sweep-probe.mts');
+      writeFileSync(
+        script,
+        `import { sweepEntriesFor } from ${JSON.stringify(modulePath)};\n` +
+          'sweepEntriesFor(process.argv[2], process.argv[3]);\n' +
+          "process.stdout.write('done');\n",
+      );
+      const tsxCli = moduleRequire.resolve('tsx/cli');
+      let stdout = '';
+      try {
+        stdout = execFileSync(
+          process.execPath,
+          [tsxCli, script, worktreesDir, mine],
+          { encoding: 'utf8', timeout: 10_000 },
+        );
+      } catch (err) {
+        throw new Error(
+          `the registration sweep wedged instead of skipping the plant: ${(err as Error).message}`,
+        );
+      }
+      expect(stdout).toBe('done');
+
+      // Every FIFO'd entry was skipped, not read — all of them still stand.
+      for (const id of entries) {
+        expect(existsSync(join(worktreesDir, id))).toBe(true);
+      }
+    },
+  );
 });
 
 describe('sanitizedGitEnv', () => {
@@ -1972,6 +2204,28 @@ describe('localFilterCommands', () => {
       expect(JSON.parse(stdout)).toBeNull();
     },
   );
+
+  it("screens the common dir's config.worktree in the PINNED form — the hardened path screened strictly less", () => {
+    // The pinned form answered the COMMON dir and swept the entries under
+    // it, but never named `<common>/config.worktree` — the MAIN worktree's
+    // per-worktree config, honored by the checkout the screen authorises
+    // once `extensions.worktreeConfig` is on (which the attacker
+    // self-enables with one plain write the filter regex ignores). Measured:
+    // the pinned screen answered [] while the pinned add fired the plant —
+    // the degraded UNPINNED path saw it. Unconditional now.
+    const common = gitRepo(
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-common-dir',
+    );
+    writeFileSync(
+      join(common, 'config.worktree'),
+      '[filter "evil"]\n\tsmudge = touch /tmp/qwen-never\n',
+    );
+    expect(localFilterCommands(repo, join(repo, '.git'))).toEqual([
+      'filter.evil.smudge',
+    ]);
+  });
 
   it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
     'answers unmeasurable — not clean — when a candidate read cannot complete',

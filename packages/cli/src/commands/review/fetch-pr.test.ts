@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createHash } from 'node:crypto';
 import type { Argv, CommandModule } from 'yargs';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import {
   fetchPrCommand,
   countDiffChangedLines,
@@ -252,6 +252,12 @@ const producerMocks = vi.hoisted(() => ({
   // path's real location IS its lexical one and the widening reader's
   // containment passes. A test that wants an ESCAPE steers it per path.
   realpathSync: vi.fn((path?: unknown): string => String(path)),
+  // Passthrough default, the same reason `statSync` has one: the recording's
+  // enumeration reads directories no fixture creates, so the real ENOENT and
+  // a mocked one answer identically, while a passthrough cannot break a
+  // consumer that lists a real directory. Tests that drive the anchored
+  // recording override it per-test.
+  readdirSync: vi.fn(),
   gh: vi.fn(),
   git: vi.fn(),
   execFileSync: vi.fn(),
@@ -297,6 +303,7 @@ vi.mock('node:fs', async (importOriginal) => {
       lstatSync: producerMocks.lstatSync,
       realpathSync: producerMocks.realpathSync,
       readFileSync: producerMocks.readFileSync,
+      readdirSync: readdirSyncThroughMock,
       writeFileSync: producerMocks.writeFileSync,
       statSync: statSyncThroughMock,
     },
@@ -304,6 +311,7 @@ vi.mock('node:fs', async (importOriginal) => {
     lstatSync: producerMocks.lstatSync,
     realpathSync: producerMocks.realpathSync,
     readFileSync: producerMocks.readFileSync,
+    readdirSync: readdirSyncThroughMock,
     writeFileSync: producerMocks.writeFileSync,
     statSync: statSyncThroughMock,
   };
@@ -311,6 +319,11 @@ vi.mock('node:fs', async (importOriginal) => {
     const mocked = producerMocks.statSync(path);
     if (mocked !== undefined) return mocked;
     return (actual.statSync as (...a: unknown[]) => unknown)(path, ...rest);
+  }
+  function readdirSyncThroughMock(path?: unknown, ...rest: unknown[]) {
+    const mocked = producerMocks.readdirSync(path);
+    if (mocked !== undefined) return mocked;
+    return (actual.readdirSync as (...a: unknown[]) => unknown)(path, ...rest);
   }
 });
 
@@ -575,55 +588,92 @@ describe('fetch-pr report assembly', () => {
     expect(report.host).toBe('ghe.example.com');
   });
 
-  it('records the worktree admin entry on the CREATING side — argv, dev:ino, both failure warnings', async () => {
+  /**
+   * The anchored recording's fixture, shared by the tests below: the
+   * creating-side discovery answers, the pinned common-dir query answers,
+   * and the entry that APPEARED across the add cross-checks against the
+   * worktree path this fetch creates.
+   */
+  function armAnchoredRecording(
+    entriesBefore: string[],
+    entriesAfter: string[],
+    entryName = 'review-pr-42',
+  ) {
+    producerMocks.gitOpt.mockImplementation((...args: string[]) => {
+      if (args.includes('--git-common-dir')) return '/repo/.git';
+      if (args.includes('--git-dir')) return '/repo/.git';
+      return null;
+    });
+    let reads = 0;
+    producerMocks.readdirSync.mockImplementation((path?: unknown) => {
+      if (String(path) !== '/repo/.git/worktrees') return undefined;
+      return (reads++ === 0 ? entriesBefore : entriesAfter).slice();
+    });
+    const backTarget = join(process.cwd(), worktreePath('42'), '.git');
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === `/repo/.git/worktrees/${entryName}/gitdir`) {
+        return `gitdir: ${backTarget}\n`;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    producerMocks.lstatSync.mockImplementation((path?: unknown) => {
+      if (path === `/repo/.git/worktrees/${entryName}/gitdir`) {
+        return { isFile: () => true } as never;
+      }
+      if (path === `/repo/.git/worktrees/${entryName}`) {
+        return { dev: 64, ino: 4242, isFile: () => false } as never;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+  }
+
+  it('records the worktree admin entry on the CREATING side — pinned argv, enumerated entry, both failure warnings', async () => {
     // The residue probe refuses a review tree whose gitfile names any admin
     // entry other than the one recorded HERE, at creation, riding the plan
-    // (#9557). The recording derives the entry on the CREATING side — the
-    // creating repository's common dir plus the entry name `worktree add`
-    // registers for the new path — and never re-resolves it through the
-    // worktree's own gitfile: the add's checkout has just run whatever that
-    // tree carries, and a gitfile swapped during it recorded the forge as
-    // the trusted anchor (measured at the pre-fix recording). The spawn
-    // carries `--path-format=absolute`: without it git answers a RELATIVE
-    // dir from a top-level checkout, and nothing downstream pins the
-    // recorded value to an absolute path. Off the default mock (gitOpt
-    // answers null) both fields degrade to null and the round is TOLD it
-    // runs unanchored: a weakened review must not pass for a hardened one —
-    // and the warning's TAIL is pinned because the lesser referent-check
-    // degradation below shares its prefix.
+    // (#9557). The recording resolves the creating common dir ONCE, PINNED
+    // at the creating identity recorded before the screen — never unpinned
+    // after the add: the unpinned spawn re-discovers through the swappable
+    // `.git`, and a swap landing in the in-process gap recorded the FORGE's
+    // common dir as the trusted anchor with the probe-time gitfile
+    // retargeted to match — every check this pipeline adds then passed over
+    // the forge (measured). The pinned query is asserted as argv: a refactor
+    // that drops the pin re-opens the window while every behavioural shape
+    // stays green. Off the default mock (gitOpt answers null) every field
+    // degrades to null and the round is TOLD it runs unanchored: a weakened
+    // review must not pass for a hardened one — and the warning's TAIL is
+    // pinned because the lesser referent-check degradation below shares its
+    // prefix.
     const unanchored = await reportFor({});
     expect(unanchored.worktreeAdminDir).toBeNull();
     expect(unanchored.worktreeAdminDevIno).toBeNull();
     expect(producerMocks.writeStderrLine).toHaveBeenCalledWith(
       expect.stringContaining('identity gate runs unanchored'),
     );
-    expect(producerMocks.gitOpt).toHaveBeenCalledWith(
-      'rev-parse',
-      '--path-format=absolute',
-      '--git-common-dir',
-    );
+    // No common-dir discovery ran at all without a creating identity.
+    expect(
+      producerMocks.gitOpt.mock.calls.filter((call) =>
+        call.includes('--git-common-dir'),
+      ),
+    ).toEqual([]);
 
-    // The creating-side derivation holds even with the worktree's own
-    // gitfile swapped: a `-C <worktree> --git-dir` probe — the pre-fix
-    // recording — answers the forge the swap names, and the shipped anchor
-    // would be the forge's entry.
-    producerMocks.gitOpt.mockImplementation((...args: string[]) => {
-      if (args.includes('--git-common-dir')) return '/repo/.git';
-      if (args.includes('-C')) return '/repo/.git/worktrees/forge';
-      return null;
-    });
-    producerMocks.statSync.mockImplementation(
-      (
-        path?: unknown,
-      ): { dev: number; ino: number; mtimeMs: number } | undefined =>
-        String(path) === '/repo/.git/worktrees/review-pr-42'
-          ? { dev: 64, ino: 4242, mtimeMs: 0 }
-          : undefined,
-    );
+    armAnchoredRecording([], ['review-pr-42']);
     producerMocks.writeStderrLine.mockClear();
     const anchored = await reportFor({});
     expect(anchored.worktreeAdminDir).toBe('/repo/.git/worktrees/review-pr-42');
     expect(anchored.worktreeAdminDevIno).toBe('64:4242');
+    // The common dir came from the PINNED spawn — the creating identity as
+    // its prefix — and never from an unpinned discovery.
+    expect(producerMocks.gitOpt).toHaveBeenCalledWith(
+      '--git-dir=/repo/.git',
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-common-dir',
+    );
+    expect(producerMocks.gitOpt).not.toHaveBeenCalledWith(
+      'rev-parse',
+      '--path-format=absolute',
+      '--git-common-dir',
+    );
     // Neither degradation warning fires on a healthy anchored fetch: a
     // warning hoisted out of its guard would print on EVERY fetch, and
     // operators learn to ignore the exact signal this gate added. Mock
@@ -635,17 +685,17 @@ describe('fetch-pr report assembly', () => {
       expect.stringContaining('without its referent check'),
     );
 
-    // The middle branch: the entry IS recorded but cannot be stat-ed. The
+    // The middle branch: the entry IS recorded but cannot be lstat-ed. The
     // gate keeps its path comparison, and the round is told it runs without
     // the referent check — with a warning TAIL distinct from the
     // fully-unanchored one above, the distinction an operator acts on.
-    producerMocks.statSync.mockImplementation(
-      (path?: unknown): { mtimeMs: number } | undefined =>
-        String(path).endsWith('-fetch.json') ||
-        String(path).endsWith('fetch-report.json')
-          ? { mtimeMs: Date.parse('2026-08-13T00:00:00.000Z') }
-          : undefined,
-    );
+    armAnchoredRecording([], ['review-pr-42']);
+    producerMocks.lstatSync.mockImplementation((path?: unknown) => {
+      if (path === '/repo/.git/worktrees/review-pr-42/gitdir') {
+        return { isFile: () => true } as never;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
     const referentless = await reportFor({});
     expect(referentless.worktreeAdminDir).toBe(
       '/repo/.git/worktrees/review-pr-42',
@@ -656,27 +706,98 @@ describe('fetch-pr report assembly', () => {
     );
   });
 
+  it('records the dev:ino from lstat — a symlink at the entry is the swap, not the referent', async () => {
+    // The entry is the directory `worktree add` created milliseconds ago.
+    // Recording its identity with a symlink-FOLLOWING stat let a swap that
+    // replaced the entry with a link record the FORGE's dev:ino under the
+    // honest name — probe-time resolution followed the same link on both
+    // sides, and every check agreed over the forge (measured). lstat records
+    // the link's OWN identity instead, which the probe's following stat
+    // refuses. The witness pins which call the record trusts: lstat answers
+    // one identity, stat another; the recorded value must be lstat's.
+    armAnchoredRecording([], ['review-pr-42']);
+    producerMocks.statSync.mockImplementation(
+      (
+        path?: unknown,
+      ): { dev: number; ino: number; mtimeMs: number } | undefined =>
+        path === '/repo/.git/worktrees/review-pr-42'
+          ? { dev: 99, ino: 9999, mtimeMs: 0 }
+          : undefined,
+    );
+    const report = await reportFor({});
+    expect(report.worktreeAdminDevIno).toBe('64:4242');
+  });
+
+  it('records the entry the add ACTUALLY registered — never the basename on a collision', async () => {
+    // git silently uniquifies the new entry's name when
+    // `<common>/worktrees/<basename>` already exists. Deriving the anchor
+    // from the basename recorded the PRE-PLANTED colliding entry as the
+    // trusted anchor, and a gitfile swap onto the plant then passed every
+    // check this pipeline adds (measured: the ATTACK arm certified clean
+    // with the mutant on disk; recording the registered entry turns the same
+    // attack into identityRefused). The recording identifies the registered
+    // entry as the one that APPEARED across the add, cross-checked by its
+    // backpointer — the plant was already there and is never it.
+    armAnchoredRecording(
+      ['review-pr-42'],
+      ['review-pr-42', 'review-pr-421'],
+      'review-pr-421',
+    );
+    const report = await reportFor({});
+    expect(report.worktreeAdminDir).toBe('/repo/.git/worktrees/review-pr-421');
+    expect(report.worktreeAdminDevIno).toBe('64:4242');
+    expect(producerMocks.writeStderrLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('identity gate runs unanchored'),
+    );
+  });
+
+  it('degrades to unanchored — loudly — when no UNIQUE new entry appeared', async () => {
+    // Two entries appearing across the add (a concurrent writer planting one
+    // beside it) leave the registration ambiguous; zero new entries with the
+    // basename pre-occupied is the persistent-collision shape whose basename
+    // derivation recorded the plant. Neither admits a guess: the recording
+    // degrades and the round is TOLD the gate runs unanchored.
+    armAnchoredRecording([], ['review-pr-42', 'review-pr-421']);
+    producerMocks.writeStderrLine.mockClear();
+    const report = await reportFor({});
+    expect(report.worktreeAdminDir).toBeNull();
+    expect(report.worktreeAdminDevIno).toBeNull();
+    expect(producerMocks.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('identity gate runs unanchored'),
+    );
+
+    // The new entry's backpointer is not a regular file — a planted FIFO
+    // blocks the cross-check in open(); the recording degrades instead of
+    // hanging and instead of recording a guess.
+    armAnchoredRecording([], ['review-pr-42']);
+    producerMocks.lstatSync.mockImplementation((path?: unknown) => {
+      if (path === '/repo/.git/worktrees/review-pr-42') {
+        return { dev: 64, ino: 4242, isFile: () => false } as never;
+      }
+      if (path === '/repo/.git/worktrees/review-pr-42/gitdir') {
+        return { isFile: () => false } as never;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    producerMocks.writeStderrLine.mockClear();
+    const unreadable = await reportFor({});
+    expect(unreadable.worktreeAdminDir).toBeNull();
+    expect(producerMocks.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('identity gate runs unanchored'),
+    );
+  });
+
   it('records the admin entry before the base fetch and diff capture — the forge-pinning window is the in-process gap', async () => {
     // The recording used to ride the report assembly — seconds to minutes of
     // network fetch and diff capture after the `worktree add` — and a
     // concurrent writer on the shared common dir replacing the freshly
     // registered entry inside that window pinned the FORGE as the trusted
     // anchor with no degradation warning; every gate this pipeline adds then
-    // passed over it (measured end-to-end). Recorded immediately after the
-    // add instead, the window is the in-process gap between two spawns —
-    // asserted here as call order: the recording's rev-parse lands before
-    // step 5's merge-base resolution opens the network window.
-    producerMocks.gitOpt.mockImplementation((...args: string[]) =>
-      args.includes('--git-common-dir') ? '/repo/.git' : null,
-    );
-    producerMocks.statSync.mockImplementation(
-      (
-        path?: unknown,
-      ): { dev: number; ino: number; mtimeMs: number } | undefined =>
-        String(path) === '/repo/.git/worktrees/review-pr-42'
-          ? { dev: 64, ino: 4242, mtimeMs: 0 }
-          : undefined,
-    );
+    // passed over it (measured end-to-end). Recorded around the add instead,
+    // the window is the in-process gap — asserted here as call order: the
+    // recording's pinned common-dir read lands before the add it brackets
+    // and before step 5's merge-base resolution opens the network window.
+    armAnchoredRecording([], ['review-pr-42']);
     await reportFor({});
     const recordCall = producerMocks.gitOpt.mock.calls.findIndex((call) =>
       call.includes('--git-common-dir'),
@@ -684,6 +805,13 @@ describe('fetch-pr report assembly', () => {
     expect(recordCall).not.toBe(-1);
     const recordOrder =
       producerMocks.gitOpt.mock.invocationCallOrder[recordCall];
+    const addCall = producerMocks.git.mock.calls.findIndex(
+      (call) => call.includes('worktree') && call.includes('add'),
+    );
+    expect(addCall).not.toBe(-1);
+    expect(recordOrder).toBeLessThan(
+      producerMocks.git.mock.invocationCallOrder[addCall],
+    );
     const mergeBaseOrder =
       producerMocks.resolveMergeBase.mock.invocationCallOrder[0];
     expect(recordOrder).toBeLessThan(mergeBaseOrder!);

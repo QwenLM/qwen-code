@@ -28,8 +28,14 @@
 import type { CommandModule } from 'yargs';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import {
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+} from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   clearReviewWorktreeLeaseIfOwned,
@@ -38,7 +44,11 @@ import {
   reviewLeaseHeldByAnotherSession,
   reviewLeasePath,
 } from '../../services/review-worktree-lease.js';
-import { localFilterCommands, sanitizedGitEnv } from './lib/worktree.js';
+import {
+  localFilterCommands,
+  samePath,
+  sanitizedGitEnv,
+} from './lib/worktree.js';
 import { setGhHost } from './lib/gh.js';
 import { getPlatformReader } from './lib/platform/registry.js';
 import type { ReviewPlatformReader } from './lib/platform/types.js';
@@ -964,6 +974,40 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       '--path-format=absolute',
       '--git-dir',
     );
+    // The creating common dir, resolved ONCE under the creating identity and
+    // before the screen: the add below registers into it, and the entry
+    // enumeration after the add measures that SAME dir — never re-discovered
+    // unpinned after the add, which re-resolves through the swappable `.git`
+    // and lets a swap landing in the in-process gap record the FORGE's common
+    // dir as the trusted anchor (measured). Null when git does not answer:
+    // the recording degrades the same way a failed creating-side discovery
+    // degrades.
+    const creatingCommonDir =
+      creatingGitDir === null
+        ? null
+        : gitOpt(
+            `--git-dir=${creatingGitDir}`,
+            'rev-parse',
+            '--path-format=absolute',
+            '--git-common-dir',
+          );
+    // The registered entries BEFORE the add: git silently uniquifies the new
+    // entry's name when `<common>/worktrees/<basename>` already exists, so
+    // the entry the add registers is identified after it — by what APPEARED
+    // — never derived from the basename, which names the pre-planted
+    // colliding entry instead (measured: the plant recorded as the trusted
+    // anchor, a gitfile swap onto it passing every check this pipeline adds).
+    let worktreeEntriesBefore: ReadonlySet<string> | null = null;
+    if (creatingCommonDir !== null) {
+      let before: ReadonlySet<string> = new Set();
+      try {
+        before = new Set(readdirSync(join(creatingCommonDir, 'worktrees')));
+      } catch {
+        // No linked worktrees yet: `.git/worktrees` does not exist until the
+        // first add creates one.
+      }
+      worktreeEntriesBefore = before;
+    }
     try {
       // The add's checkout EXECUTES repo-local content filters — and the
       // planting surface is two plain writes into the common dir this fetch
@@ -1029,24 +1073,27 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       );
     }
 
-    // The tree's own admin entry, derived on the CREATING side — the
-    // creating repository's common dir plus the entry name `worktree add`
-    // registers for the new path (its basename) — and recorded HERE,
-    // immediately after the successful add, before the base-branch fetch and
-    // the diff capture. Never re-resolved through the worktree's own
-    // gitfile: the checkout above has just run whatever that tree carries,
-    // and a gitfile swapped during it would record whichever entry the swap
-    // names as the trusted anchor — the very forge the residue probe's
-    // identity gate exists to refuse (measured: every gate this pipeline
-    // adds then passes over the forge). A mismatch between this record and
-    // the entry the gitfile names at probe time IS the swap, and the gate
-    // fails closed on it; an entry git uniquified away from the basename
-    // resolves to nothing there and fails closed the same way. Absolute,
-    // because a relative answer would later resolve against whichever cwd
-    // reads it. The entry's filesystem identity rides with it: both operands
-    // of the gate's path comparison resolve at probe time against a
-    // filesystem the contaminator writes, so it also refuses an entry that
-    // no longer carries this dev:ino.
+    // The tree's own admin entry — the entry that APPEARED in the creating
+    // common dir across the add, cross-checked by its own backpointer — and
+    // recorded HERE, immediately after the successful add, before the
+    // base-branch fetch and the diff capture. Never derived from the path's
+    // basename: git silently uniquifies the new entry's name on a basename
+    // collision, and the pre-planted colliding entry is exactly what the
+    // derivation recorded as the trusted anchor — a gitfile swap onto the
+    // plant then passed every check this pipeline adds (measured: the ATTACK
+    // arm certified clean with the mutant on disk; recording the entry the
+    // add ACTUALLY registered turns the same attack into identityRefused).
+    // Never re-resolved through the worktree's own gitfile either: the
+    // checkout above has just run whatever that tree carries. A mismatch
+    // between this record and the entry the gitfile names at probe time IS
+    // the swap, and the gate fails closed on it. Absolute, because a
+    // relative answer would later resolve against whichever cwd reads it.
+    // When no UNIQUE new entry appeared — or the one that appeared cannot be
+    // cross-checked — the recording degrades to unanchored with the warning
+    // below; it never guesses. The entry's filesystem identity rides with
+    // it: both operands of the gate's path comparison resolve at probe time
+    // against a filesystem the contaminator writes, so it also refuses an
+    // entry that no longer carries this dev:ino.
     //
     // The placement is the fix this buys: the recording used to ride the
     // report assembly — seconds to minutes of network fetch and diff capture
@@ -1054,18 +1101,53 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     // registered entry inside that window pinned the FORGE as the trusted
     // anchor with no degradation warning; every gate this pipeline adds then
     // passed over it (measured end-to-end). The window is now the
-    // in-process gap between two spawns.
-    const commonDir = gitOpt(
-      'rev-parse',
-      '--path-format=absolute',
-      '--git-common-dir',
-    );
-    const worktreeAdminDir =
-      commonDir === null ? null : join(commonDir, 'worktrees', basename(wt));
+    // in-process gap around the add.
+    let worktreeAdminDir: string | null = null;
+    if (creatingCommonDir !== null && worktreeEntriesBefore !== null) {
+      const before = worktreeEntriesBefore;
+      let fresh: string[];
+      try {
+        fresh = readdirSync(join(creatingCommonDir, 'worktrees')).filter(
+          (id) => !before.has(id),
+        );
+      } catch {
+        fresh = [];
+      }
+      if (fresh.length === 1) {
+        const candidate = join(creatingCommonDir, 'worktrees', fresh[0]);
+        try {
+          const backPath = join(candidate, 'gitdir');
+          // Bounded the way every backpointer read in this pipeline is: an
+          // entry that appeared carrying a planted FIFO where its gitdir
+          // file should be degrades the recording — it does not hang it in
+          // open().
+          if (lstatSync(backPath).isFile()) {
+            const raw = readFileSync(backPath, 'utf8').trim();
+            const match = /^gitdir:\s*(.+)$/.exec(raw);
+            if (
+              match !== null &&
+              samePath(dirname(resolve(candidate, match[1].trim()))) ===
+                samePath(wt)
+            ) {
+              worktreeAdminDir = candidate;
+            }
+          }
+        } catch {
+          // Cross-check unreadable: degrade rather than record a guess.
+        }
+      }
+    }
     let worktreeAdminDevIno: string | null = null;
     if (worktreeAdminDir !== null) {
       try {
-        const entry = statSync(worktreeAdminDir);
+        // lstat, not stat: the entry is the directory `worktree add` created
+        // milliseconds ago, and a symlink standing in its place IS the swap.
+        // A symlink-following stat recorded the FORGE's dev:ino under the
+        // honest name while probe-time resolution followed the same link on
+        // both sides — every check agreeing over the forge (measured). The
+        // link's OWN identity disagrees with the probe's following stat
+        // instead, and the gate refuses on 'filesystem identity changed'.
+        const entry = lstatSync(worktreeAdminDir);
         worktreeAdminDevIno = `${entry.dev}:${entry.ino}`;
       } catch {
         // Resolved for git, unreadable to stat: the gate degrades to its

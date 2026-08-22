@@ -266,6 +266,15 @@ export function localFilterCommands(
     pinnedGitDir === undefined ? resolve(worktree, lines[0]) : lines[0];
   const candidates = [
     join(common, 'config'),
+    // The MAIN worktree's per-worktree config, honored by any checkout once
+    // `extensions.worktreeConfig` is on — which the attacker self-enables
+    // with one plain write the filter regex ignores. The pinned form named
+    // the COMMON dir only and never screened this file, so the hardened path
+    // screened strictly LESS than the degraded unpinned one (measured: the
+    // pinned screen answered clean while the authorised add fired the plant);
+    // the unpinned form reaches it only when the SCANNED tree is the main
+    // worktree. Unconditional, before the sweep below.
+    join(common, 'config.worktree'),
     // Unpinned discovery also names the tree's OWN per-worktree config; the
     // pinned form gets it from the worktrees sweep below — the pinned answer
     // is the COMMON dir, and the sweep reads every entry under it.
@@ -288,7 +297,7 @@ export function localFilterCommands(
     // No linked worktrees registered: the candidates above are all of it.
   }
   const found: string[] = [];
-  for (const file of candidates) {
+  for (const file of [...new Set(candidates)]) {
     if (!existsSync(file)) continue;
     const r = spawnSync(
       'git',
@@ -388,6 +397,10 @@ export function discardWorktree(
       cwd,
       encoding: 'utf8',
       env: sanitizedGitEnv(),
+      // The same deadline every git wrapper in this pipeline carries — a hang
+      // must still end: the pinned entry's admin files are contaminator-
+      // writable, and a wedge there must cost the deadline, not the session.
+      timeout: GIT_TIMEOUT_MS,
     });
     if (sweep.status !== 0) {
       // A LOCKED admin entry is the one leftover neither `remove --force` nor
@@ -400,11 +413,17 @@ export function discardWorktree(
         cwd,
         encoding: 'utf8',
         env: sanitizedGitEnv(),
+        timeout: GIT_TIMEOUT_MS,
       });
       sweep = spawnSync(
         'git',
         [...pin, 'worktree', 'remove', '--force', '--force', tree],
-        { cwd, encoding: 'utf8', env: sanitizedGitEnv() },
+        {
+          cwd,
+          encoding: 'utf8',
+          env: sanitizedGitEnv(),
+          timeout: GIT_TIMEOUT_MS,
+        },
       );
     }
   }
@@ -482,14 +501,18 @@ function dropWorktreeRegistration(
   pinnedGitDir?: string,
 ): void {
   if (pinnedGitDir !== undefined) {
-    // With a pin, the authoritative registration lives in the PINNED
-    // repository, and the tree's own pointer cannot be trusted to name it:
-    // a gitfile swapped away from the pin aims `adminDirOf` at whichever
-    // entry the swap names, and `worktree remove`'s backpointer validation
-    // then refuses the genuine entry while the swapped one survives (measured
-    // — the next pinned add died "missing but already registered"). Sweep
-    // the pinned common dir for the entry whose OWN backpointer names this
-    // tree, take that, and take the pointed-at entry beside it.
+    // With a pin, the leftover registration lives in the PINNED repository,
+    // and the tree's own pointer cannot be trusted to name it: a gitfile
+    // swapped away from the pin aims `adminDirOf` at whichever entry the
+    // swap names, and `worktree remove`'s backpointer validation then
+    // refuses the genuine entry while the swapped one survives (measured —
+    // the next pinned add died "missing but already registered"). Find the
+    // leftover in the pinned common dir — the sweep's candidate set is
+    // constrained to the names `worktree add` could have registered for THIS
+    // path, so a rewritten backpointer cannot aim this cleanup at a live
+    // sibling's entry under another name (measured live: an unconstrained
+    // sweep deleted the victim's registration while its tree was alive,
+    // leaving its gitfile dangling and every git command in it failing).
     const common = spawnSync(
       'git',
       [
@@ -498,7 +521,12 @@ function dropWorktreeRegistration(
         '--path-format=absolute',
         '--git-common-dir',
       ],
-      { cwd, encoding: 'utf8', env: sanitizedGitEnv() },
+      {
+        cwd,
+        encoding: 'utf8',
+        env: sanitizedGitEnv(),
+        timeout: GIT_TIMEOUT_MS,
+      },
     );
     if (
       !common.error &&
@@ -526,18 +554,27 @@ function dropWorktreeRegistration(
   const common = spawnSync(
     'git',
     ['rev-parse', '--path-format=absolute', '--git-common-dir'],
-    { cwd, encoding: 'utf8', env: sanitizedGitEnv() },
+    { cwd, encoding: 'utf8', env: sanitizedGitEnv(), timeout: GIT_TIMEOUT_MS },
   );
   if (common.status !== 0 || typeof common.stdout !== 'string') return;
   sweepEntriesFor(join(common.stdout.trim(), 'worktrees'), tree);
 }
 
 /**
- * Remove every entry under `worktreesDir` whose own `gitdir` backpointer
- * names `tree` and whose tree is gone — never a live worktree's registration,
- * whatever its `gitdir` file claims.
+ * Remove every entry under `worktreesDir` that could be `tree`'s own
+ * registration: its entry name is the path's BASENAME — with the numeric
+ * suffix git appends when that name was taken — its own `gitdir`
+ * backpointer names `tree`, and its tree is gone by the backpointer's OWN
+ * claim. The name constraint is what keeps the scan from being aimed: an
+ * unconstrained match on backpointer CONTENT let a rewritten backpointer
+ * delete a live sibling's registration under another name (measured live —
+ * the victim's gitfile left dangling, every git command in it failing).
+ * The honest limit, stated: a live sibling sharing this path's BASENAME
+ * whose backpointer is rewritten to name `tree` still matches — its add
+ * collided with this path's name family, and nothing on disk distinguishes
+ * it from this path's own leftover.
  */
-function sweepEntriesFor(worktreesDir: string, tree: string): void {
+export function sweepEntriesFor(worktreesDir: string, tree: string): void {
   let ids: string[];
   try {
     ids = readdirSync(worktreesDir);
@@ -545,12 +582,23 @@ function sweepEntriesFor(worktreesDir: string, tree: string): void {
     return; // No linked worktrees at all.
   }
   const wanted = samePath(tree);
+  const base = basename(tree);
   for (const id of ids) {
+    // `worktree add` registers under the path's basename, uniquifying a
+    // taken name by appending a counter — no other entry name can be this
+    // path's registration.
+    if (
+      id !== base &&
+      !(id.startsWith(base) && /^\d+$/.test(id.slice(base.length)))
+    ) {
+      continue;
+    }
     try {
-      const gitdir = readFileSync(
-        join(worktreesDir, id, 'gitdir'),
-        'utf8',
-      ).trim();
+      const backPath = join(worktreesDir, id, 'gitdir');
+      // A backpointer that is not a regular file — a planted FIFO blocks
+      // readFileSync in open() forever — is an unreadable entry: leave it.
+      if (!lstatSync(backPath).isFile()) continue;
+      const gitdir = readFileSync(backPath, 'utf8').trim();
       const named = dirname(gitdir);
       if (samePath(named) !== wanted) continue;
       if (existsSync(named)) continue;
@@ -595,7 +643,7 @@ function adminDirOf(tree: string): string | null {
  * than the path itself, because the tree is usually already deleted by the time
  * this runs.
  */
-function samePath(p: string): string {
+export function samePath(p: string): string {
   const abs = resolve(p);
   try {
     return join(realpathSync(dirname(abs)), basename(abs));
@@ -1054,10 +1102,19 @@ export function worktreeResidue(
       // starts — that is what the two checks above are for.
       let pointsBack = false;
       try {
-        const backpointer = readFileSync(join(gitDir, 'gitdir'), 'utf8').trim();
-        pointsBack =
-          realpathSync(dirname(resolve(gitDir, backpointer))) ===
-          realpathSync(cwd);
+        const backPath = join(gitDir, 'gitdir');
+        // Bounded the way every backpointer read in this pipeline is: the
+        // entry's admin files are contaminator-writable, and a planted FIFO
+        // here blocks readFileSync in open() forever — hanging EVERY residue
+        // probe, anchored and unanchored alike, until a human removes it
+        // (measured). A backpointer that is not a regular file is an entry
+        // that does not point back, refused like any other unreadable shape.
+        if (lstatSync(backPath).isFile()) {
+          const backpointer = readFileSync(backPath, 'utf8').trim();
+          pointsBack =
+            realpathSync(dirname(resolve(gitDir, backpointer))) ===
+            realpathSync(cwd);
+        }
       } catch {
         // No admin entry at all — a standalone repository answering for this
         // path, which is exactly the shape being refused.
