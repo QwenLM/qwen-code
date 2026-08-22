@@ -126,7 +126,12 @@ function driveExec(opts: {
 /** A full runDrive against a faked tmux lifecycle that writes `logText`. */
 function driveWithLog(
   logText: string,
-  opts: { server: string; capture?: string[]; finish?: boolean },
+  opts: {
+    server: string;
+    capture?: string[];
+    finish?: boolean;
+    readFile?: (path: string) => string;
+  },
 ) {
   const { dir, logPath, workDir, exec } = driveExec({
     server: opts.server,
@@ -142,6 +147,7 @@ function driveWithLog(
     capture: opts.capture,
     exec,
     logPath,
+    readFile: opts.readFile,
   });
   rmSync(dir, { recursive: true, force: true });
   rmSync(workDir, { recursive: true, force: true });
@@ -603,6 +609,28 @@ describe('--capture', () => {
     expect(r.truncated).toBe(true);
     expect(r.output).not.toContain('listening on');
     expect(r.captured).toEqual({ baseUrl: 'http://127.0.0.1:8432' });
+  });
+
+  it('re-reads the log once the sentinel is observed, so a final write between the two reads is not lost', () => {
+    // The loop reads the log and THEN checks the sentinel, and the wrapper
+    // writes the sentinel from an EXIT trap, strictly after the script's
+    // last write — so a final write can land between the two back-to-back
+    // reads: on disk, and not in the snapshot extraction runs on. Measured
+    // at ~1 in 70 near-cap drives before the re-read, which turns a lost
+    // tail into `null` for a value the run produced, under a note asserting
+    // the pattern never matched. The readFile seam stands in for that write
+    // deterministically: stale until the sentinel is seen, complete after.
+    const stale = 'listening on http://127.0.0.1:8932\n';
+    let reads = 0;
+    const r = driveWithLog(stale, {
+      server: 'cap8',
+      capture: ['metric=finalmetric=(\\d+)'],
+      readFile: () => (++reads === 1 ? stale : `${stale}finalmetric=7\n`),
+    });
+    expect(r.outcome).toBe('completed');
+    expect(r.captured).toEqual({ metric: '7' });
+    expect(r.output).toContain('finalmetric=7');
+    expect(reads).toBe(2);
   });
 
   it('names an unmatched pattern in the note instead of reporting a blank', () => {

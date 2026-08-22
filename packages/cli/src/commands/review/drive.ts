@@ -158,6 +158,8 @@ export interface DriveArgs {
   exec?: (cmd: string, args: string[], input?: string) => ExecResult;
   /** Test seam — production derives it from `server`. */
   logPath?: string;
+  /** Test seam — production reads the drive log with `readFileSync`. */
+  readFile?: (path: string) => string;
 }
 
 export interface ExecResult {
@@ -493,6 +495,8 @@ export function trimCapture(s: string): { text: string; truncated: boolean } {
 
 export function runDrive(args: DriveArgs): DriveReport {
   const exec = args.exec ?? run;
+  const readFile =
+    args.readFile ?? ((p: string): string => readFileSync(p, 'utf8'));
   const server = args.server;
   if (!SERVER_NAME_RE.test(server)) {
     return {
@@ -616,7 +620,7 @@ export function runDrive(args: DriveArgs): DriveReport {
     }
     const deadline = droveFrom + args.timeout * 1000;
     for (;;) {
-      output = existsSync(logPath) ? readFileSync(logPath, 'utf8') : '';
+      output = existsSync(logPath) ? readFile(logPath) : '';
       exitCode = existsSync(sentinelPath)
         ? sentinelExitCode(readFileSync(sentinelPath, 'utf8'))
         : null;
@@ -634,7 +638,7 @@ export function runDrive(args: DriveArgs): DriveReport {
         // sentinel write, so a read taken after it is complete. Kept to this
         // branch: the other exits stopped the run rather than observing it
         // finish, and have no such guarantee to lean on.
-        output = existsSync(logPath) ? readFileSync(logPath, 'utf8') : '';
+        output = existsSync(logPath) ? readFile(logPath) : '';
         outcome = 'completed';
         break;
       }
