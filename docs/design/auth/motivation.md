@@ -1,3 +1,7 @@
+---
+description: "Understand the Qwen Code auth provider registry motivation and how provider setup unifies API keys, OAuth, plans, and custom providers."
+---
+
 # Auth Provider Registry Motivation
 
 The auth module used to model each setup path as a separate flow: API key,

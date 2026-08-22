@@ -1,3 +1,7 @@
+---
+description: "Qwen Code slash command Phase 1 technical design. Rebuild the command infrastructure with better architecture and developer experience."
+---
+
 # Phase 1 技术设计文档：基础设施重建
 
 ## 1. 设计目标与约束

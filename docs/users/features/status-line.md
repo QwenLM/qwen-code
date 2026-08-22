@@ -1,3 +1,7 @@
+---
+description: "Customize Qwen Code's status line with shell commands. Display model name, token usage, git branch, or any session info in the footer."
+---
+
 # Status Line
 
 > Display custom information in the footer.

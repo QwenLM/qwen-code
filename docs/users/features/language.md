@@ -1,3 +1,7 @@
+---
+description: "Use Qwen Code in your language. Supports UI localization (i18n), custom output language, and language packs for multilingual coding workflows."
+---
+
 # Internationalization (i18n) & Language
 
 Qwen Code is built for multilingual workflows: it supports UI localization (i18n/l10n) in the CLI, lets you choose the assistant output language, and allows custom UI language packs.

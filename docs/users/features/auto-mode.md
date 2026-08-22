@@ -1,3 +1,7 @@
+---
+description: "Use Qwen Code Auto Mode to approve safe tool calls with an LLM classifier while keeping risky actions under user control."
+---
+
 # Auto Mode
 
 Auto Mode uses an LLM classifier to evaluate each tool call and decide

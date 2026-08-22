@@ -1,3 +1,7 @@
+---
+description: "Set up a Qwen Code channel on Feishu or Lark. Configure bot credentials, permissions, and messaging integration for AI coding assistance."
+---
+
 # Feishu (Lark)
 
 This guide covers setting up a Qwen Code channel on Feishu (飞书) / Lark.

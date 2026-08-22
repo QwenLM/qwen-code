@@ -1,3 +1,7 @@
+---
+description: "Qwen Code Compact Mode design analysis. Compare with Claude Code, review implementation, and discover optimization recommendations for better UX."
+---
+
 # Compact Mode Design: Competitive Analysis & Optimization
 
 > Historical design. The current Web Shell behavior is documented in

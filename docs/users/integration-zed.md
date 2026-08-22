@@ -1,3 +1,7 @@
+---
+description: "Integrate Qwen Code with Zed Editor via the Agent Client Protocol (ACP). Get real-time code suggestions and a native agent panel inside Zed."
+---
+
 # Zed Editor
 
 > Zed Editor provides native support for AI coding assistants through the Agent Client Protocol (ACP). This integration allows you to use Qwen Code directly within Zed's interface with real-time code suggestions.

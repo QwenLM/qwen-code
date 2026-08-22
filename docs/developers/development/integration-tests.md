@@ -1,3 +1,7 @@
+---
+description: "Write integration tests for Qwen Code. Learn the testing framework, best practices, and how to ensure AI coding agent reliability."
+---
+
 # Integration Tests
 
 This document provides information about the integration testing framework used in this project.

@@ -1,3 +1,7 @@
+---
+description: "Use Qwen Code worktrees to isolate experimental edits, PR work, and subagent tasks in separate git worktree environments."
+---
+
 # Worktrees
 
 > Isolate experimental work in a temporary [git worktree](https://git-scm.com/docs/git-worktree) without leaving your current session. Useful when the model is about to make wide-ranging edits you want to keep separate from your main checkout, or when you want a subagent to work in a sandbox of its own.

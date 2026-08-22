@@ -1,3 +1,7 @@
+---
+description: "Build Qwen Code channel plugins. Connect your AI coding agent to Telegram, WeChat, DingTalk and more with this developer guide."
+---
+
 # Channel Plugin Developer Guide
 
 A channel plugin connects Qwen Code to a messaging platform. It's packaged as an [extension](../users/extension/introduction) and loaded at startup. For user-facing docs on installing and configuring plugins, see [Plugins](../users/features/channels/plugins).

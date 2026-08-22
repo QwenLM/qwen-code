@@ -1,3 +1,7 @@
+---
+description: "Qwen Code async memory recall design. Avoid blocking user turns by consuming memory recall opportunistically when results are ready."
+---
+
 # Async Memory Recall — Design Spec
 
 **Date:** 2026-05-15
