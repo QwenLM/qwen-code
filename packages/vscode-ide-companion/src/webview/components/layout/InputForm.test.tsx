@@ -312,6 +312,31 @@ describe('InputForm model selector positioning (issue #8617)', () => {
     }
   });
 
+  it('marks the positioning context flex-shrink-0 so short webviews cannot shrink it behind the form', () => {
+    const rendered = renderInputForm({
+      showModelSelector: true,
+      availableModels: models,
+      currentModelId: null,
+    });
+    root = rendered.root;
+    container = rendered.container;
+
+    const menu = container.querySelector(
+      '.model-selector',
+    ) as HTMLElement | null;
+    expect(menu).not.toBeNull();
+
+    const sharedWrapper = collectAncestors(menu as HTMLElement).find((el) =>
+      /(^|\s)relative(\s|$)/.test(el.className),
+    );
+    expect(sharedWrapper).toBeDefined();
+    // An explicit height alone does not stop the flex parent from shrinking
+    // this wrapper below the measured form height; a shrunken wrapper would
+    // slide the bottom-full anchor back into the form's footprint
+    // (#8617-style occlusion at low viewport heights).
+    expect(sharedWrapper?.className).toMatch(/(^|\s)flex-shrink-0(\s|$)/);
+  });
+
   it('does not render the selector when showModelSelector is false', () => {
     const rendered = renderInputForm({
       showModelSelector: false,

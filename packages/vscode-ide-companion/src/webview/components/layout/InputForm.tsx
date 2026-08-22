@@ -121,17 +121,22 @@ export const InputForm: FC<InputFormProps> = ({
     // (issue #8617). The effect above sizes this wrapper to the form's
     // measured height, so `bottom-full` anchors the dropdown's bottom edge
     // to the form's top edge and the dropdown grows upward over the message
-    // list instead of being hidden behind the form.
+    // list instead of being hidden behind the form. `flex-shrink-0` keeps
+    // the flex parent from shrinking this wrapper below the measured form
+    // height in short webviews — an explicit height alone does not prevent
+    // flex shrinking, and a shrunken wrapper would slide the `bottom-full`
+    // anchor back behind the opaque form (#8617-style occlusion).
     <div
       ref={wrapperRef}
-      className="relative"
+      className="relative flex-shrink-0"
       style={formHeight > 0 ? { height: `${formHeight}px` } : undefined}
     >
       {showModelSelector && onSelectModel && onCloseModelSelector && (
         // z-0 keeps ModelSelector's internal z-index (z-[1000]) inside this
         // stacking context so the dropdown stays painted below the fixed
-        // overlays (PermissionDrawer / AskUserQuestionDialog) rendered by
-        // App.tsx; App closes the selector when an overlay takes over.
+        // overlays (PermissionDrawer / AskUserQuestionDialog /
+        // AccountInfoDialog) rendered by App.tsx; App closes the selector
+        // when an overlay takes over and never opens it underneath one.
         <div className="absolute bottom-full left-4 right-4 mb-2 z-0 max-w-[600px] mx-auto">
           <ModelSelector
             visible={showModelSelector}
