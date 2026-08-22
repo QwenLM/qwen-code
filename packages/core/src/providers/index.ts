@@ -48,6 +48,8 @@ export {
   findProviderByCredentials,
   findProviderById,
   generateCustomEnvKey,
+  legacyCustomEnvKey,
+  legacyCustomEnvKey6Hex,
   getAllProviderBaseUrls,
   grokProvider,
   idealabProvider,

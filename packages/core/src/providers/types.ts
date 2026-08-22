@@ -105,6 +105,21 @@ export interface ProviderConfig {
   ownsModel?: (model: ProviderModelConfig) => boolean;
 
   /**
+   * Reports whether a stored env key belongs to the endpoint
+   * (`protocol`, `baseUrl`), recognizing historical key shapes this provider
+   * used to generate in addition to the current one. Used to attribute
+   * baseUrl-less legacy model entries (which predate baseUrl stamping) to an
+   * endpoint — their env key is the only endpoint signal they carry. When
+   * omitted, only an exact match with the endpoint's currently derived env
+   * key attributes such an entry.
+   */
+  ownsEnvKeyShape?: (
+    envKey: string,
+    protocol: AuthType,
+    baseUrl: string,
+  ) => boolean;
+
+  /**
    * Install-time merge behavior. When true, installs replace only incoming
    * model identities (id + baseUrl) instead of every model matched by
    * ownsModel. Useful for user-defined providers where multiple endpoints and

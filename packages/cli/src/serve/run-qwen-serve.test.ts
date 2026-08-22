@@ -376,7 +376,9 @@ describe('buildProviderSetupInputs', () => {
     );
     expect(explicit.preserveModels).toBeUndefined();
 
-    // Explicitly requesting the legacy id migrates it (stamped with B).
+    // Explicitly requesting the legacy id migrates it (stamped with B), and
+    // the migrated entry's envKey follows the stamp: it must point at the
+    // endpoint's own key, the one the install writes (R39-6).
     const requested = buildProviderSetupInputs(
       {
         providerId: qwenCore.customProvider.id,
@@ -394,11 +396,20 @@ describe('buildProviderSetupInputs', () => {
       },
     );
     expect(requested.preserveModels).toEqual([
-      { ...legacyModel, baseUrl: bBaseUrl },
+      {
+        ...legacyModel,
+        baseUrl: bBaseUrl,
+        envKey: qwenCore.generateCustomEnvKey(
+          qwenCore.AuthType.USE_OPENAI,
+          bBaseUrl,
+        ),
+      },
     ]);
 
     // Implicit reconnects (no modelIds) keep everything as-is: the merge-only
-    // route carries the legacy entry stamped with the selected endpoint.
+    // route carries the legacy entry stamped with the selected endpoint — with
+    // the envKey re-stamped too, so a key rotation never leaves the migrated
+    // model authenticating with the pre-rotation key (R39-6).
     const implicit = buildProviderSetupInputs(
       {
         providerId: qwenCore.customProvider.id,
@@ -415,7 +426,84 @@ describe('buildProviderSetupInputs', () => {
       },
     );
     expect(implicit.preserveModels).toEqual([
-      { ...legacyModel, baseUrl: bBaseUrl },
+      {
+        ...legacyModel,
+        baseUrl: bBaseUrl,
+        envKey: qwenCore.generateCustomEnvKey(
+          qwenCore.AuthType.USE_OPENAI,
+          bBaseUrl,
+        ),
+      },
+    ]);
+  });
+
+  it('collapses a same-id legacy+stamped pair to the stamped entry on an implicit reconnect (R39-7)', () => {
+    // A same-id baseUrl-less legacy entry beside its stamped twin (a state
+    // main's identity-only merge could create) must not both reach
+    // preserveModels on an implicit reconnect: nothing downstream dedups
+    // preserved-against-preserved, so the pair would persist as two
+    // permanent duplicate (id, baseUrl) entries. The stamped twin wins.
+    const aBaseUrl = 'https://a.example/v1';
+    const legacyModel = {
+      id: 'x',
+      name: 'x',
+      envKey: 'QWEN_CUSTOM_API_KEY_OPENAI',
+      generationConfig: { contextWindowSize: 11111 },
+    };
+    const stampedModel = {
+      id: 'x',
+      name: 'x',
+      baseUrl: aBaseUrl,
+      envKey: qwenCore.generateCustomEnvKey(
+        qwenCore.AuthType.USE_OPENAI,
+        aBaseUrl,
+      ),
+      generationConfig: { contextWindowSize: 22222 },
+    };
+    const existingModels = [legacyModel, stampedModel];
+
+    const implicit = buildProviderSetupInputs(
+      {
+        providerId: qwenCore.customProvider.id,
+        protocol: qwenCore.AuthType.USE_OPENAI,
+        apiKey: 'sk-a',
+        baseUrl: aBaseUrl,
+      },
+      qwenCore.customProvider,
+      {
+        getDefaultModelIds: qwenCore.getDefaultModelIds,
+        resolveBaseUrl: qwenCore.resolveBaseUrl,
+        normalizeBaseUrlForMatching: qwenCore.normalizeBaseUrlForMatching,
+        existingModels,
+      },
+    );
+    expect(implicit.preserveModels).toEqual([stampedModel]);
+
+    // Control: without the stamped twin the legacy entry is still migrated.
+    const legacyOnly = buildProviderSetupInputs(
+      {
+        providerId: qwenCore.customProvider.id,
+        protocol: qwenCore.AuthType.USE_OPENAI,
+        apiKey: 'sk-a',
+        baseUrl: aBaseUrl,
+      },
+      qwenCore.customProvider,
+      {
+        getDefaultModelIds: qwenCore.getDefaultModelIds,
+        resolveBaseUrl: qwenCore.resolveBaseUrl,
+        normalizeBaseUrlForMatching: qwenCore.normalizeBaseUrlForMatching,
+        existingModels: [legacyModel],
+      },
+    );
+    expect(legacyOnly.preserveModels).toEqual([
+      {
+        ...legacyModel,
+        baseUrl: aBaseUrl,
+        envKey: qwenCore.generateCustomEnvKey(
+          qwenCore.AuthType.USE_OPENAI,
+          aBaseUrl,
+        ),
+      },
     ]);
   });
 });

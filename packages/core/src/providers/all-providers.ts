@@ -44,6 +44,8 @@ export {
 export {
   CUSTOM_API_KEY_ENV_PREFIX,
   generateCustomEnvKey,
+  legacyCustomEnvKey,
+  legacyCustomEnvKey6Hex,
 } from './presets/custom-provider.js';
 
 // ---------------------------------------------------------------------------

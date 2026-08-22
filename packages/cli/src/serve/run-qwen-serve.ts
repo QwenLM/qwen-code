@@ -997,9 +997,39 @@ export function buildProviderSetupInputs(
   // back to the endpoint defaults), so the preserve decision must too.
   const hasExplicitModelIds = req.modelIds != null;
   const selectedEndpoint = helpers.normalizeBaseUrlForMatching?.(baseUrl);
+  // Ids that already have a stamped entry at the selected endpoint. An
+  // implicit reconnect must not preserve a same-id baseUrl-less legacy entry
+  // beside its stamped twin: nothing downstream dedups preserved-against-
+  // preserved, so the pair would persist as two permanent duplicate
+  // (id, baseUrl) entries, re-preserved on every reconnect (R39-7).
+  const stampedIdsAtSelectedEndpoint = new Set(
+    helpers.existingModels
+      ?.filter(
+        (model) =>
+          model.baseUrl !== undefined &&
+          helpers.normalizeBaseUrlForMatching?.(model.baseUrl) ===
+            selectedEndpoint,
+      )
+      .map((model) => model.id) ?? [],
+  );
+  const migrateEnvKey =
+    typeof provider.envKey === 'function'
+      ? provider.envKey(protocol, baseUrl)
+      : undefined;
   const preserveModels = helpers.existingModels?.flatMap((model) => {
     const preserved =
-      model.baseUrl === undefined ? { ...model, baseUrl } : model;
+      model.baseUrl === undefined
+        ? {
+            ...model,
+            baseUrl,
+            // Stamping migrates the entry to the selected endpoint; its env
+            // key must follow so the entry points at the key this install
+            // writes — a key rotation plus merge-only reconnect must not
+            // leave the migrated model authenticating with the pre-rotation
+            // key (R39-6).
+            ...(migrateEnvKey ? { envKey: migrateEnvKey } : {}),
+          }
+        : model;
     if (!provider.mergeModelsByIdentity) {
       const belongsToAnotherEndpoint =
         helpers.normalizeBaseUrlForMatching?.(preserved.baseUrl) !==
@@ -1016,8 +1046,11 @@ export function buildProviderSetupInputs(
       // request makes no explicit selection (merge-only reconnects keep
       // everything as-is) or requests its id; otherwise leave it out of the
       // plan. buildInstallPlan then only owns it at its own endpoint's env
-      // key, so an explicit selection at a sibling endpoint neither deletes
-      // nor rewrites it (R38-3).
+      // key (in any historical shape), so a selection at a sibling endpoint
+      // neither deletes nor rewrites it (R38-3, R39-2).
+      if (!hasExplicitModelIds && stampedIdsAtSelectedEndpoint.has(model.id)) {
+        return [];
+      }
       const shouldPreserve =
         !defaultIds.has(model.id) &&
         (!hasExplicitModelIds || requestedIds.has(model.id));

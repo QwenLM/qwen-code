@@ -12972,6 +12972,61 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('qwen/providers/connect treats empty and whitespace-only modelIds like an omitted key', async () => {
+    // readStringArray collapses `[]` and `[" "]` to [] exactly like
+    // `null`/`undefined` (the request resolves endpoint defaults either
+    // way), so the preserve decision must too: with `[]` a saved custom
+    // model used to be treated as deselected and deleted by the install
+    // plan, while the identical request with the key omitted preserved it
+    // (R39-1).
+    const baseSettings = makeSessionSettings();
+    const savedCustom = {
+      id: 'my-kimi-custom',
+      name: '[Kimi API] my-kimi-custom',
+      baseUrl: 'https://api.moonshot.ai/v1',
+      envKey: 'MOONSHOT_API_KEY',
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    const settings = {
+      ...baseSettings,
+      merged: {
+        ...baseSettings.merged,
+        modelProviders: { openai: [savedCustom] },
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    for (const modelIds of [[], [' '], ['   ']]) {
+      vi.mocked(buildInstallPlan).mockClear();
+      await expect(
+        agent.extMethod('qwen/providers/connect', {
+          providerId: 'kimi',
+          baseUrl: 'https://api.moonshot.ai/v1',
+          apiKey: 'sk-test',
+          modelIds,
+        }),
+      ).resolves.toMatchObject({ success: true, providerId: 'kimi' });
+
+      expect(buildInstallPlan).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'kimi' }),
+        expect.objectContaining({
+          modelIds: ['kimi-k3'],
+          preserveModels: [savedCustom],
+        }),
+      );
+    }
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it("qwen/providers/connect leaves a sibling endpoint's baseUrl-less legacy model out of an explicit selection", async () => {
     // A baseUrl-less legacy entry carries no endpoint of its own; ownership
     // is decided by its stored env key in buildInstallPlan. The ACP surface
@@ -13037,7 +13092,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     );
 
     // Explicitly requesting the legacy id at the sibling endpoint migrates
-    // it: it is preserved stamped with the selected endpoint.
+    // it: it is preserved stamped with the selected endpoint, and its envKey
+    // follows the stamp so the migrated entry points at the endpoint's own
+    // key (R39-6).
     vi.mocked(buildInstallPlan).mockClear();
     await expect(
       agent.extMethod('qwen/providers/connect', {
@@ -13054,7 +13111,69 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(buildInstallPlan).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'custom-openai-compatible' }),
       expect.objectContaining({
-        preserveModels: [{ ...legacyModel, baseUrl: bBaseUrl }],
+        preserveModels: [
+          {
+            ...legacyModel,
+            baseUrl: bBaseUrl,
+            envKey: customEnvKey('openai', bBaseUrl),
+          },
+        ],
+      }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/providers/connect collapses a same-id legacy+stamped pair on an implicit reconnect (R39-7)', async () => {
+    // A same-id baseUrl-less legacy entry beside its stamped twin (a state
+    // main's identity-only merge could create) must not both survive an
+    // implicit reconnect: the pair would persist as two permanent duplicate
+    // (id, baseUrl) entries. The stamped twin wins; the legacy copy is left
+    // to buildInstallPlan's ownership, which removes it.
+    const moonshotBaseUrl = 'https://api.moonshot.ai/v1';
+    const legacyModel = {
+      id: 'my-custom',
+      name: 'my-custom',
+      envKey: 'MOONSHOT_API_KEY',
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    const stampedModel = {
+      id: 'my-custom',
+      name: '[Kimi API] my-custom',
+      baseUrl: moonshotBaseUrl,
+      envKey: 'MOONSHOT_API_KEY',
+      generationConfig: { contextWindowSize: 67890 },
+    };
+    const baseSettings = makeSessionSettings();
+    const settings = {
+      ...baseSettings,
+      merged: {
+        ...baseSettings.merged,
+        modelProviders: { openai: [legacyModel, stampedModel] },
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'kimi',
+        baseUrl: moonshotBaseUrl,
+        apiKey: 'sk-test',
+      }),
+    ).resolves.toMatchObject({ success: true, providerId: 'kimi' });
+
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'kimi' }),
+      expect.objectContaining({
+        preserveModels: [stampedModel],
       }),
     );
 
@@ -13476,6 +13595,89 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       const listed = await agent.extMethod('qwen/providers/list', {});
       expect(JSON.stringify(listed)).not.toContain('sk-tunnel');
       expect(JSON.stringify(listed)).not.toContain('user:sk-tunnel');
+    } finally {
+      providers.pop();
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('qwen/providers/list omits baseUrlByProtocol for a baseUrl-less legacy bucket (R39-4)', async () => {
+    // A protocol bucket whose saved models predate baseUrl stamping has no
+    // restorable endpoint. Emitting '' for it made the desktop client treat
+    // the protocol as "connected": flipping the protocol Select blanked the
+    // user's typed endpoint and submitting installed the legacy models under
+    // the protocol default URL. The key must be omitted — the same guard the
+    // CLI producer (getProtocolSetups) applies.
+    const providers = ALL_PROVIDERS as unknown as Array<
+      Record<string, unknown>
+    >;
+    const settings = {
+      ...makeSessionSettings(),
+      merged: {
+        mcpServers: {},
+        env: { CUSTOM_FF_KEY: 'sk-custom' },
+        modelProviders: {
+          openai: [
+            {
+              id: 'proxy-model',
+              baseUrl: 'https://proxy.corp.example/v1',
+              envKey: 'CUSTOM_FF_KEY',
+            },
+          ],
+          anthropic: [
+            {
+              id: 'legacy-model',
+              envKey: 'CUSTOM_FF_KEY',
+            },
+          ],
+        },
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    try {
+      providers.push({
+        id: 'custom-freeform',
+        label: 'Custom Free Form',
+        description: 'Free form access',
+        protocol: 'openai',
+        protocolOptions: ['openai', 'anthropic'],
+        baseUrl: undefined,
+        envKey: (_protocol: string, _baseUrl: string) => 'CUSTOM_FF_KEY',
+        modelsEditable: true,
+        mergeModelsByIdentity: true,
+        modelNamePrefix: '',
+        ownsModel: (model: { envKey?: string }) =>
+          model.envKey === 'CUSTOM_FF_KEY',
+        uiGroup: 'custom',
+      });
+
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+
+      const listed = (await agent.extMethod('qwen/providers/list', {})) as {
+        providers: Array<{
+          id: string;
+          existingConfig?: {
+            baseUrlByProtocol?: Record<string, string>;
+          };
+        }>;
+      };
+      const freeform = listed.providers.find(
+        (provider) => provider.id === 'custom-freeform',
+      );
+      expect(freeform).toBeDefined();
+      // The stamped openai bucket keeps its endpoint; the baseUrl-less
+      // anthropic bucket is absent from the map entirely (no '' entry).
+      expect(freeform?.existingConfig?.baseUrlByProtocol).toEqual({
+        openai: 'https://proxy.corp.example/v1',
+      });
     } finally {
       providers.pop();
       mockConnectionState.resolve();

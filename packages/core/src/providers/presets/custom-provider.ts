@@ -79,19 +79,74 @@ export function generateCustomEnvKey(
   protocol: AuthType,
   baseUrl: string,
 ): string {
-  // Strip trailing slashes before hashing so callers that differ only in
-  // that (e.g. .../v1 vs .../v1/) still resolve to the same env-var bucket,
+  return `${customEnvKeyReadable(protocol, baseUrl)}_${customEnvKeyHash(
+    protocol,
+    baseUrl,
+  ).slice(0, 12)}`;
+}
+
+/**
+ * The human-readable `PREFIX_PROTOCOL_URL` part of the custom env key. Shared
+ * by every shape the key generation went through (no suffix → 6-hex suffix →
+ * 12-hex suffix), so it attributes historical keys to their endpoint.
+ */
+function customEnvKeyReadable(protocol: AuthType, baseUrl: string): string {
+  // Strip trailing slashes so callers that differ only in that
+  // (e.g. .../v1 vs .../v1/) still resolve to the same env-var bucket,
   // preserving the prior implementation's invariant.
   const canonicalBaseUrl = stripTrailingSlashes(baseUrl.trim());
-  const suffix = createHash('sha256')
-    .update(`${protocol}\0${canonicalBaseUrl}`)
-    .digest('hex')
-    .slice(0, 12)
-    .toUpperCase();
-
   return `${CUSTOM_API_KEY_ENV_PREFIX}${normalizeEnvSegment(
     protocol,
-  )}_${normalizeEnvSegment(baseUrl)}_${suffix}`;
+  )}_${normalizeEnvSegment(canonicalBaseUrl)}`;
+}
+
+/** The full uppercase SHA-256 hex of the canonical (protocol, baseUrl) pair. */
+function customEnvKeyHash(protocol: AuthType, baseUrl: string): string {
+  const canonicalBaseUrl = stripTrailingSlashes(baseUrl.trim());
+  return createHash('sha256')
+    .update(`${protocol}\0${canonicalBaseUrl}`)
+    .digest('hex')
+    .toUpperCase();
+}
+
+/**
+ * Recognizes every env-key shape this provider has ever generated for the
+ * endpoint (`protocol`, `baseUrl`): the current 12-hex-suffix shape, the
+ * earlier 6-hex-suffix shape (same hash, shorter slice — old keys persist in
+ * settings until reconnect or clear-auth), and the original suffix-less
+ * `PREFIX_PROTOCOL_URL` shape.
+ */
+function ownsCustomEnvKeyShape(
+  envKey: string,
+  protocol: AuthType,
+  baseUrl: string,
+): boolean {
+  const readable = customEnvKeyReadable(protocol, baseUrl);
+  if (envKey === readable) return true; // original suffix-less shape
+  const hash = customEnvKeyHash(protocol, baseUrl);
+  return (
+    envKey === `${readable}_${hash.slice(0, 6)}` || // 6-hex suffix era
+    envKey === `${readable}_${hash.slice(0, 12)}` // current (generateCustomEnvKey)
+  );
+}
+
+/** The original suffix-less `PREFIX_PROTOCOL_URL` key shape (#3864 era). */
+export function legacyCustomEnvKey(
+  protocol: AuthType,
+  baseUrl: string,
+): string {
+  return customEnvKeyReadable(protocol, baseUrl);
+}
+
+/** The 6-hex-suffix key shape that preceded the current 12-hex one. */
+export function legacyCustomEnvKey6Hex(
+  protocol: AuthType,
+  baseUrl: string,
+): string {
+  return `${customEnvKeyReadable(protocol, baseUrl)}_${customEnvKeyHash(
+    protocol,
+    baseUrl,
+  ).slice(0, 6)}`;
 }
 
 export const customProvider: ProviderConfig = {
@@ -107,6 +162,7 @@ export const customProvider: ProviderConfig = {
   ],
   baseUrl: undefined,
   envKey: generateCustomEnvKey,
+  ownsEnvKeyShape: ownsCustomEnvKeyShape,
   models: undefined,
   modelNamePrefix: '',
   showAdvancedConfig: true,

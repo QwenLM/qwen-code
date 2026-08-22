@@ -2442,7 +2442,15 @@ function readExistingProviderConfig(
         typeof protoFirstBaseUrl === 'string'
           ? protoFirstBaseUrl
           : resolveBaseUrl(config);
-      baseUrlByProtocol[proto] = sanitizeProviderBaseUrl(protoBaseUrl);
+      // A bucket whose saved models carry no baseUrl (pre-stamping legacy
+      // shape) has no restorable endpoint: emitting '' makes the client
+      // treat the protocol as "connected", blank the user's typed endpoint
+      // on a protocol flip, and submitting installs the legacy models under
+      // the protocol DEFAULT URL. Omit the key so the flip keeps the typed
+      // endpoint untouched — same guard the CLI producer uses (R39-4).
+      if (protoBaseUrl) {
+        baseUrlByProtocol[proto] = sanitizeProviderBaseUrl(protoBaseUrl);
+      }
       const byEndpoint: Record<string, string[]> = {};
       for (const model of savedForProto.models) {
         // Sanitize like baseUrlByProtocol above so the bucket's keys and
@@ -2610,21 +2618,50 @@ function readProviderSetupInputs(
   const selectedEndpoint = normalizeBaseUrlForMatching(baseUrl);
   const defaultModelIdSet = new Set(defaultModelIds);
   const requestedModelIdSet = new Set(resolvedModelIds);
-  // `readStringArray` accepts JSON `null` exactly like `undefined` (both
-  // resolve to the endpoint defaults), so the preserve decision must too:
-  // with `!== undefined` a `modelIds: null` reconnect resolved default models
-  // while treating the request as an explicit selection that deselects every
-  // saved custom model — silently deleting them via the install plan, while
-  // the identical request with the key omitted preserved them (R38-1).
-  const hasExplicitModelIds = params['modelIds'] != null;
+  // `readStringArray` normalizes `null`, `undefined`, `[]`, and
+  // whitespace-only elements all to `[]`, and the resolution above treats
+  // every one of those shapes as "no selection" (endpoint defaults), so the
+  // preserve decision must too: with `params['modelIds'] != null` a
+  // `modelIds: []` reconnect resolved default models while treating the
+  // request as an explicit selection that deselects every saved custom model
+  // — silently deleting them via the install plan, while the identical
+  // request with the key omitted preserved them (R38-1, R39-1).
+  const hasExplicitModelIds = modelIds.length > 0;
   const existingModels = findExistingProviderModels(
     config,
     modelProviders,
     protocol ?? config.protocol,
   )?.models;
+  // Ids that already have a stamped entry at the selected endpoint. An
+  // implicit reconnect must not preserve a same-id baseUrl-less legacy entry
+  // beside its stamped twin: the pair would persist as two permanent
+  // duplicate (id, baseUrl) entries, re-preserved on every reconnect (R39-7).
+  const stampedIdsAtSelectedEndpoint = new Set(
+    existingModels
+      ?.filter(
+        (model) =>
+          model.baseUrl !== undefined &&
+          normalizeBaseUrlForMatching(model.baseUrl) === selectedEndpoint,
+      )
+      .map((model) => model.id) ?? [],
+  );
+  const migrateEnvKey = resolveProviderEnvKey(
+    config,
+    protocol ?? config.protocol,
+    baseUrl,
+  );
   const preserveModels = existingModels?.flatMap((model) => {
     const preserved =
-      model.baseUrl === undefined ? { ...model, baseUrl } : model;
+      model.baseUrl === undefined
+        ? {
+            ...model,
+            baseUrl,
+            // Stamping migrates the entry to the selected endpoint; its env
+            // key must follow so the entry points at the key this install
+            // writes, not at the pre-migration one (R39-6).
+            ...(migrateEnvKey ? { envKey: migrateEnvKey } : {}),
+          }
+        : model;
     if (!config.mergeModelsByIdentity) {
       const belongsToAnotherEndpoint =
         normalizeBaseUrlForMatching(preserved.baseUrl) !== selectedEndpoint;
@@ -2633,6 +2670,15 @@ function readProviderSetupInputs(
         (!defaultModelIdSet.has(preserved.id) &&
           (!hasExplicitModelIds || requestedModelIdSet.has(preserved.id)));
       return shouldPreserve ? [preserved] : [];
+    }
+    // An explicit selection dedups through the generated same-id model
+    // (identity merge), so only the implicit arm needs the guard.
+    if (
+      !hasExplicitModelIds &&
+      model.baseUrl === undefined &&
+      stampedIdsAtSelectedEndpoint.has(model.id)
+    ) {
+      return [];
     }
     const selectedByEditableFreeForm = requestedModelIdSet.has(preserved.id);
     const shouldPreserve =
