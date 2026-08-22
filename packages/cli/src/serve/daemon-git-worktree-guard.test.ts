@@ -714,7 +714,12 @@ it -C ${outsideRepo} reset --hard`,
     expect(longReason).toContain('…');
 
     const tabTarget = path.join(temporaryRoot, 'tab\tdir');
-    await mkdir(path.join(tabTarget, '.git'), { recursive: true });
+    // Windows file names cannot contain control characters, so the fixture
+    // directory cannot exist there; the guard denies the nonexistent target
+    // all the same and must still strip the tab from its reason.
+    if (process.platform !== 'win32') {
+      await mkdir(path.join(tabTarget, '.git'), { recursive: true });
+    }
     const controlDenial = await guard(
       request(`git -C '${tabTarget}' reset --hard`),
     );

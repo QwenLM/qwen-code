@@ -403,13 +403,63 @@ interface TokenizedSegment {
   readonly endDepth: number;
 }
 
+// On Windows a backslash is a path separator, not a shell escape: the daemon
+// executes commands through cmd.exe (or a shell handed Windows paths), so
+// `git -C C:\repo\sub` must reach the analysis with its separators intact.
+// POSIX tokenisation would consume each unquoted `\x` as an escape for `x`,
+// mangling the path into a relative word. Rewrite each unquoted `\x` to
+// `\\\x`, which POSIX rules read back as the literal pair `\x`. Both quoted
+// forms already keep backslashes literal under POSIX rules, so they are left
+// alone; a `$'…'` body starts with `$`, marking its token dynamic either way.
+function preserveWindowsPathSeparators(segment: string): string {
+  if (process.platform !== 'win32') return segment;
+  let single = false;
+  let double = false;
+  let out = '';
+  for (let index = 0; index < segment.length; index++) {
+    const character = segment[index]!;
+    if (single) {
+      if (character === "'") single = false;
+      out += character;
+      continue;
+    }
+    if (double) {
+      if (character === '\\' && index + 1 < segment.length) {
+        out += character + segment[index + 1];
+        index++;
+        continue;
+      }
+      if (character === '"') double = false;
+      out += character;
+      continue;
+    }
+    if (character === "'") {
+      single = true;
+      out += character;
+      continue;
+    }
+    if (character === '"') {
+      double = true;
+      out += character;
+      continue;
+    }
+    if (character === '\\' && index + 1 < segment.length) {
+      out += '\\\\\\' + segment[index + 1];
+      index++;
+      continue;
+    }
+    out += character;
+  }
+  return out;
+}
+
 function tokenizeSegment(
   segment: string,
   startDepth: number,
 ): TokenizedSegment | null {
   let parsed: ReturnType<typeof parse>;
   try {
-    parsed = parse(segment, (key) => `$${key}`);
+    parsed = parse(preserveWindowsPathSeparators(segment), (key) => `$${key}`);
   } catch {
     return null;
   }
