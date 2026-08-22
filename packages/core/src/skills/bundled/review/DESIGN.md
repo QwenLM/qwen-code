@@ -1130,10 +1130,13 @@ One consequence of the name. `SubagentManager.loadSubagent` resolves session > p
 ```bash
 git checkout <merge-base> -- packages/core/src/subagents/ \
   packages/core/src/skills/bundled/review/ \
-  packages/cli/src/commands/review/agent-prompt.ts
+  packages/cli/src/commands/review/agent-prompt.ts \
+  packages/cli/src/commands/review/agent-prompt.test.ts
 npm run build:packages && npm run bundle && cp -R dist /tmp/ab/dist-base
 git reset --hard HEAD && npm run build:packages && npm run bundle && cp -R dist /tmp/ab/dist-head
 ```
+
+The test file is on that list for a reason that is easy to miss: it imports `REVIEW_BUILTIN_SUBAGENT_TYPE`, which the reverted core no longer exports, so leaving it at HEAD fails `build:packages` with TS2724 — and the `&&` then swallows the bundle step, leaving whatever `dist/` happened to be there before. Reverting the sources alone is not enough; anything that _references_ them has to go back too.
 
 **Per-turn token counts** (the 21,178 / 3,447 / 55,897 figures) come from pointing the product at a recording OpenAI-compatible endpoint and tokenising each captured request body with cl100k. `qwen review agent-prompt --plan <plan> --roster` builds the launch prompt; one orchestrator turn launches one dimension agent, and the endpoint answers with that agent's own scripted `read_file` calls so it walks all four turns. What matters is that the record keeps the request **whole**: `qwen review mock-provider` truncates its record at 8 KB, which is smaller than a single tool block, so its log cannot be the source for these numbers.
 
