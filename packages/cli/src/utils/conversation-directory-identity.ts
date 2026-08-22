@@ -318,9 +318,9 @@ export async function inspectConversationDirectoryIdentity(
     canonical = await realpath(candidate);
     after = await lstat(canonical);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      throw new ConversationDirectoryIdentityError('child', 'identity_changed');
-    }
+    // A child deleted between the lstat and the realpath is "already gone" —
+    // the same verdict as the initial-lstat ENOENT — not an identity change.
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
     throwIdentityIoError('child', error);
   }
   validateDirectoryStats(after, 'child');

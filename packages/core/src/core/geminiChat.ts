@@ -18,6 +18,7 @@ import type {
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { createUserContent, FinishReason } from './genai-compat.js';
+import { restorableAskUserQuestionCallIds } from './ask-user-question-restore.js';
 import { enforceFunctionResponseBudget } from '../utils/tool-response-finalizer.js';
 import {
   retryWithBackoff,
@@ -1744,6 +1745,10 @@ function applyRepair(
   return { insertedBefore: 1 };
 }
 
+export interface RepairOrphanedToolUseOptions {
+  preserveCallIds?: ReadonlySet<string>;
+}
+
 /**
  * Forward-walk `history`, planning and applying the repair for each
  * `model[functionCall]` turn in turn. Iteration is index-based and the
@@ -1757,12 +1762,14 @@ function applyRepair(
 export function repairOrphanedToolUseTurns(
   history: Content[],
   reason: string = ORPHAN_TOOL_USE_REPAIR_REASON,
+  options?: RepairOrphanedToolUseOptions,
 ): {
   injected: Array<{ callId: string; name: string }>;
   droppedDuplicates: Array<{ callId: string; name: string }>;
 } {
   const injected: Array<{ callId: string; name: string }> = [];
   const droppedDuplicates: Array<{ callId: string; name: string }> = [];
+  const preserveCallIds = options?.preserveCallIds;
 
   for (let i = 0; i < history.length; i++) {
     if (history[i].role !== 'model') continue;
@@ -1771,6 +1778,11 @@ export function repairOrphanedToolUseTurns(
     if (scan.expected.size === 0) continue;
 
     const plan = planRepair(scan);
+    if (preserveCallIds && preserveCallIds.size > 0) {
+      plan.synthesizeIds = plan.synthesizeIds.filter(
+        ([id]) => !preserveCallIds.has(id),
+      );
+    }
     if (plan.synthesizeIds.length === 0 && plan.removalTargets.length === 0) {
       continue;
     }
@@ -2603,6 +2615,15 @@ export class GeminiChat {
         }
       }
 
+      // Capture the trailing entry BEFORE the user push: when
+      // --restore-ask-user-question preserved a dangling ask_user_question
+      // at load, a send that beats the restore prompt must not close it
+      // with a synthetic failure — the restore hint is one-shot.
+      const preserveCallIds =
+        this.config.getRestoreAskUserQuestion?.() === true
+          ? restorableAskUserQuestionCallIds(this.history.at(-1))
+          : undefined;
+
       // Add user content to history ONCE before any attempts.
       this.history.push(userContent);
       currentUserContent = userContent;
@@ -2617,7 +2638,11 @@ export class GeminiChat {
       // pass from the session-load pass and from the React scheduler's
       // dedup-drop. See the canonical note above
       // `ORPHAN_TOOL_USE_REPAIR_REASON`.
-      const inlineRepair = repairOrphanedToolUseTurns(this.history);
+      const inlineRepair = repairOrphanedToolUseTurns(
+        this.history,
+        ORPHAN_TOOL_USE_REPAIR_REASON,
+        preserveCallIds ? { preserveCallIds } : undefined,
+      );
       if (inlineRepair.injected.length > 0) {
         debugLogger.warn(
           `[REPAIR] sendMessageStream inline pass synthesized ` +
@@ -4617,11 +4642,14 @@ export class GeminiChat {
    * Instance wrapper around the free-function {@link repairOrphanedToolUseTurns}.
    * See the canonical note above `ORPHAN_TOOL_USE_REPAIR_REASON`.
    */
-  repairOrphanedToolUseTurns(reason?: string): {
+  repairOrphanedToolUseTurns(
+    reason?: string,
+    options?: RepairOrphanedToolUseOptions,
+  ): {
     injected: Array<{ callId: string; name: string }>;
     droppedDuplicates: Array<{ callId: string; name: string }>;
   } {
-    return repairOrphanedToolUseTurns(this.history, reason);
+    return repairOrphanedToolUseTurns(this.history, reason, options);
   }
 
   setTools(tools: Tool[]): void {

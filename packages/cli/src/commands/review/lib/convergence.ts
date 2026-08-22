@@ -129,6 +129,16 @@ export interface PrevRound {
    * The number the trend is about — see `fresh` on the diagnosis.
    */
   fresh?: number;
+  /** Its own round number; 0 when nothing was recovered. */
+  round?: number;
+  /**
+   * Whether it carried an incremental anchor. Read only by the
+   * mechanism-health check: two consecutive withholds mean every later round
+   * re-reads the whole diff until a round's marker carries an anchor again —
+   * which a clean close does not guarantee, because the marker also
+   * withholds on a missing fetched sha and on a model-identity drift.
+   */
+  anchored?: boolean;
 }
 
 export interface ConvergenceDiagnosis {
@@ -165,10 +175,108 @@ export interface ConvergenceDiagnosis {
    * unavailable, which an unconditional-sounding claim would misstate.
    */
   criticalFloorKind?: CriticalFloorKind;
+  /**
+   * Blockers THIS round posts — inline plus body. A fact about the round
+   * being composed, not about the recovered list: a Critical in the previous
+   * work list this round does not re-post was fixed.
+   */
+  openCriticals?: number;
 }
 
 /** How a round's posting floor came to be `critical`. */
 export type CriticalFloorKind = 'explicit' | 'auto-resolved';
+
+/**
+ * The closed set of handling recommendations this module can match.
+ *
+ * Closed on purpose: a caller wires actions to these codes without parsing
+ * prose, so the vocabulary is a contract. Matching is measurement → advice,
+ * with zero constants and zero decisions — every entry carries the factual
+ * basis it was matched from, and none of them is a claim about how the code
+ * should be restructured.
+ *
+ * The design's menu is larger than this. The codes NOT emitted here are the
+ * ones whose evidence this round does not hold, and each is absent for a
+ * stated reason rather than forgotten:
+ *
+ * - `split` needs the diff-topology test (a separate work item); this module
+ *   can see that a cluster recurs, not that its hunks are separable.
+ * - `reset-drift` / `rescope` need `srcDelta`, which is gated on the anchor
+ *   write-side work.
+ * - `fix-pipeline` needs marker content-hash dedup to tell a repost storm
+ *   from real volume.
+ * - `reduce-cadence` is matched to "many rounds, small per-round increments",
+ *   and both halves are thresholds — the one thing this module does not own.
+ *   Its threshold-free reading ("healthy but oversampled") is also a round
+ *   that produces no diagnosis at all, so there is no paragraph to carry it.
+ * - `re-anchor` was matched to an anchorless chain on the premise that agent
+ *   budget caps dominate it. Measured on this repository the dominant causes
+ *   were a non-converged reverse audit and skipped integration tests, which
+ *   one raised-budget round does not clear — so the chain is DISCLOSED below
+ *   as mechanism health and prescribes nothing.
+ * - `human-triage` is matched to "any shape" in the design, which makes it
+ *   advice no measurement selected. Emitting it on every diagnosis would
+ *   spend the code set's only real property — that a code means a fact was
+ *   observed — on a constant.
+ *
+ * That is the whole menu: eleven codes in the design, four emitted here,
+ * seven named above.
+ */
+export const RECOMMENDATION_CODES = [
+  'root-cause-triage',
+  'land-and-defer',
+  'batch-fixes',
+  'stem-surface',
+] as const;
+
+/**
+ * Derived from the runtime list above, not declared beside it: a validator
+ * needs the membership check and a caller needs the type, and two hand-kept
+ * copies of a closed vocabulary drift the moment one gains a code.
+ */
+export type RecommendationCode = (typeof RECOMMENDATION_CODES)[number];
+
+/** One matched recommendation and the measurement that matched it. */
+export interface Recommendation {
+  code: RecommendationCode;
+  /** The deterministic fact this was matched from — never a judgement. */
+  basis: string;
+}
+
+/**
+ * What the round can say about the MECHANISM, as opposed to about the loop.
+ *
+ * A pipeline that has stopped working is indistinguishable from one with
+ * nothing to do: both are silent. These are the shapes where the round can
+ * see its own machinery failing, and they are stated as facts with no
+ * prescription attached.
+ */
+export interface MechanismHealth {
+  /**
+   * The floor resolved to `critical`, and Suggestions posted inline anyway.
+   * The posture is nominally engaged and mechanically is not.
+   */
+  postureNotEngaging: boolean;
+  /**
+   * This round did not close cleanly — unproven scope, a dimension gap that
+   * is not depth-only, or any verdict cap other than an unreviewable
+   * dimension — which withholds the incremental anchor, and the round it
+   * recovered carried none either. Two
+   * consecutive withholds mean the next round re-reads the whole diff, and
+   * the round after that, until something clears it: the closed loop
+   * measured at 119 minutes and 34M tokens on a PR whose code had not
+   * changed a line.
+   *
+   * A stated limit: those are the only withholding legs visible from here.
+   * The marker also withholds when the plan carries no fetched sha, when it
+   * cannot be read, and when the round's model identity drifted — those are
+   * decided where the marker is built, with the plan in hand, and a round
+   * withheld only by one of them is a chain this check does not see. It
+   * under-reports rather than over-reports, and the wording claims only what
+   * it measured.
+   */
+  anchorChainBroken: boolean;
+}
 
 /**
  * Is this draft a finding reported for the FIRST time?
@@ -279,6 +387,13 @@ export function diagnoseConvergence(input: {
    */
   floor?: 'c' | 'o';
   criticalFloorKind?: CriticalFloorKind;
+  /**
+   * Blockers THIS round posts — inline plus body. The one fact
+   * `land-and-defer` turns on, and it is a fact about the round being
+   * composed rather than about the recovered list: a Critical in the
+   * previous work list this round does not re-post was fixed.
+   */
+  openCriticals?: number;
 }): ConvergenceDiagnosis | null {
   const priorByFile = new Map<string, Set<number>>();
   for (const f of input.prev.findings) {
@@ -432,7 +547,11 @@ export function diagnoseConvergence(input: {
     fresh.length >= input.prev.fresh;
 
   if (clusters.length === 0 && !volumeNotShrinking) return null;
+
   return {
+    ...(input.openCriticals === undefined
+      ? {}
+      : { openCriticals: input.openCriticals }),
     round: input.round,
     posted: input.posted,
     fresh: fresh.length,
@@ -448,6 +567,91 @@ export function diagnoseConvergence(input: {
     ...(input.criticalFloorKind === undefined
       ? {}
       : { criticalFloorKind: input.criticalFloorKind }),
+  };
+}
+
+/**
+ * The handling recommendations this diagnosis matches — measurement to
+ * advice, with zero constants and zero decisions.
+ *
+ * DERIVED from the diagnosis rather than stored on it. Carried as a field,
+ * the same round would have two representations of one thing, and a caller
+ * (or a test) could hold a diagnosis whose codes and whose facts describe
+ * different rounds. Derived, the paragraph a human reads and the codes a
+ * caller wires cannot disagree, because there is only one of them.
+ */
+export function recommendationsFor(d: ConvergenceDiagnosis): Recommendation[] {
+  const out: Recommendation[] = [];
+  if (d.clusters.length > 0) {
+    const shown = d.clusters.slice(0, MAX_RENDERED_CLUSTERS).map((c) => c.file);
+    out.push({
+      code: 'root-cause-triage',
+      basis: `${d.clusters.length} file(s) carried findings in earlier rounds and carry new ones now: ${shown.join(', ')}${d.clusters.length > shown.length ? ', …' : ''}`,
+    });
+  }
+  if (d.volumeNotShrinking) {
+    out.push({
+      code: 'batch-fixes',
+      basis: `round ${d.round} produced ${d.fresh} first-time finding(s); the previous round produced ${d.prevFresh}`,
+    });
+    // The floor rung is offered only where there is a rung left to take.
+    if (d.criticalFloorKind === undefined) {
+      out.push({
+        code: 'stem-surface',
+        basis: `the posting floor for this round did not resolve to critical`,
+      });
+    }
+  }
+  // Decidable, and decidable ONLY from this round: a loop whose blockers are
+  // all fixed can end by merging, and a merged pull request cannot diverge
+  // further. Absent `openCriticals` is not zero — an unrecorded count is not
+  // a count of none.
+  if (d.openCriticals === 0) {
+    out.push({
+      code: 'land-and-defer',
+      basis: `this round posts no Critical finding(s)`,
+    });
+  }
+  return out;
+}
+
+/**
+ * The mechanism-health disclosure, or null when nothing is wrong with the
+ * machinery itself.
+ *
+ * Separate from the loop reading on purpose. A diverging loop is a fact
+ * about the WORK; these are facts about the pipeline, and they are the
+ * shapes where a failure is otherwise indistinguishable from having nothing
+ * to do — both are silent. Stated, never prescribed: what to do about a
+ * posture that is not engaging, or an anchor chain that has stopped, is the
+ * operator's call, and the one prescription the design once carried here
+ * (`re-anchor`) was matched to a cause the measurements did not bear out.
+ */
+export function renderMechanismHealth(
+  h: MechanismHealth,
+): { en: string; zh: string } | null {
+  const en: string[] = [];
+  const zh: string[] = [];
+  if (h.postureNotEngaging) {
+    en.push(
+      `the posting floor for this round resolved to critical, and Suggestion-level findings posted inline anyway — the posture is engaged in name and not in effect`,
+    );
+    zh.push(
+      `本轮的发布下限解析为 critical，但仍有 Suggestion 级发现以行内评论发布——该姿态名义上生效、实际未生效`,
+    );
+  }
+  if (h.anchorChainBroken) {
+    en.push(
+      `this round did not close cleanly, so it withholds the incremental anchor — and the round it recovered had none either, so the next review re-reads the whole diff and will keep doing so until a round's marker carries an anchor again`,
+    );
+    zh.push(
+      `本轮未能干净收尾，因而扣留了增量锚点，而它恢复到的那一轮也没有锚点，因此下一次评审将重读整个 diff——并会一直如此，直到某一轮的标记重新带上锚点`,
+    );
+  }
+  if (en.length === 0) return null;
+  return {
+    en: `Mechanism health: ${en.join('; ')}. (Stated, not acted on — this changes nothing about what the round posts.)`,
+    zh: `机制健康：${zh.join('；')}。（仅陈述，不据此行动——这不改变本轮发布的任何内容。）`,
   };
 }
 
@@ -481,7 +685,7 @@ export function renderConvergenceDiagnosis(d: ConvergenceDiagnosis): {
   const clusterEn = shown
     .map(
       (c) =>
-        `${mdField(c.file)} (findings in round${c.priorRounds.length > 1 ? 's' : ''} ${c.priorRounds.join(', ')}, ${c.thisRound} more now)`,
+        `${mdField(c.file)} (findings in round${c.priorRounds.length > 1 ? 's' : ''} ${c.priorRounds.join(', ')}; ${c.thisRound} more now)`,
     )
     .join('; ');
   const clusterZh = shown
@@ -594,6 +798,9 @@ export function renderConvergenceDiagnosis(d: ConvergenceDiagnosis): {
   // checked. And it names the posture the way that round actually got it —
   // `auto` is the DEFAULT, so wording an auto-resolved floor as an explicit
   // setting claims a flag nobody passed.
+  const matched = recommendationsFor(d);
+  const has = (code: RecommendationCode): boolean =>
+    matched.some((r) => r.code === code);
   const batchEn = `Batching the remaining fixes and verifying them before the next push`;
   const batchZh = `把剩余修复攒成一批、验证后再推送`;
   const alreadyEn: Record<CriticalFloorKind, string> = {
@@ -604,26 +811,44 @@ export function renderConvergenceDiagnosis(d: ConvergenceDiagnosis): {
     explicit: `本 PR 的评审已处于 \`--severity-floor critical\``,
     'auto-resolved': `本 PR 的评审已解析为 critical 发布下限`,
   };
-  const floorEn =
-    d.criticalFloorKind === undefined
-      ? `${batchEn}, or dropping this PR's reviews to \`--severity-floor critical\`, keeps the loop from re-deriving the same set.`
-      : `${batchEn} keeps the loop from re-deriving the same set; ${alreadyEn[d.criticalFloorKind]}.`;
-  const floorZh =
-    d.criticalFloorKind === undefined
-      ? `${batchZh}，或将本 PR 的评审降到 \`--severity-floor critical\`，可以避免循环反复推导同一组发现。`
-      : `${batchZh}，可以避免循环反复推导同一组发现；${alreadyZh[d.criticalFloorKind]}。`;
+  // The floor rung rides the batching sentence when it was MATCHED — the
+  // same condition, read off the set rather than re-derived from the flag.
+  const stem = has('stem-surface');
+  const floorEn = stem
+    ? `${batchEn}, or dropping this PR's reviews to \`--severity-floor critical\`, keeps the loop from re-deriving the same set.`
+    : `${batchEn} keeps the loop from re-deriving the same set${
+        d.criticalFloorKind === undefined
+          ? ''
+          : `; ${alreadyEn[d.criticalFloorKind]}`
+      }.`;
+  const floorZh = stem
+    ? `${batchZh}，或将本 PR 的评审降到 \`--severity-floor critical\`，可以避免循环反复推导同一组发现。`
+    : `${batchZh}，可以避免循环反复推导同一组发现${
+        d.criticalFloorKind === undefined
+          ? ''
+          : `；${alreadyZh[d.criticalFloorKind]}`
+      }。`;
 
   const clusterAdviceEn = `A cluster that keeps producing siblings usually means the fixes are treating instances of a shared root cause — triaging that cause before the next round, or splitting an independent cluster into its own pull request, tends to end the loop faster than fixing them one at a time.`;
   const clusterAdviceZh = `一个不断再生兄弟发现的簇，通常意味着逐条修复只在处理同一根因的实例——先定位并处理该根因，或把独立的簇拆成单独的 PR，通常比逐条修复更快结束循环。`;
+  const landEn = `No Critical finding is open on this round, so merging and moving the remaining Suggestion threads to a follow-up issue is available as an ending — a merged pull request cannot diverge further.`;
+  const landZh = `本轮没有未决的 Critical，因此"合入后把剩余 Suggestion 线程转到后续 issue"是一个可选的结束方式——已合入的 PR 不会继续发散。`;
+
+  // The prose is generated FROM the matched set, not beside it. Two lists
+  // would let the paragraph a human reads and the codes a caller wires
+  // describe different rounds — and this module's whole claim is that its
+  // advice is matched to what it measured.
   const adviceEn = [
-    d.clusters.length > 0 ? clusterAdviceEn : null,
-    d.volumeNotShrinking ? floorEn : null,
+    has('root-cause-triage') ? clusterAdviceEn : null,
+    has('batch-fixes') ? floorEn : null,
+    has('land-and-defer') ? landEn : null,
   ]
     .filter(Boolean)
     .join(' ');
   const adviceZh = [
-    d.clusters.length > 0 ? clusterAdviceZh : null,
-    d.volumeNotShrinking ? floorZh : null,
+    has('root-cause-triage') ? clusterAdviceZh : null,
+    has('batch-fixes') ? floorZh : null,
+    has('land-and-defer') ? landZh : null,
   ]
     .filter(Boolean)
     .join('');

@@ -699,6 +699,7 @@ describe('Gemini Client (client.ts)', () => {
       getFileReadCache: vi.fn().mockReturnValue({
         clear: vi.fn(),
       }),
+      getRestoreAskUserQuestion: vi.fn().mockReturnValue(false),
     } as unknown as Config;
 
     // Real BaseLlmClient routes generateText through mockContentGenerator;
@@ -1920,6 +1921,94 @@ describe('Gemini Client (client.ts)', () => {
       expect(
         (fr?.functionResponse?.response as { error?: string })?.error,
       ).toMatch(/interrupted/i);
+    });
+
+    it('still synthesizes a failed functionResponse for dangling ask_user_question when restore is off', async () => {
+      await client.startChat([
+        { role: 'user', parts: [{ text: 'pick one' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call_auq_resume',
+                name: 'ask_user_question',
+                args: {
+                  questions: [
+                    {
+                      question: 'Which approach?',
+                      header: 'Approach',
+                      options: [
+                        { label: 'Polling', description: 'Poll the API' },
+                        { label: 'Webhook', description: 'Use a webhook' },
+                      ],
+                    },
+                  ],
+                },
+              },
+            } as never,
+          ],
+        },
+      ]);
+
+      const history = client.getHistory();
+      const danglingIdx = history.findIndex(
+        (h) =>
+          h.role === 'model' &&
+          h.parts?.some((p) => p.functionCall?.id === 'call_auq_resume'),
+      );
+      expect(danglingIdx).toBeGreaterThanOrEqual(0);
+      const userAfter = history[danglingIdx + 1];
+      expect(userAfter?.role).toBe('user');
+      const fr = userAfter?.parts!.find((p) => p.functionResponse);
+      expect(fr?.functionResponse?.id).toBe('call_auq_resume');
+      expect(
+        (fr?.functionResponse?.response as { error?: string })?.error,
+      ).toMatch(/interrupted/i);
+    });
+
+    it('skips orphan repair for a restorable ask_user_question when restore is on', async () => {
+      vi.mocked(mockConfig.getRestoreAskUserQuestion).mockReturnValue(true);
+
+      await client.startChat([
+        { role: 'user', parts: [{ text: 'pick one' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call_auq_resume',
+                name: 'ask_user_question',
+                args: {
+                  questions: [
+                    {
+                      question: 'Which approach?',
+                      header: 'Approach',
+                      options: [
+                        { label: 'Polling', description: 'Poll the API' },
+                        { label: 'Webhook', description: 'Use a webhook' },
+                      ],
+                    },
+                  ],
+                },
+              },
+            } as never,
+          ],
+        },
+      ]);
+
+      const history = client.getHistory();
+      const danglingIdx = history.findIndex(
+        (h) =>
+          h.role === 'model' &&
+          h.parts?.some((p) => p.functionCall?.id === 'call_auq_resume'),
+      );
+      expect(danglingIdx).toBeGreaterThanOrEqual(0);
+      expect(history[danglingIdx + 1]).toBeUndefined();
+      const hasFunctionResponse = history.some((h) =>
+        h.parts?.some((p) => p.functionResponse?.id === 'call_auq_resume'),
+      );
+      expect(hasFunctionResponse).toBe(false);
     });
 
     it('is a no-op when the resumed transcript has no dangling tool_use', async () => {

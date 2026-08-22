@@ -22,13 +22,20 @@ const {
   gitRawMock: vi.fn(),
 }));
 
-vi.mock('./aone-client.js', () => ({
-  a1Json: a1JsonMock,
-  a1JsonOnce: a1JsonOnceMock,
-  a1Once: a1OnceMock,
-  a1: vi.fn(),
-  ensureAoneAuthenticated: ensureAuthMock,
-}));
+vi.mock('./aone-client.js', async (importOriginal) => {
+  // The cause helper stays REAL: the composeUrl/resolveRepo catches must
+  // run the transport's actual extraction, not a mocked re-implementation.
+  const { execErrorCause } =
+    await importOriginal<typeof import('./aone-client.js')>();
+  return {
+    a1Json: a1JsonMock,
+    a1JsonOnce: a1JsonOnceMock,
+    a1Once: a1OnceMock,
+    a1: vi.fn(),
+    ensureAoneAuthenticated: ensureAuthMock,
+    execErrorCause,
+  };
+});
 
 vi.mock('../git.js', () => ({
   git: gitMock,
@@ -495,6 +502,110 @@ describe('aoneReader.getFetchMeta / fetchHeadRefSpec', () => {
     expect(() => aoneReader.getFetchMeta(7, 'g/p')).toThrow(
       /no mergeRequest for #7/,
     );
+  });
+});
+
+describe('aoneReader.composeUrl', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('returns the platform detailUrl — the reader is the ONLY link source', () => {
+    // An Aone MR link can never be ASSEMBLED from owner/repo: the collapse
+    // to the last two segments names a different repo for a nested-group
+    // project. The URL is always the platform's own detailUrl.
+    a1JsonMock.mockReturnValue({
+      mergeRequest: {
+        detailUrl:
+          'https://code.alibaba-inc.com/odps/odps_src/codereview/29295886',
+      },
+    });
+    expect(aoneReader.composeUrl(29295886, 'odps/odps_src')).toBe(
+      'https://code.alibaba-inc.com/odps/odps_src/codereview/29295886',
+    );
+  });
+
+  it('returns empty when the platform serves no detailUrl', () => {
+    a1JsonMock.mockReturnValue({ mergeRequest: { sourceBranch: 'sha' } });
+    expect(aoneReader.composeUrl(7, 'g/p')).toBe('');
+  });
+
+  it('returns empty (never throws) when the fetch fails — but DISCLOSES it on stderr', () => {
+    // The degrade to '' stands (a missing link must not fail a consumer
+    // that owns the post's fate), but not silently: a failing lookup —
+    // auth expiry, a blip past the retry budget — must stay
+    // distinguishable from the designed coordinates-relay case. The cause
+    // extraction skips the execFileSync "Command failed: …" preamble line.
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    a1JsonMock.mockImplementation(() => {
+      throw new Error('Command failed: a1 repo mr view 7\nnetwork down\n');
+    });
+    expect(aoneReader.composeUrl(7, 'g/p')).toBe('');
+    expect(stderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('WARNING: the Aone MR-link lookup failed'),
+    );
+    expect(stderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('network down'),
+    );
+    stderrSpy.mockRestore();
+  });
+
+  it('a single-line fetch failure warns without disclosing the preamble as the cause', () => {
+    // No cause line (a killed child with no stderr): the fallback must
+    // not be the preamble itself (the copy-time drift round 3 found) —
+    // the warning names the failure, nothing else.
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    a1JsonMock.mockImplementation(() => {
+      throw new Error('Command failed: a1 repo mr view 7');
+    });
+    expect(aoneReader.composeUrl(7, 'g/p')).toBe('');
+    expect(stderrSpy).toHaveBeenCalledWith(
+      'WARNING: the Aone MR-link lookup failed; the Posted line degrades ' +
+        "to the target's coordinates.\n",
+    );
+    stderrSpy.mockRestore();
+  });
+
+  it('a NON-exec failure keeps its one diagnostic line as the cause', () => {
+    // The platform answered without the field: mrView throws the
+    // no-mergeRequest refusal itself — a single-line message with no exec
+    // preamble. A preamble-blind slice(1) discarded exactly this line,
+    // leaving the warning cause-less on the platform-anomaly state it must
+    // keep distinguishable from a transport failure.
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    a1JsonMock.mockReturnValue({});
+    expect(aoneReader.composeUrl(7, 'g/p')).toBe('');
+    expect(stderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('WARNING: the Aone MR-link lookup failed'),
+    );
+    expect(stderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('a1 returned no mergeRequest for #7 of g/p'),
+    );
+    stderrSpy.mockRestore();
+  });
+
+  it('a JSON.parse SyntaxError from the fetch rides the warning too', () => {
+    // a1 answered unparseably (a gateway's HTML error page): the
+    // SyntaxError carries no exec preamble, so its message IS the cause.
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    a1JsonMock.mockImplementation(() => {
+      throw new SyntaxError(
+        'Unexpected token \'<\', "<html>502 "... is not valid JSON',
+      );
+    });
+    expect(aoneReader.composeUrl(7, 'g/p')).toBe('');
+    expect(stderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('WARNING: the Aone MR-link lookup failed'),
+    );
+    expect(stderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Unexpected token'),
+    );
+    stderrSpy.mockRestore();
+  });
+
+  it('refuses a malformed ownerRepo before any a1 call', () => {
+    expect(() => aoneReader.composeUrl(7, 'not-a-repo')).toThrow(TypeError);
+    expect(a1JsonMock).not.toHaveBeenCalled();
   });
 });
 
@@ -1017,6 +1128,20 @@ describe('submitAoneReview (the a1 write path)', () => {
     expect(result.approved).toBe(false);
     expect(result.webUrl).toBe('https://code.alibaba-inc.com/g/p/codereview/7');
     expect(ensureAuthMock).toHaveBeenCalledTimes(1);
+    // And the auth check must PRECEDE the writes — count alone cannot
+    // show that. A mutant moving the check below the batch turns an
+    // ENOENT / expired-login failure (the dominant first-run state for
+    // this new dependency) into an ambiguous AonePartialPostError for a
+    // failure where no child ever spawned and nothing could have
+    // landed, losing the actionable remedies (install a1 / a1 auth
+    // login) and the retryable ordinary-failure shape.
+    expect(ensureAuthMock.mock.invocationCallOrder[0]).toBeLessThan(
+      Math.min(
+        ...a1JsonOnceMock.mock.invocationCallOrder,
+        ...a1JsonMock.mock.invocationCallOrder,
+        ...a1OnceMock.mock.invocationCallOrder,
+      ),
+    );
   });
 
   it('APPROVE runs the native approve AFTER the summary lands', () => {
@@ -1056,8 +1181,19 @@ describe('submitAoneReview (the a1 write path)', () => {
   });
 
   it('refuses BEFORE writing when the head drifted', () => {
-    expect(() => submitAoneReview(req({ commitId: 'stale-sha' }))).toThrow(
-      /the MR head moved/,
+    let caught: unknown;
+    try {
+      submitAoneReview(req({ commitId: 'stale-sha' }));
+    } catch (err) {
+      caught = err;
+    }
+    expect((caught as Error).message).toMatch(/the MR head moved/);
+    // The PRODUCER half of submit's refusal classification: submit keys
+    // on exactly this prefix to keep the deliberate pre-write refusal in
+    // the exit-3 shape a re-run is safe on. Rewording the message must
+    // not silently re-classify it as an ordinary command failure.
+    expect((caught as Error).message.startsWith('refusing to post:')).toBe(
+      true,
     );
     expect(a1JsonOnceMock).not.toHaveBeenCalled();
     expect(a1OnceMock).not.toHaveBeenCalled();
@@ -1124,6 +1260,12 @@ describe('submitAoneReview (the a1 write path)', () => {
     expect(caught).toBeInstanceOf(Error);
     expect((caught as Error).message).toContain(
       'over the 131072-byte single-argument limit',
+    );
+    // Producer half of submit's refusal classification (same contract as
+    // the drift refusal): the `refusing to post:` prefix keeps this in
+    // the exit-3 refusal shape instead of an ordinary command failure.
+    expect((caught as Error).message.startsWith('refusing to post:')).toBe(
+      true,
     );
     // The remedy names the USER as the actor — Step 7 forbids the agent
     // every hand-run `a1` write, and an actorless "post them manually"
@@ -1272,6 +1414,88 @@ describe('submitAoneReview (the a1 write path)', () => {
     expect(partial.ambiguous).toBe(true);
   });
 
+  it('a mid-batch failure STILL discloses a head that moved during the batch', () => {
+    // The drift disclosure must not depend on the batch succeeding: an
+    // amend pushed mid-batch orphans the landed pins, and before this
+    // test the re-read ran only on the success path — adding a write
+    // failure removed the warning silently.
+    a1JsonMock
+      .mockReturnValueOnce({
+        mergeRequest: {
+          sourceBranch: 'sha-head',
+          detailUrl: 'https://code.alibaba-inc.com/g/p/codereview/7',
+        },
+      })
+      .mockReturnValueOnce({
+        mergeRequest: {
+          sourceBranch: 'sha-amended',
+          detailUrl: 'https://code.alibaba-inc.com/g/p/codereview/7',
+        },
+      });
+    a1JsonOnceMock
+      .mockReturnValueOnce({ id: 101 })
+      .mockImplementationOnce(() => {
+        throw new Error('Command failed: boom');
+      });
+    let caught: unknown;
+    try {
+      submitAoneReview(req());
+    } catch (err) {
+      caught = err;
+    }
+    const partial = caught as AonePartialPostError;
+    expect(caught).toBeInstanceOf(AonePartialPostError);
+    expect(partial.postedInline).toBe(1);
+    expect(partial.headMovedDuringPost).toBe(true);
+  });
+
+  it('a mid-batch failure whose drift re-read ALSO fails degrades to unknown, never masks the failure', () => {
+    a1JsonMock
+      .mockReturnValueOnce({
+        mergeRequest: {
+          sourceBranch: 'sha-head',
+          detailUrl: 'https://code.alibaba-inc.com/g/p/codereview/7',
+        },
+      })
+      .mockImplementationOnce(() => {
+        throw new Error('Command failed: a1 repo mr view — network gone');
+      });
+    a1JsonOnceMock.mockImplementationOnce(() => {
+      throw new Error('Command failed: boom');
+    });
+    let caught: unknown;
+    try {
+      submitAoneReview(req());
+    } catch (err) {
+      caught = err;
+    }
+    const partial = caught as AonePartialPostError;
+    expect(caught).toBeInstanceOf(AonePartialPostError);
+    expect(partial.headMovedDuringPost).toBeUndefined();
+  });
+
+  it('a mid-batch failure whose drift re-read answers WITHOUT A HEAD degrades to unknown too', () => {
+    // The FAILED re-read degrades to undefined (the test above); its
+    // sibling could-not-verify shape — a re-read that SUCCEEDS but
+    // carries no head — must not report `false` ("verified stable") for
+    // pins that were never anchored to any head.
+    mrView('');
+    a1JsonOnceMock
+      .mockReturnValueOnce({ id: 101 })
+      .mockImplementationOnce(() => {
+        throw new Error('Command failed: boom');
+      });
+    let caught: unknown;
+    try {
+      submitAoneReview(req());
+    } catch (err) {
+      caught = err;
+    }
+    const partial = caught as AonePartialPostError;
+    expect(caught).toBeInstanceOf(AonePartialPostError);
+    expect(partial.headMovedDuringPost).toBeUndefined();
+  });
+
   it('counts an accepted-but-unreadable inline, THEN a failing write — count stays exact', () => {
     // The ambiguous count includes undefined ids: an earlier inline
     // accepted with an unparseable answer, then a later create dying,
@@ -1404,7 +1628,11 @@ describe('submitAoneReview (the a1 write path)', () => {
     expect(result.headMovedDuringPost).toBe(false);
   });
 
-  it('a post-batch re-read failure does not fail a successful post', () => {
+  it('a post-batch re-read failure does not fail a successful post — and does not claim the pins held', () => {
+    // "Could not verify" is not "verified stable": the field stays
+    // UNDEFINED so submit discloses the unknown state instead of a false
+    // all-clear (its contract comment three lines up in the
+    // implementation says exactly this).
     a1JsonMock
       .mockReturnValueOnce({
         mergeRequest: {
@@ -1418,6 +1646,20 @@ describe('submitAoneReview (the a1 write path)', () => {
     const result = submitAoneReview(req());
     expect(result.postedInline).toBe(2);
     expect(result.summaryPosted).toBe(true);
-    expect(result.headMovedDuringPost).toBe(false);
+    expect(result.headMovedDuringPost).toBeUndefined();
+  });
+
+  it('a post-batch re-read that answers WITHOUT A HEAD degrades to unknown, not verified-stable', () => {
+    // An empty sourceBranch passes the pre-write gate unanchored
+    // (nothing to compare against), so the post-batch re-read is the
+    // only anchor left. When it succeeds without a head, `false` would
+    // be a false all-clear for a post that never anchored to any head —
+    // "could not verify" is not "verified stable", the same degradation
+    // as the FAILED re-read above.
+    mrView('');
+    const result = submitAoneReview(req());
+    expect(result.postedInline).toBe(2);
+    expect(result.summaryPosted).toBe(true);
+    expect(result.headMovedDuringPost).toBeUndefined();
   });
 });

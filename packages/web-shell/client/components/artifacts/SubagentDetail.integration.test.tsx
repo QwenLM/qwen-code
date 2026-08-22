@@ -66,7 +66,9 @@ vi.mock('../../hooks/useMessages', () => ({
 }));
 
 vi.mock('../../hooks/useAnimationFrameTranscriptBlocks', () => ({
-  useAnimationFrameTranscriptBlocks: () => animationFrameBlocks,
+  useAnimationFrameTranscriptSnapshot: () => ({
+    blocks: animationFrameBlocks,
+  }),
 }));
 
 vi.mock('../../hooks/useSessionArtifacts', () => ({
