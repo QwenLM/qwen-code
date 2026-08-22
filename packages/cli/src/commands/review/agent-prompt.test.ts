@@ -3191,6 +3191,11 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     // The severity condition — guidance treating the record as a mechanism is
     // what lifts the finding to Critical; soften it and the lens files nits.
     expect(p1c).toContain('treat the record as though it had steered the run');
+    // The definition clause and the two-moments method: without them the
+    // severity rule names a record/mechanism split nothing defines, and the
+    // agent is never told to establish the timeline the trace format states.
+    expect(p1c).toContain('a record, not a mechanism');
+    expect(p1c).toContain('name two moments');
     // The verifier side of the same weld: a replay finding must not be
     // downgraded for lacking issue evidence — without this clause the lens's
     // product is terminal-only in the exact case it was written for. Both

@@ -467,7 +467,7 @@ Why this is a command and not a paragraph: **the review approved a pull request 
 The roll-call below is still worth writing for your own reading — but it is not what stops this any more:
 
 ```
-Agent 0 (Issue Fidelity) — closingIssuesReferences empty, no target issue, description narrates no incident → scope empty
+Agent 0 (Issue Fidelity) — closingIssuesReferences empty, no target issue, not a bugfix, description narrates no incident → scope empty
 Agent 1c (Cross-file tracer) — grepped 7 changed exports; every caller compiles against the new signature
 Agent 7 (Build & Test)   — `npm run build` ok; `npm test` 265 passed
 Agent 2 (Security)       — WHIFF (returned "No issues found." with no evidence of any walk)
