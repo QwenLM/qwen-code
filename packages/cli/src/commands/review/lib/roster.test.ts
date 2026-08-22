@@ -412,6 +412,40 @@ describe('requiredAgents — Step 3B', () => {
     );
     expect(keys(heavy)).not.toContain('invariant-a--src/small.ts');
   });
+
+  it('a heavy INTERACTION file KEEPS its invariant agents', () => {
+    // The skip that used to live here rested on the merge base holding still
+    // between rounds: an interaction file's full-range slice is only "already
+    // cleared" while the base it is measured against has not moved. Nothing
+    // enforces that — a backward base move (retargeting the PR to an older
+    // base) is accepted by the anchor gate — and then the file's slice
+    // carries hunks no round has read, with these three the only agents that
+    // would walk them. Its chunk agent is briefed for the seam alone.
+    const base = {
+      ...BIG,
+      files: [
+        { path: 'src/delta.ts', kind: 'source', removedLines: 9, heavy: true },
+        { path: 'src/seam.ts', kind: 'source', removedLines: 9, heavy: true },
+      ],
+    };
+    const incremental = {
+      ...base,
+      incremental: {
+        scope: {
+          anchor: 'abc1234def567890',
+          deltaFiles: ['src/delta.ts'],
+          interaction: [
+            { path: 'src/seam.ts', importsChanged: ['src/delta.ts'] },
+          ],
+        },
+      },
+    };
+    const k = keys(incremental as typeof base);
+    expect(k).toContain('invariant-a--src/delta.ts');
+    expect(k).toContain('invariant-a--src/seam.ts');
+    expect(k).toContain('invariant-b--src/seam.ts');
+    expect(k).toContain('invariant-c--src/seam.ts');
+  });
 });
 
 describe('a heavy file in a Step-3A-sized diff', () => {

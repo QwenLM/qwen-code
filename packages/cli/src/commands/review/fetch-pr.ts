@@ -56,7 +56,14 @@ import {
   refExists,
   releaseWorktree,
 } from './lib/git.js';
-import { narrowToDelta } from './lib/narrow-diff.js';
+import type { NarrowSelection } from './lib/narrow-diff.js';
+import { assembleSections, selectNarrowing } from './lib/narrow-diff.js';
+import type {
+  IncrementalScope,
+  WidenedScope,
+} from './lib/incremental-scope.js';
+import { widenScope } from './lib/incremental-scope.js';
+import { containedWorktreeReader } from './lib/worktree-reader.js';
 import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from './lib/diff-flags.js';
 import {
   REVIEW_TMP_DIR,
@@ -277,6 +284,11 @@ type FetchPrResult = PlanReport & {
    * the same change differently (a path or a rename git resolves differently
    * across the two ranges), so narrowing would drop a change the PR's diff
    * displays. Every shape keeps the full range: wider, never wrong.
+   * On Aone the two ancestry-based reasons (`not-an-ancestor`,
+   * `behind-merge-base`) never occur: an AGit-Flow update amends the head
+   * in place and orphans the cached sha, so the anchor is ruled WITHOUT
+   * ancestry (design D7) and the two heads' diff is read as the update's
+   * delta.
    *
    * Whether a PLAN exists is a separate fact, and it is `diffPath`: null
    * means this round has no diff to review, whatever refused the anchor. A
@@ -312,6 +324,14 @@ export interface IncrementalDecision {
    * out of the PR's diff.
    */
   diffBase?: string;
+  /**
+   * Which files the published scope holds and why, present exactly when the
+   * scope is the narrowed one. `deltaFiles` are what the round touched;
+   * `interaction[]` are still-clean files the one-hop widening pulled back
+   * in, each with the edges that did it, so a chunk brief can point its agent
+   * at the seam rather than order a from-scratch re-review.
+   */
+  scope?: IncrementalScope;
 }
 
 /** Thrown when a probe could not answer — the git surface, not a verdict. */
@@ -357,12 +377,33 @@ export interface AnchorProbe {
  * `isCollapsedFromUpstream`) declines to rule in that state rather than
  * ruling on it. `{fetchFailed: true, sha: null}` is not that state — there
  * is no clamp to rule at all, and the delta range needs no base.
+ *
+ * `noAncestry` is the AGit-Flow rule (Aone; design D7). Under AGit-Flow,
+ * updating a CR AMENDS the single commit in place: the amended H2 has H1's
+ * parent, never H1 itself, so the old head is orphaned and the
+ * anchor-behind-head test fails for EVERY update — the amended head never
+ * descends from the cached one. (The clamp additionally fails whenever the
+ * update also rebased onto newer master, since the merge base then moves
+ * past the cached head; a pure amend passes it.) Neither is asked: after
+ * the fetch both heads are local, so `anchor..head` IS the update's delta
+ * (for a pure amend, exactly the amended lines; if the author also rebased
+ * onto newer master, the range additionally carries the rebase drift; the
+ * narrowing join reads it only for which files changed and never lets a
+ * drift byte reach the published scope, falling back to the full range via
+ * `nothing-to-narrow` when the drift touched files outside the CR's diff).
+ * The published scope is still assembled
+ * from the PR's own diff by the narrowing step, so it cannot carry a hunk
+ * the platform does not display, and the `base-untrusted` refusal stays —
+ * it guards a capture against a stale base, not a lineage. The existence
+ * checks also stay: an anchor the object store does not hold (a fresh
+ * clone) cannot be diffed against.
  */
 export function resolveIncrementalAnchor(
   rawSince: string,
   fetchedSha: string,
   probe: AnchorProbe,
   mergeBase: { sha: string | null; fetchFailed: boolean } | null = null,
+  options: { noAncestry?: boolean } = {},
 ): { incremental: IncrementalDecision; diffBase: string | null } {
   // git resolves hex case-insensitively, and an operator pasting an
   // uppercase sha (some UIs render them that way) was refused before any
@@ -400,8 +441,11 @@ export function resolveIncrementalAnchor(
     };
   }
   // Ancestry is asked about the RESOLVED commit, so a non-commit can no
-  // longer reach it and an error here really is the git surface.
-  if (!probe.isAncestor(resolved, fetchedSha)) {
+  // longer reach it and an error here really is the git surface. Not asked
+  // at all under `noAncestry` — see the docstring's AGit-Flow paragraph:
+  // an amend orphans the cached head, so the test would fail for every
+  // update, and the two heads' diff is the update's delta anyway.
+  if (!options.noAncestry && !probe.isAncestor(resolved, fetchedSha)) {
     return {
       incremental: { since, effective: false, reason: 'not-an-ancestor' },
       diffBase: null,
@@ -411,13 +455,28 @@ export function resolveIncrementalAnchor(
   // clamp to rule, stale or otherwise, and the docstring's "a null `sha`
   // skips the clamp" holds — the delta range needs no base at all, so a
   // deleted or renamed base branch must not cost a valid anchor its scope.
+  // NOT an ancestry test — it fires under `noAncestry` too: the narrowing
+  // below assembles the published scope from the base-derived full capture,
+  // and a base the run flagged possibly-stale is one every sibling guard
+  // declines to rule on.
   if (mergeBase?.fetchFailed && mergeBase.sha != null) {
     return {
       incremental: { since, effective: false, reason: 'base-untrusted' },
       diffBase: null,
     };
   }
-  if (mergeBase?.sha != null && !probe.isAncestor(mergeBase.sha, resolved)) {
+  // The clamp. Skipped under `noAncestry` with its sibling: on a rebase
+  // onto newer master the merge base moves PAST the cached head, so the
+  // clamp fires for every amended-and-rebased update — retiring the anchor
+  // there would cost the full range even when the drift stays inside the
+  // CR's files and the narrowing join could still scope (it reads the
+  // delta for its file list only, so no drift byte is published; drift
+  // beyond the CR's files falls back to the full range there anyway).
+  if (
+    !options.noAncestry &&
+    mergeBase?.sha != null &&
+    !probe.isAncestor(mergeBase.sha, resolved)
+  ) {
     return {
       incremental: { since, effective: false, reason: 'behind-merge-base' },
       diffBase: null,
@@ -1195,6 +1254,13 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
             },
           },
           { sha: mergeBaseSha, fetchFailed: baseFetchFailed },
+          // The AGit-Flow rule (design D7): an Aone update AMENDS the single
+          // CR commit in place and orphans the cached head, so the head test
+          // refuses every update's anchor (the clamp fires only when the
+          // update also rebased) — rule it without ancestry; the two heads'
+          // diff is the update's delta. A force-pushed GitHub history keeps
+          // the tests: there they are the detection.
+          { noAncestry: platform.kind === 'aone' },
         );
       } catch (err) {
         if (!(err instanceof GitUnavailable)) throw err;
@@ -1247,6 +1313,10 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     let scopedDelta = false;
     /** The PR's own hunks, narrowed to what changed since the anchor. */
     let narrowed: Buffer | null = null;
+    /** What the narrowing selected, before the widening adds to it. */
+    let selection: NarrowSelection | null = null;
+    /** The selection plus one import hop, and the record of why. */
+    let widened: WidenedScope | null = null;
     if (anchor?.diffBase) {
       // An anchor that resolved to the merge base names the range already in
       // hand: re-running the identical `git diff` would spend the capture (and
@@ -1308,7 +1378,9 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         // large long-lived PR `--since` exists for. That is infrastructure,
         // and a re-run can succeed, so this one keeps `capture-failed`.
         demote('capture-failed');
-      } else if ((narrowed = narrowToDelta(fullBytes, deltaBytes)) === null) {
+      } else if (
+        (selection = selectNarrowing(fullBytes, deltaBytes)) === null
+      ) {
         // The narrowing found nothing it could publish — all safe, because
         // keeping the full range costs a wider review and never a wrong one:
         // the "undo per feedback" round whose commits put lines back the way
@@ -1321,9 +1393,30 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         // or a rename), so narrowing would drop a change the PR's diff
         // displays.
         demote('nothing-to-narrow');
+      } else if (
+        // One import hop past what the round touched. The narrowing is sound
+        // in one direction only: a caller cleared against the callee's OLD
+        // shape is unchanged by definition, so no delta capture shows it, and
+        // a scope holding only the touched files retires that seam at the
+        // next re-anchor. The widening never narrows — with no edge to follow
+        // it returns the narrowing's own paths — so the unwidened round is
+        // the floor rather than a second path that could disagree with it.
+        ((widened = widenScope({
+          anchor: anchor.diffBase ?? anchor.incremental.since,
+          selection,
+          readWorktree: containedWorktreeReader(wt),
+        })),
+        (narrowed = assembleSections(selection, widened.paths)) === null)
+      ) {
+        // `assembleSections` selects nothing only when the widened set names
+        // no section the full capture carries, which the guards above already
+        // rule out — but it is the same "nothing to publish" either way, and
+        // the full range is the safe answer to it.
+        demote('nothing-to-narrow');
       } else {
         if (publish(narrowed)) {
           scopedDelta = true;
+          anchor.incremental.scope = widened.scope;
           // The published hunks are byte-identical hunks of
           // `mergeBaseSha..head`, so that range is what downstream consumers
           // recomputing their own diffs must probe (Agent 7's test-efficacy
@@ -1865,10 +1958,12 @@ export const fetchPrCommand: CommandModule = {
           'Incremental anchor: the head sha the last clean review round ' +
           'covered (from the review cache, or the posted ledger marker). ' +
           'Validated against the fetched history here — an anchor that is ' +
-          'unknown or not an ancestor of the head falls back to the full ' +
-          'diff with the reason in the report; a valid one scopes the diff ' +
-          "and the chunk plan to since..head. The decision is the report's " +
-          '`incremental` field.',
+          'unknown, or not an ancestor of the head, falls back to the full ' +
+          'diff with the reason in the report. Ancestry is skipped on ' +
+          'Aone, where an update AMENDS the single CR commit and orphans ' +
+          "the cached head, so the two heads' diff is the update itself; " +
+          'a valid anchor scopes the diff and the chunk plan to ' +
+          "since..head. The decision is the report's `incremental` field.",
       })
       .option('since-model', {
         type: 'string',
