@@ -10,6 +10,7 @@ import {
   type DaemonSessionMonitorTaskStatus,
   type DaemonSessionShellTaskStatus,
   type DaemonSessionStatsStatus,
+  type DaemonSessionTaskStatus,
   type DaemonSettingDescriptor,
   type DaemonWorkspaceGitStatus,
   type GoalSnapshotV2,
@@ -417,7 +418,7 @@ const {
         | ((error: unknown, fallback: string) => void)
         | null,
       latestBackgroundTasksRefreshTrigger: null as number | null,
-      backgroundTasks: [] as DaemonSessionMonitorTaskStatus[],
+      backgroundTasks: [] as DaemonSessionTaskStatus[],
       latestMonitorDetailsOnOpen: null as
         | ((tool: {
             callId: string;
@@ -4179,6 +4180,162 @@ describe('artifact panel fullscreen', () => {
 });
 
 describe('environment agent tasks', () => {
+  it('reports transcript agent tasks without enabling the overview panel', async () => {
+    testState.messages = [
+      {
+        id: 'tools',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'agent-call',
+            toolName: 'agent',
+            title: 'Agent: Explore code',
+            status: 'completed',
+            args: {
+              description: 'Explore code',
+              run_in_background: false,
+            },
+            rawOutput: {
+              type: 'task_execution',
+              status: 'completed',
+            },
+          },
+        ],
+      },
+    ];
+    const onAgentTasksChange = vi.fn();
+
+    renderApp({
+      header: { items: [] },
+      environmentPanel: { items: [] },
+      onAgentTasksChange,
+    });
+    await flush();
+
+    expect(onAgentTasksChange).toHaveBeenLastCalledWith([
+      expect.objectContaining({
+        id: 'agent-call',
+        label: 'Explore code',
+        status: 'completed',
+        isBackgrounded: false,
+      }),
+    ]);
+  });
+
+  it('reports merged live tasks without duplication and clears for a new session', async () => {
+    const onAgentTasksChange = vi.fn();
+    const props = {
+      header: { items: [] as const },
+      environmentPanel: { items: [] as const },
+      onAgentTasksChange,
+    };
+    const { rerender } = renderApp(props);
+    await flush();
+    expect(onAgentTasksChange).toHaveBeenLastCalledWith([]);
+
+    testState.messages = [
+      {
+        id: 'tools',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'agent-call',
+            toolName: 'agent',
+            title: 'Agent: Review code',
+            status: 'in_progress',
+            args: {
+              description: 'Review code',
+              subagent_type: 'reviewer',
+              run_in_background: true,
+            },
+          },
+        ],
+      },
+    ];
+    testState.backgroundTasks = [
+      {
+        kind: 'agent',
+        id: 'agent-task',
+        label: 'reviewer: Review code',
+        description: 'Review code',
+        subagentType: 'reviewer',
+        status: 'running',
+        startTime: 1,
+        runtimeMs: 1,
+        isBackgrounded: true,
+        toolUseId: 'agent-call',
+      },
+    ];
+    rerender(props);
+    await flush();
+
+    const mergedTasks = onAgentTasksChange.mock.lastCall?.[0];
+    expect(mergedTasks).toHaveLength(1);
+    expect(mergedTasks?.[0]).toMatchObject({
+      id: 'agent-task',
+      label: 'Review code',
+      status: 'running',
+      toolUseId: 'agent-call',
+    });
+
+    const mergeCallCount = onAgentTasksChange.mock.calls.length;
+    testState.messages = [...testState.messages];
+    testState.backgroundTasks = testState.backgroundTasks.map((task) => ({
+      ...task,
+      runtimeMs: 3_001,
+      ...(task.kind === 'agent'
+        ? {
+            stats: { totalTokens: 42, toolUses: 3, durationMs: 3_001 },
+            recentActivities: [
+              { name: 'read', description: 'Read App.tsx', at: 3_000 },
+            ],
+          }
+        : {}),
+    }));
+    rerender(props);
+    await flush();
+    expect(onAgentTasksChange).toHaveBeenCalledTimes(mergeCallCount);
+
+    mockConnection.sessionId = 'session-2';
+    testState.ownerVersion += 1;
+    testState.messages = [];
+    testState.backgroundTasks = [];
+    rerender(props);
+    await flush();
+
+    expect(onAgentTasksChange).toHaveBeenLastCalledWith([]);
+  });
+
+  it('reports the current snapshot after the callback is reattached', async () => {
+    testState.backgroundTasks = [
+      {
+        kind: 'agent',
+        id: 'agent-task',
+        label: 'Review code',
+        description: 'Review code',
+        status: 'running',
+        startTime: 1,
+        runtimeMs: 1,
+        isBackgrounded: true,
+      },
+    ];
+    const onAgentTasksChange = vi.fn();
+    const props = { onAgentTasksChange };
+    const { rerender } = renderApp(props);
+    await flush();
+    expect(onAgentTasksChange).toHaveBeenCalledTimes(1);
+
+    rerender({});
+    await flush();
+    rerender(props);
+    await flush();
+
+    expect(onAgentTasksChange).toHaveBeenCalledTimes(2);
+    expect(onAgentTasksChange).toHaveBeenLastCalledWith([
+      expect.objectContaining({ id: 'agent-task', status: 'running' }),
+    ]);
+  });
+
   it('keeps a completed foreground agent from the session transcript', () => {
     const messages = [
       {
