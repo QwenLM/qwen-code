@@ -517,6 +517,16 @@ export async function runNonInteractive(
       adapter = new JsonOutputAdapter(config);
     }
     const ownsAdapter = options.adapter === undefined;
+    const throwApiError = (error: unknown): never => {
+      const errorText = parseAndFormatApiError(
+        error,
+        config.getContentGeneratorConfig()?.authType,
+      );
+      if (outputFormat === OutputFormat.TEXT) {
+        process.stderr.write(`${errorText}\n`);
+      }
+      throw new AlreadyReportedError(errorText);
+    };
     const unsubscribeRecordingFailure = ownsAdapter
       ? subscribeToHeadlessChatRecordingFailures(config, adapter)
       : undefined;
@@ -2385,7 +2395,9 @@ export async function runNonInteractive(
             adapter.finalizeAssistantMessage();
             await routeAbort();
           }
-          // Use adapter for all event processing
+          if (event.type === GeminiEventType.Error) {
+            throwApiError(event.value.error);
+          }
           adapter.processEvent(event);
           if (event.type === GeminiEventType.ToolCallRequest) {
             toolCallRequests.push(event.value);
@@ -2409,21 +2421,6 @@ export async function runNonInteractive(
               );
             }
             loopDetected = true;
-          }
-          if (
-            outputFormat === OutputFormat.TEXT &&
-            event.type === GeminiEventType.Error
-          ) {
-            const errorText = parseAndFormatApiError(
-              event.value.error,
-              config.getContentGeneratorConfig()?.authType,
-            );
-            process.stderr.write(`${errorText}\n`);
-            // We have already formatted and written the message; mark the
-            // throw so the top-level handleError doesn't reformat (which
-            // would yield "[API Error: [API Error: ...]]") or print it a
-            // second time. Exit code stays 1 — same as before.
-            throw new AlreadyReportedError(errorText);
           }
         }
         captureActiveInteractionOwner();
@@ -2711,6 +2708,9 @@ export async function runNonInteractive(
                   finalizeOneShotMonitors();
                   await routeAbort();
                 }
+                if (event.type === GeminiEventType.Error) {
+                  throwApiError(event.value.error);
+                }
                 adapter.processEvent(event);
                 if (event.type === GeminiEventType.ToolCallRequest) {
                   itemToolCallRequests.push(event.value);
@@ -2723,20 +2723,6 @@ export async function runNonInteractive(
                     );
                   }
                   loopDetected = true;
-                }
-                if (
-                  outputFormat === OutputFormat.TEXT &&
-                  event.type === GeminiEventType.Error
-                ) {
-                  const errorText = parseAndFormatApiError(
-                    event.value.error,
-                    config.getContentGeneratorConfig()?.authType,
-                  );
-                  process.stderr.write(`${errorText}\n`);
-                  // See the matching note in the first stream loop above —
-                  // we mark the throw so handleError doesn't reformat or
-                  // reprint downstream.
-                  throw new AlreadyReportedError(errorText);
                 }
               }
               captureActiveInteractionOwner();
@@ -2798,7 +2784,7 @@ export async function runNonInteractive(
           // Single-flight drain: concurrent callers wait for the running drain so
           // cron jobs firing mid-stream don't produce overlapping turns.
           //
-          // Clear via outer `.finally()` rather than inside the async body: when the
+          // Clear after the outer promise settles rather than inside the async body: when the
           // queue is empty the body runs synchronously, so an inner finally would
           // null the slot BEFORE the outer `drainPromise = p` assignment and leave
           // it stuck forever.
@@ -2816,9 +2802,12 @@ export async function runNonInteractive(
               }
             })();
             drainPromise = p;
-            void p.finally(() => {
+            const clearDrainPromise = () => {
               if (drainPromise === p) drainPromise = null;
-            });
+            };
+            // Attach both handlers directly so clearing a rejected drain does
+            // not create an unhandled promise from a detached finally chain.
+            void p.then(clearDrainPromise, clearDrainPromise);
             return p;
           };
 
@@ -3153,6 +3142,9 @@ export async function runNonInteractive(
       }
       if (recoverableCancellation) {
         return 130;
+      }
+      if (!ownsAdapter && outputFormat === OutputFormat.STREAM_JSON) {
+        throw error;
       }
       await handleError(error, config);
     } finally {
