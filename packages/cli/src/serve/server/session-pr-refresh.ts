@@ -28,19 +28,29 @@ const FIRST_RUN_DELAY_MS = 60_000;
 
 /**
  * `QWEN_SESSION_PR_REFRESH_MINUTES`: refresh interval in minutes; `0`
- * disables the sweep. Missing/invalid values fall back to the default.
+ * disables the sweep. Missing, blank, invalid, sub-minute, and
+ * timer-overflowing values fall back to the default.
  */
 export function resolveSessionPrRefreshIntervalMs(
   env: Readonly<Record<string, string | undefined>>,
 ): number | undefined {
   const raw = env['QWEN_SESSION_PR_REFRESH_MINUTES'];
-  if (raw === undefined) return DEFAULT_SESSION_PR_REFRESH_INTERVAL_MS;
+  // Blank means "unset" in templated env files; Number('') is 0 and would
+  // silently disable the sweep.
+  if (raw === undefined || raw.trim() === '') {
+    return DEFAULT_SESSION_PR_REFRESH_INTERVAL_MS;
+  }
   const minutes = Number(raw);
   if (!Number.isFinite(minutes) || minutes < 0) {
     return DEFAULT_SESSION_PR_REFRESH_INTERVAL_MS;
   }
   if (minutes === 0) return undefined;
-  return minutes * 60_000;
+  // Sub-minute values degenerate into a near-continuous sweep, and once the
+  // converted ms exceeds setInterval's 32-bit max Node clamps the delay to
+  // 1 ms — turning a "longer" interval into a hot loop.
+  if (minutes < 1) return DEFAULT_SESSION_PR_REFRESH_INTERVAL_MS;
+  const ms = minutes * 60_000;
+  return ms <= 2 ** 31 - 1 ? ms : DEFAULT_SESSION_PR_REFRESH_INTERVAL_MS;
 }
 
 export interface SessionPrRefreshResult {
@@ -65,37 +75,33 @@ export async function refreshWorkspaceSessionPrStates(
   const pendingNumbers: Array<{ prPath: string; numbers: number[] }> = [];
   let scanned = 0;
   for (const archiveState of ['active', 'archived'] as const) {
-    let cursor: number | undefined;
-    do {
-      const page = await sessionService.listSessions({
-        cursor,
-        size: 1000,
+    // Sidecar-driven, not transcript-driven: a binding persisted before the
+    // session's first flush has no transcript yet, and its state must not
+    // stay frozen at bind time.
+    for (const sessionId of sessionService.listSessionIdsWithPrSidecar(
+      archiveState,
+    )) {
+      const prPath = sessionService.getPrSessionPathForArchiveState(
+        sessionId,
         archiveState,
-      });
-      for (const item of page.items) {
-        const prPath = sessionService.getPrSessionPathForArchiveState(
-          item.sessionId,
-          archiveState,
-        );
-        let prs: Awaited<ReturnType<typeof readSessionPrs>>;
-        try {
-          prs = await readSessionPrs(prPath);
-        } catch {
-          continue;
-        }
-        if (!prs) continue;
-        scanned += 1;
-        const numbers = prs
-          // Only merged is terminal: closed PRs can be reopened, so they
-          // keep participating in the sweep.
-          .filter((p) => p.state !== 'merged')
-          .map((p) => p.number);
-        if (numbers.length > 0) {
-          pendingNumbers.push({ prPath, numbers });
-        }
+      );
+      let prs: Awaited<ReturnType<typeof readSessionPrs>>;
+      try {
+        prs = await readSessionPrs(prPath);
+      } catch {
+        continue;
       }
-      cursor = page.nextCursor;
-    } while (cursor !== undefined);
+      if (!prs) continue;
+      scanned += 1;
+      const numbers = prs
+        // Only merged is terminal: closed PRs can be reopened, so they
+        // keep participating in the sweep.
+        .filter((p) => p.state !== 'merged')
+        .map((p) => p.number);
+      if (numbers.length > 0) {
+        pendingNumbers.push({ prPath, numbers });
+      }
+    }
   }
   if (pendingNumbers.length === 0) return { scanned, updated: 0 };
 
@@ -122,8 +128,12 @@ export async function refreshWorkspaceSessionPrStates(
       if (state !== undefined) states.set(number, state);
     }
     if (states.size === 0) continue;
-    if (await updateSessionPrStates(target.prPath, states)) {
-      updated += states.size;
+    try {
+      if (await updateSessionPrStates(target.prPath, states)) {
+        updated += states.size;
+      }
+    } catch {
+      // One unwritable sidecar must not starve the rest of the sweep.
     }
   }
   return { scanned, updated };

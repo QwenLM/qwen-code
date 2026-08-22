@@ -323,6 +323,7 @@ export const SESSION_TITLE_MAX_LENGTH = 200;
  * (32-36 hex characters, optionally with hyphens).
  */
 const SESSION_FILE_PATTERN = /^[0-9a-fA-F-]{32,36}\.jsonl$/;
+const PR_SIDECAR_FILE_PATTERN = /^[0-9a-fA-F-]{32,36}\.pr\.json$/;
 /** Maximum number of lines to scan when looking for the first prompt text. */
 const MAX_PROMPT_SCAN_LINES = 10;
 /**
@@ -670,6 +671,26 @@ export class SessionService {
     state: SessionArchiveState,
   ): string {
     return this.getPrSessionPathForState(sessionId, state);
+  }
+
+  /**
+   * Lists session ids that have a PR sidecar in the given archive state's
+   * chats dir. Unlike {@link listSessions} (transcript-driven), this also
+   * sees sessions whose binding sidecar was written before their first
+   * transcript flush.
+   */
+  listSessionIdsWithPrSidecar(archiveState: SessionArchiveState): string[] {
+    const chatsDir = this.getChatsDirForState(archiveState);
+    let fileNames: string[];
+    try {
+      fileNames = fs.readdirSync(chatsDir);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw error;
+    }
+    return fileNames
+      .filter((name) => PR_SIDECAR_FILE_PATTERN.test(name))
+      .map((name) => name.slice(0, -'.pr.json'.length));
   }
 
   private async readProjectSessionHead(

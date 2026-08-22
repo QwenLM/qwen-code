@@ -87,6 +87,16 @@ describe('parsePrNumberFromWorktree', () => {
       undefined,
     );
   });
+
+  it('rejects a zero PR number', () => {
+    // `pr-0` is a legal user slug, but binding number 0 invalidates the
+    // whole sidecar (isValidSessionPr requires a positive number).
+    expect(parsePrNumberFromWorktree('pr-0', 'worktree-pr-0')).toBeUndefined();
+    expect(parsePrNumberFromWorktree('pr-00', undefined)).toBeUndefined();
+    expect(parsePrNumberFromWorktree('custom', 'worktree-pr-0')).toBe(
+      undefined,
+    );
+  });
 });
 
 describe('normalizeRemoteToWebUrl', () => {
@@ -410,6 +420,78 @@ describe('backfillWorkspaceSessionPrs', () => {
       sessionService.getPrSessionPathForArchiveState(SESSION_G, 'active'),
     );
     expect(prs?.map((pr) => pr.number).sort()).toEqual([42, 43]);
+  });
+
+  it('binds at most the sidecar cap and stays idempotent across runs', async () => {
+    await seedSession(SESSION_A, 'b-1');
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    for (let i = 2; i <= 12; i++) {
+      await fsp.appendFile(
+        path.join(chatsDir, `${SESSION_A}.jsonl`),
+        `${JSON.stringify({
+          uuid: `${SESSION_A}-user-${i}`,
+          parentUuid: `${SESSION_A}-user-${i - 1}`,
+          sessionId: SESSION_A,
+          timestamp: '2026-08-02T00:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'more' }] },
+          cwd: workspaceCwd,
+          gitBranch: `b-${i}`,
+        })}\n`,
+        'utf8',
+      );
+    }
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: Array.from({ length: 12 }, (_, i) =>
+        pr(i + 1, `b-${i + 1}`),
+      ),
+    });
+
+    const first = await backfillWorkspaceSessionPrs(runtime);
+    expect(first).toMatchObject({ bound: 10, overLimit: 2 });
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    const afterFirst = await readSessionPrs(prPath);
+    expect(afterFirst?.map((entry) => entry.number)).toEqual([
+      3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+    ]);
+
+    const second = await backfillWorkspaceSessionPrs(runtime);
+    expect(second).toMatchObject({
+      bound: 0,
+      alreadyBound: 10,
+      overLimit: 2,
+    });
+    expect(await readSessionPrs(prPath)).toEqual(afterFirst);
+  });
+
+  it('keeps backfilling other sessions when one sidecar write fails', async () => {
+    await seedSession(SESSION_A, 'fix/a');
+    await seedSession(SESSION_B, 'fix/b');
+    const prPathB = sessionService.getPrSessionPathForArchiveState(
+      SESSION_B,
+      'active',
+    );
+    // A directory at the sidecar path makes every write fail (EISDIR).
+    await fsp.mkdir(prPathB, { recursive: true });
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(1, 'fix/a'), pr(2, 'fix/b')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 1, writeErrors: 1 });
+    const prs = await readSessionPrs(
+      sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+    );
+    expect(prs?.[0]).toMatchObject({ number: 1 });
   });
 });
 

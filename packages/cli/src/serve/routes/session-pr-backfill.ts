@@ -9,6 +9,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { Application, RequestHandler } from 'express';
 import {
+  SESSION_PR_LIST_LIMIT,
   fetchGitHubPullRequests,
   readSessionPrs,
   readWorktreeSession,
@@ -38,9 +39,17 @@ export function parsePrNumberFromWorktree(
   branch?: string,
 ): number | undefined {
   const slugMatch = SLUG_PR_PATTERN.exec(slug ?? '');
-  if (slugMatch) return Number(slugMatch[1]);
+  if (slugMatch) {
+    const number = Number(slugMatch[1]);
+    // `pr-0` is a legal user slug, but 0 is not a PR number — binding it
+    // would invalidate the whole sidecar (isValidSessionPr rejects it).
+    return number > 0 ? number : undefined;
+  }
   const branchMatch = BRANCH_PR_PATTERN.exec(branch ?? '');
-  if (branchMatch) return Number(branchMatch[1]);
+  if (branchMatch) {
+    const number = Number(branchMatch[1]);
+    return number > 0 ? number : undefined;
+  }
   return undefined;
 }
 
@@ -90,8 +99,12 @@ export interface SessionPrBackfillWorkspaceResult {
   bound: number;
   /** Resolved bindings that already existed in the sidecar. */
   alreadyBound: number;
+  /** Resolved numbers skipped because they exceed the sidecar cap. */
+  overLimit: number;
   /** Convention numbers whose URL could not be resolved. */
   unresolved: number;
+  /** Sidecar writes that failed; the affected session keeps its bindings. */
+  writeErrors?: number;
   error?: string;
 }
 
@@ -144,6 +157,7 @@ export async function backfillWorkspaceSessionPrs(
     scanned: 0,
     bound: 0,
     alreadyBound: 0,
+    overLimit: 0,
     unresolved: 0,
   };
   const sessionService = createWorkspaceRuntimeSessionService(runtime);
@@ -215,7 +229,7 @@ export async function backfillWorkspaceSessionPrs(
 
   let remoteWebUrl: string | undefined;
   for (const candidate of candidates) {
-    const numbers: number[] = [];
+    let numbers: number[] = [];
     if (candidate.conventionNumber !== undefined) {
       numbers.push(candidate.conventionNumber);
     }
@@ -226,6 +240,14 @@ export async function backfillWorkspaceSessionPrs(
       }
     }
     if (numbers.length === 0) continue;
+    // Bind only the cap's tail: upsertSessionPr evicts the oldest entries
+    // beyond the cap, so binding more would leave the evicted numbers
+    // looking unbound — re-bound (with a fresh createdAt) on every run,
+    // rotating the list forever instead of converging.
+    if (numbers.length > SESSION_PR_LIST_LIMIT) {
+      result.overLimit += numbers.length - SESSION_PR_LIST_LIMIT;
+      numbers = numbers.slice(-SESSION_PR_LIST_LIMIT);
+    }
     const prPath = sessionService.getPrSessionPathForArchiveState(
       candidate.sessionId,
       candidate.archiveState,
@@ -252,11 +274,17 @@ export async function backfillWorkspaceSessionPrs(
         continue;
       }
       const state = numberToState.get(number);
-      await upsertSessionPr(prPath, {
-        number,
-        url,
-        ...(state ? { state } : {}),
-      });
+      try {
+        await upsertSessionPr(prPath, {
+          number,
+          url,
+          ...(state ? { state } : {}),
+        });
+      } catch {
+        // One unwritable sidecar must not abort the whole workspace.
+        result.writeErrors = (result.writeErrors ?? 0) + 1;
+        continue;
+      }
       have.add(number);
       result.bound += 1;
     }
@@ -283,6 +311,7 @@ export function registerSessionPrBackfillRoutes(
             scanned: 0,
             bound: 0,
             alreadyBound: 0,
+            overLimit: 0,
             unresolved: 0,
             error: 'untrusted workspace skipped',
           });
@@ -296,6 +325,7 @@ export function registerSessionPrBackfillRoutes(
             scanned: 0,
             bound: 0,
             alreadyBound: 0,
+            overLimit: 0,
             unresolved: 0,
             error: error instanceof Error ? error.message : String(error),
           });

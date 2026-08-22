@@ -71,6 +71,57 @@ describe('resolveSessionPrRefreshIntervalMs', () => {
       }),
     ).toBe(300_000);
   });
+
+  it('treats a blank value as unset, not as a disable', () => {
+    expect(
+      resolveSessionPrRefreshIntervalMs({
+        QWEN_SESSION_PR_REFRESH_MINUTES: '',
+      }),
+    ).toBe(300_000);
+    expect(
+      resolveSessionPrRefreshIntervalMs({
+        QWEN_SESSION_PR_REFRESH_MINUTES: '   ',
+      }),
+    ).toBe(300_000);
+  });
+
+  it('falls back to the default below one minute', () => {
+    expect(
+      resolveSessionPrRefreshIntervalMs({
+        QWEN_SESSION_PR_REFRESH_MINUTES: '0.0001',
+      }),
+    ).toBe(300_000);
+    expect(
+      resolveSessionPrRefreshIntervalMs({
+        QWEN_SESSION_PR_REFRESH_MINUTES: '1',
+      }),
+    ).toBe(60_000);
+  });
+
+  it('falls back to the default when the converted ms overflows the 32-bit timer max', () => {
+    // setInterval clamps out-of-range delays to 1 ms; without the fallback a
+    // "monthly" interval would become a continuous sweep hot loop.
+    expect(
+      resolveSessionPrRefreshIntervalMs({
+        QWEN_SESSION_PR_REFRESH_MINUTES: '43200',
+      }),
+    ).toBe(300_000);
+    expect(
+      resolveSessionPrRefreshIntervalMs({
+        QWEN_SESSION_PR_REFRESH_MINUTES: '1e308',
+      }),
+    ).toBe(300_000);
+    expect(
+      resolveSessionPrRefreshIntervalMs({
+        QWEN_SESSION_PR_REFRESH_MINUTES: '35792',
+      }),
+    ).toBe(300_000);
+    expect(
+      resolveSessionPrRefreshIntervalMs({
+        QWEN_SESSION_PR_REFRESH_MINUTES: '35791',
+      }),
+    ).toBe(2_147_460_000);
+  });
 });
 
 describe('refreshWorkspaceSessionPrStates', () => {
@@ -214,6 +265,118 @@ describe('refreshWorkspaceSessionPrStates', () => {
 
     expect(result).toEqual({ scanned: 1, updated: 0 });
     expect((await readSessionPrs(prPath))?.[0]?.state).toBe('open');
+  });
+
+  async function seedArchivedSession(sessionId: string): Promise<void> {
+    await seedSession(sessionId);
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    await fsp.mkdir(path.join(chatsDir, 'archive'), { recursive: true });
+    await fsp.rename(
+      path.join(chatsDir, `${sessionId}.jsonl`),
+      path.join(chatsDir, 'archive', `${sessionId}.jsonl`),
+    );
+  }
+
+  it('refreshes a sidecar written before the session flushed a transcript', async () => {
+    // No transcript: the bind route persists the sidecar before the first
+    // flush, and the sweep must still discover it.
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await upsertSessionPr(prPath, {
+      number: 42,
+      url: 'https://github.com/o/r/pull/42',
+      state: 'open',
+    });
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'merged')],
+    });
+
+    const result = await refreshWorkspaceSessionPrStates(runtime);
+
+    expect(result).toEqual({ scanned: 1, updated: 1 });
+    expect((await readSessionPrs(prPath))?.[0]?.state).toBe('merged');
+  });
+
+  it('updates every pending session with one gh call per workspace', async () => {
+    await seedSession(SESSION_A);
+    const prPathA = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await upsertSessionPr(prPathA, {
+      number: 42,
+      url: 'https://github.com/o/r/pull/42',
+      state: 'open',
+    });
+    await seedSession(SESSION_B);
+    const prPathB = sessionService.getPrSessionPathForArchiveState(
+      SESSION_B,
+      'active',
+    );
+    await upsertSessionPr(prPathB, {
+      number: 43,
+      url: 'https://github.com/o/r/pull/43',
+      state: 'closed',
+    });
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'merged'), pr(43, 'merged')],
+    });
+
+    const result = await refreshWorkspaceSessionPrStates(runtime);
+
+    expect(result).toEqual({ scanned: 2, updated: 2 });
+    expect(fetchGitHubPullRequestsMock).toHaveBeenCalledTimes(1);
+    expect((await readSessionPrs(prPathA))?.[0]?.state).toBe('merged');
+    expect((await readSessionPrs(prPathB))?.[0]?.state).toBe('merged');
+  });
+
+  it('keeps sweeping archived sessions when a sidecar write fails', async () => {
+    await seedSession(SESSION_A);
+    const prPathA = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await upsertSessionPr(prPathA, {
+      number: 42,
+      url: 'https://github.com/o/r/pull/42',
+      state: 'open',
+    });
+    await seedArchivedSession(SESSION_B);
+    const prPathB = sessionService.getPrSessionPathForArchiveState(
+      SESSION_B,
+      'archived',
+    );
+    await upsertSessionPr(prPathB, {
+      number: 43,
+      url: 'https://github.com/o/r/pull/43',
+      state: 'open',
+    });
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'merged'), pr(43, 'merged')],
+    });
+
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    await fsp.chmod(chatsDir, 0o555);
+    try {
+      const result = await refreshWorkspaceSessionPrStates(runtime);
+
+      expect(result).toEqual({ scanned: 2, updated: 1 });
+      expect((await readSessionPrs(prPathA))?.[0]?.state).toBe('open');
+      expect((await readSessionPrs(prPathB))?.[0]?.state).toBe('merged');
+    } finally {
+      await fsp.chmod(chatsDir, 0o755);
+    }
   });
 
   it('does not write back open for bindings missing from the gh page', async () => {

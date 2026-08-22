@@ -13,7 +13,9 @@ import {
   readSessionPrs,
   type SessionArchiveState,
   type SessionGroupPresetColor,
+  type SessionPr,
 } from '@qwen-code/qwen-code-core';
+import type { SessionPrInfo } from '@qwen-code/acp-bridge/bridgeTypes';
 import type {
   AcpSessionBridge,
   BridgeSessionSummary,
@@ -434,11 +436,7 @@ async function enrichPrSidecars(
     if (sidecar) {
       bySessionId.set(sessionId, {
         ...summary,
-        prs: sidecar.map(({ number, url, state }) => ({
-          number,
-          url,
-          ...(state ? { state } : {}),
-        })),
+        prs: sidecarToPrInfos(sidecar),
       });
     }
   }
@@ -503,27 +501,84 @@ function mergeLiveSessionSummary(
   // The live entry only knows PR bindings from this daemon lifetime while the
   // sidecar-enriched persisted summary holds the full history — merge by PR
   // number (live url wins, live-only bindings sort latest) instead of letting
-  // the spread overwrite the history. For `state` the sidecar wins: the
-  // refresh timer rewrites it there, while the live entry is frozen at
-  // bind-time.
+  // the spread overwrite the history.
   if (existing.prs || live.prs) {
-    const livePrs = live.prs ?? [];
-    const persistedByNumber = new Map(
-      (existing.prs ?? []).map((p) => [p.number, p]),
-    );
-    merged.prs = [
-      ...(existing.prs ?? []).filter(
-        (p) => !livePrs.some((l) => l.number === p.number),
-      ),
-      ...livePrs.map((l) => {
-        const persisted = persistedByNumber.get(l.number);
-        return persisted?.state !== undefined && persisted.state !== l.state
-          ? { ...l, state: persisted.state }
-          : l;
-      }),
-    ];
+    merged.prs = mergeSummaryPrs(existing.prs, live.prs);
   }
   return merged;
+}
+
+function sidecarToPrInfos(sidecar: readonly SessionPr[]): SessionPrInfo[] {
+  return sidecar.map(({ number, url, state }) => ({
+    number,
+    url,
+    ...(state ? { state } : {}),
+  }));
+}
+
+/**
+ * Merges persisted (sidecar-enriched) PR bindings with a live entry's for
+ * summary rendering: dedupe by number (live url wins, live-only bindings
+ * sort latest). For `state` the persisted sidecar wins: the refresh timer
+ * rewrites it there while the live entry is frozen at bind-time.
+ */
+function mergeSummaryPrs(
+  persistedPrs: readonly SessionPrInfo[] | undefined,
+  livePrs: readonly SessionPrInfo[] | undefined,
+): SessionPrInfo[] {
+  const live = livePrs ?? [];
+  const persistedByNumber = new Map(
+    (persistedPrs ?? []).map((p) => [p.number, p]),
+  );
+  return [
+    ...(persistedPrs ?? []).filter(
+      (p) => !live.some((l) => l.number === p.number),
+    ),
+    ...live.map((l) => {
+      const persisted = persistedByNumber.get(l.number);
+      return persisted?.state !== undefined && persisted.state !== l.state
+        ? { ...l, state: persisted.state }
+        : l;
+    }),
+  ];
+}
+
+/**
+ * Builds the first-page insertion for a session that is live but has no
+ * persisted record yet. The bind route persists the PR sidecar before the
+ * session's first flush, so best-effort read it: the row then renders the
+ * sidecar's refreshed `state` instead of the live entry's bind-time
+ * snapshot, matching {@link mergeLiveSessionSummary}.
+ */
+async function liveOnlySummary(
+  live: BridgeSessionSummary,
+  sessionService: SessionService,
+  signal?: AbortSignal,
+): Promise<BridgeSessionSummary> {
+  const summary: BridgeSessionSummary = {
+    ...live,
+    createdAt: live.createdAt,
+    clientCount: live.clientCount,
+    hasActivePrompt: live.hasActivePrompt,
+    isArchived: false,
+  };
+  let sidecar: Awaited<ReturnType<typeof readSessionPrs>>;
+  try {
+    const sidecarPath = sessionService.getPrSessionPathForArchiveState(
+      live.sessionId,
+      'active',
+    );
+    sidecar = signal
+      ? await readSessionPrs(sidecarPath, { signal })
+      : await readSessionPrs(sidecarPath);
+  } catch {
+    signal?.throwIfAborted();
+    sidecar = null;
+  }
+  if (sidecar) {
+    summary.prs = mergeSummaryPrs(sidecarToPrInfos(sidecar), live.prs);
+  }
+  return summary;
 }
 
 function clonePersistedSummary(
@@ -899,13 +954,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
           bySessionId.set(
             live.sessionId,
             applyOrganization(
-              {
-                ...live,
-                createdAt: live.createdAt,
-                clientCount: live.clientCount,
-                hasActivePrompt: live.hasActivePrompt,
-                isArchived: false,
-              },
+              await liveOnlySummary(live, sessionService, readOptions.signal),
               organization,
             ),
           );
@@ -1062,13 +1111,10 @@ async function listWorkspaceSessionsByMetadataForResponse(
               })
             : sessionService.sessionExists(live.sessionId)))
         ) {
-          bySessionId.set(live.sessionId, {
-            ...live,
-            createdAt: live.createdAt,
-            clientCount: live.clientCount,
-            hasActivePrompt: live.hasActivePrompt,
-            isArchived: false,
-          });
+          bySessionId.set(
+            live.sessionId,
+            await liveOnlySummary(live, sessionService, readOptions.signal),
+          );
         }
       }
     } catch (error) {
@@ -1290,13 +1336,10 @@ async function listWorkspaceSessionsForResponseInRuntime(
             })
           : sessionService.sessionExists(live.sessionId))))
     ) {
-      bySessionId.set(live.sessionId, {
-        ...live,
-        createdAt: live.createdAt,
-        clientCount: live.clientCount,
-        hasActivePrompt: live.hasActivePrompt,
-        isArchived: false,
-      });
+      bySessionId.set(
+        live.sessionId,
+        await liveOnlySummary(live, sessionService, readOptions.signal),
+      );
     }
   }
 
