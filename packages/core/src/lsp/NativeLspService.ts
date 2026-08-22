@@ -1366,12 +1366,25 @@ export class NativeLspService {
           }
         }
       } catch (error) {
-        // Fall back to cached diagnostics from publishDiagnostics notifications
-        // This is handled by the notification handler if implemented
         debugLogger.warn(
           `LSP textDocument/diagnostic failed for ${name}:`,
           error,
         );
+
+        const cache = handle.cachedDiagnostics;
+        if (!cache.has(uri)) {
+          await this.delay(DEFAULT_LSP_DOCUMENT_OPEN_DELAY_MS);
+        }
+        if (cache.has(uri)) {
+          const cached = cache.get(uri)!;
+          for (const item of cached) {
+            const normalized = this.normalizer.normalizeDiagnostic(item, name);
+            if (normalized) {
+              allDiagnostics.push(normalized);
+            }
+          }
+          continue;
+        }
       }
     }
 
@@ -1420,6 +1433,31 @@ export class NativeLspService {
         }
       } catch (error) {
         debugLogger.warn(`LSP workspace/diagnostic failed for ${name}:`, error);
+
+        const workspaceRootUris = this.workspaceContext
+          .getDirectories()
+          .map((dir) => {
+            const rootUri = pathToFileURL(dir).toString();
+            return rootUri.endsWith('/') ? rootUri : `${rootUri}/`;
+          });
+        for (const [uri, diagnostics] of handle.cachedDiagnostics) {
+          if (!workspaceRootUris.some((rootUri) => uri.startsWith(rootUri))) {
+            continue;
+          }
+          if (results.length >= limit) break;
+          const normalizedDiagnostics = [];
+          for (const diag of diagnostics) {
+            const n = this.normalizer.normalizeDiagnostic(diag, name);
+            if (n) normalizedDiagnostics.push(n);
+          }
+          if (normalizedDiagnostics.length > 0) {
+            results.push({
+              uri,
+              diagnostics: normalizedDiagnostics,
+              serverName: name,
+            });
+          }
+        }
       }
 
       if (results.length >= limit) {
