@@ -12,6 +12,7 @@ import {
   getSubagentSessionDir,
   getAgentJsonlPath,
   getAgentMetaPath,
+  getAgentMetaTerminalSummary,
   attachJsonlTranscriptWriter,
   buildAgentTranscriptAttach,
   normalizeResumedAgentDepth,
@@ -220,6 +221,28 @@ describe('agent-transcript', () => {
         subagentName: 'explore',
         executionAllowedTools: [],
       });
+    });
+
+    it('caps the persisted terminal activity summary', () => {
+      const activities = Array.from({ length: 12 }, (_, index) => ({
+        name: `tool-${index}`,
+        description: `activity-${index}`,
+        at: index,
+      }));
+      const summary = getAgentMetaTerminalSummary(
+        { totalTokens: 12, outputTokens: 8, toolUses: 12, durationMs: 100 },
+        activities,
+      );
+
+      expect(summary.stats).toEqual({
+        totalTokens: 12,
+        outputTokens: 8,
+        toolUses: 12,
+        durationMs: 100,
+      });
+      expect(summary.recentActivities).toHaveLength(10);
+      expect(summary.recentActivities?.[0]?.name).toBe('tool-2');
+      expect(summary.recentActivities?.at(-1)?.name).toBe('tool-11');
     });
   });
 

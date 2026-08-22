@@ -14,6 +14,7 @@ import * as fsSync from 'fs';
 import * as path from 'path';
 
 import type { Config } from '../config/config.js';
+import { ApprovalMode } from '../config/approval-mode.js';
 import { Storage } from '../config/storage.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
@@ -60,7 +61,8 @@ const todoWriteToolSchemaData: FunctionDeclaration = {
               type: 'array',
               items: { type: 'string', maxLength: 500 },
               uniqueItems: true,
-              description: 'Todo IDs that must be completed before this item',
+              description:
+                'Todo IDs that must be completed before this item. Active-plan updates preserve omitted dependencies for existing IDs; use [] to remove them.',
             },
           },
           required: ['content', 'status', 'id'],
@@ -282,7 +284,10 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
       // 1. Read current todos (for change detection)
       const previousPlan = await readTodoPlanFromFile(sessionId);
       const oldTodos = previousPlan.todos;
-
+      const oldTodosMap = new Map(oldTodos.map((todo) => [todo.id, todo]));
+      const hasActivePlan = oldTodos.some(
+        (todo) => todo.status !== 'completed',
+      );
       let candidateTodos: unknown;
 
       if (modified_by_user && modified_content !== undefined) {
@@ -290,17 +295,40 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
         const data = JSON.parse(modified_content) as Record<string, unknown>;
         candidateTodos = data['todos'];
       } else {
-        // Use the normal todo logic - simply replace with new todos
-        candidateTodos = todos;
+        candidateTodos = todos.map((todo) => {
+          const blockedBy =
+            todo.blockedBy ??
+            (hasActivePlan ? oldTodosMap.get(todo.id)?.blockedBy : undefined);
+          return blockedBy === undefined ? todo : { ...todo, blockedBy };
+        });
       }
 
       const validationError = validateTodos(candidateTodos);
       if (validationError) throw new Error(validationError);
       const finalTodos = candidateTodos as TodoItem[];
+      const boundWorkflowRevision =
+        this.config.getSessionWorkflowPlanRevision?.();
+      // A revision captured while the session is still in PLAN mode is a
+      // pending draft: refining the membership before approval is ordinary
+      // drafting, not divergence. Only a revision that survived an
+      // exit_plan_mode approval (the mode has since left PLAN) constrains
+      // membership here — entering PLAN clears the revision on every
+      // mode-change route, so a revision observed in PLAN mode is necessarily
+      // still pending approval.
+      const approvedWorkflowRevision =
+        boundWorkflowRevision !== undefined &&
+        this.config.getApprovalMode() !== ApprovalMode.PLAN
+          ? boundWorkflowRevision
+          : undefined;
+      const matchesApprovedTodoIds =
+        !approvedWorkflowRevision ||
+        (finalTodos.length === approvedWorkflowRevision.todoIds.length &&
+          finalTodos.every((todo) =>
+            approvedWorkflowRevision.todoIds.includes(todo.id),
+          ));
 
       // 2. Detect changes
       const changes = detectTodoChanges(oldTodos, finalTodos);
-      const oldTodosMap = new Map(oldTodos.map((t) => [t.id, t]));
 
       // 3. VALIDATION PHASE: Execute all hooks with Validation phase
       // Hooks should only check and return block/approve decisions, no side effects
@@ -371,7 +399,9 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
         finalTodos.length > 0 &&
         (oldTodos.length === 0 ||
           (oldTodos.every((todo) => todo.status === 'completed') &&
-            !isDeepStrictEqual(finalTodos, oldTodos)));
+            !isDeepStrictEqual(finalTodos, oldTodos)) ||
+          (previousPlan.planId === approvedWorkflowRevision?.planId &&
+            !matchesApprovedTodoIds));
       const activePlanId =
         finalTodos.length === 0
           ? undefined
@@ -382,6 +412,13 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
 
       // 4. Write new todos AFTER all validation passes
       await writeTodosToFile(finalTodos, activePlanId, sessionId);
+      const continuesApprovedWorkflow =
+        !approvedWorkflowRevision ||
+        (resultPlanId === approvedWorkflowRevision.planId &&
+          matchesApprovedTodoIds);
+      if (!continuesApprovedWorkflow) {
+        this.config.clearSessionWorkflowPlanRevision?.();
+      }
       const unfinishedTodos = finalTodos.filter(
         (todo) => todo.status !== 'completed',
       );
@@ -455,9 +492,13 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
       }
 
       // 6. Create structured display object for rich UI rendering
+      const workflowContextActive =
+        continuesApprovedWorkflow &&
+        this.config.isSessionWorkflowTodoContextActive?.() === true;
       const todoResultDisplay = {
         type: 'todo_list' as const,
         ...(resultPlanId ? { planId: resultPlanId } : {}),
+        ...(workflowContextActive ? { sessionWorkflow: true } : {}),
         todos: finalTodos,
         changes,
       };

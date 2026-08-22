@@ -1,0 +1,768 @@
+.cockpit,
+.emptyCockpit {
+  color: var(--foreground);
+  background: var(--background);
+  font-family: inherit;
+}
+
+/* Zero-specificity reset so the component's own button rules (.primaryButton,
+ * .backButton) keep their font metrics and colors. */
+:where(.cockpit, .emptyCockpit) button {
+  color: inherit;
+  font: inherit;
+}
+
+.cockpit button:focus-visible,
+.emptyCockpit button:focus-visible {
+  outline: 3px solid var(--agent-blue-500);
+  outline-offset: 2px;
+}
+
+.cockpit {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  container-type: inline-size;
+  overflow: hidden;
+}
+
+.main {
+  height: 100%;
+  min-width: 0;
+  overflow: auto;
+}
+
+.content,
+.attentionPage {
+  width: min(1400px, 100%);
+  margin: 0 auto;
+  padding: 24px 28px 34px;
+}
+
+.taskHeading,
+.attentionHeading {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  margin-bottom: 18px;
+}
+
+.taskHeading > div:first-child,
+.attentionHeading > div:first-child {
+  min-width: 0;
+}
+
+.attentionHeading h1,
+.attentionHeading p {
+  margin: 0;
+}
+
+.attentionHeading h1 {
+  margin-top: 6px;
+  font-size: clamp(22px, 2.2vw, 30px);
+  letter-spacing: -0.035em;
+}
+
+.attentionHeading p {
+  margin-top: 7px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.reviewEyebrow {
+  color: var(--agent-blue-500);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.titleLine {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 11px;
+}
+
+.titleLine h1 {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  font-size: clamp(22px, 2.2vw, 30px);
+  letter-spacing: -0.035em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.titleLine > span {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 9px;
+  border-radius: var(--radius-sm);
+  color: var(--success-color);
+  background: var(--success-bg);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.titleLine > span::before {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  content: '';
+}
+
+.titleLine > span[data-status='running'] {
+  color: var(--agent-blue-500);
+  background: color-mix(in srgb, var(--agent-blue-500) 8%, var(--card));
+}
+
+.titleLine > span[data-status='attention'] {
+  color: var(--warning-color);
+  background: var(--warning-bg);
+}
+
+.titleLine > span[data-status='waiting'] {
+  color: var(--muted-foreground);
+  background: var(--muted);
+}
+
+.taskMeta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 17px;
+  margin-top: 9px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.taskMeta code {
+  font-size: 11px;
+}
+
+.headingActions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.backButton {
+  display: flex;
+  height: 38px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--muted-foreground);
+  background: var(--background);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.backButton:hover {
+  color: var(--foreground);
+  background: var(--accent);
+}
+
+.backButton svg {
+  width: 14px;
+  height: 14px;
+}
+
+.cockpitTabs {
+  display: flex;
+  height: 38px;
+  flex: none;
+  align-items: center;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--muted);
+}
+
+.cockpitTabs button {
+  display: flex;
+  height: 30px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--muted-foreground);
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.cockpitTabs button:hover {
+  color: var(--foreground);
+  background: var(--accent);
+}
+
+.cockpitTabs button[data-active='true'] {
+  color: var(--foreground);
+  background: var(--background);
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--foreground) 10%, transparent);
+}
+
+.cockpitTabs svg {
+  width: 14px;
+  height: 14px;
+  stroke-width: 1.9;
+}
+
+.cockpitTabs b {
+  display: grid;
+  min-width: 17px;
+  height: 17px;
+  place-items: center;
+  border-radius: var(--radius-sm);
+  color: var(--warning-color);
+  background: var(--warning-bg);
+  font-size: 11px;
+}
+
+.environment {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--muted-foreground);
+  background: var(--background);
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.environment i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--success-color);
+  box-shadow: 0 0 0 4px var(--success-bg);
+}
+
+.environment:not([data-connected='true']) i {
+  background: var(--warning-color);
+  box-shadow: 0 0 0 4px var(--warning-bg);
+}
+
+.workflowSurface,
+.panel,
+.attentionStats,
+.attentionWorkspace {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  background: var(--card);
+  box-shadow: 0 8px 28px color-mix(in srgb, var(--foreground) 6%, transparent);
+}
+
+.workflowSurface > section {
+  padding: 16px;
+  border-bottom: 0;
+}
+
+/* The graph is the one thing on this page that is not already legible in the
+   chat transcript, so it gets a guaranteed slab of the viewport instead of
+   sizing to content and competing with the panels below it. A min-height keeps
+   the page itself scrollable on short screens. */
+.workflowSurface {
+  display: flex;
+  min-height: clamp(280px, 44vh, 560px);
+  flex-direction: column;
+}
+
+.workflowSurface > section {
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.supportGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(260px, 0.8fr);
+  gap: 14px;
+  margin-top: 14px;
+}
+
+.panel {
+  min-width: 0;
+}
+
+.panelHeader {
+  display: flex;
+  min-height: 57px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.panelHeader h2 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.panelHeader span {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.activityList {
+  display: grid;
+}
+
+.activityRow {
+  display: grid;
+  grid-template-columns: 52px 34px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px 16px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  text-align: left;
+}
+
+button.activityRow {
+  cursor: pointer;
+}
+
+/* Activity rows and attention rows run edge-to-edge inside containers with
+ * overflow: hidden, so the default outward focus ring would have its side
+ * segments clipped. */
+button.activityRow:focus-visible,
+.attentionList > button:focus-visible {
+  outline-offset: -3px;
+}
+
+button.activityRow:hover {
+  background: var(--accent);
+}
+
+.activityRow:last-child {
+  border-bottom: 0;
+}
+
+.activityRow time,
+.activityRow em {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-style: normal;
+}
+
+.activityIdentity {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border-radius: var(--radius-sm);
+  color: var(--agent-blue-500);
+  background: color-mix(in srgb, var(--agent-blue-500) 8%, var(--card));
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.activityCopy {
+  min-width: 0;
+}
+
+.activityCopy strong,
+.activityCopy small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activityCopy strong {
+  font-size: 12px;
+}
+
+.activityCopy small {
+  margin-top: 3px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.activityCopy small.skillList {
+  color: var(--agent-blue-500);
+}
+
+.activityRow em[data-status='running'] {
+  color: var(--agent-blue-500);
+}
+
+.activityRow em[data-status='failed'],
+.activityRow em[data-status='cancelled'] {
+  color: var(--error-color);
+}
+
+.deliverables {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+}
+
+.deliverables button {
+  display: grid;
+  gap: 3px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--background);
+  cursor: pointer;
+  text-align: left;
+}
+
+.deliverables button:hover:not(:disabled) {
+  background: var(--accent);
+}
+
+.deliverables button:disabled {
+  cursor: default;
+}
+
+.deliverables strong {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.deliverables small,
+.deliverables p,
+.inlineEmpty {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.inlineEmpty {
+  padding: 20px;
+  text-align: center;
+}
+
+.attentionStats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  margin-bottom: 14px;
+}
+
+.attentionStats > div {
+  min-height: 72px;
+  padding: 14px 18px;
+  border-right: 1px solid var(--border);
+}
+
+.attentionStats > div:last-child {
+  border-right: 0;
+}
+
+.attentionStats strong,
+.attentionStats span {
+  display: block;
+}
+
+.attentionStats strong {
+  font-size: 20px;
+}
+
+.attentionStats span {
+  margin-top: 4px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.attentionWorkspace {
+  display: grid;
+  min-height: 420px;
+  grid-template-columns: minmax(300px, 0.75fr) minmax(0, 1.6fr);
+}
+
+.attentionList {
+  border-right: 1px solid var(--border);
+}
+
+.attentionList header {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+}
+
+.attentionList header span {
+  color: var(--muted-foreground);
+}
+
+.attentionList > button {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 10px;
+  width: 100%;
+  padding: 13px 14px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.attentionList > button:hover {
+  background: var(--accent);
+}
+
+.attentionList > button.attentionActive {
+  background: color-mix(in srgb, var(--agent-blue-500) 8%, var(--card));
+  box-shadow: inset 3px 0 var(--agent-blue-500);
+}
+
+.attentionList > button > span {
+  display: grid;
+  width: 25px;
+  height: 25px;
+  place-items: center;
+  border-radius: var(--radius-sm);
+  color: var(--primary-foreground);
+  background: var(--error-color);
+  font-weight: 800;
+}
+
+.attentionList strong,
+.attentionList small {
+  display: block;
+}
+
+.attentionList strong {
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.attentionList small {
+  margin-top: 4px;
+  color: var(--muted-foreground);
+  font-size: 10px;
+}
+
+.attentionDetail {
+  padding: 28px;
+}
+
+.attentionDetail h2 {
+  margin: 10px 0 8px;
+  font-size: 20px;
+}
+
+.attentionDetail > p {
+  max-width: 700px;
+  margin: 0 0 18px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.attentionEmpty {
+  display: grid;
+  min-height: 320px;
+  place-items: center;
+  align-content: center;
+  padding: 32px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-xl);
+  text-align: center;
+}
+
+.attentionEmpty > span {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  border-radius: 50%;
+  color: var(--success-color);
+  background: var(--success-bg);
+  font-size: 20px;
+}
+
+.attentionEmpty h2 {
+  margin: 12px 0 5px;
+  font-size: 17px;
+}
+
+.attentionEmpty p {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.primaryButton {
+  min-height: 36px;
+  padding: 0 14px;
+  border: 1px solid var(--agent-blue-500);
+  border-radius: var(--radius);
+  color: var(--primary-foreground);
+  background: var(--agent-blue-500);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.emptyCockpit {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  place-items: center;
+  align-content: center;
+  padding: 32px;
+  text-align: center;
+}
+
+.emptyMark {
+  display: grid;
+  width: 58px;
+  height: 58px;
+  margin-bottom: 16px;
+  place-items: center;
+  border-radius: var(--radius-xl);
+  color: var(--primary-foreground);
+  background: var(--agent-blue-500);
+  font-size: 22px;
+  font-weight: 900;
+}
+
+.emptyCockpit h1 {
+  margin: 10px 0 6px;
+  font-size: 24px;
+}
+
+.emptyCockpit p {
+  max-width: 540px;
+  margin: 0 0 20px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+@container (max-width: 760px) {
+  .content,
+  .attentionPage {
+    padding-right: 14px;
+    padding-left: 14px;
+  }
+
+  .taskHeading,
+  .attentionHeading {
+    flex-direction: column;
+  }
+
+  .headingActions {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .supportGrid,
+  .attentionWorkspace {
+    grid-template-columns: 1fr;
+  }
+
+  .attentionList {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .attentionStats {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .attentionStats > div:nth-child(2) {
+    border-right: 0;
+  }
+
+  .attentionStats > div:nth-child(-n + 2) {
+    border-bottom: 1px solid var(--border);
+  }
+}
+
+@container (max-width: 500px) {
+  .environment {
+    display: none;
+  }
+
+  .cockpitTabs button span {
+    display: none;
+  }
+
+  .cockpitTabs button {
+    width: auto;
+    min-width: 34px;
+    justify-content: center;
+    padding: 0 6px;
+  }
+
+  .activityRow {
+    grid-template-columns: 34px minmax(0, 1fr) auto;
+  }
+
+  .activityRow time {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cockpit * {
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Where the failing step sits in the plan. A failure you cannot locate in the
+   graph is just a message; the IDs here are the same ones blockedBy and
+   todo_id use, so they carry the reader back to the right node. */
+.attentionContext {
+  display: flex;
+  flex-wrap: wrap;
+  margin: 10px 0 0;
+  gap: 6px 22px;
+}
+
+.attentionContext > div {
+  min-width: 0;
+}
+
+.attentionContext dt {
+  color: var(--muted-foreground);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.attentionContext dd {
+  margin: 2px 0 0;
+  font-size: 12px;
+}
+
+.attentionContext code,
+.attentionContext dd {
+  font-family: var(--font-mono, monospace);
+}

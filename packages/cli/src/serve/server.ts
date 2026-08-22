@@ -8,6 +8,7 @@ import express from 'express';
 import type { Application } from 'express';
 import * as path from 'node:path';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
+import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import {
   hashDaemonWorkspace,
   Storage,
@@ -2332,6 +2333,11 @@ export function createServeApp(
       persistSetting: async (...args) => {
         await persistSetting(...args);
       },
+      updateSessionWorkflow: (enabled) =>
+        primaryBridge.invokeWorkspaceCommand(
+          SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow,
+          { enabled },
+        ),
       broadcastSettingsChanged,
       parseAndValidateClientId: (req, res) =>
         parseAndValidateWorkspaceClientId(req, res, primaryBridge),

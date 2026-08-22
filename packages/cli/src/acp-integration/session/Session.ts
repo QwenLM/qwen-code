@@ -1871,6 +1871,7 @@ export class Session implements SessionContext {
     planId: string;
     sourceCallId: string;
   };
+  private activeTodoPlanStructure?: string;
 
   // Modular components
   private readonly historyReplayer: HistoryReplayer;
@@ -1928,6 +1929,9 @@ export class Session implements SessionContext {
       this.settings.merged.experimental?.todoStopGuard === true &&
       !this.config.getBareMode() &&
       !this.config.isSafeMode();
+    this.config.setSessionWorkflowEnabledProvider?.(
+      () => this.settings.merged.experimental?.sessionWorkflow === true,
+    );
     this.todoStopGuard = new DaemonTodoStopGuard(todoStopGuardEnabled);
     const configuredGuardMode =
       process.env[ENV_ACP_REPEATED_TOOL_FAILURE_GUARD];
@@ -2618,6 +2622,8 @@ export class Session implements SessionContext {
 
   clearActiveTodoPlanRevision(): void {
     this.activeTodoPlanRevision = undefined;
+    this.activeTodoPlanStructure = undefined;
+    this.config.clearSessionWorkflowPlanRevision?.();
   }
 
   hardSuspendTodoStopGuard(): void {
@@ -3331,6 +3337,7 @@ export class Session implements SessionContext {
   dispose(): void {
     this.disposed = true;
     this.closing = true;
+    this.clearActiveTodoPlanRevision();
     this.pendingPrompt?.abort(SESSION_DISPOSE_ABORT_REASON);
     this.pendingPrompt = null;
     this.resolveCloseGate?.();
@@ -3446,7 +3453,7 @@ export class Session implements SessionContext {
       // belong to finished cycles; only live updates may bind the next
       // exit_plan_mode approval, so a replayed session starts text-only —
       // even when the replay fails part-way.
-      this.activeTodoPlanRevision = undefined;
+      this.clearActiveTodoPlanRevision();
     }
   }
 
@@ -3487,7 +3494,7 @@ export class Session implements SessionContext {
 
     chat.truncateHistory(apiTruncateIndex);
     chat.stripThoughtsFromHistory();
-    this.activeTodoPlanRevision = undefined;
+    this.clearActiveTodoPlanRevision();
     const preserveQueuedPromptPriority = this.todoStopGuardQueuedPromptPriority;
     const shouldDrainAutomaticQueues =
       (this.todoStopGuard.blocksUnrelatedAutomaticTurns ||
@@ -3553,7 +3560,7 @@ export class Session implements SessionContext {
       .getGeminiClient()!
       .getChat()
       .setHistory(structuredClone(history));
-    this.activeTodoPlanRevision = undefined;
+    this.clearActiveTodoPlanRevision();
     this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
   }
 
@@ -6232,22 +6239,52 @@ export class Session implements SessionContext {
       sessionId: this.sessionId,
       update: projectedUpdate,
     };
+    const canUpdateTodoPlanRevision =
+      update.sessionUpdate === 'plan' &&
+      this.config.getApprovalMode() === ApprovalMode.PLAN;
+    const todoPlanRevision = canUpdateTodoPlanRevision
+      ? this.#readTodoPlanRevision(update)
+      : undefined;
+    const preservesPendingRevision =
+      todoPlanRevision !== undefined &&
+      todoPlanRevision.structure === this.activeTodoPlanStructure;
 
-    if (update.sessionUpdate === 'plan') {
+    if (canUpdateTodoPlanRevision && !preservesPendingRevision) {
       // Clear before delivery: a plan update the client never receives
       // must not stay bound to the next exit_plan_mode approval. The
       // capture below re-stamps only after delivery succeeds.
-      this.activeTodoPlanRevision = undefined;
+      this.clearActiveTodoPlanRevision();
     }
     await this.client.sessionUpdate(params);
-    if (update.sessionUpdate === 'plan') {
-      this.#captureTodoPlanRevision(update);
+    if (
+      canUpdateTodoPlanRevision &&
+      this.config.getApprovalMode() === ApprovalMode.PLAN &&
+      todoPlanRevision?.allPending
+    ) {
+      this.activeTodoPlanRevision = {
+        planId: todoPlanRevision.planId,
+        sourceCallId: todoPlanRevision.sourceCallId,
+      };
+      this.activeTodoPlanStructure = todoPlanRevision.structure;
+      this.config.setSessionWorkflowPlanRevision?.({
+        planId: todoPlanRevision.planId,
+        sourceCallId: todoPlanRevision.sourceCallId,
+        todoIds: todoPlanRevision.todoIds,
+      });
     }
   }
 
-  #captureTodoPlanRevision(
+  #readTodoPlanRevision(
     update: Extract<SessionUpdate, { sessionUpdate: 'plan' }>,
-  ): void {
+  ):
+    | {
+        planId: string;
+        sourceCallId: string;
+        todoIds: string[];
+        structure: string;
+        allPending: boolean;
+      }
+    | undefined {
     const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
     const plan = isRecord(meta?.['qwenTodoPlan'])
       ? meta['qwenTodoPlan']
@@ -6257,12 +6294,58 @@ export class Session implements SessionContext {
       : undefined;
     const planId = plan?.['id'];
     const sourceCallId = transcript?.['planToolCallId'];
-    this.activeTodoPlanRevision =
+    const workflowPlan = meta?.['qwenSessionWorkflow'] === true;
+    const hasValidIdentity =
       typeof planId === 'string' &&
+      planId.trim() !== '' &&
       typeof sourceCallId === 'string' &&
-      update.entries.length > 0
-        ? { planId, sourceCallId }
+      sourceCallId.trim() !== '' &&
+      update.entries.length > 0;
+    const workflowEnabled = this.config.isSessionWorkflowEnabled?.() === true;
+    if (!workflowEnabled || !workflowPlan || !hasValidIdentity)
+      return undefined;
+
+    const todos = update.entries.flatMap((entry) => {
+      const entryRecord = entry as unknown as Record<string, unknown>;
+      const entryMeta = isRecord(entryRecord['_meta'])
+        ? entryRecord['_meta']
         : undefined;
+      const todo = isRecord(entryMeta?.['qwenTodo'])
+        ? entryMeta['qwenTodo']
+        : undefined;
+      const todoId = todo?.['id'];
+      const blockedBy = todo?.['blockedBy'];
+      if (
+        typeof todoId !== 'string' ||
+        todoId.trim() === '' ||
+        (blockedBy !== undefined &&
+          (!Array.isArray(blockedBy) ||
+            !blockedBy.every((dependency) => typeof dependency === 'string')))
+      ) {
+        return [];
+      }
+      return [
+        {
+          id: todoId,
+          content: entry.content,
+          priority: entry.priority,
+          blockedBy: blockedBy ?? [],
+        },
+      ];
+    });
+    const todoIds = todos.map((todo) => todo.id);
+    if (
+      todos.length !== update.entries.length ||
+      new Set(todoIds).size !== todoIds.length
+    )
+      return undefined;
+    return {
+      planId,
+      sourceCallId,
+      todoIds,
+      structure: JSON.stringify([planId, todos]),
+      allPending: update.entries.every((entry) => entry.status === 'pending'),
+    };
   }
 
   #scheduleChannelDelivery(params: Record<string, unknown>): void {
@@ -8668,12 +8751,21 @@ export class Session implements SessionContext {
     }
     const previousApprovalMode = this.config.getApprovalMode();
     this.config.setApprovalMode(approvalMode);
+    // Only plan-involving transitions touch the revision: entering PLAN starts
+    // a fresh approval cycle and leaving PLAN abandons the draft, but an
+    // approved workflow plan keeps executing in a non-plan mode — switching
+    // between non-plan modes (default → auto-edit/yolo) must not disarm it
+    // mid-execution. Matches the sibling sessionApprovalMode ext route and the
+    // workspaceReload handler; the exit_plan_mode approval path deliberately
+    // retains the revision.
+    if (
+      previousApprovalMode !== approvalMode &&
+      (previousApprovalMode === ApprovalMode.PLAN ||
+        approvalMode === ApprovalMode.PLAN)
+    ) {
+      this.clearActiveTodoPlanRevision();
+    }
     if (approvalMode === ApprovalMode.PLAN) {
-      if (previousApprovalMode !== ApprovalMode.PLAN) {
-        // A redundant plan re-select keeps the revision captured by the
-        // live cycle; only a fresh entry starts a new approval cycle.
-        this.activeTodoPlanRevision = undefined;
-      }
       this.clearTodoStopGuardTrust();
     }
 
@@ -10527,6 +10619,9 @@ export class Session implements SessionContext {
               const offeredPermissionOptions = permissionOptions.map(
                 (option) => ({ ...option }),
               );
+              const workflowPlanRevision = isExitPlanModeTool
+                ? this.config.getSessionWorkflowPlanRevision?.()
+                : undefined;
               const params: RequestPermissionRequest = {
                 sessionId: this.sessionId,
                 options: permissionOptions,
@@ -10545,7 +10640,12 @@ export class Session implements SessionContext {
                   _meta: {
                     toolName,
                     ...interactionMetaFields(confirmationDetails),
-                    ...(isExitPlanModeTool && this.activeTodoPlanRevision
+                    ...(isExitPlanModeTool &&
+                    this.activeTodoPlanRevision &&
+                    workflowPlanRevision?.planId ===
+                      this.activeTodoPlanRevision.planId &&
+                    workflowPlanRevision.sourceCallId ===
+                      this.activeTodoPlanRevision.sourceCallId
                       ? {
                           qwenTodoApproval: this.activeTodoPlanRevision,
                         }
@@ -11122,7 +11222,7 @@ export class Session implements SessionContext {
           ) {
             await this.sendCurrentModeUpdateNotification();
             if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
-              this.activeTodoPlanRevision = undefined;
+              this.clearActiveTodoPlanRevision();
               this.#clearTodoStopGuardTrustAndDrainAutomaticQueues();
             }
           }

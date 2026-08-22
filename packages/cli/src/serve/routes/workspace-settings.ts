@@ -5,6 +5,7 @@
  */
 
 import type { Application, Request, Response } from 'express';
+import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import { loadSettings, SettingScope } from '../../config/settings.js';
 import {
   redactMcpServersSetting,
@@ -23,6 +24,7 @@ import {
 } from '../../utils/settingsUtils.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { parseAndValidateWorkspaceClientId } from '../server/request-helpers.js';
+import { SessionNotFoundError } from '../acp-session-bridge.js';
 import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
@@ -280,6 +282,7 @@ export interface WorkspaceSettingsRouteDeps {
     value: unknown,
     assertGenerationOpen?: () => void,
   ) => Promise<void>;
+  updateSessionWorkflow: (enabled: boolean) => Promise<unknown>;
   broadcastSettingsChanged: (
     key: string,
     value: unknown,
@@ -291,6 +294,48 @@ export interface WorkspaceSettingsRouteDeps {
     res: Response,
   ) => string | undefined | null;
   includeLiveVoice?: boolean;
+}
+
+// A user-scoped write can be shadowed by a workspace-scoped value (workspace
+// wins the merge), so live sessions must follow the post-write effective value
+// rather than the raw value that was just written.
+function readEffectiveSessionWorkflow(
+  boundWorkspace: string,
+  workspaceTrusted: boolean,
+): boolean {
+  const loaded = loadSettings(boundWorkspace, {
+    skipLoadEnvironment: true,
+    skipWorkspaceSettings: !workspaceTrusted,
+    workspaceTrusted,
+  });
+  return (
+    getNestedProperty(
+      loaded.merged as Record<string, unknown>,
+      'experimental.sessionWorkflow',
+    ) === true
+  );
+}
+
+async function updateLiveSessionWorkflow(
+  update: (enabled: boolean) => Promise<unknown>,
+  enabled: boolean,
+  workspace: string,
+  res: Response,
+): Promise<boolean> {
+  try {
+    await update(enabled);
+    return true;
+  } catch (err) {
+    if (err instanceof SessionNotFoundError) return true;
+    writeStderrLine(
+      `qwen serve: failed to update the live Session Workflow setting for ${workspace}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    res.status(500).json({
+      error: 'Failed to update the live Session Workflow setting',
+      code: 'runtime_update_error',
+    });
+    return false;
+  }
 }
 
 export function registerWorkspaceSettingsRoutes(
@@ -491,6 +536,27 @@ export function registerWorkspaceSettingsRoutes(
       } catch (err) {
         if (sendGenerationClosedError(res, err)) return;
         throw err;
+      }
+      if (key === 'experimental.sessionWorkflow') {
+        if (
+          !(await updateLiveSessionWorkflow(
+            deps.updateSessionWorkflow,
+            readEffectiveSessionWorkflow(
+              boundWorkspace,
+              deps.isWorkspaceTrusted?.() ?? true,
+            ),
+            boundWorkspace,
+            res,
+          ))
+        ) {
+          return;
+        }
+        try {
+          assertGenerationOpen();
+        } catch (err) {
+          if (sendGenerationClosedError(res, err)) return;
+          throw err;
+        }
       }
       try {
         broadcastSettingsChanged(key, publicValue, scope, clientId);
@@ -694,6 +760,32 @@ export function registerWorkspaceQualifiedSettingsRoutes(
       } catch (err) {
         if (sendGenerationClosedError(res, err)) return;
         throw err;
+      }
+      if (key === 'experimental.sessionWorkflow') {
+        if (
+          !(await updateLiveSessionWorkflow(
+            (enabled) =>
+              runtime.bridge.invokeWorkspaceCommand(
+                SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow,
+                { enabled },
+              ),
+            // Push the post-write effective value, not the raw write: a
+            // system-scope (fleet) settings file shadows a workspace write in
+            // mergeSettings, so even on this workspace-only route the written
+            // value is not necessarily the effective one.
+            readEffectiveSessionWorkflow(runtime.workspaceCwd, true),
+            runtime.workspaceCwd,
+            res,
+          ))
+        ) {
+          return;
+        }
+        try {
+          assertGenerationOpen();
+        } catch (err) {
+          if (sendGenerationClosedError(res, err)) return;
+          throw err;
+        }
       }
       deps.invalidateServeFeaturesCache();
       runtime.bridge.publishWorkspaceEvent({

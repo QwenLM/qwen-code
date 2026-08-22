@@ -2790,6 +2790,274 @@ describe('Session', () => {
     return calls.at(-1)![0];
   }
 
+  function enableSessionWorkflowRevisionContext(): void {
+    let revision:
+      | { planId: string; sourceCallId: string; todoIds: readonly string[] }
+      | undefined;
+    mockConfig.isSessionWorkflowEnabled = vi.fn().mockReturnValue(true);
+    mockConfig.setSessionWorkflowPlanRevision = vi.fn((next) => {
+      revision = next;
+    });
+    mockConfig.clearSessionWorkflowPlanRevision = vi.fn(() => {
+      revision = undefined;
+    });
+    mockConfig.getSessionWorkflowPlanRevision = vi.fn(() => revision);
+  }
+
+  describe('Session Workflow plan revision context', () => {
+    it('captures Todo IDs only for an enabled, active revision', async () => {
+      const setRevision = vi.fn();
+      const clearRevision = vi.fn();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      mockConfig.isSessionWorkflowEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.setSessionWorkflowPlanRevision = setRevision;
+      mockConfig.clearSessionWorkflowPlanRevision = clearRevision;
+
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'Inspect',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'inspect' } },
+          },
+          {
+            content: 'Ship',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'ship' } },
+          },
+        ],
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      });
+
+      expect(setRevision).toHaveBeenCalledWith({
+        planId: 'plan-1',
+        sourceCallId: 'todo-call-1',
+        todoIds: ['inspect', 'ship'],
+      });
+      expect(clearRevision).toHaveBeenCalledOnce();
+    });
+
+    it('requires both the Workflow marker and complete Todo identity', async () => {
+      const setRevision = vi.fn();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      mockConfig.isSessionWorkflowEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.setSessionWorkflowPlanRevision = setRevision;
+      mockConfig.clearSessionWorkflowPlanRevision = vi.fn();
+
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'Inspect',
+            priority: 'medium',
+            status: 'pending',
+          },
+        ],
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      });
+
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'Inspect',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'inspect' } },
+          },
+        ],
+        _meta: {
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      });
+
+      expect(setRevision).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['an in-progress plan', ['in_progress']],
+      ['a partially completed plan', ['completed', 'pending']],
+    ] as const)('does not bind %s for approval', async (_label, statuses) => {
+      const setRevision = vi.fn();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      mockConfig.isSessionWorkflowEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.setSessionWorkflowPlanRevision = setRevision;
+      mockConfig.clearSessionWorkflowPlanRevision = vi.fn();
+
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: statuses.map((status, index) => ({
+          content: `Step ${index + 1}`,
+          priority: 'medium',
+          status,
+          _meta: { qwenTodo: { id: `step-${index + 1}` } },
+        })),
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      });
+
+      expect(setRevision).not.toHaveBeenCalled();
+    });
+
+    it('keeps the last pending approval snapshot across status-only updates', async () => {
+      enableSessionWorkflowRevisionContext();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      const planUpdate: SessionUpdate = {
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'Inspect',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'inspect' } },
+          },
+        ],
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      };
+      await session.sendUpdate(planUpdate);
+
+      await session.sendUpdate({
+        ...planUpdate,
+        entries: [{ ...planUpdate.entries[0]!, status: 'in_progress' }],
+        _meta: {
+          ...planUpdate._meta,
+          qwenTranscript: { planToolCallId: 'todo-call-2' },
+        },
+      });
+
+      const request = await runExitPlanModeApprovalPrompt();
+      expect(request.toolCall._meta).toEqual(
+        expect.objectContaining({
+          qwenTodoApproval: { planId: 'plan-1', sourceCallId: 'todo-call-1' },
+        }),
+      );
+    });
+
+    it('clears the pending approval snapshot when the plan structure changes', async () => {
+      enableSessionWorkflowRevisionContext();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'Inspect',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'inspect' } },
+          },
+        ],
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      });
+
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'Changed scope',
+            priority: 'medium',
+            status: 'in_progress',
+            _meta: { qwenTodo: { id: 'inspect' } },
+          },
+        ],
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-2' },
+        },
+      });
+
+      const request = await runExitPlanModeApprovalPrompt();
+      expect(request.toolCall._meta).toEqual(
+        expect.not.objectContaining({
+          qwenTodoApproval: expect.anything(),
+        }),
+      );
+    });
+
+    it('keeps the approved Todo IDs frozen during execution updates', async () => {
+      enableSessionWorkflowRevisionContext();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'Inspect',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'inspect' } },
+          },
+        ],
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      });
+
+      await runExitPlanModeApprovalPrompt();
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'Inspect',
+            priority: 'medium',
+            status: 'in_progress',
+            _meta: { qwenTodo: { id: 'inspect' } },
+          },
+          {
+            content: 'Unapproved follow-up',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'follow-up' } },
+          },
+        ],
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-2' },
+        },
+      });
+
+      expect(mockConfig.getSessionWorkflowPlanRevision?.()).toEqual({
+        planId: 'plan-1',
+        sourceCallId: 'todo-call-1',
+        todoIds: ['inspect'],
+      });
+    });
+
+    it('clears the revision context on session disposal', () => {
+      const clearRevision = vi.fn();
+      mockConfig.clearSessionWorkflowPlanRevision = clearRevision;
+
+      session.dispose();
+
+      expect(clearRevision).toHaveBeenCalledOnce();
+    });
+  });
+
   describe('setMode', () => {
     it.each([
       ['plan', ApprovalMode.PLAN],
@@ -2837,19 +3105,40 @@ describe('Session', () => {
       );
     });
 
-    it('clears the active Todo plan revision when transitioning into plan mode', async () => {
-      mockConfig.getApprovalMode = vi
-        .fn()
-        .mockReturnValue(ApprovalMode.DEFAULT);
+    it('clears the active Todo plan revision when changing mode', async () => {
+      enableSessionWorkflowRevisionContext();
+      // Capture requires PLAN mode: sending this update in DEFAULT would never
+      // bind a revision, and the assertion below would pass vacuously.
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
       await session.sendUpdate({
         sessionUpdate: 'plan',
-        entries: [{ content: 'Ship', priority: 'medium', status: 'pending' }],
+        entries: [
+          {
+            content: 'Ship',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'ship' } },
+          },
+        ],
         _meta: {
+          qwenSessionWorkflow: true,
           qwenTodoPlan: { id: 'plan-1' },
           qwenTranscript: { planToolCallId: 'todo-call-1' },
         },
       });
 
+      const bound = await runExitPlanModeApprovalPrompt();
+      expect(bound.toolCall._meta).toEqual(
+        expect.objectContaining({
+          qwenTodoApproval: { planId: 'plan-1', sourceCallId: 'todo-call-1' },
+        }),
+      );
+
+      // A user-driven transition into plan mode from a non-plan mode starts a
+      // fresh approval cycle, so the bound revision must be dropped.
+      mockConfig.getApprovalMode = vi
+        .fn()
+        .mockReturnValue(ApprovalMode.DEFAULT);
       await session.setMode({
         sessionId: 'test-session-id',
         modeId: 'plan',
@@ -2864,11 +3153,20 @@ describe('Session', () => {
     });
 
     it('preserves the active Todo plan revision when re-selecting plan mode', async () => {
+      enableSessionWorkflowRevisionContext();
       mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
       await session.sendUpdate({
         sessionUpdate: 'plan',
-        entries: [{ content: 'Ship', priority: 'medium', status: 'pending' }],
+        entries: [
+          {
+            content: 'Ship',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'ship' } },
+          },
+        ],
         _meta: {
+          qwenSessionWorkflow: true,
           qwenTodoPlan: { id: 'plan-1' },
           qwenTranscript: { planToolCallId: 'todo-call-1' },
         },
@@ -2885,6 +3183,50 @@ describe('Session', () => {
           qwenTodoApproval: { planId: 'plan-1', sourceCallId: 'todo-call-1' },
         }),
       );
+    });
+
+    it('keeps the approved Todo plan revision when switching between non-plan modes', async () => {
+      enableSessionWorkflowRevisionContext();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'Ship',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'ship' } },
+          },
+        ],
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'plan-1' },
+          qwenTranscript: { planToolCallId: 'todo-call-1' },
+        },
+      });
+
+      // Approving via exit_plan_mode stamps the revision and leaves PLAN.
+      const bound = await runExitPlanModeApprovalPrompt();
+      expect(bound.toolCall._meta).toEqual(
+        expect.objectContaining({
+          qwenTodoApproval: { planId: 'plan-1', sourceCallId: 'todo-call-1' },
+        }),
+      );
+
+      // The approved plan keeps executing in the new mode, so a non-plan →
+      // non-plan switch (default → auto-edit) touches no approval cycle and
+      // must not disarm the revision mid-execution. (After the helper, the
+      // current mode is DEFAULT.)
+      await session.setMode({
+        sessionId: 'test-session-id',
+        modeId: 'auto-edit',
+      });
+
+      expect(mockConfig.getSessionWorkflowPlanRevision?.()).toEqual({
+        planId: 'plan-1',
+        sourceCallId: 'todo-call-1',
+        todoIds: ['ship'],
+      });
     });
   });
 
@@ -2947,31 +3289,60 @@ describe('Session', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
-      await session.sendUpdate({
-        sessionUpdate: 'plan',
-        entries: [{ content: 'old', priority: 'medium', status: 'pending' }],
-        _meta: {
-          qwenTodoPlan: { id: 'old-plan' },
-          qwenTranscript: { planToolCallId: 'old-call' },
-        },
-      });
 
       const result = session.rewindToTurn(1);
 
       expect(result).toEqual({ targetTurnIndex: 1, apiTruncateIndex: 2 });
       expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
       expect(mockChat.stripThoughtsFromHistory).toHaveBeenCalled();
-      const request = await runExitPlanModeApprovalPrompt();
-      expect(request.toolCall._meta).toEqual(
-        expect.not.objectContaining({
-          qwenTodoApproval: expect.anything(),
-        }),
-      );
       expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
         1,
         { truncatedCount: 2 },
         [],
+      );
+    });
+
+    it('clears the active Todo plan revision when rewinding', async () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+        { role: 'user', parts: [{ text: 'second' }] },
+        { role: 'model', parts: [{ text: 'second reply' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      enableSessionWorkflowRevisionContext();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      await session.sendUpdate({
+        sessionUpdate: 'plan',
+        entries: [
+          {
+            content: 'old',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'old' } },
+          },
+        ],
+        _meta: {
+          qwenSessionWorkflow: true,
+          qwenTodoPlan: { id: 'old-plan' },
+          qwenTranscript: { planToolCallId: 'old-call' },
+        },
+      });
+      const bound = await runExitPlanModeApprovalPrompt();
+      expect(bound.toolCall._meta).toEqual(
+        expect.objectContaining({
+          qwenTodoApproval: { planId: 'old-plan', sourceCallId: 'old-call' },
+        }),
+      );
+
+      session.rewindToTurn(1);
+
+      const rewound = await runExitPlanModeApprovalPrompt();
+      expect(rewound.toolCall._meta).toEqual(
+        expect.not.objectContaining({
+          qwenTodoApproval: expect.anything(),
+        }),
       );
     });
 
@@ -3271,10 +3642,20 @@ describe('Session', () => {
     });
 
     it('clears the active Todo plan revision when restoring history', async () => {
+      enableSessionWorkflowRevisionContext();
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
       await session.sendUpdate({
         sessionUpdate: 'plan',
-        entries: [{ content: 'old', priority: 'medium', status: 'pending' }],
+        entries: [
+          {
+            content: 'old',
+            priority: 'medium',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'old' } },
+          },
+        ],
         _meta: {
+          qwenSessionWorkflow: true,
           qwenTodoPlan: { id: 'old-plan' },
           qwenTranscript: { planToolCallId: 'old-call' },
         },
@@ -20889,6 +21270,7 @@ describe('Session', () => {
     ] as const)(
       'keeps exit_plan_mode approval revision correct after %s',
       async (_label, revisionSource, expectsRevision) => {
+        enableSessionWorkflowRevisionContext();
         let mode = ApprovalMode.PLAN;
         const hookSpy = vi
           .spyOn(core, 'firePermissionRequestHook')
@@ -20960,9 +21342,11 @@ describe('Session', () => {
               content: 'Ship',
               priority: 'medium',
               status: 'pending',
+              _meta: { qwenTodo: { id: 'ship' } },
             },
           ],
           _meta: {
+            qwenSessionWorkflow: true,
             qwenTodoPlan: { id: 'plan-1' },
             qwenTranscript: { planToolCallId: 'todo-call-1' },
           },

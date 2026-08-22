@@ -119,6 +119,7 @@ import { isSubagentLikeExecutionContext } from '../../agents/runtime/subagent-pl
 import {
   buildAgentTranscriptAttach,
   getAgentMetaPath,
+  getAgentMetaTerminalSummary,
   attachJsonlTranscriptWriter,
   patchAgentMeta,
   writeAgentMeta,
@@ -134,11 +135,26 @@ import type { AuthOverrides } from '../../models/content-generator-config.js';
 function persistBackgroundCancellation(
   metaPath: string,
   persistedStatus: 'running' | 'cancelled',
+  sessionWorkflow: boolean,
+  stats?: {
+    totalTokens: number;
+    outputTokens: number;
+    toolUses: number;
+    durationMs: number;
+  },
+  recentActivities?: ReadonlyArray<{
+    name: string;
+    description: string;
+    at: number;
+  }>,
 ): void {
   patchAgentMeta(metaPath, {
     status: persistedStatus,
     lastUpdatedAt: new Date().toISOString(),
     lastError: undefined,
+    ...(sessionWorkflow
+      ? getAgentMetaTerminalSummary(stats, recentActivities)
+      : {}),
   });
 }
 
@@ -987,6 +1003,19 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
       return 'Parameter "todo_id" must be a non-empty string of at most 500 characters.';
     }
 
+    const workflowRevision = this.config.getSessionWorkflowPlanRevision?.();
+    if (workflowRevision && getCurrentAgentId() === null) {
+      if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
+        return 'Top-level Agents cannot start until the Session Workflow plan is approved.';
+      }
+      if (!params.todo_id) {
+        return 'Parameter "todo_id" is required for a top-level Agent in the approved Session Workflow.';
+      }
+      if (!workflowRevision.todoIds.includes(params.todo_id)) {
+        return `Parameter "todo_id" must match the approved Session Workflow (${workflowRevision.todoIds.join(', ')}).`;
+      }
+    }
+
     if (params.subagent_type !== undefined) {
       if (
         typeof params.subagent_type !== 'string' ||
@@ -1415,16 +1444,20 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
    */
   private setupEventListeners(
     updateOutput?: (output: ToolResultDisplay) => void,
+    captureWorkflowDetails = false,
+    eventEmitter = this.eventEmitter,
   ): void {
     let pendingConfirmationCallId: string | undefined;
     const preserveProtocolPayloads = !this.config.isInteractive();
 
-    this.eventEmitter.on(AgentEventType.START, () => {
+    eventEmitter.on(AgentEventType.START, () => {
       this.updateDisplay({ status: 'running' }, updateOutput);
     });
 
-    this.eventEmitter.on(AgentEventType.TOOL_CALL, (...args: unknown[]) => {
+    eventEmitter.on(AgentEventType.TOOL_CALL, (...args: unknown[]) => {
       const event = args[0] as AgentToolCallEvent;
+      const skill =
+        event.name.toLowerCase() === 'skill' ? event.args['skill'] : undefined;
       const newToolCall = {
         callId: event.callId,
         name: event.name,
@@ -1437,12 +1470,24 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       this.updateDisplay(
         {
           toolCalls: [...this.currentToolCalls!],
+          ...(captureWorkflowDetails &&
+          typeof skill === 'string' &&
+          skill.trim()
+            ? {
+                skills: [
+                  ...new Set([
+                    ...(this.currentDisplay?.skills ?? []),
+                    skill.trim(),
+                  ]),
+                ],
+              }
+            : {}),
         },
         updateOutput,
       );
     });
 
-    this.eventEmitter.on(AgentEventType.TOOL_RESULT, (...args: unknown[]) => {
+    eventEmitter.on(AgentEventType.TOOL_RESULT, (...args: unknown[]) => {
       const event = args[0] as AgentToolResultEvent;
       const toolCallIndex = this.currentToolCalls!.findIndex(
         (call) => call.callId === event.callId,
@@ -1485,7 +1530,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       }
     });
 
-    this.eventEmitter.on(AgentEventType.FINISH, (...args: unknown[]) => {
+    eventEmitter.on(AgentEventType.FINISH, (...args: unknown[]) => {
       const event = args[0] as AgentFinishEvent;
       this.updateDisplay(
         {
@@ -1496,7 +1541,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       );
     });
 
-    this.eventEmitter.on(AgentEventType.ERROR, (...args: unknown[]) => {
+    eventEmitter.on(AgentEventType.ERROR, (...args: unknown[]) => {
       const event = args[0] as AgentErrorEvent;
       this.updateDisplay(
         {
@@ -1512,23 +1557,20 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     // output tokens across rounds.  We use candidatesTokenCount (output-only)
     // to stay consistent with the main stream's chars/4 output-token estimate.
     let accumulatedOutputTokens = 0;
-    this.eventEmitter.on(
-      AgentEventType.USAGE_METADATA,
-      (...args: unknown[]) => {
-        const event = args[0] as AgentUsageEvent;
-        const outputTokens = event.usage?.candidatesTokenCount ?? 0;
-        if (outputTokens > 0) {
-          accumulatedOutputTokens += outputTokens;
-          this.updateDisplay(
-            { tokenCount: accumulatedOutputTokens },
-            updateOutput,
-          );
-        }
-      },
-    );
+    eventEmitter.on(AgentEventType.USAGE_METADATA, (...args: unknown[]) => {
+      const event = args[0] as AgentUsageEvent;
+      const outputTokens = event.usage?.candidatesTokenCount ?? 0;
+      if (outputTokens > 0) {
+        accumulatedOutputTokens += outputTokens;
+        this.updateDisplay(
+          { tokenCount: accumulatedOutputTokens },
+          updateOutput,
+        );
+      }
+    });
 
     // Indicate when a tool call is waiting for approval
-    this.eventEmitter.on(
+    eventEmitter.on(
       AgentEventType.TOOL_WAITING_APPROVAL,
       (...args: unknown[]) => {
         const event = args[0] as AgentApprovalRequestEvent;
@@ -2213,6 +2255,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     signal?: AbortSignal,
     updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
+    const sessionWorkflowAgent =
+      this.config.getSessionWorkflowPlanRevision?.() !== undefined;
     if (this.params.plan_mode_required === true) {
       if (
         !this.params.name ||
@@ -2607,7 +2651,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         status: 'running' as const,
         subagentColor: subagentConfig.color,
       };
-      this.setupEventListeners(updateOutput);
       if (updateOutput) {
         updateOutput(this.currentDisplay);
       }
@@ -3030,6 +3073,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         subagentDispose = result.dispose;
         taskPrompt = this.params.prompt;
       }
+      const runtimeEventEmitter =
+        subagent.getCore().getEventEmitter?.() ?? this.eventEmitter;
+      if (!shouldRunInBackground) {
+        this.setupEventListeners(
+          updateOutput,
+          sessionWorkflowAgent,
+          runtimeEventEmitter,
+        );
+      }
 
       // ── Optional worktree isolation (Phase 3: notice to prompt) ───
       // Prepend a notice to the task prompt telling the subagent it is
@@ -3239,6 +3291,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           parentAgentId: getCurrentAgentId(),
           createdAt: new Date().toISOString(),
           status: 'running',
+          ...(sessionWorkflowAgent ? { sessionWorkflow: true } : {}),
           isBackgrounded: true,
           isolation: this.params.isolation,
           lastUpdatedAt: new Date().toISOString(),
@@ -3559,6 +3612,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                   status: 'completed',
                   lastUpdatedAt: new Date().toISOString(),
                   lastError: undefined,
+                  ...(sessionWorkflowAgent
+                    ? getAgentMetaTerminalSummary(
+                        completionStats,
+                        registry.get(hookOpts.agentId)?.recentActivities,
+                      )
+                    : {}),
                 });
                 registry.complete(hookOpts.agentId, finalText, completionStats);
               } else if (
@@ -3579,6 +3638,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                   metaPath,
                   registry.get(hookOpts.agentId)?.persistedCancellationStatus ??
                     'cancelled',
+                  sessionWorkflowAgent,
+                  completionStats,
+                  registry.get(hookOpts.agentId)?.recentActivities,
                 );
               } else {
                 registry.fail(
@@ -3591,6 +3653,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                   lastUpdatedAt: new Date().toISOString(),
                   lastError:
                     finalText || `Agent terminated with mode: ${terminateMode}`,
+                  ...(sessionWorkflowAgent
+                    ? getAgentMetaTerminalSummary(
+                        completionStats,
+                        registry.get(hookOpts.agentId)?.recentActivities,
+                      )
+                    : {}),
                 });
               }
               break;
@@ -3635,22 +3703,33 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             // status so the model's notification matches what task_stop
             // requested rather than reporting it as a generic failure.
             if (turnAbortController.signal.aborted) {
+              const completionStats = getCompletionStats();
               registry.finalizeCancelled(
                 hookOpts.agentId,
                 errorMsg,
-                getCompletionStats(),
+                completionStats,
               );
               persistBackgroundCancellation(
                 metaPath,
                 registry.get(hookOpts.agentId)?.persistedCancellationStatus ??
                   'cancelled',
+                sessionWorkflowAgent,
+                completionStats,
+                registry.get(hookOpts.agentId)?.recentActivities,
               );
             } else {
-              registry.fail(hookOpts.agentId, errorMsg, getCompletionStats());
+              const completionStats = getCompletionStats();
+              registry.fail(hookOpts.agentId, errorMsg, completionStats);
               patchAgentMeta(metaPath, {
                 status: 'failed',
                 lastUpdatedAt: new Date().toISOString(),
                 lastError: errorMsg,
+                ...(sessionWorkflowAgent
+                  ? getAgentMetaTerminalSummary(
+                      completionStats,
+                      registry.get(hookOpts.agentId)?.recentActivities,
+                    )
+                  : {}),
               });
             }
           } finally {
@@ -3741,6 +3820,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               lastUpdatedAt: new Date().toISOString(),
               lastError: undefined,
               resumeCount: hotContinuationCount,
+              // Mirror the resume-service twins (background-agent-resume.ts):
+              // the completed run's terminal summary must not survive into the
+              // continuation — a crash mid-continuation would otherwise let
+              // discovery restore run N-1's stats/activities as the live run's
+              // state.
+              stats: undefined,
+              recentActivities: undefined,
             });
 
             const nextContextState = new ContextState();
@@ -3959,9 +4045,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       //
       // This is a separate listener from setupEventListeners' TOOL_CALL
       // handler (which feeds `currentDisplay.toolCalls` for the committed
-      // inline frame). They consume different state — committed inline UI
-      // vs. live registry stats — and setupEventListeners runs before we
-      // know the flavor or the registry id, so folding them is awkward.
+      // inline frame). They consume different state: committed inline UI
+      // versus live registry stats.
       let fgLiveToolCallCount = 0;
       const refreshFgLiveStats = () => {
         const entry = registry.get(hookOpts.agentId);
@@ -3987,12 +4072,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       const onFgUsageMetadata = () => {
         refreshFgLiveStats();
       };
-      this.eventEmitter.on(AgentEventType.TOOL_CALL, onFgToolCall);
-      this.eventEmitter.on(AgentEventType.USAGE_METADATA, onFgUsageMetadata);
+      runtimeEventEmitter.on(AgentEventType.TOOL_CALL, onFgToolCall);
+      runtimeEventEmitter.on(AgentEventType.USAGE_METADATA, onFgUsageMetadata);
 
       try {
         ({ cleanup: cleanupFgJsonl } = attachJsonlTranscriptWriter(
-          this.eventEmitter,
+          runtimeEventEmitter,
           fgJsonlPath,
           fgTranscriptAttachOptions,
         ));
@@ -4028,6 +4113,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           parentAgentId: getCurrentAgentId(),
           createdAt: new Date().toISOString(),
           status: 'running',
+          ...(sessionWorkflowAgent ? { sessionWorkflow: true } : {}),
           isBackgrounded: false,
           isolation: this.params.isolation,
           lastUpdatedAt: new Date().toISOString(),
@@ -4105,8 +4191,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           // Helper logs its own failures; never mask the original
           // error path with cleanup noise.
         }
-        this.eventEmitter.off(AgentEventType.TOOL_CALL, onFgToolCall);
-        this.eventEmitter.off(AgentEventType.USAGE_METADATA, onFgUsageMetadata);
+        runtimeEventEmitter.off(AgentEventType.TOOL_CALL, onFgToolCall);
+        runtimeEventEmitter.off(
+          AgentEventType.USAGE_METADATA,
+          onFgUsageMetadata,
+        );
         signal?.removeEventListener('abort', onParentAbort);
         cleanupOwnedMonitorNotifications();
         // Release the JSONL writer's listeners and close the fd before

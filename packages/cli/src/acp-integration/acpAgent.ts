@@ -3943,6 +3943,7 @@ class QwenAgent implements Agent {
   >();
   private readonly pendingConfigCleanup = new Map<string, Set<Config>>();
   private readonly initializingConfigs = new Set<Config>();
+  private sessionWorkflowEnabledOverride: boolean | undefined;
   private managedShuttingDown = false;
   private clientCapabilities: ClientCapabilities | undefined;
   /** Set once the daemon negotiates active-work reporting; one per channel. */
@@ -10658,8 +10659,22 @@ class QwenAgent implements Agent {
             session.clearActiveTodoPlanRevision();
           }
           session.clearTodoStopGuardTrust();
+        } else if (previous === 'plan') {
+          session.clearActiveTodoPlanRevision();
         }
         return { previous, current };
+      }
+      case SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow: {
+        const enabled = params['enabled'];
+        if (typeof enabled !== 'boolean') {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing Session Workflow setting',
+          );
+        }
+        this.sessionWorkflowEnabledOverride = enabled;
+        this.applySessionWorkflowOverrideToLiveSessions();
+        return { enabled, sessionsUpdated: this.sessions.size };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionLanguage: {
         const sessionId = params['sessionId'];
@@ -12284,6 +12299,28 @@ class QwenAgent implements Agent {
         const envChanged =
           envResult.updatedKeys.length > 0 || envResult.removedKeys.length > 0;
 
+        // A settings-file edit to the Session Workflow gate must reach live
+        // sessions too. The UI ext method pins every Session's provider to the
+        // daemon-held override, so without re-deriving it here a disk change
+        // (hand edit, dotfile sync) would stay masked until daemon restart.
+        const readSessionWorkflow = (merged: Record<string, unknown>) =>
+          (merged as { experimental?: { sessionWorkflow?: unknown } })
+            .experimental?.sessionWorkflow === true;
+        const reloadedSessionWorkflow = readSessionWorkflow(newMerged);
+        // Diff against the live override too: the UI write path
+        // (workspaceSessionWorkflow) pins the override without updating
+        // `this.settings`, so a merged↔merged diff alone misses a disk change
+        // that contradicts a UI-pinned value — the gate would stay stuck
+        // against the file until daemon restart.
+        if (
+          reloadedSessionWorkflow !== readSessionWorkflow(oldMerged) ||
+          (this.sessionWorkflowEnabledOverride !== undefined &&
+            reloadedSessionWorkflow !== this.sessionWorkflowEnabledOverride)
+        ) {
+          this.sessionWorkflowEnabledOverride = reloadedSessionWorkflow;
+          this.applySessionWorkflowOverrideToLiveSessions();
+        }
+
         const sessions = [...this.sessions.entries()];
         const refreshed: string[] = [];
         const skipped: string[] = [];
@@ -12347,16 +12384,19 @@ class QwenAgent implements Agent {
               config.setDisabledTools(new Set(disabled));
 
               const newMode = newMerged.tools?.approvalMode;
+              const previousMode = config.getApprovalMode();
               if (
                 newMode &&
                 APPROVAL_MODES.includes(newMode as ApprovalMode) &&
-                newMode !== config.getApprovalMode()
+                newMode !== previousMode
               ) {
                 try {
                   config.setApprovalMode(newMode as ApprovalMode);
                   if (newMode === 'plan') {
                     session.clearActiveTodoPlanRevision();
                     session.clearTodoStopGuardTrust();
+                  } else if (previousMode === 'plan') {
+                    session.clearActiveTodoPlanRevision();
                   }
                 } catch (err) {
                   debugLogger.warn(
@@ -12952,6 +12992,23 @@ class QwenAgent implements Agent {
     }
   }
 
+  /**
+   * Pins every live Session's workflow gate to the daemon-held override and
+   * drops any bound plan revision. The provider reads the field rather than
+   * capturing a value so a later re-derivation (a settings-file reload) reaches
+   * sessions that were pinned earlier.
+   */
+  private applySessionWorkflowOverrideToLiveSessions(): void {
+    for (const session of this.sessions.values()) {
+      session
+        .getConfig()
+        .setSessionWorkflowEnabledProvider?.(
+          () => this.sessionWorkflowEnabledOverride === true,
+        );
+      session.clearActiveTodoPlanRevision();
+    }
+  }
+
   private setupFileSystem(config: Config): void {
     if (!this.clientCapabilities?.fs) return;
 
@@ -13017,6 +13074,11 @@ class QwenAgent implements Agent {
       (operation) => this.runExclusiveHistoryMutation(sessionId, operation),
       () => this.activeWorkReporter?.notifyChanged(),
     );
+    if (this.sessionWorkflowEnabledOverride !== undefined) {
+      config.setSessionWorkflowEnabledProvider?.(
+        () => this.sessionWorkflowEnabledOverride === true,
+      );
+    }
     let published = false;
     try {
       options.primeSession?.(session);
