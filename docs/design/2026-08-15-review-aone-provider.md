@@ -63,7 +63,14 @@ findings), and `--comment` on an Aone target refuses cleanly.
 - `comment-status.ts` anchor-status and `presubmit.ts` CI checks: skip for
   Aone v1 (the skill already handles their absence).
 
+_Update (2026-08-21, #9619): `test-plan` is no longer unbacked — its body
+fetch routes through the platform reader (the MR description on Aone, already
+carried by the reader's fetch metadata), so the Test Plan check runs on Aone
+targets like any other._
+
 `--comment` on an Aone target refuses with a clear message (posting is Phase 3).
+_Update (2026-08-19, #9491): posting landed with Phase 3 — see the 2026-08-13
+design log's Phase 3 entries._
 
 ## Key design decisions
 
