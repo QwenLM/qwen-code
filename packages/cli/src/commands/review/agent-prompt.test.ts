@@ -1618,17 +1618,22 @@ describe('--roster — every prompt the plan requires, in one call', () => {
     }
   });
 
-  it('states the launch type on the audit-round and single-block paths too', () => {
+  it('states the launch type on the audit-round path, and on NO channel in a single block', () => {
     // `runRoster` is not the only emission path. Step 4's verify shards and
     // Step 5's audit rounds are built by the other two, and they are both the
     // most numerous agents a high-effort review launches and the ones
     // furthest from SKILL.md's own statement of the rule — an omitted
     // `subagent_type` there resolves to `general-purpose` at full cost.
     //
-    // The single-block path states it on STDERR: its stdout is the block the
-    // orchestrator pastes verbatim, and the delivery check compares that
-    // against the record, so anything added to stdout makes every launch
-    // differ from its record.
+    // The two paths differ in whether they CAN carry the note. The audit-round
+    // header can: it sits outside the ───── blocks, and only the blocks become
+    // agent prompts. The single-block path cannot: its whole stdout is the
+    // block the orchestrator pastes verbatim and the delivery check compares
+    // that against the record — and stderr is not a second channel either,
+    // because `ShellExecutionService` returns `stdout + separator + stderr` as
+    // one string, so a note there lands inside the same relayed text. This
+    // test pins both halves: the header carries it, the single block emits it
+    // nowhere.
     const dir = mkdtempSync(join(tmpdir(), 'ap-type-paths-'));
     try {
       const plan = join(dir, 'plan.json');
