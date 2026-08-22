@@ -114,4 +114,23 @@ describe('WebViewContent', () => {
 
     expect(html).toContain('data-web-shell-transcript="true"');
   });
+
+  it('keeps script-src without wasm-unsafe-eval when the flag is off', () => {
+    setWebShellTranscriptFlag(false);
+    const webview = createMockWebview();
+
+    const html = WebViewContent.generate(webview as never, fakeExtensionUri);
+
+    expect(html).toContain('script-src https://csp.source;');
+    expect(html).not.toContain('wasm-unsafe-eval');
+  });
+
+  it('grants wasm-unsafe-eval to script-src when the flag is on', () => {
+    setWebShellTranscriptFlag(true);
+    const webview = createMockWebview();
+
+    const html = WebViewContent.generate(webview as never, fakeExtensionUri);
+
+    expect(html).toContain("script-src https://csp.source 'wasm-unsafe-eval';");
+  });
 });
