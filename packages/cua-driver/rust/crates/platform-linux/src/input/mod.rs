@@ -1059,44 +1059,52 @@ pub fn with_x11_foreground<T>(
 }
 
 fn x11_focus_is_within(display: *mut x11::xlib::Display, target: x11::xlib::Window) -> bool {
-    let mut focused: x11::xlib::Window = 0;
-    let mut revert_to = 0;
-    unsafe {
-        x11::xlib::XGetInputFocus(display, &mut focused, &mut revert_to);
-    }
-    if focused == target {
-        return true;
-    }
-    let root = unsafe { x11::xlib::XDefaultRootWindow(display) };
-    while focused != 0 && focused != root {
-        let mut query_root = 0;
-        let mut parent = 0;
-        let mut children: *mut x11::xlib::Window = ptr::null_mut();
-        let mut child_count = 0;
-        let status = unsafe {
-            x11::xlib::XQueryTree(
-                display,
-                focused,
-                &mut query_root,
-                &mut parent,
-                &mut children,
-                &mut child_count,
-            )
-        };
-        if !children.is_null() {
-            unsafe {
-                x11::xlib::XFree(children.cast());
-            }
+    let previous_handler = unsafe { x11::xlib::XSetErrorHandler(Some(ignore_x_error)) };
+    let result = (|| {
+        let mut focused: x11::xlib::Window = 0;
+        let mut revert_to = 0;
+        unsafe {
+            x11::xlib::XGetInputFocus(display, &mut focused, &mut revert_to);
         }
-        if status == 0 || parent == 0 || parent == focused {
-            return false;
-        }
-        if parent == target {
+        if focused == target {
             return true;
         }
-        focused = parent;
+        let root = unsafe { x11::xlib::XDefaultRootWindow(display) };
+        while focused != 0 && focused != root {
+            let mut query_root = 0;
+            let mut parent = 0;
+            let mut children: *mut x11::xlib::Window = ptr::null_mut();
+            let mut child_count = 0;
+            let status = unsafe {
+                x11::xlib::XQueryTree(
+                    display,
+                    focused,
+                    &mut query_root,
+                    &mut parent,
+                    &mut children,
+                    &mut child_count,
+                )
+            };
+            if !children.is_null() {
+                unsafe {
+                    x11::xlib::XFree(children.cast());
+                }
+            }
+            if status == 0 || parent == 0 || parent == focused {
+                return false;
+            }
+            if parent == target {
+                return true;
+            }
+            focused = parent;
+        }
+        false
+    })();
+    unsafe {
+        x11::xlib::XSync(display, 0);
+        x11::xlib::XSetErrorHandler(previous_handler);
     }
-    false
+    result
 }
 
 /// Activate `xid` and LEAVE it active (no restore) — the persistent foreground

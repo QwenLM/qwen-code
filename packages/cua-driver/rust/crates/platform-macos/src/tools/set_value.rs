@@ -4,9 +4,8 @@
 //!
 //! * **AXPopUpButton**: Find the child option whose AXTitle or AXValue matches
 //!   `value` (case-insensitive) and AXPress it directly.  The native macOS popup
-//!   menu is never opened, so focus is never stolen.  Falls back to Safari
-//!   `osascript do JavaScript` for WebKit `<select>` elements that expose no AX
-//!   children when the popup is closed.
+//!   menu is never opened, so focus is never stolen. Safari's front-document
+//!   fallback is used only when the exact requested window is already focused.
 //!
 //! * **Everything else**: Write `AXValue` directly (sliders, steppers, native
 //!   text fields that expose a settable AXValue).
@@ -217,7 +216,7 @@ impl Tool for SetValueTool {
             "set_value.AXValue",
             || async move {
                 tokio::task::spawn_blocking(move || {
-                    set_value_blocking(element_ptr, element_index, pid, &value)
+                    set_value_blocking(element_ptr, element_index, pid, window_id, &value)
                 })
                 .await
             },
@@ -248,6 +247,9 @@ impl Tool for SetValueTool {
                 }
                 ToolResult::text(msg).with_structured(structured)
             }
+            Ok(Err(error)) if error.is::<SafariFrontDocumentUnavailable>() => {
+                safari_front_document_refusal(pid, window_id)
+            }
             Ok(Err(e)) => ToolResult::error(format!("set_value failed: {e}")),
             Err(e) => ToolResult::error(format!("Task error: {e}")),
         }
@@ -273,6 +275,45 @@ struct SetValueOutcome {
     changed: Option<bool>,
 }
 
+#[derive(Debug)]
+struct SafariFrontDocumentUnavailable;
+
+impl std::fmt::Display for SafariFrontDocumentUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Safari's front document is not the exact requested window")
+    }
+}
+
+impl std::error::Error for SafariFrontDocumentUnavailable {}
+
+fn safari_front_document_matches(
+    pid: i32,
+    window_id: u32,
+    frontmost_pid: Option<i32>,
+    focused_window_id: Option<u32>,
+) -> bool {
+    frontmost_pid == Some(pid) && focused_window_id == Some(window_id)
+}
+
+fn safari_front_document_refusal(pid: i32, window_id: u32) -> ToolResult {
+    let reason = format!(
+        "Safari's front document could not be proven to be requested window {window_id}; \
+         no JavaScript was executed"
+    );
+    ToolResult::error(format!("Background input refused: {reason}"))
+        .with_structured(serde_json::json!({
+            "code": "background_unavailable",
+            "effect": "refused",
+            "pid": pid,
+            "window_id": window_id,
+            "reason": reason,
+            "escalation": {
+                "recommended": "foreground",
+                "reason": "Bring the exact Safari window to the foreground, take a fresh observation, then retry; or use browser page tools."
+            }
+        }))
+}
+
 fn apply_surface_trust(outcome: &mut SetValueOutcome, ax_echo_surface: bool) {
     if ax_echo_surface && outcome.verified == Some(true) {
         outcome.verified = Some(false);
@@ -296,6 +337,7 @@ fn set_value_blocking(
     element_ptr: usize,
     element_index: usize,
     pid: i32,
+    window_id: u32,
     value: &str,
 ) -> anyhow::Result<SetValueOutcome> {
     let element = element_ptr as AXUIElementRef;
@@ -305,12 +347,18 @@ fn set_value_blocking(
     if role == "AXPopUpButton" {
         let element_title = unsafe { copy_string_attr(element, "AXTitle") }.unwrap_or_default();
         // Menu-item selection, not an AXValue write — no read-back to report.
-        select_popup_option(element, element_index, pid, value, &element_title).map(|detail| {
-            SetValueOutcome {
-                detail,
-                verified: None,
-                changed: None,
-            }
+        select_popup_option(
+            element,
+            element_index,
+            pid,
+            window_id,
+            value,
+            &element_title,
+        )
+        .map(|detail| SetValueOutcome {
+            detail,
+            verified: None,
+            changed: None,
         })
     } else {
         // Default path: write AXValue directly. Numeric controls (AXSlider /
@@ -487,6 +535,7 @@ fn select_popup_option(
     element: AXUIElementRef,
     element_index: usize,
     pid: i32,
+    window_id: u32,
     value: &str,
     element_title: &str,
 ) -> anyhow::Result<String> {
@@ -554,6 +603,15 @@ fn select_popup_option(
             "AXPopUpButton [{element_index}] '{element_title}' has no AX children and \
              target is '{app_name}' (not Safari) — no fallback available."
         )
+    }
+
+    if !safari_front_document_matches(
+        pid,
+        window_id,
+        apps::frontmost_pid(),
+        crate::ax::bindings::focused_window_id_of_pid(pid),
+    ) {
+        return Err(anyhow::Error::new(SafariFrontDocumentUnavailable));
     }
 
     set_select_via_js(element_index, element_title, value)
@@ -677,7 +735,18 @@ fn hex_digit(n: u8) -> char {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_surface_trust, apply_verification_label, classify_write, SetValueOutcome};
+    use super::{
+        apply_surface_trust, apply_verification_label, classify_write,
+        safari_front_document_matches, SetValueOutcome,
+    };
+
+    #[test]
+    fn safari_script_requires_the_exact_frontmost_window() {
+        assert!(safari_front_document_matches(42, 7, Some(42), Some(7)));
+        assert!(!safari_front_document_matches(42, 7, Some(9), Some(7)));
+        assert!(!safari_front_document_matches(42, 7, Some(42), Some(8)));
+        assert!(!safari_front_document_matches(42, 7, Some(42), None));
+    }
 
     #[test]
     fn unreadable_value_reports_neither_verified_nor_changed() {

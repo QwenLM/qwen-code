@@ -282,7 +282,17 @@ pub fn walk_tree_bounded(
     max_elements: usize,
     max_depth: usize,
 ) -> UiaTreeResult {
-    unsafe { walk_tree_unsafe(hwnd, query, max_elements, max_depth) }
+    walk_tree_bounded_with_runtime_ids(hwnd, query, max_elements, max_depth, false)
+}
+
+pub fn walk_tree_bounded_with_runtime_ids(
+    hwnd: u64,
+    query: Option<&str>,
+    max_elements: usize,
+    max_depth: usize,
+    collect_runtime_ids: bool,
+) -> UiaTreeResult {
+    unsafe { walk_tree_unsafe(hwnd, query, max_elements, max_depth, collect_runtime_ids) }
 }
 
 unsafe fn walk_tree_unsafe(
@@ -290,6 +300,7 @@ unsafe fn walk_tree_unsafe(
     query: Option<&str>,
     max_elements: usize,
     max_depth: usize,
+    collect_runtime_ids: bool,
 ) -> UiaTreeResult {
     let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
 
@@ -454,6 +465,7 @@ unsafe fn walk_tree_unsafe(
         0,
         None,
         false,
+        collect_runtime_ids,
         &mut nodes,
         &mut lines,
         &mut counter,
@@ -523,6 +535,7 @@ unsafe fn walk_tree_unsafe(
                     &automation,
                     &cache_req,
                     target_pid,
+                    collect_runtime_ids,
                     &mut fallback_nodes,
                     &mut fallback_lines,
                     &mut fallback_counter,
@@ -619,6 +632,7 @@ unsafe fn walk_root_by_pid(
     automation: &IUIAutomation,
     cache_req: &IUIAutomationCacheRequest,
     target_pid: u32,
+    collect_runtime_ids: bool,
     nodes: &mut Vec<UiaNode>,
     lines: &mut Vec<(usize, String)>,
     counter: &mut usize,
@@ -705,6 +719,7 @@ unsafe fn walk_root_by_pid(
             0,
             None,
             false,
+            collect_runtime_ids,
             nodes,
             lines,
             counter,
@@ -731,6 +746,7 @@ unsafe fn walk_cached(
         depth,
         None,
         false,
+        false,
         nodes,
         lines,
         counter,
@@ -747,6 +763,7 @@ unsafe fn walk_cached_bounded(
     depth: usize,
     parent_index: Option<usize>,
     in_web_content: bool,
+    collect_runtime_ids: bool,
     nodes: &mut Vec<UiaNode>,
     lines: &mut Vec<(usize, String)>,
     counter: &mut usize,
@@ -805,7 +822,11 @@ unsafe fn walk_cached_bounded(
                 automation_id: automation_id.clone(),
                 help_text: help_text.clone(),
                 actions: actions.clone(),
-                runtime_id: read_runtime_id(element),
+                runtime_id: if collect_runtime_ids {
+                    read_runtime_id(element)
+                } else {
+                    None
+                },
                 enabled,
                 selected,
                 element_ptr: ptr,
@@ -826,7 +847,11 @@ unsafe fn walk_cached_bounded(
                 automation_id: automation_id.clone(),
                 help_text: help_text.clone(),
                 actions: vec![],
-                runtime_id: read_runtime_id(element),
+                runtime_id: if collect_runtime_ids {
+                    read_runtime_id(element)
+                } else {
+                    None
+                },
                 enabled,
                 selected,
                 element_ptr: ptr,
@@ -861,6 +886,7 @@ unsafe fn walk_cached_bounded(
                         depth + 1,
                         emitted_parent,
                         in_web_content || control_type.eq_ignore_ascii_case("Document"),
+                        collect_runtime_ids,
                         nodes,
                         lines,
                         counter,

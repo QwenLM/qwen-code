@@ -160,15 +160,15 @@ fn minimized_element_refusal(
     })
 }
 
-fn tool_result_text(result: ToolResult) -> String {
-    result
-        .content
-        .into_iter()
-        .find_map(|content| match content {
-            cua_driver_core::protocol::Content::Text { text, .. } => Some(text),
-            _ => None,
-        })
-        .unwrap_or_else(|| "element action was refused".to_owned())
+enum ClickDispatchError {
+    Refusal(ToolResult),
+    Failure(anyhow::Error),
+}
+
+impl From<anyhow::Error> for ClickDispatchError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Failure(error)
+    }
 }
 
 /// Convert (px, py) — "window-local screenshot pixels, top-left origin
@@ -1344,11 +1344,12 @@ impl Tool for GetWindowStateTool {
         let out_file = screenshot_out_file.clone();
         let blocking = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
             let tree_result = if do_tree {
-                Some(crate::uia::walk_tree_bounded(
+                Some(crate::uia::walk_tree_bounded_with_runtime_ids(
                     hwnd,
                     q.as_deref(),
                     max_elements,
                     max_depth,
+                    revision_request_for_capture.is_some(),
                 ))
             } else {
                 None
@@ -3648,7 +3649,7 @@ impl Tool for ClickTool {
             //     concept — PostMessage produces the actual WM_LBUTTONDBLCLK)
             let state_clone = self.state.clone();
             let use_uia_invoke = (btn == "left" || btn == "middle") && count == 1;
-            let result = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+            let result = tokio::task::spawn_blocking(move || -> Result<String, ClickDispatchError> {
                 // Direct Chromium UIA Invoke can return S_OK without firing a
                 // DOM event while occluded. Try the honest coordinate actuator
                 // first: it lands while visible and reports occlusion without
@@ -3659,14 +3660,16 @@ impl Tool for ClickTool {
                     let (cx, cy) = resolve_onscreen_point_with_scroll(
                         &state_clone.element_cache, pid, hwnd, idx, cx, cy, "clicking",
                     )
-                    .map_err(|result| anyhow::anyhow!(tool_result_text(result)))?;
+                    .map_err(ClickDispatchError::Refusal)?;
                     return crate::input::inject_click_screen(hwnd, cx, cy, count, &btn)
                         .map(|()| format!(
                             "✅ Injected click on [{idx}] (screen ({cx},{cy}), background, no foreground swap)."
                         ))
-                        .map_err(|error| anyhow::anyhow!(
-                            "__CUA_BG_UNAVAILABLE_CLICK__{error}"
-                        ));
+                        .map_err(|error| {
+                            ClickDispatchError::Failure(anyhow::anyhow!(
+                                "__CUA_BG_UNAVAILABLE_CLICK__{error}"
+                            ))
+                        });
                 }
                 if use_uia_invoke {
                     // Retain the element out of the cache (AddRef under the
@@ -3774,7 +3777,7 @@ impl Tool for ClickTool {
                         cy,
                         "clicking",
                     )
-                    .map_err(|result| anyhow::anyhow!(tool_result_text(result)))?;
+                    .map_err(ClickDispatchError::Refusal)?;
                     return crate::input::inject_click_screen(hwnd, cx, cy, count, &btn)
                         .map(|()| {
                             format!(
@@ -3782,7 +3785,9 @@ impl Tool for ClickTool {
                             )
                         })
                         .map_err(|error| {
-                            anyhow::anyhow!("__CUA_BG_UNAVAILABLE_CLICK__{error}")
+                            ClickDispatchError::Failure(anyhow::anyhow!(
+                                "__CUA_BG_UNAVAILABLE_CLICK__{error}"
+                            ))
                         });
                 }
                 crate::input::post_click_screen(hwnd, cx, cy, count, &btn)?;
@@ -3802,7 +3807,10 @@ impl Tool for ClickTool {
                 Ok(Ok(msg)) => ToolResult::text(msg).with_structured(
                     json!({ "path": "ax", "verified": false, "effect": "unverifiable" }),
                 ),
-                Ok(Err(e)) if e.to_string().contains("__CUA_BG_UNAVAILABLE_CLICK__") => {
+                Ok(Err(ClickDispatchError::Refusal(result))) => result,
+                Ok(Err(ClickDispatchError::Failure(e)))
+                    if e.to_string().contains("__CUA_BG_UNAVAILABLE_CLICK__") =>
+                {
                     let cause = e.to_string().replace("__CUA_BG_UNAVAILABLE_CLICK__", "");
                     crate::input::delivery::background_unavailable_error_with_cause(
                         hwnd,
@@ -3810,7 +3818,7 @@ impl Tool for ClickTool {
                         cause,
                     )
                 }
-                Ok(Err(e)) => ToolResult::error(e.to_string()),
+                Ok(Err(ClickDispatchError::Failure(e))) => ToolResult::error(e.to_string()),
                 Err(e) => ToolResult::error(format!("Task error: {e}")),
             }
         } else if let (Some(mut px), Some(mut py)) = (x, y) {
@@ -5586,7 +5594,48 @@ impl Tool for HotkeyTool {
             }
         };
 
-        if !px_focus && crate::input::is_xaml_host_hwnd(hwnd) {
+        let xaml_target = !px_focus && crate::input::is_xaml_host_hwnd(hwnd);
+        let has_modifiers = !mods.is_empty();
+        let event_kind = if has_modifiers {
+            EventKind::KeyCombo
+        } else {
+            EventKind::Keystroke
+        };
+        if !xaml_target
+            && delivery == DeliveryMode::Background
+            && (px_focus || crate::input::delivery::would_be_silently_dropped(hwnd, event_kind))
+        {
+            return crate::input::delivery::background_unavailable_error(hwnd, event_kind);
+        }
+
+        let _no_activate = if elem_idx.is_some() && delivery == DeliveryMode::Background {
+            Some(crate::input::NoActivateGuard::arm(
+                windows::Win32::Foundation::HWND(hwnd as *mut _),
+            ))
+        } else {
+            None
+        };
+        if let Some(idx) = elem_idx.filter(|_| delivery == DeliveryMode::Background) {
+            let state = self.state.clone();
+            let focused = tokio::task::spawn_blocking(move || {
+                crate::uia::fg_bypass::run_with_uwp_bypass(hwnd as isize, || {
+                    state.element_cache.focus_element(pid, hwnd, idx)
+                })
+            })
+            .await;
+            match focused {
+                Ok(Ok(())) => {
+                    let _ = crate::input::wait_for_focused_descendant(
+                        hwnd,
+                        std::time::Duration::from_millis(500),
+                    );
+                }
+                Ok(Err(error)) => return ToolResult::error(error.to_string()),
+                Err(error) => return ToolResult::error(format!("UIA focus task failed: {error}")),
+            }
+        }
+
+        if xaml_target {
             let mut accelerator_keys = mods.clone();
             accelerator_keys.push(key.clone());
             let accelerator_combo = accelerator_keys.join("+");
@@ -5654,24 +5703,6 @@ impl Tool for HotkeyTool {
         //     path.
         //   - Modifiers + non-Chromium Win32 → SendInput (the
         //     TranslateAccelerator path). The foreground swap stays.
-        let has_modifiers = !mods.is_empty();
-        // delivery_mode:"background" — refuse if PostMessage of the key combo
-        // would be silently dropped on this target (Chromium with modifiers).
-        let event_kind = if has_modifiers {
-            EventKind::KeyCombo
-        } else {
-            EventKind::Keystroke
-        };
-        if delivery == DeliveryMode::Background
-            && (px_focus || crate::input::delivery::would_be_silently_dropped(hwnd, event_kind))
-        {
-            // macOS-aligned: a `background` hotkey never fronts. This combo would
-            // be silently dropped (VCL/classic-Win32 TranslateAccelerator, or
-            // Chromium key-combos) and only a foreground/focus grab lands it —
-            // which background must not do. Surface background_unavailable; the
-            // agent escalates to delivery_mode:"foreground".
-            return crate::input::delivery::background_unavailable_error(hwnd, event_kind);
-        }
         // delivery_mode:"foreground" — explicit SendInput swap (the path that
         // unblocks TranslateAccelerator-style apps). A Background call that
         // reaches here means the key combo is NOT silently dropped on this

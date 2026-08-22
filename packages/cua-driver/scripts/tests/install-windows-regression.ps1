@@ -116,7 +116,7 @@ try {
         $script:ParentByPid = @{}
         $script:ParentByPid[[int]$PID] = 0
         Remove-LegacyInstall
-        Assert-True ($script:Steps -contains "detected legacy install layout (v0.2.13 or earlier); migrating to Cua\cua-driver") `
+        Assert-True ($script:Steps -contains "detected legacy Qwen install layout; migrating to Qwen\qwen-cua-driver") `
             "$marker was not detected as a legacy marker"
     }
 
@@ -183,7 +183,7 @@ finally {
 # Exercise the installed topology and Task Scheduler end to end. Register the
 # task through bin -> current -> probe-v1, retarget current to probe-v2, then
 # prove the unchanged action reaches the new executable.
-$taskName = "cua-driver-serve"
+$taskName = "qwen-cua-driver-serve"
 $taskProbeRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("cua-driver-autostart-task-" + [guid]::NewGuid().ToString("N"))
 $taskPackages = Join-Path $taskProbeRoot "packages"
 $taskReleaseV1 = Join-Path $taskPackages "releases\probe-v1"

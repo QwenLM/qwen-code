@@ -258,10 +258,8 @@ impl Tool for HotkeyTool {
         let fg = delivery_mode.is_foreground();
         let px = args.get("x").and_then(|value| value.as_f64());
         let py = args.get("y").and_then(|value| value.as_f64());
-        if px.is_some() && py.is_some() && element_index.is_some() {
-            return ToolResult::error(
-                "Pass either element_index (ax) or x,y (px) to hotkey, not both.",
-            );
+        if let Err(error) = validate_target_coordinates(px, py, element_index.is_some()) {
+            return ToolResult::error(error);
         }
 
         let element_guard = if let (Some(index), Some(window_id)) = (element_index, window_id) {
@@ -517,6 +515,20 @@ impl Tool for HotkeyTool {
     }
 }
 
+fn validate_target_coordinates(
+    x: Option<f64>,
+    y: Option<f64>,
+    has_element: bool,
+) -> Result<(), &'static str> {
+    if x.is_some() != y.is_some() {
+        return Err("Pass both x and y to hotkey, not just one coordinate.");
+    }
+    if has_element && (x.is_some() || y.is_some()) {
+        return Err("Pass either element_index (ax) or x,y (px) to hotkey, not both.");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -529,6 +541,16 @@ mod tests {
         for field in ["element_index", "element_token", "snapshot_id"] {
             assert!(properties.contains_key(field), "missing {field} schema");
         }
+    }
+
+    #[test]
+    fn hotkey_target_coordinates_are_paired_and_exclusive_with_elements() {
+        assert!(validate_target_coordinates(Some(1.0), None, false).is_err());
+        assert!(validate_target_coordinates(None, Some(1.0), false).is_err());
+        assert!(validate_target_coordinates(Some(1.0), Some(2.0), true).is_err());
+        assert!(validate_target_coordinates(Some(1.0), None, true).is_err());
+        assert!(validate_target_coordinates(None, None, true).is_ok());
+        assert!(validate_target_coordinates(Some(1.0), Some(2.0), false).is_ok());
     }
 
     #[test]

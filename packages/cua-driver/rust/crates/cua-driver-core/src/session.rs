@@ -609,25 +609,8 @@ pub fn activate_or_revive_session_for_owner(
         return Err("session is not available to this transport");
     }
 
-    let needs_cleanup = {
-        let ended = ended_sessions().lock().unwrap();
-        match ended.get(session_id) {
-            Some(Some(owner)) if owner != owner_transport => {
-                return Err("session is not available to this transport");
-            }
-            Some(None) if owner_transport != session_id => {
-                return Err("session is not available to this transport");
-            }
-            Some(_) => true,
-            None => false,
-        }
-    };
-    if needs_cleanup && !retry_session_cleanup(session_id).complete {
-        return Err("session cleanup is incomplete; retry end_session before revival");
-    }
-
     let now = Instant::now();
-    let revived = {
+    loop {
         let mut ended = ended_sessions().lock().unwrap();
         let revived = match ended.get(session_id) {
             Some(Some(owner)) if owner != owner_transport => {
@@ -639,6 +622,15 @@ pub fn activate_or_revive_session_for_owner(
             Some(_) => true,
             None => false,
         };
+        let cleanup_pending =
+            revived && cleanup_progress().lock().unwrap().contains_key(session_id);
+        if cleanup_pending {
+            drop(ended);
+            if !retry_session_cleanup(session_id).complete {
+                return Err("session cleanup is incomplete; retry end_session before revival");
+            }
+            continue;
+        }
 
         let mut records = lifecycle_records().lock().unwrap();
         if let Some(record) = records.get_mut(session_id) {
@@ -667,13 +659,14 @@ pub fn activate_or_revive_session_for_owner(
         if revived {
             ended.remove(session_id);
         }
-        revived
-    };
-    activity()
-        .lock()
-        .unwrap()
-        .insert(session_id.to_owned(), now);
-    Ok(revived)
+        drop(records);
+        drop(ended);
+        activity()
+            .lock()
+            .unwrap()
+            .insert(session_id.to_owned(), now);
+        return Ok(revived);
+    }
 }
 
 pub fn session_snapshot(
@@ -1135,9 +1128,6 @@ pub fn fire_session_end(session_id: &str) -> bool {
 
 fn fire_session_end_for_owner(session_id: &str, owner_transport: Option<&str>) -> bool {
     let first_fire = mark_session_ended(session_id, owner_transport);
-    if first_fire {
-        initialize_session_cleanup(session_id);
-    }
     let _ = retry_session_cleanup(session_id);
     first_fire
 }
@@ -1158,32 +1148,29 @@ fn mark_session_ended(session_id: &str, owner_transport: Option<&str>) -> bool {
     if ended.contains_key(session_id) {
         false
     } else {
+        crate::capture_scope::clear_session(session_id);
+        let mut registered = hooks()
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, hook)| (*id, hook.clone()))
+            .collect::<Vec<_>>();
+        registered.sort_by_key(|(id, _)| *id);
+        cleanup_progress().lock().unwrap().insert(
+            session_id.to_owned(),
+            SessionCleanupProgress {
+                hooks: registered,
+                completed: HashSet::new(),
+                failures: Vec::new(),
+                running: false,
+            },
+        );
         ended.insert(
             session_id.to_owned(),
             owner_transport.map(str::to_owned).or(record_owner),
         );
         true
     }
-}
-
-fn initialize_session_cleanup(session_id: &str) {
-    crate::capture_scope::clear_session(session_id);
-    let mut registered = hooks()
-        .lock()
-        .unwrap()
-        .iter()
-        .map(|(id, hook)| (*id, hook.clone()))
-        .collect::<Vec<_>>();
-    registered.sort_by_key(|(id, _)| *id);
-    cleanup_progress().lock().unwrap().insert(
-        session_id.to_owned(),
-        SessionCleanupProgress {
-            hooks: registered,
-            completed: HashSet::new(),
-            failures: Vec::new(),
-            running: false,
-        },
-    );
 }
 
 /// Retry only the cleanup hooks that have not yet succeeded for this ended
@@ -1342,14 +1329,20 @@ pub fn revive_session(session_id: &str) -> bool {
     if !is_trackable(session_id) {
         return false;
     }
-    if !retry_session_cleanup(session_id).complete {
-        return false;
+    loop {
+        let mut ended = ended_sessions().lock().unwrap();
+        if !ended.contains_key(session_id) {
+            return false;
+        }
+        if cleanup_progress().lock().unwrap().contains_key(session_id) {
+            drop(ended);
+            if !retry_session_cleanup(session_id).complete {
+                return false;
+            }
+            continue;
+        }
+        return ended.remove(session_id).is_some();
     }
-    ended_sessions()
-        .lock()
-        .unwrap()
-        .remove(session_id)
-        .is_some()
 }
 
 /// Owner-checked revival used by the public `start_session` tool. A public
@@ -1364,11 +1357,8 @@ pub fn revive_session_for_owner(
         return Ok(false);
     }
 
-    // Validate ownership before running any cleanup callback. A caller that
-    // merely guesses another transport's public label must not be able to
-    // trigger work for that lifecycle episode.
-    {
-        let ended = ended_sessions().lock().unwrap();
+    loop {
+        let mut ended = ended_sessions().lock().unwrap();
         let Some(ended_owner) = ended.get(session_id) else {
             return Ok(false);
         };
@@ -1384,27 +1374,15 @@ pub fn revive_session_for_owner(
             }
             _ => {}
         }
-    }
-
-    if !retry_session_cleanup(session_id).complete {
-        return Err("session cleanup is incomplete; retry end_session before revival");
-    }
-
-    // Recheck after cleanup because another thread may have completed the
-    // revival while callbacks were running.
-    let mut ended = ended_sessions().lock().unwrap();
-    let Some(ended_owner) = ended.get(session_id) else {
-        return Ok(false);
-    };
-    match ended_owner.as_deref() {
-        Some(owner) if owner != owner_transport => {
-            Err("session is not available to this transport")
+        if cleanup_progress().lock().unwrap().contains_key(session_id) {
+            drop(ended);
+            if !retry_session_cleanup(session_id).complete {
+                return Err("session cleanup is incomplete; retry end_session before revival");
+            }
+            continue;
         }
-        None if owner_transport != session_id => Err("session is not available to this transport"),
-        _ => {
-            ended.remove(session_id);
-            Ok(true)
-        }
+        ended.remove(session_id);
+        return Ok(true);
     }
 }
 
@@ -1491,9 +1469,6 @@ fn finish_session_end(session_id: &str, reason: SessionEndReason) {
         }
     });
     let cursor = cursor.or(fallback);
-    if first_fire {
-        initialize_session_cleanup(session_id);
-    }
     let _ = retry_session_cleanup(session_id);
     if first_fire {
         if let Some(observer) = SESSION_OBSERVER.get() {
@@ -2035,6 +2010,34 @@ mod tests {
             "successful cleanup hooks must not run twice"
         );
         assert!(revive_session(sid));
+    }
+
+    #[test]
+    fn tombstone_publishes_cleanup_progress_before_it_becomes_visible() {
+        let sid = "test-atomic-cleanup-progress-D9E0F1";
+        let cleanup_calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_hook = cleanup_calls.clone();
+        let _registration =
+            register_scoped_fallible_session_end_hook("atomic-progress-test", move |ended| {
+                if ended == sid {
+                    calls_for_hook.fetch_add(1, Ordering::SeqCst);
+                    return Err("synthetic cleanup failure".into());
+                }
+                Ok(())
+            });
+
+        assert!(mark_session_ended(sid, None));
+        let pending = session_cleanup_status(sid);
+        assert!(
+            !pending.complete,
+            "a visible tombstone must never look fully cleaned before hooks run"
+        );
+        assert_eq!(cleanup_calls.load(Ordering::SeqCst), 0);
+
+        let attempted = retry_session_cleanup(sid);
+        assert!(!attempted.complete);
+        assert_eq!(cleanup_calls.load(Ordering::SeqCst), 1);
+        forget_ended_sessions_with_prefix(sid);
     }
 
     #[test]

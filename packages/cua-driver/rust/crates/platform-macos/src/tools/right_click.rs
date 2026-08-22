@@ -153,7 +153,7 @@ impl Tool for RightClickTool {
             };
             let element_ptr = element_guard.as_ptr();
 
-            let _mutation_lease = match super::gate_background_window_action(
+            let mutation_lease = match super::gate_background_window_action(
                 pid,
                 wid,
                 Some(element_ptr),
@@ -165,13 +165,32 @@ impl Tool for RightClickTool {
                 Err(refusal_result) => return refusal_result,
             };
 
-            let result =
-                tokio::task::spawn_blocking(move || ax_show_menu(element_ptr, idx, pid, wid)).await;
+            let ax_result =
+                tokio::task::spawn_blocking(move || try_ax_show_menu(element_ptr, idx)).await;
+            match ax_result {
+                Ok(Some(message)) => return ToolResult::text(message),
+                Ok(None) => {}
+                Err(error) => return ToolResult::error(format!("Task error: {error}")),
+            }
 
-            return match result {
-                Ok(Ok(msg)) => ToolResult::text(msg),
-                Ok(Err(e)) => ToolResult::error(format!("Right-click failed: {e}")),
-                Err(e) => ToolResult::error(format!("Task error: {e}")),
+            if let Err(refusal_result) = mutation_lease
+                .gate_again(
+                    wid,
+                    Some(element_ptr),
+                    cua_driver_core::background_input::BackgroundAction::WindowPointer,
+                )
+                .await
+            {
+                return refusal_result;
+            }
+            let pointer_result = tokio::task::spawn_blocking(move || {
+                pixel_right_click_element(element_ptr, idx, pid, wid)
+            })
+            .await;
+            return match pointer_result {
+                Ok(Ok(message)) => ToolResult::text(message),
+                Ok(Err(error)) => ToolResult::error(format!("Right-click failed: {error}")),
+                Err(error) => ToolResult::error(format!("Task error: {error}")),
             };
         }
 
@@ -299,7 +318,7 @@ impl Tool for RightClickTool {
 
 // ── Blocking AX path ─────────────────────────────────────────────────────────
 
-fn ax_show_menu(element_ptr: usize, idx: usize, pid: i32, wid: u32) -> anyhow::Result<String> {
+fn try_ax_show_menu(element_ptr: usize, idx: usize) -> Option<String> {
     let element = element_ptr as AXUIElementRef;
 
     let role = unsafe { copy_string_attr(element, "AXRole") }.unwrap_or_default();
@@ -319,7 +338,7 @@ fn ax_show_menu(element_ptr: usize, idx: usize, pid: i32, wid: u32) -> anyhow::R
     if advertised.iter().any(|a| a == "AXShowMenu") {
         let err = unsafe { perform_action(element, "AXShowMenu") };
         if err == kAXErrorSuccess {
-            return Ok(format!(
+            return Some(format!(
                 "Shown menu for [{idx}] {role} \"{title}\" (AXShowMenu)."
             ));
         }
@@ -327,12 +346,24 @@ fn ax_show_menu(element_ptr: usize, idx: usize, pid: i32, wid: u32) -> anyhow::R
         // rather than erroring out.
         tracing::debug!("AXShowMenu returned {err} for [{idx}]; falling back to pixel right-click");
     }
+    None
+}
+
+fn pixel_right_click_element(
+    element_ptr: usize,
+    idx: usize,
+    pid: i32,
+    wid: u32,
+) -> anyhow::Result<String> {
+    let element = element_ptr as AXUIElementRef;
+    let role = unsafe { copy_string_attr(element, "AXRole") }.unwrap_or_default();
+    let title = unsafe { copy_string_attr(element, "AXTitle") }.unwrap_or_default();
 
     // Pixel right-click at the element's screen-space center.
     let (cx, cy) =
         unsafe { crate::ax::bindings::element_screen_center(element) }.ok_or_else(|| {
             anyhow::anyhow!(
-                "[{idx}] {role} \"{title}\" advertises no AXShowMenu and has no resolvable \
+                "[{idx}] {role} \"{title}\" has no available AXShowMenu action and no resolvable \
              on-screen center for a pixel right-click. Pass x, y directly."
             )
         })?;
@@ -342,6 +373,6 @@ fn ax_show_menu(element_ptr: usize, idx: usize, pid: i32, wid: u32) -> anyhow::R
     crate::input::mouse::right_click_at_xy_with_window_local(pid, cx, cy, wx, wy, wid, &[])?;
     Ok(format!(
         "Right-clicked [{idx}] {role} \"{title}\" at element center ({cx:.0}, {cy:.0}) \
-         (pixel right-click; element advertises no AXShowMenu)."
+         (pixel right-click; AXShowMenu was unavailable)."
     ))
 }

@@ -54,8 +54,8 @@ test(
       if (second.mode !== "full") {
         assert.equal(second.baseRevisionId, first.revisionId);
         assert.ok(
-          second.text.length < first.text.length,
-          "a validated diff/no_change response must be smaller than the full tree",
+          second.selectedBytes < second.fullBytes,
+          "a validated diff/no_change payload must be smaller than the current full tree",
         );
       }
 

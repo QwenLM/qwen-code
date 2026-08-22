@@ -1459,13 +1459,22 @@ impl Tool for LaunchAppTool {
                 if !urls.is_empty() {
                     let mut children = Vec::new();
                     for url in &urls {
-                        children.push((
-                            url.clone(),
-                            std::process::Command::new("xdg-open").arg(url).spawn()?,
-                        ));
+                        match std::process::Command::new("xdg-open").arg(url).spawn() {
+                            Ok(child) => children.push((url.clone(), child)),
+                            Err(error) => {
+                                for (_, child) in children {
+                                    reap_in_background(child);
+                                }
+                                return Err(error.into());
+                            }
+                        }
                     }
-                    for (url, child) in children {
+                    let mut children = children.into_iter();
+                    while let Some((url, child)) = children.next() {
                         if let Some(reason) = xdg_open_failure(child) {
+                            for (_, remaining) in children {
+                                reap_in_background(remaining);
+                            }
                             anyhow::bail!("could not open '{url}': {reason}");
                         }
                     }

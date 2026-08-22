@@ -171,7 +171,7 @@ fn apply_session_identity(args: &mut serde_json::Value, minted: &Option<String>)
         .as_object()
         .and_then(|o| o.get("session"))
         .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty() && *s != "default")
         .map(|s| s.to_owned());
     if let Some(obj) = args.as_object_mut() {
         obj.remove("_session_id");
@@ -2510,6 +2510,16 @@ mod session_boundary_tests {
         assert_eq!(eff.as_deref(), Some("mcp-123"));
         assert_eq!(args["_transport_session_id"], "mcp-123");
         assert!(args.get("session").is_none());
+    }
+
+    #[test]
+    fn explicit_default_uses_the_minted_lifecycle_identity() {
+        let mut args = json!({ "session": "default" });
+        let eff = apply_session_identity(&mut args, &Some("mcp-default".to_owned()));
+        assert_eq!(args["session"], "default");
+        assert_eq!(args["_session_id"], "mcp-default");
+        assert_eq!(args["_transport_session_id"], "mcp-default");
+        assert_eq!(eff.as_deref(), Some("mcp-default"));
     }
 
     #[test]

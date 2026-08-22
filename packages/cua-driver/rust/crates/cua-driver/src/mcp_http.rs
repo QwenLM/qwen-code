@@ -225,7 +225,7 @@ fn apply_session_identity(req: &mut Request, transport_session: &str) {
     let session = args
         .get("session")
         .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty() && *s != "default")
         .map(|s| s.to_owned());
     let effective = session.unwrap_or_else(|| transport_session.to_owned());
     args.insert(
@@ -462,6 +462,20 @@ mod tests {
         let args = req.params.unwrap();
         assert_eq!(args["arguments"]["_session_id"], "http-test");
         assert_eq!(args["arguments"]["_transport_session_id"], "http-test");
+    }
+
+    #[test]
+    fn apply_session_identity_uses_transport_implicit_for_default() {
+        let mut req: Request = serde_json::from_value(json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": { "name": "list_apps", "arguments": { "session": "default" } }
+        }))
+        .unwrap();
+        apply_session_identity(&mut req, "http-default");
+        let args = req.params.unwrap();
+        assert_eq!(args["arguments"]["session"], "default");
+        assert_eq!(args["arguments"]["_session_id"], "http-default");
+        assert_eq!(args["arguments"]["_transport_session_id"], "http-default");
     }
 
     #[test]

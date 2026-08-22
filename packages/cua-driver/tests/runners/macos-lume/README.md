@@ -196,8 +196,8 @@ for the life of the seed:
 
 ```bash
 security find-certificate \
-  -c 'CuaDriver Local Signing (cua-driver-rs)' -Z "$SIGNING_KEYCHAIN"
-codesign -d -r- /Applications/CuaDriverLocal.app 2>&1 \
+  -c 'Qwen Cua Driver Local Signing' -Z "$SIGNING_KEYCHAIN"
+codesign -d -r- /Applications/QwenCuaDriverLocal.app 2>&1 \
   | grep 'certificate leaf'
 ```
 
@@ -234,8 +234,8 @@ restart the app-owned daemon once before checking status so the live process
 observes the new grant:
 
 ```bash
-~/.local/bin/cua-driver-local stop
-open -a CuaDriverLocal
+~/.local/bin/qwen-cua-driver-local stop
+open -a QwenCuaDriverLocal
 ```
 
 Then verify the daemon's own identity and the read-only status contract before

@@ -143,7 +143,7 @@ fn apply_direct_session_identity(request: &mut Request, transport_session: &str)
     let effective = arguments
         .get("session")
         .and_then(serde_json::Value::as_str)
-        .filter(|session| !session.is_empty())
+        .filter(|session| !session.is_empty() && *session != "default")
         .unwrap_or(transport_session)
         .to_owned();
     arguments.insert("_session_id".into(), serde_json::Value::String(effective));
@@ -820,6 +820,25 @@ async fn forward_tool_call(
 mod tests {
     use super::*;
     use crate::serve::DaemonResponse;
+
+    #[test]
+    fn direct_proxy_uses_transport_identity_for_default_session() {
+        let mut request: Request = serde_json::from_value(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "list_apps",
+                "arguments": {"session": "default"}
+            }
+        }))
+        .unwrap();
+        apply_direct_session_identity(&mut request, "direct-default");
+        let arguments = &request.params.unwrap()["arguments"];
+        assert_eq!(arguments["session"], "default");
+        assert_eq!(arguments["_session_id"], "direct-default");
+        assert_eq!(arguments["_transport_session_id"], "direct-default");
+    }
 
     #[tokio::test]
     async fn proxy_loop_returns_promptly_on_clean_eof() {

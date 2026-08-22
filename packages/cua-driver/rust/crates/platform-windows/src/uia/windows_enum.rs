@@ -633,12 +633,22 @@ pub fn try_invoke_accelerator_in_window(hwnd: isize, combo: &str) -> anyhow::Res
         "keyboard message delivery",
         move |cancelled| try_invoke_accelerator_in_window_unbounded(hwnd, &combo, &cancelled),
     )
-    .unwrap_or_else(|_| {
-        Err(anyhow::anyhow!(
+    .map_err(accelerator_deadline_error)?
+}
+
+fn accelerator_deadline_error(error: UiaDeadlineError) -> anyhow::Error {
+    match error {
+        UiaDeadlineError::Timeout => anyhow::anyhow!(
             "UIA accelerator scan exceeded {}ms; a UIA provider in the target app is likely unresponsive",
             SUBTREE_OP_TIMEOUT.as_millis()
-        ))
-    })
+        ),
+        UiaDeadlineError::Busy => anyhow::anyhow!(
+            "UIA accelerator scan is temporarily busy because another provider call is still in flight or cooling down"
+        ),
+        UiaDeadlineError::Unavailable => {
+            anyhow::anyhow!("UIA accelerator worker is unavailable")
+        }
+    }
 }
 
 fn try_invoke_accelerator_in_window_unbounded(
@@ -1100,6 +1110,19 @@ mod tests {
         let mut win32 = dwm;
         win32.left -= 8;
         assert_eq!(select_window_rect(false, Some(dwm), Some(win32)), Some(dwm));
+    }
+
+    #[test]
+    fn accelerator_deadline_errors_preserve_the_failure_class() {
+        assert!(accelerator_deadline_error(UiaDeadlineError::Timeout)
+            .to_string()
+            .contains("exceeded"));
+        assert!(accelerator_deadline_error(UiaDeadlineError::Busy)
+            .to_string()
+            .contains("temporarily busy"));
+        assert!(accelerator_deadline_error(UiaDeadlineError::Unavailable)
+            .to_string()
+            .contains("unavailable"));
     }
 
     #[test]

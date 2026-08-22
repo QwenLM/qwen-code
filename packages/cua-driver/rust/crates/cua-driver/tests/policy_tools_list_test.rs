@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 
-use cua_driver_testkit::RawDriver;
+use cua_driver_testkit::{driver_binary, RawDriver};
 use serde_json::json;
 
 #[test]
@@ -12,20 +12,22 @@ fn tools_list_hides_policy_denied_tools_and_calls_stay_denied() {
     let directory = tempfile::tempdir().expect("temporary policy directory");
     let policy_path = directory.path().join("policy.yaml");
     // `get_config` is unconditionally allowed via `allow.tools`.
-    // `screenshot` is conditionally allowed via `allow.rules` with a
+    // `get_window_state` is conditionally allowed via `allow.rules` with a
     // constraint.  Both must appear in `tools/list` because `tools/list`
     // should not hide tools that are *potentially* allowed.
     // `list_apps` is explicitly denied and must be absent.
     std::fs::write(
         &policy_path,
-        "allow:\n  tools: [get_config]\n  rules:\n    - tool: screenshot\n      constraints:\n        display_id: {\"const\": 0}\ndeny:\n  tools: [list_apps]\n",
+        "allow:\n  tools: [get_config]\n  rules:\n    - tool: get_window_state\n      constraints:\n        pid: {allowed: [0]}\ndeny:\n  tools: [list_apps]\n",
     )
     .expect("write permission policy");
     let policy = policy_path.display().to_string();
 
-    let Some(mut driver) = RawDriver::spawn_with_env(&[("CUA_DRIVER_POLICY_FILE", &policy)]) else {
+    if !driver_binary().exists() {
         return;
-    };
+    }
+    let mut driver = RawDriver::spawn_with_env(&[("CUA_DRIVER_POLICY_FILE", &policy)])
+        .expect("a built driver must start with the test policy");
 
     driver.send(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}));
     driver.recv();
@@ -40,15 +42,15 @@ fn tools_list_hides_policy_denied_tools_and_calls_stay_denied() {
         .collect();
     assert!(
         names.contains("get_config"),
-        "unconditionally allowed tool must remain listed"
+        "unconditionally allowed tool must remain listed: {response}"
     );
     assert!(
-        names.contains("screenshot"),
-        "rule-conditionally allowed tool must remain listed even though empty-arg evaluation would deny it"
+        names.contains("get_window_state"),
+        "rule-conditionally allowed tool must remain listed even though empty-arg evaluation would deny it: {response}"
     );
     assert!(
         !names.contains("list_apps"),
-        "policy-denied tool must not be advertised"
+        "policy-denied tool must not be advertised: {response}"
     );
 
     driver.send(&json!({

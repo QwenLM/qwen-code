@@ -1070,12 +1070,15 @@ impl ToolRegistry {
         // caller-chosen label alone. Translate it only after authorization so
         // policy and manifests continue to evaluate the public request.
         let runtime_prefix = namespace_runtime_args(&mut args, context, evidence);
-        if session_selecting_tool(resolved_name)
-            && args.get("_session_id").and_then(Value::as_str).is_none()
-        {
+        let has_lifecycle_session = args
+            .get("_session_id")
+            .and_then(Value::as_str)
+            .is_some_and(|session| !session.is_empty() && session != "default");
+        if session_selecting_tool(resolved_name) && !has_lifecycle_session {
             let implicit = args
                 .get("_transport_session_id")
                 .and_then(Value::as_str)
+                .filter(|session| !session.is_empty() && *session != "default")
                 .map(str::to_owned)
                 .unwrap_or_else(|| format!("{runtime_prefix}implicit-direct"));
             args["_session_id"] = Value::String(implicit.clone());
@@ -2513,6 +2516,13 @@ fn namespace_runtime_args(
     let Some(arguments) = args.as_object_mut() else {
         return runtime_prefix;
     };
+    if arguments
+        .get("_session_id")
+        .and_then(Value::as_str)
+        .is_some_and(|session| session.is_empty() || session == "default")
+    {
+        arguments.remove("_session_id");
+    }
     if let Some(public_session) = arguments
         .get("session")
         .and_then(Value::as_str)
@@ -2551,7 +2561,7 @@ fn namespace_runtime_args(
         if let Some(session) = arguments
             .get("session")
             .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
+            .filter(|value| !value.is_empty() && *value != "default")
             .map(str::to_owned)
         {
             arguments.insert("_session_id".to_owned(), Value::String(session));
@@ -3085,6 +3095,26 @@ mod runtime_isolation_tests {
             )
             .await;
 
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_ne!(result.is_error, Some(true));
+    }
+
+    #[tokio::test]
+    async fn default_public_session_uses_an_implicit_runtime_lifecycle() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let registry = observation_registry(None, hits.clone());
+        let context = standard_context();
+        let runtime_prefix = format!("__cua_runtime_{}:", context.runtime_scope_key());
+        let result = registry
+            .invoke_with_context(
+                "get_window_state",
+                serde_json::json!({"pid": 42, "window_id": 7, "session": "default"}),
+                context,
+            )
+            .await;
+
+        crate::session::revoke_sessions_with_prefix(&runtime_prefix);
+        crate::session::forget_ended_sessions_with_prefix(&runtime_prefix);
         assert_eq!(hits.load(Ordering::SeqCst), 1);
         assert_ne!(result.is_error, Some(true));
     }
@@ -4415,7 +4445,7 @@ resources:
     }
 
     #[test]
-    fn anonymous_default_identity_keeps_its_legacy_process_scope() {
+    fn anonymous_default_identity_does_not_claim_a_lifecycle_key() {
         let context = standard_context();
         let mut args = serde_json::json!({
             "session": "default",
@@ -4428,7 +4458,7 @@ resources:
             &TrustedInvocationEvidence::default(),
         );
         assert_eq!(args["session"], "default");
-        assert_eq!(args["_session_id"], "default");
+        assert!(args.get("_session_id").is_none());
         assert_eq!(args["cursor_id"], "default");
         assert!(args.get("_public_session_label").is_none());
     }

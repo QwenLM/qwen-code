@@ -236,19 +236,23 @@ try {
     import { CuaDriver } from "@qwen-code/cua-sdk";
     import { ComputerUse } from "@qwen-code/cua-sdk/computer-use";
     const driver = CuaDriver.create(undefined);
+    const computer = await ComputerUse.create({ session: "release-package-smoke" });
     try {
       const listing = JSON.parse(await driver.listToolsJson());
       if (!Array.isArray(listing.tools) || listing.tools.length === 0) {
         throw new Error("native SDK returned no tools");
       }
-      if (typeof ComputerUse.create !== "function") {
-        throw new Error("ComputerUse entrypoint is unavailable");
+      const revisionSupported = await computer.supportsObservationRevision();
+      if (typeof revisionSupported !== "boolean") {
+        throw new Error("ComputerUse capability probe returned an invalid result");
       }
       process.stdout.write(JSON.stringify({
         package: "@qwen-code/cua-sdk",
         toolCount: listing.tools.length,
+        revisionSupported,
       }) + "\\n");
     } finally {
+      await computer.close();
       await driver.shutdown();
       driver.uniffiDestroy();
     }

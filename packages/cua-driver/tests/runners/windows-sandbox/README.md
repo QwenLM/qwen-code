@@ -14,9 +14,6 @@ The host script builds selected Rust test binaries and Windows fixtures, maps
 `packages/cua-driver` into the sandbox as `C:\cua-driver`, and streams logs from the
 inside-sandbox runner.
 
-For canonical GUI validation, dispatch `.github/workflows/e2e-rust-windows.yml`
-on the exact candidate SHA. Its GitHub-hosted runner is accepted only when the
-strict interactive-desktop preflight passes, then it runs
-`scripts/ci/windows/run-rust-e2e.ps1 -RequireGui`. Use Azure RDP only for an
-optional environment-parity replay or when the hosted preflight cannot prove a
-required capability.
+For current GUI validation, use the interactive Azure RDP/scheduled-task runner
+described by the Windows Rust test runner. Keep this sandbox path as a local
+smoke check only.
