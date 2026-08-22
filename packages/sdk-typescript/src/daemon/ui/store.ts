@@ -6,6 +6,7 @@
 
 import type {
   DaemonTextDeltaMeta,
+  DaemonTranscriptReducerOptions,
   DaemonTranscriptState,
   DaemonTranscriptStore,
   DaemonUiEvent,
@@ -13,14 +14,22 @@ import type {
 import {
   appendLocalUserTranscriptMessage,
   createDaemonTranscriptState,
+  estimateDaemonTranscriptBlockBytes,
   rebuildDaemonTranscriptBlockIndex,
   reduceDaemonTranscriptEvents,
 } from './transcript.js';
 
 export function createDaemonTranscriptStore(
-  seed: Partial<DaemonTranscriptState> = {},
+  seed: Partial<DaemonTranscriptState> &
+    Pick<DaemonTranscriptReducerOptions, 'onTruncation'> = {},
 ): DaemonTranscriptStore {
-  let state = createState(seed);
+  // Held in the closure (not on the state object) so `reset()` keeps the
+  // listener registered across wholesale state replacements.
+  const { onTruncation, ...stateSeed } = seed;
+  const reducerOptions: DaemonTranscriptReducerOptions = onTruncation
+    ? { onTruncation }
+    : {};
+  let state = createState(stateSeed);
   const listeners = new Set<() => void>();
   let notifyScheduled = false;
 
@@ -55,25 +64,33 @@ export function createDaemonTranscriptStore(
     dispatch(event: DaemonUiEvent | DaemonUiEvent[]) {
       const events = Array.isArray(event) ? event : [event];
       if (events.length === 0) return;
-      state = reduceDaemonTranscriptEvents(state, events);
+      state = reduceDaemonTranscriptEvents(state, events, reducerOptions);
       scheduleNotify();
     },
     appendLocalUserMessage(
       text: string,
       images?: Array<{ data: string; mimeType: string }>,
       meta?: DaemonTextDeltaMeta,
-      files?: Array<{ name: string; mimeType: string }>,
+      files?: Array<{
+        name: string;
+        mimeType: string;
+        data?: Blob;
+        text?: string;
+        attachmentId?: string;
+      }>,
     ) {
       state = appendLocalUserTranscriptMessage(state, text, {
         images,
         meta,
         files,
+        ...reducerOptions,
       });
       scheduleNotify();
     },
     reset(nextSeed: Partial<DaemonTranscriptState> = {}) {
       state = createState({
         maxBlocks: nextSeed.maxBlocks ?? state.maxBlocks,
+        maxRetainedBytes: nextSeed.maxRetainedBytes ?? state.maxRetainedBytes,
         retainSubagentBlocks:
           nextSeed.retainSubagentBlocks ?? state.retainSubagentBlocks,
         ...nextSeed,
@@ -141,10 +158,19 @@ function createState(
   return {
     ...createDaemonTranscriptState({
       maxBlocks: seed.maxBlocks,
+      maxRetainedBytes: seed.maxRetainedBytes,
       now: seed.now,
     }),
     ...seed,
     blocks,
+    // Seeded blocks (e.g. a replay snapshot handed to `reset`) must count
+    // toward the retention byte budget from the start.
+    retainedBytes:
+      seed.retainedBytes ??
+      blocks.reduce(
+        (total, block) => total + estimateDaemonTranscriptBlockBytes(block),
+        0,
+      ),
     blockIndexById: rebuildDaemonTranscriptBlockIndex(blocks),
     toolBlockByCallId: createNullIndex(seed.toolBlockByCallId),
     trimmedToolNotificationByCallId: createNullIndex(

@@ -39,6 +39,7 @@ import {
 import { workspaceLabel } from '../../utils/workspace';
 import { SessionGroupSection } from './SessionGroupSection';
 import { SessionDetailsTooltip } from './SessionDetailsTooltip';
+import { sessionMatchesGitQuery } from './sessionSearch';
 import { measureSessionTitleScroll } from './sessionTitleScroll';
 import { groupSessionsByChannelType } from './channelSessionGroups';
 import styles from './WorkspaceSection.module.css';
@@ -433,7 +434,9 @@ export function WorkspaceSection({
       if (!query) return true;
       const label = (session.displayName || '').toLowerCase();
       return (
-        label.includes(query) || session.sessionId.toLowerCase().includes(query)
+        label.includes(query) ||
+        session.sessionId.toLowerCase().includes(query) ||
+        sessionMatchesGitQuery(session, query)
       );
     });
   }, [excludePinned, searchQuery, sessions]);

@@ -86,6 +86,8 @@ import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
 import { DialogShell } from '../dialogs/DialogShell';
 import { WorkspaceSection, isAbsolutePath } from './WorkspaceSection';
+import { sessionMatchesGitQuery } from './sessionSearch';
+import { SessionPrBadge } from '../SessionPrBadge';
 import {
   hasWorkspaceExpansionPreference,
   migrateWorkspaceExpansionPreference,
@@ -2335,7 +2337,7 @@ export function WebShellSidebar({
             bumpWorkspaceReload();
             const ownerCwd = workspaceCwd ?? primaryWorkspaceCwd;
             if (ownerCwd) {
-              sessionCatalogController.invalidateWorkspace(ownerCwd);
+              sessionCatalogController.refreshWorkspace(ownerCwd);
             }
           }
         } catch (err) {
@@ -2495,6 +2497,7 @@ export function WebShellSidebar({
               effectiveName,
             );
           }
+          sessionCatalogController.refreshWorkspace(workspaceCwd);
         }
         // A late settle must not close an editor the user moved to another
         // session with while this request was in flight.
@@ -2511,7 +2514,7 @@ export function WebShellSidebar({
       })
       .finally(() => {
         if (!renamed && workspaceCwd) {
-          sessionCatalogController.invalidateWorkspace(workspaceCwd);
+          sessionCatalogController.refreshWorkspace(workspaceCwd);
         }
         setSessionBusy(sessionId, false, workspaceCwd);
       });
@@ -2667,7 +2670,7 @@ export function WebShellSidebar({
         const workspaceCwd =
           deleteCandidate.workspaceCwd ?? primaryWorkspaceCwd;
         if (scope.kind !== 'primary' && workspaceCwd) {
-          sessionCatalogController.invalidateWorkspace(workspaceCwd);
+          sessionCatalogController.refreshWorkspace(workspaceCwd);
         }
         setSessionBusy(sessionId, false, deleteCandidate.workspaceCwd);
       });
@@ -2870,7 +2873,7 @@ export function WebShellSidebar({
       } finally {
         const workspaceCwd = groupEditor.workspaceCwd ?? primaryWorkspaceCwd;
         if (workspaceCwd) {
-          sessionCatalogController.invalidateWorkspace(workspaceCwd);
+          sessionCatalogController.refreshWorkspace(workspaceCwd);
         }
         setGroupBusy(false);
       }
@@ -2938,7 +2941,7 @@ export function WebShellSidebar({
         const workspaceCwd =
           deleteGroupCandidate.workspaceCwd ?? primaryWorkspaceCwd;
         if (workspaceCwd) {
-          sessionCatalogController.invalidateWorkspace(workspaceCwd);
+          sessionCatalogController.refreshWorkspace(workspaceCwd);
         }
         setGroupBusy(false);
       });
@@ -3016,7 +3019,7 @@ export function WebShellSidebar({
         .finally(() => {
           const workspaceCwd = session.workspaceCwd ?? primaryWorkspaceCwd;
           if (workspaceCwd) {
-            sessionCatalogController.invalidateWorkspace(workspaceCwd);
+            sessionCatalogController.refreshWorkspace(workspaceCwd);
           }
           setSessionBusy(sessionId, false, session.workspaceCwd);
         });
@@ -3067,7 +3070,7 @@ export function WebShellSidebar({
           bumpWorkspaceReload();
           const workspaceCwd = session.workspaceCwd ?? primaryWorkspaceCwd;
           if (scope.kind !== 'primary' && workspaceCwd) {
-            sessionCatalogController.invalidateWorkspace(workspaceCwd);
+            sessionCatalogController.refreshWorkspace(workspaceCwd);
           }
           setSessionBusy(sessionId, false, session.workspaceCwd);
         }
@@ -3119,7 +3122,7 @@ export function WebShellSidebar({
           bumpWorkspaceReload();
           const workspaceCwd = session.workspaceCwd ?? primaryWorkspaceCwd;
           if (scope.kind !== 'primary' && workspaceCwd) {
-            sessionCatalogController.invalidateWorkspace(workspaceCwd);
+            sessionCatalogController.refreshWorkspace(workspaceCwd);
           }
           setSessionBusy(sessionId, false, session.workspaceCwd);
         }
@@ -3219,7 +3222,7 @@ export function WebShellSidebar({
         .finally(() => {
           const workspaceCwd = session.workspaceCwd ?? primaryWorkspaceCwd;
           if (workspaceCwd) {
-            sessionCatalogController.invalidateWorkspace(workspaceCwd);
+            sessionCatalogController.refreshWorkspace(workspaceCwd);
           }
           setSessionBusy(sessionId, false, session.workspaceCwd);
         });
@@ -3267,7 +3270,7 @@ export function WebShellSidebar({
         .finally(() => {
           const workspaceCwd = session.workspaceCwd ?? primaryWorkspaceCwd;
           if (workspaceCwd) {
-            sessionCatalogController.invalidateWorkspace(workspaceCwd);
+            sessionCatalogController.refreshWorkspace(workspaceCwd);
           }
           setSessionBusy(sessionId, false, session.workspaceCwd);
         });
@@ -3299,7 +3302,8 @@ export function WebShellSidebar({
           const label = getSessionLabel(session).toLowerCase();
           return (
             label.includes(query) ||
-            session.sessionId.toLowerCase().includes(query)
+            session.sessionId.toLowerCase().includes(query) ||
+            sessionMatchesGitQuery(session, query)
           );
         })
       : unpinnedSessions.slice();
@@ -3616,6 +3620,7 @@ export function WebShellSidebar({
       ) : session.branch ? (
         <GitBranchIcon aria-label={session.branch.name} />
       ) : null;
+      const prBadge = <SessionPrBadge prs={session.prs ?? []} />;
       const withDetails = (row: ReactElement) => (
         <Fragment key={sessionIdentity}>
           {sessionActionItems.has('details') ? (
@@ -3688,6 +3693,7 @@ export function WebShellSidebar({
                 <span className={styles.sessionTextInner}>{label}</span>
               </span>
             )}
+            {prBadge}
             <div
               className={styles.sessionMetaSlot}
               style={
@@ -3864,6 +3870,7 @@ export function WebShellSidebar({
               <span className={styles.sessionText} data-web-shell-session-title>
                 <span className={styles.sessionTextInner}>{label}</span>
               </span>
+              {prBadge}
               <div
                 className={styles.sessionMetaSlot}
                 style={
@@ -4180,7 +4187,11 @@ export function WebShellSidebar({
     }
     if (error && sessionsPage === undefined) {
       return (
-        <button className={styles.retry} type="button" onClick={reload}>
+        <button
+          className={styles.retry}
+          type="button"
+          onClick={() => void reload({ interactive: true })}
+        >
           {t('sidebar.loadFailed')}
         </button>
       );
@@ -4307,9 +4318,9 @@ export function WebShellSidebar({
         className={styles.retry}
         type="button"
         onClick={() => {
-          void reloadArchived().catch(() => undefined);
+          void reloadArchived({ interactive: true }).catch(() => undefined);
           for (const workspaceCwd of secondaryWorkspaceCwds) {
-            sessionCatalogController.invalidateWorkspace(workspaceCwd);
+            sessionCatalogController.refreshWorkspace(workspaceCwd);
           }
         }}
       >
@@ -5166,6 +5177,7 @@ export function WebShellSidebar({
                                       <button
                                         className={styles.workspaceHeaderAction}
                                         type="button"
+                                        title={t('sidebar.groupCreate')}
                                         aria-label={t('sidebar.groupCreate')}
                                         onClick={(event) => {
                                           event.preventDefault();

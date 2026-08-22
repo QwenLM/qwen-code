@@ -311,18 +311,25 @@ describe('WorkflowTool', () => {
         }),
     });
     const updateOutput = vi.fn();
-    const execution = tool
-      .build({
-        script: `phase('slow'); return await agent('work');`,
-        run_in_background: true,
-      })
-      .execute(new AbortController().signal, updateOutput);
+    const invocation = tool.build({
+      script: `phase('slow'); return await agent('work');`,
+      run_in_background: true,
+    });
+    (
+      invocation as unknown as { setCallId: (callId: string) => void }
+    ).setCallId('workflow-tool-call');
+    const execution = invocation.execute(
+      new AbortController().signal,
+      updateOutput,
+    );
 
     await vi.waitFor(() => expect(resolveDispatch).toBeDefined());
     const result = await execution;
     const entry = registry.list()[0]!;
     expect(entry.status).toBe('running');
     expect(entry.isBackgrounded).toBe(true);
+    expect(entry.toolUseId).toBe('workflow-tool-call');
+    expect(result.workflowRunId).toBe(entry.runId);
     expect(result.llmContent).toEqual([
       {
         text: `Workflow started in background.\nRun ID: ${entry.runId}\nStatus: running`,
