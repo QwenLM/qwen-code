@@ -844,6 +844,48 @@ describe('LoopDetectionService', () => {
 
       expect(loggers.logLoopDetected).not.toHaveBeenCalled();
     });
+
+    it('should keep fence parity across a tool call so a later closing fence re-enables detection', () => {
+      service.reset('');
+      const repeatedContent = createRepetitiveContent(1, CONTENT_CHUNK_SIZE);
+
+      // Open a code block, then land a tool call mid-block.
+      service.addAndCheck(createContentEvent('```ts\nconst a = 1;\n'));
+      service.addAndCheck(createToolCallRequestEvent('testTool', { p: 'v' }));
+
+      // The block closes in a later round-trip: parity must toggle back to
+      // false so visible-content chanting is detected again.
+      service.addAndCheck(createContentEvent('\n```'));
+
+      let isLoop = false;
+      for (let i = 0; i < CONTENT_LOOP_THRESHOLD + 5; i++) {
+        isLoop = service.addAndCheck(createContentEvent(repeatedContent));
+      }
+      expect(isLoop).toBe(true);
+      expect(service.getLastLoopType()).toBe(
+        LoopType.CHANTING_IDENTICAL_SENTENCES,
+      );
+    });
+
+    it('should clear fence parity on reset so the next prompt detects chanting', () => {
+      service.reset('');
+
+      // End the prompt inside an unclosed code block.
+      service.addAndCheck(createContentEvent('```ts\nconst a = 1;\n'));
+
+      service.reset('next-prompt');
+
+      const repeatedContent = createRepetitiveContent(1, CONTENT_CHUNK_SIZE);
+      let isLoop = false;
+      for (let i = 0; i < CONTENT_LOOP_THRESHOLD + 5; i++) {
+        isLoop = service.addAndCheck(createContentEvent(repeatedContent));
+      }
+      expect(isLoop).toBe(true);
+      expect(service.getLastLoopType()).toBe(
+        LoopType.CHANTING_IDENTICAL_SENTENCES,
+      );
+    });
+
     it('should reset tracking when a table is detected', () => {
       service.reset('');
       const repeatedContent = createRepetitiveContent(1, CONTENT_CHUNK_SIZE);

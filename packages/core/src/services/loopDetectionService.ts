@@ -266,8 +266,11 @@ export class LoopDetectionService {
     switch (event.type) {
       case GeminiEventType.ToolCallRequest: {
         // content chanting only happens in one single stream, reset if there
-        // is a tool call in between
-        this.resetContentTracking();
+        // is a tool call in between. Fence parity is preserved: a code block
+        // that closes after the tool call must still toggle inCodeBlock back
+        // to false, keeping visible-content detection active (pre-change
+        // semantics).
+        this.resetContentTracking(true, false);
         // Thought repetition is only meaningful within a single contiguous
         // reasoning stream. Once a tool call lands, the model has made
         // observable progress — any prior thoughts should not carry over.
