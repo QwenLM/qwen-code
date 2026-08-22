@@ -1499,9 +1499,15 @@ async function resolvePhysicalPath(
   base: string,
   target: string,
 ): Promise<string> {
-  let current = path.isAbsolute(target) ? path.parse(target).root : base;
+  // Splitting an absolute Windows path includes the drive as a segment
+  // (`C:`), which `path.join` would glue back onto the root as `C:\C:`;
+  // walk only the part past the root instead.
+  const parsed = path.parse(target);
+  const absolute = path.isAbsolute(target);
+  let current = absolute ? parsed.root : base;
+  const walkable = absolute ? target.slice(parsed.root.length) : target;
   const separators = path.sep === '\\' ? /[\\/]+/ : /\/+/;
-  for (const segment of target.split(separators)) {
+  for (const segment of walkable.split(separators)) {
     if (segment === '' || segment === '.') continue;
     if (segment === '..') {
       current = path.dirname(await realpathNearestExistingAsync(current));
