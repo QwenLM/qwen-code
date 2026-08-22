@@ -3601,6 +3601,33 @@ export class Session implements SessionContext {
         'Cannot rewind to the requested prompt. Its recording identity is missing or ambiguous.',
       );
     }
+    const recording = this.config.getChatRecordingService();
+    // Legacy mode derives recordingTurnIndex positionally: the walk counts
+    // EVERY user-text API entry (cron/loop ticks, background notifications,
+    // goal-runtime turns), but only recordUserMessage pushes a
+    // turnParentUuids boundary — the automatic entries are recorded with
+    // cron/notification/goal_runtime subtypes that push none. Past an
+    // interleaved automatic turn the positional ordinal over-runs the
+    // boundary list, and rewindRecording would re-root the transcript chain
+    // to a wrong — or null — parent, orphaning the pre-rewind transcript on
+    // the next resume. The true boundary of an over-run target is not
+    // recoverable from the API history alone, so fail closed instead of
+    // silently re-rooting the recording. A zero-length boundary list means
+    // the recording carries no turn data to pair against (e.g. recording
+    // disabled); there is nothing to over-run, so the rewind proceeds.
+    const recordingBoundaryCount = recording
+      ? recording.getRewindableTurnPromptIds().length
+      : 0;
+    if (
+      mode === 'legacy' &&
+      recordingBoundaryCount > 0 &&
+      target.recordingTurnIndex >= recordingBoundaryCount
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Cannot rewind to the requested turn. Its recording boundary pairing is missing.',
+      );
+    }
     const fileHistoryService = this.config.getFileHistoryService();
     const snapshots = fileHistoryService.getSnapshots();
     // Legacy mode pairs snapshot indexes with positional turn indexes; the
@@ -3881,12 +3908,27 @@ export class Session implements SessionContext {
       // pruning snapshots (surplus) — advertise nothing rather than
       // mispaired slots.
       if (snapshots.length !== projection.turns.length) return [];
+      // A positional recording index past the recording's boundary list
+      // (automatic turns count positionally but push no boundary)
+      // fail-closes in #rewindToCoordinates — do not advertise targets the
+      // rewind will refuse.
+      const recordingBoundaryCount = this.config
+        .getChatRecordingService()
+        ?.getRewindableTurnPromptIds().length;
       return snapshots
         .slice(0, projection.turns.length)
-        .map((snapshot, turnIndex) => ({
-          promptId: snapshot.promptId,
-          turnIndex,
-        }));
+        .flatMap((snapshot, turnIndex) => {
+          const recordingTurnIndex =
+            projection.turns[turnIndex]!.recordingTurnIndex;
+          if (
+            recordingBoundaryCount &&
+            recordingTurnIndex !== undefined &&
+            recordingTurnIndex >= recordingBoundaryCount
+          ) {
+            return [];
+          }
+          return [{ promptId: snapshot.promptId, turnIndex }];
+        });
     }
     return projection.turns.flatMap(
       ({ promptId, turnIndex, recordingTurnIndex }) =>
