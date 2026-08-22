@@ -43,6 +43,7 @@ const AUTH_TYPES = new Set<AuthType>(Object.values(AuthType));
 
 export {
   RUNTIME_SNAPSHOT_PREFIX,
+  buildRuntimeSnapshotId,
   stripRuntimeSnapshotPrefix,
 } from './runtimeModelPrefix.js';
 

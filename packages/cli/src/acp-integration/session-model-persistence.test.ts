@@ -569,6 +569,211 @@ describe('session-model-persistence', () => {
     expect(switchModel).not.toHaveBeenCalled();
   });
 
+  it('retries authentication when restore only changed the registry baseUrl', async () => {
+    let currentAuth: string | undefined = AuthType.USE_OPENAI;
+    let currentModel = 'qwen3-coder-plus';
+    let currentBaseUrl: string | undefined = 'https://settings.example/v1';
+    const switchModel = vi.fn(
+      async (
+        authType: string,
+        modelId: string,
+        options?: { baseUrl?: string },
+      ): Promise<void> => {
+        currentAuth = authType;
+        currentModel = modelId;
+        currentBaseUrl = options?.baseUrl;
+      },
+    );
+    const authenticate = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('oauth expired'))
+      .mockResolvedValueOnce(undefined);
+    const config = {
+      getModel: vi.fn(() => currentModel),
+      getAuthType: vi.fn(() => currentAuth),
+      getCurrentModelRegistryBaseUrl: vi.fn(() => currentBaseUrl),
+      getActiveRuntimeModelSnapshot: vi.fn().mockReturnValue(undefined),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({}),
+      switchModel,
+    } as unknown as Config;
+
+    await restoreSessionModelThenAuthenticate(
+      config,
+      recordingProjection({
+        lastCompletedUuid: 'leaf',
+        turnParentUuids: [null],
+        sessionModel: {
+          modelId: 'qwen3-coder-plus',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://session.example/v1',
+        },
+      }),
+      authenticate,
+    );
+
+    expect(authenticate).toHaveBeenCalledTimes(2);
+    expect(switchModel).toHaveBeenNthCalledWith(
+      1,
+      AuthType.USE_OPENAI,
+      'qwen3-coder-plus',
+      { baseUrl: 'https://session.example/v1' },
+    );
+    expect(switchModel).toHaveBeenNthCalledWith(
+      2,
+      AuthType.USE_OPENAI,
+      'qwen3-coder-plus',
+      { baseUrl: 'https://settings.example/v1' },
+    );
+  });
+
+  it('rolls back to the settings runtime snapshot id after restored auth fails', async () => {
+    let currentAuth: string | undefined = AuthType.USE_OPENAI;
+    let currentModel = 'custom-runtime';
+    const switchModel = vi.fn(
+      async (authType: string, modelId: string): Promise<void> => {
+        if (modelId === 'custom-runtime') {
+          throw new Error('Model not found');
+        }
+        currentAuth = authType;
+        currentModel = modelId;
+      },
+    );
+    const authenticate = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('oauth expired'))
+      .mockResolvedValueOnce(undefined);
+    const config = {
+      getModel: vi.fn(() => currentModel),
+      getAuthType: vi.fn(() => currentAuth),
+      getCurrentModelRegistryBaseUrl: vi.fn().mockReturnValue(undefined),
+      getActiveRuntimeModelSnapshot: vi.fn().mockReturnValue({
+        authType: AuthType.USE_OPENAI,
+        modelId: 'custom-runtime',
+      }),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({}),
+      switchModel,
+    } as unknown as Config;
+
+    await restoreSessionModelThenAuthenticate(
+      config,
+      recordingProjection({
+        lastCompletedUuid: 'leaf',
+        turnParentUuids: [null],
+        sessionModel: {
+          modelId: 'coder-model',
+          authType: AuthType.QWEN_OAUTH,
+        },
+      }),
+      authenticate,
+    );
+
+    expect(authenticate).toHaveBeenCalledTimes(2);
+    expect(switchModel).toHaveBeenNthCalledWith(
+      1,
+      AuthType.QWEN_OAUTH,
+      'coder-model',
+      { requireCachedCredentials: true },
+    );
+    expect(switchModel).toHaveBeenNthCalledWith(
+      2,
+      AuthType.USE_OPENAI,
+      `$runtime|${AuthType.USE_OPENAI}|custom-runtime`,
+      undefined,
+    );
+  });
+
+  it('surfaces the settings-model auth error when rollback authentication also fails', async () => {
+    let currentAuth: string | undefined = AuthType.USE_OPENAI;
+    let currentModel = 'settings-default';
+    const switchModel = vi.fn(
+      async (authType: string, modelId: string): Promise<void> => {
+        currentAuth = authType;
+        currentModel = modelId;
+      },
+    );
+    const authenticate = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('oauth expired'))
+      .mockRejectedValueOnce(new Error('settings auth failed'));
+    const config = {
+      getModel: vi.fn(() => currentModel),
+      getAuthType: vi.fn(() => currentAuth),
+      getCurrentModelRegistryBaseUrl: vi.fn().mockReturnValue(undefined),
+      getActiveRuntimeModelSnapshot: vi.fn().mockReturnValue(undefined),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({}),
+      switchModel,
+    } as unknown as Config;
+
+    await expect(
+      restoreSessionModelThenAuthenticate(
+        config,
+        recordingProjection({
+          lastCompletedUuid: 'leaf',
+          turnParentUuids: [null],
+          sessionModel: {
+            modelId: 'coder-model',
+            authType: AuthType.QWEN_OAUTH,
+          },
+        }),
+        authenticate,
+      ),
+    ).rejects.toThrow('settings auth failed');
+
+    expect(authenticate).toHaveBeenCalledTimes(2);
+    expect(switchModel).toHaveBeenNthCalledWith(
+      2,
+      AuthType.USE_OPENAI,
+      'settings-default',
+      undefined,
+    );
+  });
+
+  it('surfaces the restored auth error when rollback switchModel fails', async () => {
+    let currentAuth: string | undefined = AuthType.USE_OPENAI;
+    let currentModel = 'settings-default';
+    const switchModel = vi.fn(
+      async (authType: string, modelId: string): Promise<void> => {
+        if (modelId === 'settings-default') {
+          throw new Error('Model not found');
+        }
+        currentAuth = authType;
+        currentModel = modelId;
+      },
+    );
+    const authenticate = vi.fn().mockRejectedValue(new Error('oauth expired'));
+    const config = {
+      getModel: vi.fn(() => currentModel),
+      getAuthType: vi.fn(() => currentAuth),
+      getCurrentModelRegistryBaseUrl: vi.fn().mockReturnValue(undefined),
+      getActiveRuntimeModelSnapshot: vi.fn().mockReturnValue(undefined),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({}),
+      switchModel,
+    } as unknown as Config;
+
+    await expect(
+      restoreSessionModelThenAuthenticate(
+        config,
+        recordingProjection({
+          lastCompletedUuid: 'leaf',
+          turnParentUuids: [null],
+          sessionModel: {
+            modelId: 'coder-model',
+            authType: AuthType.QWEN_OAUTH,
+          },
+        }),
+        authenticate,
+      ),
+    ).rejects.toThrow('oauth expired');
+
+    expect(authenticate).toHaveBeenCalledTimes(1);
+    expect(switchModel).toHaveBeenNthCalledWith(
+      2,
+      AuthType.USE_OPENAI,
+      'settings-default',
+      undefined,
+    );
+  });
+
   it('marks the payload isRuntime when a runtime snapshot is active', async () => {
     const recordSessionModel = vi.fn().mockResolvedValue(true);
     const config = {

@@ -584,6 +584,18 @@ export interface SessionModelRecordPayload {
   isRuntime?: boolean;
 }
 
+export function isValidSessionModelPayload(
+  payload: unknown,
+): payload is SessionModelRecordPayload {
+  const candidate = payload as SessionModelRecordPayload | null | undefined;
+  return (
+    typeof candidate?.modelId === 'string' &&
+    Boolean(candidate.modelId.trim()) &&
+    typeof candidate.authType === 'string' &&
+    Boolean(candidate.authType.trim())
+  );
+}
+
 export function normalizeSessionModelPayload(
   payload: SessionModelRecordPayload,
 ): SessionModelRecordPayload {
@@ -1164,16 +1176,10 @@ export class ChatRecordingService {
         this.currentSourceType = payload?.sourceType;
         this.currentSourceId = payload?.sourceId;
       } else if (record.subtype === 'session_model') {
-        const payload = record.systemPayload as
-          | SessionModelRecordPayload
-          | undefined;
-        if (
-          typeof payload?.modelId === 'string' &&
-          payload.modelId.trim() &&
-          typeof payload.authType === 'string' &&
-          payload.authType.trim()
-        ) {
-          this.currentSessionModel = normalizeSessionModelPayload(payload);
+        if (isValidSessionModelPayload(record.systemPayload)) {
+          this.currentSessionModel = normalizeSessionModelPayload(
+            record.systemPayload,
+          );
         }
       }
     }
@@ -2588,12 +2594,7 @@ export class ChatRecordingService {
   async recordSessionModel(
     payload: SessionModelRecordPayload,
   ): Promise<boolean> {
-    if (
-      typeof payload.modelId !== 'string' ||
-      !payload.modelId.trim() ||
-      typeof payload.authType !== 'string' ||
-      !payload.authType.trim()
-    ) {
+    if (!isValidSessionModelPayload(payload)) {
       return false;
     }
     const normalized = normalizeSessionModelPayload(payload);

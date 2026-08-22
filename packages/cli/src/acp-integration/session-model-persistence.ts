@@ -6,8 +6,8 @@
 
 import {
   AuthType,
+  buildRuntimeSnapshotId,
   createDebugLogger,
-  RUNTIME_SNAPSHOT_PREFIX,
   stripRuntimeSnapshotPrefix,
   type Config,
   type SessionModelRecordPayload,
@@ -123,7 +123,7 @@ export async function applyRestoredSessionModel(
     Boolean(recorded?.isRuntime) &&
     hasMatchingRuntimeSnapshot(config, authType, targetModel);
   const switchModelId = useRuntimeSnapshot
-    ? `${RUNTIME_SNAPSHOT_PREFIX}${authType}|${targetModel}`
+    ? buildRuntimeSnapshotId(authType, targetModel)
     : targetModel;
   const requireCachedCredentials =
     authType === AuthType.QWEN_OAUTH && currentAuth !== authType;
@@ -159,13 +159,16 @@ export async function restoreSessionModelThenAuthenticate(
   const originalAuth = liveAuthType(config);
   const originalModel = config.getModel();
   const originalBaseUrl = config.getCurrentModelRegistryBaseUrl?.();
+  const originalRuntimeSnapshot = config.getActiveRuntimeModelSnapshot?.();
   await applyRestoredSessionModel(config, projection);
   try {
     await authenticate();
   } catch (error) {
     if (
       liveAuthType(config) === originalAuth &&
-      config.getModel() === originalModel
+      config.getModel() === originalModel &&
+      (config.getCurrentModelRegistryBaseUrl?.() ?? undefined) ===
+        (originalBaseUrl ?? undefined)
     ) {
       throw error;
     }
@@ -175,17 +178,26 @@ export async function restoreSessionModelThenAuthenticate(
     if (!originalAuth || !originalModel) {
       throw error;
     }
+    const rollbackModelId =
+      originalRuntimeSnapshot?.authType === originalAuth &&
+      originalRuntimeSnapshot.modelId ===
+        stripRuntimeSnapshotPrefix(originalModel)
+        ? buildRuntimeSnapshotId(
+            originalAuth,
+            stripRuntimeSnapshotPrefix(originalModel),
+          )
+        : originalModel;
     try {
       await config.switchModel(
         originalAuth as AuthType,
-        originalModel,
+        rollbackModelId,
         typeof originalBaseUrl === 'string'
           ? { baseUrl: originalBaseUrl }
           : undefined,
       );
-      await authenticate();
     } catch {
       throw error;
     }
+    await authenticate();
   }
 }

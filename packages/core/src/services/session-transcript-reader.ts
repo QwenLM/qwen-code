@@ -18,14 +18,15 @@ import { readSessionTitleInfoFromFileSync } from '../utils/sessionStorageUtils.j
 import type { HistoryGap } from '../utils/conversation-chain.js';
 import { parseGoalStateRecordPayloadV2 } from '../goals/goal-reducer.js';
 import type { GoalStateRecordPayloadV2 } from '../goals/goal-protocol.js';
-import type {
-  AttributionSnapshotPayload,
-  ChatRecord,
-  ParentSessionRecordPayload,
-  SessionModelRecordPayload,
-  SessionSourceRecordPayload,
-  TitleSource,
-  UiTelemetryRecordPayload,
+import {
+  isValidSessionModelPayload,
+  type AttributionSnapshotPayload,
+  type ChatRecord,
+  type ParentSessionRecordPayload,
+  type SessionModelRecordPayload,
+  type SessionSourceRecordPayload,
+  type TitleSource,
+  type UiTelemetryRecordPayload,
 } from './chatRecordingService.js';
 import {
   isApiHistoryCompressionCandidate,
@@ -2256,16 +2257,8 @@ export class SessionTranscriptReader {
         sourceType = payload?.sourceType;
         sourceId = payload?.sourceId;
       } else if (record.uuid === sessionModelUuid) {
-        const payload = record.systemPayload as
-          | SessionModelRecordPayload
-          | undefined;
-        if (
-          typeof payload?.modelId === 'string' &&
-          payload.modelId.trim() &&
-          typeof payload.authType === 'string' &&
-          payload.authType.trim()
-        ) {
-          sessionModel = payload;
+        if (isValidSessionModelPayload(record.systemPayload)) {
+          sessionModel = record.systemPayload;
         }
       }
       if (
