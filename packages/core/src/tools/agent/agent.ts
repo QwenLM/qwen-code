@@ -1490,7 +1490,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       this.updateDisplay(
         {
           status: event.terminateReason === 'GOAL' ? 'completed' : 'failed',
-          terminateReason: event.terminateReason,
+          // Surface which loop detector stopped the subagent (issue #9450)
+          // so the failed task card is attributable instead of collapsing
+          // every loop stop into the generic LOOP_DETECTED label.
+          terminateReason: event.loopType
+            ? `${event.terminateReason} (${event.loopType})`
+            : event.terminateReason,
         },
         updateOutput,
       );
