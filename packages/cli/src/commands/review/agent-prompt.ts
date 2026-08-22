@@ -101,6 +101,7 @@ import { inertPath, scratchLabel } from './lib/paths.js';
 import { worktreeResidue, type WorktreeResidue } from './lib/worktree.js';
 import {
   isTerritoryFanOut,
+  isPositivePrNumber,
   requiredAgents,
   reviewMode,
   type RequiredAgent,
@@ -793,9 +794,12 @@ export function buildChunkAgentPrompt(
     '',
     'For your territory only, you own every dimension: line-by-line correctness, the ' +
       'removed-behavior audit of your own deleted lines, security, code quality, performance, ' +
-      'test coverage, and the adversarial reading. Two duties are NOT yours, because a chunk ' +
-      'agent is structurally blind to them: cross-file tracing (a caller in another chunk) and ' +
-      'the cross-chunk half of removed-behavior. Audit the deletions in your own territory; do ' +
+      'test coverage, and the adversarial reading. Some duties are NOT yours, because a chunk ' +
+      'agent is structurally blind to them: cross-file tracing (a caller in another chunk); ' +
+      "the cross-chunk half of removed-behavior; the counter-frame audit (the author's frame " +
+      'spans every territory — a dedicated whole-diff agent owns it); and the prose-execution ' +
+      "audit of instruction files (a recipe's steps rarely respect chunk boundaries — where " +
+      'the diff owes it, a dedicated agent runs it). Audit the deletions in your own territory; do ' +
       'not conclude a deletion is unreplaced merely because its replacement is not in your range.',
     '',
     '**Shape check (part of code quality — the altitude lens, scoped to your ' +
@@ -1805,7 +1809,12 @@ export function buildRoleBrief(
   if (role === '6d') {
     const pr = report.prNumber;
     const repo = report.ownerRepo;
-    if (pr === undefined || typeof repo !== 'string') {
+    // Shape, not just presence: `isPositivePrNumber`'s doc names null/0/''/
+    // junk as "no PR", and welding one of those produces a dangling
+    // `qwen-review-pr-null-context.md` pointer that masks a misconfigured
+    // plan as a genuine pr-context failure (role 0 re-validates the same
+    // fields for the same reason).
+    if (!isPositivePrNumber(pr) || typeof repo !== 'string') {
       throw new Error(
         'agent-prompt: --role 6d needs a plan with `prNumber` and `ownerRepo` ' +
           '(the roster only owes the counter-frame audit on PR reviews — ' +

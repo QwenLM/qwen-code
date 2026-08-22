@@ -129,6 +129,12 @@ describe('requiredAgents — Step 3A', () => {
     expect(keys({ ...noPr, srcDiffLines: 900, diffLines: 4000 })).not.toContain(
       '6d',
     );
+    // But NO mode gate: an identity-bearing cross-repo lightweight review
+    // keeps 6d — it reads the diff and the PR context, needing no tree. A
+    // `&& mode !== 'diff-only'` "reconciliation" at either add site would
+    // silently drop the counter-frame audit from exactly the lightweight PR
+    // reviews the SKILL narration promises it to.
+    expect(keys({ ...PR, worktreePath: undefined })).toContain('6d');
   });
 
   it('owes the prose-execution audit exactly when the diff touches an instruction file', () => {
@@ -302,6 +308,19 @@ describe('requiredAgents — Step 3A', () => {
     // mutant ships the tier contract's contradiction green).
     expect(
       keys({ ...PR, effort: 'medium', repositoryContext: context(['6d']) }),
+    ).not.toContain('6d');
+    // …and the identity half of the same gate: a manifest cannot conjure a
+    // frame onto a PR-less review — the 6d brief builder throws on such a
+    // plan, so honouring this would wedge `agent-prompt --roster` for every
+    // local review of a repo whose manifest names 6d (the
+    // `return plan.effort !== 'medium'` mutant ships exactly that).
+    expect(
+      keys({
+        ...PR,
+        prNumber: undefined,
+        ownerRepo: undefined,
+        repositoryContext: context(['6d']),
+      }),
     ).not.toContain('6d');
     // prose-exec cannot be required into a review with no tree to execute
     // in — check-coverage would exit 3 demanding an agent that can only
@@ -566,9 +585,13 @@ describe('isPromptPath — the instruction-file detector', () => {
     ['QWEN.md', true],
     ['packages/cli/GEMINI.md', true],
     ['.github/copilot-instructions.md', true],
-    // Slash-command definitions are prompts too.
+    // Slash-command definitions are prompts too — and the dot-directories
+    // count NESTED as well as at the root (a `(^|\/)` → `(^)` mutant flips
+    // only the nested form, the false-negative direction the doc calls the
+    // expensive one).
     ['.claude/commands/deploy.md', true],
     ['.qwen/commands/review.md', true],
+    ['packages/x/.claude/agents/foo.md', true],
     // Singular and embedded tokens — the alternation's both halves (a
     // `briefs`-only or `prompt`-only mutant flips one of these).
     ['docs/brief.md', true],
