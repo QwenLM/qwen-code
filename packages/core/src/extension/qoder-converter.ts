@@ -196,12 +196,16 @@ function resolveContextFiles(
 
 export async function convertQoderPlugin(
   extensionDir: string,
+  signal?: AbortSignal,
 ): Promise<{ config: ExtensionConfig; convertedDir: string }> {
+  signal?.throwIfAborted();
   const config = loadQoderConfig(extensionDir);
   config.mcpServers = resolveMcpServers(extensionDir, config.mcpServers);
   const converted = await buildQwenExtensionFromPlugin(
     extensionDir,
     config as ClaudePluginConfig,
+    true,
+    signal,
   );
   const contextFileName = resolveContextFiles(
     converted.convertedDir,

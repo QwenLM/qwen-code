@@ -219,7 +219,16 @@ export const DiscoverTab = ({
       for (const plugin of targets) {
         let ext;
         try {
-          const metadata = await parseInstallSource(plugin.installSource);
+          if (!plugin.installSource) {
+            throw new Error(
+              t(
+                'This marketplace entry has no installable source. Add a Git, archive, or repository source to its marketplace metadata.',
+              ),
+            );
+          }
+          const metadata = await parseInstallSource(plugin.installSource, {
+            pluginSourceKind: plugin.pluginSourceKind,
+          });
           ext = await extensionManager.installExtension(
             metadata,
             undefined,

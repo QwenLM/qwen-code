@@ -32,6 +32,7 @@ import * as archiver from 'archiver';
 import {
   ExtensionUpdateState,
   type Extension,
+  type ExtensionConfig,
   type ExtensionManager,
 } from './extensionManager.js';
 import { getErrorMessage } from '../utils/errors.js';
@@ -1192,6 +1193,97 @@ describe('git extension helpers', () => {
       expect(result).toBe(ExtensionUpdateState.NOT_UPDATABLE);
     });
 
+    it('does not refetch external content selected by a local marketplace', async () => {
+      const extension = createExtension({
+        installMetadata: {
+          type: 'local',
+          source: '/local/marketplace',
+          pluginName: 'remote-child',
+          pluginSourceKind: 'marketplace-entry',
+          externalContent: true,
+        },
+      });
+      const mockManager = {
+        loadExtensionConfig: vi.fn(),
+      } as unknown as ExtensionManager;
+
+      await expect(
+        checkForExtensionUpdate(extension, mockManager),
+      ).resolves.toBe(ExtensionUpdateState.NOT_UPDATABLE);
+      expect(mockManager.loadExtensionConfig).not.toHaveBeenCalled();
+    });
+
+    it('checks a selected marketplace entry when its local source is a directory', async () => {
+      const sourceDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'local-marketplace-update-test-'),
+      );
+      try {
+        await fs.writeFile(
+          path.join(sourceDir, EXTENSIONS_CONFIG_FILENAME),
+          JSON.stringify({ name: 'marketplace-root', version: '1.0.0' }),
+        );
+        const marketplaceDir = path.join(sourceDir, '.claude-plugin');
+        const pluginDir = path.join(sourceDir, 'plugins', 'selected');
+        await fs.mkdir(marketplaceDir, { recursive: true });
+        await fs.mkdir(path.join(pluginDir, '.claude-plugin'), {
+          recursive: true,
+        });
+        await fs.writeFile(
+          path.join(marketplaceDir, 'marketplace.json'),
+          JSON.stringify({
+            name: 'marketplace-root',
+            owner: { name: 'Owner' },
+            plugins: [
+              {
+                name: 'selected',
+                source: './plugins/selected',
+              },
+            ],
+          }),
+        );
+        await fs.writeFile(
+          path.join(pluginDir, '.claude-plugin', 'plugin.json'),
+          JSON.stringify({ name: 'selected', version: '2.0.0' }),
+        );
+        const loadedNames: string[] = [];
+        const mockManager = {
+          loadExtensionConfig: vi.fn(
+            ({ extensionDir }: { extensionDir: string }) => {
+              const config = JSON.parse(
+                fsSync.readFileSync(
+                  path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
+                  'utf-8',
+                ),
+              ) as ExtensionConfig;
+              loadedNames.push(config.name);
+              return config;
+            },
+          ),
+        } as unknown as ExtensionManager;
+        const installMetadata = {
+          type: 'local' as const,
+          source: sourceDir,
+          pluginName: 'selected',
+          pluginSourceKind: 'marketplace-entry' as const,
+        };
+
+        const unchanged = await checkForExtensionUpdate(
+          createExtension({ version: '2.0.0', installMetadata }),
+          mockManager,
+        );
+        const outdated = await checkForExtensionUpdate(
+          createExtension({ version: '1.0.0', installMetadata }),
+          mockManager,
+        );
+
+        expect(unchanged).toBe(ExtensionUpdateState.UP_TO_DATE);
+        expect(outdated).toBe(ExtensionUpdateState.UPDATE_AVAILABLE);
+        expect(loadedNames).toEqual(['selected', 'selected']);
+      } finally {
+        await fs.rm(sourceDir, { recursive: true, force: true });
+      }
+    });
+
     it('should convert a local Gemini archive before checking for updates', async () => {
       const tempDir = await fs.mkdtemp(
         path.join(os.tmpdir(), 'local-archive-update-test-'),
@@ -1236,6 +1328,72 @@ describe('git extension helpers', () => {
         const result = await checkForExtensionUpdate(extension, mockManager);
 
         expect(result).toBe(ExtensionUpdateState.UPDATE_AVAILABLE);
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('forwards extension-root kind when checking a local archive update', async () => {
+      const tempDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'local-root-alias-update-test-'),
+      );
+      try {
+        const archivePath = path.join(tempDir, 'root-alias.zip');
+        const archive = await createZipBuffer(tempDir, [
+          {
+            name: '.claude-plugin/plugin.json',
+            content: JSON.stringify({
+              name: 'root-plugin',
+              version: '1.0.0',
+            }),
+          },
+          {
+            name: '.claude-plugin/marketplace.json',
+            content: JSON.stringify({
+              name: 'root-marketplace',
+              owner: { name: 'Owner' },
+              plugins: [
+                {
+                  name: 'root-alias',
+                  version: '2.0.0',
+                  source: './plugins/root-alias',
+                },
+              ],
+            }),
+          },
+          {
+            name: 'plugins/root-alias/.claude-plugin/plugin.json',
+            content: JSON.stringify({
+              name: 'child-plugin',
+              version: '2.0.0',
+            }),
+          },
+        ]);
+        await fs.writeFile(archivePath, archive);
+        const extension = createExtension({
+          version: '1.0.0',
+          installMetadata: {
+            type: 'local',
+            source: archivePath,
+            pluginName: 'root-alias',
+            pluginSourceKind: 'extension-root',
+          },
+        });
+        const mockManager = {
+          loadExtensionConfig: vi.fn(
+            ({ extensionDir }: { extensionDir: string }) =>
+              JSON.parse(
+                fsSync.readFileSync(
+                  path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
+                  'utf-8',
+                ),
+              ),
+          ),
+        } as unknown as ExtensionManager;
+
+        const result = await checkForExtensionUpdate(extension, mockManager);
+
+        expect(result).toBe(ExtensionUpdateState.UP_TO_DATE);
       } finally {
         await fs.rm(tempDir, { recursive: true, force: true });
       }
@@ -1416,6 +1574,27 @@ describe('git extension helpers', () => {
       }
     });
 
+    it('does not refetch external content selected by an archive URL marketplace', async () => {
+      const extension = createExtension({
+        installMetadata: {
+          type: 'archive-url',
+          source: 'https://example.com/catalog.zip',
+          pluginName: 'remote-child',
+          pluginSourceKind: 'marketplace-entry',
+          externalContent: true,
+        },
+      });
+      const mockManager = {
+        loadExtensionConfig: vi.fn(),
+      } as unknown as ExtensionManager;
+
+      await expect(
+        checkForExtensionUpdate(extension, mockManager),
+      ).resolves.toBe(ExtensionUpdateState.NOT_UPDATABLE);
+      expect(mockHttpsGet).not.toHaveBeenCalled();
+      expect(mockManager.loadExtensionConfig).not.toHaveBeenCalled();
+    });
+
     it('should convert an archive URL Gemini archive before checking for updates', async () => {
       const tempDir = await fs.mkdtemp(
         path.join(os.tmpdir(), 'archive-url-update-test-'),
@@ -1459,6 +1638,71 @@ describe('git extension helpers', () => {
         const result = await checkForExtensionUpdate(extension, mockManager);
 
         expect(result).toBe(ExtensionUpdateState.UPDATE_AVAILABLE);
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('forwards marketplace-entry kind when checking an archive URL update', async () => {
+      const tempDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'archive-url-marketplace-update-test-'),
+      );
+      try {
+        const archive = await createZipBuffer(tempDir, [
+          {
+            name: EXTENSIONS_CONFIG_FILENAME,
+            content: JSON.stringify({
+              name: 'marketplace-root',
+              version: '2.0.0',
+            }),
+          },
+          {
+            name: '.claude-plugin/marketplace.json',
+            content: JSON.stringify({
+              name: 'catalog',
+              owner: { name: 'Owner' },
+              plugins: [
+                {
+                  name: 'selected',
+                  source: './plugins/selected',
+                },
+              ],
+            }),
+          },
+          {
+            name: 'plugins/selected/.claude-plugin/plugin.json',
+            content: JSON.stringify({
+              name: 'selected',
+              version: '1.0.0',
+            }),
+          },
+        ]);
+        mockHttpsResponses(archive);
+        const extension = createExtension({
+          name: 'selected',
+          version: '1.0.0',
+          installMetadata: {
+            type: 'archive-url',
+            source: 'https://example.com/catalog.zip',
+            pluginName: 'selected',
+            pluginSourceKind: 'marketplace-entry',
+          },
+        });
+        const mockManager = {
+          loadExtensionConfig: vi.fn(
+            ({ extensionDir }: { extensionDir: string }) =>
+              JSON.parse(
+                fsSync.readFileSync(
+                  path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
+                  'utf-8',
+                ),
+              ),
+          ),
+        } as unknown as ExtensionManager;
+
+        const result = await checkForExtensionUpdate(extension, mockManager);
+
+        expect(result).toBe(ExtensionUpdateState.UP_TO_DATE);
       } finally {
         await fs.rm(tempDir, { recursive: true, force: true });
       }

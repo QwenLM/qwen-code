@@ -6250,7 +6250,8 @@ describe('createServeApp', () => {
               owner: { name: string; email: string };
               plugins: Array<{
                 name: string;
-                source: string;
+                source?: string;
+                description?: string;
                 category?: string;
                 tags?: string[];
               }>;
@@ -6266,6 +6267,10 @@ describe('createServeApp', () => {
                   'https://user:token@example.com/plugin?token=secret#private',
                 category: 'tools',
                 tags: ['example'],
+              },
+              {
+                name: 'root-plugin',
+                description: 'Plugin at the marketplace root',
               },
             ],
           });
@@ -6308,6 +6313,11 @@ describe('createServeApp', () => {
                   source: 'https://***REDACTED***@example.com/plugin',
                   category: 'tools',
                   tags: ['example'],
+                },
+                {
+                  name: 'root-plugin',
+                  description: 'Plugin at the marketplace root',
+                  source: '.',
                 },
               ],
             },

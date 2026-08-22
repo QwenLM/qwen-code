@@ -41,7 +41,7 @@ export interface MarketplaceInstallResult {
  * - It's not part of a URL scheme (http://, https://, git@, sso://)
  * - It appears after the repo portion
  */
-function parseSourceAndPluginName(source: string): {
+export function parseSourceAndPluginName(source: string): {
   repo: string;
   pluginName?: string;
 } {
@@ -63,11 +63,18 @@ function parseSourceAndPluginName(source: string): {
       if (lastColonIndex !== -1) {
         // Check if what follows the colon looks like a pluginName (not a port number or path)
         const potentialPluginName = afterScheme.substring(lastColonIndex + 1);
-        // Plugin name should not contain '/' and should not be a number (port)
+        const separatorIndex = scheme.length + lastColonIndex;
+        const firstPathSlashIndex = source.indexOf('/', scheme.length);
+        const isHttpPort =
+          (scheme === 'http://' || scheme === 'https://') &&
+          /^\d+$/.test(potentialPluginName) &&
+          (firstPathSlashIndex === -1 || separatorIndex < firstPathSlashIndex);
+        // HTTP(S) ports appear in the authority, before the first path slash.
+        // A suffix after the path is an appended plugin name, even if numeric.
         if (
           potentialPluginName &&
           !potentialPluginName.includes('/') &&
-          !/^\d+/.test(potentialPluginName)
+          !isHttpPort
         ) {
           repoEndIndex = scheme.length + lastColonIndex;
           hasPluginName = true;
@@ -411,6 +418,7 @@ export async function parseInstallSource(
   source: string,
   options: {
     networkPolicy?: ExtensionInstallMetadata['networkPolicy'];
+    pluginSourceKind?: ExtensionInstallMetadata['pluginSourceKind'];
   } = {},
 ): Promise<ExtensionInstallMetadata> {
   // Step 1: Parse source into repo and optional pluginName
@@ -505,6 +513,11 @@ export async function parseInstallSource(
 
   if (options.networkPolicy) {
     installMetadata.networkPolicy = options.networkPolicy;
+  }
+  const pluginSourceKind =
+    options.pluginSourceKind ?? (pluginName ? 'marketplace-entry' : undefined);
+  if (pluginSourceKind) {
+    installMetadata.pluginSourceKind = pluginSourceKind;
   }
 
   return installMetadata;

@@ -108,6 +108,18 @@ describe('parseInstallSource', () => {
       expect(result.source).toBe('https://github.com/owner/repo');
       expect(result.type).toBe('git');
       expect(result.pluginName).toBe('my-plugin');
+      expect(result.pluginSourceKind).toBe('marketplace-entry');
+    });
+
+    it('preserves an explicit root-plugin source kind', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      const result = await parseInstallSource('owner/repo:alias', {
+        pluginSourceKind: 'extension-root',
+      });
+
+      expect(result.pluginName).toBe('alias');
+      expect(result.pluginSourceKind).toBe('extension-root');
     });
 
     it('should handle owner/repo with dashes and underscores', async () => {
@@ -154,6 +166,40 @@ describe('parseInstallSource', () => {
 
       expect(result.source).toBe('https://example.com:8080/repo');
       expect(result.pluginName).toBeUndefined();
+    });
+
+    it('should not treat a trailing HTTPS port as a plugin name', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      const result = await parseInstallSource('https://example.com:8080', {
+        pluginSourceKind: 'marketplace-entry',
+      });
+
+      expect(result.source).toBe('https://example.com:8080');
+      expect(result.pluginName).toBeUndefined();
+    });
+
+    it('preserves a non-numeric HTTPS alias without a path', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      const result = await parseInstallSource(
+        'https://example.com:root-plugin',
+      );
+
+      expect(result.source).toBe('https://example.com');
+      expect(result.pluginName).toBe('root-plugin');
+    });
+
+    it('parses an all-digit HTTPS marketplace selector after the URL path', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      const result = await parseInstallSource(
+        'https://github.com/owner/repo:2048',
+      );
+
+      expect(result.source).toBe('https://github.com/owner/repo');
+      expect(result.pluginName).toBe('2048');
+      expect(result.pluginSourceKind).toBe('marketplace-entry');
     });
 
     it('should parse an uppercase HTTPS URL scheme as a git source', async () => {
@@ -222,6 +268,53 @@ describe('parseInstallSource', () => {
       expect(result.type).toBe('git');
       expect(result.pluginName).toBe('my-plugin');
     });
+
+    it('parses a digit-leading direct-root alias without mistaking it for a port', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      const result = await parseInstallSource(
+        'git@github.com:owner/repo.git:2048-game',
+        { pluginSourceKind: 'extension-root' },
+      );
+
+      expect(result.source).toBe('git@github.com:owner/repo.git');
+      expect(result.pluginName).toBe('2048-game');
+      expect(result.pluginSourceKind).toBe('extension-root');
+    });
+
+    it('parses a digit-leading sso direct-root alias', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      const result = await parseInstallSource('sso://team/repo:2048-game', {
+        pluginSourceKind: 'extension-root',
+      });
+
+      expect(result.source).toBe('sso://team/repo');
+      expect(result.pluginName).toBe('2048-game');
+      expect(result.pluginSourceKind).toBe('extension-root');
+    });
+
+    it.each([
+      [
+        'git@github.com:owner/repo.git:2048',
+        'git@github.com:owner/repo.git',
+        '2048',
+      ],
+      ['sso://team/repo:2049', 'sso://team/repo', '2049'],
+    ])(
+      'parses an all-digit direct-root alias in %s',
+      async (installSource, source, pluginName) => {
+        vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+        const result = await parseInstallSource(installSource, {
+          pluginSourceKind: 'extension-root',
+        });
+
+        expect(result.source).toBe(source);
+        expect(result.pluginName).toBe(pluginName);
+        expect(result.pluginSourceKind).toBe('extension-root');
+      },
+    );
   });
 
   describe('local path parsing', () => {
