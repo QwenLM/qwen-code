@@ -366,8 +366,54 @@ Enterprise paragraph.
     actor; the completion contract reads `partial`/`approved`; and the
     repeat-round caveats (no dedup backing, no self-PR detection) are
     documented for the user. Still open: dedup/self-PR backing for Aone,
-    `composeUrl`, cleanup audit, AI-comment marking (Q4), the
+    `composeUrl`, AI-comment marking (Q4), the
     render-adjudication carve-out.
+  - **Landed (2026-08-21, #9617):** the cleanup bypass audit — D8's
+    "`comment list` filtered by author within the audit window". `cleanup`
+    selects the audit backend from the fetch report's recorded host, with
+    the registry's cwd-origin fall-through for a hostless report (a
+    bare-number Aone run that omitted `--host`), so an Aone window is
+    never audited against GitHub — the misroute that queried github.com's
+    same-named repo (host null) or pointed gh at a host it has no auth on
+    (host recorded), skipping the tripwire either way. The author arm
+    keys on `author.username == aoneWhoamiAccount()`; the window arm
+    compares epoch milliseconds, because Aone stamps a numeric utc offset
+    (`+08:00`) and a lexicographic comparison across offsets orders by
+    local wall clock, not instant. Sanctioned-vs-bypass keys on COMMENT
+    ids — Aone's submit posts comments, not a review — so the submit
+    receipt grew a `commentIds` axis beside `reviewIds`, written on a
+    successful post (inline ids + summary id) and on a mid-batch failure
+    (the landed ids) so the audit never flags submit's own writes; an id
+    never read back is unvouchable and may draw a flag (fail-safe). The
+    automation-marker filter and the best-effort skip note carry over
+    unchanged; the audit stays read-only and offline-safe. Hardened by the
+    change's own review round, which measured two more platform facts: the
+    default `comment list` EXCLUDES resolved comments (an MR's `comments`
+    minus `closedComments` is exactly what it returns), so the audit
+    unions a `--resolved` query — a posted-then-resolved bypass inside the
+    window is still flagged — but judges a resolved comment by its
+    CREATION only, because a resolution bumps `updatedAt` exactly like an
+    edit and is not edit evidence; and a1 can answer a well-formed
+    `a1.error/v1` error object with exit 0 (a backend auth failure or a
+    client timeout), whose `message` now rides the skip note instead of a
+    bare "unexpected shape". Five disclosed residuals: resolved REPLIES
+    have no a1 listing at all; an EDIT of a receipt-vouched
+    (submit-posted) comment is outside the tripwire's sight — the
+    `updatedAt` bump cannot be told from a resolution or other state flip,
+    so detecting it would flag healthy runs, and a1 has no comment-edit
+    subcommand to begin with (the GitHub twin's sanctioned channel, the
+    review, is likewise uneditable); an edit of an UNVOUCHED
+    pre-window comment is invisible once its discussion is resolved — the
+    `--resolved` union lists it, but the posted arm keys on creation
+    inside the window and the edited arm skips resolved comments, so a
+    resolved comment is judged by creation only; the comment listing is
+    UNPAGED — one `comment list` per query, and a1 documents no page-size
+    guarantee, so if a cap exists, comments past it stay invisible to the
+    audit; and `a1 repo mr approve` / `a1 repo mr edit` writes — banned
+    by SKILL.md's Step 7 write ban — are outside the tripwire's coverage,
+    the recorded a1 surface exposing no listing an audit could query for
+    approvals or MR-metadata edits (`mr view`'s recorded shape carries no
+    approval state).
   - **AI-gate probe (2026-08-21, issue #9614):** Q4 was resolved by a
     controlled write probe on a scratch CR — `comment create` auto-sets
     NOTHING (both a general and an inline probe read back
@@ -381,12 +427,53 @@ Enterprise paragraph.
     gate does not track them; SKILL.md's Aone paragraph carries the same
     fact for the relay. Marking stays open as an a1 feature request; when
     the flag ships it wires at `createMrComment` (the sole write seam).
-    Still open: dedup/self-PR backing for Aone, `composeUrl`, cleanup
-    audit, the ai_comment marking flag (a1-side), the render-adjudication
+    Still open: dedup/self-PR backing for Aone, `composeUrl`, the
+    ai_comment marking flag (a1-side), the render-adjudication carve-out.
+  - **Self-PR backing (2026-08-21, #9616):** `presubmit` became
+    platform-aware. On an Aone target it runs the backed slice —
+    self-PR detection (`a1 auth whoami`'s `account` vs the `mr view`
+    author, one fetch, case-insensitive, fail-soft on a missing author,
+    fail-closed on a thrown `mr view`) and head drift (`sourceBranch` IS
+    the head under AGit-Flow; no compare API exists, so `compare` is
+    null and a drifted head is always anchors-at-risk) — and reports the
+    unbacked slice neutral (`no_checks` with zero checks, zero existing
+    comments: no downgrades from them, no overlap blocks). Same report
+    shape as GitHub, so Step 7's apply-the-report rules and
+    compose-review's downgrade fields are unchanged; the verdict cap
+    stays forced in `submit` (pr-context is still unbacked). SKILL.md's
+    Aone list names presubmit as reduced-backing instead of skipped, and
+    the "no self-PR detection" caveat is gone from both docs. Still
+    open: dedup backing for Aone, `composeUrl`, the
+    ai_comment marking flag (a1-side), the render-adjudication
     carve-out.
 - **Phase 4 — semantic gaps.** Incremental-cache ancestry fallback, build-test
   repo-config escape hatch, publish-assets gating polish, generic-GitLab
   (glab) evaluation.
+  - **Landed (2026-08-21): the incremental-cache ancestry fallback (D7,
+    #9618).** `resolveIncrementalAnchor` gained a `noAncestry` mode that
+    `fetch-pr` selects when the platform is Aone: an AGit-Flow update
+    AMENDS the single CR commit in place, orphaning the cached head, so
+    the anchor-behind-head test failed for EVERY update and an
+    amend-and-re-review never scoped. Both ancestry tests — the
+    anchor-behind-head test and the behind-merge-base clamp — are
+    skipped (the clamp only ever fired when the update ALSO rebased onto
+    newer master, moving the merge base past the cached head; a pure
+    amend passed it); after the fetch both heads are local, so
+    `anchor..head` IS the update's delta, and the narrowing step
+    assembles the published scope from the CR's own diff exactly as it
+    does for an ancestrally valid GitHub anchor (an amended-and-rebased
+    update's delta carries the rebase drift, but the join reads it only
+    for which files changed — no drift byte reaches the published scope
+    — and drift touching a file outside the CR's diff falls back to the
+    full range there).
+    The existence checks and the `base-untrusted` refusal stay — they
+    guard presence and the base-derived capture, not the lineage. The
+    head-drift checks Aone has were confirmed to compare the live
+    `sourceBranch` SHA against the reviewed SHA the same way D7 names —
+    submit's pre-write gate and mid-batch re-read, and fetch-pr's resume
+    probe; none consults a platform compare API or an ancestry test.
+    GitHub keeps the tests: there an ancestor-less anchor is a
+    force-push, and the tests are the detection.
 
 ## Testing strategy
 

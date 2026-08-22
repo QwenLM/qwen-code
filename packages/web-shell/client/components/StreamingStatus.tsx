@@ -19,6 +19,13 @@ interface StreamingStatusProps {
    * status compact. Defaults to true (the main chat shows the phrase).
    */
   showPhrase?: boolean;
+  /**
+   * When true, the daemon reports the session has an in-flight prompt. The
+   * indicator stays visible even while streamingState is idle, so long tool
+   * calls that produce >3s silent gaps do not hide the loading state mid-turn
+   * (#9487). The daemon's session live state is the authoritative source.
+   */
+  hasActivePrompt?: boolean;
 }
 
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -26,6 +33,7 @@ const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', 
 export function StreamingStatus({
   startedAt,
   showPhrase = true,
+  hasActivePrompt,
 }: StreamingStatusProps) {
   const streamingState = useStreamingState();
   const { estimatedOutputTokens, isReceivingContent } =
@@ -63,16 +71,23 @@ export function StreamingStatus({
   const [loadingPhrase, setLoadingPhrase] = useState(
     () => resolvePhrases(language)[0] ?? '',
   );
-
-  const isActive = streamingState !== 'idle';
+  const isActive = streamingState !== 'idle' || hasActivePrompt === true;
+  // Tracks whether the previous effect run was active, so a silent gap (active
+  // via hasActivePrompt while the host's startedAt goes undefined) keeps the
+  // turn's original anchor instead of restarting the elapsed clock at zero.
+  const wasActiveRef = useRef(false);
 
   useEffect(() => {
     if (!isActive) {
+      wasActiveRef.current = false;
       setElapsed(0);
       return;
     }
 
-    startTime.current = startedAt ?? Date.now();
+    if (startedAt !== undefined || !wasActiveRef.current) {
+      startTime.current = startedAt ?? Date.now();
+    }
+    wasActiveRef.current = true;
     setElapsed(elapsedSeconds(startTime.current));
     const interval = setInterval(() => {
       setElapsed(elapsedSeconds(startTime.current));
@@ -107,14 +122,14 @@ export function StreamingStatus({
   }, [language, streamingState, resolvePhrases, showPhrase]);
 
   useEffect(() => {
-    if (streamingState === 'idle') return;
+    if (!isActive) return;
     const interval = setInterval(() => {
       setDotFrame((f) => (f + 1) % SPINNER_FRAMES.length);
     }, 250);
     return () => clearInterval(interval);
-  }, [streamingState]);
+  }, [isActive]);
 
-  if (streamingState === 'idle') return null;
+  if (streamingState === 'idle' && !hasActivePrompt) return null;
 
   const spinnerChar = SPINNER_FRAMES[dotFrame % SPINNER_FRAMES.length];
   const arrow = isReceivingContent ? '↓' : '↑';

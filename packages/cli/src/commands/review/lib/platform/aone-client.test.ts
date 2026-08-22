@@ -15,7 +15,13 @@ vi.mock('node:child_process', () => ({
   execFileSync: mockExecFileSync,
 }));
 
-import { a1, a1JsonOnce, a1Once } from './aone-client.js';
+import {
+  a1,
+  a1JsonOnce,
+  a1Once,
+  aoneWhoamiAccount,
+  ensureAoneAuthenticated,
+} from './aone-client.js';
 
 function transientError(): Error {
   // The message shape execFileSync produces, carrying a transient marker
@@ -168,5 +174,96 @@ describe('a1 (the read path) transient-error retry — the POSITIVE side', () =>
     });
     expect(() => a1('repo', 'mr', 'view', '7')).toThrow();
     expect(mockExecFileSync).toHaveBeenCalledTimes(3); // 1 initial + 2 retries
+  });
+});
+
+describe('aoneWhoamiAccount', () => {
+  // cleanup's Aone audit filters the comment list by this account. The
+  // tripwire invariant: an unreadable account THROWS — returning a blank
+  // would match no comment, and an audit that matches nothing reads
+  // exactly like a clean window (off state indistinguishable from
+  // all-clear). Every caller mock in cleanup.test.ts stubs this module, so
+  // the throw semantics are pinned HERE, at the seam that owns them.
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('returns the account field and rides the shared JSON seam', () => {
+    mockExecFileSync.mockReturnValue('{"account": "bob"}\n');
+    expect(aoneWhoamiAccount()).toBe('bob');
+    const args = mockExecFileSync.mock.calls[0][1] as string[];
+    expect(args).toEqual(['auth', 'whoami', '--format', 'json']);
+  });
+
+  it.each([
+    ['{}', 'no account field'],
+    ['{"account": ""}', 'empty account'],
+    ['{"account": "  "}', 'blank account'],
+    ['{"account": 5}', 'non-string account'],
+    // A literal null PARSES, so it clears the SyntaxError arm; property
+    // access on it then threw an untagged TypeError outside the shape
+    // check — every accountless answer must throw the command-tagged
+    // error, or the skip note names no command.
+    ['null', 'a literal null answer'],
+  ])('throws the named error on %s (%s)', (raw) => {
+    mockExecFileSync.mockReturnValue(raw);
+    expect(() => aoneWhoamiAccount()).toThrow(
+      'a1 auth whoami returned no account',
+    );
+  });
+
+  it('throws the command-tagged shape error when the answer is unparseable', () => {
+    // The raw SyntaxError named no command; the skip note must say WHAT
+    // failed, mirroring a1CommentList's unexpected-shape standard.
+    mockExecFileSync.mockReturnValue('not json');
+    expect(() => aoneWhoamiAccount()).toThrow(
+      'a1 auth whoami returned an unexpected shape',
+    );
+  });
+});
+
+describe('ensureAoneAuthenticated — the auth gate that returns the account', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('returns the account field of ONE `a1 auth whoami --format json`', () => {
+    mockExecFileSync.mockReturnValue('{"account":"wenshao"}\n');
+    expect(ensureAoneAuthenticated()).toBe('wenshao');
+    // Pin the FULL argv and the spawn COUNT: presubmit's self-PR comparison
+    // reads this account off the gate, so a botched spread here would exec
+    // a different whoami shape — and a restored plain-whoami gate beside
+    // the JSON read would double the spawn — without any other test
+    // noticing (aone.test.ts mocks the module wholesale).
+    expect(mockExecFileSync).toHaveBeenCalledTimes(1);
+    const args = mockExecFileSync.mock.calls[0][1] as string[];
+    expect(args).toEqual(['auth', 'whoami', '--format', 'json']);
+  });
+
+  it('returns empty (fail-soft) when whoami names no account', () => {
+    // An empty account makes presubmit's self-PR comparison fail soft —
+    // isSelfPr false — exactly like the GitHub path's empty login; a throw
+    // here would kill the whole presubmit over a shape quirk.
+    mockExecFileSync.mockReturnValue('{}\n');
+    expect(ensureAoneAuthenticated()).toBe('');
+    mockExecFileSync.mockReturnValue('{"account":42}\n');
+    expect(ensureAoneAuthenticated()).toBe('');
+  });
+
+  it('trims the account — parity with gh.ts currentUser().trim()', () => {
+    // A padded account would silently miss the self-PR comparison against a
+    // clean MR author (fail-open on exactly the protection this exists for).
+    mockExecFileSync.mockReturnValue('{"account":"  wenshao\\n"}\n');
+    expect(ensureAoneAuthenticated()).toBe('wenshao');
+  });
+
+  it('returns empty when an EXEC-successful answer does not parse', () => {
+    // The exec's success IS the auth proof; an unreadable account degrades
+    // the self-PR comparison to fail-soft instead of throwing the run with
+    // no report — the pre-merge second whoami detonated on exactly this
+    // anomaly class, after the plain-format gate had waved it through.
+    mockExecFileSync.mockReturnValue('user: wenshao\n');
+    expect(ensureAoneAuthenticated()).toBe('');
+    expect(mockExecFileSync).toHaveBeenCalledTimes(1);
   });
 });

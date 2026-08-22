@@ -36,6 +36,8 @@ import {
   PRIVATE_ACP_CAPABILITY_ENV,
   PRIVATE_PARENT_CAPABILITY_META_KEY,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
+  SESSION_PR_LIST_LIMIT,
+  SESSION_PR_URL_MAX_LENGTH,
   SESSION_TRANSCRIPT_MAX_LIMIT,
   TURN_RESULT_CODE_TEXT_TRUNCATED,
   TURN_RESULT_TEXT_MAX_CHARS,
@@ -166,6 +168,7 @@ import type {
   BridgeRestoredSession,
   BridgeSessionGoal,
   BridgeSessionSummary,
+  SessionPrInfo,
   BridgeTurnStatus,
   BridgeSessionCatalogVersion,
   BridgePendingInteraction,
@@ -962,6 +965,8 @@ interface SessionEntry {
   worktree?: { slug: string; path: string; branch: string };
   /** Branch metadata, when created with branch param. */
   branch?: { name: string; baseBranch: string };
+  /** GitHub PRs bound via updateSessionMetadata, in binding order. */
+  prs?: SessionPrInfo[];
   channel: AcpChannel;
   connection: ClientSideConnection;
   /** Per-session event bus drives `GET /session/:id/events`. */
@@ -3635,6 +3640,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       pendingInteractions: [...entry.pendingInteractions.values()],
       ...(entry.worktree ? { worktree: entry.worktree } : {}),
       ...(entry.branch ? { branch: entry.branch } : {}),
+      ...(entry.prs && entry.prs.length > 0 ? { prs: entry.prs } : {}),
     };
   };
   // Pending + resolved permission state lives in
@@ -9655,6 +9661,31 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         context?.clientId !== undefined
           ? resolveTrustedClientId(entry, context.clientId)
           : undefined;
+      // Validate everything before mutating anything: a combined
+      // displayName+pr request must not partially apply when the pr is
+      // invalid.
+      if (metadata.pr !== undefined) {
+        const pr = metadata.pr as unknown;
+        if (
+          pr === null ||
+          typeof pr !== 'object' ||
+          typeof (pr as SessionPrInfo).number !== 'number' ||
+          !Number.isInteger((pr as SessionPrInfo).number) ||
+          (pr as SessionPrInfo).number <= 0 ||
+          typeof (pr as SessionPrInfo).url !== 'string' ||
+          (pr as SessionPrInfo).url.length > SESSION_PR_URL_MAX_LENGTH ||
+          !/^https?:\/\//i.test((pr as SessionPrInfo).url) ||
+          // The url is interpolated into the stderr audit line — control
+          // characters would let a client forge log lines (the displayName
+          // branch rejects them for the same reason).
+          hasControlCharacter((pr as SessionPrInfo).url)
+        ) {
+          throw new InvalidSessionMetadataError(
+            'pr',
+            `must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters`,
+          );
+        }
+      }
       if (metadata.displayName !== undefined) {
         if (
           typeof metadata.displayName !== 'string' ||
@@ -9721,7 +9752,60 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           }
         }
       }
-      return { displayName: entry.displayName };
+      if (metadata.pr !== undefined) {
+        // Already validated above, before any mutation.
+        const bound = metadata.pr;
+        const existing = entry.prs ?? [];
+        const latest = existing[existing.length - 1];
+        if (latest?.number === bound.number && latest.url === bound.url) {
+          // Same binding repeated — no change, no event.
+        } else {
+          // Re-binding a number refreshes it and moves it to latest.
+          entry.prs = [
+            ...existing.filter((p) => p.number !== bound.number),
+            { number: bound.number, url: bound.url },
+          ].slice(-SESSION_PR_LIST_LIMIT);
+          markSessionCatalogChanged();
+          writeStderrLine(
+            `qwen serve: updated session metadata ${JSON.stringify(sessionId)} ` +
+              `pr=${bound.number} bound (${bound.url})` +
+              (context?.clientId
+                ? ` by client ${JSON.stringify(context.clientId)}`
+                : ''),
+          );
+          try {
+            entry.events.publish({
+              type: 'session_metadata_updated',
+              // Echo the current name: SDK folds treat an absent displayName
+              // as "cleared", so a pr-only event must not blank the title.
+              data: {
+                sessionId,
+                ...(entry.displayName !== undefined
+                  ? { displayName: entry.displayName }
+                  : {}),
+                prs: entry.prs,
+              },
+              ...(metadataOriginatorClientId
+                ? { originatorClientId: metadataOriginatorClientId }
+                : {}),
+            });
+          } catch {
+            /* bus already closed */
+          }
+        }
+      }
+      return {
+        displayName: entry.displayName,
+        ...(entry.prs && entry.prs.length > 0 ? { prs: entry.prs } : {}),
+      };
+    },
+
+    seedSessionPrs(sessionId, prs) {
+      const entry = byId.get(sessionId);
+      if (!entry || (entry.prs && entry.prs.length > 0)) return;
+      entry.prs = prs
+        .map(({ number, url }) => ({ number, url }))
+        .slice(-SESSION_PR_LIST_LIMIT);
     },
 
     async getSessionArtifacts(sessionId, context) {
