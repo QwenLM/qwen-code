@@ -119,6 +119,21 @@ describe('git extension helpers', () => {
     } as unknown as ReturnType<typeof https.get>;
   }
 
+  // Header names are case-insensitive, so anonymity checks must not depend
+  // on the exact casing the client used for a header key.
+  function headerNames(
+    options:
+      | https.RequestOptions
+      | ((res: IncomingMessage) => void)
+      | undefined,
+  ): string[] {
+    const headers =
+      typeof options === 'object' || options === undefined
+        ? options?.headers
+        : undefined;
+    return Object.keys(headers ?? {}).map((key) => key.toLowerCase());
+  }
+
   function mockHttpsResponses(...responses: Array<string | Buffer>): void {
     mockHttpsGet.mockImplementation(((
       _url: string | URL | https.RequestOptions,
@@ -660,7 +675,7 @@ describe('git extension helpers', () => {
             expect(String(_url)).toContain(
               `/commits/${encodeURIComponent(ref || 'HEAD')}`,
             );
-            expect(options).not.toHaveProperty('headers.Authorization');
+            expect(headerNames(options)).not.toContain('authorization');
             callResponseCallback(
               options,
               callback,
@@ -672,7 +687,7 @@ describe('git extension helpers', () => {
             expect(String(_url)).toBe(
               `https://codeload.github.com/owner/repo/tar.gz/${sha}`,
             );
-            expect(options).not.toHaveProperty('headers.Authorization');
+            expect(headerNames(options)).not.toContain('authorization');
             callResponseCallback(options, callback, createResponse(archive));
             return createRequestMock();
           }) as typeof https.get);
@@ -740,7 +755,7 @@ describe('git extension helpers', () => {
           expect(String(_url)).toBe(
             'https://api.github.com/repos/owner/renamed/commits/HEAD',
           );
-          expect(options).not.toHaveProperty('headers.Authorization');
+          expect(headerNames(options)).not.toContain('authorization');
           callResponseCallback(
             options,
             callback,
@@ -782,7 +797,7 @@ describe('git extension helpers', () => {
       ] as never);
       mockHttpsGet.mockImplementationOnce(((_url, options, callback) => {
         expect(String(_url)).toContain('/commits/HEAD');
-        expect(options).not.toHaveProperty('headers.Authorization');
+        expect(headerNames(options)).not.toContain('authorization');
         callResponseCallback(
           options,
           callback,
