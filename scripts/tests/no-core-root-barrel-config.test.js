@@ -7,7 +7,7 @@ describe('core root barrel flat-config integration', () => {
       cwd: process.cwd(),
       overrideConfigFile: 'eslint.config.js',
     });
-    const [prodStatic, prodTypeOnly, prodDynamic, testStatic] =
+    const [prodStatic, prodTypeOnly, prodDynamic, prodToolsStatic, testStatic] =
       await Promise.all([
         eslint.lintText("import value from '../index.js';", {
           filePath: 'packages/core/src/core/fixture-boundary.ts',
@@ -17,6 +17,9 @@ describe('core root barrel flat-config integration', () => {
         }),
         eslint.lintText("import('../index.js');", {
           filePath: 'packages/core/src/core/fixture-boundary.ts',
+        }),
+        eslint.lintText("import value from '../index.js';", {
+          filePath: 'packages/core/src/tools/foo.ts',
         }),
         eslint.lintText("import value from '../index.js';", {
           filePath: 'packages/core/src/core/fixture-boundary.test.ts',
@@ -30,10 +33,11 @@ describe('core root barrel flat-config integration', () => {
         ),
       );
 
-    // production files: all three import kinds are caught
+    // production files: all import kinds are caught
     expect(hasViolation(prodStatic)).toBe(true);
     expect(hasViolation(prodTypeOnly)).toBe(true);
     expect(hasViolation(prodDynamic)).toBe(true);
+    expect(hasViolation(prodToolsStatic)).toBe(true);
     // test files are exempt at the flat-config level
     expect(hasViolation(testStatic)).toBe(false);
   });

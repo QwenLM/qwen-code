@@ -11,15 +11,15 @@
 import path from 'node:path';
 
 const TEST_OR_FIXTURE_SEGMENTS = new Set(['__tests__', 'fixtures']);
+const CORE_SRC_MARKER = 'packages/core/src/';
 
 function isCoreProductionFile(filename) {
   if (!filename || filename === '<input>' || filename === '<text>')
     return false;
   const normalized = path.normalize(filename).replaceAll('\\', '/');
-  const marker = 'packages/core/src/';
-  const start = normalized.indexOf(marker);
+  const start = normalized.indexOf(CORE_SRC_MARKER);
   if (start < 0) return false;
-  const relativePath = normalized.slice(start + marker.length);
+  const relativePath = normalized.slice(start + CORE_SRC_MARKER.length);
   const segments = relativePath.split('/');
   return (
     !segments.some((segment) => TEST_OR_FIXTURE_SEGMENTS.has(segment)) &&
@@ -33,13 +33,22 @@ function resolvesToCoreRootBarrel(filename, importedPath) {
   if (importedPath === CORE_PACKAGE_SPECIFIER) return true;
   if (!importedPath.startsWith('.')) return false;
   const normalized = path.normalize(filename).replaceAll('\\', '/');
-  const marker = 'packages/core/src/';
   const sourceRoot = path.resolve(
-    normalized.slice(0, normalized.indexOf(marker) + marker.length),
+    normalized.slice(
+      0,
+      normalized.indexOf(CORE_SRC_MARKER) + CORE_SRC_MARKER.length,
+    ),
   );
   const resolvedImport = path.resolve(path.dirname(filename), importedPath);
-  const relativeToSource = path.relative(sourceRoot, resolvedImport);
-  return relativeToSource === 'index.js' || relativeToSource === 'index.ts';
+  const relativeToSource = path
+    .relative(sourceRoot, resolvedImport)
+    .replaceAll('\\', '/');
+  return (
+    relativeToSource === 'index.js' ||
+    relativeToSource === 'index.ts' ||
+    relativeToSource === '../index.js' ||
+    relativeToSource === '../index.ts'
+  );
 }
 
 export default {
@@ -52,7 +61,7 @@ export default {
     schema: [],
     messages: {
       noCoreRootBarrelImport:
-        'Core production modules must import symbols from their direct owner modules, not ../index.js.',
+        'Core production modules must import symbols from their direct owner modules, not the core root barrel.',
     },
   },
 

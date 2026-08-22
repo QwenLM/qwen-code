@@ -18,10 +18,13 @@ function runRule(code, filename) {
 describe('no-core-root-barrel-import', () => {
   it.each([
     ['packages/core/src/core/client.ts', '../index.js'],
-    ['packages/core/src/core/deep/module.ts', '../../index.js'],
     ['packages/core/src/a/b/c/module.ts', '../../../index.js'],
-    // depth-0: the barrel importing itself from the same directory
+    // depth-0: src-root module importing the barrel from the same directory
     ['packages/core/src/index.ts', './index.js'],
+    // package-level barrel (packages/core/index.js) via an extra directory hop
+    ['packages/core/src/core/client.ts', '../../index.js'],
+    // .ts spelling of the src barrel
+    ['packages/core/src/core/client.ts', '../index.ts'],
   ])('rejects root barrel imports from %s', (filename, importedPath) => {
     expect(
       runRule(`import value from '${importedPath}';`, filename),
@@ -70,7 +73,7 @@ describe('no-core-root-barrel-import', () => {
     ).toHaveLength(0);
     expect(
       runRule(
-        "import value from '../../index.js';",
+        "import value from '../index.js';",
         'packages/core/src/fixtures/client.ts',
       ),
     ).toHaveLength(0);
