@@ -232,6 +232,7 @@ import {
   type WorkspaceManagementHandle,
   type WorkspaceRuntimeRemovalController,
 } from './routes/workspace-management.js';
+import { isNativeDirectoryPickerAvailable } from './native-directory-picker.js';
 import type { WorkspaceRegistrationStore } from './workspace-registration-store.js';
 import {
   registerWorkspaceGitRoutes,
@@ -977,6 +978,7 @@ export function createServeApp(
       acpHttpEnabled: acpHttpEnabledAtBoot,
       workspaceRuntimeRemovalAvailable:
         deps.workspaceRuntimeRemoval !== undefined,
+      nativeDirectoryPickerAvailable: isNativeDirectoryPickerAvailable(),
       workspaceTrustHotReloadAvailable:
         deps.workspaceTrustHotReloadAvailable === true,
       isPrimaryWorkspaceTrusted: () => isPrimaryWorkspaceTrusted(),

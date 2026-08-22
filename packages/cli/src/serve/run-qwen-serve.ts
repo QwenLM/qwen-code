@@ -8,6 +8,7 @@ import { X509Certificate, createHash, timingSafeEqual } from 'node:crypto';
 import * as fs from 'node:fs';
 import { createServer, type Server } from 'node:http';
 import * as https from 'node:https';
+import { isIP } from 'node:net';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
@@ -79,6 +80,7 @@ import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 import { PathMutexRegistry } from './fs/path-mutex-registry.js';
 import { isDeepHealthQuery } from './health-query.js';
 import { isLoopbackBind } from './loopback-binds.js';
+import { isOwnInterfaceAddress } from './local-bind-addresses.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
 import {
@@ -175,6 +177,7 @@ import type {
   ChannelWorkerSnapshot,
   CreateChannelWorkerSupervisorOptions,
 } from './channel-worker-supervisor.js';
+import { loadableCertificates } from './pem-certificate-blocks.js';
 import { QWEN_SERVER_TOKEN_ENV } from './channel-worker-env.js';
 import { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
 import {
@@ -657,6 +660,23 @@ function formatHostForUrl(host: string): string {
   return host;
 }
 
+function canonicalIpLiteral(host: string): string | undefined {
+  const inner =
+    host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
+  try {
+    const hostname = new URL(
+      `http://${inner.includes(':') ? `[${inner}]` : inner}`,
+    ).hostname;
+    const canonical =
+      hostname.startsWith('[') && hostname.endsWith(']')
+        ? hostname.slice(1, -1)
+        : hostname;
+    return isIP(canonical) === 0 ? undefined : canonical;
+  } catch {
+    return undefined;
+  }
+}
+
 function workspaceRuntimeEffectiveEnv(
   runtime: WorkspaceRuntime,
   daemonEnv: Readonly<NodeJS.ProcessEnv>,
@@ -670,17 +690,731 @@ function workspaceRuntimeEffectiveEnv(
 export function formatChannelWorkerDaemonUrl(
   host: string,
   port: number,
+  tls = false,
 ): string {
+  const scheme = tls ? 'https' : 'http';
   const normalized = host.trim().toLowerCase();
-  if (
-    normalized === '' ||
-    normalized === '0.0.0.0' ||
-    normalized === '::' ||
-    normalized === '[::]'
-  ) {
-    return `http://127.0.0.1:${port}`;
+  const canonicalIp = canonicalIpLiteral(normalized);
+  // R7-7: a wildcard bind's loopback has to match the FAMILY that was bound.
+  // An IPv6 wildcard socket answers 127.0.0.1 only when the kernel gives it a
+  // dual-stack mapping; on an IPv6-only host, or one with
+  // `net.ipv6.bindv6only=1` (historically Debian's default, still set on
+  // hardened hosts), it does not. Measured on this Node against a v6-only
+  // `[::]` socket: `dial 127.0.0.1` -> ECONNREFUSED while `dial ::1` -> ok;
+  // against a dual-stack `[::]` socket both succeed. So `::1` is the one
+  // address an IPv6 wildcard bind answers everywhere.
+  //
+  // `''` belongs with the IPv6 wildcards, not with `0.0.0.0`: `listen(port,
+  // '')` — exactly how this daemon binds — reports `{address: '::', family:
+  // 'IPv6'}`, so an empty --hostname IS an IPv6 wildcard bind.
+  //
+  // The v4 wildcard keeps v4 loopback: measured against `0.0.0.0`,
+  // `dial ::1` is ECONNREFUSED.
+  if (normalized === '' || canonicalIp === '::') {
+    return `${scheme}://[::1]:${port}`;
   }
-  return `http://${formatHostForUrl(host)}:${port}`;
+  if (canonicalIp === '0.0.0.0') {
+    return `${scheme}://127.0.0.1:${port}`;
+  }
+  return `${scheme}://${formatHostForUrl(host)}:${port}`;
+}
+
+/**
+ * Refuse a channel boot whose worker URL this host cannot answer.
+ *
+ * Workers run on the daemon's own machine and dial the address it actually
+ * bound. Loopback is not a fallback: `--hostname 192.168.1.100` binds that
+ * socket ONLY, so a worker sent to `127.0.0.1` gets `ECONNREFUSED`. A bind
+ * this host cannot certify as its own — a DNS name, or a literal on no local
+ * interface — passes every other boot check and then throws inside each
+ * worker: the first one's failure exits the daemon, and channels added later
+ * restart-loop while `/health` stays green. Name it once, at boot.
+ */
+export function assertChannelWorkerDaemonUrlIsLocal(
+  workerDaemonUrl: string,
+  hostname: string,
+): void {
+  const host = new URL(workerDaemonUrl).hostname;
+  if (isLoopbackBind(host) || isOwnInterfaceAddress(host)) return;
+  throw new Error(
+    `Channels cannot start: --hostname "${hostname}" is not a loopback bind ` +
+      `and does not name an address on this host, so channel workers have no ` +
+      `local URL to reach the daemon on. Bind to loopback, to the wildcard ` +
+      `(0.0.0.0 / ::), or to a literal address of one of this machine's ` +
+      `interfaces.`,
+  );
+}
+
+/**
+ * Two TLS misconfigurations boot green and break only the channel workers:
+ * a serving cert that is not its own trust anchor (workers fail
+ * `UNABLE_TO_VERIFY_LEAF_SIGNATURE`) and one whose SANs do not cover the
+ * loopback host workers dial (`ERR_TLS_CERT_ALTNAME_INVALID`). In both cases
+ * the daemon listens, browsers connect and `/health` stays green while every
+ * worker restart-loops, so name them at boot the way the expiry guard does.
+ */
+export function describeWorkerTlsTrustGaps(opts: {
+  cert: Buffer;
+  certPath: string;
+  daemonUrl: string;
+  operatorCaCertPath?: string;
+  /**
+   * Contents of `operatorCaCertPath`, when it was readable. A path alone says
+   * nothing — a typo'd, unrelated or unloadable NODE_EXTRA_CA_CERTS anchors
+   * exactly as little as no CA at all, and treating "the variable is set" as
+   * coverage is what silenced the warning in the cases it was written for.
+   */
+  operatorCaCert?: Buffer;
+}): string[] {
+  // A serving file is routinely a fullchain (leaf + issuing CA in one PEM),
+  // and the supervisor injects the whole file as the workers'
+  // NODE_EXTRA_CA_CERTS — so the trust question is about the file, not about
+  // its first block alone.
+  const chain = parseCertChain(opts.cert);
+  const x509 = chain[0];
+  if (!x509) {
+    // Boot validation already rejected unparseable certs with a better message.
+    return [];
+  }
+  const gaps: string[] = [];
+  // Exactly what a worker gets: the serving file merged with the operator's
+  // CA file (see resolveWorkerCaCertPath in channel-worker-supervisor.ts).
+  //
+  // The merge is all-or-nothing, and judges both files with the loader's own
+  // rules — so an operator file Node cannot load contributes NOTHING to the
+  // workers' trust and makes the merge hand them the daemon cert alone.
+  // Judging it here with the looser `parseCertChain` (which also falls back to
+  // DER, a format NODE_EXTRA_CA_CERTS never reads) is how a fused or DER
+  // operator bundle got counted as an anchor at boot: the daemon log stayed
+  // clean while every worker handshake failed UNABLE_TO_VERIFY_LEAF_SIGNATURE.
+  const operatorChain = opts.operatorCaCert
+    ? loadableCertificates(opts.operatorCaCert.toString('utf8'))
+    : undefined;
+  if (opts.operatorCaCert && !operatorChain) {
+    gaps.push(
+      `NODE_EXTRA_CA_CERTS "${opts.operatorCaCertPath}" holds no PEM ` +
+        `certificate block Node's loader can read — every ` +
+        `-----BEGIN/END CERTIFICATE----- marker must sit alone on its own ` +
+        `line and every block must decode, and a DER file is never read at ` +
+        `all. Channel workers therefore receive the daemon cert alone and ` +
+        `anchor nothing through this file. Re-export it as PEM and restart.`,
+    );
+  }
+  // Same rule for the serving file — and when it fails, the merge does NOT
+  // merge. `resolveWorkerCaCertPath` finds `daemonBlocks === undefined`,
+  // discards the operator CA and hands workers the serving file alone, so
+  // modelling a merged store here would report no gap while every worker
+  // handshake fails. (A serving file that fails extraction can still serve:
+  // `createSecureContext` accepts shapes the loader's framing rejects, so the
+  // "it would have thrown at boot" premise this fallback used to carry was
+  // false.)
+  //
+  // R2-21 entrance C1: this gap used to fire only when an operator CA was ALSO
+  // configured, on the reasoning that the merge is what a bad serving file
+  // breaks. But the workers' NODE_EXTRA_CA_CERTS is that same serving file
+  // when there is no operator CA, so an unloadable one anchors nothing either
+  // way. Measured: a `TRUSTED CERTIFICATE`-labelled PEM (a shape
+  // `createSecureContext` serves and the loader takes nothing from — a DER
+  // file, by contrast, fails loud at boot) booted with zero gaps while the
+  // worker handshake failed DEPTH_ZERO_SELF_SIGNED_CERT and the plain-PEM twin
+  // authorized. The file is what is broken; who else is configured is not part
+  // of the question.
+  const servingBlocks = loadableCertificates(opts.cert.toString('utf8'));
+  if (!servingBlocks) {
+    gaps.push(
+      `--tls-cert "${opts.certPath}" holds no PEM certificate block Node's ` +
+        `loader can read, so the channel workers anchor nothing through it` +
+        (operatorChain
+          ? `: their bundle cannot be merged, they receive that file alone ` +
+            `and NODE_EXTRA_CA_CERTS "${opts.operatorCaCertPath}" is ` +
+            `discarded. Every worker handshake to the daemon will fail ` +
+            `UNABLE_TO_VERIFY_LEAF_SIGNATURE.`
+          : `. Every worker handshake to the daemon will fail ` +
+            `DEPTH_ZERO_SELF_SIGNED_CERT.`) +
+        ` Re-export --tls-cert as PEM with every ` +
+        `-----BEGIN/END CERTIFICATE----- marker alone on its own line and ` +
+        `restart.`,
+    );
+  }
+  // The fallback keeps a leaf to reason about rather than reporting phantom
+  // gaps, but it must not pretend the operator CA reached the workers.
+  const servingChain = servingBlocks ?? chain;
+  // What `createSecureContext` serves and what the workers' loader reads is
+  // the loader-framed first block — NOT the loose parser's `chain[0]`. The two
+  // disagree whenever a predecessor's `-----BEGIN` line was absorbed into a
+  // comment: the diagnostic then SAN-checked and identified a certificate the
+  // handshake never presents, reporting no gap while every worker failed
+  // ERR_TLS_CERT_ALTNAME_INVALID.
+  const servedLeaf = servingChain[0] ?? x509;
+  const workerTrustStore =
+    operatorChain && servingBlocks
+      ? [...servingChain, ...operatorChain]
+      : servingChain;
+  // A leaf in NODE_EXTRA_CA_CERTS is a usable trust anchor only when it signed
+  // itself: chain verification has no PARTIAL_CHAIN flag here, so a CA-issued
+  // leaf (what the `mkcert` flow this project documents produces) never
+  // terminates the chain — unless something else in the worker's bundle
+  // carries the issuer that does.
+  const anchorPath = walkWorkerAnchorPath(workerTrustStore);
+  if (anchorPath.nonCaTerminator) {
+    gaps.push(
+      `--tls-cert "${opts.certPath}" chains up to ` +
+        `"${anchorPath.nonCaTerminator.subject.replace(/\r?\n/g, ', ')}", ` +
+        `which is self-signed but carries basicConstraints CA:FALSE — ` +
+        `OpenSSL refuses to let it issue the certificates below it, so every ` +
+        `worker handshake to the daemon will fail INVALID_PURPOSE ` +
+        `("unsuitable certificate purpose"). Reissue that certificate with ` +
+        `CA:TRUE, or point NODE_EXTRA_CA_CERTS at a real CA that anchors the ` +
+        `chain, and restart.`,
+    );
+  } else if (anchorPath.incapableIssuer) {
+    gaps.push(
+      `--tls-cert "${opts.certPath}" chains through ` +
+        `"${anchorPath.incapableIssuer.subject.replace(/\r?\n/g, ', ')}", ` +
+        `which is not a CA — it carries basicConstraints CA:FALSE or, as an ` +
+        `X.509 v3 certificate, no basicConstraints at all, and OpenSSL ` +
+        `refuses to let it issue the certificate below it. Every worker ` +
+        `handshake to the daemon will fail INVALID_PURPOSE or INVALID_CA ` +
+        `even though the chain looks complete. Reissue that intermediate ` +
+        `with CA:TRUE, or point NODE_EXTRA_CA_CERTS at a chain whose ` +
+        `intermediates are real CAs, and restart.`,
+    );
+  } else if (anchorPath.nonServerIssuer) {
+    gaps.push(
+      `--tls-cert "${opts.certPath}" chains through ` +
+        `"${anchorPath.nonServerIssuer.subject.replace(/\r?\n/g, ', ')}", ` +
+        `whose extendedKeyUsage does not include serverAuth — an EKU on a ` +
+        `chain member constrains every certificate below it, so every worker ` +
+        `handshake to the daemon will fail INVALID_PURPOSE even though the ` +
+        `chain is complete and every signature verifies. Reissue that member ` +
+        `with serverAuth in its EKU (or without an EKU at all), and restart.`,
+    );
+  } else if (anchorPath.unusableIssuer) {
+    gaps.push(
+      `--tls-cert "${opts.certPath}" stops at ` +
+        `"${anchorPath.unusableIssuer.subject.replace(/\r?\n/g, ', ')}", ` +
+        `which is present in the workers' bundle and IS declared a CA, but ` +
+        `whose keyUsage omits keyCertSign — OpenSSL refuses the issuance ` +
+        `link, so the chain anchors nowhere and every worker handshake to ` +
+        `the daemon will fail with "key usage does not include certificate ` +
+        `signing". Re-export that CA with keyCertSign in its keyUsage; ` +
+        `pointing NODE_EXTRA_CA_CERTS at it again will not help — it is ` +
+        `already there.`,
+    );
+  } else if (!anchorPath.anchored) {
+    gaps.push(
+      `--tls-cert "${opts.certPath}" is issued by another CA ` +
+        `(${servedLeaf.issuer.replace(/\r?\n/g, ', ')}), not self-signed, and ` +
+        `${
+          opts.operatorCaCertPath
+            ? `NODE_EXTRA_CA_CERTS "${opts.operatorCaCertPath}" does not ` +
+              `carry a certificate that anchors it`
+            : `no NODE_EXTRA_CA_CERTS is set`
+        }, so nothing in the channel workers' bundle anchors their trust — ` +
+        `every worker handshake to the daemon will fail ` +
+        `UNABLE_TO_VERIFY_LEAF_SIGNATURE unless the issuing CA is already in ` +
+        `the workers' default trust store. Point NODE_EXTRA_CA_CERTS at the ` +
+        `issuing CA (for mkcert: "$(mkcert -CAROOT)/rootCA.pem") and restart.`,
+    );
+  }
+  if (!servesTlsClients(servedLeaf)) {
+    gaps.push(
+      `--tls-cert "${opts.certPath}" is not usable as a TLS server ` +
+        `certificate: its keyUsage/extendedKeyUsage exclude server ` +
+        `authentication (OpenSSL checks the serving certificate's own ` +
+        `purpose at depth 0), so every worker handshake to the daemon will ` +
+        `fail INVALID_PURPOSE even though the daemon listens and /health ` +
+        `answers. Reissue it with extendedKeyUsage=serverAuth and a keyUsage ` +
+        `that includes digitalSignature or keyEncipherment, and restart.`,
+    );
+  }
+  // `X509Certificate.verify` checks signatures only and never consults dates,
+  // so an expired root or intermediate anchors "fine" here while every worker
+  // handshake fails CERT_HAS_EXPIRED. Boot validation covers the leaf alone.
+  const now = Date.now();
+  for (const member of anchorPath.path) {
+    if (member.fingerprint256 === servedLeaf.fingerprint256) continue;
+    const subject = member.subject.replace(/\r?\n/g, ', ');
+    if (new Date(member.validTo).getTime() < now) {
+      gaps.push(
+        `--tls-cert "${opts.certPath}" chains through "${subject}", which ` +
+          `expired on ${member.validTo} — every worker handshake to the ` +
+          `daemon will fail CERT_HAS_EXPIRED. Renew that chain member and ` +
+          `restart.`,
+      );
+    } else if (new Date(member.validFrom).getTime() > now) {
+      gaps.push(
+        `--tls-cert "${opts.certPath}" chains through "${subject}", which is ` +
+          `not yet valid (validFrom: ${member.validFrom}) — every worker ` +
+          `handshake to the daemon will fail CERT_NOT_YET_VALID. Check that ` +
+          `chain member's notBefore date or the system clock.`,
+      );
+    }
+  }
+  // `pathLenConstraint` caps how many CAs may sit BELOW a given CA on the
+  // path. Nothing modelled it, so a `pathlen:0` root anchoring a chain
+  // THROUGH an intermediate walked up green while the handshake failed
+  // PATH_LENGTH_EXCEEDED (measured; the pathlen-free control authorizes).
+  for (let depth = 1; depth < anchorPath.path.length; depth++) {
+    const member = anchorPath.path[depth];
+    if (!member) continue;
+    const limit = pathLenConstraint(member);
+    if (limit === undefined || depth - 1 <= limit) continue;
+    gaps.push(
+      `--tls-cert "${opts.certPath}" chains through ` +
+        `"${member.subject.replace(/\r?\n/g, ', ')}", which carries ` +
+        `basicConstraints pathlen:${limit} but has ${depth - 1} ` +
+        `intermediate CA${depth - 1 === 1 ? '' : 's'} below it — every ` +
+        `worker handshake to the daemon will fail PATH_LENGTH_EXCEEDED. ` +
+        `Reissue that CA with a pathlen that admits the chain, or shorten ` +
+        `the chain, and restart.`,
+    );
+    break;
+  }
+  const host = workerDialHost(opts.daemonUrl);
+  if (host && !certCoversHost(servedLeaf, host)) {
+    gaps.push(
+      `--tls-cert "${opts.certPath}" has no subjectAltName covering ` +
+        `"${host}", the host channel workers dial — every worker handshake ` +
+        `will fail ERR_TLS_CERT_ALTNAME_INVALID. Reissue the certificate ` +
+        `with that host in its SANs and restart.`,
+    );
+  }
+  return gaps;
+}
+
+/** basicConstraints, 2.5.29.19, as the contents of its OBJECT IDENTIFIER. */
+const BASIC_CONSTRAINTS_OID = Buffer.from([0x55, 0x1d, 0x13]);
+/** `[3] EXPLICIT Extensions OPTIONAL` — the last TBSCertificate member. */
+const EXTENSIONS_TAG = 0xa3;
+const SEQUENCE_TAG = 0x30;
+const BOOLEAN_TAG = 0x01;
+const OCTET_STRING_TAG = 0x04;
+const BIT_STRING_TAG = 0x03;
+const INTEGER_TAG = 0x02;
+
+/** The tag of the DER element at `at`, and the `[start, end)` of its contents. */
+function derElementAt(
+  der: Buffer,
+  at: number,
+): { tag: number; start: number; end: number } | undefined {
+  const tag = der[at];
+  const header = der[at + 1];
+  if (tag === undefined || header === undefined) return undefined;
+  let start = at + 2;
+  let length = header & 0x7f;
+  if ((header & 0x80) !== 0) {
+    // Long form: the low bits count the length's own bytes. Certificates use
+    // neither the indefinite form (zero bytes) nor more than four.
+    if (length === 0 || length > 4) return undefined;
+    let value = 0;
+    for (let index = 0; index < length; index += 1) {
+      const byte = der[start + index];
+      if (byte === undefined) return undefined;
+      value = value * 0x100 + byte;
+    }
+    start += length;
+    length = value;
+  }
+  const end = start + length;
+  return end <= der.length ? { tag, start, end } : undefined;
+}
+
+/** The TBSCertificate of `cert`: the first member of the outer SEQUENCE. */
+function tbsCertificateOf(
+  cert: X509Certificate,
+): { tag: number; start: number; end: number } | undefined {
+  const certificate = derElementAt(cert.raw, 0);
+  if (certificate?.tag !== SEQUENCE_TAG) return undefined;
+  const tbs = derElementAt(cert.raw, certificate.start);
+  return tbs?.tag === SEQUENCE_TAG ? tbs : undefined;
+}
+
+/**
+ * The value bytes of `cert`'s `oid` extension, or `undefined` when it carries
+ * none.
+ *
+ * R2-21 entrances S1/K1/D1: the three readers below each located their
+ * extension by `cert.raw.indexOf(oidBytes)` — an unanchored first-match scan
+ * of the WHOLE DER, signature and serial number included. Measured both ways:
+ * a decoy extension carrying the basicConstraints OID earlier in the DER
+ * swallowed a real PATH_LENGTH_EXCEEDED gap, and a v1 root whose serial number
+ * happens to contain the OID bytes raised a pathlen alarm on a chain that
+ * authorizes. One structural walk of the TBSCertificate extensions SEQUENCE,
+ * shared by all three, can match neither.
+ */
+function certificateExtension(
+  cert: X509Certificate,
+  oid: Buffer,
+): Buffer | undefined {
+  const der = cert.raw;
+  const tbs = tbsCertificateOf(cert);
+  if (!tbs) return undefined;
+  let at = tbs.start;
+  while (at < tbs.end) {
+    const member = derElementAt(der, at);
+    if (!member) return undefined;
+    if (member.tag !== EXTENSIONS_TAG) {
+      at = member.end;
+      continue;
+    }
+    const list = derElementAt(der, member.start);
+    if (list?.tag !== SEQUENCE_TAG) return undefined;
+    let entry = list.start;
+    while (entry < list.end) {
+      // Extension ::= SEQUENCE { extnID OID, critical BOOLEAN DEFAULT FALSE,
+      // extnValue OCTET STRING }.
+      const extension = derElementAt(der, entry);
+      if (extension?.tag !== SEQUENCE_TAG) return undefined;
+      const id = derElementAt(der, extension.start);
+      if (!id) return undefined;
+      let valueAt = id.end;
+      const critical = derElementAt(der, valueAt);
+      if (critical?.tag === BOOLEAN_TAG) valueAt = critical.end;
+      const value = derElementAt(der, valueAt);
+      if (value?.tag !== OCTET_STRING_TAG) return undefined;
+      if (der.subarray(id.start, id.end).equals(oid)) {
+        return der.subarray(value.start, value.end);
+      }
+      entry = extension.end;
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
+/**
+ * Whether `cert` says, in the extension itself, that it is not a CA.
+ *
+ * `X509Certificate.ca` is `false` in two very different cases: an explicit
+ * `basicConstraints CA:FALSE`, and an X.509 v1 / no-extension root (old
+ * internal PKIs, `openssl x509 -req -signkey`). OpenSSL accepts the second as
+ * an issuer — `X509_check_ca` returns 3 for a v1 cert and 2 only for an
+ * explicit CA:FALSE. Measured on Node 22 / OpenSSL 3: a leaf anchored by a v1
+ * root completes a real handshake `authorized: true`, while the explicit
+ * CA:FALSE twin really does fail INVALID_PURPOSE. Warning on `.ca` alone
+ * therefore sends operators to reissue a CA that already works.
+ *
+ * `toLegacyObject()` exposes no more than `.ca` does, so read the DER: the
+ * extension's presence is what separates the two shapes.
+ */
+function declaresNotACa(cert: X509Certificate): boolean {
+  return (
+    !cert.ca && certificateExtension(cert, BASIC_CONSTRAINTS_OID) !== undefined
+  );
+}
+
+/** keyUsage, 2.5.29.15, as the contents of its OBJECT IDENTIFIER. */
+const KEY_USAGE_OID = Buffer.from([0x55, 0x1d, 0x0f]);
+
+/** RFC 5280 keyUsage bit positions. */
+const KEY_USAGE_DIGITAL_SIGNATURE = 0;
+const KEY_USAGE_KEY_ENCIPHERMENT = 2;
+const KEY_USAGE_KEY_AGREEMENT = 4;
+const KEY_USAGE_KEY_CERT_SIGN = 5;
+
+const EKU_SERVER_AUTH = '1.3.6.1.5.5.7.3.1';
+
+/**
+ * The keyUsage bits `cert` asserts, or undefined when it carries no keyUsage
+ * extension (which RFC 5280 reads as "no restriction").
+ *
+ * Node exposes `X509Certificate.keyUsage` as the EXTENDED key usage OIDs, not
+ * these bits, and `toLegacyObject()` adds nothing — so read the DER through
+ * `certificateExtension`. The extension's value is a BIT STRING.
+ */
+function keyUsageBits(cert: X509Certificate): readonly number[] | undefined {
+  const value = certificateExtension(cert, KEY_USAGE_OID);
+  if (value === undefined) return undefined;
+  const bitString = derElementAt(value, 0);
+  if (bitString?.tag !== BIT_STRING_TAG) return [];
+  const unused = value[bitString.start];
+  if (unused === undefined) return [];
+  const bytes = value.subarray(bitString.start + 1, bitString.end);
+  const bits: number[] = [];
+  for (let bit = 0; bit < bytes.length * 8 - unused; bit++) {
+    const byte = bytes[bit >> 3];
+    if (byte !== undefined && (byte & (0x80 >> (bit & 7))) !== 0)
+      bits.push(bit);
+  }
+  // An EMPTY array is not the same answer as `undefined`: it is a keyUsage
+  // that is present and grants nothing. R2-21 entrance E1 — the callers below
+  // read both as "unrestricted", while OpenSSL treats a zero-bit keyUsage as
+  // an invalid certificate for every purpose.
+  return bits;
+}
+
+/**
+ * Whether `cert` may terminate a TLS *server* handshake at depth 0.
+ *
+ * OpenSSL runs a server-purpose check on the serving leaf itself, which
+ * nothing else here models: measured on Node 22 / OpenSSL 3 with real
+ * handshakes, a self-signed serving cert with `keyUsage=critical,keyCertSign`
+ * (no server bits) and one with EKU `clientAuth` only BOTH fail
+ * INVALID_PURPOSE while the daemon boots green and `/health` answers.
+ *
+ * Absent extensions mean "unrestricted" — only an extension that is present
+ * and excludes server use is a gap. Two shapes used to slip through that rule
+ * and are now gaps (R2-21 entrances EA and E1, both probe-verified on Node
+ * v22.23.0 / OpenSSL 3.0.13 as real handshakes):
+ *
+ * - anyExtendedKeyUsage alone is not serverAuth. OpenSSL's server-purpose
+ *   check requires the serverAuth OID itself, and an `EKU_ANY` exception here
+ *   reported zero gaps for a leaf whose handshake fails INVALID_PURPOSE while
+ *   its serverAuth twin authorizes.
+ * - a keyUsage that is PRESENT with no bits set is not an absent one. OpenSSL
+ *   reads it as granting nothing; reading it as unrestricted booted green.
+ */
+function servesTlsClients(cert: X509Certificate): boolean {
+  const eku = cert.keyUsage;
+  if (eku !== undefined && !eku.includes(EKU_SERVER_AUTH)) return false;
+  const bits = keyUsageBits(cert);
+  if (!bits) return true;
+  return (
+    bits.includes(KEY_USAGE_DIGITAL_SIGNATURE) ||
+    bits.includes(KEY_USAGE_KEY_ENCIPHERMENT) ||
+    bits.includes(KEY_USAGE_KEY_AGREEMENT)
+  );
+}
+
+/**
+ * Whether `cert` may sit ON the path of a TLS server chain.
+ *
+ * An EKU on a CA constrains everything below it: measured with a control arm,
+ * a chain through an intermediate carrying EKU `clientAuth` only fails
+ * INVALID_PURPOSE, and the same chain re-issued without the EKU authorizes —
+ * EKU the only variable. The issuer-capability check read basicConstraints
+ * and keyCertSign but never this.
+ *
+ * anyExtendedKeyUsage does not satisfy it either (R2-21 entrance EA): a leaf
+ * issued by an anyEKU-only CA fails INVALID_PURPOSE against the fullchain as
+ * its trust store, measured this round, while this function used to accept it.
+ */
+function issuerServesTlsChain(cert: X509Certificate): boolean {
+  const eku = cert.keyUsage;
+  if (eku === undefined) return true;
+  return eku.includes(EKU_SERVER_AUTH);
+}
+
+/**
+ * The `pathLenConstraint` a CA asserts, or undefined when it asserts none.
+ *
+ * basicConstraints is `SEQUENCE { cA BOOLEAN DEFAULT FALSE,
+ * pathLenConstraint INTEGER OPTIONAL }` inside the extnValue OCTET STRING.
+ * Nothing modelled it, so a `pathlen:0` root anchoring a chain THROUGH an
+ * intermediate walked up green while the handshake failed
+ * PATH_LENGTH_EXCEEDED (measured).
+ */
+function pathLenConstraint(cert: X509Certificate): number | undefined {
+  const value = certificateExtension(cert, BASIC_CONSTRAINTS_OID);
+  if (value === undefined) return undefined;
+  const sequence = derElementAt(value, 0);
+  if (sequence?.tag !== SEQUENCE_TAG) return undefined;
+  let at = sequence.start;
+  // Skip the optional cA BOOLEAN; the INTEGER is what we want.
+  const ca = derElementAt(value, at);
+  if (ca?.tag === BOOLEAN_TAG) at = ca.end;
+  if (at >= sequence.end) return undefined;
+  const limit = derElementAt(value, at);
+  if (limit?.tag !== INTEGER_TAG) return undefined;
+  let result = 0;
+  for (let index = limit.start; index < limit.end; index += 1) {
+    result = result * 0x100 + (value[index] ?? 0);
+  }
+  return result;
+}
+
+/** Whether `cert`'s validity window contains `now`. */
+function certValidAt(cert: X509Certificate, now: number): boolean {
+  return (
+    new Date(cert.validFrom).getTime() <= now &&
+    new Date(cert.validTo).getTime() >= now
+  );
+}
+
+function isSelfSignedCert(x509: X509Certificate): boolean {
+  try {
+    return x509.verify(x509.publicKey);
+  } catch {
+    // Unsupported key type: assume self-signed rather than warn on a guess.
+    return true;
+  }
+}
+
+// Base64 never contains `-`, so the body match cannot run past its own
+// end marker and cannot backtrack.
+const PEM_CERTIFICATE_BLOCK =
+  /-----BEGIN CERTIFICATE-----[^-]*-----END CERTIFICATE-----/g;
+
+/**
+ * Every certificate in a PEM serving file, leaf first. `X509Certificate` reads
+ * only the first block of a bundle, so a fullchain file has to be split before
+ * any of it past the leaf can be reasoned about. A non-PEM (DER) buffer has no
+ * blocks to split and is handed over whole.
+ */
+function parseCertChain(cert: Buffer): X509Certificate[] {
+  const blocks = cert.toString('utf8').match(PEM_CERTIFICATE_BLOCK);
+  if (!blocks) {
+    try {
+      return [new X509Certificate(cert)];
+    } catch {
+      return [];
+    }
+  }
+  const chain: X509Certificate[] = [];
+  for (const block of blocks) {
+    try {
+      chain.push(new X509Certificate(block));
+    } catch {
+      // One malformed block does not make the rest of the file unusable.
+    }
+  }
+  return chain;
+}
+
+function certIssuedBy(cert: X509Certificate, issuer: X509Certificate): boolean {
+  try {
+    return cert.checkIssued(issuer) && cert.verify(issuer.publicKey);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Walks the leaf up through the certificates the workers actually hold, and
+ * reports both whether the walk terminated on a self-signed anchor and the
+ * certificates it relied on. Workers get the whole bundle as their trust
+ * store, so a fullchain that walks up to a self-signed root anchors fine even
+ * though the leaf never could alone — and every member the walk leaned on is
+ * a member whose own validity window the handshake will enforce.
+ */
+function walkWorkerAnchorPath(chain: readonly X509Certificate[]): {
+  anchored: boolean;
+  path: readonly X509Certificate[];
+  /** Set when the walk terminated on a self-signed cert that is not a CA. */
+  nonCaTerminator?: X509Certificate;
+  /** Set when the walk reached an issuer OpenSSL will not let issue. */
+  incapableIssuer?: X509Certificate;
+  /** Set when a chain member's EKU excludes TLS server use below it. */
+  nonServerIssuer?: X509Certificate;
+  /**
+   * Set when the walk stopped one link short of an anchor because the only
+   * subject-matching candidate cannot sign certificates. The generic
+   * unanchored text sends the operator to point NODE_EXTRA_CA_CERTS at a CA
+   * that is already provided, so they re-export, restart and loop.
+   */
+  unusableIssuer?: X509Certificate;
+} {
+  let next: X509Certificate | undefined = chain[0];
+  const walked = new Set<string>();
+  const path: X509Certificate[] = [];
+  while (next) {
+    const current: X509Certificate = next;
+    path.push(current);
+    if (isSelfSignedCert(current)) {
+      // OpenSSL applies `basicConstraints CA:TRUE` to certificates that sign
+      // OTHER certificates, not to a self-signed leaf trusted at depth 0.
+      // Measured on Node 22: a CA:FALSE self-signed leaf in its own trust
+      // store handshakes fine, while the same shape used as an issuer fails
+      // INVALID_PURPOSE — so the constraint binds only past the leaf.
+      if (path.length > 1 && declaresNotACa(current)) {
+        return { anchored: false, path, nonCaTerminator: current };
+      }
+      return { anchored: true, path };
+    }
+    walked.add(current.fingerprint256);
+    // First-match with no backtracking picked whichever copy of a renewed CA
+    // came first in the bundle, so an expired predecessor sharing the subject
+    // was reported as the path the handshake relies on — a false alarm
+    // claiming every handshake fails CERT_HAS_EXPIRED while the merged bundle
+    // authorizes (measured). OpenSSL is free to use either; prefer the one it
+    // can actually use, and fall back to the first match so a genuinely
+    // expired sole issuer is still reported by the date walk below.
+    const issuers: readonly X509Certificate[] = chain.filter(
+      (candidate) =>
+        !walked.has(candidate.fingerprint256) &&
+        certIssuedBy(current, candidate),
+    );
+    const issuer: X509Certificate | undefined =
+      issuers.find((candidate) => certValidAt(candidate, Date.now())) ??
+      issuers[0];
+    // `certIssuedBy` asks only "did this sign that": name match plus signature.
+    // OpenSSL asks a second question of every certificate it uses AS an issuer,
+    // and answering only the first is how a chain that walks THROUGH an
+    // incapable intermediate got reported anchored while every worker
+    // handshake failed. Measured on Node 22 / OpenSSL 3 with real handshakes:
+    // an explicit CA:FALSE intermediate and a v3 intermediate with no
+    // basicConstraints both fail INVALID_PURPOSE, and a keyCertSign-only v3
+    // intermediate fails INVALID_CA.
+    if (issuer && !isSelfSignedCert(issuer) && !issuer.ca) {
+      return { anchored: false, path, incapableIssuer: issuer };
+    }
+    // An EKU on a certificate used as an issuer constrains the whole chain
+    // below it, and reading only basicConstraints/keyCertSign missed that:
+    // measured with a control arm, an intermediate carrying EKU `clientAuth`
+    // only fails INVALID_PURPOSE while the same chain re-issued without the
+    // EKU authorizes.
+    if (issuer && !issuerServesTlsChain(issuer)) {
+      return { anchored: false, path, nonServerIssuer: issuer };
+    }
+    if (!issuer) {
+      // The walk stopped. `checkIssued` rejects the issuance link when the
+      // subject-matching candidate carries a keyUsage without keyCertSign
+      // (measured: checkIssued false while verify(publicKey) true), so the
+      // bundle DOES hold the issuer and the generic unanchored advice —
+      // "point NODE_EXTRA_CA_CERTS at the issuing CA" — is already satisfied.
+      const unusable = chain.find(
+        (candidate) =>
+          candidate.subject === current.issuer &&
+          candidate.fingerprint256 !== current.fingerprint256 &&
+          cannotSignCertificates(candidate),
+      );
+      if (unusable) return { anchored: false, path, unusableIssuer: unusable };
+    }
+    next = issuer;
+  }
+  return { anchored: false, path };
+}
+
+/**
+ * Whether `cert` carries a keyUsage extension that omits keyCertSign — the
+ * one shape that makes OpenSSL refuse an otherwise valid issuance link. An
+ * absent keyUsage is unrestricted, so only a present-and-lacking one counts.
+ */
+function cannotSignCertificates(cert: X509Certificate): boolean {
+  const bits = keyUsageBits(cert);
+  if (!bits) return false;
+  return !bits.includes(KEY_USAGE_KEY_CERT_SIGN);
+}
+
+/**
+ * WHATWG `URL.hostname` keeps the brackets on an IPv6 literal (`[::1]`), and
+ * `isIP` does not recognise the bracketed form — so an unstripped host falls
+ * through to the DNS-name branch of the SAN check, where it can never match
+ * the iPAddress SAN such a certificate actually carries.
+ */
+function workerDialHost(daemonUrl: string): string | undefined {
+  try {
+    const hostname = new URL(daemonUrl).hostname;
+    if (!hostname) return undefined;
+    return hostname.startsWith('[') && hostname.endsWith(']')
+      ? hostname.slice(1, -1)
+      : hostname;
+  } catch {
+    return undefined;
+  }
+}
+
+function certCoversHost(x509: X509Certificate, host: string): boolean {
+  try {
+    // IP literals need an iPAddress SAN — checkServerIdentity has no CN
+    // fallback for them — while names go through the normal host match.
+    return isIP(host)
+      ? Boolean(x509.checkIP(host))
+      : Boolean(x509.checkHost(host));
+  } catch {
+    return true;
+  }
 }
 
 /**
@@ -2418,6 +3152,7 @@ async function runQwenServeImpl(
   // downgrade would serve the web shell over an insecure transport they
   // believe is encrypted.
   let tlsOptions: { cert: Buffer; key: Buffer } | undefined;
+  let tlsCertPath: string | undefined;
   if ((opts.tlsCert && !opts.tlsKey) || (!opts.tlsCert && opts.tlsKey)) {
     throw new Error(
       `--tls-cert and --tls-key must be provided together (got only ` +
@@ -2476,6 +3211,10 @@ async function runQwenServeImpl(
       );
     }
     tlsOptions = { cert, key };
+    // Workers are forked with `cwd: opts.workspace`, so a relative --tls-cert
+    // would resolve against the worker's cwd instead of the daemon's and load
+    // nothing. Resolve once here, against the cwd the daemon just read it with.
+    tlsCertPath = path.resolve(opts.tlsCert);
   }
 
   if (!isLoopbackBind(opts.hostname) && !token) {
@@ -7152,6 +7891,33 @@ async function runQwenServeImpl(
             );
           }
           const workerRuntime = await ensureChannelRuntime();
+          const workerDaemonUrl = formatChannelWorkerDaemonUrl(
+            opts.hostname,
+            actualPort,
+            tlsOptions !== undefined,
+          );
+          assertChannelWorkerDaemonUrlIsLocal(workerDaemonUrl, opts.hostname);
+          if (tlsOptions && tlsCertPath) {
+            const operatorCaCertPath = process.env['NODE_EXTRA_CA_CERTS'];
+            let operatorCaCert: Buffer | undefined;
+            if (operatorCaCertPath) {
+              try {
+                operatorCaCert = fs.readFileSync(operatorCaCertPath);
+              } catch {
+                // Unreadable: it anchors nothing, which is what the gap check
+                // concludes from the missing contents.
+              }
+            }
+            for (const gap of describeWorkerTlsTrustGaps({
+              cert: tlsOptions.cert,
+              certPath: tlsCertPath,
+              daemonUrl: workerDaemonUrl,
+              ...(operatorCaCertPath ? { operatorCaCertPath } : {}),
+              ...(operatorCaCert ? { operatorCaCert } : {}),
+            })) {
+              daemonLog.warn(gap);
+            }
+          }
           const createSupervisor =
             deps.channelWorkerSupervisorFactory ??
             workerRuntime.createChannelWorkerSupervisor;
@@ -7162,11 +7928,9 @@ async function runQwenServeImpl(
               createSupervisor,
               shared: {
                 cliEntryPath: workerRuntime.findCliEntryPath(),
-                daemonUrl: formatChannelWorkerDaemonUrl(
-                  opts.hostname,
-                  actualPort,
-                ),
+                daemonUrl: workerDaemonUrl,
                 ...(token ? { daemonToken: token } : {}),
+                ...(tlsCertPath ? { workerTlsCaCertPath: tlsCertPath } : {}),
               },
               onReady: (snapshot) => {
                 if (runtimeStartupError !== undefined) return;

@@ -1,10 +1,14 @@
 import { EventEmitter } from 'node:events';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ChannelWebhookTask } from '@qwen-code/channel-base';
 import {
   ChannelWorkerStartupError,
   createChannelWorkerSupervisor,
   type ChannelWorkerChild,
+  cleanupMintedWorkerCaBundleDirs,
 } from './channel-worker-supervisor.js';
 import { isChannelWorkerPromptAuthorized } from './channel-worker-prompt-authorization.js';
 import { CHANNEL_WORKER_HEARTBEAT_INTERVAL_MS } from './channel-worker-env.js';
@@ -53,6 +57,107 @@ const deliveryRequest: ChannelDeliveryRequest = {
   target: { type: 'chat', id: 'group-1' },
   text: 'inspection result',
 };
+
+/**
+ * Real PEM material: the merge now validates its inputs the way Node's
+ * certificate loader does, so placeholder text like `OP-CERT` no longer
+ * exercises the merge path at all.
+ */
+const OPERATOR_CA_PEM = `-----BEGIN CERTIFICATE-----
+MIIDHjCCAgagAwIBAgIUMfJwZrF6DjLX1ypLgu2A4v/SwKEwDQYJKoZIhvcNAQEL
+BQAwHDEaMBgGA1UEAwwRcXdlbiB0ZXN0IHJvb3QgQ0EwIBcNMjYwODE4MDk0NzE4
+WhgPMjEyNjA3MjUwOTQ3MThaMBQxEjAQBgNVBAMMCWxvY2FsaG9zdDCCASIwDQYJ
+KoZIhvcNAQEBBQADggEPADCCAQoCggEBAOff38zsoMq+oe2koKyZJ7aoGJC8CuAc
+oYoLcJaWdp6yJaj5BpYeHAnQt8QCQZB86Fj1f3yuK6KwmGm3p49NrVJMl/T39CnK
+ZAcIWATBw8mCWLFWlWhRgqrIQ5ka935m+z63gVhSQiCq2mNkAzm9I4UcbeAucSXn
+Plk0Bc/CBUh5knrjxPEebicbCUaKteWnG3SBe5PjgP6DKZojd0VakmbrDhTW+yD4
+9LRqURfzvQZghA7stqErp+WJREKAaJbNNUEhGvRSwucIsah6u7OAbYP1IRaYBGDm
+nlxaYBETRg0/3Kzx4SnPUuyx3uR6YP9MNuSzK5udCf39+iWSFCC+AnMCAwEAAaNe
+MFwwGgYDVR0RBBMwEYcEfwAAAYIJbG9jYWxob3N0MB0GA1UdDgQWBBSItY/bpVFx
+QRATvUzvo+JRFVpuyjAfBgNVHSMEGDAWgBRfCBabaBn4orvntHRiDcBU8W3vEzAN
+BgkqhkiG9w0BAQsFAAOCAQEAjIiKztoj9JtpKfP2qSYsTe+4nvCZ1ZT4PtmXQMVp
+lyHI02iH+NSSY92/ZdvGn2jBMzAFpVgJFlI6aZOne/qHI5qMf1RW7BfHBXza7wF6
+mdILIKRUYzm96o6IEuObE+QkSjRuA5OpLkObzGZLWfem0+fxnz0djbzeEBhHpP+b
+VUUcl7r2wFb3+ClobIYS24Y+tWCl53XF+2YFNebECkA+19TivHPYgyywljyFNmzk
+jCELOKOvOESV6kWBGUcrj8rcXoaF3BABInxZURGMRqWuivfYSjkGj65Trf2sVCXS
+9mkiDfB/mYPvq3ODVYLvOjcxqPFsKaRA0Gw5Nm7WKGiOhg==
+-----END CERTIFICATE-----
+`;
+
+// A second, distinct operator CA — a different workspace's trust anchor on
+// the same daemon. Not a real secret.
+const SECOND_OPERATOR_CA_PEM = `-----BEGIN CERTIFICATE-----
+MIIDMTCCAhmgAwIBAgIUG6NARk3EOcKqHtHTWztaynpXRR4wDQYJKoZIhvcNAQEL
+BQAwJzElMCMGA1UEAwwccXdlbiBzZWNvbmQgb3BlcmF0b3IgdGVzdCBDQTAgFw0y
+NjA4MTkwMzI1MTNaGA8yMTI2MDcyNjAzMjUxM1owJzElMCMGA1UEAwwccXdlbiBz
+ZWNvbmQgb3BlcmF0b3IgdGVzdCBDQTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCC
+AQoCggEBAJWYjf/umwiOmOoKXdZXRdaB6J9QI8d2TVpu1fI1vwofvbQIAethPFfz
+irdvdXhQUA0kOGpoQ0LpAvGvUreMjvnIg8RhW+2OKC+EG1jUDbD3OmA11UpeJPVU
+XxnX9VmatnMLeaGK51bbsqapC8MntfilPUmd41fAj6Z5E+FbYPmbrByQf5tRVqty
+XEd3WPDf9e5oG+neDc9bNUlJHuEBOBvDo2aQaHBpAxbryonVapcWUhLWRyIlGIPd
+MSVQm7GPdy5TEeS0LQ/mwslgzU8/uFbQhqDQ7Co89V7FNM3WJIYeQn5MX1/pinQF
+YCOJpHZU+Ns/vfRbdufvEbOyJ+6r2qECAwEAAaNTMFEwHQYDVR0OBBYEFNTc2DMq
+kwzF3JOlRQmT7KmZfHHiMB8GA1UdIwQYMBaAFNTc2DMqkwzF3JOlRQmT7KmZfHHi
+MA8GA1UdEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQELBQADggEBAG9cX7kcv+YthbUV
+OtFGTBcRDy6lof3hMbHXqHMxnI/81+4wO5QNpLjXFA71oSqnZ5s4fnme2gGPQmFO
+5ua9Vq5PRzGq3rU2Ct2wnBsQpODBLJqHj1sIq4RPO6YM2B7xFgsjOxtxehH3JuK7
+IMN8y+R9MkxqBaHMoVl5F9MCBolvK5CMssZ+ejQCYFJ1Nq+mINUrS0dxgXdz6Hr1
+lAA+L7F0PP18LXB0WwYJyBqI5iNGijeaamBs7DGSJda8UtnM8TKk4jfG8+s1EQa0
+lciZfP6Ohr9jREr0xJrCgjoM4f7FLGTRmP8b5QHIBg1Xo8pPBZWMDsI3FTgFD5cu
+35ccDyc=
+-----END CERTIFICATE-----
+`;
+
+const DAEMON_CERT_PEM = `-----BEGIN CERTIFICATE-----
+MIIDJzCCAg+gAwIBAgIUfuVC8Ulq3HIg+1tf36JrjAa6dr4wDQYJKoZIhvcNAQEL
+BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MDYzMDAyMjIxOVoYDzIxMjYw
+NjA2MDIyMjE5WjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwggEiMA0GCSqGSIb3DQEB
+AQUAA4IBDwAwggEKAoIBAQCnEk5caJsr2ShJwi4bkAMr1/IzzueiUFbnnqs3XpaB
+ANxpIZxi8WN1gf8MoAOioZteH51Q2nz8Zb2MVHoDMH3zx4V36VcXUaeR+/wZbFRN
+94NlzYCXPnzPH+Mw/vle1PTM/boPON8F4ATGJZkzmGT8+M5CqDCW4isHlpGvbn0T
+SdmqnmzihNBdaREVVkGJYa7JSFcgRth52+wTAOIM8e8HC1VTMw1OhXDAus6ro7z+
+u5XKGpG+JfsCpimNPYzNOPSkIr/QmxuaMq7kmYwT9J1Gyw9cQQj8vcipyLq6q3Hz
+iMhxUXbWp7moi4e6CzxLKyPrWwhuh+3SXqIYshAYRsKNAgMBAAGjbzBtMB0GA1Ud
+DgQWBBSM8bvfq77vXg5fsuhYGXsLuKjqxzAfBgNVHSMEGDAWgBSM8bvfq77vXg5f
+suhYGXsLuKjqxzAPBgNVHRMBAf8EBTADAQH/MBoGA1UdEQQTMBGHBH8AAAGCCWxv
+Y2FsaG9zdDANBgkqhkiG9w0BAQsFAAOCAQEAGUBgaBYEO119e28j61PTijfhw7mV
+Q8AxlUjlv+HHx+IAPR+E8w7jiS97oxvFSIkmbV+FAQOWwTE+oNvrL5qSFlG7cI60
+wj+Jxwxr+/SShV5Jm7JlynAGxOvOZ1mfxzyGrlm5cg4hoRvcoWAtB/qtiIyFIz/s
+fDAdZiFXRoTaZnpyPWA6iydf3mc0ZOastHib+mlFb+aedKz9by/f2Z1CY6RfckEj
+20c9Mar85RYkVtVTIWNSwItASmQVBaoXsXK33y4C0P1NmPoYBzyPSXsOlmIZXui5
+WYj2mrPe2DL5gCeNUxMhmzgv0bgoYiksHmdyNjRmO5AQlcdjX/7CHg0zEQ==
+-----END CERTIFICATE-----
+`;
+
+const DAEMON_KEY_PEM = `-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCnEk5caJsr2ShJ
+wi4bkAMr1/IzzueiUFbnnqs3XpaBANxpIZxi8WN1gf8MoAOioZteH51Q2nz8Zb2M
+VHoDMH3zx4V36VcXUaeR+/wZbFRN94NlzYCXPnzPH+Mw/vle1PTM/boPON8F4ATG
+JZkzmGT8+M5CqDCW4isHlpGvbn0TSdmqnmzihNBdaREVVkGJYa7JSFcgRth52+wT
+AOIM8e8HC1VTMw1OhXDAus6ro7z+u5XKGpG+JfsCpimNPYzNOPSkIr/QmxuaMq7k
+mYwT9J1Gyw9cQQj8vcipyLq6q3HziMhxUXbWp7moi4e6CzxLKyPrWwhuh+3SXqIY
+shAYRsKNAgMBAAECggEAQW/tG0qphEog+orAznDgnRqOtfYTScLX1w6RlzVIE60H
+p3HPs/1B7HOHNyWxZtCPbxVI47NAAwfCbyVjSL6EhqgeQbI2N173GDmvKzH/7y3D
+3GraM+L4tZOSw80KVTdpzqSObInk6IMuu4FceRX2cBLvjrIbne1l1yoFU8Yd3SCM
+t8J46vMys7Rh4yR0iOl1hFeLYj8KolTdp6uNYTxaHMt363G7/TcJYRqjrLkpBpXJ
+dJiP58a3WulvVKVHBjZYVmHLlkvla7LQ9tPRsk0gUQfzNpLzl6oBacrNrRv1F7Oe
+keYqt+Kpy9HhZIHt57ahwKmjhjrfIUpyQadF/me0rQKBgQDVbLV6VngGjMSCPQOQ
+VZcAMFZ+y1fgaHeVZwuFeRlCEHBDDmw5eWdUdUQNIRckpqf0IlU39aP/cLgjNZ0W
+nmxfUwhdgEMam2aHZ/8eqrOl0HTa+F5PWz8NPLKsQ970vPb1XCsoEtDVXEsMqK+s
+4h+zjRzy6lLy2cWvYZrDr/KwywKBgQDIZmitKO0MIJOWeqwI3MQvbBXCz9aEIG+3
+0ISQreD/7Z/IEcwrMpDD+z1sOj9OUO2GFflECdhtqo416cv3uo8LLABxuzsYOgug
+ZPgW9oPKVRLfqc43/n0JMtIvS+Na/7C/nCNwcZZZU91V+VG4+1rexINQybnCRbQw
+cBZLcX8nBwKBgQDMdZhl2vChVbnsCwee/l/qjmROk/9bvLjTKCSheaH46Eaj9u03
+IlcbUjwfV9QUCJReDYYWVf0GebXuBS64vIyVxbX93SJsGvPeRILjniT8dPd9zvKK
+k5+TztJctaiiTWVJKUMu4NevjvtW5UNnHDnCiS1yiYltnbMEkTzyu1yEgQKBgAYk
+pYbRX1rk0MFnJ0jqQ5VUkeIz7taEDAiterLYsbIGvcQrT3/vf+KSHBLqQjCLaIyY
+tdhxGNJbzRo3/YmtjV8BTU4vOCOI+/xBvB0wF2AndXmnweuTgI+8oBbVE7YhanCl
+P6zdvocke/97shailemISqI6XNhovJpThUtwwj4XAoGATwSvzX0VLRpoWwDl30oi
+hxyfpb0iCzGik49j/oL+ZB5C8F8AdBpza8eTXJAeAVP7L5nvWffMgvcXs5sGMF7e
+ARaOwZHpfsTw4Aq74yAWUKXumVGFXQpZMRj/QWgQEItTYF7rJVARIssv5miDbHvW
+1Qm2tDpPnmCd1BedIYWCnHA=
+-----END PRIVATE KEY-----
+`;
 
 describe('createChannelWorkerSupervisor', () => {
   afterEach(() => {
@@ -275,6 +380,735 @@ describe('createChannelWorkerSupervisor', () => {
     expect(
       isChannelWorkerPromptAuthorized(promptAuthorization, '/workspace'),
     ).toBe(false);
+  });
+
+  it('injects NODE_EXTRA_CA_CERTS when the daemon serves TLS', async () => {
+    const child = new FakeChild();
+    const spawnWorker = vi.fn(
+      (_execPath: string, _argv: string[], _options: unknown) => child,
+    );
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'https://127.0.0.1:4170',
+      tlsCaCertPath: '/certs/daemon.pem',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      workerBaseEnv: {},
+      spawnWorker,
+    });
+
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: 54321,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await started;
+
+    const env = (spawnWorker.mock.calls[0]![2] as { env: NodeJS.ProcessEnv })
+      .env;
+    expect(env['NODE_EXTRA_CA_CERTS']).toBe('/certs/daemon.pem');
+  });
+
+  it('merges an operator-set NODE_EXTRA_CA_CERTS with the daemon cert', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ca-merge-'));
+    const operatorCa = path.join(dir, 'operator.pem');
+    const daemonCa = path.join(dir, 'daemon.pem');
+    fs.writeFileSync(operatorCa, OPERATOR_CA_PEM);
+    fs.writeFileSync(daemonCa, DAEMON_CERT_PEM);
+    const child = new FakeChild();
+    const spawnWorker = vi.fn(
+      (_execPath: string, _argv: string[], _options: unknown) => child,
+    );
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'https://127.0.0.1:4170',
+      tlsCaCertPath: daemonCa,
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      workerBaseEnv: { NODE_EXTRA_CA_CERTS: operatorCa },
+      spawnWorker,
+    });
+
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: 54321,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await started;
+
+    const env = (spawnWorker.mock.calls[0]![2] as { env: NodeJS.ProcessEnv })
+      .env;
+    const combined = fs.readFileSync(env['NODE_EXTRA_CA_CERTS']!, 'utf8');
+    // R2-5: exact text, not two `toContain`s — those survive a mutated
+    // separator, and with real PEM inputs that mutant fuses
+    // `-----END CERTIFICATE-----` onto the next `-----BEGIN CERTIFICATE-----`
+    // and makes the whole bundle unparseable.
+    expect(combined).toBe(
+      `${OPERATOR_CA_PEM.trimEnd()}\n${DAEMON_CERT_PEM.trimEnd()}\n`,
+    );
+    fs.rmSync(path.dirname(env['NODE_EXTRA_CA_CERTS']!), {
+      recursive: true,
+      force: true,
+    });
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('reuses one merged bundle across worker spawns', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ca-reuse-'));
+    const operatorCa = path.join(dir, 'operator.pem');
+    const daemonCa = path.join(dir, 'daemon.pem');
+    fs.writeFileSync(operatorCa, OPERATOR_CA_PEM);
+    fs.writeFileSync(daemonCa, DAEMON_CERT_PEM);
+    const spawnWorker = vi.fn(
+      (_execPath: string, _argv: string[], _options: unknown) =>
+        new FakeChild(),
+    );
+    const makeSupervisor = () =>
+      createChannelWorkerSupervisor({
+        cliEntryPath: '/repo/dist/index.js',
+        daemonUrl: 'https://127.0.0.1:4170',
+        tlsCaCertPath: daemonCa,
+        workspace: '/workspace',
+        selection: { mode: 'names', names: ['telegram'] },
+        workerBaseEnv: { NODE_EXTRA_CA_CERTS: operatorCa },
+        spawnWorker,
+      });
+
+    for (const supervisor of [makeSupervisor(), makeSupervisor()]) {
+      const started = supervisor.start();
+      const child = spawnWorker.mock.results.at(-1)!.value as FakeChild;
+      child.emit('message', {
+        type: 'ready',
+        pid: 54321,
+        channels: ['telegram'],
+        requestedChannels: ['telegram'],
+      });
+      await started;
+    }
+
+    // Workers respawn on every restart; minting a fresh bundle directory per
+    // spawn would leak one per restart for the daemon's whole lifetime.
+    const paths = spawnWorker.mock.calls.map(
+      (call) =>
+        (call[2] as { env: NodeJS.ProcessEnv }).env['NODE_EXTRA_CA_CERTS'],
+    );
+    expect(paths).toHaveLength(2);
+    expect(paths[0]).toBe(paths[1]);
+    fs.rmSync(path.dirname(paths[0]!), { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('keeps the daemon cert when the operator CA cannot be merged', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ca-fallback-'));
+    const daemonCa = path.join(dir, 'daemon.pem');
+    fs.writeFileSync(daemonCa, DAEMON_CERT_PEM);
+    const warnings: string[] = [];
+    const onWarning = (warning: Error) => warnings.push(warning.message);
+    process.on('warning', onWarning);
+    const child = new FakeChild();
+    const spawnWorker = vi.fn(
+      (_execPath: string, _argv: string[], _options: unknown) => child,
+    );
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'https://127.0.0.1:4170',
+      tlsCaCertPath: daemonCa,
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      workerBaseEnv: {
+        NODE_EXTRA_CA_CERTS: path.join(dir, 'missing-operator.pem'),
+      },
+      spawnWorker,
+    });
+
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: 54321,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await started;
+
+    const env = (spawnWorker.mock.calls[0]![2] as { env: NodeJS.ProcessEnv })
+      .env;
+    expect(env['NODE_EXTRA_CA_CERTS']).toBe(daemonCa);
+    await new Promise((resolve) => setImmediate(resolve));
+    process.off('warning', onWarning);
+    expect(
+      warnings.some((message) => message.includes('missing-operator.pem')),
+    ).toBe(true);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  async function startWorkerWithCaPaths(
+    daemonCa: string,
+    operatorCa: string,
+  ): Promise<{ env: NodeJS.ProcessEnv }> {
+    const child = new FakeChild();
+    const spawnWorker = vi.fn(
+      (_execPath: string, _argv: string[], _options: unknown) => child,
+    );
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'https://127.0.0.1:4170',
+      tlsCaCertPath: daemonCa,
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      workerBaseEnv: { NODE_EXTRA_CA_CERTS: operatorCa },
+      spawnWorker,
+    });
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: 54321,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await started;
+    return spawnWorker.mock.calls[0]![2] as { env: NodeJS.ProcessEnv };
+  }
+
+  it('keeps the daemon cert when the operator CA is readable but unloadable', async () => {
+    // R2-11: `cat a.pem b.pem` with no trailing newline in a.pem fuses
+    // `-----END CERTIFICATE----------BEGIN CERTIFICATE-----` onto one line.
+    // Node's loader is all-or-nothing on that shape — it drops the WHOLE
+    // bundle with `bad end line`, taking the daemon cert appended after it
+    // down too, so every worker handshake fails while /health stays green.
+    // The read succeeds, so the ENOENT fallback above never sees this.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ca-fused-'));
+    const operatorCa = path.join(dir, 'operator.pem');
+    const daemonCa = path.join(dir, 'daemon.pem');
+    fs.writeFileSync(
+      operatorCa,
+      `${OPERATOR_CA_PEM.trimEnd()}${OPERATOR_CA_PEM}`,
+    );
+    fs.writeFileSync(daemonCa, DAEMON_CERT_PEM);
+    expect(fs.readFileSync(operatorCa, 'utf8')).toContain(
+      '-----END CERTIFICATE----------BEGIN CERTIFICATE-----',
+    );
+    const warnings: string[] = [];
+    const onWarning = (warning: Error) => warnings.push(warning.message);
+    process.on('warning', onWarning);
+
+    const { env } = await startWorkerWithCaPaths(daemonCa, operatorCa);
+
+    expect(env['NODE_EXTRA_CA_CERTS']).toBe(daemonCa);
+    await new Promise((resolve) => setImmediate(resolve));
+    process.off('warning', onWarning);
+    expect(
+      warnings.some(
+        (message) =>
+          message.includes(operatorCa) &&
+          message.includes('no PEM certificate block Node can load'),
+      ),
+    ).toBe(true);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('keeps the daemon cert when an operator CA block does not decode', async () => {
+    // R3-1(lax arm): the marker check validates block SHAPE only. A body made
+    // of base64 *characters* that does not decode (one misplaced `=` in a
+    // truncated or hand-edited cert) passed it, was merged ahead of the daemon
+    // cert, and Node's loader then discarded the WHOLE bundle with `bad base64
+    // decode` — measured on Node 22: the worker ends up trusting NEITHER the
+    // operator CA nor the daemon cert, while /health stays green.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ca-badb64-'));
+    const operatorCa = path.join(dir, 'operator.pem');
+    const daemonCa = path.join(dir, 'daemon.pem');
+    const lines = OPERATOR_CA_PEM.trimEnd().split('\n');
+    const body = Math.floor(lines.length / 2);
+    lines[body] = `${lines[body]!.slice(0, 10)}=${lines[body]!.slice(11)}`;
+    const corrupted = `${lines.join('\n')}\n`;
+    // Still matches the marker/alphabet shape — only decoding tells them apart.
+    expect(corrupted).toMatch(
+      /^-----BEGIN CERTIFICATE-----\n(?:[A-Za-z0-9+/=]+\n)+-----END CERTIFICATE-----\n$/,
+    );
+    fs.writeFileSync(operatorCa, corrupted);
+    fs.writeFileSync(daemonCa, DAEMON_CERT_PEM);
+
+    const { env } = await startWorkerWithCaPaths(daemonCa, operatorCa);
+
+    expect(env['NODE_EXTRA_CA_CERTS']).toBe(daemonCa);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('merges a CRLF-terminated operator CA file', async () => {
+    // R3-4: the CRLF normalization is the only thing keeping Windows-edited
+    // and vendor-exported bundles out of the daemon-cert-only fallback —
+    // Node's loader accepts CRLF PEM (measured: NODE_EXTRA_CA_CERTS with a
+    // CRLF root handshakes authorized=true), so rejecting it would drop an
+    // operator CA the loader would have taken.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ca-crlf-'));
+    const operatorCa = path.join(dir, 'operator.pem');
+    const daemonCa = path.join(dir, 'daemon.pem');
+    fs.writeFileSync(operatorCa, OPERATOR_CA_PEM.replace(/\n/g, '\r\n'));
+    fs.writeFileSync(daemonCa, DAEMON_CERT_PEM);
+
+    const { env } = await startWorkerWithCaPaths(daemonCa, operatorCa);
+
+    const bundlePath = env['NODE_EXTRA_CA_CERTS']!;
+    expect(bundlePath).not.toBe(daemonCa);
+    // Normalized to LF on the way in, so the bundle is canonical PEM.
+    expect(fs.readFileSync(bundlePath, 'utf8')).toBe(
+      `${OPERATOR_CA_PEM.trimEnd()}\n${DAEMON_CERT_PEM.trimEnd()}\n`,
+    );
+    fs.rmSync(path.dirname(bundlePath), { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('merges an operator CA file behind a UTF-8 BOM', async () => {
+    // R3-1(strict arm): a corporate bundle saved by Windows tooling carries a
+    // BOM. Node's loader reads it fine (measured), so rejecting it sent the
+    // operator to edit a file that was never the problem.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ca-bom-'));
+    const operatorCa = path.join(dir, 'operator.pem');
+    const daemonCa = path.join(dir, 'daemon.pem');
+    fs.writeFileSync(operatorCa, `\uFEFF${OPERATOR_CA_PEM}`);
+    fs.writeFileSync(daemonCa, DAEMON_CERT_PEM);
+
+    const { env } = await startWorkerWithCaPaths(daemonCa, operatorCa);
+
+    const bundlePath = env['NODE_EXTRA_CA_CERTS']!;
+    expect(bundlePath).not.toBe(daemonCa);
+    expect(fs.readFileSync(bundlePath, 'utf8')).toBe(
+      `${OPERATOR_CA_PEM.trimEnd()}\n${DAEMON_CERT_PEM.trimEnd()}\n`,
+    );
+    fs.rmSync(path.dirname(bundlePath), { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('merges an operator CA file with marker and body whitespace', async () => {
+    // R3-1(strict arm): Node's loader also accepts trailing whitespace after a
+    // marker line and leading whitespace on body lines (measured through a
+    // real NODE_EXTRA_CA_CERTS handshake), so the line-anchored match must not
+    // send either shape to the daemon-cert-only fallback.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ca-ws-'));
+    const operatorCa = path.join(dir, 'operator.pem');
+    const daemonCa = path.join(dir, 'daemon.pem');
+    const padded = OPERATOR_CA_PEM.split('\n')
+      .map((line) =>
+        line.startsWith('-----')
+          ? `${line}  `
+          : line === ''
+            ? line
+            : `  ${line}`,
+      )
+      .join('\n');
+    fs.writeFileSync(operatorCa, padded);
+    fs.writeFileSync(daemonCa, DAEMON_CERT_PEM);
+
+    const { env } = await startWorkerWithCaPaths(daemonCa, operatorCa);
+
+    const bundlePath = env['NODE_EXTRA_CA_CERTS']!;
+    expect(bundlePath).not.toBe(daemonCa);
+    expect(fs.readFileSync(bundlePath, 'utf8')).toBe(
+      `${OPERATOR_CA_PEM.trimEnd()}\n${DAEMON_CERT_PEM.trimEnd()}\n`,
+    );
+    fs.rmSync(path.dirname(bundlePath), { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('warns once per path pair, not once per spawn', async () => {
+    // R3-5: every fallback branch returns without caching and `launch()`
+    // rebuilds the env on each 'initial'/'restart' spawn, while
+    // `process.emitWarning` does not dedup identical text — so a crash-looping
+    // worker appended one identical multi-line warning per restart, burying
+    // the log stream the operator reads to diagnose the loop.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ca-dedup-'));
+    const operatorCa = path.join(dir, 'operator.pem');
+    const daemonCa = path.join(dir, 'daemon.pem');
+    fs.writeFileSync(
+      operatorCa,
+      `${OPERATOR_CA_PEM.trimEnd()}${OPERATOR_CA_PEM}`,
+    );
+    fs.writeFileSync(daemonCa, DAEMON_CERT_PEM);
+    const warnings: string[] = [];
+    const onWarning = (warning: Error) => warnings.push(warning.message);
+    process.on('warning', onWarning);
+
+    await startWorkerWithCaPaths(daemonCa, operatorCa);
+    await startWorkerWithCaPaths(daemonCa, operatorCa);
+    await startWorkerWithCaPaths(daemonCa, operatorCa);
+
+    await new Promise((resolve) => setImmediate(resolve));
+    process.off('warning', onWarning);
+    expect(
+      warnings.filter((message) => message.includes(operatorCa)),
+    ).toHaveLength(1);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('registers one exit hook however many times the bundle is rebuilt', async () => {
+    // R4-1: a `process.once('exit')` per mint accumulated a listener, a
+    // closure and an orphaned directory per rebuild — and the cache is
+    // rebuilt on purpose (in-place rotation, tmp-cleaner aging), so a
+    // long-lived daemon crossed Node's threshold and printed
+    // `MaxListenersExceededWarning: Possible EventEmitter memory leak
+    // detected` into the very log stream the fallback dedup keeps readable.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ca-exit-'));
+    const operatorCa = path.join(dir, 'operator.pem');
+    const daemonCa = path.join(dir, 'daemon.pem');
+    fs.writeFileSync(operatorCa, OPERATOR_CA_PEM);
+    fs.writeFileSync(daemonCa, DAEMON_CERT_PEM);
+
+    const before = process.listenerCount('exit');
+    const bundlePaths: string[] = [];
+    for (let round = 0; round < 5; round += 1) {
+      // Rotate in place so every spawn misses the cache and rebuilds.
+      fs.writeFileSync(
+        operatorCa,
+        round % 2 === 0 ? DAEMON_CERT_PEM : OPERATOR_CA_PEM,
+      );
+      const { env } = await startWorkerWithCaPaths(daemonCa, operatorCa);
+      bundlePaths.push(env['NODE_EXTRA_CA_CERTS']!);
+    }
+
+    expect(new Set(bundlePaths).size).toBe(5);
+    expect(process.listenerCount('exit')).toBeLessThanOrEqual(before + 1);
+    // Each rebuild also supersedes the previous bundle; holding those until
+    // process exit leaks a directory per rotation.
+    for (const superseded of bundlePaths.slice(0, -1)) {
+      expect(fs.existsSync(path.dirname(superseded))).toBe(false);
+    }
+
+    fs.rmSync(path.dirname(bundlePaths.at(-1)!), {
+      recursive: true,
+      force: true,
+    });
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  // The exit hook and the supersede path each carry one bookkeeping statement
+  // that no test reached: deleting `mintedWorkerCaBundleDirs.delete(dir)` on
+  // supersede, or the hook's `.clear()`, both shipped green. Their cost is a
+  // 0700 directory leaked per rotation for the daemon's whole lifetime, so
+  // pin the set's lifetime through what the hook actually cleans.
+  it('cleans only the live bundle dir at exit, then forgets every dir', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ca-minted-'));
+    const operatorCa = path.join(dir, 'operator.pem');
+    const daemonCa = path.join(dir, 'daemon.pem');
+    fs.writeFileSync(operatorCa, OPERATOR_CA_PEM);
+    fs.writeFileSync(daemonCa, DAEMON_CERT_PEM);
+
+    const bundlePaths: string[] = [];
+    for (let round = 0; round < 3; round += 1) {
+      fs.writeFileSync(
+        operatorCa,
+        round % 2 === 0 ? DAEMON_CERT_PEM : OPERATOR_CA_PEM,
+      );
+      const { env } = await startWorkerWithCaPaths(daemonCa, operatorCa);
+      bundlePaths.push(env['NODE_EXTRA_CA_CERTS']!);
+    }
+    const bundleDirs = bundlePaths.map((bundle) => path.dirname(bundle));
+
+    // The superseded dirs were already removed on supersede. Re-create them
+    // as sentinels: if the supersede path had stopped UNTRACKING them, the
+    // hook below would delete these again.
+    for (const superseded of bundleDirs.slice(0, -1)) {
+      fs.mkdirSync(superseded, { recursive: true });
+      fs.writeFileSync(path.join(superseded, 'sentinel'), 'x');
+    }
+
+    cleanupMintedWorkerCaBundleDirs();
+
+    for (const superseded of bundleDirs.slice(0, -1)) {
+      expect(fs.existsSync(superseded)).toBe(true);
+    }
+    expect(fs.existsSync(bundleDirs.at(-1)!)).toBe(false);
+
+    // And the set is emptied: a second run has nothing left to clean, so a
+    // re-created live dir survives it.
+    fs.mkdirSync(bundleDirs.at(-1)!, { recursive: true });
+    cleanupMintedWorkerCaBundleDirs();
+    expect(fs.existsSync(bundleDirs.at(-1)!)).toBe(true);
+
+    for (const bundleDir of bundleDirs) {
+      fs.rmSync(bundleDir, { recursive: true, force: true });
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('warns again when the SAME path pair fails a different way', async () => {
+    // R4-5(a): keying the dedup on the paths alone meant the first reason was
+    // the only one ever printed. An operator CA that is missing before a mount
+    // appears and a DER export afterwards are different fixes, and the second
+    // diagnosis was swallowed — sending the operator to fix mounts while the
+    // real problem was the format.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ca-family-'));
+    const operatorCa = path.join(dir, 'operator.pem');
+    const daemonCa = path.join(dir, 'daemon.pem');
+    fs.writeFileSync(daemonCa, DAEMON_CERT_PEM);
+    const warnings: string[] = [];
+    const onWarning = (warning: Error) => warnings.push(warning.message);
+    process.on('warning', onWarning);
+
+    // (1) not there yet — read error.
+    await startWorkerWithCaPaths(daemonCa, operatorCa);
+    // (2) there, but nothing Node's loader can take from it.
+    fs.writeFileSync(
+      operatorCa,
+      `${OPERATOR_CA_PEM.trimEnd()}${OPERATOR_CA_PEM}`,
+    );
+    await startWorkerWithCaPaths(daemonCa, operatorCa);
+    // (3) same failure as (2): still deduped.
+    await startWorkerWithCaPaths(daemonCa, operatorCa);
+
+    await new Promise((resolve) => setImmediate(resolve));
+    process.off('warning', onWarning);
+    const mine = warnings.filter((message) => message.includes(operatorCa));
+    expect(mine).toHaveLength(2);
+    expect(mine[0]).toContain('ENOENT');
+    expect(mine[1]).toContain('no PEM certificate block Node can load');
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('warns again when a pair that merged successfully fails later', async () => {
+    // R4-5(b): the dedup Set was add-only, so a pair that once failed kept its
+    // key forever. A genuinely NEW later failure of the same pair was then
+    // swallowed and the workers restart-looped with no diagnostic at all.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ca-relapse-'));
+    const operatorCa = path.join(dir, 'operator.pem');
+    const daemonCa = path.join(dir, 'daemon.pem');
+    fs.writeFileSync(daemonCa, DAEMON_CERT_PEM);
+    const warnings: string[] = [];
+    const onWarning = (warning: Error) => warnings.push(warning.message);
+    process.on('warning', onWarning);
+
+    fs.writeFileSync(
+      operatorCa,
+      `${OPERATOR_CA_PEM.trimEnd()}${OPERATOR_CA_PEM}`,
+    );
+    await startWorkerWithCaPaths(daemonCa, operatorCa);
+    // Operator fixes the file; the merge works again.
+    fs.writeFileSync(operatorCa, OPERATOR_CA_PEM);
+    const merged = await startWorkerWithCaPaths(daemonCa, operatorCa);
+    expect(merged.env['NODE_EXTRA_CA_CERTS']).not.toBe(daemonCa);
+    // And breaks it again — new information, not a repeat.
+    fs.writeFileSync(
+      operatorCa,
+      `${OPERATOR_CA_PEM.trimEnd()}${OPERATOR_CA_PEM}`,
+    );
+    const relapsed = await startWorkerWithCaPaths(daemonCa, operatorCa);
+    expect(relapsed.env['NODE_EXTRA_CA_CERTS']).toBe(daemonCa);
+
+    await new Promise((resolve) => setImmediate(resolve));
+    process.off('warning', onWarning);
+    expect(
+      warnings.filter((message) => message.includes(operatorCa)),
+    ).toHaveLength(2);
+    fs.rmSync(path.dirname(merged.env['NODE_EXTRA_CA_CERTS']!), {
+      recursive: true,
+      force: true,
+    });
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('names decoding and DER, not just markers, in the fallback warning', async () => {
+    // R4-6: `extractCertificateBlocks` rejects for three reasons, and this
+    // commit's X509 decode gate added the third without updating the message.
+    // A CA corrupted by a misplaced `=` was told its markers must sit alone on
+    // their lines — while they already did. After boot this is the ONLY
+    // diagnostic the operator gets, so it has to name the same three the
+    // boot-time check does.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ca-cause-'));
+    const operatorCa = path.join(dir, 'operator.pem');
+    const daemonCa = path.join(dir, 'daemon.pem');
+    const lines = OPERATOR_CA_PEM.trimEnd().split('\n');
+    const body = Math.floor(lines.length / 2);
+    lines[body] = `${lines[body]!.slice(0, 10)}=${lines[body]!.slice(11)}`;
+    fs.writeFileSync(operatorCa, `${lines.join('\n')}\n`);
+    fs.writeFileSync(daemonCa, DAEMON_CERT_PEM);
+    const warnings: string[] = [];
+    const onWarning = (warning: Error) => warnings.push(warning.message);
+    process.on('warning', onWarning);
+
+    await startWorkerWithCaPaths(daemonCa, operatorCa);
+
+    await new Promise((resolve) => setImmediate(resolve));
+    process.off('warning', onWarning);
+    const warning = warnings.find((message) => message.includes(operatorCa));
+    expect(warning).toBeDefined();
+    // Markers ARE already alone on their lines here, so blaming them alone
+    // sends the operator to fix nothing.
+    expect(warning).toContain('every block must decode');
+    expect(warning).toContain('a DER file is never read at all');
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('leaves the private key of a combined operator PEM out of the bundle', async () => {
+    // R2-13: boot validation parses the first block only, so a combined
+    // cert+key PEM serves fine — and copying its key into a tmpdir bundle
+    // NODE_EXTRA_CA_CERTS never reads leaves key material behind a SIGKILLed
+    // daemon, where the `exit` cleanup cannot run.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ca-combined-'));
+    const operatorCa = path.join(dir, 'operator.pem');
+    const daemonCa = path.join(dir, 'daemon.pem');
+    fs.writeFileSync(operatorCa, `${OPERATOR_CA_PEM}${DAEMON_KEY_PEM}`);
+    fs.writeFileSync(daemonCa, DAEMON_CERT_PEM);
+
+    const { env } = await startWorkerWithCaPaths(daemonCa, operatorCa);
+
+    const bundlePath = env['NODE_EXTRA_CA_CERTS']!;
+    expect(bundlePath).not.toBe(daemonCa);
+    const bundle = fs.readFileSync(bundlePath, 'utf8');
+    expect(bundle).not.toContain('PRIVATE KEY');
+    expect(bundle).toBe(
+      `${OPERATOR_CA_PEM.trimEnd()}\n${DAEMON_CERT_PEM.trimEnd()}\n`,
+    );
+    fs.rmSync(path.dirname(bundlePath), { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('rebuilds the bundle after the operator CA is rotated in place', async () => {
+    // R2-4(a): before this bundle existed a respawned worker read the
+    // operator's file live, so a path-only cache turns an in-place rotation
+    // into stale trust that lasts the daemon's whole lifetime.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ca-rotate-'));
+    const operatorCa = path.join(dir, 'operator.pem');
+    const daemonCa = path.join(dir, 'daemon.pem');
+    fs.writeFileSync(operatorCa, OPERATOR_CA_PEM);
+    fs.writeFileSync(daemonCa, DAEMON_CERT_PEM);
+
+    const first = await startWorkerWithCaPaths(daemonCa, operatorCa);
+    const firstPath = first.env['NODE_EXTRA_CA_CERTS']!;
+    expect(fs.readFileSync(firstPath, 'utf8')).toContain(
+      OPERATOR_CA_PEM.trimEnd(),
+    );
+
+    // Rotate to a different certificate under the same path.
+    fs.writeFileSync(operatorCa, DAEMON_CERT_PEM);
+    const rotated = await startWorkerWithCaPaths(daemonCa, operatorCa);
+    const rotatedPath = rotated.env['NODE_EXTRA_CA_CERTS']!;
+    expect(fs.readFileSync(rotatedPath, 'utf8')).toBe(
+      `${DAEMON_CERT_PEM.trimEnd()}\n${DAEMON_CERT_PEM.trimEnd()}\n`,
+    );
+
+    fs.rmSync(path.dirname(firstPath), { recursive: true, force: true });
+    fs.rmSync(path.dirname(rotatedPath), { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('rebuilds the bundle after a tmp cleaner removes it', async () => {
+    // R2-4(b): systemd-tmpfiles-clean ages out /tmp. A path-only cache then
+    // hands every future respawn a dead path — Node logs "Ignoring extra
+    // certs … load failed" and the worker restart-loops until the daemon
+    // itself restarts.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ca-aged-'));
+    const operatorCa = path.join(dir, 'operator.pem');
+    const daemonCa = path.join(dir, 'daemon.pem');
+    fs.writeFileSync(operatorCa, OPERATOR_CA_PEM);
+    fs.writeFileSync(daemonCa, DAEMON_CERT_PEM);
+
+    const first = await startWorkerWithCaPaths(daemonCa, operatorCa);
+    const firstPath = first.env['NODE_EXTRA_CA_CERTS']!;
+    fs.rmSync(path.dirname(firstPath), { recursive: true, force: true });
+
+    const respawned = await startWorkerWithCaPaths(daemonCa, operatorCa);
+    const respawnedPath = respawned.env['NODE_EXTRA_CA_CERTS']!;
+    expect(respawnedPath).not.toBe(firstPath);
+    expect(fs.existsSync(respawnedPath)).toBe(true);
+    // R3-5: both assertions above also hold when the rebuild fails and the
+    // worker is handed the daemon cert alone, so pin the merged content the
+    // way the rotation test does — a silent daemon-cert-only handout drops the
+    // operator CA for the daemon's remaining lifetime with /health still green.
+    expect(respawnedPath).not.toBe(daemonCa);
+    expect(fs.readFileSync(respawnedPath, 'utf8')).toBe(
+      `${OPERATOR_CA_PEM.trimEnd()}\n${DAEMON_CERT_PEM.trimEnd()}\n`,
+    );
+
+    fs.rmSync(path.dirname(respawnedPath), { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('keys the bundle cache on the operator CA, not the daemon cert alone', async () => {
+    // R2-22: every other cache test varies one operator path per test, so a
+    // mutant keying `mergedWorkerCaBundles` on `daemonCertPath` alone survived
+    // the whole suite. Under it, a workspace anchored on operator B is handed
+    // A's bundle on a cache hit — and when the two alternate, each spawn
+    // re-mints a bundle dir, the exact leak the reuse test forbids.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ca-two-op-'));
+    const daemonCa = path.join(dir, 'daemon.pem');
+    const operatorA = path.join(dir, 'operator-a.pem');
+    const operatorB = path.join(dir, 'operator-b.pem');
+    fs.writeFileSync(daemonCa, DAEMON_CERT_PEM);
+    fs.writeFileSync(operatorA, OPERATOR_CA_PEM);
+    fs.writeFileSync(operatorB, SECOND_OPERATOR_CA_PEM);
+
+    const a = await startWorkerWithCaPaths(daemonCa, operatorA);
+    const b = await startWorkerWithCaPaths(daemonCa, operatorB);
+    const pathA = a.env['NODE_EXTRA_CA_CERTS']!;
+    const pathB = b.env['NODE_EXTRA_CA_CERTS']!;
+
+    expect(pathB).not.toBe(pathA);
+    expect(fs.readFileSync(pathA, 'utf8')).toBe(
+      `${OPERATOR_CA_PEM.trimEnd()}\n${DAEMON_CERT_PEM.trimEnd()}\n`,
+    );
+    expect(fs.readFileSync(pathB, 'utf8')).toBe(
+      `${SECOND_OPERATOR_CA_PEM.trimEnd()}\n${DAEMON_CERT_PEM.trimEnd()}\n`,
+    );
+
+    // Going back to A must hit its own cached bundle, not mint a third dir.
+    const aAgain = await startWorkerWithCaPaths(daemonCa, operatorA);
+    expect(aAgain.env['NODE_EXTRA_CA_CERTS']).toBe(pathA);
+
+    fs.rmSync(path.dirname(pathA), { recursive: true, force: true });
+    fs.rmSync(path.dirname(pathB), { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('writes the merged bundle into a private directory, not a predictable tmp path', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ca-private-'));
+    const operatorCa = path.join(dir, 'operator.pem');
+    const daemonCa = path.join(dir, 'daemon.pem');
+    fs.writeFileSync(operatorCa, OPERATOR_CA_PEM);
+    fs.writeFileSync(daemonCa, DAEMON_CERT_PEM);
+    const child = new FakeChild();
+    const spawnWorker = vi.fn(
+      (_execPath: string, _argv: string[], _options: unknown) => child,
+    );
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'https://127.0.0.1:4170',
+      tlsCaCertPath: daemonCa,
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      workerBaseEnv: { NODE_EXTRA_CA_CERTS: operatorCa },
+      spawnWorker,
+    });
+
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: 54321,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await started;
+
+    const bundlePath = (
+      spawnWorker.mock.calls[0]![2] as { env: NodeJS.ProcessEnv }
+    ).env['NODE_EXTRA_CA_CERTS']!;
+    // A pre-planted path is only exploitable when it is predictable; the
+    // bundle now lives in a 0700 mkdtemp directory with a random suffix.
+    expect(bundlePath).not.toBe(
+      path.join(os.tmpdir(), `qwen-worker-ca-${process.pid}.pem`),
+    );
+    const bundleDir = path.dirname(bundlePath);
+    expect(path.dirname(bundleDir)).toBe(os.tmpdir());
+    // Windows ignores mkdtempSync's mode and libuv synthesises st_mode from
+    // file attributes (0o666 for a writable directory, structurally never
+    // 0o700), so this POSIX assertion is guarded the way
+    // observed-contact-store.test.ts guards the identical pair.
+    if (process.platform !== 'win32') {
+      expect(fs.statSync(bundleDir).mode & 0o777).toBe(0o700);
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(bundleDir, { recursive: true, force: true });
   });
 
   it('ignores non-ready IPC messages before the ready message', async () => {

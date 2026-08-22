@@ -5,17 +5,23 @@
  */
 
 import * as os from 'node:os';
+import * as dns from 'node:dns/promises';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
+import { X509Certificate } from 'node:crypto';
+import { extractCertificateBlocks } from './pem-certificate-blocks.js';
 import { createServer } from 'node:http';
 import * as https from 'node:https';
+import * as net from 'node:net';
 import type { AddressInfo } from 'node:net';
 import { describe, it, expect, vi, afterEach, afterAll } from 'vitest';
 import express from 'express';
 import {
   createLazyBridgeProxy,
   extractContextFilename,
+  assertChannelWorkerDaemonUrlIsLocal,
   formatChannelWorkerDaemonUrl,
+  describeWorkerTlsTrustGaps,
   InvalidPolicyConfigError,
   createDisabledChannelWorkerSupervisor,
   createBoundChannelDeliveryHandler,
@@ -1113,15 +1119,109 @@ describe('subSessionConcurrencyCapsFromSettings', () => {
   });
 });
 
+// R7-7: dial the loopback of the family the daemon actually bound. Refuses to
+// resolve, so an offline/AF_INET6-less runner reports the reason instead of a
+// bare timeout.
+const dialLoopback = (
+  host: string,
+  port: number,
+): Promise<{ ok: boolean; code?: string }> =>
+  new Promise((resolve) => {
+    const socket = net.connect({ host, port, autoSelectFamily: false }, () => {
+      socket.destroy();
+      resolve({ ok: true });
+    });
+    socket.on('error', (err: NodeJS.ErrnoException) => {
+      socket.destroy();
+      resolve({ ok: false, code: err.code });
+    });
+    socket.setTimeout(2000, () => {
+      socket.destroy();
+      resolve({ ok: false, code: 'ETIMEDOUT' });
+    });
+  });
+
+const listenOn = (options: net.ListenOptions): Promise<net.Server> =>
+  new Promise((resolve, reject) => {
+    const server = net.createServer((connection) => connection.end());
+    server.once('error', reject);
+    server.listen(options, () => resolve(server));
+  });
+
 describe('formatChannelWorkerDaemonUrl', () => {
-  it.each(['', '0.0.0.0', '::', '[::]'])(
-    'uses loopback when the daemon binds wildcard host %j',
+  it('uses IPv4 loopback for the IPv4 wildcard bind', () => {
+    expect(formatChannelWorkerDaemonUrl('0.0.0.0', 4170)).toBe(
+      'http://127.0.0.1:4170',
+    );
+  });
+
+  it.each(['0', '0.0'])(
+    'canonicalizes IPv4 wildcard spelling %j before choosing loopback',
     (host) => {
       expect(formatChannelWorkerDaemonUrl(host, 4170)).toBe(
         'http://127.0.0.1:4170',
       );
     },
   );
+
+  // R7-7: `[::]` -> 127.0.0.1 is only reachable through a dual-stack mapping
+  // the kernel is free not to give (IPv6-only hosts, net.ipv6.bindv6only=1).
+  // `''` is grouped here, not with 0.0.0.0, because `listen(port, '')` — how
+  // the daemon binds — reports `{address: '::', family: 'IPv6'}`.
+  it.each(['', '::', '[::]'])(
+    'uses IPv6 loopback when the daemon binds IPv6 wildcard host %j',
+    (host) => {
+      expect(formatChannelWorkerDaemonUrl(host, 4170)).toBe(
+        'http://[::1]:4170',
+      );
+    },
+  );
+
+  it.each(['::0', '0::0', '[::0]', '0:0:0:0:0:0:0:0'])(
+    'canonicalizes IPv6 wildcard spelling %j before choosing loopback',
+    (host) => {
+      expect(formatChannelWorkerDaemonUrl(host, 4170)).toBe(
+        'http://[::1]:4170',
+      );
+    },
+  );
+
+  // The oracle for the two cases above: a real socket per family, dialled at
+  // the address the worker is actually handed. A v6-only server models the
+  // bindv6only host; the dual-stack control proves the fix costs nothing
+  // there. Mutating either mapping back to the other family reddens this.
+  it('hands workers a loopback address the bound socket really answers', async () => {
+    for (const [bind, listenOptions] of [
+      ['::', { host: '::', port: 0, ipv6Only: true }],
+      ['::', { host: '::', port: 0 }],
+      ['0.0.0.0', { host: '0.0.0.0', port: 0 }],
+    ] as const) {
+      let server: net.Server;
+      try {
+        server = await listenOn(listenOptions);
+      } catch {
+        // No AF_INET6 (or no AF_INET) on this runner: nothing to measure.
+        continue;
+      }
+      try {
+        const port = (server.address() as AddressInfo).port;
+        const certified = new URL(formatChannelWorkerDaemonUrl(bind, port));
+        // URL keeps IPv6 literals bracketed; net.connect wants them bare.
+        const dialHost = certified.hostname.replace(/^\[|\]$/g, '');
+        expect({
+          bind: listenOptions,
+          certified: certified.host,
+          dial: await dialLoopback(dialHost, port),
+        }).toEqual({
+          bind: listenOptions,
+          certified: certified.host,
+          dial: { ok: true },
+        });
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+      }
+    }
+  });
 
   it('formats concrete IPv6 hosts for URLs', () => {
     expect(formatChannelWorkerDaemonUrl('::1', 4170)).toBe('http://[::1]:4170');
@@ -1132,6 +1232,2002 @@ describe('formatChannelWorkerDaemonUrl', () => {
       'http://127.0.0.2:4170',
     );
     expect(isLoopbackBind('127.0.0.2')).toBe(true);
+  });
+
+  it('uses https when the daemon serves TLS', () => {
+    expect(formatChannelWorkerDaemonUrl('0.0.0.0', 4170, true)).toBe(
+      'https://127.0.0.1:4170',
+    );
+    expect(formatChannelWorkerDaemonUrl('::1', 4170, true)).toBe(
+      'https://[::1]:4170',
+    );
+  });
+});
+
+// R2-4: a concrete non-loopback bind listens on THAT socket only, so the
+// worker URL keeps the bound address and loopback is not a fallback —
+// measured, `dial 127.0.0.1` against such a bind is `ECONNREFUSED`. What the
+// worker cannot do is reach a host that is not this one, and a bind we cannot
+// certify as local (a DNS name; a literal on no interface) used to pass every
+// boot check and then throw inside each worker — the first failure exits the
+// daemon, later channels restart-loop with /health green.
+describe('assertChannelWorkerDaemonUrlIsLocal', () => {
+  it('accepts loopback and wildcard-rewritten worker URLs', () => {
+    for (const host of [
+      '',
+      '0',
+      '0.0',
+      '0.0.0.0',
+      '::',
+      '::0',
+      '0::0',
+      '[::]',
+      '[::0]',
+      '0:0:0:0:0:0:0:0',
+      '127.0.0.1',
+      '::1',
+    ]) {
+      expect(() =>
+        assertChannelWorkerDaemonUrlIsLocal(
+          formatChannelWorkerDaemonUrl(host, 4170, true),
+          host,
+        ),
+      ).not.toThrow();
+    }
+  });
+
+  it("accepts a concrete bind on one of this host's own interfaces", () => {
+    const ownAddress = Object.values(os.networkInterfaces())
+      .flatMap((entries) => entries ?? [])
+      .find((entry) => entry.family === 'IPv4' && !entry.internal)?.address;
+    // A machine with no non-loopback IPv4 interface cannot exercise this.
+    if (!ownAddress) return;
+    expect(() =>
+      assertChannelWorkerDaemonUrlIsLocal(
+        formatChannelWorkerDaemonUrl(ownAddress, 4170, true),
+        ownAddress,
+      ),
+    ).not.toThrow();
+  });
+
+  it('refuses a bind this host cannot answer, naming the hostname', () => {
+    expect(() =>
+      assertChannelWorkerDaemonUrlIsLocal(
+        formatChannelWorkerDaemonUrl('203.0.113.7', 4170, true),
+        '203.0.113.7',
+      ),
+    ).toThrow(/Channels cannot start: --hostname "203\.0\.113\.7"/);
+  });
+
+  it('refuses a DNS-name bind — resolving it is not on the worker startup path', () => {
+    expect(() =>
+      assertChannelWorkerDaemonUrlIsLocal(
+        formatChannelWorkerDaemonUrl('daemon.internal', 4170, true),
+        'daemon.internal',
+      ),
+    ).toThrow(/does not name an address on this host/);
+  });
+});
+
+// A CA-issued leaf, the shape the documented `mkcert` flow produces: usable
+// as a serving cert, useless as a trust anchor. Not a real secret.
+const TEST_TLS_CERT_CA_ISSUED = `-----BEGIN CERTIFICATE-----
+MIIDHjCCAgagAwIBAgIUMfJwZrF6DjLX1ypLgu2A4v/SwKEwDQYJKoZIhvcNAQEL
+BQAwHDEaMBgGA1UEAwwRcXdlbiB0ZXN0IHJvb3QgQ0EwIBcNMjYwODE4MDk0NzE4
+WhgPMjEyNjA3MjUwOTQ3MThaMBQxEjAQBgNVBAMMCWxvY2FsaG9zdDCCASIwDQYJ
+KoZIhvcNAQEBBQADggEPADCCAQoCggEBAOff38zsoMq+oe2koKyZJ7aoGJC8CuAc
+oYoLcJaWdp6yJaj5BpYeHAnQt8QCQZB86Fj1f3yuK6KwmGm3p49NrVJMl/T39CnK
+ZAcIWATBw8mCWLFWlWhRgqrIQ5ka935m+z63gVhSQiCq2mNkAzm9I4UcbeAucSXn
+Plk0Bc/CBUh5knrjxPEebicbCUaKteWnG3SBe5PjgP6DKZojd0VakmbrDhTW+yD4
+9LRqURfzvQZghA7stqErp+WJREKAaJbNNUEhGvRSwucIsah6u7OAbYP1IRaYBGDm
+nlxaYBETRg0/3Kzx4SnPUuyx3uR6YP9MNuSzK5udCf39+iWSFCC+AnMCAwEAAaNe
+MFwwGgYDVR0RBBMwEYcEfwAAAYIJbG9jYWxob3N0MB0GA1UdDgQWBBSItY/bpVFx
+QRATvUzvo+JRFVpuyjAfBgNVHSMEGDAWgBRfCBabaBn4orvntHRiDcBU8W3vEzAN
+BgkqhkiG9w0BAQsFAAOCAQEAjIiKztoj9JtpKfP2qSYsTe+4nvCZ1ZT4PtmXQMVp
+lyHI02iH+NSSY92/ZdvGn2jBMzAFpVgJFlI6aZOne/qHI5qMf1RW7BfHBXza7wF6
+mdILIKRUYzm96o6IEuObE+QkSjRuA5OpLkObzGZLWfem0+fxnz0djbzeEBhHpP+b
+VUUcl7r2wFb3+ClobIYS24Y+tWCl53XF+2YFNebECkA+19TivHPYgyywljyFNmzk
+jCELOKOvOESV6kWBGUcrj8rcXoaF3BABInxZURGMRqWuivfYSjkGj65Trf2sVCXS
+9mkiDfB/mYPvq3ODVYLvOjcxqPFsKaRA0Gw5Nm7WKGiOhg==
+-----END CERTIFICATE-----
+`;
+
+// Self-signed CA, but its only SAN is a name the worker never dials — issued
+// with `-addext "subjectAltName=DNS:example.invalid"`. Not a real secret.
+// A CN-only cert is NOT this shape: `openssl req -x509 -subj "/CN=localhost"`
+// emits no SAN at all, and Node then falls back to the CN and authorizes the
+// handshake — so regenerating from that recipe would silently drop the gap
+// these tests exist to pin.
+const TEST_TLS_CERT_NO_LOOPBACK_SAN = `-----BEGIN CERTIFICATE-----
+MIIDJzCCAg+gAwIBAgIUdD6dYnXjZ2Jc+iKKyS3BH4nTFlwwDQYJKoZIhvcNAQEL
+BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MDgxOTAzMjEwM1oYDzIxMjYw
+NzI2MDMyMTAzWjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwggEiMA0GCSqGSIb3DQEB
+AQUAA4IBDwAwggEKAoIBAQDHHyq4qu8+9YSvZxTQSt6C/cbo79+S1D0KrZTVRAMS
+VkyH58yXuG2TE99OGLIsvZt/ab5Fw2ZWSFiWL70yETE0yTlu/6eNTUnUYwFBohpm
+meEe0QHRtGWl5pB6dsPgH2uM9gxK/0wtzfIrXa2B1Ubd/A3y+jPuOe4YmMlN8xhR
+vYGyqc2ECesac39AUUu4zaqueRzqt9+SnHfaR/Rz/f3FvUzdGpm0d31uxpmdQI9C
+VaY0hFB20EXJAKyuVb5+9WO1dbBHuuvJU0gAbesPi6Ep0DkVAj2tPjiXZQveXW3g
+DJHbot5AeXAcpC1pDNwP3d/zIdHZbrMeCfatb0lzW7ddAgMBAAGjbzBtMB0GA1Ud
+DgQWBBTo2zp/jIYDa3QULvKwoSmYOtpDnjAfBgNVHSMEGDAWgBTo2zp/jIYDa3QU
+LvKwoSmYOtpDnjAaBgNVHREEEzARgg9leGFtcGxlLmludmFsaWQwDwYDVR0TAQH/
+BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEASlCtPkIyJ1ecGhN8SK1bmqcosqQT
+GsBBYijBGGSLTizavdzgdnO/V6f62DptcXJRcJ3RulyqK9xg67EBZWG1D/fDA+W0
+RDoJLUrc3i2kGmGRMwkTzysZ0LgUEWwK1nLlUECNHODEFPG+8waVk6zpnxk4lgwI
+RcwGl8XJjWnjE9zL6OV2DBDqTPl1TYXN7Kz18cfkhv1OjdgvhEQaafrCQBHBw4+e
+Huc6ac8HT0701r3vJcRdrcq5OTwzk+yy5JZ3TPFAMAm8UsREajlWrPtdgry8vhqN
+krMKEFA+ti5P4zujcuTtEsCiv0KlS9XWqBYmV0BHHsIKNJ+1a3P4nKu+dg==
+-----END CERTIFICATE-----
+`;
+
+// The key `TEST_TLS_CERT_NO_LOOPBACK_SAN` pairs with, so the SAN gap can be
+// reproduced through a real boot on IPv4 rather than only in-process.
+const TEST_TLS_KEY_NO_LOOPBACK_SAN = `-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDHHyq4qu8+9YSv
+ZxTQSt6C/cbo79+S1D0KrZTVRAMSVkyH58yXuG2TE99OGLIsvZt/ab5Fw2ZWSFiW
+L70yETE0yTlu/6eNTUnUYwFBohpmmeEe0QHRtGWl5pB6dsPgH2uM9gxK/0wtzfIr
+Xa2B1Ubd/A3y+jPuOe4YmMlN8xhRvYGyqc2ECesac39AUUu4zaqueRzqt9+SnHfa
+R/Rz/f3FvUzdGpm0d31uxpmdQI9CVaY0hFB20EXJAKyuVb5+9WO1dbBHuuvJU0gA
+besPi6Ep0DkVAj2tPjiXZQveXW3gDJHbot5AeXAcpC1pDNwP3d/zIdHZbrMeCfat
+b0lzW7ddAgMBAAECggEADaZt+qQtK8xk636jh0vlSRGLQI4BGO2tFD2mBaCt8o8x
+Ro0gvLM16m6NplWRu/jGNMvTnAYIeUMTCj384vZuwHGdmvsHn2t8SNpTTGPdGh9+
+YUButtN+YbXBPcPv1ZNnKg32oHAz5rKcNquAqMqCxdZGQTE0Z3utKMkrM57F51nO
+w+R74lkXMWUAPtiSPL2jmTjIFoST6i5KIQlUhvGtSPyyyiFD/gDwPiQPoiOtQEaw
+T+XapvLNo+fpaNmgPSrBLXlNXvMnnNhjMKTlA9EBHGFC2IxIcoBeTmg9F3U0fdOB
+ugtlNVoNV0fUu06hxUWzDorYScEA16ZBlY2XFIdAAQKBgQDly4HLpKdLPd0GmreT
+Aaw15vA7fuvvaMb8gS++NA6SuT5/szsnsgmO73r4wpeaTepYDv8X+HG4fIEaqKTV
+lKy0KrKlYxMPWcwHuIZ8vagB68kdTGkOtq3dZ9b/HMgTnhFFUzVE7LlOEXt15z45
+B/SMR7TGhrwwynGpmTYuO5ffXQKBgQDd1DSEngdT7zDWGwzgfWVvX8Ssu+ACUPzb
+iJw03dbJ+wWYUDMMsxiFXITtRjRx5kDNJPql0JsloKq5wIg9IIMNqbHS7Dkro+nd
+kVRmQ5EPQ/h9RXAjS05mulTUqlsev35YLsnzshQVqNsRqc5/3BDQv/HqlNYlS44M
+0H/0nY24AQKBgHX07e6D2aBE5DUkrEDY5fZRUlWoBCJDrYkmI0TGYgis8EkKzr3E
+pSVrBru0369EeZu0Lvu1+2IQ/xCZKuu7wp9FH6jH35vMo2//J4HWtOwvhW/1riPw
+X/U7/V+8/XMce48TdE+qGEDbtn1CM22BCOYNVN1ngiilcoz1aZt32bC9AoGATTsR
+Yc6nHHjdVt2qGQpvY1xDXCQ49HV/42rnf5xwqHel1gauD1DXS68PdJCJt9IDY6jp
+PwumyG3soqk+hZGpLvuStq2ZpfD2fjaX3NbPTTJL9ElVpmQUkr1yxWveN5FSCp+X
+nim0xmm4g6jMBUX38MWzEwnomKl6dkmtEtw7uAECgYEAh6xgjebA4n9vvKFeRvzH
+sfk2fwlnUGnqLmSwTHJX7raeBF+tsNgImKSHVSfKNuADxbITMj08efkvOZjZD/wB
+7sThxaEfOiVcfL70b6ib1yJlRFpMISYKxYULIEPGEkIkRvKhrlZM11Nu9uGG21iX
+dyDrncb+W7X61y5TGw19J1Y=
+-----END PRIVATE KEY-----
+`;
+
+// Self-signed and covering `::1` via an iPAddress SAN — the shape a daemon
+// bound to IPv6 loopback needs. Not a real secret.
+const TEST_TLS_CERT_IPV6_SAN = `-----BEGIN CERTIFICATE-----
+MIIDOjCCAiKgAwIBAgIUYLTXyX2vAhC+OaM3JD4xKLtyfV8wDQYJKoZIhvcNAQEL
+BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MDgxODEyMjEzMFoYDzIxMjYw
+NzI1MTIyMTMwWjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwggEiMA0GCSqGSIb3DQEB
+AQUAA4IBDwAwggEKAoIBAQCY6GprczPMvANzG1zLli+HDkEyyUk9lnk3Lsgu8yQJ
+TqpBNBR+dTN7sYPccZpNbZ/N3G6vETbtvQ5VtKXI8izvliZMNGm2WNhr+OpMnWVb
+RQ03qiwxzISFArGwYPF9mDTDpS+fwvkIN7B0N88rdmlaPez5Oy3egHQfwSrzrzId
+dnd29tvGq9EnUps1xBgspFD8buK9fK1na4iypzSzYy9ub2tZ5ZliiqIGdmLxtE8j
+FdyIiASOCujAxjovrDcJ+Xnr3ANRgyzHS3tQdbemLlEmu9zRk/ic7FFK2acNji/O
+s5e8pJUKPmZnyyqIFlhFl8iIKvuZZev81p7Hnvmc0SHDAgMBAAGjgYEwfzAdBgNV
+HQ4EFgQUzZj7sxpXzyOiet7XS0oRiV8TQtIwHwYDVR0jBBgwFoAUzZj7sxpXzyOi
+et7XS0oRiV8TQtIwDwYDVR0TAQH/BAUwAwEB/zAsBgNVHREEJTAjhxAAAAAAAAAA
+AAAAAAAAAAABhwR/AAABgglsb2NhbGhvc3QwDQYJKoZIhvcNAQELBQADggEBAFEK
+M3+ggPGi6bFk3z9AjBWBLkJ2JsuHC1IwJ2ReXCBzwlzlHfJq8TyVTHeH+oHChVyK
+KZlWn2GDXZMrDzLxZLwH52iKq3seYw/bZZ/TpugO6OHj1WmGXyl0sajMFye3VQAT
++M+irxpT/2eQqGV73lNbuNFvcwu4FaO3n8Ux6eG1BusQCx1vc6wvoK42kb9wSJN8
+qpqn1pNDH9P3Ub/1GbhWEytVsB8B3EewG/SE11cGhXSup1K4IiPcLMJX9SYGq+uM
+GcrrZsPYuLm5eL6J3QjkFzMqyS6/4L881mihR/HKLdEnDyMzayGZ44O+DmZilUKv
+w3Chmx7wNIzXjtZRcUk=
+-----END CERTIFICATE-----
+`;
+
+// A CA-issued leaf shipped together with its issuing root in one file, the
+// standard `fullchain.pem` a real CA hands out. Not a real secret.
+const TEST_TLS_CERT_FULLCHAIN = `-----BEGIN CERTIFICATE-----
+MIIDMzCCAhugAwIBAgIUfMQ0J1fG/BhJQuzOilTasy8quOMwDQYJKoZIhvcNAQEL
+BQAwJjEkMCIGA1UEAwwbcXdlbiBmdWxsY2hhaW4gdGVzdCByb290IENBMCAXDTI2
+MDgxODEyMjEzN1oYDzIxMjYwNzI1MTIyMTM3WjAUMRIwEAYDVQQDDAlsb2NhbGhv
+c3QwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCE4sZa+FxusjUk7TzX
+9FV/x7KAIy+lu7G20F2TjSeQ6mHhwkFb/rsADoi+9RU4MF+m/Mx+Lilccu2pVk+b
+Ri+GksxX4xAC8L7XIhRwDdYWHHOMr1WnERKMqdRcEbzCAuQhR32Z0vFdg+T3o+TH
+MkQ3AXQkQc0uu5r40e3VWuRweWnOfJqojH4VQfjk/44cLZBBRAS3owOWC9fAciJI
+C5IgBnuYC7TOoZ1A69Lo+2C5UhIm6QEBzPtzVI87gzbDwqM7x8e3mMhLDQmNS3uD
++EVd05spuBq/KXMTSqHK7OIUPMFr3wXgVRm8i+68/4C2TnZANS6WSD5QZYivB4r7
+MUTtAgMBAAGjaTBnMBoGA1UdEQQTMBGHBH8AAAGCCWxvY2FsaG9zdDAJBgNVHRME
+AjAAMB0GA1UdDgQWBBQr5x1h5l442pqfn0GFyn77KiWz0TAfBgNVHSMEGDAWgBSA
+9DApi3O49l8S/UWWA91PrZWtQDANBgkqhkiG9w0BAQsFAAOCAQEAaxo+Y/u1iCNt
+Vz4bmiRlqfhjVVe9yxa0Q8rzC/V9V7qrWpHjONXLErEKZ59oi8a80ndjugdXyw0g
+gUKCmeykUtSbRLUTsZ741VKADjt87YceLrxsSVrtwMJjX2GoDNXIggRzmzdEjz3d
+nRzDXFIEEn/g90kaNCYJSkPld2wk4M0IbEGpc8V7sO09I3T0igwfduVMO31X+mV4
+7A/J5QSE/oAF3PbuUvfzI9Hl1vdzgDUal3v8Sqh4oDgucc+YVZeCUuthq8zVT4Z5
+V6y0UOsNXHRE41EN7hK3zOKWJFwoS+ga2ACg+K4yuOnlhU+2MHa4XENVyaTsQaPo
+B6U6dT+UdA==
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDLzCCAhegAwIBAgIUFRsEYHgjJUpGISLDoybs5vSsCmEwDQYJKoZIhvcNAQEL
+BQAwJjEkMCIGA1UEAwwbcXdlbiBmdWxsY2hhaW4gdGVzdCByb290IENBMCAXDTI2
+MDgxODEyMjEzN1oYDzIxMjYwNzI1MTIyMTM3WjAmMSQwIgYDVQQDDBtxd2VuIGZ1
+bGxjaGFpbiB0ZXN0IHJvb3QgQ0EwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEK
+AoIBAQDuh/DLVFUTeOwksyGdtViAHe9TNBFWUdeq5zGlcxvX5c7Qbjkclyajclb3
+yY0pJ6zgD+uSw6zAE5jID4rtsmSyciakqgHMpPmBMn7GE0I5JCrBnxsN3g7P7EUE
+qKzgj8rbUIyNQQt1E43wx4dJy4qN2hlKTusBvnUTtPB2ocRmC6+nXX/+nZWPahzI
+MALyl17Nq5w/pzODEtSaC18jscN/bs8CkcDB0kjnKUV8UlbPtMy//n/WjXfDiQV4
+KUbQQ832Xl6xwuQTHEGq01Gb/NZO5CE/zdu86/82Jnn2Mv2uBDL+1CBL7kOxgZ0Y
+axxW/a55BNpMElTbZxkgTSYivBwLAgMBAAGjUzBRMB0GA1UdDgQWBBSA9DApi3O4
+9l8S/UWWA91PrZWtQDAfBgNVHSMEGDAWgBSA9DApi3O49l8S/UWWA91PrZWtQDAP
+BgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQBfH7T/zM7pVxh4Qv+m
+InAyvXPPDdBXmVfoBwHKEMyRts7rbxBHa7BV+qVyBkgXyfjXUL6QQmSXNfG/aHIx
+rW9yVN1nM9sUwO5mTO3v07Hjqg00OJQYrqFMI8ba0nxpuIgr8Joj296/25/zwpxW
+BjkdDp6EK2LHD4JU73jEMWDMDhQ3VMf8eb6bL3SxujhhhD1T7omTJkPKcUt4BCsn
+boUKNFYlbk0HHXZmoXxTIoBxv8aOTWIIJ++sASqH7+9QY2iYtoW7kmdWLcM95nGb
+Ptz8eWt0AkYE+GuX4GgOQxWJi0IuHzM7ke3fqjOw/tu01V1inWvVx2eg4Gv+vq2I
+x2ZE
+-----END CERTIFICATE-----
+`;
+
+// The same leaf on its own — the chain does not terminate anywhere in the
+// file, so the workers really would fail to verify it. Not a real secret.
+const TEST_TLS_CERT_FULLCHAIN_LEAF_ONLY = `-----BEGIN CERTIFICATE-----
+MIIDMzCCAhugAwIBAgIUfMQ0J1fG/BhJQuzOilTasy8quOMwDQYJKoZIhvcNAQEL
+BQAwJjEkMCIGA1UEAwwbcXdlbiBmdWxsY2hhaW4gdGVzdCByb290IENBMCAXDTI2
+MDgxODEyMjEzN1oYDzIxMjYwNzI1MTIyMTM3WjAUMRIwEAYDVQQDDAlsb2NhbGhv
+c3QwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCE4sZa+FxusjUk7TzX
+9FV/x7KAIy+lu7G20F2TjSeQ6mHhwkFb/rsADoi+9RU4MF+m/Mx+Lilccu2pVk+b
+Ri+GksxX4xAC8L7XIhRwDdYWHHOMr1WnERKMqdRcEbzCAuQhR32Z0vFdg+T3o+TH
+MkQ3AXQkQc0uu5r40e3VWuRweWnOfJqojH4VQfjk/44cLZBBRAS3owOWC9fAciJI
+C5IgBnuYC7TOoZ1A69Lo+2C5UhIm6QEBzPtzVI87gzbDwqM7x8e3mMhLDQmNS3uD
++EVd05spuBq/KXMTSqHK7OIUPMFr3wXgVRm8i+68/4C2TnZANS6WSD5QZYivB4r7
+MUTtAgMBAAGjaTBnMBoGA1UdEQQTMBGHBH8AAAGCCWxvY2FsaG9zdDAJBgNVHRME
+AjAAMB0GA1UdDgQWBBQr5x1h5l442pqfn0GFyn77KiWz0TAfBgNVHSMEGDAWgBSA
+9DApi3O49l8S/UWWA91PrZWtQDANBgkqhkiG9w0BAQsFAAOCAQEAaxo+Y/u1iCNt
+Vz4bmiRlqfhjVVe9yxa0Q8rzC/V9V7qrWpHjONXLErEKZ59oi8a80ndjugdXyw0g
+gUKCmeykUtSbRLUTsZ741VKADjt87YceLrxsSVrtwMJjX2GoDNXIggRzmzdEjz3d
+nRzDXFIEEn/g90kaNCYJSkPld2wk4M0IbEGpc8V7sO09I3T0igwfduVMO31X+mV4
+7A/J5QSE/oAF3PbuUvfzI9Hl1vdzgDUal3v8Sqh4oDgucc+YVZeCUuthq8zVT4Z5
+V6y0UOsNXHRE41EN7hK3zOKWJFwoS+ga2ACg+K4yuOnlhU+2MHa4XENVyaTsQaPo
+B6U6dT+UdA==
+-----END CERTIFICATE-----
+`;
+
+/**
+ * A leaf signed by a SELF-SIGNED issuer carrying `basicConstraints CA:FALSE`.
+ * Chain geometry alone calls this anchored; OpenSSL refuses the issuer the
+ * purpose of signing and every handshake fails INVALID_PURPOSE.
+ */
+const TEST_TLS_CERT_FULLCHAIN_NON_CA_ROOT = `-----BEGIN CERTIFICATE-----
+MIIDLzCCAhegAwIBAgIUZ0Gvb+9679AdH7Z3UTSH3bpFClUwDQYJKoZIhvcNAQEL
+BQAwIjEgMB4GA1UEAwwXcXdlbiBub24tQ0EgdGVzdCBpc3N1ZXIwIBcNMjYwODE4
+MTkzNzUxWhgPMjEyNjA3MjUxOTM3NTFaMBQxEjAQBgNVBAMMCWxvY2FsaG9zdDCC
+ASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAPV+RuIkLGY4UssJmrTVgT2N
++6NC/Z5zFOscBbe06uFIr+Afe4663XDykVKRBpsW99lGi4MHhuF7+an3RLpNE6NW
+cr8IFMcPWJs6PlvG72CGiO84cbjSWSu9HuZc9usQpryqaENB672xD80eIpazwfsQ
+rR0lgqhf8jACcOmGjbkmXZ7V5GOLFESmOT2W6Pyph0dRWRyDJ9hONYUURCWhKsDq
+KrUqEzR7hAYbAqp4MIY9pptAnZsWlTjClaynG9xh4OQckT+0kKXeA375AyMojb12
+y9yCqTHgIedkgMS9kJkzcuJCFaN8fl04XCEhK9YZFNteDD2UuNFWSljKSLFR588C
+AwEAAaNpMGcwCQYDVR0TBAIwADAaBgNVHREEEzARgglsb2NhbGhvc3SHBH8AAAEw
+HQYDVR0OBBYEFMDmmEJGwv7U1oNopBAgez9nxWjbMB8GA1UdIwQYMBaAFPMJzoYw
+2Kpic33Wk1grw6CvY51dMA0GCSqGSIb3DQEBCwUAA4IBAQAV+WxQ3pMUOPQUT92t
+3VzRD4k679a5NDB47MaXh0HMPqVbph0UQRg4+BAg8pSpf7tF0Ba84eUgLHUxNrEB
+sLRew6Sm5HQn6hRnYj9PQaeWmKvCLRZmKmeF93z5QyNCLtHsqb5ttJKbt+yM7ESH
+KiQcEC1LnZjFMgR9ItEuK8Xtjb6IVkN05V54DkF6cq/MVAX6dvRGCjo1jkRqFpNJ
++sil11vK3aAjD7BP3iw/v/1iYU2qLwcpXbqNXuM7ucVTvsxP5C1Ae4WTYvoZ2fid
+r/EUKFMwxP7u9kLyOXi9EzKkb0zpVhfAcd8+yOyTZ4bs8Cc7kIEBYvcXhNL/BrVi
+6wO7
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDNDCCAhygAwIBAgIUVsyE+9hGRXVXW98Yxi5WgUsuAsAwDQYJKoZIhvcNAQEL
+BQAwIjEgMB4GA1UEAwwXcXdlbiBub24tQ0EgdGVzdCBpc3N1ZXIwIBcNMjYwODE4
+MTkzNzUxWhgPMjEyNjA3MjUxOTM3NTFaMCIxIDAeBgNVBAMMF3F3ZW4gbm9uLUNB
+IHRlc3QgaXNzdWVyMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAmS4z
+ZtAqYZ+SnMeyaHlTkV6+601FGfgglpa3th/4ZO7fSILfsDZIN7X3aAaz3u8lOhm4
+IIE5OuqNTX0Nn5CIEoxaDBjP81/pw0vgIqIjmjRacTzLU7Pe1Jl4TtbXKLTOP1At
+nfnGuiHS+shw4vkqo47/C9OT18gJLvXuB/aIDYyI6DwCpUfljagrAHdmCvzfhKMj
+EuYw3E+OIErLYb3THAvShVcrpsnuW1Csj8WRnWsmB+S6FttEKFM6C5GnALOuGnmZ
+p9x39qbDtYZoKRHMGxt8V2LWVnnWbEAyFbGnkItI+dA2xjoCFKkUoIrtr1Z4A+jF
+f9gqDd3c0UNRaQvQ1QIDAQABo2AwXjAdBgNVHQ4EFgQU8wnOhjDYqmJzfdaTWCvD
+oK9jnV0wHwYDVR0jBBgwFoAU8wnOhjDYqmJzfdaTWCvDoK9jnV0wDAYDVR0TAQH/
+BAIwADAOBgNVHQ8BAf8EBAMCAoQwDQYJKoZIhvcNAQELBQADggEBAFvpSYNXbtl6
+RHE9Dt+GjRfBWAb73n7CVi+Ep7KBB4M/G7eHY9646T+Rzp0y/+mxEn2JDJP5yUhE
+FLEOzQvXUrc0bdwWUYPbsKhG0p0KhK4+B34GogORcv3+6AiXBvGdqjyMT5zwj9OJ
+sVV/Nswkn2dfkZr+JXj8sikllPjEn+LXto8nXNPbjZRe3MzIU32bYyOcJl+wQc4t
+TJEPPVrdusShzahl0xEBAfuctVmmVvdv9st1DsoFiaEQ+vGZkJzTbhm6ggXyKpNE
+1u3aBtPdxWWjuaF3Oy6jb+HG5BrQMemzExU1izkIg+cb9VJTZyP+cm0NjOp1Oo+E
+c9BNon/M6I0=
+-----END CERTIFICATE-----
+`;
+
+/**
+ * A self-signed leaf with `basicConstraints CA:FALSE` covering the loopback
+ * host — the shape `openssl req -x509` produces without an explicit CA
+ * extension. Measured on Node 22: trusted as its own anchor at depth 0, it
+ * handshakes fine, so the CA constraint must not be applied here.
+ */
+const TEST_TLS_CERT_SELF_SIGNED_NON_CA = `-----BEGIN CERTIFICATE-----
+MIIDJDCCAgygAwIBAgIUDFbAwso3M9+z+ZUt6pZ8vk1wS+QwDQYJKoZIhvcNAQEL
+BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MDgxODE5MzgxM1oYDzIxMjYw
+NzI1MTkzODEzWjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwggEiMA0GCSqGSIb3DQEB
+AQUAA4IBDwAwggEKAoIBAQCyGf9lrTPBEDjZE91Mhw+0yISrs5UdR8ZF6UBntzIt
+xjnqOmv4SSNo9Uj+Nr2Fm3YZ2SRnyFgGVyfHICHdPddbMEo9YnFyq9PQeDy1CU2X
+l2YspCdcsgMzlUWwjqj2uaGdzW5a3kPP17VwoxMOFRJ0dMOnu/OLJQWK/2ouSR/2
+vDcGvVYV8oLwB60G6sgiWmxaBAoymfscU+ljFa9Q+FV8ma0Grtw6MU5g70Eo8hUT
+vdmhh3QdXEqPphN8Ehj1jnLkzgheLj6WUtSj0mXNgx9WiW82Eql+caQ65wyL66Lx
+kb23+Bp9jXFO4EQqcExx0del6sWA04aD4zPNzzeGaz6zAgMBAAGjbDBqMB0GA1Ud
+DgQWBBQAKIylvj34CVhT0ywSlIHBUdQtcTAfBgNVHSMEGDAWgBQAKIylvj34CVhT
+0ywSlIHBUdQtcTAMBgNVHRMBAf8EAjAAMBoGA1UdEQQTMBGCCWxvY2FsaG9zdIcE
+fwAAATANBgkqhkiG9w0BAQsFAAOCAQEAc9QfHZfvh5+tFWOa+7zZeXtH6EazImKu
+50iVfu4sI9noV+k+pA2WokMnShT3dDhp2DP0n2VRXet9CMhACz7KAEpgtpG7JTr6
+EIHFgT42V+/WVte/uxw2Uj5hfMoycvRCy8J8JFuGzdPKc2z7bn2angtXoQxZfOAk
+VNRXkOxi5lPsuJ3bW8of2DI1/q1EJkR/Ha1gdzuk/h0W6JpO2epuzOkuwckPMuu2
+FWlN+yXXWHUsIHCosHSqesOhS4qlxDoYihsggPJ2rWnibwMr7t6GC0Bo5xsMRWFS
+6gw2hOfWIeMnoRQ0ZkCB5t5z+RYPMBuCOMJoR8HxUOKm1EMHjVhoaQ==
+-----END CERTIFICATE-----
+`;
+
+/**
+ * A leaf signed by an X.509 **v1** self-signed root — no extensions at all, so
+ * no `basicConstraints` either. `X509Certificate.ca` reads `false` for it
+ * exactly as it does for an explicit `CA:FALSE`, but OpenSSL accepts a v1 cert
+ * as an issuer (`X509_check_ca` returns 3, not 2). Measured on Node 22 /
+ * OpenSSL 3 with this very pair: serving the leaf with this root as the trust
+ * store handshakes `authorized: true, status 200`.
+ */
+const TEST_TLS_CERT_FULLCHAIN_V1_ROOT = `-----BEGIN CERTIFICATE-----
+MIIDTTCCAjWgAwIBAgIUFRagk0s8Vw5T5dtWVS4OF+GJC2YwDQYJKoZIhvcNAQEL
+BQAwHDEaMBgGA1UEAwwRcXdlbiB2MSB0ZXN0IHJvb3QwIBcNMjYwODE4MjIyOTM5
+WhgPMjEyNjA3MjUyMjI5MzlaMBQxEjAQBgNVBAMMCWxvY2FsaG9zdDCCASIwDQYJ
+KoZIhvcNAQEBBQADggEPADCCAQoCggEBALB1h9AB5sJAdQaa0FRmK0EfDaVpaftc
+OgsNYp7jkjBdvE/DKcINxoOOTUyO2Qs0/Q0lyWaZNjb5jTjzSqya+XBM9hYJdzHC
+AJaNAPE86v/tS3sAsrCT1nKLjlPsHQsDcpyiQR3mJNjlAKOclrey2o44xBkhdiu4
+qBW1p1MEJe3tfu4rpH3//cDj6//T44ic9oNhIKH3hW+3QRunhqc/RCllAz82P37M
+bI2/nQzWuBMhuGj4RHZN6njkhIlAqdyIt9Qgv2v7NPtCde5r0UiR6bLaSHpx4m9o
+YmY7F7A9UOdUuRB+FY97/kzF7I9JmLH+/U9gyVcR0x+ML0SvXVN1Ph0CAwEAAaOB
+jDCBiTAaBgNVHREEEzARgglsb2NhbGhvc3SHBH8AAAEwCQYDVR0TBAIwADAdBgNV
+HQ4EFgQURZaMk15Cc6OZB/hbGR13/X/tAe8wQQYDVR0jBDowOKEgpB4wHDEaMBgG
+A1UEAwwRcXdlbiB2MSB0ZXN0IHJvb3SCFHH+EHqV3xnb3Gh9bPdocEReVG0hMA0G
+CSqGSIb3DQEBCwUAA4IBAQBhYyi5FHhgQ78b5kgFHGDrhZS313H+9IEGJgH6W/08
+9INcdz4MGlTgNoHAFRVmXOIz3hV7bgR6gQdQ7SSsL8fJ0suVG4Wh2tDhtRqzEMwK
+JTUVD8fGOM/CG8t6LPMjLpnfHyTkbLjQfRhpQI1nCVMBP+KecOU/7kjUIBBKBcAA
+T8MRH1zQvV0YeZitPPrmDQ/LK7pxEfQGcmrsN7ZbqEQ4lnlXPx4xP3RBdEy7ks7t
+P23W8Ez2eO9E86lqXTbxnpk9W2eYxU7/SlaT07BdY3RbcABcCMLrQUvlAiLXS7NV
+hFnvenEMXip5w/oNnaIdojARaUGdX8KjIt4u+dV7JzH4
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIICwTCCAakCFHH+EHqV3xnb3Gh9bPdocEReVG0hMA0GCSqGSIb3DQEBCwUAMBwx
+GjAYBgNVBAMMEXF3ZW4gdjEgdGVzdCByb290MCAXDTI2MDgxODIyMjkzOVoYDzIx
+MjYwNzI1MjIyOTM5WjAcMRowGAYDVQQDDBFxd2VuIHYxIHRlc3Qgcm9vdDCCASIw
+DQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBALfC+t0FBQURbzAdroq3P4BPP3Kl
+ZB23rI9ZK2Qb7hHvC0hbeWLCjnt+CTtQALe8yFxVa9f0VI6+4mUinQ425C29tC7Z
+5gPbzxukOurD+zFOGArW9uYg6DtQFqxaXmttuEv/cP+lOTsDbarEH42yrlVRg72v
+OJmAGFoy/eXwXgVvsEM54SdU5uF0sPKuGJMZ4KPp3v8KKaTFfs/Ru8UPCOUlQ7nY
+o7WemUlbMKIcpEfah/ZOo9f02br9K2P/+R8K1SHUpTq3kmW43vemh03sGsPZ5u1t
+B7WT/0BRI6larvSHHQD9Hw331VbenxqRK5LWLiwpx0hu7QUmUn76L+2FPXcCAwEA
+ATANBgkqhkiG9w0BAQsFAAOCAQEAEMnzsmDeOzmbSyKHuH3zzUTi8mWU1DgUtyLf
+oFxDNDxGBef4o8ufTotKmkxhj6he6O2Mx4et5aYZgNu+KMyZpRIzgAh0+pC8ezEe
+b29oLD570mOcEx8MpOOnjuJfYxnBzZigkhZq6VLh27A64hgxQhKAoySGxGDjN+C1
+Zw3xJnGWe7k7KvOPWMsbVYH1D0QCeUlzqWSmAl3L+e42OynIvOnKj6Vuh4/SxVdX
+kBv3KlcMXmaGVC8AEo/M5Zzfkq/a+IC3aVYvhQPOkv1ByeObs5+Sjy2mKb2sNqU8
+sxyEYG5sNF7HPXac1j3PqROJ8O1X1lpXWyd2MChHhhCnFCteAQ==
+-----END CERTIFICATE-----
+`;
+
+/**
+ * leaf <- intermediate with an explicit `basicConstraints CA:FALSE` <- CA:TRUE
+ * self-signed root. Chain geometry is complete and the terminator IS a CA, so
+ * every check short of issuer capability blesses it. Measured on Node 22 /
+ * OpenSSL 3 with a real `tls.createServer`/`tls.connect` handshake using this
+ * exact file as both the served chain and the trust store:
+ * `authorized=false code=INVALID_PURPOSE`.
+ */
+const TEST_TLS_CERT_FULLCHAIN_NON_CA_INTERMEDIATE = `-----BEGIN CERTIFICATE-----
+MIIDNjCCAh6gAwIBAgIUefcAWISh+F6Emetu1Y++2m4bKd8wDQYJKoZIhvcNAQEL
+BQAwKDEmMCQGA1UEAwwdcXdlbiBub24tQ0EgdGVzdCBpbnRlcm1lZGlhdGUwHhcN
+MjYwODE5MDIyNzIzWhcNNDYwODE0MDIyNzIzWjAUMRIwEAYDVQQDDAlsb2NhbGhv
+c3QwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCk3+570b8ulBlD9+nk
+AEuH5T4ptxIpEF1ICep6Lr6E+4a3e36Xw8Dj3pWLcbTzE2cWatxeBOfsxzAPTjPA
+ijHfn/7l4uEdj2VO2wdaCx+KnTY3dBDfcugsQJD1x3sRYaI2lEbql9dzlUQsoBFS
+vfOJvKAAf8ld2prnEgwK4iL8SXQxGpiRHRZxZSX5BD3hY9qNHPUg5UbxF/3bqeFd
+WRlw5clo+KmrIXZT/jpEaCUsJV4AsvzBa4T1lgfi1bXfJc13UcVuKSAdZwVBg86I
+ULLK/Tm6GxuCE5tz0mAIdVlHgLg0nZRRBqT+uCSpfYyM3ZjBntExCJVLtnpomHIL
+8YWRAgMBAAGjbDBqMBoGA1UdEQQTMBGCCWxvY2FsaG9zdIcEfwAAATAMBgNVHRMB
+Af8EAjAAMB0GA1UdDgQWBBRXeK7yvKdpEUq/SBpScRyrdPU91TAfBgNVHSMEGDAW
+gBSs7k1wDaAA+5+e9J7OaevGnakJ7TANBgkqhkiG9w0BAQsFAAOCAQEApurke98w
+xA8lUbXQUiqJ+7e5p2OeBmBklQ5ugac78ChVB60BQA4/eVQGKGU66FcbE4I9o0+6
+fbSwa8tZBF4VxDB++jF/m4v4UgldmxFSOq+zLuBdCcdvE4QDK32R+6B31qiNbaqw
+rDeT3cyugIHWz+gMt+X40HRoIHYHwvdEMgYh6xudQxycsqQNklkUsAMlEAMBGEp4
+TkiudWy9u1JbAAfrJ4SlR9BL7IlsgFK/xFntyDK4eFxC2cYPx/gayFBod/4W/msB
+KeYjaUsUyzO/D883ox2WMIFtYDIMLySoEcBro3y92MR8ncLRKk7wByZAhNXtYKCb
+g+/g99FTckehrQ==
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDMzCCAhugAwIBAgIUIqd02dCREIdTnnN3wt3E0a9Zcb8wDQYJKoZIhvcNAQEL
+BQAwLTErMCkGA1UEAwwicXdlbiBub24tQ0EgaW50ZXJtZWRpYXRlIHRlc3Qgcm9v
+dDAeFw0yNjA4MTkwMjI3MjNaFw00NjA4MTQwMjI3MjNaMCgxJjAkBgNVBAMMHXF3
+ZW4gbm9uLUNBIHRlc3QgaW50ZXJtZWRpYXRlMIIBIjANBgkqhkiG9w0BAQEFAAOC
+AQ8AMIIBCgKCAQEAslKbC3Lox1Zs6ikaKk7IgD/HzDdcqOpXtO+AIxJy2O7aZg6L
+im1qolayFT+88/arTIOxaq1KGGh3dexWBBCo6h363BYrx4OGAQjI+1GKs98DQO5Q
+1nnnadZRyU25D3ra0v78Bm+lJjCA3xsor7jfh7GUxBbxbPKfTI3OJ5QQH91OreCK
+Ctk9ONMNVz4nt1NvFnnUKSbPfm7HdMvquB16nXuyAB/Uqgj997w2EGfeNXRO2/7x
+64EbDtYgMjuraAiM8eD2cMluY74lb3sGRcCR/xMHBlpZeTpkXgjtc5VR14RygGv4
+1QTNNsNl34jsq9nfOTzUAUspkEqKmFf+nF46qQIDAQABo1AwTjAMBgNVHRMBAf8E
+AjAAMB0GA1UdDgQWBBSs7k1wDaAA+5+e9J7OaevGnakJ7TAfBgNVHSMEGDAWgBSK
+0a9cMx46PmKxxogtlcPWrbiyrzANBgkqhkiG9w0BAQsFAAOCAQEAOSUiVqnkGec6
+uRs4nXM0fR+ouwC0lxqc8E4BGdnv8crJYKjGWxIib1W/NES/zsnwasu5sglMY0Kh
+IkeHhiAYFNVir++alT5YPdUAXU8ckohhbzixPMgOSFvnyZ2xCO64fsDwb7tNe3/c
+7dtknvkngkGHJHKtKPKkZ0/jQu6LjsfcIIz5bruEfTeETY6joYjrwZL26NpYslgg
+OmOMAitXmMnbbUMEEIzIW7mXFPRBMu+Q5qp4KlD5gfJeu7upRn+NqvXu+Ne2Z0fZ
+Si8ev1QSbEku6WmNG9EFzwTC9Y8dQalrAgVegDBHsfTJWdEwfwVs2iApHB3Z+8YE
+98DkVAtPXg==
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDOzCCAiOgAwIBAgIUZ+xVhIOhGz7UzQUUPwJYZueIk/kwDQYJKoZIhvcNAQEL
+BQAwLTErMCkGA1UEAwwicXdlbiBub24tQ0EgaW50ZXJtZWRpYXRlIHRlc3Qgcm9v
+dDAeFw0yNjA4MTkwMjI3MjNaFw00NjA4MTQwMjI3MjNaMC0xKzApBgNVBAMMInF3
+ZW4gbm9uLUNBIGludGVybWVkaWF0ZSB0ZXN0IHJvb3QwggEiMA0GCSqGSIb3DQEB
+AQUAA4IBDwAwggEKAoIBAQCs+QZ+ov2ClU5axpK1Q7sWUS1f2+7s/2bClYk8L56d
+/jByGWD4HCsDNa39nn0Vgq98+4AO9WlpZQUcJlmd16yXusY078ZhNq382fJJ7cn3
+FZZBHBmESZMeHNx8HX9MslQjL29vmpHLTRWNSMO66VeTpkRpAnMY0KVrXvQV2nRp
+pulRVPagZ0DNgO6puxkJZpInyt/ieIwJ1ZU1gwF3wyX7FcSgN0UwrwBnVsCvXr62
+w3WsuXAllLf+YTys9NS7ZLqAFFyhez8lXhplx8dtNQi0iHLOF4jN5jAyCn19tVT5
+deQ6qtPVOd/7I9r5Ye6s8HaHa5peYTKn0zBocaiXcumnAgMBAAGjUzBRMB0GA1Ud
+DgQWBBSK0a9cMx46PmKxxogtlcPWrbiyrzAfBgNVHSMEGDAWgBSK0a9cMx46PmKx
+xogtlcPWrbiyrzAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQA/
+q1Eu2qiT3/6c8A5o9La2dSwj15/MIgD7C5OauBTKtfhDoVqBVTCeYG/2I+wPm8PX
+6EXC7AC7S2Jy97g7F6q+2PgyNpGrk2iuwjfTLJxgpjGbDkej7qUpn1NqbnUQrQh6
+yurBZVQi9x6na4HX7pfLVPF76IYLKqdoRdqMtl2EZD1mol0tZGIimQoYqhInSwZ0
+3zXzQ+KDMBG1qC1TKQo/8WSiUncdGRzzGKStW+Fp/q1foZsp8bZ4/XNdoJV/ESkk
+RjOhHLQYLkulVXNP/fK0cm5haD9yiS11LoFqmscwb+NXdFanLn07ibbHx/DCyyOL
+E6mwm4nEjVj2B5cT62Pv
+-----END CERTIFICATE-----
+`;
+
+// R2-21 entrance 2: a self-signed serving certificate whose keyUsage carries
+// keyCertSign ONLY — no digitalSignature/keyEncipherment, so OpenSSL's
+// depth-0 server-purpose check rejects it. Measured with a real handshake on
+// Node 22 / OpenSSL 3: INVALID_PURPOSE, while the daemon boots and /health
+// answers. 100-year validity, matching the other fixtures here.
+const TEST_TLS_CERT_LEAF_KEY_CERT_SIGN_ONLY = `-----BEGIN CERTIFICATE-----
+MIIDNzCCAh+gAwIBAgIUNIJ2wV/ZsEa8sTC6MCel5gZJUscwDQYJKoZIhvcNAQEL
+BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MDgxOTEyMDYxN1oYDzIxMjYw
+NzI2MTIwNjE3WjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwggEiMA0GCSqGSIb3DQEB
+AQUAA4IBDwAwggEKAoIBAQDAlFV1sU+lJzmi8yGqnb9ZNiIDo3hawb9O9AjAvH35
+T1HL6DUIp7MKQdtdbiiPaR424Fv6cE9hhFQEQ35jr7XRDLNhEUdlS6Eg/YI4f+WY
+jvsAyKJhivILD7sqSFuRjSn7l5KDq2eupV8zbSF2plGSvRS28TapvQ1xt6QF0S/P
+rpNmtAkfr43s4HBcAJpFwwW8nVAgCKf0LpYusNxMNBOYOt6JfZPNangkJUnHiw9+
+6x94x0lgnfLbXb7Ou/y9tazpklKugYLTso6ziR7lqk4KOpu+KgJkOK3sN2A3cYKi
+7STqRoTEbux+iBkIOLL301oC67KXevP5mvZo5ePdlRRFAgMBAAGjfzB9MB0GA1Ud
+DgQWBBS2r0YTbKq0V1LRNWMTY9o5Nj8HFDAfBgNVHSMEGDAWgBS2r0YTbKq0V1LR
+NWMTY9o5Nj8HFDAPBgNVHRMBAf8EBTADAQH/MBoGA1UdEQQTMBGHBH8AAAGCCWxv
+Y2FsaG9zdDAOBgNVHQ8BAf8EBAMCAgQwDQYJKoZIhvcNAQELBQADggEBAIKyoAw6
+RQD4rf4lDuKb4NnbEseyWKq2KinL1K/B7AFcMU9HT+pA8i8J4AZyT9sO6BLGS8jC
+DpiUj7JHbwVtsRnU2YbbIwfPUBAQpKaa72a8TLjR7QnLOi7V7EFKma666DbgDILr
+II4ZNeKywmlVtSzBhXgJ0+l+WFTHKLGj0fGioIGz+XVft2bFacsHwCLeJ7t2ZIEr
+t4BmR6pm5o1HgTncnctrhRv6Y0g34HUo+5AVrUzOLwzZbuAiqHKiMj0j/WuqW4sG
+IGojgA5tGBNUZs0PN8krIr/Yl18AMqmhesqwLWC3I7fCePWIl5QEhvMwhc7XmG2m
+9GoQNohERjArW0Q=
+-----END CERTIFICATE-----
+`;
+
+// R2-21 entrance 2: the same shape via extendedKeyUsage — `clientAuth` only.
+// Measured: INVALID_PURPOSE; the serverAuth twin authorizes.
+const TEST_TLS_CERT_LEAF_EKU_CLIENT_ONLY = `-----BEGIN CERTIFICATE-----
+MIIDPjCCAiagAwIBAgIUc/xqdx2K3+AzsAX4bQw4u8DeSo0wDQYJKoZIhvcNAQEL
+BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MDgxOTEyMDYxN1oYDzIxMjYw
+NzI2MTIwNjE3WjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwggEiMA0GCSqGSIb3DQEB
+AQUAA4IBDwAwggEKAoIBAQC5tQXe8Jg6y7KQd49lub0DB5X+V299mwDnkuhKib9b
+RLas1kkz2oXlohK07b6Z0LA9LYs2Z3KFm5T4Y8BV2Vro7iXwBmLmdsRk6UbCkuSO
+UyAgnJ/Tp5+UbhSySyZOaaPyJPY71BWcTMIBs7kpTc0mkaz+zu95/GuGboVybnPm
+vYZFSkagVJwU8ft5U67l3sSEsG22letoC4ZbSAD37L+dvG8xvDJNDQFYfLAUuHuA
+8uJfxwUBU9EsLNdZn5xc7HK3z/axo/mEJ5xr1WQQ/uGEaj7waL3i7g2Z33noRbsN
+/hel0v/vg618f8IcKhHlN8ZehiZSDfkNtnscQ94hO9ylAgMBAAGjgYUwgYIwHQYD
+VR0OBBYEFAvo9mUzTr04YDMVBEASwoxWwm+EMB8GA1UdIwQYMBaAFAvo9mUzTr04
+YDMVBEASwoxWwm+EMA8GA1UdEwEB/wQFMAMBAf8wGgYDVR0RBBMwEYcEfwAAAYIJ
+bG9jYWxob3N0MBMGA1UdJQQMMAoGCCsGAQUFBwMCMA0GCSqGSIb3DQEBCwUAA4IB
+AQCc6jfV2II8aRHHkuA188GNvd9vcWxDJnT17pMA7Yym4Z1RKm1Wc82SZSX8lXaN
+yTTRzJHX8y1w1ced+DCEuPsCgW4MdpBH0PDloEAm4prHYfvsx6e41PGuJFmD+4SN
+YEACj5vI+GYNH7IaZbDQZihCS5dOWh5EPC/X6609eFJIpJpovVBlbtMe0EZvEwEE
+JfJACGTTaiIx/glNGFaSGnrEIpNSEfnskn048voo2n1eiL9JoZSpDNt1KxQHHW6i
+IzBDXqVVk0ZWG8rQ6Mx0/rPKxexDPcb+AvnCK9XYHGFLQhKXQmgm4BXmHHLRO8HZ
+TQXj2eK21IeHSS1xct8ttacZ
+-----END CERTIFICATE-----
+`;
+
+// R2-21 entrance 3: leaf + intermediate + root, where the intermediate is a
+// real CA (CA:TRUE, keyCertSign) but carries extendedKeyUsage=clientAuth. An
+// EKU on a chain member constrains everything below it. Measured with a
+// control arm: this chain fails INVALID_PURPOSE, the same chain re-issued
+// without the intermediate EKU authorizes.
+const TEST_TLS_CERT_FULLCHAIN_EKU_INTERMEDIATE = `-----BEGIN CERTIFICATE-----
+MIIDNTCCAh2gAwIBAgIUYECIQwBb5CeB1p0J5CMpI1/239EwDQYJKoZIhvcNAQEL
+BQAwJTEjMCEGA1UEAwwacXdlbiBla3UgdGVzdCBpbnRlcm1lZGlhdGUwIBcNMjYw
+ODE5MTIwNjE4WhgPMjEyNjA3MjYxMjA2MThaMBQxEjAQBgNVBAMMCWxvY2FsaG9z
+dDCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAOT/f5K/xvkl7GtFlT9S
+Pe1kS3x+JRQ3TlWZbMzUDDd5LAsdvesL2ZhZqiFuxWsfROwZm1s4XmBGjR5xpBa8
+OBQXMtF+lbLAzU/GEUn4jOcX65J2AhGXlInyAbCnh4RspeqkbP1JAH5kpx0YoKK9
+G0Tzstsv2bFmsnWWtpMNgDob6RpuU3yGSTYt28wwAOmqQ5yGh/mAH4kOYCa2V6H6
+BsbSXgvH2U81o53D2xwCqcWBVJZgiSCzTHwEVT8IeOHor/q8/cx+/31u/go+z2Wp
+XFu4IY0WlKCH3RIJU6HVX3Qa7mQJq3AVDE3RIf3LYoK1CIBqP+P9ZfMNhZZHJFpY
+XBkCAwEAAaNsMGowGgYDVR0RBBMwEYcEfwAAAYIJbG9jYWxob3N0MAwGA1UdEwEB
+/wQCMAAwHQYDVR0OBBYEFI7k1v0l0DYZsA0LPu/+VdOlrhy1MB8GA1UdIwQYMBaA
+FBB74Tc7zsGfycsrI9Qi7tOn3Qi1MA0GCSqGSIb3DQEBCwUAA4IBAQCgFx82YTgJ
+1FOokobK9nPx1zTjNDVAxGLlFVwyODD5u5mWwNd/Kx/5V9OTN4rqJJDsIdPPwv+D
+cmC6BYtDcBuqjhU7eMByv3vJMpeiJpCBSLrhFr8PJZ0lwovQ+hQ+1cl0fW1n7AX5
+nHPj4+p9sOFbTvzxXKrC7CluZyp8uhvZK8U2fr3J9HEphMOHIPfvZVQAKDKXwo1E
+aGQM3UfyoHWOCXlPXVEERVH1ib8GDSLyakhgjgojVSNrF52QcqXU64HFv7ZOMlm2
+NVAXZ2flyHROV0IT0VRBL87UXOKI42VZNv5FEZFOdkK+ngmbykQCXUu/nSnkSq9h
+r/l85JOTG0PA
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDTTCCAjWgAwIBAgIUauW/jXR3S/dqSAmBGesaIar31uowDQYJKoZIhvcNAQEL
+BQAwIDEeMBwGA1UEAwwVcXdlbiBla3UgdGVzdCByb290IENBMCAXDTI2MDgxOTEy
+MDYxOFoYDzIxMjYwNzI2MTIwNjE4WjAlMSMwIQYDVQQDDBpxd2VuIGVrdSB0ZXN0
+IGludGVybWVkaWF0ZTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAKfb
+T1DxEdyJkY8QqE8VdjQlgMfeyIhxsWP0Qr44xlcPsRfAG4v+M1n0DIUM/I39V6Wo
+A+SWkiMbS8Fp6q1II6+AJqBvX6gKJP+F8IsFQPg3HPoI0XypclzBofPZP6cic9Q1
+OzeojHriZygV2RxN70FCLQ6NTQ5kXDSqzMguj0ESC47nBiKuaqk46F0y6Oa4pvnx
+rLOABZIQMoWquD4FcBC8AaJub7S65eU40j7VbZ3J7PNl14eIxHQOfcwQMNVQXXI9
+7VAygcYIYNa2jvCozauvlkxZ0t1rNxICt/Xzpo6BbUDYkRzHXlHqOj4Mdfb8HcP2
+VDut7AIgN3gWbsaIL4sCAwEAAaN4MHYwDwYDVR0TAQH/BAUwAwEB/zAOBgNVHQ8B
+Af8EBAMCAQYwEwYDVR0lBAwwCgYIKwYBBQUHAwIwHQYDVR0OBBYEFBB74Tc7zsGf
+ycsrI9Qi7tOn3Qi1MB8GA1UdIwQYMBaAFBNw53hrfts4nPWzZJuL8rhNc02GMA0G
+CSqGSIb3DQEBCwUAA4IBAQB+3fxqNQfhbvMcYejhVzVQd2MKd1SKH0fs8uiwthFz
+UAIl7Yo3mT7hMNqItJZ2vjKLKSNQGyCgRTHBUKUBl3l0teNEpO/SnRYbSc8sljlV
+pVXFIGDXUt6vrgsYlV6ZcMyZrarwor0fFb3UZ2uCM/V3s8sR15X4Of1IebWUbYuH
+CM0YcTszCIZxWKcrVVA5Sh1HULTZYqM/aCQpc/aXJ0r3FGC4m4jptkzE5hWtkqE5
+ypxjbizYBVF3kNElgu7LJnaB6pZ3OHmyyUnKwlHZhDvv5PBuMr3cakWhJhCcGkqS
+m+fXym2jVUnI7dzkhFzd97eoG8K1uFIQ9U9MH5kqRUKE
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDMzCCAhugAwIBAgIUQHNfFXjAx71yIHnh8JsC8e83U1EwDQYJKoZIhvcNAQEL
+BQAwIDEeMBwGA1UEAwwVcXdlbiBla3UgdGVzdCByb290IENBMCAXDTI2MDgxOTEy
+MDYxOFoYDzIxMjYwNzI2MTIwNjE4WjAgMR4wHAYDVQQDDBVxd2VuIGVrdSB0ZXN0
+IHJvb3QgQ0EwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQDct8anKcXO
+8SItawnPIMjnodOkADdjFVoPrRZ5T3Yi23Wg8CgzexxREucwi8QKIt2Puugt+hyq
+UXVXTkHwT++Bs4H7QPoPc3k89s32m++U0rjUes3L9MVMwN7ofkJjJmaLfdGNeGrQ
+thpt6yAr8WSSEYwRAH1kKap7uwFV9r20ukWgQY015saFhT4zjzz22m5XAJpZCCaF
+9Fo3x/r6emYEfoq4QUYFD/20CSjGH3pTk9hzPPnmrFjZWV/irusuxiVESf62E5ia
+lCajIwmgxlaNdw5UcgAGxII09QIadPBMUjL60+IsmIDsz+AK0wctnLQkYO8jeRK6
+P0LbwFPgXoq9AgMBAAGjYzBhMB0GA1UdDgQWBBQTcOd4a37bOJz1s2Sbi/K4TXNN
+hjAfBgNVHSMEGDAWgBQTcOd4a37bOJz1s2Sbi/K4TXNNhjAPBgNVHRMBAf8EBTAD
+AQH/MA4GA1UdDwEB/wQEAwIBBjANBgkqhkiG9w0BAQsFAAOCAQEAHiCvBvMhlEzz
+ioHqkHfW/O1EY9O4Y6mxzD0pSqm3883PYU2gIbayBjKkAjfo1Rftce1wCvKoPmsk
+bAqzTTtQRK65iWNrcbQgK3swtm0+/G2zKYQwELoAIsVubNKvkJQ6vpJQ/XpPSVyx
+2WkisoL+8fw+1UdhW/sFTSwS93oO7tt2euN9XbNvpWjanUdfAi92xuCoTqpi5eZ2
+3p7XeGQ2jp4KIhsXmtiEwY+Ra0TGucs4PoeaTfxcQItZFe3KnssALgDaUHjXxBWy
+Hsm5754C76bXDiTSjh1Ouaene5sRGp3C9Pq7PgKeZC9a9zuqlTCOx9b+hEBkoeTO
+X4161EJQYg==
+-----END CERTIFICATE-----
+`;
+
+// R5-6: the compliant twin of the pathlen fixture below — the SAME `pathlen:0`
+// root, but signing the serving leaf DIRECTLY, so zero CAs sit below it and the
+// constraint is satisfied (`depth - 1 === 0 <= 0`). This is the boundary the
+// `<=` comparison stands on, and it is a routine internal-PKI shape, not a
+// corner case. Measured on Node 22 / OpenSSL 3: the real handshake authorizes
+// (`authorized: true`), so any gap reported here is a false alarm that sends
+// the operator to reissue a CA that works.
+const TEST_TLS_CERT_FULLCHAIN_PATHLEN0_ROOT_DIRECT_LEAF = `-----BEGIN CERTIFICATE-----
+MIIDYjCCAkqgAwIBAgIUQFWDCU4nWSmHieSwTJF++8ywhbAwDQYJKoZIhvcNAQEL
+BQAwKzEpMCcGA1UEAwwgcXdlbiBwYXRobGVuIGRpcmVjdCB0ZXN0IHJvb3QgQ0Ew
+IBcNMjYwODE5MTkzOTMxWhgPMjEyNjA3MjYxOTM5MzFaMBQxEjAQBgNVBAMMCWxv
+Y2FsaG9zdDCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAKVuhk8R9NxA
+4xsGlH36meRlxgot5zoEclf901s/P0ByEoSDHeE3PQIct1+ap4aLjIPW9VeiWGYP
+gdlGgYOVSeK0/6lQuhkrTgv7nIBtLgisFG6/MmVEyRgww4azT0n+LHy3yV2Q85Yx
+AAFHXed9JqIuQXAlFGRd/b9YTbcqOi943148oci3PC+Cei2O7ts7Jv7Eb+vwBCrK
+tIxMNqoHBiZA8PVvaEWJP4UtrwXYXs9T3EbEcx5GTHbyiDyAthK4Bap335f+2nY2
+V3VvqaxMCEOeDHX64Nb0FT3HP4AYuKhovjeijiuh2m6MrjNJ97DzkCvTO8j7V4kr
+eUTIIRR8nkkCAwEAAaOBkjCBjzAaBgNVHREEEzARhwR/AAABgglsb2NhbGhvc3Qw
+DAYDVR0TAQH/BAIwADAOBgNVHQ8BAf8EBAMCBaAwEwYDVR0lBAwwCgYIKwYBBQUH
+AwEwHQYDVR0OBBYEFBI2dPpi736XRLz9bhSdPvnVNgmqMB8GA1UdIwQYMBaAFAKA
+SaZgr7HRIAEis/2MbjQKBYaTMA0GCSqGSIb3DQEBCwUAA4IBAQA33loq2Wb+KrrS
+RZ5LqoxlQB1UTUdjz8Jj+xM+C2qOcZWW0PFwJ3m1owlLPh9rN/73aQDLgvDMW3Uj
+31XwtUqoLy/wwuLzTubBFYFMUfIzrzTgXScpas6fQEi7LcVpGt6x1IwFKIzIv0uL
+x/U9XPiKBKfAPMO31xdXf7fRhkK9QLebM9eH35vULFZlfEZRkFhQ4eDlojurn80Y
+Imq1UxiLb8ShlJEDnH8TKeK10ZjL2mjtXWbEOizZEWPWHGcG5gKclGF5F+C3zkAU
+WQCF2cWq9czL5YiVzZlsu6rbBE53qyKqlym3tnsQFfDYDijx2v8w7y8YvZ1COnoP
+sHqf3h+S
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDKzCCAhOgAwIBAgIUM10oaiWBPf/BG3Luzzl1ud+SLOwwDQYJKoZIhvcNAQEL
+BQAwKzEpMCcGA1UEAwwgcXdlbiBwYXRobGVuIGRpcmVjdCB0ZXN0IHJvb3QgQ0Ew
+IBcNMjYwODE5MTkzOTMxWhgPMjEyNjA3MjYxOTM5MzFaMCsxKTAnBgNVBAMMIHF3
+ZW4gcGF0aGxlbiBkaXJlY3QgdGVzdCByb290IENBMIIBIjANBgkqhkiG9w0BAQEF
+AAOCAQ8AMIIBCgKCAQEArvaDVE4xfIo3f3SjyWd8ffvuKY3YrPC73SgGc7P9lL3k
+LZw6/IEPkgX8kqHuTt23kaTLhLNlP0coOPSsniyFP+CFuY/pJNZhXZL0Ps6+GUvQ
+lWqcOAhf//s6ivElqg+BO8cPNPSKx0cipAljZO85SjM/cz2PAK6dHM51H/wFFdUF
+Juv6zkoRtcDm+h3yq0yVFRAfdy+gJNQqPsxYy504Dq4CpGn+a9H/Zl3gJtJHdxqh
+cxgx+mEK2YSY9RmLRL45/O/72qdz9vzYO5CSgMFkzumjmqU5pK3q7tbiZ8GndFiD
+nPNrpbMlmNRPd2Enji+NuuM5QzDA1lDAB0WEFPligwIDAQABo0UwQzASBgNVHRMB
+Af8ECDAGAQH/AgEAMA4GA1UdDwEB/wQEAwIBBjAdBgNVHQ4EFgQUAoBJpmCvsdEg
+ASKz/YxuNAoFhpMwDQYJKoZIhvcNAQELBQADggEBAHB8Gk7R7Y5PssMyPJQi1hW8
+elU0ZPntodC/EXsiV2dvkLOi4SIRisjbJcVOrTu1Bkkrv3t8+VIvkxiJgGMnRWBp
+W5u4EzQfPVxsK2BcelTa13nr/xJLT99cMj9NrWHbsjj3S03k4/ENX+tObfLFHs2P
+vLSCzrifjatldTo+WcvqxLK8E6UtKFW2gOgJ8B7RB8Ww0ba4ttrr9MSHwonweMSf
+0kSjRRN8YNpDK2A3670OJiieY+2ctVGa9mHPB/7R00MGwxmhWyI4DaGmN9xZE8V6
+kBbyH6tpbpKVaN5IezdOWWhp1EsKpubMWLmCeQG04VbaAAOvr6aUK8eZPQTe5z8=
+-----END CERTIFICATE-----
+`;
+
+// R2-21 entrance 4: leaf + intermediate + a root asserting pathlen:0, which
+// admits no CA below it. Measured with a real handshake: PATH_LENGTH_EXCEEDED,
+// while the pathlen-free control authorizes.
+const TEST_TLS_CERT_FULLCHAIN_PATHLEN0_ROOT = `-----BEGIN CERTIFICATE-----
+MIIDOTCCAiGgAwIBAgIUaIEQ1LOqkGGz6D9RZaR7CWCNxNEwDQYJKoZIhvcNAQEL
+BQAwKTEnMCUGA1UEAwwecXdlbiBwYXRobGVuIHRlc3QgaW50ZXJtZWRpYXRlMCAX
+DTI2MDgxOTEyMTAwNloYDzIxMjYwNzI2MTIxMDA2WjAUMRIwEAYDVQQDDAlsb2Nh
+bGhvc3QwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCdEoNo95RI6Spw
+ZrnR266aDI53l/vXQHr4VktDJlEvga6On8a6Fq0YMMw8QSGk3DxT/dwyFuhr7kCb
+jU+/qMWDR0VxVY2vxlFfxldZU67j7oXHNQeAaugUTx69ioShSti0UK3L6Ifpuclv
+TWPVInKqcn4DolOGR6mxLj17sCF7PLSc0HUaMsx2uRUt1snQQNduPQ9eqy8wLBhz
+zjXHFksnCMop+h8xrc1oQNJNUL0BW6LyGeVbFgUvCr2RBYDCDstRFZ5O9ctIy4Nq
+ghrCjgsJZ+SQkxi30ft8QUOZybjizB2hfJPqPXpBtmk6Tctze8H446gumuXuHHWd
+a6oFgSC9AgMBAAGjbDBqMBoGA1UdEQQTMBGHBH8AAAGCCWxvY2FsaG9zdDAMBgNV
+HRMBAf8EAjAAMB0GA1UdDgQWBBSA7HyWNZNFna7ZJuW8sZOxUzUYazAfBgNVHSME
+GDAWgBTMbwpwxfFZ2jW78cE5NSeCJU7BBTANBgkqhkiG9w0BAQsFAAOCAQEAZDku
+vTmtGialqr7iOs3oCRzcG8T8UuzzPcgiKVUbtAJYVXSITVYlzmSu+fjP3ELIRKUU
+pQ1vqWWipREo+TouY9241oetH80bx1bHHQfqclhpGhO33UrfMZ3DwpdaU76WQY2v
+ANpXahyREK/tsViIqDluK9qcZChQkl07B9E8QdD+ejB67vRmSagdXKHWqdNieAY/
+ujypArWZ6tyZPyscdriH9ERLLPFycTkVRgElKqNZL5GiD/xk4CKUGoW30oFYPSm/
+GO9nMGgtd2PHHJcUfr4LGgXNq1FOt6NedgBGjPVhYLiBvQ/Yvr4kK29+EblFCn4s
+OCL8PSADHc9GZKN+wg==
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDQDCCAiigAwIBAgIUZ/0NwowgG2FivD/5cBFuIhCarDgwDQYJKoZIhvcNAQEL
+BQAwJDEiMCAGA1UEAwwZcXdlbiBwYXRobGVuIHRlc3Qgcm9vdCBDQTAgFw0yNjA4
+MTkxMjEwMDZaGA8yMTI2MDcyNjEyMTAwNlowKTEnMCUGA1UEAwwecXdlbiBwYXRo
+bGVuIHRlc3QgaW50ZXJtZWRpYXRlMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIB
+CgKCAQEA/m1EwXKszdhbrd5bfJ4ObnxOyl0VXxKMoSNZ0WXYizMR/FfXeQtrP9gL
+Lj3XEraAJav+jn2YgNWvtWij1zikTdlaxZj9pk64X/RyVROtD9xvMu6WSoGpeege
+qNqE5Cre+3Z4su5NpmM3p6wpucti0VJ17X4iMLdU7D40Jlf2XxN8u52ByVxmtfMR
+heWXlFmEai1sU21viLss8LBnzldj5Ot2dkNrtXaBpDxZU25Z3JBMk+Ff6J/R/iTa
+mAycoC/Wf1fjLvv3GXpy4M1qj0W1dBAAYIZAm/9rtHHgKtDS/Lz2KcTsIT4fnOwK
+ABpcNVB0eRmWElZ2e6O9O9rXRiejcQIDAQABo2MwYTAPBgNVHRMBAf8EBTADAQH/
+MA4GA1UdDwEB/wQEAwIBBjAdBgNVHQ4EFgQUzG8KcMXxWdo1u/HBOTUngiVOwQUw
+HwYDVR0jBBgwFoAU8MftL8wo3H1MZO6fmW/PGruEZUEwDQYJKoZIhvcNAQELBQAD
+ggEBALD0xSkKdq481iUWKKtYNpfvdmlhQS3xQPySNfdmOnNo8pw1aV5A+2x0SKkm
+BwaEdfIxlkb2HnuPEZQiKYpQ+B+uLSRuHzVAtsT+WyYa0n0wrC4vqVM2OXZSDovl
+XvtupnfQo2R7VJs70B794dcdsCOVhVLXSoAb5RQNDpFrNL6KAkGlNOyg/Smsgk+B
+4lUHN4/6urtoSuXma8bDKDULcVd4c4KDJt1p+wF2w1NsT99584FEXL02qeI++0i0
+kJ8khxwRykJq8C/GGegRaEjkx/fesKM8/5rxGgw7WnjfP/4pSl4PCSnhpwYPqQId
+NDCi+A5qc3qs5ed8HAEitMQoHOk=
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDPjCCAiagAwIBAgIUSerSo/i63+VVMK/0mzvQSze5WzIwDQYJKoZIhvcNAQEL
+BQAwJDEiMCAGA1UEAwwZcXdlbiBwYXRobGVuIHRlc3Qgcm9vdCBDQTAgFw0yNjA4
+MTkxMjEwMDZaGA8yMTI2MDcyNjEyMTAwNlowJDEiMCAGA1UEAwwZcXdlbiBwYXRo
+bGVuIHRlc3Qgcm9vdCBDQTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEB
+ANSY3Wl2OHHFEK0Ryja3vONiVCj4lWRTU6p1SjvyWsI4fLxDhJEUh9BHWzm6BUku
+ojfTGDVdPWU5I/iauY6oUiO1XacKq78sTMQrzJTGsQBn3QRB4IxKV4KsHkYfqry/
+ijjJkopRJywYDGcieMeSLfibYqosLI9O2H382mhDhx0oe1mCGT+iNP82rs5dITJ+
+FMzBTr3BSnWZ26FZ53YRYir/g7GWHQR3M3hrHa5avBTdvZphUo0WO4iLVIRKoPQ0
+khNgLFTDyzzn1tz8WGgcJYm7jF8ZAcNs+ktTuJNUpPr1lLlhen4yeyD98bgVXuDT
+W7yyZFzLwcDvKe160ad5KfkCAwEAAaNmMGQwHQYDVR0OBBYEFPDH7S/MKNx9TGTu
+n5lvzxq7hGVBMB8GA1UdIwQYMBaAFPDH7S/MKNx9TGTun5lvzxq7hGVBMBIGA1Ud
+EwEB/wQIMAYBAf8CAQAwDgYDVR0PAQH/BAQDAgEGMA0GCSqGSIb3DQEBCwUAA4IB
+AQAkXJTB1eXI9bq7wTOQ4ONfTj0e5c8j0XsrStFYBsiIjyXw8HuA0nbzSh7mKRp9
+A9yWUia+/iWBgX4q8MH0NrgZeC/G2EoChOswhufi4JikUwu87++w/9qHvbb6vJD9
+ZlPoYAQxyrUKHVWZ7dlR/kIr64tbtlHbDA6LnUj7KptIgcnls9H86bQfkjsIgtYo
+Cj8Nd/PPalwKY6taKzl3YxxYMtDHGYu9Ii3oOC7noP4Vfe0FlzgJDyS2vONHzpWJ
+A8hd5POti1+al9KsyPDeINwK4+IIHsgmhyKprMK/unxE/VDT9E2DI1+hF/SUnVd3
+sTeZY2cNQdSzUHwhKBoeQt1j
+-----END CERTIFICATE-----
+`;
+
+// R2-21 entrance 5: a renewed root — two self-signed certificates sharing a
+// subject AND a key, so both verify the leaf — with the SHORT-lived copy
+// first in the bundle. The greedy first-match walk picked the expired copy
+// and claimed every handshake fails CERT_HAS_EXPIRED while the merged bundle
+// authorizes through the renewed one.
+const TEST_TLS_CERT_FULLCHAIN_RENEWED_ROOT = `-----BEGIN CERTIFICATE-----
+MIIDNDCCAhygAwIBAgIUO1dPcT+RFrKO9eAvR7RprjWBRZswDQYJKoZIhvcNAQEL
+BQAwJDEiMCAGA1UEAwwZcXdlbiByZW5ld2VkIHRlc3Qgcm9vdCBDQTAgFw0yNjA4
+MTkxMjEyMjBaGA8yMTI2MDcyNjEyMTIyMFowFDESMBAGA1UEAwwJbG9jYWxob3N0
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvXioBNIbk+BxfkQYG51E
+4VpH2dEvI7CSVtDb9hCr6ejdrsOmIMuHgQoFNrj33WGVovXwqoUsy74j666mXwIU
+E4uXM2kObg5rgmdT010CtqVk10NQ2zVP8HfocwvhfsGc+pXxIG3llLsEfEE4Sz6H
+opapxI0J0KVngEiJtQ1pQ7ETmowE1ox9pHXg+uWNiWOfdSOffoEBdlbckl/LpPHq
+JMzB7bDvKKl7Oj1/0mQjO/vVkPeFsyO0wUSzbo7RrEYfCq9ehZIHHkhTCDLZyy5x
+DtPrvyq31LqQYdfFpM2r9hjIrAn4y9SjbrudLY7/mLAQ90gIO8/++CYfEUR7OOTY
+gQIDAQABo2wwajAaBgNVHREEEzARhwR/AAABgglsb2NhbGhvc3QwDAYDVR0TAQH/
+BAIwADAdBgNVHQ4EFgQUkteOCy+vH/p/7mLACkjh+sYr+YswHwYDVR0jBBgwFoAU
+dNjaHx6CZDrwtW6UMTPqfrILgpAwDQYJKoZIhvcNAQELBQADggEBAGPSIBGUmoNm
+ofVSh+2KNJhc5RzePoGUCBJa9wKa8RIpNGhIlKyD5UqvDXuQIK5GxpQ2B/B2T1zq
+oyQFT1cvAedW4FbgvdF45IUAsuQmtArTduL7vawgAOW3NAZl8Ib6D8UM/bMZuMZl
+78Nu8Amzuti1e4hIYceAFfs8HxgHPOhjA9O4TMr/A6hwHKsnR8CQTGE06lDkRa6p
+R3EjMxkYWwzZm+3jaJlpkmxc4u2ouW5Ve7BAyCRb5afl9HD7TA/gLnPk6Z+EKbS9
+avt2q89TDSohaR3fNGbSxWmyq6+gl/8c12kQZABY6FvvUAgfxMURCIoNhgTqJCNk
+SJzaW9y9p4M=
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDOTCCAiGgAwIBAgIUFK4nnxLsa266COSbMQBio3y2to0wDQYJKoZIhvcNAQEL
+BQAwJDEiMCAGA1UEAwwZcXdlbiByZW5ld2VkIHRlc3Qgcm9vdCBDQTAeFw0yNjA4
+MTkxMjEyMjBaFw0yNjA4MjIxMjEyMjBaMCQxIjAgBgNVBAMMGXF3ZW4gcmVuZXdl
+ZCB0ZXN0IHJvb3QgQ0EwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQC1
+WejFH2aVeBrJU/U9sMpdNxYDKB267SM7NckZwvukM/yw8uNTBnFTFmK0MMb18TVA
+uxp12+gN1EYxgSHLQQbTHy6sGk8g8XOhbJmL5CM0OSSQ3o7lVI14hbMSLa4IoTpw
+snTU/xH6FbT4F7MZc3rtKLLheymaZGaNvGGwZ6hQYSdjQxge1RLtUHqwsKR9utwF
+FNxm7EmRrDRHuoxJofQGZORyUHwLZ4X0gLjO1BHNp3qcLfMXh3NM5zmgwwi0rO/u
+7M3dv5MPz+EokG1ZdMywdOjYeMZMHKO8id75mmH7sKtePbsMyKbyNK+WtYqdsCSe
+mhmwKLUwLPsXprwngzRTAgMBAAGjYzBhMB0GA1UdDgQWBBR02NofHoJkOvC1bpQx
+M+p+sguCkDAfBgNVHSMEGDAWgBR02NofHoJkOvC1bpQxM+p+sguCkDAPBgNVHRMB
+Af8EBTADAQH/MA4GA1UdDwEB/wQEAwIBBjANBgkqhkiG9w0BAQsFAAOCAQEAryag
+ROvm/WygCrsuMoeZvzGM+hIwYpq1nuOGput0zQUAqFQhyUistLCNBQ3zGxdRFEV9
+FWIjBO3XdJArzc/34OWH28OOrf5OD24aXg3aK97NHk8RWCkx9AEU6mP3IAjgGnGy
+Qnj3CXnEAXRkDG7iCgM0jrW6gjgXvt4Ytb5WqxuqkUUOjboa5Ib01mI1QUobSqA5
+q3YiuRtwWCjJN5AyTHQnczRQU9GMcCaBd6d1Hs5DHx1dqYj5Vd6SDoUJojkydPiB
+gux1cYPewfQh1p2SX6YLKRHheooVp1mgXju1x81nPl80cXsErrlFYLo7rVhjabNR
+uhzf6T5xCyhBjj2XWA==
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDOzCCAiOgAwIBAgIURuDBy7kKe3JAEkySJTgKilHa8ecwDQYJKoZIhvcNAQEL
+BQAwJDEiMCAGA1UEAwwZcXdlbiByZW5ld2VkIHRlc3Qgcm9vdCBDQTAgFw0yNjA4
+MTkxMjEyMjBaGA8yMTI2MDcyNjEyMTIyMFowJDEiMCAGA1UEAwwZcXdlbiByZW5l
+d2VkIHRlc3Qgcm9vdCBDQTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEB
+ALVZ6MUfZpV4GslT9T2wyl03FgMoHbrtIzs1yRnC+6Qz/LDy41MGcVMWYrQwxvXx
+NUC7GnXb6A3URjGBIctBBtMfLqwaTyDxc6FsmYvkIzQ5JJDejuVUjXiFsxItrgih
+OnCydNT/EfoVtPgXsxlzeu0osuF7KZpkZo28YbBnqFBhJ2NDGB7VEu1QerCwpH26
+3AUU3GbsSZGsNEe6jEmh9AZk5HJQfAtnhfSAuM7UEc2nepwt8xeHc0znOaDDCLSs
+7+7szd2/kw/P4SiQbVl0zLB06Nh4xkwco7yJ3vmaYfuwq149uwzIpvI0r5a1ip2w
+JJ6aGbAotTAs+xemvCeDNFMCAwEAAaNjMGEwHQYDVR0OBBYEFHTY2h8egmQ68LVu
+lDEz6n6yC4KQMB8GA1UdIwQYMBaAFHTY2h8egmQ68LVulDEz6n6yC4KQMA8GA1Ud
+EwEB/wQFMAMBAf8wDgYDVR0PAQH/BAQDAgEGMA0GCSqGSIb3DQEBCwUAA4IBAQCj
+1C2V2wPvByLc9hmmx247jZs+kKiNmVW6HIEieTbRAgEr2X+sE3DGDdvxs9N7cBKW
+hrrxW0DKfi86M3cqM3Z4+hpOyPukRpGF6MSuK+Z09gN/Mr8fHcpGqY37GdcREEbt
+eSR8whZQy7mxoNBgPgDUa5dusMsemhkvQtT0kJNBo3mrVdxMrbT/iMqPHDnfUB5P
+JuqlSTd6kmII8MLMkOPnlrBLE/IiMnpeq5bPbNqWJ3jSOWB0Y5urevXlhLvhhkZi
+mfaYUhXXxhzIHbSGiqWkLbZH0m1OB7jZXhlee02W/9i/vmdFNBIAxTAfshB0X9d+
+CLo3gjYAPFzEeGqHNP3E
+-----END CERTIFICATE-----
+`;
+
+// A leaf under a root that IS basicConstraints CA:TRUE but whose keyUsage
+// omits keyCertSign. Measured: `checkIssued` false while `verify(publicKey)`
+// is true, `X509Certificate.ca` false, and the real handshake fails with
+// "key usage does not include certificate signing".
+const TEST_TLS_CERT_FULLCHAIN_NO_KEY_CERT_SIGN_ROOT = `-----BEGIN CERTIFICATE-----
+MIIDOjCCAiKgAwIBAgIUKi3c/T5nw8gASNMWOKw2Q3tpUxEwDQYJKoZIhvcNAQEL
+BQAwKjEoMCYGA1UEAwwfcXdlbiBub2tleWNlcnRzaWduIHRlc3Qgcm9vdCBDQTAg
+Fw0yNjA4MTkxMjE5MzlaGA8yMTI2MDcyNjEyMTkzOVowFDESMBAGA1UEAwwJbG9j
+YWxob3N0MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA0JejMX6sGYJ2
+t6elMJNcqsxf/yZYEj+BCkPuzkIQykFv9wUlJKGnL2or5q1qeMWbHMk/ZRg3jfOx
+DSEjKKs6ie+A1ZkoMBOSqi1gjvLqRqjMMTJxIn9WOcj+akHh2c7ZDYu8cVSOPO32
+zc6M+qBx9ssvzvrCerb5e6o4SfR0aZ7M+DK2G1LwXN5+sWD4DFPlk2gZwvGLyNDZ
+Rh/vtuyGGx7aebxo3pjkCoTyVDdvNz+yt9nwBeuNH58dcq9FEYLKes2JoBq32sDH
+IrlLXjwknu7dPtxwuMZc3nsPYb8/21iWaUd56blvgjkEwRKVftcR1LpC5JeIuYoZ
+A25hXF2XBwIDAQABo2wwajAaBgNVHREEEzARhwR/AAABgglsb2NhbGhvc3QwDAYD
+VR0TAQH/BAIwADAdBgNVHQ4EFgQU9lySqQE7aVSYiKsgjKVPRn9zGbcwHwYDVR0j
+BBgwFoAU2oK2V91KbU4TPZQjLxdHXykCB9EwDQYJKoZIhvcNAQELBQADggEBAD6X
+MUCftUl4xHSRaIPBFzmMJ59BpE+lGPRbbdpS9T2UGyhee0/LL18NhK5QQitQ7r2k
+esxcRENsrTpOVLjuzhZAiD41ptoDTC/4nh5STzGJKAl9CKh2gnMzVbdA9t0vcFB0
+II83prmIaxfoqmzxrfPZMq1AwYaNiKg+2zGySewVYRYA+NuVXKUcgV3Ih7A+NWGY
+rNIVjgfD8hOCUir9zQ3Y/teELMnU1HViCIkNei6/dMvZs++lbGLj5cYJzjNFt7vG
+eT9cwYnzyCG/iCz6Yd576iWKpSstejld8FASAeiRZrqF0s+Lwd3PP1aAH3eX46Yq
+nEBd7qFHiJ8fUPiZ928=
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDRzCCAi+gAwIBAgIUcV7b49wOPjvZ3tYvJtXasJmy/8kwDQYJKoZIhvcNAQEL
+BQAwKjEoMCYGA1UEAwwfcXdlbiBub2tleWNlcnRzaWduIHRlc3Qgcm9vdCBDQTAg
+Fw0yNjA4MTkxMjE5MzlaGA8yMTI2MDcyNjEyMTkzOVowKjEoMCYGA1UEAwwfcXdl
+biBub2tleWNlcnRzaWduIHRlc3Qgcm9vdCBDQTCCASIwDQYJKoZIhvcNAQEBBQAD
+ggEPADCCAQoCggEBAMWcyBjpNPcwAE/M/7BHMrmf9oUYoS/LH0mYxZOnjYsn1eZd
+pCilJr5pfW4wqPYRyMXq1GxjTZtr/RnjmkUyG0rYSz9xiwnVj1xVSluK8zEjqzfo
+VyKy1T5SgB0fxZbOCF8JNOWP/mL6C6bc0nNL8vQJUkBxMIDtVOSfAp4pjt89aw84
+lDuv0jAhLTX8Y+9sMTwFLsvMrOLjvOXgywF2xj/ZJ+gModN6a15KpeDoVeBi0fbB
+U0pMjdpkr8Ajaiy0uHSKIeiwoXuwhW+wmb2tQGlBfqcvRXH3HW57xXPA1bNzHMBS
+BeVP+nGWVtX1gajmOQRUuPU0pAzdouqVMlNBWXkCAwEAAaNjMGEwHQYDVR0OBBYE
+FNqCtlfdSm1OEz2UIy8XR18pAgfRMB8GA1UdIwQYMBaAFNqCtlfdSm1OEz2UIy8X
+R18pAgfRMA8GA1UdEwEB/wQFMAMBAf8wDgYDVR0PAQH/BAQDAgGCMA0GCSqGSIb3
+DQEBCwUAA4IBAQBCqnvLLxY1eXSXDp03vOh5RvjoPJ4nxgA7fuubOKYA7AaoiUxI
+BrlfcVzku3FjnMVJ5NGPmZgCcyGAs1xmSEewh0wZ9n+76BZdcKur7onBtCQuZVh4
+Cxn5HwELJI60A0qNg2rj3LbIksiy/lf0iShL/xNFglgE/tTC6t3OhRgOOgOxn4ad
+IYrwUAS7RHOK6k3tCEAtJPTtM8uVAt6JTjy3dIS1eas3jwvMWu+Rg6DY/ihe1NDu
+EO8z6X9p57C7Aecy0gMzMedfdE7tDDAKLxkFG94HFaa7mKbagmUrUWWnvxb4crJx
+xV7XpOu0J+IxSOacCqGLD7Aep4t6n1VT5GoN
+-----END CERTIFICATE-----
+`;
+
+// The v3-no-basicConstraints intermediate the incapable-issuer gap message
+// explicitly claims to cover ("or, as an X.509 v3 certificate, no
+// basicConstraints at all"): extensions present (SKI/AKI) but no
+// basicConstraints, so `.ca` is false while `declaresNotACa` is false too.
+// Measured: the handshake fails INVALID_PURPOSE.
+const TEST_TLS_CERT_FULLCHAIN_V3_NO_BC_INTERMEDIATE = `-----BEGIN CERTIFICATE-----
+MIIDODCCAiCgAwIBAgIUe4EHdm1SdRvcvNwGOcKE68nSWKswDQYJKoZIhvcNAQEL
+BQAwKDEmMCQGA1UEAwwdcXdlbiB2M25vYmMgdGVzdCBpbnRlcm1lZGlhdGUwIBcN
+MjYwODE5MTIyMDM1WhgPMjEyNjA3MjYxMjIwMzVaMBQxEjAQBgNVBAMMCWxvY2Fs
+aG9zdDCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAMjEEJ49QJyAzKb6
+1D+i/+/d+2ZF01KXQzCIzMlKhIvqubTDNTXOHAboXUfkEhgbf83bof3rKzRQy52y
+0ypd3sDZ7ALd3fhW/6og3ONIaq9SlXCTLKZUU8dw0ZGhsDcjLwLhZDsnGswG2Jam
+dnlMNjjaedP3WmURuXNiee5AeyUCuB1Ml5B5ncNGeYTPknt0iYSW2u+A8lr9HwFA
+CKlbmoK2zeaZRR8WcMc1cymItN53Wf8jaifjZSSwUC0FRHlBTDpDm/PwbQpIZdui
+XKQ9+Spas+NqIUeaeE3GZA6ee5AWC3l/+eTjukjdjttg26+mwqO41z0eT3TMnpHT
+rY6TYGUCAwEAAaNsMGowGgYDVR0RBBMwEYcEfwAAAYIJbG9jYWxob3N0MAwGA1Ud
+EwEB/wQCMAAwHQYDVR0OBBYEFJaOHngXcX9UdhusQv0fS62FiFM5MB8GA1UdIwQY
+MBaAFKUbHD8LOrV0itdYvxfiDa8+4U1hMA0GCSqGSIb3DQEBCwUAA4IBAQBBrIV9
+8ihKm6dSEcyblYMe1UrwjBVRd7bf05poP7I2IV/hExWk9t+sMFwpGvcxRIZoUEC/
+PVnqGjUeRg8z7AuSP5aco8f0BTR5Fa7FrpyA6poudahWSeoGQHERAC7p1gwhtGuz
+Pg7lz3MRZIiAstTQB8VaQr6BmnEXhxMmET6cPDC2T5yKofU1Vd6krNjU+aQGGETX
+DBA775cHQIKhpfZkzKpI56Bf/yMWhi4lOFnlqGZCktxTu7MuejQiRwa1ukceLslV
+xsq9xpizdb5KmQQgm6tez9yu2Ft227sMjFR+keHWdGIRx9Xm2Hbhbl7EhPh4ulCW
+N/i7TxrrvdGrjYnL
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDHTCCAgWgAwIBAgIUdEkS/sVYEX/e6JujObGXf/H0kPswDQYJKoZIhvcNAQEL
+BQAwIzEhMB8GA1UEAwwYcXdlbiB2M25vYmMgdGVzdCByb290IENBMCAXDTI2MDgx
+OTEyMjAzNFoYDzIxMjYwNzI2MTIyMDM0WjAoMSYwJAYDVQQDDB1xd2VuIHYzbm9i
+YyB0ZXN0IGludGVybWVkaWF0ZTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoC
+ggEBAKtw5NRKmxRCnpeYvoW1IUqrtijG6P4GLz24OV8PYCpHMqeV2gY3cw1IE1rX
+V4YxaZzEun7E41hPXN7sWHtu1QFDKYs3Lva5yNGDQJ+Q2Mk7AHyHvMXtk83UxC0D
+BVEnEBF0g+wfLx7PsVtwDM+28xk69JACaWn0kU+y6+u2yE/PgtHwOCrH9hEFA666
+mfmLS5cIg7LBD2a1hJBuC8ixpph9/xZGUESL2AAlQDI6wFU3oAa4q1GdO3dQeSj2
+RVzQ0wJrSxtozIOEkjqv33dyvNVKiqhx7C0pkp8MrQaS1tzRn9E7AQ0RGpw/v6sX
++w0MhLECk3DQBqcvow/jClmJRx8CAwEAAaNCMEAwHQYDVR0OBBYEFKUbHD8LOrV0
+itdYvxfiDa8+4U1hMB8GA1UdIwQYMBaAFHsJ6vUd16FC7XB5KbfcXizNgbeIMA0G
+CSqGSIb3DQEBCwUAA4IBAQCGzu94HQLAzHTaiQFzDAxTPwVQCeqvXAiexXMM4C7m
+Uoz7ij1GNp1snO6yLqEbgHTrLkF/U2iAR0P9RITrIpJKc9k8hxvXYG9QhnkM6fo1
+1Ksb7CeQoZk9v2ozh1XFQGMT0MG/NsFz0SOemoHDUWuTwyuhNz4v0Ly0YjSEVJH0
+gHGuh3gtRxR3ir6VLct7ohBZDpEtsO9VHCfCk68wemdbJueTaUOsZjAuniHyO+Ka
+uwA7oXbljgKVp+keHjwgp2qVMYDhtkFCq/OrH1hHBLMv4R4bxNGUnrjKZXiPcd/N
+QbnMbcuIyLUDuMt6ZeYnaKz04V1fxCE+prl1i12z1MEa
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDOTCCAiGgAwIBAgIUbYiFCuCd5kQBXIBJaH5yWhXfT/0wDQYJKoZIhvcNAQEL
+BQAwIzEhMB8GA1UEAwwYcXdlbiB2M25vYmMgdGVzdCByb290IENBMCAXDTI2MDgx
+OTEyMjAzNFoYDzIxMjYwNzI2MTIyMDM0WjAjMSEwHwYDVQQDDBhxd2VuIHYzbm9i
+YyB0ZXN0IHJvb3QgQ0EwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCr
+dCCg0SHYYIzM9SUioam7Zt8OtA8LhYnGbcCUgvMvAQvSKyn378JufVNHKzMdzfkx
+uTZ0eaFPkNRkxZ6RcZq1CaRUdD3MhJXPx5t9prYNr3HBr576N0MkVeJYOnJCkQnu
+hsFCpGXBgJtuD0m/7My9QoGgh7WwU4SyNpJk991JfqFElPwszqg7cluMMo1ofDfp
+XwQK4FzpzPTCuCA1e+2/pQny1hv3+0pk17xw4Hdcc9oiYob0rHHPcQWdCnCexOsj
+SYmRNWLwEA67loOmoSEfsHkDUcCjjWl76hzbJ+ttQaohrsvT9qS8Ox0Z66dEZxYk
+DrLOX/dlliFL30HzYKmPAgMBAAGjYzBhMB0GA1UdDgQWBBR7Cer1HdehQu1weSm3
+3F4szYG3iDAfBgNVHSMEGDAWgBR7Cer1HdehQu1weSm33F4szYG3iDAPBgNVHRMB
+Af8EBTADAQH/MA4GA1UdDwEB/wQEAwIBBjANBgkqhkiG9w0BAQsFAAOCAQEAV9Rp
+3DR4OtkLiYjiJ9RNOQhN96eR+FlQaygvUkHawa9VLjN0m2MbAytba2WrbW7hAklN
+iJtsh4Pauyx6yOyiPyxIXdb0IkVOUKbDn0we0IGjsvNAmVoI+j6sBpoVfcYxt01O
+VBLyuUGeb32pG39AS+qscS1wbBBcrvZYuDYA4VvYwKKVLVQc1qQk9bHBeaF3BbcI
+ndUiVDAPujPEMbWHkgJTunZXU9NG31kTRmdUzdKG15Xcw0mydZYui8d0LMTmrfUB
+ZsRuGFKsNla8troQc0H7DVbwpTID7XPGF/DEOCZpa5AbF7TNWkROkZqJdLpXdc7G
+Jj4O2TlARc1pC0hlVA==
+-----END CERTIFICATE-----
+`;
+
+// R2-21 entrance EA: a self-signed serving leaf whose extendedKeyUsage is
+// `anyExtendedKeyUsage` ALONE. The depth-0 server-purpose check carried an
+// `EKU_ANY` exception that admitted it, so boot reported zero gaps. Measured
+// on Node v22.23.0 / OpenSSL 3.0.13 as a real handshake with the cert as its
+// own trust store: `INVALID_PURPOSE`, while the `serverAuth` twin below —
+// identical in every other respect — authorizes.
+const TEST_TLS_CERT_LEAF_EKU_ANY_ONLY = `-----BEGIN CERTIFICATE-----
+MIIDETCCAfmgAwIBAgIUJlMrpvcR8gSJoXcsaxr5UcPejyYwDQYJKoZIhvcNAQEL
+BQAwIDEeMBwGA1UEAwwVcXdlbiBhbnlla3UgdGVzdCBsZWFmMB4XDTI2MDgyMDAw
+MjQ0MFoXDTM2MDgxNzAwMjQ0MFowIDEeMBwGA1UEAwwVcXdlbiBhbnlla3UgdGVz
+dCBsZWFmMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwOgB/PPppqf1
+hqwmCbS5BlbRyie1e7pnwLLVhpGy7wB38EEPj5/qF8IVsE3179bXwyAoozPavoo2
+lKMyUCUZjU92+btIzqZaa9XiedvliVK7yaMkC8lpSwIXJmK4b+5s8HCCOBUaFeAO
+HFUBp8lFoPbKhADlylahZzlH+Aej5ESD3utZBnb+O3LVUFF8HBj2r5QA6YcZWqRG
+dpJLGuMWYiiwtyQelDeBysup2C5vWSQLR9GjJn+xmQ8uskO+6YZEPngpW5r2EEDC
++wDnIdj3aFSlWKpUXMVtVFF1IVQk4+4RTvib3eNC89am8B5bvlL7y/E2e6N7AUKu
+X4KKz59FPQIDAQABo0MwQTAPBgNVHREECDAGhwR/AAABMA8GA1UdJQQIMAYGBFUd
+JQAwHQYDVR0OBBYEFG8vHjtQgKuXoJak9K/SAFuM7YswMA0GCSqGSIb3DQEBCwUA
+A4IBAQBDQyUkai8/6Ug4v0SLZ9PGFKQtBc6dUz71xKDK8znYjKw4y49o/ikF/SI+
+Z8Zxx/08EwwnKmeYTuhT34CVwVjgTzWBfvfRcikDuWaCcn8Pf4btngsYNMjibt/A
+Y/V0ioruPPXewNSlSlrRTCUs1AAkzitGHFRunniIhwX1+0HHunbwE7hzzY13Zn4q
+QNX7+f6/nmNKaoRCqLM6JvIVAhJpQ/SIXWJFl4pG39jg40YZ9COjLAQl65g9aMSK
+qm1gVR7rHA2wylGq6vkYw6VzCz0TRJD/J6wVge3zJs85n8zJ+SujJaUg/0wTD31d
+X9YvEp4YRDgNo9o5fZhiq/vxpcE7
+-----END CERTIFICATE-----
+`;
+
+// The control arm for the fixture above: same shape, `serverAuth` instead of
+// `anyExtendedKeyUsage`. Measured `authorized: true`, so the gap the EA test
+// asserts is attributable to the EKU and to nothing else.
+const TEST_TLS_CERT_LEAF_EKU_SERVER_ONLY = `-----BEGIN CERTIFICATE-----
+MIIDGzCCAgOgAwIBAgIUOY7YcvRnPvnvi8LkTUEnWiwKvPkwDQYJKoZIhvcNAQEL
+BQAwIzEhMB8GA1UEAwwYcXdlbiBhbnlla3UgY29udHJvbCBsZWFmMB4XDTI2MDgy
+MDAwMjQ0MFoXDTM2MDgxNzAwMjQ0MFowIzEhMB8GA1UEAwwYcXdlbiBhbnlla3Ug
+Y29udHJvbCBsZWFmMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA3/Xa
+P+ghHlMoy13zr2uZLbWOGGTSkwtgYejQ0MwXXB/0QHyx50BFCpb2ateQMD0W8EsE
+le3FrrAsqxOYRYDBTV2PhNGz9AoBTJveAhMRB5n81duUMUFKzpz/tkCrwfu5r4Oj
+1AaFRVtkz4pKYA2eLkLiW5KI8nzkL4sOwvDTgC1mKfWfs64Wd5glc5G6fd0TCh4j
+0IvZYVpA5Y9IRPa6ZNexO0EL3kOZuzy5TwPwvBmppQqoiOqjIi4NwNafvGIL88lj
+XJ31t90gvl73yqgpmGuW3OF0RvT01TpcGP9A8JG9cDAs6DACwxwIa0Z4O/B3tz+R
+4WsZypZjA+3FxhsNOQIDAQABo0cwRTAPBgNVHREECDAGhwR/AAABMBMGA1UdJQQM
+MAoGCCsGAQUFBwMBMB0GA1UdDgQWBBQpB5epBbzYQuONnG2FQK04qEYD9zANBgkq
+hkiG9w0BAQsFAAOCAQEAZGOepDVraZKKC/E7oLyBz2hVn9jM4h/+cSHW0EoY5G7S
+MFlll6P7P+0mnxb8GzP+Cua0obzZFv07pP8De0eDdmWL9O6y01lvScFnCEHDQpWl
+nwPE6r6QRQbUHIbr0k3eFkKSTgiv0lDXwhynXkdN74thXG+UF+cWx1NSOJ+ipVB7
+CmqGEy9Pd60W5SAWc+V/sv8X2dTvsSgX+OlL/hSFG7FFTSrbHhqW46tkoymDg1ct
+xbEZQnEF25eHRLVSo74ol//Rj9HzdDJVHJ2/4JpH0fJECwA3Bo0eBpCGuYBBEctW
+mK3oulm0TIgGSTLbHmTRn1LhlbeIcE11EPo8/dugSg==
+-----END CERTIFICATE-----
+`;
+
+// R2-21 entrance EA, issuer arm: a leaf carrying `serverAuth` issued by a CA
+// whose EKU is `anyExtendedKeyUsage` alone. `issuerServesTlsChain` carried the
+// same exception. Measured with the fullchain as the trust store — the shape a
+// channel worker gets — `INVALID_PURPOSE`.
+const TEST_TLS_CERT_FULLCHAIN_EKU_ANY_CA = `-----BEGIN CERTIFICATE-----
+MIIDJDCCAgygAwIBAgIBFTANBgkqhkiG9w0BAQsFADAeMRwwGgYDVQQDDBNxd2Vu
+IGFueWVrdSB0ZXN0IGNhMB4XDTI2MDgyMDAwMjcyMVoXDTM2MDgxNzAwMjcyMVow
+IzEhMB8GA1UEAwwYcXdlbiBhbnlla3UgdGVzdCBjYSBsZWFmMIIBIjANBgkqhkiG
+9w0BAQEFAAOCAQ8AMIIBCgKCAQEAt9Pbq9pJds08o1Oy7TtmCG/LGpcnDuH8EB6G
+OEreYlkzsyLEk1GgMKDZ6s/6oWOHP2estp14LpCo9i8WHZj31mW+DLgU18E/4Z4z
+q2qEpAy4PXo546ScHgnE7HwSw75wJFCrv7PRlHPk9EefK3EiCmhypQbK2QNhXI+S
+Yzogy0BdR+kkeBxkxiZtPBffH6Y9IJK/OxAlBLGGlABIzJFbEn/N5eyn9jqLihwU
+ggPEc4FnnsGmYClmwknSx/iEFwHvyZ9pXiE3du3GqPYSJ0MF8sRiZUGYjfVszTE2
+a6uLPgYhBx/fEe5j/wu0qPnpzFrApYduFlAE/7E3uWejKaPB7QIDAQABo2gwZjAP
+BgNVHREECDAGhwR/AAABMBMGA1UdJQQMMAoGCCsGAQUFBwMBMB0GA1UdDgQWBBRJ
+TJAh6+efDMShtwZVe8sdesRh2TAfBgNVHSMEGDAWgBTxONXo42hUb66HADuvUe3P
+ADG0VjANBgkqhkiG9w0BAQsFAAOCAQEAnzaxtlw6ds3KagWzR3kk2UlF8G3BFC0v
+a2X7pA6H5vMLG4pzRkuoLiV1gOmdjeS/kb772o/wL3paK+57mKeYdfvFdh/+xzy5
+v2L1HIs0glRhazNpc4XtnpM95ZxDaJIPYPgphigDdP+3maIQ0DeKdFLaWryHI6Bd
+ZNu8pBrFWLPcekZKdKtVXNy3U5gCEw7Odf6NsUXh71MbDCw94n5kpaGXI1J9kpG6
+OtACQmm7BFHRcYszIaumHWIT7kmH7M0aVyNfXjPyx3KgBYXcbQJ2Fvq2059LMzfa
+sIybKfe9lgPSI7Z3FrgbJUECE/26pm85xGkBiK/6KS/6QwUQG7JxpQ==
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDCjCCAfKgAwIBAgIBFDANBgkqhkiG9w0BAQsFADAeMRwwGgYDVQQDDBNxd2Vu
+IGFueWVrdSB0ZXN0IGNhMB4XDTI2MDgyMDAwMjcyMVoXDTM2MDgxNzAwMjcyMVow
+HjEcMBoGA1UEAwwTcXdlbiBhbnlla3UgdGVzdCBjYTCCASIwDQYJKoZIhvcNAQEB
+BQADggEPADCCAQoCggEBAJ+GEd0kEnj7S5Q2AldDauxLEB8h72elqsohqCJJURFq
+o9AfAxB4w4jJqHzYsbGj1JKLYWg5sZPMnpSt+YFmj3z6zJO19kKaml5oduWFBtdH
+qAfFS7WM01wgTccy8iQwvXa9R5uIWstjrqPSeSajBiqQZa59Vb+mXrhbxuOS2oXW
+msZIFH0R6Ik53ceL6FczKdK7opWwqomIha642nVPDAYykYxP8wDn2xivPLbTpVBr
+bzy3IuX7TmWCf6qF6NjjKONCPCh+ytMe0Q+HQNVuaTiAiQhsh5a+soY9/yx18EyO
+euLikdeGKjxDOEy52oUut3uSAF07KDgZRfc/132DZ20CAwEAAaNTMFEwHQYDVR0O
+BBYEFPE41ejjaFRvrocAO69R7c8AMbRWMA8GA1UdEwEB/wQFMAMBAf8wDgYDVR0P
+AQH/BAQDAgEGMA8GA1UdJQQIMAYGBFUdJQAwDQYJKoZIhvcNAQELBQADggEBAAdt
+qJ5Va4ZVIj4U5oirCTVD3VkRFFL1vJKx+Cp/kjZUSRbwQLkG3CslxsICU8nMR8b9
+b0xuYkOD6vLB7yBY7VJHKJoTQZmw4pUY3T/ToW2fTcEAAOfOqZtobnQcP2N2jyz+
+vVK//QPo9BfYQYfJvLoWWa9jmDlA1mrKSA/zAu8gySwPFOmlNR/QjIWFzvn3/MdK
+QadV6aen2RHLI4Yb5eNV8JlUQ9NAF7Oi9WpbuOHfoxe804QeOzZ/kpfAJvyxc1gX
+b1IZq0D3S+DmD7ajTC0VwyK5nNW0pf6oYODgAvy0QtuhxBB7glKelQQbhOTLyfTY
+ir177Y/o6XBBfNZCN7Q=
+-----END CERTIFICATE-----
+`;
+
+const TEST_TLS_CERT_LEAF_KEY_USAGE_MALFORMED = `-----BEGIN CERTIFICATE-----
+MIIDCDCCAfCgAwIBAgIUG1EjnHbTNEKayVPSpZtj8yhElzQwDQYJKoZIhvcNAQEL
+BQAwHTEbMBkGA1UEAwwSbWFsZm9ybWVkIGtleVVzYWdlMCAXDTI2MDEwMTAwMDAw
+MFoYDzIxMjYwMTAxMDAwMDAwWjAdMRswGQYDVQQDDBJtYWxmb3JtZWQga2V5VXNh
+Z2UwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCrCXg3lORQsWmBc6p7
+PP7/fsN8/86XRe3K0CMwDSMiIqTbGEK7/BpJCEvldW31yqDvhkotZ5ypd++mZ1K4
+cxvZY3YgU4j+We1sPMEuKMDW9CQT2gZJibakdcKaD0wr5gWV1NRGRGCVBzpjP4Do
+YPHrPm2g1n1mw2OuphIy4C5B3SMiR9ycNmlgFAaSIRPL2bmbwJhu3PI2hKkqi31V
+JgcXHZTxRpoASbEnVBFKmHhKYmlfhYUAaPoRIzuRPNL0aZMOJi7btHmshzBgSRqm
+BFPkaW3CkBfXKDIBuOkd6rve/Z9RotHj7RtLqmmqc1hDK4GAj87CTeDkTAAtMkd0
+SZPpAgMBAAGjPjA8MBoGA1UdEQQTMBGCCWxvY2FsaG9zdIcEfwAAATAPBgNVHRMB
+Af8EBTADAQH/MA0GA1UdDwEB/wQDBAEDMA0GCSqGSIb3DQEBCwUAA4IBAQCFiEih
+k6dBU2x7hZL2Bp3RJ8P9jMTP6MxHW6f2valDjLx2uYwQOr0d4Hj57pEPI2AWrDz/
+IGQL5OFlT4fXKImmn4d9gL53unJ9NztqX5s9IKd+yLoRpEYABmylI3awqgqJFUtT
+3lalDa5HaxkzF7qf9BJj+nLrJ8Wl0VmtGCY55ZWJsNND3STBEuHcNFl0gFbZ1vqc
+jVnGKCcv/qoLSLtLALkQmhaCKKv75jdAoVu1w5jm5hEkntzPXA5+RyNOnV+G3pm8
+9+3gJe/OhVzO4+MC8nBa6nP/M3omu0255bKTYK5nkS+6sHPnFuzvHi2IVzqWVt70
+YzHaC45ufVkW/NS1
+-----END CERTIFICATE-----
+`;
+
+const TEST_TLS_CERT_LEAF_EKU_EMPTY = `-----BEGIN CERTIFICATE-----
+MIIDHzCCAgegAwIBAgIUPN5T7uRMnckpvijiTe/E8W4P5VgwDQYJKoZIhvcNAQEL
+BQAwITEfMB0GA1UEAwwWZW1wdHkgZXh0ZW5kZWRLZXlVc2FnZTAgFw0yNjAxMDEw
+MDAwMDBaGA8yMTI2MDEwMTAwMDAwMFowITEfMB0GA1UEAwwWZW1wdHkgZXh0ZW5k
+ZWRLZXlVc2FnZTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAKVHlXgz
+/tH9oXSiZ5zA5zc+mRYPb4UqroA13Qt0hSH+z4xwcasFhIizcNw4hU+AYUDfhUF8
+J+/IfIWX7EOYKY77rUpm4stcd9mJtNIWb3QJ2yAQysdPkzxx4skl9w2ym3ic0fag
+6a0j4KyBUwyRCYXskUGU6Usl2Hy7hNP03BzB44TPHW4yI5UVBaWJL5fkp5XcQ+RI
+93T02S1/OG25aj/0htm1abwQaHxHWT6VhL1cKQwFnaxJaTmVyOeFK5YtQxCKLUsC
+WDOaYO+/0+Y9YzT5h83y+5oMzq/s9rXaSe37jw7lES15tjoju5W4E4Q0b0qsFpYs
+LdYSEurDUIov/cUCAwEAAaNNMEswGgYDVR0RBBMwEYIJbG9jYWxob3N0hwR/AAAB
+MA8GA1UdEwEB/wQFMAMBAf8wDgYDVR0PAQH/BAQDAgWgMAwGA1UdJQEB/wQCMAAw
+DQYJKoZIhvcNAQELBQADggEBAGU0ZFzxjarW0Bjnv0x756Pf+fcJfAU1stRD3nwl
+S4dBM7tVTSrsDoMn8c9gNRqvG/fyp7P5u0Yjguqptuhmrz1jXYMZS2AiycFMe4GP
+ls7Z2f6bnpseNC+F/gjonKAmpE2eChCHtc8xbw5R1TYymaBvZjuIorkR/UH+kdNN
+K26tDbXka+CU9KyGATjpDtUHG3UKDb3SdCt/12En1l4aXxrCvDJZcz+7UNZJdTWD
+J2n8RRUJtPPURhRVUOJhUVDCC/k3uuwasWso9LtmolsdnkpNNYylvznfi01XfOoN
+petiUh06l3wZJU+kHAvQmYjewP4tksczQ1SMvh89/81HLcs=
+-----END CERTIFICATE-----
+`;
+
+const TEST_TLS_CERT_FULLCHAIN_EKU_EMPTY_CA = `-----BEGIN CERTIFICATE-----
+MIIDFDCCAfygAwIBAgIUEZjiMQZm9MuO0xHLMXRtGgMCdyYwDQYJKoZIhvcNAQEL
+BQAwHzEdMBsGA1UEAwwUZW1wdHkgRUtVIGlzc3VpbmcgQ0EwIBcNMjYwMTAxMDAw
+MDAwWhgPMjEyNjAxMDEwMDAwMDBaMBQxEjAQBgNVBAMMCWxvY2FsaG9zdDCCASIw
+DQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAK4EiIPOA3ld5JYbuJ7o9pC+BWXf
+Jr1HcAQ56OttUmbto5psTafNjxwSg8pwhVxq9OM8xBqJY0JiBZw49X1d4gKtJAGE
+Q4xRdIc1Y9It+mqzslstWN70QYKz728o1aHdt1NVa6Dxc8DABZ1v+oJA2MNxHFwp
++gAD+Vhp2otTUbiGG5qX6uAT5OyInrYnWFqtv6x3dtDoUoFL8QSy9PcH3KhjqetC
+oiXzuwEUreEOmnwr5QsHFORfm4t9BLz9x7ks+PNihO9+gzIVojLxYGHqbc5AZmQA
+yklJqJ//8mCGniOTwpoGhLV7uUaePCud4yL/do75tIEEEoyYdKLU3JcWN/8CAwEA
+AaNRME8wGgYDVR0RBBMwEYIJbG9jYWxob3N0hwR/AAABMAwGA1UdEwEB/wQCMAAw
+DgYDVR0PAQH/BAQDAgWgMBMGA1UdJQQMMAoGCCsGAQUFBwMBMA0GCSqGSIb3DQEB
+CwUAA4IBAQAjjdVr6XiOLl+yLReKER41fq93i8m8zeXvEa12nwH1dMCJGyAIoUwq
+BChWCg9idFTYZqg0Z8j30rVhu+g8jIjw1iCEQPhpWAfUqRU29dfRxsLr7Y/KRFNj
+SdxXXoUdmlo5NUtyQqUdhknskxR96ceRNA8ck63JweX3etANAKH/siuCgjrkS15i
+xij6x7hD/WObJCuycvcroP+bqilJIML40+bypf25+SBYZItx0jdDSjD/chN7jPlu
+h332wowAKhd642GCYgHtvSTkHM+IaRq9B6nwFYZULDD48IHw2GqFG4SAvxA19iBt
+bzXzDMEQy1JjTitb7VjujY6BVnphVd/2
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIC/zCCAeegAwIBAgIUWf8CCBpA6C8md1LNqjN/4u9XE5UwDQYJKoZIhvcNAQEL
+BQAwHzEdMBsGA1UEAwwUZW1wdHkgRUtVIGlzc3VpbmcgQ0EwIBcNMjYwMTAxMDAw
+MDAwWhgPMjEyNjAxMDEwMDAwMDBaMB8xHTAbBgNVBAMMFGVtcHR5IEVLVSBpc3N1
+aW5nIENBMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAm4di7hsWQfdw
+H9g30pRZ1Ml71RMyXoMgvXh3sz6WVqNQO3JMoNemEOvvyj16eBFMLUfF+qEak1sE
+EETYHxD2ecekf5ebLMumLYjRip5lVO5Uzhpq2oMXkA/pgDMZAWS0/8BNz1fsypm1
+8RnddoyDC0wYcKJUIxIo1PVed42mKhiDBQG+1fud8whiTv8Tsg0uaIU3zzZRM8OM
+Hw2ULujuJUoSXbpHoaHS695c6bOCrg+i90U8hCMBVxHJLct5LycbTR/mHtqDmTI/
+rWvyH1LUmQ4Euvcl8cyofmTblBMooGb98TMYFHIZY4nOKr1K7Un4FvHU+lVxQhKp
+pcDWYBMAUQIDAQABozEwLzAPBgNVHRMBAf8EBTADAQH/MA4GA1UdDwEB/wQEAwIB
+BjAMBgNVHSUBAf8EAjAAMA0GCSqGSIb3DQEBCwUAA4IBAQA6JALOPiV2nmJAQDlj
+DR1BY3akwvtB+aXug4TDjfmKhoTvuoloph9uzbCIb31oOimWQEE6+sDECQNaobrd
++YspX02QuUUkoGH85ZZm24V52jNQUiJueRMEj5boOYy4GD1/9zn/BFEXa4u7ngz4
+HC6tRloIDefQcfHfQ1+cTVh+X0amCkAbOwtMesXEQIchDKEK5aQRliNZDkZ5L3Fx
+hckyoGrg9GRMqFDO/O2mMHIrxIGCCtaRLuzSqRJ0kLrQqvkQd0L6Gk2yq3E2Ir2H
+r5mLBUksARJu9D7Xshhg/sw8RuahCZlccRBTeCe2pqmYi4tEVR/5YtsFifcKGC0X
+/5y2
+-----END CERTIFICATE-----
+`;
+
+// R2-21 entrance E1: a self-signed serving leaf carrying a keyUsage extension
+// that is PRESENT and grants NO bit (`DER:03:01:00`). The readers conflated it
+// with an ABSENT keyUsage, which RFC 5280 reads as unrestricted, so boot
+// reported zero gaps. Measured as a real handshake with the cert as its own
+// trust store: `UNABLE_TO_VERIFY_LEAF_SIGNATURE` — a certificate that grants
+// nothing cannot serve and cannot anchor itself either.
+const TEST_TLS_CERT_LEAF_KEY_USAGE_EMPTY = `-----BEGIN CERTIFICATE-----
+MIIDEzCCAfugAwIBAgIUemy9aqJHFra5/nvk8PqIzrAs0BEwDQYJKoZIhvcNAQEL
+BQAwIjEgMB4GA1UEAwwXcXdlbiB6ZXJvIGtleXVzYWdlIGxlYWYwHhcNMjYwODIw
+MDAyNDUwWhcNMzYwODE3MDAyNDUwWjAiMSAwHgYDVQQDDBdxd2VuIHplcm8ga2V5
+dXNhZ2UgbGVhZjCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAPWTBkru
+r3hKRokTahFBe0yFQT6diGq6DqElrtSU35ad67aUGT/NsBoDGl3oNNlPKArMnZtG
+IbiSsSroFZSAt+toVnGHfUAH69/cFXpoE/AuCnJLVyP9GkvgR/RZja8IKwkr78OI
+97EROGciH3d7R6kbjLrGC+Q9nkAjPNgueLpjVa47WNKt04UmJK0IrFX9I2Y0vBU6
+7jELhT0eAzOcOjbHJu69594wVEgB1vhf1PPTMnNitbScXOpbnv8SA0qUZbKRheRH
+S9617MhqvayFktsLgZsUCd7BsrZFAWRHLHq6zVDxDGMOajpRVjKZCGY4w+nM/H19
+oea/v8JcofWuMEECAwEAAaNBMD8wDwYDVR0RBAgwBocEfwAAATANBgNVHQ8BAf8E
+AwMBADAdBgNVHQ4EFgQUITq9Ih9oL3iS2d+Ud/9IlpsIzyQwDQYJKoZIhvcNAQEL
+BQADggEBABnQHnu7pkfBR9I0n+oGWBWM/z8gV9/aU5wFNLZ6rqLWjtq9X+rWGSuE
+owsdoBr3xjnl3Jnla1OzKLcEvDWpVcgcraxek3Z4vfNvt0aYtkAWJ7xyxOVsdlf9
+nngsHa07t5aqOo+1EzpXNGvYVNUsuRsss36TdsVyvAG3gpFlWWevfK1v/fLk8T9M
+/FieRMaPu92n9Jk4uJtBdfUoX05vfccQgP/T01u3O3K4kly/s72MpmZJN44qW7Af
+PKNxcb3q/q/vwaSzDkaDdlfUYXfMqerigXWIL9N6oHkg3+sCON8q7paVDolHBH4m
+MPLRZQ5FkA6QMATcib2WkFjrJvQU9G0=
+-----END CERTIFICATE-----
+`;
+
+// R2-21 entrance D1: a leaf under an X.509 v1 root whose SERIAL NUMBER happens
+// to contain the basicConstraints OID's DER bytes (serial 0x0603551D13).
+// `declaresNotACa` located the extension with `cert.raw.includes(…)`, an
+// unanchored scan of the whole DER, so it read those serial bytes as a
+// `CA:FALSE` declaration on a v1 root that carries no extensions at all and
+// warned the operator to reissue a CA that works. Measured: this chain
+// handshakes `authorized: true`.
+const TEST_TLS_CERT_FULLCHAIN_OID_SERIAL_V1_ROOT = `-----BEGIN CERTIFICATE-----
+MIIDKDCCAhCgAwIBAgIBAjANBgkqhkiG9w0BAQsFADAiMSAwHgYDVQQDDBdxd2Vu
+IG9pZC1zZXJpYWwgdjEgcm9vdDAeFw0yNjA4MjAwMDI1NDhaFw0zNjA4MTcwMDI1
+NDhaMB8xHTAbBgNVBAMMFHF3ZW4gb2lkLXNlcmlhbCBsZWFmMIIBIjANBgkqhkiG
+9w0BAQEFAAOCAQ8AMIIBCgKCAQEAoJ0N3G6UCU4bl5RQQ2kFuGgJSZMcUcou2MpW
+m0wzy2NIMLe5uv2tPuZvxZlvCyiUKrqJppE3vt3D1NrflYbPLxgsM2GCJxFHWj1D
+vumr3p9R+Gea+4htcApqnEC8gLkbqcjCDgKCEvZMJLfPI7XHqdeHcbdwWltQZGXc
+pKZ4eAnOfrOWBFRZHw24YTq+alvrXqai+8SjhiJFnv7RDLWfCiO6dwqbirYHOBtm
+5VCF3BzqXH9D7/cq4mwKRb45XAeDTGdnpIj8XwQPZd7YySEwDnezYQbwv8Bm0jtY
+oXqVp0jRg4F0tZx0A+wdewD6BotwK/3S+b2nIExjrEk1g99arQIDAQABo2wwajAP
+BgNVHREECDAGhwR/AAABMB0GA1UdDgQWBBTTEPjPkZYlOqD7JhbPauKXwB8qoDA4
+BgNVHSMEMTAvoSakJDAiMSAwHgYDVQQDDBdxd2VuIG9pZC1zZXJpYWwgdjEgcm9v
+dIIFBgNVHRMwDQYJKoZIhvcNAQELBQADggEBAErQ8J9HcbGx+N7zzcZVZTgxe4yr
+uOahLIs93mvnJpaZk5Rd1v/0LTo6slzoteqfwyk4BcFvzjzOOb9xaNnSabScsGLB
+ti65eL236Y/6Iz5hH9D+Hn4okHR090ME/hAwb0Z+7zWhsgrG1NtGJVBbgh2FnMlx
+LXWRoQEdan+Ujc7ABBWHgxTIB+h3pPNo1tN2+d9JSIlUKInQKlI++z6nEwEE010Z
+jmUUByT2eiE6nA/Szqp5dScpBHTuz+JMENVJdrL9rTCu+utjC/qDm5OA/2EkNgc4
+x/ENPmStpAQY4PPISzx6UIWjoernOx53hptvh2BY8NHZMXJ9AvgrqAy9LxM=
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIICvDCCAaQCBQYDVR0TMA0GCSqGSIb3DQEBCwUAMCIxIDAeBgNVBAMMF3F3ZW4g
+b2lkLXNlcmlhbCB2MSByb290MB4XDTI2MDgyMDAwMjUzN1oXDTM2MDgxNzAwMjUz
+N1owIjEgMB4GA1UEAwwXcXdlbiBvaWQtc2VyaWFsIHYxIHJvb3QwggEiMA0GCSqG
+SIb3DQEBAQUAA4IBDwAwggEKAoIBAQCrJQppCO1/+5Z7m7CvZwVMwk6nit6rz1OY
+ZPPUq5LkjmtcNnp0Y6SzMz1B6RUMSwOwGsWrtoQikUMAW0/vwzv3CgEtVOwdSQlD
+sd+eYK5YqPt4BIZCSx3QYyuBjWUx/w2FrpZ1Xhy+iyHIDd5/7uy/c20UNmONOmP1
+HUAz0jyCTUEDOLyUg86FquCGqknV4i7jdEvayEXoa72Jn7F/J5kZdRer7EhKYc2m
+0eKDKbCl/CMn5X22SHwvFLnHIRNOwIoavXKBNaHPYVusInx/ecEpIqGLkrUbIyGk
+X3YALOgG7OwaTBSJPiHSMPhHQSqicKlDhdVlueDeIQ/KgN27ARNXAgMBAAEwDQYJ
+KoZIhvcNAQELBQADggEBAEDHAO2C4eVin/fnokUWrGV3zcNMZHHiGMP/PjfjnQ//
+C+TnKGH0GwzzhX9CeWyvjNXA4la90lTaTarx7HfESZ5E6ZtMczRkNfFHWT/sZsvm
+j5ZTL6ikDoiVBGgUTL9ZJwhcDrN2cziIU+CSIYkNz9GMU7xmBALSJCMuWGcxbB5K
+CZcA2/wkWHB88exOfRPk8OyHc3m1e3wxnlTQDU+IWR6Hf7aJGhkTyiACTaOsBAkW
+mcGTVd7IJD450nnPlqfjd75PmcAWaNsif/IQs4v2F/DwZuzwxq7FyP8TiGw4gJDU
+T7dXNfTLU5ftG9W3BuAPha91I9s+/HBUF0Kxw8fQlo0=
+-----END CERTIFICATE-----
+`;
+
+// R2-21 entrance S1, the other direction: a leaf under an intermediate under a
+// `pathlen:0` root that also carries a decoy extension (OID 1.2.3.4) whose
+// value bytes are the basicConstraints OID's DER. The decoy sits at DER offset
+// 444 and the real basicConstraints at 482, so `raw.indexOf` found the decoy,
+// `pathLenConstraint` returned undefined and the gap was SWALLOWED. Measured:
+// this chain fails `PATH_LENGTH_EXCEEDED`.
+const TEST_TLS_CERT_FULLCHAIN_DECOY_PATHLEN0_ROOT = `-----BEGIN CERTIFICATE-----
+MIIDHDCCAgSgAwIBAgIBDDANBgkqhkiG9w0BAQsFADArMSkwJwYDVQQDDCBxd2Vu
+IGRlY295IHBhdGhsZW4wIGludGVybWVkaWF0ZTAeFw0yNjA4MjAwMDI2MTBaFw0z
+NjA4MTcwMDI2MTBaMCMxITAfBgNVBAMMGHF3ZW4gZGVjb3kgcGF0aGxlbjAgbGVh
+ZjCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAMCajJCJVPm8DA5eMtHT
+xAtap2NewlCwQc8aMQCHTJsY0tl+7AYtitF7tGoMNOfswO1dM7MjioLJX/6VtM9T
+bR7zybNCbHlfD8TUBZl9692I7rWC3zBl9SBj6uIH9O1HT56hJpBmkmKJJtQOFzj8
+6VDHfPabXOp3cQfJwSF+QqqIfLOLJtphUrgs0i1Ig5pL3Dliwcr8h+fqW+UiCczb
+ME6CQnnmjSSQsgIByTT+gW9w+WT2w1oNGyscvjxoFEGve/aaJB+f7bJ99I/AciUl
+IMwydw5t3TDvjCIps3ZrTAJG6B04UlQ7KMBCSrB1V5sX56B2PJrSPlQ/99bR4Mto
+YPMCAwEAAaNTMFEwDwYDVR0RBAgwBocEfwAAATAdBgNVHQ4EFgQUw2T9QUclT8Ao
+AYWF1ZxdLpjS0nYwHwYDVR0jBBgwFoAU1UI6UB4AIAXOTQMJZIqWUDI1tG0wDQYJ
+KoZIhvcNAQELBQADggEBAIb9uP6z4w+gDnV3jskeLBHpS8VoIntVlw+o/GpyjhL7
+DB28qBmnWyraK3CefU39p2953t3eq45JhjumHm/FwD2eVLLVhhyf1wG8Esq8rDNk
+wp0YDyGt5FcTO5v9bLU22p1ALQ0VLAHqMKVpHQEqKpoTLsjIaq1Dyen+YSpOXkdK
+4FHaoFi3dSA2EhadTytD/1v4NWTW9mccMynHRdVvfnWvjahNRXpaItLEF/BMhNRY
+BZKgYmm8mPhd+KcnINNYfTgA/M+Bc8hyB+riVzBTr0OPI52E0SX41kAA3Q0Uz73T
+jdri5rJrriR13j2F3bjfKKCvHxNO6lXpCaoN0o82IH4=
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDLDCCAhSgAwIBAgIBCzANBgkqhkiG9w0BAQsFADAjMSEwHwYDVQQDDBhxd2Vu
+IGRlY295IHBhdGhsZW4wIHJvb3QwHhcNMjYwODIwMDAyNjA5WhcNMzYwODE3MDAy
+NjA5WjArMSkwJwYDVQQDDCBxd2VuIGRlY295IHBhdGhsZW4wIGludGVybWVkaWF0
+ZTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAJy5z72qNVW07KGS97qn
+fVv6ad0Fw1Yz6nATYEHv5GVIkzSqNRahTz07/EnDo0biXzWP3sRn/pG1siMBTc7V
+to5E8sBNeRrowQTVq3Z7ETopAu2GZhkYLkwYlyuJnR16CT+ugYlZccB4KQNjUBsw
+pIiADgSvnJb6PewrihGVTqE9oz4y2PkEJMwleu7rl824tFOWLAGVqgSeHMTjOEs9
+stGa0vtPmsJ5fDFEhfgSZXB9qp2PIbqWpDKMv83SMvYZkC73ph+meDSstwVPi9rD
+d0+jfNVYzpZr0bCFhgIAOUuF9zewIqt7URcPpfxqeVY9omcZqOEfJ1m6mV/7JKve
+ScMCAwEAAaNjMGEwHQYDVR0OBBYEFNVCOlAeACAFzk0DCWSKllAyNbRtMA8GA1Ud
+EwEB/wQFMAMBAf8wDgYDVR0PAQH/BAQDAgEGMB8GA1UdIwQYMBaAFEJT48hA5o2/
+fnN82RsY/hZUrG1LMA0GCSqGSIb3DQEBCwUAA4IBAQBI3+V/WUlDiOGY70FduOHV
+Fw1kjL5GJ/p+pKxInTpDlaGVbEqjave8qewzgAq7MwrJ90H9nlahL0FPRQA1Vk2k
+0K4e9dLgIxu/ZoiAy+a9aieoOrQKW6oFpoM+GPnI2eT9GD+dFqojnVT2mqlTDjr0
+9drvYrGlpFXp+hFO6NtcTqLboGp4pY7rYuEJP8D/KTz+4E5mx7IlprEm67GNCNut
+aqAL/M8S7HayV5T87gPFQbdFgvt/4/lvjnx7M15QCEyPWPgVMY8TlDIAxvlwty6c
+R585U9Cu3xT6DbpNea++sk7TppQQRflvSOtUbU0rz2TERfwu0L3Z8S16MTIxqFOL
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDFDCCAfygAwIBAgIBCjANBgkqhkiG9w0BAQsFADAjMSEwHwYDVQQDDBhxd2Vu
+IGRlY295IHBhdGhsZW4wIHJvb3QwHhcNMjYwODIwMDAyNjA5WhcNMzYwODE3MDAy
+NjA5WjAjMSEwHwYDVQQDDBhxd2VuIGRlY295IHBhdGhsZW4wIHJvb3QwggEiMA0G
+CSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCQ/RQOjKJAb68E/VQcDPyaF19O7QrD
+ufZ1Flar1n4ieiEJk2o5vWVZ1R2HIQlrJWGi1uaT91d21XZMVaf4KJy4PH6W0GFp
+Ab6nufPEXj/U6/K1aTLnvDtcjMAPVquXYz2MDZp9NbD8VgYbj3XnWGBiaYOJ2dBW
+oNYIo2jOP2e5FO5X7FnYjJOedDxvIuolE6SlDIoujuiTx+umwGIpyxYdPxzPmZvT
+eyUDHbZK9fpKLHIT7lrWWlJkqD1vyXi7Qdrp9TwIRPwajwP1bdfSVn+sIPeXV0CC
+kIFXHpyhecJMlhhx0QwJYUDyPdt53cdWCSMYIymDTQheDMMHNv3g1cTtAgMBAAGj
+UzBRMAwGAyoDBAQFBgNVHRMwHQYDVR0OBBYEFEJT48hA5o2/fnN82RsY/hZUrG1L
+MBIGA1UdEwEB/wQIMAYBAf8CAQAwDgYDVR0PAQH/BAQDAgEGMA0GCSqGSIb3DQEB
+CwUAA4IBAQAIMFAwW55dMj43gsGDbbZF6fpcL3ZfWGXGptoX9sTEPRgsne4y9W3A
+gmbzGhBH06rAd++YSUcDV4rSSXJQ9ouRyFjcq8InKnrikNwlBkH/lJ4tmTngKgN0
+wA6JvmT7fL1olzCrrf2r5eo/YWkEUqvFx8O+pbBnLYjBQ42VDr30Dh/Eu28BIL3/
+nNEg3sAQ0j89wskBZsHEUfaA7vng2uE+67isogc9GhSTyN/1N6OXHyUxCqSYvDSY
+v5qF7dTe/PQl2fsiX9j+D1+2H2PkPEj01oI+XalcVm16nS2YTOPxpGvircOOQaLj
+oAUOrGa/AnAk4nVPthOBguN+6aW9n7mS
+-----END CERTIFICATE-----
+`;
+
+// R2-21 entrance E1, issuer arm: a leaf under a CA that IS declared CA:TRUE
+// but whose keyUsage is present with NO bit set. `cannotSignCertificates`
+// treated an empty bit list as an absent keyUsage — unrestricted — so the walk
+// reported the generic "point NODE_EXTRA_CA_CERTS at the issuing CA" advice
+// for a CA that is already in the bundle. Measured on Node v22.23.0:
+// `checkIssued` is false while `verify(publicKey)` is true, and the handshake
+// fails UNABLE_TO_VERIFY_LEAF_SIGNATURE.
+const TEST_TLS_CERT_FULLCHAIN_EMPTY_KEY_USAGE_CA = `-----BEGIN CERTIFICATE-----
+MIIDFTCCAf2gAwIBAgIBHzANBgkqhkiG9w0BAQsFADAhMR8wHQYDVQQDDBZxd2Vu
+IGVtcHR5IGtleXVzYWdlIGNhMB4XDTI2MDgyMDAwMzMzOFoXDTM2MDgxNzAwMzMz
+OFowJjEkMCIGA1UEAwwbcXdlbiBlbXB0eSBrZXl1c2FnZSBjYSBsZWFmMIIBIjAN
+BgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAoRqkrBWUWRv8RN0TZ9ZflOcV01/8
+bxwAYLr3/8wfYksDFpfUJQ8a6IhlgJDepfJ6ifzHMpVIQ+it/JsR4qdOZ3LY5osV
+kyRZydtk0lFbhAPwJkItw1aCS8r/6jSxKjTrwJRMk/go8jInVzpihlTU+tOzel9f
+qeEu1HZYDRGhg4/t9HSMe6L5l+af9bEjDH55htuA/QhV7uyV4Sm6WFx6stDgIzud
+AAQzNQ9aK9aQoZ8wDkcFnKd8i8oD66aXngql2mxmiz3vpcyYUCUl8x+tGDFQqsOQ
+8HtbLWcCtLNJDcU8cfLBvSK8ZTGdl/tKN5K7zouqCqq8LustcOIVG8Bh/QIDAQAB
+o1MwUTAPBgNVHREECDAGhwR/AAABMB0GA1UdDgQWBBQPDg612ZtvgSs7k53vVSTL
+Z8VitDAfBgNVHSMEGDAWgBQGcCcC7phXNoDQQ/3DuXwB5ejRHzANBgkqhkiG9w0B
+AQsFAAOCAQEAK6RAp3v1SQjObptzP7mDUuR+MGUNHY2BJ4jAHJ11CiWxhI/zojfu
+my+teQhx1X9LMG45o7ZAbg/kAm4iYWsKCMUKcQjuMoVP8vq+DYGPm4TGMm292cU7
+vu/CWJgekpyy95/3Bv2YJYBXuZE3pTWh50TTb0XKlU3SbjF0SozuDn6AQ6R8P7wX
+mp12KHWkt1yrGV+UBZSgeWV1wG8u+krVwpBACrj8IIQck1ZBxWdSHb9dKfq3P0PE
+p6NrEhksM3qQiDlo+gpSFXUJM1UuSf7NcHe4hd2gzi3RtB8iadOrW6hRwOfE9ywt
+5HOmyXShJ3h6C8wlcYOtoXuwGwtQDxMf8Q==
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIC/jCCAeagAwIBAgIBHjANBgkqhkiG9w0BAQsFADAhMR8wHQYDVQQDDBZxd2Vu
+IGVtcHR5IGtleXVzYWdlIGNhMB4XDTI2MDgyMDAwMzMzOFoXDTM2MDgxNzAwMzMz
+OFowITEfMB0GA1UEAwwWcXdlbiBlbXB0eSBrZXl1c2FnZSBjYTCCASIwDQYJKoZI
+hvcNAQEBBQADggEPADCCAQoCggEBAKX0vfDpAMQr4KVjue/Ktu2PCdw++eGLSK1I
+9oYnT3G6s/Q6bmFWBSJQRomHc5xuiyyxwdHU8Yiip82UOu0lj+/EmOylGZmB5XS2
+1ovalVlMj0gXzx+Wmfq8y1sbACY6QJAXesKR/ld+931NZJxVuqBL3HbB6By23lcB
+hSQ9yHyx//X+7epaX99BXMA0XvMxvhCsPRPm7u0tbqM1p19rlBEYoqZtuj762sqG
+xP9jPs3SFR5sc+5RFAkOdQMzBYADZwOTCY9vYoWcsWN8rBtogCIwgQhHd8E22+b6
+HUuMngG/33Z2PYGllGdQQWnMgsjY+4Ajor4Ti+1/KLu7ahByfUUCAwEAAaNBMD8w
+HQYDVR0OBBYEFAZwJwLumFc2gNBD/cO5fAHl6NEfMA8GA1UdEwEB/wQFMAMBAf8w
+DQYDVR0PAQH/BAMDAQAwDQYJKoZIhvcNAQELBQADggEBAFfCs+X/FUZ8XZUKHkR1
+YBwbWeQoHKA3OPYQQCBwZr4R0wU7hqZXNi/lBHYlQZbMZ3r7bGDvjmTWLpeRL3sA
+8wC4fYBVYUix0BAI55+E35rYRQ7FE05iD3XuWtenqjG1H0EPzNZitghmtc17UnQi
+YeLM9h1iwT/e/Jepx7PtqyT8hHjO8LZuySSEIpkkWDScSBurlopuKio9UKu0iVN1
+bLlTX/N6uK2r3Bqunn3pddh1DalsowK3LhqaQsOOOnr7dSl4KpIyISaQ8JuiSGFJ
+6GXpe1amOpSl5GDovmyb0euahesGPhe61ayKPyTtyCxxaIT6y5CququDbWCRPl4O
+YWU=
+-----END CERTIFICATE-----
+`;
+
+describe('describeWorkerTlsTrustGaps', () => {
+  const daemonUrl = 'https://127.0.0.1:4170';
+
+  /** The issuing root of TEST_TLS_CERT_FULLCHAIN, on its own. */
+  const fullchainRootPem = (): string => {
+    const blocks = TEST_TLS_CERT_FULLCHAIN.match(
+      /-----BEGIN CERTIFICATE-----[^-]*-----END CERTIFICATE-----/g,
+    );
+    return `${blocks!.at(-1)}\n`;
+  };
+
+  it('reports nothing for a self-signed cert covering the dialled host', () => {
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT),
+        certPath: '/certs/daemon.pem',
+        daemonUrl,
+      }),
+    ).toEqual([]);
+  });
+
+  // R2-21 entrance 2: nothing modelled OpenSSL's server-purpose check on the
+  // serving certificate ITSELF, so both shapes below booted green with an
+  // empty diagnostic while every worker handshake failed INVALID_PURPOSE.
+  it.each([
+    [
+      'keyUsage carrying keyCertSign only',
+      TEST_TLS_CERT_LEAF_KEY_CERT_SIGN_ONLY,
+    ],
+    [
+      'extendedKeyUsage carrying clientAuth only',
+      TEST_TLS_CERT_LEAF_EKU_CLIENT_ONLY,
+    ],
+  ])(
+    'names the depth-0 server-purpose gap for a leaf with %s',
+    (_label, pem) => {
+      const gaps = describeWorkerTlsTrustGaps({
+        cert: Buffer.from(pem),
+        certPath: '/certs/daemon.pem',
+        daemonUrl,
+      });
+      expect(gaps).toHaveLength(1);
+      expect(gaps[0]).toContain('INVALID_PURPOSE');
+      expect(gaps[0]).toContain('server authentication');
+    },
+  );
+
+  // The control arm: absent extensions mean "unrestricted" in RFC 5280, so a
+  // fixture carrying neither keyUsage nor EKU must stay silent — otherwise
+  // the check above would warn on every certificate the other tests use.
+  it('stays quiet for a serving leaf that restricts nothing', () => {
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT),
+        certPath: '/certs/daemon.pem',
+        daemonUrl,
+      }),
+    ).toEqual([]);
+  });
+
+  // R2-21 entrance 3: the issuer-capability check read basicConstraints and
+  // keyCertSign but never extendedKeyUsage, so a chain through a real CA
+  // whose EKU excludes serverAuth walked up green. An EKU on a chain member
+  // constrains everything below it — measured, this chain fails
+  // INVALID_PURPOSE and the EKU-free twin authorizes.
+  it('names the EKU gap for a chain through a clientAuth-only intermediate', () => {
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_EKU_INTERMEDIATE),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('INVALID_PURPOSE');
+    expect(gaps[0]).toContain('extendedKeyUsage does not include serverAuth');
+    expect(gaps[0]).toContain('qwen eku test intermediate');
+  });
+
+  // R2-21 entrance EA: `anyExtendedKeyUsage` is not `serverAuth`. The depth-0
+  // server-purpose check carried an `EKU_ANY` exception, so this leaf booted
+  // with an empty diagnostic while its handshake failed INVALID_PURPOSE.
+  it('names the depth-0 server-purpose gap for an anyEKU-only leaf', () => {
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_LEAF_EKU_ANY_ONLY),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('INVALID_PURPOSE');
+    expect(gaps[0]).toContain('server authentication');
+  });
+
+  // The control arm, and the reason the assertion above is attributable to the
+  // EKU alone: the same shape carrying `serverAuth` authorizes (measured) and
+  // must stay silent.
+  it('stays quiet for the serverAuth twin of the anyEKU-only leaf', () => {
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_LEAF_EKU_SERVER_ONLY),
+        certPath: '/certs/daemon.pem',
+        daemonUrl,
+      }),
+    ).toEqual([]);
+  });
+
+  // R2-21 entrance EA, issuer arm: `issuerServesTlsChain` carried the same
+  // exception, so a chain through an anyEKU-only CA walked up green while the
+  // handshake failed INVALID_PURPOSE against the fullchain trust store.
+  it('names the EKU gap for a chain through an anyEKU-only CA', () => {
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_EKU_ANY_CA),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('INVALID_PURPOSE');
+    expect(gaps[0]).toContain('extendedKeyUsage does not include serverAuth');
+    expect(gaps[0]).toContain('qwen anyeku test ca');
+  });
+
+  // R2-21 entrance E1: a keyUsage that is PRESENT and grants no bit is not an
+  // ABSENT one. Reading `bits.length === 0` as "unrestricted" booted green
+  // while the handshake failed UNABLE_TO_VERIFY_LEAF_SIGNATURE.
+  it('names the depth-0 server-purpose gap for an empty keyUsage', () => {
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_LEAF_KEY_USAGE_EMPTY),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('INVALID_PURPOSE');
+    expect(gaps[0]).toContain('server authentication');
+  });
+
+  it.each([
+    ['malformed keyUsage', TEST_TLS_CERT_LEAF_KEY_USAGE_MALFORMED],
+    ['empty extendedKeyUsage', TEST_TLS_CERT_LEAF_EKU_EMPTY],
+  ])('names the depth-0 server-purpose gap for %s', (_label, pem) => {
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(pem),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('INVALID_PURPOSE');
+    expect(gaps[0]).toContain('server authentication');
+  });
+
+  it('names the EKU gap for a chain through an empty-EKU CA', () => {
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_EKU_EMPTY_CA),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('INVALID_PURPOSE');
+    expect(gaps[0]).toContain('extendedKeyUsage does not include serverAuth');
+    expect(gaps[0]).toContain('empty EKU issuing CA');
+  });
+
+  // R2-21 entrance D1: `declaresNotACa` located basicConstraints by scanning
+  // the WHOLE DER, so a v1 root whose serial number carries the OID's bytes
+  // was read as declaring CA:FALSE. The chain authorizes (measured), so every
+  // gap here would be a false alarm sending the operator to reissue a working
+  // CA. The structural walk finds no extensions on a v1 certificate at all.
+  it('stays quiet for a v1 root whose serial carries the basicConstraints OID', () => {
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_OID_SERIAL_V1_ROOT),
+        certPath: '/certs/daemon.pem',
+        daemonUrl,
+      }),
+    ).toEqual([]);
+  });
+
+  // R2-21 entrance S1, the other direction: the same unanchored scan let a
+  // decoy extension carrying the OID's bytes SWALLOW a real pathlen gap —
+  // `pathLenConstraint` matched the decoy, read no INTEGER after it and
+  // returned undefined. The chain fails PATH_LENGTH_EXCEEDED (measured).
+  it('names the pathlen gap past a decoy extension carrying the OID bytes', () => {
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_DECOY_PATHLEN0_ROOT),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('PATH_LENGTH_EXCEEDED');
+    expect(gaps[0]).toContain('pathlen:0');
+    expect(gaps[0]).toContain('qwen decoy pathlen0 root');
+  });
+
+  // R2-21 entrance C1: the unloadable-serving-file gap used to be gated on an
+  // operator CA also being configured. With none, the workers' own
+  // NODE_EXTRA_CA_CERTS *is* that file — measured through the loader (not the
+  // `ca:` option, which reads shapes the loader does not): a TRUSTED
+  // CERTIFICATE-labelled serving file boots with zero gaps while the worker
+  // handshake fails DEPTH_ZERO_SELF_SIGNED_CERT and the plain-PEM twin
+  // authorizes.
+  it('reports an unloadable serving file with no operator CA configured', () => {
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(
+        TEST_TLS_CERT_LEAF_EKU_SERVER_ONLY.replace(
+          /CERTIFICATE-----/g,
+          'TRUSTED CERTIFICATE-----',
+        ),
+      ),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('/certs/daemon.pem');
+    expect(gaps[0]).toContain(
+      "holds no PEM certificate block Node's loader can read",
+    );
+    expect(gaps[0]).toContain('DEPTH_ZERO_SELF_SIGNED_CERT');
+    // The merge clause belongs to the operator-CA arm and must not leak into
+    // this one — there is no NODE_EXTRA_CA_CERTS here to discard.
+    expect(gaps[0]).not.toContain('is discarded');
+  });
+
+  // R2-21 entrance E1, issuer arm. See the fixture: the CA is in the bundle
+  // and declared CA:TRUE, so only the keyUsage reading decides whether the
+  // operator is told the truth or sent to re-point NODE_EXTRA_CA_CERTS at a
+  // file that already holds the CA.
+  it('names the unusable issuer for a CA whose keyUsage grants nothing', () => {
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_EMPTY_KEY_USAGE_CA),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('keyUsage omits keyCertSign');
+    expect(gaps[0]).toContain('qwen empty keyusage ca');
+    expect(gaps[0]).toContain('already there');
+  });
+
+  it('names the leaf-as-trust-anchor gap for a CA-issued cert', () => {
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_CA_ISSUED),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+    expect(gaps[0]).toContain('qwen test root CA');
+  });
+
+  it('stays quiet when the operator CA actually anchors the chain', () => {
+    // R2-3: BEHAVIOUR FLIP. A set `operatorCaCertPath` used to suppress this
+    // gap on its own. A typo'd, unrelated or unloadable NODE_EXTRA_CA_CERTS
+    // anchors exactly as little as no CA at all, so coverage is now judged on
+    // the file's contents — the certificates the workers really receive.
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_LEAF_ONLY),
+        certPath: '/certs/daemon.pem',
+        daemonUrl,
+        operatorCaCertPath: '/certs/rootCA.pem',
+        operatorCaCert: Buffer.from(fullchainRootPem()),
+      }),
+    ).toEqual([]);
+  });
+
+  it('still names the gap when the operator CA does not anchor the chain', () => {
+    // R2-3(a): the merge in resolveWorkerCaCertPath cannot make an unrelated
+    // CA anchor this leaf, so the operator lands in exactly the boot-green /
+    // workers-looping mode this warning exists to name.
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_CA_ISSUED),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+      operatorCaCertPath: '/certs/unrelated.pem',
+      operatorCaCert: Buffer.from(fullchainRootPem()),
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+    expect(gaps[0]).toContain('/certs/unrelated.pem');
+  });
+
+  it('still names the gap when the operator CA path is unreadable', () => {
+    // R2-3(a): a set-but-unreadable path reaches the check with no contents.
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_CA_ISSUED),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+      operatorCaCertPath: '/certs/typo.pem',
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+    expect(gaps[0]).toContain('/certs/typo.pem');
+  });
+
+  // The generic unanchored gap told the operator to point NODE_EXTRA_CA_CERTS
+  // at the issuing CA — which this bundle already carries. The real fix is the
+  // issuer's keyUsage, so the operator re-exported, restarted, and looped on
+  // the same failure with no hint.
+  it('names the issuer keyUsage when the walk stops one link short', () => {
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_NO_KEY_CERT_SIGN_ROOT),
+      certPath: '/certs/fullchain.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('keyCertSign');
+    expect(gaps[0]).toContain('key usage does not include certificate signing');
+    expect(gaps[0]).toContain('qwen nokeycertsign test root CA');
+    // The advice this replaces is the one that sends them in a circle.
+    expect(gaps[0]).not.toContain('Point NODE_EXTRA_CA_CERTS at the');
+  });
+
+  it('softens the leaf-anchor gap for a CA already in the default trust store', () => {
+    // R2-3(c): the static model cannot see the workers' default trust store,
+    // so an issuer already anchored there makes this warning cry wolf. Say
+    // what the check actually knows instead of asserting a certain failure.
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_CA_ISSUED),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(gaps[0]).toContain(
+      "unless the issuing CA is already in the workers' default trust store",
+    );
+  });
+
+  // The explicit-CA:FALSE fixture is the only shape the incapable-issuer
+  // check was pinned on, so unifying it with the terminator's
+  // `declaresNotACa` predicate shipped green — both predicates are true for
+  // that fixture — while chains through THIS shape were reported anchored and
+  // every worker handshake failed INVALID_PURPOSE/INVALID_CA.
+  it('names a v3 intermediate that carries no basicConstraints at all', () => {
+    const intermediate = new X509Certificate(
+      TEST_TLS_CERT_FULLCHAIN_V3_NO_BC_INTERMEDIATE.match(
+        /-----BEGIN CERTIFICATE-----[^-]*-----END CERTIFICATE-----/g,
+      )![1]!,
+    );
+    // Precondition: the two predicates disagree for this shape — which is
+    // what makes unifying them a silent regression. `.ca === false` alone is
+    // shared with the explicit-CA:FALSE fixture, so it does not discriminate:
+    // pin the property that actually does, the ABSENCE of the extension, the
+    // way `declaresNotACa` reads it. Without this, regenerating the fixture
+    // with `basicConstraints=CA:FALSE` would keep every assertion below green
+    // while the fixture silently stopped covering the shape it is named for.
+    expect(intermediate.ca).toBe(false);
+    expect(
+      intermediate.raw.includes(Buffer.from([0x06, 0x03, 0x55, 0x1d, 0x13])),
+    ).toBe(false);
+
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_V3_NO_BC_INTERMEDIATE),
+      certPath: '/certs/fullchain.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('no basicConstraints at all');
+    expect(gaps[0]).toContain('qwen v3nobc test intermediate');
+  });
+
+  // Every `operatorCaCert:` fixture in this suite is date-valid, so the date
+  // walk only ever fired on serving-file members — a mutant exempting
+  // operator-contributed members kept all of them green. An operator
+  // NODE_EXTRA_CA_CERTS file contributing an expired root on the anchor path
+  // is exactly the case the walk was added for.
+  it('names an expired chain member the OPERATOR file contributed', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2130-01-01T00:00:00Z'));
+    try {
+      const gaps = describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_LEAF_ONLY),
+        certPath: '/certs/daemon.pem',
+        daemonUrl,
+        operatorCaCertPath: '/certs/rootCA.pem',
+        operatorCaCert: Buffer.from(fullchainRootPem()),
+      });
+      expect(gaps).toHaveLength(1);
+      expect(gaps[0]).toContain('CERT_HAS_EXPIRED');
+      expect(gaps[0]).toContain('qwen fullchain test root CA');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('names an expired chain member the signature-only walk accepts', () => {
+    // R2-3(b): `x509.verify` checks signatures and never consults dates, so an
+    // expired root anchors a fullchain "fine" here while every worker
+    // handshake fails CERT_HAS_EXPIRED. Boot validation covers the leaf alone,
+    // so nothing else would ever name it. The fixture root outlives its leaf
+    // by design, so the clock — not a second fullchain — is what moves.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2130-01-01T00:00:00Z'));
+    try {
+      const gaps = describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN),
+        certPath: '/certs/fullchain.pem',
+        daemonUrl,
+      });
+      expect(gaps).toHaveLength(1);
+      expect(gaps[0]).toContain('CERT_HAS_EXPIRED');
+      expect(gaps[0]).toContain('qwen fullchain test root CA');
+      // The leaf's own dates are boot validation's job, not this warning's.
+      expect(gaps[0]).not.toContain('CN=localhost,');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // R2-21 entrance 4: nothing modelled pathLenConstraint, so this chain
+  // walked up anchored and green while every worker handshake failed
+  // PATH_LENGTH_EXCEEDED.
+  it('names a pathLenConstraint the chain exceeds', () => {
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_PATHLEN0_ROOT),
+      certPath: '/certs/fullchain.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('PATH_LENGTH_EXCEEDED');
+    expect(gaps[0]).toContain('pathlen:0');
+    expect(gaps[0]).toContain('qwen pathlen test root CA');
+  });
+
+  it('leaves a pathlen:0 root that signs the leaf directly alone', () => {
+    // R5-6: the arm was pinned by a single VIOLATING chain, so the boundary
+    // comparison itself was unpinned — an off-by-one (`<` for `<=`) survived
+    // the whole suite while false-alarming on this compliant shape, telling
+    // the operator to "Reissue that CA … or shorten the chain" for a chain
+    // whose real handshake authorizes. The mirror of the depth-0 purpose
+    // pinning above, one layer down.
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_PATHLEN0_ROOT_DIRECT_LEAF),
+        certPath: '/certs/fullchain.pem',
+        daemonUrl,
+      }),
+    ).toEqual([]);
+  });
+
+  // R2-21 entrance 5, the false-alarm direction: the walk took whichever copy
+  // of a renewed CA came first and reported the expired one as the path the
+  // handshake relies on. OpenSSL may use either; preferring the usable one
+  // keeps the diagnostic from sending operators to renew a CA they already
+  // renewed. The clock is moved past the short-lived copy only.
+  it('prefers a usable issuer over an expired same-subject twin', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2030-01-01T00:00:00Z'));
+    try {
+      expect(
+        describeWorkerTlsTrustGaps({
+          cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_RENEWED_ROOT),
+          certPath: '/certs/fullchain.pem',
+          daemonUrl,
+        }),
+      ).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('names a chain member whose validity window has not started', () => {
+    // Symmetric to the expiry branch: clock skew or a freshly minted root
+    // fails every handshake CERT_NOT_YET_VALID with the same silent boot.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2020-01-01T00:00:00Z'));
+    try {
+      const gaps = describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN),
+        certPath: '/certs/fullchain.pem',
+        daemonUrl,
+      });
+      expect(gaps).toHaveLength(1);
+      expect(gaps[0]).toContain('CERT_NOT_YET_VALID');
+      expect(gaps[0]).toContain('qwen fullchain test root CA');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('says nothing about certificates outside the anchor path', () => {
+    // The bundle may carry unrelated CAs; only the members the leaf's walk
+    // leans on are members whose validity the handshake enforces.
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(`${TEST_TLS_CERT}${TEST_TLS_CERT_EXPIRED}`),
+        certPath: '/certs/daemon.pem',
+        daemonUrl,
+      }),
+    ).toEqual([]);
+  });
+
+  it('names the SAN gap when the cert does not cover the dialled host', () => {
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_NO_LOOPBACK_SAN),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('ERR_TLS_CERT_ALTNAME_INVALID');
+    expect(gaps[0]).toContain('127.0.0.1');
+  });
+
+  // R2-21 entrance 1: the diagnostic SAN-checked the LOOSE parser's first
+  // block while `createSecureContext` — and the workers' loader — serve the
+  // loader-framed first block. Absorbing a predecessor's BEGIN marker into a
+  // comment line makes the two disagree: the line-oriented loader skips that
+  // line, the regex parser still matches it. Before the fix this file
+  // reported no gap (it judged the covering certificate that is never served)
+  // while every worker handshake failed ERR_TLS_CERT_ALTNAME_INVALID.
+  it("SAN-checks the served block, not the loose parser's first block", () => {
+    const covering = TEST_TLS_CERT.trim().split('\n');
+    const servingFile = [
+      `# vendor note: ${covering[0]}`,
+      ...covering.slice(1),
+      TEST_TLS_CERT_NO_LOOPBACK_SAN.trim(),
+      '',
+    ].join('\n');
+
+    // Precondition: the two parsers really do disagree about the leaf here.
+    expect(extractCertificateBlocks(servingFile)).toHaveLength(1);
+    expect(
+      new X509Certificate(extractCertificateBlocks(servingFile)![0]!).checkIP(
+        '127.0.0.1',
+      ),
+    ).toBeFalsy();
+
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(servingFile),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('ERR_TLS_CERT_ALTNAME_INVALID');
+    expect(gaps[0]).toContain('127.0.0.1');
+  });
+
+  it('checks the host actually dialled, not a fixed loopback literal', () => {
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_NO_LOOPBACK_SAN),
+        certPath: '/certs/daemon.pem',
+        daemonUrl: 'https://example.invalid:4170',
+      }),
+    ).toEqual([]);
+  });
+
+  it('anchors a fullchain serving file on the issuing CA it carries', () => {
+    // R2-2: `X509Certificate` reads only the first PEM block, so a fullchain
+    // used to be judged on its leaf alone and reported as unanchorable — even
+    // though the supervisor injects the whole file, root included, as the
+    // workers' trust store.
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN),
+        certPath: '/certs/fullchain.pem',
+        daemonUrl,
+      }),
+    ).toEqual([]);
+  });
+
+  it('still names the gap when the bundle stops short of a root', () => {
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_LEAF_ONLY),
+      certPath: '/certs/fullchain.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+    expect(gaps[0]).toContain('qwen fullchain test root CA');
+  });
+
+  it('checks an IPv6 dial host against the iPAddress SAN, brackets stripped', () => {
+    // R2-1: `URL.hostname` yields `[::1]`, which `isIP` rejects, so the check
+    // used to take the DNS-name branch and false-positive on every correct
+    // IPv6 serving cert.
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_IPV6_SAN),
+        certPath: '/certs/daemon.pem',
+        daemonUrl: 'https://[::1]:4170',
+      }),
+    ).toEqual([]);
+  });
+
+  it('names the SAN gap for an IPv6 host the certificate does not cover', () => {
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_IPV6_SAN),
+      certPath: '/certs/daemon.pem',
+      daemonUrl: 'https://[fd00::1]:4170',
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('ERR_TLS_CERT_ALTNAME_INVALID');
+    expect(gaps[0]).toContain('fd00::1');
+    expect(gaps[0]).not.toContain('[fd00::1]');
+  });
+
+  it('reports both gaps when a CA-issued cert also misses the dialled host', () => {
+    // R2-7: every other case produces 0 or 1 gap, so an inserted `return gaps`
+    // after the first push — or turning the SAN `if` into an `else if` —
+    // survived the whole suite. Under that mutant an operator fixes the trust
+    // anchor, restarts, and only then discovers the SAN failure.
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_CA_ISSUED),
+      certPath: '/certs/daemon.pem',
+      daemonUrl: 'https://example.invalid:4170',
+    });
+    expect(gaps).toHaveLength(2);
+    expect(gaps.join('\n')).toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+    expect(gaps.join('\n')).toContain('ERR_TLS_CERT_ALTNAME_INVALID');
+  });
+
+  it('names a self-signed chain terminator that is not a CA', () => {
+    // R2-10: chain geometry alone blesses this file as anchored, but OpenSSL
+    // also requires a signing certificate to carry CA:TRUE. Measured on Node
+    // 22: leaf + CA:FALSE self-signed issuer as the trust store fails
+    // INVALID_PURPOSE, while boot stays green and warning-free.
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_NON_CA_ROOT),
+      certPath: '/certs/fullchain.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('INVALID_PURPOSE');
+    expect(gaps[0]).toContain('qwen non-CA test issuer');
+  });
+
+  it('names a chain that passes THROUGH an issuer that is not a CA', () => {
+    // R4-4: the CA-suitability check only covered the self-signed terminator,
+    // so a chain whose INTERMEDIATE carries basicConstraints CA:FALSE walked
+    // all the way to a real CA root and was reported anchored. Measured on
+    // Node 22 / OpenSSL 3 with this exact file as the served chain and the
+    // trust store: authorized=false, code=INVALID_PURPOSE — daemon green,
+    // /health green, every channel worker restart-looping with no boot hint.
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_NON_CA_INTERMEDIATE),
+      certPath: '/certs/fullchain.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('INVALID_PURPOSE');
+    expect(gaps[0]).toContain('qwen non-CA test intermediate');
+  });
+
+  it('reports the discarded operator CA when the serving file is unloadable', () => {
+    // R4-3: the model merged the operator CA into the serving chain
+    // unconditionally, but `resolveWorkerCaCertPath` does the opposite when
+    // the SERVING file yields no loadable block — `daemonBlocks === undefined`
+    // discards the operator CA and hands workers the serving file alone. Boot
+    // therefore reported no gap while every worker handshake failed.
+    const der = new X509Certificate(TEST_TLS_CERT_FULLCHAIN_LEAF_ONLY).raw;
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: der,
+      certPath: '/certs/daemon.der',
+      daemonUrl,
+      operatorCaCertPath: '/certs/rootCA.pem',
+      operatorCaCert: Buffer.from(fullchainRootPem()),
+    });
+    expect(gaps).toHaveLength(2);
+    expect(
+      gaps.some(
+        (gap) =>
+          gap.includes('/certs/daemon.der') &&
+          gap.includes('/certs/rootCA.pem') &&
+          gap.includes('is discarded'),
+      ),
+    ).toBe(true);
+    // The operator CA no longer anchors a chain the workers never receive.
+    expect(
+      gaps.some((gap) => gap.includes('UNABLE_TO_VERIFY_LEAF_SIGNATURE')),
+    ).toBe(true);
+  });
+
+  it('keeps trusting a self-signed leaf that carries CA:FALSE', () => {
+    // The constraint binds only past the leaf: a CA:FALSE self-signed cert in
+    // its OWN trust store is verified at depth 0 and handshakes fine
+    // (measured on Node 22), so requiring CA:TRUE here would cry wolf on the
+    // ordinary `openssl req -x509` daemon cert.
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_SELF_SIGNED_NON_CA),
+        certPath: '/certs/self-signed.pem',
+        daemonUrl,
+      }),
+    ).toEqual([]);
+  });
+
+  it('defers to the boot parse guard on an unreadable certificate', () => {
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from('not a certificate'),
+        certPath: '/certs/daemon.pem',
+        daemonUrl,
+      }),
+    ).toEqual([]);
+  });
+
+  it('keeps trusting a v1 root that carries no basicConstraints at all', () => {
+    // R3-8: `X509Certificate.ca` is false both for an explicit CA:FALSE and
+    // for a v1/no-extension root, but OpenSSL accepts the second as an issuer.
+    // Measured on Node 22 / OpenSSL 3 with this exact pair: serving the leaf
+    // with the v1 root as the trust store handshakes authorized=true, so the
+    // INVALID_PURPOSE warning here would send the operator to reissue a CA
+    // that already works.
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_V1_ROOT),
+        certPath: '/certs/daemon.pem',
+        daemonUrl,
+      }),
+    ).toEqual([]);
+  });
+
+  it("names an operator CA file Node's loader cannot read", () => {
+    // R3-2: the boot diagnostic used a looser parser than the spawn-time
+    // merge. `cat a.pem b.pem` with no trailing newline in a.pem fuses the
+    // markers onto one line: the loose regex still sees a CA and judged the
+    // chain anchored, while the merge discarded the file and handed workers
+    // the daemon cert alone — daemon log clean, every worker handshake failing
+    // UNABLE_TO_VERIFY_LEAF_SIGNATURE.
+    const root = fullchainRootPem();
+    const fused = `${root.trimEnd()}${root}`;
+    expect(fused).toContain(
+      '-----END CERTIFICATE----------BEGIN CERTIFICATE-----',
+    );
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_LEAF_ONLY),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+      operatorCaCertPath: '/certs/fused.pem',
+      operatorCaCert: Buffer.from(fused),
+    });
+    // R4-7: `.some()` alone lets a mutant that pushes the unanchored gap twice
+    // through, duplicating warnings in the log this diagnostic exists to keep
+    // readable. Every single-gap sibling here pins the count; so do these.
+    expect(gaps).toHaveLength(2);
+    expect(gaps.some((gap) => gap.includes('/certs/fused.pem'))).toBe(true);
+    expect(
+      gaps.some((gap) =>
+        gap.includes("holds no PEM certificate block Node's loader can read"),
+      ),
+    ).toBe(true);
+    // And it no longer counts as an anchor.
+    expect(
+      gaps.some((gap) => gap.includes('UNABLE_TO_VERIFY_LEAF_SIGNATURE')),
+    ).toBe(true);
+  });
+
+  it('does not count a DER operator CA file as an anchor', () => {
+    // R3-2(b): NODE_EXTRA_CA_CERTS is PEM-only — Node never loads a DER file
+    // and says nothing about it — but the boot side used to fall back to a DER
+    // parse and count it as an anchoring CA.
+    const der = new X509Certificate(fullchainRootPem()).raw;
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_LEAF_ONLY),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+      operatorCaCertPath: '/certs/root.der',
+      operatorCaCert: der,
+    });
+    // R4-7: gating the unreadable-file message on a `-----BEGIN` marker being
+    // present drops the DER diagnosis (DER has no markers) while the generic
+    // anchor gap still satisfies a bare `.some()` — the operator is then told
+    // the file 'does not carry a certificate that anchors it' instead of being
+    // told to re-export it as PEM. Pin the count and the DER-specific text.
+    expect(gaps).toHaveLength(2);
+    expect(gaps.some((gap) => gap.includes('/certs/root.der'))).toBe(true);
+    expect(
+      gaps.some((gap) => gap.includes('a DER file is never read at all')),
+    ).toBe(true);
+    expect(
+      gaps.some((gap) => gap.includes('UNABLE_TO_VERIFY_LEAF_SIGNATURE')),
+    ).toBe(true);
+  });
+
+  it('still anchors on a CRLF-terminated operator CA file', () => {
+    // R3-1(strict arm): Node's loader accepts CRLF PEM (measured), so a
+    // vendor-exported CRLF bundle must not be reported as unreadable.
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_FULLCHAIN_LEAF_ONLY),
+        certPath: '/certs/daemon.pem',
+        daemonUrl,
+        operatorCaCertPath: '/certs/rootCA.pem',
+        operatorCaCert: Buffer.from(fullchainRootPem().replace(/\n/g, '\r\n')),
+      }),
+    ).toEqual([]);
   });
 });
 
@@ -3272,6 +5368,87 @@ hxyfpb0iCzGik49j/oL+ZB5C8F8AdBpza8eTXJAeAVP7L5nvWffMgvcXs5sGMF7e
 ARaOwZHpfsTw4Aq74yAWUKXumVGFXQpZMRj/QWgQEItTYF7rJVARIssv5miDbHvW
 1Qm2tDpPnmCd1BedIYWCnHA=
 -----END PRIVATE KEY-----
+`;
+
+/**
+ * A CA-issued serving cert (leaf alone) with the key it pairs with, plus the
+ * root that signs it — the shape the documented `mkcert` flow produces. The
+ * leaf covers 127.0.0.1 and localhost and boots, but anchors nothing by
+ * itself: only an operator `NODE_EXTRA_CA_CERTS` pointing at the root closes
+ * the gap, which is what makes it able to tell the env wiring apart from a
+ * hard-coded `undefined`.
+ */
+const TEST_TLS_CERT_ISSUED_LEAF = `-----BEGIN CERTIFICATE-----
+MIIDMDCCAhigAwIBAgIUSUiporSz6CoX5xzIrRzMJUWh23owDQYJKoZIhvcNAQEL
+BQAwIzEhMB8GA1UEAwwYcXdlbiB3aXJpbmcgdGVzdCByb290IENBMCAXDTI2MDgx
+ODIyMzI1OFoYDzIxMjYwNzI1MjIzMjU4WjAUMRIwEAYDVQQDDAlsb2NhbGhvc3Qw
+ggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCyATi7Mip/VT+YWLvMdqpa
+IrgUpR5xLaZ9HGOI6kavvCvtveN/SEu9CT1XKQDRMT+NrJeTi97JV56GXZStGAES
+68wVnJDwV7EE5/VpRrmEZamn0lxOHeBMdu34F22aQ1xhw9bdRw+00kA5kE2rHEN1
+ZVaE0orqBtj/tnfhWET11b/99W4V+91WJQn+P+HrJGbMUW58qGsoW9C6fa0Pj365
+UymzgAWCLzf5DBziIqsevbcRzLwFUVw5bogjxmFIrd8k/R/xrjqNQJrRJX5SbS9O
+uI4tHmUeUmtjsAql53skJ2j2qpVvldZ0QFUS09O+vUkuSoZQ52s/b4/6SFwqdIXZ
+AgMBAAGjaTBnMBoGA1UdEQQTMBGCCWxvY2FsaG9zdIcEfwAAATAJBgNVHRMEAjAA
+MB0GA1UdDgQWBBQuqaRKepsHMIxA1OlXRfS9ZcyY+TAfBgNVHSMEGDAWgBSa5IYk
+ecO4EMlhojegvuVPj9xRTDANBgkqhkiG9w0BAQsFAAOCAQEASjn63nPtLzzDVWvq
+h7tITuKvE4CeWGATghhJGYYn9FOsyJxnbvVgQN0zmuzpPoTtxVdiGYob5qMEAjZB
+UsCGfWDNsJ6znUc1De0/sjvkq/uHdMgzaOldIgjdT+FO5cbtnDJx+fUe3QANW9or
+uX4mMvMI6ikw2LWPk8yavW1f0JyORa76gl0IoGyTmgBf9v9T4OIqskiR5xB1vE31
+nN5x4BuL5YnYN8x9GBDMOAGNn+HerAB8HSyygoB0A97eOGtxj5+DQh3EpirYx4bM
+4uRnAzkc2poDlbMNG1lLO5MdXjvy4Hy5pu+tSOXkRokV7V3wJWm7TFNBRYjjogip
+mt7FIw==
+-----END CERTIFICATE-----
+`;
+
+const TEST_TLS_KEY_ISSUED_LEAF = `-----BEGIN PRIVATE KEY-----
+MIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQCyATi7Mip/VT+Y
+WLvMdqpaIrgUpR5xLaZ9HGOI6kavvCvtveN/SEu9CT1XKQDRMT+NrJeTi97JV56G
+XZStGAES68wVnJDwV7EE5/VpRrmEZamn0lxOHeBMdu34F22aQ1xhw9bdRw+00kA5
+kE2rHEN1ZVaE0orqBtj/tnfhWET11b/99W4V+91WJQn+P+HrJGbMUW58qGsoW9C6
+fa0Pj365UymzgAWCLzf5DBziIqsevbcRzLwFUVw5bogjxmFIrd8k/R/xrjqNQJrR
+JX5SbS9OuI4tHmUeUmtjsAql53skJ2j2qpVvldZ0QFUS09O+vUkuSoZQ52s/b4/6
+SFwqdIXZAgMBAAECggEAP8YgRTEb+LLaLgLchcyeC90UhpEB7xqj438gShVlbeDE
+/FBkCV4lhHyi9W9DU6+JTYDgbYRXNVum+AzfD4TiHZ1NaRDG/NTuHwvb6PPl04F4
+3x+G4pXhnoOdjp0WL4aiuoQnnu+uuOH7EKSarwtZP94muT+VdXMum68MFDhDvK9X
+HPK8nS7LKYq4RMbkl6iY4HtudL7xFncrBM1rFW5tjJSemvoILmNzFNNndUO06qi5
+39RJWnWjOavlH3KGE0eBRxld+6OVJ1u14uI4ZIJ20nnaBlXPedbPMVoU0d3VGzBk
+MQZXnEIzEn5gKHu0WOH5rFjxSsBJ/LCuoXfkWzR34QKBgQDeFltt8chUENX7fpjH
+IAdSqhPU6IXeeK5bHlebmnEoHk9HmXVOvVRvoy3rfMaFuTUqr1xKrSff4BNrayRs
+TZjRc6Uhp6OL1UqEV3Wj4oIRARnl+X/7THP4c9D37i73h7wIPASRsybw+kQjPHDp
++Cy7EsMR9MtuWCuLvuuhk6ExMwKBgQDNL6CzH82RjaPRXFYliaO+0VZ4WD2zF7tm
+IM908rQRZ534yL4vTopYxiQDErmgIy6oudtdjvL/GqbsGfpA+eMzChuqrMLjoYkW
+wJkjt+8B0IjNW06gxjMhpKvOSqmyhqQUZLS/lh9bLTaEn+rBFGLSgj/eu1b8gA00
+RLYRsPvEwwKBgCcB+EckW5JgbqVAxCbdekvLsbYIrVK5Ea7RcoPTKaLpR/WEf7U3
+zffZynv9K4VbVXpM2MIJDeLloaORaxFWw8uuK0fxAOnTqcX68p+5biz8a4cYPqFt
++USfWwnhHQC/J4iuugK5W9KhsowZ1p9RxtGI5xhlTcHw3J0sCIkVvA8/AoGAHONm
+wbFplOOXO+O/MTvGtRfuD7WEwlFGDiPycWm2Vnj7Mcq5lBl/uu3ypggd4GDzscex
+DeQRbD9JXxZtOHa2OTpkGMyIB9p3XZ+yL+g2m0/L4vXHBTXCfysbEUlLyRnRwhlH
+pW2ybnjYIyYMvDBtlWvHKEnB/nzc3w4JgEYlvFcCgYBoYs7vAT44eu1LSanMeD7m
+317U0Rp+8CzVLg7Jx6cdyoY/aw797tayqNePn28pQiv8sPcsi07tfuwyP7+fuDIP
+HpK7Y2PYdLHDw2uvpM3U5uO/EeHdbcJsyPGsOH7hl2PrbRxWI3o1uH2a2TyVj4o3
+ZNK0I9xeA/IvxH54ZqElqA==
+-----END PRIVATE KEY-----
+`;
+
+const TEST_TLS_CERT_ISSUING_ROOT = `-----BEGIN CERTIFICATE-----
+MIIDKTCCAhGgAwIBAgIUPcGOSM9P9TbZ6hP5evWMiwSygd0wDQYJKoZIhvcNAQEL
+BQAwIzEhMB8GA1UEAwwYcXdlbiB3aXJpbmcgdGVzdCByb290IENBMCAXDTI2MDgx
+ODIyMzI1OFoYDzIxMjYwNzI1MjIzMjU4WjAjMSEwHwYDVQQDDBhxd2VuIHdpcmlu
+ZyB0ZXN0IHJvb3QgQ0EwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCf
+LOHXauGBhN4HTDHi+R+91uInim+k8vumqw6dbdbj6FcKZWF8iIIs2NsKRuLRaaOo
+/HLV3y4rTGWBAVYF3FcYSybqCeMoMa4JJX2FTqzgVdIAog+fNQeQdqOrsAtNXf+W
+weB1c751qJwqunKCyk02i0zbBRqLqd/PJ6lnGDA/Fv6MNvtpjN5ScC018j+RBXwF
+ZHQ0Dm8LkHShBteOr3r8ychU3Q5AMao7MnJK1fa2lixUKKimtaEeH0/SFyHMfHNt
+io9/GxQluEFrunsLcC+6USpdp9sk/N6dxG1IqKPJlpjv5D5tM5qRbDlCZD+QWS9m
+q0vXHbkd/yppytewSfYVAgMBAAGjUzBRMB0GA1UdDgQWBBSa5IYkecO4EMlhojeg
+vuVPj9xRTDAfBgNVHSMEGDAWgBSa5IYkecO4EMlhojegvuVPj9xRTDAPBgNVHRMB
+Af8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQAdypPZaHSwv1ptjv+l6hUIBM+O
+5qNUV0Gk4jmt6UZD7lzIweurap8k2dQdYBF1BjHgo+2dCW7m4W4NHczgUzHwECCG
+4jPNZhc3T0PyGQjqi/pQ1dwSfZn75H9qSq09GHbLq0Vqzp5zDav6Hv8OzSIy2Cm1
+1SDbgTndiZzHiShBJrUhJymLTcaVM2EDad3poKsVoZ7ArFPWViMlJi5fFd8sWjii
+tsVzO5eP6Ln9kRVz9DhyN5a8ky1ceVOX/KsB0fS10e9Ortldm8lbFmcNDbpaVJy1
+35gz6UVTrBB7X/4E/XvBAo9rIiiL4PheAzLjHdDvhJuotdmHIzCfQ0LjQxIU
+-----END CERTIFICATE-----
 `;
 
 // A self-signed localhost cert/key whose validity window is entirely in the
@@ -8896,6 +11073,307 @@ describe('runQwenServe channel worker supervisor', () => {
       code: 'channel_worker_unavailable',
       message: 'Channel worker is not running.',
     } satisfies Partial<ChannelWebhookEnqueueError>);
+  });
+
+  it('hands workers an absolute --tls-cert path and an https daemon url', async () => {
+    // Workers are forked with `cwd: opts.workspace`, so a relative
+    // --tls-cert would resolve against the worker's cwd, load nothing, and
+    // fail every handshake with DEPTH_ZERO_SELF_SIGNED_CERT.
+    // `path.relative` returns the ABSOLUTE target across Windows drives, and
+    // the merge-queue `Test (windows-latest, Node 22.x)` job runs from
+    // `D:\a\qwen-code\qwen-code` while `os.tmpdir()` sits on C: — where the
+    // precondition below fails and takes a required gate red. `TMPDIR` cannot
+    // move it: win32 `os.tmpdir()` reads TMP/TEMP/USERPROFILE, never TMPDIR.
+    // So fall back to a directory under the vitest cwd, which is reachable
+    // relatively on every platform.
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-tls-')),
+    );
+    if (path.isAbsolute(path.relative(process.cwd(), tmpDir))) {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+      tmpDir = fs.realpathSync(
+        fs.mkdtempSync(path.join(process.cwd(), 'qws-channel-tls-')),
+      );
+    }
+    const certPath = path.join(tmpDir, 'cert.pem');
+    const keyPath = path.join(tmpDir, 'key.pem');
+    fs.writeFileSync(certPath, TEST_TLS_CERT);
+    fs.writeFileSync(keyPath, TEST_TLS_KEY);
+    const relativeCert = path.relative(process.cwd(), certPath);
+    expect(path.isAbsolute(relativeCert)).toBe(false);
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const factory = makeReadyWorkerFactory(worker);
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        tlsCert: relativeCert,
+        tlsKey: path.relative(process.cwd(), keyPath),
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: factory,
+        channelServicePidfile: makePidfileDeps(),
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      const opts = factory.mock.calls[0]![0];
+      expect(opts.tlsCaCertPath).toBe(certPath);
+      expect(opts.daemonUrl).toMatch(/^https:\/\//);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  async function bootTlsDaemonForTrustGapLog(
+    hostname: string,
+    serving: { cert: string; key: string } = {
+      cert: TEST_TLS_CERT,
+      key: TEST_TLS_KEY,
+    },
+  ): Promise<string> {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-gap-')),
+    );
+    const certPath = path.join(tmpDir, 'cert.pem');
+    const keyPath = path.join(tmpDir, 'key.pem');
+    fs.writeFileSync(certPath, serving.cert);
+    fs.writeFileSync(keyPath, serving.key);
+    const logBaseDir = path.join(tmpDir, 'debug');
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname,
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        tlsCert: certPath,
+        tlsKey: keyPath,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: makeReadyWorkerFactory(worker),
+        channelServicePidfile: makePidfileDeps(),
+        daemonLogBaseDir: logBaseDir,
+      },
+    );
+    try {
+      await handle.runtimeReady;
+    } finally {
+      await handle.close();
+    }
+    return fs.readFileSync(
+      path.join(logBaseDir, 'daemon', 'daemon.log'),
+      'utf8',
+    );
+  }
+
+  it('writes a worker TLS trust gap to the daemon log at boot', async () => {
+    // R2-6: only the pure describeWorkerTlsTrustGaps was covered, so deleting
+    // this loop, inverting its `tlsOptions && tlsCertPath` guard or feeding it
+    // unresolved values all shipped green — and operators were back in the
+    // silent mode this diagnostic exists to end: daemon boots, /health green,
+    // every channel worker restart-looping with no log line saying why.
+    //
+    // R3-1: this used to bind `::1` to produce the gap, which fails
+    // EADDRNOTAVAIL — not skips — on the IPv6-less CI containers the sibling
+    // guard in server.test.ts names. The gap needs no IPv6: a serving cert
+    // whose only SAN is `example.invalid` is uncovered by the 127.0.0.1 the
+    // workers dial, so the same loop reports the same gap over IPv4 on every
+    // host. Measured against a real handshake: a client dialling 127.0.0.1
+    // with this cert as its CA fails ERR_TLS_CERT_ALTNAME_INVALID.
+    const log = await bootTlsDaemonForTrustGapLog('127.0.0.1', {
+      cert: TEST_TLS_CERT_NO_LOOPBACK_SAN,
+      key: TEST_TLS_KEY_NO_LOOPBACK_SAN,
+    });
+
+    expect(log).toContain('ERR_TLS_CERT_ALTNAME_INVALID');
+    expect(log).toContain('127.0.0.1');
+  });
+
+  // Some CI containers disable IPv6 entirely; binding ::1 then fails with
+  // EADDRNOTAVAIL — the same guard server.test.ts puts on its own ::1 binds.
+  const hasIpv6Loopback = Object.values(os.networkInterfaces()).some(
+    (addresses) =>
+      addresses?.some(
+        (info) => info.family === 'IPv6' && info.address === '::1',
+      ),
+  );
+
+  it.skipIf(!hasIpv6Loopback)(
+    'names the IPv6 dial host in the boot gap, brackets stripped',
+    async () => {
+      // The IPv4 test above cannot catch a regression that formats the dialled
+      // host straight out of `URL.hostname` — `[::1]` — because IPv4 hostnames
+      // carry no brackets. This one pins that, where IPv6 is available.
+      const log = await bootTlsDaemonForTrustGapLog('::1');
+
+      expect(log).toContain('ERR_TLS_CERT_ALTNAME_INVALID');
+      expect(log).toContain('::1');
+      expect(log).not.toContain('[::1]');
+    },
+  );
+
+  it('keeps the daemon log quiet when the serving cert covers the dialled host', async () => {
+    // The other half of the wiring: a guard stuck on would bury real boot
+    // warnings under a gap every TLS daemon reports.
+    const log = await bootTlsDaemonForTrustGapLog('127.0.0.1');
+
+    expect(log).not.toContain('ERR_TLS_CERT_ALTNAME_INVALID');
+    expect(log).not.toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+  });
+
+  const issuedLeafServing = {
+    cert: TEST_TLS_CERT_ISSUED_LEAF,
+    key: TEST_TLS_KEY_ISSUED_LEAF,
+  };
+
+  it('names the anchor gap for a CA-issued cert with no operator CA set', async () => {
+    // The control for the two wiring tests below: with NODE_EXTRA_CA_CERTS
+    // unset this serving cert really is unanchored, so a quiet log in the
+    // next test can only come from the operator CA being read.
+    vi.stubEnv('NODE_EXTRA_CA_CERTS', '');
+    try {
+      const log = await bootTlsDaemonForTrustGapLog(
+        '127.0.0.1',
+        issuedLeafServing,
+      );
+      expect(log).toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('reads NODE_EXTRA_CA_CERTS from the environment when judging the gap', async () => {
+    // R3-7: nothing drove the wiring that reads the env, resolves it and
+    // hands the contents to describeWorkerTlsTrustGaps — replacing that read
+    // with `undefined` shipped green. Then an operator whose CA genuinely
+    // anchors the chain gets a false UNABLE_TO_VERIFY_LEAF_SIGNATURE warning
+    // on every startup, and the content-based fix becomes dead code.
+    const caDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-operator-ca-')),
+    );
+    const operatorCaPath = path.join(caDir, 'rootCA.pem');
+    fs.writeFileSync(operatorCaPath, TEST_TLS_CERT_ISSUING_ROOT);
+    vi.stubEnv('NODE_EXTRA_CA_CERTS', operatorCaPath);
+    try {
+      const log = await bootTlsDaemonForTrustGapLog(
+        '127.0.0.1',
+        issuedLeafServing,
+      );
+      expect(log).not.toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+    } finally {
+      vi.unstubAllEnvs();
+      fs.rmSync(caDir, { recursive: true, force: true });
+    }
+  });
+
+  it('still boots and still names the gap when NODE_EXTRA_CA_CERTS is unreadable', async () => {
+    // R3-7(b): the try/catch around the read is what lets a typo'd path
+    // degrade to "it anchors nothing". Without it the throw lands inside the
+    // channel-manager starting closure and channel startup fails on exactly
+    // the case the code says must degrade.
+    vi.stubEnv(
+      'NODE_EXTRA_CA_CERTS',
+      path.join(os.tmpdir(), 'qws-no-such-ca-file.pem'),
+    );
+    try {
+      const log = await bootTlsDaemonForTrustGapLog(
+        '127.0.0.1',
+        issuedLeafServing,
+      );
+      expect(log).toContain('UNABLE_TO_VERIFY_LEAF_SIGNATURE');
+      expect(log).toContain('qws-no-such-ca-file.pem');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('refuses at boot a bind channel workers cannot certify as local', async (ctx) => {
+    // R5-1: `assertChannelWorkerDaemonUrlIsLocal` was reached only by direct
+    // unit calls — every other boot test binds loopback, where it trivially
+    // returns — so deleting the call from the boot path kept the whole suite
+    // green. The cost of that is the silent mode the assertion exists to end:
+    // the daemon boots, `/health` answers, and every channel worker throws on
+    // its own daemon URL; the first worker's failure exits the daemon and
+    // channels added later restart-loop with nothing saying why.
+    //
+    // A DNS name is the reachable shape: it binds (the resolver points it at a
+    // local interface) but `isOwnInterfaceAddress` refuses to resolve names on
+    // the worker startup path, so no worker can certify the URL as local.
+    // Skipped where this host's own name does not resolve to an address it
+    // holds — the same guard the ::1 bind above carries.
+    const hostDnsName = os.hostname();
+    let resolved: string | undefined;
+    try {
+      resolved = (await dns.lookup(hostDnsName)).address;
+    } catch {
+      resolved = undefined;
+    }
+    const ownAddresses = new Set(
+      Object.values(os.networkInterfaces())
+        .flatMap((entries) => entries ?? [])
+        .map((entry) => entry.address.toLowerCase()),
+    );
+    if (
+      !resolved ||
+      !(ownAddresses.has(resolved.toLowerCase()) || resolved.startsWith('127.'))
+    ) {
+      ctx.skip();
+      return;
+    }
+
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-nonlocal-')),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    // Boot fails outright rather than settling into the green-daemon /
+    // looping-worker mode: `runQwenServe` itself rejects, so there is no
+    // handle to close and no listening socket left behind.
+    await expect(
+      runQwenServe(
+        {
+          port: 0,
+          hostname: hostDnsName,
+          // A non-loopback bind needs a token, or the boot-time auth check
+          // rejects it before the channel path is ever reached.
+          token: 'secret-token',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          serveWebShell: false,
+          channelSelection: { mode: 'names', names: ['telegram'] },
+        },
+        {
+          bridge: makeFakeBridge(),
+          channelWorkerSupervisorFactory: makeReadyWorkerFactory(worker),
+          channelServicePidfile: makePidfileDeps(),
+        },
+      ),
+    ).rejects.toThrow(/does not name an address on this host/);
   });
 
   it('forwards webhook tasks through the channel worker group', async () => {

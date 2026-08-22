@@ -1,7 +1,11 @@
 import { fork } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { channelSelectionNames } from './channel-selection.js';
+import { extractCertificateBlocks } from './pem-certificate-blocks.js';
 import type { ServeChannelSelection } from './types.js';
 import {
   CHANNEL_DAEMON_WORKER_SENTINEL,
@@ -222,6 +226,27 @@ export interface CreateChannelWorkerSupervisorOptions {
    * daemon base env.
    */
   workerBaseEnv?: Readonly<NodeJS.ProcessEnv>;
+  /**
+   * PEM cert the worker must additionally trust when calling the daemon
+   * over a self-signed TLS listener, injected as their `NODE_EXTRA_CA_CERTS`.
+   *
+   * With no operator CA set this is handed over as a PATH, and Node re-reads
+   * it at every (re)spawn — while the daemon keeps serving the bytes it read
+   * at boot. Rotating this file in place without restarting the daemon
+   * therefore leaves respawned workers trusting the NEW contents against the
+   * OLD served cert. Whether that breaks them depends on what rotated with
+   * it: the workers restart-loop exactly when the TRUST ANCHOR rotated out
+   * too — always for a self-signed cert, whose leaf is its own anchor
+   * (DEPTH_ZERO_SELF_SIGNED_CERT), and for a fullchain only when its root was
+   * replaced as well (SELF_SIGNED_CERT_IN_CHAIN). A fullchain rotated to a
+   * renewed leaf under the SAME carried root still verifies (measured), as
+   * does an operator CA that anchors both generations — though
+   * `resolveWorkerCaCertPath` stamps BOTH sources, so that rotation does
+   * invalidate and rebuild the merged bundle. Either way the serving side
+   * lags until the daemon restarts; see the HTTPS / TLS notes in
+   * docs/users/qwen-serve.md.
+   */
+  tlsCaCertPath?: string;
   startupTimeoutMs?: number;
   spawnWorker?: SpawnChannelWorker;
   onExit?: (snapshot: ChannelWorkerSnapshot) => void;
@@ -372,11 +397,242 @@ function hasObservedExit(snapshot: ChannelWorkerSnapshot): boolean {
   return snapshot.exitCode !== undefined || snapshot.signal !== undefined;
 }
 
+const NODE_EXTRA_CA_CERTS_ENV = 'NODE_EXTRA_CA_CERTS';
+
+/**
+ * Merged bundles keyed by `${operatorCaPath}\0${daemonCertPath}`. Workers are
+ * respawned on every restart, so without this the daemon would mint a fresh
+ * bundle directory per spawn and leak all of them.
+ */
+const mergedWorkerCaBundles = new Map<string, MergedWorkerCaBundle>();
+
+interface MergedWorkerCaBundle {
+  bundlePath: string;
+  /** `${mtimeMs}:${size}` of each source file, in merge order. */
+  sourceStamps: readonly string[];
+}
+
+function sourceStamp(filePath: string): string {
+  const stat = fs.statSync(filePath);
+  return `${stat.mtimeMs}:${stat.size}`;
+}
+
+/**
+ * Path pairs already warned about, keyed the way `mergedWorkerCaBundles` is.
+ * Every fallback branch returns without caching, `launch()` rebuilds the env
+ * on every 'initial' and 'restart' spawn, and `process.emitWarning` does not
+ * dedup identical text — so without this a crash-looping worker appends one
+ * identical multi-line warning per restart, burying the very log stream the
+ * operator reads to diagnose the loop.
+ */
+const warnedWorkerCaMergeFallbacks = new Set<string>();
+
+/**
+ * The coarse reason a merge fell back, so a CHANGED failure mode re-warns once
+ * while a crash loop stays deduped. `reason` itself carries errno text and
+ * would let a flapping message defeat the dedup entirely; the paths alone
+ * swallowed the second, now-accurate diagnosis (`ENOENT` before a mount
+ * appears, then a DER export afterwards sends the operator to fix mounts).
+ */
+const WORKER_CA_MERGE_FALLBACK_FAMILIES = [
+  'read-error',
+  'no-operator-blocks',
+  'no-daemon-blocks',
+] as const;
+
+type WorkerCaMergeFallbackFamily =
+  (typeof WORKER_CA_MERGE_FALLBACK_FAMILIES)[number];
+
+function workerCaMergeFallbackKey(
+  operatorCaPath: string,
+  daemonCertPath: string,
+  family: WorkerCaMergeFallbackFamily,
+): string {
+  return `${operatorCaPath}\0${daemonCertPath}\0${family}`;
+}
+
+function warnWorkerCaMergeFallback(
+  operatorCaPath: string,
+  daemonCertPath: string,
+  family: WorkerCaMergeFallbackFamily,
+  reason: string,
+): void {
+  const key = workerCaMergeFallbackKey(operatorCaPath, daemonCertPath, family);
+  if (warnedWorkerCaMergeFallbacks.has(key)) return;
+  warnedWorkerCaMergeFallbacks.add(key);
+  // Falling back to the daemon cert alone silently drops the operator CA
+  // the merge above exists to preserve, and Node says nothing when the
+  // remaining cert loads fine — so say it here.
+  process.emitWarning(
+    `qwen: failed to merge ${NODE_EXTRA_CA_CERTS_ENV} "${operatorCaPath}" ` +
+      `with the daemon cert "${daemonCertPath}": ${reason}; channel ` +
+      `workers will trust only the daemon cert`,
+  );
+}
+
+/**
+ * Bundle directories minted this process, cleaned up together. One
+ * `process.once('exit')` per mint accumulated a listener, a closure and an
+ * orphaned directory per rebuild — and the merge cache is rebuilt on purpose
+ * (in-place operator CA rotation, tmp-cleaner aging), so a long-lived daemon
+ * crossed Node's `MaxListenersExceededWarning` threshold and printed that
+ * leak warning into the very log stream `warnWorkerCaMergeFallback` dedups to
+ * keep readable.
+ */
+const mintedWorkerCaBundleDirs = new Set<string>();
+let workerCaBundleExitHookRegistered = false;
+
+/**
+ * Remove every minted worker CA bundle directory this process still owns, and
+ * forget them.
+ *
+ * Registered as the `exit` hook, and named so the set's lifetime is testable:
+ * without the forget, a regression that stops untracking superseded bundles
+ * (or that drops this clear) leaks a 0700 directory per rotation for the
+ * daemon's whole life, and nothing observable turns red.
+ */
+export function cleanupMintedWorkerCaBundleDirs(): void {
+  for (const minted of mintedWorkerCaBundleDirs) {
+    cleanupWorkerCaBundleDir(minted);
+  }
+  mintedWorkerCaBundleDirs.clear();
+}
+
+function cleanupWorkerCaBundleDir(dir: string): void {
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch {
+    // Best effort: a tmp cleaner may already have taken it.
+  }
+}
+
+function writeMergedWorkerCaBundle(contents: string): string {
+  // mkdtempSync gives a 0700 directory with a random suffix, so the bundle
+  // path cannot be pre-planted the way a fixed `qwen-worker-ca-<pid>.pem` in
+  // the shared tmpdir can (CWE-377/CWE-59: a pre-planted symlink redirects
+  // the write, a pre-planted regular file keeps attacker ownership and mode
+  // while receiving the cert — the private key too, for a combined PEM).
+  // Same defence as standalone-update.ts's extract dir.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-worker-ca-'));
+  const bundlePath = path.join(dir, 'ca-bundle.pem');
+  fs.writeFileSync(bundlePath, contents, { mode: 0o600 });
+  // Nothing else references this directory, so the daemon owns its lifetime.
+  mintedWorkerCaBundleDirs.add(dir);
+  if (!workerCaBundleExitHookRegistered) {
+    workerCaBundleExitHookRegistered = true;
+    process.once('exit', cleanupMintedWorkerCaBundleDirs);
+  }
+  return bundlePath;
+}
+
+function resolveWorkerCaCertPath(
+  daemonCertPath: string,
+  existing: string | undefined,
+): string {
+  if (!existing || existing === daemonCertPath) return daemonCertPath;
+  const cacheKey = `${existing}\0${daemonCertPath}`;
+  const sources = [existing, daemonCertPath];
+  const cached = mergedWorkerCaBundles.get(cacheKey);
+  if (cached) {
+    try {
+      // Two ways a hit goes stale, both ending in workers that restart-loop
+      // while the daemon stays green: the operator rotates their CA file in
+      // place (before this bundle existed a respawned worker read that file
+      // live), and an external tmp cleaner ages out the bundle directory,
+      // leaving the cache pointing at a dead path. Re-stat both ends.
+      fs.statSync(cached.bundlePath);
+      if (
+        sources.every((src, i) => sourceStamp(src) === cached.sourceStamps[i])
+      ) {
+        return cached.bundlePath;
+      }
+    } catch {
+      // Unreadable source or vanished bundle: rebuild below.
+    }
+    // No eviction here on purpose. Control always reaches the rebuild below,
+    // which overwrites this key on success, and every future hit re-stats the
+    // bundle and re-compares both stamps before returning it — so a stale
+    // entry can never be handed out, and deleting it changes no observable
+    // behaviour. The rebuild itself is pinned by the rotation and tmp-cleaner
+    // tests.
+  }
+  try {
+    const sourceStamps = sources.map(sourceStamp);
+    // NODE_EXTRA_CA_CERTS takes a single file; merge so an operator-set CA
+    // (e.g. corporate proxy) keeps working alongside the daemon cert. A
+    // merely *readable* operator file is not enough — one Node's loader
+    // rejects takes the daemon cert down with it, which is strictly worse
+    // than the fallback below.
+    const operatorBlocks = extractCertificateBlocks(
+      fs.readFileSync(existing, 'utf8'),
+    );
+    if (!operatorBlocks) {
+      warnWorkerCaMergeFallback(
+        existing,
+        daemonCertPath,
+        'no-operator-blocks',
+        // Three causes reject a file, not one: markers, decoding, and DER.
+        // Blaming markers alone tells an operator whose CA is truncated or
+        // hand-edited to fix lines that are already correct — and after boot
+        // this warning is the only diagnostic they get, so it has to name the
+        // same three the boot-time check does.
+        'it holds no PEM certificate block Node can load (every ' +
+          '-----BEGIN/END CERTIFICATE----- marker must sit alone on its own ' +
+          'line and every block must decode, and a DER file is never read ' +
+          'at all)',
+      );
+      return daemonCertPath;
+    }
+    const daemonBlocks = extractCertificateBlocks(
+      fs.readFileSync(daemonCertPath, 'utf8'),
+    );
+    if (!daemonBlocks) {
+      warnWorkerCaMergeFallback(
+        existing,
+        daemonCertPath,
+        'no-daemon-blocks',
+        'the daemon cert holds no PEM certificate block to merge into',
+      );
+      return daemonCertPath;
+    }
+    const bundlePath = writeMergedWorkerCaBundle(
+      `${[...operatorBlocks, ...daemonBlocks].join('\n')}\n`,
+    );
+    const superseded = mergedWorkerCaBundles.get(cacheKey);
+    mergedWorkerCaBundles.set(cacheKey, { bundlePath, sourceStamps });
+    if (superseded) {
+      // This rebuild orphaned the previous bundle; the exit hook would hold
+      // one per rotation until the daemon stops.
+      const dir = path.dirname(superseded.bundlePath);
+      mintedWorkerCaBundleDirs.delete(dir);
+      cleanupWorkerCaBundleDir(dir);
+    }
+    // The merge works again, so a LATER failure of the same pair is new
+    // information — without this, the first failure's key silenced it forever
+    // and the workers restart-looped with no diagnostic at all.
+    for (const family of WORKER_CA_MERGE_FALLBACK_FAMILIES) {
+      warnedWorkerCaMergeFallbacks.delete(
+        workerCaMergeFallbackKey(existing, daemonCertPath, family),
+      );
+    }
+    return bundlePath;
+  } catch (err) {
+    warnWorkerCaMergeFallback(
+      existing,
+      daemonCertPath,
+      'read-error',
+      err instanceof Error ? err.message : String(err),
+    );
+    return daemonCertPath;
+  }
+}
+
 function createWorkerEnv(opts: {
   daemonUrl: string;
   daemonToken?: string;
   workspace: string;
   baseEnv?: Readonly<NodeJS.ProcessEnv>;
+  tlsCaCertPath?: string;
 }): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...(opts.baseEnv ?? process.env) };
   env['QWEN_CODE_NO_RELAUNCH'] = 'true';
@@ -384,6 +640,12 @@ function createWorkerEnv(opts: {
   // the ACP channel fallback reports channel=daemon in usage statistics
   // (see cli/src/config/acp-channel-fallback.ts).
   env['QWEN_CODE_SERVE'] = '1';
+  if (opts.tlsCaCertPath) {
+    env[NODE_EXTRA_CA_CERTS_ENV] = resolveWorkerCaCertPath(
+      opts.tlsCaCertPath,
+      env[NODE_EXTRA_CA_CERTS_ENV],
+    );
+  }
   env[CHANNEL_DAEMON_WORKER_SENTINEL] = randomUUID();
   env[QWEN_DAEMON_URL_ENV] = opts.daemonUrl;
   env[QWEN_DAEMON_WORKSPACE_ENV] = opts.workspace;
@@ -791,6 +1053,7 @@ export function createChannelWorkerSupervisor(
       workspace: opts.workspace,
       ...(opts.daemonToken ? { daemonToken: opts.daemonToken } : {}),
       ...(opts.workerBaseEnv ? { baseEnv: opts.workerBaseEnv } : {}),
+      ...(opts.tlsCaCertPath ? { tlsCaCertPath: opts.tlsCaCertPath } : {}),
     });
     const promptAuthorization = env[CHANNEL_DAEMON_WORKER_SENTINEL]!;
     registerChannelWorkerPromptAuthorization(
