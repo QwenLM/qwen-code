@@ -281,7 +281,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     return confirmationDetails;
   }
 
-  async execute(_abortSignal: AbortSignal): Promise<ToolResult> {
+  async execute(signal: AbortSignal): Promise<ToolResult> {
     const { file_path, content, ai_proposed_content, modified_by_user } =
       this.params;
 
@@ -501,6 +501,8 @@ class WriteFileToolInvocation extends BaseToolInvocation<
         };
       }
     }
+
+    signal.throwIfAborted();
 
     // Create parent directories AFTER the pre-write enforcement
     // check passes. Doing it before would leak intermediate
