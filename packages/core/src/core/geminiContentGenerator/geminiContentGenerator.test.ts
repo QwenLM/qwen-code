@@ -98,10 +98,7 @@ describe('GeminiContentGenerator', () => {
         config: expect.objectContaining({
           temperature: 1,
           topP: 0.95,
-          thinkingConfig: {
-            includeThoughts: true,
-            thinkingLevel: 'THINKING_LEVEL_UNSPECIFIED',
-          },
+          thinkingConfig: { includeThoughts: true },
         }),
       }),
     );
@@ -158,10 +155,7 @@ describe('GeminiContentGenerator', () => {
         config: expect.objectContaining({
           temperature: 1,
           topP: 0.95,
-          thinkingConfig: {
-            includeThoughts: true,
-            thinkingLevel: 'THINKING_LEVEL_UNSPECIFIED',
-          },
+          thinkingConfig: { includeThoughts: true },
         }),
       }),
     );
@@ -268,7 +262,7 @@ describe('GeminiContentGenerator', () => {
     const generatorWithReasoning = new GeminiContentGenerator(
       { apiKey: 'test' },
       {
-        model: 'gemini-2.5-pro',
+        model: 'gemini-3-pro-preview',
         reasoning: {
           effort: 'high',
         },
@@ -277,7 +271,7 @@ describe('GeminiContentGenerator', () => {
     );
 
     const request = {
-      model: 'gemini-2.5-pro',
+      model: 'gemini-3-pro-preview',
       contents: [],
     };
 
@@ -296,16 +290,16 @@ describe('GeminiContentGenerator', () => {
   });
 
   it("maps reasoning effort 'max' to HIGH (Gemini has no higher tier)", async () => {
-    // 'max' is a DeepSeek-specific extension. Gemini caps at HIGH, so the
-    // converter must clamp instead of falling through to UNSPECIFIED.
+    // 'max' is a DeepSeek-specific extension. The Gemini 3 ladder caps at
+    // HIGH, so the converter must clamp instead of dropping the tier.
     const generatorWithMax = new GeminiContentGenerator({ apiKey: 'test' }, {
-      model: 'gemini-2.5-pro',
+      model: 'gemini-3-pro-preview',
       reasoning: { effort: 'max' },
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any);
 
     await generatorWithMax.generateContent(
-      { model: 'gemini-2.5-pro', contents: [] },
+      { model: 'gemini-3-pro-preview', contents: [] },
       'prompt-id',
     );
 
@@ -323,13 +317,13 @@ describe('GeminiContentGenerator', () => {
 
   it("maps reasoning effort 'medium' to MEDIUM", async () => {
     const generatorWithMedium = new GeminiContentGenerator({ apiKey: 'test' }, {
-      model: 'gemini-2.5-pro',
+      model: 'gemini-3-pro-preview',
       reasoning: { effort: 'medium' },
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any);
 
     await generatorWithMedium.generateContent(
-      { model: 'gemini-2.5-pro', contents: [] },
+      { model: 'gemini-3-pro-preview', contents: [] },
       'prompt-id',
     );
 
@@ -347,13 +341,13 @@ describe('GeminiContentGenerator', () => {
 
   it("clamps reasoning effort 'xhigh' to HIGH (Gemini has no xhigh tier)", async () => {
     const generatorWithXhigh = new GeminiContentGenerator({ apiKey: 'test' }, {
-      model: 'gemini-2.5-pro',
+      model: 'gemini-3-pro-preview',
       reasoning: { effort: 'xhigh' },
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any);
 
     await generatorWithXhigh.generateContent(
-      { model: 'gemini-2.5-pro', contents: [] },
+      { model: 'gemini-3-pro-preview', contents: [] },
       'prompt-id',
     );
 
@@ -367,6 +361,109 @@ describe('GeminiContentGenerator', () => {
         }),
       }),
     );
+  });
+
+  describe('Gemini 2.5 thinking budget', () => {
+    const generatorFor = (model: string, reasoning?: unknown) =>
+      new GeminiContentGenerator({ apiKey: 'test' }, {
+        model,
+        reasoning,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
+
+    const sentThinkingConfig = () =>
+      mockGoogleGenAI.models.generateContent.mock.calls[0][0].config
+        .thinkingConfig;
+
+    it.each([
+      ['low', 2048],
+      ['medium', 8192],
+      ['high', 16384],
+      ['xhigh', 32768],
+      ['max', 32768],
+    ])(
+      'maps effort %s to a thinkingBudget on 2.5 Pro',
+      async (effort, budget) => {
+        const gen = generatorFor('gemini-2.5-pro', { effort });
+
+        await gen.generateContent(
+          { model: 'gemini-2.5-pro', contents: [] },
+          'prompt-id',
+        );
+
+        expect(sentThinkingConfig()).toEqual({
+          includeThoughts: true,
+          thinkingBudget: budget,
+        });
+      },
+    );
+
+    it('caps the top tiers at the Flash ceiling', async () => {
+      const gen = generatorFor('gemini-2.5-flash', { effort: 'max' });
+
+      await gen.generateContent(
+        { model: 'gemini-2.5-flash', contents: [] },
+        'prompt-id',
+      );
+
+      expect(sentThinkingConfig()).toEqual({
+        includeThoughts: true,
+        thinkingBudget: 24576,
+      });
+    });
+
+    it('never sends thinkingLevel to a 2.5 model', async () => {
+      const gen = generatorFor('gemini-2.5-flash', { effort: 'high' });
+
+      await gen.generateContent(
+        { model: 'gemini-2.5-flash', contents: [] },
+        'prompt-id',
+      );
+
+      expect(sentThinkingConfig()).not.toHaveProperty('thinkingLevel');
+    });
+
+    it('omits both knobs when no effort is configured', async () => {
+      const gen = generatorFor('gemini-2.5-pro');
+
+      await gen.generateContent(
+        { model: 'gemini-2.5-pro', contents: [] },
+        'prompt-id',
+      );
+
+      expect(sentThinkingConfig()).toEqual({ includeThoughts: true });
+    });
+
+    it('omits both knobs when reasoning is set without an effort', async () => {
+      const gen = generatorFor('gemini-2.5-pro', {});
+
+      await gen.generateContent(
+        { model: 'gemini-2.5-pro', contents: [] },
+        'prompt-id',
+      );
+
+      expect(sentThinkingConfig()).toEqual({ includeThoughts: true });
+    });
+
+    it('leaves an explicit request-level thinkingConfig alone', async () => {
+      const gen = generatorFor('gemini-2.5-pro');
+
+      await gen.generateContent(
+        {
+          model: 'gemini-2.5-pro',
+          contents: [],
+          config: {
+            thinkingConfig: { thinkingBudget: 0, includeThoughts: false },
+          },
+        },
+        'prompt-id',
+      );
+
+      expect(sentThinkingConfig()).toEqual({
+        thinkingBudget: 0,
+        includeThoughts: false,
+      });
+    });
   });
 
   it('should strip displayName from inlineData and fileData before sending to API', async () => {
