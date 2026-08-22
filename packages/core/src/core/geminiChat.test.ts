@@ -3254,13 +3254,15 @@ describe('GeminiChat', async () => {
       expect(compressSpy).toHaveBeenCalledTimes(1);
       // The seeded authoritative count is the baseline of this attempt's
       // effective count (seed + locally-estimated pending message), so the
-      // published number is the effective count, not the bare seed.
-      expect(
-        compressSpy.mock.calls[0][1].originalTokenCount,
-      ).toBeGreaterThanOrEqual(123_456);
-      expect(
-        compressSpy.mock.calls[0][1].precomputedEffectiveTokens,
-      ).toBeGreaterThanOrEqual(123_456);
+      // published number is the effective count, not the bare seed. Pin the
+      // exact deterministic value — seed 123,456 + char/4 estimate of the
+      // pending 'go' message (2 chars -> ceil(2/4) = 1 token), with
+      // lastOutputTokenCount still 0 — so over-counting regressions on the
+      // send path are caught too, not just under-counting.
+      expect(compressSpy.mock.calls[0][1].originalTokenCount).toBe(123_457);
+      expect(compressSpy.mock.calls[0][1].precomputedEffectiveTokens).toBe(
+        123_457,
+      );
     });
 
     it('yields a COMPRESSED stream event as the first event after auto-compression succeeds', async () => {
