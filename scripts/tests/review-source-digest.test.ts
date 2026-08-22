@@ -276,6 +276,11 @@ describe('the build stamp and the staleness check agree', () => {
     const utils = join(repoRoot, 'packages', 'cli', 'src', 'utils');
     expect(roots).toContain(join(utils, 'shell-args.ts'));
     expect(roots).toContain(join(utils, 'paths.ts'));
+    // findings.ts moved back into commands/review/ (#9146): re-adding its old
+    // utils/ root would find no file there, and both digest copies skip
+    // absent roots — every lane stays green while absentRoots darkens every
+    // review's staleness check. Pin the removal.
+    expect(roots).not.toContain(join(utils, 'findings.ts'));
     // List membership is not tree existence: a moved file keeps its
     // root listed — both digest copies stay equal — while absentRoots
     // darkens every review's staleness check.
