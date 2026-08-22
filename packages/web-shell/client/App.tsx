@@ -7104,7 +7104,11 @@ export function App({
           reloadWorkspaceSettings(),
         ]);
       };
-      if (streamingStateRef.current !== 'idle' || isGoalGateBlocked()) {
+      if (
+        streamingStateRef.current !== 'idle' ||
+        sessionHasActivePromptRef.current ||
+        isGoalGateBlocked()
+      ) {
         handleLanguageChange(previousLanguage);
         blockCommand();
         return;
@@ -10772,7 +10776,11 @@ export function App({
 
   const handleFastModelSelect = useCallback(
     (modelId: string) => {
-      if (streamingState !== 'idle' || isGoalGateBlocked()) {
+      if (
+        streamingState !== 'idle' ||
+        sessionHasActivePromptRef.current ||
+        isGoalGateBlocked()
+      ) {
         blockCommand();
         return;
       }
