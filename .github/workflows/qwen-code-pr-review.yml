@@ -1869,9 +1869,12 @@ jobs:
           GIT_SAFE=(git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$GITHUB_WORKSPACE")
 
           # The repair ladder for one leftover tree (see the step comment).
-          # A path that resolves through symlinks is refused rather than
-          # repaired: the sudo leg escalates to root, and a planted link
-          # would aim a chown/chmod -R outside the workspace.
+          # A path outside the workspace or resolving through symlinks is
+          # refused rather than repaired: the sudo leg escalates to root,
+          # and a planted link would aim a chown/chmod -R outside the
+          # workspace. Warning echoes strip newlines from the path first:
+          # leftover names are untrusted glob entries, and a fresh line on
+          # the runner's stdout would parse as a workflow command.
           remove_review_tree() {
             local abs="$1"
             case "$abs" in
@@ -1884,26 +1887,43 @@ jobs:
             # against the workspace's OWN resolved path: an ancestor the
             # workspace itself sits under (a macOS /tmp -> /private/tmp
             # local run) is legitimate and must not read as a redirect —
-            # only a symlink planted BELOW the workspace does.
-            local ws_real rel
+            # only a symlink planted BELOW the workspace does. The refusal
+            # names the branch that fired so the on-call knows which case
+            # hit.
+            local ws_real rel abs_real reason=''
             ws_real="$(realpath -- "$GITHUB_WORKSPACE" 2>/dev/null)" ||
               ws_real="$GITHUB_WORKSPACE"
             case "$abs" in
               "$GITHUB_WORKSPACE"/*) rel="${abs#"$GITHUB_WORKSPACE/"}" ;;
               *) rel='' ;;
             esac
-            if [ -z "$rel" ] || [ -L "$abs" ] ||
-              [ "$(realpath -- "$abs" 2>/dev/null)" != "$ws_real/$rel" ]; then
-              echo "::warning::refusing to repair a review worktree path that resolves through symlinks: $abs"
+            abs_real="$(realpath -- "$abs" 2>/dev/null)" || abs_real=''
+            if [ -z "$rel" ]; then
+              reason='outside the workspace'
+            elif [ -L "$abs" ]; then
+              reason='path is a symlink'
+            elif [ -z "$abs_real" ]; then
+              reason='path could not be resolved'
+            elif [ "$abs_real" != "$ws_real/$rel" ]; then
+              reason='resolves through symlinks'
+            fi
+            if [ -n "$reason" ]; then
+              echo "::warning::refusing to repair review worktree path (${reason}): ${abs//$'\n'/ }"
               return 0
             fi
             chmod -R u+rwX "$abs" 2>/dev/null || true
+            rm -rf "$abs" 2>/dev/null && return 0
+            local sudo_probe='absent'
             if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+              sudo_probe='ok'
               sudo -n chown -R "$(id -u):$(id -g)" "$abs" 2>/dev/null || true
               sudo -n chmod -R u+rwX "$abs" 2>/dev/null || true
             fi
             rm -rf "$abs" 2>/dev/null && return 0
-            echo "::warning::could not remove review worktree: $abs (permission repair failed)"
+            echo "::warning::could not remove review worktree: ${abs//$'\n'/ } (permission repair failed; sudo: $sudo_probe; owner: $(ls -ld "$abs" 2>/dev/null | awk '{print $3}'))"
+            # return 0 even when the warning echo fails: the heal chain must
+            # never fail the job.
+            return 0
           }
 
           "${GIT_SAFE[@]}" worktree prune -v || true

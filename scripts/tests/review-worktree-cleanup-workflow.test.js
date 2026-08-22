@@ -186,12 +186,36 @@ describe('review worktree cleanup steps', () => {
     // chown/chmod where the pool member has it — and retries the removal per
     // leftover entry (measured, run 32577821716 / PR #9718: a foreign-owned
     // scratch-verify tree killed the next review at checkout with EACCES).
-    // Pin the ladder so a rewrite cannot silently drop it back to
-    // warn-and-leave.
+    // Pin the ladder's EFFECT, not mechanism substrings: those double-match
+    // (the non-sudo chmod rung hides inside the sudo line) and let a
+    // rewrite silently drop the ladder back to warn-and-leave.
     const reviewCleanCode = stripComments(reviewCleanStep);
-    expect(reviewCleanCode).toContain('chmod -R u+rwX');
+    // Three removal attempts: the initial rm plus one retry after EACH
+    // repair rung, so a chmod-repaired tree never escalates to sudo.
+    expect(reviewCleanCode.match(/rm -rf "\$abs"/g)).toHaveLength(3);
+    // The non-sudo rung must exist as its own command, not just inside the
+    // sudo line.
+    expect(reviewCleanCode).toMatch(/^\s*chmod -R u\+rwX "\$abs"/m);
     expect(reviewCleanCode).toContain('sudo -n chown -R');
     expect(reviewCleanCode).toContain('remove_review_tree "$leftover"');
+    // The symlink-refusal guard must survive, including the direction of
+    // its comparison and the deciding reason it now carries.
+    expect(reviewCleanCode).toContain(
+      'refusing to repair review worktree path (${reason})',
+    );
+    expect(reviewCleanCode).toContain('!= "$ws_real/$rel"');
+    // Leftover names are untrusted glob entries: both warnings must strip
+    // newlines, or a hostile name injects a workflow command into the log.
+    expect(reviewCleanCode.match(/\$\{abs\/\/\$'\\n'\/ \}/g)).toHaveLength(2);
+    // The failure warning carries the deciding state (sudo probe + owner),
+    // and the function returns 0 unconditionally: even a failed warning
+    // echo must not fail the `if: always()` job via errexit.
+    expect(reviewCleanCode).toMatch(
+      /could not remove review worktree[^\n]*sudo: \$sudo_probe[^\n]*owner:/,
+    );
+    expect(reviewCleanCode).toMatch(
+      /could not remove review worktree[^\n]*\n\s*return 0/,
+    );
   });
 
   it('keeps the pre-checkout agent-state sweep pinned to paths.ts', () => {
@@ -203,7 +227,9 @@ describe('review worktree cleanup steps', () => {
   });
 
   it('uses one identical worktree filter at every list-driven sweep', () => {
-    const filter = reviewCleanStep.match(/awk '([^']+)'/)?.[1];
+    // The step's owner-extraction awk is not a worktree filter: anchor
+    // on the filter's shape, not the first awk in the step.
+    const filter = reviewCleanStep.match(/awk '(\$1 == "worktree"[^']+)'/)?.[1];
     expect(filter).toBeTruthy();
     for (const { id, run } of ciCleanSteps) {
       expect(run, id).toContain(`awk '${filter}'`);
@@ -213,7 +239,11 @@ describe('review worktree cleanup steps', () => {
   it.skipIf(!awkAvailable)(
     'filter selects review worktrees only, never the main checkout',
     () => {
-      const filter = reviewCleanStep.match(/awk '([^']+)'/)?.[1];
+      // The step's owner-extraction awk is not a worktree filter: anchor
+      // on the filter's shape, not the first awk in the step.
+      const filter = reviewCleanStep.match(
+        /awk '(\$1 == "worktree"[^']+)'/,
+      )?.[1];
       const main = '/home/runner/work/qwen-code/qwen-code';
       const review = `${main}/.qwen/tmp/review-pr-42`;
       const out = spawnSync('awk', [filter], {
