@@ -2305,12 +2305,29 @@ function composeReviewBody(
       prevRound,
     ),
     thisCriticals: criticalsInline + bodyCriticals.length,
-    posted: postedInline,
-    prevPosted: convergence?.prev.posted,
-    // Off the same recovered predecessor as the volume it qualifies — the
-    // marker records the floor its round ran under, and the observation
-    // above compares the pair for exactly this reason.
+    // The FRESH counts, not the posting totals — the number this file's own
+    // `postedFresh` docstring calls "the number the convergence trend runs
+    // on ... so the next round can compare like with like". Step 6 re-posts
+    // every standing Critical under its original id, so the total only ever
+    // rises: measured on totals a loop whose new findings fell 5 -> 4 still
+    // posted MORE comments than the round before, and the advisory fired
+    // "the severity floor will not converge it" over a converging loop.
+    // The same pair the observation above trends on, so the two features
+    // cannot disagree about what this round produced.
+    fresh: postedFresh,
+    prevFresh: convergence?.prev.fresh,
+    // Off the same recovered predecessor — the marker records the floor its
+    // round ran under, and the observation above compares the pair for
+    // exactly this reason.
     prevFloor: convergence?.prev.floor,
+    // The standing backlog, counted off the same recovered work-list the
+    // persistence half reads. It is what keeps the fresh window honest at
+    // its blind spot: a round finding nothing new while the author clears
+    // blockers sits at fresh 0 against fresh 0, and only the Critical count
+    // falling says the loop is moving.
+    prevCriticals: convergence
+      ? convergence.prev.findings.filter((f) => f.sev === 'C').length
+      : undefined,
   });
 
   // The Criticals a verifier must have ruled on before this review may post them as

@@ -2834,8 +2834,8 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
           shape: string;
           recommendation: string;
           criticals: number;
-          posted: number;
-          prevPosted: number;
+          fresh: number;
+          prevFresh: number;
         };
         event?: string;
         cappedBy?: string[];
@@ -2853,6 +2853,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
           round: 6,
           findings: [{ id: 'R6-1', sev: 'C', file: 'x.ts', title: 'blocker' }],
           posted: 1,
+          fresh: 1,
         }),
         'utf8',
       );
@@ -2889,8 +2890,8 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
         shape: 'persistently-critical',
         recommendation: 'land-with-residual-risk',
         criticals: 1,
-        posted: 1,
-        prevPosted: 1,
+        fresh: 1,
+        prevFresh: 1,
       });
       // Body disclosure rides too, carrying the same recommendation code.
       expect(composed.body).toContain('land-with-residual-risk');
@@ -2959,6 +2960,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
           round: 6,
           findings: [{ id: 'R6-1', sev: 'C', file: 'x.ts', title: 'blocker' }],
           posted: 3,
+          fresh: 3,
         }),
         'utf8',
       );
@@ -3025,8 +3027,8 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
           shape: string;
           recommendation: string;
           criticals: number;
-          posted: number;
-          prevPosted: number;
+          fresh: number;
+          prevFresh: number;
         };
         body?: string;
       };
@@ -3044,6 +3046,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
           round: 6,
           findings: [{ id: 'R6-1', sev: 'C', file: 'x.ts', title: 'blocker' }],
           posted: 0,
+          fresh: 0,
         }),
         'utf8',
       );
@@ -3057,8 +3060,8 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
         shape: 'persistently-critical',
         recommendation: 'land-with-residual-risk',
         criticals: 1,
-        posted: 0,
-        prevPosted: 0,
+        fresh: 0,
+        prevFresh: 0,
       });
       expect(composed.body).toContain('land-with-residual-risk');
       expect(
@@ -3116,6 +3119,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
           round: 1,
           findings: [{ id: 'R1-1', sev: 'C', file: 'x.ts', title: 'blocker' }],
           posted: 2,
+          fresh: 2,
         }),
         'utf8',
       );
@@ -3188,6 +3192,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
           round: 6,
           findings: [{ id: 'R6-1', sev: 'S', file: 'x.ts', title: 'nit' }],
           posted: 1,
+          fresh: 1,
         }),
         'utf8',
       );
@@ -3260,6 +3265,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
           round: 6,
           findings: [{ id: 'R6-1', sev: 'C', file: 'x.ts', title: 'blocker' }],
           posted: 1,
+          fresh: 1,
         }),
         'utf8',
       );
@@ -3327,6 +3333,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
           round: 6,
           findings: [{ id: 'R6-1', sev: 'C', file: 'x.ts', title: 'blocker' }],
           posted: 1,
+          fresh: 1,
           // Every other conjunct holds; ONLY the recorded posture differs.
           floor: 'o',
         }),
@@ -3348,6 +3355,243 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
       expect(composed.residualRisk).toBeUndefined();
       expect(composed.body ?? '').not.toContain('land-with-residual-risk');
       expect(composed.body ?? '').not.toContain('The severity floor will not');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('stays silent while the FRESH rate is falling under re-posts (#9526)', async () => {
+    // Step 6 re-posts every still-standing ledger Critical under its
+    // ORIGINAL id, so the posting TOTAL only ever rises. Round 6 posted 5
+    // first-time Criticals; the author fixed 3, and round 7 re-posts the 2
+    // that stand and drafts 4 new ones. Fresh 5 -> 4 is a loop converging,
+    // but the total went 5 -> 6, and a window measured on totals fired
+    // `land-with-residual-risk` over it.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-converge-fresh-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(planPath, JSON.stringify({ prNumber: 8255 }), 'utf8');
+    writeFileSync(
+      inputPath,
+      JSON.stringify({ modelId: MODEL, planPath, severityFloor: 'auto' }),
+      'utf8',
+    );
+    writeFileSync(
+      commentsPath,
+      JSON.stringify([
+        // Re-posts: the carried id is what marks them as not-new.
+        { path: 'f1.ts', line: 1, body: '**[Critical]** R6-1: still standing' },
+        { path: 'f2.ts', line: 1, body: '**[Critical]** R6-2: still standing' },
+        ...[1, 2, 3, 4].map((n) => ({
+          path: `n${n}.ts`,
+          line: 1,
+          body: `**[Critical]** brand new ${n}`,
+        })),
+      ]),
+      'utf8',
+    );
+    const stderr = () =>
+      (writeStderrLine as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
+        String(c[0]),
+      );
+    const stdoutJson = () =>
+      JSON.parse(
+        (writeStdoutLine as ReturnType<typeof vi.fn>).mock.calls
+          .map((c) => String(c[0]))
+          .join('\n'),
+      ) as { residualRisk?: unknown; body?: string };
+    try {
+      (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+      (writeStdoutLine as ReturnType<typeof vi.fn>).mockClear();
+      writeFileSync(
+        join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+        JSON.stringify({
+          v: 1,
+          round: 6,
+          posted: 5,
+          fresh: 5,
+          floor: 'c',
+          findings: [1, 2, 3, 4, 5].map((n) => ({
+            id: `R6-${n}`,
+            sev: 'C',
+            file: `f${n}.ts`,
+            title: `blocker ${n}`,
+          })),
+        }),
+        'utf8',
+      );
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+      });
+      // The total ROSE — this is exactly the input the old window fired on.
+      expect(stderr().find((l) => l.startsWith('VOLUME: '))).toContain(
+        '6 inline comment(s) this round (4 reported for the first time) (previous round: 5)',
+      );
+      expect(
+        stderr().filter((l) => l.startsWith('RESIDUAL-RISK: ')),
+      ).toHaveLength(0);
+      const composed = stdoutJson();
+      expect(composed.residualRisk).toBeUndefined();
+      expect(composed.body ?? '').not.toContain('land-with-residual-risk');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('stays silent while the standing BACKLOG is clearing (#9526)', async () => {
+    // The blind spot a fresh-only window leaves, and the regression that
+    // moving to fresh counts would otherwise introduce. The reviewer found
+    // nothing new in either round — fresh 0 against fresh 0, which "not
+    // falling" reads as stuck — while the author cleared 2 of 5 standing
+    // Criticals. The posting total (5 -> 3) used to catch this; only the
+    // Critical count coming down catches it now.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-converge-backlog-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(planPath, JSON.stringify({ prNumber: 8255 }), 'utf8');
+    writeFileSync(
+      inputPath,
+      JSON.stringify({ modelId: MODEL, planPath, severityFloor: 'auto' }),
+      'utf8',
+    );
+    writeFileSync(
+      commentsPath,
+      JSON.stringify(
+        [1, 2, 3].map((n) => ({
+          path: `f${n}.ts`,
+          line: 1,
+          body: `**[Critical]** R6-${n}: still standing`,
+        })),
+      ),
+      'utf8',
+    );
+    const stderr = () =>
+      (writeStderrLine as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
+        String(c[0]),
+      );
+    const stdoutJson = () =>
+      JSON.parse(
+        (writeStdoutLine as ReturnType<typeof vi.fn>).mock.calls
+          .map((c) => String(c[0]))
+          .join('\n'),
+      ) as { residualRisk?: unknown; body?: string };
+    try {
+      (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+      (writeStdoutLine as ReturnType<typeof vi.fn>).mockClear();
+      writeFileSync(
+        join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+        JSON.stringify({
+          v: 1,
+          round: 6,
+          posted: 5,
+          // Nothing new last round either — so the fresh window is flat at
+          // zero and cannot tell this loop from a stuck one.
+          fresh: 0,
+          floor: 'c',
+          findings: [1, 2, 3, 4, 5].map((n) => ({
+            id: `R6-${n}`,
+            sev: 'C',
+            file: `f${n}.ts`,
+            title: `blocker ${n}`,
+          })),
+        }),
+        'utf8',
+      );
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+      });
+      expect(stderr().find((l) => l.startsWith('VOLUME: '))).toContain(
+        '3 inline comment(s) this round (0 reported for the first time) (previous round: 5)',
+      );
+      expect(
+        stderr().filter((l) => l.startsWith('RESIDUAL-RISK: ')),
+      ).toHaveLength(0);
+      const composed = stdoutJson();
+      expect(composed.residualRisk).toBeUndefined();
+      expect(composed.body ?? '').not.toContain('land-with-residual-risk');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fires at zero fresh when the backlog HOLDS — the purest shape (#9526)', async () => {
+    // The other side of the backlog veto, and the shape this whole feature
+    // exists to name: the same Criticals re-posted round after round, the
+    // reviewer finding nothing new, nothing clearing. Fresh 0 against
+    // fresh 0 and the backlog flat at 3 — a loop the floor cannot converge.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-converge-stuck-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(planPath, JSON.stringify({ prNumber: 8255 }), 'utf8');
+    writeFileSync(
+      inputPath,
+      JSON.stringify({ modelId: MODEL, planPath, severityFloor: 'auto' }),
+      'utf8',
+    );
+    writeFileSync(
+      commentsPath,
+      JSON.stringify(
+        [1, 2, 3].map((n) => ({
+          path: `f${n}.ts`,
+          line: 1,
+          body: `**[Critical]** R6-${n}: still standing`,
+        })),
+      ),
+      'utf8',
+    );
+    const stdoutJson = () =>
+      JSON.parse(
+        (writeStdoutLine as ReturnType<typeof vi.fn>).mock.calls
+          .map((c) => String(c[0]))
+          .join('\n'),
+      ) as {
+        residualRisk?: {
+          shape: string;
+          recommendation: string;
+          criticals: number;
+          fresh: number;
+          prevFresh: number;
+        };
+        body?: string;
+      };
+    try {
+      (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+      (writeStdoutLine as ReturnType<typeof vi.fn>).mockClear();
+      writeFileSync(
+        join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+        JSON.stringify({
+          v: 1,
+          round: 6,
+          posted: 3,
+          fresh: 0,
+          floor: 'c',
+          findings: [1, 2, 3].map((n) => ({
+            id: `R6-${n}`,
+            sev: 'C',
+            file: `f${n}.ts`,
+            title: `blocker ${n}`,
+          })),
+        }),
+        'utf8',
+      );
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+      });
+      const composed = stdoutJson();
+      expect(composed.residualRisk).toMatchObject({
+        shape: 'persistently-critical',
+        recommendation: 'land-with-residual-risk',
+        criticals: 3,
+        fresh: 0,
+        prevFresh: 0,
+      });
+      expect(composed.body).toContain('land-with-residual-risk');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -3402,8 +3646,8 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
           shape: string;
           recommendation: string;
           criticals: number;
-          posted: number;
-          prevPosted: number;
+          fresh: number;
+          prevFresh: number;
         };
         body?: string;
       };
@@ -3420,6 +3664,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
           round: 6,
           findings: [{ id: 'R6-1', sev: 'C', file: 'x.ts', title: 'blocker' }],
           posted: 0,
+          fresh: 0,
         }),
         'utf8',
       );
@@ -3433,8 +3678,8 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
         shape: 'persistently-critical',
         recommendation: 'land-with-residual-risk',
         criticals: 1,
-        posted: 0,
-        prevPosted: 0,
+        fresh: 0,
+        prevFresh: 0,
       });
       // The relocated blocker and the advisory both ride the body; the
       // terminal carries the advisory line.
@@ -3529,8 +3774,8 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
           shape: string;
           recommendation: string;
           criticals: number;
-          posted: number;
-          prevPosted: number;
+          fresh: number;
+          prevFresh: number;
         };
         body?: string;
       };
@@ -3547,6 +3792,7 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
           round: 6,
           findings: [{ id: 'R6-1', sev: 'C', file: 'x.ts', title: 'blocker' }],
           posted: 0,
+          fresh: 0,
         }),
         'utf8',
       );
@@ -3560,8 +3806,8 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
         shape: 'persistently-critical',
         recommendation: 'land-with-residual-risk',
         criticals: 1,
-        posted: 0,
-        prevPosted: 0,
+        fresh: 0,
+        prevFresh: 0,
       });
       expect(composed.body).toContain('land-with-residual-risk');
       expect(
@@ -8286,6 +8532,7 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
         round: 6,
         findings: [{ id: 'R6-1', sev: 'C', file: 'x.ts', title: 'blocker' }],
         posted: 0,
+        fresh: 0,
       }),
     );
     // Sized against the PR-named budget (65,536 − margin − marker
@@ -8313,8 +8560,8 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
       shape: 'persistently-critical',
       recommendation: 'land-with-residual-risk',
       criticals: 1,
-      posted: 0,
-      prevPosted: 0,
+      fresh: 0,
+      prevFresh: 0,
     });
     // The advisory yielded to the budget, and the notice names what
     // actually went — the advisory, by its own name.
@@ -8377,6 +8624,7 @@ describe("composeReview — the composed body fits GitHub's limit", () => {
         round: 6,
         findings: [{ id: 'R6-1', sev: 'C', file: 'x.ts', title: 'blocker' }],
         posted: 0,
+        fresh: 0,
       }),
     );
     // A rank-3 section wide enough that shedding the advisory alone does

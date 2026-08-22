@@ -481,8 +481,8 @@ describe('saveReviewArtifact', () => {
         shape: 'persistently-critical',
         recommendation: 'land-with-residual-risk',
         criticals: 2,
-        posted: 3,
-        prevPosted: 3,
+        fresh: 3,
+        prevFresh: 3,
       },
     });
     saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
@@ -491,8 +491,8 @@ describe('saveReviewArtifact', () => {
       shape: 'persistently-critical',
       recommendation: 'land-with-residual-risk',
       criticals: 2,
-      posted: 3,
-      prevPosted: 3,
+      fresh: 3,
+      prevFresh: 3,
     });
   });
 

@@ -693,10 +693,36 @@ export interface ConvergenceFacts {
    * (deferred Critical markers restored to the posting set).
    */
   thisCriticals: number;
-  /** THIS round's posting volume (inline comments it sends). */
-  posted: number | undefined;
-  /** The PREVIOUS round's posting volume (the ledger's two-round window). */
-  prevPosted: number | undefined;
+  /**
+   * How many of THIS round's comments report a finding for the FIRST time.
+   *
+   * The FRESH count, not the posting total, and for the reason the sibling
+   * diagnosis above measures its own trend on the same number: Step 6
+   * re-posts every still-standing ledger Critical under its ORIGINAL id, so
+   * the re-post floor only ever rises. Measured on totals, a loop whose new
+   * findings collapsed from five to one still posts more comments than the
+   * round before — and this signal would read that as "not shrinking" and
+   * recommend landing with residual risk over a loop that is converging.
+   */
+  fresh: number | undefined;
+  /** The PREVIOUS round's fresh count (the ledger's two-round window). */
+  prevFresh: number | undefined;
+  /**
+   * How many Criticals stood in the PREVIOUS round's carried work-list, when
+   * that can be counted.
+   *
+   * The backlog, and it is here because the fresh window alone cannot see
+   * it. A loop whose reviewer finds nothing new for two rounds while the
+   * author clears blockers — the healthiest state a still-Critical PR can be
+   * in — has fresh 0 on both sides, which "not shrinking" reads as stuck.
+   * The standing count is what tells the two apart.
+   *
+   * A veto, not a requirement: it suppresses on OBSERVED shrinkage and
+   * abstains otherwise. That is what keeps it sound over a work-list the
+   * marker's byte budget shortened — an undercounted predecessor can only
+   * make the shrinkage harder to observe, never invent one.
+   */
+  prevCriticals: number | undefined;
   /**
    * Is the severity floor ENGAGED this round — an explicit `critical`
    * floor, or `auto` from round 6 with the round knowable? The advisory
@@ -739,10 +765,10 @@ export interface ConvergenceAssessment {
   recommendation: typeof LAND_WITH_RESIDUAL_RISK;
   /** Critical findings this round posts — what the residual inventory covers. */
   criticals: number;
-  /** This round's posting volume. */
-  posted: number;
-  /** The previous round's posting volume. */
-  prevPosted: number;
+  /** Findings this round reported for the first time. */
+  fresh: number;
+  /** The previous round's, the other end of the window. */
+  prevFresh: number;
 }
 
 /**
@@ -765,15 +791,29 @@ export interface ConvergenceAssessment {
  *    Critical-only volume against a predecessor that still posted
  *    Suggestions, and "the floor will not converge it" is not a claim one
  *    round of the floor can support;
- *  - the two-round posting window is present and NOT shrinking — both volumes
+ *  - the two-round FRESH window is present and NOT shrinking — both counts
  *    recorded, and this round's at least the previous round's. A falling
- *    volume is a converging loop even with Criticals present (they are being
- *    worked down), and a missing volume says nothing, so both fail open.
+ *    rate of new findings is a converging loop even with Criticals present,
+ *    and a missing count says nothing, so both fail open. Fresh rather than
+ *    total, because Step 6 re-posts every standing Critical and the total
+ *    therefore only ever rises;
+ *  - and the standing Critical backlog is not observably shrinking. The
+ *    fresh window cannot see this one: a loop finding nothing new while the
+ *    author clears blockers sits at fresh 0 on both sides, which "not
+ *    shrinking" reads as stuck. This conjunct vetoes on observed shrinkage
+ *    and abstains when the predecessor's count is unknown.
  *
- * No threshold anywhere: "not shrinking" is `posted >= prevPosted` over the
- * shortest window the ledger carries, and "persistent" is two consecutive
- * rounds with Criticals — the minimum evidence for each claim, derived from
- * the carried telemetry, never tuned.
+ * No threshold anywhere: "not shrinking" is `fresh >= prevFresh` over the
+ * shortest window the ledger carries, the backlog veto is a plain `<`, and
+ * "persistent" is two consecutive rounds with Criticals — the minimum
+ * evidence for each claim, derived from the carried telemetry, never tuned.
+ *
+ * One deliberate difference from the sibling diagnosis above, which also
+ * runs on fresh counts: it additionally requires `prev.fresh > 0`, because
+ * it is about a loop GENERATING work. This one must fire at fresh 0 on both
+ * sides — Criticals standing round after round with nothing new is not a
+ * quiet loop, it is the persistently-critical shape itself, and the backlog
+ * veto is what separates it from a backlog being cleared.
  */
 export function convergenceAssessment(
   facts: ConvergenceFacts,
@@ -781,26 +821,33 @@ export function convergenceAssessment(
   const {
     prevHadCritical,
     thisCriticals,
-    posted,
-    prevPosted,
+    fresh,
+    prevFresh,
     floorEngaged,
     prevFloor,
+    prevCriticals,
   } = facts;
   if (prevHadCritical !== true) return null;
   if (thisCriticals <= 0) return null;
   if (floorEngaged !== true) return null;
   // This round is `c` by the line above, so a RECORDED `o` predecessor is a
-  // posture change and its volume is not a comparable point. Unrecorded
+  // posture change and its window is not a comparable point. Unrecorded
   // stays evaluable, like the sibling diagnosis above.
   if (prevFloor !== undefined && prevFloor !== 'c') return null;
-  if (posted === undefined || prevPosted === undefined) return null;
-  if (posted < prevPosted) return null;
+  if (fresh === undefined || prevFresh === undefined) return null;
+  if (fresh < prevFresh) return null;
+  // The backlog veto. Positive evidence only: an unknown predecessor count
+  // abstains rather than suppressing, and a shortened work-list can only
+  // hide shrinkage, never manufacture it.
+  if (prevCriticals !== undefined && thisCriticals < prevCriticals) {
+    return null;
+  }
   return {
     shape: 'persistently-critical',
     recommendation: LAND_WITH_RESIDUAL_RISK,
     criticals: thisCriticals,
-    posted,
-    prevPosted,
+    fresh,
+    prevFresh,
   };
 }
 
@@ -827,8 +874,9 @@ export function convergenceAdvisory(a: ConvergenceAssessment): {
   const en =
     `Residual risk: this loop is persistently critical — Criticals stood in ` +
     `the previous round's work-list and stand again this round (${a.criticals} ` +
-    `Critical(s)), and the posting volume is not shrinking (this round ` +
-    `${a.posted}, previous ${a.prevPosted}). The severity floor will not ` +
+    `Critical(s)), the rate of first-time findings is not falling (this ` +
+    `round ${a.fresh}, previous ${a.prevFresh}), and the standing Critical ` +
+    `backlog is not shrinking. The severity floor will not ` +
     `converge it. Recommendation: \`${a.recommendation}\` — the exit is a ` +
     `maintainer risk-acceptance decision (merge, carrying the residual risk), ` +
     `not another review round. Residual-risk inventory for that decision ` +
@@ -839,8 +887,9 @@ export function convergenceAdvisory(a: ConvergenceAssessment): {
     `Advisory only — it does not block this review.`;
   const zh =
     `残余风险：本循环处于 persistently-critical 形态——上一轮工作清单中的 Critical ` +
-    `本轮依然存在（本轮 ${a.criticals} 条 Critical），且发布音量未收缩（本轮 ` +
-    `${a.posted}，上一轮 ${a.prevPosted}）。severity floor 无法使其收敛。` +
+    `本轮依然存在（本轮 ${a.criticals} 条 Critical），首次发现的速率没有下降（本轮 ` +
+    `${a.fresh}，上一轮 ${a.prevFresh}），且未决 Critical 积压没有减少。` +
+    `severity floor 无法使其收敛。` +
     `建议：\`${a.recommendation}\`——出口是 maintainer 的风险接受决定（合入并` +
     `承担残余风险），而非再开一轮评审。供该决定使用的残余风险清单（maintainer 填写）：` +
     `按每条未决 Critical 列出「攻击面 · 攻击者依赖性 · 影响范围」三栏。` +

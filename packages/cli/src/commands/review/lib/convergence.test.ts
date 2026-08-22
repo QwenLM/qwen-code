@@ -945,26 +945,31 @@ describe('renderConvergenceDiagnosis — what the author reads', () => {
 const FIRE: ConvergenceFacts = {
   prevHadCritical: true,
   thisCriticals: 2,
-  posted: 3,
-  prevPosted: 3,
+  fresh: 3,
+  prevFresh: 3,
   floorEngaged: true,
   prevFloor: 'c',
+  // Equal to `thisCriticals`, so the backlog veto abstains and every other
+  // arm below is pinned on its own. A firing default whose backlog was
+  // already shrinking would make each `toBeNull()` below pass for the
+  // wrong reason.
+  prevCriticals: 2,
 };
 
 describe('convergenceAssessment', () => {
-  it('fires on the full conjunction — persistent Criticals, volume not shrinking', () => {
+  it('fires on the full conjunction — persistent Criticals, fresh rate not falling', () => {
     const a = convergenceAssessment(FIRE);
     expect(a).not.toBeNull();
     expect(a?.shape).toBe('persistently-critical');
     expect(a?.recommendation).toBe(LAND_WITH_RESIDUAL_RISK);
     expect(a?.criticals).toBe(2);
-    expect(a?.posted).toBe(3);
-    expect(a?.prevPosted).toBe(3);
+    expect(a?.fresh).toBe(3);
+    expect(a?.prevFresh).toBe(3);
   });
 
-  it('fires when the volume is RISING — rising is not shrinking either', () => {
+  it('fires when the fresh rate is RISING — rising is not falling either', () => {
     expect(
-      convergenceAssessment({ ...FIRE, posted: 5, prevPosted: 3 }),
+      convergenceAssessment({ ...FIRE, fresh: 5, prevFresh: 3 }),
     ).not.toBeNull();
   });
 
@@ -1001,38 +1006,75 @@ describe('convergenceAssessment', () => {
     ).toBeNull();
   });
 
-  it('suppresses when either volume is missing — a gap says nothing', () => {
-    expect(convergenceAssessment({ ...FIRE, posted: undefined })).toBeNull();
+  it('suppresses when either fresh count is missing — a gap says nothing', () => {
+    // Reachable without tampering: a marker written before the fresh count
+    // shipped records only the total, and there is no honest way to read a
+    // trend off one end of a window.
+    expect(convergenceAssessment({ ...FIRE, fresh: undefined })).toBeNull();
+    expect(convergenceAssessment({ ...FIRE, prevFresh: undefined })).toBeNull();
+  });
+
+  it('suppresses when the fresh rate is FALLING — a converging loop', () => {
+    // Criticals present but the new ones drying up: the loop is settling.
+    // Measured on posting TOTALS this arm was unreachable — Step 6 re-posts
+    // every standing Critical, so the total only ever rises and a loop
+    // whose fresh findings fell 5 -> 4 still posted more comments than the
+    // round before, firing `land-with-residual-risk` over a converging
+    // loop.
     expect(
-      convergenceAssessment({ ...FIRE, prevPosted: undefined }),
+      convergenceAssessment({ ...FIRE, fresh: 1, prevFresh: 3 }),
     ).toBeNull();
   });
 
-  it('suppresses when the volume is SHRINKING — a converging loop', () => {
-    // Criticals present but being worked down: the floor is doing its job.
+  it('suppresses when the standing backlog is SHRINKING — the fresh window is blind to it', () => {
+    // The blind spot the fresh window alone leaves: a reviewer finding
+    // nothing new for two rounds while the author clears blockers sits at
+    // fresh 0 against fresh 0, which "not falling" reads as stuck. Only the
+    // Critical count coming down says the loop is moving.
     expect(
-      convergenceAssessment({ ...FIRE, posted: 1, prevPosted: 3 }),
+      convergenceAssessment({
+        ...FIRE,
+        fresh: 0,
+        prevFresh: 0,
+        thisCriticals: 3,
+        prevCriticals: 5,
+      }),
     ).toBeNull();
   });
 
-  it('fires at zero volume on both rounds — a flat zero is still not shrinking', () => {
-    // A loop that posts nothing yet keeps Criticals in the work-list is the
-    // purest non-convergence: the window is present and exactly flat.
+  it('abstains on the backlog when the previous count is unknown', () => {
+    // A veto on positive evidence only. The work-list the count comes off
+    // is the one the marker's byte budget may have shortened, and an
+    // undercount can only hide shrinkage — never invent it — so an unknown
+    // predecessor must not silence a loop that is genuinely stuck.
+    expect(
+      convergenceAssessment({ ...FIRE, prevCriticals: undefined }),
+    ).not.toBeNull();
+  });
+
+  it('fires at zero fresh on both rounds — the purest form of the shape', () => {
+    // Criticals standing round after round with nothing new found is not a
+    // quiet loop, it is the shape itself, so this must fire — which is why
+    // this signal does NOT carry the sibling diagnosis's `prev.fresh > 0`
+    // requirement. That module is about a loop GENERATING work; this one is
+    // about work that never clears. The backlog holding steady (not
+    // shrinking) is what separates it from a backlog being worked down.
     expect(
       convergenceAssessment({
         prevHadCritical: true,
-        thisCriticals: 1,
-        posted: 0,
-        prevPosted: 0,
+        thisCriticals: 3,
+        fresh: 0,
+        prevFresh: 0,
         floorEngaged: true,
         prevFloor: 'c',
+        prevCriticals: 3,
       }),
     ).not.toBeNull();
   });
 });
 
 it('suppresses when the previous round posted under a DIFFERENT floor', () => {
-  // The round the floor engages on compares a Critical-only volume
+  // The round the floor engages on compares a Critical-only window
   // against a predecessor that was still posting Suggestions. That
   // movement is the posture, not the loop — and "the severity floor will
   // not converge it" is not a claim one round of the floor can support.
@@ -1051,11 +1093,11 @@ it('still evaluates when the previous floor was never recorded', () => {
 
 describe('convergenceAdvisory', () => {
   it('renders a RISING window in the right direction, in both languages', () => {
-    // Every equal-volume fixture reads the same number twice, so swapping
+    // Every equal-count fixture reads the same number twice, so swapping
     // the two interpolations keeps them all green while inverting the trend
     // a maintainer reads when making the land decision. A rising window
-    // (posted 5, previous 3) fires and must read this-round-first.
-    const a = convergenceAssessment({ ...FIRE, posted: 5, prevPosted: 3 });
+    // (fresh 5, previous 3) fires and must read this-round-first.
+    const a = convergenceAssessment({ ...FIRE, fresh: 5, prevFresh: 3 });
     expect(a).not.toBeNull();
     const { en, zh } = convergenceAdvisory(a!);
     expect(en).toContain('this round 5, previous 3');
@@ -1095,5 +1137,14 @@ describe('convergenceAdvisory', () => {
     expect(en).toContain('this round 3, previous 3');
     expect(zh).toContain('本轮 2 条 Critical');
     expect(zh).toContain('本轮 3，上一轮 3');
+    // The numbers are FIRST-TIME findings, and the sentence must say so —
+    // reported as "the posting volume" they described a total the signal
+    // does not measure, which is the false record this pipeline refuses.
+    expect(en).toContain('the rate of first-time findings is not falling');
+    expect(en).toContain('the standing Critical backlog is not shrinking');
+    expect(en).not.toContain('posting volume');
+    expect(zh).toContain('首次发现的速率没有下降');
+    expect(zh).toContain('未决 Critical 积压没有减少');
+    expect(zh).not.toContain('发布音量');
   });
 });

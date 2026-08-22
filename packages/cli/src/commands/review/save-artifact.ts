@@ -354,12 +354,12 @@ function validateVerdict(value: unknown): PersistedVerdict {
     // Through the ledger's own volume reader, like every other count that
     // crosses this boundary: the caps are what keep a hand-edited artifact
     // from re-displaying a number no round could have posted.
-    const counts: Record<'criticals' | 'posted' | 'prevPosted', number> = {
+    const counts: Record<'criticals' | 'fresh' | 'prevFresh', number> = {
       criticals: 0,
-      posted: 0,
-      prevPosted: 0,
+      fresh: 0,
+      prevFresh: 0,
     };
-    for (const key of ['criticals', 'posted', 'prevPosted'] as const) {
+    for (const key of ['criticals', 'fresh', 'prevFresh'] as const) {
       const n = volumeOf(r[key]);
       if (n === undefined) {
         throw new Error(
