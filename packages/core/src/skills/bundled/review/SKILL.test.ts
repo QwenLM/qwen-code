@@ -655,6 +655,10 @@ describe('bundled review skill', () => {
     expect(body).toContain(
       "the receipt carries the MR's own `detailUrl` from the pre-write read",
     );
+    // A linkless receipt is NOT Aone-only: the GitHub compose fails closed
+    // on an unknowable routing host. The stale claim would send the model
+    // hand-assembling a GitHub link in exactly the corner the code refuses.
+    expect(body).not.toContain('possible only on Aone');
     expect(body).toContain("relay the target's coordinates");
     expect(body).toContain('Never assemble an Aone link yourself');
   });

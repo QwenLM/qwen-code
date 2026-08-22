@@ -1190,7 +1190,10 @@ export function runSubmit(
   // No deep link in GitHub's answer (or an unparseable one): the provider
   // COMPOSES the PR-page URL — deterministic grammar, no API call, and the
   // host axis binds to the routing the write just took. This used to be a
-  // prose assembly in the skill; the receipt carries it now.
+  // prose assembly in the skill; the receipt carries it now. A hostless
+  // corner fails CLOSED: the compose yields '' and this receipt stays
+  // linkless rather than affirming a host the write may not have taken
+  // (gh's own hosts.yml default is not visible here).
   reviewUrl ??= githubReader.composeUrl(args.pr, args.repo);
   // Receipt for cleanup's bypass audit: EVERY review this session was
   // authorised to create, by id. The audit lists reviews by the reviewing

@@ -6,9 +6,11 @@
 
 // githubReader.composeUrl is pure assembly — no API call — so its whole
 // surface is the PR-page grammar and the host precedence: the routed gh
-// host, else an operator-exported GH_HOST, else github.com. The same
-// precedence gh itself applies, so the composed link lands where the
-// review ran.
+// host, else an operator-exported GH_HOST, else FAIL CLOSED with ''. gh's
+// own third fallback is NOT github.com but hosts.yml's authenticated
+// default (a single recorded host wins — go-gh's defaultHost), which this
+// process cannot see, so composing a link there could point away from the
+// host the write actually took.
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { githubReader } from './github.js';
@@ -30,7 +32,25 @@ describe('githubReader.composeUrl', () => {
     setGhHost(savedRoutedHost);
   });
 
-  it('composes the github.com PR page by default', () => {
+  it('fails CLOSED when the routing host is not knowable — no routed host, no exported GH_HOST', () => {
+    // gh's own third fallback is hosts.yml's authenticated default: a
+    // hosts.yml holding a single GHE host routes the write there (probed
+    // on gh 2.23.0 — no GH_HOST, single-entry hosts.yml: `gh api user`
+    // resolved at that entry), and this process cannot read that default.
+    // Composing github.com here would print a link that can resolve to a
+    // real, unrelated PR of a same-named github.com repo while the review
+    // posted to the GHE host. '' leaves the receipt linkless — submit's
+    // truthy checks drop the url — instead of affirming a wrong host.
+    expect(githubReader.composeUrl(6771, 'QwenLM/qwen-code')).toBe('');
+  });
+
+  it('composes the github.com page when github.com IS the knowable host', () => {
+    setGhHost('github.com');
+    expect(githubReader.composeUrl(6771, 'QwenLM/qwen-code')).toBe(
+      'https://github.com/QwenLM/qwen-code/pull/6771',
+    );
+    setGhHost(undefined);
+    process.env['GH_HOST'] = 'github.com';
     expect(githubReader.composeUrl(6771, 'QwenLM/qwen-code')).toBe(
       'https://github.com/QwenLM/qwen-code/pull/6771',
     );

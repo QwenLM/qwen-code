@@ -3362,8 +3362,10 @@ describe('submit receipt (producer half of the audit contract)', () => {
 // both channels, because a summary without it leaves the user to reassemble
 // the PR address by hand. Best-effort like the receipt: a response without it
 // (or an unparseable one) must never fail a review that DID post — the
-// provider composes the PR-page URL instead, so the receipt carries a link
-// either way.
+// provider composes the PR-page URL instead when the routing host is
+// knowable; when it is NOT (gh's own hosts.yml default is not visible here),
+// the receipt stays linkless rather than affirm a host the write may not
+// have taken.
 describe('the posted-review link', () => {
   const authorizedPost = (over: Record<string, unknown> = {}) =>
     args({ userAuthorized: true, ...over });
@@ -3394,8 +3396,10 @@ describe('the posted-review link', () => {
   it('composes the PR-page url when the response carries no deep link', () => {
     // A response without html_url used to leave the receipt linkless and the
     // skill prose assembled the URL by hand. That assembly is code now: the
-    // provider composes the PR page from the routed host and the target the
-    // post took — the Posted line is never without a link on GitHub.
+    // provider composes the PR page from the knowable host and the target
+    // the post took. The exported GH_HOST supplies it here — setGhHost is
+    // mocked out, so the routing bind at submit time cannot.
+    process.env['GH_HOST'] = 'github.com';
     ghMock.mockImplementationOnce(() => JSON.stringify({ id: 42 }));
     runSubmit(authorizedPost());
     expect(stdoutJson()).toMatchObject({
@@ -3414,10 +3418,29 @@ describe('the posted-review link', () => {
     // ghMock's default return is '' — JSON.parse throws, and the receipt and
     // the link ride the same best-effort read of a post that succeeded; the
     // composed fallback still lands in the JSON.
+    process.env['GH_HOST'] = 'github.com';
     runSubmit(authorizedPost());
     expect(stdoutJson().posted).toBe(true);
     expect(stdoutJson().url).toBe(
       'https://github.com/QwenLM/qwen-code/pull/6771',
     );
+  });
+
+  it('keeps the receipt linkless when the routing host is not knowable', () => {
+    // No routed host (setGhHost is a no-op here) and no exported GH_HOST (the
+    // file-level beforeEach deletes it): gh's own third fallback — hosts.yml's
+    // authenticated default — decides where the write lands, and a composed
+    // github.com link could resolve to a real, unrelated PR of a same-named
+    // repo. The post still stands; only the link is dropped.
+    ghMock.mockImplementationOnce(() => JSON.stringify({ id: 42 }));
+    runSubmit(authorizedPost());
+    const out = stdoutJson();
+    expect(out.posted).toBe(true);
+    expect(out.url).toBeUndefined();
+    const postedLine = writeStderrSpy.mock.calls
+      .map((c) => c[0] as string)
+      .find((l) => l.startsWith('Posted '));
+    expect(postedLine).toBeDefined();
+    expect(postedLine).not.toContain('https://');
   });
 });

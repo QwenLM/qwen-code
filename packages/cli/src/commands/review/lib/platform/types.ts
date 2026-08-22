@@ -151,7 +151,9 @@ export interface ReviewPlatformReader {
    * does not re-query through it: the pre-write drift-gate read already
    * carries the same stable field, so a second fetch cannot add a link —
    * when that receipt comes up empty, the skill relays the target's
-   * coordinates. `''` when the platform cannot serve one.
+   * coordinates. `''` when the platform cannot serve one — and for
+   * GitHub when the routing host is not knowable, since a composed link
+   * there could name a host the write did not take.
    */
   composeUrl(prNumber: number, ownerRepo: string): string;
 }
