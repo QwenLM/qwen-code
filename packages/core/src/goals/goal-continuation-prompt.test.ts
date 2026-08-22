@@ -5,7 +5,10 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { renderGoalContinuationPrompt } from './goal-continuation-prompt.js';
+import {
+  buildGoalContinuationParts,
+  renderGoalContinuationPrompt,
+} from './goal-continuation-prompt.js';
 
 // These expectations pin the exact bytes each host sent before the renderer
 // existed. Any edit to a line must show up here as a diff, not slip through.
@@ -85,5 +88,24 @@ Verifier feedback: Checkpoint 2 lacks a source ref.`,
         continuationContext: 'ctx',
       }),
     );
+  });
+});
+
+describe('buildGoalContinuationParts', () => {
+  it('wraps the runtime-context prompt in a single text part', () => {
+    expect(
+      buildGoalContinuationParts({
+        continuationContext: 'Objective: ship the release notes.',
+        verifierFeedback: 'Checkpoint 2 lacks a source ref.',
+      }),
+    ).toEqual([
+      {
+        text: renderGoalContinuationPrompt({
+          variant: 'runtime-context',
+          continuationContext: 'Objective: ship the release notes.',
+          verifierFeedback: 'Checkpoint 2 lacks a source ref.',
+        }),
+      },
+    ]);
   });
 });

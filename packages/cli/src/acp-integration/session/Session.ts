@@ -199,7 +199,7 @@ import {
   buildBackgroundEntryLabel,
   collectSessionTurnState,
   computeInitialTurnFromHistory as computeInitialTurnFromHistoryCore,
-  renderGoalContinuationPrompt,
+  buildGoalContinuationParts,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import { CHANNEL_PROMPT_META_KEY } from '@qwen-code/channel-base';
@@ -549,18 +549,6 @@ function sameGoalPermit(
     left.revision === right.revision &&
     left.turnId === right.turnId
   );
-}
-
-function buildGoalContinuationParts(turn: AcpGoalTurn): Part[] {
-  return [
-    {
-      text: renderGoalContinuationPrompt({
-        variant: 'runtime-context',
-        continuationContext: turn.continuationContext,
-        verifierFeedback: turn.verifierFeedback,
-      }),
-    },
-  ];
 }
 
 async function claimGoalTurn(

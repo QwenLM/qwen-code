@@ -72,7 +72,7 @@ import {
   endInteractionSpan,
   getErrorType,
   getActiveInteractionSpan,
-  renderGoalContinuationPrompt,
+  buildGoalContinuationParts,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
@@ -231,18 +231,6 @@ function sameGoalPermit(
     left.revision === right.revision &&
     left.turnId === right.turnId
   );
-}
-
-function buildGoalContinuationParts(turn: HeadlessGoalTurn): Part[] {
-  return [
-    {
-      text: renderGoalContinuationPrompt({
-        variant: 'runtime-context',
-        continuationContext: turn.continuationContext,
-        verifierFeedback: turn.verifierFeedback,
-      }),
-    },
-  ];
 }
 
 function projectLegacyActiveGoal(snapshot: GoalSnapshotV2): ActiveGoal | null {

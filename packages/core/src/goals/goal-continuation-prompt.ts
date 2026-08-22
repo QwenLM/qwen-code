@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { Part } from '@google/genai';
+
 /**
  * The prompt a host sends when `runtime.finishTurn` schedules another Goal
  * turn. Every host renders it from here so that a new line -- or a new variant
@@ -59,4 +61,20 @@ export function renderGoalContinuationPrompt(
   }
 
   return lines.join('\n');
+}
+
+/** Builds the sendable parts for a runtime-scheduled Goal continuation turn. */
+export function buildGoalContinuationParts(turn: {
+  continuationContext: string;
+  verifierFeedback?: string;
+}): Part[] {
+  return [
+    {
+      text: renderGoalContinuationPrompt({
+        variant: 'runtime-context',
+        continuationContext: turn.continuationContext,
+        verifierFeedback: turn.verifierFeedback,
+      }),
+    },
+  ];
 }
