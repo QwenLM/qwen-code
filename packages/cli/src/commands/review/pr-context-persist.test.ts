@@ -21,6 +21,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  CHURN_FIELDS,
   persistRecoveredLedger,
   persistedAnchorSha,
   recoverLedger,
@@ -704,10 +705,10 @@ describe('persistRecoveredLedger', () => {
           // next compose would stamp it as `prevPosted`. The floor and the
           // fresh count qualify that volume, so they go with it: a posture
           // recorded for a round whose volume was deliberately discarded
-          // qualifies nothing. The streak is the OTHER class — cumulative,
-          // not round-specific: the round being advanced past is one this
-          // account could not measure, and the carry contract says an
-          // unmeasured round carries the count rather than resets it.
+          // qualifies nothing. The streak goes with them: with no `me` this
+          // branch cannot tell this account's own measured RESET marker
+          // from a stranger's, because a reset stamps no `churnRounds` at
+          // all and the two are the same bytes here.
           posted: 4,
           prevPosted: 2,
           fresh: 3,
@@ -732,27 +733,249 @@ describe('persistRecoveredLedger', () => {
         { noOwnReview: true, identityKnown: false },
       );
       const written = JSON.parse(readFileSync(side, 'utf8'));
-      // The carry witness is in the shape: the fixture carries THIS
-      // account's own streak, and the written file must still carry it —
-      // the advance is a round this account could not measure (an identity
-      // blip, exactly the `gh api user` failure the volume comment
-      // anticipates), and dropping it zeroes a standing claim the blocker's
-      // own body promises unmeasured rounds carry. Filing still needs this
-      // round's OWN above-bar census, so the carried streak arms nothing
-      // early; repeated blips otherwise keep the blocker unreachable on
-      // exactly the churning PRs the mechanism exists for.
+      // The streak goes with the volume, and this assertion is the reversal
+      // of an earlier one that kept it. The keeping argument was that a
+      // carried streak arms nothing early because filing still needs THIS
+      // round's own above-bar census — true that it is only USED where a
+      // measured round finds it, but not that it is still TRUE there.
+      // Probed: a below-bar round resets by stamping NO `churnRounds`, so
+      // during an identity blip this account's own reset marker walks as
+      // foreign and is indistinguishable from a stranger's; carried, the
+      // reset never reaches the file, one later above-bar census reads a
+      // stale 2, reaches 3 and files the blocker a round early — its body
+      // claiming three counted rounds where one has passed.
+      //
+      // Dropping costs the outage only: the own marker stays on the pull
+      // request, and the next identity-KNOWN recovery re-establishes the
+      // true streak through the union. Late, never early, is the only
+      // direction a blocker may fail in.
       expect(written).toEqual({
         v: 1,
         round: 8,
         findings: ledger.findings,
         reviewId: 200,
-        churnRounds: 2,
       });
+      expect(written.churnRounds).toBeUndefined();
       expect(written.sha).toBeUndefined();
       expect(written.commitId).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("carries the file's streak when NO own marker was read", () => {
+    // R10-1. A foreign winner at a higher round replaces the file wholesale
+    // under a known identity. If the own marker left the walk — deleted,
+    // edited until it stops parsing, or missed by a short page — the union
+    // has nothing to restore, the recovered ledger carries no churn, and the
+    // write used to drop the file's standing streak. `prevLedgerFacts` then
+    // read 0, one above-bar census restarted at 1 (below CHURN_STREAK_TO_FILE),
+    // and each recurrence re-zeroed it, keeping the blocker unreachable on
+    // exactly the churning pull requests it exists for.
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    try {
+      writeFileSync(
+        side,
+        JSON.stringify({ v: 1, round: 3, findings: [], churnRounds: 2 }),
+      );
+      persistRecoveredLedger(
+        side,
+        {
+          ledger: {
+            v: 1,
+            round: 5,
+            findings: [{ id: 'R5-1', sev: 'S', file: 'a.ts', title: 'theirs' }],
+          },
+          commitId: null,
+          reviewId: 77,
+          foreign: true,
+          merged: false,
+          ownMarkerRead: false,
+        },
+        { noOwnReview: false, identityKnown: true },
+      );
+      const written = JSON.parse(readFileSync(side, 'utf8'));
+      expect(written.round).toBe(5);
+      expect(written.churnRounds).toBe(2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does NOT resurrect a streak the own marker actually reset', () => {
+    // The other side of the same carry, and the one that makes it safe to
+    // have. A below-bar round resets by stamping NO `churnRounds`, so "the
+    // recovered ledger carries no churn" is ALSO what an authoritative reset
+    // looks like. Keyed on the absence alone, the carry above would put the
+    // reset streak straight back and the blocker would file on a pull
+    // request that had converged — the failure direction this mechanism must
+    // never take. `ownMarkerRead` is what parts the two: read, the own
+    // marker has spoken in whichever direction; not read, nothing said
+    // reset.
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    try {
+      writeFileSync(
+        side,
+        JSON.stringify({ v: 1, round: 3, findings: [], churnRounds: 2 }),
+      );
+      persistRecoveredLedger(
+        side,
+        {
+          ledger: {
+            v: 1,
+            round: 5,
+            findings: [{ id: 'R5-1', sev: 'S', file: 'a.ts', title: 'theirs' }],
+          },
+          commitId: null,
+          reviewId: 77,
+          foreign: true,
+          merged: false,
+          ownMarkerRead: true,
+        },
+        { noOwnReview: false, identityKnown: true },
+      );
+      expect(
+        JSON.parse(readFileSync(side, 'utf8')).churnRounds,
+      ).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reads the carried streak through the ledger reader, not verbatim', () => {
+    // This carry is the only path where bytes from the side file survive a
+    // write instead of being replaced by it, so a hand-edited or
+    // half-written file must not put a shape into the next file that the
+    // serializer would never have emitted. A string streak is not a streak,
+    // and the marker omits a zero, so a zero must not be written back.
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    const carry = (over: Record<string, unknown>) => {
+      writeFileSync(
+        side,
+        JSON.stringify({ v: 1, round: 3, findings: [], ...over }),
+      );
+      persistRecoveredLedger(
+        side,
+        {
+          ledger: { v: 1, round: 5, findings: [] },
+          commitId: null,
+          reviewId: 77,
+          foreign: true,
+          merged: false,
+          ownMarkerRead: false,
+        },
+        { noOwnReview: false, identityKnown: true },
+      );
+      return JSON.parse(readFileSync(side, 'utf8'));
+    };
+    try {
+      expect(carry({ churnRounds: '9999' }).churnRounds).toBeUndefined();
+      expect(carry({ churnRounds: 2.5 }).churnRounds).toBeUndefined();
+      expect(carry({ churnRounds: -1 }).churnRounds).toBeUndefined();
+      expect(carry({ churnRounds: 0 }).churnRounds).toBeUndefined();
+      expect(carry({ churnRounds: 2 }).churnRounds).toBe(2);
+      // Clamped to the round it is written beside — the write side of the
+      // clamp `prevLedgerFacts` applies on read, so a planted streak a
+      // wholesale overwrite used to discard cannot now ride past its round.
+      expect(carry({ churnRounds: 9999 }).churnRounds).toBe(5);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('pins the churn group at one member, so the carry stays complete', () => {
+    // The carry above reads `churnRounds` by name because it is the only
+    // decision-bearing member. If the group grows, that site carries part of
+    // a group and silently drops the rest — the exact drift the volume
+    // group's own comment records for `floor`, shed at one seam and kept at
+    // the other. Nothing else would redden, so this does.
+    expect([...CHURN_FIELDS]).toEqual(['churnRounds']);
+  });
+
+  it('treats an UNSET ownMarkerRead as read — the fail-safe direction', () => {
+    // The field is optional so existing call sites and fixtures keep
+    // compiling. Absent, it must read as "was read" — no carry, streak
+    // restarts, blocker files LATE. Defaulting the other way would let any
+    // caller that never learned about the field resurrect reset streaks
+    // silently, which is the early-filing direction.
+    const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
+    const side = join(dir, 'side.json');
+    try {
+      writeFileSync(
+        side,
+        JSON.stringify({ v: 1, round: 3, findings: [], churnRounds: 2 }),
+      );
+      persistRecoveredLedger(
+        side,
+        {
+          ledger: { v: 1, round: 5, findings: [] },
+          commitId: null,
+          reviewId: 77,
+          foreign: true,
+          merged: false,
+        },
+        { noOwnReview: false, identityKnown: true },
+      );
+      expect(
+        JSON.parse(readFileSync(side, 'utf8')).churnRounds,
+      ).toBeUndefined();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports ownMarkerRead false when the own review will not parse', () => {
+    // Scenario B of R10-1, through the real walk: the own review is present
+    // (so `sawOwnReview` is true) but its marker no longer parses, so no own
+    // marker was READ. The two flags must not be conflated — `sawOwnReview`
+    // would say "own review exists" and send the write down the
+    // authoritative path with nothing authoritative in hand.
+    const { recovered, sawOwnReview } = recoverLedger(
+      [
+        {
+          id: 1,
+          user: { login: 'bot' },
+          submitted_at: '2026-01-01T00:00:00Z',
+          body: 'own review, marker corrupted <!-- qwen-review-ledger {nope -->',
+        },
+        {
+          id: 2,
+          user: { login: 'stranger' },
+          submitted_at: '2026-01-02T00:00:00Z',
+          body:
+            '<!-- qwen-review-ledger {"v":1,"round":4,' +
+            '"findings":[{"id":"R4-1","sev":"S","file":"a.ts","title":"t"}]} -->',
+        },
+      ],
+      'bot',
+    );
+    expect(sawOwnReview).toBe(true);
+    expect(recovered?.ownMarkerRead).toBe(false);
+    expect(recovered?.foreign).toBe(true);
+  });
+
+  it('reports ownMarkerRead true when an own marker parsed', () => {
+    const { recovered } = recoverLedger(
+      [
+        {
+          id: 1,
+          user: { login: 'bot' },
+          submitted_at: '2026-01-01T00:00:00Z',
+          body: '<!-- qwen-review-ledger {"v":1,"round":3,"findings":[]} -->',
+        },
+        {
+          id: 2,
+          user: { login: 'stranger' },
+          submitted_at: '2026-01-02T00:00:00Z',
+          body: '<!-- qwen-review-ledger {"v":1,"round":4,"findings":[]} -->',
+        },
+      ],
+      'bot',
+    );
+    expect(recovered?.ownMarkerRead).toBe(true);
   });
 
   it('an ANONYMOUS recovery with no existing file still writes whole', () => {
@@ -775,6 +998,12 @@ describe('persistRecoveredLedger', () => {
             prevPosted: 3,
             fresh: 4,
             floor: 'c',
+            // Recovery cannot hand this branch a streak today (with no `me`
+            // every marker is foreign and the strip fires), so the fixture
+            // supplies one deliberately: the assertion below is about THIS
+            // seam shedding it, and over a churn-free fixture it would hold
+            // vacuously and pin nothing.
+            churnRounds: 4,
           },
           commitId: null,
           reviewId: 40,
@@ -800,6 +1029,12 @@ describe('persistRecoveredLedger', () => {
       expect(written.prevPosted).toBeUndefined();
       expect(written.fresh).toBeUndefined();
       expect(written.floor).toBeUndefined();
+      // ...and the streak goes with them. This is the one path that writes a
+      // whole recovered ledger to the file, so if the recovery-seam strip
+      // ever loosened, a stranger's streak would land here intact and arm
+      // the non-convergence blocker off someone else's count. The seam
+      // defends itself rather than trusting that invariant to hold forever.
+      expect(written.churnRounds).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
