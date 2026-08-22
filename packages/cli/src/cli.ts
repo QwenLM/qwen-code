@@ -197,16 +197,22 @@ function hasFlag(
   return false;
 }
 
-// Index of the exact `-v`/`--version` token before any `--`; -1 when no
-// such token exists. The scan deliberately does NOT model option-value
-// consumption: base did not either (`qwen --model -v`, `qwen -p -v -h`,
-// `qwen --resume -v --help` all printed the version — the token counts even
-// in a value slot). Tokens after `--` are positional data and never count.
+// Index of the `-v`/`--version` token before any `--`; -1 when no such
+// token exists. Mirrors the pre-PR hasFlag scan: the token following a
+// value-taking flag is skipped unconditionally (even when it starts with
+// `-`), so a version token sitting in a value slot is NOT counted —
+// `qwen -p -v -h` and `qwen --resume -v --help` printed top-level help on
+// base, not the version. Tokens after `--` are positional data and never
+// count.
 function versionTokenIndex(argv: readonly string[]): number {
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
     if (arg === '--') {
       return -1;
+    }
+    if (VALUE_FLAGS.has(arg)) {
+      i++; // skip the value slot; the loop increment consumes the token
+      continue;
     }
     if (arg === '--version' || arg === '-v') {
       return i;
@@ -271,25 +277,25 @@ export function resolveBootstrapRoute(
   const argv = normalizeServeFastPathArgv(rawArgv);
 
   // Base-parity version intercept (structural close). Base printed the
-  // version for ANY exact `-v`/`--version` token before any `--`, no matter
-  // what else the argv carries — top-level or command-prefixed, help tokens
-  // (`---help -v`, `-v help`, `--h -v`, `mcp remove victim -v help`), real
-  // options with h-prefixed names (`review fetch-pr … --host x -v`),
-  // option-shifted command argv (`mcp --debug add … -v`), even the
-  // variadic tail of `mcp add` (`mcp add name cmd server.js -v` prints the
-  // version and persists nothing). Verified by A/B probes against the base
-  // binary. The intercept therefore models nothing: an exact token before
-  // `--` IS the route. Printing the version is side-effect-free, while
-  // demoting to the full parser EXECUTES subcommands (observed: `mcp remove
-  // victim -v help` deleted the server and its OAuth creds on the full
-  // parser) — so the fail-closed direction is to intercept. The scan is
-  // unconditional on purpose: it consumes no option values (base counted a
-  // version token even in a value slot — `qwen --model -v` printed the
-  // version) and models no help state (base printed the version for every
-  // help-token sibling probed). Only tokens after `--` (positional data,
-  // e.g. `mcp add name cmd -- -v`, which the mcp fast path persists
-  // verbatim) and `=`-form tokens (`--model=-v` is one token, not an exact
-  // match) escape the intercept.
+  // version for any `-v`/`--version` token its hasFlag scan reached, no
+  // matter what else the argv carries — command-prefixed (`mcp remove
+  // victim -v help`, `mcp add name cmd server.js -v`), help tokens
+  // (`---help -v`, `-v help`, `--h -v`), real options with h-prefixed
+  // names (`review fetch-pr … --host x -v`), option-shifted command argv
+  // (`mcp --debug add … -v`). Verified by A/B probes against the base
+  // binary. Printing the version is side-effect-free, while demoting to
+  // the full parser EXECUTES subcommands (observed: `mcp remove victim -v
+  // help` deleted the server and its OAuth creds on the full parser) — so
+  // the fail-closed direction is to intercept. The scan mirrors base's
+  // hasFlag exactly: it skips the value slot of value-taking flags, so a
+  // version token sitting in that slot is NOT counted (`qwen -p -v -h`
+  // and `qwen --resume -v --help` printed top-level help on base, and
+  // `qwen --model -v` demoted to the full parser), and it models no help
+  // state (base printed the version for every other help-token sibling
+  // probed). Only tokens after `--` (positional data, e.g. `mcp add name
+  // cmd -- -v`, which the mcp fast path persists verbatim) and `=`-form
+  // tokens (`--model=-v` is one token, not an exact match) escape the
+  // intercept.
   if (versionTokenIndex(argv) !== -1) {
     return 'version';
   }

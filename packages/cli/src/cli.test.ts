@@ -157,7 +157,9 @@ describe('resolveBootstrapRoute', () => {
       resolveBootstrapRoute(['--append-system-prompt', 'be brief', '--help']),
     ).toBe('help');
     expect(resolveBootstrapRoute(['--worktree', '--help'])).toBe('help');
-    expect(resolveBootstrapRoute(['--model', '-v'])).toBe('version');
+    // A version token sitting in a value flag's value slot is skipped
+    // (base parity) and the argv demotes to the full parser.
+    expect(resolveBootstrapRoute(['--model', '-v'])).toBe('default');
   });
 
   it('matches yargs value scanning for sentinels and array options', () => {
@@ -218,21 +220,30 @@ describe('resolveBootstrapRoute', () => {
     );
   });
 
-  it('prints the version for exact version tokens regardless of help siblings (base parity)', () => {
-    // Base printed the version for ANY exact `-v`/`--version` token before
-    // `--`, even when help siblings are present — probed against the base
-    // binary: `--model -v --help`, `-p -v -h`, `--resume -v --help`,
-    // `-v --help`, `foo -v --help`, `serve -v --help`, and `mcp -v --help`
-    // all printed the version. Base also counted a token sitting in a value
-    // flag's value slot (`--model -v` printed the version), so the scan
-    // consumes no option values.
-    expect(resolveBootstrapRoute(['--model', '-v', '--help'])).toBe('version');
-    expect(resolveBootstrapRoute(['-p', '-v', '-h'])).toBe('version');
-    expect(resolveBootstrapRoute(['--resume', '-v', '--help'])).toBe('version');
+  it("skips version tokens sitting in a value flag's value slot (base parity)", () => {
+    // Base's hasFlag skipped the token after every value-taking flag
+    // unconditionally, so a `-v`/`--version` in the value slot was never
+    // counted: `qwen -p -v -h` printed top-level help (exit 0) and
+    // `qwen --model -v` demoted to the full parser. An unconditional
+    // version intercept flipped every VALUE_FLAGS x {-v,--version} x
+    // {-h,--help} shape from help to version; the restored skip returns
+    // them to parity.
+    expect(resolveBootstrapRoute(['-p', '-v', '-h'])).toBe('help');
+    expect(resolveBootstrapRoute(['--model', '-v', '--help'])).toBe('help');
+    expect(resolveBootstrapRoute(['--resume', '-v', '--help'])).toBe('help');
     expect(resolveBootstrapRoute(['--model', '--version', '--help'])).toBe(
-      'version',
+      'help',
     );
+    expect(resolveBootstrapRoute(['-m', '--version', '-h'])).toBe('help');
+    expect(resolveBootstrapRoute(['-r', '-v', '--help'])).toBe('help');
+    expect(resolveBootstrapRoute(['--output-format', '-v', '--help'])).toBe(
+      'help',
+    );
+    expect(resolveBootstrapRoute(['--model', '-v'])).toBe('default');
+    // Version tokens outside any value slot still win, with or without
+    // help siblings.
     expect(resolveBootstrapRoute(['-v', '--help'])).toBe('version');
+    expect(resolveBootstrapRoute(['--version', '--help'])).toBe('version');
     expect(resolveBootstrapRoute(['foo', '-v', '--help'])).toBe('version');
     expect(resolveBootstrapRoute(['serve', '-v', '--help'])).toBe('version');
     expect(resolveBootstrapRoute(['mcp', '-v', '--help'])).toBe('version');
@@ -286,10 +297,12 @@ describe('resolveBootstrapRoute', () => {
     expect(
       resolveBootstrapRoute(['mcp', 'add', 'my-server', 'node', '--version']),
     ).toBe('version');
-    // Version still wins for top-level argv with no command prefix.
-    expect(resolveBootstrapRoute(['--model', '-v'])).toBe('version');
+    // Bare top-level version tokens still win; a token sitting in a value
+    // flag's value slot is skipped and demotes to the full parser
+    // (base parity).
     expect(resolveBootstrapRoute(['-v'])).toBe('version');
     expect(resolveBootstrapRoute(['--version'])).toBe('version');
+    expect(resolveBootstrapRoute(['--model', '-v'])).toBe('default');
   });
 
   it('prints the version instead of persisting version-bearing mcp add argv (base parity)', () => {
