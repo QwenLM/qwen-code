@@ -8,6 +8,7 @@
  */
 
 import type { ClipboardEvent, FC, ReactNode } from 'react';
+import { useLayoutEffect, useRef, useState } from 'react';
 import { InputForm as BaseInputForm, getEditModeIcon } from '@qwen-code/webui';
 import type {
   InputFormProps as BaseInputFormProps,
@@ -74,17 +75,63 @@ export const InputForm: FC<InputFormProps> = ({
   ...rest
 }) => {
   const editModeInfo = getEditModeInfo(editMode);
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
+  const [formHeight, setFormHeight] = useState(0);
+
+  // The base form's root is `absolute bottom-0 left-0 right-0` and out of
+  // flow, so the wrapper below would collapse to zero height and any
+  // `bottom-full` dropdown would anchor at the viewport bottom, behind the
+  // opaque form (issue #8617). Measure the form and give the wrapper its
+  // height so `bottom-full` clears the form's top edge.
+  useLayoutEffect(() => {
+    const wrapper = wrapperRef.current;
+    if (!wrapper || typeof ResizeObserver === 'undefined') {
+      return;
+    }
+
+    // Find the wrapper child that contains the base form (the webui
+    // InputForm root) so the dropdown tracks the form's real height.
+    const form = wrapper.querySelector('form.composer-form');
+    let node: HTMLElement | null = form instanceof HTMLElement ? form : null;
+    while (node && node.parentElement !== wrapper) {
+      node = node.parentElement;
+    }
+    if (!node) {
+      return;
+    }
+    const formRoot = node;
+
+    const measure = () => {
+      setFormHeight(formRoot.getBoundingClientRect().height);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(formRoot);
+    return () => {
+      observer.disconnect();
+    };
+  }, []);
 
   return (
-    // The wrapper doubles as the positioning context for the ModelSelector:
-    // the base input form anchors to its bottom edge, and the selector grows
-    // upward from it (bottom-full), so the dropdown attaches to the input
-    // area instead of floating over the message list (issue #8617).
-    <div className="relative">
+    // Positioning context for the ModelSelector. The base form's root is
+    // `absolute bottom-0 left-0 right-0` and out of flow (see
+    // packages/webui/src/components/layout/InputForm.tsx), so left alone
+    // this wrapper would collapse to zero height and `bottom-full` would
+    // anchor the dropdown at the viewport bottom, behind the opaque form
+    // (issue #8617). The effect above sizes this wrapper to the form's
+    // measured height, so `bottom-full` anchors the dropdown's bottom edge
+    // to the form's top edge and the dropdown grows upward over the message
+    // list instead of being hidden behind the form.
+    <div
+      ref={wrapperRef}
+      className="relative"
+      style={formHeight > 0 ? { height: `${formHeight}px` } : undefined}
+    >
       {showModelSelector && onSelectModel && onCloseModelSelector && (
-        // z-0 keeps ModelSelector's internal z-index inside this stacking
-        // context so the base input form (rendered later) stays painted
-        // above the dropdown's hidden bottom section.
+        // z-0 keeps ModelSelector's internal z-index (z-[1000]) inside this
+        // stacking context so the dropdown stays painted below the fixed
+        // overlays (PermissionDrawer / AskUserQuestionDialog) rendered by
+        // App.tsx; App closes the selector when an overlay takes over.
         <div className="absolute bottom-full left-4 right-4 mb-2 z-0 max-w-[600px] mx-auto">
           <ModelSelector
             visible={showModelSelector}
