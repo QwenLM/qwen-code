@@ -4949,7 +4949,9 @@ export class Session implements SessionContext {
                   promptId,
                   toolLoopState,
                   onFullTurnModel,
+                  () => fullTurnModelOverride,
                   rejectOnLoopDetected,
+                  onFullTurnModelResolutionFailed,
                 );
                 nextMessage = nextAfterTools.message;
                 if (nextAfterTools.stoppedByRepeatedToolFailure) {
