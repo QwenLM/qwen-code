@@ -16,6 +16,7 @@ import type {
 import { GeminiEventType } from '../core/turn.js';
 import * as loggers from '../telemetry/loggers.js';
 import { LoopType } from '../telemetry/types.js';
+import { buildStub } from '../utils/truncation.js';
 import {
   DEFAULT_MAX_TOOL_CALLS_PER_TURN,
   LoopDetectionService,
@@ -2647,19 +2648,17 @@ describe('LoopDetectionService', () => {
       // fingerprint the model-visible finalized parts, so hashing the
       // envelope would make every fingerprint unique and silently disable
       // every result-aware guard for exactly the largest results. These
-      // tests mirror buildStub's file-path shape with a unique path per
-      // poll.
+      // tests build their stubs with the real builder so a format change
+      // in truncation.ts fails here loudly instead of leaving the guards
+      // parsing stale hand-mirrored shapes.
       const FROZEN_BOARD = 'task row for a frozen board\n'.repeat(1500); // ~41KB
 
       const persistedStub = (callId: string, board: string): string =>
-        `<persisted-output>
-Output too large (40 KB). Full output saved to: /tmp/qwen/tool-results/${callId}.txt
-Note: this file may be cleaned up after 24 hours.
-To read the complete output, use the read_file tool with the absolute file path above.
-
-Preview (up to 2000 chars):
-${board}
-</persisted-output>`;
+        buildStub(
+          board,
+          Buffer.byteLength(board, 'utf-8'),
+          `/tmp/qwen/tool-results/${callId}.txt`,
+        );
 
       const stubResult = (callId: string, board: string): Part[] =>
         taskListResult(persistedStub(callId, board), callId);

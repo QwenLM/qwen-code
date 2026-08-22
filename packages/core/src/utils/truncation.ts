@@ -17,7 +17,7 @@ import { ToolOutputTruncatedEvent } from '../telemetry/types.js';
 
 const debugLogger = createDebugLogger('TRUNCATION');
 
-const PREVIEW_SIZE_CHARS = 2000;
+export const PREVIEW_SIZE_CHARS = 2000;
 const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024; // 50MB
 export const MAX_SESSION_BYTES = 500 * 1024 * 1024; // 500MB
 
@@ -29,6 +29,17 @@ export const MAX_SESSION_BYTES = 500 * 1024 * 1024; // 500MB
  */
 export const TOOL_OUTPUT_TRUNCATED_PREFIX =
   'Tool output was too large and has been truncated';
+
+/**
+ * Format markers of the oversized-result stubs this module emits. Exported
+ * so consumers that parse stubs (the loop guards in
+ * services/loopDetectionService.ts) share the producer's constants instead
+ * of hand-mirroring literals that can silently drift.
+ */
+export const PERSISTED_OUTPUT_OPEN_TAG = '<persisted-output>';
+export const OUTPUT_TOO_LARGE_PREFIX = 'Output too large (';
+export const PERSISTED_PREVIEW_MARKER = `Preview (up to ${PREVIEW_SIZE_CHARS} chars):`;
+export const TRUNCATED_PART_MARKER = 'Truncated part of the output:\n';
 
 /**
  * Tolerance factor applied by the scheduler's combined (second) pass:
@@ -187,8 +198,7 @@ The full output has been saved to: ${outputFile}
 To read the complete output, use the ${ReadFileTool.Name} tool with the absolute file path above.
 The truncated output below shows the beginning and end of the content. The marker '... [CONTENT TRUNCATED] ...' indicates where content was removed.
 
-Truncated part of the output:
-${truncatedContent}`;
+${TRUNCATED_PART_MARKER}${truncatedContent}`;
 
   // Token-aware fallback: if the wrapped (truncated + instructions) output is
   // not actually smaller than the original, truncating wastes effort and
@@ -378,7 +388,7 @@ export async function truncateLlmContent(
 export function isAlreadyTruncated(content: string): boolean {
   return (
     content.includes('... [CONTENT TRUNCATED] ...') ||
-    content.startsWith('<persisted-output>')
+    content.startsWith(PERSISTED_OUTPUT_OPEN_TAG)
   );
 }
 
@@ -505,7 +515,14 @@ export async function persistAndTruncateToolResult(
   }
 }
 
-function buildStub(
+/**
+ * Builds the model-visible stub that replaces an oversized tool result.
+ * `filePathOrNote` is either the absolute path of the persisted full output
+ * (wrapped `<persisted-output>` envelope) or a short note explaining why it
+ * was not persisted (unwrapped stub). Exported so tests build stubs with
+ * the real producer instead of hand-mirroring its format.
+ */
+export function buildStub(
   content: string,
   byteSize: number,
   filePathOrNote: string,
@@ -515,18 +532,18 @@ function buildStub(
   const isFilePath = path.isAbsolute(filePathOrNote);
 
   if (isFilePath) {
-    return `<persisted-output>
-Output too large (${sizeKb} KB). Full output saved to: ${filePathOrNote}
+    return `${PERSISTED_OUTPUT_OPEN_TAG}
+${OUTPUT_TOO_LARGE_PREFIX}${sizeKb} KB). Full output saved to: ${filePathOrNote}
 Note: this file may be cleaned up after 24 hours.
 To read the complete output, use the ${ReadFileTool.Name} tool with the absolute file path above.
 
-Preview (up to ${PREVIEW_SIZE_CHARS} chars):
+${PERSISTED_PREVIEW_MARKER}
 ${preview}
 </persisted-output>`;
   }
 
-  return `Output too large (${sizeKb} KB). ${filePathOrNote}
+  return `${OUTPUT_TOO_LARGE_PREFIX}${sizeKb} KB). ${filePathOrNote}
 
-Preview (up to ${PREVIEW_SIZE_CHARS} chars):
+${PERSISTED_PREVIEW_MARKER}
 ${preview}`;
 }

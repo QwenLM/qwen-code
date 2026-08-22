@@ -20,6 +20,13 @@ import {
 } from '../telemetry/types.js';
 import type { Config } from '../config/config.js';
 import { getToolCallRepeatKey } from '../utils/tool-call-repeat-key.js';
+import {
+  OUTPUT_TOO_LARGE_PREFIX,
+  PERSISTED_OUTPUT_OPEN_TAG,
+  PERSISTED_PREVIEW_MARKER,
+  TOOL_OUTPUT_TRUNCATED_PREFIX,
+  TRUNCATED_PART_MARKER,
+} from '../utils/truncation.js';
 
 // Re-exported for existing importers (daemon turn-loop guard); the
 // implementation lives in a leaf module so replay detection in
@@ -426,24 +433,25 @@ export class LoopDetectionService {
    * fingerprint unique per call — silently disabling every result-aware
    * guard for exactly the largest results — so reduce a stub to its
    * semantic payload: the preview/truncated content that follows the stable
-   * marker. The `<persisted-stub>` sentinel keeps a stub fingerprint from
-   * ever colliding with a small literal output that matches the payload.
+   * marker. The markers are the shared constants from utils/truncation.ts
+   * so the parser cannot drift from the producer. The `<persisted-stub>`
+   * sentinel keeps a stub fingerprint from ever colliding with a small
+   * literal output that matches the payload.
    */
   private static stripPersistenceEnvelope(value: string): string {
     const isPreviewStub =
-      value.includes('<persisted-output>') ||
-      value.startsWith('Output too large (');
+      value.includes(PERSISTED_OUTPUT_OPEN_TAG) ||
+      value.startsWith(OUTPUT_TOO_LARGE_PREFIX);
     if (isPreviewStub) {
-      const marker = /Preview \(up to \d+ chars\):\n/.exec(value);
-      if (marker) {
-        return `<persisted-stub>${value.slice(
-          marker.index + marker[0].length,
-        )}`;
+      const marker = `${PERSISTED_PREVIEW_MARKER}\n`;
+      const index = value.indexOf(marker);
+      if (index >= 0) {
+        return `<persisted-stub>${value.slice(index + marker.length)}`;
       }
       return value;
     }
-    if (value.startsWith('Tool output was too large and has been truncated')) {
-      const marker = '\nTruncated part of the output:\n';
+    if (value.startsWith(TOOL_OUTPUT_TRUNCATED_PREFIX)) {
+      const marker = `\n${TRUNCATED_PART_MARKER}`;
       const index = value.indexOf(marker);
       if (index >= 0) {
         return `<persisted-stub>${value.slice(index + marker.length)}`;
