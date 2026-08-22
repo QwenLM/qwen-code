@@ -304,10 +304,18 @@ describe.skipIf(process.platform === 'win32' || !bashSupportsAssocArrays)(
 describe('qwen-autofix.yml design-record pointers', () => {
   const workflow = readFileSync(join(WORKFLOW_DIR, 'qwen-autofix.yml'), 'utf8');
   const doc = readFileSync(join(WORKFLOW_DIR, 'qwen-autofix.md'), 'utf8');
+  // Steps whose body outgrew the workflow file live in sibling scripts (the
+  // file sits near GitHub's 500 KB start-runs limit). Their rationale pointers
+  // moved with them, so scan those too — otherwise extracting a step orphans
+  // every section it pointed at and this suite reads it as dead prose.
+  const pointerSources = [
+    workflow,
+    readFileSync('.github/scripts/autofix-push-and-report.sh', 'utf8'),
+  ].join('\n');
 
-  const pointers = [...workflow.matchAll(/qwen-autofix\.md#(af-\d+)/g)].map(
-    (m) => m[1],
-  );
+  const pointers = [
+    ...pointerSources.matchAll(/qwen-autofix\.md#(af-\d+)/g),
+  ].map((m) => m[1]);
   const anchors = [...doc.matchAll(/<a id="(af-\d+)"><\/a>/g)].map((m) => m[1]);
 
   it('every pointer resolves to a section', () => {
