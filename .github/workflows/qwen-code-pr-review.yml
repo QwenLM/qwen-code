@@ -236,7 +236,22 @@ jobs:
       - name: 'Re-check PR state'
         id: 'pr_state'
         env:
+          # The two reads (PR state, review listing) are all the job token
+          # needs, and `pull-requests: read` covers them.
           GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          # The notice is the one WRITE here, and the job token cannot make
+          # it: the notice is an ISSUE comment (this job holds no
+          # `issues: write`), and upsert-bot-comment.sh opens by resolving its
+          # author scope through `gh api user`, which a GITHUB_TOKEN cannot
+          # call at all. Under the job token every stop was therefore silent
+          # on the PR — the one failure mode this notice exists to prevent.
+          # Same posture as `authorize`'s PAT, and narrower: the PAT is
+          # scoped to this one call, the job checks out the base branch alone
+          # with credentials dropped, and PR-controlled bytes reach nothing
+          # but JSON.parse and an integer check — never a shell, never the
+          # posted text. Posting as qwen-code-ci-bot is also what makes the
+          # upsert's author-scoped lookup find its own earlier notice.
+          NOTICE_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           PR_NUMBER: '${{ github.event.pull_request.number }}'
           # The caller's number, and the caller's off switch. Defaults live in
           # the decision module; an unset variable takes them.
@@ -280,9 +295,20 @@ jobs:
           bodies="${RUNNER_TEMP}/bot-review-bodies.json"
           # Never fail the gate over the read: a listing that errors must
           # leave the trigger alone, which is what the empty array does.
-          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" --paginate \
-            --jq '[.[] | select(.user.login == "qwen-code-ci-bot") | .body]' \
-            > "$bodies" 2>/dev/null || echo '[]' > "$bodies"
+          #
+          # `--paginate` WITHOUT `--jq`, then `jq -s` — this repository's
+          # convention everywhere else, and here the convention IS the
+          # feature. `--paginate --jq` applies the filter per page and
+          # concatenates the outputs, so a PR past 100 reviews emits
+          # `[...][...]`: two documents, which JSON.parse rejects, which the
+          # fallback below turns into "no rounds carry a marker", which keeps
+          # reviewing. Fail-open and silent — and inert on exactly the long
+          # diverging loops this rule exists for, while working on every PR
+          # short enough that the treadmill is still bearable. `jq -s` slurps
+          # every page into one document before the filter runs.
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" --paginate 2>/dev/null \
+            | jq -s '[add // [] | .[] | select(.user.login == "qwen-code-ci-bot") | .body]' \
+            > "$bodies" || echo '[]' > "$bodies"
           decision="$(node -e '
             import("./.github/scripts/review-auto-stop.mjs").then(async (m) => {
               const { readFileSync } = await import("node:fs");
@@ -324,7 +350,11 @@ jobs:
             printf '%s\n' '- 或把剩余修复攒成一批、验证后推送一次——下一轮趋势下降时，该暂停会自行解除。'
             printf '\n%s\n' '</details>'
           } > "$body_file"
-          if .github/scripts/upsert-bot-comment.sh \
+          # An absent PAT (a fork of this repository) posts nothing rather
+          # than spending three authenticated-retry rounds on a credential
+          # that cannot work; the skip still stands, and the warning says so.
+          if [ -n "${NOTICE_TOKEN:-}" ] && GH_TOKEN="${NOTICE_TOKEN}" \
+            .github/scripts/upsert-bot-comment.sh \
             "${GITHUB_REPOSITORY}" "${PR_NUMBER}" \
             '<!-- qwen-review-auto-stop -->' \
             "$body_file"; then

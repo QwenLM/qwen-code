@@ -65,9 +65,33 @@ completion (#9461 and #9623) each took nine rounds, and #9461's rounds 6 and
 7 still produced 5 and 2 Critical findings. A round-count bar would have cut
 those off. The trend is the signal; the count is not.
 
+## Two runtime traps, both fail-open, both silent
+
+The first round of this feature was green everywhere and broken in two
+places, and both were invisible for the same reason: fail-open failures leave
+no mark. They are pinned by tests now, and they are the two things to check
+before editing the step.
+
+1. **The listing must not use `--paginate --jq`.** `gh` applies the filter
+   per page and concatenates the outputs, so a pull request past 100 reviews
+   emits two JSON documents rather than one array. `JSON.parse` rejects it,
+   the fallback reads "no rounds carry a marker", and the rule keeps
+   reviewing — permanently inert on exactly the long diverging loops it
+   exists for, while working on every pull request short enough that the
+   treadmill is still bearable. Use `--paginate` alone and slurp with
+   `jq -s`, this repository's convention everywhere else.
+2. **The notice must be posted with `CI_BOT_PAT`.** It is an issue comment,
+   the job holds no `issues: write`, and `upsert-bot-comment.sh` opens by
+   resolving its author scope through `gh api user` — an endpoint a
+   `GITHUB_TOKEN` cannot call at all. Under the job token every stop was
+   silent on the pull request, which is the one failure mode the notice
+   exists to prevent. The two reads stay on the job token.
+
 ## Where it lives
 
 - `.github/scripts/review-auto-stop.mjs` — the decision, as a pure function.
 - `.github/scripts/review-auto-stop.test.mjs` — its tests, registered in
-  `HELPER_TESTS`.
+  `HELPER_TESTS`. The later half of the file replays the shipped `run:` block
+  against a stubbed `gh` that paginates the way the real one does; a unit
+  test over the decision alone cannot see either trap above.
 - `.github/workflows/qwen-code-pr-review.yml` — the gate that calls it.
