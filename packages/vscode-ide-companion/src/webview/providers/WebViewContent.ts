@@ -52,12 +52,20 @@ export class WebViewContent {
       ? ' data-web-shell-transcript="true"'
       : '';
 
+    // The WebShell transcript bundles Shiki, whose Oniguruma engine compiles
+    // WASM at runtime. `script-src` must therefore grant 'wasm-unsafe-eval'
+    // when the transcript is enabled; the flag-off path keeps the original CSP
+    // untouched so legacy users get no widened permission.
+    const csp = webShellTranscriptEnabled
+      ? `default-src 'none'; img-src ${webview.cspSource} data:; script-src ${webview.cspSource} 'wasm-unsafe-eval'; style-src ${webview.cspSource} 'unsafe-inline';`
+      : `default-src 'none'; img-src ${webview.cspSource} data:; script-src ${webview.cspSource}; style-src ${webview.cspSource} 'unsafe-inline';`;
+
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} data:; script-src ${webview.cspSource}; style-src ${webview.cspSource} 'unsafe-inline';">
+  <meta http-equiv="Content-Security-Policy" content="${csp}">
   <title>Qwen Code</title>
 </head>
 <body data-extension-uri="${safeExtensionUri}"${webShellTranscriptAttr}>
