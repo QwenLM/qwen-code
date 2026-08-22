@@ -59,6 +59,7 @@ async function connectNegotiatingControl(
 ) {
   const client = createMcpClient('qwen-code-mcp-client', {
     command: 'test-control',
+    versionNegotiation: 'auto',
   } as MCPServerConfig);
   await client.connect(
     new SdkControlClientTransport({ serverName, sendMcpMessage }),
@@ -74,7 +75,7 @@ describe('configured MCP SDK v2 negotiation', () => {
     );
   });
 
-  it('keeps non-stdio and explicit opt-outs on legacy', () => {
+  it('keeps defaults, non-stdio, and explicit legacy configs on legacy', () => {
     expect(
       mcpVersionNegotiationFor({
         httpUrl: 'https://example.com/mcp',
@@ -91,6 +92,12 @@ describe('configured MCP SDK v2 negotiation', () => {
     ).toEqual({ mode: 'legacy' });
     expect(
       mcpVersionNegotiationFor({ command: 'node' } as MCPServerConfig),
+    ).toEqual({ mode: 'legacy' });
+    expect(
+      mcpVersionNegotiationFor({
+        command: 'node',
+        versionNegotiation: 'auto',
+      } as MCPServerConfig),
     ).toEqual({
       mode: 'auto',
       probe: { timeoutMs: MCP_VERSION_NEGOTIATION_PROBE_TIMEOUT_MS },
@@ -98,12 +105,14 @@ describe('configured MCP SDK v2 negotiation', () => {
     expect(
       mcpVersionNegotiationFor({
         command: 'node',
+        versionNegotiation: 'auto',
         discoveryTimeoutMs: 2_000,
       } as MCPServerConfig),
     ).toEqual({ mode: 'legacy' });
     expect(
       mcpVersionNegotiationFor({
         command: 'node',
+        versionNegotiation: 'auto',
         discoveryTimeoutMs: 8_000,
       } as MCPServerConfig),
     ).toEqual({
@@ -114,7 +123,7 @@ describe('configured MCP SDK v2 negotiation', () => {
     });
   });
 
-  it('preserves short discovery budgets for legacy initialization', async () => {
+  it('preserves the default discovery budget for legacy initialization', async () => {
     const config = {
       command: process.execPath,
       args: [
@@ -136,11 +145,11 @@ describe('configured MCP SDK v2 negotiation', () => {
                   serverInfo: { name: 'slow-legacy', version: '1.0.0' },
                 },
               }) + '\\n');
-            }, 750);
+            }, 5100);
           });
         `,
       ],
-      discoveryTimeoutMs: 2_000,
+      discoveryTimeoutMs: 8_000,
     } as MCPServerConfig;
 
     const client = await runWithTimeout(

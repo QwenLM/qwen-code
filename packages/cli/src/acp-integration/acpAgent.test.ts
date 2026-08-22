@@ -11044,7 +11044,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         transport: 'stdio',
         command: 'node',
         args: ['server.js'],
-        versionNegotiation: 'legacy',
+        versionNegotiation: 'auto',
       },
     });
     expect(settings.setValue).toHaveBeenCalledWith(
@@ -11053,7 +11053,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect.objectContaining({
         local: expect.objectContaining({
           command: 'node',
-          versionNegotiation: 'legacy',
+          versionNegotiation: 'auto',
         }),
       }),
     );
@@ -11073,10 +11073,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         server: {
           transport: 'stdio',
           command: 'node',
-          versionNegotiation: 'auto',
+          versionNegotiation: 'modern',
         },
       }),
-    ).rejects.toThrowError(/MCP versionNegotiation must be legacy/);
+    ).rejects.toThrowError(/MCP versionNegotiation must be auto or legacy/);
 
     mockConnectionState.resolve();
     await agentPromise;

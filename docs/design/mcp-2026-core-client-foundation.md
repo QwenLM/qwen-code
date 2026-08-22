@@ -14,10 +14,10 @@ that behavior rather than duplicate it.
 
 ## Scope
 
-This slice of #8968 migrates configured MCP sessions to the v2 client, opts
-stdio sessions into automatic protocol negotiation, and adds the first MCP Apps
-host for daemon-backed WebShell sessions. Tool, prompt, resource-list, and
-resource-read operations use the v2 cache-aware helpers when the negotiated
+This slice of #8968 migrates configured MCP sessions to the v2 client, adds
+opt-in automatic protocol negotiation for stdio sessions, and adds the first
+MCP Apps host for daemon-backed WebShell sessions. Tool, prompt, resource-list,
+and resource-read operations use the v2 cache-aware helpers when the negotiated
 protocol is modern.
 
 Remote HTTP / SSE / TCP clients stay on `versionNegotiation.mode = 'legacy'`.
@@ -38,20 +38,20 @@ The following remain separate follow-ups:
 
 ## Design
 
-Configured stdio MCP clients use SDK v2 with `versionNegotiation.mode = 'auto'`
-and a `server/discover` probe capped at 5s, and further shortened so the probe
-plus initialize fallback still fit inside `discoveryTimeoutMs` (the discovery
-window clamp is `[100ms, 300s]`; a budget that cannot cover both steps skips
-the probe and uses `legacy`). The SDK sends `server/discover` first. Definitive
-modern evidence selects the stateless `2026-07-28` protocol; legacy evidence —
-including a silent stdio server that never answers the probe — falls back to
-the unchanged `initialize` flow.
+Configured stdio MCP clients default to `versionNegotiation.mode = 'legacy'`.
+Setting `versionNegotiation: "auto"` opts a server into a `server/discover`
+probe capped at 5s, and further shortened so the probe plus initialize fallback
+still fit inside `discoveryTimeoutMs` (the discovery window clamp is
+`[100ms, 300s]`; a budget that cannot cover both steps skips the probe and uses
+`legacy`). Definitive modern evidence selects the stateless `2026-07-28`
+protocol; legacy evidence — including a silent stdio server that never answers
+the probe — falls back to the unchanged `initialize` flow.
 
-The SDK performs stdio auto-negotiation on a disposable sibling process before
-starting the session process, so the configured command runs twice per
-connection. Servers with non-idempotent startup side effects or single-owner
-resources such as lockfiles can set `versionNegotiation: "legacy"` to skip the
-probe and retain the single-process initialize flow.
+The SDK performs opt-in stdio auto-negotiation on a disposable sibling process
+before starting the session process, so the configured command runs twice per
+connection. The default legacy policy skips the probe and retains the
+single-process initialize flow for servers with non-idempotent startup side
+effects or single-owner resources such as lockfiles.
 
 Remote HTTP / SSE / TCP clients use `versionNegotiation.mode = 'legacy'` and
 never send `server/discover`.
@@ -92,8 +92,8 @@ not advertise privileged App capabilities.
 ## Compatibility and safety
 
 - No configured server is pinned to the modern protocol.
-- Configured stdio servers can opt out of the extra negotiation process with
-  `versionNegotiation: "legacy"`.
+- Configured stdio servers use the single-process legacy flow by default and
+  can opt into the extra negotiation process with `versionNegotiation: "auto"`.
 - Legacy fallback remains the SDK's byte-compatible v1 sequence.
 - Authorization and Qwen Code's MCP permission boundary are unchanged.
 - The modern cache is private per client instance; no result is shared across

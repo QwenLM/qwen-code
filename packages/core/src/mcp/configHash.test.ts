@@ -112,7 +112,7 @@ describe('hashMcpServerConfig', () => {
       expect(
         hashMcpServerConfig({
           ...base,
-          versionNegotiation: 'legacy',
+          versionNegotiation: 'auto',
         }),
       ).not.toBe(baseHash);
     });

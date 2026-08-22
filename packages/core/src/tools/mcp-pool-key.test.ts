@@ -113,14 +113,19 @@ describe('mcp-pool-key', () => {
       expect(fp).toMatch(/^[0-9a-f]{16}$/);
     });
 
-    it('separates explicit legacy negotiation from the default auto mode', () => {
+    it('separates explicit automatic negotiation from the default legacy mode', () => {
       const base = { command: 'node' } as MCPServerConfig;
       const legacy = {
         ...base,
         versionNegotiation: 'legacy',
       } as MCPServerConfig;
+      const automatic = {
+        ...base,
+        versionNegotiation: 'auto',
+      } as MCPServerConfig;
 
-      expect(fingerprint(base)).not.toBe(fingerprint(legacy));
+      expect(fingerprint(base)).toBe(fingerprint(legacy));
+      expect(fingerprint(base)).not.toBe(fingerprint(automatic));
     });
   });
 

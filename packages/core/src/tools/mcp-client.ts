@@ -369,15 +369,14 @@ export type McpVersionNegotiation =
   | { mode: 'auto'; probe: { timeoutMs: number } };
 
 /**
- * External stdio clients auto-negotiate unless explicitly pinned to legacy.
- * Internal and remote transports stay on legacy because SDK v2 has no
- * non-stdio probe → initialize timeout fallback.
+ * External stdio clients negotiate automatically only when explicitly opted
+ * in. Internal, remote, and default stdio transports stay on legacy.
  */
 export function mcpVersionNegotiationFor(
   cfg: MCPServerConfig,
 ): McpVersionNegotiation {
   if (
-    cfg.versionNegotiation === 'legacy' ||
+    cfg.versionNegotiation !== 'auto' ||
     isSdkMcpServerConfig(cfg) ||
     !cfg.command ||
     cfg.httpUrl ||

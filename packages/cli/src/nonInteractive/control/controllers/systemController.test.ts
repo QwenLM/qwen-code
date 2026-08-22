@@ -227,7 +227,7 @@ describe('SystemController', () => {
   });
 
   describe('initialize MCP configuration', () => {
-    it('preserves explicit legacy version negotiation', async () => {
+    it('preserves explicit automatic version negotiation', async () => {
       const context = createContext();
       const controller = new SystemController(
         context,
@@ -239,9 +239,9 @@ describe('SystemController', () => {
         {
           subtype: 'initialize',
           mcpServers: {
-            legacy: {
+            automatic: {
               command: 'node',
-              versionNegotiation: 'legacy',
+              versionNegotiation: 'auto',
             },
           },
         },
@@ -249,9 +249,9 @@ describe('SystemController', () => {
       );
 
       expect(context.config.addMcpServers).toHaveBeenCalledWith({
-        legacy: expect.objectContaining({
+        automatic: expect.objectContaining({
           command: 'node',
-          versionNegotiation: 'legacy',
+          versionNegotiation: 'auto',
         }),
       });
     });

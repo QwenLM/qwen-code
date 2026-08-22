@@ -200,7 +200,7 @@ type McpDraft = {
   env: string;
   headers: string;
   timeout: string;
-  versionNegotiation?: 'legacy';
+  versionNegotiation?: 'auto' | 'legacy';
   trust: boolean;
   description: string;
   includeTools: string;

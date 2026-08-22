@@ -319,8 +319,8 @@ all transport-defining fields:
 
 Per-session filtering and metadata fields (`includeTools`, `excludeTools`,
 `trust`, `description`, `extensionName`, `discoveryTimeoutMs`) are excluded, so
-sessions with different filters can share one entry. The legacy negotiation
-opt-out is included because it changes how the underlying process connects.
+sessions with different filters can share one entry. The automatic negotiation
+opt-in is included because it changes how the underlying process connects.
 
 For the OAuth cell, `canonicalOAuth(o)` hashes every `MCPOAuthConfig` field:
 `clientId`, `clientSecret`, sorted `scopes`, sorted `audiences`,

@@ -1298,7 +1298,7 @@ type QwenMcpServerConfig = {
   url?: string;
   headers?: Record<string, string>;
   timeout?: number;
-  versionNegotiation?: 'legacy';
+  versionNegotiation?: 'auto' | 'legacy';
   trust?: boolean;
   description?: string;
   includeTools?: string[];
@@ -2665,7 +2665,7 @@ function normalizeMcpServerConfig(value: unknown): QwenMcpServerConfig {
   ) {
     throw RequestError.invalidParams(
       undefined,
-      'MCP versionNegotiation must be legacy',
+      'MCP versionNegotiation must be auto or legacy',
     );
   }
   server.versionNegotiation = versionNegotiation;
@@ -2797,8 +2797,10 @@ function toMcpServerConfig(value: unknown): QwenMcpServerConfig | undefined {
   return undefined;
 }
 
-function toMcpVersionNegotiation(value: unknown): 'legacy' | undefined {
-  return value === 'legacy' ? value : undefined;
+function toMcpVersionNegotiation(
+  value: unknown,
+): 'auto' | 'legacy' | undefined {
+  return value === 'auto' || value === 'legacy' ? value : undefined;
 }
 
 function redactSecretRecord(

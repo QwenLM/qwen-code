@@ -138,7 +138,7 @@ export function fingerprint(cfg: MCPServerConfig): PoolKey {
     tcp: cfg.tcp ?? null,
     headers: sortedEntries(cfg.headers),
     timeout: cfg.timeout ?? null,
-    legacyVersionNegotiation: cfg.versionNegotiation === 'legacy',
+    automaticVersionNegotiation: cfg.versionNegotiation === 'auto',
     oauth: canonicalOAuth(cfg.oauth),
     authProviderType: cfg.authProviderType ?? null,
     targetAudience: cfg.targetAudience ?? null,
