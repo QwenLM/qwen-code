@@ -95,9 +95,13 @@ anyway). The cost exceeds the benefit.
 
 ### 11. Node.js `>=22`
 
-**Mechanically enforced.** `package.json` declares
-`"engines": { "node": ">=22.0.0" }`. `npm` warns on version mismatch. CI runs
-on Node 22. No separate guard needed.
+**Mechanically enforced — partial.** `package.json` declares
+`"engines": { "node": ">=22.0.0" }`, but without `engine-strict` npm only
+_warns_ on a version mismatch — nothing fails. CI selecting Node 22 means
+shipped artifacts are built and tested on a supported runtime, but an
+unsupported local runtime is not rejected. **Gap:** making this mechanical
+requires either `engine-strict=true` in `.npmrc` or a check that actually
+fails (e.g. a preinstall runtime assertion).
 
 ### 12. Core modules are maintainer-only (two-tier gate)
 
@@ -125,6 +129,23 @@ unknown, untrusted, ambiguous, bootstrapping, draining, or removed states
 follow their declared failure semantics instead of falling back to the
 primary runtime. Whether a failure path honors those semantics is a judgment
 call; the reviewer checklist covers this.
+
+### 15. Web Shell UI conventions
+
+**Review-only.** AGENTS.md's Web Shell UI development section asserts four
+normative rules: prefer the shared primitives in
+`packages/web-shell/client/components/ui` instead of duplicating them;
+ref-accepting wrappers (including Radix `asChild`, `Slot`, `Presence`, and
+portal children) must use `React.forwardRef` so the package works under both
+React 18 and React 19; generated CSS stays scoped to the Web Shell root and
+portal root with semantic tokens, isolated from host-page styles; and portal
+components must use `useWebShellPortalRoot()` so themes, scoped CSS, and
+z-index variables keep applying. None of these has a mechanical guard — no
+lint rule or test detects a duplicated primitive, a missing `forwardRef`, a
+broken CSS scope, or a raw portal container — so they are enforced by
+reviewer judgment against `packages/web-shell/README.md`. Violations surface
+at integration time (host styles leak in, refs break under React 18), past
+the point any lint could see.
 
 ---
 
@@ -291,10 +312,11 @@ the guard goes with it, and the pattern survives only in the two tests above.
 | PascalCase `.tsx` filenames                        | AGENTS.md               | Mechanical           | —                                                                      | ⚠️ Gap (low priority)                  |
 | No comments by default                             | AGENTS.md               | Review-only          | —                                                                      | ✅ (by design)                         |
 | Conventional Commits                               | AGENTS.md               | Not worth enforcing  | —                                                                      | ✅ (by design)                         |
-| Node ≥22                                           | AGENTS.md               | Mechanical           | `package.json` `"engines"`                                             | ✅                                     |
+| Node ≥22                                           | AGENTS.md               | Mechanical (partial) | `package.json` `"engines"` (warn-only without `engine-strict`)         | ⚠️ Gap (local runtime not rejected)    |
 | Core modules maintainer-only                       | AGENTS.md               | Review-only          | Two-tier gate                                                          | ✅ (by design)                         |
 | Daemon routes classified by ownership              | AGENTS.md (Code Review) | Review-only          | Reviewer checklist                                                     | ✅ (by design)                         |
 | Workspace-scoped routes never fall back to primary | AGENTS.md (Code Review) | Review-only          | Reviewer checklist                                                     | ✅ (by design)                         |
+| Web Shell UI conventions                           | AGENTS.md               | Review-only          | —                                                                      | ✅ (by design)                         |
 | acp-integration off serve/                         | #8084                   | Mechanical           | `no-restricted-imports` + boundary test                                | ❌ PR #9144 open                       |
 | Approval-mode SDK ↔ core drift                    | #9145                   | Mechanical           | `approval-mode-drift.test.ts`                                          | ⚠️ Partial (Python/Java in #9003)      |
 | utils/ is a leaf layer                             | #9146                   | Mechanical (partial) | `no-restricted-imports` (serve/ only)                                  | ⚠️ Intentionally incremental           |
