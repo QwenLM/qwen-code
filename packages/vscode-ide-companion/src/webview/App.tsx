@@ -471,7 +471,14 @@ export const App: React.FC = () => {
     [fileContext, availableCommands, availableSkills, modelInfo?.name],
   );
 
-  const completion = useCompletionTrigger(inputFieldRef, getCompletionItems);
+  // Suppressed while the model selector is open so the completion menu can
+  // never mount alongside it — the selector's capture-phase document keydown
+  // listener owns the keyboard while it is visible.
+  const completion = useCompletionTrigger(
+    inputFieldRef,
+    getCompletionItems,
+    showModelSelector,
+  );
   const {
     isOpen: completionIsOpen,
     triggerChar: completionTriggerChar,
