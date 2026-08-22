@@ -50,6 +50,7 @@ import {
   GeminiEventType,
   Turn,
   type ServerGeminiStreamEvent,
+  type ServerGeminiToolCallRequestEvent,
 } from './turn.js';
 import { LoopType } from '../telemetry/types.js';
 import { logMemoryRecallDelivery } from '../telemetry/index.js';
@@ -7930,6 +7931,179 @@ hello
       expect(events.some((e) => e.type === GeminiEventType.LoopDetected)).toBe(
         false,
       );
+    });
+
+    // Variant of runTaskListPollTurns that polls ONLY task_list (no
+    // interleaved tool), so identical (name, args) build one unbroken
+    // consecutive streak across rounds. Round 0 streams the same call id
+    // twice — the provider-duplicate emission dedupeRequestsByCallId
+    // collapses into one executed call and one functionResponse — so request
+    // counts and result evidence desync unless the loop-guard feed counts one
+    // event per call id per attempt (issue #9450).
+    async function runDuplicateIdTaskListPollTurns(
+      board: (round: number) => string,
+      maxRounds = 6,
+    ) {
+      const promptId = 'prompt-task-list-dup-poll';
+      const taskListArgs = { status: 'in_progress', owner: 'peer-a' };
+      const allEvents: Array<{ type: string; value?: unknown }> = [];
+      for (let round = 0; round <= maxRounds; round++) {
+        const request = (callId: string) => ({
+          type: GeminiEventType.ToolCallRequest,
+          value: {
+            callId,
+            name: 'task_list',
+            args: taskListArgs,
+            isClientInitiated: false,
+            prompt_id: promptId,
+          },
+        });
+        mockTurnRunFn.mockReturnValueOnce(
+          (async function* () {
+            yield request(`tl-${round}`);
+            if (round === 0) {
+              // Provider-duplicate emission of the same call id: execution
+              // collapses it (one functionResponse comes back below), so the
+              // loop-guard feed must count it once.
+              yield request(`tl-${round}`);
+            }
+          })(),
+        );
+        const contents =
+          round === 0
+            ? [{ text: 'poll the board' }]
+            : [
+                {
+                  functionResponse: {
+                    id: `tl-${round - 1}`,
+                    name: 'task_list',
+                    response: { output: board(round - 1) },
+                  },
+                },
+              ];
+        const events = await fromAsync(
+          client.sendMessageStream(
+            contents as never,
+            new AbortController().signal,
+            promptId,
+            {
+              type:
+                round === 0
+                  ? SendMessageType.UserQuery
+                  : SendMessageType.ToolResult,
+            },
+          ),
+        );
+        allEvents.push(...(events as Array<{ type: string; value?: unknown }>));
+        if (
+          allEvents.some((e) => e.type === GeminiEventType.LoopDetected) ||
+          !events.some((e) => e.type === GeminiEventType.ToolCallRequest)
+        ) {
+          return allEvents;
+        }
+      }
+      return allEvents;
+    }
+
+    it('counts a provider-duplicate call id once so changed-board polls never halt (#9450)', async () => {
+      const events = await runDuplicateIdTaskListPollTurns(
+        (round) => `board v${round}`,
+      );
+      expect(events.some((e) => e.type === GeminiEventType.LoopDetected)).toBe(
+        false,
+      );
+      // The turn kept polling through every round: 7 rounds, 7 unique call
+      // ids, 8 streamed events (round 0's id is emitted twice and both
+      // emissions still reach consumers — only the guard feed is deduped).
+      // Without the feed dedup the duplicate round-0 emission desyncs the
+      // request counter one ahead of the result evidence and the guard halts
+      // the streak mid-poll.
+      const taskListRequests = events.filter(
+        (e) =>
+          e.type === GeminiEventType.ToolCallRequest &&
+          (e.value as { name?: string }).name === 'task_list',
+      );
+      expect(taskListRequests).toHaveLength(8);
+      expect(
+        new Set(
+          taskListRequests.map((e) => (e.value as { callId: string }).callId),
+        ).size,
+      ).toBe(7);
+    });
+
+    it('still halts a frozen board despite the duplicate-call-id feed dedup (#9450)', async () => {
+      const events = await runDuplicateIdTaskListPollTurns(
+        () => 'frozen board',
+      );
+      const loopEvent = events.find(
+        (e) => e.type === GeminiEventType.LoopDetected,
+      );
+      expect(loopEvent).toBeDefined();
+      expect(
+        (loopEvent?.value as { loopType?: string } | undefined)?.loopType,
+      ).toBe('consecutive_identical_tool_calls');
+    });
+
+    it('feeds the loop guards one event per call id per attempt, re-feeding after retries (#9450)', async () => {
+      const loopDetector = client['loopDetector'];
+      const alwaysOnSpy = vi
+        .spyOn(loopDetector, 'checkAlwaysOnSafeties')
+        .mockReturnValue(false);
+      const heuristicSpy = vi
+        .spyOn(loopDetector, 'addAndCheckHeuristicLoops')
+        .mockReturnValue(false);
+
+      const request = (callId: string) => ({
+        type: GeminiEventType.ToolCallRequest,
+        value: {
+          callId,
+          name: 'task_list',
+          args: { status: 'in_progress' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-dup-feed',
+        },
+      });
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield request('dup-1');
+          // Provider-duplicate emission within the same attempt.
+          yield request('dup-1');
+          yield { type: GeminiEventType.Retry };
+          // Fresh attempt: the attempt boundary re-feeds the same id.
+          yield request('dup-1');
+          yield request('unique-2');
+        })(),
+      );
+
+      const events = await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'poll' }] as never,
+          new AbortController().signal,
+          'prompt-dup-feed',
+          { type: SendMessageType.UserQuery },
+        ),
+      );
+
+      const fedCallIds = (spy: typeof alwaysOnSpy) =>
+        spy.mock.calls
+          .map((call) => call[0])
+          .filter(
+            (e): e is ServerGeminiToolCallRequestEvent =>
+              e.type === GeminiEventType.ToolCallRequest,
+          )
+          .map((e) => e.value.callId);
+
+      // One feed per call id per attempt: the in-attempt duplicate is
+      // skipped, and the retry clears the attempt boundary so the re-streamed
+      // id is fed again.
+      expect(fedCallIds(alwaysOnSpy)).toEqual(['dup-1', 'dup-1', 'unique-2']);
+      expect(fedCallIds(heuristicSpy)).toEqual(['dup-1', 'dup-1', 'unique-2']);
+
+      // The dedup happens only at the guard feed: every emission still
+      // reaches stream consumers.
+      expect(
+        events.filter((e) => e.type === GeminiEventType.ToolCallRequest),
+      ).toHaveLength(4);
     });
 
     it('should halt via the always-on turn cap before the skipLoopDetection gate', async () => {
