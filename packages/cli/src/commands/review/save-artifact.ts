@@ -33,10 +33,17 @@ import { EFFORT_LEVELS, type ReviewEffort } from './parse-args.js';
 import { REVIEWS_DIR } from './lib/paths.js';
 import { isSameFile } from './lib/same-file.js';
 import { volumeOf } from './lib/ledger.js';
+import {
+  RECOMMENDATION_CODES,
+  type Recommendation,
+} from './lib/convergence.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 
 interface PersistedVerdict
-  extends Omit<ComposeReviewResult, 'postedInline' | 'prevPostedInline'> {
+  extends Omit<
+    ComposeReviewResult,
+    'postedInline' | 'postedFresh' | 'prevPostedInline'
+  > {
   verdictLine: string;
   /**
    * Optional HERE, required on the composed result it is otherwise a copy
@@ -51,6 +58,13 @@ interface PersistedVerdict
    * recoverable from the marker chain inside `body`.
    */
   postedInline?: number;
+  /**
+   * Optional for the same reason as its sibling, and for one more: an
+   * artifact written before the convergence trend measured NEW findings
+   * carries only the total. Absence is preserved rather than defaulted —
+   * a round that recorded no fresh count is not a round that produced none.
+   */
+  postedFresh?: number;
 }
 
 export interface ReviewArtifactV1 {
@@ -202,6 +216,24 @@ function event(value: unknown, label: string): ReviewEvent {
   return value;
 }
 
+/**
+ * A recommendation code, checked against the closed set rather than cast
+ * into it. The set is a contract a caller wires actions to, and a cast
+ * writes whatever string it was handed into the durable record under a type
+ * that says otherwise — the shape every sibling closed vocabulary in this
+ * validator refuses.
+ */
+function recommendationCode(
+  value: unknown,
+  label: string,
+): Recommendation['code'] {
+  const code = string(value, label);
+  if (!(RECOMMENDATION_CODES as readonly string[]).includes(code)) {
+    throw new Error(`${label} must be one of the known recommendation codes.`);
+  }
+  return code as Recommendation['code'];
+}
+
 function validateVerdict(value: unknown): PersistedVerdict {
   const verdict = object(value, 'Composed verdict');
   const downgradedFrom = verdict['downgradedFrom'];
@@ -282,6 +314,62 @@ function validateVerdict(value: unknown): PersistedVerdict {
       'Composed verdict.postedInline must be a non-negative integer.',
     );
   }
+  // The convergence paragraph is the ONE clause the overflow ladder sheds
+  // first, and the artifact is where a trimmed round's record lives. Dropped
+  // by this allow-list, the durable record of a round whose body shed it
+  // held neither copy.
+  const rawConvergence = verdict['convergence'];
+  let convergence: { en: string; zh: string } | undefined;
+  if (rawConvergence !== undefined && rawConvergence !== null) {
+    const c = object(rawConvergence, 'Composed verdict.convergence');
+    convergence = {
+      en: string(c['en'], 'Composed verdict.convergence.en'),
+      zh: string(c['zh'], 'Composed verdict.convergence.zh'),
+    };
+  }
+  // The machine-readable half of the observation. Dropped by this
+  // allow-list, a caller reading the durable record sees the prose and not
+  // the codes it would key on.
+  const rawRecs = verdict['recommendations'];
+  let recommendations: Recommendation[] | undefined;
+  if (rawRecs !== undefined && rawRecs !== null) {
+    if (!Array.isArray(rawRecs)) {
+      throw new Error('Composed verdict.recommendations must be an array.');
+    }
+    recommendations = rawRecs.map((entry, i) => {
+      const r = object(entry, `Composed verdict.recommendations[${i}]`);
+      return {
+        code: recommendationCode(
+          r['code'],
+          `Composed verdict.recommendations[${i}].code`,
+        ),
+        basis: string(
+          r['basis'],
+          `Composed verdict.recommendations[${i}].basis`,
+        ),
+      };
+    });
+  }
+  // Same reasoning as the paragraph above, and more so: this block is the
+  // FIRST thing the ladder sheds.
+  const rawHealth = verdict['health'];
+  let health: { en: string; zh: string } | undefined;
+  if (rawHealth !== undefined && rawHealth !== null) {
+    const h = object(rawHealth, 'Composed verdict.health');
+    health = {
+      en: string(h['en'], 'Composed verdict.health.en'),
+      zh: string(h['zh'], 'Composed verdict.health.zh'),
+    };
+  }
+  // The fresh count reads by the same rules as the total it is part of.
+  const rawFresh = verdict['postedFresh'];
+  const freshAbsent = rawFresh === undefined || rawFresh === null;
+  const postedFresh = freshAbsent ? undefined : volumeOf(rawFresh);
+  if (!freshAbsent && postedFresh === undefined) {
+    throw new Error(
+      'Composed verdict.postedFresh must be a non-negative integer.',
+    );
+  }
   // Absent reads as "no trim", the same absence semantics the sibling count
   // gets: a composed file written before the body budget shipped carries no
   // `bodyTrim`, and a mid-upgrade save must not fail over a record of
@@ -332,6 +420,10 @@ function validateVerdict(value: unknown): PersistedVerdict {
     deferredCount,
     floorEnforced: floorEnforced as number[],
     ...(postedInline === undefined ? {} : { postedInline }),
+    ...(postedFresh === undefined ? {} : { postedFresh }),
+    ...(convergence === undefined ? {} : { convergence }),
+    ...(recommendations === undefined ? {} : { recommendations }),
+    ...(health === undefined ? {} : { health }),
     lowSignal:
       lowSignal === null
         ? null

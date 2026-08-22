@@ -143,10 +143,32 @@ describe('bundled review skill', () => {
       'Every other reason is deterministic for the same sha and must NOT be retried',
     );
     expect(body).toContain('Retry that one, once.');
-    // …and the exception's OTHER condition: a null merge base has two causes
-    // and only the fetch-failure one is retryable.
+    // The once-cap's re-keyed shape: a base-less `capture-failed` is the
+    // retryable class, but git's exit status cannot split its transient
+    // member from its deterministic one (a deleted remote base exits 128
+    // identically), so the retry is bounded to one.
+    expect(body).toContain(
+      'One shape of `capture-failed` retries ONCE, not forever',
+    );
     expect(body).toContain('`baseFetchFailed: true`');
+    // The re-key's premise: a planless partition failure cannot be
+    // base-less, so the cap no longer keys on `partition-failed` at all.
+    expect(body).toContain(
+      'a planless `partition-failed` always carries a `mergeBaseSha`',
+    );
+    // The narrowing reason is deterministic for the same sha like every other
+    // non-infrastructure one: the same two captures select the same hunks. A
+    // future edit moving it into the retryable set would re-narrow to nothing
+    // every round, forever.
+    expect(body).toContain('`nothing-to-narrow` re-narrows identically');
     expect(body).toContain('found no common ancestor at all');
+    // The narrowing reason's definition in the enumeration and the retryable
+    // set's membership, pinned outright: the recovery loop reads both, and a
+    // rename of the one or a widening of the other ships green without them.
+    expect(body).toContain(
+      '`nothing-to-narrow` (the narrowing found nothing it could publish',
+    );
+    expect(body).toContain('(`base-untrusted`, `capture-failed`:');
   });
 
   it('records the range the round actually reviewed in provenance', () => {
@@ -625,5 +647,19 @@ describe('bundled review skill', () => {
     expect(body).toContain(
       'the URL a `pr-url` target carried, or else assemble',
     );
+  });
+
+  it('runs presubmit on Aone targets — self-PR backing, not the skip list', () => {
+    // Revert guard (#9616): presubmit used to sit on the Aone skip list and
+    // the skill carried the "self-PR detection has no Aone backing" caveat —
+    // a review of the user's own MR silently got no downgrade. The command
+    // is now backed for self-PR detection and head drift; restoring either
+    // the skip or the caveat must fail here, not slip through.
+    const body = skillBody();
+    expect(body).toContain('`presubmit` **runs on Aone targets too**');
+    expect(body).toContain('the `a1 auth whoami` account vs the MR author');
+    expect(body).toContain('self-PR detection and head drift are a1-backed');
+    expect(body).not.toContain('self-PR detection has no Aone backing');
+    expect(body).not.toContain('`pr-context`, `comment-status`, `presubmit`');
   });
 });
