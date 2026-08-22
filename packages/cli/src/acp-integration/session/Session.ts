@@ -1639,8 +1639,19 @@ interface SessionRewindResult {
 
 interface RewindTurnCoordinates {
   promptId?: string;
+  /**
+   * Positional index into the visible rewindable turns, in BOTH projection
+   * modes. Numeric rewind requests address this space; it is also the
+   * advertised `turnIndex`. Never the recording ordinal.
+   */
   turnIndex: number;
   apiTruncateIndex: number;
+  /**
+   * Ordinal into the recording's turnParentUuids boundary list. Internal
+   * rewindRecording key only — never advertised, never matched against a
+   * client-supplied numeric index (the two spaces diverge after any
+   * compression, which never prunes boundaries).
+   */
   recordingTurnIndex?: number;
 }
 
@@ -3507,10 +3518,15 @@ export class Session implements SessionContext {
     this.#assertCanRewind();
     const apiHistory = this.captureHistorySnapshot();
     const projection = this.#getRewindTurnProjection(apiHistory);
-    const target = projection?.turns.find((turn) =>
-      projection.mode === 'identified'
-        ? turn.recordingTurnIndex === targetTurnIndex
-        : turn.turnIndex === targetTurnIndex,
+    // Numeric indexes are POSITIONAL in both modes: clients address the
+    // visible turn list (the same space getRewindableSnapshotTargets
+    // advertises). Matching the recording ordinal instead would diverge
+    // from the client's space after any compression — boundaries are never
+    // pruned, so the visible turn p would resolve to a different turn (or
+    // fail) whenever earlier turns were compressed away. recordingTurnIndex
+    // stays the internal rewindRecording key.
+    const target = projection?.turns.find(
+      (turn) => turn.turnIndex === targetTurnIndex,
     );
     if (!target) {
       throw RequestError.invalidParams(
@@ -3856,7 +3872,12 @@ export class Session implements SessionContext {
         : turnIndex;
       coordinates.push({
         promptId,
-        turnIndex: recordingTurnIndex ?? turnIndex,
+        // turnIndex stays POSITIONAL (matches the legacy projection and the
+        // client's numeric index space). The recording ordinal — which
+        // diverges from the positional space once compression removes turns
+        // without pruning boundaries — rides along only as the internal
+        // rewindRecording key.
+        turnIndex,
         apiTruncateIndex: apiTurn.apiTruncateIndex,
         ...(recordingTurnIndex !== undefined ? { recordingTurnIndex } : {}),
       });

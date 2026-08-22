@@ -3533,12 +3533,16 @@ describe('Session', () => {
       ]);
 
       expect(session.getRewindableUserTurnCount()).toBe(2);
+      // Advertised turnIndexes are POSITIONAL (the client's numeric index
+      // space); the recording ordinal (2 for prompt-2, whose boundary sits
+      // behind the goal-runtime snapshot) is only the internal
+      // rewindRecording key.
       expect(session.getRewindableSnapshotTargets()).toEqual([
         { promptId: 'prompt-1', turnIndex: 0 },
-        { promptId: 'prompt-2', turnIndex: 2 },
+        { promptId: 'prompt-2', turnIndex: 1 },
       ]);
-      expect(session.rewindToTurn(2)).toEqual({
-        targetTurnIndex: 2,
+      expect(session.rewindToTurn(1)).toEqual({
+        targetTurnIndex: 1,
         apiTruncateIndex: 4,
         promptId: 'prompt-2',
       });
@@ -3549,7 +3553,8 @@ describe('Session', () => {
       // boundary snapshot: the conversation keeps one fewer turn than the
       // surviving prefix holds, and a resume rebuilding the store from this
       // batch must see the aligned shape (the agent drops the boundary from
-      // the live store once the files sit AT it).
+      // the live store once the files sit AT it). The re-root itself uses
+      // the recording ordinal (2), not the positional index.
       expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
         2,
         { truncatedCount: 1 },
@@ -3919,7 +3924,16 @@ describe('Session', () => {
       );
     });
 
-    it('resolves numeric identified rewinds by recording index without ordinal collision', () => {
+    it('keeps numeric identified rewinds positional when a recording boundary is missing', () => {
+      // A client's numeric targetTurnIndex addresses the POSITIONAL visible
+      // turn space in both modes; recordingTurnIndex is only the internal
+      // rewindRecording key. The old shape matched the recording ordinal,
+      // which silently re-addressed index 0 from the boundary-less first
+      // turn to the joined second one — rewinding a different turn than
+      // the client named. Positionally, the boundary-less turn fails
+      // closed on its own missing recording identity, and the joined turn
+      // is reachable at its visible index while still re-rooting the
+      // recording through its true ordinal (0).
       const history: Content[] = [
         { role: 'user', parts: [{ text: 'unjoined first' }] },
         { role: 'model', parts: [{ text: 'first reply' }] },
@@ -3931,9 +3945,30 @@ describe('Session', () => {
       mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
         'prompt-b',
       ]);
+      mockFileHistoryService.isEnabled.mockReturnValue(true);
+      const snap = (promptId: string, minutes: number) => ({
+        promptId,
+        timestamp: new Date(`2026-06-13T00:0${minutes}:00.000Z`),
+        trackedFileBackups: {},
+      });
+      mockFileHistoryService.getSnapshots.mockReturnValue([
+        snap('prompt-a', 0),
+        snap('prompt-b', 1),
+      ]);
 
-      expect(session.rewindToTurn(0)).toEqual({
-        targetTurnIndex: 0,
+      // The boundary-less turn is not advertised...
+      expect(session.getRewindableSnapshotTargets()).toEqual([
+        { promptId: 'prompt-b', turnIndex: 1 },
+      ]);
+      // ...and a numeric rewind onto it fails closed instead of landing on
+      // a different turn...
+      expect(() => session.rewindToTurn(0)).toThrow(
+        'Its recording identity is missing or ambiguous',
+      );
+      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+      // ...while the joined turn resolves by its POSITIONAL index.
+      expect(session.rewindToTurn(1)).toEqual({
+        targetTurnIndex: 1,
         apiTruncateIndex: 2,
         promptId: 'prompt-b',
       });
@@ -3941,7 +3976,59 @@ describe('Session', () => {
       expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
         0,
         { truncatedCount: 1 },
-        [],
+        [snap('prompt-a', 0)],
+      );
+    });
+
+    it('keeps numeric identified rewinds positional after compression prunes turns', () => {
+      // Compression removes turns from the API history but never prunes
+      // turnParentUuids, so the recording ordinal space diverges from the
+      // visible turns. The numeric index must stay positional: the sole
+      // surviving turn is advertised and rewindable at index 0 (not at its
+      // recording ordinal 2), and the ordinal is only used internally to
+      // re-root the transcript.
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'surviving third' }] },
+      ];
+      core.markApiHistoryPrompt(history[0]!, 'prompt-c');
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
+        'prompt-a',
+        'prompt-b',
+        'prompt-c',
+      ]);
+      mockFileHistoryService.isEnabled.mockReturnValue(true);
+      const snap = (promptId: string, minutes: number) => ({
+        promptId,
+        timestamp: new Date(`2026-06-13T00:0${minutes}:00.000Z`),
+        trackedFileBackups: {},
+      });
+      const snapshots = [
+        snap('prompt-a', 0),
+        snap('prompt-b', 1),
+        snap('prompt-c', 2),
+      ];
+      mockFileHistoryService.getSnapshots.mockReturnValue(snapshots);
+
+      expect(session.getRewindableUserTurnCount()).toBe(1);
+      expect(session.getRewindableSnapshotTargets()).toEqual([
+        { promptId: 'prompt-c', turnIndex: 0 },
+      ]);
+      expect(session.rewindToTurn(0)).toEqual({
+        targetTurnIndex: 0,
+        apiTruncateIndex: 0,
+        promptId: 'prompt-c',
+      });
+      expect(mockChat.truncateHistory).toHaveBeenCalledWith(0);
+      expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
+        2,
+        { truncatedCount: 1 },
+        snapshots.slice(0, 2),
+      );
+      // The recording ordinal is not a valid client-facing address.
+      expect(() => session.rewindToTurn(2)).toThrow(
+        'Cannot rewind to the requested turn',
       );
     });
 
