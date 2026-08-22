@@ -206,6 +206,7 @@ export default {
   'toolDisplayName.TeamDelete': '刪除團隊',
   'toolDisplayName.TeamPlanApproval': '團隊計畫審批',
   'toolDisplayName.SendMessage': '傳送訊息',
+  'toolDisplayName.RequestShutdown': '請求下線',
   'toolDisplayName.StructuredOutput': '結構化輸出',
   'toolDisplayName.Monitor': '監控',
   'toolDisplayName.NotebookEdit': '編輯 Notebook',
