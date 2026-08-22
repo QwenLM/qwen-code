@@ -217,6 +217,11 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   emptyGoalSnapshot: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).emptyGoalSnapshot,
+  // The real predicate: the auth preflight cell must agree with the session
+  // validators on what counts as a configured Vertex project.
+  hasVertexProjectConfigured: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).hasVertexProjectConfigured,
   // The real class: `acpAgent` narrows on it with `instanceof`, so a stand-in
   // would make the goal get/clear fallbacks untestable.
   GoalPersistenceUnavailableError: (
@@ -6528,6 +6533,75 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     } finally {
       if (savedEnv !== undefined) {
         process.env['OPENAI_API_KEY'] = savedEnv;
+      }
+    }
+  });
+
+  it('extMethod preflight auth cell reports unknown for keyless Vertex with a project', async () => {
+    const savedKey = process.env['GOOGLE_API_KEY'];
+    const savedProject = process.env['GOOGLE_CLOUD_PROJECT'];
+    delete process.env['GOOGLE_API_KEY'];
+    process.env['GOOGLE_CLOUD_PROJECT'] = 'my-project';
+    try {
+      mockConfig = {
+        ...mockConfig,
+        getTargetDir: vi.fn().mockReturnValue('/work/status'),
+        getMcpServers: vi.fn().mockReturnValue({}),
+        getAuthType: vi.fn().mockReturnValue('vertex-ai'),
+        getModel: vi.fn().mockReturnValue('gemini-2.5-pro'),
+        getModelsConfig: vi.fn().mockReturnValue({
+          getGenerationConfig: vi.fn().mockReturnValue({}),
+          getCurrentAuthType: vi.fn().mockReturnValue('vertex-ai'),
+          syncAfterAuthRefresh: vi.fn(),
+        }),
+        getSkillManager: vi.fn().mockReturnValue({
+          listSkills: vi.fn().mockResolvedValue([]),
+        }),
+        getAllConfiguredModels: vi.fn().mockReturnValue([]),
+        getToolRegistry: vi.fn().mockReturnValue({ getAllTools: () => [] }),
+      } as unknown as Config;
+
+      const agentPromise = runAcpAgent(
+        mockConfig,
+        makeSessionSettings(),
+        mockArgv,
+      );
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+
+      const preflight = (await agent.extMethod(
+        SERVE_STATUS_EXT_METHODS.workspacePreflight,
+        {},
+      )) as {
+        cells: Array<{
+          kind: string;
+          status: string;
+          errorKind?: string;
+          detail?: { hasToken: boolean | 'unknown' };
+        }>;
+      };
+
+      const authCell = preflight.cells.find((c) => c.kind === 'auth');
+      // A configured project is routing configuration, not proof that a
+      // credential exists, so this must not report a confirmed token.
+      expect(authCell?.status).toBe('unknown');
+      expect(authCell?.detail?.hasToken).toBe('unknown');
+      expect(authCell?.errorKind).toBeUndefined();
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    } finally {
+      if (savedKey !== undefined) {
+        process.env['GOOGLE_API_KEY'] = savedKey;
+      }
+      if (savedProject === undefined) {
+        delete process.env['GOOGLE_CLOUD_PROJECT'];
+      } else {
+        process.env['GOOGLE_CLOUD_PROJECT'] = savedProject;
       }
     }
   });

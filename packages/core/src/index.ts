@@ -46,6 +46,7 @@ export {
   resolveModelConfig,
   type ResolvedModelConfig,
   validateModelConfig,
+  VERTEX_ADC_HINT,
 } from './models/index.js';
 
 // Output formatting
