@@ -3860,6 +3860,12 @@ jobs:
             echo "${_upsert_delim}"
           } >> "${GITHUB_OUTPUT}"
           echo "trusted_path=${PATH}" >> "${GITHUB_OUTPUT}"
+          # HOME is captured on the same doctrine: the verification gates
+          # pin it at step level, so a $GITHUB_ENV plant after staging
+          # cannot reach npm's userconfig inside the gate child — a planted
+          # HOME's .npmrc script-shell wraps every verdict-determining
+          # `npm run` in an attacker shell (R8-3).
+          echo "trusted_home=${HOME}" >> "${GITHUB_OUTPUT}"
           # The agent step runs AFTER prepare checks out the PR branch, so
           # invoking the runner from the working tree would execute
           # branch-controlled code on the host with the model key in env
@@ -5214,6 +5220,13 @@ jobs:
           # and inverts the gate's CI semantics. Pin it at step level, the
           # FOOTPRINT_ENFORCE doctrine below (R1-1).
           CI: 'true'
+          # HOME re-enters the allowlisted child below from the step
+          # environment: a $GITHUB_ENV-planted HOME points npm's userconfig
+          # at a .npmrc whose script-shell wraps every verdict-determining
+          # `npm run` in an attacker shell — a red branch reports green.
+          # Pin it from the stage-time capture, the TRUSTED_PATH doctrine
+          # above (R8-3).
+          HOME: '${{ steps.stage.outputs.trusted_home }}'
           # Step-level env outranks $GITHUB_ENV: an earlier shell-capable
           # step (the agent runs branch code on the host) must not be able
           # to downgrade a repo-variable 'reject' back to 'advisory'.
@@ -5224,18 +5237,21 @@ jobs:
         run: |-
           # The gate decides whether the PAT push runs, and the first pass
           # executes the branch's own build/test on the host before the
-          # second — so pin PATH to the staged trusted value, drop the
-          # preload channels, and verify the staged runner's digest (recorded
-          # in GITHUB_OUTPUT, unreachable from a disk write) before executing,
+          # second — so verify the staged runner's digest (recorded in
+          # GITHUB_OUTPUT, unreachable from a disk write) before executing,
           # or a mid-run overwrite lets the branch define its own verdict.
-          # The digest line's command words are called by absolute path:
-          # bare names — even builtins like echo — are shadowed by
+          # Every command word below is called by absolute path: bare names
+          # — even builtins like echo, export, or unset — are shadowed by
           # $GITHUB_ENV-planted BASH_FUNC_<name>%% functions, imported at
           # bash STARTUP even under --norc, ahead of builtins and PATH
           # (R6-4; a shadowed echo prints any digest line, blinding the
-          # check to a mid-run overwrite of the staged runner).
-          export PATH="${TRUSTED_PATH}"
-          unset LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH
+          # check to a mid-run overwrite of the staged runner, and a
+          # shadowed export/unset arms a DEBUG trap that swaps the staged
+          # runner AFTER the digest passes and BEFORE the launch executes
+          # it, R8-1). The body therefore carries no in-shell pin of its
+          # own: PATH reaches the child through the allowlist below, and
+          # the preload channels are closed by the step-level LD_* pins
+          # above, the env execve prefix, and env -i.
           /usr/bin/echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | /usr/bin/sha256sum -c - > /dev/null
           # Launch the gate through the workflow's env -i clean-child
           # pattern: the step environment inherits every $GITHUB_ENV plant
@@ -5451,6 +5467,13 @@ jobs:
           # and inverts the gate's CI semantics. Pin it at step level, the
           # FOOTPRINT_ENFORCE doctrine below (R1-1).
           CI: 'true'
+          # HOME re-enters the allowlisted child below from the step
+          # environment: a $GITHUB_ENV-planted HOME points npm's userconfig
+          # at a .npmrc whose script-shell wraps every verdict-determining
+          # `npm run` in an attacker shell — a red branch reports green.
+          # Pin it from the stage-time capture, the TRUSTED_PATH doctrine
+          # above (R8-3).
+          HOME: '${{ steps.stage.outputs.trusted_home }}'
           # Step-level env outranks $GITHUB_ENV: an earlier shell-capable
           # step (the agent runs branch code on the host) must not be able
           # to downgrade a repo-variable 'reject' back to 'advisory'.
@@ -5463,18 +5486,21 @@ jobs:
         run: |-
           # The gate decides whether the PAT push runs, and the first pass
           # executes the branch's own build/test on the host before the
-          # second — so pin PATH to the staged trusted value, drop the
-          # preload channels, and verify the staged runner's digest (recorded
-          # in GITHUB_OUTPUT, unreachable from a disk write) before executing,
+          # second — so verify the staged runner's digest (recorded in
+          # GITHUB_OUTPUT, unreachable from a disk write) before executing,
           # or a mid-run overwrite lets the branch define its own verdict.
-          # The digest line's command words are called by absolute path:
-          # bare names — even builtins like echo — are shadowed by
+          # Every command word below is called by absolute path: bare names
+          # — even builtins like echo, export, or unset — are shadowed by
           # $GITHUB_ENV-planted BASH_FUNC_<name>%% functions, imported at
           # bash STARTUP even under --norc, ahead of builtins and PATH
           # (R6-4; a shadowed echo prints any digest line, blinding the
-          # check to a mid-run overwrite of the staged runner).
-          export PATH="${TRUSTED_PATH}"
-          unset LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH
+          # check to a mid-run overwrite of the staged runner, and a
+          # shadowed export/unset arms a DEBUG trap that swaps the staged
+          # runner AFTER the digest passes and BEFORE the launch executes
+          # it, R8-1). The body therefore carries no in-shell pin of its
+          # own: PATH reaches the child through the allowlist below, and
+          # the preload channels are closed by the step-level LD_* pins
+          # above, the env execve prefix, and env -i.
           /usr/bin/echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | /usr/bin/sha256sum -c - > /dev/null
           # Launch the gate through the workflow's env -i clean-child
           # pattern: the step environment inherits every $GITHUB_ENV plant

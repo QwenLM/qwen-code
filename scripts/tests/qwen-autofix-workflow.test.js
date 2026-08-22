@@ -11257,22 +11257,20 @@ exit 1
         .join(' \\\\\n[ \\t]*'),
     );
     // The digest check executes in the PARENT shell before the clean child
-    // exists, so its own defenses — the TRUSTED_PATH export and the LD_*
-    // unset — and their order live in the pinned statement list: a
-    // commented copy matched a bare toContain, and a planted LD_PRELOAD or
-    // PATH reached the sha256sum exec (R4-4); the startup-time variants a
-    // body line cannot reach — an LD_* library mapped before line 1 and
-    // BASH_FUNC function imports shadowing the line's bare command words
-    // (echo included) — are closed by the step-level LD_* pins and the
-    // absolute binary paths below (R6-2, R6-4). The digest line is pinned
-    // whole and per step — a workflow-wide count
-    // accepts relocation out of the gates, and `|| true` accepts a digest
-    // mismatch under bash -e (R4-3, the resanitize sibling's doctrine).
+    // exists. Its binaries are absolute paths and its inputs step-level
+    // pins, because ANY bare command word in the body — echo, export, or
+    // unset alike — is shadowed by $GITHUB_ENV-planted BASH_FUNC functions
+    // imported at bash startup (R6-4), and a shadowed in-shell pin arms a
+    // DEBUG trap that swaps the staged runner AFTER the digest passes and
+    // BEFORE the launch executes it (R8-1): the body carries no pin
+    // statement of its own, so the pinned list is exactly the digest line
+    // and the launch. The digest line is pinned whole and per step — a
+    // workflow-wide count accepts relocation out of the gates, and
+    // `|| true` accepts a digest mismatch under bash -e (R4-3, the
+    // resanitize sibling's doctrine).
     const gateDigestCheck =
       '/usr/bin/echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | /usr/bin/sha256sum -c - > /dev/null';
     const gateBodyStatements = [
-      'export PATH="${TRUSTED_PATH}"',
-      'unset LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH',
       gateDigestCheck,
       ...gateLaunchTokens.map((token, index) =>
         index < gateLaunchTokens.length - 1 ? `${token} \\` : token,
@@ -19421,15 +19419,21 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
     // level, which outranks any $GITHUB_ENV plant; the gate itself then
     // runs through the workflow's env -i clean-child pattern, so its bash
     // inherits nothing at all (enumerating plants is the failure mode the
-    // verdict pipeline kept hitting). LD_* load at startup the same way —
-    // the body-side unset cannot unload a library already mapped into the
-    // parent running the digest check (R6-2) — and RUNNER_TEMP/WORKDIR/
-    // BRANCH steer that digest check and the child's tree, so they are
-    // pinned from trusted expression context too (R6-3). CI reaches the
-    // child's `CI="${CI:-true}"` expansion from the step environment, and
-    // `:-true` only covers an UNSET CI — a $GITHUB_ENV plant of CI=false
-    // survives the expansion and inverts the gate's CI semantics — so CI
-    // is pinned at step level too (R1-1).
+    // verdict pipeline kept hitting). LD_* load at startup the same way, so
+    // they are pinned empty at step level too — an in-body unset cannot
+    // unload a library already mapped into the parent running the digest
+    // check, and a bare unset is itself a BASH_FUNC shadow target (R6-2,
+    // R8-1) — and RUNNER_TEMP/WORKDIR/BRANCH steer that digest check and
+    // the child's tree, so they are pinned from trusted expression context
+    // too (R6-3). CI reaches the child's `CI="${CI:-true}"` expansion from
+    // the step environment, and `:-true` only covers an UNSET CI — a
+    // $GITHUB_ENV plant of CI=false survives the expansion and inverts the
+    // gate's CI semantics — so CI is pinned at step level too (R1-1).
+    // HOME reaches the child's allowlist from the step environment, and
+    // npm resolves its userconfig from HOME — a planted HOME's .npmrc
+    // script-shell wraps every verdict-determining `npm run`, so a red
+    // branch reports green; HOME is pinned from the stage-time capture
+    // (R8-3).
     for (const step of [verificationGateSteps[1], repairVerificationGateStep]) {
       expect(step).toContain("BASH_ENV: ''");
       expect(step).toContain("SHELLOPTS: ''");
@@ -19442,6 +19446,7 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
       );
       expect(step).toContain("BRANCH: '${{ matrix.target.branch }}'");
       expect(step).toContain("CI: 'true'");
+      expect(step).toContain("HOME: '${{ steps.stage.outputs.trusted_home }}'");
       expect(step).toContain('/usr/bin/env -i');
       expect(step).toContain(
         'bash --norc "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
@@ -19452,6 +19457,10 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
         'FOOTPRINT_ENFORCE="${FOOTPRINT_ENFORCE:-advisory}"',
       );
     }
+    // The review stage step records HOME before any branch code runs — the
+    // trusted_path doctrine — and only it: the issue job's stage has no
+    // gate child re-injecting HOME.
+    expect(workflow.match(/trusted_home=\$\{HOME\}/g) ?? []).toHaveLength(1);
   });
 });
 
