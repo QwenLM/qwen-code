@@ -308,6 +308,14 @@ export class DingtalkChannel extends ChannelBase {
   private seenMessages: Map<string, number> = new Map();
   private mentionTargets = new Map<string, string>();
   private sessionMentionTargets = new Map<string, string>();
+  /**
+   * R15-1: boundary closes reach `closeSegmentWithFiles` only through
+   * `ChannelBase.notifyOutputSegmentEnd`, which swallows hook errors, so a
+   * throw there cannot fail the turn. Undelivered-notice failures record
+   * here keyed by session; `onResponseComplete` rethrows them at the turn's
+   * next awaited hook, and `onPromptEnd`/`onSessionDied` sweep leftovers.
+   */
+  private readonly pendingBoundaryFailures = new Map<string, unknown>();
   private bufferedMentionTargets = new Set<string>();
   private bufferedMentionTargetsBySession = new Map<string, Set<string>>();
   private dedupTimer?: ReturnType<typeof setInterval>;
@@ -1781,6 +1789,7 @@ export class DingtalkChannel extends ChannelBase {
       }
     }
     this.sessionMentionTargets.delete(sessionId);
+    this.pendingBoundaryFailures.delete(sessionId);
     const cardRunId = this.cardRunBySession.get(sessionId);
     if (cardRunId) {
       this.cardRunBySession.delete(sessionId);
@@ -1973,6 +1982,7 @@ export class DingtalkChannel extends ChannelBase {
     messageId?: string,
   ): void {
     this.sessionMentionTargets.delete(sessionId);
+    this.pendingBoundaryFailures.delete(sessionId);
     this.stopReaction(chatId, messageId, sessionId);
   }
 
@@ -2027,6 +2037,14 @@ export class DingtalkChannel extends ChannelBase {
     sessionId: string,
     segment?: ChannelOutputSegmentContext,
   ): Promise<void> {
+    // R15-1: rethrow a boundary close whose corrective notice never landed —
+    // recorded there because `notifyOutputSegmentEnd` swallows hook errors.
+    // This is the turn's next awaited hook, so the turn books failed.
+    const boundaryFailure = this.pendingBoundaryFailures.get(sessionId);
+    if (boundaryFailure !== undefined) {
+      this.pendingBoundaryFailures.delete(sessionId);
+      throw boundaryFailure;
+    }
     if (segment && this.interactionPresenter) {
       const prepared = await this.prepareOutgoingContent(text);
       // R2-5: deliver BEFORE the card finalizes. `closeOutput` bakes
@@ -2192,7 +2210,10 @@ export class DingtalkChannel extends ChannelBase {
       // text keeps R8-1's intent — the fallback sanitizer strips markers,
       // so no receipt survives the failed delivery.
       await presenter.closeOutput(segment.segmentId, '', reason, segment);
-      throw error;
+      // R15-1: throwing here cannot fail the turn — the only production
+      // caller swallows hook errors. Record it for `onResponseComplete`.
+      this.pendingBoundaryFailures.set(sessionId, error);
+      return;
     }
     const delivered = await presenter.closeOutput(
       segment.segmentId,
@@ -2224,8 +2245,12 @@ export class DingtalkChannel extends ChannelBase {
       }
     }
     // Mirror `deliverPreparedReply`: deliver the corrected text first,
-    // then fail the turn when the corrective notice itself never landed.
-    if (deliveryError) throw deliveryError;
+    // then fail the turn when the corrective notice itself never landed —
+    // recorded, not thrown (R15-1), because the production caller swallows
+    // hook errors; `onResponseComplete` rethrows it.
+    if (deliveryError) {
+      this.pendingBoundaryFailures.set(sessionId, deliveryError);
+    }
   }
 
   protected override onResponseChunk(

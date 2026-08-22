@@ -396,13 +396,16 @@ describe('sanitizeFileMarkersToFixedPoint depth', () => {
     // measured ~170 ms here). The index-based sweep lands an order of
     // magnitude under that.
     // R14-2: assert CPU time, not wall time — the wall-clock budget failed
-    // intermittently under parallel full-suite load on shared CI hardware
-    // while passing solo. The mutation check is unchanged: the unbounded
-    // loop burns seconds of CPU and still trips vitest's timeout.
+    // intermittently under parallel full-suite load on shared CI hardware.
+    // The anchor must also clear hardware variance: solo runs of the capped
+    // sweep measured up to ~99 ms on slower machines, so the tight 80 ms
+    // budget flaked on its own. 800 ms stays an order of magnitude under
+    // the regression cost — the unbounded loop burns seconds of CPU and
+    // trips both this budget and vitest's timeout.
     const startedCpu = process.cpuUsage();
     const sanitized = sanitizeFileMarkersToFixedPoint(text);
     const elapsedCpu = process.cpuUsage(startedCpu);
-    expect((elapsedCpu.user + elapsedCpu.system) / 1000).toBeLessThan(80);
+    expect((elapsedCpu.user + elapsedCpu.system) / 1000).toBeLessThan(800);
 
     expect(sanitized).not.toContain('[FILE:');
     expect(sanitized).not.toContain('/x.pdf');

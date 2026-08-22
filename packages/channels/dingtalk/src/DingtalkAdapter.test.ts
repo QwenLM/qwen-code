@@ -6180,7 +6180,9 @@ describe('DingtalkChannel outbound file delivery', () => {
     // forever and never delivered even the display-sanitized text. The
     // empty-text close keeps R8-1's intent: the fallback sanitizer strips
     // markers, so no receipt survives a delivery that did not happen.
-    // ChannelBase logs the rethrown error; the hook surfaces it here.
+    // R15-1: the hook itself resolves — production reaches it only through
+    // `notifyOutputSegmentEnd`, which swallows hook errors — and the
+    // undelivered-notice failure resurfaces at the turn's next awaited hook.
     const file = createTempFile();
     try {
       const channel = createChannel({ cwd: file.dir });
@@ -6219,14 +6221,12 @@ describe('DingtalkChannel outbound file delivery', () => {
         },
       } as ChannelOutputSegmentContext;
 
-      await expect(
-        getOutputSegmentEndHook(channel)(
-          'cid-1',
-          'session-1',
-          segment,
-          'response_boundary',
-        ),
-      ).rejects.toThrow(/no delivered notice: report\.txt/);
+      await getOutputSegmentEndHook(channel)(
+        'cid-1',
+        'session-1',
+        segment,
+        'response_boundary',
+      );
 
       expect(uploadCalls()).toHaveLength(1);
       expect(closeOutput).toHaveBeenCalledWith(
@@ -6235,6 +6235,10 @@ describe('DingtalkChannel outbound file delivery', () => {
         'response_boundary',
         segment,
       );
+      // The recorded failure fails the turn from `onResponseComplete`.
+      await expect(
+        getCompleteHook(channel)('cid-1', 'final', 'session-1', segment),
+      ).rejects.toThrow(/no delivered notice: report\.txt/);
     } finally {
       rmSync(file.dir, { recursive: true, force: true });
     }
