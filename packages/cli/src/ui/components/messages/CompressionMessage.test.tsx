@@ -112,6 +112,30 @@ describe('<CompressionMessage />', () => {
     });
   });
 
+  it.each([
+    [
+      CompressionStatus.COMPRESSION_FAILED_SIDE_QUERY,
+      'Failed to compress chat history.',
+    ],
+    [
+      CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR,
+      'Could not compress chat history due to a token counting error.',
+    ],
+  ])(
+    'renders a failure message for compression failure %s',
+    (compressionStatus, expected) => {
+      const props = createCompressionProps({
+        originalTokenCount: 100,
+        newTokenCount: 100,
+        compressionStatus,
+      });
+
+      const { lastFrame } = render(<CompressionMessage {...props} />);
+
+      expect(lastFrame()).toContain(expected);
+    },
+  );
+
   describe('message content validation', () => {
     it('displays correct compression statistics', () => {
       const testCases = [

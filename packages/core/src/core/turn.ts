@@ -378,6 +378,23 @@ export enum CompressionStatus {
    * splitter). (R5.2)
    */
   COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+
+  /** The compression input could not leave enough room for a usable summary. */
+  COMPRESSION_FAILED_INPUT_TOO_LARGE,
+
+  /** The compression side-query failed before producing a summary. */
+  COMPRESSION_FAILED_SIDE_QUERY,
+}
+
+export function isCompressionFailureStatus(status: CompressionStatus): boolean {
+  return (
+    status === CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT ||
+    status === CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR ||
+    status === CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY ||
+    status === CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED ||
+    status === CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE ||
+    status === CompressionStatus.COMPRESSION_FAILED_SIDE_QUERY
+  );
 }
 
 /**

@@ -12,6 +12,7 @@ import type {
 } from './turn.js';
 import {
   CompressionStatus,
+  isCompressionFailureStatus,
   Turn,
   GeminiEventType,
   createDuplicateProviderToolCallResponse,
@@ -53,6 +54,26 @@ vi.mock('@google/genai', async (importOriginal) => {
 vi.mock('../utils/errorReporting', () => ({
   reportError: vi.fn(),
 }));
+
+describe('isCompressionFailureStatus', () => {
+  it.each([
+    CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT,
+    CompressionStatus.COMPRESSION_FAILED_TOKEN_COUNT_ERROR,
+    CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
+    CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+    CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE,
+    CompressionStatus.COMPRESSION_FAILED_SIDE_QUERY,
+  ])('classifies %s as a compression failure', (status) => {
+    expect(isCompressionFailureStatus(status)).toBe(true);
+  });
+
+  it.each([CompressionStatus.COMPRESSED, CompressionStatus.NOOP])(
+    'does not classify %s as a compression failure',
+    (status) => {
+      expect(isCompressionFailureStatus(status)).toBe(false);
+    },
+  );
+});
 
 describe('findRepeatedDuplicateProviderToolCall', () => {
   const getProviderCallId = (item: { providerCallId?: string }) =>

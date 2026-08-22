@@ -24,6 +24,8 @@ import { logChatCompression } from '../telemetry/loggers.js';
 import { makeChatCompressionEvent } from '../telemetry/types.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { isAbortError } from '../utils/errors.js';
+import { isManagedMemoryPath } from '../memory/paths.js';
 import {
   estimateContentChars,
   resolveCompactionTuning,
@@ -43,6 +45,7 @@ import {
   stripAnalysisBlock,
   type SubagentSnapshot,
 } from './postCompactAttachments.js';
+import { microcompactHistory } from './microcompaction/microcompact.js';
 
 const debugLogger = createDebugLogger('COMPRESSION');
 
@@ -59,14 +62,13 @@ export const COMPACT_MAX_OUTPUT_TOKENS = 20_000;
 
 /**
  * Safety margin subtracted from the remaining window when computing the
- * compression side-query's output budget. The side-query input size is a
- * char/4 estimate, so this pad absorbs rounding and small per-part drift.
- * It does NOT scale with the estimate: proportional tokenizer error
- * (real tokenizers vary ±30% and under-count CJK-dense content) can still
- * push `prompt + max_tokens` over the window, in which case the backend
- * rejects the request with a 400 that propagates to the caller.
+ * compression side-query's output budget. The side-query input uses a
+ * UTF-8-adjusted estimate; this fixed pad absorbs rounding and small per-part
+ * drift. Provider tokenizers can still exceed a local estimate, so side-query
+ * failures remain a breaker-compatible compression failure.
  */
 export const COMPACTION_BUDGET_SAFETY_MARGIN = 1_024;
+const MIN_COMPACTION_OUTPUT_TOKENS = 1_024;
 
 /**
  * Output budget for the compression side-query: the fixed ceiling clamped to
@@ -75,11 +77,11 @@ export const COMPACTION_BUDGET_SAFETY_MARGIN = 1_024;
  * generating, so on small-window deployments (e.g. vLLM with a reduced
  * max_model_len) an unclamped ceiling can push the request over the window
  * and the backend rejects it with a 400 before the model runs
- * (https://github.com/QwenLM/qwen-code/issues/7960). Floored at 1 so
- * `maxOutputTokens` stays provider-valid even when the estimate already
- * fills the window — the request itself may still be rejected when the
- * prompt alone leaves no room. The estimate runs on the already-slimmed
- * history, so stripped media is no longer counted.
+ * (https://github.com/QwenLM/qwen-code/issues/7960). The pure calculation is
+ * floored at 1 so it always returns a provider-valid value; the caller's
+ * admission check rejects requests that cannot leave a usable output budget.
+ * The estimate runs on the already-slimmed history, so stripped media is no
+ * longer counted.
  *
  * The main send path enforces the same `prompt + max_tokens <= window`
  * invariant via clampOutputTokensToWindow in core/tokenLimits.ts, with
@@ -141,28 +143,46 @@ export const HARD_BUFFER = 3_000;
  */
 export const MAX_CONSECUTIVE_FAILURES = 3;
 
-const CJK_CHAR_TOKEN_MULTIPLIER = 1.5;
-const CJK_CHAR_PATTERN =
-  /[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff\uac00-\ud7af]/g;
+function estimateNonAsciiUtf8Adjustment(text: string): number {
+  let utf8Bytes = 0;
+  let utf16CodeUnits = 0;
+  for (const character of text) {
+    const codePoint = character.codePointAt(0)!;
+    if (codePoint < 0x80) continue;
+    utf16CodeUnits += character.length;
+    utf8Bytes += codePoint <= 0x7ff ? 2 : codePoint <= 0xffff ? 3 : 4;
+  }
+  return Math.ceil(utf8Bytes - utf16CodeUnits / CHARS_PER_TOKEN);
+}
+
+function estimateUtf8AdjustedTextTokens(text: string): number {
+  return (
+    Math.ceil(text.length / CHARS_PER_TOKEN) +
+    estimateNonAsciiUtf8Adjustment(text)
+  );
+}
+
+function estimateUtf8AdjustedContentTokens(
+  contents: Content[],
+  imageTokenEstimate: number,
+): number {
+  const genericEstimate = estimateContentTokens(contents, imageTokenEstimate);
+  return (
+    genericEstimate + estimateNonAsciiUtf8Adjustment(JSON.stringify(contents))
+  );
+}
 
 function estimateSummaryOutputTokens(
   summary: string,
   imageTokenEstimate: number,
 ): number {
-  const genericEstimate = estimateContentTokens(
-    [{ role: 'model', parts: [{ text: summary }] }],
-    imageTokenEstimate,
+  return Math.max(
+    estimateContentTokens(
+      [{ role: 'model', parts: [{ text: summary }] }],
+      imageTokenEstimate,
+    ),
+    estimateUtf8AdjustedTextTokens(summary),
   );
-  const cjkCharCount = summary.match(CJK_CHAR_PATTERN)?.length ?? 0;
-  if (cjkCharCount === 0) {
-    return genericEstimate;
-  }
-
-  const nonCjkCharCount = Math.max(0, summary.length - cjkCharCount);
-  const cjkAwareEstimate =
-    Math.ceil(nonCjkCharCount / CHARS_PER_TOKEN) +
-    Math.ceil(cjkCharCount * CJK_CHAR_TOKEN_MULTIPLIER);
-  return Math.max(genericEstimate, cjkAwareEstimate);
 }
 
 /**
@@ -529,6 +549,216 @@ export class ChatCompressionService {
       };
     }
 
+    // A tool result is still pending when automatic compaction runs before
+    // sendMessageStream commits the current user turn to chat history. Include
+    // it in the side-query so Anthropic-compatible providers see it immediately
+    // after the preceding tool_use block.
+    const pendingToolResult = opts.pendingUserMessage?.parts?.some(
+      (part) => !!part.functionResponse,
+    );
+    const sideQueryHistory = pendingToolResult
+      ? [...curatedHistory, opts.pendingUserMessage!]
+      : curatedHistory;
+    const pendingToolResultTokenCount = pendingToolResult
+      ? estimateContentTokens(
+          [opts.pendingUserMessage!],
+          slimmingConfig.imageTokenEstimate,
+        )
+      : 0;
+
+    // Lazy: the cold fallback input is slimmed on demand. The original
+    // history keeps its media: the shared request needs it for cache-prefix
+    // identity, and the post-compact image restoration block reads it
+    // afterwards.
+    let coldInput: ReturnType<typeof slimCompactionInput> | undefined;
+    const getColdInput = () => {
+      coldInput ??= slimCompactionInput(sideQueryHistory);
+      return coldInput;
+    };
+    let cachedColdHistoryEstimate: number | undefined;
+    let coldInputReducedForAdmission = false;
+    const getColdHistoryEstimate = () =>
+      (cachedColdHistoryEstimate ??= estimateUtf8AdjustedContentTokens(
+        getColdInput().slimmedHistory,
+        slimmingConfig.imageTokenEstimate,
+      ));
+    const compressionDirectiveTokenCount = estimateUtf8AdjustedTextTokens(
+      COMPRESSION_REQUEST_DIRECTIVE,
+    );
+    const projectRoot =
+      config.getProjectRoot?.() ?? config.getTargetDir?.() ?? process.cwd();
+    const targetDir = config.getTargetDir?.() ?? projectRoot;
+    const reduceColdInputForAdmission = () => {
+      const slim = getColdInput();
+      const reduced = microcompactHistory(
+        slim.slimmedHistory,
+        null,
+        { toolResultsNumToKeep: 1 },
+        {
+          force: true,
+          keepRecentOverride: 1,
+          preserveReadFileResult: (filePath) =>
+            isManagedMemoryPath(filePath, projectRoot, targetDir),
+        },
+      );
+      if (reduced.history === slim.slimmedHistory) {
+        return false;
+      }
+      coldInput = { ...slim, slimmedHistory: reduced.history };
+      cachedColdHistoryEstimate = undefined;
+      coldInputReducedForAdmission = true;
+      config
+        .getDebugLogger()
+        .debug(
+          `[chat-compression] microcompacted ${reduced.meta?.toolsCleared ?? 0} ` +
+            `old tool result(s) before cold request admission`,
+        );
+      return true;
+    };
+    const estimateColdRequestInput = (systemPrompt: string) =>
+      getColdHistoryEstimate() +
+      estimateUtf8AdjustedTextTokens(systemPrompt) +
+      compressionDirectiveTokenCount;
+    const coldRequestCannotFit = (
+      inputTokens: number,
+      receivingWindow: number,
+    ) =>
+      inputTokens +
+        COMPACTION_BUDGET_SAFETY_MARGIN +
+        MIN_COMPACTION_OUTPUT_TOKENS >
+      receivingWindow;
+    const coldRequestWithFullOutputEstimate = (inputTokens: number) =>
+      inputTokens + COMPACTION_BUDGET_SAFETY_MARGIN + COMPACT_MAX_OUTPUT_TOKENS;
+    const buildInputTooLargeWarning = (
+      inputTokens: number,
+      receivingWindow: number,
+    ) =>
+      `Compression input too large: estimated input ` +
+      `${inputTokens.toLocaleString()} tokens cannot leave ` +
+      `${MIN_COMPACTION_OUTPUT_TOKENS.toLocaleString()} usable output tokens ` +
+      `within the ${receivingWindow.toLocaleString()}-token context window.`;
+    let effectiveCompactionModel =
+      config.getCompactionModel?.() ?? config.getModel();
+    let compactionWarning: string | undefined;
+    const getConfiguredModelWindow = (model: string): number | undefined => {
+      if (model === config.getModel()) return contextLimit;
+      const resolved = resolveModelId(model);
+      if (!resolved) return undefined;
+      const models = resolved.authType
+        ? config.getAllConfiguredModels([resolved.authType])
+        : config.getAllConfiguredModels();
+      return models.find((entry) => entry.id === resolved.modelId)
+        ?.contextWindowSize;
+    };
+    const configuredCompactionWindow = getConfiguredModelWindow(
+      effectiveCompactionModel,
+    );
+    const providerSupportsCacheSharing =
+      supportsCompressionCacheSharing(config);
+    const hasProviderTokenCount =
+      (chat.getLastPromptTokenCount?.() ?? 0) > 0 &&
+      chat.isLastPromptTokenCountEstimated?.() !== true;
+    const canAttemptSharedRequestBeforeHook =
+      effectiveCompactionModel === config.getModel() &&
+      providerSupportsCacheSharing &&
+      hasProviderTokenCount;
+    const sharedPromptTokenCountBeforeHook =
+      opts.precomputedEffectiveTokens ??
+      originalTokenCount + (chat.getLastOutputTokenCount?.() ?? 0);
+    const sharedRequestCouldFitBeforeHook = (() => {
+      if (!canAttemptSharedRequestBeforeHook) return false;
+      const preHookSystemInstruction = buildCompressionSystemPrompt(
+        opts.customInstructions,
+        '',
+      );
+      const sharedRequestText =
+        `${preHookSystemInstruction}\n\n` +
+        'Do not call tools; tool execution is disabled for this request. ' +
+        COMPRESSION_REQUEST_DIRECTIVE;
+      const sharedDirectiveTokenCount = Math.ceil(
+        sharedRequestText.length / CHARS_PER_TOKEN,
+      );
+      const generationConfig = {
+        ...(chat.getGenerationConfig?.() ?? {}),
+        ...opts.requestGenerationConfig,
+      };
+      const routeOverheadTokenEstimate = Math.ceil(
+        JSON.stringify({
+          systemInstruction: generationConfig.systemInstruction,
+          tools: generationConfig.tools,
+        }).length / CHARS_PER_TOKEN,
+      );
+      const currentRouteTokenEstimate =
+        estimateContentTokens(
+          sideQueryHistory,
+          slimmingConfig.imageTokenEstimate,
+        ) +
+        sharedDirectiveTokenCount +
+        routeOverheadTokenEstimate;
+      const admissionTokenCount = Math.max(
+        sharedPromptTokenCountBeforeHook + sharedDirectiveTokenCount,
+        currentRouteTokenEstimate,
+      );
+      return admissionTokenCount + COMPACT_MAX_OUTPUT_TOKENS <= contextLimit;
+    })();
+
+    // Do not fire side-effecting hooks for an input that cannot fit even with
+    // zero hook output. Hook output can only add prompt text, never make this
+    // minimum payload smaller. Skip this cold-path work while a cache-sharing
+    // request is still possible; that path deliberately preserves the full
+    // history and may succeed without any slimming.
+    if (!sharedRequestCouldFitBeforeHook) {
+      const preHookSystemInstruction = buildCompressionSystemPrompt(
+        opts.customInstructions,
+        '',
+      );
+      const preHookRequestCannotFit = (inputTokens: number) => {
+        const compactionModelCouldFit =
+          effectiveCompactionModel !== config.getModel() &&
+          (configuredCompactionWindow === undefined ||
+            configuredCompactionWindow <= 0 ||
+            coldRequestWithFullOutputEstimate(inputTokens) <=
+              configuredCompactionWindow);
+        return (
+          !compactionModelCouldFit &&
+          coldRequestCannotFit(inputTokens, contextLimit)
+        );
+      };
+      let preHookInputTokens = estimateColdRequestInput(
+        preHookSystemInstruction,
+      );
+      if (preHookRequestCannotFit(preHookInputTokens)) {
+        reduceColdInputForAdmission();
+        preHookInputTokens = estimateColdRequestInput(preHookSystemInstruction);
+        if (preHookRequestCannotFit(preHookInputTokens)) {
+          const warning = buildInputTooLargeWarning(
+            preHookInputTokens,
+            contextLimit,
+          );
+          config.getDebugLogger().warn(`[chat-compression] ${warning}`);
+          logChatCompression(
+            config,
+            makeChatCompressionEvent({
+              tokens_before: originalTokenCount,
+              tokens_after: originalTokenCount,
+              cache_sharing_attempted: false,
+              cache_sharing_used: false,
+            }),
+          );
+          return {
+            newHistory: null,
+            info: {
+              originalTokenCount,
+              newTokenCount: originalTokenCount,
+              compressionStatus:
+                CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE,
+              warning,
+            },
+          };
+        }
+      }
+    }
+
     // Fire PreCompact hook before compression begins. Pass any user-supplied
     // `/compress` instructions so hook scripts can read / log / amend them
     // via `hookSpecificOutput.additionalContext`. The aggregator concatenates
@@ -564,33 +794,6 @@ export class ChatCompressionService {
       }
     }
 
-    // A tool result is still pending when automatic compaction runs before
-    // sendMessageStream commits the current user turn to chat history. Include
-    // it in the side-query so Anthropic-compatible providers see it immediately
-    // after the preceding tool_use block.
-    const pendingToolResult = opts.pendingUserMessage?.parts?.some(
-      (part) => !!part.functionResponse,
-    );
-    const sideQueryHistory = pendingToolResult
-      ? [...curatedHistory, opts.pendingUserMessage!]
-      : curatedHistory;
-    const pendingToolResultTokenCount = pendingToolResult
-      ? estimateContentTokens(
-          [opts.pendingUserMessage!],
-          slimmingConfig.imageTokenEstimate,
-        )
-      : 0;
-
-    // Lazy: the cold fallback input is slimmed on demand. The original
-    // history keeps its media: the shared request needs it for cache-prefix
-    // identity, and the post-compact image restoration block reads it
-    // afterwards.
-    let coldInput: ReturnType<typeof slimCompactionInput> | undefined;
-    const getColdInput = () => {
-      coldInput ??= slimCompactionInput(sideQueryHistory);
-      return coldInput;
-    };
-
     // Hoist the system prompt so the guard can include it in the estimate.
     const systemInstruction = buildCompressionSystemPrompt(
       opts.customInstructions,
@@ -601,21 +804,15 @@ export class ChatCompressionService {
     // slimmed payload, fall back to the main model for this compression only.
     // Coalesce to the main model so an undefined getCompactionModel() (e.g.
     // validation failure) never leaks to the fast model via resolveDefaultModel.
-    let effectiveCompactionModel =
-      config.getCompactionModel?.() ?? config.getModel();
-    let compactionWarning: string | undefined;
     // Shared estimate of the slimmed side-query payload (history + system
-    // instruction), memoized and lazy: the cache-sharing path must not pay
-    // for slimming. The compaction-model guard adds the output reserve as
-    // its third term; the budget clamp adds the directive — keeping the
-    // leading terms in one place so the two checks cannot drift.
-    let cachedColdInputEstimate: number | undefined;
+    // instruction), memoized and lazy: the cache-sharing path must not pay for
+    // slimming. The model-selection checks add the directive, safety margin,
+    // and full output reserve, while final admission requires the minimum
+    // usable output reserve. Keeping the shared terms here prevents the checks
+    // from drifting.
     const getColdInputEstimate = () =>
-      (cachedColdInputEstimate ??=
-        estimateContentTokens(
-          getColdInput().slimmedHistory,
-          slimmingConfig.imageTokenEstimate,
-        ) + Math.ceil(systemInstruction.length / CHARS_PER_TOKEN));
+      getColdHistoryEstimate() +
+      estimateUtf8AdjustedTextTokens(systemInstruction);
     // Window the output budget clamps against: the window of the model that
     // actually receives the side-query. Defaults to the main model's window;
     // switched below to a distinct compaction model's window when the guard
@@ -627,25 +824,36 @@ export class ChatCompressionService {
     if (effectiveCompactionModel !== config.getModel()) {
       const resolved = resolveModelId(effectiveCompactionModel);
       if (resolved) {
-        const models = resolved.authType
-          ? config.getAllConfiguredModels([resolved.authType])
-          : config.getAllConfiguredModels();
-        const entry = models.find((m) => m.id === resolved.modelId);
-        const window = entry?.contextWindowSize;
-        // Include the system prompt and the output reserve: providers check
-        // prompt + max_tokens <= window, so all three terms count.
-        const slimmedTokenEstimate =
-          getColdInputEstimate() + COMPACT_MAX_OUTPUT_TOKENS;
+        const window = configuredCompactionWindow;
+        // Providers check prompt + max_tokens <= window, so include the
+        // directive, safety margin, and full output reserve.
+        let slimmedTokenEstimate = coldRequestWithFullOutputEstimate(
+          getColdInputEstimate() + compressionDirectiveTokenCount,
+        );
         if (window && window > 0 && slimmedTokenEstimate > window) {
-          compactionWarning =
-            `Compaction model "${resolved.modelId}" context window ` +
-            `(${window.toLocaleString()} tokens) is too small for the current ` +
-            `payload (~${slimmedTokenEstimate.toLocaleString()} tokens); ` +
-            `using the main model for this compression.`;
-          config
-            .getDebugLogger()
-            .warn(`[chat-compression] ${compactionWarning}`);
-          effectiveCompactionModel = config.getModel();
+          const unreducedColdInput = coldInput;
+          const unreducedColdHistoryEstimate = cachedColdHistoryEstimate;
+          const wasUnreducedForAdmission = coldInputReducedForAdmission;
+          reduceColdInputForAdmission();
+          slimmedTokenEstimate = coldRequestWithFullOutputEstimate(
+            getColdInputEstimate() + compressionDirectiveTokenCount,
+          );
+          if (slimmedTokenEstimate > window) {
+            compactionWarning =
+              `Compaction model "${resolved.modelId}" context window ` +
+              `(${window.toLocaleString()} tokens) is too small for the current ` +
+              `payload (~${slimmedTokenEstimate.toLocaleString()} tokens); ` +
+              `using the main model for this compression.`;
+            config
+              .getDebugLogger()
+              .warn(`[chat-compression] ${compactionWarning}`);
+            effectiveCompactionModel = config.getModel();
+            coldInput = unreducedColdInput;
+            cachedColdHistoryEstimate = unreducedColdHistoryEstimate;
+            coldInputReducedForAdmission = wasUnreducedForAdmission;
+          } else {
+            budgetWindow = window;
+          }
         } else if (window && window > 0) {
           budgetWindow = window;
         }
@@ -660,7 +868,7 @@ export class ChatCompressionService {
     // output count against it.
     let coldOutputBudget = COMPACT_MAX_OUTPUT_TOKENS;
     const runColdCompression = () => {
-      const slim = getColdInput();
+      let slim = getColdInput();
       if (slim.stats.imagesStripped > 0 || slim.stats.documentsStripped > 0) {
         config
           .getDebugLogger()
@@ -669,12 +877,27 @@ export class ChatCompressionService {
               `and ${slim.stats.documentsStripped} document(s) from side-query payload`,
           );
       }
+      let coldRequestInputTokens =
+        getColdInputEstimate() + compressionDirectiveTokenCount;
+      if (coldRequestCannotFit(coldRequestInputTokens, budgetWindow)) {
+        reduceColdInputForAdmission();
+        slim = getColdInput();
+        coldRequestInputTokens =
+          getColdInputEstimate() + compressionDirectiveTokenCount;
+      }
+      if (coldRequestCannotFit(coldRequestInputTokens, budgetWindow)) {
+        compactionWarning = buildInputTooLargeWarning(
+          coldRequestInputTokens,
+          budgetWindow,
+        );
+        config.getDebugLogger().warn(`[chat-compression] ${compactionWarning}`);
+        return undefined;
+      }
       // Clamp the output budget to the receiving model's remaining window so
       // `prompt + max_tokens <= window` holds even on small-window
       // deployments (issue #7960).
       coldOutputBudget = computeCompactionOutputBudget(
-        getColdInputEstimate() +
-          Math.ceil(COMPRESSION_REQUEST_DIRECTIVE.length / CHARS_PER_TOKEN),
+        coldRequestInputTokens,
         budgetWindow,
       );
       if (coldOutputBudget < COMPACT_MAX_OUTPUT_TOKENS) {
@@ -732,32 +955,56 @@ export class ChatCompressionService {
 
     let summaryResult: GenerateTextResult | undefined;
     let usedCacheSharing = false;
-    const sharedRequestText =
-      `${systemInstruction}\n\n` +
-      'Do not call tools; tool execution is disabled for this request. ' +
-      COMPRESSION_REQUEST_DIRECTIVE;
+    let sharedRequestText = '';
     const sharedPromptTokenCount =
       opts.precomputedEffectiveTokens ??
       originalTokenCount + (chat.getLastOutputTokenCount?.() ?? 0);
-    const sharedDirectiveTokenCount = Math.ceil(
-      sharedRequestText.length / CHARS_PER_TOKEN,
-    );
     const usesMainModel = effectiveCompactionModel === config.getModel();
-    const providerSupportsCacheSharing =
-      supportsCompressionCacheSharing(config);
     // The anchor must be provider-reported, not merely non-zero: an
     // estimate-derived count misses the ~15-20K system/tools overhead the
     // shared request actually carries, so `sharedRequestFits` could approve
     // a request that overflows the window. Estimate-only sessions stay on
     // the cold path until provider usage arrives.
-    const hasProviderTokenCount =
-      (chat.getLastPromptTokenCount?.() ?? 0) > 0 &&
-      chat.isLastPromptTokenCountEstimated?.() !== true;
-    const sharedRequestFits =
-      sharedPromptTokenCount +
+    let sharedGenerationConfig: GenerateContentConfig = {};
+    let sharedCurrentRouteTokenEstimate = 0;
+    let sharedAdmissionTokenCount = 0;
+    let sharedRequestFits = false;
+    if (
+      usesMainModel &&
+      providerSupportsCacheSharing &&
+      hasProviderTokenCount
+    ) {
+      sharedRequestText =
+        `${systemInstruction}\n\n` +
+        'Do not call tools; tool execution is disabled for this request. ' +
+        COMPRESSION_REQUEST_DIRECTIVE;
+      const sharedDirectiveTokenCount = Math.ceil(
+        sharedRequestText.length / CHARS_PER_TOKEN,
+      );
+      sharedGenerationConfig = {
+        ...(chat.getGenerationConfig?.() ?? {}),
+        ...opts.requestGenerationConfig,
+      };
+      const sharedRouteOverheadTokenEstimate = Math.ceil(
+        JSON.stringify({
+          systemInstruction: sharedGenerationConfig.systemInstruction,
+          tools: sharedGenerationConfig.tools,
+        }).length / CHARS_PER_TOKEN,
+      );
+      sharedCurrentRouteTokenEstimate =
+        estimateContentTokens(
+          sideQueryHistory,
+          slimmingConfig.imageTokenEstimate,
+        ) +
         sharedDirectiveTokenCount +
-        COMPACT_MAX_OUTPUT_TOKENS <=
-      contextLimit;
+        sharedRouteOverheadTokenEstimate;
+      sharedAdmissionTokenCount = Math.max(
+        sharedPromptTokenCount + sharedDirectiveTokenCount,
+        sharedCurrentRouteTokenEstimate,
+      );
+      sharedRequestFits =
+        sharedAdmissionTokenCount + COMPACT_MAX_OUTPUT_TOKENS <= contextLimit;
+    }
     const canShareCache =
       usesMainModel &&
       providerSupportsCacheSharing &&
@@ -770,17 +1017,15 @@ export class ChatCompressionService {
           ? 'provider does not support cache sharing'
           : !hasProviderTokenCount
             ? 'no provider-reported token-count anchor'
-            : `shared request exceeds context window: prompt=${sharedPromptTokenCount}, ` +
-              `directive=${sharedDirectiveTokenCount}, reserve=${COMPACT_MAX_OUTPUT_TOKENS}, ` +
+            : `shared request exceeds context window: admission=${sharedAdmissionTokenCount}, ` +
+              `provider=${sharedPromptTokenCount}, currentRoute=${sharedCurrentRouteTokenEstimate}, ` +
+              `reserve=${COMPACT_MAX_OUTPUT_TOKENS}, ` +
               `window=${contextLimit}`;
       debugLogger.debug(`[compaction] skipping cache sharing: ${reason}`);
     }
     if (canShareCache) {
       try {
-        const generationConfig = {
-          ...chat.getGenerationConfig(),
-          ...opts.requestGenerationConfig,
-        };
+        const generationConfig = { ...sharedGenerationConfig };
         const mainSystemInstruction = generationConfig.systemInstruction;
         delete generationConfig.systemInstruction;
         delete generationConfig.abortSignal;
@@ -860,7 +1105,54 @@ export class ChatCompressionService {
 
     if (!summaryResult) {
       abortSignal.throwIfAborted();
-      summaryResult = await runColdCompression();
+      try {
+        summaryResult = await runColdCompression();
+      } catch (error) {
+        if (abortSignal.aborted || isAbortError(error)) throw error;
+        config
+          .getDebugLogger()
+          .warn(
+            `[chat-compression] dedicated summarizer failed: ${String(error)}`,
+          );
+        logChatCompression(
+          config,
+          makeChatCompressionEvent({
+            tokens_before: originalTokenCount,
+            tokens_after: originalTokenCount,
+            cache_sharing_attempted: canShareCache,
+            cache_sharing_used: false,
+          }),
+        );
+        return {
+          newHistory: null,
+          info: {
+            originalTokenCount,
+            newTokenCount: originalTokenCount,
+            compressionStatus: CompressionStatus.COMPRESSION_FAILED_SIDE_QUERY,
+          },
+        };
+      }
+    }
+    if (!summaryResult) {
+      logChatCompression(
+        config,
+        makeChatCompressionEvent({
+          tokens_before: originalTokenCount,
+          tokens_after: originalTokenCount,
+          cache_sharing_attempted: canShareCache,
+          cache_sharing_used: false,
+        }),
+      );
+      return {
+        newHistory: null,
+        info: {
+          originalTokenCount,
+          newTokenCount: originalTokenCount,
+          compressionStatus:
+            CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE,
+          ...(compactionWarning && { warning: compactionWarning }),
+        },
+      };
     }
     const summary = summaryResult.text;
     // Check the PROCESSED summary: postProcessSummary strips <analysis>
@@ -905,6 +1197,18 @@ export class ChatCompressionService {
             `(${compressionOutputTokenCount}).`,
         );
     }
+    const logCompressionResult = (tokensAfter: number) =>
+      logChatCompression(
+        config,
+        makeChatCompressionEvent({
+          tokens_before: originalTokenCount,
+          tokens_after: tokensAfter,
+          compression_input_token_count: compressionInputTokenCount,
+          compression_output_token_count: compressionOutputTokenCount,
+          cache_sharing_attempted: canShareCache,
+          cache_sharing_used: usedCacheSharing,
+        }),
+      );
 
     // Defensive guard: if the dedicated side-query hit the output budget it
     // actually requested, the summary is likely truncated mid-content and
@@ -919,30 +1223,23 @@ export class ChatCompressionService {
     // fixed ceiling: since issue #7960's clamp the requested budget can sit
     // below COMPACT_MAX_OUTPUT_TOKENS, and output can never exceed what was
     // requested — comparing against the fixed ceiling would make this guard
-    // unreachable on every clamped request. That includes the floor regime
-    // (budget 1): a 1-token cap cannot hold a usable summary, so any output
-    // at the cap is definitionally truncated and must be dropped.
+    // unreachable on every clamped request.
     //
     // Local estimates instead keep the pre-clamp fixed-ceiling threshold:
     // unlike provider counts they can overshoot the budget purely from
     // estimator error (the ±30% variance the margin documents), so comparing
     // them against a clamped budget would convert that error into false
     // truncation verdicts for complete summaries. The fixed ceiling
-    // preserves the pre-#7960 semantics for the usage-missing path. The one
-    // exception is the floor regime (budget 1): no complete summary can
-    // exist at a 1-token cap, so the false-positive rationale cannot apply
-    // and estimates must be dropped there too — otherwise a provider that
-    // omits usage would persist a 1-token fragment as COMPRESSED.
+    // preserves the pre-#7960 semantics for the usage-missing path.
     //
     // TODO(finish_reason): the current `>= budget` check is a heuristic that
     // false-positives on legitimate summaries that happen to land exactly at
     // the budget. The proper signal is `finish_reason === 'length'` (OpenAI) /
     // `MAX_TOKENS` (Gemini), but `runSideQuery` doesn't surface it today.
     // Plumb it through and tighten this guard when that's available.
-    const truncationThreshold =
-      outputCountIsEstimated && coldOutputBudget > 1
-        ? COMPACT_MAX_OUTPUT_TOKENS
-        : coldOutputBudget;
+    const truncationThreshold = outputCountIsEstimated
+      ? COMPACT_MAX_OUTPUT_TOKENS
+      : coldOutputBudget;
     if (
       !usedCacheSharing &&
       !isSummaryEmpty &&
@@ -957,6 +1254,7 @@ export class ChatCompressionService {
             `dropping potentially-truncated result. This counts as a ` +
             `compression failure for the per-chat circuit breaker.`,
         );
+      logCompressionResult(originalTokenCount);
       return {
         newHistory: null,
         info: {
@@ -996,6 +1294,7 @@ export class ChatCompressionService {
             `potentially-truncated result. This counts as a compression ` +
             `failure for the per-chat circuit breaker.`,
         );
+      logCompressionResult(originalTokenCount);
       return {
         newHistory: null,
         info: {
@@ -1010,6 +1309,7 @@ export class ChatCompressionService {
     let newTokenCount = originalTokenCount;
     let extraHistory: Content[] = [];
     let canCalculateNewTokenCount = false;
+    let usedEstimatedVisibleDelta = false;
 
     if (!isSummaryEmpty) {
       // Manual /compress has no pending functionResponse, so a trailing
@@ -1091,18 +1391,16 @@ export class ChatCompressionService {
         ];
       }
 
-      // Best-effort token math using model-reported token counts when
-      // available. Some OpenAI-compatible providers omit usage for the
-      // compression side-query; in that case, fall back to the same local
-      // content estimator used by the auto-compaction gate so a valid summary
-      // can still shrink the history instead of failing with a token-count
-      // error.
+      // Prefer comparable model-reported counts. Cache-sharing includes the
+      // main system/tools, admission reduction changes the sent history, and
+      // some providers omit usage; those paths instead use one consistent
+      // local estimate for both visible histories.
       //
       // The cache-sharing request also includes the main system and tools, so
-      // its input count cannot isolate visible history with a fixed subtraction;
-      // that path uses the local visible-history delta below. On the cold path,
-      // compressionInputTokenCount includes the entire compression
-      // system prompt (the <state_snapshot> instructions, ~900 tokens) PLUS
+      // its input count cannot isolate visible history with a fixed subtraction.
+      // On the unreduced cold path, compressionInputTokenCount includes the
+      // entire compression system prompt (the <state_snapshot> instructions,
+      // ~900 tokens) PLUS
       // the short kick-off user turn ("First, reason in your <analysis>
       // block. Then, produce the <state_snapshot> XML.", ~20 tokens) — the
       // "approx. 1000 tokens" subtracted below is for that combined fixed
@@ -1115,6 +1413,7 @@ export class ChatCompressionService {
       // token estimation.
       if (
         !usedCacheSharing &&
+        !coldInputReducedForAdmission &&
         typeof compressionInputTokenCount === 'number' &&
         compressionInputTokenCount > 0 &&
         typeof compressionOutputTokenCount === 'number' &&
@@ -1146,11 +1445,12 @@ export class ChatCompressionService {
           );
         newTokenCount += Math.ceil(restorationChars / CHARS_PER_TOKEN);
       } else {
-        const estimatedOriginalVisibleTokenCount = estimateContentTokens(
-          curatedHistory,
-          slimmingConfig.imageTokenEstimate,
-        );
-        const estimatedNewVisibleTokenCount = estimateContentTokens(
+        const estimatedOriginalVisibleTokenCount =
+          estimateUtf8AdjustedContentTokens(
+            curatedHistory,
+            slimmingConfig.imageTokenEstimate,
+          );
+        const estimatedNewVisibleTokenCount = estimateUtf8AdjustedContentTokens(
           extraHistory,
           slimmingConfig.imageTokenEstimate,
         );
@@ -1162,42 +1462,29 @@ export class ChatCompressionService {
             0,
             originalTokenCount - estimatedOriginalVisibleTokenCount,
           );
-          // Keep the API-reported system/tool/prompt remainder intact. The
-          // local estimator is only used for the visible conversation delta, so
-          // missing usage metadata cannot replace the authoritative total with
-          // a much smaller visible-history-only estimate.
+          // Preserve the existing baseline's non-visible remainder and replace
+          // only the visible conversation. Both sides use the same
+          // UTF-8-adjusted estimator; provider prompt counts and admission
+          // savings are intentionally excluded from this local delta.
           newTokenCount =
             estimatedNonVisibleTokenCount + estimatedNewVisibleTokenCount;
           canCalculateNewTokenCount = true;
+          usedEstimatedVisibleDelta = true;
           config
             .getDebugLogger()
             .debug(
-              `[chat-compression] ${
-                usedCacheSharing
-                  ? 'cache-sharing token accounting'
-                  : 'usage metadata missing'
-              }; estimated ` +
-                `post-compression token count by preserving the ` +
-                `API-reported non-visible remainder ` +
+              `[chat-compression] estimated post-compression token count ` +
+                `by preserving the non-visible remainder ` +
                 `(${estimatedNonVisibleTokenCount}) and replacing the ` +
-                `visible-history estimate (${estimatedOriginalVisibleTokenCount} -> ` +
+                `UTF-8-adjusted visible-history estimate ` +
+                `(${estimatedOriginalVisibleTokenCount} -> ` +
                 `${estimatedNewVisibleTokenCount}).`,
             );
         }
       }
     }
 
-    logChatCompression(
-      config,
-      makeChatCompressionEvent({
-        tokens_before: originalTokenCount,
-        tokens_after: newTokenCount,
-        compression_input_token_count: compressionInputTokenCount,
-        compression_output_token_count: compressionOutputTokenCount,
-        cache_sharing_attempted: canShareCache,
-        cache_sharing_used: usedCacheSharing,
-      }),
-    );
+    logCompressionResult(newTokenCount);
 
     if (isSummaryEmpty) {
       return {
@@ -1219,11 +1506,16 @@ export class ChatCompressionService {
         },
       };
     } else if (newTokenCount > originalTokenCount) {
+      // Local visible-history deltas are heuristic rather than tokenizer
+      // bounds, but still prevent an estimated expansion from being persisted.
       return {
         newHistory: null,
         info: {
           originalTokenCount,
           newTokenCount,
+          ...(usedEstimatedVisibleDelta && {
+            newTokenCountIsEstimated: true,
+          }),
           compressionStatus:
             CompressionStatus.COMPRESSION_FAILED_INFLATED_TOKEN_COUNT,
         },
@@ -1256,7 +1548,7 @@ export class ChatCompressionService {
         info: {
           originalTokenCount,
           newTokenCount,
-          newTokenCountIsEstimated: true,
+          newTokenCountIsEstimated: usedEstimatedVisibleDelta,
           compressionStatus: CompressionStatus.COMPRESSED,
           triggerReason,
           ...(compactionWarning && { warning: compactionWarning }),
