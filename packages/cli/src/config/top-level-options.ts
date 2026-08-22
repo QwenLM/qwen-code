@@ -174,6 +174,12 @@ export const DEFAULT_COMMAND_OPTIONS = {
       'Enable experimental LSP (Language Server Protocol) feature for code intelligence',
     default: false,
   },
+  'restore-ask-user-question': {
+    type: 'boolean' as const,
+    description:
+      'On daemon session load/resume, re-hang a trailing unanswered ask_user_question instead of synthesizing a failed tool result',
+    default: false,
+  },
   channel: {
     type: 'string' as const,
     choices: ['VSCode', 'ACP', 'SDK', 'CI', 'desktop', 'daemon'] as const,

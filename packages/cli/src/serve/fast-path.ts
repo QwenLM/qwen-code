@@ -85,6 +85,7 @@ const BOOLEAN_OPTION_BY_FLAG = new Map<
   ['http-bridge', 'http-bridge'],
   ['allow-private-auth-base-url', 'allowPrivateAuthBaseUrl'],
   ['experimental-lsp', 'experimentalLsp'],
+  ['restore-ask-user-question', 'restoreAskUserQuestion'],
   ['rate-limit', 'rateLimit'],
 ]);
 

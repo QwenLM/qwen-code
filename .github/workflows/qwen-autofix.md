@@ -30,6 +30,36 @@ So: **prose belongs here, long steps belong in `.github/scripts/`.**
 `.github/scripts/check-workflow-size.sh` fails CI before the limit can be
 reached again.
 
+### Steps that moved out, not just their prose
+
+`review-address` · `Push and report` was 626 lines of inline shell — ~41 KB,
+the third-largest `run:` body in the file after
+`Scan for PRs with new feedback` and `Prepare branch and feedback` — and its
+body now lives in `.github/scripts/autofix-push-and-report.sh`. The YAML keeps
+the step's `if:` and `env:`: when it runs, and what reaches it.
+
+**The file is never executed from disk.** The stage step reads it from the
+trusted-base checkout, before any branch code has run, and passes the text
+through step output; the step runs those bytes. That is the delivery the inline
+block already had — the workflow file's own bytes, chosen by GitHub, not by
+anything on the runner — and the one `upsert-deferred-issue.sh` uses.
+
+This matters because `Push and report` holds the PAT and runs _after_ the agent
+and the verification gate have executed branch code on this host. A copy staged
+under `${RUNNER_TEMP}` would be theirs to swap, which is why the staged scripts
+that do live on disk (`resanitize-git-config.sh`, the gate runner) each carry a
+digest the invoking step re-checks. Content delivery removes the object those
+digests exist to protect: nothing to stage, nothing to digest, nothing to type
+check, no second open, and no check→use window between the steps. The
+qualifier that makes it hold is that a step output is fixed when its step ends
+— later steps read the recorded value, so a disk write after staging cannot
+change what arrives here. It is not a claim that the value is unreachable
+while the stage step is still running.
+
+`docs/design/autofix-gate-runner-isolation.md` finishes the job: once this step
+is its own `publish` job, checking out the trusted base and never executing
+branch code, the script can simply be run from the checkout.
+
 ## How the pointers work
 
 Where a block of commentary used to sit, the workflow keeps its opening lines
@@ -124,6 +154,7 @@ task-oriented guides — what a maintainer types and what happens next — see:
 - [70. review-address · Report dry-run / failure — -c drops any partial multi-byte sequence a byte-level head -c may have split, so the…](#af-070)
 - [71. review-address · Report dry-run / failure — Bilingual companion. Repo convention is English first, Chinese in a collapsed <details>.…](#af-071)
 - [72. review-address · Report dry-run / failure — Flip the status comment out of "working" so a finished round never leaves a live-looking…](#af-072)
+- [73. review-address · Report dry-run / failure — Idle (silent-sandbox) timeouts are EXCLUDED from the cumulative timeout cap.…](#af-073)
 
 ---
 
@@ -2089,4 +2120,69 @@ overwrite that round's "finished" with its own "ended without
 publishing" and report a successful round as a failed one. An empty
 'stale' (prepare itself crashed) still finalises — that IS this job's
 round, and it is exactly the case that must not stay "working".
+```
+
+<a id="af-073"></a>
+
+### 73. review-address · Report dry-run / failure — Idle (silent-sandbox) timeouts are EXCLUDED from the cumulative timeout cap.
+
+In `review-address` · `Report dry-run / failure`.
+
+```text
+TIMEOUT_WINDOW_CAP exists to stop a PR that is too big to finish a
+round inside the agent's time budget; its remedy says so ("split or
+reduce the PR, or raise the agent time budget AND its step backstop").
+An idle timeout is a different failure entirely: run-agent.mjs's idle
+watchdog kills the round after QWEN_IDLE_TIMEOUT_MS (20m) because the
+sandbox produced no output at all — the four observed hangs (#8663 x2,
+#8761 r3, #8763 r4) each printed their last byte at docker container
+entry and then sat silent. Nothing about the PR caused it, and the
+breaker's own headline already told the reader that "no budget increase
+can cure" it. Counting a failure whose prescribed remedy is
+inapplicable is what parked healthy PRs.
+
+Measured on 2026-08-21, over the preceding 14 days: 119 timeouts, of
+which 58 (49%) were idle. 51 windows tripped this cap, every one of
+them at exactly N=3. Of the 12 open PRs then carrying
+autofix/needs-human, 9 had been stopped here — #8332 at 24 rounds,
+#8368 at 28, #8276 at 16, all still producing pushed rounds when they
+were parked. With idle rounds counted, the fleet timeout rate was
+8.5% per round, so a window accumulated three of them in ~35 rounds by
+arithmetic alone, independent of whether the PR was stuck. Excluding
+idle drops the rate to 4.3%, which needs ~69 rounds — beyond the
+deepest window ever observed (22/100).
+
+The escape hatch that makes the exclusion safe: an idle round pushes
+nothing and matches none of CONSEC_FAIL's streak-reset needles
+("Addressed the latest review feedback", "no changes needed", "AutoFix
+could not start", "updated a stale base"), so a persistently wedged
+sandbox still terminates the PR at CONSECUTIVE_FAILURE_CAP. What no
+longer terminates it is idle rounds INTERLEAVED with real progress —
+which is the intended change: that PR is not stuck, the runner is.
+
+Two consequences inside the block. IDLE_N's needle became the full
+emitted headline prefix ('AutoFix ran out of time before finishing
+(idle-timeout') rather than a bare 'idle-timeout' substring: IDLE_N is
+now subtracted from TIMEOUT_N, so it MUST be a subset of it, and a
+loose needle could otherwise match provider error text that
+API_ERROR_DETAIL puts on the same first line and drive the difference
+negative. And the all-idle remedy branch is gone as unreachable: the
+guard now fires only when BUDGET_TIMEOUT_N alone reaches the cap, so a
+tripped window always holds at least TIMEOUT_WINDOW_CAP genuine budget
+timeouts — idle rounds can outnumber budget ones in it, but the budget
+remedy applies because those budget timeouts exist, not because they
+are the majority.
+
+Idle rounds stay visible through a job-log ::warning:: rather than a PR
+comment — the signal belongs to whoever owns the runners, and infra
+noise should not spend a comment on someone's PR. The census and its
+warning run outside the cap's terminal guard: the all-idle shape stops
+via the consecutive breaker with that breaker's headline, and the
+terminal run's log is exactly where the wedged runner must be named.
+
+The same exclusion applies to the prepare step's PRIOR_TIMEOUTS census
+(af-049): its budget warning tells the agent to narrow scope — the
+budget remedy again — and an idle round never exhausted any budget, so
+it must not steer the narrowing. Idle rounds are excluded there with
+the same needle the cap census uses.
 ```
