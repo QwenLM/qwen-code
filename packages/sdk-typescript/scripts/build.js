@@ -101,6 +101,8 @@ const rootDir = join(__dirname, '..');
 // (`unrecognizedDiagnostics` routing + selector, #8823).
 // Bumped from 198KB to 199KB for persistent session attachment read/remove and
 // binary resource hydration.
+// Bumped from 199KB to 200KB for the session PR binding (`DaemonSessionPrInfo`
+// + validators).
 // Bumped from 199KB to 200KB for the retention byte budget (block byte
 // estimation + budget-aware trimming) and backing-store-detached string caps
 // (#9303 review round 3).
