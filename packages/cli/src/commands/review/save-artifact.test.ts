@@ -20,7 +20,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import yargs from 'yargs';
 import type { Argv } from 'yargs';
-import { buildReport, type Finding } from '../../utils/findings.js';
+import { buildReport, type Finding } from './findings.js';
 import { saveArtifactCommand, saveReviewArtifact } from './save-artifact.js';
 
 // On a case-sensitive filesystem the alias below never exists, so that test

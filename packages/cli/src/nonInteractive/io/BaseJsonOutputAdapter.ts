@@ -42,9 +42,9 @@ import type {
   ToolUseBlock,
   Usage,
 } from '../types.js';
-import { functionResponsePartsToString } from '../../utils/nonInteractiveHelpers.js';
+import { functionResponsePartsToString } from '../nonInteractiveHelpers.js';
 import { projectHeadlessToolResultContent } from './headless-tool-result-text-projection.js';
-import { observeHeadlessToolResultProjection } from '../../utils/tool-result-boundary-diagnostics.js';
+import { observeHeadlessToolResultProjection } from '../tool-result-boundary-diagnostics.js';
 
 /**
  * Internal state for managing a single message context (main agent or subagent).

@@ -25,14 +25,13 @@ import { hasOwnModelProviders } from './modelProvidersScope.js';
 import {
   type Settings,
   type MemoryImportFormat,
-  type MergeStrategy,
   type SettingsSchema,
   type SettingDefinition,
   getSettingsSchema,
 } from './settingsSchema.js';
 import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
-import { setNestedPropertySafe } from '../utils/settingsUtils.js';
-import { customDeepMerge } from '../utils/deepMerge.js';
+import { setNestedPropertySafe } from './settingsUtils.js';
+import { customDeepMerge, type MergeStrategy } from '../utils/deepMerge.js';
 import { updateSettingsFilePreservingFormat } from '../utils/jsonc-editor.js';
 import { runMigrations, needsMigration } from './migration/index.js';
 import {
