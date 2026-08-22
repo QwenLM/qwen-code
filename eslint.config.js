@@ -15,6 +15,7 @@ import globals from 'globals';
 // For more info, see https://github.com/storybookjs/eslint-plugin-storybook#configuration-flat-config-format
 import storybook from 'eslint-plugin-storybook';
 import checkFile from 'eslint-plugin-check-file';
+import noCoreRootBarrelImport from './eslint-rules/no-core-root-barrel-import.js';
 import { legacyFilenames } from './eslint.legacy-filenames.mjs';
 
 // General syntax restrictions applied to every TS/TSX source file. Hoisted so
@@ -219,6 +220,19 @@ export default tseslint.config(
       'prefer-const': ['error', { destructuring: 'all' }],
       radix: 'error',
       'default-case': 'error',
+    },
+  },
+  {
+    // The rule itself exempts tests, __tests__, and fixtures; repeating that
+    // here would give the exemption two sources of truth.
+    files: ['packages/core/src/**/*.{ts,tsx}'],
+    plugins: {
+      architecture: {
+        rules: { 'no-core-root-barrel-import': noCoreRootBarrelImport },
+      },
+    },
+    rules: {
+      'architecture/no-core-root-barrel-import': 'error',
     },
   },
   {

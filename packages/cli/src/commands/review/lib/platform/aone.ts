@@ -668,7 +668,17 @@ export const aoneReader: ReviewPlatformReader = {
 /** One inline finding as it lands on the MR. */
 export interface AoneInlineComment {
   path: string;
-  /** The new-side line — a multi-line range posts on its END line. */
+  /**
+   * The new-side line — a multi-line range posts on its END line. The
+   * old side CANNOT be anchored (a1 expresses `--line` as a new-side
+   * position only — probed 2026-08-21, see
+   * docs/design/2026-08-21-review-aone-removed-line-anchoring.md), and
+   * the platform validates NOTHING (any integer posts; a wrong number
+   * lands on the same-numbered new-side line silently). submit therefore
+   * validates every anchor against the captured diff and relocates the
+   * unanchorable BEFORE this batch is built — nothing reaching here is
+   * unvouched.
+   */
   line: number;
   body: string;
 }
@@ -714,6 +724,13 @@ export interface AoneSubmitResult {
  * and a retry posts it twice. So an ambiguous failure is counted as
  * LANDED for the do-not-re-run advisory — overcounting by one is a
  * cosmetic lie; undercounting is a duplicate post.
+ *
+ * `headMovedDuringPost` carries the mid-batch drift disclosure the
+ * success path re-reads for: a batch runs minutes of sequential execs,
+ * and an AGit-Flow amend pushed mid-batch orphans the landed pins at
+ * code the author already replaced. Undefined when the re-read itself
+ * failed — "could not verify" is not "verified stable", but it also
+ * must not mask the post failure.
  */
 export class AonePartialPostError extends Error {
   constructor(
@@ -722,6 +739,7 @@ export class AonePartialPostError extends Error {
     readonly inlineCommentIds: number[],
     readonly summaryPosted: boolean,
     readonly ambiguous: boolean = false,
+    readonly headMovedDuringPost?: boolean,
   ) {
     super(message);
     this.name = 'AonePartialPostError';
@@ -813,6 +831,27 @@ function a1Cause(err: unknown): string {
       (typeof e.status === 'number' ? ` (exit ${e.status})` : '') +
       (e.signal ? ` (signal ${e.signal})` : '');
   return cause.length > 300 ? `${cause.slice(0, 300)}…` : cause;
+}
+
+/** The post-batch head re-read, stated ONCE for both disclosure paths:
+ *  did the MR head move away from the composed `commitId`? Undefined when
+ *  the re-read itself failed OR came back without a head to compare —
+ *  "could not verify" is not "verified stable", and either shape
+ *  degrades to unknown; it never masks the outcome it reports on (the
+ *  post failure on the partial path, the post itself on the success
+ *  path). */
+function headMovedSinceCompose(
+  prNumber: number,
+  ownerRepo: string,
+  commitId: string,
+): boolean | undefined {
+  try {
+    const afterHead = aoneHeadSha(mrView(prNumber, ownerRepo));
+    if (afterHead === '') return undefined;
+    return afterHead !== commitId;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -930,6 +969,9 @@ export function submitAoneReview(req: AoneSubmitRequest): AoneSubmitResult {
       !summaryPosted && postedIds.length === req.comments.length
         ? `; the summary did NOT land`
         : '';
+    // The same mid-batch drift disclosure the success path carries: an
+    // amend pushed during the batch orphans the landed pins, and a write
+    // failure must not silently drop the warning.
     throw new AonePartialPostError(
       `posting to MR ${req.prNumber} of ${req.ownerRepo} failed after ` +
         `${postedIds.length} of ${req.comments.length} inline comment(s)` +
@@ -940,6 +982,7 @@ export function submitAoneReview(req: AoneSubmitRequest): AoneSubmitResult {
       ids,
       summaryPosted,
       true,
+      headMovedSinceCompose(req.prNumber, req.ownerRepo, req.commitId),
     );
   }
 
@@ -975,18 +1018,13 @@ export function submitAoneReview(req: AoneSubmitRequest): AoneSubmitResult {
     approveError,
     // The drift gate above is check-then-post; the batch is N+1 sequential
     // execs (minutes for a long review), so a head that moves DURING it
-    // slips the gate. Re-read once and disclose — the success report must
-    // not claim the pins held. A read failure after a successful post must
-    // not fail the post.
-    headMovedDuringPost: (() => {
-      try {
-        const after = mrView(req.prNumber, req.ownerRepo);
-        const afterHead = aoneHeadSha(after);
-        return afterHead !== '' && afterHead !== req.commitId;
-      } catch {
-        return false;
-      }
-    })(),
+    // slips the gate — re-read once and disclose; the success report must
+    // not claim the pins held, and a read failure must not fail the post.
+    headMovedDuringPost: headMovedSinceCompose(
+      req.prNumber,
+      req.ownerRepo,
+      req.commitId,
+    ),
     webUrl: view.detailUrl ?? '',
   };
 }

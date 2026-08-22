@@ -4227,10 +4227,6 @@ export function App({
   const [isStartingNewSessionSuggestion, setIsStartingNewSessionSuggestion] =
     useState(false);
   const streamingState = useStreamingState();
-  const queuedPromptStreamingState =
-    streamingState === 'idle' && sessionHasActivePrompt
-      ? 'responding'
-      : streamingState;
   const failedPromptRetryIsCurrent = Boolean(
     failedPromptRetry &&
       retryOwnerMatchesCurrent(
@@ -6315,7 +6311,8 @@ export function App({
     canQueryMidTurn,
     canInjectMidTurnMedia,
     workspaceFileActions: artifactWorkspaceActions,
-    streamingState: queuedPromptStreamingState,
+    streamingState,
+    sessionHasActivePrompt,
     sessionActions,
     store,
     editorRef,
@@ -12768,7 +12765,8 @@ export function App({
                               t={t}
                               canMutateMidTurn={canMutateMidTurn}
                               canInsertMidTurn={
-                                queuedPromptStreamingState !== 'idle'
+                                streamingState !== 'idle' ||
+                                sessionHasActivePrompt
                               }
                               onDelete={removeQueuedPrompt}
                               onInsert={insertQueuedPrompt}
