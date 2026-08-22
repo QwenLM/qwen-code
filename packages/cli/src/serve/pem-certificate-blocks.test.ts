@@ -174,6 +174,23 @@ describe('extractCertificateBlocks', () => {
     expect(extractCertificateBlocks(file)).toEqual([ROOT_PEM.trim()]);
   });
 
+  it('does not treat a BOM-prefixed BEGIN inside a body as a closer', () => {
+    const file = ROOT_PEM.replace(
+      '-----END CERTIFICATE-----',
+      '\uFEFF-----BEGIN PRIVATE KEY-----\nQUJD\n-----END PRIVATE KEY-----',
+    );
+    expect(extractCertificateBlocks(file)).toBeUndefined();
+  });
+
+  it('lets a bare BEGIN prefix close an open body before trimming it', () => {
+    const withoutEnd = ROOT_PEM.replace('-----END CERTIFICATE-----\n', '');
+    for (const marker of ['-----BEGIN ', '-----BEGIN  ']) {
+      expect(
+        extractCertificateBlocks(`${withoutEnd}${marker}\n${LEAF_PEM}`),
+      ).toEqual([ROOT_PEM.trim()]);
+    }
+  });
+
   it('lets any column-zero BEGIN prefix close an open body', () => {
     for (const marker of [
       '-----BEGIN BOGUS-LABEL-----',
@@ -212,6 +229,22 @@ describe('extractCertificateBlocks', () => {
     expect(extractCertificateBlocks(`-----BEGIN BOGUS\n${ROOT_PEM}`)).toEqual([
       ROOT_PEM.trim(),
     ]);
+  });
+
+  it('walks past a marker longer than the loader line buffer', () => {
+    const marker = (length: number) =>
+      `-----BEGIN ${'A'.repeat(length - 16)}-----`;
+    expect(
+      extractCertificateBlocks(`${marker(253)}\n${ROOT_PEM}`),
+    ).toBeUndefined();
+    expect(extractCertificateBlocks(`${marker(254)}\n${ROOT_PEM}`)).toEqual([
+      ROOT_PEM.trim(),
+    ]);
+  });
+
+  it('stops when an END label introduces an unterminated header', () => {
+    const block = '-----BEGIN FOO:BAR-----\nQUJD\n-----END FOO:BAR-----\n';
+    expect(extractCertificateBlocks(`${block}${ROOT_PEM}`)).toBeUndefined();
   });
 
   it('takes nothing behind the block a BEGIN marker closed', () => {
@@ -534,6 +567,24 @@ describe('extractCertificateBlocks', () => {
       .map((line) => (line.startsWith('-----') ? `${line}  ` : `  ${line}`))
       .join('\n');
     expect(extractCertificateBlocks(padded)).toEqual([ROOT_PEM.trim()]);
+  });
+
+  it('normalizes every loader-trimmed marker and separator byte', () => {
+    for (const whitespace of ['\v', '\f']) {
+      for (const marker of [
+        ROOT_PEM.replace(
+          '-----BEGIN CERTIFICATE-----',
+          `-----BEGIN CERTIFICATE-----${whitespace}`,
+        ),
+        ROOT_PEM.replace(
+          '-----END CERTIFICATE-----',
+          `-----END CERTIFICATE-----${whitespace}`,
+        ),
+        `-----BEGIN CERTIFICATE-----\n${whitespace}\n${bodyLines(ROOT_PEM).join('\n')}\n-----END CERTIFICATE-----\n`,
+      ]) {
+        expect(extractCertificateBlocks(marker)).toEqual([ROOT_PEM.trim()]);
+      }
+    }
   });
 });
 

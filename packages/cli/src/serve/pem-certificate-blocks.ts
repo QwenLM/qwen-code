@@ -24,6 +24,12 @@ const CERTIFICATE_LABELS: ReadonlySet<string> = new Set([
 ]);
 /** Canonical PEM wraps the body at 64 columns; so does every producer. */
 const PEM_BODY_COLUMNS = 64;
+/** `BIO_gets(..., 255)` leaves 254 bytes for content and its line feed. */
+const PEM_LINE_MAX_BYTES = 254;
+
+function fitsPemLineBuffer(line: string, hasLineFeed: boolean): boolean {
+  return Buffer.byteLength(line) + (hasLineFeed ? 1 : 0) <= PEM_LINE_MAX_BYTES;
+}
 
 /** The raw label of an END marker, or `undefined` when it is not one. */
 function endMarkerLabel(line: string): string | undefined {
@@ -55,7 +61,9 @@ function endMarkerLabel(line: string): string | undefined {
  * the only position the loader tolerates one in.
  */
 function normalizePemLine(line: string): string {
-  return line.replace(/[ \t\r]+$/, '');
+  let end = line.length;
+  while (end > 0 && line.charCodeAt(end - 1) <= 0x20) end -= 1;
+  return line.slice(0, end);
 }
 
 /**
@@ -166,11 +174,17 @@ interface ScannedCertificateBlock {
  * the loader takes need not parse a second time as PEM.
  */
 function scanCertificateBlocks(contents: string): ScannedCertificateBlock[] {
-  const lines = contents.split('\n').map(normalizePemLine);
+  const rawLines = contents.split('\n');
+  const lines = rawLines.map(normalizePemLine);
   const blocks: ScannedCertificateBlock[] = [];
   let index = 0;
   scan: while (index < lines.length) {
-    const label = beginMarkerLabel(lines[index]!);
+    const label = fitsPemLineBuffer(
+      rawLines[index]!,
+      index < rawLines.length - 1,
+    )
+      ? beginMarkerLabel(lines[index]!)
+      : undefined;
     if (label === undefined) {
       index += 1;
       continue;
@@ -204,14 +218,22 @@ function scanCertificateBlocks(contents: string): ScannedCertificateBlock[] {
      */
     let truncatedByBeginMarker = false;
     for (; cursor < lines.length; cursor += 1) {
+      const rawLine = rawLines[cursor]!;
       const line = lines[cursor]!;
-      if (line.startsWith(END_PREFIX)) {
+      const fitsLineBuffer = fitsPemLineBuffer(
+        rawLine,
+        cursor < rawLines.length - 1,
+      );
+      if (fitsLineBuffer && line.startsWith(END_PREFIX)) {
+        if (body.findIndex(isHeaderSeparatorLine) < 0 && line.includes(':')) {
+          break scan;
+        }
         // A mismatched or fused end line is `bad end line`: the loader stops
         // reading the file here and keeps only what it already has.
         if (endMarkerLabel(line) !== label) break scan;
         break;
       }
-      if (line.replace(/^\uFEFF/, '').startsWith(BEGIN_PREFIX)) {
+      if (fitsLineBuffer && rawLine.startsWith(BEGIN_PREFIX)) {
         truncatedByBeginMarker = true;
         break;
       }
