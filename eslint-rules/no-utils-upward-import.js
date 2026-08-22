@@ -13,14 +13,17 @@ import path from 'node:path';
  * `acp-integration/`, ...): that is the dependency-direction invariant
  * tracked in #9146.
  *
- * The only permitted "upward" references are type-only constructs:
- * `import type`, `export type ... from`, inline type specifiers
- * (`import { type X } from` / `export { type X } from`), and TS
- * `import('...').T` type queries. All of them are erased at compile time, so
- * they cannot create a runtime module cycle; everything else (value imports,
- * value re-exports, literal/template dynamic `import()`) is reported. The two
- * remaining instances (`Settings` in `modelConfigUtils.ts`, `CommandContext`
- * in `sessionPaths.ts`) are this irreducible type-level coupling.
+ * The only permitted "upward" references are the type-only constructs that
+ * are genuinely erased at compile time: statement-level `import type`,
+ * `export type ... from`, and TS `import('...').T` type queries. Inline type
+ * specifiers (`import { type X } from` / `export { type X } from`) are
+ * reported instead: under this repo's `verbatimModuleSyntax`, tsc keeps the
+ * declaration and emits `import {} from` / `export {} from`, a runtime edge
+ * that still evaluates the target module. Everything else (value imports,
+ * value re-exports, literal/template dynamic `import()`) is reported too. The
+ * two remaining instances (`Settings` in `modelConfigUtils.ts`,
+ * `CommandContext` in `sessionPaths.ts`) are this irreducible type-level
+ * coupling.
  */
 
 const CLI_UTILS_MARKER = 'packages/cli/src/utils/';
@@ -86,22 +89,14 @@ export default {
     };
 
     const checkStatic = (node) => {
-      // Type-only imports (`import type`, `export type ... from`) are erased at
-      // compile time and cannot create a runtime cycle.
+      // Statement-level type-only imports (`import type`, `export type ...
+      // from`) are erased at compile time and cannot create a runtime cycle.
+      // Inline type specifiers (`import { type X } from ...`) are NOT exempt:
+      // under this repo's `verbatimModuleSyntax`, tsc keeps the declaration
+      // and emits `import {} from ...` / `export {} from ...`, a runtime edge
+      // that evaluates the target module — so they are reported like value
+      // imports.
       if (node.importKind === 'type' || node.exportKind === 'type') {
-        return;
-      }
-      // Inline type specifiers (`import { type X } from ...`,
-      // `export { type X } from ...`) carry the type-only kind on each
-      // specifier rather than on the declaration. The length guard matters:
-      // an empty `export {} from` is a runtime re-export edge, and
-      // `[].every(...)` is vacuously true.
-      if (
-        node.specifiers?.length > 0 &&
-        node.specifiers.every(
-          (s) => s.importKind === 'type' || s.exportKind === 'type',
-        )
-      ) {
         return;
       }
       reportIfEscaping(node.source, node.source?.value);

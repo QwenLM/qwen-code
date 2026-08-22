@@ -67,11 +67,15 @@ describe('utils upward-import flat-config integration', () => {
     // value imports (static and dynamic) are caught
     expect(hasViolation(prodStatic)).toBe(true);
     expect(hasViolation(prodDynamic)).toBe(true);
-    // type-only imports are erased at compile time and stay allowed
+    // statement-level type-only imports are erased at compile time and stay
+    // allowed
     expect(hasViolation(prodTypeOnly)).toBe(false);
     expect(hasViolation(prodExportTypeOnly)).toBe(false);
-    expect(hasViolation(prodInlineType)).toBe(false);
     expect(hasViolation(prodTypeQuery)).toBe(false);
+    // inline type specifiers are NOT erased under this repo's
+    // `verbatimModuleSyntax`: tsc emits `import {} from ...`, a runtime edge
+    // that evaluates the target module, so the rule reports them
+    expect(hasViolation(prodInlineType)).toBe(true);
     // test files stay exempt via the rule's own test/fixture exemption
     expect(hasViolation(testStatic)).toBe(false);
   });
