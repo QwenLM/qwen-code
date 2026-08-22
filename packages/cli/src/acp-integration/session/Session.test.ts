@@ -633,6 +633,7 @@ describe('Session', () => {
       truncateHistory: vi.fn(),
       stripThoughtsFromHistory: vi.fn(),
       stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+      reconcileLoadedSkillTracking: vi.fn(),
       setTools: vi.fn(),
     } as unknown as GeminiChat;
     mockGeminiClient = {
@@ -2623,6 +2624,9 @@ describe('Session', () => {
       mockChat.getHistory = vi
         .fn()
         .mockReturnValue([{ role: 'user', parts: [{ text: 'unanswered' }] }]);
+      mockChat.stripOrphanedUserEntriesFromHistory = vi
+        .fn()
+        .mockReturnValue([{ role: 'user', parts: [{ text: 'unanswered' }] }]);
       // Force the continuation send to fail NON-cancelled (session token limit)
       // so it hits the `!responseStream` branch — the data-loss window.
       mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
@@ -2650,6 +2654,12 @@ describe('Session', () => {
             expect.objectContaining({ text: 'unanswered' }),
           ]),
         }),
+      );
+      // The strip un-tracked any skill body it removed; once the orphan is
+      // preserved back, the settle reconcile rebuilds tracking from the
+      // settled history (residency aware — not an additive re-track).
+      expect(mockChat.reconcileLoadedSkillTracking).toHaveBeenCalledWith(
+        'acpTurnSettle',
       );
     });
 
@@ -2687,6 +2697,9 @@ describe('Session', () => {
             expect.objectContaining({ text: 'unanswered' }),
           ]),
         }),
+      );
+      expect(mockChat.reconcileLoadedSkillTracking).toHaveBeenCalledWith(
+        'acpTurnSettle',
       );
     });
 
@@ -32136,6 +32149,12 @@ describe('Session', () => {
           .mock.calls.map(([params]) => params.update._meta?.['attempt'])
           .filter((attempt) => attempt !== undefined),
       ).toEqual([1, 2, 2]);
+      // The isRetry strip discards its return value but still arms the
+      // settle reconcile (R3-3): tracking must be rebuilt from the settled
+      // history even when the strip found nothing to return.
+      expect(mockChat.reconcileLoadedSkillTracking).toHaveBeenCalledWith(
+        'acpTurnSettle',
+      );
     });
 
     it('keeps a queued prompt ahead of related automatic input', async () => {

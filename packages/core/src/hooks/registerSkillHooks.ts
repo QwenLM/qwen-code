@@ -18,6 +18,7 @@ import type { SkillHooksSettings, SkillConfig } from '../skills/types.js';
 import {
   HookType,
   type HookEventName,
+  type HookConfig,
   type CommandHookConfig,
   type HttpHookConfig,
 } from './types.js';
@@ -71,6 +72,25 @@ export function registerSkillHooks(
           skill.skillRoot,
         );
 
+        // Skip hooks this skill already registered earlier in the session.
+        // Unloading a skill body (/unskill, eviction sync) never unregisters
+        // its session hooks, so without this dedup every unload/reload cycle
+        // would push a duplicate entry and the hook would fire once per cycle.
+        const alreadyRegistered = sessionHooksManager
+          .getHooksForEvent(sessionId, eventName)
+          .some(
+            (entry) =>
+              entry.matcher === matcherPattern &&
+              entry.skillRoot === skill.skillRoot &&
+              hookConfigKey(entry.config) === hookConfigKey(hookConfig),
+          );
+        if (alreadyRegistered) {
+          debugLogger.debug(
+            `Hook for ${eventName} with matcher '${matcherPattern}' from skill '${skill.name}' already registered; skipping duplicate`,
+          );
+          continue;
+        }
+
         sessionHooksManager.addSessionHook(
           sessionId,
           eventName,
@@ -94,6 +114,18 @@ export function registerSkillHooks(
   }
 
   return registeredCount;
+}
+
+/**
+ * Identity key for dedup: the whole prepared config. Keying on only
+ * type + command/url silently drops distinct hooks the frontmatter
+ * admits per matcher (same command with different timeout/shell, same
+ * URL with different headers) — the second of the pair is skipped even
+ * on first registration. Prepared configs from frontmatter carry no
+ * functions, so a structural key is stable across reload cycles.
+ */
+function hookConfigKey(hook: HookConfig): string {
+  return `${hook.type}:${JSON.stringify(hook)}`;
 }
 
 /**

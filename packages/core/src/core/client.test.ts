@@ -91,7 +91,10 @@ import {
   buildChangedSkillsReminder,
   getInitialChatHistory,
 } from '../utils/environmentContext.js';
-import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
+import {
+  collectAvailableSkillEntries,
+  buildSkillLlmContent,
+} from '../tools/skill-utils.js';
 import type { AvailableSkillEntry } from '../tools/skill-utils.js';
 import { ToolNames } from '../tools/tool-names.js';
 import {
@@ -3257,6 +3260,127 @@ describe('Gemini Client (client.ts)', () => {
       expect(markReadEvictedFromHistory).toHaveBeenCalledTimes(1);
     });
 
+    it('delegates loaded-skill sync to setHistory after pre-send microcompaction (R3-2)', async () => {
+      mockFileReadCacheStub();
+      const unloadSkills = vi.fn();
+      const clearLoadedSkills = vi.fn();
+      const reg = vi.mocked(mockConfig.getToolRegistry)() as unknown as {
+        getTool: ReturnType<typeof vi.fn>;
+      };
+      reg.getTool.mockImplementation((name: string) =>
+        name === 'skill'
+          ? { unloadSkills, clearLoadedSkills, trackSkills: vi.fn() }
+          : null,
+      );
+
+      // Skill body loaded first, then 5 newer read_file results
+      // (keepRecent=5) push it out of the keep window.
+      const { history } = await makeReadFileResponses(5);
+      const fullHistory: Content[] = [
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'mc-skill-0',
+                name: 'skill',
+                args: { skill: 'demo-poem' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'mc-skill-0',
+                name: 'skill',
+                response: {
+                  output: buildSkillLlmContent(
+                    '/demo',
+                    'skill body '.repeat(50),
+                  ),
+                },
+              },
+            },
+          ],
+        },
+        ...history,
+      ];
+      const setHistory = vi.fn();
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(fullHistory),
+        setHistory,
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'hi' }],
+        new AbortController().signal,
+        'prompt-mc-skill-sync',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      expect(setHistory).toHaveBeenCalled();
+      // setHistory's reconcile is the single loaded-skill sync on this
+      // path: the client must not second-write tracking from the meta
+      // (a post-setHistory sync would race the reconcile's ground truth).
+      expect(unloadSkills).not.toHaveBeenCalled();
+      expect(clearLoadedSkills).not.toHaveBeenCalled();
+    });
+
+    it('wires the registry provenance set into pre-send microcompaction (R4-4)', async () => {
+      mockFileReadCacheStub();
+      const genuineOutputs = new Set<string>(['recorded-body']);
+      const reg = vi.mocked(mockConfig.getToolRegistry)() as unknown as {
+        getTool: ReturnType<typeof vi.fn>;
+      };
+      reg.getTool.mockImplementation((name: string) =>
+        name === 'skill'
+          ? {
+              unloadSkills: vi.fn(),
+              clearLoadedSkills: vi.fn(),
+              trackSkills: vi.fn(),
+              getGenuineSkillBodyOutputs: () => genuineOutputs,
+            }
+          : null,
+      );
+
+      const { history } = await makeReadFileResponses(5);
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue(history),
+        setHistory: vi.fn(),
+      } as unknown as GeminiChat;
+      client['lastApiCompletionTimestamp'] = Date.now() - 90 * 60_000;
+
+      const mcSpy = vi.mocked(microcompactHistory);
+      mcSpy.mockClear();
+
+      const stream = client.sendMessageStream(
+        [{ text: 'hi' }],
+        new AbortController().signal,
+        'prompt-mc-provenance-wiring',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        /* drain */
+      }
+
+      // The registry's provenance set must reach microcompactHistory
+      // verbatim: dropping the option at this call site shipped green
+      // while the R3-1 residency gate never engaged in production.
+      expect(mcSpy).toHaveBeenCalled();
+      expect(mcSpy.mock.calls[0]![3]?.genuineSkillBodyOutputs).toBe(
+        genuineOutputs,
+      );
+    });
+
     it('does not abort the turn when microcompaction cleanup fails', async () => {
       const { markReadEvictedFromHistory } = mockFileReadCacheStub();
       markReadEvictedFromHistory.mockImplementation(() => {
@@ -4109,6 +4233,8 @@ describe('Gemini Client (client.ts)', () => {
         microcompactMeta: {
           unresolvedEvictedReads: 2,
           evictedReadPaths: [],
+          evictedSkillNames: [],
+          unresolvedEvictedSkills: 0,
           toolsCleared: 3,
           mediaCleared: 0,
           tokensSaved: 800,
@@ -4145,6 +4271,8 @@ describe('Gemini Client (client.ts)', () => {
         microcompactMeta: {
           unresolvedEvictedReads: 0,
           evictedReadPaths: [evictedPath],
+          evictedSkillNames: [],
+          unresolvedEvictedSkills: 0,
           toolsCleared: 2,
           mediaCleared: 0,
           tokensSaved: 700,
@@ -4181,6 +4309,8 @@ describe('Gemini Client (client.ts)', () => {
         microcompactMeta: {
           unresolvedEvictedReads: 0,
           evictedReadPaths: [join(mcTmpDir, 'test-file.ts')],
+          evictedSkillNames: [],
+          unresolvedEvictedSkills: 0,
           toolsCleared: 1,
           mediaCleared: 0,
           tokensSaved: 600,
@@ -4202,6 +4332,51 @@ describe('Gemini Client (client.ts)', () => {
       expect(markReadEvictedFromHistory).toHaveBeenCalledOnce();
       expect(clear).not.toHaveBeenCalled();
       expect(client['forceFullIdeContext']).toBe(true);
+    });
+
+    it('does not second-write loaded-skill tracking on fast compression (R3-2)', async () => {
+      mockFileReadCacheStub();
+      const unloadSkills = vi.fn();
+      const clearLoadedSkills = vi.fn();
+      const reg = vi.mocked(mockConfig.getToolRegistry)() as unknown as {
+        getTool: ReturnType<typeof vi.fn>;
+      };
+      reg.getTool.mockImplementation((name: string) =>
+        name === 'skill'
+          ? { unloadSkills, clearLoadedSkills, trackSkills: vi.fn() }
+          : null,
+      );
+      const compressFast = vi.fn().mockReturnValue({
+        info: {
+          originalTokenCount: 1000,
+          newTokenCount: 400,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+        microcompactMeta: {
+          unresolvedEvictedReads: 0,
+          evictedReadPaths: [],
+          evictedSkillNames: ['demo-poem'],
+          unresolvedEvictedSkills: 0,
+          toolsCleared: 1,
+          mediaCleared: 0,
+          tokensSaved: 600,
+          toolsKept: 5,
+          mediaKept: 0,
+          gapMinutes: 0,
+          thresholdMinutes: 60,
+        },
+      });
+      client['chat'] = {
+        compressFast,
+      } as unknown as GeminiChat;
+
+      const result = await client.tryCompressChatFast();
+
+      expect(result.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      // The compressed-history swap inside compressFast reconciles
+      // tracking; the wrapper must not also sync from microcompactMeta.
+      expect(unloadSkills).not.toHaveBeenCalled();
+      expect(clearLoadedSkills).not.toHaveBeenCalled();
     });
   });
 
@@ -10517,6 +10692,265 @@ Other open files:
         ).rejects.toThrow('retry failed before first event');
 
         expect(mockChat.addHistory).toHaveBeenCalledWith(orphanedPrompt);
+      });
+
+      it('re-tracks restored skill bodies after a pre-push retry failure', async () => {
+        // The strip cleared loaded-skill tracking; when the restore puts the
+        // skill body back into history the tracking must follow, or the
+        // dedup guard would let a duplicate body through.
+        const trackSkills = vi.fn();
+        const reg = vi.mocked(mockConfig.getToolRegistry)() as unknown as {
+          getTool: ReturnType<typeof vi.fn>;
+        };
+        reg.getTool.mockImplementation((name: string) =>
+          name === 'skill'
+            ? {
+                unloadSkills: vi.fn(),
+                clearLoadedSkills: vi.fn(),
+                trackSkills,
+              }
+            : null,
+        );
+
+        const strippedSkillBody: Content = {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'retry-skill-0',
+                name: 'skill',
+                response: {
+                  output: buildSkillLlmContent('/demo', 'skill body'),
+                },
+              },
+            },
+          ],
+        };
+        // The paired functionCall survives the strip (it lives in a model
+        // entry), so the restore can resolve the call id back to the name.
+        const historyWithSkillCall: Content[] = [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'retry-skill-0',
+                  name: 'skill',
+                  args: { skill: 'demo' },
+                },
+              },
+            ],
+          },
+        ];
+        const mockChat: Partial<GeminiChat> = {
+          // Mirror the real chat: the restore mutates the history the
+          // post-settle reconcile reads, so the re-added body is visible.
+          addHistory: vi.fn((entry: Content) => {
+            historyWithSkillCall.push(entry);
+          }),
+          getHistory: vi.fn(() => historyWithSkillCall),
+          getHistoryLength: vi.fn().mockReturnValue(0),
+          // Send throws before the push, so the counter never advances → restore.
+          getUserContentPushCount: vi.fn().mockReturnValue(0),
+          setHistory: vi.fn(),
+          stripOrphanedUserEntriesFromHistory: vi
+            .fn()
+            .mockReturnValue([strippedSkillBody]),
+          repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
+        };
+        client['chat'] = mockChat as GeminiChat;
+
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield* [] as ServerGeminiStreamEvent[];
+            throw new Error('retry failed before first event');
+          })(),
+        );
+
+        await expect(
+          fromAsync(
+            client.sendMessageStream(
+              [{ text: 'retry me' }],
+              new AbortController().signal,
+              'prompt-retry-skill-retrack',
+              { type: SendMessageType.Retry },
+            ),
+          ),
+        ).rejects.toThrow('retry failed before first event');
+
+        expect(mockChat.addHistory).toHaveBeenCalledWith(strippedSkillBody);
+        expect(trackSkills).toHaveBeenCalledWith(['demo']);
+      });
+
+      it('re-tracks a stripped skill body that the retry re-pushed (push-landed branch)', async () => {
+        // R10-8: the push-landed branch must also end with the resident body
+        // tracked. The reconcile runs on BOTH branches (outside the push-count
+        // gate), so a re-track gated behind the restore block would fail here:
+        // push advanced → no addHistory, but the body is resident in the
+        // settled history → trackSkills must still fire.
+        const trackSkills = vi.fn();
+        const clearLoadedSkills = vi.fn();
+        const reg = vi.mocked(mockConfig.getToolRegistry)() as unknown as {
+          getTool: ReturnType<typeof vi.fn>;
+        };
+        reg.getTool.mockImplementation((name: string) =>
+          name === 'skill'
+            ? {
+                unloadSkills: vi.fn(),
+                clearLoadedSkills,
+                trackSkills,
+              }
+            : null,
+        );
+
+        const strippedSkillBody: Content = {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'retry-skill-1',
+                name: 'skill',
+                response: {
+                  output: buildSkillLlmContent('/demo', 'skill body'),
+                },
+              },
+            },
+          ],
+        };
+        // The retry re-pushed the stripped content, so the settled history
+        // holds the call/body pair again.
+        const settledHistory: Content[] = [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'retry-skill-1',
+                  name: 'skill',
+                  args: { skill: 'demo' },
+                },
+              },
+            ],
+          },
+          strippedSkillBody,
+        ];
+        let pushCount = 0;
+        const mockChat: Partial<GeminiChat> = {
+          addHistory: vi.fn(),
+          getHistory: vi.fn(() => settledHistory),
+          getHistoryLength: vi.fn(() => settledHistory.length),
+          getUserContentPushCount: vi.fn(() => pushCount),
+          setHistory: vi.fn(),
+          stripOrphanedUserEntriesFromHistory: vi
+            .fn()
+            .mockReturnValue([strippedSkillBody]),
+          repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
+        };
+        client['chat'] = mockChat as GeminiChat;
+
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            // Simulate the retry re-pushing the stripped content, then
+            // failing pre-event.
+            pushCount++;
+            yield* [] as ServerGeminiStreamEvent[];
+            throw new Error('retry failed after push, before first event');
+          })(),
+        );
+
+        await expect(
+          fromAsync(
+            client.sendMessageStream(
+              [{ text: 'retry me' }],
+              new AbortController().signal,
+              'prompt-retry-skill-push-landed',
+              { type: SendMessageType.Retry },
+            ),
+          ),
+        ).rejects.toThrow('retry failed after push, before first event');
+
+        // Push landed → no duplicate restore.
+        expect(mockChat.addHistory).not.toHaveBeenCalled();
+        // Body resident in settled history → tracked.
+        expect(clearLoadedSkills).toHaveBeenCalledOnce();
+        expect(trackSkills).toHaveBeenCalledWith(['demo']);
+      });
+
+      it('does not re-track a stripped skill body the retry never re-pushed (ghost guard)', async () => {
+        // R10-3: the push counter can advance on a text-only resubmission
+        // while the stripped skill-body entry stays dropped. Additive
+        // re-tracking would resurrect the ghost the strip removed; the
+        // reconcile must leave it untracked (clear only).
+        const trackSkills = vi.fn();
+        const clearLoadedSkills = vi.fn();
+        const reg = vi.mocked(mockConfig.getToolRegistry)() as unknown as {
+          getTool: ReturnType<typeof vi.fn>;
+        };
+        reg.getTool.mockImplementation((name: string) =>
+          name === 'skill'
+            ? {
+                unloadSkills: vi.fn(),
+                clearLoadedSkills,
+                trackSkills,
+              }
+            : null,
+        );
+
+        const strippedSkillBody: Content = {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'retry-skill-2',
+                name: 'skill',
+                response: {
+                  output: buildSkillLlmContent('/demo', 'skill body'),
+                },
+              },
+            },
+          ],
+        };
+        // Settled history holds only the re-pushed text — the skill body is
+        // absent (never re-pushed), so it must not be tracked.
+        const settledHistory: Content[] = [
+          { role: 'user', parts: [{ text: 'retry me' }] },
+        ];
+        let pushCount = 0;
+        const mockChat: Partial<GeminiChat> = {
+          addHistory: vi.fn(),
+          getHistory: vi.fn(() => settledHistory),
+          getHistoryLength: vi.fn(() => settledHistory.length),
+          getUserContentPushCount: vi.fn(() => pushCount),
+          setHistory: vi.fn(),
+          stripOrphanedUserEntriesFromHistory: vi
+            .fn()
+            .mockReturnValue([strippedSkillBody]),
+          repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
+        };
+        client['chat'] = mockChat as GeminiChat;
+
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            pushCount++;
+            yield* [] as ServerGeminiStreamEvent[];
+            throw new Error('retry failed after push, before first event');
+          })(),
+        );
+
+        await expect(
+          fromAsync(
+            client.sendMessageStream(
+              [{ text: 'retry me' }],
+              new AbortController().signal,
+              'prompt-retry-skill-ghost',
+              { type: SendMessageType.Retry },
+            ),
+          ),
+        ).rejects.toThrow('retry failed after push, before first event');
+
+        expect(mockChat.addHistory).not.toHaveBeenCalled();
+        expect(trackSkills).not.toHaveBeenCalled();
+        expect(clearLoadedSkills).toHaveBeenCalledOnce();
       });
 
       it('does not re-add stripped retry entries when the chat already pushed them before failing', async () => {
