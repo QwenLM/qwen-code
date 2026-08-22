@@ -696,6 +696,9 @@ describe('runNonInteractive', () => {
     const [parts, , , options] =
       mockGeminiClient.sendMessageStream.mock.calls[0]!;
     expect(parts[0]?.text).toContain('Continue working on the active Goal.');
+    expect(parts[0]?.text).toContain(
+      'Runtime continuation context: existing goal',
+    );
     expect(options).toMatchObject({
       type: SendMessageType.Goal,
       goalOrigin: 'runtime',
@@ -710,6 +713,36 @@ describe('runNonInteractive', () => {
       `goal-runtime:${options.goalPermit.turnId}`,
     );
     expect(options.goalSignal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('includes verifier feedback in a scheduled Goal continuation', async () => {
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    mockFinishedGoalWorker();
+    vi.mocked(mockConfig.bindGoalTurnHost).mockImplementation((host) =>
+      goalRuntime.bindHost({
+        startGoalTurn: (input) =>
+          host.startGoalTurn({
+            ...input,
+            verifierFeedback: 'Need independent evidence',
+          }),
+        preemptGoalTurn: (reason) => host.preemptGoalTurn(reason),
+      }),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-runtime-feedback',
+    );
+
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledOnce();
+    const [parts] = mockGeminiClient.sendMessageStream.mock.calls[0]!;
+    expect(parts[0]?.text).toContain(
+      'Verifier feedback: Need independent evidence',
+    );
   });
 
   it('keeps the exact Goal permit through a ToolResult continuation', async () => {

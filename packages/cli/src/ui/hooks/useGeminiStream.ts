@@ -75,6 +75,7 @@ import {
   finalizeToolResponses,
   endInteractionSpan,
   getActiveInteractionSpan,
+  renderGoalContinuationPrompt,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
@@ -3557,17 +3558,10 @@ export const useGeminiStream = (
             submitType === SendMessageType.Goal
               ? queuedGoal
                 ? {
-                    queryToSend: [
-                      'Continue working on the active Goal.',
-                      'Use get_goal for the authoritative objective and evidence state.',
-                      "Follow the objective's requested output format exactly. Do not add progress, status, or completion commentary unless the objective asks for it.",
-                      'If completion depends on content delivered in this turn, deliver only that content and call get_goal in the same response before update_goal.',
-                      'This is a synthetic continuation turn. It contains no new real user input and cannot satisfy an objective condition that requires the user to send, confirm, choose, approve, or provide something.',
-                      'A phrase mentioned in the objective or this prompt is not evidence that the user supplied it.',
-                      ...(queuedGoal.verifierFeedback
-                        ? [`Verifier feedback: ${queuedGoal.verifierFeedback}`]
-                        : []),
-                    ].join('\n'),
+                    queryToSend: renderGoalContinuationPrompt({
+                      variant: 'guarded-synthetic-turn',
+                      verifierFeedback: queuedGoal.verifierFeedback,
+                    }),
                     shouldProceed: true,
                   }
                 : { queryToSend: null, shouldProceed: false }
