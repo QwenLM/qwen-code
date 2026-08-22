@@ -168,13 +168,13 @@ alone rather than given a duplicate copy of the setting.
 
 ## Settings
 
-```jsonc
+```json
 {
   "permissions": {
     "planMode": {
-      "extraReadOnlyCommands": ["ib"],
-    },
-  },
+      "extraReadOnlyCommands": ["ib"]
+    }
+  }
 }
 ```
 

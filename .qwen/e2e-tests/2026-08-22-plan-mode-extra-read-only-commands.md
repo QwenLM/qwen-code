@@ -17,7 +17,7 @@ cd /tmp/ib-e2e
 
 `/tmp/ib-e2e/.qwen/settings.json`:
 
-```jsonc
+```json
 {
   "permissions": {
     "planMode": {

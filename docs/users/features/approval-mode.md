@@ -113,15 +113,15 @@ deliberately good for one exact invocation only.
 If you have a CLI you know is read-only, list its root command name under
 `permissions.planMode.extraReadOnlyCommands`:
 
-```jsonc
+```json
 // .qwen/settings.json
 {
   "permissions": {
     "planMode": {
       // Root command names only — same shape as the built-in set.
-      "extraReadOnlyCommands": ["ib"],
-    },
-  },
+      "extraReadOnlyCommands": ["ib"]
+    }
+  }
 }
 ```
 
