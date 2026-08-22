@@ -32,6 +32,20 @@ export const INTERNAL_SECRET_ENV_VARS: readonly string[] = [
   PRIVATE_ACP_CAPABILITY_ENV,
 ];
 
+const INTERNAL_SECRET_ENV_VARS_UPPER = new Set(
+  INTERNAL_SECRET_ENV_VARS.map((v) => v.toUpperCase()),
+);
+
+/**
+ * Case-insensitive check for the internal-secret denylist. `process.env` is
+ * case-insensitive on Windows, so a mixed-case reference like
+ * `$qwen_server_token` must still be blocked. On POSIX systems a genuinely
+ * distinct lowercase variable is caught too — deliberate, since these names
+ * have no legitimate use.
+ */
+export const isInternalSecretEnvVar = (name: string): boolean =>
+  INTERNAL_SECRET_ENV_VARS_UPPER.has(name.toUpperCase());
+
 /**
  * Return a shallow copy of `env` with Qwen-internal secrets removed, so it is
  * safe to pass to a child process spawned on the user's behalf. Does not
@@ -43,8 +57,13 @@ export function sanitizeChildEnv(
   env: NodeJS.ProcessEnv = process.env,
 ): NodeJS.ProcessEnv {
   const sanitized: NodeJS.ProcessEnv = { ...env };
-  for (const key of INTERNAL_SECRET_ENV_VARS) {
-    delete sanitized[key];
+  // Case variants must go too: on Windows env keys are case-insensitive,
+  // so an externally set `qwen_server_token` is just the canonical secret;
+  // on POSIX the lowercase spelling is removed as well (deliberate).
+  for (const key of Object.keys(sanitized)) {
+    if (isInternalSecretEnvVar(key)) {
+      delete sanitized[key];
+    }
   }
   return sanitized;
 }

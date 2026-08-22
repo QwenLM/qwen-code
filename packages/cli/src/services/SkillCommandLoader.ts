@@ -10,6 +10,7 @@ import {
   appendToLastTextPart,
   buildSkillLlmContent,
   applySkillAllowedTools,
+  isTrustedSkillLevel,
   recordAutoSkillUsage,
 } from '@qwen-code/qwen-code-core';
 import { dirname } from 'node:path';
@@ -151,11 +152,29 @@ export class SkillCommandLoader implements ICommandLoader {
               : {}),
           },
           action: async (context, _args): Promise<SlashCommandActionReturn> => {
-            // Auto-approve the skill's declared allowedTools before its body is submitted.
-            applySkillAllowedTools(
-              this.config?.getPermissionManager(),
-              skill.allowedTools,
-            );
+            // Auto-approve the skill's declared allowedTools before its body
+            // is submitted — never for repo-supplied skills in an untrusted
+            // folder, where frontmatter would otherwise grant session-wide
+            // permission auto-approvals. Same fail-closed gate as SkillTool:
+            // only levels that cannot originate from the repository skip it,
+            // and when the project root IS the home directory, listing skips
+            // 'project' and repository-committed skills surface at 'user'
+            // level — SkillManager records that on the skill as
+            // `homeRootShadow`, so that combination is gated too.
+            if (
+              (isTrustedSkillLevel(skill.level) &&
+                !(skill.level === 'user' && skill.homeRootShadow === true)) ||
+              this.config?.isTrustedFolder()
+            ) {
+              applySkillAllowedTools(
+                this.config?.getPermissionManager(),
+                skill.allowedTools,
+              );
+            } else if (skill.allowedTools?.length) {
+              debugLogger.warn(
+                `Skill "${skill.name}" declares allowedTools but the folder is not trusted; ignoring skill allowedTools.`,
+              );
+            }
 
             const body = buildSkillLlmContent(
               dirname(skill.filePath),

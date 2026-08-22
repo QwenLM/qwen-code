@@ -70,6 +70,17 @@ export interface SkillConfig {
   level: SkillLevel;
 
   /**
+   * Set by SkillManager at collection time on 'user'-level skills when the
+   * project root IS the home directory: listing skips the 'project' level
+   * there, so repository-committed skills surface at 'user' level. Trust
+   * gates must treat such skills as repo-supplied; the flag travels with the
+   * skill so the decision stays correct even where a per-agent Config
+   * override rebinds `getProjectRoot()` (worktree isolation, working_dir
+   * pins) and would flip a path-equality recomputation.
+   */
+  homeRootShadow?: boolean;
+
+  /**
    * Absolute path to the skill directory containing SKILL.md
    */
   filePath: string;

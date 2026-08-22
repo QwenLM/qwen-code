@@ -805,3 +805,84 @@ describe('parseChannelConfig', () => {
     );
   });
 });
+
+describe('internal-secret denylist', () => {
+  const SECRET = 'QWEN_SERVER_TOKEN';
+
+  afterEach(() => {
+    delete process.env[SECRET];
+    delete process.env[SECRET.toLowerCase()];
+  });
+
+  it('resolveEnvVars rejects Qwen-internal secrets instead of yielding the name as a value', () => {
+    process.env[SECRET] = 'daemon-secret';
+    expect(() => resolveEnvVars(`$${SECRET}`)).toThrow(
+      `${SECRET} is a Qwen-internal secret`,
+    );
+  });
+
+  it('resolveEnvVars rejects case variants (Windows-style process.env)', () => {
+    process.env[SECRET.toLowerCase()] = 'daemon-secret';
+    expect(() => resolveEnvVars(`$${SECRET.toLowerCase()}`)).toThrow(
+      'is a Qwen-internal secret',
+    );
+  });
+
+  it('parseChannelConfig rejects internal secrets in channel credentials', async () => {
+    process.env[SECRET] = 'daemon-secret';
+
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'github',
+        token: `$${SECRET}`,
+      }),
+    ).rejects.toThrow(`${SECRET} is a Qwen-internal secret`);
+
+    await expect(
+      parseChannelConfig(
+        'bot',
+        { type: 'github', token: `$${SECRET}` },
+        undefined,
+        { resolveEnvVars: 'available' },
+      ),
+    ).rejects.toThrow(`${SECRET} is a Qwen-internal secret`);
+  });
+
+  it('webhook secret and secretEnv reject Qwen-internal secrets', async () => {
+    process.env[SECRET] = 'daemon-secret';
+
+    await expect(
+      parseChannelConfig('dingtalk-main', {
+        type: 'bare',
+        token: 'token',
+        webhooks: {
+          sources: {
+            custom: {
+              secret: `$${SECRET}`,
+              targets: { default: { chatId: 'group-1', senderId: 'webhook' } },
+            },
+          },
+        },
+      }),
+    ).rejects.toThrow(`${SECRET} is a Qwen-internal secret`);
+
+    // secretEnv used to return the variable *name* as the secret — a
+    // public constant that makes HMAC verification bypassable.
+    await expect(
+      parseChannelConfig('dingtalk-main', {
+        type: 'bare',
+        token: 'token',
+        webhooks: {
+          sources: {
+            custom: {
+              secretEnv: SECRET,
+              targets: { default: { chatId: 'group-1', senderId: 'webhook' } },
+            },
+          },
+        },
+      }),
+    ).rejects.toThrow(
+      `references a Qwen-internal secret (${SECRET}); internal secrets are never resolved into channel config`,
+    );
+  });
+});

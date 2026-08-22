@@ -185,3 +185,84 @@ export function createUrlValidator(
 ): UrlValidator {
   return new UrlValidator(allowedUrls || [], allowPrivateNetworkHosts);
 }
+
+/**
+ * Returns true when every URL matched by the `inner` hook URL pattern is
+ * also matched by the `outer` pattern (both support `*` wildcards, like
+ * `security.allowedHttpHookUrls` entries). Used to intersect a
+ * workspace-scope whitelist with the higher-scope one: a workspace entry
+ * may only survive the merge when it merely narrows what a higher scope
+ * already allows.
+ *
+ * Both patterns are read as literal text plus `*` wildcards — the language
+ * `compilePattern` assigns to a pattern carrying no regex content beyond
+ * the `\.` escape, which is normalized first so both spellings of the same
+ * pattern cover each other. Any other escape or regex metacharacter makes
+ * coverage unprovable (the pre-escaped `compilePattern` branch would read
+ * it as raw regex — including a bare `.` that survives the unescaping,
+ * which acts as a wildcard), so such patterns fail closed (return false).
+ * Non-ASCII patterns fail closed too: the runtime's non-Unicode `/i` case
+ * folding diverges from the `toLowerCase()` used here for some of them, so
+ * coverage is unprovable (hook URLs are realistically ASCII — punycode and
+ * percent-encoded forms are unaffected).
+ *
+ * The comparison is a linear chunk scan — split `outer` on `*` and require
+ * the chunks in `inner` in order, anchored at both ends — never a regex
+ * test, because this runs on every startup merge and must stay O(n+m) on
+ * arbitrary-length workspace input (no catastrophic backtracking).
+ */
+export function hookUrlPatternCovers(
+  outerPattern: string,
+  innerPattern: string,
+): boolean {
+  const unescape = (pattern: string) => pattern.replace(/\\\./g, '.');
+  // The runtime matches with `compilePattern`'s non-Unicode `/i` RegExp,
+  // whose case folding is a different equivalence relation from
+  // toLowerCase() for some non-ASCII characters (e.g. ẞ U+1E9E lowers
+  // to ß U+00DF, so the two hosts fold equal here, but the runtime regex
+  // never matches them across). A covers verdict built on toLowerCase()
+  // would let such an inner entry survive the merge while its runtime
+  // regex admits hosts the outer pattern rejects, so fail closed on any
+  // non-ASCII input.
+  const nonAscii = /[\u0080-\uFFFF]/;
+  if (nonAscii.test(outerPattern) || nonAscii.test(innerPattern)) {
+    return false;
+  }
+  const outer = unescape(outerPattern).toLowerCase();
+  const inner = unescape(innerPattern).toLowerCase();
+  // `compilePattern` treats everything but `*` as raw regex once a pattern
+  // contains `\.`, so any remaining regex-active character could widen the
+  // runtime language past the literal reading used here. A bare `.` is
+  // regex-active in that branch too, but only after unescaping: the `\.`
+  // sequences it came from are literal dots, so strip them before checking.
+  const regexActive = /[+?^${}()|[\]\\]/;
+  const bareDotAfterUnescape = (pattern: string) =>
+    pattern.includes('\\.') && pattern.replace(/\\\./g, '').includes('.');
+  if (
+    regexActive.test(outer) ||
+    regexActive.test(inner) ||
+    bareDotAfterUnescape(outerPattern) ||
+    bareDotAfterUnescape(innerPattern)
+  ) {
+    return false;
+  }
+  const chunks = outer.split('*');
+  if (chunks.length === 1) {
+    return inner === outer;
+  }
+  const first = chunks[0];
+  const last = chunks[chunks.length - 1];
+  if (!inner.startsWith(first) || !inner.endsWith(last)) {
+    return false;
+  }
+  let position = first.length;
+  const end = inner.length - last.length;
+  for (const chunk of chunks.slice(1, -1)) {
+    const found = inner.indexOf(chunk, position);
+    if (found === -1 || found + chunk.length > end) {
+      return false;
+    }
+    position = found + chunk.length;
+  }
+  return position <= end;
+}

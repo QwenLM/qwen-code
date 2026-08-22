@@ -38,6 +38,7 @@ import {
   applySkillAllowedTools,
   collectAvailableSkillEntries,
   clearCollectedSkillEntriesCache,
+  isTrustedSkillLevel,
 } from './skill-utils.js';
 
 /**
@@ -98,6 +99,11 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     description: string;
   }> = [];
   private loadedSkillNames: Set<string> = new Set();
+  // Skills whose allowedTools/hooks were skipped by the folder-trust gate
+  // on first load. The gate is live (isTrustedFolder() re-reads on every
+  // call), so the early-return path re-applies them once the folder
+  // becomes trusted mid-session instead of requiring /clear.
+  private deferredSideEffectSkillNames: Set<string> = new Set();
   // Cleanup function returned by `addChangeListener`. Stored so per-agent
   // SkillTool instances (subagents share the parent's SkillManager) can
   // detach their listener at teardown — without this the SkillManager
@@ -253,6 +259,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       (name: string) => this.loadedSkillNames.add(name),
       this.config.getModelInvocableCommandsExecutor(),
       (name: string) => this.loadedSkillNames.has(name),
+      this.deferredSideEffectSkillNames,
     );
   }
 
@@ -281,6 +288,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
    */
   clearLoadedSkills(): void {
     this.loadedSkillNames.clear();
+    this.deferredSideEffectSkillNames.clear();
   }
 
   /**
@@ -315,6 +323,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
         ) => Promise<ModelInvocableCommandExecutorResult | null>)
       | null = null,
     private readonly isSkillLoaded: (name: string) => boolean = () => false,
+    private readonly deferredSideEffectSkillNames: Set<string> = new Set(),
   ) {
     super(params);
   }
@@ -351,6 +360,90 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
         `Failed to record auto-skill usage: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
+  }
+
+  /**
+   * Applies a loaded skill's repo-supplied side effects — allowedTools
+   * grants and hook registration — unless the folder-trust gate defers
+   * them. allowedTools become session-wide permission auto-approvals, and
+   * hooks are code execution (the same gate Config.getProjectHooks()
+   * applies to settings-file hooks). Fail closed: only levels that cannot
+   * originate from the repository skip the gate. Returns true when the
+   * side effects were deferred, so the caller can re-apply them on a
+   * later invocation once the folder becomes trusted.
+   */
+  private applySkillSideEffects(skill: SkillConfig): boolean {
+    // 'user' skills live in ~/.qwen — except when the project root IS the
+    // home directory: SkillManager skips the 'project' level there, so
+    // repository-committed skills surface at 'user' level and must be
+    // gated like project skills. SkillManager records that case on the
+    // skill at collection time (`homeRootShadow`); recomputing it from
+    // `this.config.getProjectRoot()` would trust the per-agent override
+    // this tool runs on inside subagents — worktree isolation and
+    // working_dir pins rebind `getProjectRoot()` to the worktree path,
+    // which would flip the detection and open the gate.
+    const sideEffectsGated =
+      (!isTrustedSkillLevel(skill.level) ||
+        (skill.level === 'user' && skill.homeRootShadow === true)) &&
+      !this.config.isTrustedFolder();
+
+    if (sideEffectsGated) {
+      if (skill.allowedTools?.length) {
+        debugLogger.warn(
+          `Skill "${this.params.skill}" declares allowedTools but the folder is not trusted; deferring skill allowedTools until the folder is trusted.`,
+        );
+      }
+    } else {
+      // Auto-approve the skill's declared allowedTools for the rest of the session.
+      applySkillAllowedTools(
+        this.config.getPermissionManager(),
+        skill.allowedTools,
+      );
+    }
+
+    // Register skill hooks if present
+    debugLogger.debug('Skill hooks check:', {
+      hasHooks: !!skill.hooks,
+      hooksKeys: skill.hooks ? Object.keys(skill.hooks) : [],
+      skillName: skill.name,
+    });
+    if (skill.hooks) {
+      if (sideEffectsGated) {
+        if (Object.keys(skill.hooks).length > 0) {
+          debugLogger.warn(
+            `Skill "${this.params.skill}" declares hooks but the folder is not trusted; deferring skill hooks until the folder is trusted.`,
+          );
+        }
+      } else {
+        const hookSystem = this.config.getHookSystem();
+        const sessionId = this.config.getSessionId();
+        debugLogger.debug('Hook system and session:', {
+          hasHookSystem: !!hookSystem,
+          sessionId,
+        });
+        if (hookSystem && sessionId) {
+          const sessionHooksManager = hookSystem.getSessionHooksManager();
+          const hookCount = registerSkillHooks(
+            sessionHooksManager,
+            sessionId,
+            skill,
+          );
+          if (hookCount > 0) {
+            debugLogger.info(
+              `Registered ${hookCount} hooks from skill "${this.params.skill}"`,
+            );
+          } else {
+            debugLogger.warn(
+              `No hooks registered from skill "${this.params.skill}"`,
+            );
+          }
+        }
+      }
+    } else {
+      debugLogger.warn(`Skill "${this.params.skill}" has no hooks to register`);
+    }
+
+    return sideEffectsGated;
   }
 
   async execute(
@@ -509,6 +602,20 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       if (this.isSkillLoaded(this.params.skill)) {
         this.onSkillLoaded(this.params.skill);
         void this.recordAutoSkillUsageBestEffort(skill);
+        // Side effects skipped by the trust gate on first load are applied
+        // on re-invocation once the folder becomes trusted (the gate is
+        // live), without re-injecting the skill body into context. Drop the
+        // entry only once the side effects were actually applied, so
+        // still-untrusted re-invocations keep the deferral alive.
+        if (
+          this.deferredSideEffectSkillNames.has(this.params.skill) &&
+          !this.applySkillSideEffects(skill)
+        ) {
+          this.deferredSideEffectSkillNames.delete(this.params.skill);
+          debugLogger.info(
+            `Applied deferred side effects for skill "${this.params.skill}" (folder is now trusted).`,
+          );
+        }
         const msg = `Skill "${this.params.skill}" is already loaded in context.`;
         return {
           llmContent: msg,
@@ -518,46 +625,8 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
 
       this.onSkillLoaded(this.params.skill);
 
-      // Auto-approve the skill's declared allowedTools for the rest of the session.
-      applySkillAllowedTools(
-        this.config.getPermissionManager(),
-        skill.allowedTools,
-      );
-
-      // Register skill hooks if present
-      debugLogger.debug('Skill hooks check:', {
-        hasHooks: !!skill.hooks,
-        hooksKeys: skill.hooks ? Object.keys(skill.hooks) : [],
-        skillName: skill.name,
-      });
-      if (skill.hooks) {
-        const hookSystem = this.config.getHookSystem();
-        const sessionId = this.config.getSessionId();
-        debugLogger.debug('Hook system and session:', {
-          hasHookSystem: !!hookSystem,
-          sessionId,
-        });
-        if (hookSystem && sessionId) {
-          const sessionHooksManager = hookSystem.getSessionHooksManager();
-          const hookCount = registerSkillHooks(
-            sessionHooksManager,
-            sessionId,
-            skill,
-          );
-          if (hookCount > 0) {
-            debugLogger.info(
-              `Registered ${hookCount} hooks from skill "${this.params.skill}"`,
-            );
-          } else {
-            debugLogger.warn(
-              `No hooks registered from skill "${this.params.skill}"`,
-            );
-          }
-        }
-      } else {
-        debugLogger.warn(
-          `Skill "${this.params.skill}" has no hooks to register`,
-        );
+      if (this.applySkillSideEffects(skill)) {
+        this.deferredSideEffectSkillNames.add(this.params.skill);
       }
 
       const baseDir = path.dirname(skill.filePath);

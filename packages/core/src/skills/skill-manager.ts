@@ -1059,6 +1059,17 @@ export class SkillManager {
         skills.push(skill);
       }
     }
+    // Home-root shadow: when the project root IS the home directory the
+    // 'project' level was skipped above, so repository-committed skills
+    // surface at this 'user' level (~/.qwen and <root>/.qwen are the same
+    // directory). Tag them so the side-effect trust gates recognise
+    // repo-supplied skills even where a per-agent Config override rebinds
+    // getProjectRoot() (worktree isolation, working_dir pins).
+    if (level === 'user' && isHomeDirectory) {
+      for (const skill of skills) {
+        skill.homeRootShadow = true;
+      }
+    }
     debugLogger.debug(`Loaded ${skills.length} ${level} level skills`);
     return skills;
   }

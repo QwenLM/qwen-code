@@ -230,10 +230,27 @@ async function main() {
   const coreSrcUrl = pathToFileURL(
     path.join(repoRoot, 'packages', 'core', 'index.ts'),
   ).href;
+  // Core's package.json maps the ./envVarResolver subpath to dist, which a
+  // fresh checkout lacks (and a built one may keep stale). `after` mode
+  // pulls it in via SkillReviewDialog -> config/settings.js, so it needs
+  // the same source remap as the bare specifier (mirrors scripts/dev.js).
+  const envVarResolverSrcUrl = pathToFileURL(
+    path.join(
+      repoRoot,
+      'packages',
+      'core',
+      'src',
+      'utils',
+      'envVarResolver.ts',
+    ),
+  ).href;
   const loader = `
     export function resolve(specifier, context, nextResolve) {
       if (specifier === '@qwen-code/qwen-code-core') {
         return { shortCircuit: true, url: '${coreSrcUrl}', format: 'module' };
+      }
+      if (specifier === '@qwen-code/qwen-code-core/envVarResolver') {
+        return { shortCircuit: true, url: '${envVarResolverSrcUrl}', format: 'module' };
       }
       return nextResolve(specifier, context);
     }

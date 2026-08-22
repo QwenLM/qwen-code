@@ -110,6 +110,26 @@ describe('HookAggregator', () => {
       expect(result.finalOutput?.reason).toBe('first reason\nsecond reason');
     });
 
+    it('should concatenate systemMessages so a one-shot message survives later hooks', () => {
+      const outputs: HookOutput[] = [
+        { continue: true, systemMessage: 'Warning: redirect to final URL' },
+        { continue: true, systemMessage: 'audit ok' },
+      ];
+
+      const results: HookExecutionResult[] = outputs.map((output) => ({
+        hookConfig: { type: HookType.Command, command: 'echo test' },
+        eventName: HookEventName.Stop,
+        success: true,
+        output,
+        duration: 100,
+      }));
+
+      const result = aggregator.aggregateResults(results, HookEventName.Stop);
+      expect(result.finalOutput?.systemMessage).toBe(
+        'Warning: redirect to final URL\naudit ok',
+      );
+    });
+
     it('should block when any hook blocks', () => {
       const outputs: HookOutput[] = [
         { reason: 'allowed', decision: 'allow' },
@@ -367,6 +387,29 @@ describe('HookAggregator', () => {
       expect(hookOutput.getDenyMessage()).toBe('msg1\nmsg2');
     });
 
+    it('should carry top-level systemMessage through so a one-shot warning survives', () => {
+      const outputs: HookOutput[] = [
+        { continue: true, systemMessage: 'Warning: redirect to final URL' },
+        { hookSpecificOutput: { decision: { behavior: 'allow' } } },
+      ];
+
+      const results: HookExecutionResult[] = outputs.map((output) => ({
+        hookConfig: { type: HookType.Command, command: 'echo test' },
+        eventName: HookEventName.PermissionRequest,
+        success: true,
+        output,
+        duration: 100,
+      }));
+
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.PermissionRequest,
+      );
+      expect(result.finalOutput?.systemMessage).toBe(
+        'Warning: redirect to final URL',
+      );
+    });
+
     it('should use last updatedInput', () => {
       const outputs: HookOutput[] = [
         {
@@ -546,6 +589,29 @@ describe('HookAggregator', () => {
       );
       expect(result.finalOutput?.reason).toBe('second');
       expect(result.finalOutput?.continue).toBe(false);
+    });
+
+    it('should concatenate systemMessages so a one-shot message survives later hooks', () => {
+      const outputs: HookOutput[] = [
+        { continue: true, systemMessage: 'Warning: redirect to final URL' },
+        { continue: true, systemMessage: 'session audited' },
+      ];
+
+      const results: HookExecutionResult[] = outputs.map((output) => ({
+        hookConfig: { type: HookType.Command, command: 'echo test' },
+        eventName: HookEventName.SessionStart,
+        success: true,
+        output,
+        duration: 100,
+      }));
+
+      const result = aggregator.aggregateResults(
+        results,
+        HookEventName.SessionStart,
+      );
+      expect(result.finalOutput?.systemMessage).toBe(
+        'Warning: redirect to final URL\nsession audited',
+      );
     });
 
     it('should concatenate additionalContext from multiple hooks', () => {

@@ -31,6 +31,10 @@ export default defineConfig({
         __dirname,
         '../core/src/memory/scopes.ts',
       ),
+      '@qwen-code/qwen-code-core/envVarResolver': path.resolve(
+        __dirname,
+        '../core/src/utils/envVarResolver.ts',
+      ),
       '@qwen-code/qwen-code-core/toolWriteOrigin': path.resolve(
         __dirname,
         '../core/src/services/tool-write-origin.ts',

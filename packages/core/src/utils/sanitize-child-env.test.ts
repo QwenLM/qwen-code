@@ -23,6 +23,17 @@ describe('sanitizeChildEnv', () => {
     expect(result['QWEN_CODE_PRIVATE_ACP_CAPABILITY']).toBeUndefined();
   });
 
+  it('removes internal secrets regardless of key casing (Windows process.env)', () => {
+    const result = sanitizeChildEnv({
+      qwen_server_token: 'lowercase-secret',
+      Qwen_Daemon_Token: 'mixed-case-secret',
+      PATH: '/usr/bin',
+    });
+    expect(result['qwen_server_token']).toBeUndefined();
+    expect(result['Qwen_Daemon_Token']).toBeUndefined();
+    expect(result['PATH']).toBe('/usr/bin');
+  });
+
   it('preserves benign vars and third-party credentials that shell workflows need', () => {
     const result = sanitizeChildEnv({
       QWEN_SERVER_TOKEN: 'super-secret',

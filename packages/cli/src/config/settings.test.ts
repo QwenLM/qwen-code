@@ -3265,12 +3265,13 @@ describe('Settings Loading and Merging', () => {
       expect(settings.merged.security?.allowPrivateNetworkHooks).toBe(true);
     });
 
-    it('should strip security.allowPrivateNetworkHooks from workspace scope even when trusted', () => {
+    it('should strip security.allowPrivateNetworkHooks and security.allowedHttpHookUrls from workspace scope even when trusted', () => {
       (mockFsExistsSync as Mock).mockReturnValue(true);
       const workspaceSettingsContent = {
         security: {
           allowPrivateNetworkHooks: true,
           allowedHttpHookUrls: ['https://hooks.example.com/*'],
+          folderTrust: { enabled: true },
         },
       };
 
@@ -3283,13 +3284,338 @@ describe('Settings Loading and Merging', () => {
       );
 
       const settings = loadSettings(MOCK_WORKSPACE_DIR);
-      // The flag is ignored from workspace scope...
+      // Both hook-security overrides are ignored from workspace scope:
+      // a repository must not self-grant an SSRF relaxation nor replace
+      // the user's hook-payload whitelist.
       expect(
         settings.merged.security?.allowPrivateNetworkHooks,
       ).toBeUndefined();
-      // ...but other workspace security settings still merge.
+      expect(settings.merged.security?.allowedHttpHookUrls).toBeUndefined();
+      // ...but the strip is surgical: other workspace security settings
+      // still merge.
+      expect(settings.merged.security?.folderTrust).toEqual({
+        enabled: true,
+      });
+    });
+
+    it('should honor security.allowedHttpHookUrls from user scope', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              security: { allowedHttpHookUrls: ['https://hooks.corp.com/*'] },
+            });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              security: { allowedHttpHookUrls: ['*'] },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      // The workspace's self-granted "*" is stripped; the user's
+      // whitelist survives.
       expect(settings.merged.security?.allowedHttpHookUrls).toEqual([
-        'https://hooks.example.com/*',
+        'https://hooks.corp.com/*',
+      ]);
+    });
+
+    it('should let a trusted workspace whitelist narrow the user whitelist', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              security: { allowedHttpHookUrls: ['https://hooks.corp.com/*'] },
+            });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              security: {
+                allowedHttpHookUrls: ['https://hooks.corp.com/ci/*'],
+              },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      // The workspace entry is covered by the user's pattern, so it
+      // narrows the effective whitelist instead of being dropped.
+      expect(settings.merged.security?.allowedHttpHookUrls).toEqual([
+        'https://hooks.corp.com/ci/*',
+      ]);
+    });
+
+    it('should drop workspace whitelist entries not covered by the user whitelist', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              security: { allowedHttpHookUrls: ['https://hooks.corp.com/*'] },
+            });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              security: {
+                allowedHttpHookUrls: [
+                  'https://hooks.corp.com/ci/*',
+                  'https://evil.example.com/*',
+                ],
+              },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.security?.allowedHttpHookUrls).toEqual([
+        'https://hooks.corp.com/ci/*',
+      ]);
+    });
+
+    it('should fall back to the user whitelist when no workspace entry is covered', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              security: { allowedHttpHookUrls: ['https://hooks.corp.com/*'] },
+            });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              security: {
+                allowedHttpHookUrls: ['https://evil.example.com/*'],
+              },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      // An empty intersection must mean "the user's policy stands", never
+      // "allow all" — the user's whitelist survives unchanged.
+      expect(settings.merged.security?.allowedHttpHookUrls).toEqual([
+        'https://hooks.corp.com/*',
+      ]);
+    });
+
+    it('should ignore a workspace whitelist when the user whitelist is explicitly empty', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              security: { allowedHttpHookUrls: [] },
+            });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              security: {
+                allowedHttpHookUrls: ['https://hooks.example.com/*'],
+              },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      // An explicit empty user whitelist means "allow all"; the workspace
+      // may not establish policy on top of it.
+      expect(settings.merged.security?.allowedHttpHookUrls).toEqual([]);
+    });
+
+    it('should let the system whitelist override workspace narrowing', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              security: { allowedHttpHookUrls: ['https://hooks.corp.com/*'] },
+            });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              security: {
+                allowedHttpHookUrls: ['https://hooks.corp.com/ci/*'],
+              },
+            });
+          if (p === getSystemSettingsPath())
+            return JSON.stringify({
+              security: {
+                allowedHttpHookUrls: ['https://managed.example.com/*'],
+              },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      // System scope is the final override: admin policy wins over both
+      // the user list and any workspace narrowing.
+      expect(settings.merged.security?.allowedHttpHookUrls).toEqual([
+        'https://managed.example.com/*',
+      ]);
+    });
+
+    it('should let a trusted workspace whitelist narrow the systemDefaults whitelist', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === getSystemDefaultsPath())
+            return JSON.stringify({
+              security: {
+                allowedHttpHookUrls: ['https://managed.example.com/*'],
+              },
+            });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              security: {
+                allowedHttpHookUrls: [
+                  'https://managed.example.com/ci/*',
+                  'https://uncovered.example.com/*',
+                ],
+              },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      // SystemDefaults is a documented honored scope: covered workspace
+      // entries narrow it; uncovered ones are dropped.
+      expect(settings.merged.security?.allowedHttpHookUrls).toEqual([
+        'https://managed.example.com/ci/*',
+      ]);
+    });
+
+    it('should judge workspace coverage by the user whitelist when both user and systemDefaults set one', () => {
+      // Pins the User-before-SystemDefaults precedence of the
+      // narrowing `??` chain: the workspace entry is covered only by
+      // the systemDefaults pattern, so it must be judged against the
+      // USER list, dropped, and the user's whitelist must stand.
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              security: { allowedHttpHookUrls: ['https://hooks.corp.com/*'] },
+            });
+          if (p === getSystemDefaultsPath())
+            return JSON.stringify({
+              security: {
+                allowedHttpHookUrls: ['https://managed.example.com/*'],
+              },
+            });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              security: {
+                allowedHttpHookUrls: ['https://managed.example.com/ci/*'],
+              },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.security?.allowedHttpHookUrls).toEqual([
+        'https://hooks.corp.com/*',
+      ]);
+    });
+
+    it('should survive a malformed workspace allowedHttpHookUrls and keep the user whitelist', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              security: { allowedHttpHookUrls: ['https://hooks.corp.com/*'] },
+            });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              // A common hand-edit to "clear" the list.
+              security: { allowedHttpHookUrls: null },
+            });
+          return '{}';
+        },
+      );
+
+      // Must not throw out of loadSettings, and the malformed value must
+      // not replace the user's list (which would read as "allow all").
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.security?.allowedHttpHookUrls).toEqual([
+        'https://hooks.corp.com/*',
+      ]);
+    });
+
+    it('should drop non-string workspace whitelist entries instead of throwing', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              security: { allowedHttpHookUrls: ['https://hooks.corp.com/*'] },
+            });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              security: {
+                allowedHttpHookUrls: [42, 'https://hooks.corp.com/ci/*', null],
+              },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.security?.allowedHttpHookUrls).toEqual([
+        'https://hooks.corp.com/ci/*',
+      ]);
+    });
+
+    it('should drop the workspace list when the higher-scope whitelist is malformed', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              security: { allowedHttpHookUrls: 'https://hooks.corp.com/*' },
+            });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              security: {
+                allowedHttpHookUrls: ['https://hooks.corp.com/ci/*'],
+              },
+            });
+          return '{}';
+        },
+      );
+
+      // No throw on the non-array higher-scope value; the workspace list
+      // is dropped and the user's value survives the merge untouched.
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.security?.allowedHttpHookUrls).toBe(
+        'https://hooks.corp.com/*',
+      );
+    });
+
+    it('should not let a non-object workspace security section wipe higher-scope security', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              security: { allowedHttpHookUrls: ['https://hooks.corp.com/*'] },
+            });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({ security: null });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      // The workspace's `security: null` is dropped instead of replacing
+      // the user's security section (an empty whitelist means "allow all").
+      expect(settings.merged.security?.allowedHttpHookUrls).toEqual([
+        'https://hooks.corp.com/*',
       ]);
     });
 
@@ -3310,6 +3636,97 @@ describe('Settings Loading and Merging', () => {
       expect(
         warnings.some((w) => w.includes('security.allowPrivateNetworkHooks')),
       ).toBe(true);
+    });
+
+    it('should warn when workspace settings define security.allowedHttpHookUrls', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              security: {
+                allowedHttpHookUrls: ['https://hooks.example.com/*'],
+              },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      const warnings = getSettingsWarnings(settings);
+      const warning = warnings.find((w) =>
+        w.includes('security.allowedHttpHookUrls'),
+      );
+      expect(warning).toBeDefined();
+      // The workspace list may only narrow a higher-scope whitelist; the
+      // warning must explain that uncovered entries are dropped and what
+      // happens when no higher-scope whitelist exists ("allow all" still
+      // applies then), so neither case reads as neutral.
+      expect(warning).toContain('can only narrow');
+      expect(warning).toContain('unrestricted apart from SSRF protection');
+    });
+
+    it('should not emit the narrowing warning when the workspace is not trusted', () => {
+      vi.mocked(isWorkspaceTrusted).mockReturnValue({
+        isTrusted: false,
+        source: 'file',
+      });
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              security: {
+                allowedHttpHookUrls: ['https://hooks.example.com/*'],
+              },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      // Untrusted workspace settings are discarded whole, so there is no
+      // narrowing to describe.
+      const warnings = getSettingsWarnings(settings);
+      expect(
+        warnings.some((w) => w.includes('security.allowedHttpHookUrls')),
+      ).toBe(false);
+    });
+
+    it('should not warn about stripped security fields when workspace settings do not define them', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              security: { folderTrust: { enabled: true } },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      const warnings = getSettingsWarnings(settings);
+      expect(
+        warnings.some((w) => w.includes('security.allowPrivateNetworkHooks')),
+      ).toBe(false);
+      expect(
+        warnings.some((w) => w.includes('security.allowedHttpHookUrls')),
+      ).toBe(false);
+    });
+
+    it('should not warn about stripped security fields when no workspace settings file is loaded', () => {
+      // beforeEach defaults (existsSync -> false): no settings file loads,
+      // so there is no workspace scope to strip or warn about.
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.workspace.rawJson).toBeUndefined();
+      const warnings = getSettingsWarnings(settings);
+      expect(
+        warnings.some((w) => w.includes('security.allowPrivateNetworkHooks')),
+      ).toBe(false);
+      expect(
+        warnings.some((w) => w.includes('security.allowedHttpHookUrls')),
+      ).toBe(false);
     });
 
     it('should let user scope win over a stripped workspace value', () => {
