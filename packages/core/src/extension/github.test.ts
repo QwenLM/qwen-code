@@ -676,6 +676,8 @@ describe('git extension helpers', () => {
               `/commits/${encodeURIComponent(ref || 'HEAD')}`,
             );
             expect(headerNames(options)).not.toContain('authorization');
+            expect(typeof options?.lookup).toBe('function');
+            expect(options?.agent).toBe(false);
             callResponseCallback(
               options,
               callback,
@@ -688,6 +690,8 @@ describe('git extension helpers', () => {
               `https://codeload.github.com/owner/repo/tar.gz/${sha}`,
             );
             expect(headerNames(options)).not.toContain('authorization');
+            expect(typeof options?.lookup).toBe('function');
+            expect(options?.agent).toBe(false);
             callResponseCallback(options, callback, createResponse(archive));
             return createRequestMock();
           }) as typeof https.get);
@@ -964,6 +968,60 @@ describe('git extension helpers', () => {
         await expect(runFallbackAgainstArchive(files)).rejects.toThrow(
           expectedError,
         );
+      },
+    );
+
+    // Issue #8993's repro repository (obra/superpowers) carries a root
+    // symlink `AGENTS.md -> CLAUDE.md`, and GitHub codeload archives
+    // preserve repository symlinks. The fallback's extraction chain rejects
+    // any archive containing a link entry, so on older Git such repositories
+    // still fail closed — the honest outcome is a clear rejection naming the
+    // link entry. Safe in-archive symlink support is tracked in #9724; this
+    // test must fail if the rejection is ever silently removed.
+    it.runIf(process.platform !== 'win32')(
+      'rejects archives containing a root symlink like the issue #8993 repro repo',
+      async () => {
+        vi.spyOn(dns, 'lookup').mockResolvedValue([
+          { address: '8.8.8.8', family: 4 },
+        ] as never);
+        const tempDir = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'old-git-fallback-symlink-test-'),
+        );
+        const sourceDir = path.join(tempDir, 'source');
+        const destination = path.join(tempDir, 'destination');
+        const archiveRoot = path.join(sourceDir, 'repo-archive');
+        await fs.mkdir(archiveRoot, { recursive: true });
+        await fs.mkdir(destination);
+        await fs.writeFile(
+          path.join(archiveRoot, EXTENSIONS_CONFIG_FILENAME),
+          JSON.stringify({ name: 'archive-extension', version: '1.0.0' }),
+        );
+        // Mirrors the obra/superpowers root symlink from issue #8993.
+        await fs.writeFile(path.join(archiveRoot, 'CLAUDE.md'), '# agents\n');
+        await fs.symlink('CLAUDE.md', path.join(archiveRoot, 'AGENTS.md'));
+        const archivePath = path.join(tempDir, 'source.tar.gz');
+        await tar.c({ gzip: true, file: archivePath, cwd: sourceDir }, [
+          'repo-archive',
+        ]);
+        const archive = await fs.readFile(archivePath);
+        mockHttpsResponses(JSON.stringify({ sha: fallbackSha }), archive);
+
+        try {
+          await expect(
+            downloadPublicGitHubArchiveFallback(
+              {
+                type: 'git',
+                source: 'https://github.com/owner/repo',
+                networkPolicy: 'public',
+              },
+              destination,
+            ),
+          ).rejects.toThrow(
+            /Tar archive contains unsupported link entry: .*AGENTS\.md/,
+          );
+        } finally {
+          await fs.rm(tempDir, { recursive: true, force: true });
+        }
       },
     );
 
@@ -2196,6 +2254,11 @@ describe('git extension helpers', () => {
     }
 
     it('stops following GitHub API redirect loops', async () => {
+      // With a network policy every hop must be re-resolved through DNS, so
+      // the lookup spy counts the per-hop re-validations.
+      const lookupSpy = vi
+        .spyOn(dns, 'lookup')
+        .mockResolvedValue([{ address: '8.8.8.8', family: 4 }] as never);
       mockHttpsGet.mockImplementation(((_url, options, callback) => {
         callResponseCallback(
           options,
@@ -2209,16 +2272,24 @@ describe('git extension helpers', () => {
 
       await expect(
         downloadFromGitHubRelease(
-          { source: 'owner/repo', type: 'github-release' },
+          {
+            source: 'owner/repo',
+            type: 'github-release',
+            networkPolicy: 'public',
+          },
           tempDir,
         ),
       ).rejects.toThrow('Too many redirects while fetching GitHub API data');
       // The initial request plus MAX_API_REDIRECTS follow-ups.
       expect(mockHttpsGet).toHaveBeenCalledTimes(6);
+      expect(lookupSpy).toHaveBeenCalledTimes(6);
     });
 
     it('rejects GitHub API redirects without a location and clears the timeout', async () => {
       vi.useFakeTimers();
+      const lookupSpy = vi
+        .spyOn(dns, 'lookup')
+        .mockResolvedValue([{ address: '8.8.8.8', family: 4 }] as never);
       const response = createResponse(undefined, 302);
       const resumeSpy = vi.spyOn(response, 'resume');
       mockHttpsGet.mockImplementationOnce(((_url, options, callback) => {
@@ -2229,11 +2300,17 @@ describe('git extension helpers', () => {
       try {
         await expect(
           downloadFromGitHubRelease(
-            { source: 'owner/repo', type: 'github-release' },
+            {
+              source: 'owner/repo',
+              type: 'github-release',
+              networkPolicy: 'public',
+            },
             tempDir,
           ),
         ).rejects.toThrow('Redirect response missing location header');
         expect(resumeSpy).toHaveBeenCalled();
+        // The single hop is resolved once against the network policy.
+        expect(lookupSpy).toHaveBeenCalledTimes(1);
         expect(vi.getTimerCount()).toBe(0);
       } finally {
         vi.useRealTimers();
@@ -2242,6 +2319,9 @@ describe('git extension helpers', () => {
 
     it('rejects GitHub API redirect scheme downgrades before following them', async () => {
       vi.stubEnv('GITHUB_TOKEN', 'secret-token');
+      const lookupSpy = vi
+        .spyOn(dns, 'lookup')
+        .mockResolvedValue([{ address: '8.8.8.8', family: 4 }] as never);
       mockHttpsGet.mockImplementationOnce(((_url, options, callback) => {
         callResponseCallback(
           options,
@@ -2255,13 +2335,19 @@ describe('git extension helpers', () => {
 
       await expect(
         downloadFromGitHubRelease(
-          { source: 'owner/repo', type: 'github-release' },
+          {
+            source: 'owner/repo',
+            type: 'github-release',
+            networkPolicy: 'public',
+          },
           tempDir,
         ),
       ).rejects.toThrow('Unsupported redirect URL protocol: http:');
 
-      // The downgrade is rejected before any request to the http: URL.
+      // The downgrade is rejected before any request to the http: URL, so
+      // only the initial hop is resolved against the network policy.
       expect(mockHttpsGet).toHaveBeenCalledTimes(1);
+      expect(lookupSpy).toHaveBeenCalledTimes(1);
       const originalOptions = mockHttpsGet.mock.calls[0][1] as
         | https.RequestOptions
         | undefined;
@@ -2272,6 +2358,9 @@ describe('git extension helpers', () => {
 
     it('does not forward the GitHub token to cross-host GitHub API redirects', async () => {
       vi.stubEnv('GITHUB_TOKEN', 'secret-token');
+      const lookupSpy = vi
+        .spyOn(dns, 'lookup')
+        .mockResolvedValue([{ address: '8.8.8.8', family: 4 }] as never);
       const archive = await createReleaseArchive();
       mockHttpsGet
         .mockImplementationOnce(((_url, options, callback) => {
@@ -2298,7 +2387,11 @@ describe('git extension helpers', () => {
         }) as typeof https.get);
 
       await downloadFromGitHubRelease(
-        { source: 'owner/repo', type: 'github-release' },
+        {
+          source: 'owner/repo',
+          type: 'github-release',
+          networkPolicy: 'public',
+        },
         tempDir,
       );
 
@@ -2314,10 +2407,23 @@ describe('git extension helpers', () => {
       expect(redirectedOptions?.headers).toEqual({
         'User-Agent': 'gemini-cli',
       });
+      // Every hop (initial API, redirected API, archive download) is
+      // re-resolved against the network policy and carries the pinned
+      // lookup, so a redirect can never escape to a freshly resolved
+      // blocked address.
+      expect(lookupSpy).toHaveBeenCalledTimes(3);
+      for (const call of mockHttpsGet.mock.calls) {
+        const hopOptions = call[1] as https.RequestOptions | undefined;
+        expect(typeof hopOptions?.lookup).toBe('function');
+        expect(hopOptions?.agent).toBe(false);
+      }
     });
 
     it('keeps the GitHub token for same-host GitHub API redirects', async () => {
       vi.stubEnv('GITHUB_TOKEN', 'secret-token');
+      const lookupSpy = vi
+        .spyOn(dns, 'lookup')
+        .mockResolvedValue([{ address: '8.8.8.8', family: 4 }] as never);
       const archive = await createReleaseArchive();
       mockHttpsGet
         .mockImplementationOnce(((_url, options, callback) => {
@@ -2345,7 +2451,11 @@ describe('git extension helpers', () => {
         }) as typeof https.get);
 
       await downloadFromGitHubRelease(
-        { source: 'owner/repo', type: 'github-release' },
+        {
+          source: 'owner/repo',
+          type: 'github-release',
+          networkPolicy: 'public',
+        },
         tempDir,
       );
 
@@ -2355,6 +2465,9 @@ describe('git extension helpers', () => {
       expect(redirectedOptions?.headers).toMatchObject({
         Authorization: 'token secret-token',
       });
+      // Initial API hop + redirected hop + archive download, each
+      // re-resolved against the network policy.
+      expect(lookupSpy).toHaveBeenCalledTimes(3);
     });
 
     it('should explain when a release archive is missing an extension manifest', async () => {
