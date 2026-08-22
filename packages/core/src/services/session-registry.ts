@@ -132,6 +132,16 @@ export interface SessionRegistryRecord {
   /** Epoch milliseconds. */
   startedAt: number;
   qwenVersion: string | null;
+  /**
+   * Path to this session's peer-messaging socket, when it has one.
+   *
+   * Absent means the session is discoverable but not messageable — the
+   * feature is off, or the inbox failed to bind. Readers must treat this
+   * as a hint and dial the socket to confirm: a record can outlive the
+   * process by the width of a crash, and a stale socket file still stats
+   * fine.
+   */
+  ipcPath?: string;
 }
 
 export interface RegisterSessionFields {
@@ -669,6 +679,7 @@ async function readRecord(filePath: string): Promise<ReadRecordResult> {
   const procStart = value['procStart'];
   const pidNs = value['pidNs'];
   const qwenVersion = value['qwenVersion'];
+  const ipcPath = value['ipcPath'];
 
   return {
     status: 'ok',
@@ -682,6 +693,10 @@ async function readRecord(filePath: string): Promise<ReadRecordResult> {
       name,
       startedAt,
       qwenVersion: typeof qwenVersion === 'string' ? qwenVersion : null,
+      // Optional rather than nulled: absent and empty both mean "not
+      // messageable", and a record written before this field existed must
+      // read back identically to one written after it.
+      ...(typeof ipcPath === 'string' && ipcPath.length > 0 ? { ipcPath } : {}),
     },
   };
 }
