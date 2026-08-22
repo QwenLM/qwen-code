@@ -16,11 +16,11 @@ import { PRIVATE_ACP_CAPABILITY_ENV } from './invocation-context.js';
  * `QWEN_SERVER_TOKEN` is the serve-daemon bearer token, `QWEN_DAEMON_TOKEN`
  * is the channel-daemon worker token, and
  * `QWEN_CODE_PRIVATE_ACP_CAPABILITY` authenticates the daemon-spawned ACP
- * child. The `QWEN_AGENT_VIEW_*` keys carry an Agent View worker's identity
- * and sideband token; an agent-run child inheriting them could impersonate
- * the worker and inject worker events. Unlike the tokens above, the worker
- * re-reads these keys for its whole lifetime, so no consumer scrubs them —
- * this denylist is their only isolation boundary.
+ * child. The `QWEN_AGENT_VIEW_*` keys carry Agent View worker or PTY-host
+ * identity and authentication data; an agent-run child inheriting them could
+ * impersonate an internal process. The worker re-reads its sideband keys for
+ * its whole lifetime, so this denylist is their child-process isolation
+ * boundary.
  *
  * This denylist is intentionally NARROW: it strips only Qwen-internal secrets,
  * NOT third-party credentials such as `GH_TOKEN`, `AWS_*`, or `NPM_TOKEN`.
@@ -41,6 +41,8 @@ export const INTERNAL_SECRET_ENV_VARS: readonly string[] = [
   // inherits it could re-enter supervisor mode when its argv mentions the
   // internal flag, so it never leaves the daemon process tree.
   'QWEN_AGENT_VIEW_SUPERVISOR',
+  'QWEN_AGENT_VIEW_PTY_HOST_TOKEN',
+  'QWEN_AGENT_VIEW_PTY_HOST_ID',
   PRIVATE_ACP_CAPABILITY_ENV,
 ];
 
