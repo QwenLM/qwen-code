@@ -230,6 +230,7 @@ export {
   isRecordableDerivedChild,
 } from './tools/record-artifact.js';
 export type { RecordArtifactParams } from './tools/record-artifact.js';
+export { CreateSubSessionTool } from './tools/create-sub-session.js';
 export type {
   ArtifactPublisher,
   PublishArtifactInput,

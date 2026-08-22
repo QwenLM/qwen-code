@@ -246,7 +246,11 @@ import {
   inactiveExtensionSkillRefs,
   isInactiveExtensionSkill,
 } from './extension-skills.js';
-import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
+import {
+  Session,
+  buildAvailableCommandsSnapshot,
+  registerCreateSubSessionTool,
+} from './session/Session.js';
 import { restoreSessionModelThenAuthenticate } from './session-model-persistence.js';
 import { HistoryReplayer } from './session/history-replayer.js';
 import { renderPreparedGoalUpdate } from './session/recovered-goal-update.js';
@@ -13101,6 +13105,10 @@ class QwenAgent implements Agent {
     );
     let published = false;
     try {
+      // After `new Session` (which wires the spawner the tool needs) and before
+      // the session is published: the permission check is async, and the tool
+      // must be declared before the first prompt can be served.
+      await registerCreateSubSessionTool(config);
       options.primeSession?.(session);
       config.hydrateSessionRestoreFileHistory?.();
       this.sessions.set(sessionId, session);
