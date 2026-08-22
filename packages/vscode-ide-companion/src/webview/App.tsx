@@ -886,12 +886,23 @@ export const App: React.FC = () => {
   // Close the model selector when a modal overlay takes over: while open it
   // consumes Enter/Escape/arrow keys via a capture-phase document listener,
   // and since it paints below the overlays (z-0) those keystrokes must reach
-  // the visible overlay (PermissionDrawer / AskUserQuestionDialog) instead.
+  // the visible overlay (PermissionDrawer / AskUserQuestionDialog /
+  // AccountInfoDialog) instead. The /model open path is gated on the same
+  // predicate, so the selector and an overlay are never mounted together in
+  // either direction.
   useEffect(() => {
-    if (permissionRequest || askUserQuestionRequest) {
+    if (
+      showModelSelector &&
+      (permissionRequest || askUserQuestionRequest || accountInfo)
+    ) {
       setShowModelSelector(false);
     }
-  }, [permissionRequest, askUserQuestionRequest]);
+  }, [
+    showModelSelector,
+    permissionRequest,
+    askUserQuestionRequest,
+    accountInfo,
+  ]);
 
   // Handle permission response
   const handlePermissionResponse = useCallback(
@@ -1016,7 +1027,15 @@ export const App: React.FC = () => {
           auth: () => vscode.postMessage({ type: 'auth', data: {} }),
           account: () =>
             vscode.postMessage({ type: 'getAccountInfo', data: {} }),
-          model: () => setShowModelSelector(true),
+          // Never arm the selector underneath an active overlay: its
+          // capture-phase document keydown listener would steal keys from
+          // the visible topmost modal. Mirror of the close-effect above.
+          model: () => {
+            if (permissionRequest || askUserQuestionRequest || accountInfo) {
+              return;
+            }
+            setShowModelSelector(true);
+          },
         };
 
         const clientAction = clientActions[itemId];
@@ -1190,6 +1209,8 @@ export const App: React.FC = () => {
       closeCompletion();
     },
     [
+      accountInfo,
+      askUserQuestionRequest,
       availableCommands,
       availableSkills,
       closeCompletion,
@@ -1198,6 +1219,7 @@ export const App: React.FC = () => {
       fileContext,
       inputFieldRef,
       openCompletion,
+      permissionRequest,
       setInputText,
       vscode,
     ],
