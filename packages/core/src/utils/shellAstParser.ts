@@ -29,6 +29,23 @@ import {
 
 export type ShellCommandSafety = 'read-only' | 'write' | 'unknown';
 type Safety = ShellCommandSafety;
+
+/** Caller-supplied extensions to the classifier's built-in knowledge. */
+export interface ShellSafetyOptions {
+  /**
+   * Extra root command names the user vouched for as read-only. Consulted
+   * only by the terminal fallback branch of `evaluateCommandSafety`, so roots
+   * the classifier already understands (`rm`, `git`, `tee`, …) keep their
+   * built-in classification and cannot be vouched away.
+   */
+  extraReadOnlyRoots?: ReadonlySet<string>;
+}
+
+const NO_EXTRA_ROOTS: ReadonlySet<string> = new Set();
+
+function extraRoots(options?: ShellSafetyOptions): ReadonlySet<string> {
+  return options?.extraReadOnlyRoots ?? NO_EXTRA_ROOTS;
+}
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -959,7 +976,10 @@ function processSafety(root: string, args: string[]): Safety {
   return 'write';
 }
 
-function evaluateSubstitutions(node: SyntaxNode): ShellCommandSafety {
+function evaluateSubstitutions(
+  node: SyntaxNode,
+  extra: ReadonlySet<string>,
+): ShellCommandSafety {
   const substitutions = collectDescendants(
     node,
     new Set(['command_substitution', 'process_substitution']),
@@ -982,11 +1002,14 @@ function evaluateSubstitutions(node: SyntaxNode): ShellCommandSafety {
     'unknown',
     ...substitutions
       .flatMap((substitution) => substitution.namedChildren)
-      .map(evaluateStatementSafety),
+      .map((child) => evaluateStatementSafety(child, extra)),
   );
 }
 
-function evaluateCommandSafety(commandNode: SyntaxNode): ShellCommandSafety {
+function evaluateCommandSafety(
+  commandNode: SyntaxNode,
+  extra: ReadonlySet<string>,
+): ShellCommandSafety {
   const rawRoot = commandNode.childForFieldName('name')?.text;
   const root = getCommandName(commandNode);
   const argNodes = getArgumentNodes(commandNode);
@@ -1034,7 +1057,13 @@ function evaluateCommandSafety(commandNode: SyntaxNode): ShellCommandSafety {
   ) {
     result = 'unknown';
   } else {
-    result = READ_ONLY_ROOT_COMMANDS.has(root) ? 'read-only' : 'unknown';
+    // Terminal fallback: every root the classifier understands specially is
+    // handled above, so a caller-supplied root can only ever add to the
+    // built-in read-only set — never override a write classification.
+    result =
+      READ_ONLY_ROOT_COMMANDS.has(root) || extra.has(root)
+        ? 'read-only'
+        : 'unknown';
   }
   if (
     result === 'read-only' &&
@@ -1056,18 +1085,21 @@ function evaluateCommandSafety(commandNode: SyntaxNode): ShellCommandSafety {
   if (root && hasEnvironment) result = mergeSafety(result, 'unknown');
   return mergeSafety(
     result,
-    evaluateRedirectionSafety(commandNode),
+    evaluateRedirectionSafety(commandNode, extra),
     ...commandNode.namedChildren
       .filter((child) => !child.type.endsWith('_redirect'))
-      .map(evaluateSubstitutions),
+      .map((child) => evaluateSubstitutions(child, extra)),
   );
 }
 
-function evaluateRedirectionSafety(node: SyntaxNode): ShellCommandSafety {
+function evaluateRedirectionSafety(
+  node: SyntaxNode,
+  extra: ReadonlySet<string>,
+): ShellCommandSafety {
   let result: ShellCommandSafety = 'read-only';
   for (const redirect of node.namedChildren) {
     if (!redirect.type.endsWith('_redirect')) continue;
-    result = mergeSafety(result, evaluateSubstitutions(redirect));
+    result = mergeSafety(result, evaluateSubstitutions(redirect, extra));
     if (redirect.type !== 'file_redirect') continue;
     const operator = redirect.children.find(
       (child) => child.type !== 'file_descriptor',
@@ -1088,27 +1120,37 @@ function evaluateRedirectionSafety(node: SyntaxNode): ShellCommandSafety {
   return result;
 }
 
-function childrenSafety(node: SyntaxNode, floor: Safety = 'read-only'): Safety {
-  return mergeSafety(floor, ...node.namedChildren.map(evaluateStatementSafety));
+function childrenSafety(
+  node: SyntaxNode,
+  extra: ReadonlySet<string>,
+  floor: Safety = 'read-only',
+): Safety {
+  return mergeSafety(
+    floor,
+    ...node.namedChildren.map((child) => evaluateStatementSafety(child, extra)),
+  );
 }
 
-function evaluateStatementSafety(node: SyntaxNode): ShellCommandSafety {
-  if (node.type === 'command') return evaluateCommandSafety(node);
-  if (CHILD_STATEMENT.test(node.type)) return childrenSafety(node);
+function evaluateStatementSafety(
+  node: SyntaxNode,
+  extra: ReadonlySet<string>,
+): ShellCommandSafety {
+  if (node.type === 'command') return evaluateCommandSafety(node, extra);
+  if (CHILD_STATEMENT.test(node.type)) return childrenSafety(node, extra);
   if (node.type === 'redirected_statement')
     return mergeSafety(
       ...node.namedChildren
         .filter((child) => !child.type.endsWith('_redirect'))
-        .map((child) => evaluateStatementSafety(child)),
-      evaluateRedirectionSafety(node),
+        .map((child) => evaluateStatementSafety(child, extra)),
+      evaluateRedirectionSafety(node, extra),
     );
   if (/^variable_assignments?$/.test(node.type))
     return mergeSafety(
       node.parent?.namedChildCount === 1 ? 'read-only' : 'unknown',
-      evaluateSubstitutions(node),
+      evaluateSubstitutions(node, extra),
     );
   if (node.type === 'function_definition') return 'unknown';
-  return childrenSafety(node, 'unknown');
+  return childrenSafety(node, extra, 'unknown');
 }
 
 function localGitConfigMakesCommandUnsafe(
@@ -1152,6 +1194,7 @@ function fallbackGitConfigMakesCommandUnsafe(
 
 async function classifyInternal(
   command: string,
+  extra: ReadonlySet<string>,
   cwd?: string,
 ): Promise<Safety> {
   const tree = await parseShellCommand(command);
@@ -1159,11 +1202,14 @@ async function classifyInternal(
     const root = tree.rootNode;
     if (root.namedChildCount === 0 || root.hasError) return 'unknown';
     const safety = mergeSafety(
-      ...root.namedChildren.map(evaluateStatementSafety),
+      ...root.namedChildren.map((child) =>
+        evaluateStatementSafety(child, extra),
+      ),
     );
     if (safety === 'read-only' && command.includes('\\\n')) {
       const normalizedSafety = await classifyInternal(
         command.replaceAll('\\\n', ''),
+        extra,
         cwd,
       );
       if (normalizedSafety !== 'read-only') return 'unknown';
@@ -1178,17 +1224,21 @@ async function classifyInternal(
 }
 export async function classifyShellCommandSafety(
   command: string,
+  options?: ShellSafetyOptions,
 ): Promise<ShellCommandSafety> {
   if (typeof command !== 'string' || !command.trim()) return 'unknown';
-  return classifyInternal(command).catch(() => 'unknown');
+  return classifyInternal(command, extraRoots(options)).catch(() => 'unknown');
 }
 
 export async function classifyShellCommandSafetyInDirectory(
   command: string,
   cwd: string,
+  options?: ShellSafetyOptions,
 ): Promise<ShellCommandSafety> {
   if (typeof command !== 'string' || !command.trim()) return 'unknown';
-  return classifyInternal(command, cwd).catch(() => 'unknown');
+  return classifyInternal(command, extraRoots(options), cwd).catch(
+    () => 'unknown',
+  );
 }
 
 /**
@@ -1206,19 +1256,22 @@ export async function classifyShellCommandSafetyInDirectory(
  */
 export async function isShellCommandReadOnlyAST(
   command: string,
+  options?: ShellSafetyOptions,
 ): Promise<boolean> {
-  return isShellCommandReadOnlyInternal(command);
+  return isShellCommandReadOnlyInternal(command, extraRoots(options));
 }
 
 export async function isShellCommandReadOnlyASTInDirectory(
   command: string,
   cwd: string,
+  options?: ShellSafetyOptions,
 ): Promise<boolean> {
-  return isShellCommandReadOnlyInternal(command, cwd);
+  return isShellCommandReadOnlyInternal(command, extraRoots(options), cwd);
 }
 
 async function isShellCommandReadOnlyInternal(
   command: string,
+  extra: ReadonlySet<string>,
   cwd?: string,
 ): Promise<boolean> {
   if (typeof command !== 'string' || !command.trim()) return false;
@@ -1234,7 +1287,7 @@ async function isShellCommandReadOnlyInternal(
   }
 
   try {
-    return (await classifyInternal(command, cwd)) === 'read-only';
+    return (await classifyInternal(command, extra, cwd)) === 'read-only';
   } catch {
     // Unexpected runtime failure (e.g. WASM init error on first call) –
     // fall back to the regex-based checker rather than propagating the error.

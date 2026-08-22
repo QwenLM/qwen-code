@@ -124,6 +124,7 @@ describe('ShellTool', () => {
       getPermissionsDeny: vi.fn().mockReturnValue([]),
       getDebugMode: vi.fn().mockReturnValue(false),
       getTargetDir: vi.fn().mockReturnValue('/test/dir'),
+      getPlanModeReadOnlyRoots: vi.fn().mockReturnValue(new Set<string>()),
       getSessionId: vi.fn().mockReturnValue('test-session'),
       getWorkspaceContext: vi
         .fn()
@@ -7231,6 +7232,37 @@ describe('ShellTool', () => {
       const permission = await invocation.getDefaultPermission();
 
       expect(permission).toBe('allow');
+    });
+
+    it('should allow a user-vouched read-only root (issue #9694)', async () => {
+      const build = () =>
+        shellTool.build({ command: 'ib domain list', is_background: false });
+
+      expect(await build().getDefaultPermission()).toBe('ask');
+
+      (
+        mockConfig.getPlanModeReadOnlyRoots as ReturnType<typeof vi.fn>
+      ).mockReturnValue(new Set(['ib']));
+
+      expect(await build().getDefaultPermission()).toBe('allow');
+    });
+
+    it('should still ask when a vouched root redirects or substitutes', async () => {
+      (
+        mockConfig.getPlanModeReadOnlyRoots as ReturnType<typeof vi.fn>
+      ).mockReturnValue(new Set(['ib']));
+
+      const redirect = shellTool.build({
+        command: 'ib domain list > out.txt',
+        is_background: false,
+      });
+      expect(await redirect.getDefaultPermission()).toBe('ask');
+
+      const substitution = shellTool.build({
+        command: 'ib domain list $(whoami)',
+        is_background: false,
+      });
+      expect(await substitution.getDefaultPermission()).toBe('ask');
     });
 
     // Regression coverage for PR #4386 round 6 (cid 3298521039): the

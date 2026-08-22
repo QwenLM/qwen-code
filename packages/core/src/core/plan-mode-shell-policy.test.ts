@@ -38,12 +38,16 @@ function createConfig(
     revision?: number;
     targetDir?: () => string;
     permissionManager?: Partial<PermissionManager>;
+    extraReadOnlyRoots?: ReadonlySet<string>;
   } = {},
 ): Config {
   return {
     getApprovalMode: vi.fn(() => options.mode ?? ApprovalMode.PLAN),
     getApprovalModeRevision: vi.fn(() => options.revision ?? 7),
     getTargetDir: vi.fn(() => options.targetDir?.() ?? '/workspace'),
+    getPlanModeReadOnlyRoots: vi.fn(
+      () => options.extraReadOnlyRoots ?? new Set<string>(),
+    ),
     getPermissionManager: vi.fn(() =>
       options.permissionManager
         ? (options.permissionManager as PermissionManager)
@@ -111,6 +115,28 @@ describe('plan-mode shell policy', () => {
     ).resolves.toMatchObject({ classification: 'unknown' });
   });
 
+  it('honours user-vouched read-only roots without loosening other rules', async () => {
+    const config = createConfig({ extraReadOnlyRoots: new Set(['ib']) });
+    await expect(evaluate('ib domain list', { config })).resolves.toMatchObject(
+      { classification: 'read-only' },
+    );
+    await expect(evaluate('ib domain list')).resolves.toMatchObject({
+      classification: 'unknown',
+    });
+    await expect(
+      evaluate('ib domain list > out.txt', { config }),
+    ).resolves.toMatchObject({ classification: 'write' });
+    await expect(
+      evaluate('ib domain list $(whoami)', { config }),
+    ).resolves.toMatchObject({ classification: 'unknown' });
+    await expect(
+      evaluate('ib domain list', {
+        config,
+        toolName: ToolNames.MONITOR,
+      }),
+    ).resolves.toMatchObject({ classification: 'read-only' });
+  });
+
   it('does not apply outside Plan mode or to non-shell tools', async () => {
     await expect(
       evaluate('git status', {
@@ -138,6 +164,7 @@ describe('plan-mode shell policy', () => {
       getApprovalModeRevision: () => revision,
       getTargetDir: () => '/workspace',
       getPermissionManager: () => undefined,
+      getPlanModeReadOnlyRoots: () => new Set<string>(),
     } as unknown as Config;
     const decision = await evaluate('git status', { config });
     const signal = new AbortController().signal;

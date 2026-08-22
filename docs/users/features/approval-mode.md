@@ -102,6 +102,66 @@ How should we handle database migration?
 }
 ```
 
+### Vouching for a custom read-only CLI
+
+Plan Mode decides whether a shell command is read-only by analysing it against
+a built-in set of known-safe root commands (`cat`, `ls`, `grep`, `find`,
+`git status`, …). A binary outside that set — typically a project-specific CLI
+— cannot be judged, so Plan Mode asks for approval, and that approval is
+deliberately good for one exact invocation only.
+
+If you have a CLI you know is read-only, list its root command name under
+`permissions.planMode.extraReadOnlyCommands`:
+
+```jsonc
+// .qwen/settings.json
+{
+  "permissions": {
+    "planMode": {
+      // Root command names only — same shape as the built-in set.
+      "extraReadOnlyCommands": ["ib"],
+    },
+  },
+}
+```
+
+Entries are merged across the user, project, and system scopes.
+
+**What an entry means.** It vouches for the _entire binary_. Qwen Code cannot
+see inside a custom CLI, so if `ib` has mutating sub-commands, listing `ib`
+silences the prompt for those too. Only list a command you would be comfortable
+letting the model run unattended.
+
+**What still applies.** Everything else about Plan Mode's analysis is unchanged
+— a vouched root only replaces the "is this binary known-safe?" question:
+
+| Command with `"ib"` listed  | Result                                                |
+| --------------------------- | ----------------------------------------------------- |
+| `ib domain list`            | runs without a prompt                                 |
+| `ib domain list > out.txt`  | blocked — output redirection is state-modifying       |
+| `ib domain list $(whoami)`  | prompts — command substitution stays unknown          |
+| `IB_TOKEN=x ib domain list` | prompts — environment-assignment prefix stays unknown |
+| `ib domain list \| badcmd`  | prompts — the pipe target is still unknown            |
+
+**What is ignored.** Two kinds of entry have no effect and are dropped:
+
+- Commands Qwen Code already understands keep their built-in classification.
+  Listing `rm`, `git`, `sed`, or `tee` does not make `rm -rf build` or
+  `git push` read-only.
+- Shell interpreters, multi-call binaries, and generic command launchers —
+  `bash`, `sh`, `zsh`, `busybox`, `env`, `sudo`, `su`, `xargs`, `watch`,
+  `nohup`, `timeout`, `setsid`, `exec`, `eval`, and similar — are rejected,
+  because each exists to run some other command and accepting one would bypass
+  the analysis entirely. That list is a denylist, so it cannot be exhaustive:
+  the rule above — only list a command you would let the model run unattended —
+  is what protects you from anything it misses.
+
+Anything that is not a bare command name (a path, a command with arguments, or
+a string containing shell metacharacters) is also dropped.
+
+**Scope.** This setting applies only in Plan Mode. In every other mode, use
+`permissions.allow` (e.g. `"Bash(ib *)"`) to auto-approve a command.
+
 ## 2. Use Ask Permissions Mode for Controlled Interaction
 
 Ask Permissions Mode is the standard way to work with Qwen Code. In this mode, you maintain full control over all potentially risky operations - Qwen Code will ask for your approval before making any file changes or executing shell commands.

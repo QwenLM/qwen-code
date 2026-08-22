@@ -213,6 +213,7 @@ describe('MonitorTool', () => {
 
     mockConfig = {
       getTargetDir: vi.fn().mockReturnValue('/test/dir'),
+      getPlanModeReadOnlyRoots: vi.fn().mockReturnValue(new Set<string>()),
       getMonitorRegistry: vi.fn().mockReturnValue(monitorRegistry),
       getPermissionManager: vi.fn().mockReturnValue(undefined),
       getWorkspaceContext: vi.fn().mockReturnValue({
@@ -516,6 +517,22 @@ describe('MonitorTool', () => {
       });
 
       await expect(invocation.getDefaultPermission()).resolves.toBe('allow');
+    });
+
+    it('forwards user-vouched read-only roots to the classifier (issue #9694)', async () => {
+      const roots = new Set(['ib']);
+      (
+        mockConfig.getPlanModeReadOnlyRoots as ReturnType<typeof vi.fn>
+      ).mockReturnValue(roots);
+      mockIsShellCommandReadOnlyAST.mockResolvedValueOnce(true);
+      const invocation = createInvocation({ command: 'ib domain watch' });
+
+      await expect(invocation.getDefaultPermission()).resolves.toBe('allow');
+      expect(mockIsShellCommandReadOnlyAST).toHaveBeenCalledWith(
+        'ib domain watch',
+        expect.any(String),
+        { extraReadOnlyRoots: roots },
+      );
     });
 
     it('surfaces a command-substitution warning via getConfirmationDetails (issue #4093)', async () => {

@@ -2211,6 +2211,8 @@ export async function loadCliConfig(
       deny: mergedDeny.length > 0 ? mergedDeny : undefined,
       autoMode:
         bareMode || safeMode ? undefined : settings.permissions?.autoMode,
+      planMode:
+        bareMode || safeMode ? undefined : settings.permissions?.planMode,
     },
     toolInvocationGuard: hostPolicy?.toolInvocationGuard,
     // Permission rule persistence callback (writes to settings files).

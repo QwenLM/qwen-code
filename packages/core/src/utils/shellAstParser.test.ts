@@ -916,7 +916,9 @@ describe('classifyShellCommandSafety', () => {
     }
     const startedAt = performance.now();
     await expect(
-      Promise.all(commands.map(classifyShellCommandSafety)),
+      Promise.all(
+        commands.map((command) => classifyShellCommandSafety(command)),
+      ),
     ).resolves.toEqual(['unknown', 'unknown']);
     expect(performance.now() - startedAt).toBeLessThan(1000);
   });
@@ -937,7 +939,9 @@ describe('classifyShellCommandSafety', () => {
     ];
     const startedAt = performance.now();
     await expect(
-      Promise.all(commands.map(classifyShellCommandSafety)),
+      Promise.all(
+        commands.map((command) => classifyShellCommandSafety(command)),
+      ),
     ).resolves.toEqual([
       'unknown',
       'read-only',
@@ -947,6 +951,91 @@ describe('classifyShellCommandSafety', () => {
       'read-only',
     ]);
     expect(performance.now() - startedAt).toBeLessThan(1000);
+  });
+});
+
+// =========================================================================
+// extraReadOnlyRoots (issue #9694)
+// =========================================================================
+
+describe('extraReadOnlyRoots', () => {
+  const withIb = { extraReadOnlyRoots: new Set(['ib']) };
+
+  it('classifies a vouched root as read-only', async () => {
+    expect(await classifyShellCommandSafety('ib domain list', withIb)).toBe(
+      'read-only',
+    );
+    expect(await isShellCommandReadOnlyAST('ib domain list', withIb)).toBe(
+      true,
+    );
+  });
+
+  it('leaves an unvouched root unknown', async () => {
+    expect(await classifyShellCommandSafety('ib domain list')).toBe('unknown');
+    expect(await classifyShellCommandSafety('other list', withIb)).toBe(
+      'unknown',
+    );
+  });
+
+  it('still blocks redirections from a vouched root', async () => {
+    expect(await classifyShellCommandSafety('ib list > out.txt', withIb)).toBe(
+      'write',
+    );
+    expect(await classifyShellCommandSafety('ib list >> out.txt', withIb)).toBe(
+      'write',
+    );
+    expect(await classifyShellCommandSafety('ib list &> out.txt', withIb)).toBe(
+      'write',
+    );
+  });
+
+  it('still flags command substitution and env prefixes', async () => {
+    expect(await classifyShellCommandSafety('ib list $(whoami)', withIb)).toBe(
+      'unknown',
+    );
+    expect(await classifyShellCommandSafety('IB_TOKEN=x ib list', withIb)).toBe(
+      'unknown',
+    );
+  });
+
+  it('still flags a pipe into an unknown command', async () => {
+    expect(await classifyShellCommandSafety('ib list | badcmd', withIb)).toBe(
+      'unknown',
+    );
+    expect(await classifyShellCommandSafety('ib list | wc -l', withIb)).toBe(
+      'read-only',
+    );
+  });
+
+  it('cannot override a built-in write classification', async () => {
+    const vouched = {
+      extraReadOnlyRoots: new Set(['rm', 'git', 'tee', 'mv', 'dd']),
+    };
+    expect(await classifyShellCommandSafety('rm -rf build', vouched)).toBe(
+      'write',
+    );
+    expect(
+      await classifyShellCommandSafety('git push origin main', vouched),
+    ).toBe('write');
+    expect(await classifyShellCommandSafety('tee out.txt', vouched)).toBe(
+      'write',
+    );
+    expect(await classifyShellCommandSafety('mv a b', vouched)).toBe('write');
+    expect(await classifyShellCommandSafety('dd of=disk.img', vouched)).toBe(
+      'write',
+    );
+  });
+
+  it('applies inside compound statements and subshells', async () => {
+    expect(await classifyShellCommandSafety('cd /tmp && ib list', withIb)).toBe(
+      'read-only',
+    );
+    expect(
+      await classifyShellCommandSafety('(ib list; ib show 1)', withIb),
+    ).toBe('read-only');
+    expect(await classifyShellCommandSafety('echo $(ib list)', withIb)).toBe(
+      'unknown',
+    );
   });
 });
 
