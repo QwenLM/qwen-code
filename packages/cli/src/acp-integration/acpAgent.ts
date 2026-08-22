@@ -32,6 +32,7 @@ import {
   runForkedAgent,
   SessionIdCaseConflictError,
   SessionService,
+  sessionIdContext,
   SESSION_WRITER_RPC_CODES,
   SessionWriterUnavailableError,
   SESSION_TITLE_MAX_LENGTH,
@@ -945,9 +946,7 @@ function validateLoadReplayEnvelope(
 
 function replayGoalBootstrap(
   projection:
-    | SessionRestoreProjection
-    | SessionLiveRestoreProjection
-    | undefined,
+    SessionRestoreProjection | SessionLiveRestoreProjection | undefined,
 ): ReturnType<typeof HistoryReplayer.v2GoalBootstrap> {
   if (projection && !('runtime' in projection)) {
     const sourceUuid = projection.goalRecoverySourceUuid;
@@ -1803,7 +1802,7 @@ export async function extractFilesFromTarGz(
       : '';
   const files: DownloadedSkillFile[] = [];
 
-  for (let offset = 0; offset + 512 <= archive.length; ) {
+  for (let offset = 0; offset + 512 <= archive.length;) {
     if (isZeroTarBlock(archive, offset)) break;
 
     const fullPath = readTarPath(archive, offset);
@@ -2345,8 +2344,7 @@ function readExistingProviderConfig(
   const existing = findExistingProviderModels(
     config,
     (settings.merged as Record<string, unknown>)['modelProviders'] as
-      | Record<string, unknown>
-      | undefined,
+      Record<string, unknown> | undefined,
   );
   const firstModel = existing?.models[0];
   const protocol = existing?.protocol ?? config.protocol;
@@ -2430,8 +2428,7 @@ function readProviderSetupInputs(
   ) => string | undefined,
 ): ProviderSetupInputs {
   const protocol = readOptionalString(params['protocol'], 'protocol') as
-    | AuthType
-    | undefined;
+    AuthType | undefined;
   if (
     protocol &&
     protocol !== config.protocol &&
@@ -3948,10 +3945,7 @@ class QwenAgent implements Agent {
   /** Set once the daemon negotiates active-work reporting; one per channel. */
   private activeWorkReporter: ActiveWorkReporter | undefined;
   private privateParentState:
-    | 'uninitialized'
-    | 'trusted'
-    | 'untrusted'
-    | 'rejected' = 'uninitialized';
+    'uninitialized' | 'trusted' | 'untrusted' | 'rejected' = 'uninitialized';
   // CPU-usage delta baseline for the daemon's `workspaceResource` extMethod
   // (Daemon Status child-resource chart). The daemon polls this at a fixed
   // cadence, so successive calls form a clean delta window independent of tool
@@ -4262,8 +4256,7 @@ class QwenAgent implements Agent {
 
   private getMcpServerStatus(config: Config, serverName: string) {
     const manager = config.getToolRegistry()?.getMcpClientManager() as
-      | { getServerStatus?: (name: string) => MCPServerStatus }
-      | undefined;
+      { getServerStatus?: (name: string) => MCPServerStatus } | undefined;
     return (
       manager?.getServerStatus?.(serverName) ?? getMCPServerStatus(serverName)
     );
@@ -5927,7 +5920,9 @@ class QwenAgent implements Agent {
         `Session not found for id: ${sessionId}`,
       );
     }
-    return session.setMode({ ...params, sessionId });
+    return sessionIdContext.run(session.getConfig().getSessionId(), () =>
+      session.setMode({ ...params, sessionId }),
+    );
   }
 
   async unstable_setSessionModel(
@@ -5941,7 +5936,9 @@ class QwenAgent implements Agent {
         `Session not found for id: ${sessionId}`,
       );
     }
-    return await session.setModel({ ...params, sessionId });
+    return await sessionIdContext.run(session.getConfig().getSessionId(), () =>
+      session.setModel({ ...params, sessionId }),
+    );
   }
 
   async setSessionConfigOption(
@@ -5958,92 +5955,102 @@ class QwenAgent implements Agent {
       );
     }
 
-    switch (configId) {
-      case 'mode': {
-        await this.setSessionMode({
-          sessionId,
-          modeId: value as string,
-        });
-        break;
-      }
-      case 'model': {
-        await session.setModel(
-          {
-            sessionId,
-            modelId: value as string,
-          },
-          { persistDefault: false },
-        );
-        break;
-      }
-      case 'reasoning_effort': {
-        const modelReasoning = this.getModelReasoningConfiguration(
-          session.getConfig(),
-        );
-        if (modelReasoning) {
-          const effortValues = modelReasoning.toggleOnly
-            ? undefined
-            : modelReasoning.efforts;
-          const selected =
-            value === ACP_REASONING_EFFORT_NONE
-              ? ACP_REASONING_EFFORT_NONE
-              : modelReasoning.toggleOnly
-                ? value === ACP_REASONING_EFFORT_DEFAULT
-                  ? ACP_REASONING_EFFORT_DEFAULT
-                  : undefined
-                : effortValues?.find((effort) => effort === value);
-          if (!selected) {
-            const choices = [
-              ACP_REASONING_EFFORT_NONE,
-              ...(effortValues ?? [ACP_REASONING_EFFORT_DEFAULT]),
-            ];
+    return sessionIdContext.run(
+      session.getConfig().getSessionId(),
+      async () => {
+        switch (configId) {
+          case 'mode': {
+            await this.setSessionMode({
+              sessionId,
+              modeId: value as string,
+            });
+            break;
+          }
+          case 'model': {
+            await session.setModel(
+              {
+                sessionId,
+                modelId: value as string,
+              },
+              { persistDefault: false },
+            );
+            break;
+          }
+          case 'reasoning_effort': {
+            const modelReasoning = this.getModelReasoningConfiguration(
+              session.getConfig(),
+            );
+            if (modelReasoning) {
+              const effortValues = modelReasoning.toggleOnly
+                ? undefined
+                : modelReasoning.efforts;
+              const selected =
+                value === ACP_REASONING_EFFORT_NONE
+                  ? ACP_REASONING_EFFORT_NONE
+                  : modelReasoning.toggleOnly
+                    ? value === ACP_REASONING_EFFORT_DEFAULT
+                      ? ACP_REASONING_EFFORT_DEFAULT
+                      : undefined
+                    : effortValues?.find((effort) => effort === value);
+              if (!selected) {
+                const choices = [
+                  ACP_REASONING_EFFORT_NONE,
+                  ...(effortValues ?? [ACP_REASONING_EFFORT_DEFAULT]),
+                ];
+                throw RequestError.invalidParams(
+                  undefined,
+                  `Unknown reasoning effort: ${value}. Choose one of: ${choices.join(', ')}`,
+                );
+              }
+              const generation = session
+                .getConfig()
+                .getContentGeneratorConfig();
+              if (selected === ACP_REASONING_EFFORT_NONE) {
+                generation.reasoning = false;
+              } else if (selected === ACP_REASONING_EFFORT_DEFAULT) {
+                generation.reasoning = undefined;
+              } else {
+                const current = generation.reasoning;
+                generation.reasoning = {
+                  ...(current || {}),
+                  effort: selected,
+                };
+              }
+              break;
+            }
+            const effort =
+              value === ACP_REASONING_EFFORT_DEFAULT
+                ? undefined
+                : REASONING_EFFORT_TIERS.find((tier) => tier === value);
+            if (
+              value !== ACP_REASONING_EFFORT_DEFAULT &&
+              effort === undefined
+            ) {
+              throw RequestError.invalidParams(
+                undefined,
+                `Unknown reasoning effort: ${value}. Choose one of: ${ACP_REASONING_EFFORT_DEFAULT}, ${REASONING_EFFORT_TIERS.join(', ')}`,
+              );
+            }
+            if (!applyReasoningEffort(session.getConfig(), effort)) {
+              throw RequestError.invalidParams(
+                undefined,
+                'Reasoning effort cannot be applied while thinking is disabled',
+              );
+            }
+            break;
+          }
+          default:
             throw RequestError.invalidParams(
               undefined,
-              `Unknown reasoning effort: ${value}. Choose one of: ${choices.join(', ')}`,
+              `Unsupported configId: ${configId}`,
             );
-          }
-          const generation = session.getConfig().getContentGeneratorConfig();
-          if (selected === ACP_REASONING_EFFORT_NONE) {
-            generation.reasoning = false;
-          } else if (selected === ACP_REASONING_EFFORT_DEFAULT) {
-            generation.reasoning = undefined;
-          } else {
-            const current = generation.reasoning;
-            generation.reasoning = {
-              ...(current || {}),
-              effort: selected,
-            };
-          }
-          break;
         }
-        const effort =
-          value === ACP_REASONING_EFFORT_DEFAULT
-            ? undefined
-            : REASONING_EFFORT_TIERS.find((tier) => tier === value);
-        if (value !== ACP_REASONING_EFFORT_DEFAULT && effort === undefined) {
-          throw RequestError.invalidParams(
-            undefined,
-            `Unknown reasoning effort: ${value}. Choose one of: ${ACP_REASONING_EFFORT_DEFAULT}, ${REASONING_EFFORT_TIERS.join(', ')}`,
-          );
-        }
-        if (!applyReasoningEffort(session.getConfig(), effort)) {
-          throw RequestError.invalidParams(
-            undefined,
-            'Reasoning effort cannot be applied while thinking is disabled',
-          );
-        }
-        break;
-      }
-      default:
-        throw RequestError.invalidParams(
-          undefined,
-          `Unsupported configId: ${configId}`,
-        );
-    }
 
-    return {
-      configOptions: this.buildConfigOptions(session.getConfig()),
-    };
+        return {
+          configOptions: this.buildConfigOptions(session.getConfig()),
+        };
+      },
+    );
   }
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {
@@ -6175,20 +6182,22 @@ class QwenAgent implements Agent {
     if (!session) {
       throw new Error(`Session not found: ${sessionId}`);
     }
-    try {
-      await session.cancelPendingPrompt();
-    } catch (error) {
-      if (!isNotCurrentlyGeneratingCancelError(error)) {
-        throw error;
+    await sessionIdContext.run(session.getConfig().getSessionId(), async () => {
+      try {
+        await session.cancelPendingPrompt();
+      } catch (error) {
+        if (!isNotCurrentlyGeneratingCancelError(error)) {
+          throw error;
+        }
       }
-    }
-    // Prompt calls still waiting at Session admission are tracked in
-    // activePromptCalls but have no session pendingPrompt yet, so
-    // cancelPendingPrompt cannot see them. Abort their controllers too, or a
-    // cancelled prompt would run in full once admission frees.
-    for (const call of this.activePromptCalls.get(sessionId) ?? []) {
-      call.controller.abort();
-    }
+      // Prompt calls still waiting at Session admission are tracked in
+      // activePromptCalls but have no session pendingPrompt yet, so
+      // cancelPendingPrompt cannot see them. Abort their controllers too, or a
+      // cancelled prompt would run in full once admission frees.
+      for (const call of this.activePromptCalls.get(sessionId) ?? []) {
+        call.controller.abort();
+      }
+    });
   }
 
   private loadPermissionSettings(cwd: string): LoadedSettings {
@@ -8454,6 +8463,15 @@ class QwenAgent implements Agent {
     };
   }
 
+  private isSessionScopedExtMethod(method: string): boolean {
+    return (
+      method === PROMPT_CANCEL_METHOD ||
+      method === TODO_STOP_GUARD_QUEUE_RELEASE_METHOD ||
+      method.startsWith('qwen/control/session/') ||
+      method.startsWith('qwen/status/session/')
+    );
+  }
+
   async extMethod(
     method: string,
     params: Record<string, unknown>,
@@ -8476,6 +8494,24 @@ class QwenAgent implements Agent {
           'Background notifications require a trusted private ACP parent',
         );
       }
+      const sessionId = normalizedParams['sessionId'];
+      const session =
+        typeof sessionId === 'string' && sessionId.length > 0
+          ? this.sessions.get(sessionId)
+          : undefined;
+      if (session && this.isSessionScopedExtMethod(method)) {
+        // Bind the owning session to this async context so that debug logs,
+        // shell env vars, and any other session-scoped diagnostics route to
+        // session A even if a Config for session B was created afterwards.
+        // Use the Config's session id spelling (not the lowercased lookup form
+        // stored on the Session object) so the context matches the binding in
+        // Session.ts and the debug log filename on disk.
+        return await sessionIdContext.run(
+          session.getConfig().getSessionId(),
+          () => this.extMethodInternal(method, normalizedParams),
+        );
+      }
+
       return await this.extMethodInternal(method, normalizedParams);
     } catch (error) {
       const writerError = getSessionWriterError(error);
@@ -11630,8 +11666,7 @@ class QwenAgent implements Agent {
         const promptId =
           typeof rawPromptId === 'string' ? rawPromptId : undefined;
         let turnIndex: number | undefined = params['targetTurnIndex'] as
-          | number
-          | undefined;
+          number | undefined;
         const resolveFromPromptId =
           promptId !== undefined &&
           (turnIndex === undefined || turnIndex === null);
