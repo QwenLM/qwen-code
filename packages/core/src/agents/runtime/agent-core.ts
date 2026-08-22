@@ -410,6 +410,25 @@ export class AgentCore {
    */
   readonly runtimeView?: RuntimeContentGeneratorView;
 
+  /**
+   * Tool names recorded by this agent's `prepareTools()` run, persisted on
+   * the core (not only on the ALS frame) because the frame recording dies
+   * with its frame. Later rounds enter FRESH frames built from the
+   * delivery caller's ambient store: an `AgentInteractive` woken by
+   * `enqueueMessage()` (top-level delivery → no set at all; delivery from
+   * another agent's tool body → the SENDER's set, since `runInContext`
+   * restores only teammate identity), background-agent continuation turns
+   * (each turn is wrapped in a fresh `runWithAgentContext` frame while
+   * `AgentHeadless` caches `toolsList` and never re-runs `prepareTools`),
+   * and resumed background agents. `runInAgentFrames` re-records this set
+   * on the live frame at every reasoning-loop / deferred-approval entry so
+   * `tool_search select:` sees THIS agent's declarations in every round.
+   * `undefined` until this core's first `prepareTools()` completes; the
+   * re-recording is a no-op while it is, so a frame that carries an
+   * inherited set (shallow copy) from its ambient keeps it.
+   */
+  private declaredToolNames?: ReadonlySet<string>;
+
   // Observable state lives on Core (not a wrapper) so headless and
   // background agents can be observed with the same accessors as
   // interactive ones. Populated by listeners set up in the constructor.
@@ -722,13 +741,22 @@ export class AgentCore {
     // registry-hidden deferred tool is nonetheless declared — and therefore
     // directly callable — for THIS agent. Wildcard/no-config agents and
     // teammates get the deferred tools above; explicit lists get exactly
-    // what they name. Forks never run prepareTools (they inherit the
-    // parent's declarations), so the absence of a recorded set there is
-    // itself the signal.
+    // what they name. Forks prepare an explicit list of the parent's
+    // committed tool names, which excludes registry-hidden deferred tools,
+    // so their recorded set naturally keeps such tools gated. The set is
+    // also persisted on the core for re-recording on later frames (see
+    // `declaredToolNames`).
     const recordDeclaredNames = (finalList: FunctionDeclaration[]) => {
-      recordCurrentAgentDeclaredToolNames(
-        new Set(finalList.map((t) => t.name).filter((n) => !!n) as string[]),
+      const declared = new Set(
+        finalList.map((t) => t.name).filter((n) => !!n) as string[],
       );
+      // Persist on the core as well as the live ALS frame: the frame
+      // recording only reaches the frame prepareTools() runs in, but
+      // rounds woken later (enqueueMessage, background continuation
+      // turns, resume) enter fresh frames — runInAgentFrames re-records
+      // this set on each of them. See `declaredToolNames` on the class.
+      this.declaredToolNames = declared;
+      recordCurrentAgentDeclaredToolNames(declared);
       return finalList;
     };
 
@@ -801,6 +829,13 @@ export class AgentCore {
    *    construction time.
    * 3. The logical owner agent id (when captured) so approved tools that
    *    consult agent context, such as Monitor, keep subagent ownership.
+   * 4. This agent's prepared tool declarations, re-recorded onto the live
+   *    frame from `this.declaredToolNames` (qwen-code-ci-bot R25-1): the
+   *    original `prepareTools()` recording dies with its frame, and every
+   *    round woken later enters a fresh frame built from the caller's
+   *    ambient store, so without the re-record tool_search's `select:`
+   *    gate would read `undefined` (or the sender's set) in every round
+   *    after the first.
    *
    * Used both around the reasoning loop and around the deferred-approval
    * `onConfirm` continuation — the latter runs from the parent UI's input
@@ -845,7 +880,26 @@ export class AgentCore {
   ): Promise<T> {
     const runInner = () =>
       subagentNameContext.run(this.name, () => {
-        const runWithView = () => this.withRuntimeView(fn, inheritedView);
+        const runWithView = () =>
+          this.withRuntimeView(() => {
+            // Re-record this agent's prepared declarations on the live
+            // frame. The set prepareTools() recorded died with its frame;
+            // every round woken later (enqueueMessage, background/resume
+            // continuation turns) enters a fresh frame built from the
+            // delivery caller's ambient store — undefined from the
+            // top-level session, the SENDER agent's set when delivered
+            // inside another agent's tool body. Both leave tool_search's
+            // `select:` gate misreading this agent's surface. This runs
+            // inside the innermost frame (after the inheritedAgentId
+            // re-entry below) so the restored deferred-approval frame is
+            // patched too. No-op until this core's first prepareTools()
+            // completes: until then the frame keeps whatever set its
+            // shallow copy inherited.
+            if (this.declaredToolNames) {
+              recordCurrentAgentDeclaredToolNames(this.declaredToolNames);
+            }
+            return fn();
+          }, inheritedView);
         // inheritedAgentDepth restores the agent's original nesting depth.
         // Without it the frame recomputes from the UI's frame-less async
         // chain to depth 0, and an approved `agent` tool call from a

@@ -20,6 +20,7 @@ import {
   getCurrentAgentDepth,
   getCurrentAgentId,
   getRuntimeContentGenerator,
+  recordCurrentAgentDeclaredToolNames,
   runWithAgentContext,
   runWithRuntimeContentGenerator,
   type RuntimeContentGeneratorView,
@@ -1045,6 +1046,182 @@ describe('AgentCore.prepareTools', () => {
     const deniedNames = deniedTools.map((t) => t.name);
     expect(deniedNames).not.toContain(ToolNames.AGENT);
     expect(deniedNames).toContain('read_file');
+  });
+});
+
+describe('AgentCore declared tool names across woken frames (R25-1)', () => {
+  // The set prepareTools() records on the ALS frame dies with that frame.
+  // Every round woken later — an idle AgentInteractive woken by
+  // enqueueMessage(), a background-agent continuation turn, a resumed
+  // background agent — enters a FRESH runWithAgentContext frame built from
+  // the delivery caller's ambient store: `undefined` when the message comes
+  // from the top-level session, or the SENDER agent's set when delivery
+  // happens inside another agent's tool body (runInContext restores only
+  // the teammate identity). runInAgentFrames — the single entry every
+  // reasoning loop and deferred-approval continuation passes through — must
+  // re-record THIS agent's persisted set onto the fresh frame, or
+  // tool_search's `select:` gate fails closed (or reads the wrong set) on
+  // every round after the first.
+
+  function makeCoreWithPreparedTools(
+    toolNames: string[],
+    name = 'wake-agent',
+  ): AgentCore {
+    const declarations = toolNames.map(
+      (toolName) => ({ name: toolName }) as FunctionDeclaration,
+    );
+    const config = {
+      getToolRegistry: vi.fn().mockReturnValue({
+        warmAll: vi.fn().mockResolvedValue(undefined),
+        getFunctionDeclarations: vi.fn().mockReturnValue(declarations),
+      }),
+      getMaxSubagentDepth: vi.fn().mockReturnValue(1),
+    } as unknown as Config;
+    return new AgentCore(
+      name,
+      config,
+      { systemPrompt: '' },
+      { model: 'test-model' },
+      { max_turns: 1 },
+    );
+  }
+
+  it('re-records the prepared set on a wake-round frame entered after the start frame unwound', async () => {
+    const core = makeCoreWithPreparedTools([
+      'core_tool',
+      'mcp__github__create_issue',
+    ]);
+
+    // First round: start()'s frame — prepareTools records the set live.
+    await runWithAgentContext('wake-agent', async () => {
+      await core.prepareTools();
+      expect(getCurrentAgentDeclaredToolNames()).toEqual(
+        new Set(['core_tool', 'mcp__github__create_issue']),
+      );
+    });
+    // The loop settles and the frame unwinds (agent goes idle).
+    expect(getCurrentAgentDeclaredToolNames()).toBeUndefined();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // A message wakes the agent: enqueueMessage -> startRunLoop builds a
+    // fresh frame from the delivery caller's ambient store — here the
+    // top-level session, which has no frame at all — and runs the round.
+    let observed: ReadonlySet<string> | undefined;
+    await runWithAgentContext('wake-agent', () =>
+      core.runInAgentFrames(async () => {
+        observed = getCurrentAgentDeclaredToolNames();
+      }),
+    );
+    expect(observed).toEqual(
+      new Set(['core_tool', 'mcp__github__create_issue']),
+    );
+  });
+
+  it('keeps the set visible through the full runReasoningLoop entry of a wake round', async () => {
+    // Full-path witness (same shape as observing runReasoningLoop from
+    // inside each round's ALS context): an idle agent woken by
+    // enqueueMessage from the top-level session enters a fresh frame, and
+    // the round's reasoning loop must still see the prepared set.
+    const core = makeCoreWithPreparedTools([
+      'core_tool',
+      'mcp__github__create_issue',
+    ]);
+    await runWithAgentContext('wake-agent', () => core.prepareTools());
+    await new Promise((resolve) => setImmediate(resolve));
+
+    let observedInLoop: ReadonlySet<string> | undefined;
+    vi.spyOn(
+      core as unknown as {
+        _runReasoningLoopInner: () => Promise<ReasoningLoopResult>;
+      },
+      '_runReasoningLoopInner',
+    ).mockImplementation(async () => {
+      observedInLoop = getCurrentAgentDeclaredToolNames();
+      return { text: '', terminateMode: null, turnsUsed: 0 };
+    });
+
+    // Called from the frame-less top-level chain: runLoop's fresh frame
+    // starts with no declared set at all.
+    await runWithAgentContext('wake-agent', () =>
+      core.runReasoningLoop({} as never, [], [], new AbortController()),
+    );
+
+    expect(observedInLoop).toEqual(
+      new Set(['core_tool', 'mcp__github__create_issue']),
+    );
+  });
+
+  it('overwrites a SENDER frame set inherited by the fresh wake frame', async () => {
+    const core = makeCoreWithPreparedTools([
+      'core_tool',
+      'mcp__github__create_issue',
+    ]);
+    await runWithAgentContext('wake-agent', () => core.prepareTools());
+
+    // Delivery happens inside another agent's tool body: the wake frame
+    // shallow-copies the sender's store, so it starts with the SENDER's
+    // recorded set. The gate must end up reading this agent's own set, and
+    // the sender's frame must not be corrupted by the re-recording.
+    let observed: ReadonlySet<string> | undefined;
+    let senderSetAfter: ReadonlySet<string> | undefined;
+    await runWithAgentContext('sender-agent', async () => {
+      recordCurrentAgentDeclaredToolNames(new Set(['other_tool']));
+      await runWithAgentContext('wake-agent', () =>
+        core.runInAgentFrames(async () => {
+          observed = getCurrentAgentDeclaredToolNames();
+        }),
+      );
+      senderSetAfter = getCurrentAgentDeclaredToolNames();
+    });
+
+    expect(observed).toEqual(
+      new Set(['core_tool', 'mcp__github__create_issue']),
+    );
+    expect(senderSetAfter).toEqual(new Set(['other_tool']));
+  });
+
+  it('re-records the prepared set on the restored deferred-approval frame', async () => {
+    const core = makeCoreWithPreparedTools(['core_tool']);
+    await runWithAgentContext('wake-agent', () => core.prepareTools());
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // Shape of the `respond` closure AgentCore emits with
+    // TOOL_WAITING_APPROVAL: runInAgentFrames with inheritedAgentId builds
+    // a fresh frame from the UI's frame-less async chain.
+    let observed: ReadonlySet<string> | undefined;
+    await core.runInAgentFrames(
+      async () => {
+        observed = getCurrentAgentDeclaredToolNames();
+      },
+      undefined,
+      'wake-agent',
+      undefined,
+      0,
+    );
+    expect(observed).toEqual(new Set(['core_tool']));
+  });
+
+  it('leaves the frame untouched when prepareTools never ran on this core', async () => {
+    // Defensive invariant: a core that has not completed prepareTools()
+    // carries no set of its own and must not clear or overwrite whatever
+    // the frame already holds (e.g. declarations inherited through the
+    // shallow-copied frame from an ambient agent context).
+    const forkCore = new AgentCore(
+      'fork-agent',
+      {} as unknown as Config,
+      { systemPrompt: '' },
+      { model: 'test-model' },
+      { max_turns: 1 },
+    );
+
+    let observed: ReadonlySet<string> | undefined;
+    await runWithAgentContext('parent-agent', async () => {
+      recordCurrentAgentDeclaredToolNames(new Set(['parent_tool']));
+      await forkCore.runInAgentFrames(async () => {
+        observed = getCurrentAgentDeclaredToolNames();
+      });
+    });
+    expect(observed).toEqual(new Set(['parent_tool']));
   });
 });
 

@@ -55,6 +55,16 @@ interface AgentContext {
    * store object. In-place mutation keeps the whole frame consistent across
    * awaits. Nested `runWithAgentContext` frames shallow-copy the store, so a
    * child's recording never leaks into its parent.
+   *
+   * The recording is also persisted on the owning `AgentCore`
+   * (`declaredToolNames`), because a frame's set dies with the frame:
+   * rounds woken after the first (an idle `AgentInteractive` woken by
+   * `enqueueMessage()`, background/resume continuation turns) enter FRESH
+   * frames shallow-copied from the delivery caller's ambient store —
+   * `undefined` from the top-level session, the sender's set inside
+   * another agent's tool body. `AgentCore.runInAgentFrames` re-records the
+   * persisted set onto the live frame at every reasoning-loop and
+   * deferred-approval entry (R25-1).
    */
   declaredToolNames?: ReadonlySet<string>;
 }
@@ -100,7 +110,10 @@ export function getCurrentAgentId(): string | null {
  * store. Nested frames shallow-copy the store in `runWithAgentContext`, so
  * a later child `prepareTools()` records on its own copy without leaking
  * into this frame. No-op outside an agent frame (the top-level session
- * never prepares an agent tool surface).
+ * never prepares an agent tool surface). Also called by
+ * `AgentCore.runInAgentFrames` to re-record the set persisted on the core
+ * onto fresh frames entered after the `prepareTools()` frame unwound
+ * (R25-1).
  */
 export function recordCurrentAgentDeclaredToolNames(
   names: ReadonlySet<string>,
