@@ -9,8 +9,9 @@
 // when the command is invoked). Use `path.join` rather than string
 // concatenation so Windows backslashes are produced when needed.
 
-import { existsSync, statSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { createHash } from 'node:crypto';
+import { existsSync, lstatSync, statSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { safeTarget } from '../../../utils/paths.js';
 
 /**
@@ -40,6 +41,58 @@ export function assertWritableOutPath(out: string): void {
 export const REVIEW_TMP_DIR = join('.qwen', 'tmp');
 export const REVIEWS_DIR = join('.qwen', 'reviews');
 export const REVIEW_CACHE_DIR = join('.qwen', 'review-cache');
+
+/**
+ * Where a generated review fan-out script has to live.
+ *
+ * Not a choice: `Workflow({scriptPath})` loads through
+ * `readWorkflowFileSecurely`, which realpaths the file and refuses anything
+ * outside the saved-workflow directories. A script written beside the plan in
+ * `.qwen/tmp` is a script the tool will not open.
+ */
+export const REVIEW_WORKFLOWS_DIR = join('.qwen', 'workflows');
+
+export function findSymlinkedReviewWorkflowPath(): string | undefined {
+  for (const candidate of [
+    dirname(REVIEW_WORKFLOWS_DIR),
+    REVIEW_WORKFLOWS_DIR,
+  ]) {
+    try {
+      if (lstatSync(candidate).isSymbolicLink()) return candidate;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+  }
+  return undefined;
+}
+
+/** Filename prefix for generated fan-out scripts; the cleanup sweep globs it. */
+export const REVIEW_WORKFLOW_PREFIX = 'qwen-review-';
+
+/**
+ * The saved-workflow name for one review's fan-out.
+ *
+ * Derived from the plan path so two reviews running in one project do not
+ * overwrite each other's script, and so re-running `emit-workflow` for the
+ * same review replaces its own file rather than accumulating.
+ *
+ * Hex digest rather than the review target: workflow names accept only
+ * lower-case letters, digits and hyphens (`validateWorkflowName`), while a
+ * target is a PR label or a file path — `safeTarget` keeps dots, underscores
+ * and capitals, all of which that validator rejects.
+ */
+export function reviewWorkflowName(planPath: string): string {
+  const digest = createHash('sha256')
+    .update(resolve(planPath))
+    .digest('hex')
+    .slice(0, 10);
+  return `${REVIEW_WORKFLOW_PREFIX}${digest}`;
+}
+
+/** Absolute-or-relative path of the generated fan-out script for a plan. */
+export function reviewWorkflowScriptPath(planPath: string): string {
+  return join(REVIEW_WORKFLOWS_DIR, `${reviewWorkflowName(planPath)}.js`);
+}
 
 /**
  * Filename prefix for review-worktree lease files under `REVIEW_TMP_DIR`.

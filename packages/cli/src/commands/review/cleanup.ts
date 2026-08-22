@@ -22,7 +22,7 @@ import {
   rmSync,
   statSync,
 } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   clearReviewWorktreeLease,
@@ -47,6 +47,9 @@ import {
   reviewBranch,
   inertPath,
   REVIEW_TMP_DIR,
+  REVIEW_WORKFLOWS_DIR,
+  findSymlinkedReviewWorkflowPath,
+  reviewWorkflowScriptPath,
   tmpFile,
   tmpPrefix,
 } from './lib/paths.js';
@@ -1008,6 +1011,93 @@ export function runCleanup(target: string): void {
     }
   }
 
+  // --- Generated fan-out script (under .qwen/workflows/) ----------------
+  // The plan path is deterministic for every cleanup target, so it identifies
+  // the one generated script this run owns, including after a killed run.
+  const workflowPaths = [
+    reviewWorkflowScriptPath(tmpFile(target, 'plan.json')),
+    ...(/^pr-\d+$/u.test(target)
+      ? [reviewWorkflowScriptPath(tmpFile(target, 'fetch.json'))]
+      : []),
+  ];
+  let workflowRootSafe = false;
+  try {
+    const unsafePath = findSymlinkedReviewWorkflowPath();
+    if (unsafePath) {
+      writeStderrLine(`Skipping workflow cleanup: ${unsafePath} is a symlink.`);
+      failedAny = true;
+    } else if (existsSync(REVIEW_WORKFLOWS_DIR)) {
+      workflowRootSafe = true;
+    }
+  } catch (err) {
+    writeStderrLine(
+      `Failed to inspect ${REVIEW_WORKFLOWS_DIR}: ${(err as Error).message}`,
+    );
+    failedAny = true;
+  }
+
+  if (workflowRootSafe) {
+    for (const workflowPath of workflowPaths) {
+      try {
+        lstatSync(workflowPath);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        writeStderrLine(
+          `Failed to inspect ${workflowPath}: ${(err as Error).message}`,
+        );
+        failedAny = true;
+        continue;
+      }
+      try {
+        rmSync(workflowPath, { force: true });
+        writeStdoutLine(`Removed generated workflow: ${workflowPath}`);
+        removedAny = true;
+      } catch (err) {
+        writeStderrLine(
+          `Failed to remove ${workflowPath}: ${(err as Error).message}`,
+        );
+        failedAny = true;
+      }
+    }
+
+    // A run killed between the temp-file write and the rename leaves
+    // `<script>.<uuid>.tmp` beside the script, and nothing else removes it.
+    // The rename target is deterministic per target, so its temp prefix is
+    // too: only this target's orphans match, never another review's files.
+    let workflowEntries: string[] = [];
+    try {
+      workflowEntries = readdirSync(REVIEW_WORKFLOWS_DIR);
+    } catch (err) {
+      writeStderrLine(
+        `Failed to inspect ${REVIEW_WORKFLOWS_DIR}: ${(err as Error).message}`,
+      );
+      failedAny = true;
+    }
+    const tmpPrefixes = workflowPaths.map((path) => `${basename(path)}.`);
+    for (const entry of workflowEntries) {
+      if (
+        !entry.endsWith('.tmp') ||
+        !tmpPrefixes.some((prefix) => entry.startsWith(prefix))
+      ) {
+        continue;
+      }
+      const orphanPath = join(REVIEW_WORKFLOWS_DIR, entry);
+      try {
+        rmSync(orphanPath, { force: true });
+        writeStdoutLine(`Removed generated workflow temp file: ${orphanPath}`);
+        removedAny = true;
+      } catch (err) {
+        writeStderrLine(
+          `Failed to remove ${orphanPath}: ${(err as Error).message}`,
+        );
+        failedAny = true;
+      }
+    }
+  }
+
+  // A generated script that will not delete is a side file, like the record
+  // directories above: it sets `failedAny` for the summary line but must NOT
+  // hold the lease, which guards only the worktree and branch.
   if (!failedDestruction) {
     clearReviewWorktreeLease(process.cwd(), target);
   }

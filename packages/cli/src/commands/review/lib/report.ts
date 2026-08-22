@@ -9,7 +9,7 @@
 // validation work identically whether the diff came from a PR worktree, a local
 // working tree, or `gh pr diff` in cross-repo lightweight mode.
 
-import { statSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { writeStderrLine } from '../../../utils/stdioHelpers.js';
 import { classifyHeavy } from './heavy.js';
 import type { DiffChunk, DiffPlan, PathKind } from './diff-plan.js';
@@ -77,6 +77,24 @@ export interface FileMetric {
 }
 
 /** Everything a review plan says about a diff, regardless of where it came from. */
+/**
+ * Read a plan report, or throw naming the command, the path and the reason.
+ *
+ * Five subcommands each hold their own copy of this try/parse/rethrow block
+ * (`agent-prompt`, `base-tree`, `build-test`, `script-lint`, `test-plan`).
+ * This is the single definition; moving those five onto it is mechanical and
+ * left to its own change, so a new caller does not have to add a sixth.
+ */
+export function readPlanReport(command: string, planPath: string): PlanReport {
+  try {
+    return JSON.parse(readFileSync(planPath, 'utf8')) as PlanReport;
+  } catch (err) {
+    throw new Error(
+      `${command}: cannot read the plan ${planPath}: ${(err as Error).message}`,
+    );
+  }
+}
+
 export interface PlanReport {
   diffLines: number;
   diffChars: number;
