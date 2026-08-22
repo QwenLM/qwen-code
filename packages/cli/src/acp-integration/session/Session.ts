@@ -223,19 +223,19 @@ import { normalizeChannelDeliveryText } from '../../runtime/channel-delivery.js'
 import {
   CAPTURE_SCREEN_CONTEXT_TOOL_NAME,
   CaptureScreenContextTool,
-} from '../../serve/live/capture-screen-context.js';
+} from '../live/capture-screen-context.js';
 import {
   createLiveTaskTools,
   type LiveTaskTool,
-} from '../../serve/live/live-task-tools.js';
+} from '../live/live-task-tools.js';
 import {
   SPEAK_TO_USER_TOOL_NAME,
   SpeakToUserTool,
-} from '../../serve/live/live-speak-to-user.js';
+} from '../live/live-speak-to-user.js';
 import {
   LIVE_BACKEND_END_INSTRUCTIONS,
   LIVE_BACKEND_START_INSTRUCTIONS,
-} from '../../serve/live/live-backend-instructions.js';
+} from '../live/live-backend-instructions.js';
 import { readVoiceModel } from '../../services/voice-settings.js';
 import {
   MAX_AUDIO_BYTES,
