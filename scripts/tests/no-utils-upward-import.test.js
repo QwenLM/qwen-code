@@ -34,8 +34,13 @@ describe('no-utils-upward-import', () => {
       'packages/cli/src/utils/foo.ts',
       '../nonInteractive/nonInteractiveHelpers.js',
     ],
-    // nested checkout: anchor on the LAST marker to derive the utils root
-    ['/tmp/checkout/packages/cli/src/utils/foo.ts', '../config/settings.js'],
+    // nested checkout: the marker appears twice, so the utils root must be
+    // anchored on the LAST one — an indexOf anchor would resolve the import
+    // inside the outer utils root and report nothing
+    [
+      '/tmp/packages/cli/src/utils/nested/packages/cli/src/utils/foo.ts',
+      '../config/settings.js',
+    ],
   ])('rejects upward imports from %s', (filename, importedPath) => {
     expect(
       runRule(`import value from '${importedPath}';`, filename),
@@ -76,6 +81,14 @@ describe('no-utils-upward-import', () => {
       runRule(
         "import value from '../../utils/sibling.js';",
         'packages/cli/src/utils/housekeeping/cleanup.ts',
+      ),
+    ).toHaveLength(0);
+    // same doubly-nested shape as the reject case: a sibling import stays
+    // inside the LAST marker's utils root
+    expect(
+      runRule(
+        "import value from './sibling.js';",
+        '/tmp/packages/cli/src/utils/nested/packages/cli/src/utils/foo.ts',
       ),
     ).toHaveLength(0);
   });
