@@ -472,8 +472,12 @@ export const App: React.FC = () => {
   );
 
   // Suppressed while the model selector is open so the completion menu can
-  // never mount alongside it — the selector's capture-phase document keydown
-  // listener owns the keyboard while it is visible.
+  // never mount alongside it: both menus anchor over the same area, and the
+  // selector's capture-phase document keydown listener consumes
+  // ArrowUp/ArrowDown/Enter/Escape while visible. Other keys (e.g. Tab) are
+  // NOT captured by the selector and fall through to the composer, so
+  // handleInputKeyDown separately disables the Tab approval-mode toggle
+  // while the selector is open.
   const completion = useCompletionTrigger(
     inputFieldRef,
     getCompletionItems,
@@ -883,26 +887,31 @@ export const App: React.FC = () => {
     return () => clearTimeout(timeout);
   }, [isAuthenticated]);
 
-  // Close the model selector when a modal overlay takes over: while open it
-  // consumes Enter/Escape/arrow keys via a capture-phase document listener,
-  // and since it paints below the overlays (z-0) those keystrokes must reach
-  // the visible overlay (PermissionDrawer / AskUserQuestionDialog /
-  // AccountInfoDialog) instead. The /model open path is gated on the same
-  // predicate, so the selector and an overlay are never mounted together in
-  // either direction.
+  // Single source of truth for "a fixed overlay layer is mounted". Besides
+  // the modal dialogs (PermissionDrawer / AskUserQuestionDialog /
+  // AccountInfoDialog) this includes webui's SessionSelector, whose backdrop
+  // and dropdown are also fixed z-[999]/z-[1000] layers. Both the
+  // close-effect below and the /model open gate must use this one predicate:
+  // the selector paints beneath every one of these layers (z-0), so the two
+  // must never be mounted together in either direction. Keeping the check in
+  // one place is what prevents the two call sites from drifting apart.
+  const isOverlayActive = Boolean(
+    permissionRequest ||
+      askUserQuestionRequest ||
+      accountInfo ||
+      sessionManagement.showSessionSelector,
+  );
+
+  // Close the model selector when an overlay takes over: while open the
+  // selector consumes Enter/Escape/arrow keys via a capture-phase document
+  // listener, and since it paints below the overlays (z-0) those keystrokes
+  // must reach the visible overlay instead. The /model open path is gated on
+  // the same isOverlayActive predicate.
   useEffect(() => {
-    if (
-      showModelSelector &&
-      (permissionRequest || askUserQuestionRequest || accountInfo)
-    ) {
+    if (showModelSelector && isOverlayActive) {
       setShowModelSelector(false);
     }
-  }, [
-    showModelSelector,
-    permissionRequest,
-    askUserQuestionRequest,
-    accountInfo,
-  ]);
+  }, [showModelSelector, isOverlayActive]);
 
   // Handle permission response
   const handlePermissionResponse = useCallback(
@@ -1029,9 +1038,11 @@ export const App: React.FC = () => {
             vscode.postMessage({ type: 'getAccountInfo', data: {} }),
           // Never arm the selector underneath an active overlay: its
           // capture-phase document keydown listener would steal keys from
-          // the visible topmost modal. Mirror of the close-effect above.
+          // the visible topmost layer. Same isOverlayActive predicate as the
+          // close-effect above — the two must stay in sync, so both read the
+          // one derived boolean instead of re-listing overlays here.
           model: () => {
-            if (permissionRequest || askUserQuestionRequest || accountInfo) {
+            if (isOverlayActive) {
               return;
             }
             setShowModelSelector(true);
@@ -1209,8 +1220,6 @@ export const App: React.FC = () => {
       closeCompletion();
     },
     [
-      accountInfo,
-      askUserQuestionRequest,
       availableCommands,
       availableSkills,
       closeCompletion,
@@ -1218,8 +1227,8 @@ export const App: React.FC = () => {
       completionTriggerChar,
       fileContext,
       inputFieldRef,
+      isOverlayActive,
       openCompletion,
-      permissionRequest,
       setInputText,
       vscode,
     ],
@@ -1272,20 +1281,25 @@ export const App: React.FC = () => {
     });
   }, [vscode]);
 
-  // Handle Tab key to cycle approval modes when input is focused
+  // Handle Tab key to cycle approval modes when input is focused.
+  // Suppressed while the model selector is open: the selector does not
+  // handle Tab itself, but the user's keyboard focus belongs to the selector
+  // then, and a stray Tab must not silently cycle the approval mode (which
+  // reaches YOLO) underneath it.
   const handleInputKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
       if (
         e.key === 'Tab' &&
         !e.shiftKey &&
         !isComposing &&
-        !completion.isOpen
+        !completion.isOpen &&
+        !showModelSelector
       ) {
         e.preventDefault();
         handleToggleEditMode();
       }
     },
-    [completion.isOpen, handleToggleEditMode, isComposing],
+    [completion.isOpen, handleToggleEditMode, isComposing, showModelSelector],
   );
 
   const handleToggleThinking = useCallback(() => {
