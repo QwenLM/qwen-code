@@ -17,6 +17,7 @@ import type {
 import { GeminiEventType } from '../core/turn.js';
 import * as loggers from '../telemetry/loggers.js';
 import { LoopType } from '../telemetry/types.js';
+import type { DebugLogger } from '../utils/debugLogger.js';
 import {
   DEFAULT_MAX_TOOL_CALLS_PER_TURN,
   LoopDetectionService,
@@ -40,6 +41,7 @@ const ALTERNATING_PATTERN_CYCLES = 3;
 describe('LoopDetectionService', () => {
   let service: LoopDetectionService;
   let mockConfig: Config;
+  let mockDebugLogger: DebugLogger;
 
   // getMaxToolCallsPerTurn mimics the real Config getter, which always
   // returns an effective cap (default applied, <= 0 resolved to Infinity).
@@ -53,9 +55,17 @@ describe('LoopDetectionService', () => {
       getTelemetryEnabled: () => true,
       getMaxToolCallsPerTurn: () => cap,
       isMaxToolCallsPerTurnExplicit: () => explicit,
+      getDebugLogger: () => mockDebugLogger,
     }) as unknown as Config;
 
   beforeEach(() => {
+    mockDebugLogger = {
+      isEnabled: () => true,
+      debug: vi.fn(),
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    };
     mockConfig = makeConfig();
     service = new LoopDetectionService(mockConfig);
     vi.clearAllMocks();
@@ -1793,6 +1803,56 @@ describe('LoopDetectionService', () => {
 
     it('never fires on a long varied stream across many trims', () => {
       expect(fireOffset(variedText(30000, 13))).toBe(-1);
+    });
+  });
+
+  describe('Chanting halt debug-log excerpt', () => {
+    // A reasoning-channel halt exits headless runs with empty stdout and a
+    // label-only stderr; the excerpt debug log is the artifact that tells a
+    // true repetition from a misfire. Kept out of the LoopDetected event
+    // payload on purpose (the event contract stays loop_type + prompt_id).
+    const DELTA = 17;
+
+    const unit =
+      'The issue might be that the API call is not being made properly ' +
+      'when the switch is toggled. Let me make sure the fetchPublicRecipes ' +
+      'function is called correctly with the right parameters. The issue ' +
+      'might be that the API call is not being made with the correct ' +
+      'parameters when the switch is toggled.';
+
+    const streamAsThoughts = (text: string): boolean => {
+      let detected = false;
+      for (let i = 0; i < text.length && !detected; i += DELTA) {
+        detected = service.addAndCheck(
+          createThoughtEvent('', text.slice(i, i + DELTA)),
+        );
+      }
+      return detected;
+    };
+
+    it('logs a short excerpt of one period of the repeated region', () => {
+      service.reset('');
+      expect(streamAsThoughts(unit.repeat(40))).toBe(true);
+
+      const debug = vi.mocked(mockDebugLogger.debug);
+      expect(debug).toHaveBeenCalledTimes(1);
+      const message = String(debug.mock.calls[0]?.[0]);
+      expect(message).toContain(LoopType.CHANTING_IDENTICAL_SENTENCES);
+      const match = /excerpt \((\d+) chars\): (.*)$/.exec(message);
+      expect(match).not.toBeNull();
+      const excerpt = JSON.parse(String(match?.[2])) as string;
+      expect(excerpt.length).toBeGreaterThan(0);
+      expect(excerpt.length).toBeLessThanOrEqual(80);
+      expect(Number(match?.[1])).toBe(excerpt.length);
+      // The excerpt is one period of the chant: it must reappear verbatim
+      // in the repeated unit (allowing a wrap across the unit boundary).
+      expect((unit + unit).includes(excerpt)).toBe(true);
+    });
+
+    it('does not log an excerpt when nothing fires', () => {
+      service.reset('');
+      expect(streamAsThoughts(unit.slice(0, 500))).toBe(false);
+      expect(vi.mocked(mockDebugLogger.debug)).not.toHaveBeenCalled();
     });
   });
 

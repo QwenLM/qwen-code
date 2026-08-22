@@ -35,6 +35,9 @@ export { getToolCallRepeatKey };
 const TOOL_CALL_LOOP_THRESHOLD = 5;
 const CONTENT_LOOP_THRESHOLD = 10;
 const CONTENT_CHUNK_SIZE = 50;
+// Cap for the debug-log excerpt of a fired chanting region (~one period,
+// see captureChantExcerpt).
+const CHANT_EXCERPT_MAX_LENGTH = 80;
 // Kept large enough that the long-period rule below can still see
 // PERIODIC_OCCURRENCES_REQUIRED occurrences of a long (~700 char) repeated
 // unit after truncation. The window also bounds the detectable unit length:
@@ -249,6 +252,14 @@ export class LoopDetectionService {
   // LoopDetected event so callers (non-interactive CLI, telemetry) can tell
   // the user which detector actually fired.
   private lastLoopType: LoopType | null = null;
+
+  // Short excerpt of the repeated region captured when the chanting
+  // detector fires, for debug logging only. Deliberately NOT part of the
+  // LoopDetected event payload: the event contract stays loop_type-only and
+  // the excerpt rides the debug log instead, so a headless reasoning-channel
+  // halt (empty stdout, label-only stderr) leaves an artifact that tells a
+  // true repetition from a misfire.
+  private lastChantExcerpt = '';
 
   constructor(config: Config) {
     this.config = config;
@@ -781,6 +792,20 @@ export class LoopDetectionService {
             this.promptId,
           ),
         );
+        // The LoopDetected event carries only loop_type + prompt_id, and a
+        // reasoning-channel halt prints nothing to stdout — without an
+        // artifact there is no way to tell a true repetition from a
+        // detector misfire. Log one period of the matched region instead of
+        // widening the event contract.
+        if (this.lastChantExcerpt) {
+          this.config
+            .getDebugLogger()
+            .debug(
+              `Loop detection halted on ${LoopType.CHANTING_IDENTICAL_SENTENCES}; ` +
+                `repeated region excerpt (${this.lastChantExcerpt.length} chars): ` +
+                JSON.stringify(this.lastChantExcerpt),
+            );
+        }
         return true;
       }
 
@@ -842,9 +867,30 @@ export class LoopDetectionService {
 
     existingIndices.push(this.lastContentIndex);
 
-    return (
+    if (
       this.isClusteredChunkRepetition(existingIndices) ||
       this.isPeriodicChunkRepetition(existingIndices)
+    ) {
+      this.lastChantExcerpt = this.captureChantExcerpt(existingIndices);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * One period of the matched repetition for debug logging: the span
+   * between the last two occurrences (exactly one stride for a verified
+   * periodic run), capped so the log line stays short.
+   */
+  private captureChantExcerpt(occurrences: number[]): string {
+    const start = occurrences[occurrences.length - 2];
+    const stride = occurrences[occurrences.length - 1] - start;
+    if (stride <= 0) {
+      return '';
+    }
+    return this.streamContentHistory.slice(
+      start,
+      start + Math.min(stride, CHANT_EXCERPT_MAX_LENGTH),
     );
   }
 
@@ -1263,6 +1309,7 @@ export class LoopDetectionService {
     this.resetToolCallCount();
     this.resetContentTracking();
     this.loopDetected = false;
+    this.lastChantExcerpt = '';
 
     // Reset new tracking variables
     this.thoughtHistory = [];
