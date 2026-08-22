@@ -581,7 +581,14 @@ describe('extension tests', () => {
       });
       // Releases stay preferred over the archive fallback on older Git.
       expect(mockDownloadFromGitHubRelease).toHaveBeenCalled();
-      expect(mockDownloadPublicGitHubArchiveFallback).toHaveBeenCalled();
+      expect(mockDownloadPublicGitHubArchiveFallback).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'git',
+          source: 'https://github.com/obra/superpowers',
+        }),
+        expect.any(String),
+        undefined,
+      );
       expect(mockGit.clone).not.toHaveBeenCalled();
     });
 
@@ -3382,7 +3389,16 @@ describe('extension tests', () => {
         type: 'git',
         gitCommit: '89abcdef0123456789abcdef0123456789abcdef',
       });
-      expect(mockDownloadPublicGitHubArchiveFallback).toHaveBeenCalled();
+      // The manager mutates installMetadata in place (gitCommit gets the new
+      // SHA after the call), so pin only the immutable identity fields.
+      expect(mockDownloadPublicGitHubArchiveFallback).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'git',
+          source: 'https://github.com/owner/repo',
+        }),
+        expect.any(String),
+        undefined,
+      );
       expect(mockGit.clone).not.toHaveBeenCalled();
     });
 
