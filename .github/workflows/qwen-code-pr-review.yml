@@ -1872,9 +1872,10 @@ jobs:
           # A path outside the workspace or resolving through symlinks is
           # refused rather than repaired: the sudo leg escalates to root,
           # and a planted link would aim a chown/chmod -R outside the
-          # workspace. Warning echoes strip newlines from the path first:
-          # leftover names are untrusted glob entries, and a fresh line on
-          # the runner's stdout would parse as a workflow command.
+          # workspace. Warning echoes strip CR and LF from every path
+          # expansion first: leftover names are untrusted glob entries, and a
+          # fresh line on the runner's stdout — which it splits on bare CR as
+          # well as LF — would parse as a workflow command.
           remove_review_tree() {
             local abs="$1"
             case "$abs" in
@@ -1908,19 +1909,20 @@ jobs:
               reason='resolves through symlinks'
             fi
             if [ -n "$reason" ]; then
-              echo "::warning::refusing to repair review worktree path (${reason}): ${abs//$'\n'/ }"
+              echo "::warning::refusing to repair review worktree path (${reason}): ${abs//[$'\r\n']/ }"
               return 0
             fi
             chmod -R u+rwX "$abs" 2>/dev/null || true
             rm -rf "$abs" 2>/dev/null && return 0
-            local sudo_probe='absent'
+            local sudo_probe='password-gated'
+            command -v sudo >/dev/null 2>&1 || sudo_probe='absent'
             if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
               sudo_probe='ok'
               sudo -n chown -R "$(id -u):$(id -g)" "$abs" 2>/dev/null || true
               sudo -n chmod -R u+rwX "$abs" 2>/dev/null || true
             fi
             rm -rf "$abs" 2>/dev/null && return 0
-            echo "::warning::could not remove review worktree: ${abs//$'\n'/ } (permission repair failed; sudo: $sudo_probe; owner: $(ls -ld "$abs" 2>/dev/null | awk '{print $3}'))"
+            echo "::warning::could not remove review worktree: ${abs//[$'\r\n']/ } (permission repair failed; sudo: $sudo_probe; owner: $(ls -ld "$abs" 2>/dev/null | awk 'NR==1 {print $3}'))"
             # return 0 even when the warning echo fails: the heal chain must
             # never fail the job.
             return 0
