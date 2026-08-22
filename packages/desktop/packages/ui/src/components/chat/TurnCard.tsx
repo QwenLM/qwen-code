@@ -39,6 +39,7 @@ import { Tooltip, TooltipTrigger, TooltipContent } from '../tooltip'
 import { parseDiffFromFile, type FileContents } from '@pierre/diffs'
 import { getDiffStats, getUnifiedDiffStats } from '../code-viewer'
 import { TurnCardActionsMenu } from './TurnCardActionsMenu'
+import { copyResponseText } from './copy-response'
 import { computeLastChildSet, groupActivitiesByParent, isActivityGroup, formatDuration, formatTokens, deriveTurnPhase, shouldShowThinkingIndicator, type ActivityGroup, type AssistantTurn } from './turn-utils'
 import {
   buildTurnTimelineItems,
@@ -1815,7 +1816,7 @@ export function ResponseCard({
   const [displayedText, setDisplayedText] = useState(text)
   const lastUpdateRef = useRef(Date.now())
   // Copy to clipboard state
-  const [copied, setCopied] = useState(false)
+  const [copyStatus, setCopyStatus] = useState<'idle' | 'copied' | 'failed'>('idle')
   // Fullscreen state
   const [isFullscreen, setIsFullscreen] = useState(false)
   // Dark mode detection - scroll fade only shown in dark mode
@@ -1910,12 +1911,14 @@ export function ResponseCard({
   })
 
   const handleCopy = useCallback(async () => {
-    try {
-      await navigator.clipboard.writeText(text)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    } catch (err) {
-      console.error('Failed to copy:', err)
+    const result = await copyResponseText(
+      text,
+      (value) => navigator.clipboard.writeText(value),
+    )
+    setCopyStatus(result.status)
+    setTimeout(() => setCopyStatus('idle'), 2000)
+    if (result.status === 'failed') {
+      console.error('Failed to copy response:', result.error)
     }
   }, [text])
 
@@ -2650,14 +2653,19 @@ export function ResponseCard({
                     onClick={handleCopy}
                     className={cn(
                       "turn-action-btn flex items-center gap-1.5 transition-colors select-none",
-                      copied ? "text-success" : "text-muted-foreground hover:text-foreground",
+                      copyStatus === 'copied' ? "text-success" : copyStatus === 'failed' ? "text-destructive" : "text-muted-foreground hover:text-foreground",
                       "focus:outline-none focus-visible:underline",
                     )}
                   >
-                    {copied ? (
+                    {copyStatus === 'copied' ? (
                       <>
                         <Check className={SIZE_CONFIG.iconSize} />
                         <span>{t('common.copied')}</span>
+                      </>
+                    ) : copyStatus === 'failed' ? (
+                      <>
+                        <XCircle className={SIZE_CONFIG.iconSize} />
+                        <span>{t('toast.copyFailed')}</span>
                       </>
                     ) : (
                       <>
@@ -2712,13 +2720,15 @@ export function ResponseCard({
           {!compactMode && !isPlan && showResponseActions && (
             <div className="flex h-5 items-center justify-start gap-1.5 pl-[22px] pr-0.5 text-[11px] font-medium text-muted-foreground/70 opacity-0 pointer-events-none transition-opacity duration-150 select-none group-hover/response:pointer-events-auto group-hover/response:opacity-100 focus-within:pointer-events-auto focus-within:opacity-100">
               <ResponseActionButton
-                label={copied ? t('common.copied') : t('common.copy')}
+                label={copyStatus === 'copied' ? t('common.copied') : copyStatus === 'failed' ? t('toast.copyFailed') : t('common.copy')}
                 onClick={() => {
                   void handleCopy()
                 }}
               >
-                {copied ? (
+                {copyStatus === 'copied' ? (
                   <Check className="size-3.5 text-success" />
+                ) : copyStatus === 'failed' ? (
+                  <XCircle className="size-3.5 text-destructive" />
                 ) : (
                   <Copy className="size-3.5" />
                 )}

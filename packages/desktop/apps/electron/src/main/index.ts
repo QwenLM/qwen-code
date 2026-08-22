@@ -116,6 +116,7 @@ import { initNotificationService, initBadgeIcon, initInstanceBadge, updateBadgeC
 import { checkForUpdatesOnLaunch, setAutoUpdateEventSink, isUpdating } from './auto-update'
 import type { EventSink } from '@craft-agent/server-core/transport'
 import { validateGitBashPath, checkVCRedistInstalled } from '@craft-agent/server-core/services'
+import { canUseDefaultSessionClipboard } from './default-session-permissions'
 
 // Initialize electron-log for renderer process support
 log.initialize()
@@ -457,8 +458,25 @@ app.whenReady().then(async () => {
     isAudioOnlyMediaRequest(permission, details) &&
     windowManager?.getWorkspaceForWindow(wc.id) != null,
   )
+  const canWriteClipboard = (
+    wc: { id: number } | null | undefined,
+    permission: string,
+    details: { isMainFrame?: boolean; requestingUrl?: string } | undefined,
+  ) => canUseDefaultSessionClipboard({
+    permission,
+    isMainFrame: details?.isMainFrame === true,
+    isWorkspaceWindow: Boolean(
+      wc && windowManager?.getWorkspaceForWindow(wc.id) != null,
+    ),
+    requestingUrl: details?.requestingUrl,
+    devServerUrl: process.env.VITE_DEV_SERVER_URL,
+  })
   session.defaultSession.setPermissionRequestHandler(
     (wc, permission, callback, details) => {
+      if (canWriteClipboard(wc, permission, details)) {
+        callback(true)
+        return
+      }
       if (!VOICE_PERMISSIONS.has(permission)) {
         mainLog.debug(`defaultSession: denied non-voice permission '${permission}'`)
         callback(false)
@@ -472,6 +490,9 @@ app.whenReady().then(async () => {
     },
   )
   session.defaultSession.setPermissionCheckHandler((wc, permission, _origin, details) => {
+    if (canWriteClipboard(wc, permission, details)) {
+      return true
+    }
     if (!VOICE_PERMISSIONS.has(permission)) {
       mainLog.debug(`defaultSession: denied non-voice permission check '${permission}'`)
       return false
