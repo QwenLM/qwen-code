@@ -143,6 +143,44 @@ describe('hashWorktreeFiles — the attributes probe is byte-faithful', () => {
     expect(off['data.bin']).toContain('a,b.binary=false');
     expect(off['data.bin']).not.toBe(on['data.bin']);
   });
+
+  it('folds a driver literally named `set` — an attribute-state spelling that is also a legal driver name', () => {
+    // `data.bin diff=set` is a legal gitattributes line naming a DRIVER `set`,
+    // and `check-attr` answers it byte-identically to the `set` attribute
+    // state. The driver collection used to exclude the attribute-state
+    // spellings, so `git diff` honoured `diff.set.binary` — flipping the
+    // section between readable hunks and "Binary files differ" — while the
+    // identity stood still across the flip it exists to track: the next
+    // round's gate compared equal and sliced the file out of scope, carrying
+    // the previous verdict forward against a different rendering.
+    // `.gitattributes` is worktree content of the reviewed PR, so the driver
+    // name is plantable; `unset` and `unspecified` are plantable the same way.
+    writeFileSync(join(repo, 'data.bin'), 'x\n');
+    writeFileSync(join(repo, '.gitattributes'), 'data.bin diff=set\n');
+    git('config', 'diff.set.binary', 'true');
+
+    const on = hashWorktreeFiles(repo, ['data.bin']);
+    expect(on['data.bin']).toContain('diff=set');
+    expect(on['data.bin']).toContain('set.binary=true');
+
+    git('config', 'diff.set.binary', 'false');
+    const off = hashWorktreeFiles(repo, ['data.bin']);
+    expect(off['data.bin']).toContain('set.binary=false');
+    expect(off['data.bin']).not.toBe(on['data.bin']);
+  });
+
+  it('a plain `diff` attribute with no such driver configured folds nothing', () => {
+    // The sibling control for the `set`-named-driver case: a path whose
+    // `diff` attribute is merely SET (no driver) is answered `set` too, and
+    // with no `diff.set.binary` in the config the identity carries no fold —
+    // the over-approximation costs one config probe, not a phantom flag.
+    writeFileSync(join(repo, 'data.bin'), 'x\n');
+    writeFileSync(join(repo, '.gitattributes'), 'data.bin diff\n');
+
+    const out = hashWorktreeFiles(repo, ['data.bin']);
+    expect(out['data.bin']).toContain('diff=set');
+    expect(out['data.bin']).not.toContain('set.binary=');
+  });
 });
 describe('hashWorktreeFiles — a decoded path is not a name', () => {
   it('refuses to hash a path carrying U+FFFD', () => {

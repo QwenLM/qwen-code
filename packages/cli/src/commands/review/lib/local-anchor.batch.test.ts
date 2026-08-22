@@ -64,6 +64,11 @@ afterEach(() => {
 /** A git stub answering each batch with one fake oid per pathspec. */
 function answerBatches(): void {
   gitOpt.mockImplementation((...args: string[]) => {
+    // Faithful to real git: no `diff.<driver>.binary` is configured here, so
+    // the config probes the driver fold runs answer null (the fixture paths
+    // all answer `diff=unspecified`, which is a legal driver NAME too, and is
+    // probed like any other candidate).
+    if (args.includes('config')) return null;
     const files = args.slice(args.indexOf('--') + 1);
     return files.map((f) => `oid-${f}`).join('\n');
   });
@@ -76,15 +81,16 @@ describe('hashWorktreeFiles — batching', () => {
     expect(Object.keys(out)).toHaveLength(201);
     for (const p of paths)
       expect(out[p]).toBe(`100644:oid-${p}:diff=unspecified`);
-    const batchSizes = gitOpt.mock.calls.map(
-      (c) => c.slice(c.indexOf('--') + 1).length,
-    );
+    const batchSizes = gitOpt.mock.calls
+      .filter((c) => !c.includes('config')) // the driver probes are not ls calls
+      .map((c) => c.slice(c.indexOf('--') + 1).length);
     expect(batchSizes).toEqual([200, 1]);
   });
 
   it('a failed batch falls back to per-file hashing — one bad file costs itself', () => {
     let batchCalls = 0;
     gitOpt.mockImplementation((...args: string[]) => {
+      if (args.includes('config')) return null; // no driver configured
       const files = args.slice(args.indexOf('--') + 1);
       if (files.length > 1) {
         batchCalls++;
@@ -100,6 +106,7 @@ describe('hashWorktreeFiles — batching', () => {
 
   it('a mismatched batch reply (wrong line count) also takes the fallback', () => {
     gitOpt.mockImplementation((...args: string[]) => {
+      if (args.includes('config')) return null; // no driver configured
       const files = args.slice(args.indexOf('--') + 1);
       if (files.length > 1) return 'just-one-line';
       return `oid-${files[0]}`;

@@ -670,6 +670,47 @@ describe('bundled review skill', () => {
     expect(body).not.toContain('--json closingIssuesReferences');
   });
 
+  it('pins the local stop bullet for the tree-moved capture shape', () => {
+    // The stop bullets are the orchestrator's branch table for the shapes a
+    // local capture can produce, and the shapes WITHOUT a field are the ones
+    // a revert is most likely to drop. The tree-moved shape — `chunks: []`,
+    // empty `skippedFiles`, no `nothingToReview` — has no machine-readable
+    // signal by construction (a moved tree is not decided, so the capture
+    // withholds the field); without this bullet the round falls through the
+    // unchanged no-diff rule and reports nothing-to-review, which is exactly
+    // what the capture's own warning sentence forbids.
+    const body = skillBody();
+    expect(body).toContain('the tree MOVED while the capture was hashing it');
+    expect(body).toContain('re-run `capture-local` once');
+    expect(body).toContain(
+      'WARNING: 0 chunks, but the working tree changed while the capture was being hashed',
+    );
+  });
+
+  it('names file-review reports from the capture-derived target token', () => {
+    // Step 8's report name and `qwen review run`'s report pin are one
+    // contract; the pre-PR `<filename>` convention agreed with the pin only
+    // at the repo root, so every file review of a nested path lost its
+    // Report: line — silently, since the verdict itself is unaffected.
+    const body = skillBody();
+    expect(body).toContain('<YYYY-MM-DD>-<HHMMSS>-<target>.md');
+    expect(body).not.toContain('<YYYY-MM-DD>-<HHMMSS>-<filename>.md');
+  });
+
+  it('keeps the file-review plan --out fill-in bounded', () => {
+    // The plan's `--out` is the one artifact name the caller chooses, and
+    // the skill used to recommend filling it with the reviewed path's
+    // separators replaced — a deep target then passes the filesystem's
+    // 255-byte filename limit and the plan write dies with ENAMETOOLONG
+    // before the capture runs. The recommendation must stay bounded.
+    const body = skillBody();
+    expect(body).toContain('basename plus a short disambiguator');
+    expect(body).toContain('ENAMETOOLONG');
+    expect(body).not.toContain(
+      'the reviewed path with its separators replaced',
+    );
+  });
+
   it('keeps the Step 6 comment-body tail-fetch and the Posted: fallback grounded', () => {
     // Revert guard: the tail-fetch must stay `--out … to the command the note
     // names` (a restored `--jq .body > file` redirect is rejected by yargs on

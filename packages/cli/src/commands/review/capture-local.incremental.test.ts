@@ -711,6 +711,45 @@ describe('capture-local — the cache key is the SOURCE path, not the token', ()
     expect(same.incremental).toBeDefined();
   });
 
+  it('derives the source even when an explicit --target rides along on --file', () => {
+    // The pre-fix `--target` describe documented this combination, and a
+    // caller following it left `sourcePath` undefined: the cache fell out of
+    // the digest namespace, the candidate recorded no `source`, and the
+    // gate's source clause degraded to `undefined === undefined` and passed —
+    // so the TOKEN-colliding pair below (which the target gate cannot tell
+    // apart) shared one cache, and the second file erased the first's anchor
+    // on promotion. The derivation wins now for EVERY `--file` capture: the
+    // parent (`qwen review run`) pins its artifact names to it anyway.
+    seedDirtyTree();
+    write('src/a.ts', 'export const a = 1;\n');
+    write('src_a.ts', 'export const collide = 1;\n');
+
+    const first = capture({ file: 'src/a.ts', target: 't', model: 'model-a' });
+    expect(first['target']).toBe('src_a.ts');
+    const candidate = JSON.parse(
+      readFileSync(first.cacheCandidatePath, 'utf8'),
+    ) as Record<string, unknown>;
+    expect(candidate['source']).toBe('src/a.ts');
+    const cachePath = join(repo, first['cachePath'] as string);
+    expect(cachePath).toContain('file-src_a.ts-');
+    mkdirSync(join(repo, '.qwen/review-cache'), { recursive: true });
+    writeFileSync(cachePath, JSON.stringify(candidate));
+
+    // The token-colliding OTHER file under the same explicit token must not
+    // inherit it: the derived tokens agree, so the source gate is the only
+    // layer that can tell the two subjects apart.
+    write('src_a.ts', 'export const collide = 2;\n');
+    stderrLines.length = 0;
+    const second = capture({
+      file: 'src_a.ts',
+      target: 't',
+      cache: cachePath,
+      model: 'model-a',
+    });
+    expect(second.incremental).toBeUndefined();
+    expect(stderrLines.join('\n')).toContain('belongs to source path');
+  });
+
   it('a hostile source path reaches stderr escaped, never raw', () => {
     // Mirrors the hostile-lastModelId pin: the refusal interpolates the
     // cache's recorded source through `display()`, so a crafted value cannot

@@ -313,11 +313,17 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   // named `srclink_foo.ts`, so the poll never matched and a review that had
   // already run — and with --comment, already posted — reported no verdict.
   //
-  // One deriver, in code. A caller that passes an explicit `--target` still
-  // wins: the plain local review names `local`, and the cache-target gate
-  // below compares whatever was used.
+  // One deriver, in code, and it runs for EVERY `--file` capture — including
+  // one an explicit `--target` rides along on. That combination used to skip
+  // the derivation: `sourcePath` stayed undefined, so the cache fell out of
+  // the digest namespace, the candidate recorded no `source`, and the gate's
+  // source clause degraded to `undefined === undefined` and passed —
+  // re-creating the cross-subject cache sharing both exist to close, while
+  // the explicit token named artifacts the parent's derived poll never
+  // matches anyway. An explicit `--target` names plain (non-file) rounds
+  // only; the cache-target gate below compares whatever was used.
   const sourcePath =
-    file !== undefined && (args.target === undefined || args.target === 'local')
+    file !== undefined
       ? repoRelativeOf(gitOpt('rev-parse', '--show-toplevel') ?? '.', file).rel
       : undefined;
   const target =
@@ -863,7 +869,7 @@ export const captureLocalCommand: CommandModule = {
         type: 'string',
         default: 'local',
         describe:
-          'Target suffix for the diff file name (`local`, or a filename for a file-path review)',
+          'Target suffix for the artifact names. Defaults to `local`; a `--file` review derives it from the file path and ignores this.',
       })
       .option('untracked', {
         type: 'boolean',

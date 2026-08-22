@@ -42,6 +42,12 @@ const SKILL_PATH = join(
 const TARGETS = {
   pr: { cls: { kind: 'pr', number: '9014' } as const, token: 'pr-9014' },
   file: { cls: { kind: 'file', base: 'foo.ts' } as const, token: 'foo.ts' },
+  // A nested target: the token is the flattened repo-relative path, and this
+  // is the shape where the pre-PR `<filename>` stem and the pin disagreed.
+  fileNested: {
+    cls: { kind: 'file', base: 'src_foo.ts' } as const,
+    token: 'src_foo.ts',
+  },
   local: { cls: { kind: 'local' } as const, token: 'local' },
 };
 
@@ -89,30 +95,34 @@ describe('run pins match the bundled skill templates', () => {
     // A miss here means Step 8 no longer lists those stems: update
     // reportPatternFor and this oracle together to the new template.
     expect(stems).toEqual(
-      expect.arrayContaining(['local', 'pr-<number>', '<filename>']),
+      expect.arrayContaining(['local', 'pr-<number>', '<target>']),
     );
 
-    const render = (stem: string): string =>
+    const render = (stem: string, token: string): string =>
       `2026-08-13-101010-${stem}.md`
         .replace('pr-<number>', 'pr-9014')
-        .replace('<filename>', 'foo.ts');
+        .replace('<target>', token);
 
-    expect(reportPatternFor(TARGETS.pr.cls).test(render('pr-<number>'))).toBe(
-      true,
-    );
-    expect(reportPatternFor(TARGETS.file.cls).test(render('<filename>'))).toBe(
-      true,
-    );
-    expect(reportPatternFor(TARGETS.local.cls).test(render('local'))).toBe(
+    expect(
+      reportPatternFor(TARGETS.pr.cls).test(render('pr-<number>', '')),
+    ).toBe(true);
+    // The file stem renders from the capture's token — for a root file and
+    // for a nested one alike, since the pin builds from the same derivation.
+    for (const { cls, token } of [TARGETS.file, TARGETS.fileNested]) {
+      expect(reportPatternFor(cls).test(render('<target>', token))).toBe(true);
+    }
+    expect(reportPatternFor(TARGETS.local.cls).test(render('local', ''))).toBe(
       true,
     );
     // And each class refuses the neighbouring classes' rendered stems — the
     // cross-capture this pinning exists to prevent.
-    expect(reportPatternFor(TARGETS.pr.cls).test(render('local'))).toBe(false);
+    expect(reportPatternFor(TARGETS.pr.cls).test(render('local', ''))).toBe(
+      false,
+    );
     expect(
-      reportPatternFor(TARGETS.local.cls).test(render('pr-<number>')),
+      reportPatternFor(TARGETS.local.cls).test(render('pr-<number>', '')),
     ).toBe(false);
-    expect(reportPatternFor(TARGETS.file.cls).test(render('local'))).toBe(
+    expect(reportPatternFor(TARGETS.file.cls).test(render('local', ''))).toBe(
       false,
     );
   });

@@ -292,7 +292,15 @@ function renderingAttributes(
   for (let i = 0; i + 2 < f.length; i += 3) {
     const [path, attr, value] = [f[i], f[i + 1], f[i + 2]];
     if (path === undefined || attr === undefined || value === undefined) break;
-    if (attr === 'diff' && !ATTR_STATES.has(value)) {
+    if (attr === 'diff' && value !== '') {
+      // EVERY answer is a driver candidate: `set`, `unset` and `unspecified`
+      // are legal driver NAMES too (`data.bin diff=set`), answered by
+      // `check-attr` byte-identically to the like-spelled attribute states.
+      // Excluding those spellings left such a driver's `diff.<name>.binary`
+      // out of the fold — `git diff` flips the section between readable
+      // hunks and "Binary files differ" while the identity stands still.
+      // The fold below still asks the CONFIG first, so a plain state answer
+      // with no driver so named costs one probe and folds nothing.
       drivers.add(value);
       diffDriverByPath[path] = value;
     }
@@ -325,9 +333,6 @@ function renderingAttributes(
   }
   return out;
 }
-
-/** `check-attr` answers for a set attribute, not a driver name. */
-const ATTR_STATES = new Set(['unspecified', 'set', 'unset']);
 
 /** One id for the whole state: order-independent, HEAD included. */
 export function stateIdOf(
