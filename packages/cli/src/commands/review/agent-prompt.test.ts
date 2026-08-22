@@ -1655,18 +1655,17 @@ describe('--roster — every prompt the plan requires, in one call', () => {
       expect([...recorded.values()]).toContain(printed);
       expect(printed).not.toContain('subagent_type');
 
+      // The single-block path emits the launch note on NO channel, and
+      // stderr is not a loophole: `ShellExecutionService` returns
+      // `stdout + separator + stderr` as one string, so a note there lands
+      // inside the very text the caller is told to paste verbatim — failing
+      // the same record equality as stdout, only where no test can see it.
       const onStderr = (writeStderrLineSafe as unknown as Mock).mock.calls
         .map((c) => String(c[0]))
         .join('\n');
-      expect(onStderr).toContain(
-        `\`subagent_type: "${REVIEW_BUILTIN_SUBAGENT_TYPE}"\``,
-      );
-      // The other half of the note. Dropping it would default every review
-      // agent to a background launch, whose findings never return inline —
-      // the review stalls in Step 4 with nothing to aggregate.
-      expect(onStderr).toContain('`run_in_background: false`');
+      expect(onStderr).not.toContain('subagent_type');
 
-      // …and the THIRD emission path: the reverse-audit round header. Its
+      // …and the SECOND emission path that CAN carry it: the reverse-audit round header. Its
       // agents are the most numerous a high-effort review launches, and no
       // test reached it — dropping the append there shipped green.
       (writeStdoutLine as unknown as Mock).mockClear();
@@ -1684,6 +1683,9 @@ describe('--roster — every prompt the plan requires, in one call', () => {
         `\`subagent_type: "${REVIEW_BUILTIN_SUBAGENT_TYPE}"\``,
       );
       expect(roundHeader).toContain('`run_in_background: false`');
+      // The header is safe because it sits OUTSIDE the ───── blocks the
+      // orchestrator pastes; only the blocks become agent prompts.
+      expect(roundHeader).toContain('─────');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

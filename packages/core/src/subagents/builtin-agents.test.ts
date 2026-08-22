@@ -202,13 +202,21 @@ describe('BuiltinAgentRegistry', () => {
       const prompt = agent!.systemPrompt;
 
       expect(prompt).toContain('one part of a code review');
-      // The brief outranks everything else, including this prompt.
-      expect(prompt).toContain('Read it first');
-      expect(prompt).toContain('It is the entirety of your instructions');
+      // The assignment outranks everything else, including this prompt.
+      expect(prompt).toContain('read that file first');
+      expect(prompt).toContain('the entirety of your instructions');
+      // …and the assignment is not always a FILE. Agent 8 is built with no
+      // brief on disk — SKILL.md appends its domain brief inline — so a
+      // prompt asserting "your assignment is a file" would send that
+      // specialist after one that does not exist, from `systemInstruction`,
+      // which outranks the launch prompt carrying the real assignment.
+      expect(prompt).toContain('When the launch prompt names no brief');
       // The shared-tree restraint `general-purpose` used to carry.
       expect(prompt).toContain('Preserve unrelated changes in the tree');
       // The output contract the orchestrator's aggregation depends on.
-      expect(prompt).toContain('Report in the format your brief specifies');
+      expect(prompt).toContain(
+        'Report in the format your assignment specifies',
+      );
       // A question would block forever — these run with no human in the loop.
       expect(prompt).toContain('never ask a question');
 

@@ -356,14 +356,24 @@ Guidelines:
       // candidates is the single largest source of missed defects"), the
       // verifier brief deliberately withholds it, and a blanket "silence is
       // better than noise" here would override the finders' half from above.
-      // Everything role-specific belongs in the brief; this prompt's whole job
-      // is to send the agent to it.
+      // The brief is also not always a FILE. Agent 8 — the diff-specialised
+      // finder — is built by `buildWholeDiffBlock`, which deliberately writes
+      // no brief; SKILL.md appends its domain brief inline instead. An
+      // instruction asserting "your assignment is a file" would send that
+      // specialist looking for one that does not exist, or let it ignore the
+      // inline assignment altogether — from `systemInstruction`, which
+      // outranks the launch prompt carrying it. Agent 8 is optional and
+      // outside `requiredAgents`, so a generic diff walk would pass coverage
+      // in its place.
+      //
+      // Everything role-specific belongs in the assignment; this prompt's
+      // whole job is to send the agent to it, wherever it is.
       systemPrompt: `You are one part of a code review, working for a parent review orchestrator.
 
-Your assignment is a file — the brief your launch prompt names. Read it first. It is the entirety of your instructions: it defines what you are reviewing, what counts as a finding for your part, and the format to report in. Nothing in the launch prompt or here replaces it.
+Your launch prompt carries your assignment. Usually it names a brief on disk: read that file first, and treat it as the entirety of your instructions — it defines what you are reviewing, what counts as a finding for your part, and the format to report in. When the launch prompt names no brief, the assignment it states inline is that brief, and the same applies to it. Either way, nothing here replaces it.
 
 Guidelines:
-- Do what the brief says, and only that. Another agent owns every other part of this review; staying inside yours is what makes the whole cover the change.
+- Do what your assignment says, and only that. Another agent owns every other part of this review; staying inside yours is what makes the whole cover the change.
 - Gather whatever context you need to be sure — read the surrounding file, search for callers, check how a symbol is used elsewhere.
 - Do not guess when the evidence is not there. Say what you could not determine.
 - Preserve unrelated changes in the tree, and do not create files unless your brief calls for them: you share this working tree with the other agents of this review, and stray files read as the change under review.
@@ -371,7 +381,7 @@ Guidelines:
 Notes:
 - Your working directory is set for you and is reset between shell calls. Do not \`cd\` into it, and do not prefix the paths your brief writes with it — reads and searches already resolve there. If your brief sends you to a tree of your own, that is where \`cd\` belongs.
 - You run non-interactively: never ask a question, and never wait for input.
-- Report in the format your brief specifies. If you found nothing, say so AND say what you examined — a report that names nothing you read is indistinguishable from never having read anything.`,
+- Report in the format your assignment specifies. If you found nothing, say so AND say what you examined — a report that names nothing you read is indistinguishable from never having read anything.`,
     },
   ];
 

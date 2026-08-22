@@ -3515,20 +3515,22 @@ function runAgentPrompt(args: AgentPromptArgs): void {
       ? foldFindings(args.role as RoleId, findingsContent, prompt, findingsFile)
       : prompt;
   recordPrompt(args.plan, key, printed);
-  // stdout is the prompt and NOTHING else on this path: the whole output IS
-  // the block the orchestrator pastes verbatim, and the delivery check
-  // compares that against the record. Appending the launch note here made
-  // every launch differ from its record — five tests caught it. The note is
-  // still owed, though: this is where a Step 4 verify shard and a Step 5
-  // chunk rebuild are built, and neither passes through the roster header
-  // that carries it. So it goes to stderr, the channel this command already
-  // uses for the operator-facing lines (BUDGET, ROUND CAP, the residue
-  // probe) that must not become part of a prompt.
+  // The whole output of this path IS the block the orchestrator pastes
+  // verbatim, and the delivery check compares that paste against the record.
+  // So the launch note gets NO channel here, and the second-best channel is
+  // not stderr: `ShellExecutionService` builds its result as
+  // `stdout + separator + stderr`, and `ShellToolInvocation` hands that
+  // combined string back, so a note on stderr arrives inside the very text
+  // the caller is told to copy. It fails the same equality as stdout would,
+  // only invisibly — the five tests that catch the stdout version see
+  // nothing. Removing it by hand is the edit the delivery gate forbids, so
+  // the launch would enter drift/relaunch repair.
+  //
+  // The rule still reaches these launches: SKILL.md states it for every
+  // `agent` call, and the two paths that CAN carry a note — the roster
+  // header and the audit-round header — do, because there the note sits
+  // outside the ───── blocks that get pasted.
   writeStdoutLine(printed);
-  // ...Safe, not the throwing variant: #9213 pins that a broken stderr must
-  // not refuse a build. An EPIPE here would turn an informational note into
-  // a failed agent launch.
-  writeStderrLineSafe(TYPE_NOTE.trim());
   // Admitted AND built — the single-build twin of the all-chunks stamp in
   // `runAllChunks`. A `--chunk <id>` build lands here too: the first chunk
   // build of an unadmitted round writes its admission stamp, and the
