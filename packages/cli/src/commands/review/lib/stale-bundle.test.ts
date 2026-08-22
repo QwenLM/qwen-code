@@ -586,12 +586,9 @@ describe('reviewSourceRoots', () => {
         ),
         kind: 'code',
       },
-      // The review helpers lifted out of `commands/review/`; the digest
-      // covered them there before the lift.
-      {
-        path: join('/w', 'packages', 'cli', 'src', 'utils', 'findings.ts'),
-        kind: 'code',
-      },
+      // The helpers of the findings validator live in `utils/`, outside the
+      // `review/` directory root; the validator itself lives back under
+      // `commands/review/` (#9146), which the directory root covers.
       {
         path: join('/w', 'packages', 'cli', 'src', 'utils', 'shell-args.ts'),
         kind: 'code',

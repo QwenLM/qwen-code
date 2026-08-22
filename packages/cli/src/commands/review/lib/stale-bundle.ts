@@ -361,14 +361,11 @@ export function reviewSourceRoots(repoRoot: string): ReviewSourceRoot[] {
       ),
       kind: 'code',
     },
-    // The findings validator and its two helpers were lifted out of
-    // `commands/review/` into `utils/`; the digest covered them there, and a
-    // root list that lost them would keep both digest copies equal while a
-    // skipped rebuild silently runs the bundle's old validator.
-    {
-      path: join(repoRoot, 'packages', 'cli', 'src', 'utils', 'findings.ts'),
-      kind: 'code',
-    },
+    // The two helpers of the findings validator live in `utils/`, outside
+    // the `review/` directory root; a root list that lost them would keep
+    // both digest copies equal while a skipped rebuild silently runs the
+    // bundle's old validator. The validator itself moved back into
+    // `commands/review/` (#9146), which the directory root covers.
     {
       path: join(repoRoot, 'packages', 'cli', 'src', 'utils', 'shell-args.ts'),
       kind: 'code',
