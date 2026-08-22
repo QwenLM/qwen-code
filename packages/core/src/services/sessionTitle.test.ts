@@ -215,6 +215,11 @@ describe('tryGenerateSessionTitle', () => {
       '[Add OAuth authentication flow]',
       '{Debug failing CI pipeline tests}',
       '（重构用户鉴权中间件）',
+      // Wrappers that survive sanitizeTitle with inner punctuation intact —
+      // the guard must not depend on an enumerated bracket family.
+      '["Fix login button on mobile"]',
+      '<Add OAuth authentication flow>',
+      '«Debug failing CI pipeline tests»',
     ];
     for (const title of wrapped) {
       const { config } = makeConfig({

@@ -239,17 +239,20 @@ export function sanitizeTitle(s: string): string {
  * that merely resembles an example still passes. Also catches the prompt's
  * "Bad (wrong case)" variant of the first example.
  *
- * Bracket wrappers are stripped for the comparison only: `sanitizeTitle`
+ * Wrapper characters are stripped for the comparison only: `sanitizeTitle`
  * keeps ASCII/full-width brackets because real titles use them (e.g.
  * "(WIP) Fix build"), but `(Fix login button on mobile)` is the same canned
- * echo as the bare example and must not slip past the guard.
+ * echo as the bare example and must not slip past the guard. The strip is
+ * Unicode-aware (any leading/trailing non-letter/non-digit run) so the next
+ * wrapper family — `["..."]`, `<...>`, `«...»` — cannot bypass it by
+ * falling outside an enumerated character class.
  */
 function isPromptExampleEcho(title: string): boolean {
   const normalized = title
     .trim()
     .toLowerCase()
-    .replace(/^[()[\]{}（）\s]+/, '')
-    .replace(/[()[\]{}（）\s]+$/, '');
+    .replace(/^[^\p{L}\p{N}]+/u, '')
+    .replace(/[^\p{L}\p{N}]+$/u, '');
   return TITLE_PROMPT_EXAMPLE_TITLES.some(
     (example) => example.toLowerCase() === normalized,
   );
