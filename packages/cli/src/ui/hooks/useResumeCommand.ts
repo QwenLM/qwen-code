@@ -191,7 +191,10 @@ export function useResumeCommand(
         //    it would leave UI on the resumed session but recorder writing
         //    into the old JSONL (split-brain).
         startNewSession(sessionId);
-        setSessionName?.(customTitle ?? null);
+        // Falsy, not nullish: an empty-string customTitle is the
+        // clear-tombstone (an explicitly cleared title) — resume must store
+        // null (no title), not an empty name (#8977).
+        setSessionName?.(customTitle || null);
         clearPendingState?.();
         clearItems();
         loadHistory(uiHistoryItems);

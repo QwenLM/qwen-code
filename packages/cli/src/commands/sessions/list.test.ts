@@ -113,13 +113,13 @@ describe('sessions list command', () => {
     expect(dataLine).toContain('你好');
   });
 
-  it('should not fall back to prompt when customTitle is empty string', async () => {
+  it('should fall back to prompt when customTitle is the empty-string clear-tombstone', async () => {
     mockListSessions.mockResolvedValue({
       items: [
         {
           ...sampleSession,
           customTitle: '',
-          prompt: '你好',
+          prompt: 'Fallback prompt',
         },
       ],
       hasMore: false,
@@ -127,7 +127,8 @@ describe('sessions list command', () => {
 
     await handleList({});
 
-    // customTitle '' is a valid value — should not fall back to prompt.
+    // customTitle '' is the clear-tombstone (an explicitly cleared title):
+    // the TITLE column must fall back to the prompt, not render blank (#8977).
     // TITLE column starts after SESSION_COL + 1 + TIME_COL + 1.
     const calls = mockWriteStdoutLine.mock.calls.map((c) => c[0]);
     const dataLine = calls.find(
@@ -136,7 +137,33 @@ describe('sessions list command', () => {
     expect(dataLine).toBeDefined();
     const titleStart = SESSION_COL + 1 + TIME_COL + 1;
     const titleCol = dataLine!.slice(titleStart, titleStart + TITLE_COL);
-    expect(titleCol.trim()).toBe('');
+    expect(titleCol.trim()).toBe('Fallback prompt');
+  });
+
+  it('should output customTitle as null in JSON for the empty-string clear-tombstone', async () => {
+    mockListSessions.mockResolvedValue({
+      items: [
+        {
+          ...sampleSession,
+          customTitle: '',
+          titleSource: 'manual',
+        },
+      ],
+      hasMore: false,
+    });
+
+    await handleList({ json: true });
+
+    const calls = mockWriteStdoutLine.mock.calls;
+    const jsonLines = calls.filter(
+      (c) => c[0] !== undefined && c[0].trim().startsWith('{'),
+    );
+    expect(jsonLines.length).toBe(1);
+
+    const parsed = JSON.parse(jsonLines[0][0]);
+    // The tombstone is reported as no title (null), not an empty string.
+    expect(parsed.customTitle).toBeNull();
+    expect(parsed.titleSource).toBe('manual');
   });
 
   it('should output JSON Lines format when --json is set', async () => {

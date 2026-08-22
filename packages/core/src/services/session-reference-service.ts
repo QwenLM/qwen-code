@@ -187,13 +187,21 @@ export class SessionReferenceService {
     // record) over the first user message, so a renamed session shows its
     // chosen name rather than the original prompt. Last-write-wins: each
     // rename appends a new record, so the last one is the current title.
+    // Track presence, not truthiness: an empty-string custom_title is the
+    // clear-tombstone, and as the last write it must win over an earlier
+    // rename — a truthiness gate would skip it and return the deleted name
+    // into the model context via a bare @<session-id> reference (#8977).
     let customTitle: string | undefined;
     for (const rec of records) {
       if (rec.type === 'system' && rec.subtype === 'custom_title') {
         const payload = rec.systemPayload as CustomTitlePayload | undefined;
-        if (payload?.customTitle) customTitle = payload.customTitle;
+        if (typeof payload?.customTitle === 'string') {
+          customTitle = payload.customTitle;
+        }
       }
     }
+    // A tombstone (empty string) is falsy, so it falls through to the
+    // first-prompt fallback instead of surfacing the cleared name.
     if (customTitle) return customTitle;
     for (const rec of records) {
       if (rec.type !== 'user') continue;
