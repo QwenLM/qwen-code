@@ -72,6 +72,7 @@ import {
 } from './lib/audit-layers.js';
 import { REVERSE_AUDIT_IDENTITY } from './lib/layer-audit-gate.js';
 import { isolateHostGitConfig } from './lib/test-utils.js';
+import { REVIEW_BUILTIN_SUBAGENT_TYPE } from '@qwen-code/qwen-code-core';
 import {
   readRecordedPrompts,
   briefPath,
@@ -1584,6 +1585,151 @@ describe('--roster — every prompt the plan requires, in one call', () => {
     }
   });
 
+  it('names the review-agent subagent type in EVERY review mode', () => {
+    // The type note used to live inside the worktree-only `paramNote`, so the
+    // three modes with no worktree — local diff, file path, cross-repo
+    // lightweight — were told nothing, and an omitted `subagent_type` resolves
+    // to `general-purpose`: the inherit-everything branch, and the whole cost
+    // this type removes. PLAN carries no `worktreePath`, which is the branch
+    // the old test never reached.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-roster-type-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, JSON.stringify(PLAN));
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        roster: true,
+      });
+
+      const printed = (writeStdoutLine as unknown as Mock).mock
+        .calls[0][0] as string;
+      expect(printed).toContain(
+        `\`subagent_type: "${REVIEW_BUILTIN_SUBAGENT_TYPE}"\``,
+      );
+      expect(printed).toContain('`run_in_background: false`');
+      // The directive form only. The note names `general-purpose` on purpose,
+      // as the default an omission resolves to — banning the word would ban
+      // the warning.
+      expect(printed).not.toContain('subagent_type: "general-purpose"');
+      // …and no worktree parameters leaked into a mode that has no worktree.
+      expect(printed).not.toContain('working_dir');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('states the launch type on the audit-round path, and on NO channel in a single block', () => {
+    // `runRoster` is not the only emission path. Step 4's verify shards and
+    // Step 5's audit rounds are built by the other two, and they are both the
+    // most numerous agents a high-effort review launches and the ones
+    // furthest from SKILL.md's own statement of the rule — an omitted
+    // `subagent_type` there resolves to `general-purpose` at full cost.
+    //
+    // The two paths differ in whether they CAN carry the note. The audit-round
+    // header can: it sits outside the ───── blocks, and only the blocks become
+    // agent prompts. The single-block path cannot: its whole stdout is the
+    // block the orchestrator pastes verbatim and the delivery check compares
+    // that against the record — and stderr is not a second channel either,
+    // because `ShellExecutionService` returns `stdout + separator + stderr` as
+    // one string, so a note there lands inside the same relayed text. This
+    // test pins both halves: the header carries it, the single block emits it
+    // nowhere.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-type-paths-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, JSON.stringify(PLAN));
+      const findings = join(dir, 'f.md');
+      writeFileSync(findings, '### Finding 1\n- **File:** a.ts\n');
+
+      // The enclosing beforeEach clears only writeStdoutLine, and earlier
+      // tests in file order walk this same single-block path — so a joined
+      // read of every accumulated stderr call would pass whether or not THIS
+      // invocation emitted anything. Clear it first.
+      (writeStderrLineSafe as unknown as Mock).mockClear();
+
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        role: 'verify',
+        findings,
+      });
+
+      const printed = (writeStdoutLine as unknown as Mock).mock
+        .calls[0][0] as string;
+      const recorded = readRecordedPrompts(plan);
+      // The invariant this note must not break: stdout IS the record.
+      expect([...recorded.values()]).toContain(printed);
+      expect(printed).not.toContain('subagent_type');
+
+      // The single-block path emits the launch note on NO channel, and
+      // stderr is not a loophole: `ShellExecutionService` returns
+      // `stdout + separator + stderr` as one string, so a note there lands
+      // inside the very text the caller is told to paste verbatim — failing
+      // the same record equality as stdout, only where no test can see it.
+      const onStderr = (writeStderrLineSafe as unknown as Mock).mock.calls
+        .map((c) => String(c[0]))
+        .join('\n');
+      expect(onStderr).not.toContain('subagent_type');
+
+      // …and the SECOND emission path that CAN carry it: the reverse-audit round header. Its
+      // agents are the most numerous a high-effort review launches, and no
+      // test reached it — dropping the append there shipped green.
+      (writeStdoutLine as unknown as Mock).mockClear();
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        role: 'reverse-audit',
+        'all-chunks': true,
+        allChunks: true,
+        findings,
+        round: 1,
+      });
+      const roundHeader = (writeStdoutLine as unknown as Mock).mock
+        .calls[0][0] as string;
+      expect(roundHeader).toContain(
+        `\`subagent_type: "${REVIEW_BUILTIN_SUBAGENT_TYPE}"\``,
+      );
+      expect(roundHeader).toContain('`run_in_background: false`');
+      // The header is safe because it sits OUTSIDE the ───── blocks the
+      // orchestrator pastes; only the blocks become agent prompts.
+      expect(roundHeader).toContain('─────');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('names the review-agent subagent type in the worktree parameter note', () => {
+    // The roster is the last text the orchestrator reads before constructing
+    // agent calls, so this note is where a worktree-mode run learns its
+    // `subagent_type`. It must not drift from the registry constant:
+    // `general-purpose` declares no `tools`, and a review launched under it
+    // re-declares 51 tool schemas on every turn of every agent — measured at
+    // ~1.08M extra prompt tokens across one roster. The failure is silent;
+    // the review still runs, just far dearer.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-roster-wt-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(
+        plan,
+        JSON.stringify({ ...PLAN, worktreePath: '.qwen/tmp/review-pr-1' }),
+      );
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        roster: true,
+      });
+
+      const printed = (writeStdoutLine as unknown as Mock).mock
+        .calls[0][0] as string;
+      expect(printed).toContain(
+        `\`subagent_type: "${REVIEW_BUILTIN_SUBAGENT_TYPE}"\``,
+      );
+      expect(printed).not.toContain('subagent_type: "general-purpose"');
+      // The worktree branch keeps its own parameters and nothing else.
+      expect(printed).toContain('working_dir');
+      expect(printed).not.toContain('isolation: "worktree"');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('drops the adversarial personas when the plan records medium effort', () => {
     // The wiring under test: the capturing command writes `effort` into the plan,
     // and the roster reads it from there — no `--effort` flag on THIS command.
@@ -2471,6 +2617,31 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(p).not.toMatch(/If you find no issues, say/i);
   });
 
+  it('welds the fix-witness format into the launched finder briefs', () => {
+    // The fix-witness mandate is pinned in SKILL.md by SKILL.test.ts, but
+    // this half is the one that actually reaches the agents: the
+    // FINDING_FORMAT embedded in every finder brief. Deleting the Fix
+    // witness line — or the exemption clause below it — shipped green once,
+    // because no test read a BUILT brief; launched finders would stop being
+    // asked for the criterion and Step 7's posting rule would go inert on
+    // every agent-built round. Pin both halves through the brief.
+    const brief = buildRoleBrief(PLAN, '1a');
+    expect(brief).toContain(
+      '**Fix witness:** <the test that must go RED if that fix is removed',
+    );
+    expect(brief).toContain('**This field never gates reporting**');
+    // The exemption TAIL, pinned beside the prefix. The prefix assertion
+    // above stops before it, so deleting or rewording `or "N/A" ...` shipped
+    // green — and the two copies of the finding format (SKILL.md, pinned by
+    // SKILL.test.ts, and this embedded one) could drift on exactly that
+    // clause. Finders would then read a brief that mandates Fix witness with
+    // no way out, and rounds would start demanding tests for fixes that add
+    // no guard at all — a rename, a comment, a docs line.
+    expect(brief).toContain(
+      'or "N/A" when the fix adds no guard, branch or behaviour a test can pin',
+    );
+  });
+
   it('injects generic repository context into reviewers and a narrow verification boundary into Agent 7', () => {
     const contextPlan = {
       ...PR_PLAN,
@@ -3154,6 +3325,55 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(p).toContain('scope empty');
     expect(p).toContain('motivating evidence');
     expect(p).toContain('fixes, closes, resolves, or implements');
+  });
+
+  it('pins the goal-mechanism lenses — the incident replay in Agent 0, the TIME axis in 1c', () => {
+    // Lens prose lives only in agent-briefs.ts: a deletion ships green unless
+    // the load-bearing clauses are pinned literally (the enumeration-trap
+    // precedent above; this file's own comments record deletions that shipped
+    // green). Both lenses exist because of a replay nobody ran (#9655) — a
+    // silently deleted lens is the same failure one level up.
+    const planPath = join(resolve('/x'), 'qwen-review-pr-6766-fetch.json');
+    const p0 = buildRoleBrief(PR_PLAN, '0', { planPath });
+    // The duty and its subject: the incident is replayed against the
+    // post-change workflow, not re-narrated.
+    expect(p0).toContain('replay it against the post-change workflow');
+    // The severity contract: an unchanged outcome is a Critical, witnessed
+    // by the replay itself — soften it to a Suggestion and the finding
+    // arrives at Step 7 non-blocking.
+    expect(p0).toContain('a **Critical** with the replay as its witness');
+    // The un-gating: closing-keyword formality does not void the duty.
+    expect(p0).toContain('does not empty the replay duty');
+    // The return routing: the no-step-changed outcome is a FINDING, never an
+    // empty-scope evidence item — a receipt contributes nothing to the
+    // verdict, so a Critical routed there dissolves (R2-1). The receipt
+    // carries only the benign outcomes, and a skipped replay must stay
+    // distinguishable from a performed one.
+    expect(p0).toContain('the Critical the replay bullet above mandates');
+    expect(p0).toContain('the step the replay saw change');
+    expect(p0).toContain(
+      'a skipped replay must never read identically to a performed one',
+    );
+    const p1c = buildRoleBrief(PR_PLAN, '1c');
+    expect(p1c).toContain('Reachability has a TIME axis too');
+    // The finding format is the whole trace; drop it and the lens degrades to
+    // a vibe about ordering.
+    expect(p1c).toContain('produced at X, needed at Y, Y precedes X');
+    // The severity condition — guidance treating the record as a mechanism is
+    // what lifts the finding to Critical; soften it and the lens files nits.
+    expect(p1c).toContain('treat the record as though it had steered the run');
+    // The definition clause and the two-moments method: without them the
+    // severity rule names a record/mechanism split nothing defines, and the
+    // agent is never told to establish the timeline the trace format states.
+    expect(p1c).toContain('a record, not a mechanism');
+    expect(p1c).toContain('name two moments');
+    // The verifier side of the same weld: a replay finding must not be
+    // downgraded for lacking issue evidence — without this clause the lens's
+    // product is terminal-only in the exact case it was written for. Both
+    // halves pinned: the exception's subject and its operative no-downgrade.
+    const pv = buildRoleBrief(PR_PLAN, 'verify');
+    expect(pv).toContain("replay finding grounds in the PR's own narrative");
+    expect(pv).toContain('do not downgrade it for lacking issue evidence');
   });
 
   it('welds --host into the Agent 0 command when the plan carries an Enterprise host', () => {

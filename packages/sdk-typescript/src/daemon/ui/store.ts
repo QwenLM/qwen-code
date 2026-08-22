@@ -5,9 +5,11 @@
  */
 
 import type {
-  DaemonTextDeltaMeta,
+  DaemonTranscriptBlock,
+  DaemonTranscriptBlockChangeSummary,
   DaemonTranscriptReducerOptions,
   DaemonTranscriptState,
+  DaemonTextDeltaMeta,
   DaemonTranscriptStore,
   DaemonUiEvent,
 } from './types.js';
@@ -30,6 +32,12 @@ export function createDaemonTranscriptStore(
     ? { onTruncation }
     : {};
   let state = createState(stateSeed);
+  const blockChangeSource = {};
+  let blockChangeSummary: DaemonTranscriptBlockChangeSummary = {
+    source: blockChangeSource,
+    revision: 0,
+    tailAppendBarrierRevision: 0,
+  };
   const listeners = new Set<() => void>();
   let notifyScheduled = false;
 
@@ -55,6 +63,9 @@ export function createDaemonTranscriptStore(
     getSnapshot() {
       return state;
     },
+    getBlockChangeSummary() {
+      return blockChangeSummary;
+    },
     subscribe(listener: () => void) {
       listeners.add(listener);
       return () => {
@@ -64,7 +75,14 @@ export function createDaemonTranscriptStore(
     dispatch(event: DaemonUiEvent | DaemonUiEvent[]) {
       const events = Array.isArray(event) ? event : [event];
       if (events.length === 0) return;
-      state = reduceDaemonTranscriptEvents(state, events, reducerOptions);
+      const previous = state;
+      state = reduceDaemonTranscriptEvents(previous, events, reducerOptions);
+      blockChangeSummary = nextBlockChangeSummary(
+        blockChangeSummary,
+        previous,
+        state,
+        events,
+      );
       scheduleNotify();
     },
     appendLocalUserMessage(
@@ -85,6 +103,7 @@ export function createDaemonTranscriptStore(
         files,
         ...reducerOptions,
       });
+      blockChangeSummary = invalidateTailAppend(blockChangeSummary);
       scheduleNotify();
     },
     reset(nextSeed: Partial<DaemonTranscriptState> = {}) {
@@ -95,6 +114,7 @@ export function createDaemonTranscriptStore(
           nextSeed.retainSubagentBlocks ?? state.retainSubagentBlocks,
         ...nextSeed,
       });
+      blockChangeSummary = invalidateTailAppend(blockChangeSummary);
       scheduleNotify();
     },
     // wenshao R4-R6 (qwen3.7-max): explicit recovery from the
@@ -133,6 +153,118 @@ export function createDaemonTranscriptStore(
       scheduleNotify();
     },
   };
+}
+
+function nextBlockChangeSummary(
+  current: DaemonTranscriptBlockChangeSummary,
+  previous: DaemonTranscriptState,
+  next: DaemonTranscriptState,
+  events: readonly DaemonUiEvent[],
+): DaemonTranscriptBlockChangeSummary {
+  if (previous.blocks === next.blocks) return current;
+  const revision = current.revision + 1;
+  const tailBlockId = streamingTailAppendBlockId(previous, next, events);
+  return tailBlockId
+    ? {
+        source: current.source,
+        revision,
+        tailAppendBarrierRevision: current.tailAppendBarrierRevision,
+        tailBlockId,
+      }
+    : {
+        source: current.source,
+        revision,
+        tailAppendBarrierRevision: revision,
+      };
+}
+
+function invalidateTailAppend(
+  current: DaemonTranscriptBlockChangeSummary,
+): DaemonTranscriptBlockChangeSummary {
+  const revision = current.revision + 1;
+  return {
+    source: current.source,
+    revision,
+    tailAppendBarrierRevision: revision,
+  };
+}
+
+function streamingTailAppendBlockId(
+  previous: DaemonTranscriptState,
+  next: DaemonTranscriptState,
+  events: readonly DaemonUiEvent[],
+): string | undefined {
+  const first = events[0];
+  if (
+    !first ||
+    (first.type !== 'assistant.text.delta' &&
+      first.type !== 'thought.text.delta') ||
+    first.parentToolCallId !== undefined ||
+    events.some(
+      (event) =>
+        event.type !== first.type ||
+        ('parentToolCallId' in event && event.parentToolCallId !== undefined),
+    ) ||
+    previous.blocks.length === 0 ||
+    previous.blocks.length !== next.blocks.length ||
+    previous.blockIndexById !== next.blockIndexById
+  ) {
+    return undefined;
+  }
+
+  const blockId =
+    first.type === 'assistant.text.delta'
+      ? previous.activeAssistantBlockId
+      : previous.activeThoughtBlockId;
+  const nextBlockId =
+    first.type === 'assistant.text.delta'
+      ? next.activeAssistantBlockId
+      : next.activeThoughtBlockId;
+  const before = previous.blocks[previous.blocks.length - 1];
+  const after = next.blocks[next.blocks.length - 1];
+  const appendedTextLength = events.reduce(
+    (length, event) =>
+      length +
+      (event.type === 'assistant.text.delta' ||
+      event.type === 'thought.text.delta'
+        ? event.text.length
+        : 0),
+    0,
+  );
+  if (
+    !blockId ||
+    nextBlockId !== blockId ||
+    before?.id !== blockId ||
+    after?.id !== blockId ||
+    before.kind !== after.kind ||
+    !isTextBlock(before) ||
+    !isTextBlock(after) ||
+    after.streaming !== true ||
+    before.parentToolCallId !== after.parentToolCallId ||
+    before.meta !== after.meta ||
+    before.usage !== after.usage ||
+    before.branchRecordId !== after.branchRecordId ||
+    before.clientReceivedAt !== after.clientReceivedAt ||
+    before.promptId !== after.promptId ||
+    before.sourceRecordIds !== after.sourceRecordIds ||
+    after.text.length !== before.text.length + appendedTextLength
+  ) {
+    return undefined;
+  }
+  return blockId;
+}
+
+function isTextBlock(
+  block: DaemonTranscriptBlock,
+): block is Extract<
+  DaemonTranscriptBlock,
+  { kind: 'assistant' | 'thought' | 'user' }
+> {
+  return (
+    block.kind === 'assistant' ||
+    block.kind === 'thought' ||
+    block.kind === 'user'
+  );
 }
 
 function reportListenerError(error: unknown): void {

@@ -9031,6 +9031,7 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
     serveWebShell?: boolean;
     token?: string;
     experimentalLsp?: boolean;
+    restoreAskUserQuestion?: boolean;
   }) {
     tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-ws-')));
     return runQwenServe(
@@ -9089,6 +9090,20 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
     await lspHandle.close();
     expect(mockCreateSpawnChannelFactoryOptions.at(-1)).toMatchObject({
       extraArgs: ['--experimental-lsp'],
+    });
+  });
+
+  it('merges --restore-ask-user-question with --experimental-lsp on ACP children', async () => {
+    mockCreateSpawnChannelFactoryOptions.length = 0;
+
+    const handle = await bootHandle({
+      serveWebShell: false,
+      experimentalLsp: true,
+      restoreAskUserQuestion: true,
+    });
+    await handle.close();
+    expect(mockCreateSpawnChannelFactoryOptions.at(-1)).toMatchObject({
+      extraArgs: ['--experimental-lsp', '--restore-ask-user-question'],
     });
   });
 
