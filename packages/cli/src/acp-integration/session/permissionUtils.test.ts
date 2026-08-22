@@ -218,6 +218,64 @@ describe('permissionUtils', () => {
     });
   });
 
+  it('renders the hook ask reason on edit, exec, and info permission requests', () => {
+    // A PreToolUse hook escalated these calls (#9434): off-TUI surfaces
+    // must carry the reason so the prompt is distinguishable from an
+    // ordinary permission request. The info class is the ask bounce's
+    // synthetic fallback for tools without a structured view (#9434
+    // review R5-2).
+    const editContent = buildPermissionRequestContent({
+      type: 'edit',
+      title: 'Confirm edit',
+      fileName: 'a.txt',
+      filePath: '/tmp/a.txt',
+      fileDiff: 'diff',
+      originalContent: 'a',
+      newContent: 'b',
+      hookAskReason: 'path requires human review',
+      onConfirm: async () => undefined,
+    });
+    expect(editContent).toContainEqual({
+      type: 'content',
+      content: {
+        type: 'text',
+        text: 'Hook requested confirmation: path requires human review',
+      },
+    });
+
+    const execContent = buildPermissionRequestContent({
+      type: 'exec',
+      title: 'Confirm shell',
+      command: 'git status',
+      rootCommand: 'git',
+      hookAskReason: 'path requires human review',
+      onConfirm: async () => undefined,
+    });
+    expect(execContent).toContainEqual({
+      type: 'content',
+      content: {
+        type: 'text',
+        text: 'Hook requested confirmation: path requires human review',
+      },
+    });
+
+    const infoContent = buildPermissionRequestContent({
+      type: 'info',
+      title: 'Hook requested confirmation to run web_fetch',
+      prompt: 'network egress requires human review',
+      renderPromptAsPlainText: true,
+      hookAskReason: 'network egress requires human review',
+      onConfirm: async () => undefined,
+    });
+    expect(infoContent).toContainEqual({
+      type: 'content',
+      content: {
+        type: 'text',
+        text: 'Hook requested confirmation: network egress requires human review',
+      },
+    });
+  });
+
   it('accepts only an option that was actually offered', () => {
     const options = toPermissionOptions({
       type: 'exec',

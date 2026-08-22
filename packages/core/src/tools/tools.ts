@@ -945,6 +945,13 @@ export type ToolCallConfirmationDetails = (
 ) & {
   /** Explains why an AUTO-mode call was routed to manual confirmation. */
   autoModeFallback?: AutoModeFallbackConfirmation;
+  /**
+   * The reason supplied by a PreToolUse hook whose 'ask' decision escalated
+   * this call into an interactive confirmation. Rendered alongside the
+   * tool's own confirmation body (e.g. the edit diff) so the user sees why
+   * the prompt appeared (#9434).
+   */
+  hookAskReason?: string;
 };
 
 export interface ToolPlanConfirmationDetails {

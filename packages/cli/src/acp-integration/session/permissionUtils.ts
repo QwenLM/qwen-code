@@ -126,6 +126,26 @@ export function buildPermissionRequestContent(
     });
   }
 
+  // A PreToolUse hook escalated this call (#9434): surface the hook's
+  // reason alongside the warnings so a hook-forced prompt is
+  // distinguishable from an ordinary one off-TUI. The info class is the
+  // ask bounce's synthetic fallback for tools without a structured view
+  // (#9434 review R5-2).
+  if (
+    (confirmation.type === 'exec' ||
+      confirmation.type === 'edit' ||
+      confirmation.type === 'info') &&
+    confirmation.hookAskReason
+  ) {
+    content.push({
+      type: 'content',
+      content: {
+        type: 'text',
+        text: `Hook requested confirmation: ${confirmation.hookAskReason}`,
+      },
+    });
+  }
+
   if (confirmation.type === 'edit') {
     content.push({
       type: 'diff',

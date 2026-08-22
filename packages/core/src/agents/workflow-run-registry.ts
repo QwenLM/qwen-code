@@ -1442,6 +1442,7 @@ function restrictWorkflowConfirmationDetails(
         hideModify: true,
         skipIdeDiff: true,
         warnings: details.warnings ? [...details.warnings] : undefined,
+        hookAskReason: details.hookAskReason,
       };
     case 'exec':
       return {
@@ -1451,6 +1452,7 @@ function restrictWorkflowConfirmationDetails(
         rootCommand: details.rootCommand,
         hideAlwaysAllow: true,
         warnings: details.warnings ? [...details.warnings] : undefined,
+        hookAskReason: details.hookAskReason,
       };
     case 'mcp':
       return {
@@ -1469,6 +1471,10 @@ function restrictWorkflowConfirmationDetails(
         renderPromptAsPlainText: details.renderPromptAsPlainText,
         urls: details.urls ? [...details.urls] : undefined,
         hideAlwaysAllow: true,
+        // The ask-bounce synthesizes an info view for every tool without
+        // a structured one; the hook reason must survive the restriction so
+        // bubbled approvals keep it in the leader UI (#9441 R8-1).
+        hookAskReason: details.hookAskReason,
       };
     case 'plan':
     case 'ask_user_question':
