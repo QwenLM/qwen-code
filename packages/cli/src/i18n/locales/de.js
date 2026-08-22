@@ -117,11 +117,10 @@ export default {
   'Search:': 'Suche:',
   'type to filter…': 'Tippen zum Filtern…',
   'No skills are currently available.': 'Derzeit sind keine Skills verfügbar.',
-  'All available skills are locked at a higher scope (see below).':
-    'Alle verfügbaren Skills sind in einer höheren Ebene gesperrt (siehe unten).',
   'No skills match the search.': 'Keine Skills passen zur Suche.',
   'Locked by higher-scope settings (cannot toggle here):':
     'Gesperrt durch Einstellungen einer höheren Ebene (kann hier nicht umgeschaltet werden):',
+  '(+{{count}} locked)': '(+{{count}} gesperrt)',
   'higher scope': 'höhere Ebene',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [gesperrt: {{scope}}]',

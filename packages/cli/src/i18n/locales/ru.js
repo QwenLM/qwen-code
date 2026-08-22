@@ -137,11 +137,10 @@ export default {
   'Search:': 'Поиск:',
   'type to filter…': 'введите для фильтрации…',
   'No skills are currently available.': 'Сейчас навыков нет.',
-  'All available skills are locked at a higher scope (see below).':
-    'Все доступные навыки заблокированы на более высоком уровне (см. ниже).',
   'No skills match the search.': 'Нет навыков, соответствующих поиску.',
   'Locked by higher-scope settings (cannot toggle here):':
     'Заблокированы настройками более высокого уровня (здесь переключить нельзя):',
+  '(+{{count}} locked)': '(+{{count}} заблокировано)',
   'higher scope': 'более высокий уровень',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [заблокировано: {{scope}}]',

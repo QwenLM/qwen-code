@@ -130,11 +130,10 @@ export default {
   'type to filter…': 'digite para filtrar…',
   'No skills are currently available.':
     'Nenhuma habilidade está disponível no momento.',
-  'All available skills are locked at a higher scope (see below).':
-    'Todas as habilidades disponíveis estão bloqueadas em um escopo superior (veja abaixo).',
   'No skills match the search.': 'Nenhuma habilidade corresponde à pesquisa.',
   'Locked by higher-scope settings (cannot toggle here):':
     'Bloqueado por configurações de escopo superior (não é possível alternar aqui):',
+  '(+{{count}} locked)': '(+{{count}} bloqueado(s))',
   'higher scope': 'escopo superior',
   '  {{name}} {{description}}  [locked: {{scope}}]':
     '  {{name}} {{description}}  [bloqueado: {{scope}}]',
