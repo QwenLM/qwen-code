@@ -8,22 +8,37 @@ import { useEffect, useRef, useState } from 'react';
 import type { SessionNotification } from '@agentclientprotocol/sdk';
 import {
   createDaemonTranscriptState,
+  reduceDaemonTranscriptEvents,
   selectTranscriptBlocks,
 } from '@qwen-code/sdk/daemon';
 import type { DaemonTranscriptState } from '@qwen-code/sdk/daemon';
-import { reduceSessionNotification } from '../adapters/acpTranscriptAdapter.js';
+import {
+  cachedMessageToNotification,
+  reduceSessionNotification,
+} from '../adapters/acpTranscriptAdapter.js';
+
+/** Map webview `streamEnd` reasons onto the reducer's done reasons. */
+function streamEndToDoneReason(reason: unknown): string {
+  if (reason === 'user_cancelled') {
+    return 'cancelled';
+  }
+  return typeof reason === 'string' && reason.length > 0 ? reason : 'end_turn';
+}
 
 /**
  * Reduce `transcriptUpdate` webview messages into a shared-SDK transcript
  * state and expose the rendered blocks.
  *
- * The transcript state resets on the session boundaries used by the rest of
- * the webview message flow (`qwenSessionSwitched` before an ACP replay, and
- * `conversationCleared` for a new session), so blocks from one session can
- * never leak into another session's replay.
+ * The transcript state resets on every session boundary used by the rest of
+ * the webview message flow (`qwenSessionSwitched` before an ACP replay,
+ * `conversationCleared` for a new session, and `conversationLoaded` on
+ * startup/reconnect), so blocks from one session can never leak into another
+ * session's replay. Frames arriving after a boundary are additionally
+ * dropped when their `sessionId` no longer matches the active session.
  */
 export function useAcpTranscript() {
   const stateRef = useRef<DaemonTranscriptState | null>(null);
+  const activeSessionIdRef = useRef<string | null>(null);
   const [blocks, setBlocks] = useState(() =>
     selectTranscriptBlocks(createDaemonTranscriptState()),
   );
@@ -31,22 +46,87 @@ export function useAcpTranscript() {
   useEffect(() => {
     const resetTranscript = () => {
       stateRef.current = null;
+      activeSessionIdRef.current = null;
       setBlocks(selectTranscriptBlocks(createDaemonTranscriptState()));
+    };
+
+    /** Finalize in-flight assistant/thought blocks at a turn boundary. */
+    const finishTurn = (reason: unknown) => {
+      if (stateRef.current === null) {
+        return;
+      }
+      stateRef.current = reduceDaemonTranscriptEvents(stateRef.current, [
+        { type: 'assistant.done', reason: streamEndToDoneReason(reason) },
+      ]);
+      setBlocks(selectTranscriptBlocks(stateRef.current));
     };
 
     const handleMessage = (event: MessageEvent) => {
       const message = event.data as {
         type?: string;
-        data?: SessionNotification;
+        data?: unknown;
       };
       if (
         message?.type === 'qwenSessionSwitched' ||
-        message?.type === 'conversationCleared'
+        message?.type === 'conversationCleared' ||
+        message?.type === 'conversationLoaded'
       ) {
         resetTranscript();
+        if (message.type === 'qwenSessionSwitched') {
+          const data = message.data as
+            | {
+                sessionId?: unknown;
+                messages?: Array<Record<string, unknown>>;
+              }
+            | undefined;
+          if (typeof data?.sessionId === 'string' && data.sessionId) {
+            activeSessionIdRef.current = data.sessionId;
+          }
+          // Offline restores and load-failure fallbacks deliver cached
+          // history here and never replay it through `transcriptUpdate`,
+          // so seed the transcript from the cached rows directly.
+          if (Array.isArray(data?.messages) && data.messages.length > 0) {
+            let state = createDaemonTranscriptState();
+            for (const cached of data.messages) {
+              const notification = cachedMessageToNotification(
+                cached,
+                activeSessionIdRef.current ?? '',
+              );
+              if (notification) {
+                state = reduceSessionNotification(state, notification);
+              }
+            }
+            stateRef.current = state;
+            setBlocks(selectTranscriptBlocks(state));
+          }
+        }
+        return;
+      }
+      if (message?.type === 'streamEnd') {
+        finishTurn((message.data as { reason?: unknown } | undefined)?.reason);
+        return;
+      }
+      if (message?.type === 'sessionLoadComplete') {
+        // History replays (and cached restores) have no turn-end frame of
+        // their own; finalize so the last block does not stay streaming.
+        finishTurn('end_turn');
         return;
       }
       if (message?.type !== 'transcriptUpdate' || !message.data) {
+        return;
+      }
+      const notification = message.data as SessionNotification;
+      // Drop late frames from a previous session that arrive after the
+      // boundary reset; adopt the session id on the first frame when the
+      // boundary did not carry one.
+      if (activeSessionIdRef.current === null) {
+        if (
+          typeof notification.sessionId === 'string' &&
+          notification.sessionId
+        ) {
+          activeSessionIdRef.current = notification.sessionId;
+        }
+      } else if (notification.sessionId !== activeSessionIdRef.current) {
         return;
       }
       if (stateRef.current === null) {
@@ -54,7 +134,7 @@ export function useAcpTranscript() {
       }
       stateRef.current = reduceSessionNotification(
         stateRef.current,
-        message.data,
+        notification,
       );
       setBlocks(selectTranscriptBlocks(stateRef.current));
     };
