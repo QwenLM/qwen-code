@@ -617,6 +617,9 @@ export const App: React.FC = () => {
         message?.type === 'conversationCleared'
       ) {
         setEditingMessage(null);
+        // The selector belongs to the previous conversation; a session
+        // switch/load/clear is an overlay-equivalent takeover.
+        setShowModelSelector(false);
         return;
       }
 
@@ -872,6 +875,16 @@ export const App: React.FC = () => {
     }, 30_000);
     return () => clearTimeout(timeout);
   }, [isAuthenticated]);
+
+  // Close the model selector when a modal overlay takes over: while open it
+  // consumes Enter/Escape/arrow keys via a capture-phase document listener,
+  // and since it paints below the overlays (z-0) those keystrokes must reach
+  // the visible overlay (PermissionDrawer / AskUserQuestionDialog) instead.
+  useEffect(() => {
+    if (permissionRequest || askUserQuestionRequest) {
+      setShowModelSelector(false);
+    }
+  }, [permissionRequest, askUserQuestionRequest]);
 
   // Handle permission response
   const handlePermissionResponse = useCallback(
