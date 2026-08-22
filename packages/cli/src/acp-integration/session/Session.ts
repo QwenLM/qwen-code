@@ -1816,6 +1816,14 @@ export class Session implements SessionContext {
   private rewindCheckpoint:
     | {
         promptIds: Array<string | null>;
+        /**
+         * User-turn identities the rewind LEFT BEHIND (the truncated
+         * prefix's user turns). Staleness fingerprint: the checkpoint's
+         * snapshot/recording rollback is only sound while the live history
+         * still matches it; any turn that lands afterwards appends user
+         * turns the checkpoint does not know about (see restoreHistory).
+         */
+        postRewindTurnPromptIds: Array<string | null>;
         recording?: ChatRecordingRewindCheckpoint;
         snapshots: FileHistorySnapshot[];
       }
@@ -3737,6 +3745,15 @@ export class Session implements SessionContext {
 
     this.rewindCheckpoint = {
       promptIds: this.captureHistoryPromptIds(apiHistory),
+      // The truncated prefix is what the rewind leaves behind; capture its
+      // user-turn identities as the staleness fingerprint restoreHistory
+      // checks before applying the store rollback. stripThoughtsFromHistory
+      // (below) can drop thought-only MODEL entries but never user entries,
+      // so the user-turn list is stable across it.
+      postRewindTurnPromptIds: apiHistory
+        .slice(0, target.apiTruncateIndex)
+        .filter((content) => this.#isUserTextContent(content))
+        .map((content) => getApiHistoryPromptId(content) ?? null),
       ...(recording ? { recording: recording.captureRewindCheckpoint() } : {}),
       snapshots: [...snapshots],
     };
@@ -4028,6 +4045,36 @@ export class Session implements SessionContext {
     }
 
     const checkpoint = this.rewindCheckpoint;
+    if (checkpoint) {
+      // Staleness fingerprint: the pair the client still holds matches the
+      // checkpoint's pre-rewind capture even after the session advances, so
+      // the pair check alone cannot detect an undo that arrives after a
+      // later turn landed. The checkpoint's snapshot/recording rollback is
+      // only sound while the live history still sits AT the post-rewind
+      // state; once any turn (ordinary, retry, continuation, or automatic)
+      // appends user turns, applying the rollback would truncate the
+      // conversation, snapshot store and recording across the intervening
+      // turn while workspace files keep its edits — silent
+      // conversation/files divergence with success:true. Fail closed
+      // instead. The guard covers the no-promptIds arm too: the checkpoint
+      // rollback runs there as well.
+      const liveTurnPromptIds = this.captureHistorySnapshot()
+        .filter((content) => this.#isUserTextContent(content))
+        .map((content) => getApiHistoryPromptId(content) ?? null);
+      if (
+        liveTurnPromptIds.length !==
+          checkpoint.postRewindTurnPromptIds.length ||
+        liveTurnPromptIds.some(
+          (promptId, index) =>
+            promptId !== checkpoint.postRewindTurnPromptIds[index],
+        )
+      ) {
+        throw RequestError.invalidParams(
+          undefined,
+          'Cannot restore history from a stale rewind checkpoint; the session advanced past the rewind.',
+        );
+      }
+    }
     if (
       checkpoint &&
       promptIds !== undefined &&

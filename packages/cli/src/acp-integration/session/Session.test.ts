@@ -4209,6 +4209,9 @@ describe('Session', () => {
       mockFileHistoryService.getSnapshots.mockReturnValue(snapshots);
 
       session.rewindToPrompt('prompt-1', { rewindFiles: false });
+      // The rewind truncated history to the (empty) prefix; the undo is
+      // only admissible while the session still sits at that state.
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue([]);
       session.restoreHistory(history, ['prompt-1', null]);
 
       expect(mockFileHistoryService.restoreFromSnapshots).toHaveBeenCalledWith(
@@ -4217,6 +4220,117 @@ describe('Session', () => {
       expect(
         mockChatRecordingService.restoreRewindCheckpoint,
       ).toHaveBeenCalledWith({}, snapshots, false);
+    });
+
+    it('restores a non-empty post-rewind prefix while the session sits at it', () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+        { role: 'user', parts: [{ text: 'second' }] },
+        { role: 'model', parts: [{ text: 'second reply' }] },
+      ];
+      core.markApiHistoryPrompt(history[0]!, 'prompt-1');
+      core.markApiHistoryPrompt(history[2]!, 'prompt-2');
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
+        'prompt-1',
+        'prompt-2',
+      ]);
+      const snapshots = [
+        {
+          promptId: 'prompt-1',
+          timestamp: new Date('2026-06-13T00:00:00.000Z'),
+          trackedFileBackups: {},
+        },
+        {
+          promptId: 'prompt-2',
+          timestamp: new Date('2026-06-13T00:01:00.000Z'),
+          trackedFileBackups: {},
+        },
+      ];
+      mockFileHistoryService.getSnapshots.mockReturnValue(snapshots);
+
+      session.rewindToTurn(1);
+      // The rewind kept the first turn; nothing has landed since.
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(
+        history.slice(0, 2),
+      );
+      session.restoreHistory(history, ['prompt-1', null, 'prompt-2', null]);
+
+      expect(mockFileHistoryService.restoreFromSnapshots).toHaveBeenCalledWith(
+        snapshots,
+      );
+      expect(
+        mockChatRecordingService.restoreRewindCheckpoint,
+      ).toHaveBeenCalledWith({}, snapshots, false);
+    });
+
+    it('rejects a stale rewind checkpoint after the session advances past the rewind', () => {
+      // The undo pair the client still holds matches the checkpoint's
+      // pre-rewind capture even after a later turn completes, so the pair
+      // check alone cannot detect the stale undo. Applying the rollback
+      // would truncate the conversation, snapshot store and recording
+      // across the intervening turn while workspace files keep its edits —
+      // refuse instead of silently diverging.
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+        { role: 'user', parts: [{ text: 'second' }] },
+        { role: 'model', parts: [{ text: 'second reply' }] },
+      ];
+      core.markApiHistoryPrompt(history[0]!, 'prompt-1');
+      core.markApiHistoryPrompt(history[2]!, 'prompt-2');
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
+        'prompt-1',
+        'prompt-2',
+      ]);
+      const snapshots = [
+        {
+          promptId: 'prompt-1',
+          timestamp: new Date('2026-06-13T00:00:00.000Z'),
+          trackedFileBackups: {},
+        },
+        {
+          promptId: 'prompt-2',
+          timestamp: new Date('2026-06-13T00:01:00.000Z'),
+          trackedFileBackups: {},
+        },
+      ];
+      mockFileHistoryService.getSnapshots.mockReturnValue(snapshots);
+
+      session.rewindToTurn(1);
+      // The rewind itself mutates stores; the assertions below isolate the
+      // stale restore attempt.
+      vi.mocked(mockFileHistoryService.restoreFromSnapshots).mockClear();
+      vi.mocked(mockChatRecordingService.restoreRewindCheckpoint).mockClear();
+      vi.mocked(mockChat.setHistory).mockClear();
+
+      // A new turn completes after the rewind: the truncated prefix plus
+      // one more marked user turn and its reply.
+      const advancedEntry: Content = {
+        role: 'user',
+        parts: [{ text: 'third' }],
+      };
+      core.markApiHistoryPrompt(advancedEntry, 'prompt-3');
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue([
+        ...history.slice(0, 2),
+        advancedEntry,
+        { role: 'model', parts: [{ text: 'third reply' }] },
+      ]);
+
+      expect(() =>
+        session.restoreHistory(history, ['prompt-1', null, 'prompt-2', null]),
+      ).toThrow('stale rewind checkpoint');
+      // No mutation landed: neither the history replacement nor the store
+      // rollback ran.
+      expect(mockChat.setHistory).not.toHaveBeenCalled();
+      expect(
+        mockFileHistoryService.restoreFromSnapshots,
+      ).not.toHaveBeenCalled();
+      expect(
+        mockChatRecordingService.restoreRewindCheckpoint,
+      ).not.toHaveBeenCalled();
     });
 
     it('drops the rewind checkpoint when a new session is rebound', () => {
