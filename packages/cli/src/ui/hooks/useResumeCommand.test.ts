@@ -5,7 +5,7 @@
  */
 
 import { act, renderHook } from '@testing-library/react';
-import { describe, it, expect, vi } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 import {
   BACKGROUND_WORK_SWITCH_BLOCKED_MESSAGE,
   useResumeCommand,
@@ -14,6 +14,11 @@ import { useHistory } from './useHistoryManager.js';
 
 import type { Content } from '@google/genai';
 import type { LoadedSettings } from '../../config/settings.js';
+
+const mockFlushSessionUsageSnapshot = vi.hoisted(() => vi.fn());
+vi.mock('../../utils/session-usage.js', () => ({
+  flushSessionUsageSnapshot: mockFlushSessionUsageSnapshot,
+}));
 
 const mockSettings = {
   merged: {
@@ -109,6 +114,10 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 });
 
 describe('useResumeCommand', () => {
+  beforeEach(() => {
+    mockFlushSessionUsageSnapshot.mockClear();
+  });
+
   it('should initialize with dialog closed', () => {
     const { result } = renderHook(() =>
       useResumeCommand({
@@ -321,6 +330,12 @@ describe('useResumeCommand', () => {
       expect.objectContaining({
         conversation: expect.anything(),
       }),
+    );
+    expect(mockFlushSessionUsageSnapshot).toHaveBeenCalledTimes(1);
+    expect(
+      mockFlushSessionUsageSnapshot.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      vi.mocked(config.startNewSession).mock.invocationCallOrder[0]!,
     );
     expect(startNewSession).toHaveBeenCalledWith('session-2');
     expect(geminiClient.initialize).toHaveBeenCalledTimes(1);
@@ -889,6 +904,17 @@ describe('useResumeCommand', () => {
       2,
       'old-session-id',
       undefined,
+    );
+    expect(mockFlushSessionUsageSnapshot).toHaveBeenCalledTimes(2);
+    expect(
+      mockFlushSessionUsageSnapshot.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      vi.mocked(config.startNewSession).mock.invocationCallOrder[0]!,
+    );
+    expect(
+      mockFlushSessionUsageSnapshot.mock.invocationCallOrder[1],
+    ).toBeLessThan(
+      vi.mocked(config.startNewSession).mock.invocationCallOrder[1]!,
     );
     expect(config.loadPausedBackgroundAgents).toHaveBeenCalledWith(
       'old-session-id',

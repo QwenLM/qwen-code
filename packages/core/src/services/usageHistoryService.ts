@@ -36,6 +36,11 @@ const LIVE_REBUILD_WINDOW_DAYS = 35;
 
 export interface UsageSummaryRecord {
   version: 1;
+  /**
+   * True for an in-progress snapshot. Final records omit this field so records
+   * written by older clients remain authoritative.
+   */
+  isPartial?: true;
   sessionId: string;
   timestamp: number;
   startTime: number;
@@ -141,14 +146,16 @@ export function persistSessionUsage(params: {
   endTime: Date;
   project: string;
   metrics: SessionMetrics;
+  isPartial?: boolean;
 }): void {
-  const { sessionId, startTime, endTime, project, metrics } = params;
+  const { sessionId, startTime, endTime, project, metrics, isPartial } = params;
   const record = metricsToUsageRecord(
     sessionId,
     project,
     startTime.getTime(),
     endTime.getTime(),
     metrics,
+    isPartial,
   );
   jsonl.writeLineSync(getUsageHistoryPath(), record);
 }
@@ -159,6 +166,7 @@ export function metricsToUsageRecord(
   startTime: number,
   endTime: number,
   metrics: SessionMetrics,
+  isPartial = false,
 ): UsageSummaryRecord {
   const models: UsageSummaryRecord['models'] = {};
   let totalLatencyMs = 0;
@@ -187,6 +195,7 @@ export function metricsToUsageRecord(
   }
   return {
     version: 1,
+    ...(isPartial ? { isPartial: true as const } : {}),
     sessionId,
     timestamp: endTime,
     startTime,
@@ -244,6 +253,7 @@ function summarizeTranscript(
   let hasEvents = false;
   for (const record of records) {
     if (record.type === 'system' && record.subtype === 'ui_telemetry') {
+      if (record.forkedFrom) continue;
       const payload = record.systemPayload as { uiEvent?: UiEvent } | undefined;
       if (payload?.uiEvent) {
         telemetry.addEvent(payload.uiEvent);
@@ -253,7 +263,11 @@ function summarizeTranscript(
   }
   if (!hasEvents) return { sessionId, record: null };
 
-  const startTime = new Date(firstRecord.timestamp).getTime();
+  const isFork = records.some((record) => record.forkedFrom);
+  const startRecord = isFork
+    ? (records.find((record) => !record.forkedFrom) ?? firstRecord)
+    : firstRecord;
+  const startTime = new Date(startRecord.timestamp).getTime();
   const endTime = new Date(records[records.length - 1]!.timestamp).getTime();
   if (isNaN(startTime) || isNaN(endTime)) {
     return { sessionId, record: null };
@@ -277,10 +291,9 @@ function summarizeTranscript(
  * exited previously erased its usage from the records forever.
  *
  * Never throws — deletion must proceed even when salvage fails — and skips
- * the write when the persisted history already carries a record for the
- * session (a `/clear` or exit already wrote the authoritative summary;
- * duplicating it would re-open #4994). Returns true when a record was
- * written.
+ * the write when the persisted history already carries a final record for the
+ * session. A partial periodic snapshot is finalized from whichever source has
+ * the newer tail. Returns true when a record was written.
  */
 export async function persistUsageBeforeTranscriptDeletion(
   transcriptPath: string,
@@ -294,8 +307,18 @@ export async function persistUsageBeforeTranscriptDeletion(
     try {
       if (fs.existsSync(usagePath)) {
         const existing = await jsonl.read<UsageSummaryRecord>(usagePath);
-        if (existing.some((r) => r?.sessionId === summarized.sessionId)) {
+        const current = dedupBySessionId(existing).find(
+          (r) => r.sessionId === summarized.sessionId,
+        );
+        if (current && !current.isPartial) {
           return false;
+        }
+        if (
+          current?.isPartial &&
+          current.timestamp >= summarized.record.timestamp
+        ) {
+          summarized.record = { ...current };
+          delete summarized.record.isPartial;
         }
       }
     } catch (e) {
@@ -445,17 +468,49 @@ async function rebuildFromSessionJsonl(
 }
 
 function dedupBySessionId(records: UsageSummaryRecord[]): UsageSummaryRecord[] {
-  // Last-wins by sessionId. Protects existing users whose usage_record.jsonl
-  // already contains duplicates produced by the bug fixed in this change
-  // (issue #4994) — without this, every aggregate stays inflated forever.
+  // Prefer the newer incarnation of a resumed session. When timestamps tie,
+  // final beats partial; records with the same completeness stay last-wins.
   const map = new Map<string, UsageSummaryRecord>();
-  for (const r of records) map.set(r.sessionId, r);
+  for (const record of records) {
+    const current = map.get(record.sessionId);
+    const sameCompleteness =
+      Boolean(current?.isPartial) === Boolean(record.isPartial);
+    if (
+      !current ||
+      sameCompleteness ||
+      record.timestamp > current.timestamp ||
+      (record.timestamp === current.timestamp && !record.isPartial)
+    ) {
+      map.set(record.sessionId, record);
+    }
+  }
   if (map.size < records.length) {
     debugLogger.debug(
       `dedupBySessionId: removed ${records.length - map.size} duplicate record(s)`,
     );
   }
   return [...map.values()];
+}
+
+function mergePartialRecords(
+  persisted: UsageSummaryRecord[],
+  rebuilt: UsageSummaryRecord[],
+): UsageSummaryRecord[] {
+  const rebuiltBySession = new Map(rebuilt.map((r) => [r.sessionId, r]));
+  const merged = persisted.map((persistedRecord) => {
+    if (!persistedRecord.isPartial) return persistedRecord;
+    const rebuiltRecord = rebuiltBySession.get(persistedRecord.sessionId);
+    rebuiltBySession.delete(persistedRecord.sessionId);
+    if (
+      !rebuiltRecord ||
+      persistedRecord.timestamp >= rebuiltRecord.timestamp
+    ) {
+      return persistedRecord;
+    }
+    return rebuiltRecord;
+  });
+
+  return dedupBySessionId([...rebuiltBySession.values(), ...merged]);
 }
 
 export async function loadUsageHistory(
@@ -465,7 +520,25 @@ export async function loadUsageHistory(
   try {
     const records = await jsonl.read<UsageSummaryRecord>(getUsageHistoryPath());
     const filtered = records.filter((r) => r.version === 1);
-    if (filtered.length > 0) return dedupBySessionId(filtered);
+    if (filtered.length > 0) {
+      const persisted = dedupBySessionId(filtered);
+      const partialIds = new Set(
+        persisted
+          .filter((r) => r.isPartial && r.sessionId !== skipSessionInRebuild)
+          .map((r) => r.sessionId),
+      );
+      if (partialIds.size === 0) return persisted;
+
+      const skipSessionIds = new Set(
+        persisted
+          .filter((r) => !partialIds.has(r.sessionId))
+          .map((r) => r.sessionId),
+      );
+      const rebuilt = (
+        await rebuildFromSessionJsonl({ persist: false, skipSessionIds })
+      ).filter((r) => partialIds.has(r.sessionId));
+      return mergePartialRecords(persisted, rebuilt);
+    }
   } catch (e) {
     debugLogger.debug(`loadUsageHistory: failed to read usage file: ${e}`);
   }
@@ -486,10 +559,11 @@ export async function loadUsageHistory(
  * Unlike {@link loadUsageHistory}, which returns the persisted file verbatim
  * whenever it is non-empty (and so silently omits everything not yet
  * persisted), this replays recent transcripts for sessions the persisted file
- * does not already cover and unions the two. Persisted records win on any
- * sessionId conflict — they are the authoritative final snapshot. This is what
- * the daemon usage-dashboard reads so its totals reflect live Web Shell
- * activity. Read-only: never writes `usage_record.jsonl`.
+ * does not already cover and unions the two. Final persisted records win on
+ * any sessionId conflict; partial periodic snapshots are compared with the
+ * transcript so a newer transcript tail is not hidden. This is what the daemon
+ * usage-dashboard reads so its totals reflect live Web Shell activity.
+ * Read-only: never writes `usage_record.jsonl`.
  *
  * The transcript scan is bounded to a trailing window (mtime-based) so an
  * established history does not pay a full cross-project replay on every load.
@@ -512,7 +586,10 @@ export async function loadUsageHistoryWithLive(options?: {
     );
   }
 
-  const persistedIds = new Set(persisted.map((r) => r.sessionId));
+  const dedupedPersisted = dedupBySessionId(persisted);
+  const finalPersistedIds = new Set(
+    dedupedPersisted.filter((r) => !r.isPartial).map((r) => r.sessionId),
+  );
 
   // The trailing window bounds an *incremental* live merge on top of persisted
   // history: old days come from the persisted file, so only recent transcripts
@@ -522,20 +599,17 @@ export async function loadUsageHistoryWithLive(options?: {
   // truncating the dashboard, matching the pre-existing empty-file behavior.
   const sinceMs =
     options?.sinceMs ??
-    (persistedIds.size > 0
+    (dedupedPersisted.length > 0
       ? Date.now() - LIVE_REBUILD_WINDOW_DAYS * MS_PER_DAY
       : undefined);
 
   const rebuilt = await rebuildFromSessionJsonl({
     persist: false,
     sinceMs,
-    skipSessionIds: persistedIds,
+    skipSessionIds: finalPersistedIds,
   });
 
-  // Persisted records are the authoritative final snapshot, so they win on any
-  // sessionId conflict — place them last (dedupBySessionId is last-wins). The
-  // rebuilt set only adds sessions the persisted file never captured.
-  return dedupBySessionId([...rebuilt, ...persisted]);
+  return mergePartialRecords(dedupedPersisted, rebuilt);
 }
 
 export function getTimeRangeBounds(range: TimeRange): {

@@ -11,7 +11,6 @@ import {
   uiTelemetryService,
   SessionEndReason,
   ToolNames,
-  persistSessionUsage,
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -20,6 +19,7 @@ import {
   resetBackgroundStateForSessionSwitch,
 } from '../utils/backgroundWorkUtils.js';
 import process from 'node:process';
+import { flushSessionUsageSnapshot } from '../../utils/session-usage.js';
 
 const debugLogger = createDebugLogger('CLEAR_COMMAND');
 
@@ -76,24 +76,7 @@ export const clearCommand: SlashCommand = {
       config.getBackgroundShellRegistry().abortAll();
       resetBackgroundStateForSessionSwitch(config);
 
-      // Persist current session's usage before resetting metrics
-      const metrics = uiTelemetryService.getMetrics();
-      const hasActivity = Object.values(metrics.models).some(
-        (m) => m.api.totalRequests > 0,
-      );
-      if (hasActivity) {
-        try {
-          persistSessionUsage({
-            sessionId: config.getSessionId(),
-            startTime: context.session.stats.sessionStartTime ?? new Date(),
-            endTime: new Date(),
-            project: config.getProjectRoot(),
-            metrics,
-          });
-        } catch {
-          // Best-effort — don't block /clear
-        }
-      }
+      flushSessionUsageSnapshot(config);
 
       const newSessionId = config.startNewSession();
 

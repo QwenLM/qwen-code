@@ -741,8 +741,18 @@ describe('SessionTranscriptReader', () => {
       } as ChatRecord['systemPayload'],
     };
     const uiEvent = { prompt_id: `${sessionId}########7`, duration_ms: 12 };
+    const inheritedTelemetry: ChatRecord = {
+      ...record('inherited-telemetry', 'compression', ''),
+      type: 'system',
+      subtype: 'ui_telemetry',
+      message: undefined,
+      systemPayload: {
+        uiEvent: { prompt_id: 'parent########1', duration_ms: 99 },
+      } as ChatRecord['systemPayload'],
+      forkedFrom: { sessionId: 'parent', messageUuid: 'parent-telemetry' },
+    };
     const telemetry: ChatRecord = {
-      ...record('telemetry', 'compression', ''),
+      ...record('telemetry', 'inherited-telemetry', ''),
       type: 'system',
       subtype: 'ui_telemetry',
       message: undefined,
@@ -855,6 +865,7 @@ describe('SessionTranscriptReader', () => {
       firstUser,
       firstAssistant,
       compression,
+      inheritedTelemetry,
       telemetry,
       attribution,
       fileHistory,

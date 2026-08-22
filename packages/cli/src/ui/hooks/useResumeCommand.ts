@@ -22,6 +22,7 @@ import {
   buildBackgroundWorkBlockedMessage,
   resetBackgroundStateForSessionSwitch,
 } from '../utils/backgroundWorkUtils.js';
+import { flushSessionUsageSnapshot } from '../../utils/session-usage.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { waitForGoalRuntime } from '../utils/goal-runtime.js';
 
@@ -171,6 +172,7 @@ export function useResumeCommand(
         //    the catch block rolls core back to the old session so the
         //    user is not stranded with a half-live client.
         resetBackgroundStateForSessionSwitch(config);
+        flushSessionUsageSnapshot(config);
         config.startNewSession(sessionId, sessionData);
         coreSwapped = true;
         await waitForGoalRuntime(config);
@@ -219,6 +221,7 @@ export function useResumeCommand(
           // orphaned session JSONL while UI still shows the old session.
           try {
             resetBackgroundStateForSessionSwitch(config);
+            flushSessionUsageSnapshot(config);
             config.startNewSession(oldSessionId, undefined);
             // The forward path cleared the old session's in-memory
             // background agents (resetBackgroundStateForSessionSwitch above,

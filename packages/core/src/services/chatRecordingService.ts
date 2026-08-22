@@ -406,10 +406,10 @@ export interface ChatRecord {
    * except for rewriting `sessionId` and rebuilding `parentUuid` by
    * write order.
    *
-   * Written by /branch on every copied record; never consumed by any
-   * feature at read time — it exists purely as per-message audit trail
-   * so that when a record is inspected in isolation its origin is
-   * self-contained (mirrors Claude Code's /branch behavior).
+   * Written by /branch on every copied record. Usage telemetry readers use it
+   * to exclude inherited events from the fork's own totals; it also keeps each
+   * record's origin self-contained for audit (mirrors Claude Code's /branch
+   * behavior).
    */
   forkedFrom?: {
     sessionId: string;

@@ -581,6 +581,30 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     expect(totalTokens).toBe(1600);
   });
 
+  it('read-side: a newer transcript replaces an incomplete periodic snapshot', async () => {
+    const sessionId = 'sess-partial-tail';
+    plantChatJsonl(sessionId, 1600);
+    const usagePath = path.join(
+      process.env['QWEN_HOME']!,
+      'usage_record.jsonl',
+    );
+    const partial = metricsToUsageRecord(
+      sessionId,
+      '/repro/project',
+      new Date('2026-06-11T00:00:00Z').getTime(),
+      new Date('2026-06-11T00:01:00Z').getTime(),
+      makeLiveMetrics(1000),
+      true,
+    );
+    fs.writeFileSync(usagePath, `${JSON.stringify(partial)}\n`);
+
+    const records = await loadUsageHistory();
+
+    expect(records).toHaveLength(1);
+    expect(records[0]!.models['qwen-max']!.totalTokens).toBe(1600);
+    expect(records[0]!.isPartial).toBeUndefined();
+  });
+
   it('read-only: persistRebuild:false rebuilds without writing usage_record.jsonl', async () => {
     const sessionId = 'sess-readonly';
     plantChatJsonl(sessionId, 1600);
@@ -735,6 +759,88 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
     expect(merged).toHaveLength(1);
     expect(merged[0]!.sessionId).toBe('sess-both');
     expect(merged[0]!.models['qwen-max']!.totalTokens).toBe(1000);
+  });
+
+  it('withLive: a newer transcript replaces an incomplete periodic snapshot', async () => {
+    seedPersisted([
+      {
+        ...persistedRec('sess-live-tail', 500),
+        timestamp: new Date('2026-06-11T00:00:30Z').getTime(),
+      },
+      {
+        ...persistedRec('sess-live-tail', 1000),
+        isPartial: true,
+        timestamp: new Date('2026-06-11T00:01:00Z').getTime(),
+      },
+    ]);
+    plantChatJsonl('sess-live-tail', 1600);
+
+    const merged = await loadUsageHistoryWithLive({ sinceMs: 0 });
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0]!.models['qwen-max']!.totalTokens).toBe(1600);
+    expect(merged[0]!.isPartial).toBeUndefined();
+  });
+
+  it('withLive: does not count inherited fork telemetry twice', async () => {
+    seedPersisted([persistedRec('sess-parent', 1000)]);
+    plantChatJsonl('sess-fork', 1000);
+    const forkPath = planted('sess-fork');
+    const inherited = fs
+      .readFileSync(forkPath, 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => ({
+        ...JSON.parse(line),
+        forkedFrom: { sessionId: 'sess-parent', messageUuid: 'parent-record' },
+      }));
+    const timestamp = new Date('2026-06-11T00:03:00Z').toISOString();
+    inherited.push({
+      sessionId: 'sess-fork',
+      cwd: '/repro/project',
+      uuid: 'fork-api',
+      parentUuid: 'u3',
+      timestamp,
+      type: 'system',
+      subtype: 'ui_telemetry',
+      systemPayload: {
+        uiEvent: {
+          'event.name': 'qwen-code.api_response',
+          'event.timestamp': timestamp,
+          response_id: 'fork-r1',
+          model: 'qwen-max',
+          duration_ms: 600,
+          input_token_count: 420,
+          output_token_count: 210,
+          cached_content_token_count: 0,
+          thoughts_token_count: 70,
+          total_token_count: 700,
+          prompt_id: 'fork-p1',
+        },
+      },
+    });
+    fs.writeFileSync(
+      forkPath,
+      inherited.map((record) => JSON.stringify(record)).join('\n') + '\n',
+    );
+
+    const merged = await loadUsageHistoryWithLive({ sinceMs: 0 });
+    const report = aggregateUsage(merged, 'all');
+    const totalTokens = Object.values(report.models).reduce(
+      (total, model) => total + model.totalTokens,
+      0,
+    );
+
+    expect(merged.map((record) => record.sessionId).sort()).toEqual([
+      'sess-fork',
+      'sess-parent',
+    ]);
+    const forkRecord = merged.find(
+      (record) => record.sessionId === 'sess-fork',
+    );
+    expect(forkRecord?.startTime).toBe(new Date(timestamp).getTime());
+    expect(forkRecord?.durationMs).toBe(0);
+    expect(totalTokens).toBe(1700);
   });
 
   it('withLive: with a persisted base, the trailing window excludes stale transcripts (sinceMs:0 includes them)', async () => {
@@ -906,6 +1012,53 @@ describe('persistUsageBeforeTranscriptDeletion (issue #7384)', () => {
     );
     const lines = fs.readFileSync(usagePath(), 'utf-8').trim().split('\n');
     expect(lines).toHaveLength(1);
+  });
+
+  it('replaces a partial snapshot with the transcript tail before deletion', async () => {
+    const filePath = plantTranscript('sess-salvage-partial', true);
+    const partial = {
+      version: 1 as const,
+      isPartial: true as const,
+      sessionId: 'sess-salvage-partial',
+      timestamp: new Date('2026-07-01T00:00:30Z').getTime(),
+      startTime: new Date('2026-07-01T00:00:00Z').getTime(),
+      project: '/salvage/project',
+      durationMs: 30000,
+      models: {
+        'qwen-max': {
+          requests: 1,
+          inputTokens: 300,
+          outputTokens: 150,
+          cachedTokens: 0,
+          thoughtsTokens: 50,
+          totalTokens: 500,
+        },
+      },
+      tools: { totalCalls: 0, totalSuccess: 0, totalFail: 0, byName: {} },
+      files: { linesAdded: 0, linesRemoved: 0 },
+    };
+    const oldFinal = {
+      ...partial,
+      isPartial: undefined,
+      timestamp: partial.timestamp - 1000,
+    };
+    fs.writeFileSync(
+      usagePath(),
+      `${JSON.stringify(oldFinal)}\n${JSON.stringify(partial)}\n`,
+    );
+
+    await expect(persistUsageBeforeTranscriptDeletion(filePath)).resolves.toBe(
+      true,
+    );
+
+    const records = fs
+      .readFileSync(usagePath(), 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as UsageSummaryRecord);
+    expect(records).toHaveLength(3);
+    expect(records[2]!.isPartial).toBeUndefined();
+    expect(records[2]!.models['qwen-max']!.totalTokens).toBe(1000);
   });
 
   it('returns false for a transcript with no telemetry and writes nothing', async () => {
