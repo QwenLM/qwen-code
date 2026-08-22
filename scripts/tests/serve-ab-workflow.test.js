@@ -7,17 +7,19 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
   chmodSync,
+  existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
@@ -25,19 +27,32 @@ const workflow = readFileSync('.github/workflows/serve-ab.yml', 'utf8');
 
 const job = parse(workflow).jobs['ab'];
 const steps = job.steps;
-const WIPE = 'Wipe stale workspace before checkout';
+const WIPE = 'Wipe stale workspace except the shared .git before checkout';
 const wipe = steps.find((s) => s.name === WIPE);
 
 // Runs the real wipe script under the runner's shell flags: this job sets
 // `defaults.run.shell: bash`, which GitHub Actions executes with
 // `-eo pipefail`, so the exec tests must reproduce that instead of hiding
 // it behind bare `bash -c`.
-const runWipe = (env, options = {}) =>
-  execFileSync('bash', ['-e', '-o', 'pipefail', '-c', wipe.run], {
+const runWipe = (env, options = {}) => {
+  // The kept-.git config scrub ends in `git config --local`, which reads
+  // the CWD's repo; pin it to the fixture so a completing wipe never
+  // scrubs the host checkout's local config. The heal fixtures hand over
+  // a workspace that is a file or a dangling symlink — no cwd to stand in —
+  // so pin the parent instead: a mkdtemp dir, never a repo.
+  let cwd = env.GITHUB_WORKSPACE;
+  try {
+    if (!statSync(cwd).isDirectory()) cwd = dirname(cwd);
+  } catch {
+    cwd = dirname(cwd);
+  }
+  return execFileSync('bash', ['-e', '-o', 'pipefail', '-c', wipe.run], {
     encoding: 'utf8',
+    cwd,
     env: { ...process.env, ...env },
     ...options,
   });
+};
 
 // `realpath -m` (the script's canonicalization line) is a GNU coreutils
 // extension. Probe the host before asserting GNU-specific path behavior.
@@ -91,11 +106,16 @@ describe('serve-ab pre-checkout workspace wipe', () => {
       "refusing runner workspace path containing '..'",
     );
     expect(wipe.run).toContain('runner workspace resolved to /');
-    // Exit contract: the wipe stays bare on purpose — under the job's
-    // `-eo pipefail` a wipe that cannot clear the workspace fails the job
-    // here instead of building both checkouts on top of the leftovers.
-    // `|| true` would silently void that.
-    expect(wipe.run).not.toContain('|| true');
+    // Exit contract: the guard and the destructive lines stay bare on
+    // purpose — under the job's `-eo pipefail` a wipe that cannot clear the
+    // workspace fails the job here instead of building both checkouts on
+    // top of the leftovers. `|| true` may appear only on the kept-.git
+    // config scrub, mirroring qwen-triage.yml's config-sanitize.
+    const loosened = wipe.run
+      .split('\n')
+      .filter((line) => line.includes('|| true'));
+    expect(loosened).toHaveLength(1);
+    expect(loosened[0]).toContain('git config --local --name-only --list');
   });
 
   it('carries the symlink heal, ordered and bounded (#9480)', () => {
@@ -135,7 +155,7 @@ describe('serve-ab pre-checkout workspace wipe', () => {
   });
 
   it.skipIf(!hasGnuRealpath)(
-    'wipes a legitimate workspace inside the runner workspace',
+    'wipes a legitimate workspace but keeps and defangs the shared .git',
     () => {
       const parent = mkdtempSync(join(tmpdir(), 'serve-ab-wipe-ok-'));
       const ws = join(parent, 'repo');
@@ -145,9 +165,44 @@ describe('serve-ab pre-checkout workspace wipe', () => {
       mkdirSync(join(ws, 'base'), { recursive: true });
       writeFileSync(join(ws, 'head', 'package.json'), '{}');
       writeFileSync(join(ws, 'bundle.tgz'), 'x');
+      // A shared root .git shaped like the real one: objects are the reason
+      // it is kept; hooks, info/attributes, and non-allowlisted local
+      // config are the exec vectors that must not survive into the next
+      // job's checkout.
+      execFileSync('git', ['init', '--quiet', ws]);
+      mkdirSync(join(ws, '.git', 'objects', 'pack'), { recursive: true });
+      writeFileSync(join(ws, '.git', 'objects', 'pack', 'sentinel'), 'x');
+      writeFileSync(
+        join(ws, '.git', 'hooks', 'post-checkout'),
+        '#!/bin/sh\necho pwned\n',
+      );
+      writeFileSync(join(ws, '.git', 'info', 'attributes'), '* filter=x\n');
+      execFileSync('git', ['config', '--local', 'alias.pwned', '!echo pwned'], {
+        cwd: ws,
+      });
+      execFileSync('git', ['config', '--local', 'safe.directory', ws], {
+        cwd: ws,
+      });
       try {
         runWipe({ GITHUB_WORKSPACE: ws, RUNNER_WORKSPACE: parent });
-        expect(readdirSync(ws)).toEqual([]);
+        expect(readdirSync(ws)).toEqual(['.git']);
+        expect(
+          readFileSync(join(ws, '.git', 'objects', 'pack', 'sentinel'), 'utf8'),
+        ).toBe('x');
+        expect(existsSync(join(ws, '.git', 'hooks'))).toBe(false);
+        expect(existsSync(join(ws, '.git', 'info', 'attributes'))).toBe(false);
+        expect(() =>
+          execFileSync('git', ['config', '--local', 'alias.pwned'], {
+            cwd: ws,
+            stdio: 'pipe',
+          }),
+        ).toThrow();
+        expect(
+          execFileSync('git', ['config', '--local', 'safe.directory'], {
+            cwd: ws,
+            encoding: 'utf8',
+          }).trim(),
+        ).toBe(ws);
         // The directory itself survives: the checkouts clone into it next.
         expect(wipe.run).toContain('-mindepth 1 -maxdepth 1');
       } finally {
