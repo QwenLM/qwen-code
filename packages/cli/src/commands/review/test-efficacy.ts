@@ -66,6 +66,15 @@ import { probeWorktreePath } from './lib/paths.js';
 // stale-sweep-then-remove step (its rationale lives there, with the helper), and
 // `exposeDependencies` followed it when `scratch-tree` needed the same
 // dependency farm for the verifier's own probe tree.
+import { shellQuotePath } from './lib/shell-quote.js';
+import {
+  containerCommand,
+  mountRootFor,
+  refuseUnsandboxedPhase,
+  reviewSandboxImage,
+  runtimeClientEnv,
+  sandboxVerdict,
+} from './lib/sandboxed-exec.js';
 import {
   discardWorktree,
   exposeDependencies,
@@ -1516,6 +1525,30 @@ export function probeCleanupFailureDetail(
  * repository out into the tree, which is the hazard the residue probe's
  * identity gate exists for. Refusing is the only answer that is neither.
  */
+/**
+ * The container argv for one probe-suite run, or null to spawn it directly.
+ *
+ * Same three null cases as `build-test`'s: policy off, no runtime under
+ * `auto`, or a tree that is not under a review temp dir (a `/review` of a
+ * local checkout, where there is no `.qwen/tmp` layout to mount).
+ */
+function probeContainer(
+  command: string,
+  probeTree: string,
+): { file: string; args: string[] } | null {
+  const verdict = sandboxVerdict();
+  if (verdict.kind !== 'container') return null;
+  const tmpDir = mountRootFor(probeTree);
+  if (tmpDir === null) return null;
+  return containerCommand(command, {
+    cwd: resolve(probeTree),
+    tmpDir,
+    kind: 'test',
+    runtime: verdict.runtime,
+    image: reviewSandboxImage(),
+  });
+}
+
 function restoreProbeTreeTracked(probeTree: string): string | null {
   if (!existsSync(join(probeTree, '.git'))) {
     return `${probeTree} carries no .git, so there is no commit to put it back to`;
@@ -1685,19 +1718,46 @@ function runProbeSuite(
   const exposed = exposeDependencies(probeTree, dependencyRoot, {
     rebuild: true,
   });
-  const r = spawnSync(
-    process.execPath,
-    [findVitestBin(dependencyRoot), 'run', '--reporter=json', ...probes],
-    {
-      cwd: probeTree,
-      encoding: 'utf8',
-      timeout,
-      // Vitest's JSON reporter on a large suite easily exceeds spawnSync's
-      // 1 MiB default stdout buffer, which returns ENOBUFS and turns every
-      // probe `inconclusive`. Match the 64 MiB ceiling the gh wrapper uses.
-      maxBuffer: 64 * 1024 * 1024,
-    },
-  );
+  // The reviewed repository's own suite, run once per baseline / control /
+  // mutant / hunk probe / revert — the second of the two places a review
+  // executes the code it is reviewing (#9556). Sandboxed it is a container
+  // per run, offline, with an env allowlist instead of this process's own;
+  // unsandboxed it is the direct spawn this has always been, and the caller
+  // has already disclosed that.
+  // `node` off the IMAGE's PATH, not `process.execPath`: the host's interpreter
+  // path (`/usr/bin/node` here, `/opt/hostedtoolcache/…` on a GitHub runner) is
+  // neither mounted nor present in the image, so baking it in exits 127 and
+  // maps every probe — baseline, control, each mutant, each hunk, the revert —
+  // to inconclusive, blaming the runner's output for a wiring error. The vitest
+  // bin path DOES resolve, because it lives under the mounted temp dir.
+  const suite = `node ${shellQuotePath(
+    findVitestBin(dependencyRoot),
+  )} run --reporter=json ${probes.map(shellQuotePath).join(' ')}`;
+  const boxed = probeContainer(suite, probeTree);
+  const r = boxed
+    ? spawnSync(boxed.file, boxed.args, {
+        cwd: probeTree,
+        encoding: 'utf8',
+        timeout,
+        maxBuffer: 64 * 1024 * 1024,
+        // The RUNTIME CLIENT's environment, minus the daemon-selecting
+        // variables a repository could have shipped in its own `.env` — the
+        // container's own environment is the allowlist in `containerEnv`.
+        env: runtimeClientEnv(),
+      })
+    : spawnSync(
+        process.execPath,
+        [findVitestBin(dependencyRoot), 'run', '--reporter=json', ...probes],
+        {
+          cwd: probeTree,
+          encoding: 'utf8',
+          timeout,
+          // Vitest's JSON reporter on a large suite easily exceeds spawnSync's
+          // 1 MiB default stdout buffer, which returns ENOBUFS and turns every
+          // probe `inconclusive`. Match the 64 MiB ceiling the gh wrapper uses.
+          maxBuffer: 64 * 1024 * 1024,
+        },
+      );
   // `r.error` is set — and `r.status` is null — when the process never ran
   // (vitest entry missing or unresolvable) or was killed (the timeout above
   // fires SIGTERM). Ignoring it reports those as "the runner produced no
@@ -2424,7 +2484,23 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
     }
   };
 
-  if (probes.length > 0 && revert.length > 0) {
+  // BEFORE the probe tree is even created. Every run this phase makes executes
+  // the reviewed repository's suite, so under `review.sandbox: required` with no
+  // container runtime the honest outcome is no efficacy evidence — not evidence
+  // bought by running that suite unsandboxed. Refusing here rather than at the
+  // spawn keeps the report's vocabulary intact: the phase produced nothing, and
+  // says why, instead of a run of probes each blaming the runner.
+  // The probe tree this phase WOULD build, named before it exists — the gate
+  // has to answer before anything is created, and `probeWorktreePath` is a
+  // pure path function.
+  const sandboxRefusal = refuseUnsandboxedPhase(probeWorktreePath(worktree));
+  if (sandboxRefusal) {
+    noteMutants(
+      `mutation probes did not run: ${sandboxRefusal}. Every probe executes ` +
+        `the reviewed repository's own test suite, which is what the policy ` +
+        `forbids unsandboxed — read the absence as unmeasured, not as covered.`,
+    );
+  } else if (probes.length > 0 && revert.length > 0) {
     // The probe reverts the PR's source to base and runs the tests against it —
     // in its OWN disposable worktree, checked out at the PR head and discarded
     // wholesale when the probe finishes. The shared worktree the other review

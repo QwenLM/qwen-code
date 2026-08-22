@@ -43,6 +43,15 @@ import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
+  containerCommand,
+  mountRootFor,
+  refuseUnsandboxedPhase,
+  reviewSandboxImage,
+  runtimeClientEnv,
+  sandboxVerdict,
+  type CommandKind,
+} from './lib/sandboxed-exec.js';
+import {
   DEFAULT_COMMAND_TIMEOUT_S,
   DEFAULT_WHOLE_CALL_BUDGET_S,
 } from './lib/build-budget.js';
@@ -110,7 +119,14 @@ export interface CommandResult {
 
 export interface BuildTestReport {
   /** The scoped toolchain that ran, or `unsupported` when selection was unsafe. */
-  toolchain: 'npm' | 'unsupported';
+  /**
+   * `refused` is not a kind of repository — it is the absence of a run.
+   * `unsupported` means "this command could not scope your repo, go run the
+   * build yourself", which is a real instruction the brief acts on; routing a
+   * sandbox refusal into it would send the agent to run the reviewed code by
+   * hand with its own shell, which is the exact thing the policy forbade.
+   */
+  toolchain: 'npm' | 'unsupported' | 'refused';
   /** Workspace dirs the diff changed. */
   affected: string[];
   /** What was built, dependencies first — after any widening. */
@@ -310,10 +326,41 @@ export function buildRunEnv(
  * set is measured HERE, off the raw text, and survives a trim that drops the
  * FAIL lines it was parsed from.
  */
+/**
+ * The container argv for one reviewed-repository command, or null to run it
+ * directly.
+ *
+ * Null covers three cases and they are not the same thing: the policy is off
+ * (today's behaviour), no runtime answered under `auto`, or this command's cwd
+ * is not inside a review temp dir — which is the case for a `/review` of a
+ * local checkout, where the tree under test IS the user's own working copy and
+ * there is no `.qwen/tmp` sibling layout to mount. The `required` policy is
+ * NOT handled here: refusing is the caller's decision, because only the caller
+ * knows what evidence it is about to mark unavailable.
+ */
+function containerised(
+  command: string,
+  cwd: string,
+  kind: CommandKind,
+): { file: string; args: string[] } | null {
+  const verdict = sandboxVerdict();
+  if (verdict.kind !== 'container') return null;
+  const tmpDir = mountRootFor(cwd);
+  if (tmpDir === null) return null;
+  return containerCommand(command, {
+    cwd: resolve(cwd),
+    tmpDir,
+    kind,
+    runtime: verdict.runtime,
+    image: reviewSandboxImage(),
+  });
+}
+
 export function run(
   command: string,
   cwd: string,
   timeoutMs: number,
+  kind: CommandKind = 'test',
 ): CommandResult {
   const started = Date.now();
   // spawnSync validates `timeout` as an unsigned integer: the adapters'
@@ -322,16 +369,34 @@ export function run(
   // with no report, or zero, which arms no kill timer at all. Coerce once
   // at the one boundary every command crosses.
   const deadlineMs = Math.max(1, Math.round(timeoutMs));
-  const r = spawnSync(command, {
-    cwd,
-    shell: true,
-    encoding: 'utf8',
-    timeout: deadlineMs,
-    maxBuffer: 64 * 1024 * 1024,
-    // A build that asks a question is a build that hangs until the deadline.
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: buildRunEnv(),
-  });
+  // This is the reviewed repository's own command — `npm ci` with whatever
+  // install scripts the PR committed, its build, its suite — so it is the
+  // thing #9556 is about. `containerised` returns null when the run is not
+  // sandboxed, and the direct spawn below is unchanged for that case.
+  const boxed = containerised(command, cwd, kind);
+  const r = boxed
+    ? spawnSync(boxed.file, boxed.args, {
+        cwd,
+        encoding: 'utf8',
+        timeout: deadlineMs,
+        maxBuffer: 64 * 1024 * 1024,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        // NOT `buildRunEnv()`: the container gets an allowlist instead (see
+        // `containerEnv`), and this env is the RUNTIME CLIENT's — the caller's
+        // PATH and nothing from the review, minus the daemon-selecting
+        // variables a repository could have shipped in its own `.env`.
+        env: runtimeClientEnv(),
+      })
+    : spawnSync(command, {
+        cwd,
+        shell: true,
+        encoding: 'utf8',
+        timeout: deadlineMs,
+        maxBuffer: 64 * 1024 * 1024,
+        // A build that asks a question is a build that hangs until the deadline.
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: buildRunEnv(),
+      });
   // `spawnSync` sets `error.code === 'ETIMEDOUT'` when the deadline fired — that is
   // the authoritative signal. The `SIGTERM`/null-status pair is only a fallback: it
   // also matches an external SIGTERM (a container stop), and it misses a non-default
@@ -739,6 +804,53 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
     previous,
     exec: args.exec ?? run,
   };
+  // BEFORE anything is executed or handed off. Under `review.sandbox: required`
+  // with no container runtime answering, this phase must produce no build/test
+  // evidence rather than produce it by running the reviewed repository's code
+  // unsandboxed. It sits here and not at the spawn because one route never
+  // reaches a spawn at all: a repo this adapter cannot scope is handed to the
+  // AGENT's own shell (`unsupportedReport`), which would otherwise run the
+  // install and the suite with nothing consulted.
+  const refusal = refuseUnsandboxedPhase(root);
+  if (refusal && args.resume) {
+    // THROW on a continuation, never return. The handler writes whatever this
+    // returns to `--out`, which on a resume is the very report the call was
+    // asked to continue — so returning the refusal below would overwrite a
+    // partial run's install, builds and finished suites, and the refusal
+    // report carries no run identity, so every later `--resume` would fail the
+    // identity check ("records no run identity") even after a runtime came
+    // back. One transient probe failure would cost the round its whole
+    // build-test chain. This is the invariant the `!adapter` branch below
+    // states in its own words; a policy refusal is subject to it too.
+    throw new Error(
+      `refusing to continue this run: ${refusal}. The report at ${args.out} ` +
+        `is left as it was — re-run without --resume once the policy can be ` +
+        `satisfied, or lower review.sandbox.`,
+    );
+  }
+  if (refusal) {
+    return {
+      toolchain: 'refused',
+      affected: [],
+      buildSet: [],
+      widenedWith: [],
+      install: null,
+      build: [],
+      test: [],
+      timedOut: [],
+      // NOT `ok: true`. `unsupportedReport`'s hand-off is `ok` because nothing
+      // was found wrong; here something WAS — the phase could not be run under
+      // the policy in force — and a reader that treats this as a clean
+      // hand-off would go do by hand exactly what the policy just refused.
+      ok: false,
+      note:
+        `no build or test evidence: ${refusal}. This phase would have had to ` +
+        `run the reviewed repository's own commands, which is what the policy ` +
+        `forbids — so it ran nothing rather than running them unsandboxed. ` +
+        `Do not read this as a passing build, and do not run the commands by ` +
+        `hand to fill the gap.`,
+    };
+  }
   const { adapter, applicable } = selectToolchainAdapter(
     root,
     toolchainAdapters,

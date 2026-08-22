@@ -13,6 +13,7 @@ const SAFE_DEFAULTS: OperatorReviewSettings = {
   comment: false,
   effort: undefined,
   reverseAuditRounds: undefined,
+  sandbox: undefined,
 };
 
 export interface OperatorReviewSettings {
@@ -26,6 +27,15 @@ export interface OperatorReviewSettings {
   effort?: string;
   /** The raw `review.severityFloor` value when set — same caveats as effort. */
   severityFloor?: string;
+  /**
+   * The raw `review.sandbox` value when set — `off` | `auto` | `required`,
+   * unvalidated here for the same reason as the two above.
+   *
+   * Read through THIS loader on purpose: it skips the workspace scope, so a
+   * repository cannot ship a `.qwen/settings.json` that switches off the
+   * containment which exists to contain that repository's own code.
+   */
+  sandbox?: string;
   /**
    * The operator's reverse-audit round ceiling, when they set a real one.
    *
@@ -97,6 +107,7 @@ export function operatorReviewSettings(): OperatorReviewSettings {
       typeof review?.severityFloor === 'string'
         ? review.severityFloor
         : undefined,
+    sandbox: typeof review?.sandbox === 'string' ? review.sandbox : undefined,
     reverseAuditRounds:
       typeof rounds === 'number' && Number.isInteger(rounds) && rounds > 0
         ? rounds
