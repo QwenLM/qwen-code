@@ -256,6 +256,17 @@ export class LoopDetectionService {
   // consumed by recordToolResultByCallId).
   private requestByCallId = new Map<string, { name: string; args: object }>();
 
+  // Repeat keys known to belong to a stateful read tool, so the
+  // alternating-pattern carve-out can tell which window participants are
+  // stateful (repeat keys are hashes and do not carry the tool name).
+  private statefulRepeatKeys = new Set<string>();
+
+  // Rolling per-key result fingerprints for the alternating-pattern
+  // carve-out (see checkAlternatingPattern), capped at one window's worth
+  // of occurrences per key so a full ABAB window is judged on the results
+  // its own requests produced.
+  private statefulAlternationHistory = new Map<string, string[]>();
+
   // Loop type of the most recent firing. Bubbled up through the
   // LoopDetected event so callers (non-interactive CLI, telemetry) can tell
   // the user which detector actually fired.
@@ -312,6 +323,15 @@ export class LoopDetectionService {
     if (resultText === null) return false;
     const fingerprint = createHash('sha256').update(resultText).digest('hex');
     const key = this.getToolCallKey(toolCall);
+
+    // Rolling result history for the alternating-pattern carve-out (see
+    // checkAlternatingPattern), capped at one window's occurrences per key.
+    const history = this.statefulAlternationHistory.get(key) ?? [];
+    history.push(fingerprint);
+    if (history.length > ALTERNATING_PATTERN_CYCLES) {
+      history.shift();
+    }
+    this.statefulAlternationHistory.set(key, history);
 
     // Consecutive-streak evidence for the always-on guard. The state entry
     // can predate the streak (lastFingerprint survives streak breaks), so
@@ -528,7 +548,11 @@ export class LoopDetectionService {
         // Stateful read tools are counted post-execution in
         // recordToolResult, keyed on (call, result fingerprint) instead of
         // args alone (issue #9450).
-        const globalDup = this.isStatefulReadTool(event.value.name)
+        const stateful = this.isStatefulReadTool(event.value.name);
+        if (stateful) {
+          this.statefulRepeatKeys.add(toolCallKey);
+        }
+        const globalDup = stateful
           ? false
           : this.checkGlobalDuplicate(toolCallKey);
         const alternating = this.checkAlternatingPattern(toolCallKey);
@@ -549,6 +573,8 @@ export class LoopDetectionService {
         // streak reset).
         this.globalToolCallCounts.clear();
         this.recentToolCallKeys = [];
+        this.statefulAlternationHistory.clear();
+        this.statefulRepeatKeys.clear();
         break;
       }
       case GeminiEventType.Content: {
@@ -611,6 +637,8 @@ export class LoopDetectionService {
         state.unchangedStreak = 0;
         state.consecutiveIdenticalResults = 0;
       }
+      this.statefulAlternationHistory.clear();
+      this.statefulRepeatKeys.clear();
       return false;
     }
 
@@ -630,6 +658,9 @@ export class LoopDetectionService {
     // can be large (e.g. write_file content), so avoid recomputing per guard.
     const key = this.getToolCallKey(event.value);
     const stateful = this.isStatefulReadTool(event.value.name);
+    if (stateful) {
+      this.statefulRepeatKeys.add(key);
+    }
 
     // Pair requests with their later results (recordToolResultByCallId).
     // Only stateful read tools participate: recordToolResult rejects every
@@ -1261,7 +1292,8 @@ export class LoopDetectionService {
    * Alternating-pattern detection: catches ABABAB… patterns where the model
    * flips between two distinct tool calls. Tracked via a sliding window of
    * tool-call keys; when the window fills with alternating A/B values the
-   * turn is halted.
+   * turn is halted — except for stateful read participants whose observed
+   * results keep changing (issue #9450), see the carve-out below.
    */
   private checkAlternatingPattern(toolCallKey: string): boolean {
     const maxLen = 2 * ALTERNATING_PATTERN_CYCLES;
@@ -1282,6 +1314,36 @@ export class LoopDetectionService {
     for (let i = 0; i < maxLen; i++) {
       const expected = i % 2 === 0 ? a : b;
       if (this.recentToolCallKeys[i] !== expected) {
+        return false;
+      }
+    }
+
+    // Result-aware carve-out for stateful read tools (issue #9450):
+    // identical arguments do not imply an identical result, so an ABAB
+    // poller is only stuck when its observed results corroborate it. For
+    // every stateful participant require the results produced by the
+    // window's own prior requests (all of them for the key that opened the
+    // window, all but the in-flight last request for the other); if ANY
+    // recorded result changed, the alternation is making observable
+    // progress and the window restarts. Missing result evidence (results
+    // never recorded) fails safe and keeps the argument-only halt, so a
+    // wiring gap never loosens the guard.
+    const windowTail = this.recentToolCallKeys[maxLen - 1];
+    for (const altKey of [a, b]) {
+      if (!this.statefulRepeatKeys.has(altKey)) continue;
+      const occurrences = this.recentToolCallKeys.filter(
+        (windowKey) => windowKey === altKey,
+      ).length;
+      const expectedResults =
+        altKey === windowTail ? occurrences - 1 : occurrences;
+      if (expectedResults <= 0) continue;
+      const history = this.statefulAlternationHistory.get(altKey);
+      if (!history || history.length < expectedResults) {
+        continue;
+      }
+      const recent = history.slice(-expectedResults);
+      if (recent.some((fp) => fp !== recent[0])) {
+        this.recentToolCallKeys = [];
         return false;
       }
     }
@@ -1320,6 +1382,8 @@ export class LoopDetectionService {
     this.capKeyCounts.clear();
     this.capMaxKeyRepeat = 0;
     this.statefulRepeatState.clear();
+    this.statefulRepeatKeys.clear();
+    this.statefulAlternationHistory.clear();
     this.requestByCallId.clear();
   }
 

@@ -2445,6 +2445,96 @@ describe('LoopDetectionService', () => {
       expect(totalCalls).toBe(80);
     });
 
+    it('does not halt an ABAB task_list poller whose results keep changing', () => {
+      // A teammate alternating task_list with another call (check board,
+      // do work, check board…) is exactly the ABAB shape this detector
+      // hunts. With changing board results it is productive polling; the
+      // result-aware carve-out must restart the window instead of halting
+      // at the first full ABAB window (6th request). tool_b keeps constant
+      // args so the window holds a stable B key; the run stays short
+      // enough that tool_b's own request count stays below the
+      // global-duplicate threshold.
+      const heuristicService = new LoopDetectionService(
+        makeConfig(DEFAULT_MAX_TOOL_CALLS_PER_TURN, false, false),
+      );
+      heuristicService.reset('alternating-productive');
+
+      let fired = false;
+      for (
+        let round = 0;
+        round < ALTERNATING_PATTERN_CYCLES + 1 && !fired;
+        round++
+      ) {
+        fired = heuristicService.addAndCheck(
+          createToolCallRequestEvent('task_list', TASK_LIST_ARGS),
+        );
+        if (fired) break;
+        fired = heuristicService.recordToolResult(
+          { name: 'task_list', args: TASK_LIST_ARGS },
+          taskListResult(`board state v${round}`),
+        );
+        if (fired) break;
+        fired = heuristicService.addAndCheck(
+          createToolCallRequestEvent('tool_b', { step: 'work' }),
+        );
+      }
+      expect(fired).toBe(false);
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
+    it('still halts an ABAB pattern with a stateful participant on frozen results', () => {
+      // Same alternation, but the board never changes: the recorded
+      // results corroborate the loop, so the halt stands.
+      const heuristicService = new LoopDetectionService(
+        makeConfig(DEFAULT_MAX_TOOL_CALLS_PER_TURN, false, false),
+      );
+      heuristicService.reset('alternating-frozen');
+
+      let fired = false;
+      for (let round = 0; round < 8 && !fired; round++) {
+        fired = heuristicService.addAndCheck(
+          createToolCallRequestEvent('task_list', TASK_LIST_ARGS),
+        );
+        if (fired) break;
+        fired = heuristicService.recordToolResult(
+          { name: 'task_list', args: TASK_LIST_ARGS },
+          taskListResult('frozen board'),
+        );
+        if (fired) break;
+        fired = heuristicService.addAndCheck(
+          createToolCallRequestEvent('tool_b', { step: 'work' }),
+        );
+      }
+      expect(fired).toBe(true);
+      expect(heuristicService.getLastLoopType()).toBe(
+        LoopType.ALTERNATING_TOOL_CALL_PATTERN,
+      );
+    });
+
+    it('still halts ABAB with a stateful participant when no results were recorded (fail-safe)', () => {
+      // A wiring gap must never loosen the guard: without result evidence
+      // the argument-only halt fires exactly as pre-fix.
+      const heuristicService = new LoopDetectionService(
+        makeConfig(DEFAULT_MAX_TOOL_CALLS_PER_TURN, false, false),
+      );
+      heuristicService.reset('alternating-no-evidence');
+
+      let fired = false;
+      for (let round = 0; round < 8 && !fired; round++) {
+        fired = heuristicService.addAndCheck(
+          createToolCallRequestEvent('task_list', TASK_LIST_ARGS),
+        );
+        if (fired) break;
+        fired = heuristicService.addAndCheck(
+          createToolCallRequestEvent('tool_b', { step: 'work' }),
+        );
+      }
+      expect(fired).toBe(true);
+      expect(heuristicService.getLastLoopType()).toBe(
+        LoopType.ALTERNATING_TOOL_CALL_PATTERN,
+      );
+    });
+
     it('treats changed results as progress for action stagnation', () => {
       const heuristicService = new LoopDetectionService(
         makeConfig(DEFAULT_MAX_TOOL_CALLS_PER_TURN, false, false),
