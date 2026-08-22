@@ -8,6 +8,9 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { Config } from '../config/config.js';
 import type { MCPServerConfig } from '../config/config.js';
 import { buildMcpServerInstructionsReminder } from './environmentContext.js';
+import { DiscoveredMCPTool } from '../tools/mcp-tool.js';
+import type { CallableTool } from '@google/genai';
+import { rebuildToolRegistryOnOverride } from '../tools/agent/agent.js';
 
 // Why this exists.
 //
@@ -45,7 +48,7 @@ describe('MCP server instructions and subagent registries', () => {
       debugMode: false,
       model: 'test-model',
       mcpServers,
-    } as ConstructorParameters<typeof Config>[0]);
+    });
     configs.push(config);
     return config;
   }
@@ -70,9 +73,10 @@ describe('MCP server instructions and subagent registries', () => {
   });
 
   it('does not carry instructions across a tool copy from the parent', async () => {
-    // `rebuildToolRegistryOnOverride` copies the parent's discovered tools into
-    // the fresh registry. If a future change copied instructions with them,
-    // the reminder would reappear — this is the assertion that would fail.
+    // Drives `rebuildToolRegistryOnOverride` itself — the function the spawn
+    // path uses — rather than re-enacting its two steps. Re-enacting them
+    // pins `copyDiscoveredToolsFrom`'s contract only, and a change that
+    // propagated instructions inside the rebuild would survive.
     const config = makeConfig({ 'server-a': { command: 'a' } });
     await config.initialize({
       skipGeminiInitialization: true,
@@ -85,19 +89,50 @@ describe('MCP server instructions and subagent registries', () => {
     // discovery is skipped in tests, so an un-stubbed parent reports an empty
     // map and the copy below would be trivially empty either way. (Measured:
     // without this stub a mutation that propagates instructions still passes.)
+    //
+    // Stubbed on the MANAGER, not on the registry getter. Instructions live on
+    // `McpClientManager`; the registry method only delegates. A subagent
+    // registry that SHARED the parent's manager would read the real manager
+    // and never touch a registry-level stub — measured: with the stub one
+    // layer up, `this.mcpClientManager = source.mcpClientManager` in the copy
+    // survives green, while in production that shares live connected clients.
     const parent = config.getToolRegistry();
-    vi.spyOn(parent, 'getMcpServerInstructions').mockReturnValue(
-      new Map([['server-a', 'Prefer concise replies.']]),
-    );
+    vi.spyOn(
+      parent.getMcpClientManager(),
+      'getServerInstructions',
+    ).mockReturnValue(new Map([['server-a', 'Prefer concise replies.']]));
     expect(parent.getMcpServerInstructions().size).toBe(1);
 
-    const subagentRegistry = await config.createToolRegistry(undefined, {
-      skipDiscovery: true,
-      forSubAgent: true,
-    });
-    subagentRegistry.copyDiscoveredToolsFrom(parent);
+    // …and the parent must hold a discovered TOOL, or the copy below iterates
+    // an empty map and its body never runs. A change that propagated a copied
+    // tool's server instructions — a shape closer to this method's tools-only
+    // design than a whole-map copy — would then copy nothing and leave the
+    // assertions green, blessing the regression this file exists to catch.
+    parent.registerTool(
+      new DiscoveredMCPTool(
+        {} as CallableTool,
+        'server-a',
+        'do_thing',
+        'A discovered tool from server-a.',
+        { type: 'object', properties: {} },
+      ),
+    );
+
+    const override = Object.create(config) as typeof config;
+    await rebuildToolRegistryOnOverride(override, config);
+    const subagentRegistry = override.getToolRegistry();
+
+    // The rebuild really produced a different registry that took the copy.
+    expect(subagentRegistry).not.toBe(parent);
+    expect(subagentRegistry.getTool('mcp__server-a__do_thing')).toBeDefined();
 
     expect(subagentRegistry.getMcpServerInstructions().size).toBe(0);
     expect(buildMcpServerInstructionsReminder(subagentRegistry)).toBeNull();
+    // The structural half: sharing the manager is the other way instructions
+    // could arrive, and it would defeat any assertion phrased on contents
+    // alone once the parent's manager holds real clients.
+    expect(subagentRegistry.getMcpClientManager()).not.toBe(
+      parent.getMcpClientManager(),
+    );
   });
 });
