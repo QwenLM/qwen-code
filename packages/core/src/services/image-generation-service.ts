@@ -21,6 +21,10 @@ const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 const PNG_SIGNATURE = Buffer.from([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
 ]);
+const JPEG_SIGNATURE = Buffer.from([0xff, 0xd8, 0xff]);
+const MAX_REFERENCE_IMAGE_BYTES = 10 * 1024 * 1024;
+const MINIMAX_IMAGE_GENERATION_PATH = '/v1/image_generation';
+const MINIMAX_IMAGE_GENERATION_SUFFIX = '/image_generation';
 
 class ResponseSizeLimitError extends Error {}
 
@@ -30,6 +34,7 @@ export interface ImageGenerationRequest {
   model: string;
   prompt: string;
   size?: string;
+  referenceImage?: string;
   signal: AbortSignal;
   fetchFn?: typeof fetch;
 }
@@ -75,6 +80,14 @@ export async function generateImage(
   if (!baseUrl) {
     throw new Error(
       'Image generation baseUrl must be a valid HTTPS URL without credentials, query, or fragment.',
+    );
+  }
+  if (isMiniMaxImageGenerationBaseUrl(baseUrl)) {
+    return generateMiniMaxImage({ ...request, baseUrl, fetchFn });
+  }
+  if (request.referenceImage) {
+    throw new Error(
+      'Reference images are not supported by the configured image endpoint.',
     );
   }
   const generationUrl = baseUrl.endsWith(
@@ -146,6 +159,91 @@ export async function generateImage(
   };
 }
 
+async function generateMiniMaxImage(
+  request: ImageGenerationRequest & { baseUrl: string; fetchFn: typeof fetch },
+): Promise<GeneratedImage> {
+  const generationUrl = request.baseUrl.endsWith(MINIMAX_IMAGE_GENERATION_PATH)
+    ? request.baseUrl
+    : `${request.baseUrl}${MINIMAX_IMAGE_GENERATION_SUFFIX}`;
+  const body: Record<string, unknown> = {
+    model: request.model,
+    prompt: request.prompt,
+    n: 1,
+    prompt_optimizer: true,
+    response_format: 'url',
+  };
+  const dimensions = parseImageSize(request.size);
+  if (dimensions) {
+    body['width'] = dimensions.width;
+    body['height'] = dimensions.height;
+  }
+  if (request.referenceImage) {
+    body['subject_reference'] = [
+      {
+        type: 'character',
+        image_file: normalizeReferenceImage(request.referenceImage),
+      },
+    ];
+  }
+
+  let response: Response;
+  try {
+    response = await request.fetchFn(generationUrl, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${request.apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+      redirect: 'error',
+      signal: combineWithTimeout(request.signal, GENERATION_TIMEOUT_MS),
+    });
+  } catch (error) {
+    throw new Error(
+      `Image generation request failed: ${getErrorMessage(error)}`,
+      { cause: error },
+    );
+  }
+
+  if (!response.ok) {
+    let payload: unknown = {};
+    try {
+      payload = await readJsonResponse(response, MAX_API_RESPONSE_BYTES);
+    } catch {
+      // non-JSON error body — formatImageGenerationError handles missing fields
+    }
+    throw new Error(formatImageGenerationError(response.status, payload));
+  }
+  const payload = await readJsonResponse(response, MAX_API_RESPONSE_BYTES);
+  const baseResponse = isRecord(payload) ? payload['base_resp'] : undefined;
+  const statusCode = readStringOrNumber(baseResponse, 'status_code');
+  if (statusCode && statusCode !== '0') {
+    throw new Error(formatImageGenerationError(response.status, payload));
+  }
+  const image = findMiniMaxGeneratedImage(payload);
+  if (!image) {
+    throw new Error('Image generation response did not contain an image URL.');
+  }
+
+  const requestId =
+    readString(payload, 'id', 'request_id', 'requestId') ??
+    readString(baseResponse, 'request_id');
+  if (image.kind === 'base64') {
+    return {
+      bytes: decodePngBase64Image(image.value),
+      mimeType: 'image/png',
+      ...(requestId ? { requestId } : {}),
+    };
+  }
+
+  const bytes = await downloadPng(image.value, request.fetchFn, request.signal);
+  return {
+    bytes,
+    mimeType: 'image/png',
+    ...(requestId ? { requestId } : {}),
+  };
+}
+
 async function readJsonResponse(
   response: Response,
   maxBytes: number,
@@ -201,8 +299,12 @@ async function readBoundedBody(
 }
 
 function formatImageGenerationError(status: number, payload: unknown): string {
-  const code = readString(payload, 'code');
-  const message = readString(payload, 'message');
+  const baseResponse = isRecord(payload) ? payload['base_resp'] : undefined;
+  const code =
+    readStringOrNumber(payload, 'code') ??
+    readStringOrNumber(baseResponse, 'status_code');
+  const message =
+    readString(payload, 'message') ?? readString(baseResponse, 'status_msg');
   const suffix = [code, message].filter(Boolean).join(': ');
 
   if (status === 429 || /throttl|rate.?limit/i.test(`${code} ${message}`)) {
@@ -218,7 +320,9 @@ function formatImageGenerationError(status: number, payload: unknown): string {
   if (/DataInspectionFailed/i.test(code ?? '')) {
     return `The image generation endpoint blocked the prompt during content moderation${message ? `: ${message}` : '.'}`;
   }
-  return `Image generation failed with HTTP ${status}${suffix ? ` (${suffix})` : ''}.`;
+  const statusText =
+    status >= 200 && status < 300 ? '' : ` with HTTP ${status}`;
+  return `Image generation failed${statusText}${suffix ? ` (${suffix})` : ''}.`;
 }
 
 function findGeneratedImageUrl(payload: unknown): string | undefined {
@@ -239,6 +343,118 @@ function findGeneratedImageUrl(payload: unknown): string | undefined {
     }
   }
   return undefined;
+}
+
+function isMiniMaxImageGenerationBaseUrl(baseUrl: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(baseUrl);
+  } catch {
+    return false;
+  }
+  const normalizedPath = parsed.pathname.replace(/\/+$/, '');
+  return (
+    (parsed.hostname === 'api.minimax.io' ||
+      parsed.hostname === 'api.minimaxi.com') &&
+    (normalizedPath === '/v1' ||
+      normalizedPath === MINIMAX_IMAGE_GENERATION_PATH)
+  );
+}
+
+function parseImageSize(
+  value: string | undefined,
+): { width: number; height: number } | undefined {
+  const match = value?.trim().match(/^(\d+)\s*[*xX]\s*(\d+)$/);
+  if (!match) return undefined;
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height)) {
+    return undefined;
+  }
+  return { width, height };
+}
+
+function normalizeReferenceImage(value: string): string {
+  const referenceImage = value.trim();
+  if (/^data:/i.test(referenceImage)) {
+    const match = /^data:image\/(?:png|jpe?g);base64,([a-z0-9+/=\s]+)$/i.exec(
+      referenceImage,
+    );
+    if (!match) {
+      throw new Error(
+        'Reference image data must be a base64-encoded PNG or JPEG data URL.',
+      );
+    }
+    const bytes = Buffer.from(match[1].replace(/\s/g, ''), 'base64');
+    const validSignature =
+      bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE) ||
+      bytes.subarray(0, JPEG_SIGNATURE.length).equals(JPEG_SIGNATURE);
+    if (
+      !validSignature ||
+      bytes.length === 0 ||
+      bytes.length >= MAX_REFERENCE_IMAGE_BYTES
+    ) {
+      throw new Error(
+        'Reference image data must be a valid PNG or JPEG smaller than 10 MB.',
+      );
+    }
+    return referenceImage;
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(referenceImage);
+  } catch {
+    throw new Error(
+      'Reference image must be a public HTTPS URL or PNG/JPEG data URL.',
+    );
+  }
+  if (
+    parsed.protocol !== 'https:' ||
+    parsed.username ||
+    parsed.password ||
+    isPrivateHost(parsed.toString())
+  ) {
+    throw new Error(
+      'Reference image must be a public HTTPS URL or PNG/JPEG data URL.',
+    );
+  }
+  return parsed.toString();
+}
+
+function findMiniMaxGeneratedImage(
+  payload: unknown,
+): { kind: 'url' | 'base64'; value: string } | undefined {
+  if (!isRecord(payload)) return undefined;
+  const data = payload['data'];
+  if (!isRecord(data)) return undefined;
+  const imageUrls = data['image_urls'];
+  if (!Array.isArray(imageUrls)) return undefined;
+
+  for (const candidate of imageUrls) {
+    if (typeof candidate !== 'string' || !candidate.trim()) continue;
+    const value = candidate.trim();
+    if (/^https:\/\//i.test(value)) {
+      return { kind: 'url', value };
+    }
+    return { kind: 'base64', value };
+  }
+  return undefined;
+}
+
+function decodePngBase64Image(value: string): Buffer {
+  const match = value.match(/^data:image\/png;base64,(.+)$/i);
+  const base64 = (match?.[1] ?? value).trim();
+  const bytes = Buffer.from(base64, 'base64');
+  if (
+    bytes.length < PNG_SIGNATURE.length ||
+    !bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)
+  ) {
+    throw new Error(
+      'Image generation response did not contain a valid PNG image.',
+    );
+  }
+  return bytes;
 }
 
 async function downloadPng(
@@ -374,6 +590,23 @@ function readString(value: unknown, ...keys: string[]): string | undefined {
   if (!isRecord(value)) return undefined;
   for (const key of keys) {
     const candidate = value[key];
+    if (typeof candidate === 'string' && candidate.trim()) {
+      return candidate.trim();
+    }
+  }
+  return undefined;
+}
+
+function readStringOrNumber(
+  value: unknown,
+  ...keys: string[]
+): string | undefined {
+  if (!isRecord(value)) return undefined;
+  for (const key of keys) {
+    const candidate = value[key];
+    if (typeof candidate === 'number' && Number.isFinite(candidate)) {
+      return String(candidate);
+    }
     if (typeof candidate === 'string' && candidate.trim()) {
       return candidate.trim();
     }
