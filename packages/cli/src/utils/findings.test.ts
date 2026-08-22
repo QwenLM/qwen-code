@@ -2023,4 +2023,30 @@ describe('validateFindings — the canonical artifact round-trips', () => {
     expect(f.witness).toBe('BASE: 2 calls / PR: 1 call — probe flipped');
     expect(validateFindings([{ ...base }])[0].witness).toBeUndefined();
   });
+
+  it('keeps fixWitness, and keeps it distinct from witness', () => {
+    // The acceptance criterion the finding hands to whoever fixes it — the
+    // reviewer-side half of #9578, and the field Step 7's comment body reads
+    // back. It is NOT the reviewer's own evidence: a round that collapsed the
+    // two would post the proof of the defect where the test to write belongs,
+    // or demand a test as the price of confirming a bug.
+    const [f] = validateFindings([
+      {
+        ...base,
+        witness: 'BASE: 2 calls / PR: 1 call — probe flipped',
+        fixWitness:
+          'src/retry.test.ts — asserts the guard rejects a negative delay; ' +
+          'reds with the guard removed',
+      },
+    ]);
+    expect(f.witness).toBe('BASE: 2 calls / PR: 1 call — probe flipped');
+    expect(f.fixWitness).toContain('reds with the guard removed');
+    // snake_case is accepted for the same reason every sibling field accepts
+    // it, and absence stays absence — `N/A` is a value a finding writes, not
+    // a default this validator invents.
+    expect(
+      validateFindings([{ ...base, fix_witness: 'N/A' }])[0].fixWitness,
+    ).toBe('N/A');
+    expect(validateFindings([{ ...base }])[0].fixWitness).toBeUndefined();
+  });
 });

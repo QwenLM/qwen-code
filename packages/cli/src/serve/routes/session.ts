@@ -13,7 +13,6 @@ import {
   GROUP_COLOR_OPTIONS,
   GitWorktreeService,
   SessionOrganizationError,
-  SessionIdCaseConflictError,
   SESSION_TRANSCRIPT_MAX_LIMIT,
   SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES,
   SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
@@ -26,6 +25,9 @@ import {
   writeWorktreeSessionMarker,
   writeWorktreeSession,
   readWorktreeSession,
+  readSessionPrs,
+  upsertSessionPr,
+  SESSION_PR_URL_MAX_LENGTH,
   type ApprovalMode,
   type SessionGroupColor,
   type SessionGroupPresetColor,
@@ -43,7 +45,7 @@ import {
   isReservedLiveSessionSource,
   isReservedStandaloneSessionSource,
   readLoadableLiveConversationMetadata,
-} from '../conversations/session-source.js';
+} from '../../runtime/live-session-source.js';
 import type { ConversationRuntimeActivityGate } from '../conversations/conversation-runtime-activity.js';
 import { ConversationRuntimeOwnershipError } from '../conversations/conversation-runtime-errors.js';
 import express, {
@@ -54,7 +56,11 @@ import express, {
   type Response,
 } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
-import { parseCallerSuppliedSessionId } from '../../config/session-id.js';
+import {
+  isValidSessionId,
+  normalizeSessionIdForLookup,
+  parseCallerSuppliedSessionId,
+} from '../../config/session-id.js';
 import { isChannelDeliveryError } from '../../runtime/channel-delivery-ipc.js';
 import { parseChannelDelivery } from '../../runtime/channel-delivery.js';
 import {
@@ -94,9 +100,11 @@ import {
   archiveDaemonSessions,
   assertSessionArchived,
   assertSessionLoadable,
+  assertSessionRestorable,
   deleteDaemonSessionIfOrphan,
   deleteDaemonSessions,
   logSessionArchiveWarning,
+  resolveSessionIdForRestore,
   type SessionArchiveCoordinator,
   unarchiveDaemonSessions,
 } from '../server/session-archive.js';
@@ -1158,8 +1166,11 @@ export function registerSessionRoutes(
     const service = createWorkspaceRuntimeSessionService(runtime);
     for (const sessionId of sessionIds) {
       const location = await service.getSessionLocation(sessionId);
-      if (location === 'conflict') throw new SessionConflictError(sessionId);
-      if (
+      if (location === 'conflict') {
+        if (archiveState !== 'active') {
+          throw new SessionConflictError(sessionId);
+        }
+      } else if (
         location === undefined ||
         (archiveState !== 'any' && location !== archiveState)
       ) {
@@ -1314,6 +1325,7 @@ export function registerSessionRoutes(
                 runtime.workspaceCwd,
                 sessionId,
                 runtime.sessionRuntimeBaseDir,
+                { allowActiveConflict: true },
               );
             }
             assertRuntimeGenerationOpen?.();
@@ -1642,11 +1654,13 @@ export function registerSessionRoutes(
   ): Promise<WorkspaceRuntime | undefined> => {
     const activeInRuntime = async (
       runtime: WorkspaceRuntime,
+      allowActiveConflict = false,
     ): Promise<boolean> => {
       const location = await assertSessionLoadable(
         runtime.workspaceCwd,
         sessionId,
         runtime.sessionRuntimeBaseDir,
+        { allowActiveConflict },
       );
       if (location !== 'active') return false;
       if (!isInternalWorkspaceRuntime(runtime)) return true;
@@ -1738,7 +1752,7 @@ export function registerSessionRoutes(
       const runtime = workspaceRegistry.primary;
       if (loadError === undefined) return runtime;
       try {
-        if (await activeInRuntime(runtime)) return runtime;
+        if (await activeInRuntime(runtime, true)) return runtime;
       } catch (err) {
         recordLoadError(err);
       }
@@ -1784,7 +1798,7 @@ export function registerSessionRoutes(
       }
       let active = false;
       try {
-        active = await activeInRuntime(liveOwner.runtime);
+        active = await activeInRuntime(liveOwner.runtime, true);
       } catch (err) {
         recordLoadError(err);
       }
@@ -1796,6 +1810,34 @@ export function registerSessionRoutes(
         return undefined;
       }
       if (active) {
+        if (isInternalWorkspaceRuntime(liveOwner.runtime)) {
+          const ordinaryCollisions: WorkspaceRuntime[] = [];
+          for (const ordinaryRuntime of workspaceRegistry.list()) {
+            const ordinaryService =
+              createWorkspaceRuntimeSessionService(ordinaryRuntime);
+            if (await ordinaryService.sessionExistsInAnyState(sessionId)) {
+              ordinaryCollisions.push(ordinaryRuntime);
+            }
+          }
+          if (
+            internalEntry &&
+            internalGeneration &&
+            !assertCurrentInternalGeneration(
+              internalEntry,
+              internalGeneration,
+              res,
+            )
+          ) {
+            return undefined;
+          }
+          if (ordinaryCollisions.length > 0) {
+            sendAmbiguousSessionOwner(res, route, sessionId, [
+              liveOwner.runtime,
+              ...ordinaryCollisions,
+            ]);
+            return undefined;
+          }
+        }
         setDaemonTelemetryWorkspace(res, liveOwner.runtime.workspaceCwd);
         return liveOwner.runtime;
       }
@@ -1807,7 +1849,7 @@ export function registerSessionRoutes(
       const runtime = requirePrimarySessionRuntime(workspaceRegistry, res);
       if (!runtime) return undefined;
       try {
-        if (await activeInRuntime(runtime)) {
+        if (await activeInRuntime(runtime, true)) {
           return runtime;
         }
       } catch (err) {
@@ -2093,6 +2135,48 @@ export function registerSessionRoutes(
       return undefined;
     }
     return [...new Set(sessionIds as string[])];
+  };
+
+  // Mirrors the bridge's displayName control-character rule (ESLint forbids
+  // control-char regexes).
+  const hasControlCharacter = (value: string): boolean =>
+    Array.from(value).some((character) => {
+      const code = character.charCodeAt(0);
+      return code <= 31 || code === 127;
+    });
+
+  // Tri-state: absent → undefined (skip); invalid → null (400 already sent);
+  // valid → the PR binding to apply.
+  const parseSessionPrBody = (
+    req: Request,
+    res: Response,
+  ): { number: number; url: string } | null | undefined => {
+    const raw: unknown = safeBody(req)['pr'];
+    if (raw === undefined) return undefined;
+    const candidate = raw as Record<string, unknown> | null;
+    const number = candidate?.['number'];
+    const url = candidate?.['url'];
+    if (
+      candidate === null ||
+      typeof candidate !== 'object' ||
+      typeof number !== 'number' ||
+      !Number.isInteger(number) ||
+      number <= 0 ||
+      typeof url !== 'string' ||
+      url.length > SESSION_PR_URL_MAX_LENGTH ||
+      !/^https?:\/\//i.test(url) ||
+      // The url lands in the bridge's stderr audit line — control
+      // characters would let a caller forge log lines.
+      hasControlCharacter(url)
+    ) {
+      res.status(400).json({
+        error: `\`pr\` must be an object with a positive integer \`number\` and an http(s) \`url\` of at most ${SESSION_PR_URL_MAX_LENGTH} characters, without control characters`,
+        code: 'invalid_metadata',
+        field: 'pr',
+      });
+      return null;
+    }
+    return { number, url };
   };
 
   const serializeSessionErrors = (
@@ -3113,49 +3197,24 @@ export function registerSessionRoutes(
         // The coordinator canonicalizes lock keys (every case variant of a
         // caller id contends on one key), so the request spelling alone
         // covers the raw-spelled batch delete/archive/unarchive locks.
-        const guardSessionService =
-          createWorkspaceRuntimeSessionService(runtime);
-        try {
-          await guardSessionService.findSessionIdIgnoringCase(sessionId);
-        } catch (error) {
-          if (
-            error instanceof SessionIdCaseConflictError &&
-            (await guardSessionService.getSessionLocation(
-              error.candidateSessionId ?? sessionId,
-            )) === 'conflict'
-          ) {
-            throw new SessionConflictError(sessionId);
-          }
-          throw error;
-        }
         const session = await archiveCoordinator.runSharedMany(
           [sessionId],
           async () => {
             const sessionService =
               createWorkspaceRuntimeSessionService(runtime);
-            let persistedSessionId: string | undefined;
-            try {
-              persistedSessionId =
-                await sessionService.findSessionIdIgnoringCase(sessionId);
-            } catch (error) {
-              if (
-                error instanceof SessionIdCaseConflictError &&
-                (await sessionService.getSessionLocation(
-                  error.candidateSessionId ?? sessionId,
-                )) === 'conflict'
-              ) {
-                throw new SessionConflictError(sessionId);
-              }
-              throw error;
-            }
+            const persistedSessionId = await resolveSessionIdForRestore(
+              sessionService,
+              sessionId,
+            );
             if (persistedSessionId) {
               restoredStorageSessionId = persistedSessionId;
             } else if (isInternalWorkspaceRuntime(runtime)) {
               throw new SessionNotFoundError(sessionId);
             }
-            const location = await assertSessionLoadable(
+            const location = await assertSessionRestorable(
               workspaceCwd,
               restoredStorageSessionId,
+              sessionId,
               runtime.sessionRuntimeBaseDir,
             );
             if (location === undefined && isInternalWorkspaceRuntime(runtime)) {
@@ -3999,6 +4058,7 @@ export function registerSessionRoutes(
                 runtime.workspaceCwd,
                 sessionId,
                 runtime.sessionRuntimeBaseDir,
+                { allowActiveConflict: true },
               );
             }
             const codec = getTranscriptCursorCodec(runtime);
@@ -5230,9 +5290,25 @@ export function registerSessionRoutes(
   app.patch(
     '/session/:id/metadata',
     mutate({ strict: true }),
+    // Gate BEFORE runtime resolution (withOwnerMutableSession): a
+    // traversal id must be rejected identically on single- and
+    // multi-workspace daemons — runtime resolution would 404 it first on a
+    // multi-entry registry, making the error contract
+    // configuration-dependent.
+    (req, res, next) => {
+      const raw = req.params['id'];
+      if (raw && !isValidSessionId(normalizeSessionIdForLookup(raw))) {
+        res.status(400).json({
+          error: '`sessionId` must be a valid session id',
+          code: 'invalid_session_id',
+        });
+        return;
+      }
+      next();
+    },
     withOwnerMutableSession(
       'PATCH /session/:id/metadata',
-      (req, res, sessionId, runtime) => {
+      async (req, res, sessionId, runtime) => {
         const body = safeBody(req);
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
@@ -5261,12 +5337,37 @@ export function registerSessionRoutes(
           });
           return;
         }
+        const pr = parseSessionPrBody(req, res);
+        if (pr === null) return;
         const displayName =
           typeof rawDisplayName === 'string'
             ? rawDisplayName.slice(0, 256)
             : undefined;
         let effective: ReturnType<AcpSessionBridge['updateSessionMetadata']>;
         try {
+          const service = createWorkspaceRuntimeSessionService(runtime);
+          // Bridge entries are re-created without prs on daemon restart,
+          // close/reload, and archive/restore. Hydrate the persisted
+          // binding history before the mutation so the
+          // `session_metadata_updated` event the bridge publishes carries
+          // the full list, not just this daemon lifetime's bindings. The
+          // read is best-effort: readSessionPrs rethrows non-ENOENT I/O
+          // errors (EISDIR/EACCES/EIO), and an unreadable sidecar must
+          // degrade the event's history, not block a pr-less rename.
+          let hydratedPrs: Awaited<ReturnType<typeof readSessionPrs>>;
+          try {
+            hydratedPrs = await readSessionPrs(
+              service.getPrSessionPathForArchiveState(sessionId, 'active'),
+            );
+          } catch {
+            hydratedPrs = null;
+          }
+          if (hydratedPrs && hydratedPrs.length > 0) {
+            runtime.bridge.seedSessionPrs?.(sessionId, hydratedPrs);
+          }
+          // Bridge first: it resolves session liveness, client trust, and
+          // metadata content. Persisting the sidecar only after it succeeds
+          // keeps a rejected request from leaving a durable binding behind.
           effective = runtime.bridge.updateSessionMetadata(
             sessionId,
             {
@@ -5274,9 +5375,19 @@ export function registerSessionRoutes(
               ...(rawTitleSource !== undefined
                 ? { titleSource: rawTitleSource }
                 : {}),
+              ...(pr ? { pr } : {}),
             },
             clientId !== undefined ? { clientId } : undefined,
           );
+          if (pr) {
+            const persistedPrs = (
+              await upsertSessionPr(
+                service.getPrSessionPathForArchiveState(sessionId, 'active'),
+                pr,
+              )
+            ).map(({ number, url }) => ({ number, url }));
+            effective = { ...effective, prs: persistedPrs };
+          }
         } finally {
           invalidateSessionLists(runtime, ['active']);
         }
@@ -5294,12 +5405,22 @@ export function registerSessionRoutes(
       if (!runtime) return;
       const sessionId = requireSessionId(req, res);
       if (sessionId === null) return;
+      // The session id is embedded in the sidecar filesystem path; reject
+      // anything that is not a session id before it can reach the chats
+      // directory.
+      if (!isValidSessionId(sessionId)) {
+        res.status(400).json({
+          error: '`sessionId` must be a valid session id',
+          code: 'invalid_session_id',
+        });
+        return;
+      }
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) return;
       const body = safeBody(req);
       const rawDisplayName = body['displayName'];
       const rawTitleSource = body['titleSource'];
-      if (typeof rawDisplayName !== 'string') {
+      if (rawDisplayName !== undefined && typeof rawDisplayName !== 'string') {
         res.status(400).json({
           error: '`displayName` must be a string',
           code: 'invalid_metadata',
@@ -5319,26 +5440,41 @@ export function registerSessionRoutes(
         });
         return;
       }
+      const pr = parseSessionPrBody(req, res);
+      if (pr === null) return;
+      if (rawDisplayName === undefined && pr === undefined) {
+        res.status(400).json({
+          error: 'at least one of `displayName` or `pr` is required',
+          code: 'invalid_metadata',
+          field: 'displayName',
+        });
+        return;
+      }
       try {
-        const displayName = rawDisplayName.slice(0, 256);
-        if (displayName.trim() === '') {
-          // An empty name would append an empty custom_title record to
-          // persisted sessions, which the title readers disagree on.
-          throw new InvalidSessionMetadataError(
-            'displayName',
-            'must not be empty',
-          );
-        }
-        if (
-          Array.from(displayName).some((character) => {
-            const code = character.charCodeAt(0);
-            return code <= 31 || code === 127;
-          })
-        ) {
-          throw new InvalidSessionMetadataError(
-            'displayName',
-            'must not contain control characters',
-          );
+        const displayName =
+          typeof rawDisplayName === 'string'
+            ? rawDisplayName.slice(0, 256)
+            : undefined;
+        if (displayName !== undefined) {
+          if (displayName.trim() === '') {
+            // An empty name would append an empty custom_title record to
+            // persisted sessions, which the title readers disagree on.
+            throw new InvalidSessionMetadataError(
+              'displayName',
+              'must not be empty',
+            );
+          }
+          if (
+            Array.from(displayName).some((character) => {
+              const code = character.charCodeAt(0);
+              return code <= 31 || code === 127;
+            })
+          ) {
+            throw new InvalidSessionMetadataError(
+              'displayName',
+              'must not contain control characters',
+            );
+          }
         }
         await archiveCoordinator.runExclusiveMany([sessionId], async () => {
           const assertRuntimeGenerationOpen =
@@ -5376,8 +5512,38 @@ export function registerSessionRoutes(
             let effective: {
               displayName?: string;
               titleSource?: 'manual' | 'auto';
+              prs?: Array<{ number: number; url: string }>;
             };
+            const service = createWorkspaceRuntimeSessionService(runtime);
             try {
+              // Bridge entries are re-created without prs on daemon
+              // restart, close/reload, and archive/restore. Hydrate the
+              // persisted binding history before the mutation so the
+              // `session_metadata_updated` event the bridge publishes
+              // carries the full list, not just this daemon lifetime's
+              // bindings. The read is best-effort: readSessionPrs rethrows
+              // non-ENOENT I/O errors (EISDIR/EACCES/EIO), and an
+              // unreadable sidecar must degrade the event's history, not
+              // block a pr-less rename.
+              let hydratedPrs: Awaited<ReturnType<typeof readSessionPrs>>;
+              try {
+                hydratedPrs = await readSessionPrs(
+                  service.getPrSessionPathForArchiveState(sessionId, 'active'),
+                );
+              } catch {
+                hydratedPrs = null;
+              }
+              if (hydratedPrs && hydratedPrs.length > 0) {
+                runtime.bridge.seedSessionPrs?.(sessionId, hydratedPrs);
+              }
+              // Bridge first: it resolves client trust and metadata
+              // content, and reports non-live sessions. Persisting the
+              // sidecar only after it succeeds keeps a rejected request
+              // from leaving a durable binding behind — and a live
+              // session's sidecar always lives in the active chats dir, so
+              // 'active' is known-correct here. Non-live sessions are
+              // handled by the fallback below, which persists at the
+              // located archive state.
               effective = runtime.bridge.updateSessionMetadata(
                 sessionId,
                 {
@@ -5385,55 +5551,94 @@ export function registerSessionRoutes(
                   ...(rawTitleSource !== undefined
                     ? { titleSource: rawTitleSource }
                     : {}),
+                  ...(pr ? { pr } : {}),
                 },
                 clientId !== undefined ? { clientId } : undefined,
               );
               assertRuntimeGenerationOpen?.();
+              if (pr) {
+                const persistedPrs = (
+                  await upsertSessionPr(
+                    service.getPrSessionPathForArchiveState(
+                      sessionId,
+                      'active',
+                    ),
+                    pr,
+                  )
+                ).map(({ number, url }) => ({ number, url }));
+                assertRuntimeGenerationOpen?.();
+                effective = { ...effective, prs: persistedPrs };
+              }
             } catch (err) {
               if (!(err instanceof SessionNotFoundError)) throw err;
-              const service = createWorkspaceRuntimeSessionService(runtime);
               const location = await service.getSessionLocation(sessionId);
               assertRuntimeGenerationOpen?.();
               if (location === 'conflict') {
                 throw new SessionConflictError(sessionId);
               }
-              // Mirror the live path's same-text downgrade guard in
-              // `bridge.updateSessionMetadata`: an `auto` re-rename whose
-              // text equals the persisted manual title must not append a
-              // downgrade record — the /clear carry gate would then drop the
-              // user's manual name (the #8977 regression itself). Skip the
-              // write and report the existing fields, as the live path does.
-              const persistedTitle = location
-                ? service.getSessionTitleInfo(sessionId, location)
-                : {};
-              if (
-                rawTitleSource === 'auto' &&
-                persistedTitle.source === 'manual' &&
-                persistedTitle.title === displayName
-              ) {
-                effective = { displayName, titleSource: 'manual' };
-              } else {
-                const renamed = location
-                  ? await service.renameSession(
-                      sessionId,
-                      displayName,
-                      rawTitleSource ?? 'manual',
-                      location,
-                    )
-                  : false;
+              if (!location) {
+                throw new SessionNotFoundError(sessionId);
+              }
+              effective = {};
+              // Persist the PR sidecar BEFORE the rename: the catalog bump
+              // below only runs when every write succeeds, so the write most
+              // likely to fail (the newer sidecar path) must run first — a
+              // failed sidecar write may not strand an already-persisted
+              // rename that the error response never announces.
+              let persistedWrite = false;
+              if (pr) {
+                const persisted = await upsertSessionPr(
+                  service.getPrSessionPathForArchiveState(sessionId, location),
+                  pr,
+                );
                 assertRuntimeGenerationOpen?.();
-                if (!renamed) {
-                  throw new SessionNotFoundError(sessionId);
+                effective.prs = persisted.map(({ number, url }) => ({
+                  number,
+                  url,
+                }));
+                persistedWrite = true;
+              }
+              if (displayName !== undefined) {
+                // Mirror the live path's same-text downgrade guard in
+                // `bridge.updateSessionMetadata`: an `auto` re-rename whose
+                // text equals the persisted manual title must not append a
+                // downgrade record — the /clear carry gate would then drop
+                // the user's manual name (the #8977 regression itself).
+                // Skip the write and report the existing fields, as the
+                // live path does.
+                const persistedTitle = service.getSessionTitleInfo(
+                  sessionId,
+                  location,
+                );
+                if (
+                  rawTitleSource === 'auto' &&
+                  persistedTitle.source === 'manual' &&
+                  persistedTitle.title === displayName
+                ) {
+                  effective.displayName = displayName;
+                  effective.titleSource = 'manual';
+                } else {
+                  const renamed = await service.renameSession(
+                    sessionId,
+                    displayName,
+                    rawTitleSource ?? 'manual',
+                    location,
+                  );
+                  assertRuntimeGenerationOpen?.();
+                  if (!renamed) {
+                    throw new SessionNotFoundError(sessionId);
+                  }
+                  effective.displayName = displayName || undefined;
+                  effective.titleSource = rawTitleSource ?? 'manual';
+                  persistedWrite = true;
                 }
-                // The persisted rename appends a custom_title record the next
-                // catalog scan serves, so this fallback must advance the same
-                // catalog revision the live rename marks — otherwise
-                // version-watching clients keep the stale name.
+              }
+              if (persistedWrite) {
+                // The persisted mutation is picked up by the next catalog
+                // scan, so this fallback must advance the same catalog
+                // revision the live update marks — otherwise version-watching
+                // clients keep the stale metadata.
                 runtime.bridge.markSessionCatalogChanged();
-                effective = {
-                  displayName: displayName || undefined,
-                  titleSource: rawTitleSource ?? 'manual',
-                };
               }
             }
             invalidateSessionLists(runtime, ['active', 'archived']);

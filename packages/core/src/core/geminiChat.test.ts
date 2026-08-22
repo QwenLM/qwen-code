@@ -12488,6 +12488,31 @@ describe('GeminiChat', async () => {
       );
     });
 
+    it('preserves selected call ids instead of synthesizing a response', () => {
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'ask' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call_auq',
+                name: 'ask_user_question',
+                args: {},
+              },
+            },
+          ],
+        },
+      ]);
+
+      const result = chat.repairOrphanedToolUseTurns(undefined, {
+        preserveCallIds: new Set(['call_auq']),
+      });
+
+      expect(result.injected).toEqual([]);
+      expect(chat.getHistory()).toHaveLength(2);
+    });
+
     it('hoists synthetic functionResponse to the front of an existing user turn (Race A)', () => {
       // Ctrl+Y race: the user retried while the in-flight tool was still
       // running. `stripOrphanedUserEntriesFromHistory` leaves the

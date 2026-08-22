@@ -47,6 +47,11 @@ import {
 } from './session-artifact-persistence.js';
 import { SessionOrganizationService } from './session-organization-service.js';
 import {
+  mergeSessionPrLists,
+  readSessionPrs,
+  writeSessionPrs,
+} from './session-pr-service.js';
+import {
   SessionTranscriptReader,
   SessionTranscriptTooLargeError,
   type SelectiveSessionRestoreOptions,
@@ -560,6 +565,13 @@ export class SessionService {
     );
   }
 
+  private getPrSessionPathForState(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): string {
+    return path.join(this.getChatsDirForState(state), `${sessionId}.pr.json`);
+  }
+
   private async sessionBelongsToCurrentProject(
     sessionId: string,
     recordCwd: string,
@@ -647,6 +659,18 @@ export class SessionService {
     state: SessionArchiveState,
   ): string {
     return this.getWorktreeSessionPathForState(sessionId, state);
+  }
+
+  /**
+   * Returns the absolute path to the sidecar JSON file that stores the
+   * session's GitHub PR binding for the given session id. The file may not
+   * exist yet — consumers must handle ENOENT as "no PR binding".
+   */
+  getPrSessionPathForArchiveState(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): string {
+    return this.getPrSessionPathForState(sessionId, state);
   }
 
   private async readProjectSessionHead(
@@ -799,7 +823,7 @@ export class SessionService {
     for (const state of ['active', 'archived'] as const) {
       let fileNames: string[];
       try {
-        fileNames = fs.readdirSync(this.getChatsDirForState(state));
+        fileNames = await fs.promises.readdir(this.getChatsDirForState(state));
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
         throw error;
@@ -937,6 +961,15 @@ export class SessionService {
     }
   }
 
+  private removePrSidecars(sessionId: string): void {
+    for (const state of ['active', 'archived'] as const) {
+      const sidecar = this.getPrSessionPathForState(sessionId, state);
+      if (fs.existsSync(sidecar)) {
+        this.removeFileIfExists(sidecar);
+      }
+    }
+  }
+
   private removePromptLedgers(sessionId: string): void {
     for (const state of ['active', 'archived'] as const) {
       const ledger = this.getPromptLedgerPathForState(sessionId, state);
@@ -1022,6 +1055,37 @@ export class SessionService {
         ? sourceContents
         : `${sourceContents}\n`;
       fs.appendFileSync(destinationPath, `\n${payload}`, 'utf8');
+    }
+    fs.unlinkSync(sourcePath);
+  }
+
+  /**
+   * Move a PR sidecar across archive states. Same policy as
+   * {@link moveLedgerSidecar}: the sidecar is the append-only binding
+   * history, so when both halves of a split pair exist (a crash between
+   * the transcript rename and the sidecar move, or an orphaned write)
+   * they are merged by PR number instead of wedging the pair forever —
+   * no transition would ever reunite them otherwise. Throws propagate to
+   * the caller, which owns the warn-only policy.
+   */
+  private async movePrSidecar(
+    sourcePath: string,
+    destinationPath: string,
+  ): Promise<void> {
+    if (!fs.existsSync(sourcePath)) {
+      return;
+    }
+    fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
+    if (!fs.existsSync(destinationPath)) {
+      fs.renameSync(sourcePath, destinationPath);
+      return;
+    }
+    const merged = mergeSessionPrLists(
+      (await readSessionPrs(destinationPath)) ?? [],
+      (await readSessionPrs(sourcePath)) ?? [],
+    );
+    if (merged.length > 0) {
+      await writeSessionPrs(destinationPath, merged);
     }
     fs.unlinkSync(sourcePath);
   }
@@ -1843,6 +1907,7 @@ export class SessionService {
           this.removeFileIfExists(archivedPath);
         }
         this.removeWorktreeSidecars(sessionId);
+        this.removePrSidecars(sessionId);
         this.removePromptLedgers(sessionId);
         this.removeFileHistoryBackups(sessionId);
         return true;
@@ -1858,6 +1923,7 @@ export class SessionService {
       await this.salvageUsageBestEffort(archivedPath);
       this.removeFileIfExists(archivedPath);
       this.removeWorktreeSidecars(sessionId);
+      this.removePrSidecars(sessionId);
       this.removePromptLedgers(sessionId);
       this.removeFileHistoryBackups(sessionId);
       return true;
@@ -1935,6 +2001,16 @@ export class SessionService {
           );
         }
         try {
+          await this.movePrSidecar(
+            this.getPrSessionPathForState(sessionId, 'active'),
+            this.getPrSessionPathForState(sessionId, 'archived'),
+          );
+        } catch (sidecarError) {
+          this.warn(
+            `archiveSessions: failed to move pr sidecar for ${sessionId}: ${sidecarError}`,
+          );
+        }
+        try {
           this.moveLedgerSidecar(activeLedger, archivedLedger);
         } catch (ledgerError) {
           this.warn(
@@ -2004,6 +2080,16 @@ export class SessionService {
         } catch (sidecarError) {
           this.warn(
             `unarchiveSessions: failed to move worktree sidecar for ${sessionId} from ${archivedSidecar} to ${activeSidecar}: ${sidecarError}`,
+          );
+        }
+        try {
+          await this.movePrSidecar(
+            this.getPrSessionPathForState(sessionId, 'archived'),
+            this.getPrSessionPathForState(sessionId, 'active'),
+          );
+        } catch (sidecarError) {
+          this.warn(
+            `unarchiveSessions: failed to move pr sidecar for ${sessionId}: ${sidecarError}`,
           );
         }
         const archivedLedger = this.getPromptLedgerPathForState(

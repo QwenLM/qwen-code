@@ -39,7 +39,7 @@ import { laterActivityTimestamp } from '../server/activity-timestamp.js';
 import {
   isCompatibleLiveSessionSource,
   readLoadableLiveConversationMetadata,
-} from '../conversations/session-source.js';
+} from '../../runtime/live-session-source.js';
 import { conversationRuntimeUnavailableError } from '../conversations/conversation-runtime-errors.js';
 import { restoreSessionTitleFields } from '../session-restore-title.js';
 
