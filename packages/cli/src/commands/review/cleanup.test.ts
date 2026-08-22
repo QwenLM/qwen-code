@@ -5,11 +5,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 
-/** The fields the sweep's entry guard and post-kill identity re-check
- * read from an lstat result. */
+/** What cleanup reads from an lstat result, for both of its readers: the
+ * capture sweep's entry guard and post-kill identity re-check, and the
+ * worktree-family symlink guard with the ancestor walk beside it.
+ * `isDirectory` is OPTIONAL, and that is what lets one mock serve both — as a
+ * required field (or an `& { isDirectory }` on the mock's return type) every
+ * fixture that answers only the sweep's half stops type-checking. No cleanup
+ * path reads it; the family fixtures set it to say what the entry beside the
+ * link is. */
 type SweepEntryStat = {
   isSymbolicLink: () => boolean;
   isSocket: () => boolean;
+  isDirectory?: () => boolean;
   nlink: number;
   ino: number;
   mode: number;
@@ -26,9 +33,7 @@ const mocks = vi.hoisted(() => ({
   // name-matched fixtures reach the pid probe and kill while no ancestor
   // looks redirected.
   lstatSync: vi.fn(
-    (
-      _path: string,
-    ): SweepEntryStat & { isDirectory: () => boolean } => ({
+    (_path: string): SweepEntryStat => ({
       isSymbolicLink: () => false,
       isDirectory: () => true,
       isSocket: () => true,
@@ -182,10 +187,6 @@ describe('runCleanup', () => {
     // set in one test would otherwise decide what the next one's directory
     // sweep sees.
     mocks.readdirSync.mockReturnValue([]);
-    mocks.lstatSync.mockReturnValue({
-      isSymbolicLink: () => false,
-      isDirectory: () => true,
-    });
     mocks.existsSync.mockReturnValue(false);
     // Implementations survive clearAllMocks — restore the fail-open throw
     // so one retention test's mtimes cannot leak into the next test. The
@@ -1390,10 +1391,7 @@ describe('runCleanup', () => {
       // Only the family entry is a link; its parent directory is a directory.
       isSymbolicLink: () => String(p).includes('-scratch-'),
       isDirectory: () => !String(p).includes('-scratch-'),
-    })) as unknown as () => {
-      isSymbolicLink: () => boolean;
-      isDirectory: () => boolean;
-    });
+    })) as unknown as (path: string) => SweepEntryStat);
 
     runCleanup('pr-123');
 
@@ -1421,10 +1419,7 @@ describe('runCleanup', () => {
     mocks.lstatSync.mockImplementation(((p: string) => ({
       isSymbolicLink: () => String(p).includes('review-pr-'),
       isDirectory: () => !String(p).includes('review-pr-'),
-    })) as unknown as () => {
-      isSymbolicLink: () => boolean;
-      isDirectory: () => boolean;
-    });
+    })) as unknown as (path: string) => SweepEntryStat);
 
     runCleanup('pr-123');
 
@@ -1488,10 +1483,7 @@ describe('runCleanup', () => {
     mocks.lstatSync.mockImplementation(((p: string) => ({
       isSymbolicLink: () => String(p) === '/repo/.qwen',
       isDirectory: () => String(p) !== '/repo/.qwen',
-    })) as unknown as () => {
-      isSymbolicLink: () => boolean;
-      isDirectory: () => boolean;
-    });
+    })) as unknown as (path: string) => SweepEntryStat);
 
     runCleanup('pr-123');
 
@@ -1895,10 +1887,16 @@ describe('runCleanup — bypass-write audit', () => {
     // the other describe would otherwise decide what this one's directory
     // sweep sees — the same drift the sibling beforeEach pins against.
     mocks.readdirSync.mockReturnValue([]);
-    mocks.lstatSync.mockReturnValue({
-      isSymbolicLink: () => false,
-      isDirectory: () => true,
-    });
+    mocks.lstatSync.mockImplementation(
+      (_path: string): SweepEntryStat => ({
+        isSymbolicLink: () => false,
+        isDirectory: () => true,
+        isSocket: () => true,
+        nlink: 1,
+        ino: 1,
+        mode: 0o140700,
+      }),
+    );
     mocks.existsSync.mockReturnValue(false);
     mocks.execFileSync.mockReturnValue(Buffer.from(''));
     mocks.readFileSync.mockImplementation(() => {
@@ -2934,4 +2932,5 @@ describe('runCleanup — Aone bypass-write audit', () => {
     expect(notes.join('\n')).not.toContain('skipped ({)');
   });
 });
+
 

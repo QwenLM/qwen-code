@@ -2002,3 +2002,4 @@ export const captureTuiCommand: CommandModule = {
       timeoutMs: argv['timeout-ms'] as number,
     }),
 };
+

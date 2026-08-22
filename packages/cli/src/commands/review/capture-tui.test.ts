@@ -1013,15 +1013,19 @@ exit 0
   );
 
   it.skipIf(process.platform === 'win32')(
-    'refuses a symlink swapped in for the .ans before staging — link() clones it',
+    "refuses a symlink swapped in for the .ans before staging — neither platform's link() refuses it",
     async () => {
       // The staging comment claimed link() refuses a symlinked ansPath
-      // with ELOOP; measured on Linux it CLONES the link, so a survivor
-      // swapping ansPath for a symlink during the probe window (a fresh
-      // freeze availability probe — seconds, not microseconds) staged the
-      // link intact and freeze rendered the victim's bytes, credited as
-      // "evidence": "png" (probe-verified end to end). lstat never
-      // follows: only a staged regular file may reach the render.
+      // with ELOOP; neither platform does. Measured on Linux it CLONES the
+      // link, so a survivor swapping ansPath for a symlink during the probe
+      // window (a fresh freeze availability probe — seconds, not
+      // microseconds) staged the link intact and freeze rendered the
+      // victim's bytes, credited as "evidence": "png" (probe-verified end
+      // to end). Measured on darwin it FOLLOWS the link instead, staging a
+      // hard link to the victim's own inode — a regular file, so a
+      // type-only guard passes it and the same bytes are credited. Identity
+      // is what refuses both: the stage must name the inode this run's own
+      // .ans write produced.
       probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
       const realFreezeProbe = probes.freeze;
       const dir = mkdtempSync(join(tmpdir(), 'capture-tui-anssym-'));
