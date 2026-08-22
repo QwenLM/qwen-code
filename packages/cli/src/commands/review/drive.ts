@@ -91,6 +91,17 @@ export interface DriveReport {
   /**
    * Facts read back out of THIS run's own output, one per `--capture`.
    *
+   * A RECORD of the run, never an input to it. Extraction happens after the
+   * drive loop has ended, so nothing here can reach a request the script has
+   * already made — and treating it as though it could is worse than not
+   * capturing at all: a script that addressed 8931 while the service logged
+   * 8932 completes with `observed: true` beside `captured.baseUrl` of 8932,
+   * and nothing in the report contradicts it, so a witness quoting that
+   * address attributes 8931's readings to the daemon on 8932. The script has
+   * to derive the address from the service's own output before its first
+   * request; what this field then adds is evidence that the address it used
+   * is the one the service printed. The verify brief carries the recipe.
+   *
    * The address a service actually bound is the motivating one, and it is not
    * the address it was asked for: `qwen serve` handed a taken port prints
    * `port 8931 is in use, trying 8932...` and listens on the next one. A caller
