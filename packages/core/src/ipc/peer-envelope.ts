@@ -27,11 +27,15 @@
 const CROSS_SESSION_TAG = 'cross_session_message';
 
 /**
- * Matches only the opening/closing delimiter token, boundary-anchored so
- * near-misses (`<cross_session_messages>`) are left intact.
+ * Matches the opening/closing delimiter token, including whitespace
+ * around the optional slash (`< /tag>` is a closer too), while a negative
+ * lookahead on identifier-continuation characters leaves near-misses
+ * (`<cross_session_messages>`) intact. An allowlist of followers cannot
+ * work here: the character after a peer-written token is peer-chosen, so
+ * anything not explicitly allowed would slip through raw.
  */
 const CROSS_SESSION_TAG_RE = new RegExp(
-  `<(\\/?\\s*${CROSS_SESSION_TAG})(?=[\\s>/]|$)`,
+  `<(\\s*\\/?\\s*${CROSS_SESSION_TAG})(?![A-Za-z0-9_-])`,
   'gi',
 );
 

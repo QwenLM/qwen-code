@@ -30,6 +30,20 @@ const debugLogger = createDebugLogger('PEER_IPC');
 /** Give up on a peer that accepts a connection but never drains it. */
 export const SEND_TIMEOUT_MS = 5_000;
 
+/**
+ * Most concurrent outbound sends allowed.
+ *
+ * Every send holds a file descriptor until it settles, and receipts are
+ * drawn by inbound traffic a same-uid peer controls. Without a ceiling a
+ * peer that accepts but never drains (each send then hangs a full
+ * timeout) can exhaust this session's fd limit with receipts alone — the
+ * outbound mirror of what MAX_PEER_CONNECTIONS stops on the inbound side.
+ * Sends over the ceiling are dropped; receipts are best-effort anyway.
+ */
+export const MAX_CONCURRENT_SENDS = 32;
+
+let inFlightSends = 0;
+
 export class PeerSendError extends Error {
   constructor(
     message: string,
@@ -58,6 +72,7 @@ export class PeerSendError extends Error {
 export function sendPeerFrame(
   socketPath: string,
   frame: PeerFrame,
+  timeoutMs: number = SEND_TIMEOUT_MS,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     if (!isLocalIpcPath(socketPath)) {
@@ -84,23 +99,39 @@ export function sendPeerFrame(
       return;
     }
 
+    if (inFlightSends >= MAX_CONCURRENT_SENDS) {
+      reject(
+        new PeerSendError(
+          `Already sending ${inFlightSends} peer frames; not opening another connection`,
+          'EBUSY',
+        ),
+      );
+      return;
+    }
+
     const socket = net.connect({ path: socketPath });
+    inFlightSends += 1;
     let settled = false;
 
     const fail = (error: NodeJS.ErrnoException) => {
       if (settled) return;
       settled = true;
+      clearTimeout(deadline);
+      inFlightSends -= 1;
       socket.destroy();
       reject(new PeerSendError(error.message, error.code));
     };
 
-    socket.setTimeout(SEND_TIMEOUT_MS, () => {
+    // An absolute deadline, not socket.setTimeout: that is an *idle* timer
+    // that any incoming byte resets, so a peer dribbling one byte at a
+    // time would hold the connection (and its fd) open forever.
+    const deadline = setTimeout(() => {
       fail(
         Object.assign(new Error(`Timed out sending to ${socketPath}`), {
           code: 'ETIMEDOUT',
         }),
       );
-    });
+    }, timeoutMs);
     socket.on('error', fail);
     socket.on('connect', () => {
       socket.end(encoded);
@@ -108,6 +139,8 @@ export function sendPeerFrame(
     socket.on('close', () => {
       if (settled) return;
       settled = true;
+      clearTimeout(deadline);
+      inFlightSends -= 1;
       debugLogger.debug(`sent ${frame.type} frame to ${socketPath}`);
       resolve();
     });

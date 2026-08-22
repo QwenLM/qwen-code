@@ -133,6 +133,19 @@ export class PeerMessaging {
 
   onHeldChange(listener: (held: readonly HeldMessage[]) => void): () => void {
     this.heldListeners.add(listener);
+    // Replay the current state: start() binds the socket before it
+    // returns, so messages can be held before the first listener
+    // subscribes, and the gate only emits on change — without a replay
+    // those holds would never be announced.
+    try {
+      listener(this.getHeld());
+    } catch (error) {
+      debugLogger.debug(
+        `held-change listener threw: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
     return () => this.heldListeners.delete(listener);
   }
 

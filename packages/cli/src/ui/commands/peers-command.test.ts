@@ -128,6 +128,25 @@ describe('resolveHeld', () => {
   it('is case-insensitive', () => {
     expect(resolveHeld(messages, 'BBBBBB')).toMatchObject({ kind: 'one' });
   });
+
+  it('matches dash-stripped prefixes longer than the short handle', () => {
+    messages = [held({ msgId: 'task-0001' }), held({ msgId: 'task-0002' })];
+    // Both share their first six dash-stripped characters, so only
+    // characters beyond the sixth can tell them apart.
+    expect(resolveHeld(messages, 'task0001')).toEqual({
+      kind: 'one',
+      msgId: 'task-0001',
+    });
+    expect(resolveHeld(messages, 'task00')).toEqual({ kind: 'ambiguous' });
+  });
+
+  it('lets an exact dash-stripped id win over an extending one', () => {
+    messages = [held({ msgId: 'task-01' }), held({ msgId: 'task-011' })];
+    expect(resolveHeld(messages, 'task01')).toEqual({
+      kind: 'one',
+      msgId: 'task-01',
+    });
+  });
 });
 
 describe('formatHeldList', () => {
@@ -159,6 +178,23 @@ describe('formatHeldList', () => {
       }),
     ]);
     expect(out).toContain('first second');
+  });
+
+  it('lengthens handles until each one alone identifies its message', () => {
+    // task-0001 and task-0002 both shorten to 'task00': printing that for
+    // both would leave the user nothing typeable to tell them apart.
+    const out = formatHeldList([
+      held({ msgId: 'task-0001' }),
+      held({ msgId: 'task-0002' }),
+    ]);
+    expect(out).toContain('task0001');
+    expect(out).toContain('task0002');
+    expect(
+      resolveHeld(
+        [held({ msgId: 'task-0001' }), held({ msgId: 'task-0002' })],
+        'task0001',
+      ),
+    ).toMatchObject({ kind: 'one' });
   });
 });
 

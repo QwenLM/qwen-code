@@ -225,6 +225,28 @@ describe('duplicate msgId', () => {
     expect(h.gate.decide(first.msgId, 'approve')).toBe('done');
     expect(h.delivered).toEqual([first]);
   });
+
+  it('treats a case-variant id as the same message', () => {
+    // /peers resolves case-insensitively, so 'Task-01' and 'task-01' are
+    // the same handle: parking both would make neither individually
+    // decidable, and approving one would release the other with it.
+    const h = harness({ mode: ApprovalMode.YOLO });
+    const first = frame({
+      msgId: 'Task-01',
+      message: { role: 'user', content: 'benign' },
+    });
+    const clone = {
+      ...first,
+      msgId: 'task-01',
+      message: { role: 'user' as const, content: 'malicious' },
+    };
+
+    expect(h.gate.admit(first)).toBe('held');
+    expect(h.gate.admit(clone)).toBe('held');
+
+    expect(h.gate.getHeld()).toHaveLength(1);
+    expect(h.gate.getHeld()[0].frame.message.content).toBe('benign');
+  });
 });
 
 describe('a transport that throws', () => {

@@ -21,7 +21,11 @@ import {
   encodePeerFrame,
   type PeerFrame,
 } from './peer-frames.js';
-import { sendPeerFrame, PeerSendError } from './uds-client.js';
+import {
+  MAX_CONCURRENT_SENDS,
+  sendPeerFrame,
+  PeerSendError,
+} from './uds-client.js';
 import { startPeerInbox, type PeerInbox } from './uds-inbox.js';
 
 let tmpDir: string;
@@ -314,5 +318,65 @@ describe.skipIf(isWindows)('client errors', () => {
     ).rejects.toMatchObject({ name: 'PeerSendError', code: 'EMSGSIZE' });
     await settle();
     expect(received).toHaveLength(0);
+  });
+
+  it('gives up on a peer that dribbles bytes back instead of closing', async () => {
+    // Accepts, drains the frame, then writes one byte at a time and
+    // never closes (half-open, so the client's FIN does not end it).
+    // socket.setTimeout would treat every byte as activity and never
+    // fire; the deadline must not.
+    const dribblePath = path.join(tmpDir, 'socks', 'dribble.sock');
+    await fs.mkdir(path.dirname(dribblePath), { recursive: true });
+    const conns: net.Socket[] = [];
+    const server = net.createServer({ allowHalfOpen: true }, (conn) => {
+      conns.push(conn);
+      conn.resume();
+      const drip = setInterval(() => conn.write('b'), 100);
+      conn.on('close', () => clearInterval(drip));
+    });
+    await new Promise<void>((resolve) => server.listen(dribblePath, resolve));
+    try {
+      const startedAt = Date.now();
+      await expect(
+        sendPeerFrame(dribblePath, buildUserFrame({ content: 'hi' }), 500),
+      ).rejects.toMatchObject({ name: 'PeerSendError', code: 'ETIMEDOUT' });
+      expect(Date.now() - startedAt).toBeLessThan(3000);
+    } finally {
+      for (const conn of conns) conn.destroy();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('drops sends beyond the concurrent cap instead of opening unbounded connections', async () => {
+    // Accepts but never services anything: each dial holds its send slot
+    // until the deadline, the way a peer that accepts and stalls holds a
+    // receipt connection open.
+    const stallPath = path.join(tmpDir, 'socks', 'stall.sock');
+    await fs.mkdir(path.dirname(stallPath), { recursive: true });
+    const conns: net.Socket[] = [];
+    const server = net.createServer((conn) => {
+      conns.push(conn);
+      conn.pause();
+    });
+    await new Promise<void>((resolve) => server.listen(stallPath, resolve));
+    try {
+      const pending: Array<Promise<void>> = [];
+      for (let i = 0; i < MAX_CONCURRENT_SENDS; i += 1) {
+        pending.push(
+          sendPeerFrame(
+            stallPath,
+            buildUserFrame({ content: 'hi' }),
+            1000,
+          ).catch(() => {}),
+        );
+      }
+      await expect(
+        sendPeerFrame(stallPath, buildUserFrame({ content: 'hi' }), 1000),
+      ).rejects.toMatchObject({ name: 'PeerSendError', code: 'EBUSY' });
+      await Promise.all(pending);
+    } finally {
+      for (const conn of conns) conn.destroy();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });

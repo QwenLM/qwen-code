@@ -12,6 +12,8 @@ import {
   resolvePeerSocketPath,
 } from './socket-path.js';
 
+const isWindows = process.platform === 'win32';
+
 const originalRuntimeDir = process.env['XDG_RUNTIME_DIR'];
 
 beforeEach(() => {
@@ -26,7 +28,10 @@ afterEach(() => {
   }
 });
 
-describe('resolvePeerSocketPath', () => {
+// POSIX-only: the resolver builds paths with path.join and the
+// expectations assume forward slashes; on Windows the whole feature is
+// out of scope (see isLocalIpcPath), like the sibling socket suites.
+describe.skipIf(isWindows)('resolvePeerSocketPath', () => {
   it('prefers XDG_RUNTIME_DIR', () => {
     process.env['XDG_RUNTIME_DIR'] = '/run/user/1000';
     expect(resolvePeerSocketPath(4242)).toBe(
@@ -61,7 +66,7 @@ describe('resolvePeerSocketPath', () => {
 });
 
 describe('isLocalIpcPath', () => {
-  it('accepts an absolute posix path', () => {
+  it.skipIf(isWindows)('accepts an absolute posix path', () => {
     expect(isLocalIpcPath('/run/user/1000/qwen-socks/1.sock')).toBe(true);
   });
 

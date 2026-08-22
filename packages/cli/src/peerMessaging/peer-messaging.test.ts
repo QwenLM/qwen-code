@@ -251,6 +251,22 @@ describe.skipIf(isWindows)('PeerMessaging', () => {
     expect(submitted).toHaveLength(1);
   });
 
+  it('replays already-held messages to a late subscriber', async () => {
+    // start() binds the socket before it returns, so a hold can park
+    // before the UI subscribes; the subscriber must still hear about it.
+    const { messaging: m } = await start(ApprovalMode.YOLO);
+    await sendPeerFrame(
+      m.socketPath!,
+      buildUserFrame({ content: 'early hold', from: '/tmp/peer.sock' }),
+    );
+    await settle();
+    expect(m.getHeld()).toHaveLength(1);
+
+    const seen: number[] = [];
+    m.onHeldChange((held) => seen.push(held.length));
+    expect(seen).toEqual([1]);
+  });
+
   it('is safe to close twice', async () => {
     const { messaging: m } = await start();
     await m.close();

@@ -214,8 +214,14 @@ export class InboundGate {
     // body behind an id the user has already been shown — and two entries
     // sharing an id can never be decided individually, because `/peers`
     // rejects an id that matches more than one message. Repeat the
-    // verdict and keep exactly one entry per id.
-    if (this.held.some((entry) => entry.frame.msgId === frame.msgId)) {
+    // verdict and keep exactly one entry per id. Case-insensitive to
+    // match `/peers` resolution: a case-variant clone is the same handle.
+    if (
+      this.held.some(
+        (entry) =>
+          entry.frame.msgId.toLowerCase() === frame.msgId.toLowerCase(),
+      )
+    ) {
       debugLogger.debug(`duplicate msgId ${frame.msgId}; already held`);
       this.report(frame, 'held');
       return 'held';
