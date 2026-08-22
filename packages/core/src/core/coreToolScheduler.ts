@@ -64,6 +64,7 @@ import type {
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
+import { resolveToolName } from '../permissions/rule-parser.js';
 import { PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES } from '../tools/exitPlanMode.js';
 import { approvedPlanRedactionText } from './geminiChat.js';
 import * as fsSync from 'node:fs';
@@ -2153,6 +2154,25 @@ export class CoreToolScheduler {
       return mcpMessage;
     }
 
+    // `list_directory` is an opt-in built-in: when it is genuinely unregistered,
+    // say how to turn it on instead of suggesting unrelated tools by edit
+    // distance. Resolve aliases (`ListFiles`, `ReadFolder`, ...) so an aliased
+    // call gets the same explanation — but only once the canonical name is
+    // confirmed absent. The registry is keyed by canonical names while the
+    // lookup that lands here resolves legacy migrations only, so an alias call
+    // misses even when the tool IS enabled; that case must keep the generic
+    // path's "Did you mean list_directory" self-correction.
+    const canonicalName = resolveToolName(unknownToolName);
+    if (
+      canonicalName === ToolNames.LS &&
+      !(await this.toolRegistry.ensureTool(canonicalName))
+    ) {
+      if (this.config.getDisabledTools().has(canonicalName)) {
+        return `Tool "${unknownToolName}" has been disabled for this workspace via the workspace tools toggle. Re-enable it there; the tools.listDirectory.enabled setting only controls whether the tool is registered by default.`;
+      }
+      return `Tool "${unknownToolName}" is a built-in tool that is disabled by default because glob covers directory listing in most cases. Enable it with the tools.listDirectory.enabled setting. Use glob instead.`;
+    }
+
     // Standard "not found" message with Levenshtein suggestions
     const suggestion = this.getToolSuggestion(unknownToolName, topN);
     return `Tool "${unknownToolName}" not found in registry. Tools must use the exact names that are registered.${suggestion}`;
@@ -3340,7 +3360,7 @@ export class CoreToolScheduler {
                 !this.config.getSdkMode();
               const planModeError = new Error(
                 `Tool blocked by plan mode: "${reqInfo.name}" is not a read-only tool. ` +
-                  `Only read-only tools (read_file, grep_search, glob, list_directory, ` +
+                  `Only read-only tools (read_file, grep_search, glob, ` +
                   `web_fetch, etc.) are allowed in plan mode.` +
                   ` Do NOT retry this tool. ` +
                   (isPlanRequiredTeammate

@@ -17800,6 +17800,62 @@ describe('Session', () => {
         ).not.toHaveBeenCalled();
       });
 
+      it('notifies the bridge that the Goal turn ended', async () => {
+        const permit: core.GoalTurnPermit = {
+          goalId: 'goal-1',
+          revision: 1,
+          turnId: 'turn-end-signal',
+        };
+        mockGoalRuntime.getSnapshot.mockReturnValue({
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'check weather',
+            status: 'active',
+            evidenceCursor: { recordId: 'cursor-1' },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1234,
+            updatedAt: 1234,
+          },
+        });
+        mockGoalRuntime.permitForTurn.mockImplementation((turnKey: string) =>
+          turnKey === 'goal-runtime:turn-end-signal' ? permit : undefined,
+        );
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        expect(boundGoalHost).toBeDefined();
+        await boundGoalHost!.startGoalTurn({
+          permit,
+          continuationContext: 'check weather',
+        });
+
+        await vi.waitFor(() => {
+          expect(mockClient.extNotification).toHaveBeenCalledWith(
+            '_qwencode/end_turn',
+            {
+              sessionId: 'test-session-id',
+              reason: 'end_turn',
+              source: 'goal',
+              promptId: expect.stringMatching(
+                /^test-session-id########\d+$/,
+              ) as unknown as string,
+            },
+          );
+        });
+        expect(mockClient.extNotification).toHaveBeenCalledWith(
+          '_qwencode/start_turn',
+          {
+            sessionId: 'test-session-id',
+            source: 'goal',
+          },
+        );
+      });
+
       it('settles a Goal turn whose prompt rejects before the turn body runs', async () => {
         // `prompt()` rejects ahead of the try whose finally settles the turn
         // when `assertCanStartTurn` throws — a session that began closing
@@ -29226,7 +29282,7 @@ describe('Session', () => {
       });
     });
 
-    it('drops repeated duplicate provider functionCall ids after the first synthetic response', async () => {
+    it('records repeated duplicate provider calls without returning results', async () => {
       const execute = vi.fn().mockResolvedValue({
         llmContent: 'should not run',
         returnDisplay: 'should not run',
@@ -29255,6 +29311,7 @@ describe('Session', () => {
           ],
         ]),
       );
+      const usedIds = new Set(['shell_1']);
       const [duplicatePart] = core.normalizeModelToolCallIds(
         [
           {
@@ -29265,7 +29322,7 @@ describe('Session', () => {
             },
           },
         ],
-        new Set(['shell_1']),
+        usedIds,
         new Set<string>(),
       );
       const duplicateCall = duplicatePart.functionCall!;
@@ -29275,6 +29332,19 @@ describe('Session', () => {
       ).runToolCalls(new AbortController().signal, 'prompt-history-dup', [
         duplicateCall,
       ]);
+      const [repeatedPart] = core.normalizeModelToolCallIds(
+        [
+          {
+            functionCall: {
+              id: 'shell_1',
+              name: 'read_file',
+              args: { file_path: 'b.ts' },
+            },
+          },
+        ],
+        usedIds,
+        new Set<string>(),
+      );
       const toolLoopState: DaemonToolLoopState = {
         totalToolCalls: 0,
         invalidToolParamErrors: new Map<string, number>(),
@@ -29284,13 +29354,14 @@ describe('Session', () => {
         repeatedToolFailureMode: 'off',
         repeatedToolFailureState: createRepeatedToolFailureGuardState(),
       };
+      expect(repeatedPart.functionCall?.id).toBe('shell_1__qwen_dup_3');
       const secondResult = await (
         session as unknown as ToolCallInternals
       ).runToolCalls(
         new AbortController().signal,
         'prompt-history-dup',
         [
-          duplicateCall,
+          repeatedPart.functionCall!,
           { id: 'fresh_shell', name: 'read_file', args: { file_path: 'c.ts' } },
         ],
         toolLoopState,
@@ -29315,9 +29386,39 @@ describe('Session', () => {
         core.LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
       );
       expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledTimes(
-        1,
+        3,
       );
-      expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(1);
+      expect(
+        mockChatRecordingService.recordToolResult.mock.calls
+          .slice(1)
+          .map(([parts, metadata]) => ({
+            callId: metadata.callId,
+            responseId: parts[0]?.functionResponse?.id,
+            error: parts[0]?.functionResponse?.response?.['error'],
+            status: metadata.status,
+            executionStatus: metadata.executionStatus,
+          })),
+      ).toEqual([
+        {
+          callId: 'shell_1__qwen_dup_3',
+          responseId: 'shell_1__qwen_dup_3',
+          error: expect.stringContaining(
+            'loop detection stopped the current turn',
+          ),
+          status: 'error',
+          executionStatus: 'not_started',
+        },
+        {
+          callId: 'fresh_shell',
+          responseId: 'fresh_shell',
+          error: expect.stringContaining(
+            'loop detection stopped the current turn',
+          ),
+          status: 'error',
+          executionStatus: 'not_started',
+        },
+      ]);
+      expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(3);
     });
 
     it('suppresses duplicate TodoWrite calls without emitting plan updates', async () => {

@@ -211,11 +211,24 @@ export {
   resolveBoundWorkspaceRoot,
   toCanonicalWorkspaceArtifactPath,
 } from './utils/workspace-artifact-path.js';
+export {
+  MAX_DIRECTORY_ARTIFACT_DEPTH,
+  MAX_DIRECTORY_ARTIFACT_FILES,
+  OFFICE_DOCUMENT_EXTENSIONS,
+  collectRecordableWorkspaceFiles,
+  isOfficeDocumentExtension,
+  pathHasSkippedDirectoryComponent,
+  shouldSkipDirectoryArtifactName,
+  stripWorktreeArtifactPrefix,
+} from './utils/workspace-artifact-directory.js';
 export type {
   ArtifactTool,
   ArtifactToolParams,
 } from './tools/artifact/artifact-tool.js';
-export { RecordArtifactTool } from './tools/record-artifact.js';
+export {
+  RecordArtifactTool,
+  isRecordableDerivedChild,
+} from './tools/record-artifact.js';
 export type { RecordArtifactParams } from './tools/record-artifact.js';
 export type {
   ArtifactPublisher,
@@ -363,6 +376,7 @@ export type {
   TokenUsageTotals,
 } from './services/tokenUsageService.js';
 export * from './services/worktreeSessionService.js';
+export * from './services/session-pr-service.js';
 export {
   stripTerminalControlSequences,
   stripDisplayControlChars,

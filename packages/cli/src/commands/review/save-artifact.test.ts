@@ -449,6 +449,40 @@ describe('saveReviewArtifact', () => {
     ).toBe(0);
   });
 
+  it('carries the fresh count and the convergence paragraph into the artifact', () => {
+    // Both are new surfaces on the composed result, and the allow-list is
+    // where a new field silently stops existing. The paragraph matters most:
+    // it is the FIRST clause the overflow ladder sheds, so on the rounds it
+    // fires the artifact may be the only durable copy.
+    const paths = fixture();
+    writeJson(paths.composed, {
+      ...verdict,
+      postedFresh: 2,
+      convergence: { en: 'Convergence: …', zh: '收敛情况：…' },
+    });
+    saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+    const saved = JSON.parse(readFileSync(paths.out, 'utf8'));
+    expect(saved.verdict.postedFresh).toBe(2);
+    expect(saved.verdict.convergence.en).toBe('Convergence: …');
+    expect(saved.verdict.convergence.zh).toBe('收敛情况：…');
+  });
+
+  it('PRESERVES an absent postedFresh and refuses a present one of the wrong shape', () => {
+    // Same distinction as its sibling: a round that recorded no fresh count
+    // is not a round that produced none.
+    const paths = fixture();
+    saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+    expect(
+      'postedFresh' in JSON.parse(readFileSync(paths.out, 'utf8')).verdict,
+    ).toBe(false);
+    rmSync(paths.out, { force: true });
+
+    writeJson(paths.composed, { ...verdict, postedFresh: -1 });
+    expect(() =>
+      saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' }),
+    ).toThrow(/postedFresh/);
+  });
+
   it('reads an absent or null floorEnforced as empty — a pre-enforcement composed file must still save', () => {
     // Null rides the same absence semantics as the sibling deferredCount
     // pair — an undefined-only check would refuse a composed file that

@@ -24,6 +24,8 @@ import type {
   DaemonSessionArtifactsEnvelope,
   DaemonTranscriptStore,
   DaemonCapabilities,
+  GoalControlRequest,
+  GoalSnapshotV2,
   DaemonBranchSessionResult,
   DaemonBranchedSession,
   DaemonSessionAttachmentReference,
@@ -42,6 +44,8 @@ import {
   mapReasoningControls,
   mapSessionContextReasoning,
   mapSupportedCommands,
+  selectGoalState,
+  selectGoalStateFromRead,
 } from './mappers.js';
 import {
   attachmentUriForName,
@@ -200,6 +204,7 @@ export function getConnectionAfterSessionClear(
     delete next.displayName;
     delete next.tokenUsage;
     delete next.tokenCount;
+    delete next.goalState;
     // Drop the session-scoped raw snapshots (both carry the cleared
     // sessionId), which also makes the effect's canReuseSessionMetadata
     // check refetch fresh data for the next session.
@@ -605,6 +610,7 @@ export function createDaemonSessionActions({
         workspaceCwd: targetWorkspaceCwd,
         clientId: undefined,
         displayName: undefined,
+        goalState: undefined,
         error: undefined,
         errorStatus: undefined,
         missingSession: false,
@@ -1364,6 +1370,7 @@ export function createDaemonSessionActions({
           ...current,
           status: 'connected',
           sessionId: nextSession.sessionId,
+          goalState: undefined,
           ...(nextSession.clientId ? { clientId: nextSession.clientId } : {}),
           workspaceCwd: nextSession.workspaceCwd,
           error: undefined,
@@ -1418,6 +1425,7 @@ export function createDaemonSessionActions({
       clearActiveSessionState();
       setConnection((current) => ({
         ...current,
+        goalState: undefined,
         missingSession: false,
         error: undefined,
         errorStatus: undefined,
@@ -1698,20 +1706,35 @@ export function createDaemonSessionActions({
       }
     },
 
-    async uploadAttachment(image, opts) {
+    async uploadAttachment(attachment, opts) {
       const session = requireSessionForAction(
         addNotice,
         sessionRef.current,
         'Attachment upload failed',
         'send_prompt',
       );
+      if (opts?.sessionId && opts.sessionId !== session.sessionId) {
+        throw new Error('Attachment session changed');
+      }
       const mimeType =
-        image.mimeType ?? image.mediaType ?? image.media_type ?? 'image/*';
+        attachment.mimeType ??
+        attachment.mediaType ??
+        attachment.media_type ??
+        ('name' in attachment ? 'application/octet-stream' : 'image/*');
       attachmentClient = session.client;
       attachmentSessionId = session.sessionId;
       attachmentClientId = session.clientId;
+      if ('name' in attachment) {
+        return await session.uploadAttachment(
+          attachment.data ??
+            new Blob([attachment.text ?? ''], { type: mimeType }),
+          attachment.name,
+          mimeType,
+          opts?.signal,
+        );
+      }
       return await session.uploadAttachment(
-        daemonPromptImageToBlob(image),
+        daemonPromptImageToBlob(attachment),
         imageAttachmentName(mimeType),
         imageAttachmentMimeType(mimeType),
         opts?.signal,
@@ -1966,6 +1989,90 @@ export function createDaemonSessionActions({
           'Clear goal failed',
           error,
           'clear_goal',
+        );
+      }
+    },
+
+    async getGoal() {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Load goal failed',
+        'load_goal',
+      );
+      // A read the daemon answered while goal-less can resolve after a
+      // concurrent create; its bare-null snapshot carries no `clearedGoal`
+      // tombstone, so reconciling it would wipe the new goal. Stamp the read
+      // with the goal observed at issue time: a bare-null response may only
+      // clear the goal it actually observed.
+      const observedGoalId = getConnection().goalState?.goal?.goalId;
+      try {
+        const response = await withActionTimeout(
+          session.goal(),
+          'Load goal timed out',
+        );
+        setConnection((current) => {
+          if (current.sessionId !== session.sessionId) return current;
+          const goalState = selectGoalStateFromRead(
+            current.goalState,
+            response.snapshot,
+            observedGoalId,
+          );
+          if (goalState === current.goalState) return current;
+          return { ...current, goalState };
+        });
+        return response;
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Load goal failed',
+          error,
+          'load_goal',
+        );
+      }
+    },
+
+    applyGoalSnapshot(sessionId: string, snapshot: GoalSnapshotV2) {
+      setConnection((current) =>
+        current.sessionId === sessionId
+          ? {
+              ...current,
+              goalState: selectGoalState(current.goalState, snapshot),
+            }
+          : current,
+      );
+    },
+
+    async controlGoal(request: GoalControlRequest) {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Control goal failed',
+        'control_goal',
+      );
+      try {
+        const response = await withActionTimeout(
+          session.controlGoal(request),
+          'Control goal timed out',
+        );
+        setConnection((current) =>
+          current.sessionId === session.sessionId
+            ? {
+                ...current,
+                goalState: selectGoalState(
+                  current.goalState,
+                  response.snapshot,
+                ),
+              }
+            : current,
+        );
+        return response;
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Control goal failed',
+          error,
+          'control_goal',
         );
       }
     },

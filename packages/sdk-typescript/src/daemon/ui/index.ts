@@ -13,8 +13,11 @@ export { createDaemonToolPreview } from './toolPreview.js';
 export {
   appendLocalUserTranscriptMessage,
   createDaemonTranscriptState,
+  estimateDaemonTranscriptBlockBytes,
   formatBlockTimestamp,
   isSubagentChildBlock,
+  isTrimmedPermissionBlockId,
+  isTrimmedToolBlockId,
   rebuildDaemonTranscriptBlockIndex,
   reduceDaemonTranscriptEvents,
   selectApprovalMode,
@@ -88,6 +91,7 @@ export type {
   DaemonTranscriptSidechannelState,
   DaemonTranscriptState,
   DaemonTranscriptStore,
+  DaemonTranscriptTruncationDetail,
   DaemonUnrecognizedDiagnostic,
   DaemonUnrecognizedDiagnosticReason,
   // Chat-stream events

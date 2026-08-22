@@ -38,6 +38,7 @@ import { SessionOrganizationService } from './session-organization-service.js';
 import { CompressionStatus } from '../core/turn.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
+import { readSessionPrs, writeSessionPrs } from './session-pr-service.js';
 
 vi.mock('./usageHistoryService.js', () => ({
   persistUsageBeforeTranscriptDeletion: vi.fn().mockResolvedValue(true),
@@ -46,6 +47,12 @@ vi.mock('node:path');
 vi.mock('../utils/paths.js');
 vi.mock('../utils/runtimeStatus.js');
 vi.mock('../utils/jsonl-utils.js');
+// Keep the real merge logic; only the sidecar I/O is controlled per test.
+vi.mock('./session-pr-service.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./session-pr-service.js')>()),
+  readSessionPrs: vi.fn(),
+  writeSessionPrs: vi.fn(),
+}));
 
 describe('SessionService', () => {
   let sessionService: SessionService;
@@ -1834,6 +1841,30 @@ describe('SessionService', () => {
       );
     });
 
+    it('should remove pr sidecars in both states when removing a session', async () => {
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes('/chats/archive/')) return [recordA1];
+          const error = new Error('ENOENT') as NodeJS.ErrnoException;
+          error.code = 'ENOENT';
+          throw error;
+        },
+      );
+      existsSyncSpy.mockImplementation((filePath: fs.PathLike) =>
+        filePath.toString().endsWith(`${sessionIdA}.pr.json`),
+      );
+
+      const result = await sessionService.removeSession(sessionIdA);
+
+      expect(result).toBe(true);
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.pr.json`),
+      );
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.pr.json`),
+      );
+    });
+
     it('should remove both JSONL files when active and archived copies conflict', async () => {
       vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
       existsSyncSpy.mockImplementation((filePath: fs.PathLike) =>
@@ -1934,6 +1965,63 @@ describe('SessionService', () => {
       expect(renameSyncSpy).toHaveBeenCalledWith(
         expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
         expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
+      );
+    });
+
+    it('should move the pr sidecar into the archive directory', async () => {
+      mockActiveSessionOnly();
+      existsSyncSpy.mockImplementation((filePath) =>
+        filePath.toString().endsWith(`/chats/${sessionIdA}.pr.json`),
+      );
+
+      const result = await sessionService.archiveSessions([sessionIdA]);
+
+      expect(result.archived).toEqual([sessionIdA]);
+      expect(result.errors).toEqual([]);
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.pr.json`),
+        expect.stringContaining(`/chats/archive/${sessionIdA}.pr.json`),
+      );
+    });
+
+    it('should merge split pr sidecars on archive instead of wedging', async () => {
+      mockActiveSessionOnly();
+      existsSyncSpy.mockImplementation((filePath) => {
+        const value = filePath.toString();
+        return (
+          value.endsWith(`/chats/${sessionIdA}.pr.json`) ||
+          value.endsWith(`/chats/archive/${sessionIdA}.pr.json`)
+        );
+      });
+      const archivedEntry = {
+        number: 100,
+        url: 'https://github.com/o/r/pull/100',
+        createdAt: '2026-08-20T00:00:00.000Z',
+      };
+      const activeEntry = {
+        number: 101,
+        url: 'https://github.com/o/r/pull/101',
+        createdAt: '2026-08-20T01:00:00.000Z',
+      };
+      vi.mocked(readSessionPrs)
+        .mockResolvedValueOnce([archivedEntry])
+        .mockResolvedValueOnce([activeEntry]);
+      const warnings: string[] = [];
+      const service = new SessionService('/test/project/root', {
+        onWarning: (message) => warnings.push(message),
+      });
+
+      const result = await service.archiveSessions([sessionIdA]);
+
+      expect(result.archived).toEqual([sessionIdA]);
+      expect(result.errors).toEqual([]);
+      expect(warnings).toEqual([]);
+      expect(writeSessionPrs).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.pr.json`),
+        [archivedEntry, activeEntry],
+      );
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.pr.json`),
       );
     });
 
@@ -2179,6 +2267,68 @@ describe('SessionService', () => {
       expect(renameSyncSpy).toHaveBeenCalledWith(
         expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
         expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
+      );
+    });
+
+    it('should move the pr sidecar back to the active directory', async () => {
+      mockArchivedSessionOnly();
+      existsSyncSpy.mockImplementation((filePath) =>
+        filePath.toString().endsWith(`/chats/archive/${sessionIdA}.pr.json`),
+      );
+
+      const result = await sessionService.unarchiveSessions([sessionIdA]);
+
+      expect(result.unarchived).toEqual([sessionIdA]);
+      expect(result.errors).toEqual([]);
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.pr.json`),
+        expect.stringContaining(`/chats/${sessionIdA}.pr.json`),
+      );
+    });
+
+    it('should merge a split pr sidecar pair on unarchive, keeping the full history', async () => {
+      mockArchivedSessionOnly();
+      existsSyncSpy.mockImplementation((filePath) => {
+        const value = filePath.toString();
+        return (
+          value.endsWith(`/chats/archive/${sessionIdA}.pr.json`) ||
+          value.endsWith(`/chats/${sessionIdA}.pr.json`)
+        );
+      });
+      const olderOne = {
+        number: 100,
+        url: 'https://github.com/o/r/pull/100',
+        createdAt: '2026-08-20T00:00:00.000Z',
+      };
+      const olderTwo = {
+        number: 101,
+        url: 'https://github.com/o/r/pull/101',
+        createdAt: '2026-08-20T00:30:00.000Z',
+      };
+      const orphan = {
+        number: 102,
+        url: 'https://github.com/o/r/pull/102',
+        createdAt: '2026-08-20T01:00:00.000Z',
+      };
+      vi.mocked(readSessionPrs)
+        .mockResolvedValueOnce([orphan])
+        .mockResolvedValueOnce([olderOne, olderTwo]);
+      const warnings: string[] = [];
+      const service = new SessionService('/test/project/root', {
+        onWarning: (message) => warnings.push(message),
+      });
+
+      const result = await service.unarchiveSessions([sessionIdA]);
+
+      expect(result.unarchived).toEqual([sessionIdA]);
+      expect(result.errors).toEqual([]);
+      expect(warnings).toEqual([]);
+      expect(writeSessionPrs).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/${sessionIdA}.pr.json`),
+        [olderOne, olderTwo, orphan],
+      );
+      expect(unlinkSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.pr.json`),
       );
     });
 
