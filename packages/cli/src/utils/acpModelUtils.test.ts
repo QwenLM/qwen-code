@@ -249,6 +249,32 @@ describe('acpModelUtils', () => {
     ['https://user:p?x@api.example/v1', 'https://api.example/v1'],
     ['https://user:p#x@api.example/v1', 'https://api.example/v1'],
     ['https://user:secret@api.example', 'https://api.example'],
+    [
+      'https://api.example — contact admin@example.com',
+      'https://api.example — contact admin@example.com',
+    ],
+    [
+      'https://user:pass@host.io please contact admin@corp.io',
+      'https://host.io please contact admin@corp.io',
+    ],
+    [
+      'https://host bad:x/v1 — contact admin@corp.io',
+      'https://host bad:x/v1 — contact admin@corp.io',
+    ],
+    ['https://user:pa ss@host.io', 'https://host.io'],
+    ['https://user:12 34@host.io', 'https://host.io'],
+    ['https://user name:pass@host.io', 'https://host.io'],
+    ['https://user name@host.io', 'https://host.io'],
+    ['https://us er@host', 'https://host'],
+    [
+      'https://user:pa ss@host.io please contact admin@corp.io',
+      'https://host.io please contact admin@corp.io',
+    ],
+    ['https://user:p w@host.io/a@b', 'https://host.io/a@b'],
+    ['https://user:p ss@real@host.io', 'https://host.io'],
+    ['https://user @host.io', 'https://host.io'],
+    ['https://foo bar baz@corp.io', 'https://corp.io'],
+    ['https://user:pa ss word@host.io/v1', 'https://host.io/v1'],
   ])('sanitizes provider base URL credentials for %s', (input, expected) => {
     expect(sanitizeProviderBaseUrl(input)).toBe(expected);
   });

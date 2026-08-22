@@ -562,6 +562,58 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     expect(result.initialized).toBe(false);
   });
 
+  it.each([
+    [
+      'keeps a port and later email unchanged',
+      'Cannot reach https://api.example:8443/v1 — contact admin@example.com',
+      'Cannot reach https://api.example:8443/v1 — contact admin@example.com',
+    ],
+    [
+      'strips a password containing an at sign',
+      'Failed loading provider https://user:p@ssw0rd-tail@broken.example/v1',
+      'Failed loading provider https://broken.example/v1',
+    ],
+    [
+      'keeps an uncredentialed URL with a port byte-identical',
+      'Cannot reach https://api.example:8443/v1',
+      'Cannot reach https://api.example:8443/v1',
+    ],
+    [
+      'keeps a pathless URL and later email unchanged',
+      'Cannot reach https://api.example — contact admin@example.com',
+      'Cannot reach https://api.example — contact admin@example.com',
+    ],
+    [
+      'strips credentials from a pathless URL before trailing prose',
+      'Cannot reach https://user:pass@host.io please contact admin@corp.io',
+      'Cannot reach https://host.io please contact admin@corp.io',
+    ],
+    [
+      'strips multi-word password userinfo from warning URLs',
+      'Failed loading provider https://user:pa ss word@host.io/v1',
+      'Failed loading provider https://host.io/v1',
+    ],
+    [
+      'strips password with embedded at-sign before host',
+      'Failed loading provider https://user:p ss@real@host.io/v1',
+      'Failed loading provider https://host.io/v1',
+    ],
+  ])('%s', async (_name, message, expected) => {
+    coreMock.throwModelsConfigError = true;
+    coreMock.modelsConfigErrorMessage = message;
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: {
+        openai: [{ id: 'model-a', name: 'Model A' }],
+      },
+    });
+
+    const result = await provider(workspace, true);
+
+    expect(result.errors?.[0]?.error).toBe(expected);
+  });
+
   async function writeUserSettings(settings: Record<string, unknown>) {
     await fs.writeFile(
       path.join(qwenHome, 'settings.json'),
