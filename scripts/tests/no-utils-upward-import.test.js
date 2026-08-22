@@ -1,3 +1,9 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 import { describe, expect, it } from 'vitest';
 import { Linter } from 'eslint';
 import rule from '../../eslint-rules/no-utils-upward-import.js';
