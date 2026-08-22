@@ -10,6 +10,7 @@ import { parse } from 'shell-quote';
 import {
   GitWorktreeService,
   isWithinRoot,
+  projectHeredocBodiesForStateTracking,
   realpathNearestExistingAsync,
   splitCommands,
 } from '@qwen-code/qwen-code-core';
@@ -1856,35 +1857,6 @@ interface EvaluationScope {
  * quote and substitution rules. `separators[i]` follows segment `i`. Both
  * sides of a `|` run in subshells, so a `cd` there must not move the shell.
  */
-/**
- * A heredoc body is stdin data delivered to the command, not shell commands,
- * yet `splitCommands` has no heredoc state and would parse each body line as
- * its own segment — letting a body `cd` launder the tracked directory. Strip
- * `<<[-]WORD … WORD` bodies (quoted or not) before splitting. This is
- * best-effort: only the first heredoc on a line is handled, which is the
- * shape a model emits, and anything unrecognised is left untouched.
- */
-function stripHeredocBodies(command: string): string {
-  const lines = command.split('\n');
-  const out: string[] = [];
-  for (let index = 0; index < lines.length; index++) {
-    const line = lines[index]!;
-    out.push(line);
-    const match = /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/.exec(line);
-    if (!match) continue;
-    const delimiter = match[2]!;
-    const stripTabs = line.includes('<<-');
-    // Consume the body up to the delimiter line, dropping it from the output.
-    while (index + 1 < lines.length) {
-      index++;
-      const body = lines[index]!;
-      const trimmed = stripTabs ? body.replace(/^\t+/, '') : body;
-      if (trimmed === delimiter) break;
-    }
-  }
-  return out.join('\n');
-}
-
 function readTopLevelSeparators(command: string): string[] {
   const separators: string[] = [];
   let single = false;
@@ -2117,8 +2089,9 @@ async function evaluateCommandWithCwd(
     return undefined;
   };
 
-  const segments = splitCommands(stripHeredocBodies(command));
-  const separators = readTopLevelSeparators(stripHeredocBodies(command));
+  const projectedCommand = projectHeredocBodiesForStateTracking(command);
+  const segments = splitCommands(projectedCommand);
+  const separators = readTopLevelSeparators(projectedCommand);
   // On any disagreement with `splitCommands`, treat every segment of a piped
   // command as a pipeline component rather than guessing.
   const separatorsMatch = separators.length === segments.length - 1;

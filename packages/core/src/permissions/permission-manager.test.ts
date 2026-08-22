@@ -468,6 +468,130 @@ describe('splitCompoundCommand', () => {
     expect(splitCompoundCommand('a && b && c')).toEqual(['a', 'b', 'c']);
   });
 
+  it('keeps a heredoc command as one segment', async () => {
+    expect(
+      splitCompoundCommand(
+        "python - <<'PY'\nimport os\nprint(os.getcwd())\nPY",
+      ),
+    ).toEqual(["python - <<'PY'"]);
+  });
+
+  it('keeps every line visible when an opener shares a compound line', async () => {
+    expect(
+      splitCompoundCommand(
+        'cat <<EOF && echo hi\nbody; with && ops\nEOF\necho done',
+      ),
+    ).toEqual([
+      'cat <<EOF',
+      'echo hi',
+      'body',
+      'with',
+      'ops',
+      'EOF',
+      'echo done',
+    ]);
+  });
+
+  it('handles the tab-stripping heredoc variant', async () => {
+    // The trailing segment keeps the terminator observable: both mutants
+    // (dropping the `-` skip, or matching the terminator without trim) must
+    // keep `echo done` visible rather than swallowing it into the body.
+    expect(
+      splitCompoundCommand('python <<-PY\n\timport os\n\tPY\necho done'),
+    ).toEqual(['python <<-PY', 'echo done']);
+  });
+
+  it('never swallows executed lines behind a phantom heredoc', async () => {
+    // arithmetic << is a shift operator, not a heredoc opener: every line
+    // stays visible to rule evaluation.
+    expect(splitCompoundCommand('echo $((1 << 20))\nrm -rf /\n20')).toEqual([
+      'echo $((1 << 20))',
+      'rm -rf /',
+      '20',
+    ]);
+  });
+
+  it('ignores a heredoc-looking token inside a comment', async () => {
+    expect(
+      splitCompoundCommand('echo hi # <<EOF\ntouch /tmp/pwned\nEOF'),
+    ).toEqual(['echo hi # <<EOF', 'touch /tmp/pwned', 'EOF']);
+  });
+
+  it('keeps every physical line visible for an unclosed quote', async () => {
+    expect(
+      splitCompoundCommand('echo "start\n<<EOF\nrm -rf /\nEOF\nend"'),
+    ).toEqual(['echo "start', '<<EOF', 'rm -rf /', 'EOF', 'end"']);
+  });
+
+  it('leaves a backslash-continued opener visible rather than guessing the body', async () => {
+    expect(
+      splitCompoundCommand('cat <<EOF \\\n&& rm -rf /\nbody\nEOF'),
+    ).toEqual(['cat <<EOF \\', 'rm -rf /', 'body', 'EOF']);
+  });
+
+  it('reads a delimiter with word characters beyond the old charset', async () => {
+    expect(splitCompoundCommand('cat <<A,B\nbody\nA,B')).toEqual(['cat <<A,B']);
+  });
+
+  it('keeps a shell-fed heredoc body visible to deny rules', async () => {
+    // bash <<EOF executes its body as shell; stripping it would hide the rm
+    // from Bash(rm *) denies. Non-shell interpreters keep the strip.
+    expect(splitCompoundCommand('bash <<EOF\nrm -rf /\nEOF')).toEqual([
+      'bash <<EOF',
+      'rm -rf /',
+    ]);
+    expect(splitCompoundCommand('sudo bash <<EOF\nrm -rf /\nEOF')).toEqual([
+      'sudo bash <<EOF',
+      'rm -rf /',
+    ]);
+  });
+
+  it('drains concurrent heredocs on a simple command in order', async () => {
+    expect(splitCompoundCommand('cat <<A <<B\nfirst\nA\nsecond\nB')).toEqual([
+      'cat <<A <<B',
+    ]);
+  });
+
+  it('strips the body of a double-quoted delimiter', async () => {
+    expect(splitCompoundCommand('cat <<"TAG"\nbody\nTAG')).toEqual([
+      'cat <<"TAG"',
+    ]);
+  });
+
+  it('recognizes a CRLF heredoc terminator', async () => {
+    expect(
+      splitCompoundCommand("python <<'PY'\r\nprint('ok')\r\nPY\r\necho done"),
+    ).toEqual(["python <<'PY'", 'echo done']);
+  });
+
+  it.each([
+    'cd /tmp && bash <<EOF\nrm -rf /important\nEOF',
+    'cat <<EOF | bash\nrm -rf /important\nEOF',
+    "'bash' <<EOF\nrm -rf /important\nEOF",
+    'nice bash <<EOF\nrm -rf /important\nEOF',
+    'busybox sh <<EOF\nrm -rf /important\nEOF',
+    '(bash) <<EOF\nrm -rf /important\nEOF',
+    "FOO='a b' bash <<EOF\nrm -rf /important\nEOF",
+    'cat <<A && bash <<B\ncat data\nA\nrm -rf /important\nB',
+    'bash \\\n<<EOF\nrm -rf /important\nEOF',
+    'echo $[1 << 5]\nrm -rf /important\nEOF',
+    'echo ${x:-<<EOF}\nrm -rf /important\nEOF',
+    'cat <<EOF$D\nrm -rf /important\nEOF',
+  ])(
+    'fails closed when the opener is not a provable simple command',
+    (input) => {
+      expect(splitCompoundCommand(input)).toContain('rm -rf /important');
+    },
+  );
+
+  it('does not let retained child syntax change parent scanning', () => {
+    expect(
+      splitCompoundCommand(
+        'bash <<EOF\ncat <<INNER\necho "\nEOF\nrm -rf /important',
+      ),
+    ).toContain('rm -rf /important');
+  });
+
   it('handles mixed operators', async () => {
     expect(splitCompoundCommand('a && b | c; d')).toEqual(['a', 'b', 'c', 'd']);
   });
@@ -630,6 +754,12 @@ describe('splitCompoundCommandSegments', () => {
     expect(splitCompoundCommandSegments('npm test &')).toEqual([
       { command: 'npm test', terminator: '&' },
     ]);
+  });
+
+  it('uses the same heredoc projection as the string API', async () => {
+    expect(
+      splitCompoundCommandSegments("python - <<'PY'\nprint('ok')\nPY"),
+    ).toEqual([{ command: "python - <<'PY'", terminator: '' }]);
   });
 });
 
@@ -1778,6 +1908,67 @@ describe('PermissionManager', () => {
           command: 'npm install',
         }),
       ).toBe('ask');
+    });
+
+    it('deny rules still see lines after an arithmetic shift expression', async () => {
+      // The phantom-heredoc witness from review: $((1 << 20)) is not a heredoc
+      // opener, so the rm line must stay a segment and hit the deny rule.
+      const pm2 = new PermissionManager(
+        makeConfig({ permissionsDeny: ['Bash(rm *)'] }),
+      );
+      pm2.initialize();
+      expect(
+        await pm2.evaluate({
+          toolName: 'run_shell_command',
+          command: 'echo $((1 << 20))\nrm -rf /important\n20',
+        }),
+      ).toBe('deny');
+    });
+
+    it('deny rules see the body of a shell-fed heredoc', async () => {
+      const pm2 = new PermissionManager(
+        makeConfig({ permissionsDeny: ['Bash(rm *)'] }),
+      );
+      pm2.initialize();
+      expect(
+        await pm2.evaluate({
+          toolName: 'run_shell_command',
+          command: 'bash <<EOF\nrm -rf /important\nEOF',
+        }),
+      ).toBe('deny');
+    });
+
+    it.each([
+      'sudo -u root bash <<EOF\nrm -rf /important\nEOF',
+      'cd /tmp && bash <<EOF\nrm -rf /important\nEOF',
+      'bash <<EOF\necho "\nEOF\nrm -rf /important',
+    ])(
+      'keeps executed lines visible across heredoc scope edges',
+      async (command) => {
+        const pm2 = new PermissionManager(
+          makeConfig({ permissionsDeny: ['Bash(rm *)'] }),
+        );
+        pm2.initialize();
+        expect(
+          await pm2.evaluate({ toolName: 'run_shell_command', command }),
+        ).toBe('deny');
+      },
+    );
+
+    it('matches an allow prefix rule against a whole heredoc command', async () => {
+      // #9381: the heredoc body is stdin, not shell segments; without stripping
+      // it, each body line fell through to per-line evaluation and the prefix
+      // rule could never match.
+      const pm2 = new PermissionManager(
+        makeConfig({ permissionsAllow: ['Bash(python *)'] }),
+      );
+      pm2.initialize();
+      expect(
+        await pm2.evaluate({
+          toolName: 'run_shell_command',
+          command: "python - <<'PY'\nimport os\nprint(os.getcwd())\nPY",
+        }),
+      ).toBe('allow');
     });
 
     // Regression coverage for issue #4093: command substitution must never

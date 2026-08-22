@@ -884,6 +884,38 @@ describe('extractShellOperationsAcrossCommand', () => {
     ]);
   });
 
+  it('does not carry child-shell state into the parent command', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        ['bash <<EOF', 'cd /tmp', 'EOF', 'echo > .qwen/settings.json'].join(
+          '\n',
+        ),
+        '/repo',
+      ),
+    ).toEqual([
+      { virtualTool: 'write_file', filePath: '/repo/.qwen/settings.json' },
+    ]);
+  });
+
+  it('tracks parent state after a compound heredoc opener', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        [
+          'cat <<EOF && cd .qwen',
+          'cd /tmp',
+          'EOF',
+          'echo > settings.json',
+        ].join('\n'),
+        '/repo',
+      ),
+    ).toEqual([
+      {
+        virtualTool: 'write_file',
+        filePath: '/repo/.qwen/settings.json',
+      },
+    ]);
+  });
+
   it('does not treat quoted heredoc-looking text as a heredoc marker', () => {
     expect(
       extractShellOperationsAcrossCommand(
