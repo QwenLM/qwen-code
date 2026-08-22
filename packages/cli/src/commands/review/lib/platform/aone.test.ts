@@ -431,6 +431,33 @@ describe('aoneReader.getCommentBody', () => {
     );
   });
 
+  it('serves a RESOLVED comment — the same surface getReviewContext renders', () => {
+    // The context union INCLUDES resolved comments, so a truncation note can
+    // name a resolved id; a default-only refetch would throw "not found" for
+    // it. getCommentBody must read the same union. Default listing (call 1)
+    // lacks the id; the `--resolved` listing (call 2) carries it.
+    a1JsonMock
+      .mockReturnValueOnce([{ id: 1, note: 'open' }])
+      .mockReturnValueOnce([{ id: 3, note: 'resolved root' }]);
+    expect(aoneReader.getCommentBody('inline', 3, 'g/p', 5)).toBe(
+      'resolved root',
+    );
+  });
+
+  it('tags the a1.error/v1 envelope instead of an untagged TypeError', () => {
+    // `(comments ?? []).find` on an error OBJECT threw an untagged TypeError
+    // that lost the envelope's actionable message. The union helper guards.
+    a1JsonMock
+      .mockReturnValueOnce([{ id: 1, note: 'open' }])
+      .mockReturnValueOnce({
+        schemaVersion: 'a1.error/v1',
+        message: 'listing MR comments: backend auth failure',
+      });
+    expect(() => aoneReader.getCommentBody('inline', 1, 'g/p', 5)).toThrow(
+      'a1 mr comment list returned an unexpected shape: listing MR comments: backend auth failure',
+    );
+  });
+
   it('requires --pr for every kind (Aone addresses comments per-MR)', () => {
     expect(() =>
       aoneReader.getCommentBody('inline', 1, 'g/p', undefined),

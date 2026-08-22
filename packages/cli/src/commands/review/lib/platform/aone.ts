@@ -348,6 +348,73 @@ function mrRepoPath(detailUrl: string | undefined): string | undefined {
   return m?.[1]?.toLowerCase();
 }
 
+/**
+ * ONE `a1 repo mr comment list` query, shape-checked. a1 can answer this
+ * exact command with a well-formed `a1.error/v1` error OBJECT at exit 0 (a
+ * backend auth failure or a client timeout — measured by cleanup's
+ * a1CommentList, same payload, same guard). `?? []` does not coalesce an
+ * object, and `.filter`/`.find` on it would throw an UNTAGGED TypeError,
+ * losing the envelope's actionable message — the difference between
+ * "re-authenticate" and "schema drift" — at exactly the moment the read
+ * fails for a recoverable reason. Surface the cause tagged instead.
+ */
+function aoneCommentListing(
+  prNumber: number,
+  ownerRepo: string,
+  ...extra: string[]
+): AoneComment[] {
+  const out = a1Json<unknown>(
+    'repo',
+    'mr',
+    'comment',
+    'list',
+    '--mr',
+    String(prNumber),
+    '--repo',
+    ownerRepo,
+    '--sort',
+    'asc',
+    ...extra,
+  );
+  if (!Array.isArray(out)) {
+    const cause = (out as { message?: unknown } | null)?.message;
+    throw new Error(
+      'a1 mr comment list returned an unexpected shape' +
+        (typeof cause === 'string' && cause.trim() !== ''
+          ? `: ${cause.trim()}`
+          : ''),
+    );
+  }
+  return out as AoneComment[];
+}
+
+/**
+ * The MR's FULL comment surface: the default listing UNIONED with the
+ * `--resolved` listing, deduped by id. The default listing EXCLUDES
+ * resolved comments (measured by cleanup's auditAoneMrWrites: the MR's
+ * `comments` minus `closedComments` is exactly what it returns), while
+ * GitHub's REST fetches INCLUDE resolved-thread comments — so any consumer
+ * that must see the same surface GitHub sees (the context bundle AND the
+ * comment-body refetch a truncation note names) reads through this union.
+ * A refetch that queried only the default list would throw "not found" for
+ * a resolved id the context file had just rendered.
+ *
+ * DISCLOSED RESIDUAL: resolved REPLIES stay invisible — the `--resolved`
+ * listing returns resolved ROOT inline comments only, and a1 exposes no
+ * listing that includes their replies (same residual cleanup's audit
+ * discloses, design doc #9617).
+ */
+function aoneAllComments(prNumber: number, ownerRepo: string): AoneComment[] {
+  const byId = new Map<number, AoneComment>();
+  for (const c of [
+    ...aoneCommentListing(prNumber, ownerRepo),
+    ...aoneCommentListing(prNumber, ownerRepo, '--resolved'),
+  ]) {
+    if (typeof c.id === 'number' && !byId.has(c.id)) byId.set(c.id, c);
+  }
+  return [...byId.values()];
+}
+
 export const aoneReader: ReviewPlatformReader = {
   kind: 'aone',
 
@@ -628,19 +695,13 @@ export const aoneReader: ReviewPlatformReader = {
       );
     }
     // Aone has one flat comment collection per MR; the text is in `note`.
-    const comments = a1Json<
-      Array<{ id: number; note?: string; body?: string }>
-    >(
-      'repo',
-      'mr',
-      'comment',
-      'list',
-      '--mr',
-      String(prNumber),
-      '--repo',
-      ownerRepo,
-    );
-    const found = (comments ?? []).find((c) => c.id === id);
+    // Serve the SAME surface getReviewContext renders — the full union that
+    // INCLUDES resolved comments — because the refetch note that lands here
+    // is emitted for a comment the context file carried, which may be a
+    // resolved one; a default-only query would throw "not found" for it.
+    // The union helper also shape-checks the a1.error/v1 envelope.
+    const comments = aoneAllComments(prNumber, ownerRepo);
+    const found = comments.find((c) => c.id === id);
     // Throw on a miss — returning '' would be indistinguishable from a
     // genuinely-empty body, and the orchestrator would proceed on corrupted
     // evidence (the GitHub provider 404s on a bad id; keep the seam aligned).
@@ -674,59 +735,18 @@ export const aoneReader: ReviewPlatformReader = {
     const view = mrView(prNumber, ownerRepo);
     // One flat collection serves the three GitHub channels; `--sort asc`
     // gives chronological order (the GitHub endpoints' natural order).
-    // a1 has no pagination flags — each query returns the full list.
-    //
-    // The DEFAULT listing EXCLUDES resolved comments (measured by cleanup's
-    // auditAoneMrWrites: the MR's `comments` minus `closedComments` is
-    // exactly what it returns), and GitHub's REST fetches INCLUDE
-    // resolved-thread comments — a bundle missing them would silently drop
-    // resolved blocker roots from the re-check walk, and a resolved marker
-    // root could not fire the fail-closed identity gate. Union the default
-    // and `--resolved` listings the way the audit does, dedupe by id.
-    const listComments = (...extra: string[]): AoneComment[] => {
-      const out = a1Json<unknown>(
-        'repo',
-        'mr',
-        'comment',
-        'list',
-        '--mr',
-        String(prNumber),
-        '--repo',
-        ownerRepo,
-        '--sort',
-        'asc',
-        ...extra,
-      );
-      // a1 can answer this exact command with a well-formed `a1.error/v1`
-      // error OBJECT at exit 0 (a backend auth failure or a client timeout
-      // — measured by cleanup's a1CommentList, same payload, same guard).
-      // `?? []` does not coalesce an object, `.filter` would throw an
-      // untagged TypeError out of getReviewContext, and the envelope's
-      // actionable message — the difference between "re-authenticate" and
-      // "schema drift" — would be lost at exactly the moment the context
-      // read fails for a recoverable reason.
-      if (!Array.isArray(out)) {
-        const cause = (out as { message?: unknown } | null)?.message;
-        throw new Error(
-          'a1 mr comment list returned an unexpected shape' +
-            (typeof cause === 'string' && cause.trim() !== ''
-              ? `: ${cause.trim()}`
-              : ''),
-        );
-      }
-      return out as AoneComment[];
-    };
-    const byId = new Map<number, AoneComment>();
-    for (const c of [...listComments(), ...listComments('--resolved')]) {
-      if (typeof c.id === 'number' && !byId.has(c.id)) byId.set(c.id, c);
-    }
+    // The full resolved-INCLUSIVE surface (default + `--resolved`, deduped
+    // by id, envelope-guarded) comes from the shared helper — the SAME one
+    // getCommentBody reads, so a refetch note emitted for any rendered
+    // comment (resolved included) always finds its body.
+    const allComments = aoneAllComments(prNumber, ownerRepo);
     // DISCLOSED RESIDUAL: resolved REPLIES stay invisible — the `--resolved`
     // listing returns resolved ROOT inline comments only, and a1 exposes no
     // listing that includes their replies (same residual cleanup's audit
     // discloses, design doc #9617). A resolved thread therefore renders its
     // root without its reply chain; the re-check walk is unaffected (a
     // reply alone never retires a blocker — the code decides).
-    const comments: ReviewContextComment[] = [...byId.values()]
+    const comments: ReviewContextComment[] = allComments
       .filter((c) => !c.isDraft)
       .map((c) => ({
         id: c.id,
