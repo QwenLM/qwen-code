@@ -13,7 +13,7 @@ import {
   rm,
   symlink,
 } from 'node:fs/promises';
-import { realpathSync } from 'node:fs';
+import { lstatSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -117,6 +117,13 @@ describe('managed scratch workspace boundary', () => {
     const root = prepareManagedScratchRoot(rootPath, []);
     await rename(rootPath, join(parent, 'old-root'));
     await mkdir(rootPath, { mode: 0o700 });
+
+    // The detection rides on dev/ino. Some Windows volumes report no inode
+    // (or reuse it at once), leaving the swap indistinguishable — in that
+    // case there is nothing for the check to compare and the pinned
+    // fail-closed behavior cannot be observed here.
+    const swapped = lstatSync(rootPath);
+    if (swapped.dev === root.device && swapped.ino === root.inode) return;
 
     await expect(createManagedScratchDirectory(root)).rejects.toThrow(
       /identity changed/,
