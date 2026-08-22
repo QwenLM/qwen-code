@@ -691,6 +691,69 @@ describe('session-model-persistence', () => {
     );
   });
 
+  it('retries authentication when restore leaves a same-id runtime snapshot', async () => {
+    let currentAuth: string | undefined = AuthType.USE_OPENAI;
+    let currentModel = 'qwen3-coder-plus';
+    let snapshot:
+      | { id?: string; authType: string; modelId: string }
+      | undefined = {
+      authType: AuthType.USE_OPENAI,
+      modelId: 'qwen3-coder-plus',
+    };
+    const switchModel = vi.fn(
+      async (authType: string, modelId: string): Promise<void> => {
+        currentAuth = authType;
+        currentModel = modelId;
+        snapshot = modelId.startsWith('$runtime|')
+          ? {
+              id: modelId,
+              authType,
+              modelId: modelId.split('|').slice(2).join('|'),
+            }
+          : undefined;
+      },
+    );
+    const authenticate = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('oauth expired'))
+      .mockResolvedValueOnce(undefined);
+    const config = {
+      getModel: vi.fn(() => currentModel),
+      getAuthType: vi.fn(() => currentAuth),
+      getCurrentModelRegistryBaseUrl: vi.fn().mockReturnValue(undefined),
+      getActiveRuntimeModelSnapshot: vi.fn(() => snapshot),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({}),
+      switchModel,
+    } as unknown as Config;
+
+    await restoreSessionModelThenAuthenticate(
+      config,
+      recordingProjection({
+        lastCompletedUuid: 'leaf',
+        turnParentUuids: [null],
+        sessionModel: {
+          modelId: 'qwen3-coder-plus',
+          authType: AuthType.USE_OPENAI,
+        },
+      }),
+      authenticate,
+    );
+
+    expect(authenticate).toHaveBeenCalledTimes(2);
+    expect(switchModel).toHaveBeenNthCalledWith(
+      1,
+      AuthType.USE_OPENAI,
+      'qwen3-coder-plus',
+      undefined,
+    );
+    expect(switchModel).toHaveBeenNthCalledWith(
+      2,
+      AuthType.USE_OPENAI,
+      `$runtime|${AuthType.USE_OPENAI}|qwen3-coder-plus`,
+      undefined,
+    );
+  });
+
   it('surfaces the settings-model auth error when rollback authentication also fails', async () => {
     let currentAuth: string | undefined = AuthType.USE_OPENAI;
     let currentModel = 'settings-default';

@@ -85,6 +85,19 @@ function liveAuthType(config: Config): string | undefined {
   );
 }
 
+function runtimeSnapshotIdentity(
+  snapshot: { id?: string; authType?: string; modelId?: string } | undefined,
+): string | undefined {
+  if (!snapshot) return undefined;
+  if (typeof snapshot.id === 'string' && snapshot.id) {
+    return snapshot.id;
+  }
+  if (snapshot.authType && snapshot.modelId) {
+    return buildRuntimeSnapshotId(snapshot.authType, snapshot.modelId);
+  }
+  return undefined;
+}
+
 function recordedRouteMatches(
   recorded: SessionModelRecordPayload | undefined,
   currentRegistryBaseUrl: string | null | undefined,
@@ -201,7 +214,9 @@ export async function restoreSessionModelThenAuthenticate(
       liveAuthType(config) === originalAuth &&
       config.getModel() === originalModel &&
       (config.getCurrentModelRegistryBaseUrl?.() ?? undefined) ===
-        (originalBaseUrl ?? undefined)
+        (originalBaseUrl ?? undefined) &&
+      runtimeSnapshotIdentity(config.getActiveRuntimeModelSnapshot?.()) ===
+        runtimeSnapshotIdentity(originalRuntimeSnapshot)
     ) {
       throw error;
     }

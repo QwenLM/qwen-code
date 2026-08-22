@@ -62,7 +62,9 @@ false`).
 file; listing, DELETE, and child death all depend on that. A new session
 already inherits `settings.model.name`. Load/resume of a session that never
 switched models uses the last assistant `model`, else the current settings
-default.
+default. A session that has user records but no assistant record and was never
+switched therefore has no binding; that residual window is accepted so empty
+sessions stay file-less.
 
 `loadSession` / `resumeSession` must not write. `workspaceReload` must not
 write.
@@ -83,9 +85,13 @@ Live attach/resume skips restore. Cold `loadSession` / `resumeSession`:
    selector, not an arbitrary endpoint: it is honored only when it matches a
    configured registry route for that auth type and model, otherwise the
    implicit registry route is used. `authType` must be a known `AuthType`.
-3. `switchModel` failure is non-fatal. If the restored auth then fails
-   `ensureAuthenticated`, load/resume reverts to the settings model and
-   retries authentication once.
+3. `switchModel` failure is non-fatal. A recorded runtime-snapshot binding
+   whose live snapshot is gone still switches the bare id when a registry
+   route exists; that can be a different endpoint than the recorded
+   binding. Restore continues on the settings default only when no route
+   resolves. If the restored auth then fails `ensureAuthenticated`,
+   load/resume reverts to the settings model and retries authentication
+   once.
 
 ## Surfaces
 
