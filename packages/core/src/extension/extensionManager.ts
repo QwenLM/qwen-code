@@ -2042,14 +2042,6 @@ export class ExtensionManager {
             gitCredential,
             gitCredential.persistence === 'one_time',
           );
-        } else if (
-          await shouldUsePublicGitHubArchiveFallback(installMetadata)
-        ) {
-          installMetadata.gitCommit = await downloadPublicGitHubArchiveFallback(
-            installMetadata,
-            tempDir,
-            signal,
-          );
         } else {
           try {
             const result = await downloadFromGitHubRelease(
@@ -2069,13 +2061,24 @@ export class ExtensionManager {
             // Release extraction may leave a partial destination behind.
             await fs.promises.rm(tempDir, { recursive: true, force: true });
             await fs.promises.mkdir(tempDir, { recursive: true });
-            installMetadata.gitCommit = await cloneFromGit(
-              installMetadata,
-              tempDir,
-              signal,
-            );
-            if (installMetadata.type === 'github-release') {
-              installMetadata.type = 'git';
+            // Keep release-first for older Git too: the archive fallback is
+            // only a clone replacement, not a release replacement.
+            if (await shouldUsePublicGitHubArchiveFallback(installMetadata)) {
+              installMetadata.gitCommit =
+                await downloadPublicGitHubArchiveFallback(
+                  installMetadata,
+                  tempDir,
+                  signal,
+                );
+            } else {
+              installMetadata.gitCommit = await cloneFromGit(
+                installMetadata,
+                tempDir,
+                signal,
+              );
+              if (installMetadata.type === 'github-release') {
+                installMetadata.type = 'git';
+              }
             }
           }
         }

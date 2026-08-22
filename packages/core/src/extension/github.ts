@@ -6,6 +6,7 @@
 
 import type { SimpleGit } from 'simple-git';
 import { getErrorMessage } from '../utils/errors.js';
+import * as crypto from 'node:crypto';
 import * as os from 'node:os';
 import * as https from 'node:https';
 import * as fs from 'node:fs';
@@ -30,7 +31,10 @@ import {
   AGENT_PLUGIN_MANIFEST,
   getAgentPluginSchemaStatus,
 } from './agent-plugins-v1/manifest.js';
-import { assertTarArchiveHasNoLinks } from './archive-safety.js';
+import {
+  assertTarArchiveHasNoLinks,
+  type TarArchiveSafetyOptions,
+} from './archive-safety.js';
 import { resolveNetworkTarget } from './network-policy.js';
 import { extractZipArchive } from './zip-extraction.js';
 import { loadSimpleGit } from '../utils/load-simple-git.js';
@@ -140,9 +144,19 @@ function getGitHubCredential(source: string): GitCredential | undefined {
   return undefined;
 }
 
-async function isPinnedGitSupported(): Promise<boolean> {
+async function getLocalGitVersion(): Promise<{
+  major: number;
+  minor: number;
+  patch?: number | string;
+}> {
   const { simpleGit } = await loadSimpleGit();
-  const version = await simpleGit().version();
+  return await simpleGit().version();
+}
+
+function isPinnedGitVersionSupported(version: {
+  major: number;
+  minor: number;
+}): boolean {
   return (
     version.major > MINIMUM_PINNED_GIT_VERSION.major ||
     (version.major === MINIMUM_PINNED_GIT_VERSION.major &&
@@ -150,14 +164,13 @@ async function isPinnedGitSupported(): Promise<boolean> {
   );
 }
 
+async function isPinnedGitSupported(): Promise<boolean> {
+  return isPinnedGitVersionSupported(await getLocalGitVersion());
+}
+
 async function assertPinnedGitSupported(): Promise<void> {
-  const { simpleGit } = await loadSimpleGit();
-  const version = await simpleGit().version();
-  if (
-    version.major < MINIMUM_PINNED_GIT_VERSION.major ||
-    (version.major === MINIMUM_PINNED_GIT_VERSION.major &&
-      version.minor < MINIMUM_PINNED_GIT_VERSION.minor)
-  ) {
+  const version = await getLocalGitVersion();
+  if (!isPinnedGitVersionSupported(version)) {
     const detectedVersion = [version.major, version.minor, version.patch]
       .filter((component) => component !== undefined)
       .join('.');
@@ -442,15 +455,12 @@ async function assertArchivePreservesGitSemantics(destination: string) {
   }
 }
 
-export async function downloadPublicGitHubArchiveFallback(
-  installMetadata: ExtensionInstallMetadata,
-  destination: string,
+async function resolvePublicGitHubCommitSha(
+  owner: string,
+  repo: string,
+  ref: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  const { owner, repo } = parseAnonymousPublicGitHubRepo(
-    installMetadata.source,
-  );
-  const ref = installMetadata.ref || 'HEAD';
   const commitData = await fetchJson<GitHubCommitData>(
     `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits/${encodeURIComponent(ref)}`,
     signal,
@@ -460,18 +470,42 @@ export async function downloadPublicGitHubArchiveFallback(
   if (!/^[a-f0-9]{40}$/i.test(commitData.sha)) {
     throw new Error('GitHub returned an invalid commit SHA.');
   }
-  const archivePath = path.join(destination, 'github-source.tar.gz');
+  return commitData.sha.toLowerCase();
+}
+
+export async function downloadPublicGitHubArchiveFallback(
+  installMetadata: ExtensionInstallMetadata,
+  destination: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const { owner, repo } = parseAnonymousPublicGitHubRepo(
+    installMetadata.source,
+  );
+  const commitSha = await resolvePublicGitHubCommitSha(
+    owner,
+    repo,
+    installMetadata.ref || 'HEAD',
+    signal,
+  );
+  // A random staging name avoids clobbering (or being filtered out as) a
+  // repository file that happens to share the archive name.
+  const archivePath = path.join(
+    destination,
+    `github-source-${crypto.randomUUID()}.tar.gz`,
+  );
   await downloadFile(
-    `https://codeload.github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/tar.gz/${commitData.sha}`,
+    `https://codeload.github.com/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/tar.gz/${commitSha}`,
     archivePath,
     { includeGitHubToken: false, networkPolicy: 'public' },
     0,
     signal,
   );
-  await extractArchiveFile(archivePath, destination, signal);
+  await extractArchiveFile(archivePath, destination, signal, {
+    enforceResourceLimits: true,
+  });
   await fs.promises.unlink(archivePath);
   await assertArchivePreservesGitSemantics(destination);
-  return commitData.sha.toLowerCase();
+  return commitSha;
 }
 
 async function fetchReleaseFromGithub(
@@ -631,19 +665,13 @@ export async function checkForExtensionUpdate(
         const { owner, repo } = parseAnonymousPublicGitHubRepo(
           installMetadata.source,
         );
-        const commitData = await fetchJson<GitHubCommitData>(
-          `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits/${encodeURIComponent(installMetadata.ref || 'HEAD')}`,
+        const remoteSha = await resolvePublicGitHubCommitSha(
+          owner,
+          repo,
+          installMetadata.ref || 'HEAD',
           signal,
-          'public',
-          false,
         );
-        if (!/^[a-f0-9]{40}$/i.test(commitData.sha)) {
-          debugLogger.error(
-            `GitHub returned an invalid commit SHA for update check: ${commitData.sha}`,
-          );
-          return ExtensionUpdateState.ERROR;
-        }
-        return commitData.sha.toLowerCase() === installMetadata.gitCommit
+        return remoteSha === installMetadata.gitCommit
           ? ExtensionUpdateState.UP_TO_DATE
           : ExtensionUpdateState.UPDATE_AVAILABLE;
       }
@@ -901,6 +929,7 @@ export async function extractArchiveFile(
   archivePath: string,
   destination: string,
   signal?: AbortSignal,
+  options: TarArchiveSafetyOptions = {},
 ): Promise<void> {
   signal?.throwIfAborted();
   if (!isSupportedArchivePath(archivePath)) {
@@ -909,7 +938,7 @@ export async function extractArchiveFile(
     );
   }
   try {
-    await extractFile(archivePath, destination, signal);
+    await extractFile(archivePath, destination, signal, options);
   } catch (error) {
     signal?.throwIfAborted();
     throw new Error(
@@ -960,11 +989,14 @@ export function findReleaseAsset(assets: Asset[]): Asset | undefined {
   return undefined;
 }
 
+const MAX_API_REDIRECTS = 5;
+
 async function fetchJson<T>(
   url: string,
   signal?: AbortSignal,
   networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
   includeGitHubToken = true,
+  redirectCount = 0,
 ): Promise<T> {
   const timeoutError = new Error('Timed out fetching GitHub API response');
   const timeoutController = new AbortController();
@@ -1027,6 +1059,52 @@ async function fetchJson<T>(
         },
         (res) => {
           res.on('error', fail);
+          if (
+            res.statusCode === 301 ||
+            res.statusCode === 302 ||
+            res.statusCode === 307 ||
+            res.statusCode === 308
+          ) {
+            res.resume();
+            if (redirectCount >= MAX_API_REDIRECTS) {
+              return fail(
+                new Error('Too many redirects while fetching GitHub API data'),
+              );
+            }
+            if (!res.headers.location) {
+              return fail(
+                new Error('Redirect response missing location header'),
+              );
+            }
+            let redirectUrl: URL;
+            try {
+              redirectUrl = new URL(res.headers.location, url);
+            } catch (error) {
+              return fail(
+                new Error(`Invalid redirect URL: ${getErrorMessage(error)}`),
+              );
+            }
+            if (redirectUrl.protocol !== 'https:') {
+              return fail(
+                new Error(
+                  `Unsupported redirect URL protocol: ${redirectUrl.protocol}`,
+                ),
+              );
+            }
+            cleanup();
+            // Every hop is re-resolved against the network policy above, and
+            // the token never follows a redirect to a different host.
+            fetchJson<T>(
+              redirectUrl.toString(),
+              signal,
+              networkPolicy,
+              redirectUrl.host === target.url.host ? includeGitHubToken : false,
+              redirectCount + 1,
+            )
+              .then(finish)
+              .catch(fail);
+            return;
+          }
           if (res.statusCode !== 200) {
             res.resume();
             return fail(
@@ -1226,10 +1304,11 @@ export async function extractFile(
   file: string,
   dest: string,
   signal?: AbortSignal,
+  options: TarArchiveSafetyOptions = {},
 ): Promise<void> {
   signal?.throwIfAborted();
   if (file.endsWith('.tar.gz')) {
-    await assertTarArchiveHasNoLinks(file, signal);
+    await assertTarArchiveHasNoLinks(file, signal, options);
     signal?.throwIfAborted();
     try {
       await pipeline(fs.createReadStream(file), tar.x({ cwd: dest }), {

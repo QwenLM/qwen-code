@@ -697,6 +697,81 @@ describe('git extension helpers', () => {
       },
     );
 
+    it('follows a limited GitHub API redirect when resolving the commit SHA', async () => {
+      vi.stubEnv('GITHUB_TOKEN', 'must-not-be-sent');
+      vi.spyOn(dns, 'lookup').mockResolvedValue([
+        { address: '8.8.8.8', family: 4 },
+      ] as never);
+      const tempDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'old-git-fallback-redirect-test-'),
+      );
+      const sourceDir = path.join(tempDir, 'source');
+      const destination = path.join(tempDir, 'destination');
+      await fs.mkdir(path.join(sourceDir, 'repo-archive'), {
+        recursive: true,
+      });
+      await fs.mkdir(destination);
+      await fs.writeFile(
+        path.join(sourceDir, 'repo-archive', EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({ name: 'archive-extension', version: '1.0.0' }),
+      );
+      const archivePath = path.join(tempDir, 'source.tar.gz');
+      await tar.c({ gzip: true, file: archivePath, cwd: sourceDir }, [
+        'repo-archive',
+      ]);
+      const archive = await fs.readFile(archivePath);
+      const sha = 'abcdef0123456789abcdef0123456789abcdef01';
+      mockHttpsGet
+        .mockImplementationOnce(((_url, _options, callback) => {
+          callResponseCallback(
+            _options,
+            callback,
+            createResponse(undefined, 301, {
+              location:
+                'https://api.github.com/repos/owner/renamed/commits/HEAD',
+            }),
+          );
+          return createRequestMock();
+        }) as typeof https.get)
+        .mockImplementationOnce(((_url, options, callback) => {
+          expect(String(_url)).toBe(
+            'https://api.github.com/repos/owner/renamed/commits/HEAD',
+          );
+          expect(options).not.toHaveProperty('headers.Authorization');
+          callResponseCallback(
+            options,
+            callback,
+            createResponse(JSON.stringify({ sha })),
+          );
+          return createRequestMock();
+        }) as typeof https.get)
+        .mockImplementationOnce(((_url, options, callback) => {
+          expect(String(_url)).toBe(
+            `https://codeload.github.com/owner/repo/tar.gz/${sha}`,
+          );
+          callResponseCallback(options, callback, createResponse(archive));
+          return createRequestMock();
+        }) as typeof https.get);
+
+      try {
+        await expect(
+          downloadPublicGitHubArchiveFallback(
+            {
+              type: 'git',
+              source: 'https://github.com/owner/repo',
+              networkPolicy: 'public',
+            },
+            destination,
+          ),
+        ).resolves.toBe(sha);
+        expect(
+          fsSync.existsSync(path.join(destination, EXTENSIONS_CONFIG_FILENAME)),
+        ).toBe(true);
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
     it.each([
       'http://github.com/owner/repo',
       'https://gitlab.com/owner/repo',
@@ -1023,6 +1098,24 @@ describe('git extension helpers', () => {
       );
 
       expect(result).toBe(ExtensionUpdateState.ERROR);
+      expect(mockGit.listRemote).not.toHaveBeenCalled();
+    });
+
+    it('returns NOT_UPDATABLE when the old-Git install has no stored commit', async () => {
+      mockGit.version.mockResolvedValue({ major: 2, minor: 34, patch: 1 });
+      const result = await checkForExtensionUpdate(
+        createExtension({
+          installMetadata: {
+            type: 'git',
+            source: 'https://github.com/owner/repo',
+            networkPolicy: 'public',
+          },
+        }),
+        mockExtensionManager,
+      );
+
+      expect(result).toBe(ExtensionUpdateState.NOT_UPDATABLE);
+      expect(mockHttpsGet).not.toHaveBeenCalled();
       expect(mockGit.listRemote).not.toHaveBeenCalled();
     });
 

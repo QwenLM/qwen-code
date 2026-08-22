@@ -77,6 +77,8 @@ describe('assertTarArchiveHasNoLinks', () => {
     },
   );
 
+  const resourceLimits = { enforceResourceLimits: true };
+
   it('accepts an archive with exactly the entry-count limit', async () => {
     const archive = path.join(root, 'exact-entries.tar');
     const header = createTarFileHeader('file', 0);
@@ -85,7 +87,9 @@ describe('assertTarArchiveHasNoLinks', () => {
       Array.from({ length: MAX_ARCHIVE_ENTRIES }, () => header),
     );
 
-    await expect(assertTarArchiveHasNoLinks(archive)).resolves.toBeUndefined();
+    await expect(
+      assertTarArchiveHasNoLinks(archive, undefined, resourceLimits),
+    ).resolves.toBeUndefined();
   });
 
   it('rejects an archive just over the entry-count limit', async () => {
@@ -96,9 +100,24 @@ describe('assertTarArchiveHasNoLinks', () => {
       Array.from({ length: MAX_ARCHIVE_ENTRIES + 1 }, () => header),
     );
 
-    await expect(assertTarArchiveHasNoLinks(archive)).rejects.toThrow(
+    await expect(
+      assertTarArchiveHasNoLinks(archive, undefined, resourceLimits),
+    ).rejects.toThrow(
       `Tar archive contains more than ${MAX_ARCHIVE_ENTRIES} entries.`,
     );
+  });
+
+  it('skips resource limits for trusted archives by default', async () => {
+    const archive = path.join(root, 'huge-but-trusted.tar');
+    await fs.writeFile(
+      archive,
+      Buffer.concat([
+        createTarFileHeader('big.bin', MAX_ARCHIVE_EXPANDED_BYTES + 1),
+        TAR_TRAILER,
+      ]),
+    );
+
+    await expect(assertTarArchiveHasNoLinks(archive)).resolves.toBeUndefined();
   });
 
   // The parser skips `size` content bytes after each header, so every entry
@@ -126,14 +145,18 @@ describe('assertTarArchiveHasNoLinks', () => {
     const archive = path.join(root, 'exact-bytes.tar');
     await writeByteLimitTar(archive, MAX_ARCHIVE_EXPANDED_BYTES - 512);
 
-    await expect(assertTarArchiveHasNoLinks(archive)).resolves.toBeUndefined();
+    await expect(
+      assertTarArchiveHasNoLinks(archive, undefined, resourceLimits),
+    ).resolves.toBeUndefined();
   });
 
   it('rejects an archive whose declared sizes sum just over the byte limit', async () => {
     const archive = path.join(root, 'too-many-bytes.tar');
     await writeByteLimitTar(archive, MAX_ARCHIVE_EXPANDED_BYTES - 512 + 1);
 
-    await expect(assertTarArchiveHasNoLinks(archive)).rejects.toThrow(
+    await expect(
+      assertTarArchiveHasNoLinks(archive, undefined, resourceLimits),
+    ).rejects.toThrow(
       `Tar archive expands beyond ${MAX_ARCHIVE_EXPANDED_BYTES} bytes.`,
     );
   });

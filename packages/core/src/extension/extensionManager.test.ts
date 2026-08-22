@@ -53,6 +53,11 @@ const mockGit = {
 };
 const mockDownloadFromArchiveUrl = vi.hoisted(() => vi.fn());
 const mockDownloadPublicGitHubArchiveFallback = vi.hoisted(() => vi.fn());
+const mockDownloadFromGitHubRelease = vi.hoisted(() =>
+  vi
+    .fn()
+    .mockRejectedValue(new Error('Mocked GitHub release download failure')),
+);
 const mockExtractArchiveFile = vi.hoisted(() => vi.fn());
 const mockDownloadFromNpmRegistry = vi.hoisted(() => vi.fn());
 
@@ -71,9 +76,7 @@ vi.mock('./github.js', async (importOriginal) => {
     downloadFromArchiveUrl: mockDownloadFromArchiveUrl,
     downloadPublicGitHubArchiveFallback:
       mockDownloadPublicGitHubArchiveFallback,
-    downloadFromGitHubRelease: vi
-      .fn()
-      .mockRejectedValue(new Error('Mocked GitHub release download failure')),
+    downloadFromGitHubRelease: mockDownloadFromGitHubRelease,
     extractArchiveFile: mockExtractArchiveFile,
   };
 });
@@ -223,6 +226,10 @@ describe('extension tests', () => {
     Object.values(mockGit).forEach((fn) => fn.mockReset());
     mockDownloadFromArchiveUrl.mockReset();
     mockDownloadPublicGitHubArchiveFallback.mockReset();
+    mockDownloadFromGitHubRelease.mockReset();
+    mockDownloadFromGitHubRelease.mockRejectedValue(
+      new Error('Mocked GitHub release download failure'),
+    );
     mockExtractArchiveFile.mockReset();
     mockDownloadFromNpmRegistry.mockReset();
     mockGit.revparse.mockResolvedValue('sample-commit');
@@ -570,7 +577,37 @@ describe('extension tests', () => {
         source: 'https://github.com/obra/superpowers',
         gitCommit: '0123456789abcdef0123456789abcdef01234567',
       });
+      // Releases stay preferred over the archive fallback on older Git.
+      expect(mockDownloadFromGitHubRelease).toHaveBeenCalled();
       expect(mockDownloadPublicGitHubArchiveFallback).toHaveBeenCalled();
+      expect(mockGit.clone).not.toHaveBeenCalled();
+    });
+
+    it('keeps release installs ahead of the old-Git archive fallback', async () => {
+      mockGit.version.mockResolvedValue({ major: 2, minor: 34, patch: 1 });
+      mockDownloadFromGitHubRelease.mockImplementation(
+        async (_metadata: ExtensionInstallMetadata, destination: string) => {
+          writeExtractedExtension(destination, 'release-extension');
+          return { tagName: 'v2.0.0', type: 'github-release' as const };
+        },
+      );
+      const manager = createExtensionManager({ networkPolicy: 'public' });
+      await manager.refreshCache();
+
+      const installed = await manager.installExtension(
+        {
+          type: 'git',
+          source: 'https://github.com/owner/repo',
+        },
+        async () => {},
+      );
+
+      expect(installed.installMetadata).toMatchObject({
+        type: 'github-release',
+        source: 'https://github.com/owner/repo',
+        releaseTag: 'v2.0.0',
+      });
+      expect(mockDownloadPublicGitHubArchiveFallback).not.toHaveBeenCalled();
       expect(mockGit.clone).not.toHaveBeenCalled();
     });
 
