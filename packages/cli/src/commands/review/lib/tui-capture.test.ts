@@ -139,39 +139,51 @@ describe('kill-verdict base attribution', () => {
     expect(verdictExaminedBase('No such file or directory', '/tmp')).toBe(true);
   });
 
-  it('canonicalizes a symlinked base the way tmux canonicalizes its wordings', () => {
-    // tmux names the REALPATH of a symlinked socket base in its wordings
-    // (probed on 3.4): under a linked TMUX_TMPDIR every honest verdict
-    // names the target while the kill was pinned to the link, and the
-    // lexical comparison rejected every one of them — a false orphan
-    // WARNING for every server that predeceased its reap.
-    const root = mkdtempSync(join(tmpdir(), 'tui-cap-verdict-'));
-    try {
-      const real = join(root, 'real');
-      mkdirSync(real);
-      const link = join(root, 'link');
-      symlinkSync(real, link);
-      expect(
-        verdictExaminedBase(`no server running on ${real}/tmux-501/srv`, link),
-      ).toBe(true);
-      expect(
-        verdictExaminedBase(
-          `error connecting to ${real}/tmux-501/srv ` +
-            '(No such file or directory)',
-          link,
-        ),
-      ).toBe(true);
-      // A wording about an UNRELATED directory stays refused.
-      expect(
-        verdictExaminedBase(
-          `no server running on ${root}/elsewhere/tmux-501/srv`,
-          link,
-        ),
-      ).toBe(false);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
+  // win32: realpathSafe resolves with `posix.*` by design (tmux's wordings are
+  // POSIX paths), and this is the one fixture in the file that builds REAL
+  // paths — `join()` hands it backslashes and `symlinkSync` needs a privilege
+  // Windows does not give by default, so it fails red against healthy code.
+  // Its POSIX-literal siblings above stay unguarded because they never touch
+  // the filesystem.
+  it.skipIf(process.platform === 'win32')(
+    'canonicalizes a symlinked base the way tmux canonicalizes its wordings',
+    () => {
+      // tmux names the REALPATH of a symlinked socket base in its wordings
+      // (probed on 3.4): under a linked TMUX_TMPDIR every honest verdict
+      // names the target while the kill was pinned to the link, and the
+      // lexical comparison rejected every one of them — a false orphan
+      // WARNING for every server that predeceased its reap.
+      const root = mkdtempSync(join(tmpdir(), 'tui-cap-verdict-'));
+      try {
+        const real = join(root, 'real');
+        mkdirSync(real);
+        const link = join(root, 'link');
+        symlinkSync(real, link);
+        expect(
+          verdictExaminedBase(
+            `no server running on ${real}/tmux-501/srv`,
+            link,
+          ),
+        ).toBe(true);
+        expect(
+          verdictExaminedBase(
+            `error connecting to ${real}/tmux-501/srv ` +
+              '(No such file or directory)',
+            link,
+          ),
+        ).toBe(true);
+        // A wording about an UNRELATED directory stays refused.
+        expect(
+          verdictExaminedBase(
+            `no server running on ${root}/elsewhere/tmux-501/srv`,
+            link,
+          ),
+        ).toBe(false);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('recognizes every create-directory wording', () => {
     for (const line of [
@@ -270,6 +282,7 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
     command: 'node cli.js',
     cwd: '/work',
     readyFile: '/ready',
+    sleepBin: '/bin/sleep',
   });
 
   it('carries -L on every call — start, capture, captureText, kill', () => {
@@ -358,6 +371,7 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
       command: 'node cli.js',
       cwd: '/tmp/foo;',
       readyFile: '/tmp/out.holder-ready',
+      sleepBin: '/bin/sleep',
     });
     expect(withCwd.start[withCwd.start.indexOf('-c') + 1]).toBe('/tmp/foo\\;');
   });
@@ -376,6 +390,7 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
       command: 'node cli.js',
       cwd: '/tmp/fmt/#{session_name}',
       readyFile: '/tmp/out.holder-ready',
+      sleepBin: '/bin/sleep',
     });
     expect(fmt.start[fmt.start.indexOf('-c') + 1]).toBe(
       '/tmp/fmt/##{session_name}',
@@ -388,6 +403,7 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
       command: 'node cli.js',
       cwd: '/tmp/d/a#b',
       readyFile: '/tmp/out.holder-ready',
+      sleepBin: '/bin/sleep',
     });
     expect(plainHash.start[plainHash.start.indexOf('-c') + 1]).toBe(
       '/tmp/d/a##b',
@@ -408,6 +424,7 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
       command: 'node cli.js',
       cwd: '/work',
       readyFile: '/ready',
+      sleepBin: '/bin/sleep',
     };
     expect(tmuxPlan({ ...opts, captureTrailing: false }).capture).not.toContain(
       '-N',
@@ -454,6 +471,7 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
       command: 'node cli.js',
       cwd: '/work',
       readyFile: '/ready',
+      sleepBin: '/bin/sleep',
     };
     const trimmed = tmuxPlan({ ...opts, captureTrim: true });
     expect(trimmed.capture).toContain('-T');
@@ -491,6 +509,7 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
       command: 'node cli.js',
       cwd: '/work',
       readyFile: '/ready',
+      sleepBin: '/bin/sleep',
     });
     expect(p.start[p.start.indexOf('-x') + 1]).toBe('132');
     expect(p.start[p.start.indexOf('-y') + 1]).toBe('43');
@@ -524,7 +543,7 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
     // neither the holder nor the server (measured: untrapped, pane →
     // session → server died before the capture).
     expect(plan.start[plan.start.length - 1]).toBe(
-      `trap : INT QUIT\n( trap '' INT QUIT; sleep 10800; kill -9 -$$ 2>/dev/null ) &\n: > '/ready'\n/bin/sh -c 'node cli.js'\ni=0; while [ $i -lt 180 ]; do sleep 60; i=$((i+1)); done`,
+      `trap : INT QUIT\n( trap '' INT QUIT; '/bin/sleep' 10800; kill -9 -$$ 2>/dev/null ) &\n: > '/ready'\n/bin/sh -c 'node cli.js'\ni=0; while [ $i -lt 180 ]; do '/bin/sleep' 60; i=$((i+1)); done`,
     );
   });
 
@@ -537,6 +556,7 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
       command: `printf '%s' "it's"`,
       cwd: '/work',
       readyFile: '/ready',
+      sleepBin: '/bin/sleep',
     });
     // ONE layer: the plan hands tmux the holder SCRIPT, whose single
     // `/bin/sh -c '<command>'` line is the only place the command is
@@ -551,8 +571,34 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
     const inner = `/bin/sh -c '${esc(cmd)}'`;
     const held = p.start[p.start.length - 1];
     expect(held).toBe(
-      `trap : INT QUIT\n( trap '' INT QUIT; sleep 10800; kill -9 -$$ 2>/dev/null ) &\n: > '${esc('/ready')}'\n${inner}\ni=0; while [ $i -lt 180 ]; do sleep 60; i=$((i+1)); done`,
+      `trap : INT QUIT\n( trap '' INT QUIT; '/bin/sleep' 10800; kill -9 -$$ 2>/dev/null ) &\n: > '${esc('/ready')}'\n${inner}\ni=0; while [ $i -lt 180 ]; do '/bin/sleep' 60; i=$((i+1)); done`,
     );
+  });
+
+  it("runs the holder's sleeps by resolved path, never by bare name", () => {
+    // The pane resolves a bare name through its OWN inherited PATH — the
+    // hazard the `/bin/sh` pin three lines above it already answers. Under a
+    // PATH that finds tmux but not sleep, the watchdog's `sleep 10800` exits
+    // 127 in milliseconds and falls straight through to `kill -9 -$$`,
+    // SIGKILLing the pane process group: the window collapses to ~0ms and
+    // the bounded three-hour hold with it. The caller resolves it once and
+    // the plan embeds it, quoted like every other caller-supplied path.
+    const p = tmuxPlan({
+      server: 'srv',
+      session: 'cap',
+      cols: 80,
+      rows: 24,
+      command: 'node cli.js',
+      cwd: '/work',
+      readyFile: '/ready',
+      sleepBin: "/opt/sl eep/sl'eep",
+    });
+    const held = p.start[p.start.length - 1];
+    expect(held).toContain(`'/opt/sl eep/sl'\\''eep' 10800`);
+    expect(held).toContain(`'/opt/sl eep/sl'\\''eep' 60`);
+    // No bare invocation survives anywhere in the script.
+    expect(held).not.toMatch(/(^|[^'])\bsleep 10800/);
+    expect(held).not.toMatch(/(^|[^'])\bsleep 60/);
   });
 
   it('quote-escapes the readyFile in the holder script', () => {
@@ -573,6 +619,7 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
       command: 'node cli.js',
       cwd: '/work',
       readyFile,
+      sleepBin: '/bin/sleep',
     });
     const esc = (v: string): string => v.replaceAll("'", "'\\''");
     const inner = `/bin/sh -c '${esc('node cli.js')}'`;
@@ -581,7 +628,7 @@ describe('tmuxPlan — every call is scoped to the private server', () => {
     // is pinned to /bin/sh in the same invocation), so the trap lives at
     // layer 0 — QUIT included — and only the sentinel path needs escaping.
     expect(held).toBe(
-      `trap : INT QUIT\n( trap '' INT QUIT; sleep 10800; kill -9 -$$ 2>/dev/null ) &\n: > '${esc(readyFile)}'\n${inner}\ni=0; while [ $i -lt 180 ]; do sleep 60; i=$((i+1)); done`,
+      `trap : INT QUIT\n( trap '' INT QUIT; '/bin/sleep' 10800; kill -9 -$$ 2>/dev/null ) &\n: > '${esc(readyFile)}'\n${inner}\ni=0; while [ $i -lt 180 ]; do '/bin/sleep' 60; i=$((i+1)); done`,
     );
   });
 

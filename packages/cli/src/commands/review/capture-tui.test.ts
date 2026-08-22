@@ -21,6 +21,7 @@ import {
 } from 'node:fs';
 import { join, relative } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import {
   captureTuiCommand,
@@ -627,6 +628,161 @@ exit 0
       { mode: 0o755 },
     );
   }
+
+  it('resolves sleep to an absolute executable path', () => {
+    // The plan embeds whatever this answers, so a walker that returns a bare
+    // name or a directory would put one back in the pane's hands — silently,
+    // because the holder only fails under a PATH that lacks sleep.
+    const resolved = probes.sleepBin();
+    expect(resolved).toBeDefined();
+    expect(resolved?.startsWith('/')).toBe(true);
+    expect(statSync(resolved as string).isFile()).toBe(true);
+  });
+
+  it('refuses a capture whose holder would have no sleep to run', async () => {
+    // The holder's watchdog (`sleep 10800`) and bounded hold loop
+    // (`sleep 60` x 180) are what keep the pane open. Resolved bare, they
+    // went through the PANE's inherited PATH, and under a PATH that finds
+    // tmux but not sleep the watchdog exited 127 in milliseconds and fell
+    // straight into `kill -9 -$$` — the whole pane process group SIGKILLed,
+    // the capture window collapsed to ~0ms, and the evidence read as "the
+    // command rendered nothing" with nothing naming the cause. Refuse up
+    // front instead, before any server exists.
+    probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+    const realSleepProbe = probes.sleepBin;
+    probes.sleepBin = () => undefined;
+    const dir = mkdtempSync(join(tmpdir(), 'capture-tui-nosleep-'));
+    try {
+      const { stdout, stderr } = await withStdio(() =>
+        runCaptureTui({
+          command: 'printf hi',
+          cwd: undefined,
+          cols: 80,
+          rows: 24,
+          settleMs: 0,
+          until: undefined,
+          keys: undefined,
+          out: join(dir, 'cap'),
+          timeoutMs: 1000,
+        } as never),
+      );
+      expect(process.exitCode).toBe(3);
+      expect(stderr).toContain('sleep is not on PATH');
+      expect(JSON.parse(stdout.trim())).toEqual({
+        captured: false,
+        evidence: 'none',
+        reason: expect.stringContaining('sleep is not on PATH'),
+      });
+      // "Nothing was started" is part of the refusal's claim.
+      expect(existsSync(join(dir, 'cap.ans'))).toBe(false);
+      expect(existsSync(join(dir, 'cap.json'))).toBe(false);
+      expect(leakedSentinels()).toEqual([]);
+    } finally {
+      probes.sleepBin = realSleepProbe;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'never connects a kill through an entry this capture did not bind',
+    async () => {
+      // The reap addresses the socket by NAME and tmux connects to whatever
+      // that name resolves to. The captured command runs under this uid —
+      // untrusted code is what a review captures — and knows the path from
+      // `$TMUX`; a HARD LINK planted there aims the pinned kill-server at
+      // another server, which dies with exit 0 while `confirmedDead` credits
+      // the success globally and nothing warns. That is this command's
+      // headline premise failing, so the entry is inspected first, exactly
+      // as the sibling sweep in cleanup.ts inspects its own.
+      probes.tmux = () => ({ status: 'ok', out: 'tmux 3.9' }) as const;
+      const uid = process.getuid?.();
+      // Short base by necessity: a unix socket path is capped near 104 bytes,
+      // and the default mkdtemp parent plus a capture server name overruns it.
+      const base = mkdtempSync('/tmp/ctui-r111-');
+      const sockDir = join(base, `tmux-${String(uid)}`);
+      mkdirSync(sockDir, { recursive: true, mode: 0o700 });
+      // A FOREIGN server's socket — what the planted link would aim at. A
+      // real one, because the guard's question is the entry's type and link
+      // count, and a regular file would answer a weaker one.
+      const foreign = join(sockDir, 'foreign');
+      const foreignServer = createServer();
+      await new Promise<void>((resolveListen) => {
+        foreignServer.listen(foreign, () => resolveListen());
+      });
+      const dir = mkdtempSync(join(tmpdir(), 'capture-tui-r111-'));
+      const killLog = join(dir, 'kills');
+      const binDir = join(dir, 'fakebin');
+      mkdirSync(binDir, { recursive: true });
+      // The shim plants at new-session — the earliest moment the server name
+      // exists — and records the base of every kill it is asked to make.
+      writeFileSync(
+        join(binDir, 'tmux'),
+        `#!/bin/sh
+[ "$1" = "-V" ] && { echo "tmux 3.9"; exit 0; }
+for a in "$@"; do
+  if [ "$a" = "new-session" ]; then
+    srv=$(printf '%s\\n' "$@" | grep -o 'qwen-review-capture-[0-9]*-[0-9a-f]*' | head -1)
+    [ -n "$srv" ] && ln '${foreign}' '${sockDir}'/"$srv"
+    s=$(printf '%s\\n' "$@" | grep -o "/[^']*qwen-capture-ready-[0-9a-f-]*" | head -1)
+    [ -n "$s" ] && : > "$s"
+    exit 0
+  fi
+  if [ "$a" = "kill-server" ]; then
+    printf '%s\\n' "$TMUX_TMPDIR" >> '${killLog}'
+    exit 0
+  fi
+done
+printf 'MARK\\n'
+exit 0
+`,
+        { mode: 0o755 },
+      );
+      const realPath = process.env['PATH'];
+      const realTmuxTmpdir = process.env['TMUX_TMPDIR'];
+      process.env['PATH'] = `${binDir}:${realPath ?? ''}`;
+      process.env['TMUX_TMPDIR'] = base;
+      try {
+        await withStdio(() =>
+          runCaptureTui({
+            command: 'printf hi',
+            cwd: undefined,
+            cols: 80,
+            rows: 24,
+            settleMs: 0,
+            until: 'MARK',
+            keys: undefined,
+            out: join(dir, 'cap'),
+            timeoutMs: 5000,
+          } as never),
+        );
+        const killedBases = existsSync(killLog)
+          ? readFileSync(killLog, 'utf8').trim().split('\n')
+          : [];
+        // The planted base is never connected to...
+        expect(killedBases).not.toContain(base);
+        // ...while the untouched fallback base still gets its kill, which is
+        // what separates "the guard refused" from "the reap never ran".
+        expect(killedBases).toContain('/tmp');
+        // And the entry is left standing: it may BE the foreign socket,
+        // reached through the link, so unlinking it is not this run's to do.
+        const planted = readdirSync(sockDir).filter((n) =>
+          n.startsWith('qwen-review-capture-'),
+        );
+        expect(planted).toHaveLength(1);
+        expect(lstatSync(join(sockDir, planted[0])).nlink).toBe(2);
+        // The foreign server is untouched — the whole point.
+        expect(lstatSync(foreign).isSocket()).toBe(true);
+      } finally {
+        if (realPath === undefined) delete process.env['PATH'];
+        else process.env['PATH'] = realPath;
+        if (realTmuxTmpdir === undefined) delete process.env['TMUX_TMPDIR'];
+        else process.env['TMUX_TMPDIR'] = realTmuxTmpdir;
+        foreignServer.close();
+        rmSync(base, { recursive: true, force: true });
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it.skipIf(process.platform === 'win32')(
     'does not render THROUGH a symlink planted at <out>.png mid-window',

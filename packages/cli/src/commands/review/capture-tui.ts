@@ -225,6 +225,30 @@ export const freezeRender = { bin: 'freeze', timeoutMs: 30_000 };
  * exactly where `describe.skipIf(!hasTmux)` skips the real-tmux tests, so
  * without this seam that path is untestable in the one environment where it
  * matters. Tests override a probe and restore it; production never does. */
+/** The first executable `bin` on this process's PATH, or undefined.
+ *
+ * In-process rather than a spawn, because the answer needed is the PATH
+ * lookup itself — the absolute path — not an exit code. An EMPTY PATH
+ * element means "the current directory" to POSIX, and that rule is NOT
+ * honoured here: the capture runs with the reviewed tree as its cwd, so
+ * honouring it would let the PR under review supply the binary the holder
+ * runs.
+ */
+function resolveOnPath(bin: string): string | undefined {
+  for (const dir of (process.env['PATH'] ?? '').split(':')) {
+    if (dir === '') continue;
+    const candidate = join(dir, bin);
+    try {
+      accessSync(candidate, fsConstants.X_OK);
+      if (statSync(candidate).isFile()) return candidate;
+    } catch {
+      // Absent here, a directory, or not executable by this uid: keep going,
+      // exactly as execvp would.
+    }
+  }
+  return undefined;
+}
+
 export const probes = {
   // The VERSION LINE, not a boolean: capture-pane -N needs tmux 3.1, and a
   // host with an older tmux must be told so up front — the real cause named,
@@ -234,6 +258,10 @@ export const probes = {
   // has no --version flag and would be misdiagnosed as absent; --help exits
   // 0 on both release lines (measured on v0.1.6 and v0.2.2).
   freeze: (): ProbeResult => probeOutput('freeze', '--help'),
+  // The holder's own `sleep`. A probe like the two above so a test can
+  // answer "PATH has no sleep" without editing the process's PATH, which is
+  // how the degraded-PATH refusal below gets covered at all.
+  sleepBin: (): string | undefined => resolveOnPath('sleep'),
 };
 
 /** A capture manifest is a few hundred bytes; anything past this is not
@@ -1206,6 +1234,22 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
   // there rather than fabricated, and the manifest says so.
   const capturePads = tmuxPadsWithCaptureN(tmuxVersion) === true;
   const captureTrims = tmuxSupportsCaptureT(tmuxVersion) === true;
+  // BEFORE the start, not after a collapsed capture: the holder cannot hold
+  // a pane open without `sleep`, and a bare name in the held script would
+  // resolve through the pane's PATH — the watchdog then exits 127 and runs
+  // `kill -9 -$$` on the pane group, which reads downstream as "the command
+  // rendered nothing". Refusing here names the real cause and starts no
+  // server.
+  const sleepBin = probes.sleepBin();
+  if (sleepBin === undefined) {
+    refuse(
+      'sleep is not on PATH — the pane holder runs it to keep the capture ' +
+        'window open, and it is resolved here rather than inside the pane. ' +
+        'Nothing was started.',
+    );
+    return;
+  }
+
   const plan = tmuxPlan({
     server,
     session,
@@ -1218,6 +1262,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // ...and 3.1-3.2.x invent trailing spaces with -N and cannot undo it.
     captureTrailing: !capturePads,
     readyFile: holderReadyPath,
+    sleepBin,
   });
 
   // The no-orphan guarantee cannot rest on `finally` alone: a SIGINT/SIGTERM
@@ -1276,6 +1321,7 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     let confirmedDead = false;
     let killSpawnFailed = false;
     let killDirUnusable = false;
+    let plantedEntry = false;
     const uid = process.getuid?.();
     // Whether the socket start bound is still the one at its path: a
     // goal-state verdict about the start base is about THIS run's server
@@ -1296,6 +1342,59 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
     // candidate set as before: tmux takes the first USABLE base.
     const envBase = process.env['TMUX_TMPDIR'];
     for (const base of new Set([envBase || '/tmp', '/tmp'])) {
+      // The kill below addresses the socket by NAME, and tmux connects to
+      // whatever that name resolves to at connect() time. The captured
+      // command is untrusted code running under this uid — that is what a
+      // review captures — and it knows this path from `$TMUX`; a symlink or
+      // a HARD LINK planted there points the pinned kill at another server,
+      // and `kill-server` destroys THAT one with exit 0 while
+      // `confirmedDead` credits the success globally and nothing warns.
+      // Measured on 3.4: a two-link socket entry killed the server on the
+      // other end of the link. That is the PR's headline premise — a capture
+      // cannot kill the user's own sessions — failing, so the entry is
+      // inspected before anything connects to it, the same three shapes the
+      // sibling sweep in cleanup.ts rejects. The residual rename race
+      // between this lstat and tmux's connect() has no portable close (Node
+      // exposes no `*at()` syscalls); what closes here is the case of no
+      // check at all.
+      let planted = false;
+      if (uid !== undefined) {
+        try {
+          const entry = lstatSync(join(base, `tmux-${uid}`, server));
+          planted =
+            // The two shapes that REDIRECT a connect: tmux follows a
+            // symlink to its target, and connect(2) is inode-addressed, so
+            // a hard link reaches the foreign server race-free. A
+            // non-socket entry is not among them — connect fails ENOTSOCK
+            // and kills nothing — which is why this rule is narrower than
+            // the sweep's: that one also UNLINKS entries it did not
+            // create, and has to know a tmux socket from a stranger's
+            // file. Here the path carries this run's own unique name.
+            entry.isSymbolicLink() ||
+            // A tmux-created socket has exactly one link, so more is never
+            // this run's own.
+            entry.nlink > 1 ||
+            // Identity only on the base the stamp was taken under: the
+            // server binds ONE socket, and only there does a differing
+            // inode mean the entry was swapped rather than that this base
+            // never held it.
+            (resolve(base) === startBase &&
+              socketStampIno !== undefined &&
+              entry.ino !== socketStampIno);
+        } catch {
+          // Absent or unstattable: there is nothing planted to connect
+          // through, and the kill's own goal-state wordings already answer
+          // for this base.
+        }
+      }
+      if (planted) {
+        // Never killed, and never unlinked either — the entry may BE the
+        // user's own socket, reached through a link. Doubt stays visible:
+        // this run's server may still be standing behind the real path.
+        plantedEntry = true;
+        unconfirmed = true;
+        continue;
+      }
       let baseDead = false;
       for (let attempt = 0; attempt < 2 && !baseDead; attempt++) {
         // Back-to-back, the second attempt was a copy of the first: under fd
@@ -1423,14 +1522,26 @@ export async function runCaptureTui(args: CaptureTuiArgs): Promise<void> {
       // becomes an uncaughtException — exit 1 instead of 128+sig, the
       // re-raise never reached, and this very warning lost).
       writeStderrLineSafe(
-        `capture-tui: WARNING — kill-server failed twice${
-          killSpawnFailed
-            ? ' (this process could not spawn tmux at all — fd exhaustion, ' +
-              'not a wedged server)'
-            : killDirUnusable
-              ? ' (tmux refused before reaching the socket directory — its ' +
-                'permissions or type, not the server)'
-              : ''
+        // The lead clause has to match what happened: a refused connect is
+        // not a kill that failed, and an operator told "failed twice" would
+        // go looking for a wedged server instead of a planted entry.
+        `capture-tui: WARNING — ${
+          plantedEntry
+            ? 'the reap refused to connect'
+            : 'kill-server failed twice'
+        }${
+          plantedEntry
+            ? " (the socket entry was not this capture's own plain socket " +
+              '— a symlink, a hard link or a non-socket stood at its path, ' +
+              'so the kill was NOT attempted: connecting would have reached ' +
+              'whatever that entry resolves to)'
+            : killSpawnFailed
+              ? ' (this process could not spawn tmux at all — fd ' +
+                'exhaustion, not a wedged server)'
+              : killDirUnusable
+                ? ' (tmux refused before reaching the socket directory — ' +
+                  'its permissions or type, not the server)'
+                : ''
         }; the private tmux server ${server} may still be running ` +
           `(tmux -L ${server} kill-server to reap it by hand).`,
       );

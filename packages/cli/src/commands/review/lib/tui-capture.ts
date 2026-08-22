@@ -313,6 +313,18 @@ export function tmuxPlan(opts: {
    * (measured: the INTR fires the instant tmux writes 0x03 to the pty,
    * not when the shell reads it — no in-script ordering can win). */
   readyFile: string;
+  /** Absolute path to `sleep`, resolved by the caller before any tmux start.
+   * The holder's watchdog and bounded hold loop run it, and a BARE name
+   * resolves through the PANE's inherited PATH — the same hazard the
+   * `/bin/sh` pin below exists for, with a worse ending: under a PATH that
+   * finds tmux but not `sleep`, the watchdog's sleep exits 127 in
+   * milliseconds and falls straight through to `kill -9 -$$`, SIGKILLing the
+   * whole pane process group. The capture window collapses to ~0ms and the
+   * bounded three-hour hold goes with it, with nothing in the manifest
+   * saying why. Resolved once, embedded here, so the pane never looks it
+   * up — and a caller that cannot resolve it refuses before starting
+   * anything, rather than discovering it as an empty capture. */
+  sleepBin: string;
 }): {
   start: string[];
   capture: string[];
@@ -419,7 +431,10 @@ export function tmuxPlan(opts: {
   // semantics, but a --keys C-\ (SIGQUIT) killed the untrapped layer 0 —
   // pane, session, server gone (measured end-to-end). QUIT is trapped for
   // the same reason INT is; both reset to default in the children.
-  const held = `trap : INT QUIT\n( trap '' INT QUIT; sleep 10800; kill -9 -$$ 2>/dev/null ) &\n: > '${esc(opts.readyFile)}'\n${inner}\ni=0; while [ $i -lt 180 ]; do sleep 60; i=$((i+1)); done`;
+  // Single-quoted like readyFile: the resolved path is a filesystem path,
+  // and nothing upstream guarantees it is free of spaces or apostrophes.
+  const sleepBin = `'${esc(opts.sleepBin)}'`;
+  const held = `trap : INT QUIT\n( trap '' INT QUIT; ${sleepBin} 10800; kill -9 -$$ 2>/dev/null ) &\n: > '${esc(opts.readyFile)}'\n${inner}\ni=0; while [ $i -lt 180 ]; do ${sleepBin} 60; i=$((i+1)); done`;
   return {
     // ONE client invocation, three properties:
     // - `-f /dev/null` starts the server CONFIG-FREE: without it the
