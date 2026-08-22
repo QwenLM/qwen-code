@@ -1180,7 +1180,12 @@ describe('SessionCatalogStore', () => {
     // The waiter settles via a later staged commit (not exercised here), so
     // drop the promise; the wake fires synchronously inside refresh().
     void store.refresh(query('/work')).catch(() => undefined);
-    expect(wake).toHaveBeenCalledWith('/work');
+    expect(wake).toHaveBeenCalledWith('/work', false);
+
+    void store
+      .refresh(query('/work'), { interactive: true })
+      .catch(() => undefined);
+    expect(wake).toHaveBeenLastCalledWith('/work', true);
 
     stopWake();
     releaseLiveState();
@@ -1598,6 +1603,84 @@ describe('SessionCatalogStore', () => {
     const unsubscribe = store.subscribe(target, vi.fn());
 
     expect(legacy).not.toHaveBeenCalled();
+    unsubscribe();
+  });
+});
+
+describe('SessionCatalogStore live-session snapshots (#9487)', () => {
+  let store: SessionCatalogStore;
+
+  function live(sessionId: string, hasActivePrompt: boolean) {
+    return {
+      sessionId,
+      clientCount: 1,
+      hasActivePrompt,
+      isWaitingForPermission: false,
+      isWaitingForUserQuestion: false,
+    };
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    const client = {
+      listWorkspaceSessionsPage: vi.fn(),
+      workspaceByCwd: vi.fn(() => ({
+        listWorkspaceSessionsPage: vi.fn(),
+      })),
+    } as unknown as DaemonClient;
+    store = new SessionCatalogStore(client);
+  });
+
+  afterEach(() => {
+    store.dispose();
+    vi.useRealTimers();
+  });
+
+  it('answers per-session lookups independently of any loaded page', () => {
+    expect(store.hasLiveSessions('/work')).toBe(false);
+    expect(store.getLiveSession('/work', 'off-page')).toBeUndefined();
+
+    // One live-state response is enough: no catalog page was ever loaded,
+    // yet a session that no page contains resolves from the snapshot.
+    store.applyLiveState('/work', [live('off-page', true)]);
+
+    expect(store.hasLiveSessions('/work')).toBe(true);
+    expect(store.getLiveSession('/work', 'off-page')?.hasActivePrompt).toBe(
+      true,
+    );
+    expect(store.getLiveSession('/work', 'unknown')).toBeUndefined();
+  });
+
+  it('notifies live-session subscribers only when volatile state changes', () => {
+    const listener = vi.fn();
+    const unsubscribe = store.subscribeLiveSessions('/work', listener);
+
+    store.applyLiveState('/work', [live('s1', true)]);
+    expect(listener).toHaveBeenCalledTimes(1);
+
+    // The 2s poll cadence keeps re-applying identical state: no churn.
+    store.applyLiveState('/work', [live('s1', true)]);
+    expect(listener).toHaveBeenCalledTimes(1);
+
+    store.applyLiveState('/work', [live('s1', false)]);
+    expect(listener).toHaveBeenCalledTimes(2);
+
+    unsubscribe();
+    store.applyLiveState('/work', [live('s1', true)]);
+    expect(listener).toHaveBeenCalledTimes(2);
+  });
+
+  it('drops the snapshot when the last live-state retainer releases', () => {
+    const release = store.retainWorkspaceLiveState('/work');
+    store.applyLiveState('/work', [live('s1', true)]);
+    const listener = vi.fn();
+    const unsubscribe = store.subscribeLiveSessions('/work', listener);
+
+    release();
+
+    expect(store.hasLiveSessions('/work')).toBe(false);
+    expect(store.getLiveSession('/work', 's1')).toBeUndefined();
+    expect(listener).toHaveBeenCalledTimes(1);
     unsubscribe();
   });
 });

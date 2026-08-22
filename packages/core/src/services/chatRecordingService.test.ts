@@ -350,11 +350,11 @@ describe('ChatRecordingService', () => {
       expect(record.systemPayload).toEqual({ displayText: 'save logs' });
     });
 
-    it('records mid-turn media references without inline bytes', async () => {
-      const mediaReferences = [
+    it('records mid-turn attachment references without inline bytes', async () => {
+      const attachmentReferences = [
         {
           type: 'image' as const,
-          mediaId: 'media-1',
+          attachmentId: 'image.png',
           mimeType: 'image/png',
           size: 3,
         },
@@ -364,7 +364,7 @@ describe('ChatRecordingService', () => {
         [{ text: 'inspect image' }],
         'inspect image',
         undefined,
-        mediaReferences,
+        attachmentReferences,
       );
       await chatRecordingService.flush();
 
@@ -375,15 +375,15 @@ describe('ChatRecordingService', () => {
       });
       expect(record.systemPayload).toEqual({
         displayText: 'inspect image',
-        mediaReferences,
+        attachmentReferences,
       });
     });
 
-    it('records media references when the mid-turn display text is empty', async () => {
-      const mediaReferences = [
+    it('records attachment references when the mid-turn display text is empty', async () => {
+      const attachmentReferences = [
         {
           type: 'image' as const,
-          mediaId: 'media-only',
+          attachmentId: 'image.png',
           mimeType: 'image/png',
           size: 3,
         },
@@ -393,14 +393,14 @@ describe('ChatRecordingService', () => {
         [{ text: '[User message received during tool execution]: ' }],
         '',
         undefined,
-        mediaReferences,
+        attachmentReferences,
       );
       await chatRecordingService.flush();
 
       const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
       expect(record.systemPayload).toEqual({
         displayText: '',
-        mediaReferences,
+        attachmentReferences,
       });
     });
 

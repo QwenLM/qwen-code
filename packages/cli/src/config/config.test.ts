@@ -13,6 +13,7 @@ import {
   OutputFormat,
   NativeLspService,
   Storage,
+  SessionIdCaseConflictError,
 } from '@qwen-code/qwen-code-core';
 import {
   isValidSessionId,
@@ -35,6 +36,7 @@ const mockSessionServiceInstance = vi.hoisted(() => ({
   forkSession: vi.fn(),
   sessionExists: vi.fn(),
   sessionExistsInAnyState: vi.fn(),
+  findSessionIdIgnoringCase: vi.fn(),
 }));
 const mockSessionServiceCtor = vi.hoisted(() =>
   vi.fn(() => mockSessionServiceInstance),
@@ -1127,6 +1129,9 @@ describe('loadCliConfig', () => {
     });
     mockSessionServiceInstance.sessionExists.mockResolvedValue(false);
     mockSessionServiceInstance.sessionExistsInAnyState.mockResolvedValue(false);
+    mockSessionServiceInstance.findSessionIdIgnoringCase.mockResolvedValue(
+      undefined,
+    );
     vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
     vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
     resetMcpApprovalsForTesting();
@@ -1894,7 +1899,43 @@ describe('loadCliConfig', () => {
 
   it('should exit when a caller-supplied sessionId already exists (default CLI behavior)', async () => {
     const sessionId = '123e4567-e89b-12d3-a456-426614174000';
-    mockSessionServiceInstance.sessionExistsInAnyState.mockResolvedValue(true);
+    mockSessionServiceInstance.findSessionIdIgnoringCase.mockResolvedValue(
+      sessionId,
+    );
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    await expect(loadCliConfig({}, { sessionId } as CliArgs)).rejects.toThrow(
+      'process.exit called',
+    );
+
+    expect(mockExit).toHaveBeenCalledWith(1);
+  });
+
+  it('should exit when a caller-supplied sessionId matches a legacy case-variant transcript', async () => {
+    const sessionId = '123e4567-e89b-12d3-a456-426614174000';
+    // The id is free in its exact spelling, but a legacy uppercase twin
+    // occupies it — creating would mint a permanently unrestorable pair.
+    mockSessionServiceInstance.findSessionIdIgnoringCase.mockResolvedValue(
+      sessionId.toUpperCase(),
+    );
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    await expect(loadCliConfig({}, { sessionId } as CliArgs)).rejects.toThrow(
+      'process.exit called',
+    );
+
+    expect(mockExit).toHaveBeenCalledWith(1);
+  });
+
+  it('should exit when the case-insensitive occupancy check reports a conflict', async () => {
+    const sessionId = '123e4567-e89b-12d3-a456-426614174000';
+    mockSessionServiceInstance.findSessionIdIgnoringCase.mockRejectedValue(
+      new SessionIdCaseConflictError(sessionId),
+    );
     const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
       throw new Error('process.exit called');
     });
@@ -1908,7 +1949,9 @@ describe('loadCliConfig', () => {
 
   it('should throw SessionIdConflictError instead of exiting when throwOnSessionIdConflict is set', async () => {
     const sessionId = '123e4567-e89b-12d3-a456-426614174000';
-    mockSessionServiceInstance.sessionExistsInAnyState.mockResolvedValue(true);
+    mockSessionServiceInstance.findSessionIdIgnoringCase.mockResolvedValue(
+      sessionId,
+    );
     const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
       throw new Error('process.exit called');
     });
@@ -1932,7 +1975,9 @@ describe('loadCliConfig', () => {
 
   it('should not throw for a fresh caller-supplied sessionId when throwOnSessionIdConflict is set', async () => {
     const sessionId = '123e4567-e89b-12d3-a456-426614174000';
-    mockSessionServiceInstance.sessionExistsInAnyState.mockResolvedValue(false);
+    mockSessionServiceInstance.findSessionIdIgnoringCase.mockResolvedValue(
+      undefined,
+    );
 
     const config = await loadCliConfig(
       {},
@@ -1947,6 +1992,27 @@ describe('loadCliConfig', () => {
     );
 
     expect(config.getSessionId()).toBe(sessionId);
+  });
+
+  it('canonicalizes a mixed-case caller-supplied sessionId before storing it', async () => {
+    const sessionId = '123E4567-E89B-12D3-A456-426614174000';
+    mockSessionServiceInstance.findSessionIdIgnoringCase.mockResolvedValue(
+      undefined,
+    );
+
+    const config = await loadCliConfig(
+      {},
+      { sessionId } as CliArgs,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+
+    expect(config.getSessionId()).toBe(sessionId.toLowerCase());
   });
 
   it('should use internal sandbox session ID without treating it as a new session', async () => {
@@ -2713,6 +2779,23 @@ describe('mergeExcludeTools', () => {
     const argv = await parseArguments();
     const config = await loadCliConfig({}, argv, undefined, []);
     expect(config.getToolSearchThreshold()).toBe(10);
+  });
+
+  it('should default tools.listDirectory.enabled to false', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+    expect(config.isLsToolEnabled()).toBe(false);
+  });
+
+  it('should enable list_directory when tools.listDirectory.enabled is true', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: { listDirectory: { enabled: true } },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.isLsToolEnabled()).toBe(true);
   });
 
   it('should force tools.toolSearch.threshold to 0 in safe mode', async () => {

@@ -31,6 +31,7 @@ import {
 import { SessionFileHistoryAccumulator } from './session-file-history-state.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { hasVerifiableInode } from '../utils/file-identity.js';
 import { readRuntimeStatus } from '../utils/runtimeStatus.js';
 import {
   LITE_READ_BUF_SIZE,
@@ -45,6 +46,11 @@ import {
   type RebuiltSessionArtifactSnapshot,
 } from './session-artifact-persistence.js';
 import { SessionOrganizationService } from './session-organization-service.js';
+import {
+  mergeSessionPrLists,
+  readSessionPrs,
+  writeSessionPrs,
+} from './session-pr-service.js';
 import {
   SessionTranscriptReader,
   SessionTranscriptTooLargeError,
@@ -142,6 +148,31 @@ export interface SessionListItem {
 export type SessionArchiveState = 'active' | 'archived';
 
 export type SessionLocation = SessionArchiveState | 'conflict' | undefined;
+
+export class SessionIdCaseConflictError extends Error {
+  override readonly name = 'SessionIdCaseConflictError';
+
+  // `candidateSessionId` is set only when one exact spelling was found
+  // persisted in both active and archived states, so callers can re-check
+  // the persisted spelling instead of the request-case id. `reason`
+  // separates a genuinely conflicted pair from a single transcript whose
+  // head is unreadable yet still occupies the id.
+  constructor(
+    readonly sessionId: string,
+    readonly candidateSessionId?: string,
+    readonly reason:
+      | 'case_conflict'
+      | 'unreadable_transcript' = 'case_conflict',
+  ) {
+    super(
+      reason === 'unreadable_transcript'
+        ? `Session "${candidateSessionId ?? sessionId}" is persisted but its transcript head is unreadable.`
+        : candidateSessionId === undefined
+          ? `Multiple persisted sessions match "${sessionId}" by case.`
+          : `Session "${candidateSessionId}" is persisted in both active and archived states.`,
+    );
+  }
+}
 
 /**
  * Pagination options for listing sessions.
@@ -533,6 +564,13 @@ export class SessionService {
     );
   }
 
+  private getPrSessionPathForState(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): string {
+    return path.join(this.getChatsDirForState(state), `${sessionId}.pr.json`);
+  }
+
   private async sessionBelongsToCurrentProject(
     sessionId: string,
     recordCwd: string,
@@ -581,11 +619,57 @@ export class SessionService {
     return this.getWorktreeSessionPathForState(sessionId, 'active');
   }
 
+  /**
+   * Returns the absolute path to the per-session prompt terminal ledger
+   * (append-only sidecar JSONL next to the transcript), in the given
+   * archive state's chats directory. The file may not exist yet —
+   * consumers must treat ENOENT as "no ledger evidence".
+   */
+  private getPromptLedgerPathForState(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): string {
+    return path.join(
+      this.getChatsDirForState(state),
+      `${sessionId}.ledger.jsonl`,
+    );
+  }
+
+  /**
+   * Returns the absolute path to the per-session prompt terminal ledger
+   * (append-only sidecar JSONL next to the transcript). The file may not
+   * exist yet — consumers must treat ENOENT as "no ledger evidence".
+   */
+  getPromptLedgerPath(sessionId: string): string {
+    return this.getPromptLedgerPathForState(sessionId, 'active');
+  }
+
+  /**
+   * Returns the absolute path to the active session transcript
+   * (append-only JSONL). The file may not exist yet — consumers must
+   * treat ENOENT as "no transcript evidence".
+   */
+  getSessionTranscriptPath(sessionId: string): string {
+    return this.getSessionFilePath(sessionId, 'active');
+  }
+
   getWorktreeSessionPathForArchiveState(
     sessionId: string,
     state: SessionArchiveState,
   ): string {
     return this.getWorktreeSessionPathForState(sessionId, state);
+  }
+
+  /**
+   * Returns the absolute path to the sidecar JSON file that stores the
+   * session's GitHub PR binding for the given session id. The file may not
+   * exist yet — consumers must handle ENOENT as "no PR binding".
+   */
+  getPrSessionPathForArchiveState(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): string {
+    return this.getPrSessionPathForState(sessionId, state);
   }
 
   private async readProjectSessionHead(
@@ -630,13 +714,59 @@ export class SessionService {
     sourceType?: string;
     sourceId?: string;
   }> {
-    for (const state of ['active', 'archived'] as const) {
+    return (
+      (await this.readCreationMetadataInternal(
+        sessionId,
+        ['active', 'archived'],
+        false,
+      )) ?? {}
+    );
+  }
+
+  /** Reads one location, returning undefined unless its head is fully readable. */
+  async readCreationMetadataIfReadable(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): Promise<
+    | {
+        parentSessionId?: string;
+        sourceType?: string;
+        sourceId?: string;
+      }
+    | undefined
+  > {
+    return this.readCreationMetadataInternal(sessionId, [state], true);
+  }
+
+  private async readCreationMetadataInternal(
+    sessionId: string,
+    states: readonly SessionArchiveState[],
+    requireCompleteLines: boolean,
+  ): Promise<
+    | {
+        parentSessionId?: string;
+        sourceType?: string;
+        sourceId?: string;
+      }
+    | undefined
+  > {
+    for (const state of states) {
       const filePath = this.getSessionFilePath(sessionId, state);
       try {
-        const records = await jsonl.readLines<ChatRecord>(
-          filePath,
-          MAX_PROMPT_SCAN_LINES,
-        );
+        let records: ChatRecord[];
+        if (requireCompleteLines) {
+          const result = await jsonl.readLinesWithIntegrity<ChatRecord>(
+            filePath,
+            MAX_PROMPT_SCAN_LINES,
+          );
+          if (!result.complete) continue;
+          records = result.records;
+        } else {
+          records = await jsonl.readLines<ChatRecord>(
+            filePath,
+            MAX_PROMPT_SCAN_LINES,
+          );
+        }
         if (records.length === 0) continue;
         if (
           !(await this.sessionBelongsToCurrentProject(
@@ -654,7 +784,7 @@ export class SessionService {
         );
       }
     }
-    return {};
+    return undefined;
   }
 
   async getSessionLocation(sessionId: string): Promise<SessionLocation> {
@@ -688,6 +818,7 @@ export class SessionService {
     sessionId: string,
   ): Promise<string | undefined> {
     const expectedFileName = `${sessionId}.jsonl`.toLowerCase();
+    const candidates = new Map<string, Set<SessionArchiveState>>();
     for (const state of ['active', 'archived'] as const) {
       let fileNames: string[];
       try {
@@ -698,12 +829,116 @@ export class SessionService {
       }
       for (const fileName of fileNames) {
         if (fileName.toLowerCase() !== expectedFileName) continue;
+        // `getSessionLocation` classifies only pattern-matching names, so a
+        // name it would reject (agent-suffixed ids) must not be enumerated
+        // here either — otherwise it reads back as occupied-but-unreadable.
+        if (!SESSION_FILE_PATTERN.test(fileName)) continue;
         const candidateSessionId = fileName.slice(0, -'.jsonl'.length);
-        const location = await this.getSessionLocation(candidateSessionId);
-        if (location !== undefined) return candidateSessionId;
+        const states = candidates.get(candidateSessionId) ?? new Set();
+        states.add(state);
+        candidates.set(candidateSessionId, states);
       }
     }
-    return undefined;
+    // Conflict decisions are content-based, not filename-based: a file whose
+    // head recovers no records (crash-mid-append tear, foreign project) still
+    // occupies the id, but does not make a loadable session conflict with one.
+    const readable: Array<{
+      candidateSessionId: string;
+      state: SessionArchiveState;
+    }> = [];
+    for (const candidateSessionId of candidates.keys()) {
+      const location = await this.getSessionLocation(candidateSessionId);
+      if (location === 'conflict') {
+        throw new SessionIdCaseConflictError(sessionId, candidateSessionId);
+      }
+      if (location !== undefined) {
+        readable.push({ candidateSessionId, state: location });
+      }
+    }
+    if (readable.length === 1) return readable[0].candidateSessionId;
+    if (readable.length > 1) {
+      // On a case-insensitive filesystem every spelling opens the same physical
+      // transcript, so several spellings can each report a readable location
+      // while only one file exists. Collapse those aliases before calling it a
+      // conflict.
+      const aliased = this.resolveAliasedReadableCandidate(
+        readable,
+        candidates,
+      );
+      if (aliased !== undefined) return aliased;
+      throw new SessionIdCaseConflictError(sessionId);
+    }
+    // No candidate recovered records. A transcript under a *different* spelling
+    // still occupies the id, because minting the requested spelling beside it
+    // would create the case-only twin that makes both permanently
+    // unrestorable. The requested spelling's own file is a twin of nothing, so
+    // it never counts as occupancy: that is how a first run which crashed
+    // before its first record resumes its own 0-byte transcript, and it keeps
+    // this resolver consistent with `getSessionLocation`, which already calls
+    // that file nonexistent. Anything that raced away is genuinely absent.
+    let occupyingSpelling: string | undefined;
+    for (const [candidateSessionId, states] of candidates) {
+      if (candidateSessionId === sessionId) continue;
+      for (const state of states) {
+        if (fs.existsSync(this.getSessionFilePath(candidateSessionId, state))) {
+          occupyingSpelling = candidateSessionId;
+          break;
+        }
+      }
+      if (occupyingSpelling !== undefined) break;
+    }
+    if (occupyingSpelling === undefined) return undefined;
+    throw new SessionIdCaseConflictError(
+      sessionId,
+      // Naming the single enumerated spelling is actionable; with several, no
+      // one of them is the answer.
+      candidates.size === 1 ? occupyingSpelling : undefined,
+      'unreadable_transcript',
+    );
+  }
+
+  /**
+   * Collapses readable candidates that are case-variant spellings of one
+   * physical transcript, as happens on case-insensitive filesystems where
+   * every spelling opens the same file. Returns the spelling whose own
+   * directory entry backs that file, or undefined when the candidates are
+   * genuinely distinct transcripts (a real conflict) or when the filesystem
+   * cannot prove otherwise. An I/O failure other than a vanished file is not
+   * evidence of a conflict, so it propagates instead of being reported as one.
+   */
+  private resolveAliasedReadableCandidate(
+    readable: Array<{
+      candidateSessionId: string;
+      state: SessionArchiveState;
+    }>,
+    candidates: Map<string, Set<SessionArchiveState>>,
+  ): string | undefined {
+    const identities = new Set<string>();
+    const owners: string[] = [];
+    for (const { candidateSessionId, state } of readable) {
+      let stats: fs.Stats;
+      try {
+        stats = fs.statSync(this.getSessionFilePath(candidateSessionId, state));
+      } catch (error) {
+        // A transcript that raced away is no longer a competing spelling; any
+        // other failure says nothing about aliasing and must not be laundered
+        // into a permanent-looking conflict.
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw error;
+      }
+      // Filesystems that do not expose inodes report 0 for every file, so
+      // `dev:ino` would collapse genuinely distinct transcripts onto one
+      // identity. Without that proof, report a conflict rather than pick one.
+      if (!hasVerifiableInode(stats.ino)) return undefined;
+      identities.add(`${stats.dev}:${stats.ino}`);
+      if (identities.size > 1) return undefined;
+      // The readable state was reached through a case-folded path unless this
+      // spelling is itself a directory entry of that state.
+      if (candidates.get(candidateSessionId)?.has(state)) {
+        owners.push(candidateSessionId);
+      }
+    }
+    return owners.length === 1 ? owners[0] : undefined;
   }
 
   private removeFileIfExists(filePath: string): void {
@@ -721,6 +956,24 @@ export class SessionService {
       const sidecar = this.getWorktreeSessionPathForState(sessionId, state);
       if (fs.existsSync(sidecar)) {
         this.removeFileIfExists(sidecar);
+      }
+    }
+  }
+
+  private removePrSidecars(sessionId: string): void {
+    for (const state of ['active', 'archived'] as const) {
+      const sidecar = this.getPrSessionPathForState(sessionId, state);
+      if (fs.existsSync(sidecar)) {
+        this.removeFileIfExists(sidecar);
+      }
+    }
+  }
+
+  private removePromptLedgers(sessionId: string): void {
+    for (const state of ['active', 'archived'] as const) {
+      const ledger = this.getPromptLedgerPathForState(sessionId, state);
+      if (fs.existsSync(ledger)) {
+        this.removeFileIfExists(ledger);
       }
     }
   }
@@ -771,6 +1024,69 @@ export class SessionService {
     fs.mkdirSync(path.dirname(targetPath), { recursive: true });
     fs.renameSync(sourcePath, targetPath);
     return true;
+  }
+
+  /**
+   * Move a prompt terminal ledger sidecar across archive states. Unlike a
+   * bare rename, an existing destination does not wedge the pair forever:
+   * the ledger is append-only JSONL, so the source records are concatenated
+   * onto the destination (preserving write order) and the source is
+   * unlinked. Throws propagate to the caller, which owns the warn-only
+   * policy — a ledger problem must never block the transcript move.
+   */
+  private moveLedgerSidecar(sourcePath: string, destinationPath: string): void {
+    if (!fs.existsSync(sourcePath)) {
+      return;
+    }
+    fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
+    if (!fs.existsSync(destinationPath)) {
+      fs.renameSync(sourcePath, destinationPath);
+      return;
+    }
+    // Destination already exists (e.g. a partially completed archive
+    // cycle): merge instead of wedging. Newline padding seals both
+    // boundaries so lines cannot fuse into one — the ledger reader skips
+    // blank lines, so a redundant newline is harmless while a fused line
+    // would drop both records.
+    const sourceContents = fs.readFileSync(sourcePath, 'utf8');
+    if (sourceContents.length > 0) {
+      const payload = sourceContents.endsWith('\n')
+        ? sourceContents
+        : `${sourceContents}\n`;
+      fs.appendFileSync(destinationPath, `\n${payload}`, 'utf8');
+    }
+    fs.unlinkSync(sourcePath);
+  }
+
+  /**
+   * Move a PR sidecar across archive states. Same policy as
+   * {@link moveLedgerSidecar}: the sidecar is the append-only binding
+   * history, so when both halves of a split pair exist (a crash between
+   * the transcript rename and the sidecar move, or an orphaned write)
+   * they are merged by PR number instead of wedging the pair forever —
+   * no transition would ever reunite them otherwise. Throws propagate to
+   * the caller, which owns the warn-only policy.
+   */
+  private async movePrSidecar(
+    sourcePath: string,
+    destinationPath: string,
+  ): Promise<void> {
+    if (!fs.existsSync(sourcePath)) {
+      return;
+    }
+    fs.mkdirSync(path.dirname(destinationPath), { recursive: true });
+    if (!fs.existsSync(destinationPath)) {
+      fs.renameSync(sourcePath, destinationPath);
+      return;
+    }
+    const merged = mergeSessionPrLists(
+      (await readSessionPrs(destinationPath)) ?? [],
+      (await readSessionPrs(sourcePath)) ?? [],
+    );
+    if (merged.length > 0) {
+      await writeSessionPrs(destinationPath, merged);
+    }
+    fs.unlinkSync(sourcePath);
   }
 
   private sessionFileMoveError(
@@ -1585,6 +1901,8 @@ export class SessionService {
           this.removeFileIfExists(archivedPath);
         }
         this.removeWorktreeSidecars(sessionId);
+        this.removePrSidecars(sessionId);
+        this.removePromptLedgers(sessionId);
         this.removeFileHistoryBackups(sessionId);
         return true;
       }
@@ -1599,6 +1917,8 @@ export class SessionService {
       await this.salvageUsageBestEffort(archivedPath);
       this.removeFileIfExists(archivedPath);
       this.removeWorktreeSidecars(sessionId);
+      this.removePrSidecars(sessionId);
+      this.removePromptLedgers(sessionId);
       this.removeFileHistoryBackups(sessionId);
       return true;
     } catch (error) {
@@ -1654,6 +1974,14 @@ export class SessionService {
           sessionId,
           'archived',
         );
+        const activeLedger = this.getPromptLedgerPathForState(
+          sessionId,
+          'active',
+        );
+        const archivedLedger = this.getPromptLedgerPathForState(
+          sessionId,
+          'archived',
+        );
         try {
           fs.renameSync(sourcePath, targetPath);
         } catch (error) {
@@ -1664,6 +1992,23 @@ export class SessionService {
         } catch (sidecarError) {
           this.warn(
             `archiveSessions: failed to move worktree sidecar for ${sessionId} from ${activeSidecar} to ${archivedSidecar}: ${sidecarError}`,
+          );
+        }
+        try {
+          await this.movePrSidecar(
+            this.getPrSessionPathForState(sessionId, 'active'),
+            this.getPrSessionPathForState(sessionId, 'archived'),
+          );
+        } catch (sidecarError) {
+          this.warn(
+            `archiveSessions: failed to move pr sidecar for ${sessionId}: ${sidecarError}`,
+          );
+        }
+        try {
+          this.moveLedgerSidecar(activeLedger, archivedLedger);
+        } catch (ledgerError) {
+          this.warn(
+            `archiveSessions: failed to move prompt ledger for ${sessionId} from ${activeLedger} to ${archivedLedger}: ${ledgerError}`,
           );
         }
         archived.push(sessionId);
@@ -1729,6 +2074,31 @@ export class SessionService {
         } catch (sidecarError) {
           this.warn(
             `unarchiveSessions: failed to move worktree sidecar for ${sessionId} from ${archivedSidecar} to ${activeSidecar}: ${sidecarError}`,
+          );
+        }
+        try {
+          await this.movePrSidecar(
+            this.getPrSessionPathForState(sessionId, 'archived'),
+            this.getPrSessionPathForState(sessionId, 'active'),
+          );
+        } catch (sidecarError) {
+          this.warn(
+            `unarchiveSessions: failed to move pr sidecar for ${sessionId}: ${sidecarError}`,
+          );
+        }
+        const archivedLedger = this.getPromptLedgerPathForState(
+          sessionId,
+          'archived',
+        );
+        const activeLedger = this.getPromptLedgerPathForState(
+          sessionId,
+          'active',
+        );
+        try {
+          this.moveLedgerSidecar(archivedLedger, activeLedger);
+        } catch (ledgerError) {
+          this.warn(
+            `unarchiveSessions: failed to move prompt ledger for ${sessionId} from ${archivedLedger} to ${activeLedger}: ${ledgerError}`,
           );
         }
         unarchived.push(sessionId);
