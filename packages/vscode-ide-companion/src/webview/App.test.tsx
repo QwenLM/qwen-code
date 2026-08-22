@@ -19,6 +19,8 @@ const {
   mockMessageState,
   mockAddMessage,
   mockEndStreaming,
+  mockModelSelectorMounts,
+  capturedWebViewHandlers,
 } = vi.hoisted(() => ({
   mockPostMessage: vi.fn(),
   mockOpenCompletion: vi.fn().mockResolvedValue(undefined),
@@ -29,6 +31,17 @@ const {
   },
   mockAddMessage: vi.fn(),
   mockEndStreaming: vi.fn(),
+  // Records every render in which InputForm receives showModelSelector=true,
+  // so tests can detect even a transient selector mount (the open gate must
+  // prevent mounting entirely, not merely get cleaned up after the fact).
+  mockModelSelectorMounts: vi.fn(),
+  // The mocked useWebViewMessages stores the real App setters here so tests
+  // can deliver overlay arrivals (permission / question / account) directly.
+  capturedWebViewHandlers: {
+    handlePermissionRequest: null as null | ((value: unknown) => void),
+    handleAskUserQuestion: null as null | ((value: unknown) => void),
+    setAccountInfo: null as null | ((value: unknown) => void),
+  },
 }));
 
 const slashSkillsItem: CompletionItem = {
@@ -57,6 +70,13 @@ const clearCommandItem: CompletionItem = {
   label: '/clear',
   type: 'command',
   value: 'clear',
+};
+
+const modelCommandItem: CompletionItem = {
+  id: 'model',
+  label: '/model',
+  type: 'command',
+  value: 'model',
 };
 
 vi.mock('./hooks/useVSCode.js', () => ({
@@ -123,6 +143,9 @@ vi.mock('./hooks/useWebViewMessages.js', async () => {
       setIsAuthenticated,
       setAvailableCommands,
       setAvailableSkills,
+      handlePermissionRequest,
+      handleAskUserQuestion,
+      setAccountInfo,
     }: {
       setIsAuthenticated: (value: boolean) => void;
       setAvailableCommands: (
@@ -133,7 +156,14 @@ vi.mock('./hooks/useWebViewMessages.js', async () => {
         }>,
       ) => void;
       setAvailableSkills: (value: string[]) => void;
+      handlePermissionRequest: (value: unknown) => void;
+      handleAskUserQuestion: (value: unknown) => void;
+      setAccountInfo: (value: unknown) => void;
     }) => {
+      capturedWebViewHandlers.handlePermissionRequest = handlePermissionRequest;
+      capturedWebViewHandlers.handleAskUserQuestion = handleAskUserQuestion;
+      capturedWebViewHandlers.setAccountInfo = setAccountInfo;
+
       const initializedRef = React.useRef(false);
 
       React.useEffect(() => {
@@ -244,44 +274,57 @@ vi.mock('./components/layout/InputForm.js', () => ({
     onCancel,
     onCompletionSelect,
     onCompletionFill,
+    showModelSelector,
   }: {
     inputText: string;
     inputFieldRef: React.RefObject<HTMLDivElement>;
     onCancel: () => void;
     onCompletionSelect: (item: CompletionItem) => void;
     onCompletionFill?: (item: CompletionItem) => void;
-  }) => (
-    <div>
-      <div
-        data-testid="input-field"
-        ref={inputFieldRef}
-        contentEditable
-        suppressContentEditableWarning
-      >
-        {inputText}
+    showModelSelector?: boolean;
+  }) => {
+    if (showModelSelector) {
+      mockModelSelectorMounts();
+    }
+    return (
+      <div>
+        <div
+          data-testid="input-field"
+          ref={inputFieldRef}
+          contentEditable
+          suppressContentEditableWarning
+        >
+          {inputText}
+        </div>
+        <div data-testid="input-text">{inputText}</div>
+        {showModelSelector && (
+          <div className="model-selector" data-testid="model-selector" />
+        )}
+        <button onClick={onCancel}>cancel-input</button>
+        <button onClick={() => onCompletionSelect(slashSkillsItem)}>
+          select-skills-command
+        </button>
+        <button onClick={() => onCompletionSelect(modelCommandItem)}>
+          select-model-command
+        </button>
+        <button onClick={() => onCompletionSelect(secondarySkillItem)}>
+          select-skill-enter
+        </button>
+        <button onClick={() => onCompletionFill?.(secondarySkillItem)}>
+          select-skill-tab
+        </button>
+        <button onClick={() => onCompletionSelect(commitCommandItem)}>
+          select-commit-enter
+        </button>
+        <button onClick={() => onCompletionSelect(clearCommandItem)}>
+          select-clear-enter
+        </button>
+        <button onClick={() => onCompletionFill?.(clearCommandItem)}>
+          select-clear-tab
+        </button>
       </div>
-      <div data-testid="input-text">{inputText}</div>
-      <button onClick={onCancel}>cancel-input</button>
-      <button onClick={() => onCompletionSelect(slashSkillsItem)}>
-        select-skills-command
-      </button>
-      <button onClick={() => onCompletionSelect(secondarySkillItem)}>
-        select-skill-enter
-      </button>
-      <button onClick={() => onCompletionFill?.(secondarySkillItem)}>
-        select-skill-tab
-      </button>
-      <button onClick={() => onCompletionSelect(commitCommandItem)}>
-        select-commit-enter
-      </button>
-      <button onClick={() => onCompletionSelect(clearCommandItem)}>
-        select-clear-enter
-      </button>
-      <button onClick={() => onCompletionFill?.(clearCommandItem)}>
-        select-clear-tab
-      </button>
-    </div>
-  ),
+    );
+  },
 }));
 
 import { App, getLastUserTurnIndex, type MessageListItem } from './App.js';
@@ -364,6 +407,71 @@ function renderApp() {
   return { container, root };
 }
 
+// Shared lifecycle for every suite that renders the real App: file scope so
+// all describes run with identical environment stubs (no duplicated blocks).
+let root: Root | null = null;
+let container: HTMLDivElement | null = null;
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  mockMessageState.isStreaming = false;
+  mockMessageState.isWaitingForResponse = false;
+  capturedWebViewHandlers.handlePermissionRequest = null;
+  capturedWebViewHandlers.handleAskUserQuestion = null;
+  capturedWebViewHandlers.setAccountInfo = null;
+  (
+    globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
+  ).IS_REACT_ACT_ENVIRONMENT = true;
+
+  Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+    configurable: true,
+    value: vi.fn(),
+  });
+  Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+    configurable: true,
+    value: vi.fn(),
+  });
+  Object.defineProperty(HTMLElement.prototype, 'getBoundingClientRect', {
+    configurable: true,
+    value: () => createDomRect(),
+  });
+  Object.defineProperty(Range.prototype, 'getBoundingClientRect', {
+    configurable: true,
+    value: () => createDomRect(),
+  });
+  Object.defineProperty(globalThis, 'ResizeObserver', {
+    configurable: true,
+    value: class {
+      observe() {}
+      disconnect() {}
+    },
+  });
+  Object.defineProperty(globalThis, 'requestAnimationFrame', {
+    configurable: true,
+    value: (callback: FrameRequestCallback) => {
+      callback(0);
+      return 1;
+    },
+  });
+  Object.defineProperty(globalThis, 'cancelAnimationFrame', {
+    configurable: true,
+    value: vi.fn(),
+  });
+});
+
+afterEach(() => {
+  if (root) {
+    act(() => {
+      root?.unmount();
+    });
+    root = null;
+  }
+  if (container) {
+    container.remove();
+    container = null;
+  }
+});
+
 describe('getLastUserTurnIndex', () => {
   it('returns the latest user turn and ignores assistant messages', () => {
     const messages: MessageListItem[] = [
@@ -418,66 +526,6 @@ describe('getLastUserTurnIndex', () => {
 });
 
 describe('App /skills secondary picker', () => {
-  let root: Root | null = null;
-  let container: HTMLDivElement | null = null;
-
-  beforeEach(() => {
-    vi.clearAllMocks();
-    mockMessageState.isStreaming = false;
-    mockMessageState.isWaitingForResponse = false;
-    (
-      globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
-    ).IS_REACT_ACT_ENVIRONMENT = true;
-
-    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
-      configurable: true,
-      value: vi.fn(),
-    });
-    Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
-      configurable: true,
-      value: vi.fn(),
-    });
-    Object.defineProperty(HTMLElement.prototype, 'getBoundingClientRect', {
-      configurable: true,
-      value: () => createDomRect(),
-    });
-    Object.defineProperty(Range.prototype, 'getBoundingClientRect', {
-      configurable: true,
-      value: () => createDomRect(),
-    });
-    Object.defineProperty(globalThis, 'ResizeObserver', {
-      configurable: true,
-      value: class {
-        observe() {}
-        disconnect() {}
-      },
-    });
-    Object.defineProperty(globalThis, 'requestAnimationFrame', {
-      configurable: true,
-      value: (callback: FrameRequestCallback) => {
-        callback(0);
-        return 1;
-      },
-    });
-    Object.defineProperty(globalThis, 'cancelAnimationFrame', {
-      configurable: true,
-      value: vi.fn(),
-    });
-  });
-
-  afterEach(() => {
-    if (root) {
-      act(() => {
-        root?.unmount();
-      });
-      root = null;
-    }
-    if (container) {
-      container.remove();
-      container = null;
-    }
-  });
-
   it('opens the secondary picker after selecting /skills', async () => {
     const rendered = renderApp();
     root = rendered.root;
@@ -621,4 +669,127 @@ describe('App /skills secondary picker', () => {
       data: {},
     });
   });
+});
+
+describe('App model selector gating', () => {
+  const permissionPayload = {
+    options: [{ optionId: 'allow_once', name: 'Allow once' }],
+    toolCall: { title: 'run: ls' },
+  };
+  const askQuestionPayload = {
+    sessionId: 'session-1',
+    questions: [
+      {
+        question: 'Which one?',
+        header: 'Pick',
+        options: [{ label: 'A', description: 'option a' }],
+        multiSelect: false,
+      },
+    ],
+  };
+  const accountPayload = { authType: 'qwen-oauth' };
+
+  /** Render the app and open the model selector via the /model action. */
+  async function renderWithOpenSelector() {
+    const rendered = renderApp();
+    root = rendered.root;
+    container = rendered.container;
+
+    await act(async () => {});
+    setInputSelection(rendered.container, '/');
+    clickButton(rendered.container, 'select-model-command');
+
+    // Control for the close tests below: the open path works when no
+    // overlay is up.
+    expect(rendered.container.querySelector('.model-selector')).not.toBeNull();
+    return rendered;
+  }
+
+  it.each([
+    ['conversationLoaded'],
+    ['qwenSessionSwitched'],
+    ['conversationCleared'],
+  ])(
+    'closes the selector on session takeover: %s',
+    async (messageType: string) => {
+      await renderWithOpenSelector();
+
+      act(() => {
+        window.dispatchEvent(
+          new MessageEvent('message', { data: { type: messageType } }),
+        );
+      });
+
+      expect(container?.querySelector('.model-selector')).toBeNull();
+    },
+  );
+
+  // Each case sets exactly ONE overlay state, so mutating the close-effect's
+  // `||` to `&&` (close only when both/all overlays are up) fails here.
+  it('closes the selector when a permission request arrives', async () => {
+    await renderWithOpenSelector();
+
+    act(() => {
+      capturedWebViewHandlers.handlePermissionRequest?.(permissionPayload);
+    });
+
+    expect(container?.querySelector('.model-selector')).toBeNull();
+  });
+
+  it('closes the selector when an ask-user-question request arrives', async () => {
+    await renderWithOpenSelector();
+
+    act(() => {
+      capturedWebViewHandlers.handleAskUserQuestion?.(askQuestionPayload);
+    });
+
+    expect(container?.querySelector('.model-selector')).toBeNull();
+  });
+
+  it('closes the selector when the account info dialog arrives', async () => {
+    await renderWithOpenSelector();
+
+    act(() => {
+      capturedWebViewHandlers.setAccountInfo?.(accountPayload);
+    });
+
+    expect(container?.querySelector('.model-selector')).toBeNull();
+  });
+
+  it.each([
+    [
+      'permission request',
+      () =>
+        capturedWebViewHandlers.handlePermissionRequest?.(permissionPayload),
+    ],
+    [
+      'ask-user-question',
+      () => capturedWebViewHandlers.handleAskUserQuestion?.(askQuestionPayload),
+    ],
+    [
+      'account info',
+      () => capturedWebViewHandlers.setAccountInfo?.(accountPayload),
+    ],
+  ])(
+    'does not open the selector from /model while a %s is up',
+    async (_label: string, raiseOverlay: () => void) => {
+      const rendered = renderApp();
+      root = rendered.root;
+      container = rendered.container;
+
+      await act(async () => {});
+      act(() => {
+        raiseOverlay();
+      });
+
+      setInputSelection(rendered.container, '/');
+      clickButton(rendered.container, 'select-model-command');
+
+      expect(rendered.container.querySelector('.model-selector')).toBeNull();
+      // The open gate must stop the selector before it mounts at all — a
+      // mount that a close-effect later reverts would still arm the
+      // selector's capture-phase keydown listener beneath the overlay.
+      expect(mockModelSelectorMounts).not.toHaveBeenCalled();
+    },
+  );
 });
