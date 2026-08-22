@@ -5861,6 +5861,117 @@ describe('GeminiChat', async () => {
         getToolCallFingerprint('read_file', { file_path: 'a.ts' }),
       );
     });
+
+    it('does not mark a call handled when its only response is an error (R24-1)', () => {
+      // R24-1: the #6721 gate's rejection is an error functionResponse that
+      // carries the SAME id as the rejected wrapper call and instructs the
+      // model to re-issue it. Pairing that error response with the
+      // functionCall would mark the call "handled", so every surface that
+      // re-seeds this map from history (TUI per-batch admission, daemon
+      // per-turn rebuild, headless --continue/resume) would suppress the
+      // instructed identical re-issue as a replay — defeating the R23-30
+      // surface-local release, which loses to the history re-seed. Error
+      // answers (gate rejections, tool failures, cancellations) never
+      // executed the call; an identical re-issue is the model's retry and,
+      // on id-reusing providers, its ONLY retry.
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'go' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'tool_call_0',
+                name: 'tool_call',
+                args: { name: 'deferred_target', arguments: { x: 1 } },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'tool_call_0',
+                name: 'tool_call',
+                response: {
+                  error:
+                    'Deferred tool "deferred_target" has no presented schema in this session',
+                },
+              },
+            },
+          ],
+        },
+      ]);
+
+      expect(chat.getHistoryToolCallFingerprints()).toEqual(new Map());
+    });
+
+    it('marks a call handled once a non-error response answers it, even after an earlier error response (R24-1)', () => {
+      // The instructed retry after an error answer may itself succeed; that
+      // success (non-error) response DOES mark the id handled so a further
+      // identical re-issue is still suppressed as a replay.
+      chat.setHistory([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'tool_call_0',
+                name: 'tool_call',
+                args: { name: 'deferred_target', arguments: { x: 1 } },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'tool_call_0',
+                name: 'tool_call',
+                response: { error: 'no presented schema' },
+              },
+            },
+          ],
+        },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'tool_call_0__qwen_dup_2',
+                name: 'tool_call',
+                args: { name: 'deferred_target', arguments: { x: 1 } },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'tool_call_0__qwen_dup_2',
+                name: 'tool_call',
+                response: { output: 'done' },
+              },
+            },
+          ],
+        },
+      ]);
+
+      const fingerprints = chat.getHistoryToolCallFingerprints();
+      expect([...fingerprints.keys()]).toEqual(['tool_call_0__qwen_dup_2']);
+      expect(fingerprints.get('tool_call_0__qwen_dup_2')).toBe(
+        getToolCallFingerprint('tool_call', {
+          name: 'deferred_target',
+          arguments: { x: 1 },
+        }),
+      );
+    });
   });
 
   describe('getHistoryTail', () => {

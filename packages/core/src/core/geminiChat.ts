@@ -4274,6 +4274,18 @@ export class GeminiChat {
    * matching user-turn `functionResponse`. Walk-only, no clone, same
    * rationale as {@link getHistoryFunctionResponseIds}; fingerprints of
    * large args are cached per part object (see getFunctionCallFingerprint).
+   *
+   * Error responses (`functionResponse.response.error` set) do NOT mark the
+   * call as handled. A call answered with an error was never executed to
+   * completion, and an identical re-issue is the model's retry — on
+   * providers whose tool-call ids restart per response (`{name}_{index}`)
+   * it is the ONLY retry available, since the model cannot mint a new id.
+   * Counting error answers as handled would suppress exactly the retry the
+   * #6721 fail-closed gate's own rejection text instructs ("call tool_call
+   * again"), and would defeat the surfaces' release of the admission-time
+   * replay record for gate-rejected wrapper calls (R23-30): every surface
+   * re-seeds this map from history, and a history entry would win over any
+   * surface-local delete.
    */
   getHistoryToolCallFingerprints(): Map<string, string> {
     const fingerprintsById = new Map<string, string>();
@@ -4281,8 +4293,10 @@ export class GeminiChat {
     for (const entry of this.history) {
       if (entry.role === 'user') {
         for (const part of entry.parts ?? []) {
-          const id = part.functionResponse?.id;
-          if (id) respondedIds.add(id);
+          const functionResponse = part.functionResponse;
+          if (!functionResponse?.id) continue;
+          if (functionResponse.response?.['error'] !== undefined) continue;
+          respondedIds.add(functionResponse.id);
         }
         continue;
       }
