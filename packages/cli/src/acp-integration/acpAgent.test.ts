@@ -11049,15 +11049,43 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agent.extMethod('qwen/settings/setMcpServer', {
       scope: 'user',
       name: 'local',
-      server: { transport: 'stdio', command: 'node', args: ['server.js'] },
+      server: {
+        transport: 'stdio',
+        command: 'node',
+        args: ['server.js'],
+        versionNegotiation: 'auto',
+      },
     });
     expect(settings.setValue).toHaveBeenCalledWith(
       'User',
       'mcpServers',
       expect.objectContaining({
-        local: expect.objectContaining({ command: 'node' }),
+        local: expect.objectContaining({
+          command: 'node',
+          versionNegotiation: 'auto',
+        }),
       }),
     );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/settings/setMcpServer rejects invalid version negotiation', async () => {
+    const settings = makeCoreSettings();
+    const { agent, agentPromise } = await bootCoreSettingsAgent(settings);
+
+    await expect(
+      agent.extMethod('qwen/settings/setMcpServer', {
+        scope: 'user',
+        name: 'invalid-negotiation',
+        server: {
+          transport: 'stdio',
+          command: 'node',
+          versionNegotiation: 'modern',
+        },
+      }),
+    ).rejects.toThrowError(/MCP versionNegotiation must be auto or legacy/);
 
     mockConnectionState.resolve();
     await agentPromise;

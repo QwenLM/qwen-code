@@ -876,6 +876,7 @@ export class MCPServerConfig {
     readonly scope?: McpServerScope,
     readonly alwaysLoadTools?: boolean,
     readonly agentPluginV1?: boolean,
+    readonly versionNegotiation?: 'auto' | 'legacy',
   ) {}
 }
 
