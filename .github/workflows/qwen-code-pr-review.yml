@@ -1916,9 +1916,11 @@ jobs:
   # sweeps the whole chain, so 'cancelled' opens the gate only when neither
   # upstream job was itself cancelled. A run-level cancel landing AFTER the
   # chain finished (mid-review) still opens the gate: the push-supersede
-  # flavor is then suppressed by the in-step head-moved guard, and a
-  # same-head twin cannot land that late — its cancel fires at run
-  # creation, seconds in. A manual run-cancel during the delay window goes
+  # flavor is then suppressed by the in-step head-moved guard, the close
+  # flavor (a `closed`-action run joining the PR-scoped group hours in, the
+  # head unchanged) by the in-step PR-state check, and a same-head twin
+  # cannot land that late — its cancel fires at run creation, seconds in.
+  # A manual run-cancel during the delay window goes
   # silent under this rule (the person who cancelled does not need retry
   # guidance); a manual cancel of review-pr alone mid-review still posts,
   # benign as before. The PR number comes from the event payload, not the
