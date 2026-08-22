@@ -25,12 +25,41 @@ import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { useAgentViewActions } from '../../contexts/AgentViewContext.js';
 import { HistoryItemDisplay } from '../HistoryItemDisplay.js';
-import { ToolCallStatus } from '../../types.js';
+import { ToolCallStatus, type HistoryItem } from '../../types.js';
 import { theme } from '../../semantic-colors.js';
 import { GeminiRespondingSpinner } from '../GeminiRespondingSpinner.js';
 import { agentMessagesToHistoryItems } from './agentHistoryAdapter.js';
 import { AgentHeader } from './AgentHeader.js';
 import { buildThoughtHeadIdMap } from '../../utils/historyUtils.js';
+import {
+  ScrollableList,
+  SCROLL_TO_ITEM_END,
+} from '../shared/ScrollableList.js';
+
+// Virtual-viewport item wrapper for the VP scroll path. `pending` preserves
+// the committed/live split: items from an executing/confirming tool group
+// onward render through the interactive path so approval dialogs keep
+// receiving input inside the viewport (same contract as the `<Static>` path).
+type AgentVpItem =
+  | { kind: 'header' }
+  | { kind: 'history'; item: HistoryItem; pending: boolean }
+  | { kind: 'spinner' };
+
+// Pure functions with no closure deps — defined outside the component so
+// they are stable references and never invalidate useMemo deps (mirrors
+// MainContent's virtual-path helpers).
+const agentVpEstimatedHeight = (index: number) => (index === 0 ? 4 : 3);
+const agentVpKeyExtractor = (vpItem: AgentVpItem) =>
+  vpItem.kind === 'header'
+    ? 'agent-header'
+    : vpItem.kind === 'spinner'
+      ? 'agent-spinner'
+      : // Adapter ids are index-stable across the pending→committed
+        // transition, so the key must not encode pending-ness.
+        `h-${vpItem.item.id}`;
+const agentVpIsStatic = (vpItem: AgentVpItem) =>
+  vpItem.kind === 'header' ||
+  (vpItem.kind === 'history' && !vpItem.pending);
 
 export interface AgentChatContentProps {
   /** The agent's AgentCore — the source of truth for transcript state. */
@@ -58,8 +87,16 @@ export const AgentChatContent = ({
 }: AgentChatContentProps) => {
   const readonly = !interactiveAgent;
   const uiState = useUIState();
-  const { historyRemountKey, availableTerminalHeight, constrainHeight } =
-    uiState;
+  const {
+    historyRemountKey,
+    availableTerminalHeight,
+    constrainHeight,
+    dialogsVisible,
+    // VP mode owns the whole screen — no terminal-native scrollback — so
+    // the transcript gets the same scrollable virtual viewport the main
+    // conversation view uses (#9507).
+    useTerminalBuffer: useVirtualScroll,
+  } = uiState;
   const { columns: terminalWidth } = useTerminalSize();
   const contentWidth = terminalWidth - 4;
 
@@ -214,6 +251,102 @@ export const AgentChatContent = ({
   );
 
   const agentModelId = core.modelConfig.model ?? '';
+
+  // ── VP (Virtualized History) path ───────────────────────────────────
+  // The whole transcript — header, committed items, live items, spinner —
+  // lives in one scrollable viewport pinned to the tail, so Page Up /
+  // Page Down / wheel can reach earlier output even though the app owns
+  // the screen. The legacy `<Static>` path below is unchanged for
+  // `useTerminalBuffer: false`, where terminal-native scrollback works.
+  const virtualItems = useMemo(
+    (): AgentVpItem[] => [
+      { kind: 'header' },
+      ...allItems.map((item, idx) => ({
+        kind: 'history' as const,
+        item,
+        pending: idx >= splitIndex,
+      })),
+      ...(isRunning ? [{ kind: 'spinner' as const }] : []),
+    ],
+    [allItems, splitIndex, isRunning],
+  );
+
+  const renderVirtualItem = useCallback(
+    ({ item: vpItem }: { item: AgentVpItem }) => {
+      if (vpItem.kind === 'header') {
+        return (
+          <AgentHeader
+            modelId={agentModelId}
+            modelName={modelName}
+            workingDirectory={agentWorkingDir}
+            gitBranch={agentGitBranch}
+          />
+        );
+      }
+      if (vpItem.kind === 'spinner') {
+        return (
+          <Box marginX={2} marginTop={1}>
+            <GeminiRespondingSpinner />
+          </Box>
+        );
+      }
+      if (vpItem.pending) {
+        return (
+          <HistoryItemDisplay
+            item={vpItem.item}
+            isPending={true}
+            terminalWidth={terminalWidth}
+            mainAreaWidth={contentWidth}
+            availableTerminalHeight={
+              constrainHeight ? availableTerminalHeight : undefined
+            }
+            isFocused={!readonly}
+            activeShellPtyId={activePtyId}
+            embeddedShellFocused={embeddedShellFocused}
+          />
+        );
+      }
+      return (
+        <HistoryItemDisplay
+          item={vpItem.item}
+          isPending={false}
+          terminalWidth={terminalWidth}
+          mainAreaWidth={contentWidth}
+          thoughtHeadId={thoughtHeadIdByItem.get(vpItem.item)}
+        />
+      );
+    },
+    [
+      agentModelId,
+      modelName,
+      agentWorkingDir,
+      agentGitBranch,
+      terminalWidth,
+      contentWidth,
+      constrainHeight,
+      availableTerminalHeight,
+      readonly,
+      activePtyId,
+      embeddedShellFocused,
+      thoughtHeadIdByItem,
+    ],
+  );
+
+  if (useVirtualScroll) {
+    return (
+      <ScrollableList
+        hasFocus={!dialogsVisible && !embeddedShellFocused}
+        data={virtualItems}
+        renderItem={renderVirtualItem}
+        estimatedItemHeight={agentVpEstimatedHeight}
+        keyExtractor={agentVpKeyExtractor}
+        initialScrollIndex={virtualItems.length <= 1 ? 0 : SCROLL_TO_ITEM_END}
+        isStaticItem={agentVpIsStatic}
+        containerHeight={Math.max(0, availableTerminalHeight ?? 0)}
+        showScrollbar={uiState.showScrollbar ?? true}
+      />
+    );
+  }
 
   return (
     <Box flexDirection="column">
