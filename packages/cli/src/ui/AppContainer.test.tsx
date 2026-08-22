@@ -6848,6 +6848,38 @@ describe('AppContainer State Management', () => {
       });
       expect(noticeCount()).toBe(2);
     });
+
+    it('does not announce arrivals that only replace an evicted entry', () => {
+      // Once the hold buffer is full, every further frame evicts the
+      // oldest while carrying a fresh id; announcing those would add a
+      // history item (and a re-render) per frame without bound.
+      const addItem = mockedUseHistory().addItem as Mock;
+      const peer = makePeerMessaging();
+
+      renderWithPeer(peer);
+      const noticeCount = () =>
+        addItem.mock.calls.filter((call) =>
+          String((call[0] as { text?: string })?.text ?? '').includes(
+            'Held a message from another session',
+          ),
+        ).length;
+
+      act(() => {
+        peer.emitHeld([heldMessage('a'), heldMessage('b')]);
+      });
+      expect(noticeCount()).toBe(1);
+
+      act(() => {
+        peer.emitHeld([heldMessage('b'), heldMessage('c')]);
+      });
+      expect(noticeCount()).toBe(1);
+
+      // A genuine growth still announces.
+      act(() => {
+        peer.emitHeld([heldMessage('b'), heldMessage('c'), heldMessage('d')]);
+      });
+      expect(noticeCount()).toBe(2);
+    });
   });
 });
 

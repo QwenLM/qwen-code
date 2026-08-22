@@ -2431,8 +2431,13 @@ export const AppContainer = (props: AppContainerProps) => {
   // Only ids that are newly held are announced: the gate emits on every
   // change to the set, so announcing every emission would print "held a
   // message" again when /peers released one of three — indistinguishable
-  // from a new arrival.
+  // from a new arrival. Announcements are additionally gated on the set
+  // *growing*: once the hold buffer is full, every further frame evicts
+  // the oldest while arriving with a fresh id, and announcing those would
+  // grow the history (and re-render) once per frame — the leak the hold
+  // buffer's ceiling exists to prevent, one layer up.
   const announcedHoldsRef = useRef<ReadonlySet<string>>(new Set());
+  const announcedCountRef = useRef(0);
   useEffect(() => {
     if (!peerMessaging) return;
     return peerMessaging.onHeldChange((held) => {
@@ -2443,8 +2448,10 @@ export const AppContainer = (props: AppContainerProps) => {
       announcedHoldsRef.current = new Set(
         held.map((entry) => entry.frame.msgId),
       );
+      const grew = held.length > announcedCountRef.current;
+      announcedCountRef.current = held.length;
       const newest = fresh.at(-1);
-      if (!newest) return;
+      if (!newest || !grew) return;
       historyManager.addItem(
         {
           type: MessageType.INFO,
