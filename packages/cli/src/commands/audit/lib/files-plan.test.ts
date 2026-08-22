@@ -1563,6 +1563,31 @@ describe('git-backed checks', () => {
     expect(licensed).toEqual(probed);
   });
 
+  it('probes every ts-stamped artifact name the skill writes', () => {
+    // The same invariant, generalized past the specialist shape: SKILL.md
+    // is the oracle, so ANY `audit-*-<ts>.*` name it instructs a run to
+    // write must be a name the guard asks about. A new artifact added to
+    // the skill without a probe would carry verbatim module content into a
+    // directory the guard just certified.
+    const skill = readFileSync(AUDIT_SKILL_PATH, 'utf8');
+    const written = new Set(
+      [...skill.matchAll(/audit-[a-z0-9-]*<ts>\.[a-z]+/g)].map((m) => m[0]),
+    );
+    const shapes = guardProbeShapes('x.md', '<ts>');
+    const probed = new Set([...shapes.audits, ...shapes.tmp]);
+    const unprobed = [...written]
+      .filter((name) => !probed.has(name))
+      // The sidecar is a DIRECTORY: git applies a trailing-slash re-include
+      // only to paths it knows are directories, so the probe deliberately
+      // asks about the child file the capture writes inside it.
+      .filter(
+        (name) =>
+          !(name.endsWith('.sidecar') && probed.has(`${name}/sidecar.json`)),
+      )
+      .sort();
+    expect(unprobed).toEqual([]);
+  });
+
   it('catches a name-selective re-include of the dated report shape', () => {
     const repo = initRepo();
     writeFileSync(
