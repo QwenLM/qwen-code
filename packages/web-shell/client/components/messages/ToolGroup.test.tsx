@@ -86,15 +86,35 @@ function renderToolGroup(
     isStreaming?: boolean;
     beforeToolCallId?: string;
   }>,
+  compactSummary = false,
+  onOpenSubagent?: (tool: ACPToolCall) => void,
+  onOpenMonitor?: (tool: ACPToolCall) => Promise<boolean>,
 ): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
   act(() => {
+    const group = (
+      <ToolGroup
+        tools={tools}
+        thoughts={thoughts}
+        compactSummary={compactSummary}
+      />
+    );
     root.render(
       <I18nProvider language="en">
         <WebShellCustomizationProvider value={customization}>
-          <ToolGroup tools={tools} thoughts={thoughts} />
+          {onOpenMonitor ? (
+            <MonitorDetailsProvider onOpen={onOpenMonitor}>
+              {group}
+            </MonitorDetailsProvider>
+          ) : onOpenSubagent ? (
+            <SubagentDetailsProvider onOpen={onOpenSubagent}>
+              {group}
+            </SubagentDetailsProvider>
+          ) : (
+            group
+          )}
         </WebShellCustomizationProvider>
       </I18nProvider>,
     );
@@ -111,6 +131,9 @@ const t = (key: string, values?: Record<string, string | number>): string => {
   }
   if (key === 'toolGroup.summary') {
     return `Ran ${values?.count ?? 0} tool${values?.count === 1 ? '' : 's'}`;
+  }
+  if (key === 'toolGroup.summary.ranAgents') {
+    return `Ran ${values?.count ?? 0} agent${values?.count === 1 ? '' : 's'}`;
   }
   if (key === 'toolGroup.summary.editedFiles') {
     return `Edited ${values?.count ?? 0} files`;
@@ -145,6 +168,21 @@ const zhT = (key: string, values?: Record<string, string | number>): string => {
 };
 
 describe('tool group summary logic', () => {
+  it('counts agents separately only for compact summaries', () => {
+    const tools = [
+      makeTool({ callId: 'agent-1', toolName: 'Agent' }),
+      makeTool({ callId: 'agent-2', toolName: 'Agent' }),
+      makeTool({ callId: 'read', toolName: 'Read' }),
+    ];
+
+    expect(formatToolGroupSummary(tools, t, undefined, true)).toBe(
+      'Ran 2 agents · Ran 1 tool',
+    );
+    expect(formatToolGroupSummary(tools, t)).toBe(
+      'Read 1 files Called 2 other tools',
+    );
+  });
+
   it('uses the active tool in running summaries', () => {
     const tools = [
       makeTool({ callId: 'done', status: 'completed' }),
@@ -1608,6 +1646,94 @@ describe('tool row rendering', () => {
 });
 
 describe('thinking rows in the compact summary', () => {
+  it('expands a single-agent compact summary before opening agent details', () => {
+    const onOpenSubagent = vi.fn();
+    const container = renderToolGroup(
+      [
+        makeTool({
+          callId: 'agent-1',
+          toolName: 'Agent',
+          args: { subagent_type: 'explore', description: 'inspect' },
+        }),
+      ],
+      {},
+      [{ content: 'main-agent thought' }],
+      true,
+      onOpenSubagent,
+    );
+    const outerSummary = container.querySelector('button')!;
+
+    act(() => outerSummary.click());
+
+    expect(onOpenSubagent).not.toHaveBeenCalled();
+    expect(outerSummary.getAttribute('aria-expanded')).toBe('true');
+    const thoughtSummary = container.querySelector<HTMLElement>(
+      '[data-testid="compact-thinking-summary"]',
+    )!;
+    act(() => thoughtSummary.click());
+    expect(container.textContent).toContain('main-agent thought');
+  });
+
+  it('expands a single-monitor compact summary before opening monitor details', () => {
+    const onOpenMonitor = vi.fn().mockResolvedValue(true);
+    const container = renderToolGroup(
+      [makeTool({ callId: 'monitor-1', toolName: 'Monitor' })],
+      {},
+      [{ content: 'main-agent thought' }],
+      true,
+      undefined,
+      onOpenMonitor,
+    );
+    const outerSummary = container.querySelector('button')!;
+
+    act(() => outerSummary.click());
+
+    expect(onOpenMonitor).not.toHaveBeenCalled();
+    expect(outerSummary.getAttribute('aria-expanded')).toBe('true');
+    expect(
+      container.querySelector('[data-testid="compact-thinking-summary"]'),
+    ).not.toBeNull();
+  });
+
+  it('nests parallel-agent details behind the compact summary', () => {
+    const container = renderToolGroup(
+      [
+        makeTool({
+          callId: 'agent-1',
+          toolName: 'Agent',
+          args: { subagent_type: 'explore', description: 'first' },
+        }),
+        makeTool({
+          callId: 'agent-2',
+          toolName: 'Agent',
+          args: { subagent_type: 'explore', description: 'second' },
+        }),
+      ],
+      {},
+      [{ content: 'thinking' }],
+      true,
+    );
+    const outerSummary = container.querySelector('button')!;
+    const parallelSummary = Array.from(
+      container.querySelectorAll('button'),
+    ).find((button) => button.textContent?.includes('Parallel agents'))!;
+
+    expect(outerSummary.textContent).toContain('Ran 2 agents');
+    expect(
+      container.querySelector('[data-testid="compact-parallel-agents"]'),
+    ).not.toBeNull();
+    expect(outerSummary.getAttribute('aria-expanded')).toBe('false');
+    expect(parallelSummary.getAttribute('aria-expanded')).toBe('false');
+
+    act(() => outerSummary.click());
+    expect(outerSummary.getAttribute('aria-expanded')).toBe('true');
+    expect(parallelSummary.textContent).toContain('2/2 done');
+
+    act(() => parallelSummary.click());
+    expect(parallelSummary.getAttribute('aria-expanded')).toBe('true');
+    expect(container.querySelectorAll('[data-agent-status]')).toHaveLength(2);
+  });
+
   it('shows a running summary while a thought is streaming', () => {
     const container = renderToolGroup(
       [
@@ -1643,7 +1769,7 @@ describe('thinking rows in the compact summary', () => {
       container.querySelector('button')?.click();
     });
     const thoughtHeader = Array.from(
-      container.querySelectorAll('[role="button"]'),
+      container.querySelectorAll('[data-testid="compact-thinking-summary"]'),
     ).find((el) =>
       (el as HTMLElement).textContent?.includes('Done thinking'),
     ) as HTMLElement;
@@ -1699,7 +1825,9 @@ describe('thinking rows in the compact summary', () => {
 
     act(() => {
       container.querySelector('button')?.click();
-      for (const header of container.querySelectorAll('[role="button"]')) {
+      for (const header of container.querySelectorAll(
+        '[data-testid="compact-thinking-summary"]',
+      )) {
         (header as HTMLElement).click();
       }
     });

@@ -13127,10 +13127,12 @@ export function App({
                 >
                   <DrawerTitle className="sr-only">Right panel</DrawerTitle>
                   <WebShellCustomizationProvider value={customization}>
-                    <ArtifactPanel
-                      {...artifactPanelSharedProps}
-                      variant="drawer"
-                    />
+                    <CompactModeContext.Provider value={compactMode}>
+                      <ArtifactPanel
+                        {...artifactPanelSharedProps}
+                        variant="drawer"
+                      />
+                    </CompactModeContext.Provider>
                   </WebShellCustomizationProvider>
                 </DrawerContent>
               </Drawer>
@@ -13195,12 +13197,14 @@ export function App({
                     />
                   )}
                   <WebShellCustomizationProvider value={customization}>
-                    <div className={styles.artifactPanelClip}>
-                      <ArtifactPanel
-                        {...artifactPanelSharedProps}
-                        panelWidth={artifactPanelWidth}
-                      />
-                    </div>
+                    <CompactModeContext.Provider value={compactMode}>
+                      <div className={styles.artifactPanelClip}>
+                        <ArtifactPanel
+                          {...artifactPanelSharedProps}
+                          panelWidth={artifactPanelWidth}
+                        />
+                      </div>
+                    </CompactModeContext.Provider>
                   </WebShellCustomizationProvider>
                 </div>,
                 artifactPanelSlotEl,
