@@ -772,6 +772,35 @@ describe('git extension helpers', () => {
       }
     });
 
+    it('rejects an invalid commit SHA before downloading the archive', async () => {
+      vi.stubEnv('GITHUB_TOKEN', 'must-not-be-sent');
+      vi.spyOn(dns, 'lookup').mockResolvedValue([
+        { address: '8.8.8.8', family: 4 },
+      ] as never);
+      mockHttpsGet.mockImplementationOnce(((_url, options, callback) => {
+        expect(String(_url)).toContain('/commits/HEAD');
+        expect(options).not.toHaveProperty('headers.Authorization');
+        callResponseCallback(
+          options,
+          callback,
+          createResponse(JSON.stringify({ sha: 'not-a-valid-sha' })),
+        );
+        return createRequestMock();
+      }) as typeof https.get);
+
+      await expect(
+        downloadPublicGitHubArchiveFallback(
+          {
+            type: 'git',
+            source: 'https://github.com/owner/repo',
+            networkPolicy: 'public',
+          },
+          '/dest',
+        ),
+      ).rejects.toThrow('GitHub returned an invalid commit SHA.');
+      expect(mockHttpsGet).toHaveBeenCalledTimes(1);
+    });
+
     it.each([
       'http://github.com/owner/repo',
       'https://gitlab.com/owner/repo',
