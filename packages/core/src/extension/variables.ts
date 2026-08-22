@@ -7,16 +7,11 @@
 import { type VariableSchema, VARIABLE_SCHEMA } from './variableSchema.js';
 import path from 'node:path';
 import { QWEN_DIR } from '../config/storage.js';
-import type { HookDefinition } from '../hooks/types.js';
-import type { HookEventName } from '../hooks/types.js';
 import * as fs from 'node:fs';
 import { glob } from 'glob';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('Extension:variables');
-
-// Re-export types for substituteHookVariables
-export type { HookDefinition };
 
 export const EXTENSIONS_DIRECTORY_NAME = path.join(QWEN_DIR, 'extensions');
 export const EXTENSIONS_CONFIG_FILENAME = 'qwen-extension.json';
@@ -70,7 +65,10 @@ export function recursivelyHydrateStrings(
     return obj.map((item) => recursivelyHydrateStrings(item, values));
   }
   if (typeof obj === 'object' && obj !== null) {
-    const newObj: JsonObject = {};
+    // Object.create(null) so a literal `__proto__` key from an untrusted
+    // manifest is set as an own property instead of triggering the
+    // prototype setter (mirrors normalizeMcpServers).
+    const newObj = Object.create(null) as JsonObject;
     for (const key in obj) {
       if (Object.prototype.hasOwnProperty.call(obj, key)) {
         newObj[key] = recursivelyHydrateStrings(obj[key], values);
@@ -79,43 +77,6 @@ export function recursivelyHydrateStrings(
     return newObj;
   }
   return obj;
-}
-
-/**
- * Substitute variables in hook configurations, particularly ${CLAUDE_PLUGIN_ROOT}
- * @param hooks - The hooks configuration object
- * @param basePath - The path to substitute for ${CLAUDE_PLUGIN_ROOT}
- * @returns A deep cloned hooks object with variables substituted
- */
-export function substituteHookVariables(
-  hooks: { [K in HookEventName]?: HookDefinition[] } | undefined,
-  basePath: string,
-): { [K in HookEventName]?: HookDefinition[] } | undefined {
-  if (!hooks) return hooks;
-
-  // Deep clone the hooks to avoid modifying the original
-  const clonedHooks = JSON.parse(JSON.stringify(hooks));
-
-  // Replace ${CLAUDE_PLUGIN_ROOT} with the actual extension path in all command hooks
-  for (const eventName in clonedHooks) {
-    const eventHooks = clonedHooks[eventName as HookEventName];
-    if (eventHooks && Array.isArray(eventHooks)) {
-      for (const hookDef of eventHooks) {
-        if (hookDef.hooks && Array.isArray(hookDef.hooks)) {
-          for (const hook of hookDef.hooks) {
-            if (hook.type === 'command' && hook.command) {
-              hook.command = hook.command.replace(
-                /\$\{CLAUDE_PLUGIN_ROOT\}/g,
-                basePath,
-              );
-            }
-          }
-        }
-      }
-    }
-  }
-
-  return clonedHooks;
 }
 
 /**

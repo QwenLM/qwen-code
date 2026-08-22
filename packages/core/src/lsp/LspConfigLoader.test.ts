@@ -4,11 +4,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import mock from 'mock-fs';
 import * as path from 'node:path';
 import { LspConfigLoader } from './LspConfigLoader.js';
 import type { Extension } from '../extension/extensionManager.js';
+
+const { mockWarn } = vi.hoisted(() => ({ mockWarn: vi.fn() }));
+
+vi.mock('../utils/debugLogger.js', () => ({
+  createDebugLogger: () => ({
+    isEnabled: () => true,
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: mockWarn,
+    error: vi.fn(),
+  }),
+}));
 
 describe('LspConfigLoader config-driven behavior', () => {
   const workspaceRoot = '/workspace';
@@ -337,5 +349,138 @@ describe('LspConfigLoader extension configs', () => {
 
     expect(configs).toHaveLength(1);
     expect(configs[0]?.env?.['EXT_ROOT']).toBe(extensionPath);
+  });
+
+  it('ignores an lspServers path that escapes the extension dir', async () => {
+    // The referenced file lives outside the extension; readExtraJsonFile must
+    // refuse it (../ traversal) instead of loading an arbitrary host file.
+    mock({
+      '/outside/leak.json': JSON.stringify({
+        typescript: {
+          command: 'evil-server',
+        },
+      }),
+      // The pre-confinement resolver looked for `<extensionPath>/../leak.json`
+      // — i.e. /extensions/leak.json. Populating it makes the assertion fail
+      // under the old resolver (it would load evil-server), so only the
+      // confinement keeps this test green.
+      '/extensions/leak.json': JSON.stringify({
+        typescript: {
+          command: 'evil-server',
+        },
+      }),
+    });
+
+    const loader = new LspConfigLoader(workspaceRoot);
+    const extension = {
+      id: 'ts-plugin',
+      name: 'ts-plugin',
+      version: '1.0.0',
+      isActive: true,
+      path: extensionPath,
+      contextFiles: [],
+      config: {
+        name: 'ts-plugin',
+        version: '1.0.0',
+        lspServers: '../leak.json',
+      },
+    } as Extension;
+
+    const configs = await loader.loadExtensionConfigs([extension]);
+
+    expect(configs).toHaveLength(0);
+  });
+
+  // Pin control-byte sanitization at LspConfigLoader.ts:148. Without
+  // stripAnsiAndControl, a hostile filename like `\u001b[2Jspoof` flows
+  // verbatim into the surfaced error.
+  it('strips control bytes from the lspServers path in surfaced errors', async () => {
+    mock({
+      '/extensions/ts-plugin/.lsp.json': 'not-json-but-path-is-clean',
+      [extensionPath + '/\u001b[2Jspoof.json']: 'control-byte-filename',
+    });
+    const loader = new LspConfigLoader(workspaceRoot);
+    const extension = {
+      id: 'ts-plugin',
+      name: 'ts-plugin',
+      version: '1.0.0',
+      isActive: true,
+      path: extensionPath,
+      contextFiles: [],
+      config: {
+        name: 'ts-plugin',
+        version: '1.0.0',
+        lspServers: '\u001b[2Jspoof.json',
+      },
+    } as Extension;
+    mockWarn.mockClear();
+    const configs = await loader.loadExtensionConfigs([extension]);
+    expect(configs).toHaveLength(0);
+    // Baseline: the raw string still contains the control byte.
+    expect((extension.config.lspServers ?? '').toString()).toContain(
+      '\u001b[2J',
+    );
+    // The parse-error warn surfaces the sanitized path and names the reason.
+    // Mutation: drop the stripAnsiAndControl wrapper → raw byte in message;
+    // mis-map the reason (e.g. 'missing') → wrong detail string.
+    const messages = mockWarn.mock.calls.map((c) => String(c[0]));
+    const sanitized = messages.find((m) =>
+      m.includes('LSP config failed to parse for extension ts-plugin'),
+    );
+    expect(sanitized).toBeDefined();
+    expect(sanitized).not.toContain('\u001b');
+  });
+
+  it('loads an out-of-tree lspServers path for a link-mode extension', async () => {
+    // Link-mode extensions read the user's own dev tree; their LSP config may
+    // live outside the extension dir (shared monorepo file). The trust flag
+    // must be derived from the install metadata, not the manifest.
+    mock({
+      '/outside/ts.lsp.json': JSON.stringify({
+        typescript: { command: 'ts-server' },
+      }),
+    });
+
+    const loader = new LspConfigLoader(workspaceRoot);
+    const extension = {
+      id: 'ts-plugin',
+      name: 'ts-plugin',
+      version: '1.0.0',
+      isActive: true,
+      path: '/extensions/ts-plugin',
+      contextFiles: [],
+      installMetadata: { type: 'link', source: '/dev/linked-ts' },
+      config: {
+        name: 'ts-plugin',
+        version: '1.0.0',
+        lspServers: '/outside/ts.lsp.json',
+      },
+    } as Extension;
+
+    const configs = await loader.loadExtensionConfigs([extension]);
+
+    expect(configs).toHaveLength(1);
+    expect(configs[0]?.command).toBe('ts-server');
+  });
+
+  it('ignores a missing lspServers file', async () => {
+    const loader = new LspConfigLoader(workspaceRoot);
+    const extension = {
+      id: 'ts-plugin',
+      name: 'ts-plugin',
+      version: '1.0.0',
+      isActive: true,
+      path: extensionPath,
+      contextFiles: [],
+      config: {
+        name: 'ts-plugin',
+        version: '1.0.0',
+        lspServers: './not-there.json',
+      },
+    } as Extension;
+
+    const configs = await loader.loadExtensionConfigs([extension]);
+
+    expect(configs).toHaveLength(0);
   });
 });

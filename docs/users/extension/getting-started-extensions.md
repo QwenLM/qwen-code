@@ -167,9 +167,9 @@ Custom commands provide a way to create shortcuts for complex prompts. Let's add
 
 After saving the file, restart the Qwen Code. You can now run `/fs:grep-code "some pattern"` to use your new command.
 
-## Step 5: Add Custom Skills and Subagents (Optional)
+## Step 5: Add Custom Skills, Subagents, and Hooks (Optional)
 
-Extensions can also provide custom skills and subagents to extend Qwen Code's capabilities.
+Extensions can also provide custom skills, subagents, and hooks to extend Qwen Code's capabilities.
 
 ### Adding a Custom Skill
 
@@ -246,7 +246,40 @@ Subagents are specialized AI assistants for specific tasks.
     5. Verify functionality is preserved
     ```
 
-After restarting Qwen Code, your custom skills will be available via `/skills` and subagents via `/agents manage`.
+### Adding Custom Hooks
+
+Hooks run scripts at specific points in the Qwen Code lifecycle.
+
+1.  Create a `hooks` directory in your extension:
+
+    ```bash
+    mkdir -p hooks
+    ```
+
+2.  Add a `hooks/hooks.json` file with a `SessionStart` hook that prints a message:
+
+    ```json
+    {
+      "hooks": {
+        "SessionStart": [
+          {
+            "hooks": [
+              {
+                "type": "command",
+                "command": "echo \"Session started\""
+              }
+            ]
+          }
+        ]
+      }
+    }
+    ```
+
+For the supported hook events, input/output schemas, and configuration format,
+see [Hooks](../features/hooks).
+
+After restarting Qwen Code, your custom skills, subagents, and hooks will be
+available via `/skills`, `/agents manage`, and `/hooks`.
 
 ## Step 6: Add a Custom `QWEN.md`
 

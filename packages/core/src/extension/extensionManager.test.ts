@@ -40,6 +40,29 @@ import {
 } from './extension-git-credentials.js';
 import { FileTokenStorage } from '../mcp/token-storage/file-token-storage.js';
 
+// Hoist a shared mock for EXTENSIONS so tests can spy without exporting
+// the private logger from extensionManager.ts.
+const { mockExtMgrDebugLogger } = vi.hoisted(() => ({
+  mockExtMgrDebugLogger: {
+    isEnabled: vi.fn().mockReturnValue(false),
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  },
+}));
+vi.mock('../utils/debugLogger.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/debugLogger.js')>();
+  return {
+    ...actual,
+    createDebugLogger: (namespace: string) =>
+      namespace === 'EXTENSIONS'
+        ? mockExtMgrDebugLogger
+        : actual.createDebugLogger(namespace),
+  };
+});
+
 const mockGit = {
   clone: vi.fn(),
   getRemotes: vi.fn(),
@@ -463,6 +486,196 @@ describe('extension tests', () => {
       expect(fs.readdirSync(installedPath)).toEqual([
         INSTALL_METADATA_FILENAME,
       ]);
+    });
+
+    // Link trust is out-of-band. A hand-placed extension shipping
+    // its own {"type":"link"} install metadata must NOT self-grant symlink/
+    // `..` trust — neither the hooks reference nor the load path may leave
+    // the extension dir. Mutation: derive trust from installMetadata.type
+    // alone (pre-fix behavior) → the outside hooks load and path is hijacked.
+    it('rejects link trust forged by a hand-placed extension', async () => {
+      const extName = 'forged-link';
+      const extensionDir = path.join(userExtensionsDir, extName);
+      fs.mkdirSync(extensionDir, { recursive: true });
+      const outside = path.join(tempWorkspaceDir, 'forged-outside');
+      fs.mkdirSync(outside, { recursive: true });
+      fs.writeFileSync(
+        path.join(outside, 'outside-hooks.json'),
+        JSON.stringify({
+          PreToolUse: [
+            { hooks: [{ type: 'command', command: 'echo PWNED-FROM-HOST' }] },
+          ],
+        }),
+        'utf-8',
+      );
+      fs.writeFileSync(
+        path.join(extensionDir, INSTALL_METADATA_FILENAME),
+        JSON.stringify({ type: 'link', source: outside }),
+        'utf-8',
+      );
+      fs.writeFileSync(
+        path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({
+          name: extName,
+          version: '1.0.0',
+          hooks: '../forged-outside/outside-hooks.json',
+        }),
+      );
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extension = manager
+        .getLoadedExtensions()
+        .find((ext) => ext.config.name === extName);
+      // Strict confinement rejects the `..` hooks reference; the forged
+      // link metadata must not grant host-file access or hijack the path.
+      expect(extension?.hooks).toBeUndefined();
+      expect(extension?.path).toBe(extensionDir);
+    });
+
+    // A link install committed BEFORE the linkedSource field existed: policy
+    // without the grant, on-disk metadata the only record. Trust must
+    // survive the upgrade via the legacy migration, or the extension
+    // silently disappears.
+    it('keeps link trust for a pre-change install through the legacy migration', async () => {
+      const extName = 'legacy-link';
+      const extensionDir = path.join(userExtensionsDir, extName);
+      fs.mkdirSync(extensionDir, { recursive: true });
+      const devTree = path.join(tempWorkspaceDir, 'legacy-link-dev');
+      fs.mkdirSync(devTree, { recursive: true });
+      fs.writeFileSync(
+        path.join(devTree, 'qwen-extension.json'),
+        JSON.stringify({ name: extName, version: '1.0.0' }),
+        'utf-8',
+      );
+      fs.writeFileSync(
+        path.join(extensionDir, INSTALL_METADATA_FILENAME),
+        JSON.stringify({ type: 'link', source: devTree }),
+        'utf-8',
+      );
+      // Pre-change store snapshot: a valid policy WITHOUT linkedSource.
+      const storeDir = path.join(tempHomeDir, '.qwen', 'extension-store');
+      fs.mkdirSync(storeDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(storeDir, 'state.json'),
+        JSON.stringify({
+          version: 2,
+          generation: 1,
+          legacyProjectionHash: '0'.repeat(64),
+          extensions: {
+            ['0'.repeat(64)]: {
+              name: extName,
+              artifactGeneration: 1,
+              defaultActivation: 'enabled',
+              workspaceOverrides: {},
+            },
+          },
+        }),
+        'utf-8',
+      );
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extension = manager
+        .getLoadedExtensions()
+        .find((ext) => ext.config.name === extName);
+      // The dev-tree manifest loads through the legacy grant; without it the
+      // stub dir would throw "Configuration file not found" and the
+      // extension would silently vanish.
+      expect(extension?.version).toBe('1.0.0');
+      expect(extension?.path).toBe(devTree);
+    });
+
+    it.runIf(process.platform !== 'win32')(
+      'loads a link-mode extension whose manifest and hooks are shared symlinks',
+      async () => {
+        // A link install reads the user's own dev tree, where the manifest/hooks
+        // files may be symlinks into a shared monorepo location. Those must
+        // load (base behavior), not be silently dropped by the symlink guard
+        // designed for untrusted conversion products.
+        const sharedDir = path.join(tempWorkspaceDir, 'linked-shared');
+        fs.mkdirSync(sharedDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(sharedDir, 'qwen-extension.json'),
+          JSON.stringify({
+            name: 'linked-qwen',
+            version: '1.0.0',
+            hooks: './shared-hooks.json',
+          }),
+        );
+        fs.writeFileSync(
+          path.join(sharedDir, 'shared-hooks.json'),
+          JSON.stringify({
+            hooks: {
+              PreToolUse: [{ type: 'command', command: 'echo hi' }],
+            },
+          }),
+        );
+
+        const sourcePath = path.join(tempWorkspaceDir, 'linked-qwen-devdir');
+        fs.mkdirSync(sourcePath, { recursive: true });
+        // The surrounding it.runIf skips on Windows — symlinkSync needs
+        // SeCreateSymbolicLinkPrivilege default CI runners don't have.
+        fs.symlinkSync(
+          path.join(sharedDir, 'qwen-extension.json'),
+          path.join(sourcePath, EXTENSIONS_CONFIG_FILENAME),
+        );
+        fs.symlinkSync(
+          path.join(sharedDir, 'shared-hooks.json'),
+          path.join(sourcePath, 'shared-hooks.json'),
+        );
+
+        const manager = createExtensionManager();
+        const linked = await manager.installExtension(
+          { type: 'link', source: sourcePath },
+          async () => {},
+        );
+        expect(linked.path).toBe(sourcePath);
+        expect(linked.config.hooks).toBe('./shared-hooks.json');
+        // config.hooks proves the symlinked manifest mounted; PreToolUse proves
+        // the symlinked hooks file was read and hydrated.
+        expect(linked.hooks?.['PreToolUse']).toHaveLength(1);
+      },
+    );
+
+    // Link-mode is the developer's own dev tree — literal `..` to a
+    // sibling monorepo file is honored (strict-mode `..` rejection is
+    // covered in path-confinement).
+    it('link-mode install loads hooks via ../shared/hooks.json from a sibling monorepo dir', async () => {
+      const sharedDir = path.join(tempWorkspaceDir, 'outside-hooks-r7');
+      fs.mkdirSync(sharedDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(sharedDir, 'hooks.json'),
+        JSON.stringify({
+          hooks: {
+            PreToolUse: [{ type: 'command', command: 'echo outside' }],
+          },
+        }),
+      );
+
+      const sourcePath = path.join(tempWorkspaceDir, 'r7-escape-devdir');
+      fs.mkdirSync(sourcePath, { recursive: true });
+      fs.writeFileSync(
+        path.join(sourcePath, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({
+          name: 'sibling-monorepo',
+          version: '1.0.0',
+          hooks: `../${path.basename(sharedDir)}/hooks.json`,
+        }),
+      );
+
+      const manager = createExtensionManager();
+      const linked = await manager.installExtension(
+        { type: 'link', source: sourcePath },
+        async () => {},
+      );
+      expect(linked.path).toBe(sourcePath);
+      // The `..` reference reaches the sibling monorepo hooks file —
+      // it loads the same way an absolute path to the same file would.
+      expect(linked.config.hooks).toBe(
+        `../${path.basename(sharedDir)}/hooks.json`,
+      );
+      expect(linked.hooks?.['PreToolUse']).toHaveLength(1);
     });
 
     it.each([undefined, 42, ''])(
@@ -4194,6 +4407,192 @@ describe('extension tests', () => {
         );
       });
     });
+
+    it('rejects a qwen-extension.json that is a symlink escaping the extension', async () => {
+      // A symlinked manifest to a host file must not be read or hydrated.
+      const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ext-secret-'));
+      const secretFile = path.join(secretDir, 'config.json');
+      fs.writeFileSync(
+        secretFile,
+        JSON.stringify({ name: 'malicious', version: '1.0.0' }),
+        'utf-8',
+      );
+      const extDir = path.join(userExtensionsDir, 'symlink-manifest');
+      fs.mkdirSync(extDir, { recursive: true });
+      fs.symlinkSync(secretFile, path.join(extDir, EXTENSIONS_CONFIG_FILENAME));
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extensions = manager.getLoadedExtensions();
+
+      expect(extensions.some((e) => e.name === 'malicious')).toBe(false);
+      fs.rmSync(secretDir, { recursive: true, force: true });
+    });
+    // config.hooks fallback ternary (extensionManager.ts:1532). Mutation:
+    // change the default 'hooks/hooks.json' to 'WRONG' → hooks undefined.
+    it('falls back to hooks/hooks.json when config.hooks string is missing', async () => {
+      const extensionDir = path.join(
+        userExtensionsDir,
+        'fallback-hooks-config',
+      );
+      fs.mkdirSync(extensionDir, { recursive: true });
+
+      fs.writeFileSync(
+        path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({
+          name: 'fallback-hooks-config',
+          version: '1.0.0',
+          hooks: 'hooks/does-not-exist.json',
+        }),
+      );
+      const hooksDir = path.join(extensionDir, 'hooks');
+      fs.mkdirSync(hooksDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(hooksDir, 'hooks.json'),
+        JSON.stringify({
+          PreToolUse: [
+            {
+              hooks: [{ type: 'command', command: 'echo from-default' }],
+            },
+          ],
+        }),
+        'utf-8',
+      );
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extensions = manager.getLoadedExtensions();
+      expect(extensions).toHaveLength(1);
+      expect(extensions[0].hooks).toBeDefined();
+      expect(extensions[0].hooks!['PreToolUse']).toHaveLength(1);
+      expect(
+        (
+          extensions[0].hooks!['PreToolUse']![0].hooks![0] as {
+            command: string;
+          }
+        ).command,
+      ).toBe('echo from-default');
+    });
+
+    // Total-loss: config.hooks missing AND no co-shipped default. The
+    // warn is hoisted out of the outer existsSync gate so it still fires.
+    // Mutation: re-nest the warn inside the outer if → no warn captured.
+    it('warns on a missing config.hooks even with no default hooks/hooks.json', async () => {
+      const extensionDir = path.join(userExtensionsDir, 'total-loss-hooks');
+      fs.mkdirSync(extensionDir, { recursive: true });
+
+      fs.writeFileSync(
+        path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({
+          name: 'total-loss-hooks',
+          version: '1.0.0',
+          hooks: 'hooks/missing-no-default.json',
+        }),
+      );
+      // No hooks/ directory written — no co-shipped default.
+
+      const warnSpy = vi.spyOn(mockExtMgrDebugLogger, 'warn');
+      try {
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const messages = warnSpy.mock.calls.map((c) => String(c[0]));
+        const matching = messages.find((m) =>
+          m.includes('hooks/missing-no-default.json'),
+        );
+        expect(matching).toBeDefined();
+        expect(matching).toMatch(/was not found/);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    // config.hooks string warn + default fallback: a missing-file reference
+    // and a directory-valued reference get a reason-specific warn and fall
+    // back to the co-shipped default. Mutation: revert the isRegularFile
+    // gate to fs.existsSync → the directory reason flips to a silent fallback.
+    it.each([
+      [
+        'missing file',
+        'dangling-hooks-config',
+        'hooks/this-file-is-missing.json',
+        'was not found',
+      ],
+      [
+        'directory',
+        'dir-hooks-config',
+        'hooks',
+        'is a directory, not a regular file',
+      ],
+    ])(
+      'warns when config.hooks points to a %s and falls back to the default',
+      async (_label, dirName, hooksRef, reason) => {
+        const extensionDir = path.join(userExtensionsDir, dirName);
+        fs.mkdirSync(extensionDir, { recursive: true });
+        fs.mkdirSync(path.join(extensionDir, 'hooks'), { recursive: true });
+
+        fs.writeFileSync(
+          path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
+          JSON.stringify({
+            name: dirName,
+            version: '1.0.0',
+            hooks: hooksRef,
+          }),
+        );
+        fs.writeFileSync(
+          path.join(extensionDir, 'hooks', 'hooks.json'),
+          JSON.stringify({
+            PreToolUse: [
+              {
+                hooks: [{ type: 'command', command: 'echo from-default' }],
+              },
+            ],
+          }),
+          'utf-8',
+        );
+
+        const warnSpy = vi.spyOn(mockExtMgrDebugLogger, 'warn');
+        try {
+          const manager = createExtensionManager();
+          await manager.refreshCache();
+          const messages = warnSpy.mock.calls.map((c) => String(c[0]));
+          const matching = messages.find((m) =>
+            m.includes(`Referenced hooks path "${hooksRef}"`),
+          );
+          expect(matching).toBeDefined();
+          expect(matching).toContain(reason);
+          expect(manager.getLoadedExtensions()[0].hooks).toBeDefined();
+        } finally {
+          warnSpy.mockRestore();
+        }
+      },
+    );
+
+    // A directory-valued DEFAULT hooks/hooks.json falls through
+    // silently — symmetric warn to the config.hooks side above. Mutation:
+    // delete the warn block → no matching message, this test fails.
+    it('warns when the default hooks/hooks.json is a directory', async () => {
+      const extensionDir = path.join(userExtensionsDir, 'dir-default-hooks');
+      fs.mkdirSync(path.join(extensionDir, 'hooks', 'hooks.json'), {
+        recursive: true,
+      });
+
+      fs.writeFileSync(
+        path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({ name: 'dir-default-hooks', version: '1.0.0' }),
+      );
+
+      const warnSpy = vi.spyOn(mockExtMgrDebugLogger, 'warn');
+      try {
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const messages = warnSpy.mock.calls.map((c) => String(c[0]));
+        const matching = messages.find((m) => m.includes('Default hooks path'));
+        expect(matching).toBeDefined();
+        expect(matching).toMatch(/is a directory, not a regular file/);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
   });
 
   describe('hooks loading and processing', () => {
@@ -4239,6 +4638,52 @@ describe('extension tests', () => {
           }
         ).command,
       ).toBe('echo "hello"');
+    });
+
+    // structuredClone isolation (extensionManager.ts:1637). Mutation: revert
+    // the clone to a bare reference → extension.hooks aliases config.hooks and
+    // the registry's .source stamp leaks into the live config.
+    it('does not leak .source stamps from extension.hooks into the live config.hooks', async () => {
+      const extensionDir = path.join(userExtensionsDir, 'clone-hooks-config');
+      fs.mkdirSync(extensionDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({
+          name: 'clone-hooks-config',
+          version: '1.0.0',
+          hooks: {
+            PreToolUse: [
+              {
+                hooks: [{ type: 'command', command: 'echo x' }],
+              },
+            ],
+          },
+        }),
+      );
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extension = manager
+        .getLoadedExtensions()
+        .find((e) => e.name === 'clone-hooks-config')!;
+      expect(extension.hooks).toBeDefined();
+      // Not the same object as the live config — the registry stamps
+      // .source onto extension.hooks and must not reach config.hooks.
+      expect(extension.hooks).not.toBe(extension.config.hooks);
+      (
+        extension.hooks!['PreToolUse']![0].hooks![0] as unknown as Record<
+          string,
+          unknown
+        >
+      )['source'] = 'stamped';
+      const configHooks = extension.config.hooks as unknown as Record<
+        string,
+        unknown
+      >;
+      const guardedGroup = (
+        configHooks['PreToolUse'] as Array<{ hooks?: unknown[] }>
+      )[0];
+      expect(guardedGroup?.hooks?.[0]).not.toHaveProperty('source');
     });
 
     it('should load hooks from hooks/hooks.json when not in main config', async () => {
@@ -4360,7 +4805,7 @@ describe('extension tests', () => {
             hooks: [
               {
                 type: 'command',
-                command: 'echo "custom hooks path"',
+                command: '${extensionPath}/scripts/setup.sh ${workspacePath}',
               },
             ],
           },
@@ -4397,7 +4842,7 @@ describe('extension tests', () => {
             command: string;
           }
         ).command,
-      ).toBe('echo "custom hooks path"');
+      ).toBe(`${extensionDir}/scripts/setup.sh ${tempWorkspaceDir}`);
     });
 
     it('should prefer config.hooks string path over hooks/hooks.json', async () => {
@@ -4462,6 +4907,40 @@ describe('extension tests', () => {
       ).toBe('echo "config path"');
     });
 
+    it.each([
+      { name: 'a relative escape' },
+      { name: 'an absolute escape', absolute: true },
+    ])(
+      'drops a hook config path that escapes the extension at load time ($name)',
+      async ({ absolute }) => {
+        const extensionDir = path.join(userExtensionsDir, 'hooks-escape-load');
+        fs.mkdirSync(extensionDir, { recursive: true });
+        // An existing hooks file outside the extension dir.
+        fs.writeFileSync(
+          path.join(userExtensionsDir, 'outside-hooks.json'),
+          JSON.stringify({ hooks: {} }),
+        );
+        const hooks = absolute
+          ? path.join(userExtensionsDir, 'outside-hooks.json')
+          : '../outside-hooks.json';
+        fs.writeFileSync(
+          path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
+          JSON.stringify({
+            name: 'hooks-escape-load',
+            version: '1.0.0',
+            hooks,
+          }),
+        );
+
+        const manager = createExtensionManager();
+        await manager.refreshCache();
+        const extensions = manager.getLoadedExtensions();
+
+        expect(extensions).toHaveLength(1);
+        expect(extensions[0].hooks).toBeUndefined();
+      },
+    );
+
     it('should substitute ${CLAUDE_PLUGIN_ROOT} in hooks file from config.hooks string path', async () => {
       const extensionDir = path.join(
         userExtensionsDir,
@@ -4516,6 +4995,51 @@ describe('extension tests', () => {
           }
         ).command,
       ).toBe(`${extensionDir}/scripts/setup.sh`);
+    });
+
+    it('drops a default hooks/hooks.json that is a symlink escaping the extension', async () => {
+      const extensionDir = path.join(
+        userExtensionsDir,
+        'hooks-default-symlink-escape',
+      );
+      fs.mkdirSync(extensionDir, { recursive: true });
+
+      // qwen-extension.json with no config.hooks → loads via default hooks/hooks.json.
+      fs.writeFileSync(
+        path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME),
+        JSON.stringify({
+          name: 'hooks-default-symlink-escape',
+          version: '1.0.0',
+        }),
+      );
+
+      // Default hooks/hooks.json is a symlink to a host file; an untrusted
+      // extension must not be able to execute hooks from outside its own
+      // directory by pointing the default route at a host path.
+      const secretDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hooks-secret-'));
+      const secretHooks = path.join(secretDir, 'hooks.json');
+      fs.writeFileSync(
+        secretHooks,
+        JSON.stringify({
+          SessionStart: [
+            {
+              hooks: [{ type: 'command', command: 'echo PWNED-FROM-HOST' }],
+            },
+          ],
+        }),
+        'utf-8',
+      );
+      const hooksDir = path.join(extensionDir, 'hooks');
+      fs.mkdirSync(hooksDir, { recursive: true });
+      fs.symlinkSync(secretHooks, path.join(hooksDir, 'hooks.json'));
+
+      const manager = createExtensionManager();
+      await manager.refreshCache();
+      const extensions = manager.getLoadedExtensions();
+
+      expect(extensions).toHaveLength(1);
+      expect(extensions[0].hooks).toBeUndefined();
+      fs.rmSync(secretDir, { recursive: true, force: true });
     });
   });
 });

@@ -31,9 +31,16 @@ import {
   EXTENSION_SETTINGS_FILENAME,
   INSTALL_METADATA_FILENAME,
   recursivelyHydrateStrings,
-  substituteHookVariables,
   performVariableReplacement,
 } from './variables.js';
+import {
+  isRegularFile,
+  readExtensionManifest,
+  realPathWithin,
+  readExtraJsonFile,
+} from './path-confinement.js';
+import { stripAnsiAndControl } from '../utils/textUtils.js';
+import type { JsonValue } from './variables.js';
 import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
 import {
   checkForExtensionUpdate,
@@ -196,7 +203,7 @@ export interface ExtensionConfig {
   skills?: string | string[];
   agents?: string | string[];
   settings?: ExtensionSetting[];
-  hooks?: { [K in HookEventName]?: HookDefinition[] };
+  hooks?: string | { [K in HookEventName]?: HookDefinition[] };
   channels?: Record<string, ExtensionChannelConfig>;
 }
 
@@ -1469,6 +1476,9 @@ export class ExtensionManager {
       return null;
     }
 
+    const snapshot = await this.extensionStore.peekSnapshot();
+    const linkedSources = this.linkedSourcesByDirectory(snapshot);
+
     for (const subdir of fs.readdirSync(userExtensionsDir)) {
       const extensionDir = path.join(userExtensionsDir, subdir);
       if (!fs.statSync(extensionDir).isDirectory()) {
@@ -1477,6 +1487,9 @@ export class ExtensionManager {
       const extension = await this.loadExtension({
         extensionDir,
         workspaceDir: cwd,
+        trustedLinkSource:
+          linkedSources.get(subdir) ??
+          this.legacyLinkSource(extensionDir, snapshot, subdir),
       });
       if (
         extension &&
@@ -1508,12 +1521,21 @@ export class ExtensionManager {
       return [];
     }
 
+    // Link grants are read via peekSnapshot (no extra lock): this function
+    // runs inside refreshCache's readConsistent callback, where the store
+    // lock is already held.
+    const snapshot = await this.extensionStore.peekSnapshot();
+    const linkedSources = this.linkedSourcesByDirectory(snapshot);
+
     const extensions: Extension[] = [];
     for (const subdir of subdirs) {
       const extensionDir = path.join(extensionsDir, subdir);
       const extension = await this.loadExtension({
         extensionDir,
         workspaceDir,
+        trustedLinkSource:
+          linkedSources.get(subdir) ??
+          this.legacyLinkSource(extensionDir, snapshot, subdir),
       });
       if (extension != null) {
         extensions.push(extension);
@@ -1533,9 +1555,19 @@ export class ExtensionManager {
 
     const installMetadata = this.loadInstallMetadata(extensionDir);
     let effectiveExtensionPath = extensionDir;
+    // Link-mode reads the user's own dev tree; manifest/hooks may be
+    // symlinks (monorepo) and `..` may point at a sibling file. Trust
+    // it: skip symlink-escape rejection and honor `..`. Link trust is
+    // OUT-OF-BAND: only the scanning/installing flow grants it (from the
+    // store snapshot or the caller-supplied metadata) — never the
+    // extension's own .qwen-extension-install.json, which a hand-placed
+    // payload could forge.
+    const trustSymlinks =
+      installMetadata?.type === 'link' &&
+      context.trustedLinkSource !== undefined;
 
     if (
-      installMetadata?.type === 'link' &&
+      trustSymlinks &&
       typeof installMetadata.source === 'string' &&
       installMetadata.source.length > 0
     ) {
@@ -1546,6 +1578,7 @@ export class ExtensionManager {
       const loadedManifest = this.loadExtensionManifest({
         extensionDir: effectiveExtensionPath,
         workspaceDir,
+        trustSymlinks,
       });
       let config = loadedManifest.config;
       if (loadedManifest.format === 'qwen') {
@@ -1619,11 +1652,12 @@ export class ExtensionManager {
         config.hooks &&
         typeof config.hooks !== 'string'
       ) {
-        // Process the hooks to substitute variables like ${CLAUDE_PLUGIN_ROOT}
-        extension.hooks = this.substituteHookVariables(
-          config.hooks,
-          effectiveExtensionPath,
-        );
+        // Inline hooks are already hydrated by loadExtensionConfig.
+        // Deep-clone so subsequent hookRegistry mutations (e.g. .source
+        // rewrites) don't leak back into config.hooks on the live config.
+        extension.hooks = structuredClone(config.hooks) as {
+          [K in HookEventName]?: HookDefinition[];
+        };
       }
 
       // Also load hooks from hooks directory or from config.hooks string path if available and not already set
@@ -1631,29 +1665,87 @@ export class ExtensionManager {
         const hooksDir = path.join(effectiveExtensionPath, 'hooks');
         const hooksJsonPath = path.join(hooksDir, 'hooks.json');
 
-        const configHooksPath =
+        let configHooksPath =
           typeof config.hooks === 'string'
             ? path.isAbsolute(config.hooks)
               ? config.hooks
               : path.join(effectiveExtensionPath, config.hooks)
             : null;
 
+        // A hooks path (string or absolute) must stay inside the extension;
+        // an escaping value would otherwise load an arbitrary host file. Only
+        // an existing path can escape via symlink — a missing file is dropped
+        // by the isRegularFile below, not an escape. Link-mode installs trust
+        // the user's own dev tree, so their symlinks are followed (not dropped).
+        // isRegularFile (not fs.existsSync) also rejects directory-valued
+        // config.hooks so the reader below doesn't silently load a folder.
         if (
-          fs.existsSync(hooksJsonPath) ||
-          (configHooksPath && fs.existsSync(configHooksPath))
+          configHooksPath &&
+          !trustSymlinks &&
+          isRegularFile(configHooksPath) &&
+          !realPathWithin(configHooksPath, effectiveExtensionPath)
         ) {
-          const hooksFilePath =
-            configHooksPath && fs.existsSync(configHooksPath)
-              ? configHooksPath
-              : hooksJsonPath;
+          debugLogger.warn(
+            `Dropping hooks path "${stripAnsiAndControl(String(config.hooks))}" that escapes the extension; falling back to hooks/hooks.json if present.`,
+          );
+          configHooksPath = null;
+        }
 
-          try {
-            const hooksContent = fs.readFileSync(hooksFilePath, 'utf-8');
-            const parsedHooks = JSON.parse(hooksContent);
+        // Warn when the user-set hooks path is missing or directory-valued —
+        // independent of whether a default hooks/hooks.json exists (without
+        // this, a typo + no co-shipped default fails silently, and a
+        // directory-valued reference would silently fall back).
+        if (
+          typeof config.hooks === 'string' &&
+          configHooksPath &&
+          !isRegularFile(configHooksPath)
+        ) {
+          const reason = fs.existsSync(configHooksPath)
+            ? 'is a directory, not a regular file'
+            : 'was not found';
+          debugLogger.warn(
+            `Referenced hooks path "${stripAnsiAndControl(config.hooks)}" ${reason}; falling back to hooks/hooks.json.`,
+          );
+        }
 
+        // Symmetric with the user-set warning above: a directory-valued
+        // DEFAULT hooks/hooks.json would otherwise fall through silently.
+        if (
+          fs.existsSync(hooksJsonPath) &&
+          !isRegularFile(hooksJsonPath) &&
+          !(configHooksPath && isRegularFile(configHooksPath))
+        ) {
+          debugLogger.warn(
+            `Default hooks path "${stripAnsiAndControl(hooksJsonPath)}" is a directory, not a regular file; no hooks will load.`,
+          );
+        }
+
+        if (
+          isRegularFile(hooksJsonPath) ||
+          (configHooksPath && isRegularFile(configHooksPath))
+        ) {
+          // Pass raw config.hooks (not the pre-joined absolute) so the
+          // relative-branch confinement check applies uniformly to both
+          // strict-mode (rejects `..`) and link-mode (honors `..`).
+          const rawHooksFileRef =
+            configHooksPath &&
+            typeof config.hooks === 'string' &&
+            isRegularFile(configHooksPath)
+              ? config.hooks
+              : 'hooks/hooks.json';
+
+          const parsedHooks = readExtraJsonFile(
+            effectiveExtensionPath,
+            rawHooksFileRef,
+            trustSymlinks,
+          );
+          if (parsedHooks) {
             let hooksData;
-            if (parsedHooks.hooks && typeof parsedHooks.hooks === 'object') {
-              hooksData = parsedHooks.hooks as {
+            if (
+              parsedHooks['hooks'] &&
+              typeof parsedHooks['hooks'] === 'object'
+            ) {
+              hooksData = parsedHooks['hooks'] as {
                 [K in HookEventName]?: HookDefinition[];
               };
             } else {
@@ -1663,15 +1755,17 @@ export class ExtensionManager {
               };
             }
 
-            // Process the hooks to substitute variables like ${CLAUDE_PLUGIN_ROOT}
-            extension.hooks = this.substituteHookVariables(
-              hooksData,
-              effectiveExtensionPath,
-            );
-          } catch (error) {
-            debugLogger.warn(
-              `Failed to parse hooks file ${hooksJsonPath}: ${error instanceof Error ? error.message : String(error)}`,
-            );
+            // Hydrate the same variables as inline hooks (see loadExtensionConfig).
+            extension.hooks = recursivelyHydrateStrings(
+              hooksData as unknown as JsonValue,
+              {
+                extensionPath: effectiveExtensionPath,
+                CLAUDE_PLUGIN_ROOT: effectiveExtensionPath,
+                workspacePath: workspaceDir ?? this.workspaceDir,
+                '/': path.sep,
+                pathSeparator: path.sep,
+              },
+            ) as { [K in HookEventName]?: HookDefinition[] };
           }
         }
       }
@@ -1688,14 +1782,46 @@ export class ExtensionManager {
     }
   }
 
-  /**
-   * Substitute variables in hook configurations, particularly ${CLAUDE_PLUGIN_ROOT}
-   */
-  private substituteHookVariables(
-    hooks: { [K in HookEventName]?: HookDefinition[] } | undefined,
-    extensionPath: string,
-  ): { [K in HookEventName]?: HookDefinition[] } | undefined {
-    return substituteHookVariables(hooks, extensionPath);
+  /** Maps extension-directory entries to their out-of-band link grant from
+   *  the store snapshot. Takes the snapshot as a parameter and never touches
+   *  the store — safe with the store lock held (see peekSnapshot). */
+  private linkedSourcesByDirectory(
+    snapshot: ExtensionStoreSnapshot,
+  ): Map<string, string> {
+    const grants = new Map<string, string>();
+    for (const policy of Object.values(snapshot.extensions)) {
+      if (policy.linkedSource !== undefined) {
+        grants.set(
+          policy.artifactDirectory ?? policy.name,
+          policy.linkedSource,
+        );
+      }
+    }
+    return grants;
+  }
+
+  /** One-way migration for link installs committed before the linkedSource
+   *  field existed: a directory that HAS a store policy — hand-placed dirs
+   *  can never be in the store — and carries legacy link metadata keeps its
+   *  trust without a reinstall. */
+  private legacyLinkSource(
+    extensionDir: string,
+    snapshot: ExtensionStoreSnapshot,
+    entryName: string,
+  ): string | undefined {
+    const policyExists = Object.values(snapshot.extensions).some(
+      (policy) => (policy.artifactDirectory ?? policy.name) === entryName,
+    );
+    if (!policyExists) return undefined;
+    const metadata = this.loadInstallMetadata(extensionDir);
+    if (
+      metadata?.type === 'link' &&
+      typeof metadata.source === 'string' &&
+      metadata.source.length > 0
+    ) {
+      return metadata.source;
+    }
+    return undefined;
   }
 
   loadInstallMetadata(
@@ -1718,7 +1844,11 @@ export class ExtensionManager {
   private loadExtensionManifest(
     context: LoadExtensionContext,
   ): LoadedExtensionManifest {
-    const { extensionDir, workspaceDir = this.workspaceDir } = context;
+    const {
+      extensionDir,
+      workspaceDir = this.workspaceDir,
+      trustSymlinks,
+    } = context;
     const agentPluginStatus = getAgentPluginSchemaStatus(extensionDir);
     if (agentPluginStatus !== 'unrelated') {
       try {
@@ -1738,14 +1868,24 @@ export class ExtensionManager {
       throw new Error(`Configuration file not found at ${configFilePath}`);
     }
     try {
-      const configContent = fs.readFileSync(configFilePath, 'utf-8');
-      const rawConfig = recursivelyHydrateStrings(JSON.parse(configContent), {
-        extensionPath: extensionDir,
-        CLAUDE_PLUGIN_ROOT: extensionDir,
-        workspacePath: workspaceDir,
-        '/': path.sep,
-        pathSeparator: path.sep,
-      }) as unknown as RawExtensionConfig;
+      const manifest = readExtensionManifest(
+        extensionDir,
+        EXTENSIONS_CONFIG_FILENAME,
+        trustSymlinks,
+      );
+      if (!manifest) {
+        throw new Error(`Invalid configuration in ${configFilePath}`);
+      }
+      const rawConfig = recursivelyHydrateStrings(
+        manifest as unknown as JsonValue,
+        {
+          extensionPath: extensionDir,
+          CLAUDE_PLUGIN_ROOT: extensionDir,
+          workspacePath: workspaceDir,
+          '/': path.sep,
+          pathSeparator: path.sep,
+        },
+      ) as unknown as RawExtensionConfig;
 
       const config = resolveExtensionConfigLocale(rawConfig, this.locale);
 
@@ -2152,6 +2292,7 @@ export class ExtensionManager {
         newExtensionConfig = this.loadExtensionConfig({
           extensionDir: localSourcePath,
           workspaceDir: currentDir,
+          trustSymlinks: installMetadata.type === 'link',
         });
         const isAgentPlugin = originSource === 'AgentPlugins';
         const extensionId = getExtensionId(newExtensionConfig, installMetadata);
@@ -2312,7 +2453,7 @@ export class ExtensionManager {
         if (
           usesPluginVariables &&
           (fs.existsSync(hooksDir) ||
-            (configHooksPath && fs.existsSync(configHooksPath)))
+            (configHooksPath && isRegularFile(configHooksPath)))
         ) {
           try {
             await performVariableReplacement(stagingPath, destinationPath);
@@ -2326,7 +2467,16 @@ export class ExtensionManager {
         await atomicWriteFile(metadataPath, metadataString);
 
         const stagedExtension = await this.loadExtension(
-          { extensionDir: stagingPath, workspaceDir: currentDir },
+          {
+            extensionDir: stagingPath,
+            workspaceDir: currentDir,
+            // The installing flow holds the caller-supplied metadata, so it
+            // is the trust authority until the commit's linkedSource lands.
+            trustedLinkSource:
+              installMetadata.type === 'link'
+                ? installMetadata.source
+                : undefined,
+          },
           { throwOnError: true },
         );
         if (!stagedExtension) {
@@ -2395,6 +2545,14 @@ export class ExtensionManager {
           ...(expectedArtifactGeneration === undefined
             ? {}
             : { expectedArtifactGeneration }),
+          ...(installMetadata.type === 'link'
+            ? {
+                linkedSource:
+                  typeof installMetadata.source === 'string'
+                    ? installMetadata.source
+                    : undefined,
+              }
+            : {}),
         });
         preparedGitCredential?.commit();
         preparedGitCredential = undefined;
@@ -2410,6 +2568,10 @@ export class ExtensionManager {
           extension = await this.loadExtension(
             {
               extensionDir: destinationPath,
+              trustedLinkSource:
+                installMetadata.type === 'link'
+                  ? installMetadata.source
+                  : undefined,
             },
             { throwOnError: true },
           );
@@ -2532,6 +2694,7 @@ export class ExtensionManager {
           newExtensionConfig = this.loadExtensionConfig({
             extensionDir: localSourcePath,
             workspaceDir: currentDir,
+            trustSymlinks: installMetadata.type === 'link',
           });
         } catch {
           // Ignore error
@@ -2614,6 +2777,10 @@ export class ExtensionManager {
           {
             extensionDir: prepared.stagingDirectory,
             workspaceDir: prepared.currentDir,
+            trustedLinkSource:
+              prepared.installMetadata?.type === 'link'
+                ? prepared.installMetadata.source
+                : undefined,
           },
           { throwOnError: true },
         );
@@ -2638,6 +2805,14 @@ export class ExtensionManager {
                 expectedArtifactGeneration:
                   prepared.expectedArtifactGeneration ?? 0,
               }),
+          ...(prepared.installMetadata?.type === 'link'
+            ? {
+                linkedSource:
+                  typeof prepared.installMetadata.source === 'string'
+                    ? prepared.installMetadata.source
+                    : undefined,
+              }
+            : {}),
         });
         prepared.commitGitCredential?.();
         prepared.gitCredentialActivated = true;
@@ -2688,6 +2863,10 @@ export class ExtensionManager {
           (await this.loadExtension(
             {
               extensionDir: prepared.destinationDirectory,
+              trustedLinkSource:
+                prepared.installMetadata?.type === 'link'
+                  ? prepared.installMetadata.source
+                  : undefined,
             },
             { throwOnError: true },
           )) ?? undefined;
