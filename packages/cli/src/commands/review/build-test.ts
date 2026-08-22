@@ -47,6 +47,7 @@ import {
   mountRootFor,
   refuseUnsandboxedPhase,
   reviewSandboxImage,
+  runtimeClientEnv,
   sandboxVerdict,
   type CommandKind,
 } from './lib/sandboxed-exec.js';
@@ -381,9 +382,10 @@ export function run(
         maxBuffer: 64 * 1024 * 1024,
         stdio: ['ignore', 'pipe', 'pipe'],
         // NOT `buildRunEnv()`: the container gets an allowlist instead (see
-        // `containerEnv`), and this env is the RUNTIME client's, which needs
-        // the caller's PATH and nothing from the review.
-        env: process.env,
+        // `containerEnv`), and this env is the RUNTIME CLIENT's — the caller's
+        // PATH and nothing from the review, minus the daemon-selecting
+        // variables a repository could have shipped in its own `.env`.
+        env: runtimeClientEnv(),
       })
     : spawnSync(command, {
         cwd,
@@ -809,7 +811,23 @@ export function runBuildTest(args: BuildTestArgs): BuildTestReport {
   // reaches a spawn at all: a repo this adapter cannot scope is handed to the
   // AGENT's own shell (`unsupportedReport`), which would otherwise run the
   // install and the suite with nothing consulted.
-  const refusal = refuseUnsandboxedPhase();
+  const refusal = refuseUnsandboxedPhase(root);
+  if (refusal && args.resume) {
+    // THROW on a continuation, never return. The handler writes whatever this
+    // returns to `--out`, which on a resume is the very report the call was
+    // asked to continue — so returning the refusal below would overwrite a
+    // partial run's install, builds and finished suites, and the refusal
+    // report carries no run identity, so every later `--resume` would fail the
+    // identity check ("records no run identity") even after a runtime came
+    // back. One transient probe failure would cost the round its whole
+    // build-test chain. This is the invariant the `!adapter` branch below
+    // states in its own words; a policy refusal is subject to it too.
+    throw new Error(
+      `refusing to continue this run: ${refusal}. The report at ${args.out} ` +
+        `is left as it was — re-run without --resume once the policy can be ` +
+        `satisfied, or lower review.sandbox.`,
+    );
+  }
   if (refusal) {
     return {
       toolchain: 'refused',

@@ -10,14 +10,25 @@
 // argv encodes: what is mounted, what crosses in the environment, and what
 // happens when there is no runtime at all.
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { join, sep } from 'node:path';
 import {
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import * as environment from '../../../config/environment.js';
+import {
   containerCommand,
+  CONTAINER_HOME,
   containerEnv,
   mountRootFor,
   refuseUnsandboxedPhase,
   reviewSandboxImage,
+  runtimeClientEnv,
   sandboxPolicy,
   sandboxVerdict,
 } from './sandboxed-exec.js';
@@ -40,6 +51,78 @@ describe('sandboxPolicy', () => {
     // A garbled value is not a policy — it falls through rather than being
     // guessed at.
     expect(sandboxPolicy({ QWEN_REVIEW_SANDBOX: 'yes' }, {})).toBe('off');
+  });
+});
+
+describe('values a repository must not be able to set', () => {
+  // `loadEnvironment` walks up from cwd and applies `<repo>/.qwen/.env` —
+  // repository content, from the checkout under review, admitted by default
+  // because folder trust starts off. So `process.env` is NOT the operator's
+  // alone, and every containment decision read from it needs to know which
+  // half it came from. The policy is additionally protected by only ever
+  // tightening; these three have no such ordering to fall back on.
+
+  it('ignores a repo-shipped image override — the image IS the code', () => {
+    vi.stubEnv('QWEN_REVIEW_SANDBOX_IMAGE', 'attacker.example/rogue:1');
+    const spy = vi
+      .spyOn(environment, 'isFileSourcedEnvKey')
+      .mockImplementation((k) => k === 'QWEN_REVIEW_SANDBOX_IMAGE');
+    try {
+      expect(reviewSandboxImage()).not.toContain('attacker.example');
+    } finally {
+      spy.mockRestore();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('ignores a repo-shipped SANDBOX_SET_UID_GID=false', () => {
+    // Left honoured, a committed opt-out puts the container back to root and
+    // leaves root-owned residue the host pipeline cannot sweep.
+    if (process.getuid === undefined) return;
+    vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
+    const spy = vi
+      .spyOn(environment, 'isFileSourcedEnvKey')
+      .mockImplementation((k) => k === 'SANDBOX_SET_UID_GID');
+    try {
+      const { args } = containerCommand('npm ci', {
+        cwd: join(sep, 'repo', '.qwen', 'tmp', 'review-pr-9'),
+        tmpDir: join(sep, 'repo', '.qwen', 'tmp'),
+        kind: 'install',
+        runtime: 'docker',
+        image: 'example/image:tag',
+      });
+      expect(args).toContain('--user');
+    } finally {
+      spy.mockRestore();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('drops a repo-shipped DOCKER_HOST from the runtime client env', () => {
+    // It decides WHICH daemon answers: a repository that ships one points the
+    // availability probe and every `docker run` at a daemon it controls, so
+    // `required` reads as satisfied and whatever that daemon returns is scored
+    // as build, test and probe evidence.
+    vi.stubEnv('DOCKER_HOST', 'tcp://attacker.example:2375');
+    const spy = vi
+      .spyOn(environment, 'isFileSourcedEnvKey')
+      .mockImplementation((k) => k === 'DOCKER_HOST');
+    try {
+      expect(runtimeClientEnv()['DOCKER_HOST']).toBeUndefined();
+    } finally {
+      spy.mockRestore();
+      vi.unstubAllEnvs();
+    }
+    // An OPERATOR's own DOCKER_HOST — a remote engine, colima, rootless — is
+    // untouched; only the file-sourced one is dropped.
+    vi.stubEnv('DOCKER_HOST', 'unix:///run/user/1000/docker.sock');
+    try {
+      expect(runtimeClientEnv()['DOCKER_HOST']).toBe(
+        'unix:///run/user/1000/docker.sock',
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
 
@@ -66,15 +149,43 @@ describe('sandboxVerdict', () => {
     // The refusal has to reach something that stops the phase. Left to "the
     // caller", no caller acted and `required` ran the reviewed code
     // unsandboxed with the full environment — the policy meant nothing.
+    const tree = join(sep, 'repo', '.qwen', 'tmp', 'review-pr-9');
+    const mounted = () => tree;
     const verdict = sandboxVerdict('required', {}, () => null);
-    expect(refuseUnsandboxedPhase(verdict)).toContain('no container runtime');
-    // ...and a verdict that is not a refusal never stops one.
-    expect(refuseUnsandboxedPhase(sandboxVerdict('off', {}, () => null))).toBe(
-      null,
+    expect(refuseUnsandboxedPhase(tree, verdict, mounted)).toContain(
+      'no container runtime',
     );
+    // ...and a verdict that is not a refusal never stops one.
     expect(
-      refuseUnsandboxedPhase(sandboxVerdict('auto', {}, () => 'docker')),
+      refuseUnsandboxedPhase(
+        tree,
+        sandboxVerdict('off', {}, () => null),
+        mounted,
+      ),
     ).toBe(null);
+    expect(
+      refuseUnsandboxedPhase(
+        tree,
+        sandboxVerdict('auto', {}, () => 'docker'),
+        mounted,
+      ),
+    ).toBe(null);
+  });
+
+  it('refuses a phase a healthy runtime still cannot contain', () => {
+    // "A runtime answered" is not containment. A `/review` of a local checkout
+    // has no `.qwen/tmp` layout to mount, so the command falls through to the
+    // direct spawn — with the full environment, and a report indistinguishable
+    // from a contained run. The policy's question is whether THIS phase can be
+    // contained, and the mount is the half that fails while the daemon is fine.
+    const contained = sandboxVerdict('required', {}, () => 'docker');
+    expect(contained.kind).toBe('container');
+    const refusal = refuseUnsandboxedPhase(
+      join(sep, 'home', 'me', 'myrepo'),
+      contained,
+      () => null,
+    );
+    expect(refusal).toContain('cannot be mounted');
   });
 
   it('discloses rather than hides that the reviewed code ran as you', () => {
@@ -133,41 +244,72 @@ describe('containerCommand', () => {
     // This is the finding the design is built on: both call sites used to give
     // the PR's code `process.env`, which on CI carries the review's model and
     // GitHub credentials. A `postinstall` reading them is one line.
-    const env = containerEnv('/home-in-mount');
+    const env = containerEnv('/cache-in-mount');
     expect(env).toEqual([
       'CI=1',
       'npm_config_yes=true',
       'QWEN_SKIP_PREPARE=1',
-      // HOME inside the mount: forcing a uid resets it to `/`, which the
-      // mapped user cannot write, and npm fails before the install starts.
-      'HOME=/home-in-mount',
-      'npm_config_cache=/home-in-mount/.npm',
+      // HOME is a tmpfs path, NOT under the mount: `sh -lc` sources
+      // `$HOME/.profile` and npm reads `$HOME/.npmrc`, so a HOME on the shared
+      // mount lets one run plant what the next one executes — across `--rm`
+      // and across reviews.
+      `HOME=${CONTAINER_HOME}`,
+      'npm_config_cache=/cache-in-mount',
     ]);
 
-    const { args } = containerCommand('npm ci', {
-      ...base,
-      cwd: join(tmpDir, 'review-pr-9'),
-      kind: 'install',
-    });
-    const passed = args.filter((_, i) => args[i - 1] === '--env');
-    expect(passed.some((e) => /TOKEN|KEY|SECRET|PASSWORD/i.test(e))).toBe(
-      false,
-    );
+    // A PLANTED canary, not whatever the runner's shell happens to export:
+    // the regression this guards against is `containerCommand` forwarding the
+    // inherited environment, and on a box exporting no TOKEN/KEY/SECRET the
+    // old form shipped green.
+    vi.stubEnv('OPENAI_API_KEY', 'canary-should-not-cross');
+    vi.stubEnv('GH_TOKEN', 'canary-should-not-cross');
+    try {
+      const { args } = containerCommand('npm ci', {
+        ...base,
+        cwd: join(tmpDir, 'review-pr-9'),
+        kind: 'install',
+      });
+      const passed = args.filter((_, i) => args[i - 1] === '--env');
+      expect(passed.some((e) => e.includes('canary-should-not-cross'))).toBe(
+        false,
+      );
+      // ...and the WIRING, not just `containerEnv` called with a literal: HOME
+      // must be the tmpfs the argv also declares, or the mapped uid has no
+      // writable home and npm fails before the install starts.
+      expect(passed).toContain(`HOME=${CONTAINER_HOME}`);
+      const tmpfs = args[args.indexOf('--tmpfs') + 1];
+      expect(tmpfs.startsWith(`${CONTAINER_HOME}:`)).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
-  it('maps the host uid so its writes stay removable from the host', () => {
-    // The container writes into a mount the HOST then cleans up — `node_modules`
-    // after an install timeout, the tree at `discardWorktree`, the sweeps. Root
-    // in the container makes every one of those EACCES, and the residue
-    // accumulates across reviews: the cross-run-state class #9221 closed.
-    const { args } = containerCommand('npm ci', {
-      ...base,
-      cwd: join(tmpDir, 'review-pr-9'),
-      kind: 'install',
-    });
-    const user = args[args.indexOf('--user') + 1];
-    expect(user).toBe(`${process.getuid?.()}:${process.getgid?.()}`);
-  });
+  // Windows has no `process.getuid`, so the flag is correctly absent there —
+  // and the merge queue runs this file on Windows.
+  it.skipIf(process.getuid === undefined)(
+    'maps the host uid so its writes stay removable from the host',
+    () => {
+      // The container writes into a mount the HOST then cleans up — `node_modules`
+      // after an install timeout, the tree at `discardWorktree`, the sweeps. Root
+      // in the container makes every one of those EACCES, and the residue
+      // accumulates across reviews: the cross-run-state class #9221 closed.
+      // The documented opt-out (`SANDBOX_SET_UID_GID=false`) is something a
+      // developer's own shell may carry, which would fail this spuriously; it
+      // is stubbed rather than assumed.
+      vi.stubEnv('SANDBOX_SET_UID_GID', 'true');
+      try {
+        const { args } = containerCommand('npm ci', {
+          ...base,
+          cwd: join(tmpDir, 'review-pr-9'),
+          kind: 'install',
+        });
+        const user = args[args.indexOf('--user') + 1];
+        expect(user).toBe(`${process.getuid?.()}:${process.getgid?.()}`);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
 
   it('runs one ephemeral container per command', () => {
     // Not one long-lived container per phase: that would be cheaper by about
@@ -193,36 +335,70 @@ describe('containerCommand', () => {
 });
 
 describe('mountRootFor', () => {
+  // Real directories, because the function is no longer lexical: it realpaths
+  // the root and refuses a redirected ancestor, and a fixture of invented
+  // paths would pin the arithmetic while missing both.
+  const made: string[] = [];
+  const tmp = () => {
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-mount-'));
+    made.push(dir);
+    return dir;
+  };
+  afterEach(() => {
+    for (const dir of made.splice(0))
+      rmSync(dir, { recursive: true, force: true });
+  });
+
   it('takes the DEEPEST temp dir, not the first', () => {
     // A review run from inside another review's worktree — this pipeline's own
     // dogfood geometry — nests one `.qwen/tmp` inside another. First-occurrence
     // search widens the mount to the OUTER temp dir, which pulls `<repo>/.git`
     // and every sibling checkout into the container and defeats the one
     // property the mount exists for.
-    const nested = join(
-      sep,
-      'srv',
+    const root = tmp();
+    const inner = join(
+      root,
       '.qwen',
       'tmp',
       'checkouts',
       'myrepo',
       '.qwen',
       'tmp',
-      'review-pr-1-probe',
     );
-    expect(mountRootFor(nested)).toBe(
-      join(sep, 'srv', '.qwen', 'tmp', 'checkouts', 'myrepo', '.qwen', 'tmp'),
+    mkdirSync(join(inner, 'review-pr-1-probe'), { recursive: true });
+
+    expect(mountRootFor(join(inner, 'review-pr-1-probe'))).toBe(
+      realpathSync(inner),
     );
-    // The flat case — the one the other tests exercise — is unchanged.
-    expect(mountRootFor(join(sep, 'repo', '.qwen', 'tmp', 'review-pr-9'))).toBe(
-      join(sep, 'repo', '.qwen', 'tmp'),
+  });
+
+  it('refuses a root reached through a symlink instead of mounting it', () => {
+    // `resolve` never touches the filesystem, so a link at or above
+    // `.qwen/tmp` — committable as mode 120000, materialised by a fresh clone
+    // — would silently widen a read-write bind mount to wherever it points.
+    // Every other creating or destroying path in this pipeline refuses that.
+    const root = tmp();
+    const elsewhere = tmp();
+    mkdirSync(join(elsewhere, 'tmp', 'review-pr-1'), { recursive: true });
+    mkdirSync(join(root, '.qwen'), { recursive: true });
+    symlinkSync(join(elsewhere, 'tmp'), join(root, '.qwen', 'tmp'));
+
+    expect(mountRootFor(join(root, '.qwen', 'tmp', 'review-pr-1'))).toBe(null);
+
+    // ...and the same layout without the link is mounted normally, so the
+    // refusal is about the redirect and not about the shape.
+    const honest = tmp();
+    mkdirSync(join(honest, '.qwen', 'tmp', 'review-pr-1'), { recursive: true });
+    expect(mountRootFor(join(honest, '.qwen', 'tmp', 'review-pr-1'))).toBe(
+      realpathSync(join(honest, '.qwen', 'tmp')),
     );
   });
 
   it('is null outside a temp dir, so a local checkout is never mounted', () => {
     // `/review` of a local checkout has no sibling layout: the tree under test
     // IS the user's working copy.
-    expect(mountRootFor(join(sep, 'home', 'me', 'myrepo'))).toBe(null);
+    const root = tmp();
+    expect(mountRootFor(join(root, 'myrepo'))).toBe(null);
   });
 });
 

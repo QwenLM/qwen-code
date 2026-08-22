@@ -72,6 +72,7 @@ import {
   mountRootFor,
   refuseUnsandboxedPhase,
   reviewSandboxImage,
+  runtimeClientEnv,
   sandboxVerdict,
 } from './lib/sandboxed-exec.js';
 import {
@@ -1739,6 +1740,10 @@ function runProbeSuite(
         encoding: 'utf8',
         timeout,
         maxBuffer: 64 * 1024 * 1024,
+        // The RUNTIME CLIENT's environment, minus the daemon-selecting
+        // variables a repository could have shipped in its own `.env` — the
+        // container's own environment is the allowlist in `containerEnv`.
+        env: runtimeClientEnv(),
       })
     : spawnSync(
         process.execPath,
@@ -2485,7 +2490,10 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
   // bought by running that suite unsandboxed. Refusing here rather than at the
   // spawn keeps the report's vocabulary intact: the phase produced nothing, and
   // says why, instead of a run of probes each blaming the runner.
-  const sandboxRefusal = refuseUnsandboxedPhase();
+  // The probe tree this phase WOULD build, named before it exists — the gate
+  // has to answer before anything is created, and `probeWorktreePath` is a
+  // pure path function.
+  const sandboxRefusal = refuseUnsandboxedPhase(probeWorktreePath(worktree));
   if (sandboxRefusal) {
     noteMutants(
       `mutation probes did not run: ${sandboxRefusal}. Every probe executes ` +

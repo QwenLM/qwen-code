@@ -46,10 +46,13 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { join, resolve, sep } from 'node:path';
+import { realpathSync } from 'node:fs';
+import { dirname, join, resolve, sep } from 'node:path';
 import { operatorReviewSettings } from './review-settings.js';
 import { REVIEW_TMP_DIR } from './paths.js';
+import { redirectedAncestor } from './worktree.js';
 import { CUSTOM_SANDBOX_IMAGE_ENV_VAR } from '../../../utils/processUtils.js';
+import { isFileSourcedEnvKey } from '../../../config/environment.js';
 
 /**
  * The fallback when neither override names an image: the published sandbox
@@ -95,12 +98,36 @@ export function sandboxPolicy(
   // Injected so a test can pin the settings half without a settings file on
   // disk deciding the outcome.
   settings: { sandbox?: string } = operatorReviewSettings(),
+  fileSourced: (key: string) => boolean = isFileSourcedEnvKey,
 ): SandboxPolicy {
-  const fromEnv = env['QWEN_REVIEW_SANDBOX']?.trim().toLowerCase();
-  if (fromEnv && POLICIES.includes(fromEnv)) return fromEnv as SandboxPolicy;
+  // The env layer is READ, but it may only ever tighten, and only when the
+  // value is a real process variable.
+  //
+  // Both halves are load-bearing, and the first cut had neither. `process.env`
+  // is not the operator's alone: `loadEnvironment` walks up from cwd and
+  // applies `<repo>/.qwen/.env` — repository content, from the very checkout
+  // under review, admitted by default because folder trust starts off. Letting
+  // that outrank the setting made the guarantee this module advertises
+  // ("a repository cannot switch off the containment that exists to contain
+  // it") true of `settings.json` and false in practice: `QWEN_REVIEW_SANDBOX=off`
+  // in a committed `.env` disabled it. So a file-sourced value is ignored here,
+  // and even a genuine process variable can only raise the policy, never lower
+  // it — a CI workflow's `env:` block requiring containment still works, while
+  // nothing reachable by the reviewed repository can take it away.
+  const raw = env['QWEN_REVIEW_SANDBOX']?.trim().toLowerCase();
+  const fromEnv =
+    raw && POLICIES.includes(raw) && !fileSourced('QWEN_REVIEW_SANDBOX')
+      ? (raw as SandboxPolicy)
+      : undefined;
   const setting = settings.sandbox;
-  if (setting && POLICIES.includes(setting)) return setting as SandboxPolicy;
-  return 'off';
+  const fromSettings =
+    setting && POLICIES.includes(setting)
+      ? (setting as SandboxPolicy)
+      : undefined;
+  const strictest = (a: SandboxPolicy, b: SandboxPolicy) =>
+    POLICIES.indexOf(a) >= POLICIES.indexOf(b) ? a : b;
+  if (fromEnv && fromSettings) return strictest(fromEnv, fromSettings);
+  return fromEnv ?? fromSettings ?? 'off';
 }
 
 let probed: ContainerRuntime | null | undefined;
@@ -120,6 +147,7 @@ export function containerRuntime(force = false): ContainerRuntime | null {
     const r = spawnSync(runtime, ['info'], {
       stdio: 'ignore',
       timeout: 30_000,
+      env: runtimeClientEnv(),
     });
     if (!r.error && r.status === 0) {
       probed = runtime;
@@ -218,9 +246,31 @@ export function sandboxVerdict(
  * code, or null when it may.
  */
 export function refuseUnsandboxedPhase(
+  // The tree this phase would execute in. Required, because "is a runtime
+  // running" is the wrong question — see below.
+  root: string,
   verdict: SandboxVerdict = sandboxVerdict(),
+  mountRoot: (cwd: string) => string | null = mountRootFor,
 ): string | null {
-  return verdict.kind === 'refused' ? verdict.reason : null;
+  if (verdict.kind === 'refused') return verdict.reason;
+  if (verdict.kind === 'direct') return null;
+  // A runtime answering is not containment. The first cut asked only whether
+  // one did, and every route the container cannot actually serve still ran the
+  // reviewed code with the full environment under `required`: a `/review` of a
+  // local checkout has no `.qwen/tmp` layout to mount, so `mountRootFor`
+  // returns null, the command falls through to the direct spawn, and the
+  // report is indistinguishable from a contained run. The question the policy
+  // asks is whether THIS phase can be contained, and the mount is the half
+  // that can fail while the runtime is healthy.
+  if (mountRoot(root) === null) {
+    return (
+      'review.sandbox is "required" and this tree cannot be mounted: it is ' +
+      `not under a review temp dir (${root}), which is the layout the ` +
+      'container boundary is built on — a review of a local checkout has no ' +
+      'such layout, so its commands cannot be contained'
+    );
+  }
+  return null;
 }
 
 /** Whether one command needs the network. */
@@ -235,18 +285,34 @@ export type CommandKind = 'install' | 'build' | 'test';
  * the pipeline sets on purpose (`buildRunEnv`), so they are the ones that
  * cross.
  */
-export function containerEnv(homeDir: string): string[] {
+export const CONTAINER_HOME = '/qwen-review-home';
+
+export function containerEnv(cacheDir: string): string[] {
   return [
     'CI=1',
     'npm_config_yes=true',
     'QWEN_SKIP_PREPARE=1',
-    // `HOME` explicitly, and inside the mount. Forcing a uid resets `$HOME` to
-    // `/` in these images — `utils/sandbox.ts` copies the host's for the same
-    // reason — and `/` is not writable by the mapped user, so npm's first
-    // write fails before the install starts. Pointing it at the mount gives
-    // every tool that wants a home one it owns.
-    `HOME=${homeDir}`,
-    `npm_config_cache=${join(homeDir, '.npm')}`,
+    // `HOME` explicitly, because forcing a uid resets it to `/` in these
+    // images — `utils/sandbox.ts` copies the host's for the same reason — and
+    // `/` is not writable by the mapped user, so npm's first write fails
+    // before the install starts.
+    //
+    // And it points at a TMPFS, not at the mount. The first cut put it under
+    // the mount and shared it across every command of every tree: `sh -lc` is
+    // a login shell that sources `$HOME/.profile`, and npm reads
+    // `$HOME/.npmrc`, so one run's postinstall could plant both and the NEXT
+    // review's install — network on — would source and read them. That is
+    // cross-run execution wearing this module's own `--rm` "isolation by
+    // construction" claim, and it was introduced by the fix for the `$HOME`
+    // problem rather than found in the original. A tmpfs is discarded with the
+    // container and never touches the host, so the claim is true again.
+    `HOME=${CONTAINER_HOME}`,
+    // The npm cache stays on the mount, deliberately: it is what keeps an
+    // install from re-downloading ~1 700 packages every review, it holds no
+    // rc file or profile, and npm verifies each entry's integrity hash on
+    // read. That verification is what stands between a poisoned cache and a
+    // bad install — worth naming rather than implying the cache is inert.
+    `npm_config_cache=${cacheDir}`,
   ];
 }
 
@@ -275,7 +341,23 @@ export function mountRootFor(cwd: string): string | null {
   const resolved = resolve(cwd);
   const marker = `${sep}${REVIEW_TMP_DIR}${sep}`;
   const at = resolved.lastIndexOf(marker);
-  return at < 0 ? null : resolved.slice(0, at + marker.length - 1);
+  if (at < 0) return null;
+  const root = resolved.slice(0, at + marker.length - 1);
+  // A LEXICAL root is not a safe mount target. `resolve` never touches the
+  // filesystem, so a symlink at or above `.qwen/tmp` — committable as mode
+  // 120000 and materialised by a fresh clone — silently widens a read-write
+  // bind mount to wherever it points. Every other creating or destroying path
+  // in this pipeline refuses that (`runCleanup`, `releaseWorktree`,
+  // `resetScratchTree`); the mount is the one place a redirect would hand the
+  // reviewed code a directory nobody chose.
+  try {
+    if (redirectedAncestor(root, dirname(resolve(root, '..', '..'))) !== null) {
+      return null;
+    }
+    return realpathSync(root);
+  } catch {
+    return null;
+  }
 }
 
 export interface ContainerCommandOptions {
@@ -332,11 +414,21 @@ export function containerCommand(
   if (
     uid !== undefined &&
     gid !== undefined &&
-    process.env['SANDBOX_SET_UID_GID']?.toLowerCase().trim() !== 'false'
+    // The opt-out is the operator's, not the repository's: a committed
+    // `SANDBOX_SET_UID_GID=false` would put the container back to root and
+    // leave root-owned residue the host cannot sweep.
+    !(
+      !isFileSourcedEnvKey('SANDBOX_SET_UID_GID') &&
+      process.env['SANDBOX_SET_UID_GID']?.toLowerCase().trim() === 'false'
+    )
   ) {
     args.push('--user', `${uid}:${gid}`);
   }
-  for (const entry of containerEnv(join(opts.tmpDir, '.sandbox-home'))) {
+  // `mode=1777` so the mapped uid owns what it writes there: a tmpfs mounts
+  // root-owned by default, and `--user` would then be unable to write its own
+  // HOME — the very failure this HOME exists to prevent.
+  args.push('--tmpfs', `${CONTAINER_HOME}:rw,mode=1777`);
+  for (const entry of containerEnv(join(opts.tmpDir, '.npm-cache'))) {
     args.push('--env', entry);
   }
   args.push(opts.image, 'sh', '-lc', command);
@@ -356,9 +448,43 @@ export function containerCommand(
 export function reviewSandboxImage(
   env: NodeJS.ProcessEnv = process.env,
 ): string {
+  // File-sourced overrides are ignored for the same reason the policy ignores
+  // them, and this one is sharper: the image IS the code the reviewed
+  // repository's commands run inside, so a `.env` committed in that repository
+  // naming its own image would be arbitrary execution wearing the containment's
+  // name.
+  const pick = (key: string) =>
+    isFileSourcedEnvKey(key) ? undefined : env[key]?.trim();
   return (
-    env['QWEN_REVIEW_SANDBOX_IMAGE']?.trim() ||
-    env[CUSTOM_SANDBOX_IMAGE_ENV_VAR]?.trim() ||
+    pick('QWEN_REVIEW_SANDBOX_IMAGE') ||
+    pick(CUSTOM_SANDBOX_IMAGE_ENV_VAR) ||
     DEFAULT_IMAGE
   );
+}
+
+/**
+ * The environment the container RUNTIME CLIENT is spawned with.
+ *
+ * `DOCKER_HOST` and its TLS companions decide which daemon answers — so a
+ * repository that ships one in `.qwen/.env` points both the availability probe
+ * and every `docker run` at a daemon it controls: `required` reads as
+ * satisfied, the mount is handed over, and whatever that daemon returns is
+ * scored as build, test and probe evidence. An operator's own `DOCKER_HOST`
+ * (a remote engine, colima, rootless) is untouched — only the file-sourced
+ * ones are dropped.
+ */
+export function runtimeClientEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const scrubbed = { ...env };
+  for (const key of [
+    'DOCKER_HOST',
+    'DOCKER_CERT_PATH',
+    'DOCKER_TLS_VERIFY',
+    'DOCKER_CONTEXT',
+    'CONTAINER_HOST',
+  ]) {
+    if (isFileSourcedEnvKey(key)) delete scrubbed[key];
+  }
+  return scrubbed;
 }
