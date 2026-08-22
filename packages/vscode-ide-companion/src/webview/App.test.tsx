@@ -17,10 +17,13 @@ const {
   mockOpenCompletion,
   mockCloseCompletion,
   mockMessageState,
+  mockCompletionState,
   mockAddMessage,
   mockEndStreaming,
   mockModelSelectorMounts,
   capturedWebViewHandlers,
+  capturedSessionHandlers,
+  capturedCompletionTriggerCalls,
 } = vi.hoisted(() => ({
   mockPostMessage: vi.fn(),
   mockOpenCompletion: vi.fn().mockResolvedValue(undefined),
@@ -28,6 +31,12 @@ const {
   mockMessageState: {
     isStreaming: false,
     isWaitingForResponse: false,
+  },
+  // Completion menu visibility for the mocked useCompletionTrigger. Tests
+  // that exercise composer key handling without the menu flip this to
+  // false; the default true keeps the /skills picker suites working.
+  mockCompletionState: {
+    isOpen: true,
   },
   mockAddMessage: vi.fn(),
   mockEndStreaming: vi.fn(),
@@ -42,6 +51,14 @@ const {
     handleAskUserQuestion: null as null | ((value: unknown) => void),
     setAccountInfo: null as null | ((value: unknown) => void),
   },
+  // The mocked useSessionManagement exposes its real setShowSessionSelector
+  // setter here so tests can raise the SessionSelector overlay directly.
+  capturedSessionHandlers: {
+    setShowSessionSelector: null as null | ((value: boolean) => void),
+  },
+  // Every call the App makes to the mocked useCompletionTrigger, so tests
+  // can assert the suppression argument is actually wired at the call site.
+  capturedCompletionTriggerCalls: [] as unknown[][],
 }));
 
 const slashSkillsItem: CompletionItem = {
@@ -85,23 +102,35 @@ vi.mock('./hooks/useVSCode.js', () => ({
   }),
 }));
 
-vi.mock('./hooks/session/useSessionManagement.js', () => ({
-  useSessionManagement: () => ({
-    showSessionSelector: false,
-    filteredSessions: [],
-    currentSessionId: 'session-1',
-    sessionSearchQuery: '',
-    setSessionSearchQuery: vi.fn(),
-    handleSwitchSession: vi.fn(),
-    setShowSessionSelector: vi.fn(),
-    hasMore: false,
-    isLoading: false,
-    handleLoadMoreSessions: vi.fn(),
-    handleLoadQwenSessions: vi.fn(),
-    handleNewQwenSession: vi.fn(),
-    currentSessionTitle: 'Session 1',
-  }),
-}));
+// Stateful mock: the real hook owns the SessionSelector visibility state,
+// and the App's overlay predicate reads it. Keeping a real useState behind
+// the mock lets tests raise/lower the session selector overlay and trigger
+// genuine App re-renders, exactly like the header toggle does in production.
+vi.mock('./hooks/session/useSessionManagement.js', async () => {
+  const React = await import('react');
+  return {
+    useSessionManagement: () => {
+      const [showSessionSelector, setShowSessionSelector] =
+        React.useState(false);
+      capturedSessionHandlers.setShowSessionSelector = setShowSessionSelector;
+      return {
+        showSessionSelector,
+        filteredSessions: [],
+        currentSessionId: 'session-1',
+        sessionSearchQuery: '',
+        setSessionSearchQuery: vi.fn(),
+        handleSwitchSession: vi.fn(),
+        setShowSessionSelector,
+        hasMore: false,
+        isLoading: false,
+        handleLoadMoreSessions: vi.fn(),
+        handleLoadQwenSessions: vi.fn(),
+        handleNewQwenSession: vi.fn(),
+        currentSessionTitle: 'Session 1',
+      };
+    },
+  };
+});
 
 vi.mock('./hooks/file/useFileContext.js', () => ({
   useFileContext: () => ({
@@ -212,20 +241,26 @@ vi.mock('./hooks/useImage.js', () => ({
 }));
 
 vi.mock('./hooks/useCompletionTrigger.js', () => ({
-  useCompletionTrigger: () => ({
-    isOpen: true,
-    triggerChar: '/',
-    query: 'skills ',
-    items: [
-      slashSkillsItem,
-      secondarySkillItem,
-      commitCommandItem,
-      clearCommandItem,
-    ],
-    closeCompletion: mockCloseCompletion,
-    openCompletion: mockOpenCompletion,
-    refreshCompletion: vi.fn(),
-  }),
+  // Record every call so tests can assert the App actually passes its
+  // suppression argument (third positional parameter) — reverting the call
+  // site leaves it undefined and fails that assertion.
+  useCompletionTrigger: (...args: unknown[]) => {
+    capturedCompletionTriggerCalls.push(args);
+    return {
+      isOpen: mockCompletionState.isOpen,
+      triggerChar: '/',
+      query: 'skills ',
+      items: [
+        slashSkillsItem,
+        secondarySkillItem,
+        commitCommandItem,
+        clearCommandItem,
+      ],
+      closeCompletion: mockCloseCompletion,
+      openCompletion: mockOpenCompletion,
+      refreshCompletion: vi.fn(),
+    };
+  },
 }));
 
 vi.mock('./utils/contextUsage.js', () => ({
@@ -274,6 +309,7 @@ vi.mock('./components/layout/InputForm.js', () => ({
     onCancel,
     onCompletionSelect,
     onCompletionFill,
+    onKeyDown,
     showModelSelector,
   }: {
     inputText: string;
@@ -281,6 +317,7 @@ vi.mock('./components/layout/InputForm.js', () => ({
     onCancel: () => void;
     onCompletionSelect: (item: CompletionItem) => void;
     onCompletionFill?: (item: CompletionItem) => void;
+    onKeyDown?: (e: React.KeyboardEvent) => void;
     showModelSelector?: boolean;
   }) => {
     if (showModelSelector) {
@@ -293,6 +330,7 @@ vi.mock('./components/layout/InputForm.js', () => ({
           ref={inputFieldRef}
           contentEditable
           suppressContentEditableWarning
+          onKeyDown={onKeyDown}
         >
           {inputText}
         </div>
@@ -416,9 +454,12 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockMessageState.isStreaming = false;
   mockMessageState.isWaitingForResponse = false;
+  mockCompletionState.isOpen = true;
   capturedWebViewHandlers.handlePermissionRequest = null;
   capturedWebViewHandlers.handleAskUserQuestion = null;
   capturedWebViewHandlers.setAccountInfo = null;
+  capturedSessionHandlers.setShowSessionSelector = null;
+  capturedCompletionTriggerCalls.length = 0;
   (
     globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
   ).IS_REACT_ACT_ENVIRONMENT = true;
@@ -756,6 +797,16 @@ describe('App model selector gating', () => {
     expect(container?.querySelector('.model-selector')).toBeNull();
   });
 
+  it('closes the selector when the session selector opens', async () => {
+    await renderWithOpenSelector();
+
+    act(() => {
+      capturedSessionHandlers.setShowSessionSelector?.(true);
+    });
+
+    expect(container?.querySelector('.model-selector')).toBeNull();
+  });
+
   it.each([
     [
       'permission request',
@@ -769,6 +820,10 @@ describe('App model selector gating', () => {
     [
       'account info',
       () => capturedWebViewHandlers.setAccountInfo?.(accountPayload),
+    ],
+    [
+      'session selector',
+      () => capturedSessionHandlers.setShowSessionSelector?.(true),
     ],
   ])(
     'does not open the selector from /model while a %s is up',
@@ -792,6 +847,83 @@ describe('App model selector gating', () => {
       expect(mockModelSelectorMounts).not.toHaveBeenCalled();
     },
   );
+
+  /** Dispatch a Tab keydown on the mocked composer input. */
+  function dispatchTabOnInput(target: HTMLElement) {
+    act(() => {
+      target.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }),
+      );
+    });
+  }
+
+  // Control for the Tab test below: with the selector closed (and the
+  // completion menu closed, since an open menu owns Tab for filling), Tab
+  // on the composer cycles the approval mode and posts setApprovalMode.
+  it('cycles approval mode with Tab when the selector is closed', async () => {
+    mockCompletionState.isOpen = false;
+    const rendered = renderApp();
+    root = rendered.root;
+    container = rendered.container;
+
+    await act(async () => {});
+    mockPostMessage.mockClear();
+
+    const input = rendered.container.querySelector(
+      '[data-testid="input-field"]',
+    );
+    expect(input).not.toBeNull();
+    dispatchTabOnInput(input as HTMLElement);
+
+    expect(mockPostMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'setApprovalMode' }),
+    );
+  });
+
+  it('does not cycle approval mode with Tab while the selector is open', async () => {
+    // Completion must be closed here too, so the only thing standing between
+    // Tab and the approval-mode toggle is the showModelSelector guard —
+    // removing that guard term makes this test fail.
+    mockCompletionState.isOpen = false;
+    await renderWithOpenSelector();
+    mockPostMessage.mockClear();
+
+    const input = container?.querySelector('[data-testid="input-field"]');
+    expect(input).not.toBeNull();
+    dispatchTabOnInput(input as HTMLElement);
+
+    // The selector does not capture Tab itself; without the guard the
+    // keystroke silently cycles the approval mode (up to YOLO) underneath
+    // the open dropdown.
+    expect(mockPostMessage).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'setApprovalMode' }),
+    );
+  });
+
+  it('wires selector visibility into completion suppression', async () => {
+    const rendered = renderApp();
+    root = rendered.root;
+    container = rendered.container;
+
+    await act(async () => {});
+
+    const lastSuppressionArg = () => {
+      const calls = capturedCompletionTriggerCalls;
+      const last = calls[calls.length - 1];
+      return last ? last[2] : undefined;
+    };
+
+    // Selector closed: completion is not suppressed.
+    expect(lastSuppressionArg()).toBe(false);
+
+    setInputSelection(rendered.container, '/');
+    clickButton(rendered.container, 'select-model-command');
+    expect(rendered.container.querySelector('.model-selector')).not.toBeNull();
+
+    // Selector open: the App must pass showModelSelector as the hook's
+    // third argument — dropping it (or hardcoding false) fails here.
+    expect(lastSuppressionArg()).toBe(true);
+  });
 });
 
 describe('App messages container bottom clearance', () => {
