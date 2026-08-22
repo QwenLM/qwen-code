@@ -863,3 +863,294 @@ export function renderConvergenceDiagnosis(d: ConvergenceDiagnosis): {
     zh: `收敛情况：${factsZh}。${reasonZh}${caveatZh}${adviceZh}（仅为观察——本轮评审未因此扣留任何内容。）`,
   };
 }
+
+// ---------------------------------------------------------------------------
+// The convergence EXIT, past the diagnosis above.
+//
+// Everything above answers "is this loop settling, and if not, why", and its
+// handling advice ends at a posture the operator can still change — including
+// dropping the round to a Critical-only floor. What follows picks up where
+// that advice has already been taken and the loop STILL does not settle: the
+// floor is engaged, the Suggestions are gone, and the volume has flatlined on
+// Criticals that never clear. The diagnosis names the shape; this names the
+// way out of it (#9410).
+// ---------------------------------------------------------------------------
+
+// Persistently-critical loop detection — the convergence exit the severity
+// floor cannot provide (#9410).
+//
+// The floor (round 6 onward, or an explicit `critical` floor) removes
+// Suggestions from posting, so a healthy loop's posting volume shrinks to its
+// Criticals and then to zero as those Criticals get fixed. But a loop whose
+// Criticals never clear — the security-sensitive PR under adversarial review
+// that PR 9226 ran for twelve rounds — posts Criticals every round forever:
+// the floor engages, the Suggestions stop, and the volume flatlines at the
+// Critical count instead of falling. The floor has done its job and the loop
+// STILL does not converge, and nothing before this module said so.
+//
+// This module names that shape. It is DATA the operator rules on, never
+// authority: it computes one fact from the carried telemetry (Criticals in
+// the previous round's work-list AND this round, the severity floor
+// engaged, and the two-round posting window not shrinking) and, when it
+// fires, surfaces the ONE recommendation
+// that fits — `land-with-residual-risk`, merge and accept the residual risk.
+// It decides nothing: it cannot block a post, cannot merge, cannot close, and
+// holds no numeric threshold (the "two-round window" is the shortest one the
+// ledger's own `posted`/`prevPosted` pair can express, not a tuned constant).
+// Every input degrades OPEN — a missing volume or an unrecovered previous
+// round costs a missed advisory, never a false one and never a changed post.
+
+/**
+ * The facts the signal reads, all carried by the compose boundary — nothing
+ * here reads a file or asks the model.
+ *
+ * `prevHadCritical` is `undefined` (not `false`) when no previous round was
+ * recovered: "no prior work-list" is not "the previous round had no
+ * Criticals". Both `false` and `undefined` suppress the signal (the guard
+ * is `!== true`); `undefined` marks "no previous round recovered" for
+ * readability, and production only ever yields `true | undefined`.
+ */
+export interface ConvergenceFacts {
+  /** Did the PREVIOUS round's carried work-list hold a Critical? */
+  prevHadCritical: boolean | undefined;
+  /**
+   * Critical findings THIS round posts — inline, body-only, and relocated
+   * (deferred Critical markers restored to the posting set).
+   */
+  thisCriticals: number;
+  /**
+   * How many of THIS round's comments report a finding for the FIRST time.
+   *
+   * The FRESH count, not the posting total, and for the reason the sibling
+   * diagnosis above measures its own trend on the same number: Step 6
+   * re-posts every still-standing ledger Critical under its ORIGINAL id, so
+   * the re-post floor only ever rises. Measured on totals, a loop whose new
+   * findings collapsed from five to one still posts more comments than the
+   * round before — and this signal would read that as "not shrinking" and
+   * recommend landing with residual risk over a loop that is converging.
+   */
+  fresh: number | undefined;
+  /** The PREVIOUS round's fresh count (the ledger's two-round window). */
+  prevFresh: number | undefined;
+  /**
+   * How many Criticals stood in the PREVIOUS round's carried work-list, when
+   * that can be counted.
+   *
+   * The backlog, and it is here because the fresh window alone cannot see
+   * it. A loop whose reviewer finds nothing new for two rounds while the
+   * author clears blockers — the healthiest state a still-Critical PR can be
+   * in — has fresh 0 on both sides, which "not shrinking" reads as stuck.
+   * The standing count is what tells the two apart.
+   *
+   * A veto, not a requirement: it suppresses on OBSERVED shrinkage and
+   * abstains otherwise. That is what keeps it sound over a work-list the
+   * marker's byte budget shortened — an undercounted predecessor can only
+   * make the shrinkage harder to observe, never invent one.
+   */
+  prevCriticals: number | undefined;
+  /**
+   * Is the severity floor ENGAGED this round — an explicit `critical`
+   * floor, or `auto` from round 6 with the round knowable? The advisory
+   * claims the floor "will not converge" the loop; that claim is provable
+   * only where the floor is actually running, so a disengaged floor (early
+   * `auto` rounds, an explicit `suggestion`, an unknowable round)
+   * suppresses the signal — fail open, like every other conjunct.
+   */
+  floorEngaged: boolean | undefined;
+  /**
+   * The posting floor the PREVIOUS round ran under, when its marker
+   * recorded one. The volume window is a two-round comparison, and two
+   * rounds that posted under different postures are not two points on one
+   * loop's trend: the round the floor engages on drops its Suggestions, so
+   * its volume falls against a predecessor that still posted them, and the
+   * round after an operator loosens the floor rises for the same reason.
+   * Neither movement is the loop.
+   *
+   * Read the way the sibling diagnosis in this file reads it — a floor that
+   * was never recorded is not a floor that DIFFERS, so a pre-field marker
+   * evaluates exactly as it did before this conjunct existed.
+   */
+  prevFloor: 'c' | 'o' | undefined;
+  /**
+   * Did the PREVIOUS round's work-list still carry a Suggestion?
+   *
+   * The direct evidence that the floor was NOT enforcing there, and it is
+   * needed because the recorded `prevFloor` above cannot supply it. That
+   * stamp is written from the REPORTING reading, which folds an absent
+   * `severityFloor` into `auto` and so stamps `c` on any round >= 6 whose
+   * state named no floor at all — while the strict enforcement reading
+   * moved nothing and Suggestions posted normally. Pairing that stamp
+   * against this round's enforcement reading let a genuinely un-enforced
+   * predecessor pass as an engaged one, and the advisory then published
+   * "the severity floor will not converge it" against a window whose far
+   * end still included Suggestions (#9526).
+   *
+   * The work-list settles it without either reading: enforcement moves
+   * drafted Suggestions out of the posting set before the marker is built,
+   * so an engaged round's list is Critical-only and an un-enforced one is
+   * not. Suppresses on the POSITIVE observation, so the two ways it can be
+   * wrong land on opposite sides and only one of them fires: a shortened
+   * list that shed its Suggestion reads as engaged (bounded by the same
+   * truncation caveat the backlog veto carries), while a pathless
+   * Suggestion that an engaged round left inline reads as un-enforced and
+   * costs one round of silence.
+   */
+  prevPostedSuggestion: boolean | undefined;
+}
+
+/** The one shape this module detects. */
+export type ConvergenceShape = 'persistently-critical';
+
+/**
+ * The one recommendation that fits a persistently-critical loop. Spelled as
+ * a stable code because the operator's tooling keys on it: it names the exit
+ * (land — merge — with the residual risk accepted), never an action the tool
+ * takes itself.
+ */
+export const LAND_WITH_RESIDUAL_RISK = 'land-with-residual-risk';
+
+/** The fired assessment, all fields pure facts about the loop. */
+export interface ConvergenceAssessment {
+  shape: ConvergenceShape;
+  recommendation: typeof LAND_WITH_RESIDUAL_RISK;
+  /** Critical findings this round posts — what the residual inventory covers. */
+  criticals: number;
+  /** Findings this round reported for the first time. */
+  fresh: number;
+  /** The previous round's, the other end of the window. */
+  prevFresh: number;
+}
+
+/**
+ * Detect the persistently-critical shape, or return null when the loop is not
+ * (provably) in it.
+ *
+ * Fires only on the conjunction, and every conjunct degrades open:
+ *  - the previous round's work-list held a Critical (`prevHadCritical ===
+ *    true` — an UNrecovered previous round is `undefined` and suppresses the
+ *    signal, so a second round introducing its first Critical cannot read as
+ *    "persistent");
+ *  - this round posts at least one Critical;
+ *  - the severity floor is ENGAGED this round (`floorEngaged === true`) —
+ *    the advisory's "the floor will not converge it" claim is provable only
+ *    where the floor is actually running; before engagement the loop may
+ *    still converge once it does, so a disengaged floor suppresses the
+ *    signal;
+ *  - the previous round posted under the SAME engaged floor. Two facts say
+ *    so and both must hold: its recorded floor is not `o`, and its
+ *    work-list carried no Suggestion. The stamp alone is not enough — it is
+ *    written from the reporting reading, which folds an absent floor into
+ *    `auto` and stamps `c` on a round enforcement never touched. The round
+ *    the floor engages on compares a Critical-only window against a
+ *    predecessor that still posted Suggestions, and "the floor will not
+ *    converge it" is not a claim one round of the floor can support;
+ *  - the two-round FRESH window is present and NOT shrinking — both counts
+ *    recorded, and this round's at least the previous round's. A falling
+ *    rate of new findings is a converging loop even with Criticals present,
+ *    and a missing count says nothing, so both fail open. Fresh rather than
+ *    total, because Step 6 re-posts every standing Critical and the total
+ *    therefore only ever rises;
+ *  - and the standing Critical backlog is not observably shrinking. The
+ *    fresh window cannot see this one: a loop finding nothing new while the
+ *    author clears blockers sits at fresh 0 on both sides, which "not
+ *    shrinking" reads as stuck. This conjunct vetoes on observed shrinkage
+ *    and abstains when the predecessor's count is unknown.
+ *
+ * No threshold anywhere: "not shrinking" is `fresh >= prevFresh` over the
+ * shortest window the ledger carries, the backlog veto is a plain `<`, and
+ * "persistent" is two consecutive rounds with Criticals — the minimum
+ * evidence for each claim, derived from the carried telemetry, never tuned.
+ *
+ * One deliberate difference from the sibling diagnosis above, which also
+ * runs on fresh counts: it additionally requires `prev.fresh > 0`, because
+ * it is about a loop GENERATING work. This one must fire at fresh 0 on both
+ * sides — Criticals standing round after round with nothing new is not a
+ * quiet loop, it is the persistently-critical shape itself, and the backlog
+ * veto is what separates it from a backlog being cleared.
+ */
+export function convergenceAssessment(
+  facts: ConvergenceFacts,
+): ConvergenceAssessment | null {
+  const {
+    prevHadCritical,
+    thisCriticals,
+    fresh,
+    prevFresh,
+    floorEngaged,
+    prevFloor,
+    prevPostedSuggestion,
+    prevCriticals,
+  } = facts;
+  if (prevHadCritical !== true) return null;
+  if (thisCriticals <= 0) return null;
+  if (floorEngaged !== true) return null;
+  // This round is `c` by the line above, so a RECORDED `o` predecessor is a
+  // posture change and its window is not a comparable point. Unrecorded
+  // stays evaluable, like the sibling diagnosis above.
+  if (prevFloor !== undefined && prevFloor !== 'c') return null;
+  // And a `c` STAMP is not proof the floor enforced: the stamp comes from
+  // the reporting fold. A Suggestion in the predecessor's work-list is the
+  // proof, and it says the floor did not.
+  if (prevPostedSuggestion === true) return null;
+  if (fresh === undefined || prevFresh === undefined) return null;
+  if (fresh < prevFresh) return null;
+  // The backlog veto. Positive evidence only: an unknown predecessor count
+  // abstains rather than suppressing, and a shortened work-list can only
+  // hide shrinkage, never manufacture it.
+  if (prevCriticals !== undefined && thisCriticals < prevCriticals) {
+    return null;
+  }
+  return {
+    shape: 'persistently-critical',
+    recommendation: LAND_WITH_RESIDUAL_RISK,
+    criticals: thisCriticals,
+    fresh,
+    prevFresh,
+  };
+}
+
+/**
+ * The advisory sentence, bilingual — one rendering shared by the body clause
+ * and the terminal line so the two surfaces cannot drift. Pure facts plus the
+ * recommendation code; it names the exit, then disclaims itself: advisory
+ * only, blocks nothing. The residual-risk inventory is scaffolded as a blank
+ * three-column table (attack surface · attacker-dependency · blast radius)
+ * for the maintainer to complete — the tool cannot judge those dimensions,
+ * and a scaffold it pre-filled would be a verdict it has no authority to
+ * make. Bounded by construction: fixed prose plus a count, no model text.
+ *
+ * Led by "Residual risk", not by "Convergence": the loop-settling
+ * observation above already opens its paragraph that way, both can render
+ * into the SAME body, and two paragraphs with one opening word is a body
+ * whose reader cannot tell which one is speaking. The lead-in matches the
+ * recommendation it carries and the terminal label it prints under.
+ */
+export function convergenceAdvisory(a: ConvergenceAssessment): {
+  en: string;
+  zh: string;
+} {
+  const en =
+    `Residual risk: this loop is persistently critical — Criticals stood in ` +
+    `the previous round's work-list and stand again this round (${a.criticals} ` +
+    `Critical(s)), the rate of first-time findings is not falling (this ` +
+    `round ${a.fresh}, previous ${a.prevFresh}), and the standing Critical ` +
+    `backlog is not shrinking. The severity floor will not ` +
+    `converge it. Recommendation: \`${a.recommendation}\` — the exit is a ` +
+    `maintainer risk-acceptance decision (merge, carrying the residual risk), ` +
+    `not another review round. Residual-risk inventory for that decision ` +
+    `(maintainer to complete):\n\n` +
+    `| standing Critical | attack surface | attacker-dependency | blast radius |\n` +
+    `| --- | --- | --- | --- |\n` +
+    `| (each standing Critical) | … | … | … |\n\n` +
+    `Advisory only — it does not block this review.`;
+  const zh =
+    `残余风险：本循环处于 persistently-critical 形态——上一轮工作清单中的 Critical ` +
+    `本轮依然存在（本轮 ${a.criticals} 条 Critical），首次发现的速率没有下降（本轮 ` +
+    `${a.fresh}，上一轮 ${a.prevFresh}），且未决 Critical 积压没有减少。` +
+    `severity floor 无法使其收敛。` +
+    `建议：\`${a.recommendation}\`——出口是 maintainer 的风险接受决定（合入并` +
+    `承担残余风险），而非再开一轮评审。供该决定使用的残余风险清单（maintainer 填写）：` +
+    `按每条未决 Critical 列出「攻击面 · 攻击者依赖性 · 影响范围」三栏。` +
+    `仅为建议——不阻断本次评审。`;
+  return { en, zh };
+}

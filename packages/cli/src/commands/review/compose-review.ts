@@ -87,11 +87,14 @@ import {
 } from './lib/ledger.js';
 import { mdField } from './lib/md-field.js';
 import {
+  convergenceAdvisory,
+  convergenceAssessment,
   diagnoseConvergence,
   isFreshDraft,
   recommendationsFor,
   renderConvergenceDiagnosis,
   renderMechanismHealth,
+  type ConvergenceAssessment,
   type Recommendation,
   type CriticalFloorKind,
   type DraftedFinding,
@@ -476,6 +479,13 @@ export function criticalFloorKind(
  * posture the state never named cannot move a finding out of the posting
  * set. `floorEnforcedReroute` acts on this; the reporting reading above is
  * what the round says about itself.
+ *
+ * The residual-risk signal (#9410) reads THIS one, not the reporting
+ * reading: its "the severity floor will not converge this loop" claim is
+ * about Suggestions actually having left the posting set, which is what a
+ * strict reading is. Shared rather than restated for the reason the whole
+ * pair exists — two spellings of one predicate is the drift class
+ * `normalizeSeverityFloor` above was extracted to prevent.
  */
 export function criticalFloorInEffect(
   severityFloor: unknown,
@@ -870,6 +880,24 @@ export interface ComposeReviewResult {
    * nothing", which is why absence is distinct from zero here.
    */
   prevPostedInline?: number;
+  /**
+   * The persistently-critical convergence assessment (#9410), present only
+   * when the carried telemetry shows the loop is in that shape: Criticals
+   * stood in the previous round's work-list AND stand again this round, with
+   * the two-round posting window present and not shrinking. Advisory only —
+   * it never moves the event, never caps, never blocks; it surfaces the
+   * `land-with-residual-risk` recommendation and a residual-risk inventory
+   * scaffold for the maintainer's risk-acceptance decision. Absent whenever
+   * the shape is not provable; every input degrades open, so absence is the
+   * fail-safe reading, never a suppressed finding.
+   *
+   * Named for its exit rather than for `convergence` above, which is the
+   * loop-settling OBSERVATION's rendered paragraph: two features share the
+   * word, they can fire in the same round, and one field name over both
+   * would have made the composed JSON — and every consumer keying on it —
+   * unable to say which it was reading.
+   */
+  residualRisk?: ConvergenceAssessment;
   /**
    * What the body budget had to give up to fit GitHub's limit, when it did.
    * On the result because `verdictLine` — printed to stderr, persisted in
@@ -1762,6 +1790,22 @@ function ledgerMarkerFor(
           // The same split the body performed: a relocated Critical is a
           // posted, counted blocker and must enter the work list.
           ...splitDeferralChannel(input.deferredSuggestions).relocated,
+          // The gate's Criticals, for the same reason: a gate Critical is a
+          // posted, counted blocker too — leaving it out let the next
+          // round's persistence half read "no prior Critical" over a round
+          // that posted one (#9526).
+          //
+          // A SECOND invocation, not the body composer's result — the two
+          // live in different functions and nothing passes the value across.
+          // What makes them agree is that `scriptLintGate` is pure in
+          // `planPath` and its inputs (the plan JSON, the report, the diff)
+          // are immutable for the length of one synchronous compose; it is
+          // NOT the single-origin discipline `postedInline` gets one line
+          // below. So the standing hazard is an edit, not a race: anything
+          // that filters, caps, or carves out what the BODY pushes must
+          // change this list too, or the posted body and the carried work
+          // list stop describing the same round (R4-1).
+          ...scriptLintGate(input.planPath).criticals,
         ],
         carriedWorkList,
       ),
@@ -2839,6 +2883,100 @@ function composeReviewBody(
     ? renderConvergenceDiagnosis(diagnosis)
     : undefined;
   const recommendations = diagnosis ? recommendationsFor(diagnosis) : undefined;
+  // The persistently-critical residual-risk signal (#9410): computed, never
+  // decided. Computed HERE, beside the observation's own derivation, for two
+  // reasons that now coincide. It counts every Critical this round stands
+  // behind, and `bodyCriticals` is only complete once the relocated push and
+  // the script-lint gate push have both joined it — the SAME array, with the
+  // SAME semantics, the verdict's `c` counts below; a count taken before
+  // them read a gate-only round (a standing deterministic [lint] blocker the
+  // floor can never converge) as standing behind zero Criticals, so the
+  // advisory the shape exists to surface never fired on it (#9526). And its
+  // window runs on `postedFresh`, which is derived here. The persistence
+  // half, the fresh pair, the recorded floor and the backlog all come off
+  // the SAME recovered predecessor the loop-settling observation above
+  // reads, so the two features cannot disagree about what a round held.
+  // Advisory only: it cannot move the event or cap the verdict; it only
+  // surfaces, and every input degrades open to "no assessment".
+  // A PURE-FOREIGN work-list is a stranger's, not a shortened version of
+  // this account's. Recovery adopts the highest-round marker whoever posted
+  // it, and where that marker was NOT merged over this account's own
+  // findings, this account's entries are in no work list at all — the same
+  // state `openCriticals` above refuses to infer across, for the same
+  // reason. Every prev-round fact this signal reads comes off that list, so
+  // reading it there let a stranger's Criticals stand in for this account's:
+  // an own round-6 marker that was a clean LGTM, a foreign same-round marker
+  // carrying Criticals and no Suggestions winning recovery, and one Critical
+  // drafted this round were enough to publish "Criticals stood in the
+  // previous round's work-list and stand again this round —
+  // land-with-residual-risk" over this account's own LGTM (#9526).
+  //
+  // Merged foreign lists are NOT withheld: the union keeps this account's
+  // own certified entries under their own ids, which is exactly the part
+  // that makes the list speak for this account again.
+  const pureForeignPrev =
+    convergence?.prev.foreign === true && convergence?.prev.merged !== true;
+  const residualRisk = convergenceAssessment({
+    // The persistence half, read straight off the recovered work list rather
+    // than off a flag derived beside it: `prev.findings` is already gated on
+    // the round (a round-0 work list is no work list) and already through the
+    // ledger's own admission test, and a second derivation would be free to
+    // drift from the list the observation clusters over. A list the marker's
+    // byte budget truncated may have shed the very Critical that proves
+    // persistence — that costs a missed advisory, which is the fail-safe
+    // direction and the direction every other conjunct degrades in too.
+    prevHadCritical:
+      pureForeignPrev || !convergence
+        ? undefined
+        : convergence.prev.findings.some((f) => f.sev === 'C') || undefined,
+    // The floor-engagement conjunct is computed by the SAME predicate the
+    // enforcement backstop keys on (#9410): the advisory's "the floor will
+    // not converge it" claim is provable only where the floor is actually
+    // running, so a pre-engagement round degrades open to silence. The
+    // ENFORCEMENT reading, not the reporting one beside it — the claim is
+    // about Suggestions actually having been moved out of the posting set,
+    // not about the posture the round describes itself as running.
+    floorEngaged: criticalFloorInEffect(
+      input.severityFloor,
+      input.contextUnavailable === true,
+      prevRound,
+    ),
+    thisCriticals: criticalsInline + bodyCriticals.length,
+    // The FRESH counts, not the posting totals — the number this file's own
+    // `postedFresh` docstring calls "the number the convergence trend runs
+    // on ... so the next round can compare like with like". Step 6 re-posts
+    // every standing Critical under its original id, so the total only ever
+    // rises: measured on totals a loop whose new findings fell 5 -> 4 still
+    // posted MORE comments than the round before, and the advisory fired
+    // "the severity floor will not converge it" over a converging loop.
+    // The same pair the observation above trends on, so the two features
+    // cannot disagree about what this round produced.
+    fresh: postedFresh,
+    prevFresh: convergence?.prev.fresh,
+    // Off the same recovered predecessor — the marker records the floor its
+    // round ran under, and the observation above compares the pair for
+    // exactly this reason.
+    prevFloor: convergence?.prev.floor,
+    // The stamp above is the REPORTING reading and folds an absent floor to
+    // `auto`, so it says `c` on a round >= 6 the enforcement backstop never
+    // touched. A Suggestion still standing in that round's work-list is the
+    // fact the stamp cannot carry: enforcement moves drafted Suggestions out
+    // of the posting set before the marker is built, so its presence means
+    // the floor was not running (#9526).
+    prevPostedSuggestion:
+      convergence && !pureForeignPrev
+        ? convergence.prev.findings.some((f) => f.sev === 'S')
+        : undefined,
+    // The standing backlog, counted off the same recovered work-list the
+    // persistence half reads. It is what keeps the fresh window honest at
+    // its blind spot: a round finding nothing new while the author clears
+    // blockers sits at fresh 0 against fresh 0, and only the Critical count
+    // falling says the loop is moving.
+    prevCriticals:
+      convergence && !pureForeignPrev
+        ? convergence.prev.findings.filter((f) => f.sev === 'C').length
+        : undefined,
+  });
 
   let event: ReviewEvent = baseEvent;
   if (event === 'APPROVE' && cappedBy.length > 0) event = 'COMMENT';
@@ -2973,6 +3111,10 @@ function composeReviewBody(
   /** What a rank drops, in the author's words — the note names it. */
   const RANK_NAMES: Record<number, { en: string; zh: string }> = {
     [-1]: { en: 'the mechanism-health note', zh: '机制健康说明' },
+    0: {
+      en: 'the persistently-critical convergence advisory',
+      zh: 'persistently-critical 收敛建议',
+    },
     1: { en: 'the deferred-findings list', zh: '延后发现清单' },
     2: {
       en: 'the not-reviewed and non-blocking disclosures',
@@ -2995,7 +3137,7 @@ function composeReviewBody(
     const named = ranks.map((r) => RANK_NAMES[r]).filter(Boolean);
     const en = named.map((n) => n.en).join(' and ');
     const zh = named.map((n) => n.zh).join('与');
-    // "Nothing blocking was trimmed" is true of the RANKS — both are
+    // "Nothing blocking was trimmed" is true of the RANKS — all are
     // non-blocking by construction. It is not true of the tail cut below,
     // which can reach blocker text, so the claim is dropped exactly when a
     // cut happened and the truncation notice takes over the subject.
@@ -3009,9 +3151,10 @@ function composeReviewBody(
           zh: '被裁剪的均非阻断内容。',
         };
     // The artifact pointer is about the deferral list, so it rides only when
-    // that list is what went. Rank 2 can drop alone — it does, on any run
-    // with disclosures and no posture deferrals — and the unconditional
-    // pointer then sent the author to read a list that does not exist.
+    // that list is what went. Ranks 2 and 3 can drop alone — rank 3 does on
+    // any run with disclosures and no posture deferrals, rank 2 on a fired
+    // zero-deferral round — and the unconditional pointer then sent the
+    // author to read a list that does not exist.
     const artifact = ranks.includes(1)
       ? {
           en: `, and deferred findings in this run's findings artifact`,
@@ -3034,8 +3177,10 @@ function composeReviewBody(
    * degrade, and the ORDER of the degradation is the policy: the bilingual
    * fold yields FIRST (it is a translation of the English above it, so it
    * costs the author nothing the body does not still say), then parts by
-   * ascending `trim` rank (the deferral display before the not-reviewed
-   * disclosures), the blockers and the caps never, and every drop is
+   * ascending `trim` rank (the mechanism-health note, then the residual-risk
+   * advisory, then the deferral display, then the not-reviewed disclosures,
+   * then the convergence observation), the blockers and the caps never, and
+   * every drop is
    * disclosed with its count and its kind — a list silently shortened reads
    * as a list that was complete.
    *
@@ -3055,12 +3200,23 @@ function composeReviewBody(
    * Every exit of `render` that dropped a rank owes this line — the
    * last-resort path drops ranks AND cuts, and a stderr record naming only
    * the cut leaves the kinds it dropped disclosed nowhere but the body.
-   * Rank 1 has a second durable copy (each deferral is a `D<round>-<n>`
-   * entry in the findings artifact) and rank 3 has one too (the composed
-   * result carries the paragraph, and the command prints it as
-   * `CONVERGENCE:`); a trimmed disclosure section survives nowhere but the
-   * terminal summary, so ask for it there rather than pointing at an
-   * artifact that does not carry it.
+   * Four of the five ranks keep a second durable copy, and the ladder's
+   * order now follows that fact almost exactly: rank -1's health note and
+   * rank 0's residual-risk advisory both ride the composed result and print
+   * as `HEALTH:` and `RESIDUAL-RISK:`, rank 1's deferrals are each a
+   * `D<round>-<n>` entry in the findings artifact, and rank 3's observation
+   * rides the composed result too (and prints as `CONVERGENCE:`) — it is
+   * last for the arithmetic its own block explains, not for want of a copy.
+   * Rank 2 is the exception — a trimmed disclosure section survives nowhere
+   * but the terminal summary, so ask for it there rather than pointing at
+   * an artifact that does not carry it.
+   *
+   * Which is why the tail clause keys on rank 2, the one rank with nothing
+   * behind it. Keyed on the advisory instead it read "another copy — the
+   * advisory also rides the composed JSON" over a combined drop that took
+   * the disclosures with it, telling the operator the trimmed set was
+   * backed up when the half of it that is NOT backed up was exactly the
+   * half this sentence exists to rescue.
    */
   const noteTrimmedRanks = (droppedRanks: number[]): void => {
     if (droppedRanks.length === 0) return;
@@ -3073,8 +3229,18 @@ function composeReviewBody(
         (droppedRanks.includes(1)
           ? `the deferred findings are in the findings artifact; `
           : '') +
-        `repeat the trimmed sections in your terminal summary, which is ` +
-        `their only other copy`,
+        `repeat the trimmed sections in your terminal summary` +
+        (droppedRanks.includes(2)
+          ? droppedRanks.length === 1
+            ? `, which is their only other copy`
+            : `, which is the only other copy of the disclosures among them`
+          : // Deliberately unnamed here: the ONE place the artifact may be
+            // named is the rank-1 clause above, which rides only when the
+            // deferral list actually went. Naming it in this tail sent the
+            // operator to a `D<round>-<n>` list that does not exist on a
+            // rank-0-or-2-only drop — the same false record the clause
+            // above was split out to refuse.
+            `, though every section that went also has a durable copy elsewhere`),
     );
   };
   const render = (parts: Bi[], sep: string): string => {
@@ -3758,6 +3924,39 @@ function composeReviewBody(
       ]
     : [];
 
+  // The persistently-critical residual-risk advisory (#9410): disclosed on
+  // every event the shape can reach when the carried telemetry shows the
+  // loop will not self-converge via the floor — the assessment only fires
+  // when this round stands behind a Critical, which is REQUEST_CHANGES by
+  // construction (or COMMENT when an unverified arm softens it), so those
+  // two branches render the block and the composed-JSON field rides every
+  // branch's return object. Non-capping and advisory-only — it never moves
+  // the event, never caps, and its own text disclaims it ("does not
+  // block"). Bounded by construction: fixed prose plus a count, no model
+  // text, so it cannot balloon the body it rides.
+  //
+  // `trim: 0` — its OWN rank, and the slot the observation vacated when it
+  // moved to last. The order here is by what a dropped block costs its
+  // reader, and this one costs the least after the health note: the
+  // maintainer it is written for receives it whole on the terminal
+  // `RESIDUAL-RISK:` line AND in the composed JSON, which the persisted
+  // artifact carries. The deferral list below it keeps one copy (the
+  // findings artifact), the disclosures below that keep none but the
+  // terminal report, and the observation last is the author's only sentence
+  // about the shape of the loop. Sharing a rank with any of them is what
+  // the trim notice cannot survive: it names what a rank drops, and rank
+  // 1's findings-artifact pointer is true only of the deferral list — a
+  // dropped advisory once posted a notice naming a deferral list that never
+  // existed.
+  const residualRiskBlock: Bi[] = residualRisk
+    ? [
+        {
+          trim: 0,
+          ...convergenceAdvisory(residualRisk),
+        },
+      ]
+    : [];
+
   // The not-reviewed disclosures yield after the deferral display and before
   // the convergence observation: they say what the review could not certify,
   // which the verdict's own cap already carries, so trimming them costs
@@ -3894,6 +4093,7 @@ function composeReviewBody(
       ...deferredSuggestionsBlock,
       ...convergenceBlock,
       ...healthBlock,
+      ...residualRiskBlock,
       ...continuityBlock,
       ...bodyCriticalBlock,
     ];
@@ -3923,6 +4123,7 @@ function composeReviewBody(
       lowSignal,
       scopeUnproven,
       dimensionGapsAreDepthOnly,
+      ...(residualRisk ? { residualRisk } : {}),
     };
   }
 
@@ -4010,6 +4211,7 @@ function composeReviewBody(
       lowSignal,
       scopeUnproven,
       dimensionGapsAreDepthOnly,
+      ...(residualRisk ? { residualRisk } : {}),
     };
   }
 
@@ -4179,7 +4381,13 @@ function composeReviewBody(
   clauses.push(...convergenceBlock);
   clauses.push(...healthBlock);
 
-  // 6g. Resumed-run continuity (non-capping) — reused work that COUNTS as
+  // 6g. Persistently-critical residual-risk advisory (non-capping, advisory
+  //     only) — the exit for a loop the observation above has run out of
+  //     postures to suggest. It follows the observation because it answers
+  //     the question the observation leaves open.
+  clauses.push(...residualRiskBlock);
+
+  // 6h. Resumed-run continuity (non-capping) — reused work that COUNTS as
   //     reviewed, disclosed so the author knows two attempts fed this verdict.
   clauses.push(...continuityBlock);
 
@@ -4246,6 +4454,7 @@ function composeReviewBody(
     lowSignal,
     scopeUnproven,
     dimensionGapsAreDepthOnly,
+    ...(residualRisk ? { residualRisk } : {}),
   };
 }
 
@@ -4361,9 +4570,11 @@ interface Bi {
    * GitHub's limit — LOWER goes first, absent never goes. The order is a
    * policy, not a convenience: a body that cannot post loses its blockers,
    * so the display of findings the review deliberately did NOT request
-   * (the deferral list, rank 1) yields before the disclosures of what went
-   * unreviewed (rank 2), and the blockers, the caps, and the sentences that
-   * qualify the verdict never yield at all.
+   * (the deferral list, rank 1) yields before the persistently-critical
+   * advisory (rank 2 — it keeps two whole copies elsewhere), which yields
+   * before the disclosures of what went unreviewed (rank 3), and the
+   * blockers, the caps, and the sentences that qualify the verdict never
+   * yield at all.
    */
   trim?: number;
 }
@@ -4961,6 +5172,30 @@ export const composeReviewCommand: CommandModule = {
     // overflow ladder sheds, and the notice points the reader here.
     if (result.health) {
       writeStderrLine(`HEALTH: ${result.health.en}`);
+    }
+    // The persistently-critical residual-risk advisory (#9410), when the
+    // carried telemetry shows the loop will not self-converge via the floor.
+    // Its OWN label, not the CONVERGENCE line's: both can fire in the same
+    // round, and one label over two different paragraphs is a terminal
+    // record neither an operator nor a parser can split back apart.
+    // Advisory only, like the VOLUME line beside it — facts plus the one
+    // recommendation that fits, never a threshold, never a decision: the
+    // land-with-residual-risk exit is the maintainer's to take. Printed only
+    // when the shape is provable; absence is the fail-safe reading.
+    if (result.residualRisk) {
+      // ONE line, like `VOLUME:`, `FIX:` and `CONVERGENCE:` beside it. The
+      // advisory carries a blank markdown table for the body, so printed
+      // verbatim it spread one labelled record over seven lines — six of
+      // them unlabelled, which is a record no line-oriented reader (an
+      // operator scanning, a `grep`, a log collector) can put back
+      // together. Collapsed rather than dropped: the pipes survive, so the
+      // inventory's three columns are still all there on the round where
+      // the body budget shed the formatted copy and this line is the copy.
+      writeStderrLine(
+        `RESIDUAL-RISK: ${convergenceAdvisory(result.residualRisk)
+          .en.replace(/\s+/g, ' ')
+          .trim()}`,
+      );
     }
     writeStderrLine(verdictLine(result));
   },
