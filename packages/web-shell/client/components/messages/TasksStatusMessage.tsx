@@ -23,6 +23,7 @@ import { formatRuntime } from '../../utils/formatRuntime';
 import { formatContextTokens } from '../../utils/formatTokenCount';
 import { createSentinelSerializer } from '../../utils/sentinelMessage';
 import type { ACPToolCall, TodoItem } from '../../adapters/types';
+import { useTranscriptRenderMode } from '../../transcriptRenderMode';
 import { PlanExecutionView } from './PlanExecutionView';
 import {
   localizeAgentTypeName,
@@ -259,6 +260,7 @@ export function TasksStatusMessage({
   onOpenMonitor?: (task: DaemonSessionMonitorTaskStatus) => void;
 }) {
   const { t } = useI18n();
+  const documentMode = useTranscriptRenderMode() === 'document';
   const actions = useActions();
   const [tasks, setTasks] = useState(() =>
     arrangeTasks(message.snapshot.tasks),
@@ -288,7 +290,7 @@ export function TasksStatusMessage({
   const blockingIds = useMemo(() => computeUserBlockingIds(tasks), [tasks]);
 
   useEffect(() => {
-    if (!isOpen) return;
+    if (documentMode || !isOpen) return;
     const refresh = () => {
       if (refreshInFlightRef.current) return;
       refreshInFlightRef.current = true;
@@ -312,7 +314,7 @@ export function TasksStatusMessage({
     };
     const id = setInterval(refresh, REFRESH_INTERVAL_MS);
     return () => clearInterval(id);
-  }, [isOpen, actions]);
+  }, [documentMode, isOpen, actions]);
 
   useEffect(() => {
     if (tasks.length === 0 && selectedIndex !== 0) {
@@ -351,14 +353,14 @@ export function TasksStatusMessage({
   }, [isOpen, step, selectedTask]);
 
   useEffect(() => {
-    if (!manageActiveEvent) return undefined;
+    if (documentMode || !manageActiveEvent) return undefined;
     const id = panelIdRef.current;
     dispatchActive(id, isOpen);
     return () => dispatchActive(id, false);
-  }, [isOpen, manageActiveEvent]);
+  }, [documentMode, isOpen, manageActiveEvent]);
 
   useEffect(() => {
-    if (!manageActiveEvent) return undefined;
+    if (documentMode || !manageActiveEvent) return undefined;
     const onActiveChange = (event: Event) => {
       const detail = (event as CustomEvent<{ id?: string; active?: boolean }>)
         .detail;
@@ -368,15 +370,15 @@ export function TasksStatusMessage({
     };
     window.addEventListener(ACTIVE_EVENT, onActiveChange);
     return () => window.removeEventListener(ACTIVE_EVENT, onActiveChange);
-  }, [manageActiveEvent]);
+  }, [documentMode, manageActiveEvent]);
 
   useEffect(() => {
-    if (!isOpen) onClose?.();
-  }, [isOpen, onClose]);
+    if (!documentMode && !isOpen) onClose?.();
+  }, [documentMode, isOpen, onClose]);
 
   const handleCancel = useCallback(
     async (task: DaemonSessionTaskStatus) => {
-      if (busy) return;
+      if (documentMode || busy) return;
       const isRunning = task.status === 'running';
       const isAbandonable = task.kind === 'agent' && task.status === 'paused';
       if (!isRunning && !isAbandonable) return;
@@ -409,12 +411,12 @@ export function TasksStatusMessage({
         setBusy(false);
       }
     },
-    [actions, busy, blockingIds, pendingCancelId, t],
+    [actions, busy, blockingIds, documentMode, pendingCancelId, t],
   );
 
   useDelayedGlobalKeyDown(
     (event: KeyboardEvent) => {
-      if (!isOpen) return;
+      if (documentMode || !isOpen) return;
 
       if (
         event.key !== 'Escape' &&
@@ -499,6 +501,7 @@ export function TasksStatusMessage({
     },
     [
       embedded,
+      documentMode,
       isOpen,
       step,
       tasks.length,
@@ -509,7 +512,7 @@ export function TasksStatusMessage({
     ],
   );
 
-  if (!isOpen) return null;
+  if (!documentMode && !isOpen) return null;
 
   const showCancelConfirm =
     pendingCancelId !== null &&
@@ -579,7 +582,7 @@ export function TasksStatusMessage({
         <div>
           <div className={styles.secondary}>{t('tasks.empty')}</div>
         </div>
-        {!embedded && (
+        {!documentMode && !embedded && (
           <div className={styles.shortcuts}>{t('tasks.shortcut.close')}</div>
         )}
       </div>
@@ -590,8 +593,8 @@ export function TasksStatusMessage({
     tasks,
     clampedSelectedIndex,
   );
-  const listTasks = embedded ? tasks : visible;
-  const listOffset = embedded ? 0 : windowStart;
+  const listTasks = embedded || documentMode ? tasks : visible;
+  const listOffset = embedded || documentMode ? 0 : windowStart;
 
   return (
     <div
@@ -629,17 +632,18 @@ export function TasksStatusMessage({
               <span className={styles.secondary}>({tasks.length})</span>
             </div>
           )}
-          {!embedded && hiddenAbove > 0 && (
+          {!documentMode && !embedded && hiddenAbove > 0 && (
             <div className={styles.overflowHint}>
               {t('tasks.moreAbove', { count: hiddenAbove })}
             </div>
           )}
           {listTasks.map((task, visibleIndex) => {
             const index = listOffset + visibleIndex;
-            const selected = index === clampedSelectedIndex;
+            const selected = !documentMode && index === clampedSelectedIndex;
             const stClass = statusClassName(task.status);
             const taskStatusLabel = statusLabel(task.status, t);
-            const expanded = embedded && selected && step === 'detail';
+            const expanded =
+              documentMode || (embedded && selected && step === 'detail');
             const showSelected = embedded ? expanded : selected;
             const tree: AgentTreeInfo | undefined =
               task.kind === 'agent' ? treeInfo.get(task.id) : undefined;
@@ -671,17 +675,29 @@ export function TasksStatusMessage({
                       ? `${styles.row} ${styles.selected}`
                       : styles.row
                   }
-                  onClick={() => {
-                    setSelectedIndex(index);
-                    if (embedded && task.kind === 'monitor' && onOpenMonitor) {
-                      onOpenMonitor(task);
-                    } else {
-                      setStep(embedded && expanded ? 'list' : 'detail');
-                    }
-                  }}
-                  onMouseEnter={() => {
-                    if (!embedded) setSelectedIndex(index);
-                  }}
+                  onClick={
+                    documentMode
+                      ? undefined
+                      : () => {
+                          setSelectedIndex(index);
+                          if (
+                            embedded &&
+                            task.kind === 'monitor' &&
+                            onOpenMonitor
+                          ) {
+                            onOpenMonitor(task);
+                          } else {
+                            setStep(embedded && expanded ? 'list' : 'detail');
+                          }
+                        }
+                  }
+                  onMouseEnter={
+                    documentMode
+                      ? undefined
+                      : () => {
+                          if (!embedded) setSelectedIndex(index);
+                        }
+                  }
                 >
                   <span className={styles.pointer}>
                     {showSelected ? '❯' : ''}
@@ -724,16 +740,24 @@ export function TasksStatusMessage({
                       t={t}
                       hideHeader
                       busy={busy}
-                      showCancelConfirm={pendingCancelId === task.id}
-                      onCancel={() => void handleCancel(task)}
-                      onCancelConfirmDismiss={() => setPendingCancelId(null)}
+                      showCancelConfirm={
+                        !documentMode && pendingCancelId === task.id
+                      }
+                      onCancel={
+                        documentMode ? undefined : () => void handleCancel(task)
+                      }
+                      onCancelConfirmDismiss={
+                        documentMode
+                          ? undefined
+                          : () => setPendingCancelId(null)
+                      }
                     />
                   </div>
                 )}
               </div>
             );
           })}
-          {!embedded && hiddenBelow > 0 && (
+          {!documentMode && !embedded && hiddenBelow > 0 && (
             <div className={styles.overflowHint}>
               {t('tasks.moreBelow', { count: hiddenBelow })}
             </div>
@@ -741,7 +765,7 @@ export function TasksStatusMessage({
         </div>
       )}
 
-      {!embedded && step === 'detail' && selectedTask && (
+      {!documentMode && !embedded && step === 'detail' && selectedTask && (
         <>
           {actionError && <div className={styles.error}>{actionError}</div>}
           <TaskDetail
@@ -755,7 +779,7 @@ export function TasksStatusMessage({
         </>
       )}
 
-      {!embedded && (
+      {!documentMode && !embedded && (
         <div
           className={
             showCancelConfirm
@@ -1103,6 +1127,7 @@ function TaskDetail({
   onCancel?: () => void;
   onCancelConfirmDismiss?: () => void;
 }) {
+  const documentMode = useTranscriptRenderMode() === 'document';
   const terminalIcon = terminalStatusIcon(task.status);
   const stClass = statusClassName(task.status);
   const isAbandonable = task.kind === 'agent' && task.status === 'paused';
@@ -1174,7 +1199,7 @@ function TaskDetail({
   const promptLines =
     task.kind === 'agent' && task.prompt ? task.prompt.split('\n') : [];
   const actionControls =
-    canCancel && onCancel ? (
+    !documentMode && canCancel && onCancel ? (
       <div className={styles.actionBar}>
         {showCancelConfirm ? (
           <>
@@ -1294,7 +1319,7 @@ function TaskDetail({
             </div>
             <div className={styles.detailContent}>
               {task.recentActivities
-                .slice(-MAX_DISPLAYED_ACTIVITIES)
+                .slice(documentMode ? 0 : -MAX_DISPLAYED_ACTIVITIES)
                 .map((a, i, arr) => {
                   const isLast = i === arr.length - 1;
                   const desc = formatActivityLabel(a.name, a.description, t);
@@ -1320,13 +1345,17 @@ function TaskDetail({
             {t('tasks.detail.prompt')}
           </div>
           <div className={styles.promptContent}>
-            {promptLines.slice(0, 5).map((line, i, arr) => (
-              <div key={i}>
-                {i === arr.length - 1 && promptLines.length > 5
-                  ? `${line}…`
-                  : line || ' '}
-              </div>
-            ))}
+            {promptLines
+              .slice(0, documentMode ? undefined : 5)
+              .map((line, i, arr) => (
+                <div key={i}>
+                  {!documentMode &&
+                  i === arr.length - 1 &&
+                  promptLines.length > 5
+                    ? `${line}…`
+                    : line || ' '}
+                </div>
+              ))}
           </div>
         </div>
       )}

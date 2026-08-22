@@ -13,6 +13,7 @@ import type {
 import type { ACPToolCall, TodoItem } from '../../adapters/types';
 import { isSubAgentToolCall } from '../../adapters/toolClassification';
 import { useI18n } from '../../i18n';
+import { useTranscriptRenderMode } from '../../transcriptRenderMode';
 import { getAgentDisplayStatus, isAgentCancelled } from './toolFormatting';
 import styles from './PlanExecutionView.module.css';
 
@@ -309,6 +310,7 @@ export function PlanExecutionView({
   onOpenSubagent?: (tool: ACPToolCall) => void;
 }) {
   const { t } = useI18n();
+  const documentMode = useTranscriptRenderMode() === 'document';
   const taskIndex = useMemo(() => createTaskExecutionIndex(tasks), [tasks]);
 
   const knownIds = new Set(todos.map((todo) => todo.id));
@@ -650,6 +652,7 @@ export function PlanExecutionView({
                           current === todo.id ? undefined : todo.id,
                         )
                       }
+                      disabled={documentMode}
                     >
                       <div className={styles.nodeTop}>
                         <span className={styles.nodeId}>{todo.id}</span>

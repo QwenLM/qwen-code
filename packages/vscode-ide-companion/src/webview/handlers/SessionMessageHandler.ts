@@ -1030,12 +1030,14 @@ export class SessionMessageHandler extends BaseMessageHandler {
       const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
       const workingDir = workspaceFolder?.uri.fsPath || process.cwd();
 
-      await this.agentManager.createNewSession(workingDir, { forceNew: true });
+      const sessionId = await this.agentManager.createNewSession(workingDir, {
+        forceNew: true,
+      });
       this.updateCurrentConversationId(null);
 
       this.sendToWebView({
         type: 'conversationCleared',
-        data: {},
+        data: { sessionId },
       });
 
       // Reset title flag when creating a new session

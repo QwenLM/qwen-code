@@ -4,7 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { MCPServerConfig, ExtensionInstallMetadata } from '../config/config.js';
+import type {
+  MCPServerConfig,
+  ExtensionInstallMetadata,
+} from '../config/config.js';
 import { Config } from '../config/config.js';
 import type { SkillConfig } from '../skills/types.js';
 import type { SubagentConfig } from '../subagents/types.js';
