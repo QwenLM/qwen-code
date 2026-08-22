@@ -103,34 +103,34 @@ function renderInputForm(props?: {
   };
 }
 
-describe('InputForm completion keyboard handling', () => {
-  let root: Root | null = null;
-  let container: HTMLDivElement | null = null;
+let root: Root | null = null;
+let container: HTMLDivElement | null = null;
 
-  beforeEach(() => {
-    vi.clearAllMocks();
-    (
-      globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
-    ).IS_REACT_ACT_ENVIRONMENT = true;
-    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
-      configurable: true,
-      value: vi.fn(),
+beforeEach(() => {
+  vi.clearAllMocks();
+  (
+    globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
+  ).IS_REACT_ACT_ENVIRONMENT = true;
+  Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+    configurable: true,
+    value: vi.fn(),
+  });
+});
+
+afterEach(() => {
+  if (root) {
+    act(() => {
+      root?.unmount();
     });
-  });
+    root = null;
+  }
+  if (container) {
+    container.remove();
+    container = null;
+  }
+});
 
-  afterEach(() => {
-    if (root) {
-      act(() => {
-        root?.unmount();
-      });
-      root = null;
-    }
-    if (container) {
-      container.remove();
-      container = null;
-    }
-  });
-
+describe('InputForm completion keyboard handling', () => {
   it('uses onCompletionFill for Tab without triggering onCompletionSelect', () => {
     const rendered = renderInputForm();
     root = rendered.root;
@@ -171,37 +171,10 @@ describe('InputForm completion keyboard handling', () => {
 });
 
 describe('InputForm model selector positioning (issue #8617)', () => {
-  let root: Root | null = null;
-  let container: HTMLDivElement | null = null;
-
   const models: ModelInfo[] = [
     { modelId: 'model-a', name: 'Model A' },
     { modelId: 'model-b', name: 'Model B' },
   ];
-
-  beforeEach(() => {
-    vi.clearAllMocks();
-    (
-      globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
-    ).IS_REACT_ACT_ENVIRONMENT = true;
-    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
-      configurable: true,
-      value: vi.fn(),
-    });
-  });
-
-  afterEach(() => {
-    if (root) {
-      act(() => {
-        root?.unmount();
-      });
-      root = null;
-    }
-    if (container) {
-      container.remove();
-      container = null;
-    }
-  });
 
   function collectAncestors(el: HTMLElement): HTMLElement[] {
     const ancestors: HTMLElement[] = [];
@@ -251,6 +224,92 @@ describe('InputForm model selector positioning (issue #8617)', () => {
     );
     expect(sharedWrapper).toBeDefined();
     expect(sharedWrapper?.querySelector('form.composer-form')).not.toBeNull();
+  });
+
+  it('sizes the positioning context to the form height so the dropdown clears the form', () => {
+    // jsdom performs no layout, so emulate the browser measurement the
+    // adapter relies on: capture the ResizeObserver, give the observed
+    // element a real height, and fire the observer callback.
+    const observers: Array<{
+      callback: ResizeObserverCallback;
+      targets: Element[];
+    }> = [];
+    const originalResizeObserver = globalThis.ResizeObserver;
+    Object.defineProperty(globalThis, 'ResizeObserver', {
+      configurable: true,
+      value: class {
+        readonly targets: Element[] = [];
+        constructor(callback: ResizeObserverCallback) {
+          observers.push({ callback, targets: this.targets });
+        }
+        observe(target: Element) {
+          this.targets.push(target);
+        }
+        unobserve() {}
+        disconnect() {}
+      },
+    });
+
+    try {
+      const rendered = renderInputForm({
+        showModelSelector: true,
+        availableModels: models,
+        currentModelId: null,
+      });
+      root = rendered.root;
+      container = rendered.container;
+
+      const menu = container.querySelector(
+        '.model-selector',
+      ) as HTMLElement | null;
+      expect(menu).not.toBeNull();
+      const sharedWrapper = collectAncestors(menu as HTMLElement).find((el) =>
+        /(^|\s)relative(\s|$)/.test(el.className),
+      );
+      expect(sharedWrapper).toBeDefined();
+
+      // The adapter must measure the wrapper child that carries the base
+      // form, so the positioning context gets the form's real height
+      // instead of collapsing to zero (which anchors the dropdown at the
+      // viewport bottom, behind the opaque form).
+      const observed = observers.flatMap((entry) => entry.targets);
+      const formCarrier = observed.find((target) =>
+        target.querySelector('form.composer-form'),
+      );
+      expect(formCarrier).toBeDefined();
+      expect(formCarrier?.parentElement).toBe(sharedWrapper);
+
+      Object.defineProperty(formCarrier, 'getBoundingClientRect', {
+        configurable: true,
+        value: () => ({
+          height: 120,
+          width: 400,
+          top: 680,
+          bottom: 800,
+          left: 0,
+          right: 400,
+          x: 0,
+          y: 680,
+          toJSON: () => ({}),
+        }),
+      });
+
+      act(() => {
+        for (const entry of observers) {
+          entry.callback([], {} as ResizeObserver);
+        }
+      });
+
+      expect((sharedWrapper as HTMLElement).style.height).toBe('120px');
+    } finally {
+      // jsdom ships without ResizeObserver; restore the original value
+      // (undefined there), keeping the property writable for other stubs.
+      Object.defineProperty(globalThis, 'ResizeObserver', {
+        configurable: true,
+        writable: true,
+        value: originalResizeObserver,
+      });
+    }
   });
 
   it('does not render the selector when showModelSelector is false', () => {
