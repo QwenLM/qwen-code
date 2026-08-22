@@ -5189,8 +5189,25 @@ jobs:
           # clean child, so its bash inherits nothing at all.
           BASH_ENV: ''
           SHELLOPTS: ''
+          # LD_* are likewise mapped by ld.so at process STARTUP, before the
+          # body's unset can run: the unset clears them for children but
+          # cannot unload a library already mapped into THIS step's bash,
+          # whose execve hooks would forge the pre-launch digest check
+          # below; ld.so ignores empty values (R6-2).
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
           VERIFY_RUNNER_SHA256: '${{ steps.stage.outputs.verify_runner_sha256 }}'
+          # RUNNER_TEMP, WORKDIR, and BRANCH re-enter the digest check and
+          # the allowlisted child below from the step environment: a
+          # $GITHUB_ENV plant points the digest oracle at a decoy runner
+          # (the hash is expression-context, the checked path is not) and
+          # swaps the tree the gate builds/tests. Pin them from trusted
+          # expression context, the TRUSTED_PATH doctrine above (R6-3).
+          RUNNER_TEMP: '${{ runner.temp }}'
+          WORKDIR: '/tmp/autofix-review-${{ matrix.target.pr }}'
+          BRANCH: '${{ matrix.target.branch }}'
           # Step-level env outranks $GITHUB_ENV: an earlier shell-capable
           # step (the agent runs branch code on the host) must not be able
           # to downgrade a repo-variable 'reject' back to 'advisory'.
@@ -5205,9 +5222,15 @@ jobs:
           # preload channels, and verify the staged runner's digest (recorded
           # in GITHUB_OUTPUT, unreachable from a disk write) before executing,
           # or a mid-run overwrite lets the branch define its own verdict.
+          # The digest line's command words are called by absolute path:
+          # bare names — even builtins like echo — are shadowed by
+          # $GITHUB_ENV-planted BASH_FUNC_<name>%% functions, imported at
+          # bash STARTUP even under --norc, ahead of builtins and PATH
+          # (R6-4; a shadowed echo prints any digest line, blinding the
+          # check to a mid-run overwrite of the staged runner).
           export PATH="${TRUSTED_PATH}"
           unset LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH
-          echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | sha256sum -c - > /dev/null
+          /usr/bin/echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | /usr/bin/sha256sum -c - > /dev/null
           # Launch the gate through the workflow's env -i clean-child
           # pattern: the step environment inherits every $GITHUB_ENV plant
           # earlier steps left (verdict-variable plants, BITE_RUNNER
@@ -5397,8 +5420,25 @@ jobs:
           # clean child, so its bash inherits nothing at all.
           BASH_ENV: ''
           SHELLOPTS: ''
+          # LD_* are likewise mapped by ld.so at process STARTUP, before the
+          # body's unset can run: the unset clears them for children but
+          # cannot unload a library already mapped into THIS step's bash,
+          # whose execve hooks would forge the pre-launch digest check
+          # below; ld.so ignores empty values (R6-2).
+          LD_PRELOAD: ''
+          LD_AUDIT: ''
+          LD_LIBRARY_PATH: ''
           TRUSTED_PATH: '${{ steps.stage.outputs.trusted_path }}'
           VERIFY_RUNNER_SHA256: '${{ steps.stage.outputs.verify_runner_sha256 }}'
+          # RUNNER_TEMP, WORKDIR, and BRANCH re-enter the digest check and
+          # the allowlisted child below from the step environment: a
+          # $GITHUB_ENV plant points the digest oracle at a decoy runner
+          # (the hash is expression-context, the checked path is not) and
+          # swaps the tree the gate builds/tests. Pin them from trusted
+          # expression context, the TRUSTED_PATH doctrine above (R6-3).
+          RUNNER_TEMP: '${{ runner.temp }}'
+          WORKDIR: '/tmp/autofix-review-${{ matrix.target.pr }}'
+          BRANCH: '${{ matrix.target.branch }}'
           # Step-level env outranks $GITHUB_ENV: an earlier shell-capable
           # step (the agent runs branch code on the host) must not be able
           # to downgrade a repo-variable 'reject' back to 'advisory'.
@@ -5415,9 +5455,15 @@ jobs:
           # preload channels, and verify the staged runner's digest (recorded
           # in GITHUB_OUTPUT, unreachable from a disk write) before executing,
           # or a mid-run overwrite lets the branch define its own verdict.
+          # The digest line's command words are called by absolute path:
+          # bare names — even builtins like echo — are shadowed by
+          # $GITHUB_ENV-planted BASH_FUNC_<name>%% functions, imported at
+          # bash STARTUP even under --norc, ahead of builtins and PATH
+          # (R6-4; a shadowed echo prints any digest line, blinding the
+          # check to a mid-run overwrite of the staged runner).
           export PATH="${TRUSTED_PATH}"
           unset LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH
-          echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | sha256sum -c - > /dev/null
+          /usr/bin/echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | /usr/bin/sha256sum -c - > /dev/null
           # Launch the gate through the workflow's env -i clean-child
           # pattern: the step environment inherits every $GITHUB_ENV plant
           # earlier steps left (verdict-variable plants, BITE_RUNNER

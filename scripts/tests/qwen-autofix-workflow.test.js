@@ -10544,7 +10544,7 @@ exit 1
     // runs its own build/test between them), with PATH pinned first.
     expect(
       workflow.match(
-        /echo "\$\{VERIFY_RUNNER_SHA256\} {2}\$\{RUNNER_TEMP\}\/run-autofix-review-verification\.sh" \| sha256sum -c - > \/dev\/null/g,
+        /\/usr\/bin\/echo "\$\{VERIFY_RUNNER_SHA256\} {2}\$\{RUNNER_TEMP\}\/run-autofix-review-verification\.sh" \| \/usr\/bin\/sha256sum -c - > \/dev\/null/g,
       ) ?? [],
     ).toHaveLength(2);
     expect(
@@ -11215,8 +11215,13 @@ exit 1
     // launch head moved into a comment) each broke the child's isolation
     // while every token-level pin stayed green (R2-1). Anchoring the chain
     // on the LD_* prefix pins the one channel env -i cannot block; the
-    // body-side unset and PATH export that protect the pre-launch digest
-    // check are pinned with it (R3-1, R2-2). The shapes AROUND the chain
+    // body-side unset and PATH export are pinned with it (R3-1, R2-2). By
+    // themselves they do NOT protect the pre-launch digest check, which
+    // runs in this step's own bash: startup-time channels — an LD_*
+    // library mapped before line 1, a BASH_FUNC function import, a
+    // path-variable redirection of the checked file — are closed by the
+    // step-level env pins and the absolute digest path below (R6-2, R6-3,
+    // R6-4). The shapes AROUND the chain
     // are closed by pinning the run body's whole statement list with
     // comments stripped: a prefix command word that demotes the whole chain
     // to one command's argv (the gate never executes and a forged outcome
@@ -11228,9 +11233,10 @@ exit 1
     // `\s` also matches a blank line, which splits the chain into two
     // commands (the orphaned env -i prints and exits 0 while the rest runs
     // with the FULL step environment), and NBSP/U+2028, which glue into the
-    // next operand and rename it; the statement list sees neither shape
-    // (blank lines filter out, trim strips a leading NBSP), so only this
-    // pin closes them (R4-1).
+    // next operand and rename it. Blank lines filter out of the statement
+    // list too, so only this pin closes the blank-line split; lines that
+    // carry NBSP/U+2028 instead fail the statement list's exact match,
+    // whose ASCII-only strip keeps them visible (R4-1, R6-1).
     const gateLaunchTokens = [
       'LD_PRELOAD= LD_AUDIT= LD_LIBRARY_PATH=',
       '/usr/bin/env -i',
@@ -11254,12 +11260,16 @@ exit 1
     // exists, so its own defenses — the TRUSTED_PATH export and the LD_*
     // unset — and their order live in the pinned statement list: a
     // commented copy matched a bare toContain, and a planted LD_PRELOAD or
-    // PATH reached the sha256sum exec (R4-4). The digest line is pinned
-    // whole and per step — a workflow-wide count accepts relocation out of
-    // the gates, and `|| true` accepts a digest mismatch under bash -e
-    // (R4-3, the resanitize sibling's doctrine).
+    // PATH reached the sha256sum exec (R4-4); the startup-time variants a
+    // body line cannot reach — an LD_* library mapped before line 1 and
+    // BASH_FUNC function imports shadowing the line's bare command words
+    // (echo included) — are closed by the step-level LD_* pins and the
+    // absolute binary paths below (R6-2, R6-4). The digest line is pinned
+    // whole and per step — a workflow-wide count
+    // accepts relocation out of the gates, and `|| true` accepts a digest
+    // mismatch under bash -e (R4-3, the resanitize sibling's doctrine).
     const gateDigestCheck =
-      'echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | sha256sum -c - > /dev/null';
+      '/usr/bin/echo "${VERIFY_RUNNER_SHA256}  ${RUNNER_TEMP}/run-autofix-review-verification.sh" | /usr/bin/sha256sum -c - > /dev/null';
     const gateBodyStatements = [
       'export PATH="${TRUSTED_PATH}"',
       'unset LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH',
@@ -11268,18 +11278,25 @@ exit 1
         index < gateLaunchTokens.length - 1 ? `${token} \\` : token,
       ),
     ];
+    // Bash breaks words only on ASCII space/tab/newline: strip ASCII
+    // whitespace only, so a line carrying any other "whitespace" (NBSP,
+    // U+2000–U+200A, U+2028, ...) keeps it and fails the exact match.
+    // JS trim() stripped those too, classifying `\u00a0# x` as a comment
+    // while bash executed it — a smuggled statement invisible to
+    // every other pin here (R6-1).
+    const gateBodyStatementsOf = (stepText) =>
+      stepText
+        .slice(stepText.indexOf('run: |-') + 'run: |-'.length)
+        .split('\n')
+        .map((line) => line.replace(/^[ \t]+|[ \t]+$/g, ''))
+        .filter((line) => line !== '' && !line.startsWith('#'));
+    expect(gateBodyStatementsOf('run: |-\n  \u00a0# x')).toEqual(['\u00a0# x']);
     for (const step of [
       reviewVerificationGateStep,
       repairVerificationGateStep,
     ]) {
       expect(step).toMatch(gateLaunchPin);
-      expect(
-        step
-          .slice(step.indexOf('run: |-') + 'run: |-'.length)
-          .split('\n')
-          .map((line) => line.trim())
-          .filter((line) => line !== '' && !line.startsWith('#')),
-      ).toEqual(gateBodyStatements);
+      expect(gateBodyStatementsOf(step)).toEqual(gateBodyStatements);
       // Exactly one launch per step: a second, unpinned `bash --norc` (the
       // pinned block demoted into a never-run arm) must fail here (R2-1).
       expect((step.match(/bash --norc/g) ?? []).length).toBe(1);
@@ -19404,10 +19421,22 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
     // level, which outranks any $GITHUB_ENV plant; the gate itself then
     // runs through the workflow's env -i clean-child pattern, so its bash
     // inherits nothing at all (enumerating plants is the failure mode the
-    // verdict pipeline kept hitting).
+    // verdict pipeline kept hitting). LD_* load at startup the same way —
+    // the body-side unset cannot unload a library already mapped into the
+    // parent running the digest check (R6-2) — and RUNNER_TEMP/WORKDIR/
+    // BRANCH steer that digest check and the child's tree, so they are
+    // pinned from trusted expression context too (R6-3).
     for (const step of [verificationGateSteps[1], repairVerificationGateStep]) {
       expect(step).toContain("BASH_ENV: ''");
       expect(step).toContain("SHELLOPTS: ''");
+      expect(step).toContain("LD_PRELOAD: ''");
+      expect(step).toContain("LD_AUDIT: ''");
+      expect(step).toContain("LD_LIBRARY_PATH: ''");
+      expect(step).toContain("RUNNER_TEMP: '${{ runner.temp }}'");
+      expect(step).toContain(
+        "WORKDIR: '/tmp/autofix-review-${{ matrix.target.pr }}'",
+      );
+      expect(step).toContain("BRANCH: '${{ matrix.target.branch }}'");
       expect(step).toContain('/usr/bin/env -i');
       expect(step).toContain(
         'bash --norc "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
