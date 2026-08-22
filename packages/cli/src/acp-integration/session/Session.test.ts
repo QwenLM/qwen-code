@@ -3813,15 +3813,18 @@ describe('Session', () => {
       });
     });
 
-    it('fails closed when the legacy recording ordinal over-runs the turn boundaries', () => {
+    it('fails closed on every target when automatic turns desync turns from recording boundaries', () => {
       // Cron/notification/goal-runtime turns push user-text API entries
       // (counted positionally, snapshotted since R5-2) but record with
-      // subtypes that push NO turnParentUuids boundary. Past an
-      // interleaved automatic turn the positional recording ordinal
-      // over-runs the boundary list; rewindRecording would then re-root
-      // the transcript chain to a null parent, orphaning the pre-rewind
-      // transcript on the next resume. Fail closed instead — and do not
-      // advertise the unreachable target either.
+      // subtypes that push NO turnParentUuids boundary, so an interleaved
+      // automatic turn leaves fewer boundaries than positional turns. The
+      // deficit shifts EVERY boundary lookup: rewindRecording(i) re-roots
+      // to a LATER turn's parent (the rewound turn resurrects on resume)
+      // and ordinal 0 re-roots to the first real prompt's parent — one
+      // boundary early even for the target "before" the automatic turn.
+      // The pre-strict-gate shape rewound those targets and reported
+      // success while orphaning records onto the dead branch; fail closed
+      // on the count mismatch itself and advertise nothing.
       const history: Content[] = [
         { role: 'user', parts: [{ text: 'first' }] },
         { role: 'model', parts: [{ text: 'first reply' }] },
@@ -3832,7 +3835,8 @@ describe('Session', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      // Only the two real prompts pushed boundaries.
+      // Only the two real prompts pushed boundaries: 2 boundaries for 3
+      // positional turns.
       mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
         undefined,
         undefined,
@@ -3849,33 +3853,66 @@ describe('Session', () => {
         snap('snap-2', 2),
       ]);
 
-      // The over-running target is not advertised...
-      expect(session.getRewindableSnapshotTargets()).toEqual([
-        { promptId: 'snap-0', turnIndex: 0 },
-        { promptId: 'snap-1', turnIndex: 1 },
-      ]);
-      // ...and both entry points refuse it instead of re-rooting the
-      // recording to a null parent.
+      // No target is advertised while the counts diverge...
+      expect(session.getRewindableSnapshotTargets()).toEqual([]);
+      // ...and every entry point refuses instead of re-rooting the
+      // recording to a shifted parent.
+      expect(() => session.rewindToTurn(0)).toThrow(
+        'Its recording boundary pairing is missing or ambiguous',
+      );
       expect(() => session.rewindToTurn(2)).toThrow(
-        'Its recording boundary pairing is missing',
+        'Its recording boundary pairing is missing or ambiguous',
       );
       expect(() => session.rewindToPrompt('snap-2')).toThrow(
-        'Its recording boundary pairing is missing',
+        'Its recording boundary pairing is missing or ambiguous',
       );
       expect(mockChat.truncateHistory).not.toHaveBeenCalled();
       expect(mockChatRecordingService.rewindRecording).not.toHaveBeenCalled();
+    });
 
-      // Targets before the over-run stay rewindable.
-      expect(session.rewindToTurn(0)).toEqual({
-        targetTurnIndex: 0,
-        apiTruncateIndex: 0,
-        promptId: 'snap-0',
+    it('fails closed when recording boundaries outnumber positional turns', () => {
+      // Surplus direction: locally-handled slash commands (/help) and
+      // hook-blocked prompts push a turnParentUuids boundary via
+      // recordUserMessage BEFORE their early returns but create no
+      // positional turn or snapshot. The extra boundary shifts every later
+      // lookup one early — rewindRecording would re-root onto the previous
+      // turn's parent and orphan the rewound turn's records onto the dead
+      // branch — so fail closed in the surplus direction too.
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+        { role: 'user', parts: [{ text: 'second' }] },
+        { role: 'model', parts: [{ text: 'second reply' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      // Two positional turns, three boundaries (one pushed by a
+      // locally-handled command that never became a turn).
+      mockChatRecordingService.getRewindableTurnPromptIds.mockReturnValue([
+        undefined,
+        undefined,
+        undefined,
+      ]);
+      mockFileHistoryService.isEnabled.mockReturnValue(true);
+      const snap = (promptId: string, minutes: number) => ({
+        promptId,
+        timestamp: new Date(`2026-06-13T00:0${minutes}:00.000Z`),
+        trackedFileBackups: {},
       });
-      expect(mockChatRecordingService.rewindRecording).toHaveBeenCalledWith(
-        0,
-        { truncatedCount: 6 },
-        [],
+      mockFileHistoryService.getSnapshots.mockReturnValue([
+        snap('snap-0', 0),
+        snap('snap-1', 1),
+      ]);
+
+      expect(session.getRewindableSnapshotTargets()).toEqual([]);
+      expect(() => session.rewindToTurn(0)).toThrow(
+        'Its recording boundary pairing is missing or ambiguous',
       );
+      expect(() => session.rewindToTurn(1)).toThrow(
+        'Its recording boundary pairing is missing or ambiguous',
+      );
+      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+      expect(mockChatRecordingService.rewindRecording).not.toHaveBeenCalled();
     });
 
     it('does not fall back to positional rewinds when recorder identities are missing from API history', () => {
