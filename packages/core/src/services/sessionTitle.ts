@@ -21,6 +21,20 @@ const debugLogger = createDebugLogger('SESSION_TITLE');
 const MAX_CONVERSATION_CHARS = 1000;
 const RECENT_MESSAGE_WINDOW = 20;
 
+// The "Good examples" shown to the model in TITLE_SYSTEM_PROMPT, and the
+// echo-guard set: when the recent conversation carries little topical signal
+// (boilerplate-heavy channel/hook context), the model takes the cheapest
+// schema-valid answer and parrots one of these back verbatim (#9706). A
+// canned example says nothing about the session, so matches are rejected
+// like empty results. The prompt's "Good examples" block is rendered from
+// this array, so the two cannot drift apart.
+const TITLE_PROMPT_EXAMPLE_TITLES = [
+  'Fix login button on mobile',
+  'Add OAuth authentication flow',
+  'Debug failing CI pipeline tests',
+  '重构用户鉴权中间件',
+];
+
 const TITLE_SYSTEM_PROMPT = `Generate a concise, sentence-case title (3-7 words) that captures what this programming-assistant session is about. Think of it as a git commit subject for the session.
 
 Rules:
@@ -31,10 +45,9 @@ Rules:
 - Be specific about the user's actual goal — name the feature, bug, or subject area. Avoid vague "Code changes", "Help request", "Conversation".
 
 Good examples:
-{"title": "Fix login button on mobile"}
-{"title": "Add OAuth authentication flow"}
-{"title": "Debug failing CI pipeline tests"}
-{"title": "重构用户鉴权中间件"}
+${TITLE_PROMPT_EXAMPLE_TITLES.map(
+  (title) => `{"title": ${JSON.stringify(title)}}`,
+).join('\n')}
 
 Bad (too vague): {"title": "Code changes"}
 Bad (too long): {"title": "Investigate and fix the session title generation issue in the chat recording service"}
@@ -45,19 +58,6 @@ Return ONLY a JSON object with a single "title" key. No preamble, no reasoning, 
 
 const TITLE_USER_PROMPT =
   'Generate the session title now. Populate the schema with a single short title string.';
-
-// The "Good examples" shown to the model in TITLE_SYSTEM_PROMPT. When the
-// recent conversation carries little topical signal (boilerplate-heavy
-// channel/hook context), the model takes the cheapest schema-valid answer
-// and parrots one of these back verbatim (#9706). A canned example says
-// nothing about the session, so matches are rejected like empty results.
-// Keep in sync with the "Good examples" block in TITLE_SYSTEM_PROMPT.
-const TITLE_PROMPT_EXAMPLE_TITLES = [
-  'Fix login button on mobile',
-  'Add OAuth authentication flow',
-  'Debug failing CI pipeline tests',
-  '重构用户鉴权中间件',
-];
 
 const TITLE_SCHEMA = {
   type: 'object',
@@ -183,6 +183,11 @@ export async function tryGenerateSessionTitle(
       typeof result?.['title'] === 'string' ? (result['title'] as string) : '';
     const title = sanitizeTitle(rawTitle);
     if (!title || isPromptExampleEcho(title)) {
+      // Pre-#9706 an echo produced a visible bad title; post-guard the
+      // failure mode is a silent absence, so leave a trace for oncall.
+      debugLogger.warn(
+        `Session title rejected (${title ? 'prompt-example echo' : 'empty'}): ${JSON.stringify(rawTitle)}`,
+      );
       return { ok: false, reason: 'empty_result' };
     }
 
@@ -233,9 +238,18 @@ export function sanitizeTitle(s: string): string {
  * after sanitization — deliberately not fuzzy, so a genuinely topical title
  * that merely resembles an example still passes. Also catches the prompt's
  * "Bad (wrong case)" variant of the first example.
+ *
+ * Bracket wrappers are stripped for the comparison only: `sanitizeTitle`
+ * keeps ASCII/full-width brackets because real titles use them (e.g.
+ * "(WIP) Fix build"), but `(Fix login button on mobile)` is the same canned
+ * echo as the bare example and must not slip past the guard.
  */
 function isPromptExampleEcho(title: string): boolean {
-  const normalized = title.trim().toLowerCase();
+  const normalized = title
+    .trim()
+    .toLowerCase()
+    .replace(/^[()[\]{}（）\s]+/, '')
+    .replace(/[()[\]{}（）\s]+$/, '');
   return TITLE_PROMPT_EXAMPLE_TITLES.some(
     (example) => example.toLowerCase() === normalized,
   );

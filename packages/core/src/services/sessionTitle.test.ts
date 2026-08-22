@@ -206,6 +206,53 @@ describe('tryGenerateSessionTitle', () => {
     }
   });
 
+  it('rejects bracket-wrapped echoes of prompt examples (#9706)', async () => {
+    // sanitizeTitle keeps ASCII/full-width brackets (legitimate in titles
+    // like "(WIP) Fix build"), so the guard itself must see through a
+    // bracket wrapper around a canned example.
+    const wrapped = [
+      '(Fix login button on mobile)',
+      '[Add OAuth authentication flow]',
+      '{Debug failing CI pipeline tests}',
+      '（重构用户鉴权中间件）',
+    ];
+    for (const title of wrapped) {
+      const { config } = makeConfig({
+        fastModel: 'qwen-turbo',
+        history: DIALOG_HISTORY,
+        generateJsonResult: { title },
+      });
+      const outcome = await tryGenerateSessionTitle(
+        config,
+        new AbortController().signal,
+      );
+      expect(
+        outcome,
+        `wrapped echo not rejected: ${JSON.stringify(title)}`,
+      ).toEqual({ ok: false, reason: 'empty_result' });
+    }
+  });
+
+  it('still accepts a genuine title wrapped in brackets (#9706)', async () => {
+    // The wrapper strip is comparison-only: a real title that happens to
+    // carry brackets must pass through unchanged, not be corrupted or
+    // rejected.
+    const { config } = makeConfig({
+      fastModel: 'qwen-turbo',
+      history: DIALOG_HISTORY,
+      generateJsonResult: { title: '(WIP) Fix build' },
+    });
+    const outcome = await tryGenerateSessionTitle(
+      config,
+      new AbortController().signal,
+    );
+    expect(outcome).toEqual({
+      ok: true,
+      title: '(WIP) Fix build',
+      modelUsed: 'qwen-turbo',
+    });
+  });
+
   it('still accepts a topical title that merely resembles an example (#9706)', async () => {
     // The guard must be an exact (normalized) match, not fuzzy: a session
     // genuinely about a login button still gets a real, non-canned title.
