@@ -19,6 +19,7 @@ import {
   a1JsonOnce,
   a1Once,
   ensureAoneAuthenticated,
+  execErrorCause,
 } from './aone-client.js';
 import type {
   ClosingIssueRef,
@@ -360,16 +361,7 @@ export const aoneReader: ReviewPlatformReader = {
     try {
       url = git('remote', 'get-url', 'origin').trim();
     } catch (err) {
-      // execFileSync failure messages BEGIN with the fixed preamble
-      // "Command failed: git remote get-url origin"; git's actual error is
-      // the first NON-empty line after it (same pitfall aone-client
-      // documents). `.split('\n')[0]` would render only the preamble.
-      const cause =
-        (err as Error).message
-          .split('\n')
-          .slice(1)
-          .map((l) => l.trim())
-          .find(Boolean) ?? '';
+      const cause = execErrorCause(err);
       throw new Error(
         `cannot resolve the repository: no \`origin\` remote` +
           (cause ? ` (${cause})` : ''),
@@ -771,6 +763,30 @@ export const aoneReader: ReviewPlatformReader = {
       const who = a1Json<{ account?: unknown } | null>('auth', 'whoami');
       return typeof who?.account === 'string' ? who.account : '';
     } catch {
+      return '';
+    }
+  },
+
+  composeUrl(prNumber: number, ownerRepo: string): string {
+    checkOwnerRepo(ownerRepo);
+    // Reader-backed by construction: an Aone MR link can NEVER be assembled
+    // from owner/repo — the collapse to the last two segments names a
+    // different (possibly nonexistent) repo for a nested-group project —
+    // so the only source is the platform's own detailUrl. A fetch failure
+    // degrades to '' — a missing link must not fail a consumer that owns
+    // the post's fate — but NOT silently: every other fail-open in this
+    // provider discloses on stderr, and a failing re-query (auth expiry,
+    // a network blip past the retry budget) must stay distinguishable
+    // from the designed coordinates-relay case.
+    try {
+      return mrView(prNumber, ownerRepo).detailUrl ?? '';
+    } catch (err) {
+      const cause = execErrorCause(err);
+      process.stderr.write(
+        `WARNING: the Aone MR-link lookup failed` +
+          (cause ? ` (${JSON.stringify(cause.slice(0, 80))})` : '') +
+          `; the Posted line degrades to the target's coordinates.\n`,
+      );
       return '';
     }
   },
