@@ -283,14 +283,15 @@ export class LoopDetectionService {
           globalDup || alternating || readFileLoop || actionStagnation;
         break;
       }
-      case GeminiEventType.Retry: {
-        // A retry replays the failed attempt's tool calls (Turn clears
-        // pendingToolCalls on retry), so drop the heuristic duplicate counters
-        // to avoid firing on a duplicated replay — e.g. 3 identical calls +
-        // Retry + 3 more would otherwise hit the global-duplicate threshold of
-        // 6. The always-on guards reset their own counters in
-        // checkAlwaysOnSafeties' Retry branch (cap rollback + always-on
-        // streak reset).
+      case GeminiEventType.Retry:
+      case GeminiEventType.ModelFallback: {
+        if (
+          event.type === GeminiEventType.ModelFallback ||
+          event.isContinuation !== true
+        ) {
+          this.resetContentTracking();
+          this.thoughtHistory = [];
+        }
         this.globalToolCallCounts.clear();
         this.recentToolCallKeys = [];
         break;
@@ -333,15 +334,18 @@ export class LoopDetectionService {
       return false;
     }
 
-    // A retry re-streams the failed attempt's tool calls, which would
+    // A retry or fallback re-streams the failed attempt's tool calls, which would
     // double-count against both always-on guards. Roll the per-turn cap back
     // to the last committed round-trip (never below it — prior round-trips
     // stay) and drop the consecutive-identical streak so the replayed attempt
     // cannot push it over the threshold. The adaptive cap's repeat tracker is
     // cleared (consistent with how the heuristic path clears
-    // globalToolCallCounts on retry): the replayed calls re-populate it, and a
+    // globalToolCallCounts on reset): the replayed calls re-populate it, and a
     // stuck pattern simply re-accumulates toward the threshold.
-    if (event.type === GeminiEventType.Retry) {
+    if (
+      event.type === GeminiEventType.Retry ||
+      event.type === GeminiEventType.ModelFallback
+    ) {
       this.turnToolCallTotal = this.turnToolCallTotalCommitted;
       this.resetToolCallCount();
       this.capKeyCounts.clear();
