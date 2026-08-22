@@ -23,11 +23,13 @@ import {
   resetBackgroundStateForSessionSwitch,
 } from '../utils/backgroundWorkUtils.js';
 import type { LoadedSettings } from '../../config/settings.js';
-import { waitForGoalRuntime } from '../utils/goal-runtime.js';
 import {
+  AGENT_VIEW_WORKER_RESUME_MESSAGE,
+  isAgentViewWorkerResumeCommandBlocked,
   isManagedAgentViewResumeBlocked,
   MANAGED_AGENT_VIEW_RESUME_MESSAGE,
 } from '../../startup/agent-view-resume-guard.js';
+import { waitForGoalRuntime } from '../utils/goal-runtime.js';
 
 export interface UseResumeCommandOptions {
   config: Config | null;
@@ -98,6 +100,18 @@ export function useResumeCommand(
         return;
       }
 
+      if (isAgentViewWorkerResumeCommandBlocked()) {
+        addItem(
+          {
+            type: MessageType.ERROR,
+            text: AGENT_VIEW_WORKER_RESUME_MESSAGE,
+          } as HistoryItemWithoutId,
+          Date.now(),
+        );
+        closeResumeDialog();
+        return;
+      }
+
       if (hasBlockingBackgroundWork(config)) {
         const blockedMessage: HistoryItemWithoutId = {
           type: MessageType.ERROR,
@@ -131,8 +145,7 @@ export function useResumeCommand(
       let recoveredBackgroundAgentsNotice: string | null = null;
 
       try {
-        const cwd = config.getTargetDir();
-        const sessionService = new SessionService(cwd);
+        const sessionService = new SessionService(config.getTargetDir());
         const sessionData = await sessionService.loadSession(sessionId);
 
         if (!sessionData) {

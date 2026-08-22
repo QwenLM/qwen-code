@@ -137,6 +137,7 @@ import { useBranchCommand } from './hooks/useBranchCommand.js';
 import { useResumeCommand } from './hooks/useResumeCommand.js';
 import { useDeleteCommand } from './hooks/useDeleteCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
+import type { AgentViewIdleGateState } from './commands/types.js';
 import { useDoublePress } from './hooks/useDoublePress.js';
 import {
   computeApiTruncationIndex,
@@ -153,6 +154,7 @@ import { calculatePromptWidths } from './components/InputPrompt.js';
 import { useStdin, useStdout } from 'ink';
 import ansiEscapes from 'ansi-escapes';
 import * as fs from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { basename } from 'node:path';
 import {
   formatSessionWindowTitle,
@@ -241,7 +243,21 @@ import { useMemoryDialog } from './hooks/useMemoryDialog.js';
 import { useAttentionNotifications } from './hooks/useAttentionNotifications.js';
 import { buildTerminalNotification } from './hooks/useTerminalNotification.js';
 import { useContextualTips } from './hooks/useContextualTips.js';
+import { detachCurrentSessionToAgentView } from '../agent-view/managed-detach.js';
+import { buildCurrentQwenCliArgv } from '../agent-view/current-cli-argv.js';
+import {
+  readAgentViewWorkerSidebandEnv,
+  readAgentViewWorkerControlEvents,
+  reportAgentViewWorkerState,
+  sendAgentViewWorkerEvent,
+} from '../agent-view/worker-sideband.js';
 import { getTipHistory } from '../services/tips/index.js';
+import {
+  applyAgentViewWorkerControlEventForUi,
+  getAgentViewAnswerableToolCalls,
+  getAgentViewWorkerStateForUi,
+  getLastAgentViewModelOutputLine,
+} from './agent-view/worker-ui-bridge.js';
 import { restorePromptStash } from '../services/prompt-stash.js';
 import { useRemoteInput } from '../remoteInput/RemoteInputContext.js';
 import { useDualOutput } from '../dualOutput/DualOutputContext.js';
@@ -249,13 +265,6 @@ import {
   requestConsentInteractive,
   requestConsentOrFail,
 } from '../commands/extensions/consent.js';
-import { detachCurrentSessionToAgentView } from '../agent-view/managed-detach.js';
-import {
-  readAgentViewWorkerSidebandEnv,
-  reportAgentViewWorkerState,
-  sendAgentViewWorkerEvent,
-} from '../agent-view/worker-sideband.js';
-import type { AgentViewIdleGateState } from './commands/types.js';
 import {
   findLastUserItemIndex,
   isSyntheticHistoryItem,
@@ -265,6 +274,9 @@ import {
 import { MAIN_CONTENT_HEIGHT_RESERVATION } from './utils/layoutUtils.js';
 
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
+// Stable empty default so the destructured `pendingToolCalls` doesn't get a
+// fresh array identity each render, which would re-run dependent effects.
+const EMPTY_TOOL_CALLS: WaitingToolCall[] = [];
 const debugLogger = createDebugLogger('APP_CONTAINER');
 
 export function isRenderModeToggleKey(key: Key): boolean {
@@ -683,6 +695,7 @@ export const AppContainer = (props: AppContainerProps) => {
   );
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [embeddedShellFocused, setEmbeddedShellFocused] = useState(false);
+  const agentViewIdleGateStateRef = useRef<AgentViewIdleGateState>({});
 
   const [geminiMdFileCount, setGeminiMdFileCount] = useState<number>(
     initializationResult.geminiMdFileCount,
@@ -1185,7 +1198,6 @@ export const AppContainer = (props: AppContainerProps) => {
   // Note: isIdleRef.current is assigned after streamingState becomes available
   // (see the assignment below useGeminiStream).
   const isIdleRef = useRef(true);
-  const agentViewIdleGateStateRef = useRef<AgentViewIdleGateState>({});
   // Live content-area height, kept in a ref so useGeminiStream (called above the
   // point where availableTerminalHeight is computed) can read the current value
   // when bounding the pending item's rendered height. terminalWidthRef pairs
@@ -1741,11 +1753,16 @@ export const AppContainer = (props: AppContainerProps) => {
       return;
     }
     await config.getChatRecordingService?.()?.flush?.();
-    await detachCurrentSessionToAgentView(config);
+    await detachCurrentSessionToAgentView(config, {
+      terminal: {
+        columns: terminalWidth,
+        rows: terminalHeight,
+      },
+    });
     config.getGeminiClient()?.requestShutdown();
     await runExitCleanup();
-    process.exit(0);
-  }, [config]);
+    process.exit(runAgentViewRosterCommand(config.getProjectRoot()));
+  }, [config, terminalHeight, terminalWidth]);
 
   // Subscribe to skill-review task changes and keep skillReviewPending in sync.
   useEffect(() => {
@@ -2160,7 +2177,7 @@ export const AppContainer = (props: AppContainerProps) => {
     handleApprovalModeChange,
     activePtyId,
     loopDetectionConfirmationRequest,
-    pendingToolCalls,
+    pendingToolCalls = EMPTY_TOOL_CALLS,
     streamingResponseLengthRef,
     isReceivingContent,
   } = useGeminiStream(
@@ -2191,6 +2208,10 @@ export const AppContainer = (props: AppContainerProps) => {
     goalQueueRef,
   );
   cancelOngoingRequestRef.current = cancelOngoingRequest;
+  const streamingStateRef = useRef(streamingState);
+  streamingStateRef.current = streamingState;
+  const isProcessingRef = useRef(isProcessing);
+  isProcessingRef.current = isProcessing;
   clearPendingStateRef.current = clearPendingState;
 
   // Now that streamingState is available, keep isIdleRef in sync and
@@ -2206,20 +2227,41 @@ export const AppContainer = (props: AppContainerProps) => {
     }
   }, [streamingState]);
 
-  useEffect(() => {
-    if (readAgentViewWorkerSidebandEnv() === undefined) {
-      return undefined;
-    }
-    const sessionState =
-      streamingState === StreamingState.Responding
-        ? 'working'
-        : streamingState === StreamingState.WaitingForConfirmation
-          ? 'needs_input'
-          : 'idle';
+  const agentViewLastResult = getLastAgentViewModelOutputLine([
+    ...historyManager.history,
+    ...pendingGeminiHistoryItems,
+  ]);
+  const agentViewLastResultRef = useRef(agentViewLastResult);
+  agentViewLastResultRef.current = agentViewLastResult;
+  const answeredAgentViewSoftQuestionRef = useRef<string | undefined>(
+    undefined,
+  );
 
-    void reportAgentViewWorkerState({ sessionState });
-    return undefined;
-  }, [streamingState]);
+  useEffect(() => {
+    if (readAgentViewWorkerSidebandEnv() === undefined) return;
+    if (streamingState !== StreamingState.Idle) {
+      answeredAgentViewSoftQuestionRef.current = undefined;
+    }
+    const report = getAgentViewWorkerStateForUi({
+      initError,
+      streamingState,
+      pendingToolCalls,
+      lastResult: agentViewLastResult,
+      answeredSoftQuestion: answeredAgentViewSoftQuestionRef.current,
+    });
+    void reportAgentViewWorkerState({
+      ...report,
+      // Fold the recorded session title into the authoritative report instead
+      // of emitting a partial one that would clobber waitingFor/lastResult.
+      ...(report.summary || !sessionName ? {} : { summary: sessionName }),
+    });
+  }, [
+    agentViewLastResult,
+    initError,
+    pendingToolCalls,
+    sessionName,
+    streamingState,
+  ]);
 
   // Auto-open the skill-review dialog when idle and there are pending skills.
   // Gated on the live auto-skill flag: after the dialog's turn-off option
@@ -2278,29 +2320,6 @@ export const AppContainer = (props: AppContainerProps) => {
     livePanelFocused: bgLivePanelFocused,
   } = useBackgroundTaskViewState();
   const { closeDialog: closeBgTasksDialog } = useBackgroundTaskViewActions();
-  agentViewIdleGateStateRef.current = {
-    hasPendingUserQuestion: pendingToolCalls.some(
-      (call) =>
-        call.status === 'awaiting_approval' &&
-        call.confirmationDetails?.type === 'ask_user_question',
-    ),
-    hasPendingToolConfirmation: pendingToolCalls.some(
-      (call) => call.status === 'awaiting_approval',
-    ),
-    hasPendingCommandConfirmation: Boolean(
-      shellConfirmationRequest ||
-        confirmationRequest ||
-        loopDetectionConfirmationRequest,
-    ),
-    hasForegroundShell: Boolean(
-      activePtyId || embeddedShellFocused || agentViewState.agentShellFocused,
-    ),
-    hasBackgroundFocusDialog: bgTasksDialogOpen || bgLivePanelFocused,
-    hasQueuedPrompt:
-      goalQueueRef.current?.hasQueuedUserMessages?.() === true ||
-      (goalQueueRef.current?.getPendingSubmissionCount?.() ?? 0) > 0,
-  };
-
   // Prompt suggestion state
   const [promptSuggestion, setPromptSuggestion] = useState<string | null>(null);
   const prevStreamingStateRef = useRef<StreamingState>(StreamingState.Idle);
@@ -2547,9 +2566,13 @@ export const AppContainer = (props: AppContainerProps) => {
       options?: {
         deferUntilIdle?: boolean;
         submittedPrompt?: string;
+        bypassAgentTabRouting?: boolean;
       },
     ) => {
-      const consumesComposerState = options !== undefined;
+      // Control prompts (bypassAgentTabRouting) are not composer
+      // submissions and must not consume composer restore state.
+      const consumesComposerState =
+        options !== undefined && !options.bypassAgentTabRouting;
       const restoredSubmission = consumesComposerState
         ? restoredSubmissionRef.current
         : null;
@@ -2577,7 +2600,12 @@ export const AppContainer = (props: AppContainerProps) => {
       }
 
       // Route to active in-process agent if viewing a sub-agent tab.
-      if (agentViewState.activeView !== 'main') {
+      // Control prompts from the roster target the main session and must
+      // not be swallowed by a sub-agent the roster has no visibility into.
+      if (
+        !options?.bypassAgentTabRouting &&
+        agentViewState.activeView !== 'main'
+      ) {
         const agent = agentViewState.agents.get(agentViewState.activeView);
         if (agent) {
           agent.interactiveAgent.enqueueMessage(submittedValue.trim());
@@ -2590,6 +2618,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // Quit must bypass reminders and the message queue so it can stop an
       // active stream without consuming one-shot session state.
       if (
+        !options?.bypassAgentTabRouting &&
         ['/quit', '/exit', 'exit', 'quit', ':q', ':q!', ':wq', ':wq!'].includes(
           userPromptText.trim(),
         )
@@ -2822,6 +2851,96 @@ export const AppContainer = (props: AppContainerProps) => {
       vimEnabled,
     ],
   );
+
+  const pendingAgentViewControlPromptsRef = useRef<string[]>([]);
+  // Keep the poll loop mounted across streaming-state transitions; reading
+  // the submitter through a ref avoids tearing down/restarting the 250 ms
+  // loop (and its immediate poll RPC) on every state change.
+  const handleFinalSubmitRef = useRef(handleFinalSubmit);
+  handleFinalSubmitRef.current = handleFinalSubmit;
+  useEffect(() => {
+    if (readAgentViewWorkerSidebandEnv() === undefined) return undefined;
+
+    let disposed = false;
+    let timer: NodeJS.Timeout | undefined;
+    const flushPrompt = () => {
+      if (
+        streamingStateRef.current !== StreamingState.Idle ||
+        isProcessingRef.current
+      ) {
+        return;
+      }
+      const nextPrompt = pendingAgentViewControlPromptsRef.current.shift();
+      if (nextPrompt) {
+        const lastResult = agentViewLastResultRef.current;
+        answeredAgentViewSoftQuestionRef.current = lastResult;
+        void reportAgentViewWorkerState({
+          sessionState: 'idle',
+          ...(lastResult ? { lastResult } : {}),
+        });
+        handleFinalSubmitRef.current(nextPrompt, {
+          bypassAgentTabRouting: true,
+        });
+      }
+    };
+    const poll = async () => {
+      let stopped = false;
+      try {
+        const events = await readAgentViewWorkerControlEvents();
+        if (!disposed && events.some((event) => event.type === 'redraw')) {
+          refreshStatic();
+        }
+        for (const event of events) {
+          await applyAgentViewWorkerControlEventForUi(
+            event,
+            pendingToolCallsRef.current,
+            (text) => {
+              pendingAgentViewControlPromptsRef.current.push(text);
+            },
+            () => {
+              if (streamingStateRef.current === StreamingState.Responding) {
+                cancelOngoingRequestRef.current();
+              }
+              // Terminal stop: drop queued prompts and shut the worker down
+              // gracefully (the supervisor's SIGTERM is only a 10 s backstop).
+              pendingAgentViewControlPromptsRef.current = [];
+              const shutdown = async () => {
+                config.getGeminiClient()?.requestShutdown();
+                await runExitCleanup();
+                process.exit(0);
+              };
+              void reportAgentViewWorkerState({
+                sessionState: 'stopped',
+                lastResult: 'Stopped by user',
+              }).then(shutdown, shutdown);
+            },
+          );
+          if (event.type === 'stop') {
+            stopped = true;
+            break;
+          }
+        }
+      } catch {
+        // Supervisor sideband is best-effort; normal TUI rendering continues.
+      } finally {
+        if (!disposed) {
+          if (!stopped) {
+            flushPrompt();
+          }
+          timer = setTimeout(poll, 250);
+        }
+      }
+    };
+
+    flushPrompt();
+    void poll();
+    return () => {
+      disposed = true;
+      if (timer) {
+        clearTimeout(timer);
+      }
+    };
+  }, [config, refreshStatic]);
 
   const handleArenaModelsSelected = useCallback(
     (models: string[]) => {
@@ -3419,6 +3538,28 @@ export const AppContainer = (props: AppContainerProps) => {
     showWorktreeExitDialog ||
     !!(settings.corruptedPath && !settings.corruptionDialogDismissed);
   dialogsVisibleRef.current = dialogsVisible;
+
+  const answerableAgentViewToolCalls =
+    getAgentViewAnswerableToolCalls(pendingToolCalls);
+  agentViewIdleGateStateRef.current = {
+    hasPendingUserQuestion: answerableAgentViewToolCalls.some(
+      (toolCall) => toolCall.confirmationDetails.type === 'ask_user_question',
+    ),
+    hasPendingToolConfirmation: answerableAgentViewToolCalls.some(
+      (toolCall) => toolCall.confirmationDetails.type !== 'ask_user_question',
+    ),
+    hasPendingCommandConfirmation:
+      !!shellConfirmationRequest ||
+      !!confirmationRequest ||
+      !!loopDetectionConfirmationRequest,
+    hasForegroundShell: Boolean(
+      activePtyId || embeddedShellFocused || agentViewState.agentShellFocused,
+    ),
+    hasBackgroundFocusDialog: bgTasksDialogOpen || bgLivePanelFocused,
+    hasQueuedPrompt:
+      goalQueueRef.current?.hasQueuedUserMessages?.() === true ||
+      (goalQueueRef.current?.getPendingSubmissionCount?.() ?? 0) > 0,
+  };
 
   const shouldShowStickyTodos =
     stickyTodos !== null &&
@@ -4047,7 +4188,8 @@ export const AppContainer = (props: AppContainerProps) => {
         return; // Btw cancelled, end processing
       }
 
-      // 4. Cancel ongoing requests
+      // 4. Cancel ongoing requests (cancel-and-continue: the worker session
+      // stays alive, so no terminal state is reported)
       if (streamingState === StreamingState.Responding) {
         cancelOngoingRequest?.();
         return; // Request cancelled, end processing
@@ -4168,6 +4310,8 @@ export const AppContainer = (props: AppContainerProps) => {
             clearTimeout(escapeTimerRef.current);
             escapeTimerRef.current = null;
           }
+          // Cancel-and-continue: the worker session stays alive, so no
+          // terminal state is reported.
           cancelOngoingRequest?.();
           setEscapePressedOnce(false);
           return;
@@ -4934,3 +5078,39 @@ export const AppContainer = (props: AppContainerProps) => {
     </VirtualViewportContext.Provider>
   );
 };
+
+type SpawnSyncFn = typeof spawnSync;
+
+// Deliberately synchronous: the roster relaunch is a terminal handoff — the
+// current process must exit and hand stdio to the child before returning, so
+// an async spawn would leave two processes racing for the same TTY.
+export function runAgentViewRosterCommand(
+  cwd: string,
+  spawn: SpawnSyncFn = spawnSync,
+): number {
+  let argv: string[];
+  try {
+    argv = buildCurrentQwenCliArgv(['agents', '--cwd', cwd]);
+  } catch {
+    return 1;
+  }
+  const [command, ...commandArgs] = argv;
+  if (!command) {
+    return 1;
+  }
+  const result = spawn(command, commandArgs, {
+    stdio: 'inherit',
+    env: {
+      ...process.env,
+      QWEN_CODE_NO_RELAUNCH: '1',
+    },
+  });
+  if (result.error || result.signal) {
+    if (result.error) {
+      // eslint-disable-next-line no-console
+      console.error(result.error);
+    }
+    return 1;
+  }
+  return result.status ?? 1;
+}

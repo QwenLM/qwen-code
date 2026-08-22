@@ -33,7 +33,7 @@ import {
 export interface UseSessionPickerOptions {
   sessionService: SessionService | null;
   currentBranch?: string;
-  onSelect: (sessionId: string) => void;
+  onSelect: (sessionId: string, session?: SessionListItem) => void;
   onCancel: () => void;
   maxVisibleItems: number;
   /**
@@ -48,6 +48,8 @@ export interface UseSessionPickerOptions {
    * match the given title.
    */
   initialSessions?: SessionListItem[];
+  extraSessions?: SessionListItem[];
+  excludeSessionIds?: readonly string[];
   /**
    * Enable/disable input handling.
    */
@@ -127,6 +129,8 @@ export function useSessionPicker({
   maxVisibleItems,
   centerSelection = false,
   initialSessions,
+  extraSessions,
+  excludeSessionIds,
   isActive = true,
   enablePreview = false,
   enableMultiSelect = false,
@@ -152,7 +156,8 @@ export function useSessionPicker({
   }
 
   const hasInitialSessions = initialSessions !== undefined;
-  const [selectedIndex, setSelectedIndex] = useState(0);
+  const [selectedSessionId, setSelectedSessionId] = useState<string>();
+  const selectedSessionIdRef = useRef<string | undefined>(undefined);
   const [sessionState, setSessionState] = useState<SessionState>(
     hasInitialSessions
       ? { sessions: initialSessions, hasMore: false, nextCursor: undefined }
@@ -180,6 +185,10 @@ export function useSessionPicker({
   const disabledIdSet = useMemo(
     () => new Set(disabledIds ?? []),
     [disabledIds],
+  );
+  const excludeSessionIdSet = useMemo(
+    () => new Set(excludeSessionIds ?? []),
+    [excludeSessionIds],
   );
 
   const toggleChecked = useCallback(
@@ -214,16 +223,22 @@ export function useSessionPicker({
     useSessionSearchInput({ onExitToList });
 
   const isLoadingMoreRef = useRef(false);
+  const allSessions = useMemo(
+    () =>
+      mergeSessionItems(sessionState.sessions, extraSessions ?? []).filter(
+        (session) => !excludeSessionIdSet.has(session.sessionId),
+      ),
+    [sessionState.sessions, extraSessions, excludeSessionIdSet],
+  );
 
   const filteredSessions = useMemo(
     () =>
-      filterSessions(
-        sessionState.sessions,
-        filterByBranch,
-        currentBranch,
-        searchQuery,
-      ),
-    [sessionState.sessions, filterByBranch, currentBranch, searchQuery],
+      filterSessions(allSessions, filterByBranch, currentBranch, searchQuery),
+    [allSessions, filterByBranch, currentBranch, searchQuery],
+  );
+  const selectedIndex = useMemo(
+    () => getSelectedSessionIndex(filteredSessions, selectedSessionId),
+    [filteredSessions, selectedSessionId],
   );
 
   const scrollOffset = useMemo(() => {
@@ -301,19 +316,30 @@ export function useSessionPicker({
 
   // Reset selection when any filter changes (branch toggle or text query).
   useEffect(() => {
-    setSelectedIndex(0);
+    selectedSessionIdRef.current = undefined;
+    setSelectedSessionId(undefined);
     setFollowScrollOffset(0);
   }, [filterByBranch, searchQuery]);
 
-  // Ensure selectedIndex is valid when filtered sessions change
+  // Anchor the cursor to a session id so async merges and mtime re-sorts do
+  // not move a different row under the user's selection.
   useEffect(() => {
-    if (
-      selectedIndex >= filteredSessions.length &&
-      filteredSessions.length > 0
-    ) {
-      setSelectedIndex(filteredSessions.length - 1);
+    if (filteredSessions.length === 0) {
+      selectedSessionIdRef.current = undefined;
+      setSelectedSessionId(undefined);
+      return;
     }
-  }, [filteredSessions.length, selectedIndex]);
+    if (
+      !selectedSessionId ||
+      !filteredSessions.some(
+        (session) => session.sessionId === selectedSessionId,
+      )
+    ) {
+      const firstSessionId = filteredSessions[0]?.sessionId;
+      selectedSessionIdRef.current = firstSessionId;
+      setSelectedSessionId(firstSessionId);
+    }
+  }, [filteredSessions, selectedSessionId]);
 
   // Auto-load more when centered mode hits the sentinel or list is empty.
   useEffect(() => {
@@ -351,33 +377,32 @@ export function useSessionPicker({
       // about — share the early-return so a future tweak in either
       // branch can't drift past length 0.
       if (filteredSessions.length === 0) return;
-      if (delta === -1) {
-        setSelectedIndex((prev) => {
-          const newIndex = Math.max(0, prev - 1);
-          if (!centerSelection && newIndex < followScrollOffset) {
-            setFollowScrollOffset(newIndex);
-          }
-          return newIndex;
-        });
-        return;
+      const currentIndex = getSelectedSessionIndex(
+        filteredSessions,
+        selectedSessionIdRef.current,
+      );
+      const newIndex = Math.min(
+        filteredSessions.length - 1,
+        Math.max(0, currentIndex + delta),
+      );
+      if (!centerSelection && newIndex < followScrollOffset) {
+        setFollowScrollOffset(newIndex);
+      } else if (
+        !centerSelection &&
+        newIndex >= followScrollOffset + maxVisibleItems
+      ) {
+        setFollowScrollOffset(newIndex - maxVisibleItems + 1);
       }
-      setSelectedIndex((prev) => {
-        const newIndex = Math.min(filteredSessions.length - 1, prev + 1);
-        if (
-          !centerSelection &&
-          newIndex >= followScrollOffset + maxVisibleItems
-        ) {
-          setFollowScrollOffset(newIndex - maxVisibleItems + 1);
-        }
-        if (!centerSelection && newIndex >= filteredSessions.length - 3) {
-          void loadMoreSessions();
-        }
-        return newIndex;
-      });
+      if (!centerSelection && newIndex >= filteredSessions.length - 3) {
+        void loadMoreSessions();
+      }
+      const nextSessionId = filteredSessions[newIndex]?.sessionId;
+      selectedSessionIdRef.current = nextSessionId;
+      setSelectedSessionId(nextSessionId);
     },
     [
       centerSelection,
-      filteredSessions.length,
+      filteredSessions,
       followScrollOffset,
       loadMoreSessions,
       maxVisibleItems,
@@ -390,6 +415,10 @@ export function useSessionPicker({
       // callback only runs in list/search modes — no inline guard
       // needed.
       const { name, sequence, ctrl } = key;
+      const currentSelectedIndex = getSelectedSessionIndex(
+        filteredSessions,
+        selectedSessionIdRef.current,
+      );
 
       if (ctrl && name === 'c') {
         onCancel();
@@ -416,7 +445,7 @@ export function useSessionPicker({
           // Order by the full session list so the receiver can present
           // "Deleted N sessions" feedback in display order, even for
           // items that were filtered out at commit time.
-          const orderedIds = sessionState.sessions
+          const orderedIds = allSessions
             .map((s) => s.sessionId)
             .filter((id) => checkedIds.has(id) && !disabledIdSet.has(id));
           if (orderedIds.length > 0) {
@@ -429,12 +458,12 @@ export function useSessionPicker({
           // footer's "N selected" hint promised.
           return;
         }
-        const session = filteredSessions[selectedIndex];
+        const session = filteredSessions[currentSelectedIndex];
         // Disabled rows render dimmed with a "cannot delete" hint; honor
         // that here so a stray Enter on the active session doesn't close
         // the dialog and leave the receiver to bounce back with an error.
         if (session && !disabledIdSet.has(session.sessionId)) {
-          onSelect(session.sessionId);
+          onSelect(session.sessionId, session);
         }
         return;
       }
@@ -459,7 +488,7 @@ export function useSessionPicker({
         if (
           delta === -1 &&
           filteredSessions.length > 0 &&
-          selectedIndex === 0
+          currentSelectedIndex === 0
         ) {
           setViewMode('search');
           return;
@@ -507,14 +536,14 @@ export function useSessionPicker({
       if (name === 'space') {
         // The constructor invariant ensures at most one of these is on.
         if (enableMultiSelect) {
-          const session = filteredSessions[selectedIndex];
+          const session = filteredSessions[currentSelectedIndex];
           if (session) {
             toggleChecked(session.sessionId);
           }
           return;
         }
         if (enablePreview) {
-          const session = filteredSessions[selectedIndex];
+          const session = filteredSessions[currentSelectedIndex];
           if (session) {
             setPreviewSessionId(session.sessionId);
             setViewMode('preview');
@@ -569,4 +598,65 @@ export function useSessionPicker({
     searchQuery,
     isSearchActive: viewMode === 'search',
   };
+}
+
+function getSelectedSessionIndex(
+  sessions: SessionListItem[],
+  sessionId: string | undefined,
+): number {
+  if (sessions.length === 0) return 0;
+  const index = sessions.findIndex(
+    (session) => session.sessionId === sessionId,
+  );
+  return index >= 0 ? index : 0;
+}
+
+function mergeSessionItems(
+  primary: SessionListItem[],
+  extra: SessionListItem[],
+): SessionListItem[] {
+  if (extra.length === 0) return primary;
+  const byId = new Map(primary.map((session) => [session.sessionId, session]));
+  for (const session of extra) {
+    const existing = byId.get(session.sessionId);
+    byId.set(
+      session.sessionId,
+      existing ? mergeSessionItem(existing, session) : session,
+    );
+  }
+  return Array.from(byId.values()).sort(
+    (left, right) => right.mtime - left.mtime,
+  );
+}
+
+function mergeSessionItem(
+  existing: SessionListItem,
+  incoming: SessionListItem,
+): SessionListItem {
+  const manualTitleItem =
+    existing.titleSource === 'manual'
+      ? existing
+      : incoming.titleSource === 'manual'
+        ? incoming
+        : undefined;
+  const merged = {
+    ...existing,
+    ...incoming,
+    prompt: existing.prompt || incoming.prompt,
+    customTitle:
+      manualTitleItem?.customTitle ??
+      existing.customTitle ??
+      incoming.customTitle,
+    titleSource:
+      manualTitleItem?.titleSource ??
+      existing.titleSource ??
+      incoming.titleSource,
+    gitBranch: existing.gitBranch ?? incoming.gitBranch,
+    filePath: existing.filePath || incoming.filePath,
+    messageCount: existing.messageCount ?? incoming.messageCount,
+    parentSessionId: existing.parentSessionId ?? incoming.parentSessionId,
+    isArchived: existing.isArchived ?? incoming.isArchived,
+    mtime: Math.max(existing.mtime, incoming.mtime),
+  };
+  return merged;
 }

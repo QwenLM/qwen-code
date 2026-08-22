@@ -36,6 +36,7 @@ const mockEnsureAgentViewSupervisor = vi.hoisted(() =>
   vi.fn(async () => ({
     status: vi.fn(async () => ({ pid: 123 })),
     list: vi.fn(async () => []),
+    subscribe: vi.fn(() => ({ dispose: vi.fn() })),
     dispatch: vi.fn(async () => ({ sessionId: 'session-1' })),
     attach: vi.fn(async () => ({ attached: true })),
     logs: vi.fn(async () => ({ output: '' })),

@@ -422,7 +422,10 @@ describe('SessionPicker', () => {
       stdin.write('\r');
       await flush();
 
-      expect(onSelect).toHaveBeenCalledWith('selected-session');
+      expect(onSelect).toHaveBeenCalledWith(
+        'selected-session',
+        expect.objectContaining({ sessionId: 'selected-session' }),
+      );
     });
 
     it('should cancel on Escape', async () => {
@@ -460,6 +463,27 @@ describe('SessionPicker', () => {
   });
 
   describe('Display', () => {
+    it('sanitizes managed session titles before rendering', async () => {
+      const session = Object.assign(createMockSession(), {
+        agentViewManaged: true,
+        customTitle: '\u001b]0;spoof\u0007first\nsecond',
+      });
+      const { lastFrame } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SessionPicker
+            sessionService={createMockSessionService([session]) as never}
+            onSelect={vi.fn()}
+            onCancel={vi.fn()}
+          />
+        </KeypressProvider>,
+      );
+
+      await flush();
+
+      expect(lastFrame()).toContain('first second');
+      expect(lastFrame()).not.toContain('spoof');
+    });
+
     it('should show session metadata', async () => {
       const sessions = [
         createMockSession({
@@ -489,6 +513,33 @@ describe('SessionPicker', () => {
       expect(output).toContain('Test prompt text');
       expect(output).toContain('5 messages');
       expect(output).toContain('feature-branch');
+    });
+
+    it('keeps long Agent View metadata within one item line', async () => {
+      const session = Object.assign(createMockSession(), {
+        agentViewManaged: true,
+        agentViewLastResult: 'x'.repeat(300),
+        messageCount: undefined,
+        gitBranch: undefined,
+      });
+      const { lastFrame } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SessionPicker
+            sessionService={createMockSessionService([session]) as never}
+            onSelect={vi.fn()}
+            onCancel={vi.fn()}
+          />
+        </KeypressProvider>,
+      );
+
+      await flush();
+
+      const lines = (lastFrame() ?? '').split('\n');
+      const promptLine = lines.findIndex((line) =>
+        line.includes('Test prompt'),
+      );
+      expect(promptLine).toBeGreaterThanOrEqual(0);
+      expect(lines[promptLine + 1]).toMatch(/just now · bg/);
     });
 
     it('renders the metadata line cleanly when messageCount is undefined', async () => {
@@ -887,7 +938,10 @@ describe('SessionPicker', () => {
       await flush();
       stdin.write('\r'); // Enter
       await flush();
-      expect(onSelect).toHaveBeenCalledWith('s1');
+      expect(onSelect).toHaveBeenCalledWith(
+        's1',
+        expect.objectContaining({ sessionId: 's1' }),
+      );
     });
 
     it('without enablePreview, Space is a no-op and footer omits the hint', async () => {
@@ -934,7 +988,10 @@ describe('SessionPicker', () => {
       // unchanged), not be eaten by a phantom preview.
       stdin.write('\r');
       await flush();
-      expect(onSelect).toHaveBeenCalledWith('s1');
+      expect(onSelect).toHaveBeenCalledWith(
+        's1',
+        expect.objectContaining({ sessionId: 's1' }),
+      );
       expect(service.loadSession).not.toHaveBeenCalled();
     });
   });

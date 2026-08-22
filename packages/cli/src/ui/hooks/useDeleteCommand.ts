@@ -9,6 +9,11 @@ import type { Config } from '@qwen-code/qwen-code-core';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import { t } from '../../i18n/index.js';
 import { fireSessionDeleteHook } from '../../hooks/session-delete-hook.js';
+import {
+  isManagedAgentViewDeleteBlocked,
+  MANAGED_AGENT_VIEW_DELETE_MESSAGE,
+  releaseExitedManagedSessionForContinue,
+} from '../../startup/agent-view-resume-guard.js';
 
 export interface UseDeleteCommandOptions {
   config: Config | null;
@@ -65,6 +70,29 @@ export function useDeleteCommand(
           {
             type: 'info',
             text: t('Cannot delete the current active session.'),
+          },
+          Date.now(),
+        );
+        return;
+      }
+
+      // A live managed Agent View session's transcript is being written by
+      // its worker; deleting it mid-run destroys the running agent's state.
+      if (await isManagedAgentViewDeleteBlocked(sessionId)) {
+        addItem?.(
+          {
+            type: 'info',
+            text: MANAGED_AGENT_VIEW_DELETE_MESSAGE,
+          },
+          Date.now(),
+        );
+        return;
+      }
+      if (!(await releaseExitedManagedSessionForContinue(sessionId))) {
+        addItem?.(
+          {
+            type: 'error',
+            text: t('Failed to release Agent View session before deletion.'),
           },
           Date.now(),
         );
@@ -151,18 +179,45 @@ export function useDeleteCommand(
           );
         }
 
+        // Skip live managed Agent View sessions: their transcripts are
+        // being written by running workers and must not be removed mid-run.
+        const deletable: string[] = [];
+        let blockedManaged = 0;
+        for (const id of filtered) {
+          if (
+            (await isManagedAgentViewDeleteBlocked(id)) ||
+            !(await releaseExitedManagedSessionForContinue(id))
+          ) {
+            blockedManaged++;
+          } else {
+            deletable.push(id);
+          }
+        }
+        if (blockedManaged > 0) {
+          addItem?.(
+            {
+              type: 'info',
+              text: MANAGED_AGENT_VIEW_DELETE_MESSAGE,
+            },
+            Date.now(),
+          );
+        }
+        if (deletable.length === 0) {
+          return;
+        }
+
         addItem?.(
           {
             type: 'info',
             text: t('Deleting {{count}} session(s)...', {
-              count: String(filtered.length),
+              count: String(deletable.length),
             }),
           },
           Date.now(),
         );
 
         const sessionService = config.getSessionService();
-        const result = await sessionService.removeSessions(filtered);
+        const result = await sessionService.removeSessions(deletable);
 
         for (const sessionId of result.removed) {
           fireSessionDeleteHook(config, sessionId);

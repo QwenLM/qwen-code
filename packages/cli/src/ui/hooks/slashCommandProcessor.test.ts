@@ -795,6 +795,40 @@ describe('useSlashCommandProcessor', () => {
       expect(actions.detachAgentViewSession).toHaveBeenCalledTimes(1);
     });
 
+    it('shows agent view detach failures in history', async () => {
+      const command = createTestCommand({
+        name: 'background',
+        action: vi.fn().mockResolvedValue({ type: 'agent_view_detach' }),
+      });
+      const actions = createMockActions();
+      actions.detachAgentViewSession = vi
+        .fn()
+        .mockRejectedValue(new Error('supervisor unavailable'));
+      const result = setupProcessorHook(
+        [command],
+        [],
+        [],
+        vi.fn(),
+        mockSettings,
+        undefined,
+        { current: true },
+        actions,
+      );
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/background');
+      });
+
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.ERROR,
+          text: 'supervisor unavailable',
+        }),
+        expect.any(Number),
+      );
+    });
+
     it.each([
       ['/auth status', 'auth', ['connect', 'login'], 'auth'],
       ['/connect', 'auth', ['connect', 'login'], 'auth'],

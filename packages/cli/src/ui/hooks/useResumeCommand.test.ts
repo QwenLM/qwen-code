@@ -82,13 +82,19 @@ vi.mock('../utils/resumeHistoryUtils.js', async (importOriginal) => {
   };
 });
 
+vi.mock('../utils/restoreGoal.js', () => ({
+  restoreGoalFromHistory: vi.fn(() => ({ restored: false })),
+}));
+
 const mockIsManagedAgentViewResumeBlocked = vi.hoisted(() =>
   vi.fn(async () => false),
 );
 
 vi.mock('../../startup/agent-view-resume-guard.js', () => ({
   isManagedAgentViewResumeBlocked: mockIsManagedAgentViewResumeBlocked,
+  isAgentViewWorkerResumeCommandBlocked: vi.fn(() => false),
   MANAGED_AGENT_VIEW_RESUME_MESSAGE: 'managed session message',
+  AGENT_VIEW_WORKER_RESUME_MESSAGE: 'worker resume message',
 }));
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {

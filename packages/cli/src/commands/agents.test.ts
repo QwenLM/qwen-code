@@ -7,13 +7,52 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import yargs, { type Argv } from 'yargs';
 import * as path from 'node:path';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { Storage } from '@qwen-code/qwen-code-core';
+import type { AgentViewSessionSnapshot } from '../agent-view/protocol.js';
+import type { LoadedSettings } from '../config/settings.js';
 import {
   agentsCommand,
+  agentsInteractiveSession,
   agentsListCommand,
   handleAgentViewBackgroundPrompt,
+  runAgentsInteractiveSession,
 } from './agents.js';
 
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
+const mockWriteStderrLine = vi.hoisted(() => vi.fn());
+const mockLoadSettings = vi.hoisted(() =>
+  vi.fn(
+    () =>
+      ({
+        merged: {
+          security: { auth: { selectedType: 'openai' } },
+          model: { name: 'settings-model' },
+          modelProviders: {
+            idealab: [{ id: 'settings-model' }],
+          },
+          env: {},
+        },
+      }) as unknown as LoadedSettings,
+  ),
+);
+const mockGetCliVersion = vi.hoisted(() => vi.fn(async () => 'test-version'));
+const mockShowResumeSessionPickerItem = vi.hoisted(() =>
+  vi.fn(
+    async () =>
+      undefined as
+        | {
+            sessionId: string;
+            cwd: string;
+            startTime: string;
+            mtime: number;
+            prompt: string;
+            filePath: string;
+          }
+        | undefined,
+  ),
+);
 const mockSupervisor = vi.hoisted(() => ({
   list: vi.fn(async () => [
     {
@@ -42,6 +81,13 @@ const mockSupervisor = vi.hoisted(() => ({
         queuedPromptCount: 2,
         lastActivityAt: '2026-07-17T09:00:00.000Z',
         capabilities: [],
+      },
+      worker: {
+        schemaVersion: 1,
+        protocolVersion: 1,
+        platform: 'darwin',
+        recentOutputBytes: 0,
+        lastHeartbeatAt: '2026-07-17T09:00:00.000Z',
       },
       rosterEntry: {
         sessionId: 'session-1',
@@ -88,7 +134,48 @@ const mockSupervisor = vi.hoisted(() => ({
       },
     },
   ]),
+  subscribe: vi.fn(() => ({ dispose: vi.fn() })),
   dispatch: vi.fn(async () => ({ sessionId: 'session-2', state: 'created' })),
+  adopt: vi.fn(async () => ({ sessionId: 'session-resume', adopted: true })),
+  attach: vi.fn(async () => ({ attached: true })),
+  peek: vi.fn(async () => ({
+    sessionId: 'session-1',
+    state: {
+      schemaVersion: 1,
+      sessionId: 'session-1',
+      ownership: 'managed',
+      sessionState: 'needs_input',
+      processState: 'alive',
+      attachState: 'detached',
+      projectCwd: '/tmp/workspace',
+      originalCwd: '/tmp/workspace',
+      activeCwd: '/tmp/workspace',
+      createdAt: '2026-07-17T09:00:00.000Z',
+      updatedAt: '2026-07-17T09:00:00.000Z',
+      worktree: { mode: 'none' },
+    },
+    activity: {
+      schemaVersion: 1,
+      waitingFor: 'permission',
+      summary: 'write tests',
+      lastActivityAt: '2026-07-17T09:00:00.000Z',
+      capabilities: [],
+    },
+    worker: {
+      schemaVersion: 1,
+      protocolVersion: 1,
+      platform: 'darwin',
+      recentOutputBytes: 0,
+      workerPid: 123,
+    },
+    live: true,
+  })),
+  send: vi.fn(async () => ({ sent: true })),
+  answer: vi.fn(async () => ({ answered: true })),
+  pin: vi.fn(async () => ({ pinned: true })),
+  rename: vi.fn(async () => ({ displayName: 'Build Fix' })),
+  stop: vi.fn(async () => ({ stopped: true })),
+  remove: vi.fn(async () => ({ removed: true })),
 }));
 const mockEnsureAgentViewSupervisor = vi.hoisted(() =>
   vi.fn(async () => mockSupervisor),
@@ -96,10 +183,27 @@ const mockEnsureAgentViewSupervisor = vi.hoisted(() =>
 
 vi.mock('../utils/stdioHelpers.js', () => ({
   writeStdoutLine: mockWriteStdoutLine,
+  writeStderrLine: mockWriteStderrLine,
 }));
 
 vi.mock('../agent-view/supervisor-runner.js', () => ({
   ensureAgentViewSupervisor: mockEnsureAgentViewSupervisor,
+}));
+
+vi.mock('../config/settings.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../config/settings.js')>();
+  return {
+    ...actual,
+    loadSettings: mockLoadSettings,
+  };
+});
+
+vi.mock('../utils/version.js', () => ({
+  getCliVersion: mockGetCliVersion,
+}));
+
+vi.mock('../ui/components/StandaloneSessionPicker.js', () => ({
+  showResumeSessionPickerItem: mockShowResumeSessionPickerItem,
 }));
 
 vi.mock('../agent-view/feature.js', () => ({
@@ -125,13 +229,14 @@ function buildParser(): Argv<AgentsArgs> {
 describe('agents command', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    process.exitCode = undefined;
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  it('has the command definition', () => {
+  it('has the Phase 1 command definition', () => {
     expect(agentsCommand.command).toBe('agents');
     expect(agentsCommand.describe).toBe('Manage Agent View background agents');
     expect(typeof agentsCommand.builder).toBe('function');
@@ -175,14 +280,21 @@ describe('agents command', () => {
     expect(options.key['all']).toBe(true);
   });
 
-  it('prints active agents as a JSON array', async () => {
+  it('rejects --all without --json', () => {
+    expect(() => buildParser().parseSync('--all')).toThrow(
+      'qwen agents --all requires --json.',
+    );
+  });
+
+  it('prints all managed agents as a JSON array without entering interactive helper', async () => {
+    const runSpy = vi.spyOn(agentsInteractiveSession, 'run');
     const handler = agentsListCommand.handler;
     if (!handler) throw new Error('agents list command handler missing');
 
     await handler(
-      buildParser().parseSync('--cwd /tmp/workspace --json') as Parameters<
-        typeof handler
-      >[0],
+      buildParser().parseSync(
+        '--cwd /tmp/workspace --json --all',
+      ) as Parameters<typeof handler>[0],
     );
 
     const payload = JSON.parse(
@@ -213,10 +325,35 @@ describe('agents command', () => {
         attached: true,
         pinned: false,
       }),
+      expect.objectContaining({
+        sessionId: 'session-done',
+        state: 'completed',
+        processState: 'exited',
+        pinned: false,
+        attached: false,
+      }),
     ]);
     expect(mockSupervisor.list).toHaveBeenCalledWith(
       path.resolve('/tmp/workspace'),
     );
+    expect(runSpy).not.toHaveBeenCalled();
+  });
+
+  it('omits completed agents from JSON unless --all is set', async () => {
+    const handler = agentsListCommand.handler;
+    if (!handler) throw new Error('agents list command handler missing');
+
+    await handler(
+      buildParser().parseSync('--json') as Parameters<typeof handler>[0],
+    );
+
+    const payload = JSON.parse(
+      String(mockWriteStdoutLine.mock.calls[0]?.[0]),
+    ) as Array<{ sessionId: string }>;
+    expect(payload.map((session) => session.sessionId)).toEqual([
+      'session-1',
+      'session-attached',
+    ]);
   });
 
   it('lists all projects by default for JSON output', async () => {
@@ -230,40 +367,10 @@ describe('agents command', () => {
     expect(mockSupervisor.list).toHaveBeenCalledWith(undefined);
   });
 
-  it('includes completed agents in JSON output with --all', async () => {
-    const handler = agentsListCommand.handler;
-    if (!handler) throw new Error('agents list command handler missing');
-
-    await handler(
-      buildParser().parseSync(
-        '--cwd /tmp/workspace --json --all',
-      ) as Parameters<typeof handler>[0],
-    );
-
-    const payload = JSON.parse(
-      String(mockWriteStdoutLine.mock.calls[0]?.[0]),
-    ) as Array<{ sessionId: string; state: string }>;
-    expect(payload.map((agent) => agent.sessionId)).toEqual([
-      'session-1',
-      'session-attached',
-      'session-done',
-    ]);
-    expect(payload[2]).toMatchObject({
-      sessionId: 'session-done',
-      state: 'completed',
-      processState: 'exited',
-      pinned: false,
-      attached: false,
-    });
-  });
-
-  it('rejects --all without --json', async () => {
-    expect(() => buildParser().parseSync('--all')).toThrow(
-      'qwen agents --all requires --json.',
-    );
-  });
-
-  it('prints a text list when --json is not set', async () => {
+  it('runs the interactive helper when --json is not set', async () => {
+    const runSpy = vi
+      .spyOn(agentsInteractiveSession, 'run')
+      .mockResolvedValue(undefined);
     const handler = agentsListCommand.handler;
     if (!handler) throw new Error('agents list command handler missing');
 
@@ -273,13 +380,692 @@ describe('agents command', () => {
       >[0],
     );
 
-    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
-      'session-1 working alive /tmp/workspace/.qwen/worktrees/fix-tests Write Tests write tests\n' +
-        'session-attached idle alive /tmp/other-project',
+    expect(runSpy).toHaveBeenCalledOnce();
+    expect(runSpy.mock.calls[0]?.[0]).toEqual({
+      cwd: path.resolve('/tmp/workspace'),
+      listCwd: path.resolve('/tmp/workspace'),
+      supervisor: mockSupervisor,
+      renderRoster: expect.any(Function),
+      header: expect.objectContaining({
+        version: 'test-version',
+        cwd: path.resolve('/tmp/workspace'),
+        model: 'settings-model',
+        providerLabel: 'Idealab',
+      }),
+    });
+    expect(mockSupervisor.list).not.toHaveBeenCalled();
+  });
+
+  it('prints a text roster when --json is not set and stdout is not a TTY', async () => {
+    const snapshots = structuredClone(await mockSupervisor.list());
+    mockSupervisor.list.mockClear();
+    snapshots[0]!.state.activeCwd = '\u001b]0;spoof\u0007/tmp/work\nspace';
+    snapshots[0]!.activity!.summary = 'write\nmore tests';
+    mockSupervisor.list.mockResolvedValueOnce(snapshots);
+    const handler = agentsListCommand.handler;
+    if (!handler) throw new Error('agents list command handler missing');
+
+    await handler(
+      buildParser().parseSync('--cwd /tmp/workspace') as Parameters<
+        typeof handler
+      >[0],
     );
-    expect(mockSupervisor.list).toHaveBeenCalledWith(
-      path.resolve('/tmp/workspace'),
+
+    const output = String(mockWriteStdoutLine.mock.calls[0]?.[0]);
+    const lines = output.split('\n');
+    expect(lines).toHaveLength(3);
+    expect(lines[0]).toMatch(
+      /^session-1 Working alive \/tmp\/work space \S+ write more tests$/,
     );
+    expect(
+      lines.some((line) => line.startsWith('session-attached Idle alive ')),
+    ).toBe(true);
+    expect(
+      lines.some((line) => line.startsWith('session-done Completed offline ')),
+    ).toBe(true);
+    expect(output).not.toContain('spoof');
+  });
+
+  it('prints a placeholder when the non-TTY roster is empty', async () => {
+    vi.mocked(mockSupervisor.list).mockResolvedValueOnce([]);
+    const handler = agentsListCommand.handler;
+    if (!handler) throw new Error('agents list command handler missing');
+
+    await handler(
+      buildParser().parseSync('--cwd /tmp/workspace') as Parameters<
+        typeof handler
+      >[0],
+    );
+
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith('No background agents.');
+  });
+
+  it('reports non-TTY roster load failures on stderr', async () => {
+    mockSupervisor.list.mockRejectedValueOnce(
+      new Error('supervisor unavailable'),
+    );
+    const handler = agentsListCommand.handler;
+    if (!handler) throw new Error('agents list command handler missing');
+
+    await handler(
+      buildParser().parseSync('--cwd /tmp/workspace') as Parameters<
+        typeof handler
+      >[0],
+    );
+
+    expect(mockWriteStderrLine).toHaveBeenCalledWith('supervisor unavailable');
+    expect(mockWriteStdoutLine).not.toHaveBeenCalledWith(
+      'No background agents.',
+    );
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('builds rows for the roster renderer', async () => {
+    const renderRoster = vi.fn();
+
+    await runAgentsInteractiveSession({
+      cwd: '/tmp/workspace',
+      supervisor: mockSupervisor,
+      renderRoster,
+    });
+
+    expect(mockSupervisor.list).toHaveBeenCalledWith(undefined);
+    expect(renderRoster).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sessionId: 'session-1',
+          displayName: 'Write Tests',
+          pinned: true,
+          stateLabel: 'Working',
+          cwd: '/tmp/workspace/.qwen/worktrees/fix-tests',
+          summary: 'write tests',
+        }),
+      ]),
+      expect.objectContaining({
+        dispatchPrompt: expect.any(Function),
+        peekSelected: expect.any(Function),
+        sendToSession: expect.any(Function),
+        answerSession: expect.any(Function),
+        pinSession: expect.any(Function),
+        renameSession: expect.any(Function),
+        stopSession: expect.any(Function),
+        removeSession: expect.any(Function),
+        loadRows: expect.any(Function),
+        subscribeToChanges: expect.any(Function),
+      }),
+      undefined,
+      undefined,
+    );
+  });
+
+  it('reads transcript titles from the configured runtime output directory', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'agent-view-title-'));
+    const cwd = path.join(root, 'workspace');
+    const runtimeOutputDir = path.join(root, 'runtime');
+    const snapshots = structuredClone(
+      await mockSupervisor.list(),
+    ) as AgentViewSessionSnapshot[];
+    snapshots.splice(1);
+    delete snapshots[0]!.rosterEntry!.displayName;
+    snapshots[0]!.state.projectCwd = cwd;
+    snapshots[0]!.state.activeCwd = cwd;
+    snapshots[0]!.rosterEntry!.projectCwd = cwd;
+    snapshots[0]!.rosterEntry!.activeCwd = cwd;
+    const chatsDir = path.join(
+      new Storage(cwd, runtimeOutputDir).getProjectDir(),
+      'chats',
+    );
+    mkdirSync(chatsDir, { recursive: true });
+    writeFileSync(
+      path.join(chatsDir, 'session-1.jsonl'),
+      '{"type":"system","subtype":"custom_title","customTitle":"Runtime title"}\n',
+    );
+    mockSupervisor.list.mockResolvedValueOnce(snapshots as never);
+    mockLoadSettings.mockReturnValueOnce({
+      merged: {
+        security: { auth: { selectedType: 'openai' } },
+        model: { name: 'settings-model' },
+        modelProviders: {
+          idealab: [{ id: 'settings-model' }],
+        },
+        advanced: { runtimeOutputDir },
+        env: {},
+      },
+    } as unknown as LoadedSettings);
+
+    try {
+      const renderRoster = vi.fn();
+      await runAgentsInteractiveSession({
+        cwd,
+        supervisor: mockSupervisor,
+        renderRoster,
+      });
+
+      expect(renderRoster.mock.calls[0]?.[0]).toEqual([
+        expect.objectContaining({ displayName: 'Runtime title' }),
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('filters roster rows when listCwd is provided', async () => {
+    await runAgentsInteractiveSession({
+      cwd: '/tmp/workspace',
+      listCwd: '/tmp/workspace',
+      supervisor: mockSupervisor,
+      renderRoster: vi.fn(),
+    });
+
+    expect(mockSupervisor.list).toHaveBeenCalledWith('/tmp/workspace');
+  });
+
+  it('dispatches without attaching inside roster actions', async () => {
+    const calls: string[] = [];
+    const supervisor = {
+      list: vi.fn(async () => []),
+      subscribe: vi.fn(() => ({ dispose: vi.fn() })),
+      dispatch: vi.fn(async () => {
+        calls.push('dispatch');
+        return { sessionId: 'new-session' };
+      }),
+      adopt: vi.fn(),
+      attach: vi.fn(async () => {
+        calls.push('attach');
+      }),
+      peek: vi.fn(),
+      send: vi.fn(),
+      answer: vi.fn(),
+      pin: vi.fn(),
+      rename: vi.fn(),
+      stop: vi.fn(),
+      remove: vi.fn(),
+    };
+
+    await runAgentsInteractiveSession({
+      cwd: '/tmp/workspace',
+      supervisor,
+      renderRoster: async (_rows, actions) => {
+        await actions.dispatchPrompt('  write tests  ', true);
+      },
+    });
+
+    expect(supervisor.dispatch).toHaveBeenCalledWith(
+      'write tests',
+      '/tmp/workspace',
+    );
+    expect(supervisor.attach).not.toHaveBeenCalled();
+    expect(calls).toEqual(['dispatch']);
+  });
+
+  it('attaches after the roster returns an attach intent', async () => {
+    const calls: string[] = [];
+    let renderCount = 0;
+    const supervisor = {
+      list: vi.fn(async () => []),
+      subscribe: vi.fn(() => ({ dispose: vi.fn() })),
+      dispatch: vi.fn(async () => {
+        calls.push('dispatch');
+        return { sessionId: 'new-session' };
+      }),
+      adopt: vi.fn(),
+      attach: vi.fn(async () => {
+        calls.push('attach');
+      }),
+      peek: vi.fn(),
+      send: vi.fn(),
+      answer: vi.fn(),
+      pin: vi.fn(),
+      rename: vi.fn(),
+      stop: vi.fn(),
+      remove: vi.fn(),
+    };
+
+    await runAgentsInteractiveSession({
+      cwd: '/tmp/workspace',
+      supervisor,
+      renderRoster: async (_rows, actions) => {
+        renderCount += 1;
+        if (renderCount > 1) {
+          return { type: 'exit' };
+        }
+        const result = await actions.dispatchPrompt('write tests', true);
+        expect(result).toEqual({ sessionId: 'new-session' });
+        return { type: 'attach', sessionId: 'new-session' };
+      },
+    });
+
+    expect(supervisor.attach).toHaveBeenCalledWith('new-session');
+    expect(calls).toEqual(['dispatch', 'attach']);
+  });
+
+  it('keeps a foreground subscription alive while attaching', async () => {
+    const calls: string[] = [];
+    let renderCount = 0;
+    const dispose = vi.fn(() => {
+      calls.push('dispose');
+    });
+    const supervisor = {
+      list: vi.fn(async () => []),
+      subscribe: vi.fn(() => {
+        calls.push('subscribe');
+        return { dispose };
+      }),
+      dispatch: vi.fn(),
+      adopt: vi.fn(),
+      attach: vi.fn(async () => {
+        calls.push('attach');
+        expect(dispose).not.toHaveBeenCalled();
+      }),
+      peek: vi.fn(),
+      send: vi.fn(),
+      answer: vi.fn(),
+      pin: vi.fn(),
+      rename: vi.fn(),
+      stop: vi.fn(),
+      remove: vi.fn(),
+    };
+
+    await runAgentsInteractiveSession({
+      cwd: '/tmp/workspace',
+      supervisor,
+      renderRoster: async () => {
+        renderCount += 1;
+        return renderCount === 1
+          ? { type: 'attach', sessionId: 'session-1' }
+          : { type: 'exit' };
+      },
+    });
+
+    expect(calls).toEqual(['subscribe', 'attach', 'dispose']);
+  });
+
+  it('reopens the roster with an error panel when attach fails', async () => {
+    let renderCount = 0;
+    const supervisor = {
+      list: vi.fn(async () => []),
+      subscribe: vi.fn(() => ({ dispose: vi.fn() })),
+      dispatch: vi.fn(),
+      adopt: vi.fn(),
+      attach: vi.fn(async () => {
+        throw new Error('stale PTY host');
+      }),
+      peek: vi.fn(),
+      send: vi.fn(),
+      answer: vi.fn(),
+      pin: vi.fn(),
+      rename: vi.fn(),
+      stop: vi.fn(),
+      remove: vi.fn(),
+    };
+
+    await runAgentsInteractiveSession({
+      cwd: '/tmp/workspace',
+      supervisor,
+      renderRoster: async (_rows, _actions, initialPeekPanel) => {
+        renderCount += 1;
+        if (renderCount === 1) {
+          expect(initialPeekPanel).toBeUndefined();
+          return { type: 'attach', sessionId: 'session-1' };
+        }
+        expect(initialPeekPanel).toEqual({
+          kind: 'session',
+          sessionId: 'session-1',
+          content: 'message',
+          lines: ['stale PTY host'],
+          tone: 'error',
+        });
+        return { type: 'exit' };
+      },
+    });
+
+    expect(supervisor.attach).toHaveBeenCalledWith('session-1');
+    expect(renderCount).toBe(2);
+  });
+
+  it('renders an error panel when the initial roster load fails', async () => {
+    const supervisor = {
+      ...mockSupervisor,
+      list: vi.fn(async () => {
+        throw new Error('supervisor unavailable');
+      }),
+    };
+
+    await expect(
+      runAgentsInteractiveSession({
+        cwd: '/tmp/workspace',
+        supervisor,
+        renderRoster: async (rows, _actions, initialPeekPanel) => {
+          expect(rows).toEqual([]);
+          expect(initialPeekPanel).toEqual({
+            kind: 'message',
+            title: 'Agent View',
+            lines: ['supervisor unavailable'],
+            tone: 'error',
+          });
+          return { type: 'exit' };
+        },
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('adopts a picked history session when the roster requests resume', async () => {
+    let renderCount = 0;
+    const runtimeOutputDir = '/tmp/custom-agent-runtime';
+    const supervisor = {
+      list: vi.fn(async () => []),
+      subscribe: vi.fn(() => ({ dispose: vi.fn() })),
+      dispatch: vi.fn(),
+      adopt: vi.fn(async () => ({
+        sessionId: '123e4567-e89b-12d3-a456-426614174000',
+        adopted: true,
+      })),
+      attach: vi.fn(),
+      peek: vi.fn(async () => {
+        throw new Error(
+          'Agent View session 123e4567-e89b-12d3-a456-426614174000 is not managed.',
+        );
+      }),
+      send: vi.fn(),
+      answer: vi.fn(),
+      pin: vi.fn(),
+      rename: vi.fn(),
+      stop: vi.fn(),
+      remove: vi.fn(),
+    };
+    mockLoadSettings.mockReturnValueOnce({
+      merged: {
+        advanced: { runtimeOutputDir },
+      },
+    } as unknown as LoadedSettings);
+    mockShowResumeSessionPickerItem.mockImplementationOnce(async () => {
+      expect(Storage.getRuntimeBaseDir()).toBe(runtimeOutputDir);
+      return {
+        sessionId: '123e4567-e89b-12d3-a456-426614174000',
+        cwd: '/tmp/history-workspace',
+        startTime: '2026-07-17T08:00:00.000Z',
+        mtime: Date.parse('2026-07-17T08:00:00.000Z'),
+        prompt: 'historical prompt',
+        filePath: '/tmp/history-workspace/.qwen/chats/session.jsonl',
+      };
+    });
+
+    await runAgentsInteractiveSession({
+      cwd: '/tmp/workspace',
+      supervisor,
+      renderRoster: async (_rows, _actions, initialPeekPanel) => {
+        renderCount += 1;
+        if (renderCount === 1) {
+          return { type: 'resume' };
+        }
+        expect(initialPeekPanel).toEqual({
+          kind: 'session',
+          sessionId: '123e4567-e89b-12d3-a456-426614174000',
+          content: 'message',
+          lines: ['Session added to Agent View.'],
+        });
+        return { type: 'exit' };
+      },
+    });
+
+    expect(mockShowResumeSessionPickerItem).toHaveBeenCalledWith(
+      '/tmp/workspace',
+      undefined,
+      {
+        includeAgentViewSessions: false,
+        allowManagedAgentViewSelection: true,
+      },
+    );
+    expect(supervisor.dispatch).not.toHaveBeenCalled();
+    expect(supervisor.adopt).toHaveBeenCalledWith({
+      sessionId: '123e4567-e89b-12d3-a456-426614174000',
+      projectCwd: path.resolve('/tmp/history-workspace'),
+      activeCwd: path.resolve('/tmp/history-workspace'),
+      terminal: {
+        columns: expect.any(Number),
+        rows: expect.any(Number),
+      },
+    });
+  });
+
+  it('does not re-adopt a history session that is already managed', async () => {
+    mockShowResumeSessionPickerItem.mockResolvedValueOnce({
+      sessionId: 'managed-session',
+      cwd: '/tmp/history-workspace',
+      startTime: '2026-07-17T08:00:00.000Z',
+      mtime: Date.parse('2026-07-17T08:00:00.000Z'),
+      prompt: 'historical prompt',
+      filePath: '/tmp/history-workspace/.qwen/chats/session.jsonl',
+    });
+    let renderCount = 0;
+
+    await runAgentsInteractiveSession({
+      cwd: '/tmp/workspace',
+      supervisor: mockSupervisor,
+      renderRoster: async (_rows, _actions, initialPeekPanel) => {
+        renderCount += 1;
+        if (renderCount === 1) return { type: 'resume' };
+        expect(initialPeekPanel).toEqual({
+          kind: 'session',
+          sessionId: 'managed-session',
+          content: 'message',
+          lines: ['Session is already managed by Agent View.'],
+        });
+        return { type: 'exit' };
+      },
+    });
+
+    expect(mockSupervisor.adopt).not.toHaveBeenCalled();
+  });
+
+  it('handles an already-managed result returned by adopt', async () => {
+    mockShowResumeSessionPickerItem.mockResolvedValueOnce({
+      sessionId: 'managed-session',
+      cwd: '/tmp/history-workspace',
+      startTime: '2026-07-17T08:00:00.000Z',
+      mtime: Date.parse('2026-07-17T08:00:00.000Z'),
+      prompt: 'historical prompt',
+      filePath: '/tmp/history-workspace/.qwen/chats/session.jsonl',
+    });
+    mockSupervisor.peek.mockRejectedValueOnce(
+      new Error('Agent View session managed-session is not managed.'),
+    );
+    mockSupervisor.adopt.mockResolvedValueOnce({
+      sessionId: 'managed-session',
+      adopted: false,
+      alreadyManaged: true,
+    } as never);
+    let renderCount = 0;
+
+    await runAgentsInteractiveSession({
+      cwd: '/tmp/workspace',
+      supervisor: mockSupervisor,
+      renderRoster: async (_rows, _actions, initialPeekPanel) => {
+        renderCount += 1;
+        if (renderCount === 1) return { type: 'resume' };
+        expect(initialPeekPanel).toEqual({
+          kind: 'session',
+          sessionId: 'managed-session',
+          content: 'message',
+          lines: ['Session is already managed by Agent View.'],
+        });
+        return { type: 'exit' };
+      },
+    });
+
+    expect(mockSupervisor.adopt).toHaveBeenCalledOnce();
+  });
+
+  it('does not adopt when peek fails for a transient reason', async () => {
+    mockShowResumeSessionPickerItem.mockResolvedValueOnce({
+      sessionId: 'history-session',
+      cwd: '/tmp/history-workspace',
+      startTime: '2026-07-17T08:00:00.000Z',
+      mtime: Date.parse('2026-07-17T08:00:00.000Z'),
+      prompt: 'historical prompt',
+      filePath: '/tmp/history-workspace/.qwen/chats/session.jsonl',
+    });
+    mockSupervisor.peek.mockRejectedValueOnce(new Error('daemon unavailable'));
+    let renderCount = 0;
+
+    await runAgentsInteractiveSession({
+      cwd: '/tmp/workspace',
+      supervisor: mockSupervisor,
+      renderRoster: async (_rows, _actions, initialPeekPanel) => {
+        renderCount += 1;
+        if (renderCount === 1) return { type: 'resume' };
+        expect(initialPeekPanel).toEqual({
+          kind: 'message',
+          title: 'Resume',
+          tone: 'error',
+          lines: ['daemon unavailable'],
+        });
+        return { type: 'exit' };
+      },
+    });
+
+    expect(mockSupervisor.adopt).not.toHaveBeenCalled();
+  });
+
+  it('shows adoption failures in a persistent error panel', async () => {
+    mockShowResumeSessionPickerItem.mockResolvedValueOnce({
+      sessionId: 'history-session',
+      cwd: '/tmp/history-workspace',
+      startTime: '2026-07-17T08:00:00.000Z',
+      mtime: Date.parse('2026-07-17T08:00:00.000Z'),
+      prompt: 'historical prompt',
+      filePath: '/tmp/history-workspace/.qwen/chats/session.jsonl',
+    });
+    mockSupervisor.peek.mockRejectedValueOnce(
+      new Error('Agent View session history-session is not managed.'),
+    );
+    mockSupervisor.adopt.mockRejectedValueOnce(new Error('adopt failed'));
+    let renderCount = 0;
+
+    await runAgentsInteractiveSession({
+      cwd: '/tmp/workspace',
+      supervisor: mockSupervisor,
+      renderRoster: async (_rows, _actions, initialPeekPanel) => {
+        renderCount += 1;
+        if (renderCount === 1) return { type: 'resume' };
+        expect(initialPeekPanel).toEqual({
+          kind: 'session',
+          sessionId: 'history-session',
+          content: 'message',
+          lines: ['adopt failed'],
+          tone: 'error',
+        });
+        return { type: 'exit' };
+      },
+    });
+  });
+
+  it('shows picker failures in a persistent error panel', async () => {
+    mockShowResumeSessionPickerItem.mockRejectedValueOnce(
+      new Error('cannot read session history'),
+    );
+    let renderCount = 0;
+
+    await runAgentsInteractiveSession({
+      cwd: '/tmp/workspace',
+      supervisor: mockSupervisor,
+      renderRoster: async (_rows, _actions, initialPeekPanel) => {
+        renderCount += 1;
+        if (renderCount === 1) return { type: 'resume' };
+        expect(initialPeekPanel).toEqual({
+          kind: 'message',
+          title: 'Resume',
+          lines: ['cannot read session history'],
+          tone: 'error',
+        });
+        return { type: 'exit' };
+      },
+    });
+
+    expect(renderCount).toBe(2);
+  });
+
+  it('sends and answers selected sessions through the supervisor', async () => {
+    await runAgentsInteractiveSession({
+      cwd: '/tmp/workspace',
+      supervisor: mockSupervisor,
+      renderRoster: async (_rows, actions) => {
+        await actions.sendToSession('idle-session', 'next');
+        await actions.answerSession('needs-input-session', 'yes');
+      },
+    });
+
+    expect(mockSupervisor.send).toHaveBeenCalledWith('idle-session', 'next');
+    expect(mockSupervisor.answer).toHaveBeenCalledWith(
+      'needs-input-session',
+      'yes',
+    );
+  });
+
+  it('pins and renames selected sessions through the supervisor', async () => {
+    await runAgentsInteractiveSession({
+      cwd: '/tmp/workspace',
+      supervisor: mockSupervisor,
+      renderRoster: async (_rows, actions) => {
+        await actions.pinSession('session-1');
+        await actions.renameSession('session-1', 'Build Fix');
+      },
+    });
+
+    expect(mockSupervisor.pin).toHaveBeenCalledWith('session-1');
+    expect(mockSupervisor.rename).toHaveBeenCalledWith(
+      'session-1',
+      'Build Fix',
+    );
+  });
+
+  it('stops and removes selected sessions through the supervisor', async () => {
+    await runAgentsInteractiveSession({
+      cwd: '/tmp/workspace',
+      supervisor: mockSupervisor,
+      renderRoster: async (_rows, actions) => {
+        await actions.stopSession('session-1');
+        await actions.removeSession('session-1');
+      },
+    });
+
+    expect(mockSupervisor.stop).toHaveBeenCalledWith('session-1');
+    expect(mockSupervisor.remove).toHaveBeenCalledWith('session-1');
+  });
+
+  it('peeks selected session details through the supervisor', async () => {
+    let panel;
+
+    await runAgentsInteractiveSession({
+      cwd: '/tmp/workspace',
+      supervisor: mockSupervisor,
+      renderRoster: async (_rows, actions) => {
+        panel = await actions.peekSelected('session-1');
+      },
+    });
+
+    expect(mockSupervisor.peek).toHaveBeenCalledWith('session-1');
+    expect(panel).toEqual({
+      kind: 'session',
+      sessionId: 'session-1',
+      content: 'activity',
+      lines: ['Waiting: permission', 'Summary: write tests'],
+    });
+  });
+
+  it('rejects blank prompts', async () => {
+    await expect(
+      runAgentsInteractiveSession({
+        cwd: '/tmp/workspace',
+        supervisor: mockSupervisor,
+        renderRoster: async (_rows, actions) => {
+          await actions.dispatchPrompt('   ', false);
+        },
+      }),
+    ).rejects.toThrow('Prompt cannot be empty.');
+
+    expect(mockSupervisor.dispatch).not.toHaveBeenCalled();
+    expect(mockSupervisor.attach).not.toHaveBeenCalled();
   });
 
   it('dispatches a background prompt through the supervisor', async () => {

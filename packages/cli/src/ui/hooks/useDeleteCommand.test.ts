@@ -8,6 +8,23 @@ import { act, renderHook } from '@testing-library/react';
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { useDeleteCommand } from './useDeleteCommand.js';
 import type { Config, RemoveSessionsResult } from '@qwen-code/qwen-code-core';
+import {
+  isManagedAgentViewDeleteBlocked,
+  MANAGED_AGENT_VIEW_DELETE_MESSAGE,
+  releaseExitedManagedSessionForContinue,
+} from '../../startup/agent-view-resume-guard.js';
+
+vi.mock('../../startup/agent-view-resume-guard.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import('../../startup/agent-view-resume-guard.js')
+    >();
+  return {
+    ...actual,
+    isManagedAgentViewDeleteBlocked: vi.fn(async () => false),
+    releaseExitedManagedSessionForContinue: vi.fn(async () => true),
+  };
+});
 
 function createConfig(opts: {
   currentSessionId: string;
@@ -63,6 +80,61 @@ describe('useDeleteCommand', () => {
   });
 
   describe('handleDeleteMany', () => {
+    it('skips live managed Agent View sessions and deletes the rest', async () => {
+      const guard = vi.mocked(isManagedAgentViewDeleteBlocked);
+      guard.mockResolvedValueOnce(true); // managed-id
+      guard.mockResolvedValueOnce(false); // a
+      const removeSessions = vi.fn().mockResolvedValue({
+        removed: ['a'],
+        notFound: [],
+        errors: [],
+      });
+      const { config } = createConfig({
+        currentSessionId: 'current',
+        removeSessions,
+      });
+      const addItem = vi.fn();
+      const { result } = renderHook(() =>
+        useDeleteCommand({ config, addItem }),
+      );
+
+      await act(async () => {
+        result.current.handleDeleteMany(['managed-id', 'a']);
+        await flushAsync();
+      });
+
+      expect(removeSessions).toHaveBeenCalledWith(['a']);
+      expect(releaseExitedManagedSessionForContinue).toHaveBeenCalledWith('a');
+      expect(addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'info',
+          text: MANAGED_AGENT_VIEW_DELETE_MESSAGE,
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('skips a batch item when Agent View ownership cannot be released', async () => {
+      vi.mocked(releaseExitedManagedSessionForContinue).mockResolvedValueOnce(
+        false,
+      );
+      const removeSessions = vi.fn();
+      const { config } = createConfig({
+        currentSessionId: 'current',
+        removeSessions,
+      });
+      const { result } = renderHook(() =>
+        useDeleteCommand({ config, addItem: vi.fn() }),
+      );
+
+      await act(async () => {
+        result.current.handleDeleteMany(['managed-id']);
+        await flushAsync();
+      });
+
+      expect(removeSessions).not.toHaveBeenCalled();
+    });
+
     it('removes sessions and reports the count on success', async () => {
       const removeSessions = vi.fn().mockResolvedValue({
         removed: ['a', 'b'],
@@ -588,6 +660,31 @@ describe('useDeleteCommand', () => {
   });
 
   describe('handleDelete', () => {
+    it('refuses to delete a live managed Agent View session', async () => {
+      vi.mocked(isManagedAgentViewDeleteBlocked).mockResolvedValueOnce(true);
+      const { config, sessionService } = createConfig({
+        currentSessionId: 'current',
+      });
+      const addItem = vi.fn();
+      const { result } = renderHook(() =>
+        useDeleteCommand({ config, addItem }),
+      );
+
+      await act(async () => {
+        result.current.handleDelete('managed-id');
+        await flushAsync();
+      });
+
+      expect(sessionService.removeSession).not.toHaveBeenCalled();
+      expect(addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'info',
+          text: MANAGED_AGENT_VIEW_DELETE_MESSAGE,
+        }),
+        expect.any(Number),
+      );
+    });
+
     it('fires after a successful deletion', async () => {
       const { config, hookSystem } = createConfig({
         currentSessionId: 'current',
@@ -605,6 +702,28 @@ describe('useDeleteCommand', () => {
       expect(hookSystem.fireSessionDeleteEvent).toHaveBeenCalledWith(
         'deleted-id',
       );
+      expect(releaseExitedManagedSessionForContinue).toHaveBeenCalledWith(
+        'deleted-id',
+      );
+    });
+
+    it('does not delete when Agent View ownership cannot be released', async () => {
+      vi.mocked(releaseExitedManagedSessionForContinue).mockResolvedValueOnce(
+        false,
+      );
+      const { config, sessionService } = createConfig({
+        currentSessionId: 'current',
+      });
+      const { result } = renderHook(() =>
+        useDeleteCommand({ config, addItem: vi.fn() }),
+      );
+
+      await act(async () => {
+        result.current.handleDelete('managed-id');
+        await flushAsync();
+      });
+
+      expect(sessionService.removeSession).not.toHaveBeenCalled();
     });
 
     it('does not fire when the session was not removed', async () => {

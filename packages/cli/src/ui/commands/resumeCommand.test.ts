@@ -25,12 +25,11 @@ const mockIsManagedAgentViewResumeBlocked = vi.hoisted(() =>
 );
 
 vi.mock('../../startup/agent-view-resume-guard.js', () => ({
-  AGENT_VIEW_WORKER_RESUME_MESSAGE:
-    'Resume is disabled inside an attached background agent. Detach to `qwen agents` and use `/resume` there.',
+  isManagedAgentViewResumeBlocked: mockIsManagedAgentViewResumeBlocked,
   isAgentViewWorkerResumeCommandBlocked:
     mockIsAgentViewWorkerResumeCommandBlocked,
-  isManagedAgentViewResumeBlocked: mockIsManagedAgentViewResumeBlocked,
   MANAGED_AGENT_VIEW_RESUME_MESSAGE: 'managed session message',
+  AGENT_VIEW_WORKER_RESUME_MESSAGE: 'worker resume message',
 }));
 
 describe('resumeCommand', () => {
@@ -38,6 +37,7 @@ describe('resumeCommand', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockIsManagedAgentViewResumeBlocked.mockResolvedValue(false);
     mockIsAgentViewWorkerResumeCommandBlocked.mockReturnValue(false);
     mockContext = createMockCommandContext();
   });
@@ -68,8 +68,7 @@ describe('resumeCommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'error',
-      content:
-        'Resume is disabled inside an attached background agent. Detach to `qwen agents` and use `/resume` there.',
+      content: 'worker resume message',
     });
   });
 

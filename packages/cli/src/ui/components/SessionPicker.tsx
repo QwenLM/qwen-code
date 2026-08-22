@@ -4,11 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { useEffect, useMemo, useState } from 'react';
 import { Box, Text } from 'ink';
-import type {
-  SessionListItem as SessionData,
-  SessionService,
-} from '@qwen-code/qwen-code-core';
+import type { SessionService } from '@qwen-code/qwen-code-core';
 import { theme } from '../semantic-colors.js';
 import { useSessionPicker } from '../hooks/useSessionPicker.js';
 import { formatRelativeTime } from '../utils/formatters.js';
@@ -16,13 +14,27 @@ import {
   formatMessageCount,
   truncateText,
 } from '../utils/sessionPickerUtils.js';
+import {
+  cleanSingleLineText,
+  getCachedStringWidth,
+  stripUnsafeCharacters,
+} from '../utils/textUtils.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { t } from '../../i18n/index.js';
 import { SessionPreview } from './SessionPreview.js';
+import { useKeypress } from '../hooks/useKeypress.js';
+import {
+  listAgentViewProjectResumeSessions,
+  listManagedAgentViewResumeSessions,
+  type AgentViewResumeSessionListItem,
+} from '../../startup/agent-view-resume-sessions.js';
+import { MANAGED_AGENT_VIEW_RESUME_MESSAGE } from '../../startup/agent-view-resume-guard.js';
+
+type SessionData = AgentViewResumeSessionListItem;
 
 export interface SessionPickerProps {
   sessionService: SessionService | null;
-  onSelect: (sessionId: string) => void;
+  onSelect: (sessionId: string, session?: SessionData) => void;
   onCancel: () => void;
   currentBranch?: string;
 
@@ -42,6 +54,9 @@ export interface SessionPickerProps {
    * When provided, skips initial load and disables pagination.
    */
   initialSessions?: SessionData[];
+  excludeSessionIds?: readonly string[];
+  includeAgentViewSessions?: boolean;
+  allowManagedAgentViewSelection?: boolean;
 
   /**
    * Enable Space-to-preview. Off by default — preview's Enter shortcut
@@ -130,6 +145,26 @@ function SessionListItemView({
     typeof session.messageCount === 'number'
       ? formatMessageCount(session.messageCount)
       : undefined;
+  const metadataSuffix = [
+    timeAgo,
+    session.agentViewManaged ? 'bg' : undefined,
+    messageText,
+    session.gitBranch,
+    isDisabled ? disabledHint : undefined,
+  ]
+    .filter((value): value is string => Boolean(value))
+    .join(' · ');
+  const agentViewMetaWidth = Math.max(
+    0,
+    maxPromptWidth - getCachedStringWidth(metadataSuffix) - 3,
+  );
+  const agentViewMeta =
+    session.agentViewManaged && session.agentViewLastResult
+      ? truncateText(
+          cleanSingleLineText(session.agentViewLastResult),
+          agentViewMetaWidth,
+        )
+      : undefined;
 
   const showUpIndicator = isFirst && showScrollUp;
   const showDownIndicator = isLast && showScrollDown;
@@ -142,7 +177,9 @@ function SessionListItemView({
         ? prefixChars.scrollDown
         : prefixChars.normal;
 
-  const promptText = session.customTitle || session.prompt || '(empty prompt)';
+  const promptText = cleanSingleLineText(
+    session.customTitle || session.prompt || '(empty prompt)',
+  );
   // Reserve space for the checkbox when multi-select is active so the
   // prompt column doesn't shift between modes.
   const checkboxWidth = isChecked === undefined ? 0 : 4; // "[x] "
@@ -204,10 +241,8 @@ function SessionListItemView({
       </Box>
       <Box paddingLeft={2}>
         <Text color={theme.text.secondary}>
-          {timeAgo}
-          {messageText !== undefined && ` · ${messageText}`}
-          {session.gitBranch && ` · ${session.gitBranch}`}
-          {isDisabled && disabledHint ? ` · ${disabledHint}` : ''}
+          {agentViewMeta ? `${agentViewMeta} · ` : ''}
+          {metadataSuffix}
         </Text>
       </Box>
     </Box>
@@ -223,13 +258,55 @@ export function SessionPicker(props: SessionPickerProps) {
     title,
     centerSelection = true,
     initialSessions,
+    excludeSessionIds,
     enablePreview = false,
     enableMultiSelect = false,
     onConfirmMulti,
     disabledIds,
+    includeAgentViewSessions = false,
+    allowManagedAgentViewSelection = false,
   } = props;
+  const [agentViewSessions, setAgentViewSessions] = useState<SessionData[]>([]);
+  const [managedPreviewSessionId, setManagedPreviewSessionId] = useState<
+    string | undefined
+  >();
+  const managedSessionIds = useMemo(
+    () =>
+      new Set([
+        ...agentViewSessions
+          .filter((session) => session.agentViewManaged)
+          .map((session) => session.sessionId),
+      ]),
+    [agentViewSessions],
+  );
+
+  useEffect(() => {
+    if (!includeAgentViewSessions) {
+      setAgentViewSessions([]);
+      return;
+    }
+    let disposed = false;
+    void Promise.all([
+      listAgentViewProjectResumeSessions().catch(() => []),
+      listManagedAgentViewResumeSessions().catch(() => []),
+    ]).then(([projectSessions, managedSessions]) => {
+      if (!disposed) {
+        setAgentViewSessions([...projectSessions, ...managedSessions]);
+      }
+    });
+    return () => {
+      disposed = true;
+    };
+  }, [includeAgentViewSessions]);
 
   const { columns: width, rows: height } = useTerminalSize();
+  const handleSelect = (sessionId: string, session?: SessionData) => {
+    if (!allowManagedAgentViewSelection && managedSessionIds.has(sessionId)) {
+      setManagedPreviewSessionId(sessionId);
+      return;
+    }
+    onSelect(sessionId, session);
+  };
 
   // Calculate box width (marginX={2})
   const boxWidth = width - 4;
@@ -249,17 +326,34 @@ export function SessionPicker(props: SessionPickerProps) {
   const picker = useSessionPicker({
     sessionService,
     currentBranch,
-    onSelect,
+    onSelect: handleSelect,
     onCancel,
     maxVisibleItems,
     centerSelection,
     initialSessions,
-    isActive: true,
+    // Gate picker input while the managed-session preview overlay is open.
+    isActive: managedPreviewSessionId === undefined,
     enablePreview,
     enableMultiSelect,
     onConfirmMulti,
     disabledIds,
+    extraSessions: agentViewSessions,
+    excludeSessionIds,
   });
+
+  if (managedPreviewSessionId) {
+    const session = picker.filteredSessions.find(
+      (item) => item.sessionId === managedPreviewSessionId,
+    );
+    if (isAgentViewManagedSession(session)) {
+      return (
+        <ManagedAgentViewSessionPreview
+          session={session}
+          onExit={() => setManagedPreviewSessionId(undefined)}
+        />
+      );
+    }
+  }
 
   if (
     enablePreview &&
@@ -270,16 +364,33 @@ export function SessionPicker(props: SessionPickerProps) {
     const previewed = picker.filteredSessions.find(
       (s) => s.sessionId === picker.previewSessionId,
     );
+    if (isAgentViewManagedSession(previewed)) {
+      return (
+        <ManagedAgentViewSessionPreview
+          session={previewed}
+          onExit={picker.exitPreview}
+        />
+      );
+    }
     return (
       <SessionPreview
         sessionService={sessionService}
         sessionId={picker.previewSessionId}
-        sessionTitle={previewed?.customTitle ?? previewed?.prompt ?? undefined}
+        sessionTitle={
+          previewed?.customTitle || previewed?.prompt
+            ? cleanSingleLineText(
+                previewed.customTitle || previewed.prompt || '',
+              )
+            : undefined
+        }
         messageCount={previewed?.messageCount}
         mtime={previewed?.mtime}
         gitBranch={previewed?.gitBranch}
         onExit={picker.exitPreview}
-        onResume={onSelect}
+        // Pass the resolved list item: resume consumers (e.g. the roster
+        // adopt flow) read session.cwd, and an id-only resume would force
+        // them to fabricate the cwd — wrong for worktree sessions.
+        onResume={(sessionId) => onSelect(sessionId, previewed)}
       />
     );
   }
@@ -474,4 +585,53 @@ export function SessionPicker(props: SessionPickerProps) {
       </Box>
     </Box>
   );
+}
+
+function ManagedAgentViewSessionPreview({
+  session,
+  onExit,
+}: {
+  session: SessionData;
+  onExit: () => void;
+}): React.JSX.Element {
+  useKeypress(
+    (key) => {
+      if (
+        key.name === 'escape' ||
+        key.name === 'return' ||
+        (key.ctrl && key.name === 'c')
+      ) {
+        onExit();
+      }
+    },
+    { isActive: true },
+  );
+
+  return (
+    <Box
+      flexDirection="column"
+      borderStyle="round"
+      borderColor={theme.border.default}
+      paddingX={1}
+    >
+      <Text bold>
+        {cleanSingleLineText(session.customTitle ?? session.prompt ?? '')}
+      </Text>
+      {session.agentViewLastResult ? (
+        <Text color={theme.text.secondary}>
+          {stripUnsafeCharacters(session.agentViewLastResult)}
+        </Text>
+      ) : null}
+      <Text color={theme.text.secondary}>
+        {MANAGED_AGENT_VIEW_RESUME_MESSAGE}
+      </Text>
+      <Text color={theme.text.secondary}>Esc to return</Text>
+    </Box>
+  );
+}
+
+function isAgentViewManagedSession(
+  session: SessionData | undefined,
+): session is SessionData {
+  return Boolean(session?.agentViewManaged);
 }

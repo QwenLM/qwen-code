@@ -18,6 +18,7 @@ import { SettingsContext } from '../contexts/SettingsContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { SessionPicker } from './SessionPicker.js';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
+import { listManagedAgentViewResumeSessions } from '../../startup/agent-view-resume-sessions.js';
 
 /**
  * `--resume` runs this picker BEFORE `loadCliConfig`, so no real Config /
@@ -46,10 +47,13 @@ const PREVIEW_SETTINGS_STUB = {
 
 interface StandalonePickerScreenProps {
   sessionService: SessionService;
-  onSelect: (sessionId: string) => void;
+  onSelect: (session: SessionListItem) => void;
   onCancel: () => void;
   currentBranch?: string;
   initialSessions?: SessionListItem[];
+  excludeSessionIds?: readonly string[];
+  includeAgentViewSessions?: boolean;
+  allowManagedAgentViewSelection?: boolean;
 }
 
 function StandalonePickerScreen({
@@ -58,6 +62,9 @@ function StandalonePickerScreen({
   onCancel,
   currentBranch,
   initialSessions,
+  excludeSessionIds,
+  includeAgentViewSessions = true,
+  allowManagedAgentViewSelection,
 }: StandalonePickerScreenProps): React.JSX.Element {
   const { exit } = useApp();
   const [isExiting, setIsExiting] = useState(false);
@@ -76,8 +83,8 @@ function StandalonePickerScreen({
       <SettingsContext.Provider value={PREVIEW_SETTINGS_STUB}>
         <SessionPicker
           sessionService={sessionService}
-          onSelect={(id) => {
-            onSelect(id);
+          onSelect={(id, session) => {
+            onSelect(session ?? makeFallbackSessionItem(id, sessionService));
             handleExit();
           }}
           onCancel={() => {
@@ -87,7 +94,12 @@ function StandalonePickerScreen({
           currentBranch={currentBranch}
           centerSelection={true}
           initialSessions={initialSessions}
+          excludeSessionIds={excludeSessionIds}
           enablePreview
+          includeAgentViewSessions={
+            includeAgentViewSessions && initialSessions === undefined
+          }
+          allowManagedAgentViewSelection={allowManagedAgentViewSelection}
         />
       </SettingsContext.Provider>
     </ConfigContext.Provider>
@@ -98,8 +110,10 @@ function StandalonePickerScreen({
  * Clears the terminal screen.
  */
 function clearScreen(): void {
-  // Move cursor to home position and clear screen
-  process.stdout.write('\x1b[2J\x1b[H');
+  // Reset terminal state before fullscreen picker rendering. The explicit
+  // alt-screen exit prevents stale alternate-buffer content from surfacing
+  // when Agent View hands off between Ink apps.
+  process.stdout.write('\x1b[0m\x1b[?25h\x1b[?1049l\x1b[2J\x1b[H');
 }
 
 /**
@@ -109,10 +123,33 @@ function clearScreen(): void {
 export async function showResumeSessionPicker(
   cwd: string = process.cwd(),
   initialSessions?: SessionListItem[],
+  options: {
+    includeAgentViewSessions?: boolean;
+    allowManagedAgentViewSelection?: boolean;
+  } = {},
 ): Promise<string | undefined> {
+  return (await showResumeSessionPickerItem(cwd, initialSessions, options))
+    ?.sessionId;
+}
+
+export async function showResumeSessionPickerItem(
+  cwd: string = process.cwd(),
+  initialSessions?: SessionListItem[],
+  options: {
+    includeAgentViewSessions?: boolean;
+    allowManagedAgentViewSelection?: boolean;
+  } = {},
+): Promise<SessionListItem | undefined> {
   const sessionService = new SessionService(cwd);
-  const hasSession = await sessionService.loadLastSession();
-  if (!hasSession) {
+  const hasSession = await hasResumeSession(sessionService, initialSessions);
+  const includeAgentViewSessions = options.includeAgentViewSessions ?? true;
+  const managedSessions = await listManagedAgentViewResumeSessions().catch(
+    () => [],
+  );
+  const displayManagedSessions = includeAgentViewSessions
+    ? managedSessions
+    : [];
+  if (!hasSession && displayManagedSessions.length === 0) {
     writeStdoutLine('No sessions found. Start a new session with `qwen`.');
     return undefined;
   }
@@ -126,8 +163,8 @@ export async function showResumeSessionPicker(
     process.stdin.setRawMode(true);
   }
 
-  return new Promise<string | undefined>((resolve) => {
-    let selectedId: string | undefined;
+  return new Promise<SessionListItem | undefined>((resolve) => {
+    let selectedSession: SessionListItem | undefined;
 
     const { unmount, waitUntilExit } = render(
       <KeypressProvider
@@ -139,14 +176,23 @@ export async function showResumeSessionPicker(
       >
         <StandalonePickerScreen
           sessionService={sessionService}
-          onSelect={(id) => {
-            selectedId = id;
+          onSelect={(session) => {
+            selectedSession = session;
           }}
           onCancel={() => {
-            selectedId = undefined;
+            selectedSession = undefined;
           }}
           currentBranch={getGitBranch(cwd)}
           initialSessions={initialSessions}
+          excludeSessionIds={
+            includeAgentViewSessions
+              ? undefined
+              : managedSessions.map((session) => session.sessionId)
+          }
+          includeAgentViewSessions={includeAgentViewSessions}
+          allowManagedAgentViewSelection={
+            options.allowManagedAgentViewSelection
+          }
         />
       </KeypressProvider>,
       {
@@ -160,13 +206,36 @@ export async function showResumeSessionPicker(
       // Clear the screen after the picker closes for a clean fullscreen experience
       clearScreen();
 
-      // Restore raw mode state only if we changed it and user cancelled
-      // (if user selected a session, main app will handle raw mode)
-      if (process.stdin.isTTY && !wasRaw && !selectedId) {
+      // Restore raw mode state if this standalone picker changed it.
+      if (process.stdin.isTTY && !wasRaw) {
         process.stdin.setRawMode(false);
       }
 
-      resolve(selectedId);
+      resolve(selectedSession);
     });
   });
+}
+
+async function hasResumeSession(
+  sessionService: SessionService,
+  initialSessions: SessionListItem[] | undefined,
+): Promise<boolean> {
+  if (initialSessions) {
+    return initialSessions.length > 0;
+  }
+  return (await sessionService.listSessions({ size: 1 })).items.length > 0;
+}
+
+function makeFallbackSessionItem(
+  sessionId: string,
+  sessionService: SessionService,
+): SessionListItem {
+  return {
+    sessionId,
+    cwd: sessionService.getProjectRoot(),
+    startTime: new Date().toISOString(),
+    mtime: Date.now(),
+    prompt: sessionId,
+    filePath: '',
+  };
 }
