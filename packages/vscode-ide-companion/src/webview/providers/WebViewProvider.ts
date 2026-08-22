@@ -351,6 +351,14 @@ export class WebViewProvider {
       });
     });
 
+    // Forward raw ACP session/update notifications for the WebShell transcript UI.
+    this.agentManager.onTranscriptUpdate((notification) => {
+      this.sendMessageToWebView({
+        type: 'transcriptUpdate',
+        data: notification,
+      });
+    });
+
     // Surface available modes and current mode (from ACP initialize)
     this.agentManager.onModeInfo((info) => {
       try {

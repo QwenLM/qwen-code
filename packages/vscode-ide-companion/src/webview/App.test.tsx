@@ -284,7 +284,7 @@ vi.mock('./components/layout/InputForm.js', () => ({
   ),
 }));
 
-import { App, getLastUserTurnIndex, type MessageListItem } from './App.js';
+import { App } from './App.js';
 
 function createDomRect(): DOMRect {
   return {
@@ -363,59 +363,6 @@ function renderApp() {
 
   return { container, root };
 }
-
-describe('getLastUserTurnIndex', () => {
-  it('returns the latest user turn and ignores assistant messages', () => {
-    const messages: MessageListItem[] = [
-      {
-        type: 'message',
-        timestamp: 1,
-        data: { role: 'user', content: 'first', timestamp: 1, turnIndex: 0 },
-      },
-      {
-        type: 'message',
-        timestamp: 2,
-        data: { role: 'assistant', content: 'reply', timestamp: 2 },
-      },
-      {
-        type: 'message',
-        timestamp: 3,
-        data: { role: 'user', content: 'second', timestamp: 3, turnIndex: 1 },
-      },
-    ];
-
-    expect(getLastUserTurnIndex(messages)).toBe(1);
-  });
-
-  it('keeps image and text parts in the same explicit user turn', () => {
-    const messages: MessageListItem[] = [
-      {
-        type: 'message',
-        timestamp: 1,
-        data: { role: 'user', content: 'first', timestamp: 1, turnIndex: 0 },
-      },
-      {
-        type: 'message',
-        timestamp: 2,
-        data: {
-          role: 'user',
-          content: '',
-          timestamp: 2,
-          turnIndex: 1,
-          kind: 'image',
-          imagePath: '/tmp/image.png',
-        },
-      },
-      {
-        type: 'message',
-        timestamp: 2,
-        data: { role: 'user', content: 'caption', timestamp: 2, turnIndex: 1 },
-      },
-    ];
-
-    expect(getLastUserTurnIndex(messages)).toBe(1);
-  });
-});
 
 describe('App /skills secondary picker', () => {
   let root: Root | null = null;

@@ -293,6 +293,7 @@
     "@qwen-code/acp-bridge": "*",
     "@qwen-code/sdk": "*",
     "@qwen-code/webui": "*",
+    "@qwen-code/web-shell": "*",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "cors": "^2.8.5",
     "dotenv": "^17.1.0",
