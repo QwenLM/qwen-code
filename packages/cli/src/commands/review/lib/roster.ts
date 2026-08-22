@@ -149,6 +149,62 @@ export function hasExecutableScript(plan: RosterPlan): boolean {
   });
 }
 
+/**
+ * Does the diff touch a file whose CONTENT a future agent follows as
+ * instructions — a skill, an agent brief, a prompt template? Path-detected,
+ * like `hasExecutableScript`: names this ecosystem reserves for instruction
+ * prose, because only the plan's file paths are in hand here. The predicate is
+ * deliberately generous — `prompt-record.ts` (code about prompts) trips it too
+ * — because the false-positive cost is one agent returning a documented empty
+ * scope, while a prompt file nobody executed is how #9655's guidance shipped
+ * a misattribution four review rounds read as sound. A repository whose
+ * prompt files match none of these shapes requires `prose-exec` back through
+ * a manifest rule instead.
+ */
+export function isPromptPath(path: string): boolean {
+  const base = path.split('/').pop() ?? '';
+  // Test code ABOUT prompts pins them; it is not itself followed as one.
+  if (/\.(test|spec)\./.test(base)) return false;
+  if (base === 'SKILL.md') return true;
+  // Root guidance files agents follow as standing instructions, by each
+  // ecosystem's reserved name — they carry operational recipes, and an
+  // AGENTS.md-only diff whose new instructions get readings but no execution
+  // is the motivating incident's shape verbatim.
+  if (/^(AGENTS|CLAUDE|QWEN|GEMINI)\.md$/.test(base)) return true;
+  if (base === 'copilot-instructions.md') return true;
+  // Agent and slash-command definitions, and prompts/ directories.
+  if (/(^|\/)\.(claude|qwen)\/(agents|commands)\//.test(path)) return true;
+  if (/(^|\/)prompts\//.test(path)) return true;
+  const stem = base.replace(/\.[^.]+$/, '');
+  return stem
+    .split(/[-_.]/)
+    .some((token) => /^(prompts?|briefs?)$/.test(token));
+}
+
+/** Any changed file `isPromptPath` recognises — the prose-execution trigger. */
+export function hasPromptFiles(plan: RosterPlan): boolean {
+  const files = Array.isArray(plan.files) ? plan.files : [];
+  return files.some((f) => typeof f?.path === 'string' && isPromptPath(f.path));
+}
+
+/**
+ * Is the counter-frame audit (6d) owed? Its two mandatory extractions — the
+ * author's nominated frame and the motivating incident — both live in the PR
+ * description, so a review with no PR identity has no frame to counter and no
+ * incident to replay: requiring 6d there manufactures a fourth undirected
+ * persona, the exact degradation the role exists to counter. Same identity
+ * condition as Agent 0 (the brief builder welds the context pointer from the
+ * same two fields), the personas' effort tier (medium skips it), and — unlike
+ * the personas — both topologies: the frame spans territories.
+ */
+function countersFrame(plan: RosterPlan): boolean {
+  return (
+    plan.effort !== 'medium' &&
+    isPositivePrNumber(plan.prNumber) &&
+    typeof plan.ownerRepo === 'string'
+  );
+}
+
 /** Source files rewritten heavily enough that the diff is the wrong frame. */
 function heavyFiles(plan: RosterPlan): string[] {
   const files = Array.isArray(plan.files) ? plan.files : [];
@@ -207,6 +263,12 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
       }
     }
     add('test-matrix');
+    // The counter-frame audit is a whole-diff question: the author's frame
+    // spans territories, so no chunk agent can escape it from inside one —
+    // and a chunked PR with a strong narrative is the MOST frame-capturable
+    // shape there is. Gated by countersFrame like its 3A twin: the personas'
+    // effort tier plus the PR identity the frame lives in.
+    if (countersFrame(plan)) add('6d');
   } else {
     // Step 3A: every dimension, each walking the whole diff.
     add('1a');
@@ -230,12 +292,25 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
       add('6a');
       add('6b');
       add('6c');
+      // The counter-frame audit joins the personas: like them it is a
+      // depth pass over the whole diff, and its whole premise — attention
+      // the author's narrative cannot steer — is the kind of coverage a
+      // balanced review deliberately trades away (issue #9707, proposal 4).
+      if (countersFrame(plan)) add('6d');
     }
   }
 
   // Both topologies. 1b owns the deleted side; 1c owns the cross-file walk and
   // needs a tree to grep.
   if (hasDeletions(plan)) add('1b');
+  // Instruction prose is executed, not read: a diff touching a file a future
+  // agent follows as instructions owes the prose-execution audit — in both
+  // topologies (a chunked PR touching SKILL.md still owes it) and at every
+  // effort, because on a prompt-file diff it is the highest-yield agent there
+  // is (issue #9707, proposal 3: #9655's two prose defects each fall out of a
+  // single execution and fell out of none of twenty-five readings). It runs
+  // the repository's own tooling, so like 1c and 7 it needs a tree.
+  if (mode !== 'diff-only' && hasPromptFiles(plan)) add('prose-exec');
   if (mode !== 'diff-only') {
     add('1c');
     add('7');
@@ -314,9 +389,21 @@ function contextRoleRunsInThisReview(
     case '6b':
     case '6c':
       return !fanOut && plan.effort !== 'medium';
+    case '6d':
+      // Whole-diff in both topologies — the frame spans territories — but a
+      // manifest cannot conjure a frame: no PR identity, no counter-frame.
+      return countersFrame(plan);
     case 'test-matrix':
       return fanOut;
     case '1c':
+      return mode !== 'diff-only';
+    case 'prose-exec':
+      // Both topologies, every effort, prompt files or not — whether it has
+      // work is the diff's business (hasPromptFiles), not the policy's: a
+      // manifest may require it back where the path detector misses, which
+      // is the escape hatch `isPromptPath`'s doc comment promises. The one
+      // policy line is capability: never without a tree to run the
+      // repository's tooling in (the same line 1c and 7 draw).
       return mode !== 'diff-only';
     case '1b':
       // Both topologies run the removed-behavior audit; whether it has work is

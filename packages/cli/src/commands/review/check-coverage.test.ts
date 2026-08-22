@@ -2883,11 +2883,12 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
     expect(r.ok).toBe(true);
     expect(r.coveredChunks).toEqual([1, 2]);
     // EXACT: the prior session holds three recoverable records — the two
-    // chunk agents plus the roster stand-in, which recovers through the
-    // whole-diff branch of `certifies()` (no `chunk N of M` in its launch).
-    // `>= 2` could not see that branch: deleting it read 3 as 2 and stayed
-    // green, silently dropping recovered whole-diff work (verify,
-    // reverse-audit) from the continuity count.
+    // chunk agents plus the roster stand-in (test-matrix; this plan has no
+    // PR identity, so no 6d), which recovers through the whole-diff branch
+    // of `certifies()` (no `chunk N of M` in its launch). `>= 2` could not
+    // see that branch: deleting it under-read the count and stayed green,
+    // silently dropping recovered whole-diff work (verify, reverse-audit)
+    // from the continuity count.
     expect(r.recoveredAgents).toBe(3);
   });
 });
