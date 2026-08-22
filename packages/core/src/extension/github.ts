@@ -61,6 +61,16 @@ interface GitHubCommitData {
   sha: string;
 }
 
+interface GitHubTreeEntry {
+  path?: string;
+  type?: string;
+}
+
+interface GitHubTreeData {
+  tree?: GitHubTreeEntry[];
+  truncated?: boolean;
+}
+
 interface Asset {
   name: string;
   browser_download_url: string;
@@ -469,6 +479,40 @@ async function assertArchivePreservesGitSemantics(destination: string) {
   }
 }
 
+// codeload archives honor `.gitattributes` `export-ignore`, so a repository
+// can strip its root `.gitmodules` from the archive and slip past the
+// extracted-tree presence check above. The commit's tree object still lists
+// every path regardless of export-ignore, so verify it directly: a root
+// `.gitmodules` blob or any gitlink (type `commit`) entry means the archive
+// would silently drop submodule content.
+async function assertGitHubTreeHasNoSubmodules(
+  owner: string,
+  repo: string,
+  commitSha: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  const treeData = await fetchJson<GitHubTreeData>(
+    `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/trees/${encodeURIComponent(commitSha)}?recursive=1`,
+    signal,
+    'public',
+    false,
+  );
+  if (treeData.truncated) {
+    throw new Error(
+      'Older-Git fallback cannot verify that the repository is free of submodules because GitHub truncated the tree listing.',
+    );
+  }
+  const entries = Array.isArray(treeData.tree) ? treeData.tree : [];
+  const hasSubmoduleSemantics = entries.some(
+    (entry) => entry?.path === '.gitmodules' || entry?.type === 'commit',
+  );
+  if (hasSubmoduleSemantics) {
+    throw new Error(
+      'Older-Git fallback does not support repositories with submodules.',
+    );
+  }
+}
+
 async function resolvePublicGitHubCommitSha(
   owner: string,
   repo: string,
@@ -501,6 +545,7 @@ export async function downloadPublicGitHubArchiveFallback(
     installMetadata.ref || 'HEAD',
     signal,
   );
+  await assertGitHubTreeHasNoSubmodules(owner, repo, commitSha, signal);
   // A random staging name avoids clobbering (or being filtered out as) a
   // repository file that happens to share the archive name.
   const archivePath = path.join(

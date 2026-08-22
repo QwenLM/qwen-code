@@ -687,6 +687,20 @@ describe('git extension helpers', () => {
           }) as typeof https.get)
           .mockImplementationOnce(((_url, options, callback) => {
             expect(String(_url)).toBe(
+              `https://api.github.com/repos/owner/repo/git/trees/${sha}?recursive=1`,
+            );
+            expect(headerNames(options)).not.toContain('authorization');
+            expect(typeof options?.lookup).toBe('function');
+            expect(options?.agent).toBe(false);
+            callResponseCallback(
+              options,
+              callback,
+              createResponse(JSON.stringify({ tree: [], truncated: false })),
+            );
+            return createRequestMock();
+          }) as typeof https.get)
+          .mockImplementationOnce(((_url, options, callback) => {
+            expect(String(_url)).toBe(
               `https://codeload.github.com/owner/repo/tar.gz/${sha}`,
             );
             expect(headerNames(options)).not.toContain('authorization');
@@ -764,6 +778,20 @@ describe('git extension helpers', () => {
             options,
             callback,
             createResponse(JSON.stringify({ sha })),
+          );
+          return createRequestMock();
+        }) as typeof https.get)
+        .mockImplementationOnce(((_url, options, callback) => {
+          // The tree check targets the source owner/repo; rename redirects
+          // are followed inside fetchJson, not by the caller.
+          expect(String(_url)).toBe(
+            `https://api.github.com/repos/owner/repo/git/trees/${sha}?recursive=1`,
+          );
+          expect(headerNames(options)).not.toContain('authorization');
+          callResponseCallback(
+            options,
+            callback,
+            createResponse(JSON.stringify({ tree: [], truncated: false })),
           );
           return createRequestMock();
         }) as typeof https.get)
@@ -892,10 +920,16 @@ describe('git extension helpers', () => {
 
     // Builds an extension archive whose repo root contains the given files
     // (paths relative to that root), then runs the real fallback download
-    // against it. Resolves with the pinned SHA; rejects when validation
-    // fails.
+    // against it. The mocked commit-tree listing mirrors `files` unless
+    // overridden, e.g. to model `.gitattributes` `export-ignore` hiding a
+    // path from the archive. Resolves with the pinned SHA; rejects when
+    // validation fails.
     async function runFallbackAgainstArchive(
       files: Record<string, string>,
+      treeOverride?: {
+        tree: Array<{ path: string; type: string }>;
+        truncated?: boolean;
+      },
     ): Promise<string> {
       vi.spyOn(dns, 'lookup').mockResolvedValue([
         { address: '8.8.8.8', family: 4 },
@@ -923,7 +957,18 @@ describe('git extension helpers', () => {
         'repo-archive',
       ]);
       const archive = await fs.readFile(archivePath);
-      mockHttpsResponses(JSON.stringify({ sha: fallbackSha }), archive);
+      const treeData = treeOverride ?? {
+        tree: Object.keys(files).map((filePath) => ({
+          path: filePath.split(path.sep).join('/'),
+          type: 'blob',
+        })),
+        truncated: false,
+      };
+      mockHttpsResponses(
+        JSON.stringify({ sha: fallbackSha }),
+        JSON.stringify(treeData),
+        archive,
+      );
 
       try {
         return await downloadPublicGitHubArchiveFallback(
@@ -971,6 +1016,50 @@ describe('git extension helpers', () => {
       },
     );
 
+    it('rejects a repo whose root .gitmodules is hidden from the archive via export-ignore', async () => {
+      // codeload strips `export-ignore` paths from the archive, so the
+      // extracted tree carries no `.gitmodules`; the commit tree still
+      // lists it (alongside the submodule gitlink), and the tree-based
+      // check must fail closed on it.
+      await expect(
+        runFallbackAgainstArchive(
+          {},
+          {
+            tree: [
+              { path: '.gitmodules', type: 'blob' },
+              { path: 'nested', type: 'commit' },
+            ],
+          },
+        ),
+      ).rejects.toThrow('submodules');
+    });
+
+    it('rejects a repo with a bare submodule gitlink and no .gitmodules', async () => {
+      await expect(
+        runFallbackAgainstArchive(
+          {},
+          { tree: [{ path: 'vendor/nested', type: 'commit' }] },
+        ),
+      ).rejects.toThrow('submodules');
+    });
+
+    it('rejects a repo when GitHub truncates the tree listing', async () => {
+      await expect(
+        runFallbackAgainstArchive({}, { tree: [], truncated: true }),
+      ).rejects.toThrow('tree listing');
+    });
+
+    it('still rejects a root .gitmodules absent from the tree listing', async () => {
+      // Defense in depth: even if the tree listing under-reports, the
+      // extracted-tree scan must keep rejecting a root `.gitmodules`.
+      await expect(
+        runFallbackAgainstArchive(
+          { '.gitmodules': '[submodule "nested"]\n\tpath = nested\n' },
+          { tree: [] },
+        ),
+      ).rejects.toThrow('submodules');
+    });
+
     // Issue #8993's repro repository (obra/superpowers) carries a root
     // symlink `AGENTS.md -> CLAUDE.md`, and GitHub codeload archives
     // preserve repository symlinks. The fallback's extraction chain rejects
@@ -1004,7 +1093,11 @@ describe('git extension helpers', () => {
           'repo-archive',
         ]);
         const archive = await fs.readFile(archivePath);
-        mockHttpsResponses(JSON.stringify({ sha: fallbackSha }), archive);
+        mockHttpsResponses(
+          JSON.stringify({ sha: fallbackSha }),
+          JSON.stringify({ tree: [], truncated: false }),
+          archive,
+        );
 
         try {
           await expect(
@@ -1081,7 +1174,11 @@ describe('git extension helpers', () => {
           Buffer.alloc(1024), // tar trailer
         ]),
       );
-      mockHttpsResponses(JSON.stringify({ sha: fallbackSha }), archive);
+      mockHttpsResponses(
+        JSON.stringify({ sha: fallbackSha }),
+        JSON.stringify({ tree: [], truncated: false }),
+        archive,
+      );
 
       try {
         await expect(
