@@ -244,6 +244,14 @@ export interface SteerInput {
   /** True when this drain routed raw media to the active model override. */
   mediaRouted?: boolean;
   /**
+   * The route selector the drain routed its media to, captured at drain time.
+   * The drain can install (or clear) the model override after the original
+   * send options were frozen, so a nested continuation must not derive its
+   * route from the stale inherited `options.modelOverride` alone — when media
+   * was routed, this selector names the exact route that owns it.
+   */
+  routeSelector?: string;
+  /**
    * Invoked when `restore` settles this input (the message goes back to the
    * queue, so the re-drain — not a stored retry payload — owns recovery).
    * The CLI uses this to strip the steer segment from the stored Ctrl+Y
@@ -3153,18 +3161,23 @@ export class GeminiClient {
 
       // A boundary-drained steer that routed raw media to the active override
       // must keep the exact route for its own send: the drain runs after the
-      // original send options were built, so the inherited selector is still
-      // bare. Mirrors the hook path, which stamps the trailing-NUL marker on
-      // the media-routed prompt's sends.
+      // original send options were built, so the inherited selector is stale.
+      // Prefer the drain-time `routeSelector` — the drain can install (or
+      // clear) the override after `options.modelOverride` was frozen, so the
+      // inherited value can be absent or wrong; the selector names the exact
+      // route the media was bridged/routed for. Mirrors the hook path, which
+      // stamps the trailing-NUL marker on the media-routed prompt's sends.
       const steerRouteOverride = (
         override: string | undefined,
         steerInput: SteerInput | undefined,
-      ): string | undefined =>
-        steerInput?.mediaRouted === true &&
-        override !== undefined &&
-        !override.endsWith('\0')
-          ? `${override}\0`
-          : override;
+      ): string | undefined => {
+        const base = steerInput?.routeSelector ?? override;
+        return steerInput?.mediaRouted === true &&
+          base !== undefined &&
+          !base.endsWith('\0')
+          ? `${base}\0`
+          : base;
+      };
 
       // Auto-compaction happens inside GeminiChat.sendMessageStream and surfaces
       // via the `compressed → ChatCompressed` bridge in turn.ts. Manual /compress

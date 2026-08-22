@@ -6836,12 +6836,11 @@ export class Session implements SessionContext {
       signal: abortSignal,
       onVisionBridgeNotice: (notice) => notices.push(notice),
     });
-    // A cancellation arriving during the awaited bridge work must keep the
-    // original media intact too: the rewritten parts would otherwise flow
-    // into the abort branch's message and persist in session history.
-    if (abortSignal.aborted) {
-      return parts;
-    }
+    // Emit collected bridge notices BEFORE the abort short-circuit: a
+    // cancellation landing mid-bridge can coincide with egress that already
+    // sent image bytes off-machine, and the disclosure must reach the user
+    // even on a cancelled turn. Mirrors the runTool site, which emits its
+    // collected visionBridgeNotices unconditionally before handling abort.
     for (const notice of notices) {
       try {
         await this.messageEmitter.emitAgentMessage(notice);
@@ -6850,6 +6849,12 @@ export class Session implements SessionContext {
           `Failed to emit fallback vision bridge notice: ${this.#formatError(error)}`,
         );
       }
+    }
+    // A cancellation arriving during the awaited bridge work must keep the
+    // original media intact too: the rewritten parts would otherwise flow
+    // into the abort branch's message and persist in session history.
+    if (abortSignal.aborted) {
+      return parts;
     }
     const converted = await this.#applyBridgeConversionsIfNeeded(
       nestedChecked,

@@ -1083,6 +1083,80 @@ describe('useGeminiStream', () => {
     );
   });
 
+  it('fails closed a tool-result image an audio-only inline override cannot see', async () => {
+    const audioPart = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    mockConfig.getModel = vi.fn(() => 'session-model');
+    mockConfig.getEffectiveInputModalities = vi.fn(() => ({ audio: true }));
+    mockConfig.getContentGeneratorConfig = vi.fn(
+      () => ({ authType: AuthType.QWEN_OAUTH }) as never,
+    );
+    mockConfig.getAvailableModelsForAuthType = vi.fn(
+      () =>
+        [
+          {
+            id: 'audio-model',
+            authType: AuthType.QWEN_OAUTH,
+            modalities: { audio: true },
+          },
+        ] as never,
+    );
+    const resolveForModel = vi.fn().mockResolvedValue({
+      contentGeneratorConfig: { modalities: { audio: true } },
+    });
+    mockConfig.getBaseLlmClient = vi.fn(() => ({ resolveForModel }) as never);
+    mockHandleSlashCommand.mockResolvedValue({
+      type: 'submit_prompt',
+      content: [{ text: 'listen' }, audioPart],
+      modelOverride: 'audio-model',
+    });
+    const { result, mockSendMessageStream } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery('/model audio-model listen');
+    });
+    // The routed audio turn exact-routes to the audio-only override and stamps
+    // the owning prompt.
+    expect(mockSendMessageStream.mock.calls[0]?.[3]?.modelOverride).toBe(
+      'audio-model\0',
+    );
+
+    // Mid-turn a tool returns an image nested in the function response. The
+    // audio-only override was only validated for audio, so the continuation
+    // must fail the image closed visibly instead of exact-routing it to a route
+    // whose slimming would silently placeholder-substitute it.
+    await act(async () => {
+      await result.current.submitQuery(
+        [
+          {
+            functionResponse: {
+              id: 'tool-call',
+              name: 'read_file',
+              response: { output: 'screenshot attached' },
+              parts: [
+                { inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' } },
+              ],
+            },
+          } as never,
+        ],
+        SendMessageType.ToolResult,
+      );
+    });
+
+    const sent = JSON.stringify(mockSendMessageStream.mock.calls[1]?.[0]);
+    expect(sent).not.toContain('image/png');
+    expect(sent).not.toContain('aW1hZ2U=');
+    expect(sent).toContain('was not sent');
+    expect(mockAddItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: MessageType.ERROR,
+        text: expect.stringContaining('Image returned by a tool was not sent'),
+      }),
+      expect.any(Number),
+    );
+  });
+
   it('retries the original audio after an inline override fails closed', async () => {
     const audioPart = {
       inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },

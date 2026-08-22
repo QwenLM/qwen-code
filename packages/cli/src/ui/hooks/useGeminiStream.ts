@@ -193,6 +193,101 @@ const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS = 10_000;
 const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE =
   'Mid-turn @ command resolution timed out';
 
+/**
+ * Detect inline media nested inside `functionResponse.parts` — the carrier
+ * qwen-code uses for tool-result images/audio (see
+ * `coreToolScheduler.createFunctionResponsePart`). The top-level
+ * `hasImageParts`/`hasAudioParts` helpers only see top-level `inlineData`, so
+ * a tool-result continuation's media is invisible to them.
+ */
+function detectNestedFunctionResponseMedia(parts: PartListUnion): {
+  hasImage: boolean;
+  hasAudio: boolean;
+} {
+  const list = Array.isArray(parts) ? parts : [parts];
+  let hasImage = false;
+  let hasAudio = false;
+  for (const part of list) {
+    if (typeof part === 'string') continue;
+    const nested = (part.functionResponse as { parts?: unknown } | undefined)
+      ?.parts;
+    if (!Array.isArray(nested)) continue;
+    for (const inner of nested as Part[]) {
+      const mime = inner.inlineData?.mimeType;
+      const data = inner.inlineData?.data;
+      if (
+        typeof mime !== 'string' ||
+        typeof data !== 'string' ||
+        data.length === 0
+      ) {
+        continue;
+      }
+      if (mime.startsWith('image/')) hasImage = true;
+      else if (mime.startsWith('audio/')) hasAudio = true;
+    }
+  }
+  return { hasImage, hasAudio };
+}
+
+/**
+ * Replace inline media nested inside `functionResponse.parts` with a text note
+ * and append the note to the response text, so a fail-closed tool-result media
+ * payload keeps its shape but carries no raw bytes. Returns the input unchanged
+ * (identity) when no nested media matched.
+ */
+function replaceNestedFunctionResponseMedia(
+  parts: PartListUnion,
+  match: 'image' | 'audio',
+  note: string,
+): Part[] {
+  const prefix = match === 'image' ? 'image/' : 'audio/';
+  const list = Array.isArray(parts) ? parts : [parts];
+  return list.map((part) => {
+    if (typeof part === 'string') return { text: part };
+    const functionResponse = part.functionResponse as
+      | ({ parts?: unknown } & Record<string, unknown>)
+      | undefined;
+    const nested = functionResponse?.parts;
+    if (!Array.isArray(nested)) return part;
+    let touched = false;
+    const retained: Part[] = [];
+    for (const inner of nested as Part[]) {
+      const mime = inner.inlineData?.mimeType;
+      const data = inner.inlineData?.data;
+      const isMatch =
+        typeof mime === 'string' &&
+        mime.startsWith(prefix) &&
+        typeof data === 'string' &&
+        data.length > 0;
+      if (isMatch) {
+        touched = true;
+      } else {
+        retained.push(inner);
+      }
+    }
+    if (!touched) return part;
+    const { parts: _dropped, ...rest } = functionResponse ?? {};
+    const response = (rest['response'] ?? {}) as Record<string, unknown>;
+    const key = typeof response['error'] === 'string' ? 'error' : 'output';
+    const current = response[key];
+    const nextResponse = {
+      ...response,
+      [key]:
+        typeof current === 'string' && current.length > 0
+          ? `${current}\n\n${note}`
+          : note,
+    };
+    return {
+      ...part,
+      functionResponse: {
+        ...rest,
+        response: nextResponse,
+        ...(retained.length > 0 ? { parts: retained } : {}),
+      } as Part['functionResponse'],
+    };
+  });
+}
+
 interface PendingDuplicateToolResponses {
   executableCallIds: Set<string>;
   promptId: string | undefined;
@@ -214,6 +309,13 @@ interface ResolvedSteerMessages {
   retryParts?: Part[];
   /** True when this drain routed raw media to the active model override. */
   mediaRouted?: boolean;
+  /**
+   * The route selector the drain routed its media to (captured at drain time).
+   * Carried onto the SteerInput so a nested continuation keeps the exact route
+   * even though the drain installed/cleared the override after the original
+   * send options were frozen.
+   */
+  routeSelector?: string;
   accept: () => void;
   restoreMessages: string[];
 }
@@ -1348,6 +1450,7 @@ export const useGeminiStream = (
       parts: PartListUnion | null;
       shouldProceed: boolean;
       preOverrideParts?: PartListUnion;
+      mediaRouted?: boolean;
     }> => {
       if (parts === null || !hasImageParts(parts)) {
         return { parts, shouldProceed: true };
@@ -1414,6 +1517,12 @@ export const useGeminiStream = (
           getFullTurnVisionModelSelector(fullTurnModel),
           false,
         );
+        // Record the full-turn selector as the media-routing route: a drained
+        // steer carrying these images must keep this exact route for its own
+        // send (the continuation derives it from the captured routeSelector,
+        // not the stale pre-drain options.modelOverride).
+        mediaRoutedOverrideRef.current =
+          getFullTurnVisionModelSelector(fullTurnModel);
         addItem(
           {
             type: MessageType.VISION_NOTICE,
@@ -1421,7 +1530,7 @@ export const useGeminiStream = (
           },
           timestamp,
         );
-        return { parts: fullTurnParts, shouldProceed: true };
+        return { parts: fullTurnParts, shouldProceed: true, mediaRouted: true };
       }
 
       const bridgeResult = await runVisionBridge({ config, parts, signal });
@@ -1689,10 +1798,94 @@ export const useGeminiStream = (
         // supplies the pristine images so Retry re-derives from them instead
         // of resending marker text.
         preOverrideParts: preOverrideParts ?? visionResult.preOverrideParts,
-        mediaRouted,
+        // The full-turn vision branch routes the turn's images to the
+        // installed full-turn selector; merge its mediaRouted so the route is
+        // recorded for the owning prompt / drained steer.
+        mediaRouted: mediaRouted || visionResult.mediaRouted === true,
       };
     },
     [addItem, applyVisionBridgeIfNeeded, config, settings],
+  );
+
+  // Gate nested tool-result media against the active media-routed override.
+  // The send-time marker exact-routes every send owned by the stamped prompt —
+  // including tool-result continuations — but the capability probe only
+  // validated the modality that ESTABLISHED the route. A continuation whose
+  // functionResponse.parts nest media of an unvalidated modality would be
+  // exact-routed to the override and silently placeholder-substituted by the
+  // route's slimming (the model answers about media it never received). Detect
+  // that here and fail the unsupported modality closed visibly instead.
+  const applyToolResultMediaGate = useCallback(
+    async (
+      query: PartListUnion,
+      timestamp: number,
+    ): Promise<PartListUnion> => {
+      const nested = detectNestedFunctionResponseMedia(query);
+      if (!nested.hasImage && !nested.hasAudio) return query;
+      // Only a media-routed inline override exact-routes this continuation: a
+      // full-turn selector already ends with the NUL marker and owns the whole
+      // turn, and without a media-routed override the send goes to the session
+      // model where normal bridging/slimming applies.
+      const activeOverride = modelOverrideRef.current;
+      if (
+        activeOverride === undefined ||
+        activeOverride.endsWith('\0') ||
+        mediaRoutedOverrideRef.current !== activeOverride
+      ) {
+        return query;
+      }
+      let supportsImage = false;
+      let supportsAudio = false;
+      try {
+        const runtimeView = await config
+          .getBaseLlmClient()
+          .resolveForModel(activeOverride, { failClosed: true });
+        supportsImage =
+          runtimeView.contentGeneratorConfig.modalities?.image === true;
+        supportsAudio =
+          runtimeView.contentGeneratorConfig.modalities?.audio === true;
+      } catch (error) {
+        // Fail closed: exact-routing an unresolvable selector would drop the
+        // media silently, so treat it as supporting nothing and surface the
+        // omission below.
+        debugLogger.warn(
+          `tool-result media gate could not resolve override '${activeOverride}': ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+      let result: PartListUnion = query;
+      if (nested.hasImage && !supportsImage) {
+        result = replaceNestedFunctionResponseMedia(
+          result,
+          'image',
+          '[Image content returned by a tool was not sent: the active model override does not support images.]',
+        );
+        addItem(
+          {
+            type: MessageType.ERROR,
+            text: 'Image returned by a tool was not sent: the active model override does not support images.',
+          },
+          timestamp,
+        );
+      }
+      if (nested.hasAudio && !supportsAudio) {
+        result = replaceNestedFunctionResponseMedia(
+          result,
+          'audio',
+          '[Audio content returned by a tool was not sent: the active model override does not support audio.]',
+        );
+        addItem(
+          {
+            type: MessageType.ERROR,
+            text: 'Audio returned by a tool was not sent: the active model override does not support audio.',
+          },
+          timestamp,
+        );
+      }
+      return result;
+    },
+    [addItem, config],
   );
 
   const prepareQueryForGemini = useCallback(
@@ -1930,8 +2123,14 @@ export const useGeminiStream = (
         preOverrideParts = bridgeResult.preOverrideParts;
         mediaRouted = bridgeResult.mediaRouted === true;
       } else {
-        // It's a function response (PartListUnion that isn't a string)
-        localQueryToSendToGemini = query;
+        // It's a function response (PartListUnion that isn't a string). Gate
+        // nested tool-result media against the active media-routed override so
+        // an unvalidated modality is fail-closed visibly instead of being
+        // exact-routed and silently placeholder-substituted.
+        localQueryToSendToGemini = await applyToolResultMediaGate(
+          query,
+          userMessageTimestamp,
+        );
       }
 
       if (localQueryToSendToGemini === null) {
@@ -1958,6 +2157,7 @@ export const useGeminiStream = (
       registerToolBatch,
       scheduleToolCalls,
       applyBridgeConversionsIfNeeded,
+      applyToolResultMediaGate,
     ],
   );
 
@@ -3598,6 +3798,13 @@ export const useGeminiStream = (
         parts: resolvedMessages,
         retryParts: retryDiffers ? retryMessages : undefined,
         mediaRouted: drainMediaRouted,
+        // Capture the drain-time route so the nested continuation keeps the
+        // exact route the media was bridged/routed for — the drain may have
+        // installed (or cleared) the override after the caller's send options
+        // were frozen, so those can no longer be trusted to name the route.
+        routeSelector: drainMediaRouted
+          ? mediaRoutedOverrideRef.current
+          : undefined,
         restoreMessages,
         accept: () => {
           for (const { message, parts, sideEffects } of resolvedForRecording) {
@@ -3650,6 +3857,7 @@ export const useGeminiStream = (
           parts: resolved.parts,
           retryParts: resolved.retryParts,
           mediaRouted: resolved.mediaRouted,
+          routeSelector: resolved.routeSelector,
           accept: () => {
             if (settled) return;
             settled = true;
