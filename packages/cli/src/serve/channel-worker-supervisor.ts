@@ -567,6 +567,7 @@ export function resolveWorkerCaCertPath(
     // than the fallback below.
     const operatorBlocks = extractCertificateBlocks(
       fs.readFileSync(existing, 'utf8'),
+      existing,
     );
     if (!operatorBlocks) {
       warnWorkerCaMergeFallback(
@@ -587,6 +588,7 @@ export function resolveWorkerCaCertPath(
     }
     const daemonBlocks = extractCertificateBlocks(
       fs.readFileSync(daemonCertPath, 'utf8'),
+      daemonCertPath,
     );
     if (!daemonBlocks) {
       warnWorkerCaMergeFallback(

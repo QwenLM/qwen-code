@@ -789,8 +789,12 @@ export async function verifyWorkerTlsTrust(opts: {
 export function describeWorkerTlsTrustGaps(opts: {
   cert: Buffer;
   certPath: string;
+  /** Existing source file for loader inspection; omit for in-memory callers. */
+  certSourcePath?: string;
   daemonUrl: string;
   operatorCaCertPath?: string;
+  /** Existing operator source file for loader inspection. */
+  operatorCaCertSourcePath?: string;
   /**
    * Contents of `operatorCaCertPath`, when it was readable. A path alone says
    * nothing — a typo'd, unrelated or unloadable NODE_EXTRA_CA_CERTS anchors
@@ -837,7 +841,10 @@ export function describeWorkerTlsTrustGaps(opts: {
   // operator bundle got counted as an anchor at boot: the daemon log stayed
   // clean while every worker handshake failed UNABLE_TO_VERIFY_LEAF_SIGNATURE.
   const operatorChain = opts.operatorCaCert
-    ? loadableCertificates(opts.operatorCaCert.toString('utf8'))
+    ? loadableCertificates(
+        opts.operatorCaCert.toString('utf8'),
+        opts.operatorCaCertSourcePath,
+      )
     : undefined;
   // Same rule for the serving file — and when it fails, the merge does NOT
   // merge. `resolveWorkerCaCertPath` finds `daemonBlocks === undefined`,
@@ -847,7 +854,10 @@ export function describeWorkerTlsTrustGaps(opts: {
   // `createSecureContext` accepts shapes the loader's framing rejects, so the
   // "it would have thrown at boot" premise this fallback used to carry was
   // false.)
-  const servingBlocks = loadableCertificates(opts.cert.toString('utf8'));
+  const servingBlocks = loadableCertificates(
+    opts.cert.toString('utf8'),
+    opts.certSourcePath,
+  );
   // An unreadable serving file is a gap on its own terms: the workers receive
   // it as their whole bundle and their loader takes NOTHING from it, whether
   // or not an operator CA was set. Gating this on `operatorChain` reported
@@ -8001,9 +8011,15 @@ async function runQwenServeImpl(
             const predictedGaps = describeWorkerTlsTrustGaps({
               cert: tlsOptions.cert,
               certPath: tlsCertPath,
+              certSourcePath: tlsCertPath,
               daemonUrl: workerDaemonUrl,
               ...(operatorCaCertPath ? { operatorCaCertPath } : {}),
-              ...(operatorCaCert ? { operatorCaCert } : {}),
+              ...(operatorCaCert
+                ? {
+                    operatorCaCert,
+                    operatorCaCertSourcePath: operatorCaCertPath,
+                  }
+                : {}),
               ...(operatorCaCertReadError ? { operatorCaCertReadError } : {}),
             });
             const workerCaCertPath = workerRuntime.resolveWorkerCaCertPath(

@@ -143,6 +143,14 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/pem-certificate-blocks.ts',
+    {
+      reason:
+        'The certificate-loader oracle child must inherit the daemon process environment so it uses the same Node and OpenSSL configuration as channel workers.',
+      accesses: { whole: 1 },
+    },
+  ],
+  [
     'packages/cli/src/serve/run-qwen-serve.ts',
     {
       reason:

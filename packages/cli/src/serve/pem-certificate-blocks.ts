@@ -4,161 +4,30 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { spawnSync } from 'node:child_process';
 import { X509Certificate } from 'node:crypto';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
-/** `-----BEGIN <label>-----` / `-----END <label>-----` framing. */
-const BEGIN_PREFIX = '-----BEGIN ';
-const END_PREFIX = '-----END ';
-const MARKER_SUFFIX = '-----';
-const CERTIFICATE_LABEL = 'CERTIFICATE';
-/**
- * Every label the loader reads a certificate from. `X509 CERTIFICATE` is the
- * legacy alias OpenSSL still accepts (`PEM_STRING_X509_OLD`); measured on Node
- * v22.23.0, a root under that label loads through `NODE_EXTRA_CA_CERTS` and
- * authorizes the handshake, while recognising only the modern spelling here
- * returned `undefined` for the file and handed workers the daemon cert alone.
- */
-const CERTIFICATE_LABELS: ReadonlySet<string> = new Set([
-  CERTIFICATE_LABEL,
-  'X509 CERTIFICATE',
-]);
-/** Canonical PEM wraps the body at 64 columns; so does every producer. */
-const PEM_BODY_COLUMNS = 64;
-/** `BIO_gets(..., 255)` leaves 254 bytes for content and its line feed. */
-const PEM_LINE_MAX_BYTES = 254;
-
-function fitsPemLineBuffer(line: string, hasLineFeed: boolean): boolean {
-  return Buffer.byteLength(line) + (hasLineFeed ? 1 : 0) <= PEM_LINE_MAX_BYTES;
+const NODE_EXTRA_CA_CERTS_ENV = 'NODE_EXTRA_CA_CERTS';
+const ORACLE_TIMEOUT_MS = 10_000;
+const ORACLE_MAX_BUFFER_BYTES = 16 * 1024 * 1024;
+const ORACLE_SOURCE = `
+const tls = require('node:tls');
+if (typeof tls.getCACertificates === 'function') {
+  process.stdout.write(JSON.stringify({
+    certificates: tls.getCACertificates('extra'),
+  }));
+} else {
+  const crypto = process.binding('crypto');
+  process.stdout.write(JSON.stringify({
+    fullyLoaded: crypto.isExtraRootCertsFileLoaded(),
+  }));
 }
-
-/** The raw label of an END marker, or `undefined` when it is not one. */
-function endMarkerLabel(line: string): string | undefined {
-  if (!line.startsWith(END_PREFIX) || !line.endsWith(MARKER_SUFFIX)) {
-    return undefined;
-  }
-  return line.slice(END_PREFIX.length, line.length - MARKER_SUFFIX.length);
-}
-
-/**
- * Everything OpenSSL's line reader tolerates that a verbatim match does not:
- * CRLF terminators and trailing whitespace. Measured on Node 22 through real
- * `NODE_EXTRA_CA_CERTS` handshakes: both shapes load and verify, so rejecting
- * either drops an operator CA the workers would have trusted and blames a file
- * that was never the problem.
- *
- * LEADING whitespace is deliberately NOT stripped. It is the one shape in this
- * family the loader does not tolerate on a marker line: measured on Node
- * v22.23.0 / OpenSSL 3.0.13, a CA file whose `-----BEGIN/END CERTIFICATE-----`
- * markers carry a leading space or tab loads NOTHING — the handshake fails
- * UNABLE_TO_VERIFY_LEAF_SIGNATURE with no `Ignoring extra certs` warning, and
- * `openssl storeutl -certs` reports 0 — while the same file un-indented loads
- * and verifies. Stripping it here made this module count such a block as an
- * anchor the workers never got. Body lines are unaffected: their leading
- * whitespace is dropped when the base64 is joined below, which is what the
- * decoder does too.
- *
- * A leading BOM is NOT stripped here either — see `beginMarkerLabel`, which is
- * the only position the loader tolerates one in.
- */
-function normalizePemLine(line: string): string {
-  let end = line.length;
-  while (end > 0 && line.charCodeAt(end - 1) <= 0x20) end -= 1;
-  return line.slice(0, end);
-}
-
-/**
- * The raw label of a BEGIN marker line, tolerating a single leading BOM.
- * OpenSSL anchors the marker at the start of the line and requires its suffix,
- * but opens the block attempt before validating the label. Returning empty or
- * hyphenated labels lets a matching non-certificate block be skipped while an
- * unmatched attempt stops the file with the loader's prefix semantics.
- *
- * The BOM's tolerance is positional, and stripping it from every line is how
- * this module counted a block the loader takes nothing from. Measured on Node
- * v22.23.0: a BOM in front of a `-----BEGIN` line loads and authorizes
- * (Windows tooling writes one, and concatenating operator files puts one
- * mid-file in front of a later block), while a BOM in front of the matching
- * `-----END` line fails `bad end line` and the loader takes NOTHING — the
- * blanket strip made this module return that block as an anchor.
- */
-function beginMarkerLabel(line: string): string | undefined {
-  const normalized = line.replace(/^\uFEFF/, '');
-  if (
-    !normalized.startsWith(BEGIN_PREFIX) ||
-    !normalized.endsWith(MARKER_SUFFIX)
-  ) {
-    return undefined;
-  }
-  // Keep unusual labels raw so they participate in pairing instead of acting
-  // as prose; an unmatched attempt then stops the file below.
-  return normalized.slice(
-    BEGIN_PREFIX.length,
-    normalized.length - MARKER_SUFFIX.length,
-  );
-}
-
-/**
- * Whether `line` is the blank line that ends a block's header section.
- *
- * A BOM-only line counts: measured on Node v22.23.0, one immediately after
- * `-----BEGIN` loads exactly like an empty line (`authorized: true`), and one
- * further down the body fails `not proc type` exactly like an empty line
- * there — the loader is splitting on it, not decoding it.
- */
-function isHeaderSeparatorLine(line: string): boolean {
-  return line.replace(/^\uFEFF/, '') === '';
-}
-
-/**
- * Whether the decoder behind `NODE_EXTRA_CA_CERTS` would decode `encoded`.
- *
- * Testing the base64 ALPHABET alone is not that question: `====` and `AAAAA`
- * are alphabet-valid and both fail `bad base64 decode` on the real loader,
- * which takes NOTHING from the file — while this module read past them and
- * reported the certificates behind them as anchors the workers never got.
- * Line wrapping is not part of the judgment: a body rewrapped at 63 columns
- * loads and authorizes, so the joined length is what has to line up.
- */
-function decodesAsBase64(encoded: string): boolean {
-  return encoded.length % 4 === 0 && /^[A-Za-z0-9+/]+={0,2}$/.test(encoded);
-}
-
-/**
- * The certificate blocks a worker's `NODE_EXTRA_CA_CERTS` loader would take
- * from `contents`, in file order, or `undefined` when it would take none.
- *
- * This walks the file the way OpenSSL's `PEM_read_bio_X509` loop does rather
- * than pattern-matching what a well-formed file looks like. Three rounds of
- * review found three more shapes the pattern-matching version rejected and the
- * loader accepts (embedded marker text, whitespace inside a base64 body line,
- * a mid-file BOM); the shape-by-shape surface is unbounded, so the framing
- * decisions themselves are the loader's here.
- *
- * The loader is PREFIX-loading, not all-or-nothing (measured on Node 22:
- * a good root followed by a fused block still handshakes `authorized=true`
- * while Node prints `Ignoring extra certs … bad end line`): it keeps every
- * certificate up to the first malformed block and loses that block and
- * everything after it. So do we — dropping the good prefix too would discard
- * anchors the workers would otherwise have.
- *
- * Only certificate blocks come back. A combined cert+key serving PEM passes
- * boot validation (which parses the first block alone), and copying its
- * private key into a tmpdir bundle `NODE_EXTRA_CA_CERTS` never reads would
- * leave key material behind a SIGKILLed daemon, where the `exit` cleanup
- * cannot run.
- *
- * Both the spawn-time merge (`resolveWorkerCaCertPath`) and the boot-time
- * trust-gap diagnostic (`describeWorkerTlsTrustGaps`) go through here. Judging
- * the same file with two different parsers is what let a fused or DER operator
- * bundle be counted as an anchor at boot while the merge discarded it — the
- * daemon log stayed clean while every worker handshake failed.
- */
-export function extractCertificateBlocks(
-  contents: string,
-): string[] | undefined {
-  const scanned = scanCertificateBlocks(contents);
-  return scanned.length > 0 ? scanned.map((entry) => entry.block) : undefined;
-}
+`;
+const STRICT_CERTIFICATE_BLOCK =
+  /^-----BEGIN CERTIFICATE-----\r?\n(?:[A-Za-z0-9+/=]+\r?\n)+-----END CERTIFICATE-----[ \t]*(?:\r?\n|$)/gm;
 
 /** A block the loader takes, in canonical PEM and as its parsed certificate. */
 interface ScannedCertificateBlock {
@@ -166,195 +35,112 @@ interface ScannedCertificateBlock {
   certificate: X509Certificate;
 }
 
-/**
- * One walk of the file, shared by both exports.
- *
- * The certificate each block parsed to is carried out with the block rather
- * than re-derived from it: the gate below judges the DECODED bytes, so a block
- * the loader takes need not parse a second time as PEM.
- */
-function scanCertificateBlocks(contents: string): ScannedCertificateBlock[] {
-  const rawLines = contents.split('\n');
-  const lines = rawLines.map(normalizePemLine);
+function strictCertificateBlocks(contents: string): ScannedCertificateBlock[] {
   const blocks: ScannedCertificateBlock[] = [];
-  let index = 0;
-  scan: while (index < lines.length) {
-    const label = fitsPemLineBuffer(
-      rawLines[index]!,
-      index < rawLines.length - 1,
-    )
-      ? beginMarkerLabel(lines[index]!)
-      : undefined;
-    if (label === undefined) {
-      index += 1;
-      continue;
+  for (const match of contents.matchAll(STRICT_CERTIFICATE_BLOCK)) {
+    try {
+      const certificate = new X509Certificate(match[0]);
+      blocks.push({
+        block: certificate.toString().trimEnd(),
+        certificate,
+      });
+    } catch {
+      return [];
     }
-    const body: string[] = [];
-    let cursor = index + 1;
-    /**
-     * Set when a BEGIN marker — not an end line — closed this body.
-     *
-     * The loader does not read on past it and does not resume at it: it
-     * decodes what it collected SO FAR as this block's data and takes nothing
-     * from the rest of the file. Measured on Node v22.23.0 / OpenSSL 3.5.7
-     * through real `NODE_EXTRA_CA_CERTS` handshakes, four shapes that pin
-     * both halves of that rule:
-     *
-     * - `[root without its END line][full root]` -> `authorized: true`, no
-     *   warning (the truncated body IS taken);
-     * - `[leaf without its END line][full root]` -> `authorized: false`
-     *   UNABLE_TO_VERIFY_LEAF_SIGNATURE, no warning (the root BEHIND it is
-     *   not — so the loader stops rather than resuming at the inner marker);
-     * - `[full leaf][leaf without its END line][full root]` -> likewise
-     *   `authorized: false`, confirming the stop is not about which block
-     *   came first;
-     * - `[root without its END line]` at EOF -> `bad end line`, nothing.
-     *
-     * Folding the inner marker into the body instead made the base64
-     * judgment below fail on its `-` characters and dropped the WHOLE file:
-     * `resolveWorkerCaCertPath` then fired the no-operator-blocks fallback
-     * and discarded a CA the workers' own loader reads, while the boot
-     * diagnostic predicted an outage the workers do not have.
-     */
-    let truncatedByBeginMarker = false;
-    for (; cursor < lines.length; cursor += 1) {
-      const rawLine = rawLines[cursor]!;
-      const line = lines[cursor]!;
-      const fitsLineBuffer = fitsPemLineBuffer(
-        rawLine,
-        cursor < rawLines.length - 1,
-      );
-      if (fitsLineBuffer && line.startsWith(END_PREFIX)) {
-        if (body.findIndex(isHeaderSeparatorLine) < 0 && line.includes(':')) {
-          break scan;
-        }
-        // A mismatched or fused end line is `bad end line`: the loader stops
-        // reading the file here and keeps only what it already has.
-        if (endMarkerLabel(line) !== label) break scan;
-        break;
-      }
-      if (fitsLineBuffer && rawLine.startsWith(BEGIN_PREFIX)) {
-        truncatedByBeginMarker = true;
-        break;
-      }
-      body.push(line);
-    }
-    // Ran off the end without an end line — same `bad end line` stop. A body
-    // closed by a BEGIN marker is NOT that shape: the loader took it.
-    if (!truncatedByBeginMarker && cursor >= lines.length) break;
-    // Everything between the markers is `header CRLF CRLF data`, not data
-    // alone: the loader splits a block on its FIRST blank line and reads what
-    // precedes it as RFC 1421 headers. Folding the header lines into the
-    // base64 judgment is how a legacy encrypted key (`Proc-Type:` /
-    // `DEK-Info:`) aborted this scan while the loader consumed it as headers,
-    // skipped the block and loaded every certificate after it.
-    const separator = body.findIndex(isHeaderSeparatorLine);
-    const headed = separator > 0;
-    // A header section is only ever INSPECTED on a block the loader tries to
-    // consume, and `NODE_EXTRA_CA_CERTS` consumes certificate labels alone. On
-    // one of those the file stops whatever the headers say, because
-    // `PEM_get_EVP_CIPHER_INFO` runs either way: `not proc type` when
-    // `Proc-Type` is not the first header, and — since the loader then tries to
-    // DECRYPT — `bad decrypt` or `not dek info` when it is. All three take
-    // NOTHING from the file (measured, Node v22.23.0 / OpenSSL 3.0.13).
-    //
-    // Under every OTHER label the headers are not read at all. Enforcing RFC
-    // 1421's `Proc-Type`-first rule for all labels was a divergence with live
-    // harm: the same `Comment:`-headed section that kills a CERTIFICATE block
-    // loads the root behind it fine under `PRIVATE KEY`, `RSA PRIVATE KEY`,
-    // `X509 CRL`, `TRUSTED CERTIFICATE` and every other label tried
-    // (`authorized: true` for all of them), yet this scan returned `undefined`
-    // for such an operator file — so `resolveWorkerCaCertPath` fired the
-    // no-operator-blocks fallback, discarded a CA the workers' own loader
-    // reads, and blamed marker defects the file does not have.
-    if (headed && CERTIFICATE_LABELS.has(label)) break;
-    // A header section with no blank line after it needs no separate stop: its
-    // `Name: value` line carries a colon, which the base64 judgment below
-    // already refuses — measured `authorized: false` for that shape too.
-    const data = separator >= 0 ? body.slice(separator + 1) : body;
-    // A second blank line is still inside the data region. OpenSSL treats it
-    // as a malformed end to the block and stops loading the file.
-    if (data.some(isHeaderSeparatorLine)) break;
-    // Interior and leading whitespace in a body line is skipped by the
-    // decoder, not an error, so join first and judge the base64 afterwards.
-    // A BOM is NOT whitespace to the decoder: one inside a base64 line is
-    // `bad base64 decode` (measured), which is why the join names the
-    // characters it drops instead of leaning on `\s`.
-    const encoded = data.join('').replace(/[ \t\r\n]/g, '');
-    // The loader decodes EVERY block's body, whatever its label, and a body it
-    // cannot decode is `bad base64 decode` — another stop. Judging only
-    // CERTIFICATE bodies let a file whose leading PRIVATE KEY block is corrupt
-    // be counted as holding an anchor while the loader took nothing from it
-    // (measured on Node v22.23.0: handshake UNABLE_TO_VERIFY_LEAF_SIGNATURE
-    // for `bad-key-block + good root`, and for an empty body under any label,
-    // against `authorized: true` for the same file with the block removed).
-    if (encoded.length === 0 || !decodesAsBase64(encoded)) break;
-    if (headed) {
-      // A well-formed encrypted or otherwise headed non-certificate block: no
-      // certificate comes out of it, and the loader reads straight on past it.
-      // The base64 judgment above still had to run first — the loader decodes
-      // the body BELOW the headers too, so an encrypted key with an
-      // undecodable body is `bad base64 decode` and stops the file (measured
-      // for `!!!!` and for `AAAAA` under `Proc-Type:`/`DEK-Info:`), and a
-      // header section with no body at all takes nothing either.
-      if (truncatedByBeginMarker) break;
-      index = cursor + 1;
-      continue;
-    }
-    if (CERTIFICATE_LABELS.has(label)) {
-      let certificate: X509Certificate;
-      try {
-        // Shape is not loadability: a body made only of base64 *characters*
-        // still frames correctly while failing to decode (one misplaced `=` in
-        // a truncated or hand-edited cert), so something has to parse it.
-        //
-        // The DECODED BYTES are what the loader parses, and judging the
-        // re-rendered PEM instead was stricter than the loader by exactly one
-        // shape: a body carrying a complete DER certificate followed by extra
-        // bytes. `new X509Certificate(<that PEM>)` throws `wrong tag`, while
-        // the loader TAKES the block — measured `authorized: true` with no
-        // `Ignoring extra certs` warning for a root with trailing bytes
-        // appended. The DER-buffer path accepts the same bytes the loader
-        // accepts and still throws on truncated or invalid DER, so it is the
-        // gate that answers the loader's question. Judging the PEM dropped
-        // that block AND every block behind it, and the operator was told
-        // their file holds no certificate block Node can load.
-        certificate = new X509Certificate(Buffer.from(encoded, 'base64'));
-      } catch {
-        break;
-      }
-      // The canonical re-render keeps a merged bundle byte-stable; it carries
-      // the same body bytes, so the loader takes it exactly as it took the
-      // original.
-      blocks.push({ block: renderCertificateBlock(encoded), certificate });
-    }
-    if (truncatedByBeginMarker) break;
-    index = cursor + 1;
   }
   return blocks;
 }
 
-/** Canonical PEM for `encoded`, so a merged bundle is byte-stable. */
-function renderCertificateBlock(encoded: string): string {
-  const wrapped: string[] = [];
-  for (let at = 0; at < encoded.length; at += PEM_BODY_COLUMNS) {
-    wrapped.push(encoded.slice(at, at + PEM_BODY_COLUMNS));
+/**
+ * Ask the same Node executable that launches workers which certificates its
+ * `NODE_EXTRA_CA_CERTS` loader accepts. OpenSSL's PEM reader has byte-buffer,
+ * NUL, BOM, header and prefix-loading semantics that cannot be reproduced by
+ * a string parser without drifting from the worker runtime.
+ */
+function scanCertificateBlocks(
+  contents: string,
+  sourcePath?: string,
+): ScannedCertificateBlock[] {
+  // Production already has a source file. Reuse it so a SIGKILL cannot leave
+  // a second copy of private-key material from a combined serving PEM behind.
+  const dir = sourcePath
+    ? undefined
+    : mkdtempSync(join(tmpdir(), 'qwen-ca-oracle-'));
+  const certPath = sourcePath ?? join(dir!, 'extra-ca.pem');
+  try {
+    if (dir) writeFileSync(certPath, contents, { mode: 0o600 });
+    const result = spawnSync(
+      process.execPath,
+      ['--no-deprecation', '-e', ORACLE_SOURCE],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, [NODE_EXTRA_CA_CERTS_ENV]: certPath },
+        maxBuffer: ORACLE_MAX_BUFFER_BYTES,
+        timeout: ORACLE_TIMEOUT_MS,
+        windowsHide: true,
+      },
+    );
+    if (result.error) throw result.error;
+    if (result.status !== 0) {
+      throw new Error(
+        `Node certificate loader oracle exited with status ${result.status}: ${result.stderr.trim()}`,
+      );
+    }
+    const parsed: unknown = JSON.parse(result.stdout);
+    if (typeof parsed !== 'object' || parsed === null) {
+      throw new Error('Node certificate loader oracle returned invalid output');
+    }
+    const certificates = Reflect.get(parsed, 'certificates');
+    if (certificates !== undefined) {
+      if (
+        !Array.isArray(certificates) ||
+        !certificates.every((item) => typeof item === 'string')
+      ) {
+        throw new Error(
+          'Node certificate loader oracle returned invalid certificates',
+        );
+      }
+      return certificates.map((block) => ({
+        block: block.trimEnd(),
+        certificate: new X509Certificate(block),
+      }));
+    }
+    const fullyLoaded = Reflect.get(parsed, 'fullyLoaded');
+    if (typeof fullyLoaded !== 'boolean') {
+      throw new Error('Node certificate loader oracle returned invalid output');
+    }
+    // `tls.getCACertificates('extra')` was added during Node 22. Older Node 22
+    // releases expose only the loader's success bit. In that compatibility
+    // path, extract a strict subset only after the loader confirms the whole
+    // file was accepted; unusual but loadable shapes fail closed and trigger
+    // the existing visible merge fallback instead of creating phantom roots.
+    return fullyLoaded ? strictCertificateBlocks(contents) : [];
+  } finally {
+    if (dir) rmSync(dir, { recursive: true, force: true });
   }
-  return [
-    `${BEGIN_PREFIX}${CERTIFICATE_LABEL}${MARKER_SUFFIX}`,
-    ...wrapped,
-    `${END_PREFIX}${CERTIFICATE_LABEL}${MARKER_SUFFIX}`,
-  ].join('\n');
 }
 
 /**
- * The certificates a worker's loader would actually take from `contents`, or
- * `undefined` when it would take none of them.
+ * The certificate blocks a worker's `NODE_EXTRA_CA_CERTS` loader takes from
+ * `contents`, in file order, or `undefined` when it takes none.
+ */
+export function extractCertificateBlocks(
+  contents: string,
+  sourcePath?: string,
+): string[] | undefined {
+  const scanned = scanCertificateBlocks(contents, sourcePath);
+  return scanned.length > 0 ? scanned.map((entry) => entry.block) : undefined;
+}
+
+/**
+ * The certificates a worker's loader takes from `contents`, or `undefined`
+ * when it takes none of them.
  */
 export function loadableCertificates(
   contents: string,
+  sourcePath?: string,
 ): X509Certificate[] | undefined {
-  const scanned = scanCertificateBlocks(contents);
+  const scanned = scanCertificateBlocks(contents, sourcePath);
   return scanned.length > 0
     ? scanned.map((entry) => entry.certificate)
     : undefined;

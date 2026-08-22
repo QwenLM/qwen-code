@@ -148,7 +148,7 @@ describe('extractCertificateBlocks', () => {
     ).toBeUndefined();
   });
 
-  it('takes a body carrying a certificate followed by extra bytes', () => {
+  it('takes and canonicalizes a certificate followed by extra bytes', () => {
     // R4-2. Oracle: authorized=true with no `Ignoring extra certs` warning —
     // the loader parses the DECODED BYTES and tolerates trailing content past
     // a complete DER certificate, while `new X509Certificate(<this PEM>)`
@@ -161,7 +161,7 @@ describe('extractCertificateBlocks', () => {
         Buffer.from([0, 0, 0]),
       ]),
     );
-    expect(extractCertificateBlocks(padded)).toEqual([padded.trim()]);
+    expect(extractCertificateBlocks(padded)).toEqual([ROOT_PEM.trim()]);
     expect(() => new X509Certificate(padded)).toThrow();
   });
 
@@ -231,15 +231,65 @@ describe('extractCertificateBlocks', () => {
     ]);
   });
 
-  it('walks past a marker longer than the loader line buffer', () => {
+  it('stops at markers that fill the loader line buffer', () => {
     const marker = (length: number) =>
       `-----BEGIN ${'A'.repeat(length - 16)}-----`;
     expect(
       extractCertificateBlocks(`${marker(253)}\n${ROOT_PEM}`),
     ).toBeUndefined();
-    expect(extractCertificateBlocks(`${marker(254)}\n${ROOT_PEM}`)).toEqual([
-      ROOT_PEM.trim(),
-    ]);
+    expect(
+      extractCertificateBlocks(`${marker(254)}\n${ROOT_PEM}`),
+    ).toBeUndefined();
+  });
+
+  it('does not turn a BEGIN marker at EOF into a body closer', () => {
+    const withoutEnd = ROOT_PEM.replace('-----END CERTIFICATE-----\n', '');
+    for (const suffix of [
+      '-----BEGIN CERTIFICATE-----',
+      '-----BEGIN CERTIFICATE-----\n',
+    ]) {
+      expect(
+        extractCertificateBlocks(`${withoutEnd}${suffix}`),
+      ).toBeUndefined();
+    }
+  });
+
+  it('does not close an open certificate on a mismatched BEGIN label', () => {
+    const withoutEnd = ROOT_PEM.replace('-----END CERTIFICATE-----\n', '');
+    const key =
+      '-----BEGIN PRIVATE KEY-----\nQUJD\n-----END PRIVATE KEY-----\n';
+    expect(extractCertificateBlocks(`${withoutEnd}${key}`)).toBeUndefined();
+  });
+
+  it('follows the loader NUL boundary on marker and body lines', () => {
+    const firstBodyLine = bodyLines(ROOT_PEM)[0]!;
+    for (const file of [
+      ROOT_PEM.replace(
+        '-----BEGIN CERTIFICATE-----',
+        '-----BEGIN CERTIFICATE-----\0junk',
+      ),
+      ROOT_PEM.replace(firstBodyLine, `${firstBodyLine}\0junk`),
+      ROOT_PEM.replace(
+        '-----END CERTIFICATE-----',
+        '-----END CERTIFICATE-----\0junk',
+      ),
+    ]) {
+      expect(extractCertificateBlocks(file)).toEqual([ROOT_PEM.trim()]);
+    }
+  });
+
+  it('follows the loader BOM boundary on separators and end markers', () => {
+    const body = bodyLines(ROOT_PEM).join('\n');
+    for (const file of [
+      `-----BEGIN CERTIFICATE-----\n\uFEFF\uFEFF\n${body}\n-----END CERTIFICATE-----\n`,
+      `-----BEGIN CERTIFICATE-----\n \uFEFF\n${body}\n-----END CERTIFICATE-----\n`,
+      ROOT_PEM.replace(
+        '-----END CERTIFICATE-----',
+        '-----END CERTIFICATE-----\uFEFF',
+      ),
+    ]) {
+      expect(extractCertificateBlocks(file)).toEqual([ROOT_PEM.trim()]);
+    }
   });
 
   it('stops when an END label introduces an unterminated header', () => {
