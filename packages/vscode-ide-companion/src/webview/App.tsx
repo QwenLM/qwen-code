@@ -18,6 +18,7 @@ import { useFileContext } from './hooks/file/useFileContext.js';
 import { useMessageHandling } from './hooks/message/useMessageHandling.js';
 import { useToolCalls } from './hooks/useToolCalls.js';
 import { useWebViewMessages } from './hooks/useWebViewMessages.js';
+import { useAcpTranscript } from './hooks/useAcpTranscript.js';
 import {
   shouldSendMessage,
   useMessageSubmit,
@@ -71,6 +72,14 @@ import {
   buildSlashCommandItems,
   isExpandableSlashCommand,
 } from './utils/slashCommandUtils.js';
+// Lazy-load the WebShell transcript renderer so the experimental flag stays
+// opt-in at the bundle level: the ~17MB web-shell chunk is fetched only when
+// `data-web-shell-transcript` is present on <body>.
+const WebShellTranscriptLazy = React.lazy(() =>
+  import('@qwen-code/web-shell').then((module) => ({
+    default: module.WebShellTranscript,
+  })),
+);
 
 /**
  * Memoized message list that only re-renders when messages or callbacks change,
@@ -1488,6 +1497,22 @@ export const App: React.FC = () => {
     planEntries.length > 0 ||
     allMessages.length > 0;
 
+  // Experimental WebShell transcript rendering, enabled via the
+  // `qwen-code.experimental.webShellTranscript` setting. The flag is threaded
+  // from the extension host through a `<body data-web-shell-transcript>`
+  // attribute so the webview can decide once at mount without postMessage.
+  const webShellTranscriptEnabled = useMemo(
+    () =>
+      typeof document !== 'undefined' &&
+      document.body.getAttribute('data-web-shell-transcript') === 'true',
+    [],
+  );
+  const webShellTheme = useMemo<'dark' | 'light'>(() => {
+    const kind = document.body.getAttribute('data-vscode-theme-kind') ?? '';
+    return kind.includes('light') ? 'light' : 'dark';
+  }, []);
+  const transcriptBlocks = useAcpTranscript();
+
   return (
     <div className="chat-container relative">
       {/* Top-level loading overlay */}
@@ -1532,12 +1557,33 @@ export const App: React.FC = () => {
 
       <div
         ref={messagesContainerRef}
-        className="chat-messages messages-container flex-1 overflow-y-auto overflow-x-hidden pt-5 pr-5 pl-5 pb-[140px] flex flex-col relative min-w-0 focus:outline-none [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:rounded-sm [&>*]:flex [&>*]:gap-0 [&>*]:items-start [&>*]:text-left [&>*]:py-2 [&>*:not(:last-child)]:pb-[8px] [&>*]:flex-col [&>*]:relative [&>*]:animate-[fadeIn_0.2s_ease-in]"
+        className={
+          webShellTranscriptEnabled
+            ? 'flex-1 min-h-0 relative'
+            : 'chat-messages messages-container flex-1 overflow-y-auto overflow-x-hidden pt-5 pr-5 pl-5 pb-[140px] flex flex-col relative min-w-0 focus:outline-none [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:rounded-sm [&>*]:flex [&>*]:gap-0 [&>*]:items-start [&>*]:text-left [&>*]:py-2 [&>*:not(:last-child)]:pb-[8px] [&>*]:flex-col [&>*]:relative [&>*]:animate-[fadeIn_0.2s_ease-in]'
+        }
         data-vscode-context={
-          hasContent ? '{"webviewSection": "chat-messages"}' : undefined
+          hasContent && !webShellTranscriptEnabled
+            ? '{"webviewSection": "chat-messages"}'
+            : undefined
         }
       >
-        {!hasContent && !isLoading && !sessionManagement.isSwitchingSession ? (
+        {webShellTranscriptEnabled ? (
+          <React.Suspense
+            fallback={
+              <div className="flex h-full items-center justify-center">
+                <span className="border-primary inline-block h-6 w-6 animate-spin rounded-full border-2 border-t-transparent" />
+              </div>
+            }
+          >
+            <WebShellTranscriptLazy
+              blocks={transcriptBlocks}
+              theme={webShellTheme}
+            />
+          </React.Suspense>
+        ) : !hasContent &&
+          !isLoading &&
+          !sessionManagement.isSwitchingSession ? (
           isAuthenticated === false ? (
             <Onboarding />
           ) : isAuthenticated === null ? (

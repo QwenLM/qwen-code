@@ -227,6 +227,12 @@
           "type": "boolean",
           "default": true,
           "description": "Show notifications with sound when a task completes (at least 20 seconds) or needs your attention, while you are not actively viewing the Qwen Code panel."
+        },
+        "qwen-code.experimental.webShellTranscript": {
+          "order": 5,
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Render the conversation timeline with the shared WebShell transcript UI (experimental). Requires a window reload after changing."
         }
       }
     },
@@ -293,6 +299,7 @@
     "@qwen-code/acp-bridge": "*",
     "@qwen-code/sdk": "*",
     "@qwen-code/webui": "*",
+    "@qwen-code/web-shell": "*",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "cors": "^2.8.5",
     "dotenv": "^17.1.0",
