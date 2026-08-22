@@ -4,9 +4,10 @@
 # The body below is the 'Push and report' step of review-address in
 # .github/workflows/qwen-autofix.yml — the inline block it came from (626
 # lines, ~41 KB at the move), its long comments since migrated to
-# qwen-autofix.md pointers like the rest of the workflow. The file it left is within a few KB of the
-# repo's 470,000-byte gate, and GitHub stops starting runs past 512,000 without
-# saying so (.github/scripts/check-workflow-size.sh). No absolute size is
+# qwen-autofix.md pointers like the rest of the workflow. The file it left
+# is within a few KB of the repo's 470,000-byte gate, and GitHub stops starting
+# runs past 512,000 without saying so (.github/scripts/check-workflow-size.sh).
+# No absolute size is
 # quoted here on purpose — main moves it every day, and a number that decays is
 # how this comment earned three review rounds. It is also
 # the step docs/design/autofix-gate-runner-isolation.md moves into its own

@@ -171,7 +171,7 @@ task-oriented guides — what a maintainer types and what happens next — see:
 - [77. run — Upper bound on review targets emitted per scan (fan-out defense-in-depth; excess…](#af-077)
 - [78. run — Upper bound on candidates INSPECTED per scan: idle candidates consume serial API…](#af-078)
 - [79. run — Commit-status context stamped PENDING on a PR head when a scan dispatches a…](#af-079)
-- [80. run — Consecutive-failure sub-cap, distinct from the total round cap (MAX_ROUNDS,…](#af-080)
+- [80. run — Consecutive-failure sub-cap, distinct from the total round cap (TAKEOVER_MAX_ROUNDS,…](#af-080)
 - [81. run — Cumulative agent-timeout sub-cap, the sibling of the consecutive cap for the…](#af-081)
 - [82. route · Decide phases — Real-time review triggers: process the SAME managed set the scheduled scan does,…](#af-082)
 - [83. route · Decide phases — Comment-command sugar over the labels: TAKEOVER_COMMAND applies TAKEOVER_LABEL,…](#af-083)
@@ -2397,12 +2397,12 @@ sha does not exist in this repo's object store.
 
 <a id="af-080"></a>
 
-### 80. run — Consecutive-failure sub-cap, distinct from the total round cap (MAX_ROUNDS,…
+### 80. run — Consecutive-failure sub-cap, distinct from the total round cap (TAKEOVER_MAX_ROUNDS,…
 
 In `run`.
 
 ```text
-Consecutive-failure sub-cap, distinct from the total round cap (MAX_ROUNDS, documented at its declaration in qwen-autofix.yml). The
+Consecutive-failure sub-cap, distinct from the total round cap (TAKEOVER_MAX_ROUNDS, documented at its declaration in qwen-autofix.yml). The
 total cap bounds how many PRODUCTIVE rounds a PR may take; this bounds how
 many rounds may fail IN A ROW with nothing pushed. Under takeover a PR gets
 up to 100 rounds, but a PR that fails to push this many times running is not
@@ -2758,9 +2758,10 @@ check-run yet, but a push now would still cancel it via
 synchronize. Only pull_request_target runs are cancelable —
 comment/review-triggered runs use per-run concurrency groups
 that a synchronize never cancels, so holding the round for
-one would defer autofix for nothing (R2-1). The scan fetched
-the newest run page once above; match by immutable head SHA or
-PR number, never by fork-controlled bare branch name.
+one would defer autofix for nothing (R2-1). Match against the
+scan's REVIEW_RUNS_JSON fetch — one page of the review
+workflow's runs, empty on lookup failure — by immutable head
+SHA or PR number, never by fork-controlled bare branch name.
 ```
 
 <a id="af-100"></a>
@@ -2971,9 +2972,11 @@ In `review-address` · `Stage trusted schema gate and agent runner`.
 ```text
 The staged copies' trusted-base provenance holds at cp time only:
 RUNNER_TEMP is writable by the branch/agent code later steps run
-on this host, so record each digest in GITHUB_OUTPUT — expression
-context, which a disk write after staging cannot reach — for the
-invoking step to verify before execution. The gate runner is
+on this host, so the two digested copies — resanitize-git-config.sh
+and run-autofix-review-verification.sh — record each digest in
+GITHUB_OUTPUT — expression context, which a disk write after staging
+cannot reach — for the invoking step to verify before execution.
+(The step's other staged scripts carry no digest.) The gate runner is
 pinned too: it runs the branch's own build/test between the two
 gate passes, so an unverified copy would let the branch define
 its own verdict. The trusted PATH is recorded before any branch
@@ -3049,7 +3052,7 @@ of 403ing at the report step after the work is done.
 One-shot host-scoped helper like the push steps: the leading
 empty credential.helper resets the inherited helper list (a
 planted helper must never answer first) and http.sslVerify
-pins the transport — see 'Publish PR' for the full rationale.
+pins the transport — full rationale → af-015.
 ```
 
 <a id="af-116"></a>
