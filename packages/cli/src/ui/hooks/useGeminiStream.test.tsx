@@ -2045,6 +2045,154 @@ describe('useGeminiStream', () => {
       );
     });
 
+    it('keeps the previous retry payload intact when a preempted goal round restores its envelope before storing its own payload', async () => {
+      // Pin for the trailing-match guard in settleDrainedTeammates: a
+      // restore that fires BEFORE submitQuery stores this round's payload
+      // (goal controller aborted mid-round) looks at lastPromptRef while
+      // it still holds the PREVIOUS turn's payload. The guard must keep
+      // the strip a no-op there — the previous payload's trailing entries
+      // do not match the batch — or an unconditional strip truncates the
+      // retry payload by the batch size.
+      const permit: GoalTurnPermit = {
+        goalId: 'goal-preempt-strip',
+        revision: 1,
+        turnId: 'turn-preempt-strip',
+      };
+      mockConfig.getGoalRuntimeReady = vi.fn().mockResolvedValue({
+        permitForTurn: vi.fn().mockReturnValue(undefined),
+        getSnapshot: vi.fn().mockReturnValue({ goal: null }),
+      } as never);
+
+      // Hold the Idle drain behind the goal gate so Ctrl+Y can fire while
+      // the restored batch is still queued (a Retry is admissible; an Idle
+      // drain would overwrite lastPromptRef before the retry).
+      let queuedUserMessages = true;
+      let pendingSubmissionCount = 0;
+      const goalQueueRef = {
+        current: {
+          hasQueuedUserMessages: vi.fn(() => queuedUserMessages),
+          getPendingSubmissionCount: vi.fn(() => pendingSubmissionCount),
+          claimGoalTurn: vi.fn(),
+        },
+      };
+
+      const {
+        result,
+        rerenderWithToolCalls,
+        leaderCallback,
+        completeToolRound,
+      } = renderBusyMultiRoundTask(
+        [createExecutingToolCall('call-r1')],
+        goalQueueRef as never,
+      );
+
+      const normalStream = () =>
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })();
+      // Round 1: the boundary send FAILS after lastPromptRef stored this
+      // round's payload, so the previous-turn retry payload becomes the
+      // two tool-response parts below (retryable via lastPromptErroredRef).
+      mockSendMessageStream
+        .mockImplementation(normalStream)
+        .mockImplementationOnce(() => {
+          throw new Error('round one delivery failed');
+        });
+      const roundOneCompleted: TrackedCompletedToolCall = {
+        ...createCompletedToolCall('call-r1'),
+        response: {
+          ...createCompletedToolCall('call-r1').response,
+          responseParts: [{ text: 'call-r1' }, { text: 'call-r1-extra' }],
+        },
+      };
+      rerenderWithToolCalls([roundOneCompleted]);
+      await completeToolRound([roundOneCompleted]);
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      });
+
+      // A teammate message queues for the next boundary.
+      act(() => {
+        leaderCallback()(teammateModelText, teammateDisplay);
+      });
+
+      // Round 2 is goal-owned. Hang the flow after the goal binding is
+      // created (refreshMemoryAfterManagedWrite is awaited right past the
+      // bind), abort the goal controller mid-round, then release it: the
+      // preempt check settles the drained batch by restore BEFORE
+      // submitQuery stores round 2's payload.
+      let releaseRefresh: (() => void) | undefined;
+      mockRefreshMemoryAfterManagedWrite.mockImplementationOnce(
+        () =>
+          new Promise<boolean>((resolve) => {
+            releaseRefresh = () => resolve(false);
+          }),
+      );
+      const roundTwoCompleted: TrackedCompletedToolCall = {
+        ...createCompletedToolCall('call-r2'),
+        request: {
+          ...createCompletedToolCall('call-r2').request,
+          goalContext: permit,
+        },
+      };
+      rerenderWithToolCalls([roundTwoCompleted]);
+      const roundTwo = completeToolRound([roundTwoCompleted]);
+      await waitFor(() => {
+        expect(mockRefreshMemoryAfterManagedWrite).toHaveBeenCalledTimes(2);
+      });
+      act(() => {
+        result.current.preemptGoalTurn('preempted by test');
+      });
+      releaseRefresh?.();
+      await roundTwo;
+
+      // The preempted round never submitted: still only the failed round 1
+      // attempt reached the client.
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+
+      // Settle to Idle; the goal gate still holds the Idle drain, so the
+      // restored batch stays queued while Ctrl+Y fires.
+      rerenderWithToolCalls([]);
+      await waitFor(() => {
+        expect(result.current.streamingState).toBe(StreamingState.Idle);
+      });
+
+      // Ctrl+Y re-sends round 1's payload INTACT — the trailing-match
+      // guard kept the restore from stripping a non-matching tail.
+      await act(async () => {
+        await result.current.retryLastPrompt();
+      });
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      expect(mockSendMessageStream.mock.calls[1][0]).toEqual([
+        { text: 'call-r1' },
+        { text: 'call-r1-extra' },
+      ]);
+
+      // Release the goal gate (and change the pending count so the Idle
+      // drain effect's dep re-runs it): the restored envelope proves it
+      // was requeued by being delivered exactly once here.
+      queuedUserMessages = false;
+      pendingSubmissionCount = 1;
+      rerenderWithToolCalls([]);
+      await waitFor(() => {
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(3);
+      });
+      expect(mockSendMessageStream).toHaveBeenLastCalledWith(
+        teammateModelText,
+        expect.any(AbortSignal),
+        expect.any(String),
+        expect.objectContaining({
+          type: SendMessageType.Teammate,
+          notificationDisplayText: teammateDisplay,
+        }),
+      );
+    });
+
     it('delivers and records every envelope in a boundary batch', async () => {
       const recordNotification = vi.fn();
       mockConfig.getChatRecordingService = vi.fn().mockReturnValue({
