@@ -744,6 +744,18 @@ describe('bundled review skill', () => {
     expect(body).toContain(
       'It is the attributed count, not the count of findings on new lines',
     );
+    // What NOT to count, besides the ruled-away dispositions: a finding
+    // confirmed but dropped as an already-reported duplicate RESTATES a
+    // defect an earlier round identified — it is not newly identified, and
+    // it reaches none of the three channels the module cross-checks `fresh`
+    // against. Counting it inflates the census past everything reported,
+    // the module refuses the pair as impossible, and a measured below-bar
+    // round then reads as unmeasured — the streak CARRIES where the
+    // contract says a measured below-bar round RESETS (or, above the bar,
+    // the advance is lost and the blocker delayed).
+    expect(body).toContain(
+      'dropped as duplicates of already-reported findings',
+    );
     expect(body).toContain('**Omitting is not the same as zero**');
     expect(body).toContain('**You count; the module rules.**');
     expect(body).toContain(

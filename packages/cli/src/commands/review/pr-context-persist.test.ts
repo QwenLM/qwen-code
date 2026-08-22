@@ -109,15 +109,24 @@ describe('persistRecoveredLedger', () => {
     }
   });
 
-  it('a FOREIGN winner reaching the side file carries no planted churn state', () => {
-    // The round trip for the recovery seam: any account that can submit a
-    // review can post a marker carrying `churnRounds`, and recovery adopts
-    // the highest round inside the headroom. If the foreign winner's streak
-    // rode the identity-known write into the side file, `compose-review`
-    // would read it back as THIS account's standing claim — one honest
-    // above-bar census later, the non-convergence blocker files on a pull
-    // request that never churned. The winner must reach the file with the
-    // churn state already gone, whichever write path carries it.
+  it('a FOREIGN winner carries no planted churn state — and own streak still restores across the round gap', () => {
+    // The round trip for the recovery seam, both halves: any account that
+    // can submit a review can post a marker carrying `churnRounds`, and
+    // recovery adopts the highest round inside the headroom. If the foreign
+    // winner's PLANTED streak rode the identity-known write into the side
+    // file, `compose-review` would read it back as THIS account's standing
+    // claim — one honest above-bar census later, the non-convergence
+    // blocker files on a pull request that never churned. The planted
+    // number must not survive.
+    //
+    // But the streak is CUMULATIVE, and the winner here is strictly NEWER
+    // than this account's own marker: the interleaved foreign round is a
+    // round this account never measured, and the carry contract says an
+    // unmeasured round carries the count, not zeroes it. Skipping the
+    // restore on the round gap let one drive-by marker wipe a standing
+    // streak — on a PR two accounts alternate on, every account's streak
+    // would reset before reaching the filing bar, disarming the mechanism
+    // wholesale. Own streak restored (1), planted streak gone (never 4).
     const dir = mkdtempSync(join(tmpdir(), 'prev-ledger-'));
     const side = join(dir, 'side.json');
     try {
@@ -153,18 +162,17 @@ describe('persistRecoveredLedger', () => {
       });
       const written = JSON.parse(readFileSync(side, 'utf8'));
       expect(written.round).toBe(4);
-      expect(written.churnRounds).toBeUndefined();
+      expect(written.churnRounds).toBe(1);
+      expect(written.churnRounds).not.toBe(4);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
   it("a SAME-round union carries this account's own churn state to disk", () => {
-    // The other half of the strip, end to end. The test above is CROSS-round,
-    // so the churn state is already absent by the time the write runs and a
-    // second drop there would be a no-op — it can never redden. This arm is
-    // the one that can: the own marker describes the SAME round the foreign
-    // winner claims, so the union restores own churn over the stripped
+    // The same-round arm of the restore, end to end: the own marker
+    // describes the SAME round the foreign winner claims, so the union
+    // restores own churn (and the same-round volume) over the stripped
     // winner, and the restore only means anything if it survives the
     // identity-known write.
     //
@@ -696,10 +704,10 @@ describe('persistRecoveredLedger', () => {
           // next compose would stamp it as `prevPosted`. The floor and the
           // fresh count qualify that volume, so they go with it: a posture
           // recorded for a round whose volume was deliberately discarded
-          // qualifies nothing. The streak is the same class of
-          // round-specific fact — kept, it would re-date this account's
-          // claim across the foreign round and discard the foreign
-          // winner's own streak state.
+          // qualifies nothing. The streak is the OTHER class — cumulative,
+          // not round-specific: the round being advanced past is one this
+          // account could not measure, and the carry contract says an
+          // unmeasured round carries the count rather than resets it.
           posted: 4,
           prevPosted: 2,
           fresh: 3,
@@ -724,18 +732,24 @@ describe('persistRecoveredLedger', () => {
         { noOwnReview: true, identityKnown: false },
       );
       const written = JSON.parse(readFileSync(side, 'utf8'));
+      // The carry witness is in the shape: the fixture carries THIS
+      // account's own streak, and the written file must still carry it —
+      // the advance is a round this account could not measure (an identity
+      // blip, exactly the `gh api user` failure the volume comment
+      // anticipates), and dropping it zeroes a standing claim the blocker's
+      // own body promises unmeasured rounds carry. Filing still needs this
+      // round's OWN above-bar census, so the carried streak arms nothing
+      // early; repeated blips otherwise keep the blocker unreachable on
+      // exactly the churning PRs the mechanism exists for.
       expect(written).toEqual({
         v: 1,
         round: 8,
         findings: ledger.findings,
         reviewId: 200,
+        churnRounds: 2,
       });
       expect(written.sha).toBeUndefined();
       expect(written.commitId).toBeUndefined();
-      // The drop witness: the fixture carries a streak, and the written
-      // file must not — keeping it arms the blocker one round early across
-      // a round this account never ran.
-      expect(written.churnRounds).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
