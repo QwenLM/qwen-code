@@ -13113,6 +13113,54 @@ describe('GeminiChat', async () => {
       } as AsyncGenerator<GenerateContentResponse>;
     }
 
+    it('escalates an empty MAX_TOKENS response instead of retrying it as an empty stream', async () => {
+      vi.useFakeTimers();
+      try {
+        const requestedMaxOutputTokens: Array<number | undefined> = [];
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async (request) => {
+          const maxOutputTokens = request.config?.maxOutputTokens;
+          requestedMaxOutputTokens.push(maxOutputTokens);
+          return maxOutputTokens !== undefined && maxOutputTokens > 8_192
+            ? makeStream([
+                makeChunk([{ text: 'Completed after escalation.' }], 'STOP'),
+              ])
+            : makeStream([makeChunk([], 'MAX_TOKENS')]);
+        });
+
+        const stream = await chat.sendMessageStream(
+          'gemini-pro',
+          { message: 'complete the tool call' },
+          'prompt-empty-max-tokens-escalation',
+        );
+        const events = await collectStreamWithFakeTimers(stream, 25_000);
+
+        expect(requestedMaxOutputTokens).toEqual([8_192, 64_000]);
+        expect(
+          events.filter((event) => event.type === StreamEventType.RETRY),
+        ).toEqual([
+          {
+            type: StreamEventType.RETRY,
+            maxOutputTokensEscalated: 64_000,
+          },
+        ]);
+        expect(mockLogContentRetry).not.toHaveBeenCalledWith(
+          mockConfig,
+          expect.objectContaining({ error_type: 'NO_RESPONSE_TEXT' }),
+        );
+        expect(chat.getHistory()).toEqual([
+          { role: 'user', parts: [{ text: 'complete the tool call' }] },
+          {
+            role: 'model',
+            parts: [{ text: 'Completed after escalation.' }],
+          },
+        ]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('re-clamps maxOutputTokens on each recovery send as the prompt grows (window invariant)', async () => {
       // The #5950 shape at recovery time: 131,072 window, 71,349 prompt,
       // 64K-ceiling model. Initial clamp grants 49,722. The response
