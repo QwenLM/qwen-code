@@ -20,10 +20,8 @@ if (typeof tls.getCACertificates === 'function') {
     certificates: tls.getCACertificates('extra'),
   }));
 } else {
-  const crypto = process.binding('crypto');
-  process.stdout.write(JSON.stringify({
-    fullyLoaded: crypto.isExtraRootCertsFileLoaded(),
-  }));
+  tls.createSecureContext();
+  process.stdout.write(JSON.stringify({ legacy: true }));
 }
 `;
 const STRICT_CERTIFICATE_BLOCK =
@@ -63,60 +61,67 @@ function scanCertificateBlocks(
 ): ScannedCertificateBlock[] {
   // Production already has a source file. Reuse it so a SIGKILL cannot leave
   // a second copy of private-key material from a combined serving PEM behind.
-  const dir = sourcePath
-    ? undefined
-    : mkdtempSync(join(tmpdir(), 'qwen-ca-oracle-'));
-  const certPath = sourcePath ?? join(dir!, 'extra-ca.pem');
+  let dir: string | undefined;
   try {
+    dir = sourcePath
+      ? undefined
+      : mkdtempSync(join(tmpdir(), 'qwen-ca-oracle-'));
+    const certPath = sourcePath ?? join(dir!, 'extra-ca.pem');
     if (dir) writeFileSync(certPath, contents, { mode: 0o600 });
+    const oracleEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      [NODE_EXTRA_CA_CERTS_ENV]: certPath,
+    };
+    for (const key of Object.keys(oracleEnv)) {
+      if (key.toUpperCase() === 'NODE_OPTIONS') delete oracleEnv[key];
+    }
     const result = spawnSync(
       process.execPath,
-      ['--no-deprecation', '-e', ORACLE_SOURCE],
+      ['--no-deprecation', '--input-type=commonjs', '-e', ORACLE_SOURCE],
       {
         encoding: 'utf8',
-        env: { ...process.env, [NODE_EXTRA_CA_CERTS_ENV]: certPath },
+        env: oracleEnv,
         maxBuffer: ORACLE_MAX_BUFFER_BYTES,
         timeout: ORACLE_TIMEOUT_MS,
         windowsHide: true,
       },
     );
-    if (result.error) throw result.error;
-    if (result.status !== 0) {
-      throw new Error(
-        `Node certificate loader oracle exited with status ${result.status}: ${result.stderr.trim()}`,
-      );
-    }
+    if (result.error || result.status !== 0) return [];
     const parsed: unknown = JSON.parse(result.stdout);
-    if (typeof parsed !== 'object' || parsed === null) {
-      throw new Error('Node certificate loader oracle returned invalid output');
-    }
+    if (typeof parsed !== 'object' || parsed === null) return [];
     const certificates = Reflect.get(parsed, 'certificates');
     if (certificates !== undefined) {
       if (
         !Array.isArray(certificates) ||
         !certificates.every((item) => typeof item === 'string')
       ) {
-        throw new Error(
-          'Node certificate loader oracle returned invalid certificates',
-        );
+        return [];
       }
       return certificates.map((block) => ({
         block: block.trimEnd(),
         certificate: new X509Certificate(block),
       }));
     }
-    const fullyLoaded = Reflect.get(parsed, 'fullyLoaded');
-    if (typeof fullyLoaded !== 'boolean') {
-      throw new Error('Node certificate loader oracle returned invalid output');
-    }
+    if (Reflect.get(parsed, 'legacy') !== true) return [];
     // `tls.getCACertificates('extra')` was added during Node 22. Older Node 22
-    // releases expose only the loader's success bit. In that compatibility
-    // path, extract a strict subset only after the loader confirms the whole
-    // file was accepted; unusual but loadable shapes fail closed and trigger
-    // the existing visible merge fallback instead of creating phantom roots.
-    return fullyLoaded ? strictCertificateBlocks(contents) : [];
+    // releases expose no certificate list. Creating a secure context drives
+    // the same loader and reports a malformed file on stderr; accept only the
+    // strict subset after a warning-free load. Unusual but loadable shapes
+    // fail closed and trigger the existing visible merge fallback instead of
+    // creating phantom roots.
+    return result.stderr.includes('Warning: Ignoring extra certs from')
+      ? []
+      : strictCertificateBlocks(contents);
+  } catch {
+    return [];
   } finally {
-    if (dir) rmSync(dir, { recursive: true, force: true });
+    if (dir) {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch {
+        // Best effort: a tmp cleaner may already have taken it.
+      }
+    }
   }
 }
 

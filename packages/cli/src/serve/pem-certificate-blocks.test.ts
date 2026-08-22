@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { X509Certificate } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
@@ -77,6 +80,33 @@ const renderBlock = (der: Buffer): string => {
 };
 
 describe('extractCertificateBlocks', () => {
+  it('ignores NODE_OPTIONS that only affect eval-based oracle children', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ca-preload-'));
+    const preload = path.join(dir, 'stdout-preload.cjs');
+    fs.writeFileSync(preload, "process.stdout.write('preload noise');\n");
+    const previous = process.env['NODE_OPTIONS'];
+    try {
+      for (const value of ['--input-type=module', `--require=${preload}`]) {
+        process.env['NODE_OPTIONS'] = value;
+        expect(extractCertificateBlocks(ROOT_PEM)).toEqual([ROOT_PEM.trim()]);
+        expect(process.env['NODE_OPTIONS']).toBe(value);
+      }
+    } finally {
+      if (previous === undefined) delete process.env['NODE_OPTIONS'];
+      else process.env['NODE_OPTIONS'] = previous;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed when the loader oracle cannot inspect its source file', () => {
+    expect(
+      extractCertificateBlocks(
+        ROOT_PEM,
+        path.join(os.tmpdir(), 'qwen-ca-source-does-not-exist.pem'),
+      ),
+    ).toBeUndefined();
+  });
+
   it('takes a canonical single-certificate file verbatim', () => {
     expect(extractCertificateBlocks(ROOT_PEM)).toEqual([ROOT_PEM.trim()]);
   });
