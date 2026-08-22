@@ -5,6 +5,9 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import type { Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import type {
@@ -16,7 +19,11 @@ import type {
 import { GeminiEventType } from '../core/turn.js';
 import * as loggers from '../telemetry/loggers.js';
 import { LoopType } from '../telemetry/types.js';
-import { buildStub, PREVIEW_SIZE_CHARS } from '../utils/truncation.js';
+import {
+  buildStub,
+  PREVIEW_SIZE_CHARS,
+  truncateAndSaveToFile,
+} from '../utils/truncation.js';
 import {
   DEFAULT_MAX_TOOL_CALLS_PER_TURN,
   LoopDetectionService,
@@ -2790,6 +2797,70 @@ describe('LoopDetectionService', () => {
         // Halts just past the soft cap (20) once the stuck signal is armed,
         // far below the hard backstop (20 * 10).
         expect(totalCalls).toBeLessThanOrEqual(22);
+      });
+
+      it('halts on a frozen unwrapped oversized stub (disk unavailable)', () => {
+        // buildStub's unwrapped shape (no `<persisted-output>` tag) is
+        // emitted when disk persistence is unavailable. Its note depends on
+        // the failure mode, so alternate the two notes across polls: only a
+        // guard that recognizes the shape and reduces it to the payload can
+        // see through the varying envelope to the frozen board.
+        const notes = [
+          '(file too large to persist)',
+          '(session disk budget exhausted)',
+        ];
+        let fired = false;
+        for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD; i++) {
+          fired = service.checkAlwaysOnSafeties(taskListEvent(`poll_${i}`));
+          if (fired) break;
+          const stub = buildStub(
+            FROZEN_BOARD,
+            Buffer.byteLength(FROZEN_BOARD, 'utf-8'),
+            notes[i % notes.length],
+          );
+          service.recordToolResult(
+            { name: 'task_list', args: TASK_LIST_ARGS },
+            taskListResult(stub, `poll_${i}`),
+          );
+        }
+        expect(fired).toBe(true);
+        expect(service.getLastLoopType()).toBe(
+          LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+        );
+      });
+
+      it('halts on a frozen truncated-output stub despite per-call unique file paths', async () => {
+        // The truncateAndSaveToFile shape (TOOL_OUTPUT_TRUNCATED_PREFIX)
+        // embeds a per-call file path in its envelope; a frozen board must
+        // still halt. The real builder spills its file, so give it a
+        // throwaway directory.
+        const spillDir = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'loop-detection-stub-'),
+        );
+        try {
+          let fired = false;
+          for (let i = 0; i < TOOL_CALL_LOOP_THRESHOLD; i++) {
+            fired = service.checkAlwaysOnSafeties(taskListEvent(`poll_${i}`));
+            if (fired) break;
+            const { content } = await truncateAndSaveToFile(
+              FROZEN_BOARD,
+              `task_list_poll_${i}`,
+              spillDir,
+              1024,
+              20,
+            );
+            service.recordToolResult(
+              { name: 'task_list', args: TASK_LIST_ARGS },
+              taskListResult(content, `poll_${i}`),
+            );
+          }
+          expect(fired).toBe(true);
+          expect(service.getLastLoopType()).toBe(
+            LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS,
+          );
+        } finally {
+          await fs.rm(spillDir, { recursive: true, force: true });
+        }
       });
     });
   });
