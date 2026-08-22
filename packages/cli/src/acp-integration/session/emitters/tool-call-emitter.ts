@@ -282,6 +282,44 @@ export class ToolCallEmitter extends BaseEmitter {
   }
 
   /**
+   * Emits a progress update for a parent tool call (e.g., subagent execution).
+   * This allows standard ACP clients to show live progress inside the parent tool card,
+   * bridging the gap for clients that do not support nested tool calls.
+   *
+   * @param parentToolCallId - The tool call ID of the parent (e.g., Agent tool)
+   * @param subagentType - The type of subagent
+   * @param message - Progress message to display
+   */
+  async emitProgressUpdate(
+    parentToolCallId: string,
+    subagentType: string,
+    message: string,
+    toolName?: string,
+  ): Promise<void> {
+    if (toolName && this.isTodoWriteTool(toolName)) return;
+
+    await this.sendUpdate({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: parentToolCallId,
+      status: 'in_progress',
+      content: [
+        {
+          type: 'content',
+          content: {
+            type: 'text',
+            text: sanitizeTerminalText(message),
+          },
+        },
+      ],
+      _meta: {
+        subagentType,
+        provenance: 'subagent',
+        subagentProgress: true,
+      },
+    });
+  }
+
+  /**
    * Resolve a tool's provenance for UI dispatch on tool_call events.
    * The SDK reads `_meta.
    * provenance` + `_meta.serverId` to render builtin / MCP-server-badge /

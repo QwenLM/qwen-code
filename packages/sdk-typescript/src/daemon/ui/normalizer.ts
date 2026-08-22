@@ -923,9 +923,10 @@ function normalizeSessionUpdate(
       // the web UI has its own activity indicator, so drop the frame.
       const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
       if (
-        getString(update, 'status') === 'in_progress' &&
-        getString(update, 'kind') === undefined &&
-        meta?.['shellProgress'] !== undefined
+        (getString(update, 'status') === 'in_progress' &&
+          getString(update, 'kind') === undefined &&
+          meta?.['shellProgress'] !== undefined) ||
+        meta?.subagentProgress === true
       ) {
         return [];
       }

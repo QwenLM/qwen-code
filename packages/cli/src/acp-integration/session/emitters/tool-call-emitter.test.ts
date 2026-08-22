@@ -786,7 +786,7 @@ describe('ToolCallEmitter', () => {
 
   describe('emitError', () => {
     it('should emit tool_call_update with failed status and error message', async () => {
-      const error = new Error('Connection timeout');
+      const error = new Error('connection timeout');
 
       await emitter.emitError('call-123', 'test_tool', error);
 
@@ -797,11 +797,59 @@ describe('ToolCallEmitter', () => {
         content: [
           {
             type: 'content',
-            content: { type: 'text', text: 'Connection timeout' },
+            content: { type: 'text', text: 'connection timeout' },
           },
         ],
         _meta: { toolName: 'test_tool', provenance: 'builtin' },
       });
+    });
+  });
+
+  describe('emitProgressUpdate', () => {
+    it('should emit tool_call_update with in_progress status and text content', async () => {
+      await emitter.emitProgressUpdate(
+        'parent-call-1',
+        'Explore',
+        'Searching files...',
+      );
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'parent-call-1',
+        status: 'in_progress',
+        content: [
+          {
+            type: 'content',
+            content: {
+              type: 'text',
+              text: 'Searching files...',
+            },
+          },
+        ],
+        _meta: {
+          subagentType: 'Explore',
+          provenance: 'subagent',
+          subagentProgress: true,
+        },
+      });
+    });
+
+    it('should sanitizes terminal controls in the progress message', async () => {
+      await emitter.emitProgressUpdate(
+        'parent-call-2',
+        'Coder',
+        'Running command\x1b[31mred text\x1b[0m',
+      );
+
+      const call = sendUpdateSpy.mock.calls[0][0] as {
+        content: Array<{ content?: { text?: string } }>;
+      };
+
+      const progressText = call.content[0].content?.text;
+
+      expect(progressText).toContain('Running command');
+      expect(progressText).toContain('red text');
+      expect(progressText).not.toContain('\x1b');
     });
   });
 

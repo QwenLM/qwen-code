@@ -4848,7 +4848,7 @@ export class QwenAgent extends BaseAgent {
     if (
       asString(update.status) === 'in_progress' &&
       asString(update.kind) === undefined &&
-      meta.shellProgress !== undefined
+      (meta.shellProgress !== undefined || meta?.subagentProgress === true)
     ) {
       return;
     }

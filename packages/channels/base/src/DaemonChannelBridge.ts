@@ -764,18 +764,20 @@ export class DaemonChannelBridge
         const kind = getString(update['kind']);
         const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
         if (
-          !kind &&
-          toolCallId &&
-          getString(update['status']) === 'in_progress' &&
-          meta?.['shellProgress'] !== undefined
+          (!kind &&
+            toolCallId &&
+            getString(update['status']) === 'in_progress' &&
+            meta?.['shellProgress'] !== undefined) ||
+          meta?.['subagentProgress'] === true
         ) {
-          // Silent-shell liveness heartbeat: a kind-less in_progress frame
-          // carrying only the id, status, and _meta.shellProgress stats.
+          // Silent-shell liveness heartbeat OR subagent progress update:
+          // A kind-less in_progress frame carrying only the id, status, and
+          // _meta.shellProgress stats OR _meta.subagentProgress.
           // Channels have no use for it — drop it without flagging the
-          // session as malformed. Gate on shellProgress (matching the
-          // qwen-agent and web-shell normalizer guards) so a genuinely
-          // malformed kind-less tool_call still reaches emitProtocolError
-          // below instead of being silently swallowed.
+          // session as malformed. Gate on shellProgress or subagentProgress
+          // (matching the qwen-agent and web-shell normalizer guards) so a
+          // genuinely malformed kind-less tool_call still reaches
+          // emitProtocolError below instead of being silently swallowed.
           break;
         }
         if (!toolCallId || !kind) {
