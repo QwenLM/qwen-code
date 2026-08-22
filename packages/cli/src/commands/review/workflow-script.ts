@@ -97,16 +97,22 @@ const returns = await parallel(
   ),
 );
 
-// parallel() reports a failed dispatch as a null element rather than throwing,
-// so a role that died is indistinguishable from one that returned nothing
-// unless the script looks. Collect them by name: an agent silently missing
-// from the fan-out is the one regression this path must not introduce, and
-// the coverage gate needs it named to fail closed on it.
+// parallel() reports a failed dispatch as a null element rather than
+// throwing, and a result whose visible text strips to empty delivered just
+// as little — collect both by name. An agent silently missing from the
+// fan-out is the one regression this path must not introduce, and the
+// coverage gate cannot see this class — it asserts launches, and a
+// cap-killed agent WAS launched — so the skill's Exit-0 branch is the
+// consumer: a non-empty missingRoles fails the step there.
 const delivered = [];
 const missingRoles = [];
 for (let i = 0; i < AGENTS.length; i++) {
   const value = returns[i];
-  if (value === null || value === undefined) {
+  if (
+    value === null ||
+    value === undefined ||
+    (typeof value === 'string' && value.trim() === '')
+  ) {
     missingRoles.push(AGENTS[i].key);
   } else {
     delivered.push({ key: AGENTS[i].key, text: value });

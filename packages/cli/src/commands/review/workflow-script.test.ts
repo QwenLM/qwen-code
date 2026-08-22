@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, it, expect } from 'vitest';
 import {
   buildReviewWorkflowScript,
@@ -195,6 +198,27 @@ describe('the generated Step 3A fan-out script', () => {
     expect((result as { missingRoles: string[] }).missingRoles).toEqual(['7']);
   });
 
+  it('counts a result that strips to empty as missing, not delivered', async () => {
+    // A GOAL-mode dispatch can finish with visible text that strips to
+    // nothing — a scratchpad-only final message, or a cutoff mid-analysis.
+    // It fulfilled, so the null check passes it; counting it delivered would
+    // assert a complete fan-out while one dimension contributed nothing, and
+    // Step 3D cannot catch it — the agent was launched, so a transcript
+    // exists.
+    for (const empty of ['', '   ']) {
+      const { result } = await runScript(
+        buildReviewWorkflowScript(AGENTS),
+        async (prompt) => (prompt === 'PROMPT-2' ? empty : `said:${prompt}`),
+      );
+      const r = result as {
+        delivered: Array<{ key: string }>;
+        missingRoles: string[];
+      };
+      expect(r.missingRoles).toEqual(['2']);
+      expect(r.delivered.map((d) => d.key)).toEqual(['1a', '7']);
+    }
+  });
+
   it('carries each agent return back under its roster key', async () => {
     const { result } = await runScript(
       buildReviewWorkflowScript(AGENTS),
@@ -240,4 +264,50 @@ describe('the generated Step 3A fan-out script', () => {
     expect(generated).not.toContain('parallel(');
     expect(generated).not.toContain('agent(');
   });
+});
+
+// The script's fail-closed guarantee is only half in code: it NAMES the roles
+// that came back empty, but the coverage step asserts launches against
+// transcripts — and a cap-killed or stripped-empty agent left one. The
+// consumer of the naming is prose: the skill's Exit-0 branch must treat a
+// non-empty missingRoles as a failed step and re-dispatch before Step 3D. Pin
+// the branch to the field it consumes; a skill edit that drops the gate fails
+// here, next to the script that would orphan it.
+describe('the skill consumes the missingRoles the script returns', () => {
+  const repoRoot = resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    '..',
+    '..',
+    '..',
+    '..',
+    '..',
+  );
+  const SKILL_PATH = join(
+    repoRoot,
+    'packages/core/src/skills/bundled/review/SKILL.md',
+  );
+  const skill = existsSync(SKILL_PATH)
+    ? readFileSync(SKILL_PATH, 'utf8').replace(/\r\n/g, '\n')
+    : null;
+  // A sparse or partial checkout has no skill to read — the same exemption
+  // run-skill-parity.test.ts grants its own SKILL.md oracles.
+  const itWithSkill = skill === null ? it.skip : it;
+
+  itWithSkill(
+    'the Exit-0 branch gates Step 3D on an empty missingRoles',
+    () => {
+      const start = (skill as string).indexOf(
+        '### Which engine dispatches this fan-out',
+      );
+      const end = (skill as string).indexOf('## Step 3B');
+      expect(start).toBeGreaterThan(-1);
+      expect(end).toBeGreaterThan(start);
+      const section = (skill as string).slice(start, end);
+      expect(section).toContain('`missingRoles`');
+      expect(section).toContain('A non-empty `missingRoles` is a failed step');
+      expect(section).toContain('do not carry it to Step 3D');
+      expect(section).toContain('agent-prompt --role <role>');
+      expect(section).toContain('QWEN_CODE_WORKFLOW_AGENT_MAX_TURNS');
+    },
+  );
 });
