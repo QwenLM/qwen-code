@@ -643,14 +643,28 @@ describe('bundled review skill', () => {
     // Revert guard: the tail-fetch must stay `--out … to the command the note
     // names` (a restored `--jq .body > file` redirect is rejected by yargs on
     // the welded command-body notes, so the tail is never fetched), and the
-    // Posted: fallback must stay grounded on Step 1's meta output / the pr-url.
+    // Posted: fallback must stay CODE on GitHub (the provider composes the
+    // missing url) while the Aone arm never regresses to hand-assembling a
+    // link or re-querying the platform for the stable detailUrl.
     const body = skillBody();
     expect(body).toContain(
       'add `--out .qwen/tmp/qwen-review-{target}-body-<id>.md` to the command the note names',
     );
+    expect(body).toContain('`submit` fills the gap itself');
     expect(body).toContain(
-      'the URL a `pr-url` target carried, or else assemble',
+      'the provider composes the PR-page URL from the routed host and the target',
     );
+    // The Aone receipt rides the pre-write read's detailUrl — no re-query,
+    // and the coordinates relay survives the one case it comes up empty.
+    expect(body).toContain(
+      "the receipt carries the MR's own `detailUrl` from the pre-write read",
+    );
+    // A linkless receipt is NOT Aone-only: the GitHub compose fails closed
+    // on an unknowable routing host. The stale claim would send the model
+    // hand-assembling a GitHub link in exactly the corner the code refuses.
+    expect(body).not.toContain('possible only on Aone');
+    expect(body).toContain("relay the target's coordinates");
+    expect(body).toContain('Never assemble an Aone link yourself');
   });
 
   it('runs presubmit on Aone targets — self-PR backing, not the skip list', () => {
@@ -665,6 +679,38 @@ describe('bundled review skill', () => {
     expect(body).toContain('self-PR detection and head drift are a1-backed');
     expect(body).not.toContain('self-PR detection has no Aone backing');
     expect(body).not.toContain('`pr-context`, `comment-status`, `presubmit`');
+  });
+
+  it('keeps the corrected Aone --comment contract, not merge residue', () => {
+    // The merge that became this PR's head committed conflict markers and a
+    // STALE variant of the `--comment` bullet back-to-back with the corrected
+    // one (R8-1). The stale variant claims a blanket verdict cap and orders
+    // an unbounded drift re-review — contradicting the implementation:
+    // compose-review caps only APPROVE, submit's drift re-review stops at the
+    // once-per-review restart bound, and submit prints the could-not-re-verify
+    // warning the relay names. Re-resolving the merge against the stale side
+    // must fail here, not slip through.
+    const body = skillBody();
+    // No merge-conflict residue anywhere: a bare `=======` under a bullet
+    // list parses as a setext-heading underline and `>>>>>>>` renders as a
+    // blockquote, silently restructuring the instructions a review runs on.
+    expect(body).not.toMatch(/^(<{7}|={7}|>{7})/m);
+    // The cap keeps an Approve at Comment; a Request-changes verdict still
+    // posts its blocking summary — not the stale bullet's blanket cap.
+    expect(body).toContain(
+      'the context-unavailable cap keeps an **Approve** verdict at Comment (a Request-changes verdict still posts its blocking summary)',
+    );
+    expect(body).not.toContain('which caps the verdict at');
+    // The drift re-review is bounded by the once-per-review restart bound;
+    // the stale variant ordered it unconditionally.
+    expect(body).toContain(
+      'but ONLY while the per-review head-movement restart bound is unspent',
+    );
+    // The could-not-re-verify relay the corrected variant adds: submit
+    // prints the warning on both the success and the mid-batch-failure path.
+    expect(body).toContain(
+      'WARNING: could not re-verify the MR head after posting',
+    );
   });
 
   it('mandates the review-agent subagent type, never general-purpose', () => {
