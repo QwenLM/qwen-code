@@ -8,7 +8,8 @@
  * exercise the module in isolation; this file pins the contract that
  * /clear, /reset, /new and /resume — all of which flow through
  * startNewSession() — actually drive the sidecar swap, and only when
- * the interactive UI bootstrap has flipped runtimeStatusEnabled on.
+ * this process established its own sidecar at startup
+ * (Config.initializeOnce flipped runtimeStatusEnabled on).
  */
 
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
@@ -103,8 +104,8 @@ describe('Config.startNewSession runtime.json swap', () => {
     const sessionB = 'bbbbbbbb-1111-2222-3333-bbbbbbbbbbbb';
     const config = makeConfig(sessionA);
 
-    // Mimic what startInteractiveUI() does on launch: write the initial
-    // sidecar, then mark this Config as the owner.
+    // Mimic what Config.initializeOnce() does at session establishment:
+    // write the initial sidecar, then mark this Config as the owner.
     const aPath = config.storage.getRuntimeStatusPath(sessionA);
     await writeRuntimeStatus(aPath, {
       sessionId: sessionA,

@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type { Mock } from 'vitest';
+import type { Mock, MockInstance } from 'vitest';
 import { mkdir, mkdtemp, open, rm, stat, writeFile } from 'node:fs/promises';
 import type { ConfigParameters, SandboxConfig } from './config.js';
 import {
@@ -21,7 +21,7 @@ import {
 import { Storage } from './storage.js';
 import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
+import os from 'node:os';
 import * as path from 'node:path';
 import { setGeminiMdFilename as mockSetGeminiMdFilename } from '../memory/const.js';
 import {
@@ -54,9 +54,11 @@ import { GeminiClient } from '../core/client.js';
 import { ShellTool } from '../tools/shell.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import { getSessionProjectDir } from '../utils/sessionIdContext.js';
+import { sanitizeCwd } from '../utils/paths.js';
 import { logRipgrepFallback } from '../telemetry/loggers.js';
 import { RipgrepFallbackEvent } from '../telemetry/types.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
+import { persistUsageBeforeTranscriptDeletion } from '../services/usageHistoryService.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
@@ -142,6 +144,10 @@ vi.mock('node:fs', async (importOriginal) => {
 });
 
 // Mock dependencies that might be called during Config construction or createServerConfig
+vi.mock('../services/usageHistoryService.js', () => ({
+  persistUsageBeforeTranscriptDeletion: vi.fn().mockResolvedValue(false),
+}));
+
 vi.mock('../tools/tool-registry', () => {
   const ToolRegistryMock = vi.fn();
   ToolRegistryMock.prototype.registerTool = vi.fn();
@@ -1656,6 +1662,124 @@ describe('Server Config (config.ts)', () => {
       // call — recorded entries would vanish between operations.
       const config = new Config(baseParams);
       expect(config.getFileReadCache()).toBe(config.getFileReadCache());
+    });
+  });
+
+  describe('initialize() runtime sidecar claim', () => {
+    it('writes the runtime sidecar at session establishment for every process kind', async () => {
+      const config = new Config({ ...baseParams, chatRecording: true });
+      const sessionId = config.getSessionId();
+      const writeSpy = vi
+        .spyOn(runtimeStatus, 'writeRuntimeStatus')
+        .mockResolvedValue('');
+
+      await config.initialize();
+
+      // The orphan sweep's pid-liveness gate reads only these sidecars;
+      // without this claim a headless/ACP/SDK/serve session has no
+      // liveness proof and is judged dead from file age alone.
+      expect(writeSpy).toHaveBeenCalledWith(
+        config.storage.getRuntimeStatusPath(sessionId),
+        expect.objectContaining({
+          sessionId,
+          workDir: config.getTargetDir(),
+        }),
+      );
+
+      writeSpy.mockRestore();
+    });
+
+    it('skips the sidecar claim when chat recording is disabled', async () => {
+      // No transcript entry is created, so no sidecar should exist for
+      // it either — e.g. ACP bootstrap and workspace-discovery configs.
+      const config = new Config({ ...baseParams, chatRecording: false });
+      const writeSpy = vi
+        .spyOn(runtimeStatus, 'writeRuntimeStatus')
+        .mockResolvedValue('');
+
+      await config.initialize();
+
+      expect(writeSpy).not.toHaveBeenCalled();
+
+      writeSpy.mockRestore();
+    });
+  });
+
+  describe('shutdown() runtime sidecar release', () => {
+    const sidecarOf = (
+      config: Config,
+      pid: number,
+    ): runtimeStatus.RuntimeStatus => ({
+      schemaVersion: 1,
+      pid,
+      sessionId: config.getSessionId(),
+      workDir: '/work',
+      hostname: 'host',
+      startedAt: 0,
+      qwenVersion: null,
+    });
+
+    it('clears the sidecar so a closed session stops claiming a live pid', async () => {
+      // In multi-session processes (the `qwen serve` ACP child) the pid
+      // outlives the session; a leftover sidecar would shield the closed
+      // session's entry from the sweep forever.
+      const config = new Config(baseParams);
+      config.markRuntimeStatusEnabled(); // models the successful claim
+      const readSpy = vi
+        .spyOn(runtimeStatus, 'readRuntimeStatus')
+        .mockResolvedValue(sidecarOf(config, process.pid));
+      const clearSpy = vi
+        .spyOn(runtimeStatus, 'clearRuntimeStatus')
+        .mockResolvedValue(undefined);
+
+      await config.shutdown();
+
+      expect(clearSpy).toHaveBeenCalledWith(
+        config.storage.getRuntimeStatusPath(config.getSessionId()),
+      );
+
+      readSpy.mockRestore();
+      clearSpy.mockRestore();
+    });
+
+    it('keeps a sidecar recorded by a sibling process (R14-1)', async () => {
+      // Concurrent --resume (writer lease off) lets two processes serve
+      // one session id; unlinking the sibling's claim would destroy its
+      // only liveness evidence.
+      const config = new Config(baseParams);
+      config.markRuntimeStatusEnabled();
+      const readSpy = vi
+        .spyOn(runtimeStatus, 'readRuntimeStatus')
+        .mockResolvedValue(sidecarOf(config, process.pid + 12345));
+      const clearSpy = vi
+        .spyOn(runtimeStatus, 'clearRuntimeStatus')
+        .mockResolvedValue(undefined);
+
+      await config.shutdown();
+
+      expect(clearSpy).not.toHaveBeenCalled();
+
+      readSpy.mockRestore();
+      clearSpy.mockRestore();
+    });
+
+    it('keeps the sidecar when a session-writer handoff was requested', async () => {
+      // The successor resumes from this very entry; its own claim lands
+      // at its initializeOnce.
+      const config = new Config(baseParams);
+      config.markRuntimeStatusEnabled();
+      (
+        config as unknown as { sessionWriterHandoffRequested: boolean }
+      ).sessionWriterHandoffRequested = true;
+      const clearSpy = vi
+        .spyOn(runtimeStatus, 'clearRuntimeStatus')
+        .mockResolvedValue(undefined);
+
+      await config.shutdown();
+
+      expect(clearSpy).not.toHaveBeenCalled();
+
+      clearSpy.mockRestore();
     });
   });
 
@@ -7210,6 +7334,417 @@ describe('Server Config (config.ts)', () => {
     await config.shutdown();
 
     expect(shutdownTelemetry).not.toHaveBeenCalled();
+  });
+
+  describe('Config shutdown temp project cleanup (issue #7906)', () => {
+    let rmSpy: MockInstance;
+    let tmpdirSpy: MockInstance | undefined;
+
+    beforeEach(() => {
+      // Pin the temp root: the merge-queue legs put the ambient temp
+      // root outside the allowlist (POSIX exports TMPDIR=$RUNNER_TEMP;
+      // the Windows runner action overrides TEMP/TMP the same way),
+      // which would keep the shutdown gate closed here. POSIX pins
+      // /var/tmp, not /tmp: lstatSync is real in this file's fs mock
+      // while realpathSync is identity-mocked, so /tmp's macOS symlink
+      // would resolve the root to /private/tmp but never the fixture.
+      // Windows pins C:\Windows\Temp, an OS-known location the distrust
+      // guard accepts.
+      tmpdirSpy = vi
+        .spyOn(os, 'tmpdir')
+        .mockReturnValue(
+          process.platform === 'win32' ? 'C:\\Windows\\Temp' : '/var/tmp',
+        );
+      Storage.setRuntimeBaseDir(
+        path.join(os.tmpdir(), 'qwen-shutdown-test-runtime'),
+      );
+      rmSpy = vi.spyOn(fs, 'rmSync').mockImplementation(() => undefined);
+    });
+
+    afterEach(() => {
+      rmSpy.mockRestore();
+      tmpdirSpy?.mockRestore();
+      Storage.setRuntimeBaseDir(null);
+    });
+
+    it('removes the project dir when the session ran from a temp dir', async () => {
+      // Records only ever point at temp roots → disposable at exit; the
+      // transcripts are usage-salvaged first (#7384).
+      const cwdSpy = vi.spyOn(Storage, 'collectRecordedCwds').mockReturnValue({
+        cwds: [path.join(os.tmpdir(), 'qwen-sess-cwd')],
+        incomplete: false,
+      });
+      const listSpy = vi
+        .spyOn(Storage, 'listTranscriptPaths')
+        .mockReturnValue(['/entry/chats/sess.jsonl']);
+      const liveSpy = vi
+        .spyOn(Storage, 'hasLiveSession')
+        .mockReturnValue(false);
+      try {
+        const tmpCwd = path.join(os.tmpdir(), 'qwen-enter-sess-test');
+        const config = new Config({
+          ...baseParams,
+          cwd: tmpCwd,
+          targetDir: tmpCwd,
+        });
+        config['initialized'] = true;
+
+        await config.shutdown();
+
+        expect(persistUsageBeforeTranscriptDeletion).toHaveBeenCalledWith(
+          '/entry/chats/sess.jsonl',
+        );
+        expect(rmSpy).toHaveBeenCalledWith(config.storage.getProjectDir(), {
+          recursive: true,
+          force: true,
+        });
+        // Ordering: salvage must read the transcripts BEFORE they are
+        // deleted, otherwise there is nothing left to salvage.
+        expect(
+          vi.mocked(persistUsageBeforeTranscriptDeletion).mock
+            .invocationCallOrder[0],
+        ).toBeLessThan(rmSpy.mock.invocationCallOrder[0]);
+      } finally {
+        cwdSpy.mockRestore();
+        listSpy.mockRestore();
+        liveSpy.mockRestore();
+      }
+    });
+
+    it('keeps the project dir when a sibling still serves this session id (R14-1)', async () => {
+      // Concurrent --resume (writer lease off) lets two processes serve
+      // one session id. The release unlinked only our own claim, so a
+      // surviving sidecar records the sibling; the windowless liveness
+      // re-check — mirroring the sweep-side removeEntry — must abort
+      // before the irreversible step.
+      const guardSpy = vi
+        .spyOn(Storage, 'containsOnlySessionArtifacts')
+        .mockReturnValue(true);
+      const cwdSpy = vi.spyOn(Storage, 'collectRecordedCwds').mockReturnValue({
+        cwds: [path.join(os.tmpdir(), 'qwen-sess-cwd')],
+        incomplete: false,
+      });
+      const liveSpy = vi.spyOn(Storage, 'hasLiveSession').mockReturnValue(true);
+      try {
+        const tmpCwd = path.join(os.tmpdir(), 'qwen-sibling-entry');
+        const config = new Config({
+          ...baseParams,
+          cwd: tmpCwd,
+          targetDir: tmpCwd,
+        });
+        config['initialized'] = true;
+
+        await config.shutdown();
+
+        expect(liveSpy).toHaveBeenCalledWith(
+          config.storage.getProjectDir(),
+          false,
+        );
+        expect(rmSpy).not.toHaveBeenCalledWith(
+          config.storage.getProjectDir(),
+          expect.anything(),
+        );
+      } finally {
+        guardSpy.mockRestore();
+        cwdSpy.mockRestore();
+        liveSpy.mockRestore();
+      }
+    });
+
+    it('keeps the project dir when the session writer was sealed for handoff', async () => {
+      // A certified handoff seals the writer so a successor can resume
+      // from this very entry — shutdown must not delete the transcripts
+      // out from under it, even when every guard would pass.
+      const cwdSpy = vi.spyOn(Storage, 'collectRecordedCwds').mockReturnValue({
+        cwds: [path.join(os.tmpdir(), 'qwen-sess-cwd')],
+        incomplete: false,
+      });
+      try {
+        const tmpCwd = path.join(os.tmpdir(), 'qwen-handoff-sess-test');
+        const config = new Config({
+          ...baseParams,
+          cwd: tmpCwd,
+          targetDir: tmpCwd,
+        });
+        config['initialized'] = true;
+        config['sessionWriterHandoffRequested'] = true;
+
+        await config.shutdown();
+
+        expect(rmSpy).not.toHaveBeenCalledWith(
+          config.storage.getProjectDir(),
+          expect.anything(),
+        );
+      } finally {
+        cwdSpy.mockRestore();
+      }
+    });
+
+    it('keeps the project dir when serving an ACP host (daemon reload)', async () => {
+      // A daemon closes the session child and may load it back from
+      // disk right after; deleting the entry at child exit breaks the
+      // close/load contract. Cleanup is left to the startup sweep's
+      // freshness + marker gates.
+      const cwdSpy = vi.spyOn(Storage, 'collectRecordedCwds').mockReturnValue({
+        cwds: [path.join(os.tmpdir(), 'qwen-sess-cwd')],
+        incomplete: false,
+      });
+      try {
+        const tmpCwd = path.join(os.tmpdir(), 'qwen-acp-sess-test');
+        const config = new Config({
+          ...baseParams,
+          cwd: tmpCwd,
+          targetDir: tmpCwd,
+          acpMode: true,
+        });
+        config['initialized'] = true;
+
+        await config.shutdown();
+
+        expect(rmSpy).not.toHaveBeenCalledWith(
+          config.storage.getProjectDir(),
+          expect.anything(),
+        );
+      } finally {
+        cwdSpy.mockRestore();
+      }
+    });
+
+    it('keeps the project dir for regular project roots', async () => {
+      const config = new Config(baseParams);
+      config['initialized'] = true;
+
+      await config.shutdown();
+
+      expect(rmSpy).not.toHaveBeenCalledWith(
+        config.storage.getProjectDir(),
+        expect.anything(),
+      );
+    });
+
+    it('keeps the project dir when it holds another session’s artifacts', async () => {
+      // Sanitized-cwd collisions and concurrent temp sessions can share
+      // one entry; whole-entry deletion must require exclusive
+      // ownership. node:fs is module-mocked in this file, so the
+      // guard outcome is injected at the Storage boundary (its own
+      // disk-scanning logic is covered in storage.test.ts).
+      const guardSpy = vi
+        .spyOn(Storage, 'containsOnlySessionArtifacts')
+        .mockReturnValue(false);
+      try {
+        const tmpCwd = path.join(os.tmpdir(), 'qwen-shared-entry');
+        const config = new Config({
+          ...baseParams,
+          cwd: tmpCwd,
+          targetDir: tmpCwd,
+        });
+        config['initialized'] = true;
+
+        await config.shutdown();
+
+        expect(guardSpy).toHaveBeenCalledWith(
+          config.storage.getProjectDir(),
+          config['sessionId'],
+        );
+        expect(rmSpy).not.toHaveBeenCalledWith(
+          config.storage.getProjectDir(),
+          expect.anything(),
+        );
+      } finally {
+        guardSpy.mockRestore();
+      }
+    });
+
+    it('keeps the project dir when a sibling session lands during salvage (R8-1)', async () => {
+      // The ownership guard passes before salvage, but a sibling
+      // session sharing the entry (concurrent temp sessions or a
+      // sanitized-cwd collision) starts writing during the salvage
+      // await: the pre-delete re-check must abort the removal.
+      const guardSpy = vi
+        .spyOn(Storage, 'containsOnlySessionArtifacts')
+        .mockReturnValueOnce(true)
+        .mockReturnValue(false);
+      const cwdSpy = vi.spyOn(Storage, 'collectRecordedCwds').mockReturnValue({
+        cwds: [path.join(os.tmpdir(), 'qwen-sess-cwd')],
+        incomplete: false,
+      });
+      try {
+        const tmpCwd = path.join(os.tmpdir(), 'qwen-raced-entry');
+        const config = new Config({
+          ...baseParams,
+          cwd: tmpCwd,
+          targetDir: tmpCwd,
+        });
+        config['initialized'] = true;
+
+        await config.shutdown();
+
+        expect(guardSpy).toHaveBeenCalledTimes(2);
+        expect(rmSpy).not.toHaveBeenCalledWith(
+          config.storage.getProjectDir(),
+          expect.anything(),
+        );
+      } finally {
+        guardSpy.mockRestore();
+        cwdSpy.mockRestore();
+      }
+    });
+
+    it('keeps the project dir when its records point at any non-temp cwd', async () => {
+      // Records migrated here via `/cd` from a real project stay
+      // resumable — the exit-time predicate requires EVERY recorded cwd
+      // to be temp, and does not even look at existence: a transiently
+      // absent mount must not be decided by one existsSync snapshot
+      // (that gone-cwd class is left to the grace-gated startup sweep).
+      // Mixed temp + non-temp pins `every` against a `some` mutation.
+      const guardSpy = vi
+        .spyOn(Storage, 'containsOnlySessionArtifacts')
+        .mockReturnValue(true);
+      const cwdSpy = vi.spyOn(Storage, 'collectRecordedCwds').mockReturnValue({
+        cwds: ['/real/project', path.join(os.tmpdir(), 'qwen-mixed-temp')],
+        incomplete: false,
+      });
+      try {
+        const tmpCwd = path.join(os.tmpdir(), 'qwen-migrated-entry');
+        const config = new Config({
+          ...baseParams,
+          cwd: tmpCwd,
+          targetDir: tmpCwd,
+        });
+        config['initialized'] = true;
+
+        await config.shutdown();
+
+        expect(rmSpy).not.toHaveBeenCalledWith(
+          config.storage.getProjectDir(),
+          expect.anything(),
+        );
+      } finally {
+        guardSpy.mockRestore();
+        cwdSpy.mockRestore();
+      }
+    });
+
+    it('keeps the project dir when it has no readable cwd records', async () => {
+      // Empty record set is not proof of disposability — the entry is
+      // left to the startup sweep's empty/stale branch.
+      const guardSpy = vi
+        .spyOn(Storage, 'containsOnlySessionArtifacts')
+        .mockReturnValue(true);
+      const cwdSpy = vi
+        .spyOn(Storage, 'collectRecordedCwds')
+        .mockReturnValue({ cwds: [], incomplete: false });
+      try {
+        const tmpCwd = path.join(os.tmpdir(), 'qwen-norecords-entry');
+        const config = new Config({
+          ...baseParams,
+          cwd: tmpCwd,
+          targetDir: tmpCwd,
+        });
+        config['initialized'] = true;
+
+        await config.shutdown();
+
+        expect(rmSpy).not.toHaveBeenCalledWith(
+          config.storage.getProjectDir(),
+          expect.anything(),
+        );
+      } finally {
+        guardSpy.mockRestore();
+        cwdSpy.mockRestore();
+      }
+    });
+
+    it('still resolves strict shutdown when the temp-dir removal fails', async () => {
+      rmSpy.mockImplementation(() => {
+        throw new Error('EACCES');
+      });
+      const cwdSpy = vi.spyOn(Storage, 'collectRecordedCwds').mockReturnValue({
+        cwds: [path.join(os.tmpdir(), 'qwen-sess-cwd')],
+        incomplete: false,
+      });
+      try {
+        const tmpCwd = path.join(os.tmpdir(), 'qwen-enter-sess-test');
+        const config = new Config({
+          ...baseParams,
+          cwd: tmpCwd,
+          targetDir: tmpCwd,
+        });
+        config['initialized'] = true;
+
+        await expect(
+          config.shutdown({ strictResourceCleanup: true }),
+        ).resolves.toBeUndefined();
+        expect(rmSpy).toHaveBeenCalledWith(
+          config.storage.getProjectDir(),
+          expect.anything(),
+        );
+      } finally {
+        cwdSpy.mockRestore();
+      }
+    });
+  });
+
+  describe('Config startup orphan-project sweep wiring (issue #7906)', () => {
+    it('schedules cleanOrphanProjectDirs with the project id and a salvage hook', async () => {
+      const sweepSpy = vi
+        .spyOn(Storage, 'cleanOrphanProjectDirs')
+        .mockResolvedValue({ removed: [], errors: [] });
+      try {
+        const config = new Config(baseParams);
+        await config.initialize();
+        // The sweep runs on setImmediate; flushing one tick guarantees it
+        // already fired (immediates run FIFO).
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(sweepSpy).toHaveBeenCalledWith(
+          sanitizeCwd(config.storage.getProjectRoot()),
+          expect.any(Function),
+        );
+      } finally {
+        sweepSpy.mockRestore();
+      }
+    });
+
+    it('salvages usage from an entry’s transcripts via the hook', async () => {
+      // Derive the transcript path from the argument so the test also
+      // pins that the hook receives the doomed entry's path (a hook
+      // salvaging the wrong directory would yield a different path).
+      const listSpy = vi
+        .spyOn(Storage, 'listTranscriptPaths')
+        .mockImplementation((dir: string) => [`${dir}/sess.jsonl`]);
+      const sweepSpy = vi
+        .spyOn(Storage, 'cleanOrphanProjectDirs')
+        .mockResolvedValue({ removed: [], errors: [] });
+      try {
+        const config = new Config(baseParams);
+        await config.initialize();
+        await new Promise((resolve) => setImmediate(resolve));
+        const hook = sweepSpy.mock.calls[0]?.[1];
+        expect(hook).toBeDefined();
+        await hook?.('/some/entry');
+        expect(listSpy).toHaveBeenCalledWith('/some/entry');
+        expect(persistUsageBeforeTranscriptDeletion).toHaveBeenCalledWith(
+          '/some/entry/sess.jsonl',
+        );
+      } finally {
+        sweepSpy.mockRestore();
+        listSpy.mockRestore();
+      }
+    });
+
+    it('initializes successfully even when the sweep rejects', async () => {
+      const sweepSpy = vi
+        .spyOn(Storage, 'cleanOrphanProjectDirs')
+        .mockRejectedValue(new Error('sweep exploded'));
+      try {
+        const config = new Config(baseParams);
+        await expect(config.initialize()).resolves.not.toThrow();
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(sweepSpy).toHaveBeenCalled();
+      } finally {
+        sweepSpy.mockRestore();
+      }
+    });
   });
 
   it('Config constructor should set telemetry to false when provided as false', () => {

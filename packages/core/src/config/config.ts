@@ -209,14 +209,17 @@ import {
   unregisterSessionProjectDir,
 } from '../utils/sessionIdContext.js';
 import { Storage } from './storage.js';
+import { persistUsageBeforeTranscriptDeletion } from '../services/usageHistoryService.js';
 import {
   ChatRecordingService,
   type ChatRecordingFailureEvent,
   type ChatRecordingFailureListener,
 } from '../services/chatRecordingService.js';
 import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
+import { isTempDirPath, sanitizeCwd } from '../utils/paths.js';
 import {
   clearRuntimeStatus,
+  readRuntimeStatus,
   writeRuntimeStatus,
 } from '../utils/runtimeStatus.js';
 import {
@@ -1225,6 +1228,12 @@ export interface ConfigParameters {
   chatCompression?: ChatCompressionSettings;
   autoCompactThreshold?: number;
   interactive?: boolean;
+  /**
+   * True when this process serves an ACP host (daemon or IDE): the host
+   * closes session children and may reload them from disk afterwards, so
+   * session snapshots must outlive this Config's shutdown.
+   */
+  acpMode?: boolean;
   trustedFolder?: boolean;
   defaultFileEncoding?: FileEncodingType;
   useRipgrep?: boolean;
@@ -2072,6 +2081,7 @@ export class Config {
   private readonly chatCompression: ChatCompressionSettings | undefined;
   private readonly autoCompactThreshold: number | undefined;
   private readonly interactive: boolean;
+  private readonly acpMode: boolean;
   private readonly trustedFolder: boolean | undefined;
   private readonly useRipgrep: boolean;
   private readonly useBuiltinRipgrep: boolean;
@@ -2371,6 +2381,7 @@ export class Config {
     this.chatCompression = params.chatCompression;
     this.autoCompactThreshold = params.autoCompactThreshold;
     this.interactive = params.interactive ?? false;
+    this.acpMode = params.acpMode ?? false;
     this.trustedFolder = params.trustedFolder;
     this.skipLoopDetection = params.skipLoopDetection ?? false;
     this.maxToolCallsPerTurn = validateMaxToolCallsPerTurn(
@@ -2688,6 +2699,32 @@ export class Config {
       }
       registerSessionProjectDir(this.sessionId, this.storage.getProjectDir());
       this.sessionProjectDirRegistered = true;
+      // Every process kind that records chat history claims its runtime
+      // sidecar here, at the single session-establishment choke point:
+      // the orphan sweep's pid-liveness gate reads only these sidecars,
+      // so a session that never writes one (headless/ACP/SDK/serve)
+      // has no liveness proof and would be judged dead from file age
+      // alone. Best-effort like the rest of runtime status: a read-only
+      // filesystem degrades to the sweep's freshness gates, it must not
+      // block session startup.
+      if (this.chatRecordingEnabled) {
+        try {
+          await writeRuntimeStatus(
+            this.storage.getRuntimeStatusPath(this.sessionId),
+            {
+              sessionId: this.sessionId,
+              workDir: this.getTargetDir(),
+              qwenVersion: this.cliVersion ?? null,
+            },
+          );
+          // Arm the session-swap refresh for every kind, not just the
+          // interactive UI: /clear, /resume and ACP session switches
+          // must keep the sidecar on the session this pid now serves.
+          this.markRuntimeStatusEnabled();
+        } catch {
+          // ignored: best-effort, never block session startup.
+        }
+      }
       await this.initializeInternal(options);
     } catch (error) {
       this.clearSessionRestoreProjection();
@@ -3211,6 +3248,41 @@ export class Config {
         }
       })();
     }
+
+    // Fire-and-forget sweep of orphaned project snapshots under
+    // `<runtime>/projects/` — sessions that ran from one-shot temp dirs
+    // (or since-deleted worktrees) leave entries whose recorded cwd no
+    // longer exists (issue #7906). Exit-time cleanup misses crashes and
+    // SIGKILL, so startup is the backstop. Unconditional (not gated on
+    // bare mode) because temp-dir sessions are common in scripted/bare
+    // usage. Fresh entries skip after a stat-only walk; only stale
+    // deletion candidates pay a handful of bounded record reads.
+    // setImmediate defers actual I/O past the startup hot path. Removals
+    // and per-entry failures are logged so a missing-history report has
+    // something to grep for; transcripts are usage-salvaged first (#7384).
+    setImmediate(() => {
+      void Storage.cleanOrphanProjectDirs(
+        sanitizeCwd(this.storage.getProjectRoot()),
+        (entryPath) => this.salvageSessionUsage(entryPath),
+      )
+        .then(({ removed, errors }) => {
+          for (const name of removed) {
+            this.debugLogger.info(
+              `Orphan project snapshot removed by startup sweep: ${name}`,
+            );
+          }
+          for (const { entry, error } of errors) {
+            this.debugLogger.warn(
+              `Orphan project sweep failed for ${entry} (non-fatal): ${error}`,
+            );
+          }
+        })
+        .catch((error: unknown) => {
+          this.debugLogger.warn(
+            `Orphan project sweep failed (non-fatal): ${error}`,
+          );
+        });
+    });
   }
 
   private async activateChatRecording(): Promise<void> {
@@ -4081,9 +4153,9 @@ export class Config {
     // transition. Best-effort: must never block /clear or /resume.
     //
     // Only refresh when THIS process established its own sidecar at
-    // startup (interactive UI). A non-interactive `/clear` (e.g.
-    // qwen --prompt-interactive) must not delete a sibling shell's
-    // sidecar that happens to share the outgoing session id
+    // startup (Config.initializeOnce). A process whose initial sidecar
+    // write failed (e.g. read-only filesystem) must not delete a
+    // sibling's sidecar that happens to share the outgoing session id
     // mirrors the kimi-cli "write only when a session is
     // established for this process" rule.
     if (isSessionTransition) {
@@ -4131,12 +4203,12 @@ export class Config {
 
   /**
    * Marks this Config as the owner of a runtime.json sidecar for the
-   * current PID. Call once after the initial sidecar write succeeds
-   * (typically from the interactive UI bootstrap). When set, subsequent
-   * startNewSession() calls will refresh the sidecar on session swap;
-   * when unset, startNewSession() leaves sibling sidecars alone so a
-   * short-lived non-interactive process can't trample a concurrent
-   * shell's sidecar that happens to share the outgoing session id.
+   * current PID. Called once from `initializeOnce` after the initial
+   * sidecar write succeeds. When set, subsequent startNewSession()
+   * calls will refresh the sidecar on session swap; when unset (the
+   * initial write failed), startNewSession() leaves sibling sidecars
+   * alone so this process can't trample a sidecar that happens to
+   * share the outgoing session id.
    */
   markRuntimeStatusEnabled(): void {
     this.runtimeStatusEnabled = true;
@@ -4189,6 +4261,18 @@ export class Config {
       .catch(() => {
         // ignored: runtime status must not disrupt session control flow.
       });
+  }
+
+  /**
+   * Salvages usage summaries from an entry's transcripts before its
+   * deletion (#7384): daemon/Web Shell/crashed sessions never persist
+   * usage otherwise, and the usage dashboard replays exactly these
+   * transcripts. `persistUsageBeforeTranscriptDeletion` never throws.
+   */
+  private async salvageSessionUsage(projectDir: string): Promise<void> {
+    for (const transcript of Storage.listTranscriptPaths(projectDir)) {
+      await persistUsageBeforeTranscriptDeletion(transcript);
+    }
   }
 
   /**
@@ -5428,6 +5512,24 @@ export class Config {
       // same daemon-mode leak rationale as the project dir above.
       unregisterSessionModel(this.sessionId);
 
+      // Release the runtime sidecar claimed at session establishment:
+      // this Config stopped serving the session even though the process
+      // may keep living. In multi-session processes (the `qwen serve`
+      // ACP child) the pid stays alive for the next sessions, and the
+      // sweep's windowless pid re-check would otherwise protect this
+      // closed session's entry forever. A handoff keeps the sidecar:
+      // the successor resumes from this very entry. Release only the
+      // claim THIS process established: a sibling serving the same
+      // session id (concurrent --resume, writer lease off) may hold
+      // the sidecar, and unlinking it would destroy the sibling's
+      // only liveness evidence.
+      if (this.runtimeStatusEnabled && !this.sessionWriterHandoffRequested) {
+        const sidecarPath = this.storage.getRuntimeStatusPath(this.sessionId);
+        if ((await readRuntimeStatus(sidecarPath))?.pid === process.pid) {
+          await clearRuntimeStatus(sidecarPath);
+        }
+      }
+
       if (Object.hasOwn(this, 'goalRuntime')) {
         this.rejectGoalRestoreActivation?.(
           new GoalPersistenceUnavailableError('Goal runtime disposed'),
@@ -5449,6 +5551,84 @@ export class Config {
       if (!this.initialized) {
         // Nothing else to clean up if not initialized.
         return;
+      }
+
+      // Remove the on-disk project snapshot when the session ran from a
+      // throwaway temp directory (e.g. `%TEMP%\qwen-*-sess-*`): such a
+      // path can never be resumed, so the entry would linger under
+      // `<runtime>/projects/` forever (issue #7906). The startup sweep
+      // backstops crash paths that skip shutdown. ACP mode is the
+      // inverse exception: the host closes a session child and may load
+      // it back from disk right after, so this leg stays off there and
+      // leaves cleanup to the sweep's freshness + marker gates. The chat recording
+      // flush happens in shutdown() before this runs, so no records are
+      // removed mid-write. A handoff is the one exception: its writer
+      // was sealed so a successor can resume from this very entry, so
+      // the entry must survive. Two more guards keep this from
+      // destroying data
+      // that isn't ours: the entry must contain only this session's
+      // artifacts (sanitized-cwd collisions and concurrent sessions can
+      // share an entry), and every cwd recorded in those artifacts must
+      // itself be temp — records `/cd`-migrated from a real project stay
+      // resumable, and a single exit-time existsSync snapshot must not
+      // decide the fate of a transiently absent mount; that gone-cwd
+      // class is left to the grace-gated startup sweep.
+      try {
+        if (
+          !this.acpMode &&
+          !this.sessionWriterHandoffRequested &&
+          isTempDirPath(this.storage.getProjectRoot())
+        ) {
+          const projectDir = this.storage.getProjectDir();
+          if (
+            Storage.containsOnlySessionArtifacts(projectDir, this.sessionId)
+          ) {
+            const { cwds: recordedCwds, incomplete } =
+              Storage.collectRecordedCwds(projectDir);
+            // Incomplete evidence (an unreadable or oversized artifact)
+            // may omit a non-temp cwd — fail closed, like the sweep.
+            // The windowless liveness re-check mirrors the sweep-side
+            // removeEntry: a sibling may serve this very session id
+            // concurrently (concurrent --resume, writer lease off), and
+            // the release above unlinked only our own claim — a
+            // surviving sidecar records the sibling, so never delete
+            // out from under it. Salvaging first would double-count a
+            // session still accruing usage.
+            const disposable =
+              !incomplete &&
+              recordedCwds.length > 0 &&
+              recordedCwds.every((cwd) => isTempDirPath(cwd)) &&
+              !Storage.hasLiveSession(projectDir, false);
+            if (disposable) {
+              try {
+                await this.salvageSessionUsage(projectDir);
+              } catch {
+                // Salvage failures must never block removal.
+              }
+              // The salvage await (and the transcript streaming above)
+              // widens the check-then-delete window: a sibling session
+              // sharing this entry — concurrent temp sessions or a
+              // sanitized-cwd collision — may have started writing
+              // since the guard ran. Re-check before the irreversible
+              // step, mirroring the sweep-side removeEntry.
+              if (
+                Storage.containsOnlySessionArtifacts(projectDir, this.sessionId)
+              ) {
+                fs.rmSync(projectDir, {
+                  recursive: true,
+                  force: true,
+                });
+                this.debugLogger.info(
+                  `Orphan project snapshot removed at shutdown: ${path.basename(
+                    projectDir,
+                  )}`,
+                );
+              }
+            }
+          }
+        }
+      } catch {
+        // Best-effort — don't block shutdown
       }
 
       this.skillManager?.stopWatching();
