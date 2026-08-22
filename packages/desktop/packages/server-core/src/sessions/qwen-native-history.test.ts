@@ -407,6 +407,330 @@ describe('Qwen native history loading', () => {
     expect(managed.lastMessageAt).toBe(timestamp);
   });
 
+  it('keeps a restored mirror the cwd-scoped session list never returned', async () => {
+    const workspaceRoot = mkdtempSync(
+      join(tmpdir(), 'craft-managed-workspace-'),
+    );
+    const projectRoot = mkdtempSync(join(tmpdir(), 'qwen-code-project-'));
+    tempRoots.push(workspaceRoot, projectRoot);
+
+    const sessionId = 'b7c1f0de-4a6e-4d51-9f2c-8a5d3e1c7b90';
+    const timestamp = Date.parse('2026-04-26T10:12:13.000Z');
+    saveWorkspaceConfig(workspaceRoot, {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      defaults: {
+        defaultLlmConnection: 'qwen-code',
+        permissionMode: 'allow-all',
+        workingDirectory: projectRoot,
+      },
+      localMcpServers: { enabled: true },
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+
+    // The session was started in a different project folder, so qwen-code's
+    // cwd-scoped session list never reports it for this workspace. That is
+    // absence of evidence, not evidence that the user deleted the session.
+    const manager = new SessionManager({
+      createExternalSessionAgent: () =>
+        ({
+          listSessions: async () => ({ sessions: [] }),
+          destroy: () => {},
+          dispose: () => {},
+        }) as unknown as AgentBackend,
+    });
+
+    const workspace: Workspace = {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      rootPath: workspaceRoot,
+      createdAt: timestamp,
+    };
+
+    await saveSession({
+      id: sessionId,
+      workspaceRootPath: workspaceRoot,
+      sdkSessionId: sessionId,
+      name: 'Real conversation',
+      createdAt: timestamp - 30_000,
+      lastUsedAt: timestamp,
+      lastMessageAt: timestamp,
+      permissionMode: 'allow-all',
+      llmConnection: 'qwen-code',
+      messages: [],
+    } as unknown as Parameters<typeof saveSession>[0]);
+
+    const managed = createManagedSession(
+      {
+        id: sessionId,
+        sdkSessionId: sessionId,
+        name: 'Real conversation',
+        createdAt: timestamp - 30_000,
+        lastUsedAt: timestamp,
+        lastMessageAt: timestamp,
+        llmConnection: 'qwen-code',
+      },
+      workspace,
+    );
+    (
+      manager as unknown as { sessions: Map<string, typeof managed> }
+    ).sessions.set(sessionId, managed);
+
+    await (
+      manager as unknown as {
+        doRefreshExternalSessionsForWorkspace: (
+          workspace: Workspace,
+        ) => Promise<void>;
+      }
+    ).doRefreshExternalSessionsForWorkspace(workspace);
+
+    expect(
+      (
+        manager as unknown as { sessions: Map<string, unknown> }
+      ).sessions.has(sessionId),
+    ).toBe(true);
+    expect(loadSession(workspaceRoot, sessionId)).not.toBeNull();
+  });
+
+  it('still prunes a mirror once a listing that reported it stops doing so', async () => {
+    const workspaceRoot = mkdtempSync(
+      join(tmpdir(), 'craft-managed-workspace-'),
+    );
+    const projectRoot = mkdtempSync(join(tmpdir(), 'qwen-code-project-'));
+    tempRoots.push(workspaceRoot, projectRoot);
+
+    const sessionId = 'c4e2a9b1-77d3-4e0a-8b6f-2d9c5a3e18f4';
+    const timestamp = Date.parse('2026-04-26T10:12:13.000Z');
+    saveWorkspaceConfig(workspaceRoot, {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      defaults: {
+        defaultLlmConnection: 'qwen-code',
+        permissionMode: 'allow-all',
+        workingDirectory: projectRoot,
+      },
+      localMcpServers: { enabled: true },
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+
+    // Listed once, then gone — the genuine "deleted somewhere else" case, which
+    // must still be cleaned up so the guard above cannot become prune-nothing.
+    let listCalls = 0;
+    const manager = new SessionManager({
+      createExternalSessionAgent: () =>
+        ({
+          listSessions: async () => {
+            listCalls += 1;
+            return listCalls === 1
+              ? {
+                  sessions: [
+                    {
+                      sessionId,
+                      cwd: projectRoot,
+                      title: 'qwen native conversation',
+                      createdAt: new Date(timestamp - 30_000).toISOString(),
+                      updatedAt: new Date(timestamp).toISOString(),
+                    },
+                  ],
+                }
+              : { sessions: [] };
+          },
+          destroy: () => {},
+          dispose: () => {},
+        }) as unknown as AgentBackend,
+    });
+
+    const workspace: Workspace = {
+      id: 'workspace-qwen',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      rootPath: workspaceRoot,
+      createdAt: timestamp,
+    };
+
+    const refresh = (
+      manager as unknown as {
+        doRefreshExternalSessionsForWorkspace: (
+          workspace: Workspace,
+        ) => Promise<void>;
+      }
+    ).doRefreshExternalSessionsForWorkspace.bind(manager);
+
+    await refresh(workspace);
+    expect(
+      (
+        manager as unknown as { sessions: Map<string, unknown> }
+      ).sessions.has(sessionId),
+    ).toBe(true);
+
+    // The prune has to be auditable: the ratchet that permits it lives in
+    // memory and resets on restart, so a post-restart "my session vanished"
+    // report is only traceable if the removal names the mirror it took.
+    const infos: unknown[][] = [];
+    const originalInfo = logger.info;
+    logger.info = (...args: unknown[]) => {
+      infos.push(args);
+    };
+    try {
+      await refresh(workspace);
+    } finally {
+      logger.info = originalInfo;
+    }
+
+    expect(
+      infos.filter((args) =>
+        args.some(
+          (arg) =>
+            typeof arg === 'string' &&
+            arg.includes('[external-prune]') &&
+            arg.includes(sessionId),
+        ),
+      ),
+    ).toHaveLength(1);
+    expect(
+      (
+        manager as unknown as { sessions: Map<string, unknown> }
+      ).sessions.has(sessionId),
+    ).toBe(false);
+    expect(loadSession(workspaceRoot, sessionId)).toBeNull();
+  });
+
+  it('does not prune one workspace mirror on another workspace listing the shared slug', async () => {
+    // Two workspaces share the built-in qwen-code slug and refresh in the same
+    // process. A session the provider lists under workspace A's working
+    // directory must not authorise pruning workspace B's mirror of it: the
+    // ratchet key carries workspace.id for exactly this reason. Drop that
+    // component and A's listing evidence prunes B's restored mirror — the data
+    // loss the ratchet exists to prevent.
+    const timestamp = Date.parse('2026-04-26T10:12:13.000Z');
+    const sessionId = 'a1b2c3d4-5e6f-4a7b-8c9d-0e1f2a3b4c5d';
+
+    const rootA = mkdtempSync(join(tmpdir(), 'craft-managed-workspace-'));
+    const cwdA = mkdtempSync(join(tmpdir(), 'qwen-code-project-'));
+    const rootB = mkdtempSync(join(tmpdir(), 'craft-managed-workspace-'));
+    const cwdB = mkdtempSync(join(tmpdir(), 'qwen-code-project-'));
+    tempRoots.push(rootA, cwdA, rootB, cwdB);
+
+    for (const [id, root, cwd] of [
+      ['workspace-a', rootA, cwdA],
+      ['workspace-b', rootB, cwdB],
+    ] as const) {
+      saveWorkspaceConfig(root, {
+        id,
+        name: 'qwen-code',
+        slug: 'qwen-code',
+        defaults: {
+          defaultLlmConnection: 'qwen-code',
+          permissionMode: 'allow-all',
+          workingDirectory: cwd,
+        },
+        localMcpServers: { enabled: true },
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      });
+    }
+
+    // The provider reports the session only for workspace A's cwd; workspace
+    // B's cwd-scoped listing never returns it.
+    const manager = new SessionManager({
+      createExternalSessionAgent: () =>
+        ({
+          listSessions: async (options?: { cwd?: string }) => ({
+            sessions:
+              options?.cwd === cwdA
+                ? [
+                    {
+                      sessionId,
+                      cwd: cwdA,
+                      title: 'qwen native conversation',
+                      createdAt: new Date(timestamp - 30_000).toISOString(),
+                      updatedAt: new Date(timestamp).toISOString(),
+                    },
+                  ]
+                : [],
+          }),
+          destroy: () => {},
+          dispose: () => {},
+        }) as unknown as AgentBackend,
+    });
+
+    const workspaceA: Workspace = {
+      id: 'workspace-a',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      rootPath: rootA,
+      createdAt: timestamp,
+    };
+    const workspaceB: Workspace = {
+      id: 'workspace-b',
+      name: 'qwen-code',
+      slug: 'qwen-code',
+      rootPath: rootB,
+      createdAt: timestamp,
+    };
+
+    const refresh = (
+      manager as unknown as {
+        doRefreshExternalSessionsForWorkspace: (
+          workspace: Workspace,
+        ) => Promise<void>;
+      }
+    ).doRefreshExternalSessionsForWorkspace.bind(manager);
+
+    // A lists the session, recording it as "ever listed" under A's key.
+    await refresh(workspaceA);
+    // Drop A's imported copy so only B's mirror remains under the shared id.
+    (
+      manager as unknown as { sessions: Map<string, unknown> }
+    ).sessions.clear();
+
+    // B holds the same provider session as a restored mirror in memory and on
+    // disk.
+    await saveSession({
+      id: sessionId,
+      workspaceRootPath: rootB,
+      sdkSessionId: sessionId,
+      name: 'Real conversation',
+      createdAt: timestamp - 30_000,
+      lastUsedAt: timestamp,
+      lastMessageAt: timestamp,
+      permissionMode: 'allow-all',
+      llmConnection: 'qwen-code',
+      messages: [],
+    } as unknown as Parameters<typeof saveSession>[0]);
+    const mirror = createManagedSession(
+      {
+        id: sessionId,
+        sdkSessionId: sessionId,
+        name: 'Real conversation',
+        createdAt: timestamp - 30_000,
+        lastUsedAt: timestamp,
+        lastMessageAt: timestamp,
+        llmConnection: 'qwen-code',
+      },
+      workspaceB,
+    );
+    (
+      manager as unknown as { sessions: Map<string, typeof mirror> }
+    ).sessions.set(sessionId, mirror);
+
+    // Refreshing B (empty listing) must not prune B's mirror on the strength of
+    // A's listing under the shared slug.
+    await refresh(workspaceB);
+
+    expect(
+      (
+        manager as unknown as { sessions: Map<string, unknown> }
+      ).sessions.has(sessionId),
+    ).toBe(true);
+    expect(loadSession(rootB, sessionId)).not.toBeNull();
+  });
+
   it('does not clear Qwen provider titles from stripped local headers', () => {
     const workspaceRoot = mkdtempSync(
       join(tmpdir(), 'craft-managed-workspace-'),

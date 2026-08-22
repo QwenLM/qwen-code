@@ -1484,6 +1484,10 @@ export class SessionManager implements ISessionManager {
   private configWatchers: Map<string, ConfigWatcher> = new Map()
   // Automation systems for workspace event automations - one per workspace (includes scheduler, diffing, and handlers)
   private automationSystems: Map<string, AutomationSystem> = new Map()
+  // Provider session ids this process has seen in a completed external listing,
+  // keyed by `${workspace.id}::${connectionSlug}`. Gates mirror pruning so an
+  // unlisted session is only removed once we have positively seen it listed.
+  private everListedExternalSessionIds: Map<string, Set<string>> = new Map()
   // Pending credential request resolvers (keyed by requestId)
   private pendingCredentialResolvers: Map<
     string,
@@ -3401,6 +3405,16 @@ export class SessionManager implements ISessionManager {
   ): Promise<boolean> {
     let removed = false
 
+    // Prune only mirrors this workspace has positively seen listed before.
+    // The provider's listing is scoped to one working directory, so a session
+    // started in a different project folder is simply absent from it — and
+    // absence of evidence is not evidence the user deleted it. Without this
+    // ratchet the first refresh after a restart destroys every such mirror.
+    const everListed = this.getEverListedExternalSessionIds(
+      workspace,
+      connectionSlug,
+    )
+
     for (const managed of Array.from(this.sessions.values())) {
       if (managed.workspace.id !== workspace.id) continue
       if (this.resolveExternalSessionConnectionSlug(managed) !== connectionSlug)
@@ -3408,7 +3422,17 @@ export class SessionManager implements ISessionManager {
       if (!managed.sdkSessionId || managed.id !== managed.sdkSessionId)
         continue
       if (seenSdkSessionIds.has(managed.sdkSessionId)) continue
+      if (!everListed.has(managed.sdkSessionId)) continue
       if (managed.isProcessing) continue
+
+      // Audit the deletion. The ratchet that permits it lives in memory and
+      // resets on restart, so without a record a "my session vanished" report
+      // after a restart cannot be traced back to the refresh that pruned it.
+      sessionLog.info(
+        `[external-prune] removing mirror ${managed.id} for workspace ` +
+          `${workspace.id} (${connectionSlug}): absent from a listing that ` +
+          `previously included it`,
+      )
 
       this.sessions.delete(managed.id)
       removed = true
@@ -3419,7 +3443,26 @@ export class SessionManager implements ISessionManager {
       automationSystem?.removeSessionMetadata(managed.id)
     }
 
+    // Record this listing so a session that later disappears from it — the
+    // real "deleted elsewhere" case — is still pruned on a subsequent refresh.
+    for (const sdkSessionId of seenSdkSessionIds) {
+      everListed.add(sdkSessionId)
+    }
+
     return removed
+  }
+
+  private getEverListedExternalSessionIds(
+    workspace: Workspace,
+    connectionSlug: string,
+  ): Set<string> {
+    const key = `${workspace.id}::${connectionSlug}`
+    let everListed = this.everListedExternalSessionIds.get(key)
+    if (!everListed) {
+      everListed = new Set<string>()
+      this.everListedExternalSessionIds.set(key, everListed)
+    }
+    return everListed
   }
 
   // Persist a session to disk (async with debouncing)
