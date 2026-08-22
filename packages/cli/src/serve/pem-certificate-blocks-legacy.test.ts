@@ -4,17 +4,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { X509Certificate } from 'node:crypto';
 import { rootCertificates } from 'node:tls';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { spawnSync } = vi.hoisted(() => ({
-  spawnSync: vi.fn(() => ({
-    error: undefined,
-    status: 0,
-    stdout: JSON.stringify({ legacy: true }),
-    stderr: '',
-  })),
+  spawnSync: vi.fn(),
 }));
+
+const legacyOracleResult = (stderr = '') => ({
+  error: undefined,
+  status: 0,
+  stdout: JSON.stringify({ legacy: true }),
+  stderr,
+});
 
 vi.mock('node:child_process', async (importOriginal) => {
   const original = await importOriginal<typeof import('node:child_process')>();
@@ -28,18 +31,59 @@ vi.mock('node:child_process', async (importOriginal) => {
 import { extractCertificateBlocks } from './pem-certificate-blocks.js';
 
 const ROOT_PEM = `${rootCertificates[0]!}\n`;
+const SECOND_ROOT_PEM = `${rootCertificates[1]!}\n`;
 
 describe('legacy certificate loader oracle', () => {
-  beforeEach(() => spawnSync.mockClear());
+  beforeEach(() => {
+    spawnSync.mockReset();
+    spawnSync.mockReturnValue(legacyOracleResult());
+  });
 
   it('accepts a strict certificate-only file', () => {
     expect(extractCertificateBlocks(ROOT_PEM)).toHaveLength(1);
     expect(spawnSync).toHaveBeenCalledOnce();
   });
 
-  it('fails closed when strict blocks do not cover the whole file', () => {
+  it.each([
+    ['leading prose', `# exported by secret manager\n${ROOT_PEM}`, 1],
+    ['trailing prose', `${ROOT_PEM}# end of export\n`, 1],
+    ['inter-block prose', `${ROOT_PEM}# second trust anchor\n${ROOT_PEM}`, 2],
+    [
+      'leading private key',
+      `-----BEGIN PRIVATE KEY-----\nQUJD\n-----END PRIVATE KEY-----\n${ROOT_PEM}`,
+      1,
+    ],
+    [
+      'trailing private key',
+      `${ROOT_PEM}-----BEGIN PRIVATE KEY-----\nQUJD\n-----END PRIVATE KEY-----\n`,
+      1,
+    ],
+    ['blank line between certificates', `${ROOT_PEM}\n${ROOT_PEM}`, 2],
+  ])('accepts %s around loadable certificates', (_name, contents, count) => {
+    expect(extractCertificateBlocks(contents)).toHaveLength(count);
+    expect(spawnSync).toHaveBeenCalledOnce();
+  });
+
+  it('fails closed on the warning-free legacy header stop', () => {
     const malformed = '-----BEGIN FOO:BAR-----\nQUJD\n-----END FOO:BAR-----\n';
     expect(extractCertificateBlocks(`${malformed}${ROOT_PEM}`)).toBeUndefined();
+    expect(spawnSync).toHaveBeenCalledOnce();
+  });
+
+  it('keeps certificates loaded before a warning-free legacy header stop', () => {
+    const malformed = '-----BEGIN FOO:BAR-----\nQUJD\n-----END FOO:BAR-----\n';
+    expect(
+      extractCertificateBlocks(`${ROOT_PEM}${malformed}${SECOND_ROOT_PEM}`),
+    ).toEqual([new X509Certificate(ROOT_PEM).toString().trimEnd()]);
+    expect(spawnSync).toHaveBeenCalledOnce();
+  });
+
+  it('fails closed when the legacy loader reports malformed extra certs', () => {
+    spawnSync.mockReturnValue(
+      legacyOracleResult('Warning: Ignoring extra certs from malformed.pem'),
+    );
+
+    expect(extractCertificateBlocks(ROOT_PEM)).toBeUndefined();
     expect(spawnSync).toHaveBeenCalledOnce();
   });
 });

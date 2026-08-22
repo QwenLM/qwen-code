@@ -26,6 +26,8 @@ if (typeof tls.getCACertificates === 'function') {
 `;
 const STRICT_CERTIFICATE_BLOCK =
   /^-----BEGIN CERTIFICATE-----\r?\n(?:[A-Za-z0-9+/=]+\r?\n)+-----END CERTIFICATE-----[ \t]*(?:\r?\n|$)/gm;
+const LEGACY_SILENT_STOP_HEADER_BLOCK =
+  /^-----BEGIN ([^\r\n]*:[^\r\n]*)-----[ \t]*\r?\n[\s\S]*?^-----END \1-----[ \t]*(?:\r?\n|$)/m;
 
 /** A block the loader takes, in canonical PEM and as its parsed certificate. */
 interface ScannedCertificateBlock {
@@ -33,28 +35,23 @@ interface ScannedCertificateBlock {
   certificate: X509Certificate;
 }
 
-function strictCertificateBlocks(contents: string): ScannedCertificateBlock[] {
+function legacyCertificateBlocks(contents: string): ScannedCertificateBlock[] {
+  const silentStop = contents.search(LEGACY_SILENT_STOP_HEADER_BLOCK);
+  const loadablePrefix =
+    silentStop === -1 ? contents : contents.slice(0, silentStop);
   const blocks: ScannedCertificateBlock[] = [];
-  let coveredUntil = 0;
-  for (const match of contents.matchAll(STRICT_CERTIFICATE_BLOCK)) {
-    if (
-      match.index === undefined ||
-      contents.slice(coveredUntil, match.index).trim() !== ''
-    ) {
-      return [];
-    }
+  for (const match of loadablePrefix.matchAll(STRICT_CERTIFICATE_BLOCK)) {
     try {
       const certificate = new X509Certificate(match[0]);
       blocks.push({
         block: certificate.toString().trimEnd(),
         certificate,
       });
-      coveredUntil = match.index + match[0].length;
     } catch {
       return [];
     }
   }
-  return contents.slice(coveredUntil).trim() === '' ? blocks : [];
+  return blocks;
 }
 
 /**
@@ -113,13 +110,12 @@ function scanCertificateBlocks(
     if (Reflect.get(parsed, 'legacy') !== true) return [];
     // `tls.getCACertificates('extra')` was added during Node 22. Older Node 22
     // releases expose no certificate list. Creating a secure context drives
-    // the same loader and reports a malformed file on stderr; accept only the
-    // strict subset after a warning-free load. Unusual but loadable shapes
-    // fail closed and trigger the existing visible merge fallback instead of
-    // creating phantom roots.
+    // the same loader and reports most malformed files on stderr. The bounded
+    // scanner also stops at the known warning-free header shape, while
+    // retaining the loader's measured surrounding-content tolerance.
     return result.stderr.includes('Warning: Ignoring extra certs from')
       ? []
-      : strictCertificateBlocks(contents);
+      : legacyCertificateBlocks(contents);
   } catch {
     return [];
   } finally {
