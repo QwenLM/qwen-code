@@ -1,6 +1,7 @@
 import {
   useState,
   useEffect,
+  useLayoutEffect,
   useCallback,
   useRef,
   useMemo,
@@ -12,6 +13,7 @@ import type { PermissionRequest, TodoItem } from '../../adapters/types';
 import { useI18n } from '../../i18n';
 import { PlanExecutionView } from './PlanExecutionView';
 import { isExitPlanApprovalRequest } from '../../utils/todos';
+import { getShadowAwareActiveElement, isEditableTarget } from '../../utils/dom';
 import { localizeToolDisplayName } from './toolFormatting';
 import styles from './ToolApproval.module.css';
 
@@ -259,6 +261,7 @@ export function ToolApproval({
   const safeDefaultIndexRef = useRef(safeDefaultIndex);
   safeDefaultIndexRef.current = safeDefaultIndex;
   const optionRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const panelRef = useRef<HTMLDivElement | null>(null);
   const headingId = useId();
   const questionId = useId();
   const descId = useId();
@@ -308,7 +311,14 @@ export function ToolApproval({
   // already topmost on mount still focuses its default.
   const prevKeyboardActiveRef = useRef(false);
   const prevRequestIdRef = useRef(request.id);
-  useEffect(() => {
+  // Must be a layout effect, not a passive one: the commit that mounts this
+  // overlay also hides the composer, and sibling layout effects can force a
+  // synchronous style recalculation (by reading layout) before any passive
+  // effect runs — Chromium drops focus from the just-hidden composer during
+  // that recalculation, so a passive guard would read `body` and miss.
+  // Layout effects run right after DOM mutation, before any recalculation,
+  // while the hidden composer still holds focus.
+  useLayoutEffect(() => {
     const wasActive = prevKeyboardActiveRef.current;
     const prevRequestId = prevRequestIdRef.current;
     prevKeyboardActiveRef.current = keyboardActive;
@@ -316,6 +326,15 @@ export function ToolApproval({
     if (!keyboardActive) return;
     const requestChanged = request.id !== prevRequestId;
     if (wasActive && !requestChanged) return;
+    // The approval can appear while the user is mid-typing in the composer:
+    // the same commit hides the composer and mounts this overlay. Grabbing
+    // focus would redirect the in-progress keystrokes — Enter-to-send, Space,
+    // digits — to the safe-default option and can confirm the request
+    // unintentionally. Yield to the editable target; the dialog stays
+    // reachable by Tab/click.
+    if (isEditableTarget(getShadowAwareActiveElement(panelRef.current))) {
+      return;
+    }
     // Fresh request → safe default; same request re-activated (e.g. a covering
     // panel closed) → restore the option the user had selected rather than
     // snapping focus back to the default and silently changing their choice.
@@ -399,6 +418,7 @@ export function ToolApproval({
 
   return (
     <div
+      ref={panelRef}
       className={
         variant === 'floating'
           ? `${styles.approval} ${styles.floating}${

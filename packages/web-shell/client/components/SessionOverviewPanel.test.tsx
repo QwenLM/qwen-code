@@ -268,6 +268,17 @@ describe('deriveSessionCards', () => {
     expect(cards[0].clientCount).toBe(2);
   });
 
+  it('passes bound PRs through to the card', () => {
+    const prs = [
+      { number: 9500, url: 'https://github.com/o/r/pull/9500' },
+      { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+    ];
+    const cards = deriveSessionCards([session('s', { prs })], [], undefined);
+    expect(cards[0].prs).toEqual(prs);
+    const bare = deriveSessionCards([session('bare')], [], undefined);
+    expect(bare[0].prs).toBeUndefined();
+  });
+
   it('does not expose opaque route ids as model names', () => {
     const cards = deriveSessionCards(
       [session('s')],
