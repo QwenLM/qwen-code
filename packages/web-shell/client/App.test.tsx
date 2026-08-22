@@ -10930,7 +10930,7 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
     expect(onToast).toHaveBeenCalledWith(
       'error',
-      "Slash commands can't be queued while a turn is running.",
+      'Slash commands are unavailable while a Goal owns the session or its state is loading.',
     );
   });
 
@@ -10992,6 +10992,21 @@ describe('App session callbacks', () => {
     expect(rawEnqueuePrompt.mock.calls[0]?.[0]).toBe(
       'hello during active turn',
     );
+  });
+
+  it('enqueues a forwarded command while the session is active and Goal is idle', async () => {
+    testState.streamingState = 'responding';
+    renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('/deploy production');
+      await flush();
+    });
+
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(rawEnqueuePrompt).toHaveBeenCalledTimes(1);
+    expect(rawEnqueuePrompt.mock.calls[0]?.[0]).toBe('/deploy production');
   });
 
   it('inserts a prompt when the session becomes active before effects run', async () => {
@@ -13174,8 +13189,9 @@ describe('App session callbacks', () => {
     );
   });
 
-  it('allows manual retry after a model stream interrupted turn error', async () => {
+  it('allows manual retry after a model stream interrupted turn error with an active Goal', async () => {
     const retrySend = deferred<void>();
+    mockConnection.goalState = activeGoalSnapshot('keep working');
     const { container, rerender } = renderApp();
     await flush();
 
@@ -18626,8 +18642,9 @@ describe('App prompt send failure retry', () => {
     warn.mockRestore();
   });
 
-  it('marks the failed message and retries its original payload without a duplicate', async () => {
+  it('marks and retries a failed prompt while an active Goal is known', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockConnection.goalState = activeGoalSnapshot('keep working');
     const firstSend = deferred<void>();
     mockSessionActions.sendPrompt.mockImplementationOnce(() => {
       testState.blocks = [{ id: 'u1', kind: 'user' }];

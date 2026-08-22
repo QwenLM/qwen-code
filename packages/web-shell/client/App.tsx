@@ -8913,11 +8913,17 @@ export function App({
         return false;
       }
       const goalBlocked = isGoalGateBlocked();
-      const promptBlocked = streamingStateRef.current !== 'idle' || goalBlocked;
-      const enqueueBlockedCommand = (commandText: string) => {
+      const commandBlocked =
+        streamingStateRef.current !== 'idle' || goalBlocked;
+      const blockCommand = () => {
         if (goalBlocked) {
-          return blockLocalCommandDuringTurn();
+          pushToast('error', t('queue.commandGoalBlocked'));
+          return false;
         }
+        return blockLocalCommandDuringTurn();
+      };
+      const enqueueBlockedCommand = (commandText: string) => {
+        if (goalBlocked) return blockCommand();
         return enqueuePrompt(
           commandText,
           images,
@@ -9046,7 +9052,7 @@ export function App({
         if (match) {
           const cmd = match[1];
           if (hiddenCommands.has(normalizeHiddenCommand(cmd))) {
-            if (promptBlocked) {
+            if (commandBlocked) {
               return enqueueBlockedCommand(text);
             }
             return submitPromptFromEditor(
@@ -9173,7 +9179,7 @@ export function App({
               // (turn in flight, or a Goal owning the session) refuse the
               // command instead of switching the UI alone — the language
               // picker treats the identical condition the same way.
-              if (promptBlocked) return blockLocalCommandDuringTurn();
+              if (commandBlocked) return blockCommand();
               handleLanguageChange(nextLanguage);
               {
                 const deferComposerCommit =
@@ -9236,13 +9242,13 @@ export function App({
             return true;
           }
           if (cmd === 'branch') {
-            if (promptBlocked) return blockLocalCommandDuringTurn();
+            if (commandBlocked) return blockCommand();
             const branchName = text.slice(match[0].length).trim();
             branchCurrentSession(branchName || undefined);
             return true;
           }
           if (cmd === 'fork') {
-            if (promptBlocked) return blockLocalCommandDuringTurn();
+            if (commandBlocked) return blockCommand();
             if (!requireActiveSessionForLocalCommand()) return false;
             const directive = text.slice(match[0].length).trim();
             if (!directive) {
@@ -9283,7 +9289,7 @@ export function App({
               return true;
             }
             if (modelArg.startsWith('--fast ')) {
-              if (promptBlocked) {
+              if (commandBlocked) {
                 return enqueueBlockedCommand(text);
               }
               return submitPromptFromEditor(
@@ -9343,7 +9349,7 @@ export function App({
             return true;
           }
           if (cmd === 'plan') {
-            if (promptBlocked) return blockLocalCommandDuringTurn();
+            if (commandBlocked) return blockCommand();
             const prompt = text.slice(match[0].length).trim();
             if (!connectionRef.current.sessionId) {
               setPendingMode('plan');
@@ -9434,7 +9440,7 @@ export function App({
               openPanel('skills');
             } else {
               const skillPrompt = `/${skillArg}`;
-              if (promptBlocked) {
+              if (commandBlocked) {
                 return enqueueBlockedCommand(skillPrompt);
               }
               return submitPromptFromEditor(
@@ -9546,7 +9552,7 @@ export function App({
             if (subCommand === 'install') {
               // Install echoes into the transcript (and its error/usage replies
               // do too); block it mid-turn so it can't split the active turn.
-              if (promptBlocked) return blockLocalCommandDuringTurn();
+              if (commandBlocked) return blockCommand();
               const tokens = args.slice('install'.length).trim().split(/\s+/);
               let source = '';
               let ref: string | undefined;
@@ -9657,7 +9663,7 @@ export function App({
           if (cmd === 'rename') {
             const renameArg = parseRenameArgument(text.slice(match[0].length));
             if (renameArg.type === 'auto' || renameArg.type === 'delegate') {
-              if (promptBlocked) {
+              if (commandBlocked) {
                 return enqueueBlockedCommand(text);
               }
               return submitPromptFromEditor(
@@ -9882,7 +9888,7 @@ export function App({
           }
         }
         // Forward slash commands as prompts
-        if (promptBlocked) {
+        if (commandBlocked) {
           return enqueueBlockedCommand(text);
         }
         return submitPromptFromEditor(

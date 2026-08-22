@@ -1667,21 +1667,34 @@ describe('ChatPane', () => {
 
     expect(sendPrompt).toHaveBeenCalledTimes(1);
     expect(enqueuePrompt).not.toHaveBeenCalled();
-  });
 
-  it('blocks a forwarded slash command while Goal state is hydrating', () => {
-    connectionState = { ...connectionState, goalState: undefined };
-    render();
-
+    sendPrompt.mockClear();
     let accepted: boolean | undefined;
     act(() => {
       accepted = latestOnSubmit!('/deploy production');
     });
-
     expect(accepted).toBe(false);
     expect(sendPrompt).not.toHaveBeenCalled();
     expect(enqueuePrompt).not.toHaveBeenCalled();
   });
+
+  it.each(['idle', 'responding'] as const)(
+    'blocks a forwarded slash command while Goal state is hydrating (%s)',
+    (streamingState) => {
+      streamingStateValue = streamingState;
+      connectionState = { ...connectionState, goalState: undefined };
+      render();
+
+      let accepted: boolean | undefined;
+      act(() => {
+        accepted = latestOnSubmit!('/deploy production');
+      });
+
+      expect(accepted).toBe(false);
+      expect(sendPrompt).not.toHaveBeenCalled();
+      expect(enqueuePrompt).not.toHaveBeenCalled();
+    },
+  );
 
   it('lets the host handle a slash command', () => {
     const onSlashCommand = vi.fn(() => true);
@@ -1715,6 +1728,27 @@ describe('ChatPane', () => {
       onAdmissionStarted: expect.any(Function),
       onAdmitted: expect.any(Function),
     });
+  });
+
+  it('queues a forwarded slash command while the pane is running', () => {
+    streamingStateValue = 'responding';
+    const onSlashCommand = vi.fn();
+    render({ onSlashCommand });
+
+    act(() => {
+      latestOnSubmit!('/deploy staging');
+    });
+
+    expect(onSlashCommand).toHaveBeenCalledTimes(1);
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(enqueuePrompt).toHaveBeenCalledWith(
+      '/deploy staging',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      expect.any(Function),
+    );
   });
 
   it('lets the host handle a slash command while the pane is disconnected', () => {
