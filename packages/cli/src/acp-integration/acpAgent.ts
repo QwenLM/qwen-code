@@ -11693,10 +11693,19 @@ class QwenAgent implements Agent {
           try {
             let filesChanged: string[] = [];
             let filesFailed: string[] = [];
-            if (rewindFiles && promptId) {
+            // Numeric rewinds (the VS Code companion's message-edit flow
+            // sends only targetTurnIndex) resolve the target's identity
+            // inside the session — key the file rewind and the
+            // consumed-boundary drop on the RESOLVED identity so both arms
+            // run them. Without the drop the live store keeps the boundary
+            // while the conversation keeps one fewer turn, the strict
+            // legacy pairing gate fails every later rewind closed, and file
+            // rewind becomes one-shot until a session reload.
+            const fileRewindPromptId = promptId ?? rewindResult.promptId;
+            if (rewindFiles && fileRewindPromptId) {
               const fhs = session.getConfig().getFileHistoryService();
               try {
-                const fileResult = await fhs.rewind(promptId, true);
+                const fileResult = await fhs.rewind(fileRewindPromptId, true);
                 filesChanged = fileResult.filesChanged;
                 filesFailed = fileResult.filesFailed;
                 if (fileResult.filesFailed.length === 0) {
@@ -11716,7 +11725,7 @@ class QwenAgent implements Agent {
               } catch (err) {
                 const reason = err instanceof Error ? err.message : String(err);
                 debugLogger.error(
-                  `[ACP] File-history rewind failed for session=${sessionId} promptId=${promptId}: ${reason}`,
+                  `[ACP] File-history rewind failed for session=${sessionId} promptId=${fileRewindPromptId}: ${reason}`,
                 );
                 filesFailed = [`file-history-rewind: ${reason}`];
               }
