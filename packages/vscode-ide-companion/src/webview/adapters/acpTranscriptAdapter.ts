@@ -28,3 +28,44 @@ export function reduceSessionNotification(
   };
   return reduceDaemonTranscriptEvents(state, normalizeDaemonEvent(event));
 }
+
+/** Minimal shape of cached history rows (ChatMessage) delivered offline. */
+export interface CachedTranscriptMessage {
+  role?: string;
+  content?: string;
+}
+
+/**
+ * Convert one cached ChatMessage-shaped history row into the ACP
+ * session/update notification the shared reducer already understands.
+ * Returns `null` for rows without renderable text so offline restores and
+ * load-failure fallbacks render the same timeline as live replays.
+ */
+export function cachedMessageToNotification(
+  message: CachedTranscriptMessage,
+  sessionId: string,
+): SessionNotification | null {
+  if (typeof message?.content !== 'string' || message.content.length === 0) {
+    return null;
+  }
+  const content = { type: 'text' as const, text: message.content };
+  switch (message.role) {
+    case 'user':
+      return {
+        sessionId,
+        update: { sessionUpdate: 'user_message_chunk', content },
+      };
+    case 'assistant':
+      return {
+        sessionId,
+        update: { sessionUpdate: 'agent_message_chunk', content },
+      };
+    case 'thinking':
+      return {
+        sessionId,
+        update: { sessionUpdate: 'agent_thought_chunk', content },
+      };
+    default:
+      return null;
+  }
+}

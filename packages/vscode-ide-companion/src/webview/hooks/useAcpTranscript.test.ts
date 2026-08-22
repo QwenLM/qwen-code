@@ -25,6 +25,19 @@ function userTextNotification(
   };
 }
 
+function assistantTextNotification(
+  sessionId: string,
+  text: string,
+): SessionNotification {
+  return {
+    sessionId,
+    update: {
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text },
+    },
+  };
+}
+
 function postToWebview(message: unknown): void {
   window.dispatchEvent(new MessageEvent('message', { data: message }));
 }
@@ -141,5 +154,161 @@ describe('useAcpTranscript', () => {
     });
     expect(captured.blocks).toHaveLength(1);
     expect(captured.blocks[0]).toMatchObject({ kind: 'user', text: 'beta' });
+  });
+
+  it('resets transcript state when conversationLoaded arrives on reconnect', () => {
+    act(() => {
+      postToWebview({
+        type: 'transcriptUpdate',
+        data: userTextNotification('session-a', 'alpha'),
+      });
+    });
+    expect(captured.blocks).toHaveLength(1);
+
+    // Agent reconnect initialises an empty conversation and only posts
+    // conversationLoaded; the previous session's blocks must not survive.
+    act(() => {
+      postToWebview({
+        type: 'conversationLoaded',
+        data: { id: 'temp', messages: [] },
+      });
+    });
+    expect(captured.blocks).toHaveLength(0);
+
+    act(() => {
+      postToWebview({
+        type: 'transcriptUpdate',
+        data: userTextNotification('session-b', 'beta'),
+      });
+    });
+    expect(captured.blocks).toHaveLength(1);
+    expect(captured.blocks[0]).toMatchObject({ kind: 'user', text: 'beta' });
+  });
+
+  it('drops late transcript frames from a previous session after a switch', () => {
+    act(() => {
+      postToWebview({
+        type: 'transcriptUpdate',
+        data: userTextNotification('session-a', 'first'),
+      });
+    });
+    expect(captured.blocks).toHaveLength(1);
+
+    act(() => {
+      postToWebview({
+        type: 'qwenSessionSwitched',
+        data: { sessionId: 'session-b', messages: [] },
+      });
+    });
+    expect(captured.blocks).toHaveLength(0);
+
+    // Session A's turn is still running on the CLI and emits a trailing
+    // frame after the boundary; it must not contaminate session B.
+    act(() => {
+      postToWebview({
+        type: 'transcriptUpdate',
+        data: userTextNotification('session-a', 'late tail from A'),
+      });
+    });
+    expect(captured.blocks).toHaveLength(0);
+
+    act(() => {
+      postToWebview({
+        type: 'transcriptUpdate',
+        data: userTextNotification('session-b', 'beta'),
+      });
+    });
+    expect(captured.blocks).toHaveLength(1);
+    expect(captured.blocks[0]).toMatchObject({ kind: 'user', text: 'beta' });
+  });
+
+  it('seeds the transcript from cached messages carried by qwenSessionSwitched', () => {
+    act(() => {
+      postToWebview({
+        type: 'qwenSessionSwitched',
+        data: {
+          sessionId: 'session-cached',
+          messages: [
+            { role: 'user', content: 'cached question', timestamp: 1 },
+            { role: 'assistant', content: 'cached answer', timestamp: 2 },
+            { role: 'thinking', content: 'cached thought', timestamp: 3 },
+          ],
+        },
+      });
+    });
+
+    expect(captured.blocks).toHaveLength(3);
+    expect(captured.blocks[0]).toMatchObject({
+      kind: 'user',
+      text: 'cached question',
+    });
+    expect(captured.blocks[1]).toMatchObject({
+      kind: 'assistant',
+      text: 'cached answer',
+    });
+    expect(captured.blocks[2]).toMatchObject({
+      kind: 'thought',
+      text: 'cached thought',
+    });
+
+    // History restores are completed turns; sessionLoadComplete finalizes
+    // the last block so it does not keep streaming.
+    act(() => {
+      postToWebview({
+        type: 'sessionLoadComplete',
+        data: { sessionId: 'session-cached' },
+      });
+    });
+    expect(captured.blocks[2]).toMatchObject({ streaming: false });
+  });
+
+  it('finalizes the streaming assistant block when the turn ends', () => {
+    act(() => {
+      postToWebview({
+        type: 'transcriptUpdate',
+        data: userTextNotification('session-a', 'hi'),
+      });
+    });
+    act(() => {
+      postToWebview({
+        type: 'transcriptUpdate',
+        data: assistantTextNotification('session-a', 'answer'),
+      });
+    });
+
+    const assistant = captured.blocks.find((b) => b.kind === 'assistant');
+    expect(assistant).toMatchObject({ kind: 'assistant', streaming: true });
+
+    act(() => {
+      postToWebview({
+        type: 'streamEnd',
+        data: { timestamp: Date.now(), reason: 'end_turn' },
+      });
+    });
+
+    const finished = captured.blocks.find((b) => b.kind === 'assistant');
+    expect(finished).toMatchObject({
+      kind: 'assistant',
+      text: 'answer',
+      streaming: false,
+    });
+  });
+
+  it('finalizes blocks with a cancelled reason when the user cancels', () => {
+    act(() => {
+      postToWebview({
+        type: 'transcriptUpdate',
+        data: assistantTextNotification('session-a', 'partial'),
+      });
+    });
+    expect(captured.blocks[0]).toMatchObject({ streaming: true });
+
+    act(() => {
+      postToWebview({
+        type: 'streamEnd',
+        data: { timestamp: Date.now(), reason: 'user_cancelled' },
+      });
+    });
+    expect(captured.blocks[0]).toMatchObject({ streaming: false });
   });
 });
