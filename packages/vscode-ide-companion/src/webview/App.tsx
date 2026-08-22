@@ -908,6 +908,9 @@ export const App: React.FC = () => {
   const isOverlayActive = Boolean(
     permissionRequest ||
       askUserQuestionRequest ||
+      // accountInfo doubles as the AccountInfoDialog visibility flag: it is
+      // only set by the on-demand accountInfo message and reset by the
+      // dialog's onClose, so truthy here means "the dialog is up".
       accountInfo ||
       sessionManagement.showSessionSelector,
   );
