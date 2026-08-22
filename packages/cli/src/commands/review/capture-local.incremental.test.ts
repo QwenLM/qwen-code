@@ -446,6 +446,34 @@ describe('capture-local — round-2 regressions from the stop work', () => {
   });
 });
 
+describe('capture-local — round-5 sibling gaps', () => {
+  it('does not stop a FILE review whose anchored change was discarded', () => {
+    // `scope-emptied` lacked the exclusion both sibling stops carry, so the
+    // same tree decided differently depending on whether a cache existed:
+    // with one it completed as a decided round, without one it routed to the
+    // whole-file review SKILL.md owes a file target.
+    seedDirtyTree();
+    write('src/foo.ts', 'export const real = 1;\n');
+    const first = capture({ file: 'src/foo.ts', model: 'model-a' });
+    mkdirSync(join(repo, '.qwen/review-cache'), { recursive: true });
+    writeFileSync(
+      first['cachePath'] as string,
+      readFileSync(first.cacheCandidatePath, 'utf8'),
+    );
+    // Discard the reviewed change entirely; HEAD does not move. The file was
+    // untracked, so discarding it removes it — the anchored path vanishes and
+    // the slice keeps nothing.
+    rmSync(join(repo, 'src/foo.ts'));
+
+    const second = capture({
+      file: 'src/foo.ts',
+      cache: join(repo, '.qwen/review-cache'),
+      model: 'model-a',
+    });
+    expect(second['nothingToReview']).toBeUndefined();
+  });
+});
+
 describe('capture-local — the cache namespace discriminates the subject', () => {
   it('gives a file review its own key, so colliding targets keep separate ledgers', () => {
     // The anchor gate's `source` check is the second layer, not the first: it

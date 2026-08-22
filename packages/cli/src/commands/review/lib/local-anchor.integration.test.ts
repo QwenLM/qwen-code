@@ -144,3 +144,16 @@ describe('hashWorktreeFiles — the attributes probe is byte-faithful', () => {
     expect(off['data.bin']).not.toBe(on['data.bin']);
   });
 });
+describe('hashWorktreeFiles — a decoded path is not a name', () => {
+  it('refuses to hash a path carrying U+FFFD', () => {
+    // The capture pins `core.quotePath=false` and decodes with `toString`,
+    // so every invalid byte folds to U+FFFD. Beside a file LITERALLY named
+    // with one, two plan paths fold to a single key: `lstat` succeeds on the
+    // real file, the invalid-byte sibling inherits its identity, is never
+    // hashed, and its changes compare unchanged for ever. The `lstat` guard
+    // cannot see it, because the stat succeeds.
+    writeFileSync(join(repo, '\ufffd.ts'), 'export const a = 1;\n');
+    const out = hashWorktreeFiles(repo, ['\ufffd.ts', 'plain.ts']);
+    expect(out['\ufffd.ts']).toBe('unhashable');
+  });
+});

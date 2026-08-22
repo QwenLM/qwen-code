@@ -229,7 +229,14 @@ function resolveCachePath(
 }
 
 /**
- * How many blockers the cached ledger still holds open.
+ * How many blockers the cached ledger still holds open — REPORTING only.
+ *
+ * `run` deliberately does not turn this into a verdict: the ledger is
+ * rewritten only by a round that writes the cache, and a stop round does not,
+ * so a blocker the user has since FIXED and committed stays `open` for ever.
+ * Mapped to an exit code it produced a failure no action could clear. It is
+ * here because the orchestrator's stop branches render these entries, and a
+ * count beside them tells a human reader whether the round had any.
  *
  * A decided stop is not necessarily a CLEAN one: SKILL.md's two stop branches
  * both open by rendering the cache's still-open findings, and the common shape
@@ -676,7 +683,14 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     incremental !== undefined &&
     plan.chunks.length === 0 &&
     capture.skipped.length === 0 &&
-    treeHeldStill
+    treeHeldStill &&
+    // …and NOT a file review, the same exclusion both sibling stops carry.
+    // A file review whose anchored change was discarded has nothing in the
+    // slice, but SKILL.md owes it a whole-file review exactly as it does for
+    // the no-cache case — and without this the two disagreed on identical
+    // trees: with a cache the round completed decided, without one it routed
+    // to the whole-file review.
+    args.file === undefined
   ) {
     nothingToReview = { reason: 'scope-emptied' };
   }

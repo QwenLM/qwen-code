@@ -116,6 +116,23 @@ export function hashWorktreeFiles(
     // 120000 — exactly what `git diff` renders — not the target's bytes.
     // Following the link let a retargeted symlink whose new target happened
     // to hold equal content compare "unchanged".
+    // A path carrying U+FFFD is a decode, not a name. The capture pins
+    // `core.quotePath=false` and decodes with `toString('utf8')`, so every
+    // invalid byte folds to the replacement character — and when a file
+    // LITERALLY named with U+FFFD exists beside such a path, the two fold to
+    // one key: `lstat` succeeds on the real one, the invalid-byte sibling
+    // inherits its identity, is never hashed, and its changes compare
+    // unchanged for ever. That is the fail-open this identity exists to
+    // close, and the `lstat` guard below cannot see it because the stat
+    // SUCCEEDS.
+    //
+    // Over-review is the affordable direction, and a filename holding a real
+    // U+FFFD is rare enough that paying for it every round costs nothing
+    // measurable.
+    if (p.includes('\ufffd')) {
+      out[p] = UNHASHABLE;
+      continue;
+    }
     let st;
     try {
       st = lstatSync(join(repoRoot, p));

@@ -300,7 +300,17 @@ export function repoRelativeOf(
 ): { rel: string; abs: string; escapes: boolean } {
   const abs = canonicalise(resolve(from, file));
   const rel = relative(repoRoot, abs);
-  const escapes =
-    rel === '' || rel === '..' || rel.startsWith('..' + sep) || isAbsolute(rel);
+  // `rel === ''` is the repository ROOT, which is inside the repository — the
+  // one place the old test called an escape. `classifyRunTarget` accepts a
+  // directory target explicitly ("a tab-completed `src/` classifies as a file
+  // target"), so the root is a reachable one, and treating it as an escape
+  // split the two sides that must agree: the parent fell back to pinning the
+  // typed spelling while the child derived `safeTarget('') === 'target'`, so
+  // the poll never matched and a review that had run — and with `--comment`
+  // already posted — reported no verdict. `--file <root>` also threw the
+  // self-contradictory "resolves to <root>, which is outside the repository
+  // at <root>". As a pathspec `.` scopes the diff to the whole tree, which is
+  // what naming the root asks for.
+  const escapes = rel === '..' || rel.startsWith('..' + sep) || isAbsolute(rel);
   return { rel, abs, escapes };
 }
