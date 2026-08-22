@@ -9,7 +9,14 @@ import {
   createDaemonTranscriptState,
   createDaemonTranscriptStore,
   reduceDaemonTranscriptEvents,
+  type DaemonTranscriptStore,
 } from '../../src/daemon/index.js';
+
+function requireSummary(store: DaemonTranscriptStore) {
+  const summary = store.getBlockChangeSummary?.();
+  if (!summary) throw new Error('block change summary unavailable');
+  return summary;
+}
 
 describe('daemon transcript store block change summary', () => {
   it.each(['assistant', 'thought'] as const)(
@@ -19,19 +26,19 @@ describe('daemon transcript store block change summary', () => {
       const otherStore = createDaemonTranscriptStore();
       const type = `${kind}.text.delta` as const;
       store.dispatch({ type, text: 'one' });
-      const initial = store.getBlockChangeSummary();
+      const initial = requireSummary(store);
       const blockId =
         kind === 'assistant'
           ? store.getSnapshot().activeAssistantBlockId
           : store.getSnapshot().activeThoughtBlockId;
 
-      expect(initial.source).not.toBe(
-        otherStore.getBlockChangeSummary().source,
-      );
+      expect(initial.source).not.toBe(requireSummary(otherStore).source);
       store.dispatch({ type, text: ' two' });
       store.dispatch({ type, text: ' three' });
 
-      expect(store.getBlockChangeSummary()).toEqual({
+      const summary = requireSummary(store);
+      expect(summary.source).toBe(initial.source);
+      expect(summary).toEqual({
         source: initial.source,
         revision: initial.revision + 2,
         tailAppendBarrierRevision: initial.tailAppendBarrierRevision,
@@ -40,11 +47,24 @@ describe('daemon transcript store block change summary', () => {
     },
   );
 
+  it('invalidates a tail append after a local user message', () => {
+    const store = createDaemonTranscriptStore();
+    store.dispatch({ type: 'assistant.text.delta', text: 'one' });
+    const before = requireSummary(store);
+
+    store.appendLocalUserMessage('next');
+
+    const summary = requireSummary(store);
+    expect(summary.revision).toBe(before.revision + 1);
+    expect(summary.tailAppendBarrierRevision).toBe(summary.revision);
+    expect(summary.tailBlockId).toBeUndefined();
+  });
+
   it('advances the barrier for non-tail mutations and resets', () => {
     const store = createDaemonTranscriptStore();
     store.dispatch({ type: 'assistant.text.delta', text: 'one' });
     store.dispatch({ type: 'assistant.text.delta', text: ' two' });
-    const tailAppend = store.getBlockChangeSummary();
+    const tailAppend = requireSummary(store);
 
     store.dispatch({
       type: 'tool.update',
@@ -52,13 +72,13 @@ describe('daemon transcript store block change summary', () => {
       toolName: 'read_file',
       status: 'running',
     });
-    const toolUpdate = store.getBlockChangeSummary();
+    const toolUpdate = requireSummary(store);
     expect(toolUpdate.revision).toBe(tailAppend.revision + 1);
     expect(toolUpdate.tailAppendBarrierRevision).toBe(toolUpdate.revision);
     expect(toolUpdate.tailBlockId).toBeUndefined();
 
     store.reset();
-    const reset = store.getBlockChangeSummary();
+    const reset = requireSummary(store);
     expect(reset.revision).toBe(toolUpdate.revision + 1);
     expect(reset.tailAppendBarrierRevision).toBe(reset.revision);
   });
@@ -76,7 +96,7 @@ describe('daemon transcript store block change summary', () => {
       },
     ]);
 
-    const summary = store.getBlockChangeSummary();
+    const summary = requireSummary(store);
     expect(summary.tailAppendBarrierRevision).toBe(summary.revision);
     expect(summary.tailBlockId).toBeUndefined();
   });
@@ -87,11 +107,11 @@ describe('daemon transcript store block change summary', () => {
       type: 'assistant.text.delta',
       text: 'x'.repeat(100_000),
     });
-    const before = store.getBlockChangeSummary();
+    const before = requireSummary(store);
 
     store.dispatch({ type: 'assistant.text.delta', text: 'y' });
 
-    const summary = store.getBlockChangeSummary();
+    const summary = requireSummary(store);
     expect(summary.revision).toBe(before.revision + 1);
     expect(summary.tailAppendBarrierRevision).toBe(summary.revision);
     expect(summary.tailBlockId).toBeUndefined();
@@ -100,7 +120,7 @@ describe('daemon transcript store block change summary', () => {
   it('invalidates when a text delta also changes projection metadata', () => {
     const store = createDaemonTranscriptStore();
     store.dispatch({ type: 'assistant.text.delta', text: 'one' });
-    const before = store.getBlockChangeSummary();
+    const before = requireSummary(store);
 
     store.dispatch({
       type: 'assistant.text.delta',
@@ -108,7 +128,7 @@ describe('daemon transcript store block change summary', () => {
       meta: { source: 'background_notification' },
     });
 
-    const summary = store.getBlockChangeSummary();
+    const summary = requireSummary(store);
     expect(summary.revision).toBe(before.revision + 1);
     expect(summary.tailAppendBarrierRevision).toBe(summary.revision);
     expect(summary.tailBlockId).toBeUndefined();
@@ -139,6 +159,18 @@ describe('daemon transcript store block change summary', () => {
         toolProgress: { 'call-1': { ratio: 0.5 } },
       };
       const progress = before.toolProgress['call-1'];
+      const sideIndexContents = {
+        toolBlockByCallId: { ...before.toolBlockByCallId },
+        activeAssistantBlockByParent: {
+          ...before.activeAssistantBlockByParent,
+        },
+        activeThoughtBlockByParent: { ...before.activeThoughtBlockByParent },
+        trimmedToolNotificationByCallId: {
+          ...before.trimmedToolNotificationByCallId,
+        },
+        permissionBlockByRequestId: { ...before.permissionBlockByRequestId },
+        toolProgress: { 'call-1': { ...progress } },
+      };
 
       const after = reduceDaemonTranscriptEvents(before, [
         { type: `${kind}.text.delta`, text: ' two' },
@@ -160,6 +192,13 @@ describe('daemon transcript store block change summary', () => {
       );
       expect(after.toolProgress).toBe(before.toolProgress);
       expect(after.toolProgress['call-1']).toBe(progress);
+      for (const key of Object.keys(sideIndexContents) as Array<
+        keyof typeof sideIndexContents
+      >) {
+        expect(after[key]).toEqual(sideIndexContents[key]);
+        expect(Object.isFrozen(after[key])).toBe(true);
+      }
+      expect(Object.isFrozen(after.toolProgress['call-1'])).toBe(true);
     },
   );
 

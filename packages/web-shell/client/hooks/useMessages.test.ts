@@ -16,7 +16,6 @@ import {
   projectStreamingTailMessages,
   reconcileBackgroundAgentResolutions,
   transcriptBlocksToLocalizedMessages,
-  useMessages,
   useMessagesFromBlocks,
 } from './useMessages';
 import type { Message } from '../adapters/types';
@@ -183,7 +182,11 @@ describe('transcriptBlocksToLocalizedMessages', () => {
       );
       expect(latest[0]).toBe(firstProjection[0]);
       expect(latest[1]).not.toBe(firstProjection[1]);
-      expect(latest[1]).toMatchObject({ content: 'ab', isStreaming: true });
+      expect(latest[1]).toMatchObject({
+        content: 'ab',
+        isStreaming: true,
+        timestamp: 1_002,
+      });
 
       const changedUser = { ...user, text: 'changed', updatedAt: 2 };
       await act(async () =>
@@ -308,7 +311,7 @@ describe('transcriptBlocksToLocalizedMessages', () => {
     ).toBeUndefined();
   });
 
-  it('reuses streaming history without a block change summary', () => {
+  it('reuses only valid streaming history without a block change summary', () => {
     const t = (key: string) => key;
     const user = baseBlock({ id: 'user', kind: 'user', text: 'hello' });
     const assistant = baseBlock({
@@ -328,6 +331,23 @@ describe('transcriptBlocksToLocalizedMessages', () => {
     expect(projected?.[0]).toBe(messages[0]);
     expect(projected?.[1]).not.toBe(messages[1]);
     expect(projected?.[1]).toMatchObject({ content: 'ab' });
+    expect(
+      projectStreamingTailMessages(
+        { blocks: [user, assistant], messages, t },
+        [
+          { ...user, text: 'changed' },
+          { ...assistant, text: 'ab' },
+        ],
+        t,
+      ),
+    ).toBeUndefined();
+    expect(
+      projectStreamingTailMessages(
+        { blocks: [user, assistant], messages, t },
+        [user, { ...assistant, text: 'replacement' }],
+        t,
+      ),
+    ).toBeUndefined();
   });
 
   it('falls back when an insight marker spans the appended-text boundary', async () => {
@@ -516,12 +536,23 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function mountStatusConsumer(options: { allTools?: boolean } = {}) {
+function mountStatusConsumer(
+  options: {
+    allTools?: boolean;
+    getBlockChangeSummary?: () =>
+      | DaemonTranscriptBlockChangeSummary
+      | undefined;
+  } = {},
+) {
   const container = document.createElement('div');
   const root = createRoot(container);
   const t = (key: string) => key;
   function Consumer() {
-    const messages = useMessages(t);
+    const messages = useMessagesFromBlocks(
+      t,
+      hookState.blocks,
+      options.getBlockChangeSummary?.(),
+    );
     const status = options.allTools
       ? messages
           .flatMap((message) =>
@@ -1191,6 +1222,12 @@ describe('background agent task reconciliation', () => {
 
   it('resets accumulated missing-agent misses when an approval engages', async () => {
     vi.useFakeTimers();
+    const source = {};
+    let summary: DaemonTranscriptBlockChangeSummary = {
+      source,
+      revision: 1,
+      tailAppendBarrierRevision: 1,
+    };
     // Phase 1: no permission yet — one probe fires and 404s (miss 1).
     hookState.blocks = [
       baseBlock({
@@ -1212,7 +1249,9 @@ describe('background agent task reconciliation', () => {
         'not found',
       ),
     );
-    const { container, render, unmount } = mountStatusConsumer();
+    const { container, render, unmount } = mountStatusConsumer({
+      getBlockChangeSummary: () => summary,
+    });
 
     await act(async () => render());
     await vi.waitFor(() =>
@@ -1241,6 +1280,11 @@ describe('background agent task reconciliation', () => {
       }),
       hookState.blocks[0],
     ];
+    summary = {
+      source,
+      revision: 2,
+      tailAppendBarrierRevision: 2,
+    };
     await act(async () => render());
     expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(1);
 
@@ -1254,6 +1298,11 @@ describe('background agent task reconciliation', () => {
       },
       hookState.blocks[1],
     ];
+    summary = {
+      source,
+      revision: 3,
+      tailAppendBarrierRevision: 3,
+    };
     await act(async () => render());
     await vi.waitFor(() =>
       expect(hookState.resolveSubagentSession).toHaveBeenCalledTimes(2),

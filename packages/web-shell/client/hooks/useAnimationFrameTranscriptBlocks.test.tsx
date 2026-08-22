@@ -87,14 +87,24 @@ let container: HTMLDivElement | null = null;
 let renderCount = 0;
 let latestBlocks: readonly DaemonTranscriptBlock[] = [];
 let latestSummary: DaemonTranscriptBlockChangeSummary | undefined;
-let renderLog: string[][] = [];
+let renderLog: Array<{
+  ids: string[];
+  texts: Array<string | undefined>;
+  revision?: number;
+}> = [];
 
 function Harness() {
   const snapshot = useAnimationFrameTranscriptSnapshot();
   latestBlocks = snapshot.blocks;
   latestSummary = snapshot.blockChangeSummary;
   renderCount += 1;
-  renderLog.push(latestBlocks.map((block) => block.id));
+  renderLog.push({
+    ids: latestBlocks.map((block) => block.id),
+    texts: latestBlocks.map((block) =>
+      'text' in block ? block.text : undefined,
+    ),
+    revision: latestSummary?.revision,
+  });
   return null;
 }
 
@@ -142,6 +152,14 @@ describe('useAnimationFrameTranscriptSnapshot', () => {
       tailAppendBarrierRevision: barrier,
       tailBlockId: 'thought',
     });
+    const revisionByText = new Map([
+      ['a', 1],
+      ['ab', 2],
+      ['abc', 3],
+    ]);
+    for (const entry of renderLog) {
+      expect(entry.revision).toBe(revisionByText.get(entry.texts[0] ?? ''));
+    }
   });
 
   it('coalesces transcript notifications into one render per frame', () => {
@@ -307,7 +325,7 @@ describe('useAnimationFrameTranscriptSnapshot', () => {
     // session's snapshot.
     expect(renderLog.length).toBeGreaterThan(0);
     for (const entry of renderLog) {
-      expect(entry).toEqual(['b1']);
+      expect(entry.ids).toEqual(['b1']);
     }
     expect(latestBlocks).toEqual([blockB]);
   });
@@ -330,7 +348,7 @@ describe('useAnimationFrameTranscriptSnapshot', () => {
     act(() => testStore.resetBlocks());
     act(() => pendingFrame?.(1_000));
 
-    expect(renderLog).not.toContainEqual(['old']);
+    expect(renderLog.some((entry) => entry.ids.includes('old'))).toBe(false);
     expect(latestBlocks).toEqual([]);
   });
 });

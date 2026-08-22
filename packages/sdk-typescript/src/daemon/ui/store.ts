@@ -97,16 +97,13 @@ export function createDaemonTranscriptStore(
         attachmentId?: string;
       }>,
     ) {
-      const previousBlocks = state.blocks;
       state = appendLocalUserTranscriptMessage(state, text, {
         images,
         meta,
         files,
         ...reducerOptions,
       });
-      if (state.blocks !== previousBlocks) {
-        blockChangeSummary = invalidateTailAppend(blockChangeSummary);
-      }
+      blockChangeSummary = invalidateTailAppend(blockChangeSummary);
       scheduleNotify();
     },
     reset(nextSeed: Partial<DaemonTranscriptState> = {}) {

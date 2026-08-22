@@ -29,6 +29,9 @@ const virtualizerTestState = vi.hoisted(() => ({
   resizeItem: vi.fn(),
   renderItems: true,
 }));
+const messageItemTestState = vi.hoisted(() => ({
+  toolArrays: [] as unknown[][],
+}));
 
 // Mock the App context and the heavy row children so this test exercises only
 // MessageList's own collapse + deferred-scroll logic, not the whole render tree.
@@ -61,6 +64,9 @@ vi.mock('./MessageItem', async () => {
       sendFailed?: boolean;
       onRetrySend?: () => void;
     }) => {
+      if (message.role === 'tool_group') {
+        messageItemTestState.toolArrays.push(message.tools);
+      }
       const { renderAssistantTurnFooter } = useWebShellCustomization();
       const assistantTurnFooter = assistantTurnFooterInfo
         ? renderAssistantTurnFooter?.(assistantTurnFooterInfo)
@@ -197,6 +203,7 @@ afterEach(() => {
   virtualizerTestState.resizeItem.mockClear();
   virtualizerTestState.renderItems = true;
   virtualizerTestState.getItemKeys.length = 0;
+  messageItemTestState.toolArrays.length = 0;
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
@@ -549,6 +556,7 @@ describe('MessageList — compact mode', () => {
       isResponding: true,
     });
     const summary = container.querySelector('[data-testid="msg-summary-t1"]');
+    const tools = messageItemTestState.toolArrays.at(-1);
     expect(summary?.getAttribute('data-thought-content')).toBe('first');
 
     rerenderMessages(
@@ -560,6 +568,7 @@ describe('MessageList — compact mode', () => {
     expect(container.querySelector('[data-testid="msg-summary-t1"]')).toBe(
       summary,
     );
+    expect(messageItemTestState.toolArrays.at(-1)).toBe(tools);
     expect(summary?.getAttribute('data-thought-content')).toBe('first second');
   });
 
@@ -729,6 +738,20 @@ describe('MessageList — compact mode', () => {
 });
 
 describe('MessageList — turn collapse (DOM)', () => {
+  it('does not reload a responding transcript when pause is implicit', async () => {
+    vi.useFakeTimers();
+    const onReloadTranscript = vi.fn().mockResolvedValue(undefined);
+    mount([userMsg('u1'), asstMsg('a1')], undefined, {
+      transcriptBlockCount: WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS + 1,
+      onReloadTranscript,
+      isResponding: true,
+    });
+
+    await act(async () => vi.advanceTimersByTimeAsync(15_000));
+
+    expect(onReloadTranscript).not.toHaveBeenCalled();
+  });
+
   it('reloads an oversized transcript after 15 quiet seconds at the tail', async () => {
     vi.useFakeTimers();
     const onReloadTranscript = vi.fn().mockResolvedValue(undefined);

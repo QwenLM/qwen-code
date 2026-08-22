@@ -209,12 +209,21 @@ export function reduceDaemonTranscriptEvents(
   const next = cloneTranscriptState(state, opts, shareSideIndexes);
   for (const event of events) applyDaemonTranscriptEvent(next, event);
   const result = trimTranscriptState(next, shareSideIndexes);
-  // With lazy COW, blocks and their index can be shared across snapshots.
-  // Freeze both at the dispatch boundary so external in-place mutation throws
-  // in strict mode instead of poisoning every snapshot sharing the reference.
+  // With lazy COW, these collections can be shared across snapshots. Freeze
+  // them at the dispatch boundary so external in-place mutation throws in
+  // strict mode instead of poisoning every snapshot sharing the reference.
   if (FREEZE_TRANSCRIPT_COLLECTIONS) {
     Object.freeze(result.blocks);
     Object.freeze(result.blockIndexById);
+    Object.freeze(result.toolBlockByCallId);
+    Object.freeze(result.activeAssistantBlockByParent);
+    Object.freeze(result.activeThoughtBlockByParent);
+    Object.freeze(result.trimmedToolNotificationByCallId);
+    Object.freeze(result.permissionBlockByRequestId);
+    for (const progress of Object.values(result.toolProgress)) {
+      Object.freeze(progress);
+    }
+    Object.freeze(result.toolProgress);
   }
   return result;
 }
