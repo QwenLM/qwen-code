@@ -228,7 +228,10 @@ The skip list shrinks to what is still unbacked: `comment-status`,
 The repeat-round caveats shrink to the two that remain true (no dedup
 backing; no self-PR detection). The "approve does not fire this phase" text
 goes. `docs/users/features/code-review.md`'s Aone paragraph and the parent
-doc's phase tracker update with it.
+doc's phase tracker update with it. (Post-write merges shrink the list
+again: #9629 lands presubmit's self-PR/drift backing and #9633 the Aone
+bypass audit — the merged SKILL.md and user doc carry the live state; this
+paragraph records the phase-3b scope as written.)
 
 ## Files affected
 

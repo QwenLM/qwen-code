@@ -3323,8 +3323,10 @@ describe('prContextCommand handler — Aone routing', () => {
       baseRefName: 'master',
       isCrossRepository: false,
     }),
-    getReviewContext: () => structuredClone(aoneContext),
-    getCurrentUser: () => 'review-bot',
+    // vi.fn (implementations survive the beforeEach clearAllMocks) so the
+    // identity-gate test can swap the context and observe the lookup.
+    getReviewContext: vi.fn(() => structuredClone(aoneContext)),
+    getCurrentUser: vi.fn(() => 'review-bot'),
   };
 
   let savedGhHost: string | undefined;
@@ -3403,6 +3405,29 @@ describe('prContextCommand handler — Aone routing', () => {
     );
     expect(sideCall).toBeDefined();
     expect(String(sideCall?.[1])).toContain('"round": 3');
+  });
+
+  it('looks up the current user when only ledger carriers exist', async () => {
+    // A repeat-round MR whose inline threads all resolved: zero inline
+    // comments, prior qwen summaries present. The identity gate keys on
+    // CARRIERS, not reviews (always empty on Aone — the platform has no
+    // review objects): reverting it to `reviews.length` skips the lookup,
+    // the recovery walks anonymous, and the account's own summary renders
+    // as another account's claims. This fixture kills that mutant.
+    (aoneStub.getReviewContext as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+      {
+        ...structuredClone(aoneContext),
+        comments: structuredClone(aoneContext.comments).filter(
+          (c) => c.path === undefined,
+        ),
+      },
+    );
+    const written = await runHandler({
+      host: 'gitlab.alibaba-inc.com',
+    });
+    expect(aoneStub.getCurrentUser).toHaveBeenCalled();
+    expect(written).toContain('## Previous /review round (machine ledger)');
+    expect(written).not.toContain('another account');
   });
 
   it('bakes --pr and --host into EVERY emitted refetch command', async () => {

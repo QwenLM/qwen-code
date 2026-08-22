@@ -264,12 +264,12 @@ function mrHeadRefSpec(prNumber: number): string {
 
 /** The MR's live head SHA: under AGit-Flow `sourceBranch` IS the head.
  *  Stated ONCE for the provider — every read site (presubmit facts,
- *  getPrMeta, getFetchMeta, submit's pre-write drift gate, the
- *  head-moved-during-post re-read) routes through here. Hand-derived
- *  copies had already diverged on normalization (two of the five read
- *  untrimmed), and a padded server value then drifted against the
- *  trimmed reads — a phantom "PR head advanced during review" for an MR
- *  that never moved (#9629 review). */
+ *  getPrMeta, getFetchMeta, getReviewContext, submit's pre-write drift
+ *  gate, the head-moved-during-post re-read) routes through here.
+ *  Hand-derived copies had already diverged on normalization (two of the
+ *  five read untrimmed), and a padded server value then drifted against
+ *  the trimmed reads — a phantom "PR head advanced during review" for an
+ *  MR that never moved (#9629 review). */
 function aoneHeadSha(view: NonNullable<AoneMrView['mergeRequest']>): string {
   return (view.sourceBranch ?? '').trim();
 }
@@ -728,9 +728,13 @@ export const aoneReader: ReviewPlatformReader = {
       baseRefName: view.targetBranch ?? 'master',
       // Under AGit-Flow the head is a bare SHA and sourceBranch carries it;
       // rendering `target ← <sha>` is truthful and informative. A
-      // non-AGit-Flow MR's real branch name renders the same way.
-      headRefName: view.sourceBranch ?? '',
-      headRefOid: view.sourceBranch ?? '',
+      // non-AGit-Flow MR's real branch name renders the same way. Both
+      // fields route through the provider's ONE head normalization — a
+      // padded server value must not diverge from the trimmed reads every
+      // other subcommand reports (aoneHeadSha's docstring names the read
+      // sites; this one joins them).
+      headRefName: aoneHeadSha(view),
+      headRefOid: aoneHeadSha(view),
       // Aone reports no diff stats; the context header degrades.
       comments,
       verdicts: [],
@@ -739,8 +743,19 @@ export const aoneReader: ReviewPlatformReader = {
   },
 
   getCurrentUser(): string {
-    const who = a1Json<{ account?: string }>('auth', 'whoami');
-    return who.account ?? '';
+    // The seam contract: '' on the empty-output shapes, never an untagged
+    // throw or a non-string leak. A literal `null` payload PARSES (the
+    // cleanup audit's aoneWhoamiAccount guards the same shape); an exit-0
+    // empty stdout throws inside a1Json before any guard runs, so the call
+    // is wrapped; a non-string account reaching recoverLedger's
+    // `.toLowerCase()` would throw into the conservative recovery strip
+    // and silently lose the ledger anchor.
+    try {
+      const who = a1Json<{ account?: unknown } | null>('auth', 'whoami');
+      return typeof who?.account === 'string' ? who.account : '';
+    } catch {
+      return '';
+    }
   },
 };
 

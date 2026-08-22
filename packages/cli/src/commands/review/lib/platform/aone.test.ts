@@ -655,6 +655,34 @@ describe('aoneReader.getReviewContext / getCurrentUser', () => {
     a1JsonMock.mockReturnValueOnce({});
     expect(aoneReader.getCurrentUser()).toBe('');
   });
+
+  it('getCurrentUser degrades to empty on the anomalous whoami shapes', () => {
+    // The seam contract: '' on the empty-output shapes, never an untagged
+    // throw or a non-string leak. A literal `null` payload PARSES; an
+    // exit-0 empty stdout throws inside a1Json before any guard runs; a
+    // non-string account reaching recoverLedger's `.toLowerCase()` would
+    // throw into the conservative recovery strip and silently lose the
+    // ledger anchor.
+    a1JsonMock.mockReturnValueOnce(null);
+    expect(aoneReader.getCurrentUser()).toBe('');
+    a1JsonMock.mockReturnValueOnce({ account: 123 });
+    expect(aoneReader.getCurrentUser()).toBe('');
+    a1JsonMock.mockImplementationOnce(() => {
+      throw new SyntaxError('Unexpected end of JSON input');
+    });
+    expect(aoneReader.getCurrentUser()).toBe('');
+  });
+
+  it('trims a padded sourceBranch into the context head — one normalization', () => {
+    // Mirror of the getFetchMeta pin: the context file's HEAD SHA must not
+    // diverge from the trimmed reads every other subcommand reports — a
+    // consumer comparing the two would reproduce the phantom-drift bug the
+    // aoneHeadSha consolidation closed (#9629 review).
+    mockContext([], { sourceBranch: '  sha123\n' });
+    const ctx = aoneReader.getReviewContext(7, 'g/p');
+    expect(ctx.headRefOid).toBe('sha123');
+    expect(ctx.headRefName).toBe('sha123');
+  });
 });
 
 describe("mrPresubmitFacts (the presubmit gate's Aone seam)", () => {
