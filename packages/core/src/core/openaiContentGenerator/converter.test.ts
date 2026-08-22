@@ -1369,6 +1369,61 @@ describe('OpenAIContentConverter', () => {
       ]);
     });
 
+    it('strips the held candidate prefix from a renormalized cumulative superset replay before demotion (issue #9348)', () => {
+      // Pre-demotion twin of the post-demotion replay alignment: while the
+      // opening block is still held as a candidate, a cumulative provider
+      // replay renormalized against the delta history — here the
+      // renormalization stripped the leading whitespace the held candidate
+      // carries — passes through normalizeStreamingTextDelta unsliced.
+      // Concatenating it onto the pending candidate duplicated the held
+      // prefix, guaranteed the block never balanced, and the finish chunk
+      // threw PROTOCOL_TAG_LEAK on a legitimate turn — the exact error the
+      // demotion route exists to remove.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const whitespace = converter.convertOpenAIChunkToGemini(
+        streamChunk('whitespace', { content: ' ' }),
+        stream,
+      );
+      const opening = converter.convertOpenAIChunkToGemini(
+        streamChunk('opening', { content: '<thinking>x' }),
+        stream,
+      );
+
+      expect(whitespace.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(opening.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingThinkingTagCandidate).toEqual({
+        text: ' <thinking>x',
+      });
+
+      const replay = converter.convertOpenAIChunkToGemini(
+        streamChunk('cumulative-replay', {
+          content: '<thinking>xyz</thinking>Answer',
+        }),
+        stream,
+      );
+
+      expect(replay.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'xyz' },
+        { text: 'Answer' },
+      ]);
+      expect(stream.pendingThinkingTagCandidate).toBeUndefined();
+      expect(stream.inlineThinkingBlockDemoted).toBe(true);
+
+      // The finish chunk must complete cleanly instead of throwing
+      // PROTOCOL_TAG_LEAK on the balanced turn.
+      const finish = converter.convertOpenAIChunkToGemini(
+        streamChunk('finish', {}, 'stop'),
+        stream,
+      );
+      expect(finish.candidates?.[0]?.content?.parts ?? []).toEqual([]);
+    });
+
     it('preserves a genuine delta equal to the held tag tail after a demotion (issue #9348)', () => {
       // Tail equality alone is not replay evidence: adjacent genuine deltas
       // may carry identical tag-like text and both must survive.

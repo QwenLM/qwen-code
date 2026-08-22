@@ -1700,6 +1700,31 @@ export function convertOpenAIChunkToGemini(
       requestContext.postDemotionReplayText =
         (requestContext.postDemotionReplayText ?? '') + visibleText;
     }
+    // Cumulative superset replays can also arrive while the opening block is
+    // still held in a pre-demotion candidate: a provider buffer renormalized
+    // against the delta history (the exact anomaly the post-demotion
+    // alignment above was built for — e.g. the renormalization stripped the
+    // leading whitespace the held candidate carries) passes through
+    // normalizeStreamingTextDelta unsliced. Concatenating it onto the
+    // pending candidate would duplicate the held prefix and guarantee the
+    // block never balances, so the finish chunk would throw
+    // PROTOCOL_TAG_LEAK on a legitimate turn. Strip the held candidate's
+    // trimStart()-aligned prefix before concatenation, mirroring the
+    // post-demotion baseline.
+    if (
+      pendingTagCandidate &&
+      !pendingTagCandidate.closingTagName &&
+      /\S/.test(pendingTagCandidate.text) &&
+      visibleText
+    ) {
+      const alignedCandidateText = pendingTagCandidate.text.trimStart();
+      const alignedVisibleText = visibleText.trimStart();
+      if (alignedVisibleText.startsWith(alignedCandidateText)) {
+        visibleText = alignedVisibleText.slice(alignedCandidateText.length);
+        parts = parts.filter((part) => !getVisibleText(part));
+        if (visibleText) parts.push({ text: visibleText });
+      }
+    }
     const combinedCandidateText =
       (pendingTagCandidate?.text ?? '') + visibleText;
     const hasStructuredReasoning =
