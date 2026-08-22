@@ -679,6 +679,186 @@ describe('buildProviderSetupInputs', () => {
     // 4 api-china defaults + both k3 entries.
     expect(written).toHaveLength(6);
   });
+
+  it('removes a deselected attributable baseUrl-less legacy entry on an array merge provider (R41-3)', async () => {
+    // For merge providers with endpoint options, buildInstallPlan claims a
+    // baseUrl-less entry only via migratedLegacyModelIds. The deselection
+    // exit must therefore record the id too: otherwise an explicit selection
+    // omitting the entry never removes the stored original — a permanent
+    // silent deselection no-op, contradicting the "a deselection at the
+    // entry's endpoint must remove it like any other omitted entry"
+    // contract (provider-config.ts). KIMI_CODE_API_KEY is unique to the
+    // coding endpoint, so this entry is attributable there.
+    const legacyModel = {
+      id: 'my-code-custom',
+      name: '[Kimi Code] my-code-custom',
+      envKey: qwenCore.KIMI_CODE_ENV_KEY,
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    const codingDefaults = qwenCore.getDefaultModelIds(
+      qwenCore.kimiProvider,
+      qwenCore.KIMI_CODE_BASE_URL,
+    );
+    const inputs = buildProviderSetupInputs(
+      {
+        providerId: 'kimi',
+        protocol: qwenCore.AuthType.USE_OPENAI,
+        apiKey: 'sk-code',
+        baseUrl: qwenCore.KIMI_CODE_BASE_URL,
+        // An explicit selection omitting 'my-code-custom' deselects it.
+        modelIds: codingDefaults,
+      },
+      qwenCore.kimiProvider,
+      {
+        getDefaultModelIds: qwenCore.getDefaultModelIds,
+        resolveBaseUrl: qwenCore.resolveBaseUrl,
+        normalizeBaseUrlForMatching: qwenCore.normalizeBaseUrlForMatching,
+        existingModels: [legacyModel],
+      },
+    );
+    expect(inputs.preserveModels).toBeUndefined();
+    expect(inputs.migratedLegacyModelIds).toEqual(['my-code-custom']);
+
+    const adapter = createSettingsAdapter({
+      [qwenCore.AuthType.USE_OPENAI]: [legacyModel],
+    });
+    const plan = qwenCore.buildInstallPlan(qwenCore.kimiProvider, {
+      ...inputs,
+      apiKey: 'sk-code',
+    });
+    try {
+      await qwenCore.applyProviderInstallPlan(plan, {
+        settings: adapter,
+        doRefreshAuth: false,
+      });
+    } finally {
+      delete process.env[qwenCore.KIMI_CODE_ENV_KEY];
+    }
+
+    const written = adapter.setValue.mock.calls.find(
+      (call: unknown[]) => call[0] === 'modelProviders.openai',
+    )?.[1] as Array<Record<string, unknown>> | undefined;
+    expect(written).toBeDefined();
+    // The deselected entry is gone — no baseUrl-less original, no copy.
+    expect(
+      written!.filter((model) => model['id'] === 'my-code-custom'),
+    ).toHaveLength(0);
+  });
+
+  it('never re-homes or deletes a shared-key baseUrl-less legacy entry (R41-4)', async () => {
+    // alibaba token-plan shares ONE static env key across its cn/global region
+    // endpoints, so a baseUrl-less entry carrying it cannot be attributed to
+    // either region. Reconnecting at one region must neither stamp/re-home
+    // it there (requests would route to that region with that credential
+    // and fail for ids only valid in the other) nor delete it: attribution
+    // fails closed and the entry survives every reconnect byte-identical.
+    const legacyModel = {
+      id: 'my-token-custom',
+      name: '[ModelStudio Token Plan] my-token-custom',
+      envKey: qwenCore.TOKEN_PLAN_ENV_KEY,
+      generationConfig: { contextWindowSize: 12345 },
+    };
+
+    // Implicit (defaults-only) reconnect at the GLOBAL region: no stamp, no
+    // migration claim.
+    const implicit = buildProviderSetupInputs(
+      {
+        providerId: 'token-plan',
+        apiKey: 'sk-token',
+        baseUrl: qwenCore.TOKEN_PLAN_GLOBAL_BASE_URL,
+      },
+      qwenCore.tokenPlanProvider,
+      {
+        getDefaultModelIds: qwenCore.getDefaultModelIds,
+        resolveBaseUrl: qwenCore.resolveBaseUrl,
+        normalizeBaseUrlForMatching: qwenCore.normalizeBaseUrlForMatching,
+        existingModels: [legacyModel],
+      },
+    );
+    expect(implicit.preserveModels).toBeUndefined();
+    expect(implicit.migratedLegacyModelIds).toBeUndefined();
+
+    const adapter = createSettingsAdapter({
+      [qwenCore.AuthType.USE_OPENAI]: [legacyModel],
+    });
+    const plan = qwenCore.buildInstallPlan(qwenCore.tokenPlanProvider, {
+      ...implicit,
+      apiKey: 'sk-token',
+    });
+    try {
+      await qwenCore.applyProviderInstallPlan(plan, {
+        settings: adapter,
+        doRefreshAuth: false,
+      });
+    } finally {
+      delete process.env[qwenCore.TOKEN_PLAN_ENV_KEY];
+    }
+    const written = adapter.setValue.mock.calls.find(
+      (call: unknown[]) => call[0] === 'modelProviders.openai',
+    )?.[1] as Array<Record<string, unknown>> | undefined;
+    expect(written).toBeDefined();
+    // Survives byte-identical — not deleted, no re-homed GLOBAL copy.
+    expect(written).toContainEqual(legacyModel);
+    expect(
+      written!.filter((model) => model['id'] === 'my-token-custom'),
+    ).toHaveLength(1);
+
+    // An explicit selection at the OTHER region omitting the id must not
+    // delete it either — it cannot be attributed to that region.
+    const deselection = buildProviderSetupInputs(
+      {
+        providerId: 'token-plan',
+        apiKey: 'sk-token',
+        baseUrl: qwenCore.TOKEN_PLAN_CHINA_BASE_URL,
+        modelIds: qwenCore.getDefaultModelIds(
+          qwenCore.tokenPlanProvider,
+          qwenCore.TOKEN_PLAN_CHINA_BASE_URL,
+        ),
+      },
+      qwenCore.tokenPlanProvider,
+      {
+        getDefaultModelIds: qwenCore.getDefaultModelIds,
+        resolveBaseUrl: qwenCore.resolveBaseUrl,
+        normalizeBaseUrlForMatching: qwenCore.normalizeBaseUrlForMatching,
+        existingModels: [legacyModel],
+      },
+    );
+    expect(deselection.preserveModels).toBeUndefined();
+    expect(deselection.migratedLegacyModelIds).toBeUndefined();
+  });
+
+  it('leaves an ambiguously shared-key entry alive even on explicit deselection (R41-3 × R41-4)', () => {
+    // MOONSHOT_API_KEY serves both api-china and api-international, so a
+    // baseUrl-less entry carrying it cannot be attributed to either. The
+    // R41-3 deselection claim applies only to ATTRIBUTABLE entries —
+    // deleting this one at .cn would destroy it if it actually belonged to
+    // .ai, so fail-closed attribution outranks the deselection exit.
+    const legacyModel = {
+      id: 'my-custom',
+      name: '[Kimi API] my-custom',
+      envKey: qwenCore.KIMI_API_ENV_KEY,
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    const inputs = buildProviderSetupInputs(
+      {
+        providerId: 'kimi',
+        protocol: qwenCore.AuthType.USE_OPENAI,
+        apiKey: 'sk-moon',
+        baseUrl: 'https://api.moonshot.ai/v1',
+        // An explicit selection omitting 'my-custom'.
+        modelIds: ['kimi-k3'],
+      },
+      qwenCore.kimiProvider,
+      {
+        getDefaultModelIds: qwenCore.getDefaultModelIds,
+        resolveBaseUrl: qwenCore.resolveBaseUrl,
+        normalizeBaseUrlForMatching: qwenCore.normalizeBaseUrlForMatching,
+        existingModels: [legacyModel],
+      },
+    );
+    expect(inputs.preserveModels).toBeUndefined();
+    expect(inputs.migratedLegacyModelIds).toBeUndefined();
+  });
 });
 
 describe('createBoundChannelDeliveryHandler', () => {

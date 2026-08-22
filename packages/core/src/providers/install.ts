@@ -303,17 +303,18 @@ export async function applyProviderInstallPlan(
             return false;
           })
         : (plan.modelProviders ?? []).flatMap((patch) => patch.models);
-      const planOffersCurrentModel =
-        typeof currentModelId === 'string' &&
-        currentModelId.length > 0 &&
-        offeredModels.some((model) =>
-          currentBaseUrl === '' || currentBaseUrl === undefined
-            ? model.id === currentModelId
-            : isSameModelIdentity(
-                { id: currentModelId, baseUrl: currentBaseUrl },
-                model,
-              ),
-        );
+      const currentOfferMatch =
+        typeof currentModelId === 'string' && currentModelId.length > 0
+          ? offeredModels.find((model) =>
+              currentBaseUrl === '' || currentBaseUrl === undefined
+                ? model.id === currentModelId
+                : isSameModelIdentity(
+                    { id: currentModelId, baseUrl: currentBaseUrl },
+                    model,
+                  ),
+            )
+          : undefined;
+      const planOffersCurrentModel = currentOfferMatch !== undefined;
       const invalidatedCurrentSibling =
         typeof currentModelId === 'string' &&
         (updatedModelProviders[plan.authType] ?? []).some(
@@ -345,6 +346,30 @@ export async function applyProviderInstallPlan(
         };
       } else if (planOffersCurrentModel) {
         effectiveModelSelection = undefined;
+        // The match above may be a NORMALIZED identity match: a stored
+        // selection whose baseUrl differs from the offered entry only by a
+        // trailing slash. Left alone, the exact-match runtime registry
+        // (modelRegistry keys by `${id}\0${baseUrl}`; hasModel falls back
+        // only to an exact baseUrl) never resolves the slash-variant
+        // selection — the installed model surfaces as a phantom duplicate in
+        // model lists and switchModel with the stored baseUrl throws
+        // "Model … not found" (R41-6). Rewrite the selection to the matched
+        // entry's exact spelling so it self-heals. Id-only selections
+        // (currentBaseUrl ''/undefined) keep floating: they must not gain a
+        // baseUrl disambiguator.
+        if (
+          typeof currentModelId === 'string' &&
+          typeof currentBaseUrl === 'string' &&
+          currentBaseUrl !== '' &&
+          currentOfferMatch !== undefined &&
+          typeof currentOfferMatch.baseUrl === 'string' &&
+          currentOfferMatch.baseUrl !== currentBaseUrl
+        ) {
+          effectiveModelSelection = {
+            modelId: currentModelId,
+            baseUrl: currentOfferMatch.baseUrl,
+          };
+        }
       }
     }
     if (effectiveModelSelection?.modelId) {

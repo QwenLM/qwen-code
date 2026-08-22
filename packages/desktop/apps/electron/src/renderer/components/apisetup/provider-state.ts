@@ -18,7 +18,36 @@ export function defaultBaseUrl(provider: QwenProviderSummary): string {
 }
 
 function normalizeBaseUrl(value: string): string {
-  return value.trim().replace(/\/+$/, '');
+  return stripUserInfo(value.trim().replace(/\/+$/, ''));
+}
+
+/**
+ * Strips basic-auth userinfo from a URL, mirroring the ACP producer's
+ * `sanitizeProviderBaseUrl` (cli `acpModelUtils.ts`): the producer sanitizes
+ * every wire-bound endpoint key with
+ * `sanitizeProviderBaseUrl(normalizeBaseUrlForMatching(…))` precisely because
+ * a saved URL may carry userinfo that must not reach the wire. This consumer
+ * must look those keys up the same way — a typed/pasted userinfo endpoint
+ * that kept its `user:pass@` here would miss the destination's sanitized
+ * saved-state keys on an endpoint switch, treating it as unseen and deleting
+ * its saved models via the submit's remove-owned merge (R41-7). Kept in sync
+ * by construction: scheme prefix, then the authority's last `@`.
+ */
+function stripUserInfo(value: string): string {
+  const scheme = value.match(/^[A-Za-z][A-Za-z\d+.-]*:\/\//);
+  if (!scheme) return value;
+  const authorityStart = scheme[0].length;
+  const rest = value.slice(authorityStart);
+  const authorityEndMatch = rest.match(/[/?#]/);
+  const authorityEnd =
+    authorityEndMatch?.index === undefined ? rest.length : authorityEndMatch.index;
+  const at = rest.slice(0, authorityEnd).lastIndexOf('@');
+  if (at === -1) return value;
+  return (
+    value.slice(0, authorityStart) +
+    rest.slice(at + 1, authorityEnd) +
+    rest.slice(authorityEnd)
+  );
 }
 
 export function canonicalBaseUrl(
@@ -132,11 +161,13 @@ export function protocolBaseUrl(
  * Resolves the endpoint to show after switching the protocol Select: the
  * saved bucket's canonical baseUrl when the protocol was connected before,
  * or `undefined` to signal that the form must keep the user's current
- * endpoint and model state untouched. The producer only populates
- * `baseUrlByProtocol` for protocols that already have saved models, so an
- * `undefined` bucket means "not yet connected" — substituting the provider
- * default there would overwrite the typed endpoint with the DEFAULT
- * protocol's URL (multi-protocol setups on one server share the endpoint).
+ * endpoint. The producer only populates `baseUrlByProtocol` for protocols
+ * whose saved models carry a baseUrl (R39-4), so `undefined` covers BOTH
+ * "not yet connected" and "a baseUrl-less legacy bucket"; the caller must
+ * check `modelIdsByBaseUrlByProtocol` to tell them apart (R41-2) —
+ * substituting the provider default there would overwrite the typed
+ * endpoint with the DEFAULT protocol's URL (multi-protocol setups on one
+ * server share the endpoint).
  */
 export function baseUrlAfterProtocolChange(
   provider: QwenProviderSummary,
@@ -174,7 +205,15 @@ export function seedProtocolModelState(
   const modelIds =
     endpointEntries.find(
       ([endpoint]) => normalizeBaseUrl(endpoint) === normalizeBaseUrl(baseUrl),
-    )?.[1] ?? defaultModelIds(provider, baseUrl);
+    )?.[1] ??
+    // A baseUrl-less legacy bucket (the producer omits baseUrlByProtocol for
+    // it, R39-4): its saved models belong to whatever endpoint the user keeps
+    // typed, so seed THEM — keeping the previous protocol's ids in the field
+    // would install them under this protocol and let the submit's
+    // remove-owned merge delete this bucket's saved models (R41-2).
+    endpointEntries.find(([endpoint]) => normalizeBaseUrl(endpoint) === '')
+      ?.[1] ??
+    defaultModelIds(provider, baseUrl);
   return buildModelStateFromEntries(provider, baseUrl, modelIds, endpointEntries);
 }
 

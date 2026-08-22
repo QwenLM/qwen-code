@@ -1084,6 +1084,16 @@ export function buildProviderSetupInputs(
         migratedLegacyModelIds.push(model.id);
         return [preserved];
       }
+      if (attributable) {
+        // An attributable entry that leaves the plan at its OWN endpoint —
+        // explicitly deselected, or superseded by a generated default — must
+        // still be claimed by id so buildInstallPlan removes the stored
+        // original; otherwise a deselection at the entry's endpoint silently
+        // no-ops forever (the entry stays baseUrl-less and attributable, so
+        // every reconnect repeats the no-op — R41-3). buildInstallPlan's
+        // sibling guard keeps this from over-claiming.
+        migratedLegacyModelIds.push(model.id);
+      }
       return [];
     }
     const selectedModel =

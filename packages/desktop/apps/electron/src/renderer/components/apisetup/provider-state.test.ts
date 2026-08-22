@@ -921,3 +921,150 @@ describe('round-37 regressions', () => {
     expect(atChina.modelIds).toEqual(['kimi-k3', 'k3-256k']);
   });
 });
+
+describe('round-41 regressions', () => {
+  const freeForm: QwenProviderSummary = {
+    ...kimi,
+    id: 'custom-openai-compatible',
+    protocolOptions: ['openai', 'anthropic', 'gemini'],
+    baseUrl: undefined,
+    defaultModelIds: [],
+    models: [],
+    baseUrlPlaceholder: 'https://api.openai.com/v1',
+  };
+
+  it('re-seeds the model field from a baseUrl-less protocol bucket (R41-2)', () => {
+    // The producer emits modelIdsByBaseUrlByProtocol for a bucket whose
+    // saved models carry no baseUrl while deliberately OMITTING
+    // baseUrlByProtocol (the R39-4 guard). baseUrlAfterProtocolChange then
+    // returns undefined — which must not be treated as "no saved bucket":
+    // the form re-seeds the field from the bucket's own saved models (the
+    // typed endpoint is kept); keeping the PREVIOUS protocol's ids would
+    // install them under the new protocol and delete the bucket's saved
+    // models on submit.
+    const provider: QwenProviderSummary = {
+      ...freeForm,
+      existingConfig: {
+        modelIdsByBaseUrlByProtocol: {
+          anthropic: { '': ['m1', 'm2'] },
+        },
+        // No baseUrlByProtocol entry for anthropic — the R39-4 wire shape.
+      },
+    };
+    expect(
+      baseUrlAfterProtocolChange(provider, 'anthropic'),
+    ).toBeUndefined();
+    // The caller distinguishes "bucket exists" via this map.
+    expect(
+      provider.existingConfig?.modelIdsByBaseUrlByProtocol?.anthropic,
+    ).toBeDefined();
+    const seeded = seedProtocolModelState(
+      provider,
+      'anthropic',
+      'https://typed.example/v1',
+    );
+    // The bucket's own saved ids seed the field — not another protocol's
+    // ids, not the defaults.
+    expect(seeded.modelIds).toEqual(['m1', 'm2']);
+  });
+
+  it('keeps endpoint-match precedence over the baseUrl-less fallback (R41-2)', () => {
+    const provider: QwenProviderSummary = {
+      ...freeForm,
+      existingConfig: {
+        modelIdsByBaseUrlByProtocol: {
+          anthropic: {
+            '': ['legacy-1'],
+            'https://typed.example/v1': ['e1'],
+          },
+        },
+      },
+    };
+    const seeded = seedProtocolModelState(
+      provider,
+      'anthropic',
+      'https://typed.example/v1',
+    );
+    expect(seeded.modelIds).toEqual(['e1']);
+  });
+
+  it('still seeds defaults for a protocol with no saved bucket at all (R41-2 control)', () => {
+    const provider: QwenProviderSummary = {
+      ...freeForm,
+      defaultModelIds: ['default-model'],
+      existingConfig: {
+        modelIdsByBaseUrlByProtocol: {
+          openai: { 'https://x.example/v1': ['m1'] },
+        },
+        baseUrlByProtocol: { openai: 'https://x.example/v1' },
+      },
+    };
+    expect(baseUrlAfterProtocolChange(provider, 'gemini')).toBeUndefined();
+    expect(
+      provider.existingConfig?.modelIdsByBaseUrlByProtocol?.gemini,
+    ).toBeUndefined();
+    const seeded = seedProtocolModelState(
+      provider,
+      'gemini',
+      'https://typed.example/v1',
+    );
+    expect(seeded.modelIds).toEqual(['default-model']);
+  });
+
+  it('strips basic-auth userinfo from endpoints like the producer (R41-7)', () => {
+    // The ACP producer sanitizes userinfo out of every wire key
+    // (sanitizeProviderBaseUrl(normalizeBaseUrlForMatching(…))); the
+    // consumer must normalize lookups the same way.
+    expect(
+      canonicalBaseUrl(freeForm, 'https://user:pass@proxy.example/v1'),
+    ).toBe('https://proxy.example/v1');
+    expect(
+      canonicalBaseUrl(freeForm, 'https://user@proxy.example/v1/'),
+    ).toBe('https://proxy.example/v1');
+    expect(canonicalBaseUrl(freeForm, 'https://proxy.example/v1')).toBe(
+      'https://proxy.example/v1',
+    );
+  });
+
+  it('restores a destination saved state when the typed URL carries userinfo (R41-7)', () => {
+    const provider: QwenProviderSummary = {
+      ...freeForm,
+      existingConfig: {
+        protocol: 'openai',
+        baseUrl: 'https://a.example/v1',
+        modelIds: ['n1', 'n2'],
+        // Producer-sanitized keys (userinfo stripped).
+        modelIdsByBaseUrl: {
+          'https://a.example/v1': ['n1', 'n2'],
+          'https://proxy.example/v1': ['m1', 'm2'],
+        },
+      },
+    };
+    const seeded = seedProviderModelState(provider, 'https://a.example/v1');
+    expect(seeded.modelIds).toEqual(['n1', 'n2']);
+
+    // Re-seeding straight from a typed userinfo URL must hit the sanitized
+    // key too.
+    const reseed = seedProviderModelState(
+      provider,
+      'https://user:pass@proxy.example/v1',
+    );
+    expect(reseed.modelIds).toEqual(['m1', 'm2']);
+
+    // The user pastes the destination with userinfo; the lookup must hit
+    // the producer's sanitized key and restore m1/m2 instead of treating
+    // the destination as unseen (which re-homes n1/n2 onto it and lets the
+    // submit's remove-owned merge delete m1/m2).
+    const next = switchEndpointModelState(
+      provider,
+      'https://a.example/v1',
+      'https://user:pass@proxy.example/v1',
+      seeded.modelIds.join(', '),
+      seeded.customModelIds,
+      seeded.customModelIdsByBaseUrl,
+      seeded.trimmedDefaultModelIds,
+    );
+    expect(next.modelIds).toEqual(['m1', 'm2']);
+    expect(next.customModelIds).toEqual(['m1', 'm2']);
+  });
+});

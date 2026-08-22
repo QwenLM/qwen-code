@@ -734,10 +734,18 @@ import {
 } from '../all-providers.js';
 import {
   buildInstallPlan as buildInstallPlanSrc,
+  legacyEnvKeyAttribution as legacyEnvKeyAttributionSrc,
   resolveBaseUrl as resolveBaseUrlSrc,
   resolveMetadataKey as resolveMetadataKeySrc,
   providerMatchesCredentials as providerMatchesCredentialsSrc,
 } from '../provider-config.js';
+import { tokenPlanProvider } from '../presets/alibaba-token-plan.js';
+import {
+  kimiProvider,
+  KIMI_API_ENV_KEY,
+  KIMI_CODE_BASE_URL,
+  KIMI_CODE_ENV_KEY,
+} from '../presets/kimi.js';
 
 describe('resolveBaseUrl edge cases', () => {
   it('does not crash on an empty baseUrl array — falls back to selected or ""', () => {
@@ -1169,5 +1177,86 @@ describe('headless custom-model preservation', () => {
     expect(
       plan.modelProviders?.[0]?.models[0]?.generationConfig,
     ).toBeUndefined();
+  });
+});
+
+describe('legacyEnvKeyAttribution (R41-4 shared env keys)', () => {
+  // A key the provider uses for MORE than one endpoint cannot attribute a
+  // baseUrl-less entry to any single one of them. Reporting the selected
+  // endpoint as the unambiguous owner re-homed the entry to whichever
+  // endpoint a reconnect happened to land on (the same entry was
+  // "unambiguously" attributable to two mutually exclusive endpoints).
+  // Attribution must fail closed: not attributable to the selected endpoint,
+  // but still sibling-protected (the key names the endpoint GROUP), so no
+  // connect at any endpoint deletes or rewrites it.
+  it('fails attribution closed for a static env key shared by multiple endpoints', () => {
+    // alibaba token-plan: one static env key across the cn/sgp regions.
+    const atChina = legacyEnvKeyAttributionSrc(
+      tokenPlanProvider,
+      AuthType.USE_OPENAI,
+      TOKEN_PLAN_CHINA_BASE_URL,
+    );
+    const atGlobal = legacyEnvKeyAttributionSrc(
+      tokenPlanProvider,
+      AuthType.USE_OPENAI,
+      TOKEN_PLAN_GLOBAL_BASE_URL,
+    );
+    const sharedKeyEntry = { envKey: TOKEN_PLAN_ENV_KEY };
+    expect(atChina.namesSelectedEndpoint(sharedKeyEntry)).toBe(false);
+    expect(atGlobal.namesSelectedEndpoint(sharedKeyEntry)).toBe(false);
+    // The key still names an endpoint group, so the entry is sibling-
+    // protected at BOTH endpoints (never deletable, never adoptable).
+    expect(atChina.namesSiblingEndpoint(sharedKeyEntry)).toBe(true);
+    expect(atGlobal.namesSiblingEndpoint(sharedKeyEntry)).toBe(true);
+  });
+
+  it('fails attribution closed for a derived env key shared by sibling endpoints', () => {
+    // Kimi: MOONSHOT_API_KEY serves both api-china and api-international;
+    // KIMI_CODE_API_KEY is unique to the coding endpoint.
+    const atChina = legacyEnvKeyAttributionSrc(
+      kimiProvider,
+      AuthType.USE_OPENAI,
+      'https://api.moonshot.cn/v1',
+    );
+    const atInternational = legacyEnvKeyAttributionSrc(
+      kimiProvider,
+      AuthType.USE_OPENAI,
+      'https://api.moonshot.ai/v1',
+    );
+    const atCoding = legacyEnvKeyAttributionSrc(
+      kimiProvider,
+      AuthType.USE_OPENAI,
+      KIMI_CODE_BASE_URL,
+    );
+    const moonshotEntry = { envKey: KIMI_API_ENV_KEY };
+    expect(atChina.namesSelectedEndpoint(moonshotEntry)).toBe(false);
+    expect(atInternational.namesSelectedEndpoint(moonshotEntry)).toBe(false);
+    expect(atChina.namesSiblingEndpoint(moonshotEntry)).toBe(true);
+    expect(atInternational.namesSiblingEndpoint(moonshotEntry)).toBe(true);
+    // The unique coding-endpoint key still attributes unambiguously...
+    const codeEntry = { envKey: KIMI_CODE_ENV_KEY };
+    expect(atCoding.namesSelectedEndpoint(codeEntry)).toBe(true);
+    expect(atCoding.namesSiblingEndpoint(codeEntry)).toBe(false);
+    // ...and is sibling-protected at the moonshot endpoints.
+    expect(atChina.namesSiblingEndpoint(codeEntry)).toBe(true);
+    expect(atCoding.namesSiblingEndpoint(moonshotEntry)).toBe(true);
+  });
+
+  it('keeps attribution for a static env key with a single endpoint', () => {
+    const single = makeConfig({
+      baseUrl: [{ id: 'only', label: 'Only', url: 'https://only.example/v1' }],
+      envKey: 'SINGLE_API_KEY',
+    });
+    const attribution = legacyEnvKeyAttributionSrc(
+      single,
+      AuthType.USE_OPENAI,
+      'https://only.example/v1',
+    );
+    expect(
+      attribution.namesSelectedEndpoint({ envKey: 'SINGLE_API_KEY' }),
+    ).toBe(true);
+    expect(attribution.namesSiblingEndpoint({ envKey: 'SINGLE_API_KEY' })).toBe(
+      false,
+    );
   });
 });

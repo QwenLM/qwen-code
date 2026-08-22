@@ -425,6 +425,34 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
         uiGroup: 'third-party',
       };
     }
+    if (id === 'token-plan') {
+      return {
+        id: 'token-plan',
+        label: 'Token Plan',
+        description: 'Shared-key region endpoints',
+        protocol: 'openai',
+        baseUrl: [
+          {
+            id: 'cn-beijing',
+            label: 'China (Beijing)',
+            url: 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+          },
+          {
+            id: 'ap-southeast-1',
+            label: 'Singapore (International)',
+            url: 'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
+          },
+        ],
+        envKey: 'BAILIAN_TOKEN_PLAN_API_KEY',
+        models: [{ id: 'qwen3.8-max' }],
+        modelsEditable: true,
+        mergeModelsByIdentity: true,
+        modelNamePrefix: 'ModelStudio Token Plan',
+        ownsModel: (model: { envKey?: string }) =>
+          model.envKey === 'BAILIAN_TOKEN_PLAN_API_KEY',
+        uiGroup: 'alibaba',
+      };
+    }
     if (id === 'custom-openai-compatible') {
       return {
         id: 'custom-openai-compatible',
@@ -13133,10 +13161,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
   it('qwen/providers/connect collapses a same-id legacy+stamped pair on an implicit reconnect (R39-7)', async () => {
     // A same-id baseUrl-less legacy entry beside its stamped twin (a state
-    // main's identity-only merge could create) must not both survive an
-    // implicit reconnect: the pair would persist as two permanent duplicate
-    // (id, baseUrl) entries. The stamped twin wins; the legacy copy is left
-    // to buildInstallPlan's ownership, which removes it.
+    // main's identity-only merge could create) must not both be carried into
+    // preserveModels: the pair would persist as two permanent duplicate
+    // (id, baseUrl) entries. The stamped twin wins. (Since R41-4 the
+    // MOONSHOT_API_KEY legacy copy is additionally fail-closed — its key is
+    // shared by both regional endpoints, so it is left out of the plan
+    // entirely and survives in storage; this test pins the plan inputs.)
     const moonshotBaseUrl = 'https://api.moonshot.ai/v1';
     const legacyModel = {
       id: 'my-custom',
@@ -13242,6 +13272,118 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect.objectContaining({ id: 'kimi' }),
       expect.objectContaining({
         migratedLegacyModelIds: expect.arrayContaining(['k3-legacy']),
+      }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/providers/connect claims a deselected attributable baseUrl-less legacy entry on an array merge provider (R41-3)', async () => {
+    // The ACP twin of serve's buildProviderSetupInputs: an explicit
+    // selection omitting an ATTRIBUTABLE baseUrl-less entry (KIMI_CODE_API_KEY
+    // is unique to the coding endpoint) must record its id in
+    // migratedLegacyModelIds so buildInstallPlan removes the stored
+    // original — otherwise the deselection silently no-ops forever (R41-3).
+    const legacyModel = {
+      id: 'my-code-custom',
+      name: '[Kimi Code] my-code-custom',
+      envKey: 'KIMI_CODE_API_KEY',
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    const baseSettings = makeSessionSettings();
+    const settings = {
+      ...baseSettings,
+      merged: {
+        ...baseSettings.merged,
+        modelProviders: { openai: [legacyModel] },
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'kimi',
+        baseUrl: 'https://api.kimi.com/coding/v1',
+        apiKey: 'sk-code',
+        // Coding-endpoint defaults — an explicit selection omitting
+        // 'my-code-custom'.
+        modelIds: [
+          'k3-256k',
+          'k3',
+          'kimi-for-coding',
+          'kimi-for-coding-highspeed',
+        ],
+      }),
+    ).resolves.toMatchObject({ success: true, providerId: 'kimi' });
+
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'kimi' }),
+      expect.objectContaining({
+        migratedLegacyModelIds: ['my-code-custom'],
+      }),
+    );
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'kimi' }),
+      expect.not.objectContaining({ preserveModels: expect.anything() }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/providers/connect fails attribution closed for a shared-key baseUrl-less legacy entry (R41-4)', async () => {
+    // alibaba token-plan shares ONE static env key across its cn/global
+    // regions, so a baseUrl-less entry carrying it cannot be attributed to
+    // the selected region: no stamp into preserveModels (that re-homed it),
+    // no migratedLegacyModelIds claim (that deleted the original).
+    const legacyModel = {
+      id: 'my-token-custom',
+      name: '[ModelStudio Token Plan] my-token-custom',
+      envKey: 'BAILIAN_TOKEN_PLAN_API_KEY',
+      generationConfig: { contextWindowSize: 12345 },
+    };
+    const baseSettings = makeSessionSettings();
+    const settings = {
+      ...baseSettings,
+      merged: {
+        ...baseSettings.merged,
+        modelProviders: { openai: [legacyModel] },
+      },
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod('qwen/providers/connect', {
+        providerId: 'token-plan',
+        baseUrl:
+          'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
+        apiKey: 'sk-token',
+      }),
+    ).resolves.toMatchObject({ success: true, providerId: 'token-plan' });
+
+    expect(buildInstallPlan).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'token-plan' }),
+      expect.not.objectContaining({ preserveModels: expect.anything() }),
+    );
+    expect(buildInstallPlan).not.toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'token-plan' }),
+      expect.objectContaining({
+        migratedLegacyModelIds: expect.arrayContaining(['my-token-custom']),
       }),
     );
 

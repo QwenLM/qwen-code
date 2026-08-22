@@ -365,10 +365,34 @@ export function legacyEnvKeyAttribution(
   }
   const envKeyFn =
     typeof config.envKey === 'function' ? config.envKey : undefined;
+  // A key the provider uses for MORE than one endpoint cannot attribute a
+  // baseUrl-less entry to any single one of them: the alibaba token-plan /
+  // coding-plan presets share one static env key across all their region
+  // endpoints, and the Kimi/Xiaomi regional endpoints derive one shared key
+  // per region group. Reporting the selected endpoint as the unambiguous
+  // owner would re-home the entry to whichever endpoint a reconnect happens
+  // to land on — requests would then route to that endpoint with that
+  // credential and fail whenever the model id is only valid at the entry's
+  // true origin (R41-4). Attribution fails closed instead: such an entry is
+  // left alone entirely (it names the endpoint GROUP, so it is still
+  // sibling-protected below — no connect may delete or rewrite it).
+  const endpointKeyIsSharedAcrossEndpoints =
+    endpointEnvKey !== undefined &&
+    Array.isArray(config.baseUrl) &&
+    config.baseUrl.filter((option) => {
+      try {
+        return (
+          (envKeyFn ? envKeyFn(protocol, option.url) : endpointEnvKey) ===
+          endpointEnvKey
+        );
+      } catch {
+        return false;
+      }
+    }).length > 1;
   const namesSelectedEndpoint = (model: { envKey?: string }): boolean =>
     typeof model.envKey === 'string' &&
     endpointEnvKey !== undefined &&
-    (model.envKey === endpointEnvKey ||
+    ((model.envKey === endpointEnvKey && !endpointKeyIsSharedAcrossEndpoints) ||
       config.ownsEnvKeyShape?.(model.envKey, protocol, baseUrl) === true);
   const namesSiblingEndpoint = (model: { envKey?: string }): boolean => {
     if (typeof model.envKey !== 'string') return false;
@@ -376,8 +400,21 @@ export function legacyEnvKeyAttribution(
     const namesAnEndpoint = config.envKeyNamesAnEndpoint
       ? config.envKeyNamesAnEndpoint(storedKey, protocol)
       : Array.isArray(config.baseUrl) &&
-        envKeyFn !== undefined &&
-        config.baseUrl.some((opt) => envKeyFn(protocol, opt.url) === storedKey);
+        config.baseUrl.length > 0 &&
+        (envKeyFn !== undefined
+          ? config.baseUrl.some((opt) => {
+              try {
+                return envKeyFn(protocol, opt.url) === storedKey;
+              } catch {
+                return false;
+              }
+            })
+          : // A static env key is every endpoint's key; an entry carrying it
+            // names the endpoint group (the sibling check must not be dead
+            // for string-envKey providers, or a fail-closed shared-key entry
+            // would degrade to a floating one that an explicit selection
+            // could re-home — R41-4).
+            storedKey === config.envKey);
     return namesAnEndpoint && !namesSelectedEndpoint(model);
   };
   return { endpointEnvKey, namesSelectedEndpoint, namesSiblingEndpoint };

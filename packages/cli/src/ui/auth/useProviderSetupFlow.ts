@@ -556,9 +556,13 @@ export function useProviderSetupFlow(
       setBaseUrlError(t('Base URL must start with http:// or https://.'));
       return false;
     }
-    if (!baseUrl.trim()) {
-      setBaseUrl(effective);
-    }
+    // Always sync the visible state to the committed (trimmed) endpoint. The
+    // per-endpoint model-state maps key off this state (changeModelIds) while
+    // the committed endpoint is the trimmed value; if the state kept a
+    // whitespace-padded paste, writes landed under one key and reads on
+    // endpoint return used the other — orphaning trim state and resurrecting
+    // deselected defaults (R41-5).
+    setBaseUrl(effective);
     if (provider) {
       const previousCommittedBaseUrl = committedBaseUrlRef.current;
       const nextModelIds = switchEndpointModelState(

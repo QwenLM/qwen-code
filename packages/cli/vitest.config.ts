@@ -35,6 +35,15 @@ export default defineConfig({
         __dirname,
         '../core/src/services/tool-write-origin.ts',
       ),
+      // run-qwen-serve.ts imports the providerConfig subpath (added by this
+      // PR's bundle-lean fast-path fix) — like every sibling subpath it needs
+      // an explicit alias BEFORE the catch-all root alias below, which would
+      // otherwise prefix-match it onto '../core/index.ts' and fail to
+      // resolve (R41-1).
+      '@qwen-code/qwen-code-core/providerConfig': path.resolve(
+        __dirname,
+        '../core/src/providers/provider-config.ts',
+      ),
       '@qwen-code/qwen-code-core': path.resolve(__dirname, '../core/index.ts'),
       // cli's daemon-status-provider.test.ts imports `FakeAgent` /
       // `makeChannel` from acp-bridge's package-private

@@ -226,6 +226,30 @@ export function ProviderConnectForm({
         nextProtocol,
       );
       if (nextBaseUrl === undefined) {
+        const bucket =
+          selectedProvider.existingConfig?.modelIdsByBaseUrlByProtocol?.[
+            nextProtocol
+          ];
+        if (bucket && Object.keys(bucket).length > 0) {
+          // A saved bucket whose models carry no baseUrl: the producer omits
+          // baseUrlByProtocol for it (R39-4), so keep the user's typed
+          // endpoint — but re-seed the model field from the bucket's OWN
+          // saved models. Keeping the PREVIOUS protocol's ids here would
+          // install them under the new protocol on submit, and the server's
+          // remove-owned merge would delete this bucket's saved legacy
+          // models — silent data loss (R41-2).
+          const seeded = seedProtocolModelState(
+            selectedProvider,
+            nextProtocol,
+            baseUrl,
+          );
+          customModelIdsRef.current = seeded.customModelIds;
+          customModelIdsByBaseUrlRef.current = seeded.customModelIdsByBaseUrl;
+          trimmedDefaultModelIdsRef.current = seeded.trimmedDefaultModelIds;
+          setModelIdsText(seeded.modelIds.join(', '));
+          setFormError(null);
+          return;
+        }
         // No saved bucket for this protocol yet: keep the user's typed
         // endpoint, model field, and per-endpoint state untouched. Falling
         // back to the provider default here would overwrite the endpoint
@@ -248,7 +272,7 @@ export function ProviderConnectForm({
       setModelIdsText(seeded.modelIds.join(', '));
       setFormError(null);
     },
-    [selectedProvider, protocol],
+    [selectedProvider, protocol, baseUrl],
   );
 
   const handleSubmit = useCallback(async () => {

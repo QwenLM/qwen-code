@@ -2707,6 +2707,15 @@ function readProviderSetupInputs(
         migratedLegacyModelIds.push(model.id);
         return [preserved];
       }
+      if (attributable) {
+        // An attributable entry that leaves the plan at its OWN endpoint —
+        // explicitly deselected, or superseded by a generated default — must
+        // still be claimed by id so buildInstallPlan removes the stored
+        // original; otherwise the deselection silently no-ops forever
+        // (R41-3; see the matching comment in serve's
+        // buildProviderSetupInputs).
+        migratedLegacyModelIds.push(model.id);
+      }
       return [];
     }
     const selectedByEditableFreeForm = requestedModelIdSet.has(preserved.id);

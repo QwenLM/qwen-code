@@ -394,6 +394,69 @@ describe('useProviderSetupFlow', () => {
     expect(result.current.state.modelIds).toBe('second-default');
   });
 
+  it('keys per-endpoint model state off the committed endpoint, not a padded paste (R41-5)', () => {
+    // submitBaseUrl commits the TRIMMED endpoint; the per-endpoint maps must
+    // be keyed by that same identity. A whitespace-padded paste used to
+    // write under one key and read under the other, orphaning trim state so
+    // deselected defaults resurrected when the user returned to the
+    // endpoint.
+    const endpointUrl = 'https://x.example/v1';
+    const siblingUrl = 'https://y.example/v1';
+    const provider: ProviderConfig = {
+      id: 'padded-provider',
+      label: 'Padded Provider',
+      description: 'Provider for whitespace-padded endpoint pastes',
+      protocol: AuthType.USE_OPENAI,
+      baseUrl: [
+        {
+          id: 'first',
+          label: 'First',
+          url: endpointUrl,
+          models: [{ id: 'default-a' }, { id: 'default-b' }],
+        },
+        {
+          id: 'second',
+          label: 'Second',
+          url: siblingUrl,
+          models: [{ id: 'sibling-default' }],
+        },
+      ],
+      envKey: () => 'PADDED_API_KEY',
+      modelsEditable: true,
+      modelNamePrefix: 'Padded',
+    };
+    const runArm = (pastedBaseUrl: string): string => {
+      const { result } = renderHook(() => useProviderSetupFlow(vi.fn()));
+      act(() => {
+        result.current.start(provider);
+      });
+      act(() => {
+        // Paste the endpoint (possibly padded) and submit the baseUrl step.
+        result.current.changeBaseUrl(pastedBaseUrl);
+      });
+      act(() => {
+        expect(result.current.submitBaseUrl()).toBe(true);
+      });
+      act(() => {
+        // Deselect 'default-a' at the endpoint.
+        result.current.changeModelIds('default-b');
+      });
+      act(() => {
+        result.current.selectBaseUrl(siblingUrl);
+      });
+      act(() => {
+        result.current.selectBaseUrl(endpointUrl);
+      });
+      return result.current.state.modelIds;
+    };
+
+    // Control arm: an unpadded endpoint keeps the deselection across a
+    // round trip.
+    expect(runArm(endpointUrl)).toBe('default-b');
+    // Padded arm: the same round trip must behave identically.
+    expect(runArm(`  ${endpointUrl}  `)).toBe('default-b');
+  });
+
   it('rebuilds endpoint defaults after a net-zero model edit', () => {
     const firstUrl = 'https://first.example/v1';
     const secondUrl = 'https://second.example/v1';

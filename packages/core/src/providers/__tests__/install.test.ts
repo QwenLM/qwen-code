@@ -532,7 +532,12 @@ describe('applyProviderInstallPlan', () => {
     expect(adapter.setValue).toHaveBeenCalledWith('model.baseUrl', intlUrl);
   });
 
-  it('retains a current model whose stored baseUrl differs only by a trailing slash', async () => {
+  it('heals a current selection whose stored baseUrl differs only by a trailing slash (R41-6)', async () => {
+    // The normalized identity match retains the user's model, but the
+    // runtime registry keys models by EXACT (id, baseUrl): a slash-variant
+    // selection would resolve to nothing (phantom duplicate in model lists,
+    // switchModel "not found"). The install must rewrite the selection to
+    // the offered entry's exact spelling.
     const intlUrl = 'https://api.moonshot.ai/v1';
     const intlModels = buildProviderTemplate(kimiProvider, intlUrl);
     const adapter = createAdapter({
@@ -555,13 +560,51 @@ describe('applyProviderInstallPlan', () => {
       doRefreshAuth: false,
     });
 
-    expect(adapter.setValue).not.toHaveBeenCalledWith(
+    // The model is retained (same id) and its baseUrl is rewritten to the
+    // entry's exact spelling so the exact-match registry resolves it.
+    expect(adapter.setValue).toHaveBeenCalledWith(
       'model.name',
-      expect.anything(),
+      'kimi-k2.7-code',
     );
+    expect(adapter.setValue).toHaveBeenCalledWith('model.baseUrl', intlUrl);
     expect(adapter.setValue).not.toHaveBeenCalledWith(
       'model.baseUrl',
-      expect.anything(),
+      `${intlUrl}/`,
+    );
+  });
+
+  it('heals a slash-variant stored selection on a custom-provider reconnect (R41-6)', async () => {
+    const baseUrl = 'https://my.proxy/v1';
+    const envKey = generateCustomEnvKey(AuthType.USE_OPENAI, baseUrl);
+    const adapter = createAdapter({
+      [AuthType.USE_OPENAI]: [{ id: 'm1', name: 'm1', baseUrl, envKey }],
+    });
+    adapter.getValue.mockImplementation((key: string) => {
+      if (key === 'model.name') return 'm1';
+      // Stored selection carries the trailing-slash variant.
+      if (key === 'model.baseUrl') return `${baseUrl}/`;
+      return '';
+    });
+    const plan = buildInstallPlan(customProvider, {
+      protocol: AuthType.USE_OPENAI,
+      baseUrl,
+      apiKey: 'sk-proxy',
+      modelIds: ['m1'],
+    });
+
+    try {
+      await applyProviderInstallPlan(plan, {
+        settings: adapter,
+        doRefreshAuth: false,
+      });
+    } finally {
+      delete process.env[envKey];
+    }
+
+    expect(adapter.setValue).toHaveBeenCalledWith('model.baseUrl', baseUrl);
+    expect(adapter.setValue).not.toHaveBeenCalledWith(
+      'model.baseUrl',
+      `${baseUrl}/`,
     );
   });
 
