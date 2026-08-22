@@ -10,7 +10,11 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as tar from 'tar';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { assertTarArchiveHasNoLinks } from './archive-safety.js';
+import {
+  MAX_ARCHIVE_ENTRIES,
+  MAX_ARCHIVE_EXPANDED_BYTES,
+  assertTarArchiveHasNoLinks,
+} from './archive-safety.js';
 
 // Passthrough wrapper around `fs.createReadStream` that tests can hook to
 // observe how much of the archive the scan actually reads.
@@ -45,9 +49,6 @@ vi.mock('node:fs', async (importOriginal) => {
     },
   };
 });
-
-const MAX_ARCHIVE_ENTRIES = 100_000;
-const MAX_ARCHIVE_EXPANDED_BYTES = 1024 * 1024 * 1024;
 
 // Builds a ustar header for a zero-content regular file. `tar.t` parses
 // headers via `onReadEntry` without requiring entry content, so these

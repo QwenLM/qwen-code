@@ -12,8 +12,8 @@ import { stripAnsiAndControl } from '../utils/textUtils.js';
 const MAX_REPORTED_ENTRY_PATH_LENGTH = 200;
 const MAX_REPORTED_LINK_ENTRIES = 10;
 const MAX_LINK_ENTRIES = 100;
-const MAX_ARCHIVE_ENTRIES = 100_000;
-const MAX_ARCHIVE_EXPANDED_BYTES = 1024 * 1024 * 1024;
+export const MAX_ARCHIVE_ENTRIES = 100_000;
+export const MAX_ARCHIVE_EXPANDED_BYTES = 1024 * 1024 * 1024;
 
 export interface TarArchiveSafetyOptions {
   /**
