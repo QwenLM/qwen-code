@@ -155,6 +155,7 @@ export type {
   DaemonToolPreview,
   DaemonToolTranscriptBlock,
   DaemonTranscriptBlock,
+  DaemonTranscriptBlockChangeSummary,
   DaemonTranscriptBlockKind,
   DaemonTranscriptQuestion,
   DaemonTranscriptQuestionOption,

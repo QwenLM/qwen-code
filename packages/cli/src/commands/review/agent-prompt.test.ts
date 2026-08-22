@@ -72,6 +72,7 @@ import {
 } from './lib/audit-layers.js';
 import { REVERSE_AUDIT_IDENTITY } from './lib/layer-audit-gate.js';
 import { isolateHostGitConfig } from './lib/test-utils.js';
+import { REVIEW_BUILTIN_SUBAGENT_TYPE } from '@qwen-code/qwen-code-core';
 import {
   readRecordedPrompts,
   briefPath,
@@ -1579,6 +1580,151 @@ describe('--roster — every prompt the plan requires, in one call', () => {
       expect(printed).toMatch(
         /───── agent \d+ of 11 — Agent 1a: Line-by-line correctness ─────/,
       );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('names the review-agent subagent type in EVERY review mode', () => {
+    // The type note used to live inside the worktree-only `paramNote`, so the
+    // three modes with no worktree — local diff, file path, cross-repo
+    // lightweight — were told nothing, and an omitted `subagent_type` resolves
+    // to `general-purpose`: the inherit-everything branch, and the whole cost
+    // this type removes. PLAN carries no `worktreePath`, which is the branch
+    // the old test never reached.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-roster-type-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, JSON.stringify(PLAN));
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        roster: true,
+      });
+
+      const printed = (writeStdoutLine as unknown as Mock).mock
+        .calls[0][0] as string;
+      expect(printed).toContain(
+        `\`subagent_type: "${REVIEW_BUILTIN_SUBAGENT_TYPE}"\``,
+      );
+      expect(printed).toContain('`run_in_background: false`');
+      // The directive form only. The note names `general-purpose` on purpose,
+      // as the default an omission resolves to — banning the word would ban
+      // the warning.
+      expect(printed).not.toContain('subagent_type: "general-purpose"');
+      // …and no worktree parameters leaked into a mode that has no worktree.
+      expect(printed).not.toContain('working_dir');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('states the launch type on the audit-round path, and on NO channel in a single block', () => {
+    // `runRoster` is not the only emission path. Step 4's verify shards and
+    // Step 5's audit rounds are built by the other two, and they are both the
+    // most numerous agents a high-effort review launches and the ones
+    // furthest from SKILL.md's own statement of the rule — an omitted
+    // `subagent_type` there resolves to `general-purpose` at full cost.
+    //
+    // The two paths differ in whether they CAN carry the note. The audit-round
+    // header can: it sits outside the ───── blocks, and only the blocks become
+    // agent prompts. The single-block path cannot: its whole stdout is the
+    // block the orchestrator pastes verbatim and the delivery check compares
+    // that against the record — and stderr is not a second channel either,
+    // because `ShellExecutionService` returns `stdout + separator + stderr` as
+    // one string, so a note there lands inside the same relayed text. This
+    // test pins both halves: the header carries it, the single block emits it
+    // nowhere.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-type-paths-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, JSON.stringify(PLAN));
+      const findings = join(dir, 'f.md');
+      writeFileSync(findings, '### Finding 1\n- **File:** a.ts\n');
+
+      // The enclosing beforeEach clears only writeStdoutLine, and earlier
+      // tests in file order walk this same single-block path — so a joined
+      // read of every accumulated stderr call would pass whether or not THIS
+      // invocation emitted anything. Clear it first.
+      (writeStderrLineSafe as unknown as Mock).mockClear();
+
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        role: 'verify',
+        findings,
+      });
+
+      const printed = (writeStdoutLine as unknown as Mock).mock
+        .calls[0][0] as string;
+      const recorded = readRecordedPrompts(plan);
+      // The invariant this note must not break: stdout IS the record.
+      expect([...recorded.values()]).toContain(printed);
+      expect(printed).not.toContain('subagent_type');
+
+      // The single-block path emits the launch note on NO channel, and
+      // stderr is not a loophole: `ShellExecutionService` returns
+      // `stdout + separator + stderr` as one string, so a note there lands
+      // inside the very text the caller is told to paste verbatim — failing
+      // the same record equality as stdout, only where no test can see it.
+      const onStderr = (writeStderrLineSafe as unknown as Mock).mock.calls
+        .map((c) => String(c[0]))
+        .join('\n');
+      expect(onStderr).not.toContain('subagent_type');
+
+      // …and the SECOND emission path that CAN carry it: the reverse-audit round header. Its
+      // agents are the most numerous a high-effort review launches, and no
+      // test reached it — dropping the append there shipped green.
+      (writeStdoutLine as unknown as Mock).mockClear();
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        role: 'reverse-audit',
+        'all-chunks': true,
+        allChunks: true,
+        findings,
+        round: 1,
+      });
+      const roundHeader = (writeStdoutLine as unknown as Mock).mock
+        .calls[0][0] as string;
+      expect(roundHeader).toContain(
+        `\`subagent_type: "${REVIEW_BUILTIN_SUBAGENT_TYPE}"\``,
+      );
+      expect(roundHeader).toContain('`run_in_background: false`');
+      // The header is safe because it sits OUTSIDE the ───── blocks the
+      // orchestrator pastes; only the blocks become agent prompts.
+      expect(roundHeader).toContain('─────');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('names the review-agent subagent type in the worktree parameter note', () => {
+    // The roster is the last text the orchestrator reads before constructing
+    // agent calls, so this note is where a worktree-mode run learns its
+    // `subagent_type`. It must not drift from the registry constant:
+    // `general-purpose` declares no `tools`, and a review launched under it
+    // re-declares 51 tool schemas on every turn of every agent — measured at
+    // ~1.08M extra prompt tokens across one roster. The failure is silent;
+    // the review still runs, just far dearer.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-roster-wt-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(
+        plan,
+        JSON.stringify({ ...PLAN, worktreePath: '.qwen/tmp/review-pr-1' }),
+      );
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        roster: true,
+      });
+
+      const printed = (writeStdoutLine as unknown as Mock).mock
+        .calls[0][0] as string;
+      expect(printed).toContain(
+        `\`subagent_type: "${REVIEW_BUILTIN_SUBAGENT_TYPE}"\``,
+      );
+      expect(printed).not.toContain('subagent_type: "general-purpose"');
+      // The worktree branch keeps its own parameters and nothing else.
+      expect(printed).toContain('working_dir');
+      expect(printed).not.toContain('isolation: "worktree"');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
