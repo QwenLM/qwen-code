@@ -2239,6 +2239,58 @@ describe('multi-workspace session dispatch', () => {
     },
   );
 
+  it.each([
+    ['qualified', '/workspaces/secondary-id/sessions/archive'],
+    ['owner-routed', '/sessions/archive'],
+  ])(
+    'keeps non-regular lifecycle failures scoped to their %s batch item',
+    async (_kind, route) => {
+      await withRuntimeDir(async () => {
+        const healthyId = '550e8400-e29b-41d4-a716-446655440211';
+        const invalidId = '550e8400-e29b-41d4-a716-446655440212';
+        const healthy = await writeLifecycleFixture({
+          sessionId: healthyId,
+          shape: 'orphan',
+          state: 'active',
+        });
+        const invalidPath = path.join(
+          path.dirname(healthy.activePath),
+          `${invalidId}.jsonl`,
+        );
+        await fsp.mkdir(invalidPath);
+        const { app } = makeHarness({
+          secondaryProvenance: 'live-conversation',
+          secondaryRuntimeBaseDir: Storage.getRuntimeBaseDir(),
+          secondarySummaries: [],
+        });
+
+        const response = await request(app)
+          .post(route)
+          .set('Host', host())
+          .send({ sessionIds: [healthyId, invalidId] });
+
+        expect(response.status).toBe(200);
+        expect(response.body).toMatchObject({
+          archived: [healthyId],
+          notFound: [],
+          errors: [
+            {
+              sessionId: invalidId,
+              error: 'Session operation failed.',
+            },
+          ],
+        });
+        await expect(fsp.stat(healthy.activePath)).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+        await expect(fsp.readFile(healthy.archivedPath)).resolves.toEqual(
+          healthy.contents,
+        );
+        expect((await fsp.lstat(invalidPath)).isDirectory()).toBe(true);
+      });
+    },
+  );
+
   it('keeps the private directory canonical when restoring a mixed-case transcript', async () => {
     const storageSessionId = LIVE_PROJECTLESS_TASK_ID.toUpperCase();
     await withStoredProjectlessLiveTasks(

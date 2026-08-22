@@ -13,6 +13,7 @@ import {
   GROUP_COLOR_OPTIONS,
   GitWorktreeService,
   SessionOrganizationError,
+  SessionStorageEntryError,
   SESSION_TRANSCRIPT_MAX_LIMIT,
   SESSION_TRANSCRIPT_MAX_EXPANDED_PAGE_BYTES,
   SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
@@ -1144,6 +1145,25 @@ export function registerSessionRoutes(
     return true;
   };
 
+  const hasLifecycleStorageEvidence = async (
+    service: ReturnType<typeof createWorkspaceRuntimeSessionService>,
+    sessionId: string,
+  ): Promise<boolean> => {
+    try {
+      return (
+        (await service.getMaintainableSessionLocation(sessionId)) !== undefined
+      );
+    } catch (error) {
+      if (
+        error instanceof SessionStorageEntryError &&
+        error.reason === 'non_regular'
+      ) {
+        return true;
+      }
+      throw error;
+    }
+  };
+
   const resolveQualifiedSessionRuntime = async (
     req: Request,
     res: Response,
@@ -1166,10 +1186,7 @@ export function registerSessionRoutes(
     const service = createWorkspaceRuntimeSessionService(runtime);
     for (const sessionId of sessionIds) {
       if (options.lifecycleMaintenance) {
-        if (
-          (await service.getMaintainableSessionLocation(sessionId)) ===
-          undefined
-        ) {
+        if (!(await hasLifecycleStorageEvidence(service, sessionId))) {
           throw new SessionNotFoundError(sessionId);
         }
         continue;
@@ -2003,10 +2020,10 @@ export function registerSessionRoutes(
       for (const entry of workspaceRegistry.listAllEntries()) {
         const generation = entry.current;
         if (entry.internal || !generation) continue;
-        const exists =
-          (await createWorkspaceRuntimeSessionService(
-            generation.runtime,
-          ).getMaintainableSessionLocation(sessionId)) !== undefined;
+        const exists = await hasLifecycleStorageEvidence(
+          createWorkspaceRuntimeSessionService(generation.runtime),
+          sessionId,
+        );
         if (!exists) continue;
         if (
           entry.state !== 'active' ||
@@ -2059,9 +2076,7 @@ export function registerSessionRoutes(
         }
         const runtime = generation.runtime;
         const service = createWorkspaceRuntimeSessionService(runtime);
-        const exists =
-          (await service.getMaintainableSessionLocation(sessionId)) !==
-          undefined;
+        const exists = await hasLifecycleStorageEvidence(service, sessionId);
         if (!assertCurrentInternalGeneration(entry, generation, res)) {
           return undefined;
         }
@@ -2110,9 +2125,7 @@ export function registerSessionRoutes(
 
     for (const sessionId of sessionIds) {
       const service = createWorkspaceRuntimeSessionService(internalRuntime);
-      if (
-        (await service.getMaintainableSessionLocation(sessionId)) === undefined
-      ) {
+      if (!(await hasLifecycleStorageEvidence(service, sessionId))) {
         const ordinarySessions = await findOrdinarySessions(sessionId);
         if (!ordinarySessions) return undefined;
         if (ordinarySessions.size > 0) {

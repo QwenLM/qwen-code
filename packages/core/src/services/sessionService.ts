@@ -5,7 +5,11 @@
  */
 
 import { Storage } from '../config/storage.js';
-import { persistUsageBeforeTranscriptDeletion } from './usageHistoryService.js';
+import {
+  commitUsageBeforeTranscriptDeletion,
+  prepareUsageBeforeTranscriptDeletion,
+  type PreparedUsageBeforeTranscriptDeletion,
+} from './usageHistoryService.js';
 import { getProjectHash } from '../utils/paths.js';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -2182,17 +2186,31 @@ export class SessionService {
 
   /**
    * Usage salvage wrapper enforcing the "never blocks deletion" contract at
-   * the call site: persistUsageBeforeTranscriptDeletion catches its own
-   * errors, but this second layer keeps the guarantee structural rather
-   * than an implementation detail of another module.
+   * the call site. Preparation is read-only so rejected lifecycle mutations
+   * cannot pin an incomplete usage summary; commit happens only after every
+   * mutation fence passes.
    */
-  private async salvageUsageBestEffort(transcriptPath: string): Promise<void> {
+  private async prepareUsageSalvageBestEffort(
+    transcriptPath: string,
+  ): Promise<PreparedUsageBeforeTranscriptDeletion | null> {
     try {
-      await persistUsageBeforeTranscriptDeletion(transcriptPath);
+      return await prepareUsageBeforeTranscriptDeletion(transcriptPath);
     } catch (error) {
       this.warn(
         `usage salvage failed for ${transcriptPath}: ${error}; deleting anyway`,
       );
+      return null;
+    }
+  }
+
+  private commitUsageSalvageBestEffort(
+    prepared: PreparedUsageBeforeTranscriptDeletion | null,
+  ): void {
+    if (!prepared) return;
+    try {
+      commitUsageBeforeTranscriptDeletion(prepared);
+    } catch (error) {
+      this.warn(`usage salvage commit failed: ${error}; deleting anyway`);
     }
   }
 
@@ -2208,12 +2226,23 @@ export class SessionService {
       const physicalSnapshot =
         await this.resolveMaintainableSessionSnapshot(sessionId);
       if (physicalSnapshot.location === undefined) return false;
+      const preparedUsage: PreparedUsageBeforeTranscriptDeletion[] = [];
+      const preparedSessionIds = new Set<string>();
       for (const identity of physicalSnapshot.identities) {
-        await this.salvageUsageBestEffort(identity.filePath);
+        const prepared = await this.prepareUsageSalvageBestEffort(
+          identity.filePath,
+        );
+        if (prepared && !preparedSessionIds.has(prepared.record.sessionId)) {
+          preparedUsage.push(prepared);
+          preparedSessionIds.add(prepared.record.sessionId);
+        }
       }
       await options.assertStorageUnchanged?.();
       options.assertCanMutate?.();
       this.assertMaintainableSessionUnchanged(sessionId, physicalSnapshot);
+      for (const prepared of preparedUsage) {
+        this.commitUsageSalvageBestEffort(prepared);
+      }
       for (const identity of physicalSnapshot.identities) {
         this.removeFileIfExists(identity.filePath);
       }
@@ -2270,10 +2299,13 @@ export class SessionService {
           const active = snapshot.identities.find(
             (identity) => identity.state === 'active',
           )!;
-          await this.salvageUsageBestEffort(active.filePath);
+          const preparedUsage = await this.prepareUsageSalvageBestEffort(
+            active.filePath,
+          );
           await options.assertStorageUnchanged?.();
           options.assertCanMutate?.();
           this.assertMaintainableSessionUnchanged(sessionId, snapshot);
+          this.commitUsageSalvageBestEffort(preparedUsage);
           this.removeFileIfExists(active.filePath);
           try {
             this.removeStateSidecars(sessionId, 'active');
@@ -2393,10 +2425,13 @@ export class SessionService {
           const archived = snapshot.identities.find(
             (identity) => identity.state === 'archived',
           )!;
-          await this.salvageUsageBestEffort(archived.filePath);
+          const preparedUsage = await this.prepareUsageSalvageBestEffort(
+            archived.filePath,
+          );
           await options.assertStorageUnchanged?.();
           options.assertCanMutate?.();
           this.assertMaintainableSessionUnchanged(sessionId, snapshot);
+          this.commitUsageSalvageBestEffort(preparedUsage);
           this.removeFileIfExists(archived.filePath);
           try {
             this.removeStateSidecars(sessionId, 'archived');

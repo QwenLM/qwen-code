@@ -5,7 +5,11 @@
  */
 
 import fs from 'node:fs';
-import { persistUsageBeforeTranscriptDeletion } from './usageHistoryService.js';
+import {
+  commitUsageBeforeTranscriptDeletion,
+  prepareUsageBeforeTranscriptDeletion,
+  type PreparedUsageBeforeTranscriptDeletion,
+} from './usageHistoryService.js';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import {
@@ -41,7 +45,11 @@ import * as jsonl from '../utils/jsonl-utils.js';
 import { readSessionPrs, writeSessionPrs } from './session-pr-service.js';
 
 vi.mock('./usageHistoryService.js', () => ({
-  persistUsageBeforeTranscriptDeletion: vi.fn().mockResolvedValue(true),
+  prepareUsageBeforeTranscriptDeletion: vi.fn().mockResolvedValue({
+    usagePath: '/usage.jsonl',
+    record: { sessionId: 'salvage-session' },
+  }),
+  commitUsageBeforeTranscriptDeletion: vi.fn().mockReturnValue(true),
 }));
 vi.mock('node:path');
 vi.mock('../utils/paths.js');
@@ -78,7 +86,15 @@ describe('SessionService', () => {
     sessionService = new SessionService('/test/project/root');
     // Module mocks are not reset by restoreAllMocks; clear the salvage spy
     // so per-test call/order assertions never read stale invocations.
-    vi.mocked(persistUsageBeforeTranscriptDeletion).mockClear();
+    vi.mocked(prepareUsageBeforeTranscriptDeletion)
+      .mockReset()
+      .mockResolvedValue({
+        usagePath: '/usage.jsonl',
+        record: { sessionId: 'salvage-session' },
+      } as PreparedUsageBeforeTranscriptDeletion);
+    vi.mocked(commitUsageBeforeTranscriptDeletion)
+      .mockReset()
+      .mockReturnValue(true);
 
     readdirSyncSpy = vi.spyOn(fs, 'readdirSync').mockReturnValue([]);
     statSyncSpy = vi.spyOn(fs, 'statSync').mockImplementation(
@@ -1752,13 +1768,17 @@ describe('SessionService', () => {
       expect(unlinkSyncSpy).toHaveBeenCalled();
       // #7384: the usage salvage must see the transcript BEFORE it is
       // unlinked, or the summary is unrecoverable.
-      const salvage = vi.mocked(persistUsageBeforeTranscriptDeletion);
+      const salvage = vi.mocked(prepareUsageBeforeTranscriptDeletion);
       expect(salvage).toHaveBeenCalledWith(
         expect.stringContaining(`${sessionIdA}.jsonl`),
       );
       expect(salvage.mock.invocationCallOrder[0]!).toBeLessThan(
         unlinkSyncSpy.mock.invocationCallOrder[0]!,
       );
+      expect(
+        vi.mocked(commitUsageBeforeTranscriptDeletion).mock
+          .invocationCallOrder[0]!,
+      ).toBeLessThan(unlinkSyncSpy.mock.invocationCallOrder[0]!);
       expect(rmSyncSpy).toHaveBeenCalledWith(
         expect.stringContaining(`file-history/${sessionIdA}`),
         { recursive: true, force: true },
@@ -1767,7 +1787,7 @@ describe('SessionService', () => {
 
     it('still deletes the session when the usage salvage fails', async () => {
       // Contract: the salvage must never block deletion.
-      vi.mocked(persistUsageBeforeTranscriptDeletion).mockRejectedValueOnce(
+      vi.mocked(prepareUsageBeforeTranscriptDeletion).mockRejectedValueOnce(
         new Error('salvage exploded'),
       );
       vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
@@ -1776,6 +1796,23 @@ describe('SessionService', () => {
         true,
       );
       expect(unlinkSyncSpy).toHaveBeenCalled();
+    });
+
+    it('does not commit usage when a mutation fence rejects deletion', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+      const rejected = new Error('generation changed');
+
+      await expect(
+        sessionService.removeSession(sessionIdA, {
+          assertCanMutate: () => {
+            throw rejected;
+          },
+        }),
+      ).rejects.toBe(rejected);
+
+      expect(prepareUsageBeforeTranscriptDeletion).toHaveBeenCalled();
+      expect(commitUsageBeforeTranscriptDeletion).not.toHaveBeenCalled();
+      expect(unlinkSyncSpy).not.toHaveBeenCalled();
     });
 
     it('should clear session organization when removing a session', async () => {
@@ -1939,7 +1976,7 @@ describe('SessionService', () => {
       // the only holder of the session's history. Pin the call so removing
       // the "redundant-looking" archived salvage fails this test.
       expect(
-        vi.mocked(persistUsageBeforeTranscriptDeletion),
+        vi.mocked(prepareUsageBeforeTranscriptDeletion),
       ).toHaveBeenCalledWith(
         expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
       );
@@ -2274,6 +2311,22 @@ describe('SessionService', () => {
       expect(result.errors[0]?.error.message).toMatch(/conflict/i);
       expect(renameSyncSpy).not.toHaveBeenCalled();
     });
+
+    it('does not commit usage when conflict repair is rejected', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+
+      const result = await sessionService.archiveSessions([sessionIdA], {
+        resolveConflicts: true,
+        assertCanMutate: () => {
+          throw new Error('generation changed');
+        },
+      });
+
+      expect(result.errors).toHaveLength(1);
+      expect(prepareUsageBeforeTranscriptDeletion).toHaveBeenCalled();
+      expect(commitUsageBeforeTranscriptDeletion).not.toHaveBeenCalled();
+      expect(unlinkSyncSpy).not.toHaveBeenCalled();
+    });
   });
 
   describe('unarchiveSessions', () => {
@@ -2398,6 +2451,22 @@ describe('SessionService', () => {
         expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
         expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
       );
+    });
+
+    it('does not commit usage when conflict repair is rejected', async () => {
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+
+      const result = await sessionService.unarchiveSessions([sessionIdA], {
+        resolveConflicts: true,
+        assertCanMutate: () => {
+          throw new Error('generation changed');
+        },
+      });
+
+      expect(result.errors).toHaveLength(1);
+      expect(prepareUsageBeforeTranscriptDeletion).toHaveBeenCalled();
+      expect(commitUsageBeforeTranscriptDeletion).not.toHaveBeenCalled();
+      expect(unlinkSyncSpy).not.toHaveBeenCalled();
     });
 
     it('should recreate active chats directory before moving archived sessions', async () => {
