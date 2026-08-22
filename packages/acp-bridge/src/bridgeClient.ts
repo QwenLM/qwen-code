@@ -31,6 +31,7 @@ import {
   ACTIVE_WORK_MAX_SESSION_HOLDS,
   ACTIVE_WORK_MAX_SNAPSHOT_SESSIONS,
   ACTIVE_WORK_NOTIFICATION_METHOD,
+  DAEMON_PERMISSION_CANCEL_REASON_META_KEY,
   MID_TURN_RECONCILIATION_RING_SIZE,
   MID_TURN_QUEUE_DRAIN_METHOD,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
@@ -497,7 +498,9 @@ function preserveFsErrorOverAcp(err: unknown): never {
  * Voter-cancel, timeout, and session-closed all project to the same
  * `{outcome: 'cancelled'}` shape — the ACP wire frame doesn't
  * distinguish them. The audit log carries `decisionReason.type`
- * for forensic discrimination.
+ * for forensic discrimination. The cancel reason also rides in
+ * response `_meta` so the child can tell an unattended timeout
+ * apart from a deliberate user cancel.
  */
 function resolutionToAcpResponse(
   resolution: PermissionResolution,
@@ -508,7 +511,12 @@ function resolutionToAcpResponse(
       ...(resolution.metadata ?? {}),
     };
   }
-  return { outcome: { outcome: 'cancelled' } };
+  return {
+    outcome: { outcome: 'cancelled' },
+    _meta: {
+      [DAEMON_PERMISSION_CANCEL_REASON_META_KEY]: resolution.reason,
+    },
+  };
 }
 
 /**
