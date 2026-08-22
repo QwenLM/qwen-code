@@ -5208,6 +5208,12 @@ jobs:
           RUNNER_TEMP: '${{ runner.temp }}'
           WORKDIR: '/tmp/autofix-review-${{ matrix.target.pr }}'
           BRANCH: '${{ matrix.target.branch }}'
+          # CI re-enters the allowlisted child through the step
+          # environment: the child's `:-true` default only covers an UNSET
+          # CI, so a $GITHUB_ENV plant of CI=false survives the expansion
+          # and inverts the gate's CI semantics. Pin it at step level, the
+          # FOOTPRINT_ENFORCE doctrine below (R1-1).
+          CI: 'true'
           # Step-level env outranks $GITHUB_ENV: an earlier shell-capable
           # step (the agent runs branch code on the host) must not be able
           # to downgrade a repo-variable 'reject' back to 'advisory'.
@@ -5439,6 +5445,12 @@ jobs:
           RUNNER_TEMP: '${{ runner.temp }}'
           WORKDIR: '/tmp/autofix-review-${{ matrix.target.pr }}'
           BRANCH: '${{ matrix.target.branch }}'
+          # CI re-enters the allowlisted child through the step
+          # environment: the child's `:-true` default only covers an UNSET
+          # CI, so a $GITHUB_ENV plant of CI=false survives the expansion
+          # and inverts the gate's CI semantics. Pin it at step level, the
+          # FOOTPRINT_ENFORCE doctrine below (R1-1).
+          CI: 'true'
           # Step-level env outranks $GITHUB_ENV: an earlier shell-capable
           # step (the agent runs branch code on the host) must not be able
           # to downgrade a repo-variable 'reject' back to 'advisory'.

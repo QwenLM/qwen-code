@@ -11203,7 +11203,7 @@ exit 1
     );
     // The gate launches through an env -i clean child with a SANCTIONED
     // allowlist (R5-1): every variable the gate's own build/test checks need
-    // must be passed, and the runner-provided CI=true is one of them — without
+    // must be passed, and the step-pinned CI=true is one of them — without
     // it the gate's checks run with inverted CI semantics and the 18
     // deliberately-skipped TUI-input tests un-skip inside the gate (one flakes
     // ~5s, reject_fix fires retryable on a fix the PR's own CI passes green).
@@ -19425,7 +19425,11 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
     // the body-side unset cannot unload a library already mapped into the
     // parent running the digest check (R6-2) — and RUNNER_TEMP/WORKDIR/
     // BRANCH steer that digest check and the child's tree, so they are
-    // pinned from trusted expression context too (R6-3).
+    // pinned from trusted expression context too (R6-3). CI reaches the
+    // child's `CI="${CI:-true}"` expansion from the step environment, and
+    // `:-true` only covers an UNSET CI — a $GITHUB_ENV plant of CI=false
+    // survives the expansion and inverts the gate's CI semantics — so CI
+    // is pinned at step level too (R1-1).
     for (const step of [verificationGateSteps[1], repairVerificationGateStep]) {
       expect(step).toContain("BASH_ENV: ''");
       expect(step).toContain("SHELLOPTS: ''");
@@ -19437,6 +19441,7 @@ describe('growth-audit hardening: park wake set and verdict pipeline (round 3)',
         "WORKDIR: '/tmp/autofix-review-${{ matrix.target.pr }}'",
       );
       expect(step).toContain("BRANCH: '${{ matrix.target.branch }}'");
+      expect(step).toContain("CI: 'true'");
       expect(step).toContain('/usr/bin/env -i');
       expect(step).toContain(
         'bash --norc "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
