@@ -7835,6 +7835,103 @@ hello
       expect(client['pendingMemoryPrefetch']).toBeUndefined();
     });
 
+    // Drives sendMessageStream with ToolResult messages whose
+    // functionResponse ids match previously streamed ToolCallRequest
+    // callIds, exercising the result-aware recording branch on the main
+    // interactive path (issue #9450).
+    async function runTaskListPollTurns(
+      board: (round: number) => string,
+      maxRounds = 9,
+    ) {
+      const promptId = 'prompt-task-list-poll';
+      const taskListArgs = { status: 'in_progress', owner: 'peer-a' };
+      const allEvents: Array<{ type: string; value?: unknown }> = [];
+      for (let round = 0; round <= maxRounds; round++) {
+        mockTurnRunFn.mockReturnValueOnce(
+          (async function* () {
+            yield {
+              type: GeminiEventType.ToolCallRequest,
+              value: {
+                callId: `tl-${round}`,
+                name: 'task_list',
+                args: taskListArgs,
+                isClientInitiated: false,
+                prompt_id: promptId,
+              },
+            };
+            yield {
+              type: GeminiEventType.ToolCallRequest,
+              value: {
+                callId: `other-${round}`,
+                name: 'tool_b',
+                args: { step: round },
+                isClientInitiated: false,
+                prompt_id: promptId,
+              },
+            };
+          })(),
+        );
+        const contents =
+          round === 0
+            ? [{ text: 'poll the board' }]
+            : [
+                {
+                  functionResponse: {
+                    id: `tl-${round - 1}`,
+                    name: 'task_list',
+                    response: { output: board(round - 1) },
+                  },
+                },
+                {
+                  functionResponse: {
+                    id: `other-${round - 1}`,
+                    name: 'tool_b',
+                    response: { output: `step ${round - 1}` },
+                  },
+                },
+              ];
+        const events = await fromAsync(
+          client.sendMessageStream(
+            contents as never,
+            new AbortController().signal,
+            promptId,
+            {
+              type:
+                round === 0
+                  ? SendMessageType.UserQuery
+                  : SendMessageType.ToolResult,
+            },
+          ),
+        );
+        allEvents.push(...(events as Array<{ type: string; value?: unknown }>));
+        if (
+          allEvents.some((e) => e.type === GeminiEventType.LoopDetected) ||
+          !events.some((e) => e.type === GeminiEventType.ToolCallRequest)
+        ) {
+          return allEvents;
+        }
+      }
+      return allEvents;
+    }
+
+    it('halts the interactive turn when paired ToolResults show a frozen stateful board (#9450)', async () => {
+      const events = await runTaskListPollTurns(() => 'frozen board');
+      const loopEvent = events.find(
+        (e) => e.type === GeminiEventType.LoopDetected,
+      );
+      expect(loopEvent).toBeDefined();
+      expect(
+        (loopEvent?.value as { loopType?: string } | undefined)?.loopType,
+      ).toBe('global_tool_call_duplicate');
+    });
+
+    it('keeps the interactive turn alive while paired ToolResults keep changing (#9450)', async () => {
+      const events = await runTaskListPollTurns((round) => `board v${round}`);
+      expect(events.some((e) => e.type === GeminiEventType.LoopDetected)).toBe(
+        false,
+      );
+    });
+
     it('should halt via the always-on turn cap before the skipLoopDetection gate', async () => {
       let abortHandlerInvoked = false;
       mockMemoryManager.recall.mockImplementation((_root, _query, opts) => {

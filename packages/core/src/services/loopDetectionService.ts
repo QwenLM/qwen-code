@@ -5,6 +5,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import type { Part } from '@google/genai';
 import type { ServerGeminiStreamEvent } from '../core/turn.js';
 import { GeminiEventType } from '../core/turn.js';
 import type { ThoughtSummary } from '../utils/thoughtUtils.js';
@@ -19,6 +20,15 @@ import {
 } from '../telemetry/types.js';
 import type { Config } from '../config/config.js';
 import { getToolCallRepeatKey } from '../utils/tool-call-repeat-key.js';
+import { BATCH_BUDGET_FIT_PREFIX } from '../utils/tool-response-finalizer.js';
+import {
+  FULL_OUTPUT_DIGEST_LABEL,
+  OUTPUT_TOO_LARGE_PREFIX,
+  PERSISTED_OUTPUT_OPEN_TAG,
+  PERSISTED_PREVIEW_MARKER,
+  TOOL_OUTPUT_TRUNCATED_PREFIX,
+  TRUNCATED_PART_MARKER,
+} from '../utils/truncation.js';
 
 // Re-exported for existing importers (daemon turn-loop guard); the
 // implementation lives in a leaf module so replay detection in
@@ -36,6 +46,31 @@ const TOOL_CALL_LOOP_THRESHOLD = 5;
 const CONTENT_LOOP_THRESHOLD = 10;
 const CONTENT_CHUNK_SIZE = 50;
 const MAX_HISTORY_LENGTH = 1000;
+
+// Tools whose identical arguments do NOT imply an identical result: they
+// read shared state that other agents can mutate between calls (issue
+// #9450 — a teammate polling `task_list` while peers keep completing tasks
+// was halted by the argument-only guards). For these tools the guards below
+// become result-aware: repetition only counts as a loop when the observed
+// results are unchanged too. Intentionally narrow — deterministic tools keep
+// the argument-only behavior, and other team tools (`send_message`,
+// `task_update`) have different mutation/delivery semantics and stay out.
+const STATEFUL_READ_TOOLS: ReadonlySet<string> = new Set(['task_list']);
+
+/**
+ * Whether a tool is a stateful read tool (see STATEFUL_READ_TOOLS).
+ * Exported so the daemon's turn-loop guard (ACP Session) applies the same
+ * result-aware treatment as this service — the two runtimes must not drift
+ * (issue #9450 requirement #6).
+ */
+export function isStatefulReadTool(toolName: string): boolean {
+  return STATEFUL_READ_TOOLS.has(toolName);
+}
+
+// Bound for the callId → request map used to pair tool results with their
+// requests (recordToolResultByCallId). Parallel tool batches are far smaller;
+// the cap only protects against unpaired entries accumulating.
+const MAX_TRACKED_TOOL_REQUESTS = 500;
 
 // Thought tracking
 const THOUGHT_REPEAT_THRESHOLD = 3;
@@ -123,6 +158,159 @@ export function shouldHaltOnTurnToolCallCap(
   return isExplicitCap || totalCalls > hardCap || stuck;
 }
 
+// Producer shapes of the oversized-result stubs (see utils/truncation.ts
+// and the batch-budget finalizer). Recognition is anchored on these
+// prefixes: task results such as task_list embed peer-authored text
+// verbatim, and that text can quote stub markers (this PR puts a
+// `Full output sha256: <hex>` line into every oversized output, and agents
+// quote stubs into board state). Honoring a marker found MID-string would
+// let quoted content collapse or vary the whole-board fingerprint —
+// re-shipping the #9450 false halt via content. Every shape here embeds a
+// per-call unique artifact path in its envelope, which is exactly why it
+// must be reduced to its digest; content that merely contains (or even
+// starts with) the digest label carries no per-call path and is
+// fingerprinted verbatim instead.
+const STUB_PRODUCER_PREFIXES: readonly string[] = [
+  PERSISTED_OUTPUT_OPEN_TAG,
+  OUTPUT_TOO_LARGE_PREFIX,
+  TOOL_OUTPUT_TRUNCATED_PREFIX,
+  // The batch-budget finalizer's fitText header.
+  BATCH_BUDGET_FIT_PREFIX,
+];
+
+/**
+ * Extracts the sha256 digest a stub producer embedded for the FULL
+ * pre-truncation output, anchored to a producer line: the label must start
+ * its line and be followed by exactly 64 hex chars ending the line. A
+ * mid-string mention of the label (e.g. board content quoting a stub) never
+ * matches. Returns null when no anchored digest is present.
+ */
+function extractAnchoredStubDigest(value: string): string | null {
+  let searchFrom = 0;
+  for (;;) {
+    const index = value.indexOf(FULL_OUTPUT_DIGEST_LABEL, searchFrom);
+    if (index < 0) return null;
+    const digestStart = index + FULL_OUTPUT_DIGEST_LABEL.length;
+    const lineAnchored = index === 0 || value[index - 1] === '\n';
+    if (lineAnchored) {
+      const digest = value.slice(digestStart, digestStart + 64);
+      const terminator = value[digestStart + 64];
+      if (
+        /^[0-9a-f]{64}$/.test(digest) &&
+        (terminator === undefined || terminator === '\n' || terminator === '\r')
+      ) {
+        return digest;
+      }
+    }
+    searchFrom = index + 1;
+  }
+}
+
+/**
+ * Reduces an oversized-result stub to its semantic payload for
+ * fingerprinting. Oversized tool results are rewritten into truncation
+ * stubs: a `<persisted-output>` envelope embedding the unique
+ * `<toolResultsDir>/<callId>.txt` path, an unwrapped `Output too large
+ * (...)` envelope whose session-dependent note can also vary between
+ * calls, the `truncateAndSaveToFile` shape embedding a random temp-file
+ * name, or a batch-budget fit whose header embeds a per-call artifact
+ * path. Hashing the envelope would make every fingerprint unique per call
+ * — silently disabling every result-aware guard for exactly the largest
+ * results. The producers embed a sha256 of the full pre-truncation output
+ * (FULL_OUTPUT_DIGEST_LABEL); prefer it over any visible content, because
+ * previews and head+tail payloads only cover the first/last chars — a
+ * board mutating in the dropped band must still fingerprint differently
+ * each poll (and a frozen board identically) no matter which stub shape
+ * carries it. The digest-first rule also covers stubs nested inside a
+ * further batch-budget fit, where the outer digest fingerprints the inner
+ * stub as a whole. Stubs without a digest line fall back to the shape's
+ * visible payload after its stable marker. The markers are the shared
+ * constants from utils/truncation.ts and the batch-budget finalizer so the
+ * parser cannot drift from the producer. The `<persisted-stub>` sentinel
+ * keeps a stub fingerprint from ever colliding with a small literal output
+ * that matches the payload.
+ *
+ * Stub recognition is gated on the producer prefixes (see
+ * STUB_PRODUCER_PREFIXES) and the digest must be line-anchored with a full
+ * 64-hex payload, so arbitrary result text that merely contains the label
+ * is fingerprinted verbatim instead of being collapsed to a quoted window.
+ */
+function stripPersistenceEnvelope(value: string): string {
+  const isProducerStub = STUB_PRODUCER_PREFIXES.some((prefix) =>
+    value.startsWith(prefix),
+  );
+  if (!isProducerStub) {
+    return value;
+  }
+
+  const digest = extractAnchoredStubDigest(value);
+  if (digest !== null) {
+    return `<persisted-stub>sha256:${digest}`;
+  }
+
+  const isPreviewStub =
+    value.startsWith(PERSISTED_OUTPUT_OPEN_TAG) ||
+    value.startsWith(OUTPUT_TOO_LARGE_PREFIX);
+  if (isPreviewStub) {
+    const marker = `${PERSISTED_PREVIEW_MARKER}\n`;
+    const index = value.indexOf(marker);
+    if (index >= 0) {
+      return `<persisted-stub>${value.slice(index + marker.length)}`;
+    }
+    return value;
+  }
+  if (value.startsWith(TOOL_OUTPUT_TRUNCATED_PREFIX)) {
+    const marker = `\n${TRUNCATED_PART_MARKER}`;
+    const index = value.indexOf(marker);
+    if (index >= 0) {
+      return `<persisted-stub>${value.slice(index + marker.length)}`;
+    }
+  }
+  return value;
+}
+
+/**
+ * Reconstructs the model-visible result text from tool response parts.
+ * Only the fingerprint of this text is retained by the guards, never the
+ * text itself. Returns null when the parts carry no functionResponse
+ * content. Shared by this service and the daemon's turn-loop guard (ACP
+ * Session) so both runtimes fingerprint results identically and cannot
+ * drift (issue #9450 requirement #6).
+ */
+export function extractToolResultText(
+  responseParts: readonly Part[],
+): string | null {
+  const chunks: string[] = [];
+  for (const part of responseParts) {
+    const functionResponse = part.functionResponse;
+    if (!functionResponse) continue;
+    // Oversized results arrive as persistence stubs whose envelope embeds
+    // a per-call unique file path; fingerprint the semantic payload only
+    // (see stripPersistenceEnvelope) so identical underlying results stay
+    // identical no matter where they were persisted.
+    chunks.push(
+      JSON.stringify(functionResponse.response ?? {}, (_key, value) =>
+        typeof value === 'string' ? stripPersistenceEnvelope(value) : value,
+      ),
+    );
+  }
+  return chunks.length > 0 ? chunks.join('\n') : null;
+}
+
+/**
+ * sha256 fingerprint of a tool result's model-visible text (see
+ * extractToolResultText), or null when the parts carry no functionResponse
+ * content. Shared with the daemon's turn-loop guard for the same
+ * cannot-drift reason as extractToolResultText.
+ */
+export function fingerprintToolResult(
+  responseParts: readonly Part[],
+): string | null {
+  const resultText = extractToolResultText(responseParts);
+  if (resultText === null) return null;
+  return createHash('sha256').update(resultText).digest('hex');
+}
+
 /**
  * Service for detecting and preventing infinite loops in AI responses.
  * Monitors tool call repetitions and content sentence repetitions.
@@ -201,6 +389,59 @@ export class LoopDetectionService {
   private capKeyCounts = new Map<string, number>();
   private capMaxKeyRepeat = 0;
 
+  // Stateful-read contribution to the cap's stuck signal: the running max of
+  // the CURRENT consecutive-identical-result streaks (see
+  // statefulRepeatState). Unlike capMaxKeyRepeat this disarms when a result
+  // changes — a frozen-then-thawed board must release the cap exactly as it
+  // releases the result-time global-duplicate count, so the adaptive cap
+  // cannot latch a stale peak from a frozen phase and halt productive
+  // polling just past the soft cap. Kept separate from capMaxKeyRepeat
+  // (which stays a high-water mark for deterministic tools, where a 6x
+  // repeat is never productive even if the model later varies its calls).
+  private statefulCapKeyRepeat = 0;
+
+  // Result-aware tracking for stateful read tools (see STATEFUL_READ_TOOLS).
+  // Keyed by the (tool, args) repeat key. `resultsObserved` /
+  // `unchangedStreak` count results within the CURRENT consecutive-identical
+  // streak (restarted when the streak breaks); `lastFingerprint` survives
+  // streak breaks so a state change is still visible across interleaved
+  // calls (used by the action-stagnation reset).
+  // `consecutiveIdenticalResults` is the stuck-repetition evidence for the
+  // global-duplicate detector and the adaptive cap (replacing the
+  // request-time global-duplicate counting and the cap's stuck-repetition
+  // counting for these tools): it counts results that repeat the key's
+  // IMMEDIATELY PRECEDING result (interleaved calls still accumulate) and
+  // restarts at 1 whenever a result differs from its predecessor — the same
+  // call returning changed state is productive and must not accumulate
+  // toward either halt. Counting turn-wide (key, fingerprint) totals
+  // instead would halt a board oscillating between two byte-identical
+  // states even though every result there differs from its predecessor.
+  private statefulRepeatState = new Map<
+    string,
+    {
+      resultsObserved: number;
+      unchangedStreak: number;
+      consecutiveIdenticalResults: number;
+      lastFingerprint: string | undefined;
+    }
+  >();
+
+  // callId → request pairing so results can be matched to their calls when
+  // the runtime only has the response (populated on ToolCallRequest events,
+  // consumed by recordToolResultByCallId).
+  private requestByCallId = new Map<string, { name: string; args: object }>();
+
+  // Repeat keys known to belong to a stateful read tool, so the
+  // alternating-pattern carve-out can tell which window participants are
+  // stateful (repeat keys are hashes and do not carry the tool name).
+  private statefulRepeatKeys = new Set<string>();
+
+  // Rolling per-key result fingerprints for the alternating-pattern
+  // carve-out (see checkAlternatingPattern), capped at one window's worth
+  // of occurrences per key so a full ABAB window is judged on the results
+  // its own requests produced.
+  private statefulAlternationHistory = new Map<string, string[]>();
+
   // Loop type of the most recent firing. Bubbled up through the
   // LoopDetected event so callers (non-interactive CLI, telemetry) can tell
   // the user which detector actually fired.
@@ -231,6 +472,142 @@ export class LoopDetectionService {
       this.config,
       new LoopDetectionDisabledEvent(this.promptId),
     );
+  }
+
+  /**
+   * Records the executed result of a tool call so the guards can treat
+   * stateful read tools (see STATEFUL_READ_TOOLS) result-aware: identical
+   * arguments whose results keep changing are productive polling, not a
+   * loop (issue #9450). Call this once per executed call, after execution
+   * and before the model is re-prompted with the result. Runtime paths that
+   * only hold the response (no name/args) can use recordToolResultByCallId.
+   *
+   * Returns true when the recorded result itself trips a detector (the
+   * result-aware global-duplicate count); callers must then halt the turn
+   * the same way they do for an event-detected loop.
+   */
+  recordToolResult(
+    toolCall: { name: string; args: object },
+    responseParts: readonly Part[],
+  ): boolean {
+    if (this.loopDetected) return true;
+    if (this.disabledForSession) return false;
+    if (!this.isStatefulReadTool(toolCall.name)) return false;
+
+    const fingerprint = fingerprintToolResult(responseParts);
+    if (fingerprint === null) return false;
+    const key = this.getToolCallKey(toolCall);
+
+    // Rolling result history for the alternating-pattern carve-out (see
+    // checkAlternatingPattern), capped at one window's occurrences per key.
+    const history = this.statefulAlternationHistory.get(key) ?? [];
+    history.push(fingerprint);
+    if (history.length > ALTERNATING_PATTERN_CYCLES) {
+      history.shift();
+    }
+    this.statefulAlternationHistory.set(key, history);
+
+    // Consecutive-streak evidence for the always-on guard. The state entry
+    // can predate the streak (lastFingerprint survives streak breaks), so
+    // create it lazily but only count results while a streak exists.
+    let state = this.statefulRepeatState.get(key);
+    if (!state) {
+      state = {
+        resultsObserved: 0,
+        unchangedStreak: 0,
+        consecutiveIdenticalResults: 0,
+        lastFingerprint: undefined,
+      };
+      this.statefulRepeatState.set(key, state);
+    }
+    const firstResult = state.lastFingerprint === undefined;
+    const fingerprintChanged =
+      !firstResult && state.lastFingerprint !== fingerprint;
+    if (this.lastToolCallKey === key) {
+      state.resultsObserved++;
+      if (firstResult) {
+        state.lastFingerprint = fingerprint;
+      } else if (state.lastFingerprint === fingerprint) {
+        state.unchangedStreak++;
+      } else {
+        state.unchangedStreak = 0;
+        state.lastFingerprint = fingerprint;
+      }
+    } else {
+      state.lastFingerprint = fingerprint;
+    }
+
+    // A changed result is observable progress: restart the same-name streak
+    // so ACTION_STAGNATION does not fire on productive polling.
+    if (fingerprintChanged && this.lastSeenToolName === toolCall.name) {
+      this.sameNameStreak = 1;
+    }
+
+    // Consecutive identical-result counting (see statefulRepeatState): a
+    // result that differs from the key's predecessor restarts the count, so
+    // an oscillating board never accumulates toward either halt.
+    const consecutiveIdentical = fingerprintChanged
+      ? 1
+      : state.consecutiveIdenticalResults + 1;
+    state.consecutiveIdenticalResults = consecutiveIdentical;
+
+    // Cap stuck signal from result evidence (see statefulCapKeyRepeat). A
+    // raised peak must NOT latch: when a result changes, recompute the peak
+    // from the keys' CURRENT streaks so a thawed board disarms the adaptive
+    // cap exactly as it disarms the result-time global-duplicate count.
+    if (consecutiveIdentical > this.statefulCapKeyRepeat) {
+      this.statefulCapKeyRepeat = consecutiveIdentical;
+    } else if (fingerprintChanged) {
+      let peak = consecutiveIdentical;
+      for (const other of this.statefulRepeatState.values()) {
+        if (other.consecutiveIdenticalResults > peak) {
+          peak = other.consecutiveIdenticalResults;
+        }
+      }
+      this.statefulCapKeyRepeat = peak;
+    }
+
+    // The global-duplicate detector is gated (skipLoopDetection) exactly as
+    // its request-time counterpart in addAndCheckHeuristicLoops.
+    if (
+      !this.config.getSkipLoopDetection() &&
+      consecutiveIdentical >= GLOBAL_DUPLICATE_THRESHOLD
+    ) {
+      this.lastLoopType = LoopType.GLOBAL_TOOL_CALL_DUPLICATE;
+      logLoopDetected(
+        this.config,
+        new LoopDetectedEvent(
+          LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+          this.promptId,
+        ),
+      );
+      this.loopDetected = true;
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Variant of recordToolResult for runtimes that only have the response:
+   * the request is resolved through the callId pairing populated on
+   * ToolCallRequest events. Unknown callIds (e.g. client-initiated calls
+   * that never streamed through this service) are ignored.
+   */
+  recordToolResultByCallId(
+    callId: string,
+    responseParts: readonly Part[],
+  ): boolean {
+    const request = this.requestByCallId.get(callId);
+    if (!request) return false;
+    this.requestByCallId.delete(callId);
+    return this.recordToolResult(
+      { name: request.name, args: request.args },
+      responseParts,
+    );
+  }
+
+  private isStatefulReadTool(toolName: string): boolean {
+    return isStatefulReadTool(toolName);
   }
 
   private getToolCallKey(toolCall: { name: string; args: object }): string {
@@ -274,7 +651,16 @@ export class LoopDetectionService {
 
         this.trackToolCall(event.value);
         const toolCallKey = this.getToolCallKey(event.value);
-        const globalDup = this.checkGlobalDuplicate(toolCallKey);
+        // Stateful read tools are counted post-execution in
+        // recordToolResult, keyed on (call, result fingerprint) instead of
+        // args alone (issue #9450).
+        const stateful = this.isStatefulReadTool(event.value.name);
+        if (stateful) {
+          this.statefulRepeatKeys.add(toolCallKey);
+        }
+        const globalDup = stateful
+          ? false
+          : this.checkGlobalDuplicate(toolCallKey);
         const alternating = this.checkAlternatingPattern(toolCallKey);
         const readFileLoop = this.checkReadFileLoop();
         const actionStagnation = this.checkActionStagnation();
@@ -293,6 +679,8 @@ export class LoopDetectionService {
         // streak reset).
         this.globalToolCallCounts.clear();
         this.recentToolCallKeys = [];
+        this.statefulAlternationHistory.clear();
+        this.statefulRepeatKeys.clear();
         break;
       }
       case GeminiEventType.Content: {
@@ -346,6 +734,18 @@ export class LoopDetectionService {
       this.resetToolCallCount();
       this.capKeyCounts.clear();
       this.capMaxKeyRepeat = 0;
+      this.statefulCapKeyRepeat = 0;
+      // A retry replays the failed attempt's tool calls; drop the stateful
+      // result evidence too so the replayed attempt is judged on its own
+      // results (the consecutive counts re-accumulate as results land,
+      // consistent with the capKeyCounts/globalToolCallCounts clears).
+      for (const state of this.statefulRepeatState.values()) {
+        state.resultsObserved = 0;
+        state.unchangedStreak = 0;
+        state.consecutiveIdenticalResults = 0;
+      }
+      this.statefulAlternationHistory.clear();
+      this.statefulRepeatKeys.clear();
       return false;
     }
 
@@ -364,20 +764,45 @@ export class LoopDetectionService {
     // it (consecutive-identical and the adaptive cap's stuck tracker). Args
     // can be large (e.g. write_file content), so avoid recomputing per guard.
     const key = this.getToolCallKey(event.value);
+    const stateful = this.isStatefulReadTool(event.value.name);
+    if (stateful) {
+      this.statefulRepeatKeys.add(key);
+    }
+
+    // Pair requests with their later results (recordToolResultByCallId).
+    // Only stateful read tools participate: recordToolResult rejects every
+    // other tool, so tracking them would just accumulate full args objects
+    // (write_file args can carry whole file contents) until eviction.
+    if (event.value.callId && stateful) {
+      this.requestByCallId.set(event.value.callId, {
+        name: event.value.name,
+        args: event.value.args,
+      });
+      if (this.requestByCallId.size > MAX_TRACKED_TOOL_REQUESTS) {
+        const oldest = this.requestByCallId.keys().next().value;
+        if (oldest !== undefined) this.requestByCallId.delete(oldest);
+      }
+    }
 
     // Always-on stuck-repetition tracking for the adaptive cap (see
     // checkTurnToolCallCap): lets the cap tell a productive turn from a stuck
-    // one, regardless of skipLoopDetection.
-    this.trackCapKeyRepeat(key);
+    // one, regardless of skipLoopDetection. Stateful read tools are counted
+    // post-execution instead (recordToolResult): the same call returning
+    // changed state is productive and must not build the stuck signal.
+    if (!stateful) {
+      this.trackCapKeyRepeat(key);
+    }
 
     // Consecutive identical tool calls (same name AND identical args) are the
-    // one repetition signal precise enough to halt unconditionally — an
-    // identical call returns an identical result, so it is never productive.
-    // Promoted here from the opt-in tier so it protects every user regardless
-    // of the `skipLoopDetection` config default: the DashScope server rejects
-    // this pattern with a 400 (issue #5019) far below the per-turn cap, so
-    // the gated default left users unprotected.
-    if (this.checkToolCallLoop(key)) {
+    // one repetition signal precise enough to halt unconditionally — for
+    // deterministic tools an identical call returns an identical result, so
+    // it is never productive. Promoted here from the opt-in tier so it
+    // protects every user regardless of the `skipLoopDetection` config
+    // default: the DashScope server rejects this pattern with a 400 (issue
+    // #5019) far below the per-turn cap, so the gated default left users
+    // unprotected. For stateful read tools the guard additionally requires
+    // the observed results to be unchanged (issue #9450).
+    if (this.checkToolCallLoop(event.value, key)) {
       this.loopDetected = true;
       return true;
     }
@@ -394,14 +819,50 @@ export class LoopDetectionService {
     return false;
   }
 
-  private checkToolCallLoop(key: string): boolean {
+  private checkToolCallLoop(
+    toolCall: { name: string; args: object },
+    key: string,
+  ): boolean {
     if (this.lastToolCallKey === key) {
       this.toolCallRepetitionCount++;
     } else {
+      // The streak moved on: restart the result evidence for both the old
+      // and the new key so each consecutive streak is judged on the results
+      // observed within it.
+      for (const streakKey of [this.lastToolCallKey, key]) {
+        if (!streakKey) continue;
+        const state = this.statefulRepeatState.get(streakKey);
+        if (state) {
+          state.resultsObserved = 0;
+          state.unchangedStreak = 0;
+        }
+      }
       this.lastToolCallKey = key;
       this.toolCallRepetitionCount = 1;
     }
     if (this.toolCallRepetitionCount >= TOOL_CALL_LOOP_THRESHOLD) {
+      if (this.isStatefulReadTool(toolCall.name)) {
+        // Result-aware guard (issue #9450): identical arguments to a stateful
+        // read do not imply an identical result, so only halt when the
+        // executed results corroborate the loop. By the Nth identical request
+        // the prior N-1 results have been recorded; if they were ALL observed
+        // and unchanged, the repetition is genuinely unproductive. If some
+        // result changed, the model's re-poll was productive — restart the
+        // streak instead of halting. Missing result evidence (results never
+        // recorded for this streak) fails safe and keeps the pre-#9450
+        // behavior, so the DashScope protection (#5019) is never loosened by
+        // a wiring gap.
+        const state = this.statefulRepeatState.get(key);
+        const expectedResults = this.toolCallRepetitionCount - 1;
+        if (state && state.resultsObserved >= expectedResults) {
+          if (state.unchangedStreak < expectedResults - 1) {
+            this.toolCallRepetitionCount = 1;
+            state.resultsObserved = 0;
+            state.unchangedStreak = 0;
+            return false;
+          }
+        }
+      }
       this.lastLoopType = LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS;
       logLoopDetected(
         this.config,
@@ -895,7 +1356,10 @@ export class LoopDetectionService {
     if (
       !shouldHaltOnTurnToolCallCap(
         this.turnToolCallTotal,
-        this.capMaxKeyRepeat,
+        // Request-time evidence (deterministic tools) and result-time
+        // evidence (stateful reads) feed the same stuck signal; the
+        // stateful half disarms when results change (statefulCapKeyRepeat).
+        Math.max(this.capMaxKeyRepeat, this.statefulCapKeyRepeat),
         this.config.getMaxToolCallsPerTurn(),
         this.config.isMaxToolCallsPerTurnExplicit(),
       )
@@ -938,7 +1402,8 @@ export class LoopDetectionService {
    * Alternating-pattern detection: catches ABABAB… patterns where the model
    * flips between two distinct tool calls. Tracked via a sliding window of
    * tool-call keys; when the window fills with alternating A/B values the
-   * turn is halted.
+   * turn is halted — except for stateful read participants whose observed
+   * results keep changing (issue #9450), see the carve-out below.
    */
   private checkAlternatingPattern(toolCallKey: string): boolean {
     const maxLen = 2 * ALTERNATING_PATTERN_CYCLES;
@@ -959,6 +1424,36 @@ export class LoopDetectionService {
     for (let i = 0; i < maxLen; i++) {
       const expected = i % 2 === 0 ? a : b;
       if (this.recentToolCallKeys[i] !== expected) {
+        return false;
+      }
+    }
+
+    // Result-aware carve-out for stateful read tools (issue #9450):
+    // identical arguments do not imply an identical result, so an ABAB
+    // poller is only stuck when its observed results corroborate it. For
+    // every stateful participant require the results produced by the
+    // window's own prior requests (all of them for the key that opened the
+    // window, all but the in-flight last request for the other); if ANY
+    // recorded result changed, the alternation is making observable
+    // progress and the window restarts. Missing result evidence (results
+    // never recorded) fails safe and keeps the argument-only halt, so a
+    // wiring gap never loosens the guard.
+    const windowTail = this.recentToolCallKeys[maxLen - 1];
+    for (const altKey of [a, b]) {
+      if (!this.statefulRepeatKeys.has(altKey)) continue;
+      const occurrences = this.recentToolCallKeys.filter(
+        (windowKey) => windowKey === altKey,
+      ).length;
+      const expectedResults =
+        altKey === windowTail ? occurrences - 1 : occurrences;
+      if (expectedResults <= 0) continue;
+      const history = this.statefulAlternationHistory.get(altKey);
+      if (!history || history.length < expectedResults) {
+        continue;
+      }
+      const recent = history.slice(-expectedResults);
+      if (recent.some((fp) => fp !== recent[0])) {
+        this.recentToolCallKeys = [];
         return false;
       }
     }
@@ -996,6 +1491,11 @@ export class LoopDetectionService {
     this.turnToolCallTotalCommitted = 0;
     this.capKeyCounts.clear();
     this.capMaxKeyRepeat = 0;
+    this.statefulCapKeyRepeat = 0;
+    this.statefulRepeatState.clear();
+    this.statefulRepeatKeys.clear();
+    this.statefulAlternationHistory.clear();
+    this.requestByCallId.clear();
   }
 
   private resetToolCallCount(): void {

@@ -204,6 +204,14 @@ export interface AgentExternalMessageEvent {
 export interface AgentFinishEvent {
   subagentId: string;
   terminateReason: string;
+  /**
+   * Which loop detector fired when terminateReason is LOOP_DETECTED
+   * (issue #9450), so stops are attributable instead of collapsing into
+   * one generic label. Read by AgentTool's FINISH handler, which appends
+   * it to the failed task card's terminateReason; the journaled sink is
+   * SubagentExecutionEvent.loop_type (see agent-headless.ts).
+   */
+  loopType?: string;
   timestamp: number;
   rounds?: number;
   totalDurationMs?: number;

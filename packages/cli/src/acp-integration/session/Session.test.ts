@@ -9240,6 +9240,14 @@ describe('Session', () => {
           invalidToolParamErrors: new Map<string, number>(),
           toolCallKeyCounts: new Map<string, number>(),
           maxToolCallKeyRepeat: 0,
+          statefulResultStreaks: new Map<
+            string,
+            {
+              consecutiveIdenticalResults: number;
+              lastFingerprint: string | undefined;
+            }
+          >(),
+          statefulMaxResultRepeat: 0,
           loopDetected: false,
         };
 
@@ -9303,6 +9311,14 @@ describe('Session', () => {
           invalidToolParamErrors: new Map<string, number>(),
           toolCallKeyCounts: new Map<string, number>(),
           maxToolCallKeyRepeat: 0,
+          statefulResultStreaks: new Map<
+            string,
+            {
+              consecutiveIdenticalResults: number;
+              lastFingerprint: string | undefined;
+            }
+          >(),
+          statefulMaxResultRepeat: 0,
           loopDetected: false,
         };
 
@@ -9369,6 +9385,14 @@ describe('Session', () => {
           invalidToolParamErrors: new Map<string, number>(),
           toolCallKeyCounts: new Map<string, number>(),
           maxToolCallKeyRepeat: 0,
+          statefulResultStreaks: new Map<
+            string,
+            {
+              consecutiveIdenticalResults: number;
+              lastFingerprint: string | undefined;
+            }
+          >(),
+          statefulMaxResultRepeat: 0,
           loopDetected: false,
         };
 
@@ -9595,6 +9619,14 @@ describe('Session', () => {
           invalidToolParamErrors: new Map<string, number>(),
           toolCallKeyCounts: new Map<string, number>(),
           maxToolCallKeyRepeat: 0,
+          statefulResultStreaks: new Map<
+            string,
+            {
+              consecutiveIdenticalResults: number;
+              lastFingerprint: string | undefined;
+            }
+          >(),
+          statefulMaxResultRepeat: 0,
           loopDetected: false,
         };
         const calls = Array.from({ length: 5 }, (_, index) => ({
@@ -9658,6 +9690,14 @@ describe('Session', () => {
           invalidToolParamErrors: new Map<string, number>(),
           toolCallKeyCounts: new Map<string, number>(),
           maxToolCallKeyRepeat: 0,
+          statefulResultStreaks: new Map<
+            string,
+            {
+              consecutiveIdenticalResults: number;
+              lastFingerprint: string | undefined;
+            }
+          >(),
+          statefulMaxResultRepeat: 0,
           loopDetected: false,
         };
         // Six identical (tool, args) calls below the cap. Core's always-on
@@ -9727,6 +9767,14 @@ describe('Session', () => {
           invalidToolParamErrors: new Map<string, number>(),
           toolCallKeyCounts: new Map<string, number>(),
           maxToolCallKeyRepeat: 0,
+          statefulResultStreaks: new Map<
+            string,
+            {
+              consecutiveIdenticalResults: number;
+              lastFingerprint: string | undefined;
+            }
+          >(),
+          statefulMaxResultRepeat: 0,
           loopDetected: false,
         };
         const calls = Array.from({ length: 6 }, (_, index) => ({
@@ -9806,6 +9854,14 @@ describe('Session', () => {
           invalidToolParamErrors: new Map<string, number>(),
           toolCallKeyCounts: new Map<string, number>(),
           maxToolCallKeyRepeat: 0,
+          statefulResultStreaks: new Map<
+            string,
+            {
+              consecutiveIdenticalResults: number;
+              lastFingerprint: string | undefined;
+            }
+          >(),
+          statefulMaxResultRepeat: 0,
           loopDetected: false,
         };
         // The prompt loop calls runToolCalls once per model response against
@@ -9901,6 +9957,14 @@ describe('Session', () => {
           invalidToolParamErrors: new Map<string, number>(),
           toolCallKeyCounts: new Map<string, number>(),
           maxToolCallKeyRepeat: 0,
+          statefulResultStreaks: new Map<
+            string,
+            {
+              consecutiveIdenticalResults: number;
+              lastFingerprint: string | undefined;
+            }
+          >(),
+          statefulMaxResultRepeat: 0,
           loopDetected: false,
         };
         // Six identical (tool, args) calls in one batch — three execute, and
@@ -10001,6 +10065,14 @@ describe('Session', () => {
           invalidToolParamErrors: new Map<string, number>(),
           toolCallKeyCounts: new Map<string, number>(),
           maxToolCallKeyRepeat: 0,
+          statefulResultStreaks: new Map<
+            string,
+            {
+              consecutiveIdenticalResults: number;
+              lastFingerprint: string | undefined;
+            }
+          >(),
+          statefulMaxResultRepeat: 0,
           loopDetected: false,
         };
         // One diverse call plus six identical ones push the turn past the
@@ -10096,6 +10168,14 @@ describe('Session', () => {
           invalidToolParamErrors: new Map<string, number>(),
           toolCallKeyCounts: new Map<string, number>(),
           maxToolCallKeyRepeat: 0,
+          statefulResultStreaks: new Map<
+            string,
+            {
+              consecutiveIdenticalResults: number;
+              lastFingerprint: string | undefined;
+            }
+          >(),
+          statefulMaxResultRepeat: 0,
           loopDetected: false,
         };
         const calls = [
@@ -10184,6 +10264,14 @@ describe('Session', () => {
           invalidToolParamErrors: new Map<string, number>(),
           toolCallKeyCounts: new Map<string, number>(),
           maxToolCallKeyRepeat: 0,
+          statefulResultStreaks: new Map<
+            string,
+            {
+              consecutiveIdenticalResults: number;
+              lastFingerprint: string | undefined;
+            }
+          >(),
+          statefulMaxResultRepeat: 0,
           loopDetected: false,
         };
         // 29 prior calls + a batch of 2 diverse calls crosses the backstop
@@ -10290,6 +10378,14 @@ describe('Session', () => {
             invalidToolParamErrors: new Map<string, number>(),
             toolCallKeyCounts: new Map<string, number>(),
             maxToolCallKeyRepeat: 0,
+            statefulResultStreaks: new Map<
+              string,
+              {
+                consecutiveIdenticalResults: number;
+                lastFingerprint: string | undefined;
+              }
+            >(),
+            statefulMaxResultRepeat: 0,
             loopDetected: false,
           };
           const result = await (
@@ -10382,6 +10478,14 @@ describe('Session', () => {
           invalidToolParamErrors: new Map<string, number>(),
           toolCallKeyCounts: new Map<string, number>(),
           maxToolCallKeyRepeat: 0,
+          statefulResultStreaks: new Map<
+            string,
+            {
+              consecutiveIdenticalResults: number;
+              lastFingerprint: string | undefined;
+            }
+          >(),
+          statefulMaxResultRepeat: 0,
           loopDetected: false,
         };
 
@@ -10469,6 +10573,14 @@ describe('Session', () => {
             invalidToolParamErrors: new Map<string, number>(),
             toolCallKeyCounts: new Map<string, number>(),
             maxToolCallKeyRepeat: 0,
+            statefulResultStreaks: new Map<
+              string,
+              {
+                consecutiveIdenticalResults: number;
+                lastFingerprint: string | undefined;
+              }
+            >(),
+            statefulMaxResultRepeat: 0,
             loopDetected: false,
           };
 
@@ -10601,6 +10713,172 @@ describe('Session', () => {
         expect(
           secondFollowUp.message[0].functionResponse?.response?.['error'],
         ).toContain('Duplicate provider tool call id "shell_1"');
+      });
+
+      describe('result-aware daemon guard for stateful reads (issue #9450)', () => {
+        const TASK_LIST_ARGS = {
+          status: 'in_progress',
+          owner: 'peer-a',
+          blockedBy: '',
+        };
+
+        const freshLoopState = () => ({
+          totalToolCalls: 0,
+          invalidToolParamErrors: new Map<string, number>(),
+          toolCallKeyCounts: new Map<string, number>(),
+          maxToolCallKeyRepeat: 0,
+          statefulResultStreaks: new Map<
+            string,
+            {
+              consecutiveIdenticalResults: number;
+              lastFingerprint: string | undefined;
+            }
+          >(),
+          statefulMaxResultRepeat: 0,
+          loopDetected: false,
+          loopType: undefined as core.LoopType | undefined,
+        });
+
+        // A task_list mock whose executed result changes (or freezes) per
+        // call, mirroring a task board peers keep mutating.
+        const installTaskListTool = (boards: () => string) => {
+          const execute = vi.fn().mockImplementation(async () => ({
+            llmContent: boards(),
+            returnDisplay: 'ok',
+          }));
+          mockToolRegistry.getTool.mockImplementation((name: string) =>
+            name === 'task_list'
+              ? {
+                  name: 'task_list',
+                  kind: core.Kind.Read,
+                  displayName: 'TaskList',
+                  description: 'TaskList',
+                  build: vi.fn().mockImplementation((args) => ({
+                    params: args,
+                    getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+                    getDescription: vi.fn().mockReturnValue('task_list'),
+                    toolLocations: vi.fn().mockReturnValue([]),
+                    execute,
+                  })),
+                  canUpdateOutput: false,
+                  isOutputMarkdown: false,
+                }
+              : undefined,
+          );
+          return execute;
+        };
+
+        const runTaskListPoll = (
+          loopState: ReturnType<typeof freshLoopState>,
+          round: number,
+        ) =>
+          (
+            session as unknown as {
+              runToolCalls: (
+                abortSignal: AbortSignal,
+                promptId: string,
+                calls: unknown[],
+                loopState: ReturnType<typeof freshLoopState>,
+              ) => Promise<{ loopDetected?: boolean; parts: Part[] }>;
+            }
+          ).runToolCalls(
+            new AbortController().signal,
+            `prompt-task-list-${round}`,
+            [
+              {
+                id: `task_list_${round}`,
+                name: 'task_list',
+                args: TASK_LIST_ARGS,
+              },
+            ],
+            loopState,
+          );
+
+        it('does not halt a daemon task_list poller while the board keeps changing (skipLoopDetection=false)', async () => {
+          // The exact #9450 shape on the daemon runtime: identical args,
+          // every executed result differing. Pre-fix the request-time
+          // global-duplicate mirror halted at the 6th identical-args poll.
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(100);
+          mockConfig.isMaxToolCallsPerTurnExplicit = vi
+            .fn()
+            .mockReturnValue(false);
+          mockConfig.getSkipLoopDetection = vi.fn().mockReturnValue(false);
+          let boardVersion = 0;
+          const execute = installTaskListTool(
+            () => `board state v${++boardVersion}`,
+          );
+          const loopState = freshLoopState();
+
+          for (let round = 0; round < 8; round++) {
+            const result = await runTaskListPoll(loopState, round);
+            expect(result.loopDetected ?? false).toBe(false);
+          }
+          expect(execute).toHaveBeenCalledTimes(8);
+          expect(loopState.maxToolCallKeyRepeat).toBe(0);
+          expect(loopState.loopDetected).toBe(false);
+        });
+
+        it('still halts a daemon task_list poller on a frozen board (skipLoopDetection=false)', async () => {
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(100);
+          mockConfig.isMaxToolCallsPerTurnExplicit = vi
+            .fn()
+            .mockReturnValue(false);
+          mockConfig.getSkipLoopDetection = vi.fn().mockReturnValue(false);
+          installTaskListTool(() => 'frozen board');
+          const loopState = freshLoopState();
+
+          let haltedAt = -1;
+          for (let round = 0; round < 8 && haltedAt < 0; round++) {
+            const result = await runTaskListPoll(loopState, round);
+            if (result.loopDetected) haltedAt = round;
+          }
+          // The 6th identical result trips the result-time global-duplicate
+          // mirror (GLOBAL_DUPLICATE_THRESHOLD = 6); the 6th request is not
+          // executed because the batch is skipped whole.
+          expect(haltedAt).toBeGreaterThanOrEqual(0);
+          expect(loopState.loopType).toBe(
+            core.LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+          );
+        });
+
+        it('keeps a frozen-then-thawed daemon poller alive past the adaptive cap', async () => {
+          // CLI defaults: skipLoopDetection=true, adaptive soft cap. A frozen
+          // phase builds the result-time stuck signal; once the board thaws
+          // the signal must disarm so productive polling continues past the
+          // soft cap (the cap-ratchet regression on the daemon mirror).
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(20);
+          mockConfig.isMaxToolCallsPerTurnExplicit = vi
+            .fn()
+            .mockReturnValue(false);
+          mockConfig.getSkipLoopDetection = vi.fn().mockReturnValue(true);
+          const boards: string[] = [];
+          for (let i = 0; i < 6; i++) boards.push('frozen board');
+          let thawed = false;
+          const execute = installTaskListTool(() => {
+            if (boards.length > 0) return boards.shift()!;
+            thawed = true;
+            return `thawed board v${execute.mock.calls.length}`;
+          });
+          const loopState = freshLoopState();
+
+          let fired = false;
+          for (let round = 0; round < 40 && !fired; round++) {
+            const result = await runTaskListPoll(loopState, round);
+            fired = result.loopDetected ?? false;
+          }
+          expect(fired).toBe(false);
+          expect(thawed).toBe(true);
+          expect(loopState.loopDetected).toBe(false);
+        });
       });
     });
 
@@ -11138,6 +11416,14 @@ describe('Session', () => {
                 invalidToolParamErrors: Map<string, number>;
                 toolCallKeyCounts: Map<string, number>;
                 maxToolCallKeyRepeat: number;
+                statefulResultStreaks: Map<
+                  string,
+                  {
+                    consecutiveIdenticalResults: number;
+                    lastFingerprint: string | undefined;
+                  }
+                >;
+                statefulMaxResultRepeat: number;
                 loopDetected: boolean;
               },
             ) => Promise<unknown>;
@@ -11151,6 +11437,14 @@ describe('Session', () => {
             invalidToolParamErrors: new Map(),
             toolCallKeyCounts: new Map<string, number>(),
             maxToolCallKeyRepeat: 0,
+            statefulResultStreaks: new Map<
+              string,
+              {
+                consecutiveIdenticalResults: number;
+                lastFingerprint: string | undefined;
+              }
+            >(),
+            statefulMaxResultRepeat: 0,
             loopDetected: false,
           },
         );
@@ -27090,6 +27384,14 @@ describe('Session', () => {
         invalidToolParamErrors: new Map<string, number>(),
         toolCallKeyCounts: new Map<string, number>(),
         maxToolCallKeyRepeat: 0,
+        statefulResultStreaks: new Map<
+          string,
+          {
+            consecutiveIdenticalResults: number;
+            lastFingerprint: string | undefined;
+          }
+        >(),
+        statefulMaxResultRepeat: 0,
         loopDetected: false,
         repeatedToolFailureMode: 'off',
         repeatedToolFailureState: createRepeatedToolFailureGuardState(),
@@ -27831,6 +28133,14 @@ describe('Session', () => {
           invalidToolParamErrors: new Map([[core.ToolNames.AGENT, 2]]),
           toolCallKeyCounts: new Map<string, number>(),
           maxToolCallKeyRepeat: 0,
+          statefulResultStreaks: new Map<
+            string,
+            {
+              consecutiveIdenticalResults: number;
+              lastFingerprint: string | undefined;
+            }
+          >(),
+          statefulMaxResultRepeat: 0,
           loopDetected: false,
           repeatedToolFailureMode: 'off',
           repeatedToolFailureState: createRepeatedToolFailureGuardState(),
@@ -27930,6 +28240,14 @@ describe('Session', () => {
           invalidToolParamErrors: new Map([[core.ToolNames.AGENT, 2]]),
           toolCallKeyCounts: new Map<string, number>(),
           maxToolCallKeyRepeat: 0,
+          statefulResultStreaks: new Map<
+            string,
+            {
+              consecutiveIdenticalResults: number;
+              lastFingerprint: string | undefined;
+            }
+          >(),
+          statefulMaxResultRepeat: 0,
           loopDetected: false,
           repeatedToolFailureMode: 'off',
           repeatedToolFailureState: createRepeatedToolFailureGuardState(),
@@ -29044,6 +29362,14 @@ describe('Session', () => {
         invalidToolParamErrors: new Map<string, number>(),
         toolCallKeyCounts: new Map<string, number>(),
         maxToolCallKeyRepeat: 0,
+        statefulResultStreaks: new Map<
+          string,
+          {
+            consecutiveIdenticalResults: number;
+            lastFingerprint: string | undefined;
+          }
+        >(),
+        statefulMaxResultRepeat: 0,
         loopDetected: false,
         repeatedToolFailureMode: 'off',
         repeatedToolFailureState: createRepeatedToolFailureGuardState(),

@@ -3354,6 +3354,43 @@ export class GeminiClient {
       }
 
       if (messageType === SendMessageType.ToolResult) {
+        // Record executed tool results for stateful read tools (task_list)
+        // so the loop guards can distinguish productive re-polling — the
+        // shared task board changed between identical calls — from a stuck
+        // loop (issue #9450). A detection here (the result-aware global
+        // duplicate count) halts the turn exactly like the event-loop
+        // guards below.
+        for (const part of requestToSend) {
+          if (
+            typeof part !== 'object' ||
+            part === null ||
+            !('functionResponse' in part)
+          ) {
+            continue;
+          }
+          const functionResponseId = (part as Part).functionResponse?.id;
+          if (!functionResponseId) continue;
+          if (
+            this.loopDetector.recordToolResultByCallId(functionResponseId, [
+              part as Part,
+            ])
+          ) {
+            for (const goalEvent of await finalizeInterruptedGoalTurn()) {
+              yield goalEvent;
+            }
+            const loopType = this.loopDetector.getLastLoopType();
+            yield {
+              type: GeminiEventType.LoopDetected,
+              ...(loopType && { value: { loopType } }),
+            };
+            await arenaAgentClient?.reportError('Loop detected');
+            this.lastApiCompletionTimestamp = Date.now();
+            endCurrentInteraction('error', 'loop detected', 'loop_detected');
+            this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
+            this.fireLoopDetectedStopFailure(loopType);
+            return turn;
+          }
+        }
         const toolResultMemory =
           await this.tryConsumeMemoryPrefetch('tool_result');
         if (toolResultMemory?.prompt) {
