@@ -2051,6 +2051,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       const isReadOnly = await isShellCommandReadOnlyASTInDirectory(
         command,
         this.params.directory || this.config.getTargetDir(),
+        { extraReadOnlyRoots: this.config.getPlanModeReadOnlyRoots() },
       );
       if (isReadOnly) {
         return 'allow';
@@ -2125,7 +2126,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
     for (const sub of subCommands) {
       let isReadOnly = false;
       try {
-        isReadOnly = await isShellCommandReadOnlyASTInDirectory(sub, cwd);
+        isReadOnly = await isShellCommandReadOnlyASTInDirectory(sub, cwd, {
+          extraReadOnlyRoots: this.config.getPlanModeReadOnlyRoots(),
+        });
       } catch {
         // conservative: treat unknown commands as requiring confirmation
       }

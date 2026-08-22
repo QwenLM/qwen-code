@@ -454,6 +454,78 @@ export interface AutoModeSettings {
   classifyAllShell?: boolean;
 }
 
+/** Settings for the PLAN approval mode shell policy. */
+export interface PlanModeSettings {
+  /**
+   * Extra root command names to treat as read-only, on top of the
+   * classifier's built-in set. Entries vouch for the entire binary,
+   * including any mutating sub-commands it may have.
+   *
+   * Every other conservative rule still applies on top: redirections,
+   * command substitution, environment-assignment prefixes, and pipes into
+   * unknown commands keep their `unknown`/`write` classification, and roots
+   * the classifier already understands (`rm`, `git`, `tee`, …) keep their
+   * built-in classification. Shell interpreters and generic command wrappers
+   * are rejected outright — see `NON_VOUCHABLE_READ_ONLY_ROOTS`.
+   */
+  extraReadOnlyCommands?: string[];
+}
+
+/**
+ * Roots that can never be vouched for as read-only. Each one exists to run
+ * some other command, so accepting it would let a single settings entry
+ * bypass the AST analysis entirely (`bash -c 'rm -rf /'`).
+ */
+const NON_VOUCHABLE_READ_ONLY_ROOTS = new Set([
+  'bash',
+  'command',
+  'csh',
+  'dash',
+  'doas',
+  'env',
+  'eval',
+  'exec',
+  'fish',
+  'ksh',
+  'nice',
+  'nohup',
+  'script',
+  'sh',
+  'source',
+  'stdbuf',
+  'sudo',
+  'tcsh',
+  'timeout',
+  'xargs',
+  'zsh',
+]);
+
+/** A bare command name: no path separators, whitespace, or shell metacharacters. */
+const BARE_COMMAND_NAME = /^[a-z0-9][a-z0-9._+-]*$/;
+
+const EMPTY_READ_ONLY_ROOTS: ReadonlySet<string> = new Set();
+
+/**
+ * Normalize `permissions.planMode.extraReadOnlyCommands` into the root-name
+ * set the shell AST classifier matches against. The classifier lowercases the
+ * root token and rejects any command whose raw name differs from it, so
+ * anything that is not a bare lowercase command name could never match and is
+ * dropped rather than silently kept.
+ */
+export function normalizePlanModeReadOnlyRoots(
+  commands: readonly string[] | undefined,
+): ReadonlySet<string> {
+  const roots = new Set<string>();
+  for (const entry of commands ?? []) {
+    if (typeof entry !== 'string') continue;
+    const root = entry.trim().toLowerCase();
+    if (!BARE_COMMAND_NAME.test(root)) continue;
+    if (NON_VOUCHABLE_READ_ONLY_ROOTS.has(root)) continue;
+    roots.add(root);
+  }
+  return roots;
+}
+
 export interface AccessibilitySettings {
   enableLoadingPhrases?: boolean;
   screenReader?: boolean;
@@ -1051,6 +1123,8 @@ export interface ConfigParameters {
     deny?: string[];
     /** Settings consumed by the AUTO approval mode classifier. */
     autoMode?: AutoModeSettings;
+    /** Settings consumed by the PLAN approval mode shell policy. */
+    planMode?: PlanModeSettings;
   };
   /**
    * Optional host policy evaluated with final tool arguments immediately
@@ -1892,6 +1966,7 @@ export class Config {
   private readonly permissionsAsk: string[];
   private readonly permissionsDeny: string[];
   private readonly permissionsAutoMode: AutoModeSettings;
+  private readonly planModeReadOnlyRoots: ReadonlySet<string>;
   private readonly toolDiscoveryCommand: string | undefined;
   private readonly toolCallCommand: string | undefined;
   private readonly mcpServerCommand: string | undefined;
@@ -2228,6 +2303,9 @@ export class Config {
     this.permissionsAsk = params.permissions?.ask || [];
     this.permissionsDeny = params.permissions?.deny || [];
     this.permissionsAutoMode = params.permissions?.autoMode ?? {};
+    this.planModeReadOnlyRoots = normalizePlanModeReadOnlyRoots(
+      params.permissions?.planMode?.extraReadOnlyCommands,
+    );
     this.toolInvocationGuard = params.toolInvocationGuard;
     this.toolDiscoveryCommand = params.toolDiscoveryCommand;
     this.toolCallCommand = params.toolCallCommand;
@@ -6374,6 +6452,20 @@ export class Config {
    */
   getAutoModeSettings(): AutoModeSettings {
     return this.permissionsAutoMode;
+  }
+
+  /**
+   * Root command names the user vouched for as read-only in plan mode.
+   *
+   * Empty outside PLAN approval mode: the vouch exists to stop plan mode from
+   * re-prompting on every invocation of a custom read-only CLI, and must never
+   * widen auto-approval in default/auto/yolo mode, where `permissions.allow`
+   * is the supported way to allow a command.
+   */
+  getPlanModeReadOnlyRoots(): ReadonlySet<string> {
+    return this.getApprovalMode() === ApprovalMode.PLAN
+      ? this.planModeReadOnlyRoots
+      : EMPTY_READ_ONLY_ROOTS;
   }
 
   /**

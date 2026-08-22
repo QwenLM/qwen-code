@@ -17,6 +17,7 @@ import {
   TrustGateError,
   matchesServerPattern,
   matchesAnyServerPattern,
+  normalizePlanModeReadOnlyRoots,
 } from './config.js';
 import { Storage } from './storage.js';
 import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
@@ -8957,6 +8958,99 @@ describe('setApprovalMode with folder trust', () => {
         },
         environment: ['Open-source monorepo'],
       });
+    });
+  });
+
+  describe('normalizePlanModeReadOnlyRoots', () => {
+    it('returns an empty set for undefined or empty input', () => {
+      expect(normalizePlanModeReadOnlyRoots(undefined)).toEqual(new Set());
+      expect(normalizePlanModeReadOnlyRoots([])).toEqual(new Set());
+    });
+
+    it('trims and lowercases entries', () => {
+      expect(normalizePlanModeReadOnlyRoots(['  IB  ', 'MyCli'])).toEqual(
+        new Set(['ib', 'mycli']),
+      );
+    });
+
+    it('drops entries that are not bare command names', () => {
+      expect(
+        normalizePlanModeReadOnlyRoots([
+          '',
+          '   ',
+          'ib list',
+          '/usr/local/bin/ib',
+          'C:\\tools\\ib.exe',
+          'ib;rm',
+          'ib*',
+          '$ib',
+          '-ib',
+        ]),
+      ).toEqual(new Set());
+    });
+
+    it('drops shell interpreters and command wrappers', () => {
+      expect(
+        normalizePlanModeReadOnlyRoots([
+          'bash',
+          'SH',
+          'zsh',
+          'env',
+          'sudo',
+          'xargs',
+          'nohup',
+          'timeout',
+          'exec',
+          'eval',
+          'ib',
+        ]),
+      ).toEqual(new Set(['ib']));
+    });
+  });
+
+  describe('getPlanModeReadOnlyRoots', () => {
+    const params: ConfigParameters = {
+      ...baseParams,
+      permissions: { planMode: { extraReadOnlyCommands: ['ib', 'mycli'] } },
+    };
+
+    it('returns the configured roots in PLAN mode', () => {
+      const config = new Config({ ...params, approvalMode: ApprovalMode.PLAN });
+      expect(config.getPlanModeReadOnlyRoots()).toEqual(
+        new Set(['ib', 'mycli']),
+      );
+    });
+
+    it('returns an empty set outside PLAN mode', () => {
+      for (const mode of [
+        ApprovalMode.DEFAULT,
+        ApprovalMode.AUTO,
+        ApprovalMode.AUTO_EDIT,
+        ApprovalMode.YOLO,
+      ]) {
+        const config = new Config({ ...params, approvalMode: mode });
+        expect(config.getPlanModeReadOnlyRoots()).toEqual(new Set());
+      }
+    });
+
+    it('follows a runtime approval-mode switch', () => {
+      const config = new Config({
+        ...params,
+        approvalMode: ApprovalMode.DEFAULT,
+      });
+      expect(config.getPlanModeReadOnlyRoots()).toEqual(new Set());
+      config.setApprovalMode(ApprovalMode.PLAN);
+      expect(config.getPlanModeReadOnlyRoots()).toEqual(
+        new Set(['ib', 'mycli']),
+      );
+    });
+
+    it('returns an empty set when nothing is configured', () => {
+      const config = new Config({
+        ...baseParams,
+        approvalMode: ApprovalMode.PLAN,
+      });
+      expect(config.getPlanModeReadOnlyRoots()).toEqual(new Set());
     });
   });
 

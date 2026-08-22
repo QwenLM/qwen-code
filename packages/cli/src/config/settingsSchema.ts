@@ -2486,6 +2486,39 @@ const SETTINGS_SCHEMA = {
           },
         },
       },
+      planMode: {
+        type: 'object',
+        label: 'Plan Mode',
+        category: 'Tools',
+        requiresRestart: true,
+        default: {},
+        description:
+          'Settings consumed by the PLAN approval mode shell policy.',
+        showInDialog: false,
+        properties: {
+          extraReadOnlyCommands: {
+            type: 'array',
+            label: 'Plan Mode Extra Read-Only Commands',
+            category: 'Tools',
+            requiresRestart: true,
+            default: undefined as string[] | undefined,
+            description:
+              'Root command names Plan Mode treats as read-only in addition ' +
+              'to its built-in set, so a custom read-only CLI stops ' +
+              'prompting on every invocation. An entry vouches for the ' +
+              'entire binary, including any mutating sub-commands. Every ' +
+              'other Plan Mode rule still applies: redirections, command ' +
+              'substitution, environment-assignment prefixes and pipes into ' +
+              'unknown commands are unaffected, commands the classifier ' +
+              'already understands (git, rm, sed, …) keep their built-in ' +
+              'classification, and shell interpreters or command wrappers ' +
+              '(bash, env, sudo, xargs, …) are ignored. Applies only in Plan ' +
+              'Mode; use permissions.allow for other modes.',
+            showInDialog: false,
+            mergeStrategy: MergeStrategy.UNION,
+          },
+        },
+      },
     },
   },
 

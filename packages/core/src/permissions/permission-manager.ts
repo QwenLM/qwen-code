@@ -76,6 +76,11 @@ export interface PermissionManagerConfig {
    */
   getApprovalMode?(): string;
   /**
+   * Root command names the user vouched for as read-only in plan mode.
+   * Already empty outside PLAN mode, so this is passed through unconditionally.
+   */
+  getPlanModeReadOnlyRoots?(): ReadonlySet<string>;
+  /**
    * Returns the legacy coreTools allowlist.
    *
    * When non-empty, only the tools in this list will be considered enabled at
@@ -510,9 +515,12 @@ export class PermissionManager {
     cwd?: string,
   ): Promise<'allow' | 'ask'> {
     try {
+      const options = {
+        extraReadOnlyRoots: this.config.getPlanModeReadOnlyRoots?.(),
+      };
       const isReadOnly = cwd
-        ? await isShellCommandReadOnlyASTInDirectory(command, cwd)
-        : await isShellCommandReadOnlyAST(command);
+        ? await isShellCommandReadOnlyASTInDirectory(command, cwd, options)
+        : await isShellCommandReadOnlyAST(command, options);
       if (isReadOnly) {
         return 'allow';
       }

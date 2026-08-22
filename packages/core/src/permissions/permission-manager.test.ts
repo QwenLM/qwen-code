@@ -1630,6 +1630,7 @@ function makeConfig(
     projectRoot: string;
     cwd: string;
     approvalMode: string;
+    planModeReadOnlyRoots: ReadonlySet<string>;
   }> = {},
 ): PermissionManagerConfig {
   return {
@@ -1640,6 +1641,8 @@ function makeConfig(
     getProjectRoot: () => opts.projectRoot ?? '/project',
     getCwd: () => opts.cwd ?? '/project',
     getApprovalMode: () => opts.approvalMode ?? 'default',
+    getPlanModeReadOnlyRoots: () =>
+      opts.planModeReadOnlyRoots ?? new Set<string>(),
   };
 }
 
@@ -1778,6 +1781,52 @@ describe('PermissionManager', () => {
           command: 'npm install',
         }),
       ).toBe('ask');
+    });
+
+    // Issue #9694: a user-vouched read-only root resolves the L3 'default'
+    // branch to 'allow' the same way a built-in read-only root does, while
+    // the surrounding syntactic rules still hold.
+    describe('user-vouched read-only roots (issue #9694)', () => {
+      it('resolves a vouched root to allow', async () => {
+        const vouched = new PermissionManager(
+          makeConfig({
+            permissionsAllow: ['Bash(git *)'],
+            planModeReadOnlyRoots: new Set(['ib']),
+          }),
+        );
+        vouched.initialize();
+
+        expect(
+          await vouched.evaluate({
+            toolName: 'run_shell_command',
+            command: 'git status && ib domain list',
+          }),
+        ).toBe('allow');
+      });
+
+      it('keeps asking without the vouch, and for redirects with it', async () => {
+        expect(
+          await pm.evaluate({
+            toolName: 'run_shell_command',
+            command: 'git status && ib domain list',
+          }),
+        ).toBe('ask');
+
+        const vouched = new PermissionManager(
+          makeConfig({
+            permissionsAllow: ['Bash(git *)'],
+            planModeReadOnlyRoots: new Set(['ib']),
+          }),
+        );
+        vouched.initialize();
+
+        expect(
+          await vouched.evaluate({
+            toolName: 'run_shell_command',
+            command: 'git status && ib domain list > out.txt',
+          }),
+        ).toBe('ask');
+      });
     });
 
     // Regression coverage for issue #4093: command substitution must never

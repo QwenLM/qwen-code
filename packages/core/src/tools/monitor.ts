@@ -192,6 +192,7 @@ class MonitorToolInvocation extends BaseToolInvocation<
       const isReadOnly = await isShellCommandReadOnlyASTInDirectory(
         command,
         cwd,
+        { extraReadOnlyRoots: this.config.getPlanModeReadOnlyRoots() },
       );
       if (isReadOnly) {
         return 'allow';
@@ -222,7 +223,9 @@ class MonitorToolInvocation extends BaseToolInvocation<
       // permission boundary.
       let isReadOnly = false;
       try {
-        isReadOnly = await isShellCommandReadOnlyASTInDirectory(sub, cwd);
+        isReadOnly = await isShellCommandReadOnlyASTInDirectory(sub, cwd, {
+          extraReadOnlyRoots: this.config.getPlanModeReadOnlyRoots(),
+        });
       } catch (e) {
         // Conservative fallback: if AST analysis fails, keep the sub-command
         // in the confirmation scope instead of accidentally dropping it.

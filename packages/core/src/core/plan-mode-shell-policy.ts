@@ -162,6 +162,9 @@ export async function evaluatePlanModeShellPolicy(input: {
     ambientWorkingDirectory,
   };
 
+  const safetyOptions = {
+    extraReadOnlyRoots: input.config.getPlanModeReadOnlyRoots(),
+  };
   let classification: ShellCommandSafety;
   try {
     classification = await raceWithAbort(
@@ -170,8 +173,9 @@ export async function evaluatePlanModeShellPolicy(input: {
           ? classifyShellCommandSafetyInDirectory(
               safetyCommand,
               permissionContext.cwd,
+              safetyOptions,
             )
-          : classifyShellCommandSafety(safetyCommand),
+          : classifyShellCommandSafety(safetyCommand, safetyOptions),
       input.signal,
     );
   } catch (error) {
