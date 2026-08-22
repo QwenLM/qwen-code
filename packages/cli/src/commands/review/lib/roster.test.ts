@@ -121,6 +121,14 @@ describe('requiredAgents — Step 3A', () => {
     expect(
       keys({ ...PR, srcDiffLines: 900, diffLines: 4000, effort: 'medium' }),
     ).not.toContain('6d');
+    // And no frame without a PR: a local or file-path review has no
+    // description to counter and no incident to replay — 6d is gated on the
+    // PR identity exactly as Agent 0 is, in both topologies.
+    const noPr = { ...PR, prNumber: undefined, ownerRepo: undefined };
+    expect(keys(noPr)).not.toContain('6d');
+    expect(keys({ ...noPr, srcDiffLines: 900, diffLines: 4000 })).not.toContain(
+      '6d',
+    );
   });
 
   it('owes the prose-execution audit exactly when the diff touches an instruction file', () => {
@@ -288,6 +296,30 @@ describe('requiredAgents — Step 3A', () => {
     expect(fanOut).not.toContain('6a');
     expect(fanOut.filter((role) => role === 'test-matrix')).toHaveLength(1);
     expect(fanOut).toContain('1b');
+
+    // 6d keeps the persona tier's effort gate: a manifest cannot re-add the
+    // counter-frame audit to a medium review (a `case '6d': return true`
+    // mutant ships the tier contract's contradiction green).
+    expect(
+      keys({ ...PR, effort: 'medium', repositoryContext: context(['6d']) }),
+    ).not.toContain('6d');
+    // prose-exec cannot be required into a review with no tree to execute
+    // in — check-coverage would exit 3 demanding an agent that can only
+    // whiff.
+    expect(
+      keys({
+        ...PR,
+        worktreePath: undefined,
+        repositoryContext: context(['prose-exec']),
+      }),
+    ).not.toContain('prose-exec');
+    // …but on a tree'd review with NO prompt-path files, the manifest
+    // re-add is honoured — the escape hatch isPromptPath's doc comment
+    // promises, which a `case 'prose-exec': return false` mutant would
+    // silently kill.
+    expect(
+      keys({ ...PR, repositoryContext: context(['prose-exec']) }),
+    ).toContain('prose-exec');
   });
 
   it('fails closed on a present-but-invalid repository context', () => {
@@ -527,8 +559,24 @@ describe('isPromptPath — the instruction-file detector', () => {
     ['packages/cli/src/commands/review/lib/agent-briefs.ts', true],
     ['packages/cli/src/commands/review/agent-prompt.ts', true],
     ['docs/system-prompt.md', true],
-    // Test code ABOUT prompts pins them; it is not itself followed as one.
+    // Root guidance files, by each ecosystem's reserved name — standing
+    // instructions with operational recipes, the motivating incident's shape.
+    ['AGENTS.md', true],
+    ['CLAUDE.md', true],
+    ['QWEN.md', true],
+    ['packages/cli/GEMINI.md', true],
+    ['.github/copilot-instructions.md', true],
+    // Slash-command definitions are prompts too.
+    ['.claude/commands/deploy.md', true],
+    ['.qwen/commands/review.md', true],
+    // Singular and embedded tokens — the alternation's both halves (a
+    // `briefs`-only or `prompt`-only mutant flips one of these).
+    ['docs/brief.md', true],
+    ['docs/my-prompts.md', true],
+    // Test code ABOUT prompts pins them; it is not itself followed as one —
+    // both exclusion spellings.
     ['packages/cli/src/commands/review/agent-prompt.test.ts', false],
+    ['src/review-brief.spec.ts', false],
     // Ordinary code and docs.
     ['packages/cli/src/commands/review/drive.ts', false],
     ['README.md', false],

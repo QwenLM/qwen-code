@@ -166,8 +166,14 @@ export function isPromptPath(path: string): boolean {
   // Test code ABOUT prompts pins them; it is not itself followed as one.
   if (/\.(test|spec)\./.test(base)) return false;
   if (base === 'SKILL.md') return true;
-  // Agent definitions: .claude/agents/*.md, .qwen/agents/*.md, and prompts/ dirs.
-  if (/(^|\/)\.(claude|qwen)\/agents\//.test(path)) return true;
+  // Root guidance files agents follow as standing instructions, by each
+  // ecosystem's reserved name — they carry operational recipes, and an
+  // AGENTS.md-only diff whose new instructions get readings but no execution
+  // is the motivating incident's shape verbatim.
+  if (/^(AGENTS|CLAUDE|QWEN|GEMINI)\.md$/.test(base)) return true;
+  if (base === 'copilot-instructions.md') return true;
+  // Agent and slash-command definitions, and prompts/ directories.
+  if (/(^|\/)\.(claude|qwen)\/(agents|commands)\//.test(path)) return true;
   if (/(^|\/)prompts\//.test(path)) return true;
   const stem = base.replace(/\.[^.]+$/, '');
   return stem
@@ -179,6 +185,24 @@ export function isPromptPath(path: string): boolean {
 export function hasPromptFiles(plan: RosterPlan): boolean {
   const files = Array.isArray(plan.files) ? plan.files : [];
   return files.some((f) => typeof f?.path === 'string' && isPromptPath(f.path));
+}
+
+/**
+ * Is the counter-frame audit (6d) owed? Its two mandatory extractions — the
+ * author's nominated frame and the motivating incident — both live in the PR
+ * description, so a review with no PR identity has no frame to counter and no
+ * incident to replay: requiring 6d there manufactures a fourth undirected
+ * persona, the exact degradation the role exists to counter. Same identity
+ * condition as Agent 0 (the brief builder welds the context pointer from the
+ * same two fields), the personas' effort tier (medium skips it), and — unlike
+ * the personas — both topologies: the frame spans territories.
+ */
+function countersFrame(plan: RosterPlan): boolean {
+  return (
+    plan.effort !== 'medium' &&
+    isPositivePrNumber(plan.prNumber) &&
+    typeof plan.ownerRepo === 'string'
+  );
 }
 
 /** Source files rewritten heavily enough that the diff is the wrong frame. */
@@ -242,8 +266,9 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
     // The counter-frame audit is a whole-diff question: the author's frame
     // spans territories, so no chunk agent can escape it from inside one —
     // and a chunked PR with a strong narrative is the MOST frame-capturable
-    // shape there is. Same effort gate as the personas it runs beside in 3A.
-    if (plan.effort !== 'medium') add('6d');
+    // shape there is. Gated by countersFrame like its 3A twin: the personas'
+    // effort tier plus the PR identity the frame lives in.
+    if (countersFrame(plan)) add('6d');
   } else {
     // Step 3A: every dimension, each walking the whole diff.
     add('1a');
@@ -271,7 +296,7 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
       // depth pass over the whole diff, and its whole premise — attention
       // the author's narrative cannot steer — is the kind of coverage a
       // balanced review deliberately trades away (issue #9707, proposal 4).
-      add('6d');
+      if (countersFrame(plan)) add('6d');
     }
   }
 
@@ -365,15 +390,20 @@ function contextRoleRunsInThisReview(
     case '6c':
       return !fanOut && plan.effort !== 'medium';
     case '6d':
-      // Whole-diff in both topologies — the frame spans territories.
-      return plan.effort !== 'medium';
+      // Whole-diff in both topologies — the frame spans territories — but a
+      // manifest cannot conjure a frame: no PR identity, no counter-frame.
+      return countersFrame(plan);
     case 'test-matrix':
       return fanOut;
     case '1c':
       return mode !== 'diff-only';
     case 'prose-exec':
-      // Both topologies, every effort — but never without a tree to run the
-      // repository's tooling in (the same capability line 1c and 7 draw).
+      // Both topologies, every effort, prompt files or not — whether it has
+      // work is the diff's business (hasPromptFiles), not the policy's: a
+      // manifest may require it back where the path detector misses, which
+      // is the escape hatch `isPromptPath`'s doc comment promises. The one
+      // policy line is capability: never without a tree to run the
+      // repository's tooling in (the same line 1c and 7 draw).
       return mode !== 'diff-only';
     case '1b':
       // Both topologies run the removed-behavior audit; whether it has work is

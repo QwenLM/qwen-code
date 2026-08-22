@@ -460,8 +460,9 @@ function coveredPlan(
   recordMatrix(p);
   recordStep45(p, step45Keys);
   // The counter-frame audit (6d) is a whole-diff role in both topologies at
-  // high effort, so a clean plan owes its record like the matrix's; at medium
-  // it is not required and the extra record is inert.
+  // high effort, gated on the PR identity: a plan naming the PR owes its
+  // record like Agent 0's. Where it is not required (no PR named, or medium
+  // effort) the extra record is inert.
   if (planOpts.effort !== 'medium') {
     recordStep45(p, ['6d']);
   }
@@ -938,11 +939,11 @@ describe('composeReview — the low-signal Approve disclosure', () => {
     const r = composeReview(base({}));
     expect(r.event).toBe('APPROVE');
     expect(r.body).toBe(`No issues found. LGTM! ✅\n\n${FOOTER}`);
-    // The fixture's roster: two chunk agents, the test matrix, and the
-    // counter-frame audit.
-    expect(r.lowSignal).toEqual({ agents: 4, srcDiffLines: 5000 });
+    // The fixture's roster: two chunk agents plus the test matrix (no PR
+    // identity in this plan, so no counter-frame audit).
+    expect(r.lowSignal).toEqual({ agents: 3, srcDiffLines: 5000 });
     expect(verdictLine(r)).toBe(
-      'Verdict: Approve — low signal: none of the 4 review agents reported ' +
+      'Verdict: Approve — low signal: none of the 3 review agents reported ' +
         'a finding on a non-trivial diff (5000 source diff lines)',
     );
   });
