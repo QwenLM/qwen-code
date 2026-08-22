@@ -26,7 +26,7 @@ import {
 import { tokenizeArgs } from '../../utils/shell-args.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
 import { bundleStalenessNotices } from './lib/stale-bundle.js';
-import { isAoneHost } from './lib/platform/registry.js';
+import { isAoneCanonicalHost } from './lib/remote-match.js';
 
 export type ReviewEffort = 'low' | 'medium' | 'high';
 
@@ -241,11 +241,14 @@ function classifyToken(token: string): ReviewTarget | 'invalid-url' | null {
   if (urlMatch) {
     const [, scheme, host, owner, repo, num] = urlMatch;
     const lowerHost = host.toLowerCase();
-    // Aone serves no `/pull/` pages — a `/pull/<n>` URL on an Aone host is a
-    // fabrication (the Aone CR grammar is `…/codereview/<id>`, keyed on the
-    // global MR id). Refuse it fail-closed, mirroring the Aone-only
-    // constraint on `/codereview/` (a non-Aone host there is refused too).
-    if (isAoneHost(lowerHost)) return 'invalid-url';
+    // Aone serves no `/pull/` pages — a `/pull/<n>` URL on a CANONICAL Aone
+    // host is a fabrication (the Aone CR grammar is `…/codereview/<id>`,
+    // keyed on the global MR id). Refuse it fail-closed, mirroring the
+    // Aone-only constraint on `/codereview/` (a non-Aone host there is
+    // refused too). The canonical pair only: a `*.alibaba-inc.com` GHE
+    // instance (`ghe.alibaba-inc.com`) legitimately serves `/pull/` pages,
+    // and the family wildcard once refused its real PR URLs.
+    if (isAoneCanonicalHost(lowerHost)) return 'invalid-url';
     return {
       type: 'pr-url',
       url: `${scheme.toLowerCase()}://${lowerHost}/${owner}/${repo}/pull/${Number(num)}`,
