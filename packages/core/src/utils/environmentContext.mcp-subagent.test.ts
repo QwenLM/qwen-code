@@ -10,7 +10,10 @@ import type { MCPServerConfig } from '../config/config.js';
 import { buildMcpServerInstructionsReminder } from './environmentContext.js';
 import { DiscoveredMCPTool } from '../tools/mcp-tool.js';
 import type { CallableTool } from '@google/genai';
-import { rebuildToolRegistryOnOverride } from '../tools/agent/agent.js';
+import {
+  rebuildToolRegistryOnOverride,
+  hasRebuiltToolRegistry,
+} from '../tools/agent/agent.js';
 
 // Why this exists.
 //
@@ -70,6 +73,41 @@ describe('MCP server instructions and subagent registries', () => {
 
     expect(subagentRegistry.getMcpServerInstructions().size).toBe(0);
     expect(buildMcpServerInstructionsReminder(subagentRegistry)).toBeNull();
+  });
+
+  it('leaves a long-lived override unmarked when asked', async () => {
+    // The marker means "a descendant may skip its own rebuild", and
+    // `hasRebuiltToolRegistry` reads it through the PROTOTYPE CHAIN. On a
+    // short-lived per-launch override that is the point; on a config an agent
+    // keeps — `InProcessBackend`'s per-agent config — it hands that permission
+    // to every wrapper built on it later.
+    //
+    // The one that matters is a dir-scoped workflow dispatch: its wrapper
+    // rebinds only the dir getters, so the rebuild it would otherwise run is
+    // the sole re-anchoring that lifts the subagent's tools above the wrapper.
+    // Skipped, relative paths resolve against the parent's working directory
+    // instead of the provisioned worktree.
+    const config = makeConfig({ 'server-a': { command: 'a' } });
+    await config.initialize({
+      skipGeminiInitialization: true,
+      skipHooks: true,
+      skipMcpDiscovery: true,
+      skipFileCheckpointing: true,
+    });
+
+    const longLived = Object.create(config) as typeof config;
+    await rebuildToolRegistryOnOverride(longLived, config, {
+      markRebuilt: false,
+    });
+    expect(hasRebuiltToolRegistry(longLived)).toBe(false);
+    // …and a wrapper on it still owes its own rebuild.
+    const dirScoped = Object.create(longLived) as typeof config;
+    expect(hasRebuiltToolRegistry(dirScoped)).toBe(false);
+
+    // The default is unchanged for the per-launch callers that want it.
+    const perLaunch = Object.create(config) as typeof config;
+    await rebuildToolRegistryOnOverride(perLaunch, config);
+    expect(hasRebuiltToolRegistry(perLaunch)).toBe(true);
   });
 
   it('does not carry instructions across a tool copy from the parent', async () => {

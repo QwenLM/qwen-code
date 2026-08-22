@@ -541,9 +541,18 @@ async function createPerAgentConfig(
     // parent's `McpClientManager`, or propagating server instructions during
     // the copy, would leak them into every in-process-spawned agent's first
     // message while the tests covering the other spawn path stayed green.
-    // Delegating also sets the rebuilt marker, so a wrapper-of-wrapper spawn
-    // downstream can skip a redundant rebuild.
-    await rebuildToolRegistryOnOverride(override as Config, base);
+    //
+    // `markRebuilt: false` keeps the delegation behaviour-identical to the
+    // block it replaced. This config is LONG-LIVED — the agent keeps it — and
+    // the marker is read through the prototype chain, so stamping it would
+    // hand "you may skip your rebuild" to every wrapper built on it later. A
+    // dir-scoped workflow dispatch rebinds only the dir getters; its rebuild
+    // is the sole re-anchoring that lifts the subagent's tools above the
+    // wrapper, and skipping it resolves relative paths against the parent's
+    // working directory instead of the provisioned worktree.
+    await rebuildToolRegistryOnOverride(override as Config, base, {
+      markRebuilt: false,
+    });
     agentRegistry = override.getToolRegistry();
 
     if (authOverrides?.authType) {
