@@ -2937,6 +2937,15 @@ function composeReviewBody(
     // round ran under, and the observation above compares the pair for
     // exactly this reason.
     prevFloor: convergence?.prev.floor,
+    // The stamp above is the REPORTING reading and folds an absent floor to
+    // `auto`, so it says `c` on a round >= 6 the enforcement backstop never
+    // touched. A Suggestion still standing in that round's work-list is the
+    // fact the stamp cannot carry: enforcement moves drafted Suggestions out
+    // of the posting set before the marker is built, so its presence means
+    // the floor was not running (#9526).
+    prevPostedSuggestion: convergence
+      ? convergence.prev.findings.some((f) => f.sev === 'S')
+      : undefined,
     // The standing backlog, counted off the same recovered work-list the
     // persistence half reads. It is what keeps the fresh window honest at
     // its blind spot: a round finding nothing new while the author clears

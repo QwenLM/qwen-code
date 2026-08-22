@@ -1094,6 +1094,9 @@ const FIRE: ConvergenceFacts = {
   prevFresh: 3,
   floorEngaged: true,
   prevFloor: 'c',
+  // The predecessor's work-list was Critical-only, which is what an engaged
+  // floor leaves behind — the stamp above cannot say so on its own.
+  prevPostedSuggestion: false,
   // Equal to `thisCriticals`, so the backlog veto abstains and every other
   // arm below is pinned on its own. A firing default whose backlog was
   // already shrinking would make each `toBeNull()` below pass for the
@@ -1212,6 +1215,7 @@ describe('convergenceAssessment', () => {
         prevFresh: 0,
         floorEngaged: true,
         prevFloor: 'c',
+        prevPostedSuggestion: false,
         prevCriticals: 3,
       }),
     ).not.toBeNull();
@@ -1224,6 +1228,30 @@ it('suppresses when the previous round posted under a DIFFERENT floor', () => {
   // movement is the posture, not the loop — and "the severity floor will
   // not converge it" is not a claim one round of the floor can support.
   expect(convergenceAssessment({ ...FIRE, prevFloor: 'o' })).toBeNull();
+});
+
+it('suppresses when the predecessor still posted a Suggestion — the stamp lied', () => {
+  // The recorded floor is the REPORTING reading, which folds an absent
+  // `severityFloor` into `auto` and stamps `c` on any round >= 6 — even one
+  // the strict enforcement backstop never touched, where Suggestions posted
+  // normally. Paired against this round's enforcement reading, that stamp
+  // let an un-enforced predecessor pass as an engaged one and the advisory
+  // published "the severity floor will not converge it" against a window
+  // whose far end still included Suggestions. A Suggestion in the
+  // work-list is the fact the stamp cannot carry: enforcement moves drafted
+  // Suggestions out of the posting set before the marker is built, so an
+  // engaged round's list is Critical-only.
+  expect(
+    convergenceAssessment({ ...FIRE, prevPostedSuggestion: true }),
+  ).toBeNull();
+});
+
+it('still evaluates when the predecessor work-list is unreadable', () => {
+  // Unknown abstains, like every other fact read off that list — a marker
+  // this round could not recover says nothing about what the floor did.
+  expect(
+    convergenceAssessment({ ...FIRE, prevPostedSuggestion: undefined }),
+  ).not.toBeNull();
 });
 
 it('still evaluates when the previous floor was never recorded', () => {

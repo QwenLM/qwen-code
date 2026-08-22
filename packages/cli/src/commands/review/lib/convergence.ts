@@ -971,6 +971,31 @@ export interface ConvergenceFacts {
    * evaluates exactly as it did before this conjunct existed.
    */
   prevFloor: 'c' | 'o' | undefined;
+  /**
+   * Did the PREVIOUS round's work-list still carry a Suggestion?
+   *
+   * The direct evidence that the floor was NOT enforcing there, and it is
+   * needed because the recorded `prevFloor` above cannot supply it. That
+   * stamp is written from the REPORTING reading, which folds an absent
+   * `severityFloor` into `auto` and so stamps `c` on any round >= 6 whose
+   * state named no floor at all — while the strict enforcement reading
+   * moved nothing and Suggestions posted normally. Pairing that stamp
+   * against this round's enforcement reading let a genuinely un-enforced
+   * predecessor pass as an engaged one, and the advisory then published
+   * "the severity floor will not converge it" against a window whose far
+   * end still included Suggestions (#9526).
+   *
+   * The work-list settles it without either reading: enforcement moves
+   * drafted Suggestions out of the posting set before the marker is built,
+   * so an engaged round's list is Critical-only and an un-enforced one is
+   * not. Suppresses on the POSITIVE observation, so the two ways it can be
+   * wrong land on opposite sides and only one of them fires: a shortened
+   * list that shed its Suggestion reads as engaged (bounded by the same
+   * truncation caveat the backlog veto carries), while a pathless
+   * Suggestion that an engaged round left inline reads as un-enforced and
+   * costs one round of silence.
+   */
+  prevPostedSuggestion: boolean | undefined;
 }
 
 /** The one shape this module detects. */
@@ -1011,11 +1036,14 @@ export interface ConvergenceAssessment {
  *    where the floor is actually running; before engagement the loop may
  *    still converge once it does, so a disengaged floor suppresses the
  *    signal;
- *  - the previous round posted under the SAME engaged floor, when its
- *    marker recorded one — the round the floor engages on compares a
- *    Critical-only volume against a predecessor that still posted
- *    Suggestions, and "the floor will not converge it" is not a claim one
- *    round of the floor can support;
+ *  - the previous round posted under the SAME engaged floor. Two facts say
+ *    so and both must hold: its recorded floor is not `o`, and its
+ *    work-list carried no Suggestion. The stamp alone is not enough — it is
+ *    written from the reporting reading, which folds an absent floor into
+ *    `auto` and stamps `c` on a round enforcement never touched. The round
+ *    the floor engages on compares a Critical-only window against a
+ *    predecessor that still posted Suggestions, and "the floor will not
+ *    converge it" is not a claim one round of the floor can support;
  *  - the two-round FRESH window is present and NOT shrinking — both counts
  *    recorded, and this round's at least the previous round's. A falling
  *    rate of new findings is a converging loop even with Criticals present,
@@ -1050,6 +1078,7 @@ export function convergenceAssessment(
     prevFresh,
     floorEngaged,
     prevFloor,
+    prevPostedSuggestion,
     prevCriticals,
   } = facts;
   if (prevHadCritical !== true) return null;
@@ -1059,6 +1088,10 @@ export function convergenceAssessment(
   // posture change and its window is not a comparable point. Unrecorded
   // stays evaluable, like the sibling diagnosis above.
   if (prevFloor !== undefined && prevFloor !== 'c') return null;
+  // And a `c` STAMP is not proof the floor enforced: the stamp comes from
+  // the reporting fold. A Suggestion in the predecessor's work-list is the
+  // proof, and it says the floor did not.
+  if (prevPostedSuggestion === true) return null;
   if (fresh === undefined || prevFresh === undefined) return null;
   if (fresh < prevFresh) return null;
   // The backlog veto. Positive evidence only: an unknown predecessor count

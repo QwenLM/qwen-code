@@ -3626,6 +3626,94 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     }
   });
 
+  it("stays silent when the predecessor's `c` stamp was a fold, not enforcement (#9526)", async () => {
+    // The stamp and the engagement test are two different readings. A round
+    // >= 6 whose state named no floor at all is stamped `c` by the REPORTING
+    // fold, while the strict enforcement backstop moved nothing and
+    // Suggestions posted normally. Paired against this round's enforcement
+    // reading, that stamp let an un-enforced predecessor pass as an engaged
+    // one and the advisory published "the severity floor will not converge
+    // it" against a window whose far end still included Suggestions.
+    //
+    // The Suggestion left standing in that round's work-list is the fact the
+    // stamp cannot carry, and it is what makes this fixture silent.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-converge-foldstamp-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(planPath, JSON.stringify({ prNumber: 8255 }), 'utf8');
+    // THIS round names the floor, so enforcement really is engaged here.
+    writeFileSync(
+      inputPath,
+      JSON.stringify({ modelId: MODEL, planPath, severityFloor: 'critical' }),
+      'utf8',
+    );
+    writeFileSync(
+      commentsPath,
+      JSON.stringify(
+        [1, 2, 3, 4].map((n) => ({
+          path: `n${n}.ts`,
+          line: 1,
+          body: `**[Critical]** new blocker ${n}`,
+        })),
+      ),
+      'utf8',
+    );
+    const stderr = () =>
+      (writeStderrLine as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
+        String(c[0]),
+      );
+    const stdoutJson = () =>
+      JSON.parse(
+        (writeStdoutLine as ReturnType<typeof vi.fn>).mock.calls
+          .map((c) => String(c[0]))
+          .join('\n'),
+      ) as { residualRisk?: unknown; body?: string };
+    try {
+      (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+      (writeStdoutLine as ReturnType<typeof vi.fn>).mockClear();
+      writeFileSync(
+        join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+        JSON.stringify({
+          v: 1,
+          round: 6,
+          posted: 4,
+          fresh: 4,
+          // The stamp the reporting fold writes for a round that named no
+          // floor — every other conjunct is arranged to hold, so this
+          // fixture is silent on the work-list evidence alone.
+          floor: 'c',
+          findings: [
+            { id: 'R6-1', sev: 'C', file: 'a.ts', title: 'b1' },
+            { id: 'R6-2', sev: 'C', file: 'b.ts', title: 'b2' },
+            { id: 'R6-3', sev: 'C', file: 'c.ts', title: 'b3' },
+            // Enforcement never ran, so this posted and is in the list.
+            { id: 'R6-4', sev: 'S', file: 'd.ts', title: 'nit' },
+          ],
+        }),
+        'utf8',
+      );
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+      });
+      // The predecessor WAS recovered — the silence is its Suggestion, not a
+      // fixture that never loaded.
+      expect(stderr().find((l) => l.startsWith('VOLUME: '))).toContain(
+        '(previous round: 4)',
+      );
+      expect(
+        stderr().filter((l) => l.startsWith('RESIDUAL-RISK: ')),
+      ).toHaveLength(0);
+      const composed = stdoutJson();
+      expect(composed.residualRisk).toBeUndefined();
+      expect(composed.body ?? '').not.toContain('land-with-residual-risk');
+      expect(composed.body ?? '').not.toContain('The severity floor will not');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('counts a relocated Critical toward the advisory (#9410)', async () => {
     // This round's only Critical arrives through the deferral channel's
     // RELOCATED arm — a deferred entry with severity Critical is relocated
