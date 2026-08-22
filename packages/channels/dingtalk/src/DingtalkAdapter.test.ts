@@ -6244,6 +6244,80 @@ describe('DingtalkChannel outbound file delivery', () => {
     }
   });
 
+  it('records a boundary failure whose notice dies on a live webhook', async () => {
+    // R15-1 (deliveryError arm): the file post AND its corrective notice are
+    // both rejected by the same dying webhook — `sendReplyFiles` returns a
+    // `deliveryError` instead of throwing, and the boundary close must
+    // record it for the turn's next awaited hook rather than throw into the
+    // swallowed wrapper.
+    const file = createTempFile();
+    try {
+      const channel = createChannel({ cwd: file.dir });
+      seedWebhook(channel, 'cid-1');
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      stubFileReplyFetch({
+        fileHandler: () =>
+          new Response(JSON.stringify({ errcode: 310000 }), { status: 200 }),
+        markdownHandler: () =>
+          new Response(JSON.stringify({ errcode: 130101 }), { status: 200 }),
+      });
+      const closeOutput = vi.fn().mockResolvedValue(true);
+      const segmentContent = vi.fn().mockReturnValue(`[FILE: ${file.path}]`);
+      const acceptsLateDelivery = vi.fn().mockReturnValue(true);
+      const terminalSettled = vi.fn().mockResolvedValue(undefined);
+      (
+        channel as unknown as {
+          interactionPresenter: {
+            closeOutput: typeof closeOutput;
+            segmentContent: typeof segmentContent;
+            acceptsLateDelivery: typeof acceptsLateDelivery;
+            terminalSettled: typeof terminalSettled;
+          };
+        }
+      ).interactionPresenter = {
+        closeOutput,
+        segmentContent,
+        acceptsLateDelivery,
+        terminalSettled,
+      };
+      const segment = {
+        channelName: 'dingtalk',
+        sessionId: 'session-1',
+        runId: 'run-1',
+        segmentId: 'segment-1',
+        owner: { kind: 'channel_user', id: 'owner-1' },
+        target: {
+          channelName: 'dingtalk',
+          chatId: 'cid-1',
+          senderId: 'owner-1',
+          isGroup: true,
+        },
+      } as ChannelOutputSegmentContext;
+
+      await getOutputSegmentEndHook(channel)(
+        'cid-1',
+        'session-1',
+        segment,
+        'response_boundary',
+      );
+
+      // The corrected text still finalizes — the receipt rewritten into the
+      // failure marker before the display closes.
+      expect(closeOutput).toHaveBeenCalledWith(
+        'segment-1',
+        '[File delivery failed: report.txt]',
+        'response_boundary',
+        segment,
+      );
+      // The undelivered notice then fails the turn from `onResponseComplete`.
+      await expect(
+        getCompleteHook(channel)('cid-1', 'final', 'session-1', segment),
+      ).rejects.toThrow(/no delivered notice: report\.txt/);
+    } finally {
+      rmSync(file.dir, { recursive: true, force: true });
+    }
+  });
+
   it('delivers a boundary segment whose run completed mid-upload', async () => {
     // R8-4: ChannelBase dispatches the boundary close fire-and-forget; the
     // run can COMPLETE while `prepareOutgoingContent` still uploads. The
