@@ -135,10 +135,11 @@ export class LoopDetectionService {
   private lastToolCallKey: string | null = null;
   private toolCallRepetitionCount: number = 0;
 
-  // Content streaming tracking
-  private streamContentHistory = '';
-  private contentStats = new Map<string, number[]>();
-  private lastContentIndex = 0;
+  // Streaming text tracking. Visible content and hidden reasoning use separate
+  // histories so one stream cannot erase or dilute repetition evidence in the
+  // other.
+  private readonly contentLoopState = this.createTextLoopState();
+  private readonly thoughtLoopState = this.createTextLoopState();
   private loopDetected = false;
   private inCodeBlock = false;
 
@@ -265,8 +266,11 @@ export class LoopDetectionService {
     switch (event.type) {
       case GeminiEventType.ToolCallRequest: {
         // content chanting only happens in one single stream, reset if there
-        // is a tool call in between
-        this.resetContentTracking();
+        // is a tool call in between. Fence parity is preserved: a code block
+        // that closes after the tool call must still toggle inCodeBlock back
+        // to false, keeping visible-content detection active (pre-change
+        // semantics).
+        this.resetContentTracking(true, false);
         // Thought repetition is only meaningful within a single contiguous
         // reasoning stream. Once a tool call lands, the model has made
         // observable progress — any prior thoughts should not carry over.
@@ -302,6 +306,16 @@ export class LoopDetectionService {
       case GeminiEventType.Thought: {
         this.trackThought(event.value);
         this.loopDetected = this.checkRepetitiveThoughts();
+        if (!this.loopDetected) {
+          // OpenAI-compatible providers stream reasoning as thought parts,
+          // which getResponseText filters out of Content events. Accumulate
+          // that text in a reasoning-only chunk history, without applying the
+          // visible-content markdown heuristics (issue #9656).
+          const thoughtText = this.getThoughtText(event.value);
+          if (thoughtText) {
+            this.loopDetected = this.checkThoughtContentLoop(thoughtText);
+          }
+        }
         break;
       }
       default:
@@ -565,8 +579,9 @@ export class LoopDetectionService {
       isDivider
     ) {
       // Reset tracking when different content elements are detected to avoid analyzing content
-      // that spans across different element boundaries.
-      this.resetContentTracking();
+      // that spans across different element boundaries. Fence parity is updated
+      // below, so preserve it during this structural reset.
+      this.resetContentTracking(true, false);
     }
 
     const wasInCodeBlock = this.inCodeBlock;
@@ -576,41 +591,54 @@ export class LoopDetectionService {
       return false;
     }
 
-    this.streamContentHistory += content;
+    return this.checkTextLoop(content, this.contentLoopState);
+  }
 
-    this.truncateAndUpdate();
-    return this.analyzeContentChunksForLoop();
+  private checkThoughtContentLoop(content: string): boolean {
+    return this.checkTextLoop(content, this.thoughtLoopState);
+  }
+
+  private checkTextLoop(
+    content: string,
+    state: {
+      history: string;
+      stats: Map<string, number[]>;
+      lastIndex: number;
+    },
+  ): boolean {
+    state.history += content;
+    this.truncateAndUpdate(state);
+    return this.analyzeContentChunksForLoop(state);
   }
 
   /**
    * Truncates the content history to prevent unbounded memory growth.
    * When truncating, adjusts all stored indices to maintain their relative positions.
    */
-  private truncateAndUpdate(): void {
-    if (this.streamContentHistory.length <= MAX_HISTORY_LENGTH) {
+  private truncateAndUpdate(state: {
+    history: string;
+    stats: Map<string, number[]>;
+    lastIndex: number;
+  }): void {
+    if (state.history.length <= MAX_HISTORY_LENGTH) {
       return;
     }
 
     // Calculate how much content to remove from the beginning
-    const truncationAmount =
-      this.streamContentHistory.length - MAX_HISTORY_LENGTH;
-    this.streamContentHistory =
-      this.streamContentHistory.slice(truncationAmount);
-    this.lastContentIndex = Math.max(
-      0,
-      this.lastContentIndex - truncationAmount,
-    );
+    const truncationAmount = state.history.length - MAX_HISTORY_LENGTH;
+    state.history = state.history.slice(truncationAmount);
+    state.lastIndex = Math.max(0, state.lastIndex - truncationAmount);
 
     // Update all stored chunk indices to account for the truncation
-    for (const [hash, oldIndices] of this.contentStats.entries()) {
+    for (const [hash, oldIndices] of state.stats.entries()) {
       const adjustedIndices = oldIndices
         .map((index) => index - truncationAmount)
         .filter((index) => index >= 0);
 
       if (adjustedIndices.length > 0) {
-        this.contentStats.set(hash, adjustedIndices);
+        state.stats.set(hash, adjustedIndices);
       } else {
-        this.contentStats.delete(hash);
+        state.stats.delete(hash);
       }
     }
   }
@@ -624,16 +652,20 @@ export class LoopDetectionService {
    * 3. Track positions where identical chunks appear
    * 4. Detect loops when chunks repeat frequently within a short distance
    */
-  private analyzeContentChunksForLoop(): boolean {
-    while (this.hasMoreChunksToProcess()) {
+  private analyzeContentChunksForLoop(state: {
+    history: string;
+    stats: Map<string, number[]>;
+    lastIndex: number;
+  }): boolean {
+    while (this.hasMoreChunksToProcess(state)) {
       // Extract current chunk of text
-      const currentChunk = this.streamContentHistory.substring(
-        this.lastContentIndex,
-        this.lastContentIndex + CONTENT_CHUNK_SIZE,
+      const currentChunk = state.history.substring(
+        state.lastIndex,
+        state.lastIndex + CONTENT_CHUNK_SIZE,
       );
       const chunkHash = createHash('sha256').update(currentChunk).digest('hex');
 
-      if (this.isLoopDetectedForChunk(currentChunk, chunkHash)) {
+      if (this.isLoopDetectedForChunk(currentChunk, chunkHash, state)) {
         this.lastLoopType = LoopType.CHANTING_IDENTICAL_SENTENCES;
         logLoopDetected(
           this.config,
@@ -646,17 +678,17 @@ export class LoopDetectionService {
       }
 
       // Move to next position in the sliding window
-      this.lastContentIndex++;
+      state.lastIndex++;
     }
 
     return false;
   }
 
-  private hasMoreChunksToProcess(): boolean {
-    return (
-      this.lastContentIndex + CONTENT_CHUNK_SIZE <=
-      this.streamContentHistory.length
-    );
+  private hasMoreChunksToProcess(state: {
+    history: string;
+    lastIndex: number;
+  }): boolean {
+    return state.lastIndex + CONTENT_CHUNK_SIZE <= state.history.length;
   }
 
   /**
@@ -669,19 +701,27 @@ export class LoopDetectionService {
    * 4. A loop is detected when the same chunk appears CONTENT_LOOP_THRESHOLD times
    *    within a small average distance (≤ 1.5 * chunk size)
    */
-  private isLoopDetectedForChunk(chunk: string, hash: string): boolean {
-    const existingIndices = this.contentStats.get(hash);
+  private isLoopDetectedForChunk(
+    chunk: string,
+    hash: string,
+    state: {
+      history: string;
+      stats: Map<string, number[]>;
+      lastIndex: number;
+    },
+  ): boolean {
+    const existingIndices = state.stats.get(hash);
 
     if (!existingIndices) {
-      this.contentStats.set(hash, [this.lastContentIndex]);
+      state.stats.set(hash, [state.lastIndex]);
       return false;
     }
 
-    if (!this.isActualContentMatch(chunk, existingIndices[0])) {
+    if (!this.isActualContentMatch(chunk, existingIndices[0], state.history)) {
       return false;
     }
 
-    existingIndices.push(this.lastContentIndex);
+    existingIndices.push(state.lastIndex);
 
     if (existingIndices.length < CONTENT_LOOP_THRESHOLD) {
       return false;
@@ -704,12 +744,25 @@ export class LoopDetectionService {
   private isActualContentMatch(
     currentChunk: string,
     originalIndex: number,
+    history: string,
   ): boolean {
-    const originalChunk = this.streamContentHistory.substring(
+    const originalChunk = history.substring(
       originalIndex,
       originalIndex + CONTENT_CHUNK_SIZE,
     );
     return originalChunk === currentChunk;
+  }
+
+  /**
+   * Joins a thought summary back into raw text for the content-repetition
+   * detector. For reasoning streamed from OpenAI-compatible providers the
+   * subject is empty and the description is the reasoning delta, so this
+   * yields the reasoning text verbatim.
+   */
+  private getThoughtText(summary: ThoughtSummary): string {
+    return [summary.subject, summary.description]
+      .filter((part) => part.length > 0)
+      .join(' ');
   }
 
   /**
@@ -1005,11 +1058,37 @@ export class LoopDetectionService {
     this.shellInspectionStreak = 0;
   }
 
-  private resetContentTracking(resetHistory = true): void {
-    if (resetHistory) {
-      this.streamContentHistory = '';
+  private createTextLoopState(): {
+    history: string;
+    stats: Map<string, number[]>;
+    lastIndex: number;
+  } {
+    return { history: '', stats: new Map(), lastIndex: 0 };
+  }
+
+  private resetContentTracking(
+    resetHistory = true,
+    resetCodeBlock = true,
+  ): void {
+    this.resetTextLoopState(this.contentLoopState, resetHistory);
+    this.resetTextLoopState(this.thoughtLoopState, resetHistory);
+    if (resetCodeBlock) {
+      this.inCodeBlock = false;
     }
-    this.contentStats.clear();
-    this.lastContentIndex = 0;
+  }
+
+  private resetTextLoopState(
+    state: {
+      history: string;
+      stats: Map<string, number[]>;
+      lastIndex: number;
+    },
+    resetHistory: boolean,
+  ): void {
+    if (resetHistory) {
+      state.history = '';
+    }
+    state.stats.clear();
+    state.lastIndex = 0;
   }
 }

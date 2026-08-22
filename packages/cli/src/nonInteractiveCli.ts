@@ -168,8 +168,12 @@ import {
 const LOOP_TYPE_LABELS: Record<LoopType, string> = {
   [LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS]:
     'the model repeated the same tool call with identical arguments',
+  // "output or reasoning": since issue #9656 the chunk-hash chanting detector
+  // also runs on the hidden reasoning stream, where a halt can fire before
+  // any visible content streams — claiming the repetition was "in its
+  // output" alone would point at text the user never received.
   [LoopType.CHANTING_IDENTICAL_SENTENCES]:
-    'the model repeated the same sentence in its output',
+    'the model repeated the same sentence in its output or reasoning',
   [LoopType.REPETITIVE_THOUGHTS]:
     'the model repeated the same reasoning thought',
   [LoopType.READ_FILE_LOOP]:
