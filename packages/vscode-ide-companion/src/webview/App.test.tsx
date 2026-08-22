@@ -25,6 +25,7 @@ const {
   capturedWebViewHandlers,
   capturedSessionHandlers,
   capturedCompletionTriggerCalls,
+  capturedInputFormProps,
 } = vi.hoisted(() => ({
   mockPostMessage: vi.fn(),
   mockOpenCompletion: vi.fn().mockResolvedValue(undefined),
@@ -60,6 +61,12 @@ const {
   // Every call the App makes to the mocked useCompletionTrigger, so tests
   // can assert the suppression argument is actually wired at the call site.
   capturedCompletionTriggerCalls: [] as unknown[][],
+  // The mocked InputForm stores the App-provided clearance callback here so
+  // tests can simulate the adapter's ResizeObserver height report (jsdom
+  // performs no layout, so the real observer always measures 0).
+  capturedInputFormProps: {
+    onModelSelectorClearance: null as null | ((heightPx: number) => void),
+  },
 }));
 
 const slashSkillsItem: CompletionItem = {
@@ -315,6 +322,7 @@ vi.mock('./components/layout/InputForm.js', () => ({
     onCompletionFill,
     onKeyDown,
     showModelSelector,
+    onModelSelectorClearance,
   }: {
     inputText: string;
     inputFieldRef: React.RefObject<HTMLDivElement>;
@@ -323,10 +331,15 @@ vi.mock('./components/layout/InputForm.js', () => ({
     onCompletionFill?: (item: CompletionItem) => void;
     onKeyDown?: (e: React.KeyboardEvent) => void;
     showModelSelector?: boolean;
+    onModelSelectorClearance?: (heightPx: number) => void;
   }) => {
     if (showModelSelector) {
       mockModelSelectorMounts();
     }
+    // Expose the App-provided clearance callback so tests can simulate the
+    // adapter's ResizeObserver height report (jsdom performs no layout).
+    capturedInputFormProps.onModelSelectorClearance =
+      onModelSelectorClearance ?? null;
     return (
       <div>
         <div
@@ -464,6 +477,7 @@ beforeEach(() => {
   capturedWebViewHandlers.setAccountInfo = null;
   capturedSessionHandlers.setShowSessionSelector = null;
   capturedCompletionTriggerCalls.length = 0;
+  capturedInputFormProps.onModelSelectorClearance = null;
   (
     globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
   ).IS_REACT_ACT_ENVIRONMENT = true;
@@ -962,6 +976,11 @@ describe('App model selector gating', () => {
 });
 
 describe('App messages container bottom clearance', () => {
+  const permissionPayload = {
+    options: [{ optionId: 'allow_once', name: 'Allow once' }],
+    toolCall: { title: 'run: ls' },
+  };
+
   it('keeps only a small bottom padding now that the form is an in-flow sibling', async () => {
     const rendered = renderApp();
     root = rendered.root;
@@ -979,5 +998,54 @@ describe('App messages container bottom clearance', () => {
     // dead space between the last message and the form (#8617 follow-up).
     expect(messages?.className ?? '').toContain('pb-2');
     expect(messages?.className ?? '').not.toContain('pb-[140px]');
+    // Selector closed: no dynamic clearance padding either.
+    expect((messages as HTMLElement).style.paddingBottom).toBe('');
+  });
+
+  it('reserves the measured dropdown clearance while the selector is open and frees it on close', async () => {
+    const rendered = renderApp();
+    root = rendered.root;
+    container = rendered.container;
+
+    await act(async () => {});
+    setInputSelection(rendered.container, '/');
+    clickButton(rendered.container, 'select-model-command');
+    expect(rendered.container.querySelector('.model-selector')).not.toBeNull();
+
+    const messages = rendered.container.querySelector(
+      '.chat-messages',
+    ) as HTMLElement | null;
+    expect(messages).not.toBeNull();
+
+    // The App must hand the adapter its clearance callback; the real
+    // adapter reports the open dropdown's measured height through it.
+    expect(capturedInputFormProps.onModelSelectorClearance).not.toBeNull();
+
+    const scrollToSpy = HTMLElement.prototype.scrollTo as ReturnType<
+      typeof vi.fn
+    >;
+    scrollToSpy.mockClear();
+
+    // Simulate the adapter measuring a 184px-tall open dropdown.
+    act(() => {
+      capturedInputFormProps.onModelSelectorClearance?.(184);
+    });
+
+    // The messages viewport gains exactly that clearance (plus the 8px
+    // mb-2 gap and an 8px gap above the dropdown's top edge) as inline
+    // padding — the className pb-2 stays untouched — so the last message
+    // can scroll up clear of the dropdown instead of being hidden behind
+    // it (issue #8617).
+    expect(messages?.style.paddingBottom).toBe('200px');
+    // A view pinned to the bottom re-anchors to the new scroll floor.
+    expect(scrollToSpy).toHaveBeenCalledWith({ top: 0 });
+
+    // Closing the selector frees the clearance again — no stranded dead
+    // space (the round-5 pb-[140px] regression direction).
+    act(() => {
+      capturedWebViewHandlers.handlePermissionRequest?.(permissionPayload);
+    });
+    expect(rendered.container.querySelector('.model-selector')).toBeNull();
+    expect(messages?.style.paddingBottom).toBe('');
   });
 });

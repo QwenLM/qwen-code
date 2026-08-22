@@ -338,6 +338,16 @@ export const App: React.FC = () => {
     null,
   );
   const [showModelSelector, setShowModelSelector] = useState(false);
+  // Measured height of the open model-selector dropdown, reported by the
+  // InputForm adapter (which renders the dropdown). While open, the
+  // dropdown paints over the messages viewport, so the messages container
+  // reserves this much bottom scroll clearance — letting the last message
+  // scroll up above the dropdown instead of being hidden behind it
+  // (issue #8617).
+  const [modelSelectorClearance, setModelSelectorClearance] = useState(0);
+  const handleModelSelectorClearanceChange = useCallback((heightPx: number) => {
+    setModelSelectorClearance(heightPx);
+  }, []);
   const [accountInfo, setAccountInfo] = useState<AccountInfo | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   // Maps DOM child position → allMessages index. Built during render by
@@ -919,6 +929,23 @@ export const App: React.FC = () => {
       setShowModelSelector(false);
     }
   }, [showModelSelector, isOverlayActive]);
+
+  // While the selector is open, the messages container carries extra bottom
+  // padding (the dropdown clearance). Re-anchor a view pinned to the bottom
+  // to the new scroll floor so the last message sits above the dropdown's
+  // top edge instead of behind the dropdown (issue #8617). Users who
+  // scrolled away are left alone — no scroll stealing.
+  useLayoutEffect(() => {
+    if (!showModelSelector || modelSelectorClearance <= 0 || !pinnedToBottom) {
+      return;
+    }
+    const container = messagesContainerRef.current;
+    if (!container) {
+      return;
+    }
+    const top = container.scrollHeight - container.clientHeight;
+    container.scrollTo({ top });
+  }, [showModelSelector, modelSelectorClearance, pinnedToBottom]);
 
   // Handle permission response
   const handlePermissionResponse = useCallback(
@@ -1601,6 +1628,18 @@ export const App: React.FC = () => {
         // over the messages and needed pb-[140px] of scroll clearance;
         // keeping it would strand ~140px of dead space above the form.
         className="chat-messages messages-container flex-1 overflow-y-auto overflow-x-hidden pt-5 pr-5 pl-5 pb-2 flex flex-col relative min-w-0 focus:outline-none [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:rounded-sm [&>*]:flex [&>*]:gap-0 [&>*]:items-start [&>*]:text-left [&>*]:py-2 [&>*:not(:last-child)]:pb-[8px] [&>*]:flex-col [&>*]:relative [&>*]:animate-[fadeIn_0.2s_ease-in]"
+        // While the model selector is open it paints over the bottom of this
+        // viewport. Add bottom scroll clearance for the dropdown's measured
+        // height (plus its 8px mb-2 gap to the form and an 8px gap above
+        // the dropdown's top edge) so the last message can scroll up clear
+        // of the dropdown instead of being hidden behind it (issue #8617).
+        // Applied only while open, so no dead space is stranded once it
+        // closes.
+        style={
+          showModelSelector && modelSelectorClearance > 0
+            ? { paddingBottom: `${modelSelectorClearance + 16}px` }
+            : undefined
+        }
         data-vscode-context={
           hasContent ? '{"webviewSection": "chat-messages"}' : undefined
         }
@@ -1780,6 +1819,7 @@ export const App: React.FC = () => {
           currentModelId={modelInfo?.modelId}
           onSelectModel={handleModelSelect}
           onCloseModelSelector={() => setShowModelSelector(false)}
+          onModelSelectorClearance={handleModelSelectorClearanceChange}
         />
       )}
 

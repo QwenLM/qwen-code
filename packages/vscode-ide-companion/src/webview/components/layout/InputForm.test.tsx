@@ -42,6 +42,7 @@ function renderInputForm(props?: {
   currentModelId?: string | null;
   onSelectModel?: (modelId: string) => void;
   onCloseModelSelector?: () => void;
+  onModelSelectorClearance?: (heightPx: number) => void;
 }) {
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -89,6 +90,7 @@ function renderInputForm(props?: {
         currentModelId={props?.currentModelId}
         onSelectModel={onSelectModel}
         onCloseModelSelector={onCloseModelSelector}
+        onModelSelectorClearance={props?.onModelSelectorClearance}
       />,
     );
   });
@@ -392,5 +394,85 @@ describe('InputForm model selector positioning (issue #8617)', () => {
 
     expect(rendered.onCloseModelSelector).toHaveBeenCalledTimes(1);
     expect(rendered.onSelectModel).not.toHaveBeenCalled();
+  });
+
+  it('reports the open dropdown height for messages scroll clearance', () => {
+    const observers: Array<{
+      callback: ResizeObserverCallback;
+      targets: Element[];
+    }> = [];
+    const originalResizeObserver = globalThis.ResizeObserver;
+    Object.defineProperty(globalThis, 'ResizeObserver', {
+      configurable: true,
+      value: class {
+        readonly targets: Element[] = [];
+        constructor(callback: ResizeObserverCallback) {
+          observers.push({ callback, targets: this.targets });
+        }
+        observe(target: Element) {
+          this.targets.push(target);
+        }
+        unobserve() {}
+        disconnect() {}
+      },
+    });
+
+    const onModelSelectorClearance = vi.fn();
+    try {
+      const rendered = renderInputForm({
+        showModelSelector: true,
+        availableModels: models,
+        currentModelId: null,
+        onModelSelectorClearance,
+      });
+      root = rendered.root;
+      container = rendered.container;
+
+      const menu = container.querySelector(
+        '.model-selector',
+      ) as HTMLElement | null;
+      expect(menu).not.toBeNull();
+
+      // The adapter must observe the dropdown's own positioned wrapper (the
+      // element that paints over the messages viewport) and report its
+      // measured height — that number becomes the messages container's
+      // bottom scroll clearance while the selector is open (#8617).
+      const dropdown = collectAncestors(menu as HTMLElement).find((el) =>
+        /(^|\s)absolute(\s|$)/.test(el.className),
+      );
+      expect(dropdown).toBeDefined();
+
+      const observed = observers.flatMap((entry) => entry.targets);
+      expect(observed).toContain(dropdown);
+
+      Object.defineProperty(dropdown, 'getBoundingClientRect', {
+        configurable: true,
+        value: () => ({
+          height: 184,
+          width: 400,
+          top: 300,
+          bottom: 484,
+          left: 0,
+          right: 400,
+          x: 0,
+          y: 300,
+          toJSON: () => ({}),
+        }),
+      });
+
+      act(() => {
+        for (const entry of observers) {
+          entry.callback([], {} as ResizeObserver);
+        }
+      });
+
+      expect(onModelSelectorClearance).toHaveBeenCalledWith(184);
+    } finally {
+      Object.defineProperty(globalThis, 'ResizeObserver', {
+        configurable: true,
+        writable: true,
+        value: originalResizeObserver,
+      });
+    }
   });
 });

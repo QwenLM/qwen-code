@@ -43,6 +43,12 @@ export interface InputFormProps
   onSelectModel?: (modelId: string) => void;
   /** Callback to close model selector */
   onCloseModelSelector?: () => void;
+  /**
+   * Reports the open model-selector dropdown's measured height so the chat
+   * viewport can reserve bottom scroll clearance for it (issue #8617: the
+   * last message must stay revealable while the dropdown is open).
+   */
+  onModelSelectorClearance?: (heightPx: number) => void;
 }
 
 /**
@@ -72,10 +78,12 @@ export const InputForm: FC<InputFormProps> = ({
   currentModelId,
   onSelectModel,
   onCloseModelSelector,
+  onModelSelectorClearance,
   ...rest
 }) => {
   const editModeInfo = getEditModeInfo(editMode);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
+  const dropdownRef = useRef<HTMLDivElement | null>(null);
   const [formHeight, setFormHeight] = useState(0);
 
   // The base form's root is `absolute bottom-0 left-0 right-0` and out of
@@ -112,6 +120,32 @@ export const InputForm: FC<InputFormProps> = ({
     };
   }, []);
 
+  // While the selector is open, report the dropdown's measured height so
+  // the chat viewport can reserve bottom scroll clearance for it — the
+  // dropdown paints over the messages viewport, and without clearance the
+  // last message's tail cannot be scrolled into view while the dropdown is
+  // open (issue #8617).
+  useLayoutEffect(() => {
+    const dropdown = dropdownRef.current;
+    if (
+      !showModelSelector ||
+      !dropdown ||
+      !onModelSelectorClearance ||
+      typeof ResizeObserver === 'undefined'
+    ) {
+      return;
+    }
+    const measure = () => {
+      onModelSelectorClearance(dropdown.getBoundingClientRect().height);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(dropdown);
+    return () => {
+      observer.disconnect();
+    };
+  }, [showModelSelector, onModelSelectorClearance]);
+
   return (
     // Positioning context for the ModelSelector. The base form's root is
     // `absolute bottom-0 left-0 right-0` and out of flow (see
@@ -137,7 +171,10 @@ export const InputForm: FC<InputFormProps> = ({
         // overlays (PermissionDrawer / AskUserQuestionDialog /
         // AccountInfoDialog) rendered by App.tsx; App closes the selector
         // when an overlay takes over and never opens it underneath one.
-        <div className="absolute bottom-full left-4 right-4 mb-2 z-0 max-w-[600px] mx-auto">
+        <div
+          ref={dropdownRef}
+          className="absolute bottom-full left-4 right-4 mb-2 z-0 max-w-[600px] mx-auto"
+        >
           <ModelSelector
             visible={showModelSelector}
             models={availableModels ?? []}
