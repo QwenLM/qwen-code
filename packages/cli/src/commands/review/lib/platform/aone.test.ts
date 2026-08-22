@@ -1620,6 +1620,15 @@ describe('comment/status reads (the a1 backing for dedup)', () => {
     ]);
   });
 
+  it('getMrStatusChecks reads an all-garbage checks array as unreadable', () => {
+    // A found array whose entries ALL fail the object filter is the same
+    // unreadable gate state as no array at all: collapsing it to [] would
+    // emit the all-clear shape over the string-entry drift the drop above
+    // anticipates, capping nothing where the no-array twin caps an Approve.
+    a1JsonMock.mockReturnValue({ checks: ['lint: ok', 'build: ok'] });
+    expect(getMrStatusChecks(123, 'g/p')).toBeUndefined();
+  });
+
   it('getMrStatusChecks reads a null payload as unreadable, never a crash', () => {
     // a1 can answer a bare `null` to mr status — the same payload shape
     // listMrComments tolerates (and pins). The caller maps that unreadable

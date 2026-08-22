@@ -761,8 +761,9 @@ export function aoneWhoami(): string {
  *  subcommands). Entries that are not objects are dropped — a classifier
  *  reading a string entry as a record would report every gate as pending on
  *  a key typo, and the drop keeps the shape contract honest. `null` means
- *  NO checks array was recognizable at all — distinct from a found-but-empty
- *  array, which is a real "no gates exist" statement. */
+ *  NO checks array was readable — none recognizable, or a found array whose
+ *  entries ALL died on that filter — distinct from a found-but-empty array,
+ *  which is a real "no gates exist" statement. */
 function extractStatusChecks(
   out: unknown,
 ): Array<Record<string, unknown>> | null {
@@ -783,10 +784,15 @@ function extractStatusChecks(
     }
     const checks = (container as Record<string, unknown>)['checks'];
     if (Array.isArray(checks)) {
-      return checks.filter(
+      const objects = checks.filter(
         (e): e is Record<string, unknown> =>
           e !== null && typeof e === 'object' && !Array.isArray(e),
       );
+      // A found array the filter empties entirely is the SAME unreadable
+      // gate state as no array at all — returning [] here would hand the
+      // caller the all-clear shape over a shape drift.
+      if (objects.length === 0 && checks.length > 0) return null;
+      return objects;
     }
   }
   return null;
@@ -796,8 +802,9 @@ function extractStatusChecks(
  *  A found-but-empty array stays `[]` — the GitHub contract's "no CI at
  *  all" shape, which the classifier reads as `no_checks` with zero totals
  *  and does NOT downgrade. `undefined` means a1 answered but no
- *  recognizable `checks` array was present — the caller maps that
- *  unreadable gate state to pending, never to the all-clear. */
+ *  readable `checks` array was present — none recognizable, or one every
+ *  entry of which was garbage — the caller maps that unreadable gate
+ *  state to pending, never to the all-clear. */
 export function getMrStatusChecks(
   prNumber: number,
   ownerRepo: string,
