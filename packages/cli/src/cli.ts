@@ -92,6 +92,28 @@ const VALUE_FLAGS = new Set(
 // becomes the first positional and defeats a later --help/--version fast path.
 VALUE_FLAGS.add('--sandbox-session-id');
 
+// The exact value-taking-flag spellings the pre-PR hasFlag scan hardcoded.
+// versionTokenIndex must skip value slots for THIS set only: flags that only
+// the derived VALUE_FLAGS knows (--worktree, --proxy, -e, --auth-type,
+// --session-id, --exclude-tools, ...) were absent from the base scan, so base
+// COUNTED a `-v`/`--version` sitting in their value slot and printed the
+// version. Skipping those slots here would drop the intercept and hand the
+// argv to the full parser (corrupted `mcp add` settings writes, swallowed
+// `-e` values, exit-1 Unknown-argument on `--proxy -v mcp remove ...`).
+const BASE_VALUE_FLAGS = new Set([
+  '--model',
+  '-m',
+  '--fallback-model',
+  '--prompt',
+  '-p',
+  '--prompt-interactive',
+  '-i',
+  '--output-format',
+  '-o',
+  '--resume',
+  '-r',
+]);
+
 // Every flag spelling the exact-token scanner is allowed to recognize: the
 // full option/alias surface from the shared top-level definitions (same
 // derivation pattern as VALUE_FLAGS) plus the help/version flags registered
@@ -198,19 +220,23 @@ function hasFlag(
 }
 
 // Index of the `-v`/`--version` token before any `--`; -1 when no such
-// token exists. Mirrors the pre-PR hasFlag scan: the token following a
-// value-taking flag is skipped unconditionally (even when it starts with
-// `-`), so a version token sitting in a value slot is NOT counted —
-// `qwen -p -v -h` and `qwen --resume -v --help` printed top-level help on
-// base, not the version. Tokens after `--` are positional data and never
-// count.
+// token exists. Mirrors the pre-PR hasFlag scan exactly: the token
+// following one of the base's hardcoded value-taking flags
+// (BASE_VALUE_FLAGS) is skipped unconditionally (even when it starts with
+// `-`), so a version token sitting in one of THOSE value slots is NOT
+// counted — `qwen -p -v -h` and `qwen --resume -v --help` printed
+// top-level help on base, not the version. The derived VALUE_FLAGS set is
+// deliberately NOT used here: flags it adds were absent from the base
+// scan, which counted a version token in their value slot (`qwen --proxy
+// -v ...` printed the version), so this scan must count it too. Tokens
+// after `--` are positional data and never count.
 function versionTokenIndex(argv: readonly string[]): number {
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
     if (arg === '--') {
       return -1;
     }
-    if (VALUE_FLAGS.has(arg)) {
+    if (BASE_VALUE_FLAGS.has(arg)) {
       i++; // skip the value slot; the loop increment consumes the token
       continue;
     }
@@ -287,15 +313,19 @@ export function resolveBootstrapRoute(
   // the full parser EXECUTES subcommands (observed: `mcp remove victim -v
   // help` deleted the server and its OAuth creds on the full parser) — so
   // the fail-closed direction is to intercept. The scan mirrors base's
-  // hasFlag exactly: it skips the value slot of value-taking flags, so a
-  // version token sitting in that slot is NOT counted (`qwen -p -v -h`
-  // and `qwen --resume -v --help` printed top-level help on base, and
-  // `qwen --model -v` demoted to the full parser), and it models no help
-  // state (base printed the version for every other help-token sibling
-  // probed). Only tokens after `--` (positional data, e.g. `mcp add name
-  // cmd -- -v`, which the mcp fast path persists verbatim) and `=`-form
-  // tokens (`--model=-v` is one token, not an exact match) escape the
-  // intercept.
+  // hasFlag exactly: it skips the value slot of the base's hardcoded
+  // value-taking flags only (BASE_VALUE_FLAGS), so a version token
+  // sitting in one of those slots is NOT counted (`qwen -p -v -h` and
+  // `qwen --resume -v --help` printed top-level help on base, and
+  // `qwen --model -v` demoted to the full parser). Flags the base scan
+  // did not know (--worktree, --proxy, -e, --auth-type, ...) never
+  // consumed a value slot there, so a version token in their value slot
+  // WAS counted and IS intercepted here. The scan models no help state
+  // (base printed the version for every other help-token sibling probed).
+  // Escape surface: tokens after `--` (positional data, e.g. `mcp add
+  // name cmd -- -v`, which the mcp fast path persists verbatim),
+  // `=`-form tokens (`--model=-v` is one token, not an exact match), and
+  // version tokens sitting in a BASE_VALUE_FLAGS value slot.
   if (versionTokenIndex(argv) !== -1) {
     return 'version';
   }

@@ -252,6 +252,59 @@ describe('resolveBootstrapRoute', () => {
     expect(resolveBootstrapRoute(['-p', 'hello', '-h'])).toBe('help');
   });
 
+  it('intercepts version tokens in derived-only value-flag slots (base parity)', () => {
+    // Base's hasFlag skipped value slots only for its hardcoded
+    // 11-spelling set (BASE_VALUE_FLAGS). Flags added by the derived
+    // VALUE_FLAGS (--worktree, --proxy, -e, --auth-type, --session-id,
+    // --exclude-tools, --append-system-prompt, the hidden
+    // --sandbox-session-id) did not consume their value slot in the base
+    // scan, so a `-v`/`--version` sitting there WAS counted and base
+    // printed the version. Skipping those slots here would drop the
+    // intercept and corrupt real runs: `mcp add srv cmd --exclude-tools
+    // -v` persisted excludeTools:["-v"], `mcp add srv cmd -e -v`
+    // swallowed the `-v` env value, `--proxy -v mcp remove victim`
+    // became an exit-1 Unknown argument instead of an exit-0 version
+    // print, and `--worktree -v --help` printed help instead of the
+    // version.
+    expect(
+      resolveBootstrapRoute(['--proxy', '-v', 'mcp', 'remove', 'victim']),
+    ).toBe('version');
+    expect(
+      resolveBootstrapRoute(['mcp', 'add', 'name', 'cmd', '-e', '-v']),
+    ).toBe('version');
+    expect(
+      resolveBootstrapRoute([
+        'mcp',
+        'add',
+        'srv',
+        'cmd',
+        '--exclude-tools',
+        '-v',
+      ]),
+    ).toBe('version');
+    expect(resolveBootstrapRoute(['--worktree', '-v', '--help'])).toBe(
+      'version',
+    );
+    expect(resolveBootstrapRoute(['--exclude-tools', '-v', '--help'])).toBe(
+      'version',
+    );
+    expect(resolveBootstrapRoute(['--auth-type', '-v'])).toBe('version');
+    expect(resolveBootstrapRoute(['--session-id', '--version'])).toBe(
+      'version',
+    );
+    expect(
+      resolveBootstrapRoute(['--append-system-prompt', '-v', '--help']),
+    ).toBe('version');
+    expect(resolveBootstrapRoute(['--sandbox-session-id', '-v'])).toBe(
+      'version',
+    );
+    // Base-set control: the 11 base spellings still skip their value
+    // slot, unchanged by the derived-only fix above.
+    expect(resolveBootstrapRoute(['--model', '-v'])).toBe('default');
+    expect(resolveBootstrapRoute(['-m', '--version', '-h'])).toBe('help');
+    expect(resolveBootstrapRoute(['--resume', '-v', '--help'])).toBe('help');
+  });
+
   it('prints the version for exact version tokens with hidden help states (base parity)', () => {
     // Base printed the version even when argv carries tokens that set the
     // help flag on the full parser — probed against the base binary:
