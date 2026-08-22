@@ -559,3 +559,4 @@ create --file/--line` and `-f json` stability? Provider version floor TBD.
 - **Lightweight-only support** (diff-only, no fetch/context/post): viable as a
   stopgap but fails the actual goal — the team's workflow needs posted,
   gate-aware reviews, and diff-only mode forbids APPROVE by design.
+

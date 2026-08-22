@@ -1407,3 +1407,5 @@ These criteria apply to both Step 3 (review agents) and Step 4 (verification age
 - Silence is better than noise. If you have nothing important to say, say nothing.
 - **Do NOT use `#N` notation** (e.g., `#1`, `#2`) in PR comments or summaries — GitHub auto-links these to issues/PRs. Use `(1)`, `[1]`, or descriptive references instead.
 - **Match the language of the PR in everything you post.** Write the review comments, findings, and summaries that land on the PR in the same language as the PR title/description/code comments. If the PR is in English, write in English. If in Chinese, write in Chinese. Do NOT switch languages. Terminal narration and agent `description`s follow the output language preference instead — the split is critical rule 2 at the top of this document. For **local reviews** (no PR), nothing is posted, so the output language preference governs throughout; without one, follow the user's input language.
+
+
