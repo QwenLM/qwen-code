@@ -633,12 +633,13 @@ export const RESIDUE_PATH_CAP = 12;
  * worktree pair with the contamination committed — all of it resolving
  * through the link and agreeing with itself — so a path reached through a
  * link is refused — the walk that finds one is bounded at the repository the
- * common dir belongs to, and an answer whose common dir is no LITERAL
- * ancestor of the tree path is refused before the walk: that is the shape a
- * forge uses to steer the walk's own stop boundary, and no healthy review
- * worktree takes it. And a FORGED admin entry — hand-written to name this
- * tree back, which the round trip cannot tell from the entry `worktree add`
- * wrote — is refused when the caller supplies the commit the tree must hold:
+ * common dir belongs to, and an answer whose common dir is no ancestor of
+ * the tree path in the caller's spelling OR its resolution is refused before
+ * the walk: that is the shape a forge uses to steer the walk's own stop
+ * boundary, and no healthy review worktree takes it. And a FORGED admin
+ * entry — hand-written to name this tree back, which the round trip
+ * cannot tell from the entry `worktree add` wrote — is refused when the
+ * caller supplies the commit the tree must hold:
  * a forge carrying the contamination as committed content cannot also
  * reproduce the fetched head sha, so a pinned `rev-parse HEAD` disagreeing
  * with the caller's record is a refusal. The record arrives read from disk,
@@ -731,19 +732,33 @@ export function worktreeResidue(
       }
       // The walk below is bounded at the repository the common dir belongs
       // to — above that is the user's own layout, and `/var` is a symlink on
-      // every macOS box. A bound only bounds when the tree's spelled path
-      // actually runs under it: a healthy review worktree sits under the
-      // checkout it answers to, and both spellings start in this process's
-      // resolved cwd. A repository answering from anywhere else — a forge
-      // whose common dir is steered so the walk's stop test fires before the
-      // planted link is ever lstat'd, a repo that merely names this path its
-      // `core.worktree` — is itself the suspect shape, and refusing it here
-      // is what keeps the walk from escaping its bound up into the
-      // filesystem's own links. Measured: through the steered boundary a
-      // completely genuine forge pair certified a mutant clean.
+      // every macOS box. A bound only bounds when the tree's path actually
+      // runs under it, and the containment test reads BOTH spellings its two
+      // sides carry: the caller's path as spelled, git's common dir as
+      // physical (its discovery chdir canonicalises). A tree reached through
+      // a link ABOVE the checkout — `/tmp` on every macOS box, a linked
+      // home — fails the literal test while remaining the healthy shape, so
+      // its resolution decides that case, and the walk still lstats every
+      // spelled component under the bound either way. Contained in NEITHER
+      // spelling is the suspect shape — a forge whose common dir is steered
+      // so the walk's stop test fires before the planted link is ever
+      // lstat'd, a repo that merely names this path its `core.worktree` —
+      // and refusing it here is what keeps the walk from escaping its bound
+      // up into the filesystem's own links. Measured: through the steered
+      // boundary a completely genuine forge pair certified a mutant clean,
+      // and the literal-only test refused every healthy tree on a host whose
+      // checkout spelling carries a link above the repository.
       const spelled = resolve(cwd);
       const bound = dirname(commonDir);
-      if (!spelled.startsWith(bound + sep)) {
+      let contained = spelled.startsWith(bound + sep);
+      if (!contained) {
+        try {
+          contained = realpathSync(spelled).startsWith(bound + sep);
+        } catch {
+          // Unresolvable: the literal test is the whole containment test.
+        }
+      }
+      if (!contained) {
         return {
           paths: [],
           total: 0,

@@ -29,7 +29,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { isolateHostGitConfig } from './test-utils.js';
 import {
   discardWorktree,
@@ -413,6 +413,35 @@ describe('worktreeResidue', () => {
       expect(got.unmeasured).toContain('does not contain it');
     } finally {
       rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('measures a healthy tree spelled through a symlink ABOVE the repository root', () => {
+    // The containment gate holds the caller's spelling against git's
+    // PHYSICAL common dir, so a checkout reached through a link above the
+    // repository — `/tmp` on every macOS box, a linked home — failed the
+    // literal test and was refused on every run: the note nobody reads, on
+    // a shape the walk deliberately does not look at (above the root is the
+    // user's own layout, not anything a probe can plant). The resolution is
+    // contained, so the healthy shape must measure.
+    const head = git('rev-parse', 'HEAD');
+    const aliasHome = mkdtempSync(join(tmpdir(), 'qwen-spell-'));
+    const alias = join(aliasHome, 'alias');
+    symlinkSync(dirname(repo), alias);
+    const spelled = join(alias, basename(repo), '.qwen', 'tmp', 'review-wt');
+    try {
+      expect(worktreeResidue(spelled, 12, head)).toEqual({
+        paths: [],
+        total: 0,
+      });
+      // And the measurement is the tree's, not the spelling's: residue
+      // written at the physical path is named through the alias.
+      writeFileSync(join(tree, '__probe__.test.ts'), 'probe');
+      expect(worktreeResidue(spelled, 12, head).paths).toEqual([
+        '__probe__.test.ts',
+      ]);
+    } finally {
+      rmSync(aliasHome, { recursive: true, force: true });
     }
   });
 
