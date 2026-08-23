@@ -97,10 +97,18 @@ block; the test-corpus re-grep below is what catches any surviving consumer.
 
 Then re-grep the test corpus **on this checkout** for every removed symbol and
 run every file it hits — a deletion's characteristic failure is a distant test
-that imports the symbol, which a targeted run never executes:
+that imports the symbol, which a targeted run never executes. Branch on the
+symbol's shape: identifiers keep the word boundaries; sentence-shaped symbols
+(locale keys) must search fixed-string with no anchors — `\b` cannot form a
+boundary after punctuation, and keys like `{{name}}` are regex parse errors:
 
 ```bash
+# identifier symbols:
 "$RG" -n '\b<Symbol>\b' packages integrations integration-tests scripts \
+  .github docs-site \
+  -g '*.test.*' -g '*.spec.*' -g '**/__snapshots__/**'
+# sentence-shaped symbols (locale keys); -e keeps a leading `--` a pattern:
+"$RG" -nF -e '<exact key>' packages integrations integration-tests scripts \
   .github docs-site \
   -g '*.test.*' -g '*.spec.*' -g '**/__snapshots__/**'
 ```

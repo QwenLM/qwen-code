@@ -9,22 +9,23 @@ gone, that is a finding about this document, not about the repo.
 
 ## 0 — Before searching
 
-1. **Survey fresh code** — `git fetch origin || exit 1`, then survey from a
-   throwaway worktree, never by switching the user's checkout:
-   `SURVEY_PARENT="$(mktemp -d)"`, `SURVEY="$SURVEY_PARENT/main"`, then
-   `trap 'cd / && git worktree remove "$SURVEY" 2>/dev/null; rm -rf "$SURVEY_PARENT"' EXIT`
-   before `git worktree add --detach "$SURVEY" origin/main || exit 1`, and
-   run every grep below from `$SURVEY`. The trap goes in before the worktree
-   is added: a mandatory step can still exit early later (SKILL.md § Shared
-   Rules' `"$RG" --version || exit 1`), and a failed run must not leave a
-   registered worktree accumulating run after run. This phase is read-only, and a detached HEAD
-   left sitting in the user's checkout belongs to no branch. Fetch only
-   updates the ref, while every grep in this phase reads the working tree,
-   so "work against `origin/main`" means actually being on it. A local
-   checkout drifts hundreds of commits behind; a stale base invents dead
-   surface someone already deleted, and misses what landed since. Both
-   guards matter: when the fetch fails, `git worktree add` still succeeds
-   against the stale cached ref, and no grep below can see the staleness.
+1. **Survey fresh code** — run SKILL.md § Rotation's setup block verbatim
+   (fetch, then a throwaway worktree at the fixed path
+   `${TMPDIR:-/tmp}/find-simplifications-survey/main`), never switching the
+   user's checkout, and run every grep below from that worktree: the
+   consuming harness spawns a fresh shell per command, so each later call
+   re-derives the fixed path and `cd`s into it itself. This phase is
+   read-only, and a detached HEAD left sitting in the user's checkout
+   belongs to no branch. Fetch only updates the ref, while every grep in
+   this phase reads the working tree, so "work against `origin/main`" means
+   actually being on it. A local checkout drifts hundreds of commits behind;
+   a stale base invents dead surface someone already deleted, and misses
+   what landed since. Both guards matter: when the fetch fails,
+   `git worktree add` still succeeds against the stale cached ref, and no
+   grep below can see the staleness. A failed or interrupted run leaves at
+   most one leftover worktree at the fixed path, and the next run's setup
+   block removes it first — that is the accumulation guard; an EXIT trap
+   cannot serve it across per-command shells.
 2. **Read the ledger** (SKILL.md § The ledger). Collect every tombstoned id.
    If the ledger cannot be read, stop per that section — surveying without
    the tombstones can re-propose a permanently declined id.
@@ -104,8 +105,12 @@ goes on the ledger and what stops the next run re-deriving it.
 ```bash
 # whole file or directory:
 git log --follow --diff-filter=A --format=%ad --date=short -- <path> | tail -1
-# a symbol, key, or export — the symbol's age, not its file's:
+# an identifier-shaped symbol, key, or export — the symbol's age, not its file's:
 git log --follow --pickaxe-regex -S '(^|[^A-Za-z0-9_])<exact symbol>($|[^A-Za-z0-9_])' --format='%ad %h' --date=short -- <path> | tail -1
+# a string-shaped key (an i18n sentence key) — its regex metacharacters are
+# literal: `{{name}}` fatals --pickaxe-regex, and unescaped parens or `+`
+# match something other than the key. Date those as fixed strings:
+git log --follow --fixed-strings -S '<exact key>' --format='%ad %h' --date=short -- <path> | tail -1
 ```
 
 `--follow` dates a surface at its creation, not its last rename — without it,
@@ -123,6 +128,11 @@ and `[[:<:]]` finding the introduction). And an empty result is not an age:
 if the query prints nothing, the pattern matched no commit on this platform —
 stop and do not file the candidate, because a symbol you cannot date never
 passes this gate.
+
+Branch on the surface's shape: identifiers and bare symbols take the boundary
+alternation; sentence keys and other string-shaped surfaces take the
+`--fixed-strings` variant above — injecting their metacharacters into the
+regex form either fatals or matches a superset and dates the wrong surface.
 
 Younger than ~90 days → **drop silently**, do not even file it. It is a
 feature someone is still wiring up. (90 days is a heuristic, not a measured
@@ -297,9 +307,15 @@ excellent evidence for an issue, not for a PR.
    (consumers named with certainty) × (lines removed) and file them all.
 5. Write the ledger comment per SKILL.md § Output: survivors with their
    evidence, plus one line per rejected id and the step that killed it.
-6. **STOP.** Return to the user's checkout and remove the survey worktree and
-   its temporary parent (`git worktree remove "$SURVEY"`,
-   `rm -rf "$SURVEY_PARENT"`), then clear §0's trap (`trap - EXIT`), leaving
-   the checkout as §0 found it.
+6. **STOP.** Return to the user's checkout and remove the survey worktree.
+   Nothing from §0's shell survived to this call, so the cleanup is
+   self-contained: re-derive the fixed path
+   (`SURVEY="${TMPDIR:-/tmp}/find-simplifications-survey/main"`), then
+   `git worktree remove --force "$SURVEY" || git worktree prune`, then
+   `rm -rf "$(dirname "$SURVEY")"`. `--force` discards nothing foreign — the
+   worktree is this phase's own throwaway — and without it one untracked
+   file (step 5's ledger-comment file, if written there) makes `remove`
+   refuse and orphans the registration; `prune` recovers when the directory
+   is already gone. Leave the checkout as §0 found it.
    Do not create a branch, do not edit code, do not open a PR. Landing
    requires an assent and `references/land.md`.
