@@ -5940,6 +5940,10 @@ export function App({
       opts?: {
         optimisticUserMessage?: boolean;
         retry?: boolean;
+        // Skips prepareSubmit without daemon retry semantics; used
+        // by the failed-prompt retry, whose user message was never
+        // recorded.
+        skipPrepareSubmit?: boolean;
         inputAnnotations?: DaemonInputAnnotation[];
         clearComposerOnPromptStart?: boolean;
         commitComposerAccepted?: ComposerSubmitCommit;
@@ -5961,7 +5965,6 @@ export function App({
       let preparedInputAnnotations = opts?.inputAnnotations
         ? [...opts.inputAnnotations]
         : [];
-      const isUserPrompt = !text.trimStart().startsWith('/');
       let promptPreparationOwner: symbol | undefined;
       const startPreparing = () => {
         promptPreparationOwner ??= beginPromptPreparation();
@@ -5974,7 +5977,10 @@ export function App({
         opts?.onCancelledBeforeAdmission?.();
       };
       const shouldShowPreparing = !connectionRef.current.sessionId;
-      const prepare = opts?.retry ? undefined : prepareSubmitRef.current;
+      const prepare =
+        opts?.retry || opts?.skipPrepareSubmit
+          ? undefined
+          : prepareSubmitRef.current;
       const submitBefore = onSubmitBeforeRef.current;
       const hasAsyncPreflight = Boolean(prepare || submitBefore);
       const admissionSource = {
@@ -6095,7 +6101,7 @@ export function App({
       if (
         !opts?.retry &&
         opts?.optimisticUserMessage !== false &&
-        isUserPrompt
+        !preparedPrompt.trimStart().startsWith('/')
       ) {
         lastSubmittedPromptRef.current = preparedPrompt;
         lastSubmittedImagesRef.current = images;
@@ -6479,7 +6485,7 @@ export function App({
     let admissionStarted = false;
     sendPrompt(failed.text, failed.images, failed.files, {
       optimisticUserMessage: false,
-      retry: true,
+      skipPrepareSubmit: true,
       inputAnnotations: failed.inputAnnotations,
       onAdmissionStarted: () => {
         admissionStarted = true;

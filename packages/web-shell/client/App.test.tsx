@@ -12166,6 +12166,170 @@ describe('App session callbacks', () => {
     expect(testState.prompt).toBe('hello');
   });
 
+  it('keeps the original payload when preparation resolves without a result', async () => {
+    const prepareSubmit = vi.fn().mockResolvedValue(undefined);
+    const inputAnnotations: DaemonInputAnnotation[] = [
+      {
+        type: 'reference',
+        start: 0,
+        end: 5,
+        text: 'hello',
+        reference: { id: 'file:hello', kind: 'file', value: 'hello' },
+      },
+    ];
+    testState.inputAnnotations = inputAnnotations;
+    const { container } = renderApp({ prepareSubmit });
+    await flush();
+
+    await clickSubmit(container);
+    await flush();
+
+    expect(prepareSubmit).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      prompt: 'hello',
+      inputAnnotations,
+    });
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      'hello',
+      expect.objectContaining({ inputAnnotations }),
+    );
+  });
+
+  it('inherits the original annotations when preparation returns only a prompt', async () => {
+    const prepareSubmit = vi.fn().mockResolvedValue({ prompt: 'rewritten' });
+    const inputAnnotations: DaemonInputAnnotation[] = [
+      {
+        type: 'reference',
+        start: 0,
+        end: 5,
+        text: 'hello',
+        reference: { id: 'file:hello', kind: 'file', value: 'hello' },
+      },
+    ];
+    testState.inputAnnotations = inputAnnotations;
+    const { container } = renderApp({ prepareSubmit });
+    await flush();
+
+    await clickSubmit(container);
+    await flush();
+
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      'rewritten',
+      expect.objectContaining({ inputAnnotations }),
+    );
+  });
+
+  it('cancels a direct submission when the session owner changes while preparing', async () => {
+    // No session yet: without the post-prepare staleness check the stale
+    // submit would run the host gate and allocate a session before the
+    // later guards run.
+    mockConnection.sessionId = undefined;
+    let finishPrepare: (() => void) | undefined;
+    const prepareSubmit = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishPrepare = resolve;
+        }),
+    );
+    const onSubmitBefore = vi.fn().mockResolvedValue(undefined);
+    const { container, rerender } = renderApp({
+      prepareSubmit,
+      onSubmitBefore,
+    });
+    await flush();
+
+    await clickSubmit(container);
+    expect(prepareSubmit).toHaveBeenCalledOnce();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+
+    act(() => {
+      mockConnection.sessionId = 'session-2';
+      mockConnection.workspaceCwd = '/tmp/project-2';
+      testState.ownerVersion += 1;
+      rerender({ prepareSubmit, onSubmitBefore });
+    });
+    await act(async () => {
+      finishPrepare?.();
+      await Promise.resolve();
+    });
+
+    expect(onSubmitBefore).not.toHaveBeenCalled();
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(editorCommit).not.toHaveBeenCalled();
+    expect(editorClear).not.toHaveBeenCalled();
+    expect(testState.prompt).toBe('hello');
+    expect(testState.latestChatEditorProps?.isPreparing).toBe(false);
+  });
+
+  it('keeps the draft when prepareSubmit rejects', async () => {
+    const prepareSubmit = vi.fn().mockRejectedValue(new Error('host failed'));
+    const { container } = renderApp({ prepareSubmit });
+    await flush();
+
+    await clickSubmit(container);
+    await flush();
+
+    expect(prepareSubmit).toHaveBeenCalledOnce();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(editorCommit).not.toHaveBeenCalled();
+    expect(editorClear).not.toHaveBeenCalled();
+    expect(testState.prompt).toBe('hello');
+    expect(testState.latestChatEditorProps?.isPreparing).toBe(false);
+  });
+
+  it('classifies the retry payload from the prepared prompt, not the raw text', async () => {
+    const prepareSubmit = vi.fn().mockResolvedValue({
+      prompt: 'fix the CI pipeline',
+      inputAnnotations: [],
+    });
+    const { container, rerender } = renderApp({ prepareSubmit });
+    await flush();
+
+    testState.prompt = '/fix-ci';
+    await clickSubmit(container);
+
+    expect(prepareSubmit).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      prompt: '/fix-ci',
+      inputAnnotations: [],
+    });
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      'fix the CI pipeline',
+      expect.objectContaining({ retry: undefined }),
+    );
+
+    act(() => {
+      testState.blocks = [
+        {
+          kind: 'error',
+          source: 'turn_error',
+          id: 'turn-error-rewritten',
+          errorKind: 'model_stream_interrupted',
+          text: 'terminated',
+        },
+      ];
+      rerender({ prepareSubmit });
+    });
+
+    expect(container.querySelector('[data-testid="retry"]')).not.toBeNull();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="retry"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.sendPrompt).toHaveBeenLastCalledWith(
+      'fix the CI pipeline',
+      expect.objectContaining({
+        optimisticUserMessage: false,
+        retry: true,
+      }),
+    );
+  });
+
   it('does not attribute prompt admission when the active owner is unknown', async () => {
     mockConnection.workspaceCwd = undefined;
     const { container } = renderApp();
@@ -15277,6 +15441,91 @@ describe('App session callbacks', () => {
     expect(rawEnqueuePrompt).not.toHaveBeenCalled();
     expect(editorClear).not.toHaveBeenCalled();
     expect(editorCommit).not.toHaveBeenCalled();
+  });
+
+  it('cancels a queued submission when the owner changes while preparing', async () => {
+    let finishPrepare: (() => void) | undefined;
+    const prepareSubmit = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishPrepare = resolve;
+        }),
+    );
+    const { container, rerender } = renderApp({ prepareSubmit });
+    await flush();
+
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({ prepareSubmit });
+    });
+    testState.prompt = 'queued';
+    await clickSubmit(container);
+    expect(prepareSubmit).toHaveBeenCalledOnce();
+
+    act(() => {
+      mockConnection.sessionId = 'session-2';
+      mockConnection.workspaceCwd = '/tmp/project-2';
+      testState.ownerVersion += 1;
+      rerender({ prepareSubmit });
+    });
+    act(() => {
+      mockConnection.sessionId = 'session-1';
+      mockConnection.workspaceCwd = '/tmp/project';
+      testState.ownerVersion += 1;
+      rerender({ prepareSubmit });
+    });
+    await act(async () => {
+      finishPrepare?.();
+      await Promise.resolve();
+    });
+
+    expect(rawEnqueuePrompt).not.toHaveBeenCalled();
+    expect(editorCommit).not.toHaveBeenCalled();
+    expect(editorClear).not.toHaveBeenCalled();
+    expect(testState.prompt).toBe('queued');
+  });
+
+  it('cancels queued submissions when prepareSubmit rejects', async () => {
+    const prepareSubmit = vi.fn().mockRejectedValue(new Error('host failed'));
+    const { container, rerender } = renderApp({ prepareSubmit });
+    await flush();
+
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({ prepareSubmit });
+    });
+    testState.prompt = 'queued';
+    await clickSubmit(container);
+    await flush();
+
+    expect(prepareSubmit).toHaveBeenCalledOnce();
+    expect(rawEnqueuePrompt).not.toHaveBeenCalled();
+    expect(editorCommit).not.toHaveBeenCalled();
+    expect(editorClear).not.toHaveBeenCalled();
+    expect(testState.prompt).toBe('queued');
+  });
+
+  it('keeps the draft when preparation empties a queued prompt', async () => {
+    const prepareSubmit = vi.fn().mockResolvedValue({
+      prompt: '',
+      inputAnnotations: [],
+    });
+    const { container, rerender } = renderApp({ prepareSubmit });
+    await flush();
+
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({ prepareSubmit });
+    });
+    testState.prompt = 'queued';
+    await clickSubmit(container);
+    await flush();
+
+    expect(prepareSubmit).toHaveBeenCalledOnce();
+    expect(rawEnqueuePrompt).not.toHaveBeenCalled();
+    expect(editorCommit).not.toHaveBeenCalled();
+    expect(editorClear).not.toHaveBeenCalled();
+    expect(testState.prompt).toBe('queued');
   });
 
   it('keeps goal controls on the control plane instead of prompt admission', async () => {
@@ -20000,6 +20249,57 @@ describe('App prompt send failure retry', () => {
           }),
         ],
         optimisticUserMessage: false,
+      }),
+    );
+  });
+
+  it('does not resend a failed-prompt retry with daemon retry semantics', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const prepareSubmit = vi.fn().mockResolvedValue({
+      prompt: 'prepared hello',
+      inputAnnotations: [],
+    });
+    const firstSend = deferred<void>();
+    mockSessionActions.sendPrompt.mockImplementationOnce(() => {
+      testState.blocks = [{ id: 'u1', kind: 'user' }];
+      return firstSend.promise;
+    });
+    renderApp({ prepareSubmit });
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('hello');
+    });
+    testState.messages = [
+      { id: 'u1', role: 'user', content: 'prepared hello' },
+    ];
+    await act(async () => {
+      firstSend.reject(new DaemonHttpError(413, {}, 'Prompt too large'));
+      await Promise.resolve();
+    });
+
+    expect(prepareSubmit).toHaveBeenCalledOnce();
+    expect(
+      document.querySelector('[data-testid="failed-prompt-retry"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>('[data-testid="failed-prompt-retry"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    // The failed prompt was never admitted, so no user-message record exists
+    // for it; daemon retry semantics skip that record and would drop the
+    // turn's user message from the transcript. The retry must reuse the
+    // prepared payload without forwarding `retry` to the daemon.
+    expect(prepareSubmit).toHaveBeenCalledOnce();
+    expect(mockSessionActions.sendPrompt).toHaveBeenLastCalledWith(
+      'prepared hello',
+      expect.objectContaining({
+        optimisticUserMessage: false,
+        retry: undefined,
       }),
     );
   });
