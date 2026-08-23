@@ -8,7 +8,7 @@ import { beforeEach, describe, it, expect, vi } from 'vitest';
 import express from 'express';
 import request from 'supertest';
 import { registerWorkspaceSettingsRoutes } from './workspace-settings.js';
-import { loadSettings } from '../../config/settings.js';
+import { loadSettings, type SettingScope } from '../../config/settings.js';
 import { WorkspaceGenerationClosedError } from '../workspace-registry.js';
 
 vi.mock('../../config/settings.js', async (importOriginal) => {
@@ -128,6 +128,106 @@ describe('POST /workspace/settings', () => {
     expect(persistSetting).toHaveBeenCalled();
     expect(updateSessionWorkflow).toHaveBeenCalledWith(true);
     expect(updateSessionWorkflow).not.toHaveBeenCalledWith(false);
+  });
+
+  it('holds a second Session Workflow write until the first write finished its live push', async () => {
+    // The daemon-side settings lock only covers the persist; the readback +
+    // live push happen after it. The route must serialize the whole
+    // persist → readback → push critical section per workspace, otherwise a
+    // second write's persist + push can overtake the first write's push and
+    // live sessions end on a value that contradicts the file.
+    const app = express();
+    app.use(express.json());
+
+    let diskValue = false;
+    vi.mocked(loadSettings).mockImplementation(
+      () =>
+        ({
+          get merged() {
+            return { experimental: { sessionWorkflow: diskValue } };
+          },
+          user: { settings: {} },
+          workspace: { settings: {} },
+          forScope: vi.fn().mockReturnValue({ settings: {} }),
+        }) as never,
+    );
+
+    let releaseFirstPush: (() => void) | undefined;
+    const firstPushBlocked = new Promise<void>((resolve) => {
+      releaseFirstPush = resolve;
+    });
+    const persistedValues: boolean[] = [];
+    const persistSetting = vi.fn(
+      async (
+        _workspace: string,
+        _scope: SettingScope,
+        _key: string,
+        value: unknown,
+      ) => {
+        persistedValues.push(value === true);
+        diskValue = value === true;
+      },
+    );
+    const pushedValues: boolean[] = [];
+    const updateSessionWorkflow = vi.fn(async (enabled: boolean) => {
+      if (pushedValues.length === 0) {
+        // Hold the first live push; the second write must not be able to
+        // start its persist while this push is still in flight.
+        await firstPushBlocked;
+      }
+      pushedValues.push(enabled);
+    });
+
+    registerWorkspaceSettingsRoutes(app, {
+      boundWorkspace: '/workspace',
+      mutate: () => (_req, _res, next) => next(),
+      safeBody: (req) =>
+        req.body && typeof req.body === 'object' ? req.body : {},
+      persistSetting,
+      updateSessionWorkflow,
+      broadcastSettingsChanged: vi.fn(),
+      parseAndValidateClientId: () => undefined,
+    });
+
+    // supertest requests are lazy until consumed; `.then()` both starts the
+    // request and yields a plain promise we can await later.
+    const first = request(app)
+      .post('/workspace/settings')
+      .send({
+        scope: 'workspace',
+        key: 'experimental.sessionWorkflow',
+        value: false,
+      })
+      .then((res) => res);
+    await vi.waitFor(() =>
+      expect(updateSessionWorkflow).toHaveBeenCalledTimes(1),
+    );
+
+    const second = request(app)
+      .post('/workspace/settings')
+      .send({
+        scope: 'workspace',
+        key: 'experimental.sessionWorkflow',
+        value: true,
+      })
+      .then((res) => res);
+    // Give the second request time to reach the route handler. Without the
+    // write-chain it would persist (and push) right here, overtaking the
+    // first write's in-flight push.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(persistSetting).toHaveBeenCalledTimes(1);
+
+    releaseFirstPush!();
+    const [firstRes, secondRes] = await Promise.all([first, second]);
+    expect(firstRes.status).toBe(200);
+    expect(secondRes.status).toBe(200);
+
+    // Persists, readbacks, and pushes all serialized in request order: each
+    // push carries its own post-write effective value and the final disk
+    // state (true) is the final pushed state.
+    expect(persistedValues).toEqual([false, true]);
+    expect(pushedValues).toEqual([false, true]);
+    expect(diskValue).toBe(true);
   });
 
   it('exposes the Live shortcut as user-global and rejects generic writes', async () => {

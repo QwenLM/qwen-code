@@ -269,6 +269,38 @@ async function withMcpServerMutationLock<T>(
   }
 }
 
+// The daemon-side settings lock serializes the disk persist only; it is
+// released before these routes sample the post-write effective value and
+// push it to live sessions. Two concurrent Session Workflow writes could
+// then read back each other's state and push out of persist order, leaving
+// live sessions on a gate value that contradicts the file. Chain the whole
+// persist → readback → push critical section per workspace so each push
+// reflects its own write and pushes land in persist order. This nests
+// inside (never around) the daemon lock via persistSetting, so there is no
+// lock-ordering cycle. Same promise-chain pattern as
+// withMcpServerMutationLock above.
+const sessionWorkflowWriteQueues = new Map<string, Promise<void>>();
+async function withSessionWorkflowWriteLock<T>(
+  workspace: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const previous =
+    sessionWorkflowWriteQueues.get(workspace) ?? Promise.resolve();
+  const run = previous.catch(() => undefined).then(operation);
+  const tail = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  sessionWorkflowWriteQueues.set(workspace, tail);
+  try {
+    return await run;
+  } finally {
+    if (sessionWorkflowWriteQueues.get(workspace) === tail) {
+      sessionWorkflowWriteQueues.delete(workspace);
+    }
+  }
+}
+
 export interface WorkspaceSettingsRouteDeps {
   boundWorkspace: string;
   isWorkspaceTrusted?: () => boolean;
@@ -480,84 +512,97 @@ export function registerWorkspaceSettingsRoutes(
         return;
       }
       let publicValue: unknown = value;
-      try {
-        const persist = async () => {
-          const prepared = prepareSettingWrite(
-            boundWorkspace,
-            settingScope,
-            key,
-            value,
-            mcpServerMutation,
-            deps.isWorkspaceTrusted?.() ?? true,
-          );
-          publicValue = prepared.publicValue;
-          if (deps.captureGenerationAssertion) {
-            await persistSetting(
+      const persistAndPushSessionWorkflow = async (): Promise<boolean> => {
+        try {
+          const persist = async () => {
+            const prepared = prepareSettingWrite(
               boundWorkspace,
               settingScope,
               key,
-              prepared.persistedValue,
-              assertGenerationOpen,
+              value,
+              mcpServerMutation,
+              deps.isWorkspaceTrusted?.() ?? true,
+            );
+            publicValue = prepared.publicValue;
+            if (deps.captureGenerationAssertion) {
+              await persistSetting(
+                boundWorkspace,
+                settingScope,
+                key,
+                prepared.persistedValue,
+                assertGenerationOpen,
+              );
+            } else {
+              await persistSetting(
+                boundWorkspace,
+                settingScope,
+                key,
+                prepared.persistedValue,
+              );
+            }
+          };
+          if (mcpServerMutation) {
+            await withMcpServerMutationLock(
+              boundWorkspace,
+              settingScope,
+              persist,
             );
           } else {
-            await persistSetting(
-              boundWorkspace,
-              settingScope,
-              key,
-              prepared.persistedValue,
-            );
+            await persist();
           }
-        };
-        if (mcpServerMutation) {
-          await withMcpServerMutationLock(
-            boundWorkspace,
-            settingScope,
-            persist,
+        } catch (err) {
+          if (sendGenerationClosedError(res, err)) return false;
+          writeStderrLine(
+            `qwen serve: POST /workspace/settings persist error (key=${key}, scope=${scope}, workspace=${boundWorkspace}): ${
+              err instanceof Error ? err.message : String(err)
+            }`,
           );
-        } else {
-          await persist();
+          res.status(500).json({
+            error: 'Failed to persist setting',
+            code: 'persist_error',
+          });
+          return false;
         }
-      } catch (err) {
-        if (sendGenerationClosedError(res, err)) return;
-        writeStderrLine(
-          `qwen serve: POST /workspace/settings persist error (key=${key}, scope=${scope}, workspace=${boundWorkspace}): ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
-        res.status(500).json({
-          error: 'Failed to persist setting',
-          code: 'persist_error',
-        });
-        return;
-      }
 
-      try {
-        assertGenerationOpen();
-      } catch (err) {
-        if (sendGenerationClosedError(res, err)) return;
-        throw err;
-      }
-      if (key === 'experimental.sessionWorkflow') {
-        if (
-          !(await updateLiveSessionWorkflow(
-            deps.updateSessionWorkflow,
-            readEffectiveSessionWorkflow(
-              boundWorkspace,
-              deps.isWorkspaceTrusted?.() ?? true,
-            ),
-            boundWorkspace,
-            res,
-          ))
-        ) {
-          return;
-        }
         try {
           assertGenerationOpen();
         } catch (err) {
-          if (sendGenerationClosedError(res, err)) return;
+          if (sendGenerationClosedError(res, err)) return false;
           throw err;
         }
-      }
+        if (key === 'experimental.sessionWorkflow') {
+          if (
+            !(await updateLiveSessionWorkflow(
+              deps.updateSessionWorkflow,
+              readEffectiveSessionWorkflow(
+                boundWorkspace,
+                deps.isWorkspaceTrusted?.() ?? true,
+              ),
+              boundWorkspace,
+              res,
+            ))
+          ) {
+            return false;
+          }
+          try {
+            assertGenerationOpen();
+          } catch (err) {
+            if (sendGenerationClosedError(res, err)) return false;
+            throw err;
+          }
+        }
+        return true;
+      };
+      // Session Workflow writes serialize the whole persist → readback →
+      // push sequence; other keys keep the plain (persist-only) path.
+      const persisted =
+        key === 'experimental.sessionWorkflow'
+          ? await withSessionWorkflowWriteLock(
+              boundWorkspace,
+              persistAndPushSessionWorkflow,
+            )
+          : await persistAndPushSessionWorkflow();
+      if (!persisted) return;
       try {
         broadcastSettingsChanged(key, publicValue, scope, clientId);
       } catch (err) {
@@ -713,80 +758,93 @@ export function registerWorkspaceQualifiedSettingsRoutes(
         return;
       }
       let publicValue: unknown = value;
-      try {
-        const persist = async () => {
-          const prepared = prepareSettingWrite(
-            runtime.workspaceCwd,
-            settingScope,
-            key,
-            value,
-            mcpServerMutation,
-            true,
+      const persistAndPushSessionWorkflow = async (): Promise<boolean> => {
+        try {
+          const persist = async () => {
+            const prepared = prepareSettingWrite(
+              runtime.workspaceCwd,
+              settingScope,
+              key,
+              value,
+              mcpServerMutation,
+              true,
+            );
+            publicValue = prepared.publicValue;
+            await deps.persistSetting(
+              runtime.workspaceCwd,
+              settingScope,
+              key,
+              prepared.persistedValue,
+              assertGenerationOpen,
+            );
+          };
+          if (mcpServerMutation) {
+            await withMcpServerMutationLock(
+              runtime.workspaceCwd,
+              settingScope,
+              persist,
+            );
+          } else {
+            await persist();
+          }
+        } catch (err) {
+          if (sendGenerationClosedError(res, err)) return false;
+          writeStderrLine(
+            `qwen serve: POST /workspaces/:workspace/settings persist error (key=${key}, scope=${scope}, workspace=${runtime.workspaceCwd}): ${
+              err instanceof Error ? err.message : String(err)
+            }`,
           );
-          publicValue = prepared.publicValue;
-          await deps.persistSetting(
-            runtime.workspaceCwd,
-            settingScope,
-            key,
-            prepared.persistedValue,
-            assertGenerationOpen,
-          );
-        };
-        if (mcpServerMutation) {
-          await withMcpServerMutationLock(
-            runtime.workspaceCwd,
-            settingScope,
-            persist,
-          );
-        } else {
-          await persist();
+          res.status(500).json({
+            error: 'Failed to persist setting',
+            code: 'persist_error',
+          });
+          return false;
         }
-      } catch (err) {
-        if (sendGenerationClosedError(res, err)) return;
-        writeStderrLine(
-          `qwen serve: POST /workspaces/:workspace/settings persist error (key=${key}, scope=${scope}, workspace=${runtime.workspaceCwd}): ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
-        res.status(500).json({
-          error: 'Failed to persist setting',
-          code: 'persist_error',
-        });
-        return;
-      }
 
-      try {
-        assertGenerationOpen();
-      } catch (err) {
-        if (sendGenerationClosedError(res, err)) return;
-        throw err;
-      }
-      if (key === 'experimental.sessionWorkflow') {
-        if (
-          !(await updateLiveSessionWorkflow(
-            (enabled) =>
-              runtime.bridge.invokeWorkspaceCommand(
-                SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow,
-                { enabled },
-              ),
-            // Push the post-write effective value, not the raw write: a
-            // system-scope (fleet) settings file shadows a workspace write in
-            // mergeSettings, so even on this workspace-only route the written
-            // value is not necessarily the effective one.
-            readEffectiveSessionWorkflow(runtime.workspaceCwd, true),
-            runtime.workspaceCwd,
-            res,
-          ))
-        ) {
-          return;
-        }
         try {
           assertGenerationOpen();
         } catch (err) {
-          if (sendGenerationClosedError(res, err)) return;
+          if (sendGenerationClosedError(res, err)) return false;
           throw err;
         }
-      }
+        if (key === 'experimental.sessionWorkflow') {
+          if (
+            !(await updateLiveSessionWorkflow(
+              (enabled) =>
+                runtime.bridge.invokeWorkspaceCommand(
+                  SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow,
+                  { enabled },
+                ),
+              // Push the post-write effective value, not the raw write: a
+              // system-scope (fleet) settings file shadows a workspace write in
+              // mergeSettings, so even on this workspace-only route the written
+              // value is not necessarily the effective one.
+              readEffectiveSessionWorkflow(runtime.workspaceCwd, true),
+              runtime.workspaceCwd,
+              res,
+            ))
+          ) {
+            return false;
+          }
+          try {
+            assertGenerationOpen();
+          } catch (err) {
+            if (sendGenerationClosedError(res, err)) return false;
+            throw err;
+          }
+        }
+        return true;
+      };
+      // Session Workflow writes serialize the whole persist → readback →
+      // push sequence; other keys keep the plain (persist-only) path.
+      const persisted =
+        key === 'experimental.sessionWorkflow'
+          ? await withSessionWorkflowWriteLock(
+              runtime.workspaceCwd,
+              persistAndPushSessionWorkflow,
+            )
+          : await persistAndPushSessionWorkflow();
+      if (!persisted) return;
       deps.invalidateServeFeaturesCache();
       runtime.bridge.publishWorkspaceEvent({
         type: 'settings_changed',
