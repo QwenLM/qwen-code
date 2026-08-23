@@ -17,6 +17,7 @@ const {
   mockOpenCompletion,
   mockCloseCompletion,
   mockMessageState,
+  mockMessages,
   mockAddMessage,
   mockEndStreaming,
   mockWebShellTranscriptProps,
@@ -28,6 +29,12 @@ const {
     isStreaming: false,
     isWaitingForResponse: false,
   },
+  mockMessages: [] as Array<{
+    role: string;
+    content: string;
+    timestamp: number;
+    localOnly?: boolean;
+  }>,
   mockAddMessage: vi.fn(),
   mockEndStreaming: vi.fn(),
   mockWebShellTranscriptProps: {
@@ -101,7 +108,7 @@ vi.mock('./hooks/file/useFileContext.js', () => ({
 
 vi.mock('./hooks/message/useMessageHandling.js', () => ({
   useMessageHandling: () => ({
-    messages: [],
+    messages: mockMessages,
     isStreaming: mockMessageState.isStreaming,
     isWaitingForResponse: mockMessageState.isWaitingForResponse,
     loadingMessage: null,
@@ -386,6 +393,7 @@ describe('App /skills secondary picker', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockMessages.length = 0;
     mockMessageState.isStreaming = false;
     mockMessageState.isWaitingForResponse = false;
     (
@@ -577,12 +585,53 @@ describe('App /skills secondary picker', () => {
       expect.objectContaining({
         role: 'assistant',
         content: 'Interrupted',
+        // The transcript only renders ACP frames; the local cancel mark
+        // must carry the localOnly flag or it is never shown.
+        localOnly: true,
       }),
     );
     expect(mockPostMessage).toHaveBeenCalledWith({
       type: 'cancelStreaming',
       data: {},
     });
+  });
+
+  it('renders locally generated messages in a notice slot beside the transcript', async () => {
+    mockMessages.push(
+      { role: 'user', content: 'ordinary history', timestamp: 1 },
+      {
+        role: 'assistant',
+        content: 'Failed to connect to Qwen agent: spawn failed',
+        timestamp: 2,
+        localOnly: true,
+      },
+      {
+        role: 'assistant',
+        content: 'Interrupted',
+        timestamp: 3,
+        localOnly: true,
+      },
+    );
+
+    const rendered = renderApp();
+    root = rendered.root;
+    container = rendered.container;
+
+    await act(async () => {});
+
+    const notices = rendered.container.querySelectorAll(
+      '[data-testid="local-message-notice"]',
+    );
+    expect(notices).toHaveLength(2);
+    expect(notices[0]?.textContent).toContain(
+      'Failed to connect to Qwen agent: spawn failed',
+    );
+    expect(notices[1]?.textContent).toBe('Interrupted');
+    // Extension-provided history must not leak into the notice slot.
+    expect(
+      rendered.container.querySelector('[data-testid="local-message-notices"]')
+        ?.textContent,
+    ).not.toContain('ordinary history');
   });
 
   it('disables WebShell transcript turn auto-collapse while a response is in flight', async () => {

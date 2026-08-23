@@ -351,6 +351,7 @@ export const App: React.FC = () => {
           role: 'assistant',
           content: 'Interrupted',
           timestamp: Date.now(),
+          localOnly: true,
         });
       }
     }
@@ -784,6 +785,14 @@ export const App: React.FC = () => {
     completedToolCalls.length > 0 ||
     planEntries.length > 0;
 
+  // Locally generated messages (connection/auth/generic errors and the
+  // "Interrupted" cancel mark) never flow through ACP `transcriptUpdate`,
+  // so the WebShell transcript cannot render them. Surface them in a
+  // notice slot above the composer instead of dropping them silently.
+  const localNotices = messageHandling.messages.filter(
+    (message) => message.localOnly,
+  );
+
   const webShellTheme = useMemo<'dark' | 'light'>(() => {
     const kind = document.body.getAttribute('data-vscode-theme-kind') ?? '';
     return kind.includes('light') ? 'light' : 'dark';
@@ -886,6 +895,30 @@ export const App: React.FC = () => {
               }
             />
           </React.Suspense>
+        )}
+        {localNotices.length > 0 && (
+          <div
+            data-testid="local-message-notices"
+            // Above the 140px composer clearance so the notices sit right
+            // over the input box without covering transcript content.
+            className="absolute bottom-[150px] left-0 right-0 z-20 mx-auto flex w-full max-w-[600px] flex-col gap-1 px-4"
+          >
+            {localNotices.map((notice, index) => (
+              <div
+                key={`${notice.timestamp}-${index}`}
+                data-testid="local-message-notice"
+                className="break-words rounded border px-3 py-2 text-sm"
+                style={{
+                  color:
+                    'var(--vscode-editorError-foreground, var(--app-secondary-foreground))',
+                  borderColor: 'var(--vscode-editorError-border, transparent)',
+                  backgroundColor: 'var(--vscode-editorWidget-background)',
+                }}
+              >
+                {notice.content}
+              </div>
+            ))}
+          </div>
         )}
       </div>
 
