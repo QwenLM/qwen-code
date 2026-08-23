@@ -4998,12 +4998,10 @@ class QwenAgent implements Agent {
   ): boolean {
     const idleAtReplay = session?.isTurnIdle() ?? true;
     const finalize = turnIdleBeforeRead && idleAtReplay;
+    // Template literal, not printf-style placeholders: createDebugLogger's
+    // formatArgs does no util.format substitution, it space-joins the args.
     debugLogger.debug(
-      '[ACP] restore replay finalizeDangling=%s (idleBeforeRead=%s, idleAtReplay=%s) session=%s',
-      finalize,
-      turnIdleBeforeRead,
-      idleAtReplay,
-      session?.getId() ?? '(non-live)',
+      `[ACP] restore replay finalizeDangling=${finalize} (idleBeforeRead=${turnIdleBeforeRead}, idleAtReplay=${idleAtReplay}) session=${session?.getId() ?? '(non-live)'}`,
     );
     return finalize;
   }

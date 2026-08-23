@@ -12139,6 +12139,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       undefined,
       expect.objectContaining({ finalizeDangling: false }),
     );
+    // The diagnostic must be a single interpolated string: debugLogger does
+    // no printf substitution, so %s placeholders would ship unexpanded.
+    expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+      expect.stringContaining(
+        '[ACP] restore replay finalizeDangling=false (idleBeforeRead=false, idleAtReplay=false)',
+      ),
+    );
 
     finishPrompt?.({ stopReason: 'end_turn' });
     await prompt;
