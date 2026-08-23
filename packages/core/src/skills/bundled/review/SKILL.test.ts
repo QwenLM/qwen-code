@@ -825,18 +825,26 @@ describe('bundled review skill', () => {
     );
   });
 
-  it('runs presubmit on Aone targets — self-PR backing, not the skip list', () => {
-    // Revert guard (#9616): presubmit used to sit on the Aone skip list and
-    // the skill carried the "self-PR detection has no Aone backing" caveat —
-    // a review of the user's own MR silently got no downgrade. The command
-    // is now backed for self-PR detection and head drift; restoring either
-    // the skip or the caveat must fail here, not slip through.
+  it('runs comment-status and presubmit on Aone targets — backed, not skipped', () => {
+    // Revert guard (#9616, #9627): comment-status and presubmit used to sit
+    // on the Aone skip list and the skill carried the "no dedup backing" /
+    // "self-PR detection has no Aone backing" caveats — repeat rounds
+    // re-posted every finding and a review of the user's own MR got no
+    // downgrade. Both subcommands are now a1-backed with the full semantics;
+    // restoring either the skip or a caveat must fail here, not slip
+    // through.
     const body = skillBody();
-    expect(body).toContain('`presubmit` **runs on Aone targets too**');
-    expect(body).toContain('the `a1 auth whoami` account vs the MR author');
-    expect(body).toContain('self-PR detection and head drift are a1-backed');
+    expect(body).toContain('`comment-status`, `presubmit`) work unchanged');
+    expect(body).toContain('(`comment-status` and `presubmit` ARE a1-backed');
+    expect(body).toContain('the MR author is matched against `a1 auth whoami`');
     expect(body).not.toContain('self-PR detection has no Aone backing');
+    expect(body).not.toContain('no dedup backing yet');
     expect(body).not.toContain('`pr-context`, `comment-status`, `presubmit`');
+    expect(body).not.toContain('come back neutral');
+    expect(body).not.toContain('`--new-findings` is unused');
+    expect(body).not.toContain(
+      '`pr-context` and `comment-status` have no Aone backing',
+    );
   });
 
   it('keeps the corrected Aone --comment contract, not merge residue', () => {

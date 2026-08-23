@@ -2756,6 +2756,7 @@ describe('startInteractiveUI', () => {
       exitOnCtrlC: false,
       isScreenReaderEnabled: false,
       alternateScreen: true,
+      maxFps: 60,
     });
 
     // Verify React element structure is valid (but don't deep dive into JSX internals)
@@ -2793,6 +2794,7 @@ describe('startInteractiveUI', () => {
 
     const [, options] = renderSpy.mock.calls[0];
     expect(options).toMatchObject({ alternateScreen: false });
+    expect(options).not.toHaveProperty('maxFps');
   });
 
   it('should not use alternate screen when stdout is not interactive', async () => {
