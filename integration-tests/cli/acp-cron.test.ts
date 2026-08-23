@@ -101,6 +101,11 @@ function setupAcpCronTest(rig: TestRig, fakeServer: FakeOpenAIServer) {
     {
       cwd: rig.testDir!,
       stdio: ['pipe', 'pipe', 'pipe'],
+      // Run the CLI in its own process group so cleanup can signal the
+      // whole tree. Grandchildren spawned by the CLI (MCP helpers, cron
+      // internals) otherwise survive `agent.kill()` and keep writing
+      // into QWEN_HOME while rmSync is deleting it (ENOTEMPTY flakes).
+      detached: process.platform !== 'win32',
       env: {
         ...process.env,
         QWEN_HOME: qwenHome,
@@ -288,9 +293,23 @@ function setupAcpCronTest(rig: TestRig, fakeServer: FakeOpenAIServer) {
 
   const cleanup = async () => {
     rl.close();
-    agent.kill();
     pending.forEach(({ timeout }) => clearTimeout(timeout));
     pending.clear();
+    // Signal the entire process group, not just the direct child: the CLI
+    // spawns helpers that keep running after the parent dies and can drop
+    // fresh files into the fake HOME while the final rmSync walks it.
+    if (process.platform === 'win32') {
+      // No POSIX process groups: taskkill /T walks the child tree instead.
+      spawn('taskkill', ['/pid', String(agent.pid), '/T', '/F']);
+      agent.kill();
+    } else {
+      try {
+        process.kill(-agent.pid!, 'SIGTERM');
+      } catch {
+        // Process group already gone (ESRCH) - nothing to do.
+      }
+      agent.kill('SIGTERM');
+    }
     await waitForExit();
     // The cron job is recurring and, under QWEN_CODE_TEST_CRON_FAST, re-fires
     // every ~5s. A second fire can race cleanup and drop a fresh file into the
@@ -299,8 +318,8 @@ function setupAcpCronTest(rig: TestRig, fakeServer: FakeOpenAIServer) {
     rmSync(qwenHome, {
       recursive: true,
       force: true,
-      maxRetries: 3,
-      retryDelay: 100,
+      maxRetries: 5,
+      retryDelay: 200,
     });
   };
 
