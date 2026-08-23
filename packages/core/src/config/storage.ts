@@ -336,12 +336,13 @@ export class Storage {
   }
 
   /**
-   * Outside-repo landing for /audit reports and sidecars when the audited
-   * repository's ignore state cannot keep them out of version control.
-   * Per-user and per-project, honoring the QWEN_HOME override; 0700 so the
-   * quoted (possibly exploitable) module content stays private to the user.
+   * Create or adopt the outside-repo landing for /audit reports and sidecars
+   * when the audited repository's ignore state cannot keep them out of
+   * version control. Per-user and per-project, honoring the QWEN_HOME
+   * override; 0700 on POSIX so the quoted (possibly exploitable) module
+   * content stays private to the user.
    */
-  static getAuditFallbackDir(projectRoot: string): string {
+  static ensureAuditFallbackDir(projectRoot: string): string {
     // Resolve symlinks before hashing so the fallback root is stable across
     // spellings of the same directory (macOS `/var` → `/private/var`):
     // plan-files, guard-check, and the SKILL relocation must all agree on
@@ -351,6 +352,17 @@ export class Storage {
       resolved = fs.realpathSync(projectRoot);
     } catch {
       // Unresolvable (e.g. not yet created): hash the raw path.
+    }
+    const baseDir = Storage.getGlobalQwenDir();
+    const dir = path.join(baseDir, 'audits', getProjectHash(resolved));
+    // The landing exists to keep artifacts OUT of version control, so refuse
+    // before creating anything when QWEN_HOME resolves inside the audited
+    // repository.
+    if (Storage.isPathWithinDirectory(dir, resolved)) {
+      throw new Error(
+        `audit: the fallback landing ${dir} resolves inside the audited ` +
+          `project root — point QWEN_HOME outside the repository and re-run.`,
+      );
     }
     // Everything below validates a landing this process may have ADOPTED
     // rather than created. The path is fully predictable — the project hash
@@ -370,22 +382,23 @@ export class Storage {
     // writes to "this root" later cannot help if the root itself moved.
     //
     // QWEN_HOME itself is deliberately NOT validated here: it is the user's
-    // own configured location, not a path this method invents.
-    const auditsDir = Storage.adoptDirectory(
-      path.join(Storage.getGlobalQwenDir(), 'audits'),
+    // own configured location, not a path this method invents. It is created
+    // recursively when missing — matching every other writer under it — and
+    // only `audits` and the project leaf below are validated components.
+    fs.mkdirSync(baseDir, { recursive: true });
+    Storage.adoptDirectory(
+      path.join(baseDir, 'audits'),
       'the audit artifact directory',
     );
-    const dir = Storage.adoptDirectory(
-      path.join(auditsDir, getProjectHash(resolved)),
-      'the fallback landing',
-    );
+    Storage.adoptDirectory(dir, 'the fallback landing');
     Storage.assertAuditLandingIsClean(dir);
     return dir;
   }
 
   /**
    * Create one path component and return it only if what is there now is a
-   * real directory owned by this user's private mode.
+   * real directory (not a symlink). On POSIX a pre-existing component is
+   * tightened to 0700; ownership itself is not checked.
    *
    * Non-recursive on purpose: `recursive: true` would silently walk (and
    * follow) anything already standing in the path. Creating exactly one
@@ -407,10 +420,14 @@ export class Storage {
       );
     }
     // mkdirSync's mode applies only to directories it CREATES, so a
-    // pre-existing component keeps whatever mode it was given. Windows
-    // reports a mode that does not carry POSIX group/other bits; chmod there
-    // is a no-op, and the check would fire on every run.
-    if (process.platform !== 'win32' && (stat.mode & 0o077) !== 0) {
+    // pre-existing component keeps whatever mode it was given. Normalize the
+    // FULL mode, not just group/other: a missing owner-read bit (e.g. 0300)
+    // is just as planted — listing needs r while creating entries needs only
+    // w+x, so it would blind the content check below while writes still
+    // succeed. Windows reports a mode that carries no POSIX bits and chmod
+    // there is a no-op, so a pre-existing component keeps whatever DACL it
+    // had — Node exposes no portable ACL enforcement.
+    if (process.platform !== 'win32' && (stat.mode & 0o777) !== 0o700) {
       fs.chmodSync(dir, 0o700);
     }
     return dir;
@@ -437,10 +454,14 @@ export class Storage {
     let entries: fs.Dirent[];
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      // Unreadable right after a successful lstat: nothing can be validated,
-      // and nothing can be written either — let the write surface it.
-      return;
+    } catch (err) {
+      // Fail closed: an unlistable landing cannot be validated, and
+      // unreadable does NOT imply unwritable — listing needs r while
+      // creating entries needs only w+x.
+      throw new Error(
+        `audit: the fallback landing ${dir} could not be listed for ` +
+          `validation (${(err as Error).message}) — remove it and re-run.`,
+      );
     }
     for (const entry of entries) {
       // Some filesystems return an unknown dirent type, and then BOTH
