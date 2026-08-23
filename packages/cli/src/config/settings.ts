@@ -379,6 +379,14 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
       `Warning: security.allowedInsecureVoiceBaseUrls in workspace settings (${workspaceFile.path}) is ignored. This setting is only honored from User, System, or SystemDefaults scope settings.`,
     );
   }
+  if (
+    workspaceFile.rawJson !== undefined &&
+    workspaceFile.originalSettings.permissions?.planMode !== undefined
+  ) {
+    warningSet.add(
+      `Warning: permissions.planMode in workspace settings (${workspaceFile.path}) is ignored. This setting is only honored from User, System, or SystemDefaults scope settings.`,
+    );
+  }
 
   return [...warningSet];
 }
@@ -414,18 +422,26 @@ function tagMcpServerScope(
  * Returns a shallow copy — never mutates input.
  */
 function stripWorkspaceSecurityBypasses(settings: Settings): Settings {
+  let stripped = settings;
   if (
-    settings.security?.allowPrivateNetworkHooks === undefined &&
-    settings.security?.allowedInsecureVoiceBaseUrls === undefined
+    settings.security?.allowPrivateNetworkHooks !== undefined ||
+    settings.security?.allowedInsecureVoiceBaseUrls !== undefined
   ) {
-    return settings;
+    const {
+      allowPrivateNetworkHooks: _privateHooks,
+      allowedInsecureVoiceBaseUrls: _insecureVoice,
+      ...restSecurity
+    } = settings.security!;
+    stripped = { ...stripped, security: restSecurity };
   }
-  const {
-    allowPrivateNetworkHooks: _privateHooks,
-    allowedInsecureVoiceBaseUrls: _insecureVoice,
-    ...restSecurity
-  } = settings.security;
-  return { ...settings, security: restSecurity };
+  // A plan-mode vouch says "run this binary unattended". Honouring it from a
+  // repository's own settings would let a clone grant itself that, so it is
+  // taken only from scopes the user maintains, like the bypasses above.
+  if (settings.permissions?.planMode !== undefined) {
+    const { planMode: _planMode, ...restPermissions } = settings.permissions;
+    stripped = { ...stripped, permissions: restPermissions };
+  }
+  return stripped;
 }
 
 function mergeSettings(

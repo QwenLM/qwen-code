@@ -180,7 +180,9 @@ export const NEVER_READ_ONLY_ROOT_COMMANDS: ReadonlySet<string> = new Set([
   'bun',
   'deno',
   'lua',
+  'java',
   'node',
+  'nodejs',
   'osascript',
   'perl',
   'php',
@@ -189,6 +191,18 @@ export const NEVER_READ_ONLY_ROOT_COMMANDS: ReadonlySet<string> = new Set([
   'ruby',
   'tclsh',
   'wish',
+  // Build and package tools. The payload is a Makefile recipe, a package
+  // script, or a downloaded package — never argv — so no argument inspection
+  // can see it either.
+  'cargo',
+  'cmake',
+  'g++',
+  'gcc',
+  'make',
+  'npm',
+  'npx',
+  'pnpm',
+  'yarn',
   // Privilege, namespace, scheduling, and process launchers.
   'at',
   'batch',
@@ -235,7 +249,11 @@ export const NEVER_READ_ONLY_ROOT_COMMANDS: ReadonlySet<string> = new Set([
   'fc',
   'hash',
   'history',
+  'getopts',
   'let',
+  'mapfile',
+  'read',
+  'readarray',
   'set',
   'shopt',
   'source',
@@ -246,23 +264,34 @@ export const NEVER_READ_ONLY_ROOT_COMMANDS: ReadonlySet<string> = new Set([
   'unalias',
 ]);
 
+/**
+ * Versioned spellings of the interpreters above — `python3.12`, `lua5.4`.
+ * Listing every release of every interpreter is not a finite job.
+ */
+const VERSIONED_INTERPRETER =
+  /^(?:python|ruby|perl|php|lua|tclsh|wish|node|java)[0-9]+(?:\.[0-9]+)*$/;
+
 /** Roots with a dedicated evaluator in `evaluateCommandSafety`. */
 const SPECIAL_ROOT_COMMAND = /^(dd|kill|killall|pkill|tee)$/;
 
 /**
- * Whether a word names a command this file decides the safety of. Matched on
- * the basename, and on the basename with one trailing `.exe` removed, so a
- * wrapped `/bin/rm` and a Windows-spelled `rm.exe` both count.
+ * Whether a word names a command this file decides the safety of. Every
+ * `/`, `\\` and `=` separated segment counts, with and without a trailing
+ * `.exe`, so `/bin/rm`, `rm.exe` and `--exec=rm` all name `rm`.
  */
 function namesAKnownCommand(word: string): boolean {
-  const basename = (word.split(/[\\/]/).pop() ?? '').toLowerCase();
-  return [basename, basename.replace(/\.exe$/, '')].some(
-    (name) =>
-      READ_ONLY_ROOT_COMMANDS.has(name) ||
-      NEVER_READ_ONLY_ROOT_COMMANDS.has(name) ||
-      WRITE_ROOT_COMMAND.test(name) ||
-      SPECIAL_ROOT_COMMAND.test(name),
-  );
+  return word
+    .toLowerCase()
+    .split(/[\\/=]/)
+    .flatMap((segment) => [segment, segment.replace(/\.exe$/, '')])
+    .some(
+      (name) =>
+        READ_ONLY_ROOT_COMMANDS.has(name) ||
+        NEVER_READ_ONLY_ROOT_COMMANDS.has(name) ||
+        VERSIONED_INTERPRETER.test(name) ||
+        WRITE_ROOT_COMMAND.test(name) ||
+        SPECIAL_ROOT_COMMAND.test(name),
+    );
 }
 
 /**
@@ -343,6 +372,13 @@ const UNIQ_VALUE_OPTIONS = new Set(
  * Input-only redirections (`<`, `<<`, `<<<`) are safe.
  */
 const WRITE_REDIRECT_OPERATORS = new Set(['>', '>>', '&>', '&>>', '>|']);
+
+/**
+ * `${v@P}` prompt expansion, which runs any `$(…)` held in the variable's
+ * value. In a pattern word it is a leaf, so the `@`/`P` child-adjacency check
+ * never sees it.
+ */
+const PROMPT_EXPANSION = /\$\{[^{}]*@P/;
 
 /**
  * A command or process substitution that survived the substitution-node walk.
@@ -1172,7 +1208,12 @@ function evaluateSubstitutions(
       // yields no node of its own even though bash runs it while expanding.
       // Nothing was collected above, so an opener still present in an
       // expansion is exactly that hidden channel.
-      if (HIDDEN_SUBSTITUTION.test(expansion.text)) return 'unknown';
+      if (
+        HIDDEN_SUBSTITUTION.test(expansion.text) ||
+        PROMPT_EXPANSION.test(expansion.text)
+      ) {
+        return 'unknown';
+      }
     }
     // A heredoc body is one leaf too, and bash expands it before feeding it to
     // stdin — unless the delimiter is quoted, which makes the body inert.
@@ -1181,7 +1222,8 @@ function evaluateSubstitutions(
       const delimiter = body.parent?.namedChildren.find(
         (child) => child.type === 'heredoc_start',
       );
-      if (delimiter && /['"]/.test(delimiter.text)) continue;
+      // `<<\EOF` quotes the delimiter as surely as `<<'EOF'` does.
+      if (delimiter && /['"\\]/.test(delimiter.text)) continue;
       return 'unknown';
     }
     return 'read-only';
@@ -1244,7 +1286,10 @@ function evaluateCommandSafety(
       ))
   ) {
     result = 'unknown';
-  } else if (NEVER_READ_ONLY_ROOT_COMMANDS.has(root)) {
+  } else if (
+    NEVER_READ_ONLY_ROOT_COMMANDS.has(root) ||
+    VERSIONED_INTERPRETER.test(root)
+  ) {
     // Decided here rather than by filtering the caller's set, so no caller can
     // vouch a launcher or a state planter back in.
     result = 'unknown';

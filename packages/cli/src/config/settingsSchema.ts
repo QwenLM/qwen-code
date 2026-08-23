@@ -2515,8 +2515,12 @@ const SETTINGS_SCHEMA = {
               'their arguments (bash, busybox, env, sudo, xargs, watch, ' +
               'time, …) and builtins that rebind name resolution (hash, ' +
               'alias, …) are refused, as is a vouched root whose arguments ' +
-              'name a command the classifier knows. Applies only in Plan ' +
-              'Mode; use permissions.allow for other modes.',
+              'are not plain literal words or name a command the classifier ' +
+              'knows. Only honored from User, System, and SystemDefaults ' +
+              'settings scopes; values set in Workspace settings are ignored ' +
+              'so a cloned repository cannot vouch for a command on your ' +
+              'behalf. Applies only in Plan Mode; use permissions.allow for ' +
+              'other modes.',
             showInDialog: false,
             mergeStrategy: MergeStrategy.UNION,
           },

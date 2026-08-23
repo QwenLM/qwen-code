@@ -5,17 +5,22 @@ read-only root commands for Plan mode.
 
 ## Setup
 
-Create a scratch workspace with a fake read-only CLI on `PATH`:
+Create a scratch workspace with a fake read-only CLI on `PATH`, and a scratch
+Qwen home so the vouch does not touch your real settings:
 
 ```bash
-mkdir -p /tmp/ib-e2e/bin /tmp/ib-e2e/.qwen
+mkdir -p /tmp/ib-e2e/bin /tmp/ib-e2e/home /tmp/ib-e2e/.qwen
 printf '#!/bin/sh\necho ok\n' > /tmp/ib-e2e/bin/ib
 chmod +x /tmp/ib-e2e/bin/ib
 export PATH="/tmp/ib-e2e/bin:$PATH"
+export QWEN_HOME=/tmp/ib-e2e/home
 cd /tmp/ib-e2e
 ```
 
-`/tmp/ib-e2e/.qwen/settings.json`:
+`extraReadOnlyCommands` is honoured only from user, system and system-default
+scopes — a workspace `.qwen/settings.json` is stripped during the merge — so
+the vouch goes in `$QWEN_HOME/settings.json`, which `QWEN_HOME` has redirected
+to the scratch directory:
 
 ```json
 {
@@ -27,11 +32,9 @@ cd /tmp/ib-e2e
 }
 ```
 
-**Launch from `/tmp/ib-e2e`, not from the repo.** Workspace settings resolve
-from the process cwd with no upward search, so a CLI started in the repo root
-never loads the scratch workspace's `.qwen/settings.json` and every case below
-silently behaves as if the vouch were absent. `npm run dev` runs the CLI with
-cwd set to the package root, so it cannot be used here. Use either:
+**Launch from `/tmp/ib-e2e`, not from the repo**, with `QWEN_HOME` exported in
+the same shell. `npm run dev` runs the CLI with cwd set to the package root,
+so it cannot be used here. Use either:
 
 ```bash
 node /path/to/qwen-code/scripts/dev.js       # derives repo paths from its own location
@@ -88,8 +91,8 @@ other case behaves identically with and without it.
 
 ### 6. The safety net cannot be switched off from settings
 
-Add `"bash"`, `"time"`, `"hash"`, and `"rm"` to `extraReadOnlyCommands` and
-restart.
+Add `"bash"`, `"time"`, `"hash"`, `"python3"`, `"make"`, and `"rm"` to
+`extraReadOnlyCommands` and restart.
 
 - Ask for `bash -c 'echo hi'`.
   **Expect**: still prompts — the classifier refuses to let any caller vouch a
@@ -99,6 +102,11 @@ restart.
   vouch for what it wraps.
 - Ask for `hash -p ./bin/git git && git status`.
   **Expect**: still prompts — `hash` re-binds how the later `git` resolves.
+- Ask for `python3 -c "print(1)"` with `"python3"` also listed.
+  **Expect**: still prompts — an interpreter's payload is a code string, so
+  vouching one says nothing about what it runs.
+- Ask for `make` with `"make"` also listed.
+  **Expect**: still prompts — the recipe is not in the command line.
 - Ask for `rm -rf tmp`.
   **Expect**: still blocked as state-modifying — `rm` keeps its built-in write
   classification.
@@ -118,6 +126,19 @@ With only `"ib"` vouched, ask for:
 
 This is what keeps the guarantee from depending on an exhaustive list of
 launcher names.
+
+### 6c. A workspace cannot vouch for itself
+
+Move the vouch into the repository's own settings:
+
+```bash
+mv "$QWEN_HOME/settings.json" /tmp/ib-e2e/.qwen/settings.json
+```
+
+- Restart and ask for `ib domain list` in Plan mode.
+- **Expect**: the prompt is back — the workspace value is stripped during the
+  merge — and a startup warning names `permissions.planMode`. Move the file
+  back to `$QWEN_HOME/settings.json` before continuing.
 
 ### 7. The vouch is scoped to Plan mode
 
@@ -151,4 +172,5 @@ Set `extraReadOnlyCommands` to
 
 ```bash
 rm -rf /tmp/ib-e2e
+unset QWEN_HOME
 ```

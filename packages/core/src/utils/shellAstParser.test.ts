@@ -554,6 +554,23 @@ describe('substitution hidden in an expansion pattern word', () => {
     },
   );
 
+  // `${v@P}` runs any $(…) held in the variable's value, and in a pattern word
+  // it is a leaf, so the @/P child-adjacency check never sees it either.
+  it.each(['%%', '%', '##', '#'])(
+    'treats ${var%so${v@P}} as unknown',
+    async (operator) => {
+      expect(
+        await classifyShellCommandSafety(`echo \${x${operator}\${v@P}}`),
+      ).toBe('unknown');
+    },
+  );
+
+  it('treats ${var/pat/${v@P}} as unknown', async () => {
+    expect(await classifyShellCommandSafety('echo ${x/pat/${v@P}}')).toBe(
+      'unknown',
+    );
+  });
+
   it('does not flag expansions without a substitution', async () => {
     expect(await classifyShellCommandSafety('echo ${HOME%%/*}')).toBe(
       'read-only',
@@ -582,6 +599,10 @@ describe('substitution hidden in a heredoc body', () => {
     ).toBe('read-only');
     expect(
       await classifyShellCommandSafety('cat <<"EOF"\n`rm -rf build`\nEOF'),
+    ).toBe('read-only');
+    // `<<\EOF` quotes the delimiter just as surely.
+    expect(
+      await classifyShellCommandSafety('cat <<\\EOF\n$(rm -rf build)\nEOF'),
     ).toBe('read-only');
   });
 
@@ -1207,6 +1228,80 @@ describe('extraReadOnlyRoots', () => {
     expect(
       await classifyShellCommandSafety('ib rm.exe -rf build', withIb),
     ).toBe('unknown');
+  });
+
+  it('sees a command name in an =-separated argument', async () => {
+    const vouched = { extraReadOnlyRoots: new Set(['obscurelauncher']) };
+    for (const command of [
+      'obscurelauncher --exec=rm -rf build',
+      'obscurelauncher --exec=/bin/rm -rf build',
+      'obscurelauncher --exec=rm.exe -rf build',
+    ]) {
+      expect(await classifyShellCommandSafety(command, vouched)).toBe(
+        'unknown',
+      );
+    }
+  });
+
+  // Listing every release of every interpreter is not a finite job, so the
+  // versioned spellings are matched by shape.
+  it.each([
+    'python3.12',
+    'python2.7',
+    'ruby3.1',
+    'perl5',
+    'php8.3',
+    'lua5.4',
+    'tclsh8.6',
+    'node20',
+    'java17',
+  ])('refuses to vouch the versioned interpreter %s', async (root) => {
+    expect(
+      await classifyShellCommandSafety(`${root} ./verify.py`, {
+        extraReadOnlyRoots: new Set([root]),
+      }),
+    ).toBe('unknown');
+    // And as a wrapped argument of some other vouched root.
+    expect(
+      await classifyShellCommandSafety(`obscurelauncher ${root} ./verify.py`, {
+        extraReadOnlyRoots: new Set(['obscurelauncher']),
+      }),
+    ).toBe('unknown');
+  });
+
+  // The it.each above iterates the very constant it guards, so a deletion
+  // would delete its own test. These names are spelled out for that reason.
+  it('keeps the families the refusal list exists for', () => {
+    for (const root of [
+      'bash',
+      'sh',
+      'busybox',
+      'env',
+      'sudo',
+      'su',
+      'xargs',
+      'time',
+      'watch',
+      'nohup',
+      'python3',
+      'node',
+      'perl',
+      'ruby',
+      'ssh',
+      'make',
+      'npx',
+      'npm',
+      'eval',
+      'exec',
+      'hash',
+      'alias',
+      'source',
+      '.',
+      'read',
+      'getopts',
+    ]) {
+      expect(NEVER_READ_ONLY_ROOT_COMMANDS.has(root)).toBe(true);
+    }
   });
 
   it('applies inside compound statements and subshells', async () => {

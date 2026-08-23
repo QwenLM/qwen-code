@@ -51,10 +51,13 @@ Reported as issue #9694.
 if/else chain, ending in:
 
 ```ts
-result =
-  READ_ONLY_ROOT_COMMANDS.has(root) || extra.has(root)
-    ? 'read-only'
-    : 'unknown';
+} else if (READ_ONLY_ROOT_COMMANDS.has(root)) {
+  result = 'read-only';
+} else if (extra.has(root)) {
+  result = vouchedRootIsSafe(root, argNodes) ? 'read-only' : 'unknown';
+} else {
+  result = 'unknown';
+}
 ```
 
 Every root the classifier understands specially — `WRITE_ROOT_COMMAND`, the
@@ -94,6 +97,28 @@ drops:
 
 Which roots are _refusable_ is deliberately not decided here — see below.
 
+### Who may vouch
+
+The vouch is taken from user, system and system-default settings only;
+`stripWorkspaceSecurityBypasses` drops it from workspace scope, and a warning
+fires if a workspace file sets it. This is the same treatment
+`security.allowPrivateNetworkHooks` gets, for the same reason.
+
+It is also what bounds everything below. Four review rounds produced four
+batches of roots whose payload the classifier cannot see — launchers,
+interpreters, versioned interpreter spellings, build tools — and that list has
+no end: any binary can execute something the command line does not mention.
+Enumerating it is only worth attempting because the enumeration no longer has
+to be _complete_. With workspace scope excluded, an entry can only come from
+someone who typed it into their own settings file, so a vouch for `make` means
+what the docs say it means — the user accepted that binary. The lists below
+catch foreseeable mistakes; they are not a boundary against an adversary who
+chooses the entry.
+
+What remains adversarial is the _invocation_: the model picks the arguments,
+and repository content can influence the model. That is a bounded problem, and
+it is what `vouchedRootIsSafe` addresses.
+
 ### Refusing launchers and state planters
 
 A vouch says "this binary only reads". It can never say "and so does whatever I
@@ -105,10 +130,15 @@ no caller can vouch them back in:
 - **Launchers**: shell and language interpreters, multi-call binaries, and
   wrappers that exec a command from their arguments. `time rm -rf build` is not
   what the user meant by vouching `time`.
-- **State planters**: builtins that rebind how a _later_ command resolves.
-  Statements are classified independently, so nothing else models
-  `hash -p ./evil/git git && git status` turning a trusted root into an
-  attacker-chosen binary.
+- **State planters**: builtins that rebind how a _later_ command resolves, or
+  assign a variable the next statement resolves through. Statements are
+  classified independently, so nothing else models
+  `hash -p ./evil/git git && git status` — or `read PATH <<< ./evil` — turning
+  a trusted root into an attacker-chosen binary. The `variable_assignment`
+  guard does not see these: there is no `VAR=VALUE` word.
+- **Payload executors**: build and package tools whose payload is a Makefile
+  recipe, a package script or a downloaded package. Structurally identical to
+  interpreters — argv does not contain what runs.
 
 The state-planter family is an enumerable set of bash builtins. The launcher
 family is not: review demonstrated 16 missing names in one round and a further
@@ -157,8 +187,11 @@ substitution walk collected nothing, as exactly that hidden channel.
 Two more leaves have the same shape and are handled in the same branch:
 `<(…)`/`>(…)` in a pattern word, which bash runs exactly as it runs `$(…)`;
 and a heredoc body, which bash expands before feeding it to stdin unless the
-delimiter is quoted (`cat <<EOF` with a backtick payload classified read-only
-before this change, with no vouch involved).
+delimiter is quoted — including `<<\EOF`, where the backslash quotes it
+(`cat <<EOF` with a backtick payload classified read-only before this change,
+with no vouch involved). `${v@P}` belongs to the same channel: prompt
+expansion runs a `$(…)` held in the variable's value, and in a pattern word it
+is a leaf, so the existing `@`/`P` adjacency check never sees it.
 
 ### Mode scoping
 

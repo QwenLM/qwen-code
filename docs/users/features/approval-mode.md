@@ -126,7 +126,12 @@ built-in set):
 }
 ```
 
-Entries are merged across the user, project, and system scopes.
+**Where it can be set.** User (`~/.qwen/settings.json`) and system settings
+only, merged across those scopes. A vouch is a standing instruction to run a
+binary unattended, so a project's own `.qwen/settings.json` cannot grant one —
+otherwise cloning a repository would be enough to arrange it. Qwen Code warns
+if it finds the key in workspace settings, the same way it treats other
+security-relevant keys.
 
 **What an entry means.** It vouches for the _entire binary_. Qwen Code cannot
 see inside a custom CLI, so if `ib` has mutating sub-commands, listing `ib`
@@ -145,7 +150,7 @@ letting the model run unattended.
 | `ib domain list \| badcmd`  | prompts — the pipe target is still unknown            |
 | `ib exec rm -rf build`      | prompts — see "how a vouch is applied" below          |
 
-**What has no effect.** Three kinds of entry are ignored:
+**What has no effect.** Four kinds of entry are ignored:
 
 - Commands Qwen Code already understands keep their built-in classification.
   Listing `rm`, `git`, `sed`, or `tee` does not make `rm -rf build` or
@@ -153,15 +158,20 @@ letting the model run unattended.
 - **Launchers** — shell interpreters, language interpreters, multi-call
   binaries, and wrappers whose job is to run a command taken from their
   arguments (`bash`, `busybox`, `env`, `sudo`, `su`, `xargs`, `watch`,
-  `nohup`, `timeout`, `time`, `setsid`, `powershell`, `python3`, `node`,
-  `perl`, `ruby`, `ssh`, and similar). Vouching one of these is not a
+  `nohup`, `timeout`, `time`, `setsid`, `powershell`, `python3`, `python3.12`,
+  `node`, `perl`, `ruby`, `ssh`, and similar). Vouching one of these is not a
   statement about that binary, it is a statement about whatever it is handed:
   `time rm -rf build` and `python3 -c "…"` would launder a write past the
   analysis.
-- **Shell builtins that rebind name resolution** (`hash`, `alias`, `unalias`,
-  `bind`, `complete`, `enable`, `set`, `shopt`, and similar). One of these can
-  change what a _later_ command in the same line resolves to, so vouching
-  `hash` would quietly vouch for whatever it points `git` at.
+- **Build and package tools** (`make`, `npm`, `npx`, `pnpm`, `yarn`, `cargo`,
+  `cmake`, `gcc`, and similar). Their payload is a Makefile recipe or a package
+  script — it never appears in the command line, so nothing about
+  `make` on its own says what `make` will do.
+- **Shell builtins that rebind name resolution or assign variables** (`hash`,
+  `alias`, `unalias`, `bind`, `complete`, `enable`, `set`, `shopt`, `read`,
+  `getopts`, `mapfile`, and similar). One of these can change what a _later_
+  command in the same line resolves to — `hash` would quietly vouch for
+  whatever it points `git` at, and `read PATH` for everything after it.
 
 **How a vouch is applied.** Qwen Code cannot recognise every launcher by name,
 so the vouch is honoured only for an invocation it can read literally:
