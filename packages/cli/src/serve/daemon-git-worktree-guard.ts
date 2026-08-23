@@ -243,6 +243,8 @@ const DYNAMIC_RELOCATION_DENIAL =
   'Daemon shell guard denied a mutating Git command with a dynamic repository location.';
 const UNPARSEABLE_COMMAND_DENIAL =
   'Daemon shell guard denied a shell command that could not be parsed before execution.';
+const CMD_REWRITE_SYNTAX_DENIAL =
+  'Daemon shell guard denied a shell command containing cmd.exe rewrite syntax it cannot evaluate before execution.';
 const UNRESOLVED_TARGET_DENIAL_PREFIX =
   'Daemon shell guard denied a mutating Git command with an unresolvable repository location: ';
 const OUTSIDE_TARGET_DENIAL_PREFIX =
@@ -493,8 +495,8 @@ export function preserveWindowsPathSeparators(
 // inside double quotes too. The POSIX tokeniser reads all three as literal
 // text, so the executed argv can carry a relocation the analysis never saw
 // (`git ^-C <outside> reset --hard` analyses as cwd-local but executes
-// relocated). Any command containing such syntax is unparseable for the
-// guard's purposes. A caret inside double quotes is literal in cmd.exe as
+// relocated). Any command containing such syntax is denied rather than
+// guessed at. A caret inside double quotes is literal in cmd.exe as
 // it is for the tokeniser, and a lone `%` or `!` names no expansion, so
 // those stay resolvable. PowerShell keeps carets literal and does not
 // expand `%…%`/`!…!`; bash sessions execute through a shell the POSIX
@@ -2245,7 +2247,7 @@ async function evaluateCommandWithCwd(
   const strippedCommand = stripHeredocBodies(command);
   if (containsCmdRewriteSyntax(strippedCommand)) {
     return {
-      denial: { allowed: false, reason: UNPARSEABLE_COMMAND_DENIAL },
+      denial: { allowed: false, reason: CMD_REWRITE_SYNTAX_DENIAL },
       cwdAfter: trackedCwd,
     };
   }

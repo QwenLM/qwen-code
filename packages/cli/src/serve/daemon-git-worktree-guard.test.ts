@@ -8,7 +8,15 @@ import { mkdirSync, mkdtempSync } from 'node:fs';
 import { mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterAll, describe, expect, it, vi } from 'vitest';
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
 import {
   getShellConfiguration,
   GitWorktreeService,
@@ -700,37 +708,50 @@ it -C ${outsideRepo} reset --hard`,
   // cmd.exe strips carets and expands `%…%`/`!…!` before the child runs, so
   // a relocation written in rewrite syntax is invisible to a static token
   // scan yet live in the executed argv (`git ^-C <outside> reset --hard`).
-  // The guard denies the whole class as unparseable instead of guessing.
+  // The guard denies the whole class instead of guessing.
   describe.runIf(
     process.platform === 'win32' && getShellConfiguration().shell === 'cmd',
   )('cmd.exe rewrite-syntax shapes', () => {
-    it('denies a caret-escaped relocation flag as unparseable', async () => {
+    it('denies a caret-escaped relocation flag as cmd rewrite syntax', async () => {
       const guard = createDaemonToolGuard();
       await expect(
         guard(request(`git ^-C ${outsideRepo} reset --hard`)),
       ).resolves.toMatchObject({
         allowed: false,
-        reason: expect.stringContaining('could not be parsed'),
+        reason: expect.stringContaining('cmd.exe rewrite syntax'),
       });
     });
 
-    it('denies a caret-escaped quote as unparseable', async () => {
+    it('denies a caret-escaped quote as cmd rewrite syntax', async () => {
       const guard = createDaemonToolGuard();
       await expect(
         guard(request(`git ^"-C ${outsideRepo}^" reset --hard`)),
       ).resolves.toMatchObject({
         allowed: false,
-        reason: expect.stringContaining('could not be parsed'),
+        reason: expect.stringContaining('cmd.exe rewrite syntax'),
       });
     });
 
-    it('denies an expansion-pair relocation as unparseable', async () => {
+    it('denies an expansion-pair relocation as cmd rewrite syntax', async () => {
       const guard = createDaemonToolGuard();
       await expect(
         guard(request('git -C %OUTSIDE_REPO% reset --hard')),
       ).resolves.toMatchObject({
         allowed: false,
-        reason: expect.stringContaining('could not be parsed'),
+        reason: expect.stringContaining('cmd.exe rewrite syntax'),
+      });
+    });
+
+    // The two markers pair only across the `&&`, so only the whole-text
+    // check before `splitCommands` sees them; moving the check into the
+    // per-segment loop would silently allow this shape.
+    it('denies a rewrite pair distributed across a command separator', async () => {
+      const guard = createDaemonToolGuard();
+      await expect(
+        guard(request('echo %A && git -C %B reset --hard')),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining('cmd.exe rewrite syntax'),
       });
     });
 
@@ -741,6 +762,63 @@ it -C ${outsideRepo} reset --hard`,
       ).resolves.toMatchObject({
         allowed: false,
         reason: expect.stringContaining(outsideRepo),
+      });
+    });
+  });
+
+  // The rewrite gate reads process.platform and getShellConfiguration() at
+  // call time, so spoofing both pins the cmd-lane denial on every lane — the
+  // merge_group Windows lane is otherwise the only lane that executes the
+  // gate, and a regression would first go red inside the merge queue.
+  describe('cmd.exe rewrite-syntax denial (spoofed cmd lane)', () => {
+    const savedEnv: Record<string, string | undefined> = {};
+
+    beforeEach(() => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      vi.spyOn(os, 'platform').mockReturnValue('win32');
+      // Keep the Git Bash detectors (MSYSTEM/TERM) off so the shell
+      // configuration resolves to cmd like the Windows merge lane.
+      for (const key of ['MSYSTEM', 'TERM', 'ComSpec'] as const) {
+        savedEnv[key] = process.env[key];
+        delete process.env[key];
+      }
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+      for (const key of ['MSYSTEM', 'TERM', 'ComSpec'] as const) {
+        if (savedEnv[key] === undefined) delete process.env[key];
+        else process.env[key] = savedEnv[key];
+      }
+    });
+
+    it('denies rewrite syntax on its own reason, not the unparseable one', async () => {
+      const guard = createDaemonToolGuard();
+      await expect(
+        guard(request('git -C %OUTSIDE_REPO% reset --hard')),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining('cmd.exe rewrite syntax'),
+      });
+    });
+
+    it('denies a rewrite pair that only straddles a command separator', async () => {
+      const guard = createDaemonToolGuard();
+      await expect(
+        guard(request('echo %A && git -C %B reset --hard')),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining('cmd.exe rewrite syntax'),
+      });
+    });
+
+    it('keeps the unparseable reason for genuinely unparseable commands', async () => {
+      const guard = createDaemonToolGuard();
+      await expect(
+        guard(request('git -C ${UNBALANCED reset --hard')),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining('could not be parsed'),
       });
     });
   });
@@ -2302,15 +2380,6 @@ it -C ${outsideRepo} reset --hard`,
     // function, so the model must not delete it (it tracks no variables).
     () =>
       `pwn() { git -C ${plainOutsidePath} reset --hard; }; pwn=1; unset pwn; pwn`,
-    // `env -u BASH_FUNC_git%%` (separated, attached, and `--unset=` forms)
-    // strips the exported function from the child, which then runs the real
-    // git — the guard must not replay the harmless imported body.
-    () =>
-      `git() { :; }; export -f git; env -u 'BASH_FUNC_git%%' bash -c "git -C ${plainOutsidePath} reset --hard"`,
-    () =>
-      `git() { :; }; export -f git; env -u'BASH_FUNC_git%%' bash -c "git -C ${plainOutsidePath} reset --hard"`,
-    () =>
-      `git() { :; }; export -f git; env --unset='BASH_FUNC_git%%' bash -c "git -C ${plainOutsidePath} reset --hard"`,
     // A bare `unset git` with no same-name variable removes the function in
     // bash; the harmless body must not mask the relocating call arguments.
     () => `git() { :; }; unset git; git -C ${plainOutsidePath} reset --hard`,
@@ -2355,28 +2424,62 @@ it -C ${outsideRepo} reset --hard`,
     },
   );
 
-  it('keeps a live compatible shadow modelled', async () => {
-    await mkdir(path.join(plainOutsidePath, '.git'), { recursive: true });
-    const guard = createDaemonToolGuard();
+  // `BASH_FUNC_git%%` spells a bash exported-function entry, but the two
+  // percent signs are also a cmd.exe expansion pair — cmd expands `%…%`
+  // through single quotes — so the rewrite-syntax gate denies these commands
+  // on the cmd lane before shadow modelling runs. That denial is right for
+  // cmd sessions; the bash-semantics pins below only mean what they say off
+  // that lane.
+  describe.runIf(
+    process.platform !== 'win32' || getShellConfiguration().shell !== 'cmd',
+  )('bash exported-function shadow semantics', () => {
+    it.each([
+      // `env -u BASH_FUNC_git%%` (separated, attached, and `--unset=` forms)
+      // strips the exported function from the child, which then runs the real
+      // git — the guard must not replay the harmless imported body.
+      () =>
+        `git() { :; }; export -f git; env -u 'BASH_FUNC_git%%' bash -c "git -C ${plainOutsidePath} reset --hard"`,
+      () =>
+        `git() { :; }; export -f git; env -u'BASH_FUNC_git%%' bash -c "git -C ${plainOutsidePath} reset --hard"`,
+      () =>
+        `git() { :; }; export -f git; env --unset='BASH_FUNC_git%%' bash -c "git -C ${plainOutsidePath} reset --hard"`,
+    ])(
+      'does not let a mis-modelled removal drop a live relocating shadow %#',
+      async (build) => {
+        await mkdir(path.join(plainOutsidePath, '.git'), { recursive: true });
+        const guard = createDaemonToolGuard();
 
-    for (const command of [
-      // bash imports the function, which really shadows git and drops args.
-      `git() { :; }; export -f git; bash -c "git -C ${plainOutsidePath} reset --hard"`,
-      // The alias is still in effect (no removal).
-      `alias git='echo hi'; git -C ${plainOutsidePath} reset --hard`,
-      // Removing a different name leaves the git shadow intact.
-      `git() { :; }; unset -f other; git -C ${plainOutsidePath} reset --hard`,
-      // `env -i` clears the function, but a read-only relocation is still fine.
-      `git() { :; }; export -f git; env -i bash -c "git -C ${plainOutsidePath} rev-parse HEAD"`,
-      // `env` without a clearing flag keeps the bash-imported shadow live.
-      `git() { :; }; export -f git; env FOO=bar bash -c "git -C ${plainOutsidePath} reset --hard"`,
-      // `env -u` of an unrelated key leaves the exported function in place.
-      `git() { :; }; export -f git; env -u FOO bash -c "git -C ${plainOutsidePath} reset --hard"`,
-      // `env -u BASH_FUNC_other%%` strips a different function, not git.
-      `git() { :; }; export -f git; env -u 'BASH_FUNC_other%%' bash -c "git -C ${plainOutsidePath} reset --hard"`,
-    ]) {
-      await expect(guard(request(command))).resolves.toEqual({ allowed: true });
-    }
+        await expect(guard(request(build()))).resolves.toMatchObject({
+          allowed: false,
+        });
+      },
+    );
+
+    it('keeps a live compatible shadow modelled', async () => {
+      await mkdir(path.join(plainOutsidePath, '.git'), { recursive: true });
+      const guard = createDaemonToolGuard();
+
+      for (const command of [
+        // bash imports the function, which really shadows git and drops args.
+        `git() { :; }; export -f git; bash -c "git -C ${plainOutsidePath} reset --hard"`,
+        // The alias is still in effect (no removal).
+        `alias git='echo hi'; git -C ${plainOutsidePath} reset --hard`,
+        // Removing a different name leaves the git shadow intact.
+        `git() { :; }; unset -f other; git -C ${plainOutsidePath} reset --hard`,
+        // `env -i` clears the function, but a read-only relocation is still fine.
+        `git() { :; }; export -f git; env -i bash -c "git -C ${plainOutsidePath} rev-parse HEAD"`,
+        // `env` without a clearing flag keeps the bash-imported shadow live.
+        `git() { :; }; export -f git; env FOO=bar bash -c "git -C ${plainOutsidePath} reset --hard"`,
+        // `env -u` of an unrelated key leaves the exported function in place.
+        `git() { :; }; export -f git; env -u FOO bash -c "git -C ${plainOutsidePath} reset --hard"`,
+        // `env -u BASH_FUNC_other%%` strips a different function, not git.
+        `git() { :; }; export -f git; env -u 'BASH_FUNC_other%%' bash -c "git -C ${plainOutsidePath} reset --hard"`,
+      ]) {
+        await expect(guard(request(command))).resolves.toEqual({
+          allowed: true,
+        });
+      }
+    });
   });
 
   // The shell-executing set pins ToolNames literals in acp-bridge, which
