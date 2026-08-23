@@ -922,8 +922,15 @@ export class BackgroundAgentResumeService {
         target.subagentConfig?.approvalMode === BUBBLE_APPROVAL_MODE &&
           this.config.isInteractive(),
       );
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const bgConfig = Object.create(activeAgentConfig) as any;
+      // Stamp the policy on activeAgentConfig itself — the config whose
+      // rebuilt tool registry a nested AgentTool binds to — so nested
+      // launches under the resumed agent inherit it through their own
+      // config prototype chains. Mirrors the launch path (agent.ts); a
+      // wrapper-only stamp left nested schedulers resolving
+      // Config.prototype's `false` and hanging on unanswerable approvals.
+      // activeAgentConfig is created per-resume by
+      // createApprovalModeOverride, so the stamp leaks nowhere.
+      const bgConfig = activeAgentConfig;
       bgConfig.getShouldAvoidPermissionPrompts = () => !shouldBubble;
 
       const records = await jsonl.read<ChatRecord>(outputFile);

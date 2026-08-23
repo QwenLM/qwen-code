@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   AgentTool,
   type AgentParams,
+  findBackgroundedAncestorAgentId,
   resolveSubagentApprovalMode,
 } from './agent.js';
 import type { Content, Part, PartListUnion } from '@google/genai';
@@ -2242,6 +2243,62 @@ describe('AgentTool', () => {
         fs.rmSync(nonRepo, { recursive: true, force: true });
         vi.useFakeTimers();
       }
+    });
+
+    it('bridges nested approvals to the nearest backgrounded ancestor entry', async () => {
+      // A foreground launch from inside a background agent (fork) has no
+      // inline UI: its TOOL_WAITING_APPROVAL fires on the invocation's own
+      // emitter. The launch path must bridge that emitter onto the
+      // ancestor's Background-tasks entry (marked nestedSource so the UI
+      // can name the waiter) and unbridge on completion.
+      const registry = config.getBackgroundTaskRegistry() as unknown as {
+        get: ReturnType<typeof vi.fn>;
+        bridgeApprovalEvents: ReturnType<typeof vi.fn>;
+      };
+      const cleanupSpy = vi.fn();
+      registry.bridgeApprovalEvents.mockReturnValue(cleanupSpy);
+      registry.get.mockImplementation((id: string) =>
+        id === 'fork-entry'
+          ? { isBackgrounded: true, status: 'running' }
+          : undefined,
+      );
+
+      const invocation = agentTool.build({
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      });
+      await runWithAgentContext('fork-entry', () =>
+        invocation.execute(new AbortController().signal),
+      );
+
+      expect(registry.bridgeApprovalEvents).toHaveBeenCalledTimes(1);
+      const [ownerId, emitter, opts] =
+        registry.bridgeApprovalEvents.mock.calls[0];
+      expect(ownerId).toBe('fork-entry');
+      expect(emitter).toBe(
+        (invocation as unknown as { eventEmitter: unknown }).eventEmitter,
+      );
+      expect(opts).toEqual({ nestedSource: true });
+      // Unbridged in the foreground finally — no listener leak.
+      expect(cleanupSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not bridge approvals for a top-level foreground launch', async () => {
+      // No agent-context frame → no backgrounded ancestor → the inline
+      // confirmation path applies unchanged.
+      const registry = config.getBackgroundTaskRegistry() as unknown as {
+        bridgeApprovalEvents: ReturnType<typeof vi.fn>;
+      };
+
+      const invocation = agentTool.build({
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      });
+      await invocation.execute(new AbortController().signal);
+
+      expect(registry.bridgeApprovalEvents).not.toHaveBeenCalled();
     });
 
     it('strips internal analysis and summary tags from subagent result', async () => {
@@ -6960,6 +7017,62 @@ describe('AgentTool', () => {
       expect(createdConfig.getShouldAvoidPermissionPrompts()).toBe(true);
     });
 
+    it('stamps the prompt-avoidance policy where nested launches inherit it', async () => {
+      // The policy must sit on the config the rebuilt tool registry binds to
+      // (the createToolRegistry receiver), not on a wrapper above it: a
+      // nested AgentTool branches its own configs off that receiver via
+      // Object.create, and a wrapper-only stamp left nested schedulers
+      // resolving Config.prototype's `false` — believing they could prompt
+      // and waiting forever on approvals nobody could see.
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(bgSubagent);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      });
+      await invocation.execute();
+
+      const contexts = vi.mocked(config.createToolRegistry).mock.contexts;
+      const toolBoundConfig = contexts[contexts.length - 1] as Config;
+      // Auto-deny background agent (non-interactive session): the policy is
+      // visible on the tool-bound config itself...
+      expect(toolBoundConfig.getShouldAvoidPermissionPrompts()).toBe(true);
+      // ...and through the prototype chain of any config a nested launch
+      // derives from it.
+      const derived = Object.create(toolBoundConfig) as Config;
+      expect(derived.getShouldAvoidPermissionPrompts()).toBe(true);
+    });
+
+    it('keeps prompts allowed through the chain for a bubbling background agent', async () => {
+      vi.mocked(
+        config.isInteractive as ReturnType<typeof vi.fn>,
+      ).mockReturnValue(true);
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
+        ...bgSubagent,
+        approvalMode: 'bubble',
+      });
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      });
+      await invocation.execute();
+
+      const contexts = vi.mocked(config.createToolRegistry).mock.contexts;
+      const toolBoundConfig = contexts[contexts.length - 1] as Config;
+      // Bubbling: prompts stay allowed (they park on the entry), and nested
+      // launches inherit the same policy so THEIR approvals can bubble too.
+      expect(toolBoundConfig.getShouldAvoidPermissionPrompts()).toBe(false);
+      const derived = Object.create(toolBoundConfig) as Config;
+      expect(derived.getShouldAvoidPermissionPrompts()).toBe(false);
+    });
+
     it('forwards the scheduler-provided callId as toolUseId on the registry entry', async () => {
       const params: AgentParams = {
         description: 'Start monitor',
@@ -7141,6 +7254,80 @@ describe('AgentTool', () => {
         createSpy.mockRestore();
       },
     );
+  });
+});
+
+describe('findBackgroundedAncestorAgentId', () => {
+  type Entry = {
+    isBackgrounded: boolean;
+    status: string;
+    parentAgentId?: string | null;
+  };
+  const registryOf = (entries: Record<string, Entry>) => ({
+    get: (id: string) =>
+      entries[id] as unknown as ReturnType<
+        Parameters<typeof findBackgroundedAncestorAgentId>[0]['get']
+      >,
+  });
+
+  it('returns undefined without a starting agent id', () => {
+    const registry = registryOf({});
+    expect(findBackgroundedAncestorAgentId(registry, undefined)).toBe(
+      undefined,
+    );
+    expect(findBackgroundedAncestorAgentId(registry, null)).toBe(undefined);
+  });
+
+  it('returns a directly backgrounded running ancestor', () => {
+    const registry = registryOf({
+      'fork-1': { isBackgrounded: true, status: 'running' },
+    });
+    expect(findBackgroundedAncestorAgentId(registry, 'fork-1')).toBe('fork-1');
+  });
+
+  it('walks foreground lineage to the backgrounded ancestor', () => {
+    const registry = registryOf({
+      'leaf-fg': {
+        isBackgrounded: false,
+        status: 'running',
+        parentAgentId: 'mid-fg',
+      },
+      'mid-fg': {
+        isBackgrounded: false,
+        status: 'running',
+        parentAgentId: 'fork-1',
+      },
+      'fork-1': { isBackgrounded: true, status: 'running' },
+    });
+    expect(findBackgroundedAncestorAgentId(registry, 'leaf-fg')).toBe('fork-1');
+  });
+
+  it('returns undefined for a terminal backgrounded ancestor', () => {
+    const registry = registryOf({
+      'fork-1': { isBackgrounded: true, status: 'completed' },
+    });
+    expect(findBackgroundedAncestorAgentId(registry, 'fork-1')).toBe(undefined);
+  });
+
+  it('returns undefined when the lineage breaks', () => {
+    const registry = registryOf({
+      'leaf-fg': {
+        isBackgrounded: false,
+        status: 'running',
+        parentAgentId: 'gone',
+      },
+    });
+    expect(findBackgroundedAncestorAgentId(registry, 'leaf-fg')).toBe(
+      undefined,
+    );
+  });
+
+  it('caps the walk on a corrupt (cyclic) lineage', () => {
+    const registry = registryOf({
+      a: { isBackgrounded: false, status: 'running', parentAgentId: 'b' },
+      b: { isBackgrounded: false, status: 'running', parentAgentId: 'a' },
+    });
+    expect(findBackgroundedAncestorAgentId(registry, 'a')).toBe(undefined);
   });
 });
 

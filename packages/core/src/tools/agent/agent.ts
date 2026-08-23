@@ -125,6 +125,7 @@ import {
   type AgentPersistedCliFlags,
 } from '../../agents/agent-transcript.js';
 import type {
+  AgentTask,
   BackgroundSlotReservation,
   ResidentBackgroundAgent,
 } from '../../agents/background-tasks.js';
@@ -321,6 +322,40 @@ function approvalModeToPermissionMode(mode: ApprovalMode): PermissionMode {
  * - Otherwise, the agent definition's mode applies if set
  * - Default fallback is auto-edit (sub-agents need autonomy)
  */
+/**
+ * Walks a foreground launch's registry lineage (parentAgentId links) to the
+ * nearest BACKGROUNDED, still-running ancestor entry.
+ *
+ * Why: a nested foreground agent has no inline UI. Its scheduler's
+ * TOOL_WAITING_APPROVAL fires on the invocation's own emitter, which nothing
+ * bridges — the call would wait forever (the batch promise only resolves on
+ * completion or abort). When such an ancestor exists, the launch path bridges
+ * the nested emitter to that ancestor's Background-tasks entry, parking the
+ * approval exactly where the ancestor's own approvals go. No ancestor (a
+ * top-level foreground launch from the main session) → undefined → no bridge,
+ * and the existing inline confirmation path applies unchanged.
+ *
+ * Foreground entries stay registered while running and carry parentAgentId
+ * (register() in the launch path), so the chain is walkable mid-execution.
+ * The hop cap is defensive: lineage is acyclic by construction, but a corrupt
+ * entry must not spin.
+ */
+export function findBackgroundedAncestorAgentId(
+  registry: { get(agentId: string): AgentTask | undefined },
+  startAgentId: string | null | undefined,
+): string | undefined {
+  let id = startAgentId ?? undefined;
+  for (let hops = 0; id !== undefined && hops < 16; hops++) {
+    const entry = registry.get(id);
+    if (!entry) return undefined;
+    if (entry.isBackgrounded) {
+      return entry.status === 'running' ? id : undefined;
+    }
+    id = entry.parentAgentId ?? undefined;
+  }
+  return undefined;
+}
+
 export function resolveSubagentApprovalMode(
   parentApprovalMode: ApprovalMode,
   agentApprovalMode?: string,
@@ -2992,9 +3027,17 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // Background agents have no inline UI. Preserve the resolved approval
       // mode while overriding only the prompt-avoidance policy used by their
       // scheduler.
-      const subagentRuntimeConfig = shouldRunInBackground
-        ? (Object.create(agentConfig) as Config)
-        : agentConfig;
+      //
+      // Stamp the policy on agentConfig itself — the config the rebuilt tool
+      // registry's tools (including any nested AgentTool) are bound to — not
+      // on a wrapper above it. Nested launches branch their own configs off
+      // agentConfig via Object.create, so the policy must sit where their
+      // prototype chains can reach it: stamped only on a wrapper, a nested
+      // scheduler resolved Config.prototype's `false`, believed it could
+      // prompt, and waited forever on a TOOL_WAITING_APPROVAL nobody could
+      // see or answer. agentConfig is created per-launch by
+      // createApprovalModeOverride, so the stamp leaks nowhere.
+      const subagentRuntimeConfig = agentConfig;
       if (shouldRunInBackground) {
         subagentRuntimeConfig.getShouldAvoidPermissionPrompts = () =>
           !shouldBubble;
@@ -4011,6 +4054,26 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       this.eventEmitter.on(AgentEventType.TOOL_CALL, onFgToolCall);
       this.eventEmitter.on(AgentEventType.USAGE_METADATA, onFgUsageMetadata);
 
+      // Nested foreground launches under a backgrounded ancestor (a fork or
+      // any background agent that spawns sub-agents) have no inline UI:
+      // their TOOL_WAITING_APPROVAL fires on this invocation's emitter,
+      // which nothing else bridges. Park those approvals on the ancestor's
+      // Background-tasks entry — the same place the ancestor's own approvals
+      // go — so the user can answer them from the dialog instead of the
+      // nested call hanging forever. Top-level foreground launches have no
+      // such ancestor and keep the inline confirmation path unchanged.
+      // Double answers (dialog + any inline path) are deduped by the
+      // runtime's per-call responded guard.
+      const approvalAncestorId = findBackgroundedAncestorAgentId(
+        registry,
+        getCurrentAgentId(),
+      );
+      const cleanupNestedApprovalBridge = approvalAncestorId
+        ? registry.bridgeApprovalEvents(approvalAncestorId, this.eventEmitter, {
+            nestedSource: true,
+          })
+        : undefined;
+
       try {
         ({ cleanup: cleanupFgJsonl } = attachJsonlTranscriptWriter(
           this.eventEmitter,
@@ -4128,6 +4191,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         }
         this.eventEmitter.off(AgentEventType.TOOL_CALL, onFgToolCall);
         this.eventEmitter.off(AgentEventType.USAGE_METADATA, onFgUsageMetadata);
+        cleanupNestedApprovalBridge?.();
         signal?.removeEventListener('abort', onParentAbort);
         cleanupOwnedMonitorNotifications();
         // Release the JSONL writer's listeners and close the fd before

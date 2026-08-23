@@ -2657,6 +2657,54 @@ describe('BackgroundTaskRegistry', () => {
       expect(registry.getPendingApprovals('bg-appr-8')).toHaveLength(0);
     });
 
+    it('stamps subagentId on bridged approvals only for a nestedSource bridge', () => {
+      // A nested agent's approvals are parked on its backgrounded ancestor's
+      // entry; the UI needs to name the actual waiter. The entry's OWN
+      // approvals must stay unstamped — the runtime subagentId and the
+      // registry agentId use different suffixes, so the bridge caller
+      // declares the nested case rather than anyone comparing ids.
+      const makeWaiting = (callId: string, subagentId: string) => ({
+        subagentId,
+        round: 1,
+        callId,
+        name: 'Shell',
+        description: `run ${callId}`,
+        args: {},
+        confirmationDetails: {
+          type: 'exec',
+        } as BackgroundApproval['confirmationDetails'],
+        respond: vi.fn(async () => {}),
+        timestamp: Date.now(),
+      });
+
+      registry.register(makeRegistration('bg-appr-nested'));
+
+      const ownEmitter = new AgentEventEmitter();
+      registry.bridgeApprovalEvents('bg-appr-nested', ownEmitter);
+      ownEmitter.emit(
+        AgentEventType.TOOL_WAITING_APPROVAL,
+        makeWaiting('own-1', 'fork-runtime1'),
+      );
+
+      const nestedEmitter = new AgentEventEmitter();
+      registry.bridgeApprovalEvents('bg-appr-nested', nestedEmitter, {
+        nestedSource: true,
+      });
+      nestedEmitter.emit(
+        AgentEventType.TOOL_WAITING_APPROVAL,
+        makeWaiting('nested-1', 'review-agent-abc123'),
+      );
+
+      const parked = registry.getPendingApprovals('bg-appr-nested');
+      expect(parked).toHaveLength(2);
+      expect(parked.find((a) => a.callId === 'own-1')?.subagentId).toBe(
+        undefined,
+      );
+      expect(parked.find((a) => a.callId === 'nested-1')?.subagentId).toBe(
+        'review-agent-abc123',
+      );
+    });
+
     it('cancel() rejects parked approvals before the abort-driven clear (production ordering)', () => {
       // In production, abort() synchronously unwinds the agent's awaiting
       // tool batch, which emits a synthetic TOOL_RESULT for the parked call;

@@ -693,6 +693,95 @@ describe('BackgroundAgentResumeService', () => {
     expect(subagentManager.loadSubagent).toHaveBeenCalledWith('researcher');
   });
 
+  it('stamps the resumed prompt-avoidance policy where nested launches inherit it', async () => {
+    // The policy must sit on the config the rebuilt tool registry binds to
+    // (the createToolRegistry receiver) — not on a wrapper above it — so a
+    // nested AgentTool launched by the resumed agent inherits it through its
+    // own config prototype chain. Mirrors the launch path in agent.ts.
+    const sessionId = 'session-policy';
+    const agentId = 'agent-policy';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Resume policy stamp',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'auto-edit',
+    });
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Resume policy stamp' }] },
+      }) + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: 'Resume policy stamp',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Resume policy stamp',
+      outputFile,
+      metaPath,
+    });
+
+    const subagent = {
+      execute: vi.fn(async () => {}),
+      setExternalMessageProvider: vi.fn(),
+      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        outputTokens: 0,
+        totalDurationMs: 0,
+      }),
+      getTerminateMode: () => AgentTerminateMode.GOAL,
+      getFinalText: () => 'done',
+    };
+
+    const { service, subagentManager } = createService();
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+    expect(resumed).toBeDefined();
+
+    const createCall = subagentManager.createAgentHeadless.mock.calls.at(-1);
+    expect(createCall).toBeDefined();
+    const bgConfig = createCall![1] as Config;
+    const contexts = vi.mocked(bgConfig.createToolRegistry).mock.contexts;
+    // The runtime config IS the createToolRegistry receiver — the config
+    // whose rebuilt registry a nested AgentTool binds to. A wrapper-only
+    // stamp would leave these two distinct objects.
+    expect(contexts[contexts.length - 1]).toBe(bgConfig);
+    // Non-interactive harness → auto-deny, visible on the tool-bound config
+    // itself and through any derived config's prototype chain.
+    expect(bgConfig.getShouldAvoidPermissionPrompts()).toBe(true);
+    expect(
+      (Object.create(bgConfig) as Config).getShouldAvoidPermissionPrompts(),
+    ).toBe(true);
+
+    await vi.waitFor(() => {
+      expect(registry.get(agentId)?.status).toBe('completed');
+    });
+  });
+
   it('fires SubagentStart hooks when resuming and injects hook context', async () => {
     const sessionId = 'session-resume';
     const agentId = 'agent-resume';

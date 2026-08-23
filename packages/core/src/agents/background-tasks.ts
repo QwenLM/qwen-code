@@ -240,6 +240,16 @@ export interface BackgroundApproval {
   respond: AgentApprovalRequestEvent['respond'];
   /** Emission timestamp (ms) — newest-first ordering in the UI. */
   at: number;
+  /**
+   * Set ONLY for approvals bridged from a NESTED agent onto this entry
+   * (see AgentTool's nested approval bridge): the nested runtime's
+   * subagentId (`<name>-<suffix>`), so the UI can say which descendant is
+   * actually waiting. Undefined for the entry's own approvals — the
+   * runtime id and the registry agentId use different suffixes, so
+   * comparing them cannot distinguish own from nested; the bridge caller
+   * declares it instead.
+   */
+  subagentId?: string;
 }
 
 /**
@@ -1141,6 +1151,14 @@ export class BackgroundTaskRegistry {
   bridgeApprovalEvents(
     agentId: string,
     emitter: AgentEventEmitter,
+    options?: {
+      /**
+       * The emitter belongs to a NESTED agent whose approvals are parked
+       * on this (ancestor) entry. Stamps each parked approval with the
+       * event's subagentId so the UI can name the actual waiter.
+       */
+      nestedSource?: boolean;
+    },
   ): () => void {
     const onWaiting = (event: AgentApprovalRequestEvent) => {
       const parked = this.addPendingApproval(agentId, {
@@ -1150,6 +1168,7 @@ export class BackgroundTaskRegistry {
         confirmationDetails: event.confirmationDetails,
         respond: event.respond,
         at: event.timestamp,
+        ...(options?.nestedSource ? { subagentId: event.subagentId } : {}),
       });
       // If the entry is already gone/terminal we couldn't park it — reject
       // so the agent's reasoning loop doesn't block forever on this call.
