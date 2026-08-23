@@ -8,6 +8,7 @@ import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -180,6 +181,17 @@ const runRemoveReviewTree = (workspace, ...args) =>
     ],
     { env: { ...process.env, GITHUB_WORKSPACE: workspace }, encoding: 'utf8' },
   );
+
+// existsSync follows the link: a dangling leftover reports as absent while
+// the link itself still survives, so link presence is asserted via lstat.
+const linkExists = (path) => {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 describe('review worktree cleanup steps', () => {
   it('keeps every shared-pool ci.yml checkout sweep pinned to paths.ts', () => {
@@ -468,6 +480,110 @@ describe('review worktree cleanup steps', () => {
         ).toBe(true);
       } finally {
         chmodSync(join(fixture, '.qwen/tmp'), 0o755);
+        rmSync(fixture, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!permissionFixturesAvailable)(
+    'remove_review_tree unlinks a symlinked leftover over a writable parent',
+    () => {
+      const fixture = mkdtempSync(join(tmpdir(), 'review-tree-fixture-'));
+      try {
+        const target = join(fixture, 'target');
+        mkdirSync(target);
+        writeFileSync(join(target, 'keep.txt'), 'x');
+        const leftoverDir = join(fixture, '.qwen/tmp');
+        mkdirSync(leftoverDir, { recursive: true });
+        const link = join(leftoverDir, 'review-pr-103');
+        symlinkSync(target, link);
+        // The parent stays writable, so the first rm must unlink the link
+        // before the guard runs: deadening that rm routes the leftover to
+        // the symlink refusal instead, warning and leaving it behind.
+        const out = runRemoveReviewTree(fixture, link);
+        expect(out.status).toBe(0);
+        expect(out.stdout).toBe('');
+        expect(linkExists(link)).toBe(false);
+        expect(readFileSync(join(target, 'keep.txt'), 'utf8')).toBe('x');
+      } finally {
+        rmSync(fixture, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!permissionFixturesAvailable)(
+    'remove_review_tree removes a dangling symlink via the -L existence arm',
+    () => {
+      const fixture = mkdtempSync(join(tmpdir(), 'review-tree-fixture-'));
+      try {
+        const leftoverDir = join(fixture, '.qwen/tmp');
+        mkdirSync(leftoverDir, { recursive: true });
+        const link = join(leftoverDir, 'review-pr-104');
+        symlinkSync(join(fixture, 'missing-target'), link);
+        // -e follows the link and is false here: only the -L arm keeps the
+        // remove-or-named-warning contract for dangling links.
+        const out = runRemoveReviewTree(fixture, link);
+        expect(out.status).toBe(0);
+        expect(out.stdout).toBe('');
+        expect(linkExists(link)).toBe(false);
+      } finally {
+        rmSync(fixture, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!permissionFixturesAvailable)(
+    'remove_review_tree refuses a path outside the workspace',
+    () => {
+      const fixture = mkdtempSync(join(tmpdir(), 'review-tree-fixture-'));
+      const outside = mkdtempSync(join(tmpdir(), 'review-tree-outside-'));
+      const leftover = join(outside, 'review-pr-105');
+      try {
+        mkdirSync(leftover);
+        writeFileSync(join(leftover, 'keep.txt'), 'x');
+        // Lock the tree AND its parent: rm may run before the guard and
+        // unlinks anything it can, so both locks are needed to observe the
+        // refusal leaving a foreign tree completely untouched.
+        chmodSync(leftover, 0o555);
+        chmodSync(outside, 0o555);
+        const out = runRemoveReviewTree(fixture, leftover);
+        expect(out.status).toBe(0);
+        const warnings = out.stdout
+          .split('\n')
+          .filter((line) => line.startsWith('::warning::'));
+        expect(warnings).toHaveLength(1);
+        expect(warnings[0]).toContain(
+          'refusing to repair review worktree path (outside the workspace)',
+        );
+        expect(existsSync(join(leftover, 'keep.txt'))).toBe(true);
+      } finally {
+        chmodSync(outside, 0o755);
+        chmodSync(leftover, 0o755);
+        rmSync(fixture, { recursive: true, force: true });
+        rmSync(outside, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!permissionFixturesAvailable || !realpathAvailable)(
+    'remove_review_tree repairs a permission-locked tree and then removes it',
+    () => {
+      const fixture = mkdtempSync(join(tmpdir(), 'review-tree-fixture-'));
+      const leftover = join(fixture, '.qwen/tmp/review-pr-106');
+      try {
+        mkdirSync(leftover, { recursive: true });
+        writeFileSync(join(leftover, 'locked.txt'), 'x');
+        // Lock the tree itself, not the parent: the rungs repair $abs only,
+        // so the chmod-555-parent fixtures never reach the repair-success
+        // path this exercises — first rm fails, chmod rung heals, retry rm
+        // removes.
+        chmodSync(leftover, 0o555);
+        const out = runRemoveReviewTree(fixture, '.qwen/tmp/review-pr-106');
+        expect(out.status).toBe(0);
+        expect(out.stdout).toBe('');
+        expect(existsSync(leftover)).toBe(false);
+      } finally {
+        if (existsSync(leftover)) chmodSync(leftover, 0o755);
         rmSync(fixture, { recursive: true, force: true });
       }
     },
