@@ -1568,6 +1568,7 @@ const ThoughtLineHeader = memo(function ThoughtLineHeader({
       className={`${styles.chatSummaryThoughtHeader}${
         expanded ? ` ${styles.chatSummaryThoughtHeaderExpanded}` : ''
       }`}
+      onClick={onToggle}
     >
       <button
         type="button"
@@ -1575,7 +1576,6 @@ const ThoughtLineHeader = memo(function ThoughtLineHeader({
         data-testid="compact-thinking-summary"
         aria-expanded={expanded}
         title={t(expanded ? 'thinking.collapse' : 'thinking.expand')}
-        onClick={onToggle}
       >
         <span className={styles.chatSummaryThoughtIcon} aria-hidden="true">
           <ThinkingDoneIcon />

@@ -1780,6 +1780,36 @@ describe('thinking rows in the compact summary', () => {
     expect(container.textContent).toContain('private chain of thought');
   });
 
+  it('expands the thought when the header row is clicked outside the button', () => {
+    const container = renderToolGroup(
+      [
+        makeTool({
+          callId: 'tool-1',
+          toolName: 'ReadFile',
+          status: 'completed',
+        }),
+      ],
+      {},
+      [{ content: 'private chain of thought' }],
+    );
+
+    act(() => {
+      container.querySelector('button')?.click();
+    });
+    const header = container.querySelector(
+      '[class*="chatSummaryThoughtHeader"]',
+    ) as HTMLElement;
+    expect(header).toBeTruthy();
+    const chevron = header.querySelector(
+      '[class*="chatSummaryThoughtChevron"]',
+    ) as HTMLElement;
+    expect(chevron).toBeTruthy();
+    expect(container.textContent).not.toContain('private chain of thought');
+    // The pointer-styled row is the hit target, not just the label button.
+    act(() => chevron.click());
+    expect(container.textContent).toContain('private chain of thought');
+  });
+
   it('keeps the single tool compact when thinking is folded in', () => {
     const container = renderToolGroup(
       [
