@@ -135,6 +135,8 @@ function anchorRefusalReason(
   source: string | undefined,
   skippedCount: number,
   treeHeldStill: boolean,
+  /** Did THIS capture include untracked files? */
+  untracked: boolean,
 ): string | null {
   if (!treeHeldStill) {
     // The hashes this scoping would compare against were computed over a tree
@@ -186,6 +188,13 @@ function anchorRefusalReason(
     return `the cache belongs to source path ${display(
       (cache.source ?? 'an unrecorded path').slice(0, 96),
     )}, not ${display(source ?? 'an unrecorded path')}`;
+  }
+  if (cache.untracked === true && !untracked) {
+    // Narrower than the round that wrote it: this capture cannot see the
+    // untracked files that one hashed, so their absence from it is scope, not
+    // change. Refusing costs a full round; honouring it certifies bytes
+    // nobody read.
+    return 'this round excludes untracked files the cached round reviewed';
   }
   if (cache.stateId !== stateIdOf(cache.headSha, cache.files)) {
     // Integrity: a shape-valid cache whose hashes were edited without
@@ -447,6 +456,14 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     // empty string means the runtime published nothing, which the gate reads
     // as a mismatch rather than a pass.
     lastModelId: roundModelIdFrom(process.env),
+    // What this round could SEE. A later round that sees less cannot certify
+    // this one's state: with `--no-untracked` (or a `.gitignore` entry added
+    // between rounds) the untracked block never runs and records no `skipped`
+    // entries, so a cached untracked path reads as VANISHED rather than
+    // out-of-scope — the slice keeps nothing and the round stops decided over
+    // bytes it never captured. The stop does not advance the cache, so every
+    // later narrow round repeats it.
+    untracked: args.untracked !== false,
     // The path the target token was FLATTENED from, when there is one.
     //
     // `safeTarget` is not injective: `src/foo.ts` and `src_foo.ts` both
@@ -513,6 +530,7 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
       sourcePath,
       capture.skipped.length,
       treeHeldStill,
+      args.untracked !== false,
     );
     if (refusal !== null) {
       writeStderrLine(

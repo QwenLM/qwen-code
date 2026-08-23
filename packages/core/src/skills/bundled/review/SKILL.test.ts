@@ -702,9 +702,13 @@ describe('bundled review skill', () => {
     // the skill used to recommend filling it with the reviewed path's
     // separators replaced — a deep target then passes the filesystem's
     // 255-byte filename limit and the plan write dies with ENAMETOOLONG
-    // before the capture runs. The recommendation must stay bounded.
+    // before the capture runs.
+    //
+    // "Short" is not bounded, which is what the first fix said: a basename
+    // is itself allowed up to 255 bytes and the decoration adds 34, so the
+    // recommendation has to name a NUMBER.
     const body = skillBody();
-    expect(body).toContain('basename plus a short disambiguator');
+    expect(body).toContain('first 24 characters of the basename');
     expect(body).toContain('ENAMETOOLONG');
     expect(body).not.toContain(
       'the reviewed path with its separators replaced',

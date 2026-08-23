@@ -195,3 +195,24 @@ describe('hashWorktreeFiles — a decoded path is not a name', () => {
     expect(out['\ufffd.ts']).toBe('unhashable');
   });
 });
+describe('hashWorktreeFiles — every diff-driver spelling reaches the fold', () => {
+  it('folds the EMPTY driver name, which git accepts as `diff..binary`', () => {
+    // `*.dat diff=` is a legal attributes line, `check-attr --stdin -z`
+    // answers it with an empty value, and `git config diff..binary true`
+    // flips that section between readable hunks and "Binary files differ"
+    // with the mode and the blob standing still (verified against git
+    // 2.47.3). Excluding the empty spelling was the last entrance of the
+    // family whose `set`/`unset`/`unspecified` siblings were already closed.
+    writeFileSync(join(repo, 'a.dat'), 'hello\n');
+    writeFileSync(join(repo, '.gitattributes'), '*.dat diff=\n');
+    const before = hashWorktreeFiles(repo, ['a.dat'])['a.dat'];
+
+    execFileSync('git', ['config', 'diff..binary', 'true'], { cwd: repo });
+    const after = hashWorktreeFiles(repo, ['a.dat'])['a.dat'];
+
+    // The bytes and the mode did not move; the RENDERING did, so the
+    // identity has to.
+    expect(after).not.toBe(before);
+    expect(after).toContain('.binary=true');
+  });
+});

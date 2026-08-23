@@ -446,6 +446,32 @@ describe('capture-local — round-2 regressions from the stop work', () => {
   });
 });
 
+describe('capture-local — a narrower round cannot certify a wider one', () => {
+  it('refuses the anchor when this round excludes untracked files', () => {
+    // With `--no-untracked` the untracked block never runs and records no
+    // `skipped` entries, so the skipped-content gate sees zero — while a
+    // cached untracked path reads as VANISHED rather than out of scope. The
+    // slice keeps nothing and the round stops decided over bytes it never
+    // captured; the stop does not advance the cache, so every later narrow
+    // round repeats it.
+    seedDirtyTree();
+    write('src/untracked.ts', 'export const u = 1;\n');
+    const cachePath = promoteCandidate(
+      capture({ model: 'model-a' }),
+      'model-a',
+    );
+
+    const narrow = capture({
+      cache: cachePath,
+      model: 'model-a',
+      untracked: false,
+    });
+    expect(narrow.incremental).toBeUndefined();
+    expect(narrow['nothingToReview']).toBeUndefined();
+    expect(stderrLines.join('\n')).toContain('excludes untracked files');
+  });
+});
+
 describe('capture-local — round-5 sibling gaps', () => {
   it('does not stop a FILE review whose anchored change was discarded', () => {
     // `scope-emptied` lacked the exclusion both sibling stops carry, so the
