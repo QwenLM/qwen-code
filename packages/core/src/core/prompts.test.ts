@@ -720,6 +720,18 @@ describe('Core System Prompt (prompts.ts)', () => {
       expect(prompt).toContain('TODO(human)');
     });
 
+    it('keeps Learning in acp prompts', () => {
+      const prompt = getCoreSystemPrompt(
+        undefined,
+        undefined,
+        undefined,
+        'acp',
+        learning,
+      );
+
+      expect(prompt).toContain('# Output Style: Learning');
+    });
+
     it('keeps the style section under a QWEN_SYSTEM_IDENTITY_MD override', () => {
       // The override owns the identity sentence verbatim, so the styled
       // wording is skipped there — but the style itself still has to land.
