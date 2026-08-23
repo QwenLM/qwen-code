@@ -2660,6 +2660,19 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     );
   });
 
+  it('keeps the moved checklists out of the Agent 1a brief', () => {
+    // The other half of the #9788 split: the test above pins what STAYED in
+    // 1a; this one pins what LEFT. A future edit that re-adds either bullet
+    // to 1a's brief — a merge resolution, or a restore aimed at the wrong
+    // role — keeps every suite green while high-effort 1a's walk and Agents
+    // 1d/1e double-flag the same ground, re-diluting the checklist inside
+    // the walk rhythm. SKILL.test.ts negatively pins the SKILL.md digest
+    // row; this pins the brief the agents actually read.
+    const brief = buildRoleBrief(PLAN, '1a');
+    expect(brief).not.toContain('language-pitfall checklist for this diff');
+    expect(brief).not.toContain('**Wrapper/proxy routing.**');
+  });
+
   it('injects generic repository context into reviewers and a narrow verification boundary into Agent 7', () => {
     const contextPlan = {
       ...PR_PLAN,
