@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 function installMeasureGuard(
   measure: (...args: unknown[]) => unknown,
+  clearMeasures?: () => void,
 ): Performance {
   const html = readFileSync(resolve(__dirname, 'index.html'), 'utf8');
   const script = Array.from(
@@ -14,7 +15,7 @@ function installMeasureGuard(
 
   if (!script) throw new Error('Performance measure guard not found');
 
-  const performance = { measure };
+  const performance = { measure, clearMeasures };
   Function('performance', 'DOMException', script)(performance, DOMException);
   return performance as Performance;
 }
@@ -58,5 +59,48 @@ describe('React performance measure guard', () => {
     performance.measure('custom-measure', options);
 
     expect(measure).toHaveBeenCalledWith('custom-measure', options);
+  });
+
+  it('strips detail from any React devtools track, not just Components', () => {
+    const measure = vi.fn(() => 'measure');
+    const performance = installMeasureGuard(measure);
+    const options = {
+      start: 1,
+      end: 2,
+      detail: { devtools: { track: 'Blocking', properties: [['k', 'v']] } },
+    };
+
+    performance.measure('React', options);
+
+    expect(
+      (measure.mock.calls[0]?.[1] as PerformanceMeasureOptions).detail,
+    ).toBeNull();
+  });
+
+  it('clears the measure timeline on a budget so entries cannot accumulate', () => {
+    const measure = vi.fn(() => 'measure');
+    const clearMeasures = vi.fn();
+    const performance = installMeasureGuard(measure, clearMeasures);
+    const reactOptions = {
+      start: 1,
+      end: 2,
+      detail: { devtools: { track: 'Components ⚛' } },
+    };
+
+    for (let i = 0; i < 16384; i += 1) {
+      performance.measure('React', reactOptions);
+    }
+    expect(clearMeasures).toHaveBeenCalledTimes(1);
+
+    performance.measure('React', reactOptions);
+    expect(clearMeasures).toHaveBeenCalledTimes(1);
+
+    // Non-React measures do not count toward the budget.
+    for (let i = 0; i < 16384 - 1; i += 1) {
+      performance.measure('custom-measure', {
+        detail: { source: 'web-shell' },
+      });
+    }
+    expect(clearMeasures).toHaveBeenCalledTimes(1);
   });
 });
