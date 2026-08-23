@@ -130,6 +130,23 @@ export type ChunkFailureClass =
    */
   | 'unknown';
 
+/**
+ * The closed failure vocabulary, as a value. `ChunkFailureClass` the type is
+ * compile-time only; the persistence boundary (`save-artifact`) validates a
+ * hand-editable file against THIS list, so a corrupted or hand-written
+ * classification is refused there instead of laundering an out-of-vocabulary
+ * string into the sealed ledger's type.
+ */
+export const CHUNK_FAILURE_CLASSES = [
+  'no-agent',
+  'blind-prompt',
+  'idle',
+  'unopened',
+  'rewritten-prompt',
+  'declared-uncoverable',
+  'unknown',
+] as const satisfies readonly ChunkFailureClass[];
+
 /** One planned chunk's entry in the coverage ledger. */
 export interface ChunkCoverageItem {
   id: number;
@@ -490,18 +507,29 @@ function readPlan(path: string): {
   }
   // Does the plan still describe the diff it was planned over? Reported, never
   // thrown — see `selectionDrift`'s own note on why an unmeasured predicate
-  // does not get to refuse a review. An unreadable diff file is not drift
-  // either: it is the same class as an unreadable plan, and the reads below
-  // fail on it in their own words.
+  // does not get to refuse a review. An unreadable diff is not "no drift"
+  // either, on a plan that carries an identity: `null` means the identity was
+  // checked and everything matched, and this read is the ONLY read of the
+  // diff — neither consumer of this function reads the file again. Collapsing
+  // the failure to `null` certified over a file that may have been rewritten
+  // or deleted since the agents ran, the one mutation the identity exists to
+  // catch. An identity-less plan checks nothing, so an unreadable file stays
+  // `null` there — the same absence rule `selectionDrift` itself states.
   let drift: SelectionDrift = null;
-  try {
-    drift = selectionDrift(
-      (plan as { selection?: unknown }).selection,
-      readFileSync(plan.diffPathAbsolute, 'utf8'),
-      plan.chunks as unknown as DiffChunk[],
-    );
-  } catch {
-    drift = null;
+  const identity = (plan as { selection?: unknown }).selection;
+  if (identity !== undefined && identity !== null) {
+    try {
+      drift = selectionDrift(
+        identity,
+        readFileSync(plan.diffPathAbsolute, 'utf8'),
+        plan.chunks as unknown as DiffChunk[],
+      );
+    } catch {
+      drift =
+        `the diff file at ${plan.diffPathAbsolute} could not be read when ` +
+        'the selection identity was checked, so the plan’s chunk ranges ' +
+        'could not be verified against it — re-capture the diff and re-plan';
+    }
   }
   return { plan, mtimeMs: statSync(path).mtimeMs, drift };
 }

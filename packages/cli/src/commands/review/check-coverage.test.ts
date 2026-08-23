@@ -3001,6 +3001,61 @@ describe('the chunk ledger', () => {
     });
   });
 
+  it('names an agent that worked but never opened the diff it was pointed at', () => {
+    // Two successful tool calls, none of them on the diff: it did work, just
+    // not this work. The repair is a relaunch — the prompt already names the
+    // diff and its ranges — a different class from a rewritten prompt, whose
+    // repair is a rebuild.
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), { calls: 2, toolPath: '/abs/other-file.ts' });
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(entryFor(r, 2)).toMatchObject({
+      outcome: 'missing',
+      classification: 'unopened',
+    });
+    expect(r.unopenedAgents).toEqual(['chunk 2']);
+  });
+
+  it('names a rewritten launch — a prompt rebuild, not a relaunch', () => {
+    // The CLI built good(2); the orchestrator delivered a prompt that
+    // ALTERED one of its lines (adding lines is delivery, not rewrite —
+    // `wasDeliveredVerbatim` permits it). The record worked but never read
+    // the diff, so the cause is the rewrite — the ternary above the
+    // unopened branch decides it, and a mutant dropping that ternary
+    // reports `unopened` here instead.
+    transcript('a1', good(1), { calls: 2 });
+    transcript(
+      'a2',
+      good(2).replace('offset=100, limit=100', 'offset=0, limit=50'),
+      { calls: 2, toolPath: '/abs/other-file.ts' },
+    );
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(entryFor(r, 2)).toMatchObject({
+      outcome: 'missing',
+      classification: 'rewritten-prompt',
+    });
+  });
+
+  it('orders two causes on one chunk by which repair subsumes which', () => {
+    // Chunk 2 had two failing records: the first never started (idle), the
+    // replacement worked but not on the diff (unopened). `classify()` walks
+    // its precedence list — a relaunch fixes both, and `idle` is the class
+    // the plain relaunch is ordered around — so idle outranks unopened. A
+    // mutant reordering the list flips this and hands the operator the
+    // wrong cause.
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2', good(2), { calls: 0 });
+    transcript('a3', good(2), { calls: 2, toolPath: '/abs/other-file.ts' });
+
+    const r = coverageFromTranscripts(plan(), ENV);
+    expect(entryFor(r, 2)).toMatchObject({
+      outcome: 'missing',
+      classification: 'idle',
+    });
+  });
+
   it('marks a chunk nobody was assigned to as no-agent, not unknown', () => {
     // The failure with no transcript to interrogate. Every other class is a
     // question asked of an agent that ran; this one is the absence of one, and
@@ -3142,6 +3197,28 @@ describe('coverage — a drifted selection identity, end to end', () => {
     // Report-only: the same run still certifies what its transcripts prove.
     expect(r.coveredChunks).toEqual([1, 2]);
     expect(r.ok).toBe(true);
+  });
+
+  it('reports no drift when the identity-carrying diff is unchanged', () => {
+    // The unchanged-diff control: every sibling exercises the drift-present
+    // or the identity-absent state, so a mutant digesting the wrong text
+    // fires on rewritten diffs as expected AND on unchanged ones — and only
+    // this control goes red.
+    const { p } = identityRun();
+
+    expect(coverageFromTranscripts(p, ENV).selectionDrift).toBeNull();
+  });
+
+  it('reports an unreadable diff file instead of certifying over it', () => {
+    // Deletion is the one mutation the identity exists to catch. Collapsing
+    // the read failure into `null` — "everything matched" — certified over a
+    // file that may have been rewritten or deleted since the agents ran.
+    const { p, diffPath } = identityRun();
+    rmSync(diffPath);
+
+    expect(coverageFromTranscripts(p, ENV).selectionDrift).toMatch(
+      /could not be read/,
+    );
   });
 
   it('prints the drift NOTE scoped to the whole report, exit unchanged', () => {

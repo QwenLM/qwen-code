@@ -542,6 +542,199 @@ describe('saveReviewArtifact', () => {
     ).toThrow(/postedFresh/);
   });
 
+  // Written together by composeReview, read back together here — the
+  // tolerance is at the group, and this validator is the only gate between
+  // a hand-edited composed file and the durable artifact.
+  describe('the coverage triple — terminalState, capAxes, chunkLedger', () => {
+    const capAxes = {
+      coverage: ['chunk-nobody-read'],
+      verification: [],
+      posture: [],
+      other: [],
+    };
+    // Mixed on purpose: one covered chunk and one missing, so the
+    // `terminalState` beside it ('partial') and the classification below are
+    // both load-bearing in the round-trip.
+    const chunkLedger = [
+      { id: 1, files: ['src/a.ts'], outcome: 'covered', agents: ['chunk 1'] },
+      {
+        id: 2,
+        files: ['src/b.ts'],
+        outcome: 'missing',
+        classification: 'idle',
+        agents: ['chunk 2'],
+      },
+    ];
+    const triple = { terminalState: 'partial', capAxes, chunkLedger };
+
+    it('round-trips a current-shape verdict with all three fields intact', () => {
+      const paths = fixture();
+      writeJson(paths.composed, { ...verdict, ...triple });
+
+      saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+
+      const saved = JSON.parse(readFileSync(paths.out, 'utf8')).verdict;
+      expect(saved.terminalState).toBe('partial');
+      expect(saved.capAxes).toEqual(capAxes);
+      expect(saved.chunkLedger).toEqual(chunkLedger);
+    });
+
+    it('accepts an old composed file carrying none of the three, preserving the absence', () => {
+      // The base fixture models a pre-feature artifact. Acceptance is not
+      // enough — defaulting the absence would invent a run state out of a
+      // file that recorded none.
+      const paths = fixture();
+
+      saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+
+      const saved = JSON.parse(readFileSync(paths.out, 'utf8')).verdict;
+      expect('terminalState' in saved).toBe(false);
+      expect('capAxes' in saved).toBe(false);
+      expect('chunkLedger' in saved).toBe(false);
+    });
+
+    it('accepts a skipped run — empty ledger, no invented chunks', () => {
+      const paths = fixture();
+      writeJson(paths.composed, {
+        ...verdict,
+        terminalState: 'skipped',
+        capAxes: { coverage: [], verification: [], posture: [], other: [] },
+        chunkLedger: [],
+      });
+
+      saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+
+      const saved = JSON.parse(readFileSync(paths.out, 'utf8')).verdict;
+      expect(saved.terminalState).toBe('skipped');
+      expect(saved.chunkLedger).toEqual([]);
+    });
+
+    it.each([
+      ['one field of three', { terminalState: 'partial' }],
+      ['two fields of three', { terminalState: 'partial', capAxes }],
+    ])(
+      'refuses a partial triple (%s) — written together or not at all',
+      (_label, partial) => {
+        const paths = fixture();
+        writeJson(paths.composed, { ...verdict, ...partial });
+
+        expect(() =>
+          saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' }),
+        ).toThrow(/some but not all/);
+        expect(existsSync(paths.out)).toBe(false);
+      },
+    );
+
+    it('refuses a terminalState outside its closed set', () => {
+      const paths = fixture();
+      writeJson(paths.composed, {
+        ...verdict,
+        ...triple,
+        terminalState: 'done',
+      });
+
+      expect(() =>
+        saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' }),
+      ).toThrow(/terminalState must be one of/);
+      expect(existsSync(paths.out)).toBe(false);
+    });
+
+    it.each([
+      [
+        'an outcome outside its closed set',
+        { ...chunkLedger[1], outcome: 'waived' },
+        /outcome must be one of/,
+      ],
+      [
+        'a non-positive id',
+        { ...chunkLedger[1], id: 0 },
+        /id must be a positive integer/,
+      ],
+      [
+        'an out-of-vocabulary classification',
+        { ...chunkLedger[1], classification: 'bogus' },
+        /classification must be one of/,
+      ],
+      [
+        'a non-string classification',
+        { ...chunkLedger[1], classification: 42 },
+        /classification must be one of/,
+      ],
+    ])('refuses a ledger entry carrying %s', (_label, badEntry, message) => {
+      const paths = fixture();
+      writeJson(paths.composed, {
+        ...verdict,
+        ...triple,
+        chunkLedger: [chunkLedger[0], badEntry],
+      });
+
+      expect(() =>
+        saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' }),
+      ).toThrow(message);
+      expect(existsSync(paths.out)).toBe(false);
+    });
+
+    it('refuses a duplicate chunk id — a sealed ledger lists each chunk once', () => {
+      const paths = fixture();
+      writeJson(paths.composed, {
+        ...verdict,
+        ...triple,
+        chunkLedger: [chunkLedger[0], { ...chunkLedger[1], id: 1 }],
+      });
+
+      expect(() =>
+        saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' }),
+      ).toThrow(/carries chunk 1 twice/);
+      expect(existsSync(paths.out)).toBe(false);
+    });
+
+    it('refuses a terminalState the ledger beside it contradicts', () => {
+      // The composed result derives the state from this very ledger; a
+      // hand-edited file saying `complete` over unread chunks is the
+      // corruption this boundary exists to refuse.
+      const paths = fixture();
+      const allCovered = [
+        chunkLedger[0],
+        { id: 2, files: ['src/b.ts'], outcome: 'covered', agents: ['chunk 2'] },
+      ];
+      for (const [terminalState, ledger] of [
+        ['complete', chunkLedger],
+        ['skipped', chunkLedger],
+        ['partial', allCovered],
+      ] as const) {
+        writeJson(paths.composed, {
+          ...verdict,
+          ...triple,
+          terminalState,
+          chunkLedger: ledger,
+        });
+
+        expect(() =>
+          saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' }),
+        ).toThrow(/cannot disagree/);
+        expect(existsSync(paths.out)).toBe(false);
+      }
+    });
+
+    it('accepts `failed` over any ledger — a run-level failure is not persisted', () => {
+      // The one state the ledger cannot contradict: the coverage machinery
+      // can break after any amount of it ran, and this boundary cannot tell
+      // that case apart.
+      const paths = fixture();
+      writeJson(paths.composed, {
+        ...verdict,
+        ...triple,
+        terminalState: 'failed',
+      });
+
+      saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+
+      expect(
+        JSON.parse(readFileSync(paths.out, 'utf8')).verdict.terminalState,
+      ).toBe('failed');
+    });
+  });
+
   it('reads an absent or null floorEnforced as empty — a pre-enforcement composed file must still save', () => {
     // Null rides the same absence semantics as the sibling deferredCount
     // pair — an undefined-only check would refuse a composed file that

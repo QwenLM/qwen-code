@@ -168,14 +168,30 @@ const CAP_AXIS_OF: Record<string, keyof CapAxes> = {
   'unlicensed-deferral': 'posture',
 };
 
-export function groupCapAxes(cappedBy: readonly string[]): CapAxes {
+/**
+ * `unreviewedDimensionAxis` is the one axis not decided by the map: three
+ * kinds of fact fire that cap — a doubt that lines were read, a Step 4/5
+ * floor over a fully-read diff, and the reverse audit's budget stop — and a
+ * caller holding the entries that fired it says which axis it belongs on.
+ * The map entry is the default for a caller with only the cap's name.
+ */
+export function groupCapAxes(
+  cappedBy: readonly string[],
+  unreviewedDimensionAxis: keyof CapAxes = 'coverage',
+): CapAxes {
   const axes: CapAxes = {
     coverage: [],
     verification: [],
     posture: [],
     other: [],
   };
-  for (const cap of cappedBy) axes[CAP_AXIS_OF[cap] ?? 'other'].push(cap);
+  for (const cap of cappedBy) {
+    const axis =
+      cap === 'unreviewed-dimension'
+        ? unreviewedDimensionAxis
+        : (CAP_AXIS_OF[cap] ?? 'other');
+    axes[axis].push(cap);
+  }
   return axes;
 }
 
@@ -2459,6 +2475,11 @@ function composeReviewBody(
     subjectZh?: string;
     reasonZh?: string;
   }> = [];
+  // The Step 4/5 floor's entries, tracked by reference: they ride
+  // `coverageEntries` for the render and the cap like every other gap, but
+  // they are verification facts, not coverage facts — the axis view below
+  // must not classify the cap they fire as "the diff was not fully read".
+  const verificationFloorEntries = new Set<(typeof coverageEntries)[number]>();
   // The budget-stop marker: when the reverse-audit round builder refused a
   // round on the review's time budget, it recorded the refusal beside the
   // prompt records. Synthesizing the disclosure from the marker makes the
@@ -2948,25 +2969,29 @@ function composeReviewBody(
       // Structural, both languages — no boundary is recovered from rendered
       // prose (reparsing was the bug the disclosure entries already fixed).
       for (const gap of verification.gaps) {
-        coverageEntries.push({
+        const entry = {
           subject: gap.subject,
           reason: gap.reason,
           subjectZh: gap.subjectZh,
           reasonZh: gap.reasonZh,
-        });
+        };
+        coverageEntries.push(entry);
+        verificationFloorEntries.add(entry);
       }
       remediation.push(...verification.remediation);
       criticalsUnverified =
         verification.unverifiedFindings && criticalsNeedingVerify >= 1;
     } catch (err) {
-      coverageEntries.push({
+      const entry = {
         subject: 'verification',
         reason:
           `could not check that Step 4 and Step 5 ran ` +
           `(${(err as Error).message})`,
         subjectZh: '验证',
         reasonZh: `无法检查步骤 4 与步骤 5 是否运行（${(err as Error).message}）`,
-      });
+      };
+      coverageEntries.push(entry);
+      verificationFloorEntries.add(entry);
       // Fail closed: a verification that cannot be CHECKED is not a
       // verification that happened.
       criticalsUnverified = criticalsNeedingVerify >= 1;
@@ -3160,7 +3185,6 @@ function composeReviewBody(
   // view of the caps that leaves `cappedBy` itself untouched. Neither changes
   // `event`. This is a reporting surface, not a new gate.
   const terminalState = deriveTerminalState(chunkLedger, coverageRunFailure);
-  const capAxes = groupCapAxes(cappedBy);
 
   // Is there any doubt that the whole diff was READ? That is a narrower
   // question than "did anything cap the verdict", and it is the only one the
@@ -3228,6 +3252,26 @@ function composeReviewBody(
     ...unreviewed,
     ...splicedForBudgetPhrase,
   ].every((entry) => isNonDiffDimensionGap(entry) || isRelayedStopEntry(entry));
+
+  // The axis `unreviewed-dimension` lands on, derived from the facts that
+  // fired it rather than read off its name: a doubt that any line was read
+  // puts it on the coverage axis, and when nothing but verification facts
+  // back it — the Step 4/5 floor, or the reverse audit's budget stop — the
+  // diff WAS read and the cap belongs on the verification axis instead. The
+  // fixed map sent every backing fact to coverage, and an automated caller
+  // routing repairs by axis was told to relaunch Step 3 agents that had read
+  // everything. Coverage doubt wins when both hold: its repair subsumes the
+  // other's, the same precedence `coverage.ts`'s `classify()` applies.
+  const capAxes = groupCapAxes(
+    cappedBy,
+    !dimensionGapsAreDepthOnly ||
+      coverageEntries.some(
+        (entry) =>
+          entry !== budgetEntry && !verificationFloorEntries.has(entry),
+      )
+      ? 'coverage'
+      : 'verification',
+  );
 
   const diagnosis = convergence
     ? diagnoseConvergence({

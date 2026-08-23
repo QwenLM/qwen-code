@@ -11511,4 +11511,72 @@ describe('capAxes — three kinds of cap, three repairs', () => {
     ];
     expect(all.sort()).toEqual([...r.cappedBy].sort());
   });
+
+  it('puts a verification-floor cap on the verification axis — the diff WAS read', () => {
+    // A fully covered run whose reverse audit never ran: the only fact
+    // behind the cap is the Step 4/5 floor. The fixed map put the cap on
+    // the coverage axis, and an automated caller routing repairs by axis
+    // was told to relaunch Step 3 agents that had read everything.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(['verify']), // reverse audit absent
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.terminalState).toBe('complete');
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.capAxes.coverage).toEqual([]);
+    expect(r.capAxes.verification).toContain('unreviewed-dimension');
+  });
+
+  it('puts the reverse-audit budget stop on the verification axis too', () => {
+    // The depth disclosure is the third fact riding the cap: the audit ran
+    // out of rounds over a diff every agent had read, so its repair is the
+    // audit — never a Step 3 relaunch.
+    const p = coveredPlan();
+    writeRoundCapStop(p, 3, 4);
+    const r = composeReview(base({ planPath: p }));
+    expect(r.terminalState).toBe('complete');
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.capAxes.coverage).toEqual([]);
+    expect(r.capAxes.verification).toContain('unreviewed-dimension');
+  });
+
+  it('keeps a coverage-fired cap on the coverage axis', () => {
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: idlePlan(),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.capAxes.coverage).toContain('unreviewed-dimension');
+    expect(r.capAxes.verification).not.toContain('unreviewed-dimension');
+  });
+
+  it('coverage doubt wins when both kinds of fact fire the same cap', () => {
+    // The same repair-subsumption precedence `classify()` applies: a
+    // relaunch of the agents that never read their chunks subsumes
+    // re-running the audit that also never ran.
+    const p = plan({ step45: false });
+    transcript('a1', goodPrompt(1), { toolCalls: 0 });
+    transcript('a2', goodPrompt(2), { toolCalls: 0 });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    recordMatrix(p);
+    // No recordStep45: the floor fires beside the idle agents.
+
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.capAxes.coverage).toContain('unreviewed-dimension');
+    expect(r.capAxes.verification).not.toContain('unreviewed-dimension');
+  });
 });

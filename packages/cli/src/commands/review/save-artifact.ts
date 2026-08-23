@@ -23,13 +23,17 @@ import {
 } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import type { CommandModule } from 'yargs';
-import type {
-  CapAxes,
-  ComposeReviewResult,
-  ReviewEvent,
-  TerminalState,
+import {
+  deriveTerminalState,
+  type CapAxes,
+  type ComposeReviewResult,
+  type ReviewEvent,
+  type TerminalState,
 } from './compose-review.js';
-import type { ChunkCoverageItem } from './lib/coverage.js';
+import {
+  CHUNK_FAILURE_CLASSES,
+  type ChunkCoverageItem,
+} from './lib/coverage.js';
 import {
   buildReport,
   type FindingsReport,
@@ -285,6 +289,7 @@ function coverageTriple(verdict: Record<string, unknown>): {
   if (!Array.isArray(raw.chunkLedger)) {
     throw new Error('Composed verdict.chunkLedger must be an array.');
   }
+  const seenChunkIds = new Set<number>();
   const chunkLedger = raw.chunkLedger.map((entry, i) => {
     const item = object(entry, `Composed verdict.chunkLedger[${i}]`);
     if (!Number.isSafeInteger(item['id']) || (item['id'] as number) < 1) {
@@ -292,6 +297,16 @@ function coverageTriple(verdict: Record<string, unknown>): {
         `Composed verdict.chunkLedger[${i}].id must be a positive integer.`,
       );
     }
+    // A sealed ledger lists each planned chunk once — `coverage.ts` refuses a
+    // plan whose ids are not unique before any ledger is built, so a
+    // duplicate here is a hand-edited file, and a ratio read off the
+    // artifact would double-count the chunk it names twice.
+    if (seenChunkIds.has(item['id'] as number)) {
+      throw new Error(
+        `Composed verdict.chunkLedger carries chunk ${item['id']} twice.`,
+      );
+    }
+    seenChunkIds.add(item['id'] as number);
     const outcome = item['outcome'];
     if (
       outcome !== 'covered' &&
@@ -317,11 +332,19 @@ function coverageTriple(verdict: Record<string, unknown>): {
     };
     // Preserved verbatim rather than re-derived: this reader has no plan and
     // no transcripts, so the only honest source for why a chunk went
-    // uncovered is what the composing run wrote down.
+    // uncovered is what the composing run wrote down. Verbatim is not
+    // unchecked, though: the vocabulary is closed and the sibling fields here
+    // are validated against theirs, so a hand-edited file's out-of-vocabulary
+    // string is refused like every other malformed value.
     if (item['classification'] !== undefined) {
-      if (typeof item['classification'] !== 'string') {
+      if (
+        typeof item['classification'] !== 'string' ||
+        !(CHUNK_FAILURE_CLASSES as readonly string[]).includes(
+          item['classification'],
+        )
+      ) {
         throw new Error(
-          `Composed verdict.chunkLedger[${i}].classification must be a string.`,
+          `Composed verdict.chunkLedger[${i}].classification must be one of ${CHUNK_FAILURE_CLASSES.join(' / ')}.`,
         );
       }
       parsed.classification = item[
@@ -330,6 +353,18 @@ function coverageTriple(verdict: Record<string, unknown>): {
     }
     return parsed;
   });
+  // The composed result derives `terminalState` from this very ledger (and a
+  // run-level failure the artifact does not persist), so the two cannot
+  // disagree — except that a run-level failure reads as `failed` whatever the
+  // ledger says, and this boundary cannot tell that case apart.
+  if (
+    raw.terminalState !== 'failed' &&
+    raw.terminalState !== deriveTerminalState(chunkLedger, null)
+  ) {
+    throw new Error(
+      `Composed verdict.terminalState is ${JSON.stringify(raw.terminalState)}, but the chunk ledger beside it derives ${JSON.stringify(deriveTerminalState(chunkLedger, null))} — they are one derivation and cannot disagree.`,
+    );
+  }
   return { terminalState: raw.terminalState, capAxes, chunkLedger };
 }
 
