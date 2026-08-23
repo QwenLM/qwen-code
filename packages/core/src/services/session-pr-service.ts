@@ -270,6 +270,81 @@ export function upsertSessionPr(
   });
 }
 
+/** One locked read-modify-write for several candidate bindings at once. */
+export interface SessionPrUpsertManyResult {
+  /** The persisted list after the mutation. */
+  prs: SessionPr[];
+  /** Candidate numbers newly appended and present in `prs`. */
+  added: readonly number[];
+  /** Candidate numbers already present — left untouched. */
+  alreadyBound: readonly number[];
+  /** Candidate numbers with no url that were not already bound. */
+  unresolved: readonly number[];
+}
+
+/**
+ * Applies a run's candidate bindings in ONE locked read-modify-write.
+ * Candidates are given in ascending authority order (later entries outrank
+ * earlier ones under the tail cap). A number already present keeps its entry
+ * untouched — a re-bind would move it to the tail with a fresh createdAt,
+ * falsifying the binding-time order the badge and tooltip render by. A
+ * candidate without a url is reported `unresolved` (unless already bound).
+ * New candidates append with a fresh createdAt; the capped list is written
+ * once, so the write cannot cascade and a failure cannot strand a partial
+ * result. The read inside the lock sees bindings concurrent writers land
+ * before this mutation.
+ */
+export function upsertSessionPrs(
+  filePath: string,
+  candidates: ReadonlyArray<{
+    number: number;
+    url?: string;
+    state?: SessionPrState;
+  }>,
+): Promise<SessionPrUpsertManyResult> {
+  return enqueuePrMutation(filePath, async () => {
+    const existing = (await readSessionPrs(filePath)) ?? [];
+    const existingNumbers = new Set(existing.map((entry) => entry.number));
+    const next = [...existing];
+    const appended = new Set<number>();
+    const alreadyBound: number[] = [];
+    const unresolved: number[] = [];
+    for (const candidate of candidates) {
+      if (existingNumbers.has(candidate.number)) {
+        alreadyBound.push(candidate.number);
+        continue;
+      }
+      if (candidate.url === undefined) {
+        unresolved.push(candidate.number);
+        continue;
+      }
+      const entry: SessionPr = {
+        number: candidate.number,
+        url: candidate.url,
+        createdAt: new Date().toISOString(),
+        ...(candidate.state ? { state: candidate.state } : {}),
+      };
+      if (!isValidSessionPr(entry)) {
+        unresolved.push(candidate.number);
+        continue;
+      }
+      existingNumbers.add(candidate.number);
+      appended.add(candidate.number);
+      next.push(entry);
+    }
+    if (appended.size === 0) {
+      return { prs: existing, added: [], alreadyBound, unresolved };
+    }
+    const prs = next.slice(-SESSION_PR_LIST_LIMIT);
+    const persistedNumbers = new Set(prs.map((entry) => entry.number));
+    const added = [...appended].filter((number) =>
+      persistedNumbers.has(number),
+    );
+    await writeSessionPrs(filePath, prs);
+    return { prs, added, alreadyBound, unresolved };
+  });
+}
+
 /**
  * Rewrites bound PR states in place — order and createdAt are preserved, so
  * a refresh sweep never reshuffles the badge's "latest" entry. Returns the

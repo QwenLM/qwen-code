@@ -6,6 +6,7 @@
 
 import {
   addDaemonRequestAttribute,
+  SESSION_PR_LIST_LIMIT,
   SessionService,
   SessionOrganizationError,
   Storage,
@@ -523,12 +524,23 @@ function mergeLiveSessionSummary(
           }
         : p;
     });
-    // A binding present only in the live entry was bound this daemon
-    // lifetime and has not landed in the sidecar yet — the newest binding.
+    // A binding present only in the live entry was either bound this
+    // daemon lifetime and has not landed in the sidecar yet (the newest
+    // binding), or was EVICTED from the sidecar: the sidecar-only writers
+    // (the shell hook, backfill) never touch the live entry, and its tail
+    // cap drops the oldest binding once it overflows. Eviction only
+    // happens at the cap, so below it a live-only entry is genuinely the
+    // newest; at the cap it is an evicted oldest binding and must not be
+    // re-appended as the session's latest.
     for (const liveEntry of livePrs) {
-      if (!persistedNumbers.has(liveEntry.number)) ordered.push(liveEntry);
+      if (
+        !persistedNumbers.has(liveEntry.number) &&
+        ordered.length < SESSION_PR_LIST_LIMIT
+      ) {
+        ordered.push(liveEntry);
+      }
     }
-    merged.prs = ordered;
+    merged.prs = ordered.slice(-SESSION_PR_LIST_LIMIT);
   }
   return merged;
 }

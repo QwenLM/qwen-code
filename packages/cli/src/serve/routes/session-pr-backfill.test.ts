@@ -15,6 +15,7 @@ import {
   fetchGitHubPullRequests,
   fetchRemoteWebUrl,
   readSessionPrs,
+  writeSessionPrs,
   type SessionService,
 } from '@qwen-code/qwen-code-core';
 import { sendBridgeError } from '../server/error-response.js';
@@ -596,6 +597,242 @@ describe('backfillWorkspaceSessionPrs', () => {
     );
     expect(path.relative(chatsDir, escapedSidecar).startsWith('..')).toBe(true);
     await expect(fsp.access(escapedSidecar)).rejects.toThrow();
+  });
+
+  let appendCounter = 0;
+
+  function transcriptRecord(
+    sessionId: string,
+    type: 'user' | 'assistant',
+    parts: unknown[],
+  ): string {
+    appendCounter += 1;
+    return JSON.stringify({
+      uuid: `${sessionId}-extra-${appendCounter}`,
+      parentUuid: `${sessionId}-user-1`,
+      sessionId,
+      timestamp: '2026-08-02T00:00:00.000Z',
+      type,
+      message: { role: type === 'user' ? 'user' : 'model', parts },
+      cwd: workspaceCwd,
+    });
+  }
+
+  async function appendUserText(
+    sessionId: string,
+    text: string,
+  ): Promise<void> {
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    await fsp.appendFile(
+      path.join(chatsDir, `${sessionId}.jsonl`),
+      transcriptRecord(sessionId, 'user', [{ text }]) + '\n',
+      'utf8',
+    );
+  }
+
+  async function appendShellCommand(
+    sessionId: string,
+    command: string,
+    output: string,
+  ): Promise<void> {
+    appendCounter += 1;
+    const callId = `call-${appendCounter}`;
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    await fsp.appendFile(
+      path.join(chatsDir, `${sessionId}.jsonl`),
+      transcriptRecord(sessionId, 'assistant', [
+        {
+          functionCall: {
+            id: callId,
+            name: 'run_shell_command',
+            args: { command },
+          },
+        },
+      ]) +
+        '\n' +
+        transcriptRecord(sessionId, 'user', [
+          {
+            functionResponse: {
+              id: callId,
+              name: 'run_shell_command',
+              response: { output },
+            },
+          },
+        ]) +
+        '\n',
+      'utf8',
+    );
+  }
+
+  it('fails closed on the gh page when the workspace repo key is unknown', async () => {
+    // An upstream-only remote layout leaves no resolvable origin (key
+    // undefined) while `gh pr list` still resolves a repo — the page map
+    // must not bind that repo's PRs on a bare number collision.
+    fetchRemoteWebUrlMock.mockResolvedValue(undefined);
+    await seedSession(SESSION_A);
+    await seedWorktreeSidecar(SESSION_A, 'pr-42', 'worktree-pr-42');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [
+        {
+          ...pr(42, 'whatever'),
+          url: 'https://github.com/upstream-owner/upstream-repo/pull/42',
+        },
+      ],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0, unresolved: 1 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+  });
+
+  it('moves a gh-create number past weaker reviewed duplicates', async () => {
+    await seedSession(SESSION_A);
+    for (const n of [5, 1, 2, 3, 4, 6, 7, 8, 9, 10, 11]) {
+      await appendUserText(SESSION_A, `/review ${n}`);
+    }
+    await appendShellCommand(
+      SESSION_A,
+      'gh pr create --title x --body y',
+      'https://github.com/o/r/pull/5\n',
+    );
+    // Negative control: a non-create gh command printing the workspace's
+    // own PR URL must not bind at gh-create authority.
+    await appendShellCommand(
+      SESSION_A,
+      'gh pr view 98 --json url -q .url',
+      'https://github.com/o/r/pull/98\n',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({ kind: 'cli_unavailable' });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    // 11 candidates, tail-10 cap: only the 10 persisted bindings count.
+    expect(result.bound).toBe(10);
+    const prs = await readSessionPrs(
+      sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+    );
+    // The created PR outranks the reviewed tier, so it sits at the tail and
+    // survives the sidecar's cap instead of being evicted from the head.
+    expect(prs?.map((p) => p.number)).toEqual([2, 3, 4, 6, 7, 8, 9, 10, 11, 5]);
+  });
+
+  it("keeps the run's new bindings under the sidecar tail cap", async () => {
+    // Seeded at 8 so the 3 new bindings overflow the cap: the single
+    // capped write must keep every new binding (evicting the oldest seeded
+    // entry) instead of cascading re-upserts that drop the new ones, and
+    // survivors keep their binding-time createdAt.
+    const prPath = sessionService.getPrSessionPathForArchiveState(
+      SESSION_A,
+      'active',
+    );
+    await writeSessionPrs(
+      prPath,
+      Array.from({ length: 8 }, (_, i) => ({
+        number: i + 1,
+        url: `https://github.com/o/r/pull/${i + 1}`,
+        createdAt: `2026-08-01T00:00:0${i}.000Z`,
+      })),
+    );
+    await seedSession(SESSION_A);
+    await seedWorktreeSidecar(SESSION_A, 'pr-101', 'worktree-pr-101');
+    await appendUserText(SESSION_A, '/review 102');
+    await appendUserText(SESSION_A, '/review 103');
+    fetchGitHubPullRequestsMock.mockResolvedValue({ kind: 'cli_unavailable' });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 3, alreadyBound: 0 });
+    const final = await readSessionPrs(prPath);
+    expect(final?.map((p) => p.number)).toEqual([
+      2, 3, 4, 5, 6, 7, 8, 102, 103, 101,
+    ]);
+    expect(final?.[0]?.createdAt).toBe('2026-08-01T00:00:01.000Z');
+  });
+
+  it('does not bind /review named mid-prose in user text', async () => {
+    // Bundled skill bodies are recorded verbatim as user records; a
+    // line-anchored pattern must not read a `/review` mention inside prose
+    // as a command — neither `/review <N>` mid-line nor one inside a
+    // literal path followed by a `(#N)` token.
+    await seedSession(SESSION_A);
+    await appendUserText(
+      SESSION_A,
+      'Save reports under .qwen/tmp/review-pr-<n> (#9205) and run /review 77 before merging',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(9205, 'docs'), pr(77, 'fix/77')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+  });
+
+  it('binds the number the user named, not a later token on the line', async () => {
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/review 42 and fix #7');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'fix/42'), pr(7, 'fix/7')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 1 });
+    const prs = await readSessionPrs(
+      sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+    );
+    expect(prs?.map((p) => p.number)).toEqual([42]);
+  });
+
+  it('rejects foreign-repo and zero /review numbers', async () => {
+    // The URL form names another repo: resolution must not bind the
+    // workspace's own same-numbered PR instead. `/review 0` must not count
+    // either — PR 0 does not exist, and counting it would report a phantom
+    // bind that never persists.
+    await seedSession(SESSION_A);
+    await appendUserText(
+      SESSION_A,
+      '/review https://github.com/other-org/repoB/pull/42 --comment',
+    );
+    await seedSession(SESSION_B);
+    await appendUserText(SESSION_B, '/review 0');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'fix/42')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0, unresolved: 0 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_B, 'active'),
+      ),
+    ).toBeNull();
   });
 });
 

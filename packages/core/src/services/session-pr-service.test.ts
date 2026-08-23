@@ -17,6 +17,7 @@ import {
   readSessionPrs,
   updateSessionPrStates,
   upsertSessionPr,
+  upsertSessionPrs,
   writeSessionPrs,
   type SessionPr,
 } from './session-pr-service.js';
@@ -260,6 +261,90 @@ describe('upsertSessionPr state', () => {
     });
     expect(prs).toHaveLength(1);
     expect(prs[0]?.state).toBe('merged');
+  });
+});
+
+describe('upsertSessionPrs', () => {
+  it('leaves already-bound numbers untouched (position and createdAt)', async () => {
+    await writeSessionPrs(filePath, [entry(100), entry(101)]);
+    const result = await upsertSessionPrs(filePath, [
+      { number: 100, url: 'https://github.com/owner/repo/pull/100?v=2' },
+      { number: 102, url: entry(102).url },
+    ]);
+    expect(result.added).toEqual([102]);
+    expect(result.alreadyBound).toEqual([100]);
+    const persisted = await readSessionPrs(filePath);
+    expect(persisted?.map((p) => p.number)).toEqual([100, 101, 102]);
+    expect(persisted?.[0]).toEqual(entry(100));
+  });
+
+  it('caps the merged list once, keeping the newest entries', async () => {
+    const seeded = Array.from({ length: SESSION_PR_LIST_LIMIT }, (_, i) =>
+      entry(i + 1),
+    );
+    await writeSessionPrs(filePath, seeded);
+    const result = await upsertSessionPrs(filePath, [
+      { number: 101, url: entry(101).url },
+      { number: 102, url: entry(102).url },
+    ]);
+    expect(result.prs).toHaveLength(SESSION_PR_LIST_LIMIT);
+    // The single capped write drops the oldest seeded entries; the new
+    // bindings survive at the tail.
+    expect(result.prs.map((p) => p.number)).toEqual([
+      ...Array.from({ length: SESSION_PR_LIST_LIMIT - 2 }, (_, i) => i + 3),
+      101,
+      102,
+    ]);
+    expect(result.added).toEqual([101, 102]);
+    // Seeded survivors keep their original createdAt.
+    expect(result.prs[0]?.createdAt).toBe(entry(3).createdAt);
+    expect(await readSessionPrs(filePath)).toEqual(result.prs);
+  });
+
+  it('keeps a binding a concurrent writer lands while the batch runs', async () => {
+    // The batch reads INSIDE the locked mutation: a concurrently landed
+    // binding is part of the read and survives the capped write.
+    const seeded = Array.from({ length: SESSION_PR_LIST_LIMIT }, (_, i) =>
+      entry(i + 1),
+    );
+    await writeSessionPrs(filePath, seeded);
+    await Promise.all([
+      upsertSessionPrs(filePath, [
+        { number: 101, url: entry(101).url },
+        { number: 102, url: entry(102).url },
+      ]),
+      upsertSessionPr(filePath, { number: 999, url: entry(999).url }),
+    ]);
+    const persisted = await readSessionPrs(filePath);
+    expect(persisted).toHaveLength(SESSION_PR_LIST_LIMIT);
+    expect(persisted?.map((p) => p.number)).toContain(999);
+    expect(persisted?.map((p) => p.number)).toContain(101);
+    expect(persisted?.map((p) => p.number)).toContain(102);
+  });
+
+  it('returns no write when every input number is already bound', async () => {
+    await writeSessionPrs(filePath, [entry(100)]);
+    const before = await fs.readFile(filePath, 'utf-8');
+    const result = await upsertSessionPrs(filePath, [
+      { number: 100, url: entry(100).url },
+    ]);
+    expect(result.added).toEqual([]);
+    expect(result.alreadyBound).toEqual([100]);
+    expect(await fs.readFile(filePath, 'utf-8')).toBe(before);
+  });
+
+  it('reports url-less candidates as unresolved, counting already-bound ones separately', async () => {
+    await writeSessionPrs(filePath, [entry(100)]);
+    const result = await upsertSessionPrs(filePath, [
+      { number: 7 },
+      { number: 100 },
+      { number: 8, url: entry(8).url },
+    ]);
+    expect(result.added).toEqual([8]);
+    expect(result.alreadyBound).toEqual([100]);
+    expect(result.unresolved).toEqual([7]);
+    expect(result.prs.map((p) => p.number)).toEqual([100, 8]);
+    expect(await readSessionPrs(filePath)).toEqual(result.prs);
   });
 });
 

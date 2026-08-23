@@ -211,7 +211,9 @@ describe('refreshWorkspaceSessionPrStates', () => {
       state: 'open',
     });
     fetchGitHubPullRequestsMock.mockResolvedValue({
-      kind: 'cli_unavailable',
+      kind: 'failed',
+      message: 'boom',
+      gitRoot: workspaceCwd,
     });
 
     const result = await refreshWorkspaceSessionPrStates(runtime);
@@ -221,6 +223,8 @@ describe('refreshWorkspaceSessionPrStates', () => {
   });
 
   it('does not write back open for bindings missing from the gh page', async () => {
+    // Seeded 'closed': resurrecting page-absent bindings to 'open' would
+    // rewrite this entry (an 'open' seed makes that regression vacuous).
     await seedSession(SESSION_A);
     const prPath = sessionService.getPrSessionPathForArchiveState(
       SESSION_A,
@@ -229,7 +233,7 @@ describe('refreshWorkspaceSessionPrStates', () => {
     await upsertSessionPr(prPath, {
       number: 999,
       url: 'https://github.com/o/r/pull/999',
-      state: 'open',
+      state: 'closed',
     });
     fetchGitHubPullRequestsMock.mockResolvedValue({
       kind: 'ok',
@@ -239,7 +243,7 @@ describe('refreshWorkspaceSessionPrStates', () => {
     const result = await refreshWorkspaceSessionPrStates(runtime);
 
     expect(result).toEqual({ scanned: 1, updated: 0 });
-    expect((await readSessionPrs(prPath))?.[0]?.state).toBe('open');
+    expect((await readSessionPrs(prPath))?.[0]?.state).toBe('closed');
   });
 
   it('updates nothing when the gh page is unavailable', async () => {

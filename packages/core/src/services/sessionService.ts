@@ -689,6 +689,16 @@ export class SessionService {
     this.sessionPrBoundCallback = callback;
   }
 
+  /**
+   * Exposes the registered callback so `Config.relocateWorkingDirectory`
+   * can carry it onto the replacement service when it resets this one.
+   */
+  getSessionPrBoundCallback():
+    | ((sessionId: string, pr: { number: number; url: string }) => void)
+    | undefined {
+    return this.sessionPrBoundCallback;
+  }
+
   emitSessionPrBound(
     sessionId: string,
     pr: { number: number; url: string },

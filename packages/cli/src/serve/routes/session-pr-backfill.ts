@@ -11,11 +11,11 @@ import {
   commandRunsGhPrCreate,
   fetchGitHubPullRequests,
   fetchRemoteWebUrl,
-  readSessionPrs,
   readWorktreeSession,
   repoKeyFromWebUrl,
-  upsertSessionPr,
+  upsertSessionPrs,
   type SessionArchiveState,
+  type SessionPrState,
 } from '@qwen-code/qwen-code-core';
 import type { SendBridgeError } from '../server/error-response.js';
 import { isValidSessionId } from '../../config/session-id.js';
@@ -82,12 +82,20 @@ interface BackfillCandidate {
 const PRINTED_PR_URL_PATTERN =
   /https?:\/\/[A-Za-z0-9][^\s"'<>)]*\/pull\/(\d{1,9})/g;
 
-// `/review 9584`, `/review #9584`, `/review https://…/pull/9584 …`. Bare
-// session git branches are NOT a source: they bind the workspace's current
-// branch PR onto every session (including unrelated chats and reviews of
-// other PRs) — measured pure noise, removed with cleanup.
+// `/review 9584`, `/review #9584`, `/review https://…/pull/9584 …`, read
+// only at COMMAND position (line start): user-turn prose — including
+// bundled skill bodies recorded verbatim as user records — mentions
+// `/review` mid-line, and only a line-leading command names a PR to bind.
+// The bare-number alternative comes first: `/review 42 and fix #7` names 42,
+// and the lazy span alternative would otherwise consume the line and
+// capture the later token. Bare session git branches are NOT a source: they
+// bind the workspace's current branch PR onto every session (including
+// unrelated chats and reviews of other PRs) — measured pure noise, removed
+// with cleanup.
 const REVIEW_COMMAND_PATTERN =
-  /\/review\b[^\n"\\]*?(?:pull\/|#)(\d{1,9})|\/review\s+(\d{1,9})/g;
+  /(?:^|\n)\s*\/review\s+#?(\d{1,9})|(?:^|\n)\s*\/review\b[^\n"\\]*?(https?:\/\/[A-Za-z0-9][^\s"'<>)]*\/pull\/(\d{1,9}))/g;
+
+const EMPTY_NUMBER_URL_MAP: ReadonlyMap<number, string> = new Map();
 
 interface TranscriptToolPart {
   functionCall?: {
@@ -164,7 +172,10 @@ function collectGhPrCreateBindings(
 // Only USER text records count: assistant prose, tool calls, and tool
 // results (read_file echoes of fixtures/docs) quote `/review <N>` without
 // requesting one, and raw-text matching over escaped JSON would bind them.
-function collectReviewedPrNumbers(raw: string): readonly number[] {
+function collectReviewedPrNumbers(
+  raw: string,
+  workspaceRepoKey: string | undefined,
+): readonly number[] {
   const numbers = new Set<number>();
   for (const line of raw.split('\n')) {
     if (!line.includes('/review')) continue;
@@ -185,8 +196,27 @@ function collectReviewedPrNumbers(raw: string): readonly number[] {
         continue;
       }
       for (const match of part.text.matchAll(REVIEW_COMMAND_PATTERN)) {
-        const value = match[1] ?? match[2];
-        if (value !== undefined) numbers.add(Number(value));
+        const bareNumber = match[1];
+        if (bareNumber !== undefined) {
+          // `\d{1,9}` admits 0; PR 0 does not exist and the sidecar write
+          // declines it, so it must never count as a binding.
+          if (Number(bareNumber) > 0) numbers.add(Number(bareNumber));
+          continue;
+        }
+        const url = match[2];
+        const urlNumber = match[3];
+        if (url === undefined || urlNumber === undefined) continue;
+        // The URL form names the repo it reviewed. Resolution would prefer
+        // the workspace's own page and bind its same-numbered PR instead,
+        // so gate here: a foreign repo's PR must never bind into this
+        // workspace, and an unknown workspace key fails closed.
+        if (
+          workspaceRepoKey === undefined ||
+          repoKeyFromWebUrl(url) !== workspaceRepoKey
+        ) {
+          continue;
+        }
+        if (Number(urlNumber) > 0) numbers.add(Number(urlNumber));
       }
     }
   }
@@ -195,17 +225,14 @@ function collectReviewedPrNumbers(raw: string): readonly number[] {
 
 /**
  * Backfills PR bindings onto a workspace's persisted sessions. Sources, in
- * priority order: the worktree slug/branch convention (names the number
- * without any network); and one batched `gh pr list --state all` per
- * workspace mapping head branches — the worktree branch and every
- * `gitBranch` recorded in the session's transcript — to PR numbers and URLs.
- * The URL comes from `gh` when available, else from the git remote web URL
- * (convention numbers only). A session may bind several PRs.
- *
- * URLs printed in transcripts are NOT a source: text cannot attribute a
- * printed URL to the session's own `gh pr create`, so persisting one would
- * let forged bindings survive retroactively. What gh itself cannot vouch
- * for stays unbound.
+ * ascending authority order: `/review <N|#N|url>` commands in the session's
+ * user records (the session merely looked at that PR); URLs gh itself
+ * printed in the session's `gh pr create` runs (call/response paired by
+ * part id, repo-gated — text alone must never forge a binding); and the
+ * worktree slug/branch convention last (the session exists FOR that PR, so
+ * it must never be evicted by weaker numbers). Numbers resolve to URLs via
+ * one batched `gh pr list --state all` per workspace, else the workspace's
+ * git remote web URL; a session may bind several PRs.
  */
 export async function backfillWorkspaceSessionPrs(
   runtime: WorkspaceRuntime,
@@ -271,7 +298,10 @@ export async function backfillWorkspaceSessionPrs(
           transcriptRaw,
           workspaceRepoKey,
         );
-        const reviewed = collectReviewedPrNumbers(transcriptRaw);
+        const reviewed = collectReviewedPrNumbers(
+          transcriptRaw,
+          workspaceRepoKey,
+        );
         const conventionNumber = worktree
           ? parsePrNumberFromWorktree(worktree.slug, worktree.worktreeBranch)
           : undefined;
@@ -343,7 +373,12 @@ export async function backfillWorkspaceSessionPrs(
       if (!numbers.includes(reviewedNumber)) numbers.push(reviewedNumber);
     }
     for (const directNumber of candidate.direct.keys()) {
-      if (!numbers.includes(directNumber)) numbers.push(directNumber);
+      // Filter+re-append, the same as the convention tier below: skipping
+      // in place would leave the number at its weaker reviewed position,
+      // where the tail cap evicts the strongest binding in the overlap.
+      const rest = numbers.filter((n) => n !== directNumber);
+      numbers.length = 0;
+      numbers.push(...rest, directNumber);
     }
     if (candidate.conventionNumber !== undefined) {
       const conventionNumber = candidate.conventionNumber;
@@ -361,7 +396,15 @@ export async function backfillWorkspaceSessionPrs(
         numbers,
         {
           numberToUrl,
-          pageUrlByNumber,
+          // The page map holds foreign entries too (fork layout needs them,
+          // gh's own attribution names the PR authoritatively). Consuming
+          // them with an unknown workspace key would bind whatever default
+          // repo gh resolved — the exact collision numberToUrl fails
+          // closed on — so the fallback map is empty in that state.
+          pageUrlByNumber:
+            workspaceRepoKey !== undefined
+              ? pageUrlByNumber
+              : EMPTY_NUMBER_URL_MAP,
           pageStateByNumber,
           remote,
         },
@@ -390,23 +433,13 @@ async function bindCandidateNumbers(
     candidate.sessionId,
     candidate.archiveState,
   );
-  let existing: Awaited<ReturnType<typeof readSessionPrs>>;
-  try {
-    existing = await readSessionPrs(prPath);
-  } catch {
-    existing = null;
-  }
-  const initialNumbers = new Set(existing?.map((pr) => pr.number));
-  let persisted: Awaited<ReturnType<typeof upsertSessionPr>> | undefined;
+  const bindings: Array<{
+    number: number;
+    url?: string;
+    state?: SessionPrState;
+  }> = [];
   for (const number of numbers) {
     const isConvention = number === candidate.conventionNumber;
-    if (initialNumbers.has(number)) {
-      result.alreadyBound += 1;
-      // Plain skip for EVERY already-bound number: a re-upsert would move
-      // the entry to the end with a fresh createdAt, violating the
-      // binding-time order the badge and tooltip render by.
-      continue;
-    }
     let url = sources.numberToUrl.get(number) ?? candidate.direct.get(number);
     if (
       url === undefined &&
@@ -422,35 +455,22 @@ async function bindCandidateNumbers(
         url = `${sources.remote}/pull/${number}`;
       }
     }
-    if (url === undefined) {
-      result.unresolved += 1;
-      continue;
-    }
     const state = sources.pageStateByNumber.get(number);
-    persisted = await upsertSessionPr(prPath, {
+    bindings.push({
       number,
       url,
       ...(state ? { state } : {}),
     });
-    result.bound += 1;
   }
-  // Eviction repair: this run's NEW bindings can push pre-existing entries
-  // past the tail cap — including live gh-backed bindings, the strongest
-  // signal class, which no other path restores. Re-upsert every initially
-  // bound number the run evicted (URL/state from the pre-run snapshot).
-  // Runs that bind nothing new leave the sidecar untouched.
-  if (persisted !== undefined && existing) {
-    let survivors = new Set(persisted.map((pr) => pr.number));
-    for (const entry of existing) {
-      if (survivors.has(entry.number)) continue;
-      persisted = await upsertSessionPr(prPath, {
-        number: entry.number,
-        url: entry.url,
-        ...(entry.state ? { state: entry.state } : {}),
-      });
-      survivors = new Set(persisted.map((pr) => pr.number));
-    }
-  }
+  // One locked read-modify-write per session: the read inside the mutation
+  // sees bindings concurrent writers land during this run, the capped list
+  // is computed once (a repeated re-upsert repair would cascade and evict
+  // this run's own new bindings), and nothing is persisted until the final
+  // list is complete — a mid-write failure cannot strand evicted entries.
+  const applied = await upsertSessionPrs(prPath, bindings);
+  result.bound += applied.added.length;
+  result.alreadyBound += applied.alreadyBound.length;
+  result.unresolved += applied.unresolved.length;
 }
 
 export function registerSessionPrBackfillRoutes(
