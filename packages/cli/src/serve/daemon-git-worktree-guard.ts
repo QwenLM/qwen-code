@@ -486,6 +486,40 @@ export function preserveWindowsPathSeparators(
   return out;
 }
 
+// cmd.exe rewrites the command line before executing it: outside double
+// quotes a caret escapes the next character (`^-C` executes as `-C`, and
+// `^"` becomes a literal quote that desyncs any quote tracking), and
+// `%…%`/`!…!` pairs expand variables at execution time — the pair forms
+// inside double quotes too. The POSIX tokeniser reads all three as literal
+// text, so the executed argv can carry a relocation the analysis never saw
+// (`git ^-C <outside> reset --hard` analyses as cwd-local but executes
+// relocated). Any command containing such syntax is unparseable for the
+// guard's purposes. A caret inside double quotes is literal in cmd.exe as
+// it is for the tokeniser, and a lone `%` or `!` names no expansion, so
+// those stay resolvable. PowerShell keeps carets literal and does not
+// expand `%…%`/`!…!`; bash sessions execute through a shell the POSIX
+// tokeniser already models — both are exempt.
+export function containsCmdRewriteSyntax(
+  segment: string,
+  platform: string = process.platform,
+  shell: ShellType = getShellConfiguration().shell,
+): boolean {
+  if (platform !== 'win32' || shell !== 'cmd') return false;
+  let doubleQuoted = false;
+  let percents = 0;
+  let bangs = 0;
+  for (const character of segment) {
+    if (character === '"') {
+      doubleQuoted = !doubleQuoted;
+      continue;
+    }
+    if (character === '^' && !doubleQuoted) return true;
+    if (character === '%') percents++;
+    else if (character === '!') bangs++;
+  }
+  return percents >= 2 || bangs >= 2;
+}
+
 function tokenizeSegment(
   segment: string,
   startDepth: number,
@@ -2206,8 +2240,17 @@ async function evaluateCommandWithCwd(
     return undefined;
   };
 
-  const segments = splitCommands(stripHeredocBodies(command));
-  const separators = readTopLevelSeparators(stripHeredocBodies(command));
+  // A cmd rewrite pair can straddle a command separator (`%A && git -C %B`
+  // pairs across the `&&`), so the whole text is checked before splitting.
+  const strippedCommand = stripHeredocBodies(command);
+  if (containsCmdRewriteSyntax(strippedCommand)) {
+    return {
+      denial: { allowed: false, reason: UNPARSEABLE_COMMAND_DENIAL },
+      cwdAfter: trackedCwd,
+    };
+  }
+  const segments = splitCommands(strippedCommand);
+  const separators = readTopLevelSeparators(strippedCommand);
   // On any disagreement with `splitCommands`, treat every segment of a piped
   // command as a pipeline component rather than guessing.
   const separatorsMatch = separators.length === segments.length - 1;

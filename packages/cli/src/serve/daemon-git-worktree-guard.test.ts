@@ -17,6 +17,7 @@ import {
 import type { ExternalToolGuardPrepareRequest } from '@qwen-code/acp-bridge/bridgeOptions';
 import { SHELL_EXECUTING_TOOL_NAMES } from '@qwen-code/acp-bridge/externalToolGuard';
 import {
+  containsCmdRewriteSyntax,
   createDaemonToolGuard,
   preserveWindowsPathSeparators,
 } from './daemon-git-worktree-guard.js';
@@ -594,6 +595,59 @@ it -C ${outsideRepo} reset --hard`,
     });
   });
 
+  // The win32/cmd lane pin for the rewrite-syntax denial below, pinned on
+  // every lane for the same reason the separator pre-pass is: the pipeline
+  // shape only runs in the merge_group Windows lane.
+  describe('containsCmdRewriteSyntax (pure predicate)', () => {
+    const detects = (segment: string, shell: 'cmd' | 'powershell' | 'bash') =>
+      containsCmdRewriteSyntax(segment, 'win32', shell);
+
+    it('flags an unquoted caret', () => {
+      expect(detects('git ^-C C:\\outside reset --hard', 'cmd')).toBe(true);
+    });
+
+    it('flags a caret-escaped quote', () => {
+      expect(detects('git ^"status^"', 'cmd')).toBe(true);
+    });
+
+    it('flags an expansion pair', () => {
+      expect(detects('git -C %USERPROFILE%\\repo reset --hard', 'cmd')).toBe(
+        true,
+      );
+    });
+
+    it('flags an expansion pair inside double quotes', () => {
+      expect(detects('git -C "%OUTSIDE%" reset --hard', 'cmd')).toBe(true);
+    });
+
+    it('flags a delayed-expansion pair', () => {
+      expect(detects('git -C C:\\a!b!c reset --hard', 'cmd')).toBe(true);
+    });
+
+    it('leaves a caret inside double quotes alone', () => {
+      expect(detects('git commit -m "a ^ b"', 'cmd')).toBe(false);
+    });
+
+    it('leaves a lone percent or bang alone', () => {
+      expect(detects('git -C C:\\100%\\repo status', 'cmd')).toBe(false);
+      expect(detects('git commit -m "done!"', 'cmd')).toBe(false);
+    });
+
+    it.each(['powershell', 'bash'] as const)(
+      'stays off for %s sessions',
+      (shell) => {
+        expect(detects('git ^-C C:\\outside reset --hard', shell)).toBe(false);
+        expect(detects('git -C %OUTSIDE% reset --hard', shell)).toBe(false);
+      },
+    );
+
+    it('stays off on other platforms', () => {
+      expect(
+        containsCmdRewriteSyntax('git ^-C C:\\outside reset', 'linux', 'cmd'),
+      ).toBe(false);
+    });
+  });
+
   // cmd.exe has no backslash escape, so a path separator followed by
   // whitespace is a word boundary in the executed argv. These shapes only
   // mean what they say on win32 executing through cmd.exe or PowerShell,
@@ -640,6 +694,54 @@ it -C ${outsideRepo} reset --hard`,
       await expect(
         guard(request(`git -C ${effectiveCwd}\\ reset --hard`)),
       ).resolves.toEqual({ allowed: true });
+    });
+  });
+
+  // cmd.exe strips carets and expands `%…%`/`!…!` before the child runs, so
+  // a relocation written in rewrite syntax is invisible to a static token
+  // scan yet live in the executed argv (`git ^-C <outside> reset --hard`).
+  // The guard denies the whole class as unparseable instead of guessing.
+  describe.runIf(
+    process.platform === 'win32' && getShellConfiguration().shell === 'cmd',
+  )('cmd.exe rewrite-syntax shapes', () => {
+    it('denies a caret-escaped relocation flag as unparseable', async () => {
+      const guard = createDaemonToolGuard();
+      await expect(
+        guard(request(`git ^-C ${outsideRepo} reset --hard`)),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining('could not be parsed'),
+      });
+    });
+
+    it('denies a caret-escaped quote as unparseable', async () => {
+      const guard = createDaemonToolGuard();
+      await expect(
+        guard(request(`git ^"-C ${outsideRepo}^" reset --hard`)),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining('could not be parsed'),
+      });
+    });
+
+    it('denies an expansion-pair relocation as unparseable', async () => {
+      const guard = createDaemonToolGuard();
+      await expect(
+        guard(request('git -C %OUTSIDE_REPO% reset --hard')),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining('could not be parsed'),
+      });
+    });
+
+    it('still denies the unescaped relocation on its own reason (control)', async () => {
+      const guard = createDaemonToolGuard();
+      await expect(
+        guard(request(`git -C ${outsideRepo} reset --hard`)),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining(outsideRepo),
+      });
     });
   });
 
