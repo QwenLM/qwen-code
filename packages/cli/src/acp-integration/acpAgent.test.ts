@@ -223,6 +223,11 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   emptyGoalSnapshot: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).emptyGoalSnapshot,
+  // The real predicate: the auth preflight cell must agree with the session
+  // validators on what counts as a configured Vertex project.
+  hasVertexProjectConfigured: (
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
+  ).hasVertexProjectConfigured,
   // The real class: `acpAgent` narrows on it with `instanceof`, so a stand-in
   // would make the goal get/clear fallbacks untestable.
   GoalPersistenceUnavailableError: (
@@ -6592,6 +6597,75 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }
   });
 
+  it('extMethod preflight auth cell reports unknown for keyless Vertex with a project', async () => {
+    const savedKey = process.env['GOOGLE_API_KEY'];
+    const savedProject = process.env['GOOGLE_CLOUD_PROJECT'];
+    delete process.env['GOOGLE_API_KEY'];
+    process.env['GOOGLE_CLOUD_PROJECT'] = 'my-project';
+    try {
+      mockConfig = {
+        ...mockConfig,
+        getTargetDir: vi.fn().mockReturnValue('/work/status'),
+        getMcpServers: vi.fn().mockReturnValue({}),
+        getAuthType: vi.fn().mockReturnValue('vertex-ai'),
+        getModel: vi.fn().mockReturnValue('gemini-2.5-pro'),
+        getModelsConfig: vi.fn().mockReturnValue({
+          getGenerationConfig: vi.fn().mockReturnValue({}),
+          getCurrentAuthType: vi.fn().mockReturnValue('vertex-ai'),
+          syncAfterAuthRefresh: vi.fn(),
+        }),
+        getSkillManager: vi.fn().mockReturnValue({
+          listSkills: vi.fn().mockResolvedValue([]),
+        }),
+        getAllConfiguredModels: vi.fn().mockReturnValue([]),
+        getToolRegistry: vi.fn().mockReturnValue({ getAllTools: () => [] }),
+      } as unknown as Config;
+
+      const agentPromise = runAcpAgent(
+        mockConfig,
+        makeSessionSettings(),
+        mockArgv,
+      );
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+
+      const preflight = (await agent.extMethod(
+        SERVE_STATUS_EXT_METHODS.workspacePreflight,
+        {},
+      )) as {
+        cells: Array<{
+          kind: string;
+          status: string;
+          errorKind?: string;
+          detail?: { hasToken: boolean | 'unknown' };
+        }>;
+      };
+
+      const authCell = preflight.cells.find((c) => c.kind === 'auth');
+      // A configured project is routing configuration, not proof that a
+      // credential exists, so this must not report a confirmed token.
+      expect(authCell?.status).toBe('unknown');
+      expect(authCell?.detail?.hasToken).toBe('unknown');
+      expect(authCell?.errorKind).toBeUndefined();
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    } finally {
+      if (savedKey !== undefined) {
+        process.env['GOOGLE_API_KEY'] = savedKey;
+      }
+      if (savedProject === undefined) {
+        delete process.env['GOOGLE_CLOUD_PROJECT'];
+      } else {
+        process.env['GOOGLE_CLOUD_PROJECT'] = savedProject;
+      }
+    }
+  });
+
   it('extMethod preflight auth cell reports warning when no apiKey in env or generationConfig', async () => {
     const savedEnv = process.env['OPENAI_API_KEY'];
     delete process.env['OPENAI_API_KEY'];
@@ -6970,6 +7044,102 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     });
     expect(vi.mocked(tokenLimit)).toHaveBeenCalledWith('runtime-qwen-plus');
     expect(mockConfig.getCurrentModelRegistryBaseUrl).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('projects reasoning preview only for stable non-runtime qwen3.8-max', async () => {
+    mockConfig = {
+      ...mockConfig,
+      getTargetDir: vi.fn().mockReturnValue('/work/status'),
+      getAuthType: vi.fn().mockReturnValue('qwen'),
+      getActiveRuntimeModelSnapshot: vi.fn().mockReturnValue(undefined),
+      getModel: vi.fn().mockReturnValue('qwen3.8-max'),
+      getAllConfiguredModels: vi.fn().mockReturnValue([
+        {
+          id: 'qwen3.8-max',
+          label: 'Qwen 3.8 Max',
+          authType: 'qwen',
+        },
+        {
+          id: 'qwen3.8-max-preview',
+          label: 'Qwen 3.8 Max Preview',
+          authType: 'qwen',
+        },
+        {
+          id: 'qwen3.8-max',
+          label: 'Qwen 3.8 Max Route One',
+          authType: 'openai',
+          baseUrl: 'https://one.example/v1',
+        },
+        {
+          id: 'qwen3.8-max',
+          label: 'Qwen 3.8 Max Route Two',
+          authType: 'openai',
+          baseUrl: 'https://two.example/v1',
+        },
+        {
+          id: 'qwen3.8-max',
+          runtimeSnapshotId: 'runtime-qwen3.8-max',
+          label: 'Runtime Qwen 3.8 Max',
+          authType: 'qwen',
+          isRuntimeModel: true,
+        },
+      ]),
+    } as unknown as Config;
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    const status = await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.workspaceProviders,
+      {},
+    );
+    const models = (
+      status['providers'] as Array<{
+        models: Array<{
+          modelId: string;
+          baseModelId: string;
+          isRuntime: boolean;
+          configOptions?: unknown[];
+        }>;
+      }>
+    ).flatMap((provider) => provider.models);
+    const stable = models.find(
+      (model) =>
+        model.baseModelId === 'qwen3.8-max' && model.isRuntime === false,
+    );
+
+    expect(stable?.configOptions).toMatchObject([
+      {
+        id: 'reasoning_effort',
+        currentValue: 'xhigh',
+        options: [
+          { value: 'none' },
+          { value: 'low' },
+          { value: 'medium' },
+          { value: 'xhigh' },
+        ],
+      },
+    ]);
+    expect(
+      models
+        .filter((model) => model !== stable)
+        .every((model) => model.configOptions === undefined),
+    ).toBe(true);
+    expect(
+      models.filter((model) => model.modelId.startsWith('qwen-route:v1:')),
+    ).toHaveLength(2);
 
     mockConnectionState.resolve();
     await agentPromise;
