@@ -2270,6 +2270,55 @@ describe('OpenAIContentConverter', () => {
       ]);
     });
 
+    it('does not inflate emittedLength when the tag-hold overlap guard fires on a long snapshot (issue #9348 R11-3)', () => {
+      // `state.emittedLength += rawDelta.length` on the non-cumulative
+      // tag-hold overlap guard double-counted the overlap bytes — the held
+      // candidate, already counted when first normalized. Once the guard
+      // fired on a snapshot at or above the detection window, the inflated
+      // total made baselineFrozenAtCap fire on the next cumulative
+      // transition and re-emit the whole cumulative text, including the raw
+      // thinking block, as a fresh visible delta. The cumulative-mode twin
+      // guard already assigns; the non-cumulative guard must too.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('opening', { content: '<thinking>' }),
+        stream,
+      );
+      const seeded = converter.convertOpenAIChunkToGemini(
+        streamChunk('seed', { content: '<thinking>x' }),
+        stream,
+      );
+      expect(seeded.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingThinkingTagCandidate).toEqual({
+        text: '<thinking>x',
+      });
+
+      const body = `x${'y'.repeat(1100)}`;
+      const snapshot = `<thinking>${body}</thinking>`;
+      const completed = converter.convertOpenAIChunkToGemini(
+        streamChunk('snapshot', { content: snapshot }),
+        stream,
+      );
+      expect(completed.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: body },
+      ]);
+      expect(stream.textDeltaState?.emittedLength).toBe(snapshot.length);
+
+      const finish = converter.convertOpenAIChunkToGemini(
+        streamChunk('answer', { content: `${snapshot}Answer` }, 'stop'),
+        stream,
+      );
+      expect(finish.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'Answer' },
+      ]);
+    });
+
     it('keeps genuine content intact when a sub-word "<" candidate is held (issue #9348)', () => {
       // The held-candidate prefix strip fired on sub-word candidates too:
       // with a lone '<' held, a genuine '<EOF' delta lost its leading '<'

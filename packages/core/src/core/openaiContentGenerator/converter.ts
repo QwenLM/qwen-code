@@ -196,8 +196,17 @@ function normalizeStreamingTextDelta(
       // Emit it verbatim; the guard zone recombines it with the held
       // candidate and the depth-counting scanner absorbs any duplication
       // a true rewind introduces (issue #9348 R8-1).
+      //
+      // emittedLength is ASSIGNED, not accumulated (matching the
+      // cumulative-mode twin above): emittedText is replaced with the full
+      // chunk, so the cap can never apply to it, and the overlap bytes (the
+      // held candidate) were already counted when first normalized.
+      // Accumulating them again would inflate emittedLength beyond the
+      // chunk length once the snapshot reaches the detection window, making
+      // baselineFrozenAtCap fire on the next cumulative transition and
+      // over-slice or re-emit the whole cumulative text (issue #9348 R11-3).
       state.emittedText = rawDelta;
-      state.emittedLength += rawDelta.length;
+      state.emittedLength = rawDelta.length;
       return rawDelta;
     }
     const baselineLen = state.emittedText.length;
