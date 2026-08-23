@@ -2062,7 +2062,14 @@ function ledgerMarkerFor(
           body?: unknown;
         }>,
         [
-          ...ingestEntryList(input.bodyCriticals, 'bodyCriticals'),
+          // The same rule the body applied, through the same statement of
+          // it: a re-post of a claim the gate regenerates below is dropped
+          // here too, or the work-list grows a second entry for one blocker
+          // every round.
+          ...withoutGateReposts(
+            ingestEntryList(input.bodyCriticals, 'bodyCriticals'),
+            scriptLintGate(input.planPath).criticals,
+          ),
           // The same split the body performed: a relocated Critical is a
           // posted, counted blocker and must enter the work list.
           ...splitDeferralChannel(input.deferredSuggestions).relocated,
@@ -2574,6 +2581,18 @@ function composeReviewBody(
   // `[probe]` tag (filtered out before the subtract) or a gate finding's own text
   // contains one, erasing an unrelated claim's verification requirement. Identity,
   // not arithmetic, decides provenance.
+  //
+  // The gate runs BEFORE that capture, and its regenerated claims are used to
+  // drop the model's re-posts of them first. Dropping them later would leave
+  // the re-post out of the body while `modelBodyCriticals` still counted it
+  // toward `criticalsNeedingVerify` — a blocker the linter proved would go on
+  // pulling the unverified cap through a copy that no longer posts.
+  const gate = input.planPath
+    ? scriptLintGate(input.planPath)
+    : { criticals: [], unreviewed: [], disclosed: [] };
+  const ownAfterGateDedup = withoutGateReposts(bodyCriticals, gate.criticals);
+  bodyCriticals.length = 0;
+  bodyCriticals.push(...ownAfterGateDedup);
   const modelBodyCriticals = [...bodyCriticals]; // input's, captured before the gate
   // Disclosed-but-non-capping notes from the gate (a deferred checker). Rendered
   // in the body on every verdict, but never fed into the cap.
@@ -2587,7 +2606,8 @@ function composeReviewBody(
   // affected review impossible to approve.
   const repositoryContextNotes: string[] = [];
   if (input.planPath) {
-    const gate = scriptLintGate(input.planPath);
+    // The gate ran above, where its claims were needed to dedup the model's
+    // re-posts before provenance was taken. ONE invocation, reused here.
     bodyCriticals.push(...gate.criticals); // render + count toward `c`, deterministic
     unreviewed.push(...gate.unreviewed);
     gateDisclosed.push(...gate.disclosed);
@@ -3218,7 +3238,18 @@ function composeReviewBody(
   // the SAME recovered predecessor the loop-settling observation above
   // reads, so the two features cannot disagree about what a round held.
   // Advisory only: it cannot move the event or cap the verdict; it only
-  // surfaces, and every input degrades open to "no assessment".
+  // surfaces.
+  //
+  // Every input degrades open to "no assessment" WITH ONE EXCEPTION, stated
+  // here because a blanket claim is the kind of false record this module
+  // polices. Two facts are read off the predecessor's work-list by ABSENCE —
+  // "no Suggestion in it, so the floor was enforcing" and "the backlog is
+  // not shrinking" — and a list the marker's byte budget SHORTENED can only
+  // lose entries, so both lean toward firing. The gate is not restored for
+  // it (a whole-list requirement would silence the advisory on exactly the
+  // deep-work-list rounds it exists for, which are the rounds that get
+  // shortened); `prevTruncated` rides instead, and the paragraph discloses
+  // that those two readings came off an incomplete list.
   // A PURE-FOREIGN work-list is a stranger's, not a shortened version of
   // this account's. Recovery adopts the highest-round marker whoever posted
   // it, and where that marker was NOT merged over this account's own
@@ -3297,6 +3328,13 @@ function composeReviewBody(
       convergence && !pureForeignPrev
         ? convergence.prev.findings.filter((f) => f.sev === 'C').length
         : undefined,
+    // Not a conjunct — it decides nothing about whether the signal fires.
+    // It is what lets the paragraph qualify the two readings it takes off
+    // that list's ABSENCES ("no Suggestion, so the floor enforced"; "the
+    // backlog is not shrinking"), which are the two inputs that lean toward
+    // firing when the marker's byte budget shortened the list.
+    prevTruncated:
+      convergence && !pureForeignPrev ? convergence.prev.truncated : undefined,
   });
 
   let event: ReviewEvent = baseEvent;
@@ -4966,6 +5004,59 @@ export function repositoryContextGate(planPath: string): string[] {
  * the model's input JSON, and the plan itself decides whether the lint was owed:
  * this is what takes the model out of both the block decision and the proof it ran.
  */
+/**
+ * The model's own body Criticals, minus any that RE-POST a claim this
+ * round's script-lint gate regenerates anyway.
+ *
+ * Putting the gate's Criticals into the carried work-list (#9526) is what
+ * made this necessary: from that round on, SKILL Step 6's still-standing
+ * rule tells the model to re-post the entry under its original id, while
+ * `composeReviewBody` re-derives the same Critical from the report — so one
+ * blocker rendered twice, `buildLedger` minted a second id beside the
+ * carried one because the regenerated copy claims none, and the pair
+ * compounded every round: `[R1-1]`, `[R1-1, R2-1]`, `[R1-1, R2-1, R3-1]`
+ * for a single lint finding, inflating the residual-risk count and the
+ * marker's byte budget with it.
+ *
+ * The GATE's copy is the one kept, not the model's. The gate re-derives it
+ * from a report bound to this diff's hash, so the re-post is structurally
+ * redundant — and the model's copy is untrusted prose that `[lint]` does
+ * not exempt from verification (`DETERMINISTIC_TAG_RE` covers `[build]`,
+ * `[test]` and `[probe]` only), so keeping THAT one instead pulled the
+ * unverified-blocker cap on every round a pipeline-proven blocker stood.
+ * The id chain is not preserved for these entries, deliberately: a gate
+ * finding is regenerated from the report every round, and what the next
+ * round needs from the work-list is that a Critical stood, not which id it
+ * stood under.
+ *
+ * The carried id is stripped through the ledger's OWN readback — a second
+ * spelling of that is the drift class `lib/ledger.ts`'s header exists to
+ * prevent — and what is matched is the gate line's LOCATOR, the
+ * `` `path`:line CODE `` it opens with, not the whole rendered string. A
+ * re-post is model-written prose: it carries the entry forward but is not
+ * required to reproduce the message byte for byte, and an exact-match rule
+ * silently stopped deduping the moment the wording drifted — which is the
+ * common case, not the edge. Two findings sharing a path, a line AND a
+ * checker code are the same finding.
+ */
+export function withoutGateReposts(
+  ownBodyCriticals: readonly string[],
+  gateCriticals: readonly string[],
+): string[] {
+  const locator = (entry: string): string => {
+    const claim = entry.trim().replace(LEDGER_ID_READBACK, '').trim();
+    const dash = claim.indexOf(' — ');
+    // Backticks stripped: the gate renders the path through `mdField`, and a
+    // re-post that types the locator plainly names the same finding.
+    return (dash === -1 ? claim : claim.slice(0, dash))
+      .replace(/`/g, '')
+      .trim();
+  };
+  const regenerated = new Set(gateCriticals.map(locator).filter((k) => k));
+  if (regenerated.size === 0) return [...ownBodyCriticals];
+  return ownBodyCriticals.filter((c) => !regenerated.has(locator(c)));
+}
+
 export function scriptLintGate(planPath: string): {
   criticals: string[];
   unreviewed: string[];

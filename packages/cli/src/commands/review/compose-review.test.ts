@@ -51,6 +51,7 @@ import {
   buildLedger,
   repositoryContextGate,
   scriptLintGate,
+  withoutGateReposts,
   testPlanGate,
   composeReviewCommand,
   describeChunkGap,
@@ -3837,6 +3838,76 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     ]);
   });
 
+  it('discloses that a fired reading came off a TRUNCATED work-list (#9526)', async () => {
+    // `prevLedgerFacts` carries shortened lists on purpose — the marker's
+    // byte budget sheds findings on exactly the deep-work-list rounds this
+    // advisory exists for. It still fires there, and the paragraph says
+    // which of its readings came off an incomplete list: "no Suggestion, so
+    // the floor was enforcing" and "the backlog is not shrinking" are read
+    // off ABSENCE, and a shortened list can only lose entries.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-converge-trunc-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(planPath, JSON.stringify({ prNumber: 8255 }), 'utf8');
+    writeFileSync(
+      inputPath,
+      JSON.stringify({ modelId: MODEL, planPath, severityFloor: 'auto' }),
+      'utf8',
+    );
+    writeFileSync(
+      commentsPath,
+      JSON.stringify([
+        { path: 'a.ts', line: 1, body: '**[Critical]** standing blocker' },
+      ]),
+      'utf8',
+    );
+    const stderr = () =>
+      (writeStderrLine as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
+        String(c[0]),
+      );
+    const stdoutJson = () =>
+      JSON.parse(
+        (writeStdoutLine as ReturnType<typeof vi.fn>).mock.calls
+          .map((c) => String(c[0]))
+          .join('\n'),
+      ) as { residualRisk?: { prevTruncated?: boolean }; body?: string };
+    try {
+      (writeStderrLine as ReturnType<typeof vi.fn>).mockClear();
+      (writeStdoutLine as ReturnType<typeof vi.fn>).mockClear();
+      writeFileSync(
+        join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+        JSON.stringify({
+          v: 1,
+          round: 6,
+          posted: 1,
+          fresh: 1,
+          floor: 'c',
+          findings: [{ id: 'R6-1', sev: 'C', file: 'x.ts', title: 'blocker' }],
+          // What the serializer records when the byte budget shed entries —
+          // the list that came back is known-incomplete.
+          dropped: 4,
+        }),
+        'utf8',
+      );
+      await runComposeReviewCommand({
+        input: inputPath,
+        comments: commentsPath,
+      });
+      // It STILL fires: the gate is not restored, because a whole-list
+      // requirement would silence exactly these rounds.
+      const composed = stdoutJson();
+      expect(composed.residualRisk?.prevTruncated).toBe(true);
+      // ...and both the body and the terminal record say what it rests on.
+      expect(composed.body).toContain('truncated to fit the marker');
+      expect(composed.body).toContain('read off a list known to be incomplete');
+      const line = stderr().find((l) => l.startsWith('RESIDUAL-RISK: ')) ?? '';
+      expect(line).toContain('truncated to fit the marker');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('counts a relocated Critical toward the advisory (#9410)', async () => {
     // This round's only Critical arrives through the deferral channel's
     // RELOCATED arm — a deferred entry with severity Critical is relocated
@@ -6010,6 +6081,169 @@ describe('bilingual body — recovered from the live PR when the plan omits the 
       expect(written.body).toContain('<details>\n<summary>中文说明</summary>');
     } finally {
       rmSync(handlerDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('a standing gate Critical enters the posting set exactly once (#9526)', () => {
+  // Putting the gate's Criticals into the carried work-list is what created
+  // this: from that round on, SKILL Step 6's still-standing rule tells the
+  // model to re-post the entry under its original id while `composeReview`
+  // re-derives the same Critical from the report. `buildLedger` keys by
+  // claimed id and the regenerated copy claims none, so it minted a second
+  // id beside the carried one and the pair compounded every round.
+  function gateFixture() {
+    const dir = mkdtempSync(join(tmpdir(), 'compose-gate-once-'));
+    const diffPath = join(dir, 'the.diff');
+    writeFileSync(
+      diffPath,
+      'diff --git a/deploy.sh b/deploy.sh\n@@ -0,0 +1 @@\n+x\n',
+      'utf8',
+    );
+    const diffHash = createHash('sha256')
+      .update(readFileSync(diffPath))
+      .digest('hex');
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(
+      planPath,
+      JSON.stringify({
+        prNumber: 8255,
+        worktreePath: '.qwen/tmp/review-pr-8255',
+        diffPathAbsolute: diffPath,
+      }),
+      'utf8',
+    );
+    writeFileSync(
+      join(dir, 'qwen-review-pr-8255-script-lint.json'),
+      JSON.stringify({
+        checked: [
+          {
+            path: 'deploy.sh',
+            tool: 'shellcheck',
+            findings: [
+              {
+                line: 1,
+                code: 'SC2086',
+                level: 'info',
+                message: 'quote the variable',
+                inDiff: true,
+              },
+            ],
+          },
+        ],
+        skipped: [],
+        errored: [],
+        deferred: [],
+        ok: false,
+        note: '',
+        diffHash,
+      }),
+      'utf8',
+    );
+    return { dir, planPath };
+  }
+
+  it('does not compound the work-list or the body across rounds', () => {
+    const { dir, planPath } = gateFixture();
+    try {
+      const gateLine = scriptLintGate(planPath).criticals[0]!;
+      const renders = (body: string) => (body.match(/SC2086/g) ?? []).length;
+      const seen: Array<{ round: number; ids: string[]; renders: number }> = [];
+      let carried: string[] = [];
+      for (let round = 1; round <= 3; round++) {
+        const r = composeReview({
+          planPath,
+          env: ENV,
+          modelId: MODEL,
+          criticalsInline: 0,
+          suggestionsInline: 0,
+          // A SKILL-compliant run re-posts every still-standing work-list
+          // entry under its original id. That is the input under test.
+          bodyCriticals: carried.map((id) => `${id}: ${gateLine}`),
+        });
+        const led = parseLedger(r.body)!;
+        seen.push({
+          round,
+          ids: led.findings.map((f) => `${f.id}:${f.sev}`),
+          renders: renders(r.body),
+        });
+        carried = led.findings.map((f) => f.id);
+        writeFileSync(
+          join(dir, 'qwen-review-pr-8255-prev-ledger.json'),
+          JSON.stringify({
+            v: 1,
+            round: led.round,
+            posted: 0,
+            fresh: 0,
+            floor: 'o',
+            findings: led.findings,
+          }),
+          'utf8',
+        );
+      }
+      // ONE entry and one rendering per round, for one lint finding. Before
+      // the dedup this read [R1-1] / [R1-1,R2-1] / [R1-1,R2-1,R3-1] with the
+      // body rendering 1, 2 and 3 copies of the same blocker.
+      expect(seen).toEqual([
+        { round: 1, ids: ['R1-1:C'], renders: 2 },
+        { round: 2, ids: ['R2-1:C'], renders: 2 },
+        { round: 3, ids: ['R3-1:C'], renders: 2 },
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the deterministic copy, so a proven blocker pulls no verify cap', () => {
+    // `[lint]` is not in `DETERMINISTIC_TAG_RE` (`[build]`/`[test]`/
+    // `[probe]` only), so the model's re-post counts toward
+    // `criticalsNeedingVerify`. Dropping it only from the BODY while
+    // provenance still saw it left a linter-proven blocker pulling the
+    // unverified-blocker cap on every re-post round.
+    const { dir, planPath } = gateFixture();
+    try {
+      const gateLine = scriptLintGate(planPath).criticals[0]!;
+      const r = composeReview({
+        planPath,
+        env: ENV,
+        modelId: MODEL,
+        criticalsInline: 0,
+        suggestionsInline: 0,
+        bodyCriticals: [`R1-1: ${gateLine}`],
+      });
+      expect(r.cappedBy).not.toContain('criticals-unverified');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("matches the locator, not the model's wording", () => {
+    // A re-post is model prose: it carries the entry forward without being
+    // required to reproduce the message, or the gate's `mdField` backticks,
+    // byte for byte. An exact-match rule stopped deduping the moment the
+    // wording drifted — which is the common case, not the edge.
+    const { dir, planPath } = gateFixture();
+    try {
+      const gate = scriptLintGate(planPath).criticals;
+      expect(
+        withoutGateReposts(
+          [
+            'R1-1: `deploy.sh`:1 SC2086 — reworded by the model [lint]',
+            'R1-2: deploy.sh:1 SC2086 — and without the backticks [lint]',
+          ],
+          gate,
+        ),
+      ).toEqual([]);
+      // A DIFFERENT finding in the same file is not the same finding.
+      expect(
+        withoutGateReposts(['R1-3: `deploy.sh`:9 SC2115 — other [lint]'], gate),
+      ).toEqual(['R1-3: `deploy.sh`:9 SC2115 — other [lint]']);
+      // No gate findings: nothing is dropped.
+      expect(withoutGateReposts(['R1-1: anything'], [])).toEqual([
+        'R1-1: anything',
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

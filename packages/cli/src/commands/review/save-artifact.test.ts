@@ -552,6 +552,9 @@ describe('saveReviewArtifact', () => {
       criticals: 2,
       fresh: 3,
       prevFresh: 3,
+      // Absent in the composed JSON reads as "not disclosed", never as a
+      // refusal — an artifact written before the caveat existed still saves.
+      prevTruncated: false,
     });
   });
 

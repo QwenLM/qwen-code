@@ -1157,6 +1157,9 @@ const FIRE: ConvergenceFacts = {
   // already shrinking would make each `toBeNull()` below pass for the
   // wrong reason.
   prevCriticals: 2,
+  // A WHOLE predecessor list, so the two absence-derived readings above are
+  // evidence and the advisory publishes them unqualified.
+  prevTruncated: false,
 };
 
 describe('convergenceAssessment', () => {
@@ -1272,6 +1275,7 @@ describe('convergenceAssessment', () => {
         prevFloor: 'c',
         prevPostedSuggestion: false,
         prevCriticals: 3,
+        prevTruncated: false,
       }),
     ).not.toBeNull();
   });
@@ -1317,6 +1321,26 @@ it('still evaluates when the previous floor was never recorded', () => {
   expect(
     convergenceAssessment({ ...FIRE, prevFloor: undefined }),
   ).not.toBeNull();
+});
+
+it('fires on a truncated predecessor, and says the reading came off one', () => {
+  // The gate is deliberately NOT restored: a whole-list requirement would
+  // silence the advisory on exactly the deep-work-list rounds it exists for,
+  // which are the rounds the marker's byte budget shortens. What a shortened
+  // list changes is what may be CLAIMED — "no Suggestion, so the floor was
+  // enforcing" and "the backlog is not shrinking" are both read off absence,
+  // and absence in a shortened list is not evidence.
+  const a = convergenceAssessment({ ...FIRE, prevTruncated: true });
+  expect(a).not.toBeNull();
+  expect(a?.prevTruncated).toBe(true);
+  const { en, zh } = convergenceAdvisory(a!);
+  expect(en).toContain('truncated to fit the marker');
+  expect(en).toContain('read off a list known to be incomplete');
+  expect(zh).toContain('为适配 marker 被截断');
+  // And a WHOLE list publishes the readings unqualified.
+  const whole = convergenceAdvisory(convergenceAssessment(FIRE)!);
+  expect(whole.en).not.toContain('truncated to fit the marker');
+  expect(whole.zh).not.toContain('为适配 marker 被截断');
 });
 
 describe('convergenceAdvisory', () => {

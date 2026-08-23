@@ -980,6 +980,24 @@ export interface ConvergenceFacts {
    */
   prevCriticals: number | undefined;
   /**
+   * Was the previous round's work-list known to be INCOMPLETE — shed by the
+   * marker's byte budget, or refused by the admission test?
+   *
+   * It changes nothing about whether the signal fires, and that is
+   * deliberate: requiring a whole list would silence the advisory on the
+   * deep-work-list rounds it exists for, which are precisely the rounds the
+   * budget shortens (measured at up to 35 shed per round). What it changes
+   * is what the advisory may CLAIM. Two of the facts read off that list —
+   * "no Suggestion, so the floor was enforcing" and "the backlog is not
+   * shrinking" — are read off ABSENCE, and absence in a shortened list is
+   * not evidence. Both therefore lean toward FIRING here, against the
+   * fail-open direction every other input has, so the rendered paragraph
+   * discloses it rather than publishing an unqualified reading. The sibling
+   * diagnosis in this file qualifies its own recurrence reading on the same
+   * fact, for the same reason.
+   */
+  prevTruncated: boolean | undefined;
+  /**
    * Is the severity floor ENGAGED this round — an explicit `critical`
    * floor, or `auto` from round 6 with the round knowable? The advisory
    * claims the floor "will not converge" the loop; that claim is provable
@@ -1050,6 +1068,13 @@ export interface ConvergenceAssessment {
   fresh: number;
   /** The previous round's, the other end of the window. */
   prevFresh: number;
+  /**
+   * The predecessor's work-list was known-incomplete, so the two readings
+   * taken off its ABSENCES are weaker than the rest. Carried onto the
+   * assessment because the paragraph has to disclose it — see the field of
+   * the same name on `ConvergenceFacts`.
+   */
+  prevTruncated: boolean;
 }
 
 /**
@@ -1111,6 +1136,7 @@ export function convergenceAssessment(
     prevFloor,
     prevPostedSuggestion,
     prevCriticals,
+    prevTruncated,
   } = facts;
   if (prevHadCritical !== true) return null;
   if (thisCriticals <= 0) return null;
@@ -1137,6 +1163,7 @@ export function convergenceAssessment(
     criticals: thisCriticals,
     fresh,
     prevFresh,
+    prevTruncated: prevTruncated === true,
   };
 }
 
@@ -1165,7 +1192,13 @@ export function convergenceAdvisory(a: ConvergenceAssessment): {
     `the previous round's work-list and stand again this round (${a.criticals} ` +
     `Critical(s)), the rate of first-time findings is not falling (this ` +
     `round ${a.fresh}, previous ${a.prevFresh}), and the standing Critical ` +
-    `backlog is not shrinking. The severity floor will not ` +
+    `backlog is not shrinking${
+      a.prevTruncated
+        ? ` — though the previous round's work list was truncated to fit the ` +
+          `marker, so "the backlog is not shrinking" and "the floor was ` +
+          `enforcing" are both read off a list known to be incomplete`
+        : ''
+    }. The severity floor will not ` +
     `converge it. Recommendation: \`${a.recommendation}\` — the exit is a ` +
     `maintainer risk-acceptance decision (merge, carrying the residual risk), ` +
     `not another review round. Residual-risk inventory for that decision ` +
@@ -1177,8 +1210,12 @@ export function convergenceAdvisory(a: ConvergenceAssessment): {
   const zh =
     `残余风险：本循环处于 persistently-critical 形态——上一轮工作清单中的 Critical ` +
     `本轮依然存在（本轮 ${a.criticals} 条 Critical），首次发现的速率没有下降（本轮 ` +
-    `${a.fresh}，上一轮 ${a.prevFresh}），且未决 Critical 积压没有减少。` +
-    `severity floor 无法使其收敛。` +
+    `${a.fresh}，上一轮 ${a.prevFresh}），且未决 Critical 积压没有减少${
+      a.prevTruncated
+        ? `——但上一轮的工作清单为适配 marker 被截断，因此「积压没有减少」与` +
+          `「floor 已在执法」都是从一份已知不完整的清单上读出的`
+        : ''
+    }。severity floor 无法使其收敛。` +
     `建议：\`${a.recommendation}\`——出口是 maintainer 的风险接受决定（合入并` +
     `承担残余风险），而非再开一轮评审。供该决定使用的残余风险清单（maintainer 填写）：` +
     `按每条未决 Critical 列出「攻击面 · 攻击者依赖性 · 影响范围」三栏。` +

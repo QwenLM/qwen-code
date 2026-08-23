@@ -422,10 +422,15 @@ function validateVerdict(value: unknown): PersistedVerdict {
       }
       counts[key] = n;
     }
+    // The caveat is a boolean the paragraph turns on, so absence reads as
+    // "not disclosed" rather than refusing an artifact written before the
+    // field existed — the same absence semantics its numeric siblings get
+    // one boundary up.
     residualRisk = {
       shape: 'persistently-critical',
       recommendation: LAND_WITH_RESIDUAL_RISK,
       ...counts,
+      prevTruncated: r['prevTruncated'] === true,
     };
   }
   // The fresh count reads by the same rules as the total it is part of.
