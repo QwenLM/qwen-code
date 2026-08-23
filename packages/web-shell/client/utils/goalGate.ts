@@ -22,12 +22,11 @@ export interface GoalGateConnection {
  * Fails CLOSED while `goalState` is still hydrating: the session load clears
  * `loadingTranscript` (making the composer writable) before its `goal()` fetch
  * resolves, so an unknown Goal state on a real session has to read as "a Goal
- * may be active". The daemon has no server-side prompt gate for an active Goal,
- * so a submit inside that window would bypass the Goal queue outright.
+ * may be active". Commands and automatic runs must not start against that
+ * unknown ownership state.
  *
- * Every Goal gate in the client goes through here — the composer submit path,
- * the local queue hold, and the manual/bound run guards — so none of them can
- * drift into failing open on its own.
+ * Command and automatic/manual run guards go through here. Ordinary chat
+ * submissions are routed only by the session's streaming state.
  */
 export function isGoalGateBlocked(connection: GoalGateConnection): boolean {
   return (
