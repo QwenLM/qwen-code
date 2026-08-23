@@ -3158,7 +3158,10 @@ export class Session implements SessionContext {
   }
 
   async deleteWorkflowHistory(runId: string): Promise<boolean> {
-    const handle = this.config.getWorkflowRunRegistry().getHandle(runId);
+    const registry = this.config.getWorkflowRunRegistry();
+    const entry = registry.get(runId);
+    if (entry && !isTerminalWorkflowStatus(entry.status)) return false;
+    const handle = registry.getHandle(runId);
     if (handle) await handle.completion;
     await this.refreshWorkflowHistory();
     if (!this.workflowHistory.some((item) => item.runId === runId)) {

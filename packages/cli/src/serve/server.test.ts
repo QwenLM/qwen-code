@@ -3987,6 +3987,20 @@ describe('createServeApp', () => {
           },
         },
       };
+      const settingsEnabled = {
+        ...makeWorkspaceRuntimeForTest({
+          workspaceId: 'settings-enabled-id',
+          workspaceCwd: '/workspace/settings-enabled',
+          primary: false,
+          bridge: fakeBridge(),
+        }),
+        env: {
+          mode: 'runtime-overlay' as const,
+          overlayKeys: [],
+          effectiveEnv: {},
+          workflowsEnabledBySettings: true,
+        },
+      };
       const untrusted = makeWorkspaceRuntimeForTest({
         workspaceId: 'untrusted-id',
         workspaceCwd: '/workspace/untrusted',
@@ -3999,6 +4013,7 @@ describe('createServeApp', () => {
         workspaceRegistry: createWorkspaceRegistry([
           primary,
           secondary,
+          settingsEnabled,
           untrusted,
         ]),
         daemonEnv: { QWEN_CODE_ENABLE_WORKFLOWS: '1' },
@@ -4017,6 +4032,10 @@ describe('createServeApp', () => {
         expect.objectContaining({
           id: 'secondary-id',
           workflowsEnabled: false,
+        }),
+        expect.objectContaining({
+          id: 'settings-enabled-id',
+          workflowsEnabled: true,
         }),
         expect.objectContaining({
           id: 'untrusted-id',

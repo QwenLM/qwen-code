@@ -48,7 +48,10 @@ function workflowsEnabledForRuntime(
       ? (runtime.env.effectiveEnv ?? {})
       : (runtime.env.effectiveEnv ?? daemonEnv);
   if (env['QWEN_CODE_DISABLE_WORKFLOWS'] === '1') return false;
-  return env['QWEN_CODE_ENABLE_WORKFLOWS'] === '1';
+  return (
+    env['QWEN_CODE_ENABLE_WORKFLOWS'] === '1' ||
+    runtime.env.workflowsEnabledBySettings === true
+  );
 }
 
 export function registerCapabilitiesRoutes(
