@@ -5527,6 +5527,29 @@ describe('App conversation indicator keep-alive (#9487)', () => {
 });
 
 describe('App shell command queueing', () => {
+  it('skips prompt preparation for locally handled slash and shell commands', async () => {
+    const prepareSubmit = vi.fn(async () => undefined);
+    const onThemeChange = vi.fn();
+    renderApp({ prepareSubmit, onThemeChange });
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('/help');
+      testState.latestChatEditorProps?.onSubmit('/theme dark');
+    });
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('!echo hello');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.sendShellCommand).toHaveBeenCalledWith(
+          'echo hello',
+        );
+      });
+    });
+
+    expect(onThemeChange).toHaveBeenCalledWith('dark');
+    expect(prepareSubmit).not.toHaveBeenCalled();
+  });
+
   it('lazily creates a session for ! shell commands in a new task', async () => {
     mockConnection.sessionId = undefined;
     mockSessionActions.createSession.mockImplementation(async () => {
@@ -12074,6 +12097,75 @@ describe('App session callbacks', () => {
     );
   });
 
+  it('prepares direct transport before the submit gate and session event', async () => {
+    const order: string[] = [];
+    const inputAnnotations: DaemonInputAnnotation[] = [
+      {
+        type: 'reference',
+        start: 0,
+        end: 8,
+        text: 'resolved',
+        reference: { id: 'resolved', kind: 'file' },
+      },
+    ];
+    const prepareSubmit = vi.fn(async () => {
+      order.push('prepare');
+      return { prompt: 'resolved', inputAnnotations };
+    });
+    const onSubmitBefore = vi.fn(async ({ prompt }: { prompt: string }) => {
+      order.push(`gate:${prompt}`);
+    });
+    mockSessionActions.sendPrompt.mockImplementationOnce(
+      async (prompt: string) => {
+        order.push(`transport:${prompt}`);
+      },
+    );
+    const onSessionChange = vi.fn();
+    const { container } = renderApp({
+      prepareSubmit,
+      onSubmitBefore,
+      onSessionChange,
+    });
+    await flush();
+
+    await clickSubmit(container);
+    await flush();
+
+    expect(prepareSubmit).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      prompt: 'hello',
+      inputAnnotations: [],
+    });
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      'resolved',
+      expect.objectContaining({ inputAnnotations }),
+    );
+    expect(onSessionChange).toHaveBeenCalledWith({
+      type: 'submit',
+      sessionId: 'session-1',
+      prompt: 'resolved',
+      queued: false,
+    });
+    expect(order).toEqual(['prepare', 'gate:resolved', 'transport:resolved']);
+  });
+
+  it('keeps the draft when preparation removes all prompt content', async () => {
+    const prepareSubmit = vi.fn().mockResolvedValue({
+      prompt: '',
+      inputAnnotations: [],
+    });
+    const { container } = renderApp({ prepareSubmit });
+    await flush();
+
+    await clickSubmit(container);
+    await flush();
+
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(editorCommit).not.toHaveBeenCalled();
+    expect(editorClear).not.toHaveBeenCalled();
+    expect(testState.prompt).toBe('hello');
+  });
+
   it('does not attribute prompt admission when the active owner is unknown', async () => {
     mockConnection.workspaceCwd = undefined;
     const { container } = renderApp();
@@ -15011,6 +15103,51 @@ describe('App session callbacks', () => {
     });
     expect(editorCommit).toHaveBeenCalledTimes(1);
     expect(editorClear).not.toHaveBeenCalled();
+  });
+
+  it('freezes a normalized prepared submission before it enters the queue', async () => {
+    const inputAnnotations: DaemonInputAnnotation[] = [
+      {
+        type: 'reference',
+        start: 0,
+        end: 6,
+        text: 'queued',
+        reference: { id: 'queued', kind: 'file' },
+      },
+    ];
+    const prepareSubmit = vi.fn().mockResolvedValue({
+      prompt: 'queued target',
+      inputAnnotations,
+    });
+    const onSessionChange = vi.fn();
+    const { container, rerender } = renderApp({
+      prepareSubmit,
+      onSessionChange,
+    });
+    await flush();
+
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({ prepareSubmit, onSessionChange });
+    });
+    testState.prompt = 'queued';
+    await clickSubmit(container);
+    await flush();
+
+    expect(prepareSubmit).toHaveBeenCalledOnce();
+    expect(rawEnqueuePrompt).toHaveBeenCalledWith(
+      'queued target',
+      undefined,
+      undefined,
+      undefined,
+      inputAnnotations,
+    );
+    expect(onSessionChange).toHaveBeenCalledWith({
+      type: 'submit',
+      sessionId: 'session-1',
+      prompt: 'queued target',
+      queued: true,
+    });
   });
 
   it('cancels an approved queued submission after an A-to-B-to-A owner cycle', async () => {
@@ -19668,6 +19805,71 @@ describe('App prompt send failure retry', () => {
     );
     confirm.mockRestore();
     warn.mockRestore();
+  });
+
+  it('reuses the first prepared payload without preparing retry again', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const firstSend = deferred<void>();
+    const inputAnnotations: DaemonInputAnnotation[] = [
+      {
+        type: 'reference',
+        start: 0,
+        end: 8,
+        text: 'resolved',
+        reference: { id: 'resolved', kind: 'file' },
+      },
+    ];
+    const prepareSubmit = vi.fn().mockResolvedValueOnce({
+      prompt: 'resolved',
+      inputAnnotations,
+    });
+    const onSubmitBefore = vi.fn().mockResolvedValue(undefined);
+    mockSessionActions.sendPrompt.mockImplementationOnce(() => {
+      testState.blocks = [{ id: 'u1', kind: 'user' }];
+      return firstSend.promise;
+    });
+    const { container } = renderApp({ prepareSubmit, onSubmitBefore });
+    await flush();
+
+    await clickSubmit(container);
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      'resolved',
+      expect.objectContaining({ inputAnnotations }),
+    );
+    testState.messages = [{ id: 'u1', role: 'user', content: 'resolved' }];
+    await act(async () => {
+      firstSend.reject(new DaemonHttpError(413, {}, 'Prompt too large'));
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>('[data-testid="failed-prompt-retry"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(prepareSubmit).toHaveBeenCalledOnce();
+    expect(prepareSubmit).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      prompt: 'hello',
+      inputAnnotations: [],
+    });
+    expect(onSubmitBefore).toHaveBeenNthCalledWith(1, {
+      sessionId: 'session-1',
+      prompt: 'resolved',
+    });
+    expect(onSubmitBefore).toHaveBeenNthCalledWith(2, {
+      sessionId: 'session-1',
+      prompt: 'resolved',
+    });
+    expect(mockSessionActions.sendPrompt).toHaveBeenLastCalledWith(
+      'resolved',
+      expect.objectContaining({
+        inputAnnotations,
+        optimisticUserMessage: false,
+      }),
+    );
   });
 
   it('marks and retries a failed prompt while an active Goal is known', async () => {
