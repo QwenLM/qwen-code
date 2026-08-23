@@ -629,6 +629,19 @@ describe('DaemonClient', () => {
         client.readWorkspaceFile('src/a.ts', { line: 2, limit: 3 }),
       ).resolves.toEqual(payload);
       expect(calls[0]?.url).toBe('/daemon/file?path=src%2Fa.ts&line=2&limit=3');
+
+      // maxBytes is the one GET /file option no test pinned on either base URL:
+      // deleting its branch left the whole suite green.
+      await expect(
+        client.readWorkspaceFile('src/a.ts', {
+          maxBytes: 100,
+          line: 2,
+          limit: 3,
+        }),
+      ).resolves.toEqual(payload);
+      expect(calls[1]?.url).toBe(
+        '/daemon/file?path=src%2Fa.ts&maxBytes=100&line=2&limit=3',
+      );
     });
 
     it('stats files with a relative base URL', async () => {
