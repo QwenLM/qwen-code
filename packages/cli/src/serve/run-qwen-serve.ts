@@ -931,20 +931,32 @@ export function describeWorkerTlsTrustGaps(opts: {
   // message used to announce a certain UNABLE_TO_VERIFY_LEAF_SIGNATURE outage
   // that never happens.
   if (opts.operatorCaCertReadError !== undefined) {
+    // The reassurance is only true when the fallback the workers get is
+    // loadable: with `servingBlocks === undefined` the merge hands them the
+    // serving file itself, their loader takes nothing from it, and
+    // `anchored: true` above judged a certificate they never receive.
+    const servingFallbackAnchors =
+      anchorPath.anchored && servingBlocks !== undefined;
     gaps.push(
       `NODE_EXTRA_CA_CERTS "${opts.operatorCaCertPath}" could not be read by ` +
         `the daemon (${opts.operatorCaCertReadError}), so channel workers ` +
         `receive no CA from it — a root-owned or mode-600 file is the usual ` +
         `cause, and its contents are not the problem. ` +
-        (anchorPath.anchored
+        (servingFallbackAnchors
           ? `--tls-cert "${opts.certPath}" carries an anchor of its own, and ` +
             `that file is what the workers fall back to, so their trust does ` +
             `not rest on this one today — whatever it was meant to add ` +
-            `reaches nobody. `
-          : `Every worker handshake to the daemon will fail ` +
-            `UNABLE_TO_VERIFY_LEAF_SIGNATURE unless the issuing CA is ` +
-            `already in the workers' default trust store. `) +
-        `Fix that file's permissions or path and restart.`,
+            `reaches nobody. Fix that file's permissions or path and restart.`
+          : servingBlocks === undefined
+            ? `--tls-cert "${opts.certPath}" itself holds no block the ` +
+              `workers' loader can read, so their fallback bundle is that ` +
+              `file alone and it anchors nothing — fixing this CA file's ` +
+              `permissions changes nothing; re-export the serving file as ` +
+              `the gap below describes and restart.`
+            : `Every worker handshake to the daemon will fail ` +
+              `UNABLE_TO_VERIFY_LEAF_SIGNATURE unless the issuing CA is ` +
+              `already in the workers' default trust store. Fix that file's ` +
+              `permissions or path and restart.`),
     );
   } else if (opts.operatorCaCert && !operatorChain) {
     gaps.push(
@@ -1100,6 +1112,23 @@ export function describeWorkerTlsTrustGaps(opts: {
   for (const member of anchorPath.path) {
     if (member.fingerprint256 === x509.fingerprint256) continue;
     const subject = member.subject.replace(/\r?\n/g, ', ');
+    // OpenSSL applies the server-purpose test to EVERY chain member, not
+    // just the leaf (`check_purpose_ssl_server`), and `anyExtendedKeyUsage`
+    // does not satisfy it in-chain — measured on Node v22.23.2: a CA:TRUE
+    // keyCertSign intermediate carrying only clientAuth walks to anchored
+    // here while every worker handshake fails INVALID_PURPOSE. `keyUsage`
+    // is undefined when the certificate carries no extendedKeyUsage at all,
+    // which OpenSSL accepts in a CA.
+    if (member.keyUsage && !member.keyUsage.includes(TLS_SERVER_AUTH_OID)) {
+      gaps.push(
+        `--tls-cert "${opts.certPath}" chains through "${subject}", whose ` +
+          `extendedKeyUsage does not include serverAuth — every worker ` +
+          `handshake to the daemon will fail INVALID_PURPOSE. Reissue that ` +
+          `chain member with serverAuth in its extendedKeyUsage and ` +
+          `restart.`,
+      );
+      continue;
+    }
     if (new Date(member.validTo).getTime() < now) {
       gaps.push(
         `--tls-cert "${opts.certPath}" chains through "${subject}", which ` +
@@ -7994,7 +8023,22 @@ async function runQwenServeImpl(
             actualPort,
             tlsOptions !== undefined,
           );
-          if (tlsOptions && tlsCertPath) {
+          if (
+            tlsOptions &&
+            tlsCertPath &&
+            process.env['NODE_TLS_REJECT_UNAUTHORIZED'] === '0'
+          ) {
+            // Workers inherit this variable unscrubbed and dial via fetch,
+            // which honors it — but the handshake probe hardcodes strict
+            // verification, so under ='0' it would fail while every worker
+            // connects fine: a certain-outage log for an outage that never
+            // happens.
+            daemonLog.warn(
+              `NODE_TLS_REJECT_UNAUTHORIZED=0 disables certificate ` +
+                `verification for channel workers; skipping the worker TLS ` +
+                `trust check.`,
+            );
+          } else if (tlsOptions && tlsCertPath) {
             const operatorCaCertPath = process.env['NODE_EXTRA_CA_CERTS'];
             let operatorCaCert: Buffer | undefined;
             let operatorCaCertReadError: string | undefined;

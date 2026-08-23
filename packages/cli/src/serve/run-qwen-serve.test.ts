@@ -1994,6 +1994,146 @@ FD7Sc2l6Dh2GBS56ZA==
 -----END CERTIFICATE-----
 `;
 
+/**
+ * A leaf signed by an intermediate that IS a CA (basicConstraints CA:TRUE,
+ * keyCertSign) but carries `extendedKeyUsage=clientAuth` — the shape a
+ * multi-purpose internal CA reissued with a wrong purpose template produces.
+ * OpenSSL applies the server-purpose EKU test to EVERY chain member, not just
+ * the leaf: measured on Node v22.23.2 / OpenSSL 3.0.20 with this exact file
+ * as the served chain and the root as the trust store, a worker-shape
+ * `tls.connect` fails `{"code":"INVALID_PURPOSE","message":"unsuitable
+ * certificate purpose"}` and `openssl verify -purpose sslserver` reports
+ * "error 26 at 1 depth lookup: unsuitable certificate purpose". The file
+ * includes the root so the chain anchors — only the purpose fails. Not a
+ * real secret.
+ */
+const TEST_TLS_CERT_CLIENT_EKU_CHAIN = `-----BEGIN CERTIFICATE-----
+MIIDWTCCAkGgAwIBAgIUXgiovCRxbm0joqkwaCbrlJAg5VUwDQYJKoZIhvcNAQEL
+BQAwJzElMCMGA1UEAwwccXdlbiBjbGllbnQtZWt1IGludGVybWVkaWF0ZTAeFw0y
+NjA4MjMxMjM1NTZaFw0zNjA4MjAxMjM1NTZaMBQxEjAQBgNVBAMMCWxvY2FsaG9z
+dDCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAJmLMHPtMZw+1/DcCFeW
+xVNsJwQyECgfARs1rxOgVInGlqsePZBFOadECFVP1Wj2EQiZUjBNe6PHWdWnu3/Z
+WKbDxfOWR5DQn2h0EkhUJTrU929RwqnHuRaIgzaai54XWxezXakVD2vpoh3RlGRN
+6FDZdLTmnrESX+618EPwKQI8w2iBjkTqLvOf4jpQJwNPLSQ/+AM/X1lgAgppA672
+flHHtCwpMGJmKAKSivYolDHmdKXdbS8Uddc8aiTqTeaQB+8ExgMYidZ5R5OLYKOc
+c5rg73dlk0tJOl5/YUb+iuKcY5MGTRlIcOOKcMoMzqpwxujbbvpNO4295n2ZXPSE
+EMECAwEAAaOBjzCBjDAJBgNVHRMEAjAAMA4GA1UdDwEB/wQEAwIFoDATBgNVHSUE
+DDAKBggrBgEFBQcDATAaBgNVHREEEzARgglsb2NhbGhvc3SHBH8AAAEwHQYDVR0O
+BBYEFDzACaM+l1+De7ME7pcOKxJrQeylMB8GA1UdIwQYMBaAFLVfKnl9aiiN1eu9
+UXsquyEzyolmMA0GCSqGSIb3DQEBCwUAA4IBAQCAOWCYES6p29FS09NEMiKEJPIZ
+cElWVxVbmV0rr+8lzTUPP2N41TH3W7Kns5DYK1SQH90eFz+4POcInaLwAisKEUk2
+WLn1MBq9n2v6o/E3eQ/9z901F0i25JYtF2JdWqzZwwHgDtcx7rWKyOe/g8JrgyO1
+1qHMK83lNuTdX2nmM6LLR5fM+7HvH/B6A5t0SMy7jkRFBg/k5cxrcTb6mEpjSWs4
+MT+9wic3NKX13RW7dMtstJRpaSUY2bK9J8eUJc1owYi7g6CzKdGYFzHormJi9oKr
+vAmNnDnFLKjZecTjbNoiK04a41uhNQ16WVoviK3jrNHaOoCES1w951H9Q1ol
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDSjCCAjKgAwIBAgIUNyW6Y5XGTAL740qXa3847G6GyeYwDQYJKoZIhvcNAQEL
+BQAwHTEbMBkGA1UEAwwScXdlbiBla3UgdGVzdCByb290MB4XDTI2MDgyMzEyMzU1
+NloXDTM2MDgyMDEyMzU1NlowJzElMCMGA1UEAwwccXdlbiBjbGllbnQtZWt1IGlu
+dGVybWVkaWF0ZTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAKcIGZnE
+dIr9ea1NCD8VckHdQD6OJl8UUPneZWAfWcth7w1O7MGpbBSZDqMWr0XI6+hEgFeD
+abZxQGRlPuAbC9Wc2B6QDg9BURafaD1ma6HKAkZtVTwfnK7i775aOyervcyKG6m8
+SlNwU++Flc7C8M3S/pvZW/B5UsDPlQc7zSb4//tu4Oc61S/HDy4RldkziEBFGXik
+uu1s37Fk5QvVEq6f3v1N3IaxdJpItPmYWbd8iqBJ3kOWU4yro7ZjAca2PKRuNzAb
+J2opLxm+1V5B7/ny0OTL/0oGFgTEegBIWE92EJFN5tsdAfIQhRJYIeHIhEhs2v1t
+JCpL3YKKeaG5t10CAwEAAaN4MHYwDwYDVR0TAQH/BAUwAwEB/zAOBgNVHQ8BAf8E
+BAMCAQYwEwYDVR0lBAwwCgYIKwYBBQUHAwIwHQYDVR0OBBYEFLVfKnl9aiiN1eu9
+UXsquyEzyolmMB8GA1UdIwQYMBaAFPNu3I4kv7G16WSFypNL4OpviRREMA0GCSqG
+SIb3DQEBCwUAA4IBAQCZ5SScQb496KHb+OMHB/wqJO59zX2XFfLhOqEPWHpIXT/g
+NMJenwlr/r9aB9I4yLFQpJcAMtnDXa2qfB91hOcKpoVyernnNqaD5lpEDBffrmJl
+dKvebpHwdMNlfIbFelsEtb/ZU9F6SLGWuNK+QrnUkOvWTXy0GUBcmdOPiR6b90NP
+r2IRn+UX3u+92/0OAKquhS34EM+T+cIwHqBWJuE3Acp4CELvDgVlJmAfCq/i1wnB
+/UIlnEYhlHZ2pk/tIh5mujr+rFyANe8KzifDmvjC0o98CHLghYkcntcU01gsrYy8
+bPH1/S0f5dB2rp7Ne0ZPLMStzjD87Pm2WKFk102l
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDKzCCAhOgAwIBAgIUOWUnEy0fcOcnsRZaSQ6B5JnUZzgwDQYJKoZIhvcNAQEL
+BQAwHTEbMBkGA1UEAwwScXdlbiBla3UgdGVzdCByb290MB4XDTI2MDgyMzEyMzU1
+NloXDTM2MDgyMDEyMzU1NlowHTEbMBkGA1UEAwwScXdlbiBla3UgdGVzdCByb290
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnzmx++Qvu1xQezLzRJUM
+IiWo84LyLhAjj9z9cSQWV0gV6DVZjZh2NGiegKcTyj9a2hTG6vMNAa2eLyNpB4J3
+a2RBPDE+A0t8f0aJDBJh8s2IG19gdJj2TCecx3BEk/nRtbjGYRQIqHkQuJcT5EhC
+2igIkONRQ/fNKbXt1enTL/uc9TyAEOcDVzyvE+Y/4J10I6ZhrSAhZ5MvoZvK7SY0
+agscsyH8ocKehD/FZJ+7lWNrZmNtwWJCyVRjvIK6E+9HkZYi8Lzn8SeuaMCeIKqt
+TvYLgvp0Y21jumS3TeXKdcwwrJd5cPF8jSfVeTdA9Owi+u3Vx5H6xVl4r5oRmfa5
+nQIDAQABo2MwYTAdBgNVHQ4EFgQU827cjiS/sbXpZIXKk0vg6m+JFEQwHwYDVR0j
+BBgwFoAU827cjiS/sbXpZIXKk0vg6m+JFEQwDwYDVR0TAQH/BAUwAwEB/zAOBgNV
+HQ8BAf8EBAMCAQYwDQYJKoZIhvcNAQELBQADggEBAAjscSpURTsy4xP2uC9UlsCn
+Lmb2bTWO+ejlcP2y5vsdP+cNaO8FtANbBPTkPV5+Kizu7a7L5QlDSuQxDEDWg54l
+3+1Ize0KPILPA1SC5SEkh4JpvG+wN1udm0ykFiQyCyET/wfoWe3O74nKyZTVgtq0
+09uLEVXaWBl3gZJ5NKOD73kM2StVyXsFkGEPz4FwVGMrQaFpPHHrzJOW3iU0xo3v
+aa+iyqy+FppmCRJZKyqP1n3Bzk7m9tzSfYNb8vdFsLA5DlkV1lAhtBoSbkLAsYPN
+gupdQ6qWEKa1z147s84N7ASbhYZhnluZs9t4gpYZ8PavMSggcPhYPxLDFshHkqo=
+-----END CERTIFICATE-----
+`;
+
+/**
+ * The same chain with a serverAuth-EKU intermediate — the control that
+ * authorizes (measured on Node v22.23.2: `authorized: true`) and keeps the
+ * chain-wide EKU rule from crying wolf. Not a real secret.
+ */
+const TEST_TLS_CERT_SERVER_EKU_CHAIN = `-----BEGIN CERTIFICATE-----
+MIIDWTCCAkGgAwIBAgIUIFGbo8TlS1PT3vk6OaFo7I7i2XAwDQYJKoZIhvcNAQEL
+BQAwJzElMCMGA1UEAwwccXdlbiBzZXJ2ZXItZWt1IGludGVybWVkaWF0ZTAeFw0y
+NjA4MjMxMjM2MTJaFw0zNjA4MjAxMjM2MTJaMBQxEjAQBgNVBAMMCWxvY2FsaG9z
+dDCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAJmLMHPtMZw+1/DcCFeW
+xVNsJwQyECgfARs1rxOgVInGlqsePZBFOadECFVP1Wj2EQiZUjBNe6PHWdWnu3/Z
+WKbDxfOWR5DQn2h0EkhUJTrU929RwqnHuRaIgzaai54XWxezXakVD2vpoh3RlGRN
+6FDZdLTmnrESX+618EPwKQI8w2iBjkTqLvOf4jpQJwNPLSQ/+AM/X1lgAgppA672
+flHHtCwpMGJmKAKSivYolDHmdKXdbS8Uddc8aiTqTeaQB+8ExgMYidZ5R5OLYKOc
+c5rg73dlk0tJOl5/YUb+iuKcY5MGTRlIcOOKcMoMzqpwxujbbvpNO4295n2ZXPSE
+EMECAwEAAaOBjzCBjDAJBgNVHRMEAjAAMA4GA1UdDwEB/wQEAwIFoDATBgNVHSUE
+DDAKBggrBgEFBQcDATAaBgNVHREEEzARgglsb2NhbGhvc3SHBH8AAAEwHQYDVR0O
+BBYEFDzACaM+l1+De7ME7pcOKxJrQeylMB8GA1UdIwQYMBaAFB8Uo17wlkWbW8LR
+gK2N72eca5TuMA0GCSqGSIb3DQEBCwUAA4IBAQBh+UhSnSp+rULQ/NwBFd81kYeW
+ZWcWq+rDoGQoB2WoLKD7tfSgkdyKHoVJfgjR8VvS4oByGrsnuPQ5UihUEtLbvrZY
+HHE3kcixwe0/xFyLrOMY7mXAcnCu9xps11hMk0yEgSrICGg5CSt1kK5mkIqf5sYx
+2Em10IdH0436G+xLnlMzXJqEwwR2W/RA3a0R27Hp5+38L/UoSrTvmICa3BJ+oq4u
+BAoMkvm2dmNR/FlxZ7MeArHOgyYC0aHwZi0fvFjKVATyuFEWIOYBCj/aJr5C/CVR
+ZF6V0QbD+Yj0cvR7Uko/4BnPb/ig9gamQ/Un7Bpo0C+EHi3hOQH5hsjFpvrp
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDSjCCAjKgAwIBAgIUNyW6Y5XGTAL740qXa3847G6GyecwDQYJKoZIhvcNAQEL
+BQAwHTEbMBkGA1UEAwwScXdlbiBla3UgdGVzdCByb290MB4XDTI2MDgyMzEyMzYx
+MloXDTM2MDgyMDEyMzYxMlowJzElMCMGA1UEAwwccXdlbiBzZXJ2ZXItZWt1IGlu
+dGVybWVkaWF0ZTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAPFGRLTl
+0ZOQr8Em/a8Xkm6Zq6gYQCmAcwnQa+XFkTFJpDImYPakibECxIKzU0kJ2pFX4CfW
+fdkDzssjVy7pLBGqqrqncQy4F6llbLAFYC+2/VNs7pmO3A1Ews52wMyZShqkItid
+FmZcfeX+FiqwL9bdCJj47soA9PJ5vBnJlxECBM74B4aBVaWYespUGJFkjgq9+gMb
+PWo/m8Nvb3T2ukqqzD0m6xuOqggrHHA34vrjl7xHyqcA92K70cTT1ObMWeDW2REQ
+we3W0liWVRZtRfYozO8wQ/sotEW5O0cq0nbwVPtzXVEGtSir4QXV02cYua58Fue3
+myFyUT+mqYpsyosCAwEAAaN4MHYwDwYDVR0TAQH/BAUwAwEB/zAOBgNVHQ8BAf8E
+BAMCAQYwEwYDVR0lBAwwCgYIKwYBBQUHAwEwHQYDVR0OBBYEFB8Uo17wlkWbW8LR
+gK2N72eca5TuMB8GA1UdIwQYMBaAFPNu3I4kv7G16WSFypNL4OpviRREMA0GCSqG
+SIb3DQEBCwUAA4IBAQBXSGmK9T0d9wz8KEnsUOtWS3dY3oxjLU84i/zkwJwRwwzf
+7f7XH/zyfr3teTG+bdFsgX1tUiOFzIWTzUZCCW7NV+cUbv5QD7/nIT/lYuqzcdIB
+47FtghDEnyfm4CfiSomLKgmUbcXa+MXc0Z/u2G5uuSpBPwfBJnMQ8YrJwDlrXsnb
+FTNESjvLkErHA2XUfKVimp9GiWSbqo60FjNmKam8sOTNpqzdfqtrj2qOty07TvQY
+eLiRyfmLSJUSh3liAxHSgYRC46lMnM0NPgYY/0XssJZQb+rfNyCSuok2L74rNpEd
+ybXgO+LWfjCIByNZOmzvPUEbpDbptYQlWwQBK4TB
+-----END CERTIFICATE-----
+-----BEGIN CERTIFICATE-----
+MIIDKzCCAhOgAwIBAgIUOWUnEy0fcOcnsRZaSQ6B5JnUZzgwDQYJKoZIhvcNAQEL
+BQAwHTEbMBkGA1UEAwwScXdlbiBla3UgdGVzdCByb290MB4XDTI2MDgyMzEyMzU1
+NloXDTM2MDgyMDEyMzU1NlowHTEbMBkGA1UEAwwScXdlbiBla3UgdGVzdCByb290
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnzmx++Qvu1xQezLzRJUM
+IiWo84LyLhAjj9z9cSQWV0gV6DVZjZh2NGiegKcTyj9a2hTG6vMNAa2eLyNpB4J3
+a2RBPDE+A0t8f0aJDBJh8s2IG19gdJj2TCecx3BEk/nRtbjGYRQIqHkQuJcT5EhC
+2igIkONRQ/fNKbXt1enTL/uc9TyAEOcDVzyvE+Y/4J10I6ZhrSAhZ5MvoZvK7SY0
+agscsyH8ocKehD/FZJ+7lWNrZmNtwWJCyVRjvIK6E+9HkZYi8Lzn8SeuaMCeIKqt
+TvYLgvp0Y21jumS3TeXKdcwwrJd5cPF8jSfVeTdA9Owi+u3Vx5H6xVl4r5oRmfa5
+nQIDAQABo2MwYTAdBgNVHQ4EFgQU827cjiS/sbXpZIXKk0vg6m+JFEQwHwYDVR0j
+BBgwFoAU827cjiS/sbXpZIXKk0vg6m+JFEQwDwYDVR0TAQH/BAUwAwEB/zAOBgNV
+HQ8BAf8EBAMCAQYwDQYJKoZIhvcNAQELBQADggEBAAjscSpURTsy4xP2uC9UlsCn
+Lmb2bTWO+ejlcP2y5vsdP+cNaO8FtANbBPTkPV5+Kizu7a7L5QlDSuQxDEDWg54l
+3+1Ize0KPILPA1SC5SEkh4JpvG+wN1udm0ykFiQyCyET/wfoWe3O74nKyZTVgtq0
+09uLEVXaWBl3gZJ5NKOD73kM2StVyXsFkGEPz4FwVGMrQaFpPHHrzJOW3iU0xo3v
+aa+iyqy+FppmCRJZKyqP1n3Bzk7m9tzSfYNb8vdFsLA5DlkV1lAhtBoSbkLAsYPN
+gupdQ6qWEKa1z147s84N7ASbhYZhnluZs9t4gpYZ8PavMSggcPhYPxLDFshHkqo=
+-----END CERTIFICATE-----
+`;
+
 describe('describeWorkerTlsTrustGaps', () => {
   const daemonUrl = 'https://127.0.0.1:4170';
 
@@ -2554,6 +2694,46 @@ describe('describeWorkerTlsTrustGaps', () => {
     ).toBe(true);
   });
 
+  it('does not promise an anchor the serving file cannot hand the workers', () => {
+    // R23-9: when `--tls-cert` holds no block the workers' loader reads — a
+    // self-signed leaf exported by `openssl x509 -trustout` — the
+    // `servingBlocks === undefined` fallback forces the walk to treat the
+    // leaf as held, so it returns `anchored: true` for a certificate the
+    // workers never receive, and this branch told the operator the serving
+    // file "carries an anchor of its own" and to fix the CA file's
+    // permissions. Both claims are false in that state:
+    // `resolveWorkerCaCertPath`'s read-error fallback hands workers that
+    // unloadable file verbatim and their loader extracts nothing from it, so
+    // every handshake fails (measured on Node v22.23.2, worker shape:
+    // DEPTH_ZERO_SELF_SIGNED_CERT) and fixing the CA file changes nothing.
+    const trustLabelled = TEST_TLS_CERT_SELF_SIGNED_NON_CA.replace(
+      /^-----BEGIN CERTIFICATE-----([\s\S]*?)-----END CERTIFICATE-----/,
+      '-----BEGIN TRUSTED CERTIFICATE-----$1-----END TRUSTED CERTIFICATE-----',
+    );
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(trustLabelled),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+      operatorCaCertPath: '/root/ca/rootCA.pem',
+      operatorCaCertReadError: 'EACCES',
+    });
+    const readErrorGap = gaps.find((gap) =>
+      gap.includes('could not be read by the daemon (EACCES)'),
+    );
+    expect(readErrorGap).toBeDefined();
+    expect(readErrorGap).not.toContain('carries an anchor of its own');
+    expect(readErrorGap).not.toContain("Fix that file's permissions or path");
+    expect(readErrorGap).toContain('changes nothing');
+    // The outage itself keeps being named by the sibling gap.
+    expect(
+      gaps.some(
+        (gap) =>
+          gap.includes('holds no PEM certificate block') &&
+          gap.includes('Re-export --tls-cert as PEM'),
+      ),
+    ).toBe(true);
+  });
+
   it('names a self-signed terminator refused for keyUsage, not for CA:FALSE', () => {
     // R7-1: `cannotIssueCertificates` refuses a terminator for three
     // independent reasons and this branch described only one. A CA:TRUE root
@@ -2692,6 +2872,34 @@ describe('describeWorkerTlsTrustGaps', () => {
     expect(gaps[0]).not.toContain(
       'Point NODE_EXTRA_CA_CERTS at the issuing CA',
     );
+  });
+
+  it('names an intermediate whose extendedKeyUsage omits serverAuth', () => {
+    // R23-29: `tlsServerPurposeDefect` judged the LEAF alone, but OpenSSL's
+    // `check_purpose_ssl_server` applies the EKU test to every certificate
+    // in the chain — a CA:TRUE keyCertSign intermediate carrying only
+    // clientAuth walked to `anchored: true` and reported zero gaps while
+    // every worker handshake failed INVALID_PURPOSE (see the fixture's
+    // measurement note; `anyExtendedKeyUsage` does not rescue the chain
+    // either).
+    const gaps = describeWorkerTlsTrustGaps({
+      cert: Buffer.from(TEST_TLS_CERT_CLIENT_EKU_CHAIN),
+      certPath: '/certs/daemon.pem',
+      daemonUrl,
+    });
+    expect(gaps).toHaveLength(1);
+    expect(gaps[0]).toContain('qwen client-eku intermediate');
+    expect(gaps[0]).toContain('extendedKeyUsage does not include serverAuth');
+    expect(gaps[0]).toContain('INVALID_PURPOSE');
+    // The control: the same chain with a serverAuth-EKU intermediate
+    // authorizes and must stay quiet.
+    expect(
+      describeWorkerTlsTrustGaps({
+        cert: Buffer.from(TEST_TLS_CERT_SERVER_EKU_CHAIN),
+        certPath: '/certs/daemon.pem',
+        daemonUrl,
+      }),
+    ).toEqual([]);
   });
 
   it('names a chain that exceeds a CA pathLenConstraint', () => {
@@ -10876,6 +11084,33 @@ describe('runQwenServe channel worker supervisor', () => {
     expect(log).toContain('exact CA bundle workers receive');
     expect(log).toContain('INVALID_PURPOSE');
     expect(log).toContain('unsuitable certificate purpose');
+  });
+
+  it('skips the worker TLS trust check when NODE_TLS_REJECT_UNAUTHORIZED disables verification', async () => {
+    // R23-10: workers inherit NODE_TLS_REJECT_UNAUTHORIZED unscrubbed
+    // (createWorkerEnv copies the env wholesale) and dial via fetch, which
+    // honors it — a first-class mode in this project (`--insecure` sets
+    // it). The probe hardcodes `rejectUnauthorized: true`, so under ='0' it
+    // fails while every worker connects fine, and boot logged a certain
+    // outage for an outage that never happens. Measured on Node v22.23.2:
+    // probe UNABLE_TO_VERIFY_LEAF_SIGNATURE, worker fetch 200.
+    const workerTlsTrustVerifier = vi.fn().mockResolvedValue({
+      code: 'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+      message: 'unable to verify the first certificate',
+    });
+    process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '0';
+    try {
+      const log = await bootTlsDaemonForTrustGapLog(
+        '127.0.0.1',
+        { cert: TEST_TLS_CERT, key: TEST_TLS_KEY },
+        workerTlsTrustVerifier,
+      );
+      expect(workerTlsTrustVerifier).not.toHaveBeenCalled();
+      expect(log).toContain('NODE_TLS_REJECT_UNAUTHORIZED=0');
+      expect(log).not.toContain('exact CA bundle workers receive');
+    } finally {
+      delete process.env['NODE_TLS_REJECT_UNAUTHORIZED'];
+    }
   });
 
   it('normalizes a TLS trust probe process exit code before logging it', async () => {
