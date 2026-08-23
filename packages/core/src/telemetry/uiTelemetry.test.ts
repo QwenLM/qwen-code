@@ -1443,3 +1443,50 @@ describe('UiTelemetryService', () => {
     });
   });
 });
+
+describe('replay snapshot completeness', () => {
+  it('notifies listeners so the displayed session usage refreshes', () => {
+    const service = new UiTelemetryService();
+    const snapshot = service.snapshotForReplay('session-1');
+    const updates: unknown[] = [];
+    service.on('update', (payload) => updates.push(payload));
+
+    service.restoreFromReplaySnapshot(snapshot);
+
+    // SessionContext re-reads the displayed usage from this event; without it
+    // a rolled-back swap leaves the abandoned session's figure on screen.
+    expect(updates).toHaveLength(1);
+  });
+
+  it('returns every field a replay mutates to its pre-replay value', () => {
+    const service = new UiTelemetryService();
+    service.setLastPromptTokenCount(11);
+    service.setLastCachedContentTokenCount(22);
+    service.recordSkillInvocation('before', true, 'session-1');
+    const before = {
+      metrics: structuredClone(service.getMetrics()),
+      sessionMetrics: structuredClone(
+        service.getMetricsForSession('session-1'),
+      ),
+      lastPromptTokenCount: service.getLastPromptTokenCount(),
+      lastCachedContentTokenCount: service.getLastCachedContentTokenCount(),
+    };
+
+    const snapshot = service.snapshotForReplay('session-1');
+    // Stand in for a replay: touch every field the snapshot claims to cover.
+    service.resetSession('session-1');
+    service.recordSkillInvocation('replayed', true, 'session-1');
+    service.setLastPromptTokenCount(999);
+    service.setLastCachedContentTokenCount(888);
+    service.restoreFromReplaySnapshot(snapshot);
+
+    // A field added to the service but forgotten in the snapshot shows up here
+    // as a value that did not come back.
+    expect({
+      metrics: service.getMetrics(),
+      sessionMetrics: service.getMetricsForSession('session-1'),
+      lastPromptTokenCount: service.getLastPromptTokenCount(),
+      lastCachedContentTokenCount: service.getLastCachedContentTokenCount(),
+    }).toEqual(before);
+  });
+});

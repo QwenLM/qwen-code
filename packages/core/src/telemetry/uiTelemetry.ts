@@ -209,20 +209,22 @@ const createInitialMetrics = (): SessionMetrics => ({
 /**
  * The slice of telemetry state a session-swap replay overwrites.
  *
- * `/resume` and `/branch` take this snapshot immediately before client
- * initialization replays the incoming session's stored history. The rest of
- * initialization and background-agent recovery can still fail after that
- * replay. Their catch blocks roll core back to the old session, but the
- * service has no subtraction API — `resetSession` clears one bucket and
- * `reset()` would take the surviving session's live data with it — so an
- * abandoned swap would otherwise leak a full copy of the dead session's
- * history into the process-wide totals for the life of the process, and
- * `persistSessionUsage` would later write that inflated figure out.
+ * `GeminiClient.initialize()` takes this snapshot for itself, immediately
+ * before it replays the incoming session's stored history — it is the only
+ * caller that knows whether a replay is about to happen. Everything after
+ * that replay can still fail: the rest of initialization, background-agent
+ * recovery, building the resumed history, the UI swap. Those catch blocks
+ * roll core back to the old session, but the service has no subtraction API
+ * — `resetSession` clears one bucket and `reset()` would take the surviving
+ * session's live data with it — so an abandoned swap would otherwise leak a
+ * full copy of the dead session's history into the process-wide totals for
+ * the life of the process, and `persistSessionUsage` would later write that
+ * inflated figure out.
  *
- * Take one with {@link UiTelemetryService.snapshotForReplay} immediately
- * before replaying and hand it back to
- * {@link UiTelemetryService.restoreFromReplaySnapshot} whenever that replay
- * must be undone, including rollback and duplicate same-session replay paths.
+ * Callers do not take one directly; they ask the client to undo or settle the
+ * replay it performed ({@link GeminiClient.undoTelemetryReplay} /
+ * `settleTelemetryReplay`). Restore overwrites rather than subtracts, so it
+ * is safe to apply after a rollback has replayed something else on top.
  */
 export interface UiTelemetryReplaySnapshot {
   readonly metrics: SessionMetrics;
