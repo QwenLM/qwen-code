@@ -2270,6 +2270,147 @@ describe('OpenAIContentConverter', () => {
       ]);
     });
 
+    it('demotes a held balanced block delivered by per-token cumulative snapshots (issue #9348 R11-2)', () => {
+      // Entrance 2 regime gate: ordinary cumulative delivery — no replay —
+      // of a held balanced block used to throw PROTOCOL_TAG_LEAK at finish.
+      // Monotonic snapshots '<thinking>' → '<thinking>b' → … →
+      // '<thinking>body</thinking>' → '<thinking>body</thinking>Answer'
+      // reach the strip zone on the tag-hold overlap-verbatim regime, where
+      // the closer-leading remainder is the held block's OWN completion;
+      // entrance 2 read it as a genuine nested respell and appended the
+      // whole snapshot, re-spelling the opener+body into the candidate so
+      // the block never balanced. The identical stream with the closer
+      // split across snapshots demoted cleanly. Overlap-regime
+      // closer-leading remainders strip instead; only genuinely fresh
+      // deltas keep the R8-1 append direction.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      for (const snapshot of [
+        '<thinking>',
+        '<thinking>b',
+        '<thinking>bo',
+        '<thinking>bod',
+        '<thinking>body',
+      ]) {
+        expect(
+          converter.convertOpenAIChunkToGemini(
+            streamChunk(`snapshot-${snapshot.length}`, { content: snapshot }),
+            stream,
+          ).candidates?.[0]?.content?.parts,
+        ).toEqual([]);
+      }
+
+      const completed = converter.convertOpenAIChunkToGemini(
+        streamChunk('snapshot-complete', {
+          content: '<thinking>body</thinking>',
+        }),
+        stream,
+      );
+      expect(completed.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'body' },
+      ]);
+
+      const finish = converter.convertOpenAIChunkToGemini(
+        streamChunk(
+          'answer',
+          { content: '<thinking>body</thinking>Answer' },
+          'stop',
+        ),
+        stream,
+      );
+      expect(finish.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'Answer' },
+      ]);
+    });
+
+    it('recombines a sub-word held candidate with its cumulative re-send instead of leaking raw tags (issue #9348 R11-2)', () => {
+      // Sub-word entrance: tagHoldActive used to fire for sub-word held
+      // candidates ('<t', '<thi'), verbatim-emitting a cumulative re-send
+      // the superset strip is gated off for (the strip needs a full tag
+      // word in the candidate). The re-send concatenated onto the
+      // candidate and reached visible output as raw tags —
+      // '<t<thinking>body</thinking>Answer' — where the single-chunk twin
+      // demoted cleanly. Sub-word candidates are restricted out of the
+      // verbatim guard: slicing the overlap recombines the suffix with the
+      // held prefix in the guard zone.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const subword = converter.convertOpenAIChunkToGemini(
+        streamChunk('sub-word', { content: '<t' }),
+        stream,
+      );
+      expect(subword.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingThinkingTagCandidate).toEqual({ text: '<t' });
+
+      const resend = converter.convertOpenAIChunkToGemini(
+        streamChunk(
+          'cumulative-resend',
+          { content: '<thinking>body</thinking>Answer' },
+          'stop',
+        ),
+        stream,
+      );
+      expect(resend.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'body' },
+        { text: 'Answer' },
+      ]);
+    });
+
+    it('appends a fresh nested respell whose body ends in whitespace (issue #9348 R11-2)', () => {
+      // Entrance 2's closer anchor used to require the closing tag
+      // immediately after the candidate prefix: a nested body ending in
+      // whitespace ('<thinking>b </thinking>' as a fresh respell delta)
+      // missed the anchor, was stripped, demoted early, and the turn threw
+      // PROTOCOL_TAG_LEAK when the genuine outer closer arrived. The anchor
+      // is whitespace-tolerant on genuinely fresh deltas.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const demoted = converter.convertOpenAIChunkToGemini(
+        streamChunk('first-block', {
+          content: '<thinking>a</thinking><thinking>b',
+        }),
+        stream,
+      );
+      expect(demoted.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingThinkingTagCandidate).toEqual({
+        text: '<thinking>b',
+      });
+
+      const nested = converter.convertOpenAIChunkToGemini(
+        streamChunk('nested-respell', { content: '<thinking>b </thinking>' }),
+        stream,
+      );
+      expect(nested.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingThinkingTagCandidate).toEqual({
+        text: '<thinking>b<thinking>b </thinking>',
+      });
+
+      const rest = converter.convertOpenAIChunkToGemini(
+        streamChunk('rest', { content: 'c</thinking>Answer' }, 'stop'),
+        stream,
+      );
+      expect(rest.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'a' },
+        { thought: true, text: 'b<thinking>b </thinking>c' },
+        { text: 'Answer' },
+      ]);
+    });
+
     it('does not inflate emittedLength when the tag-hold overlap guard fires on a long snapshot (issue #9348 R11-3)', () => {
       // `state.emittedLength += rawDelta.length` on the non-cumulative
       // tag-hold overlap guard double-counted the overlap bytes — the held

@@ -121,6 +121,14 @@ function normalizeStreamingTextDelta(
   rawDelta: string,
   state: StreamingTextDeltaState,
 ): string {
+  // Per-call regime signal for the guard zone: true only when this delta is
+  // emitted verbatim by one of the tag-hold overlap guards below (prefix
+  // overlap against the baseline while a pre-demotion opening-shaped
+  // candidate is held). A delta on that path is a cumulative re-send of the
+  // held block's bytes until proven otherwise, while the identical shape on
+  // any other path is genuinely fresh content — content comparison alone
+  // cannot tell them apart (issue #9348 R11-2).
+  state.tagHoldVerbatimEmission = false;
   if (rawDelta.length === 0) {
     return '';
   }
@@ -149,6 +157,7 @@ function normalizeStreamingTextDelta(
         // degrades to duplicated content inside the hidden thought
         // channel, which the depth-counting scanner absorbs, rather than
         // failing a legitimate turn (issue #9348 R8-1).
+        state.tagHoldVerbatimEmission = true;
         state.emittedText = rawDelta;
         state.emittedLength = rawDelta.length;
         return rawDelta;
@@ -205,6 +214,7 @@ function normalizeStreamingTextDelta(
       // chunk length once the snapshot reaches the detection window, making
       // baselineFrozenAtCap fire on the next cumulative transition and
       // over-slice or re-emit the whole cumulative text (issue #9348 R11-3).
+      state.tagHoldVerbatimEmission = true;
       state.emittedText = rawDelta;
       state.emittedLength = rawDelta.length;
       return rawDelta;
@@ -1545,6 +1555,10 @@ export function convertOpenAIChunkToGemini(
   if (choice) {
     let parts: Part[] = [];
     let contentParts: Part[] = [];
+    // The content-channel normalizer's regime signal for this chunk (set
+    // below when the content delta is normalized; read by the held-candidate
+    // superset strip further down).
+    let tagHoldVerbatimEmission = false;
 
     // Handle reasoning content (thoughts).
     const reasoningText =
@@ -1563,17 +1577,31 @@ export function convertOpenAIChunkToGemini(
       // user; a prefix-overlapping chunk carrying a full opening tag word is
       // then undecidable between a cumulative re-send and a genuine nested
       // opener, so emit it verbatim instead of slicing it (issue #9348 R8-1).
+      // The guard is restricted to candidates that already carry a full
+      // opening tag word: a sub-word candidate ('<t', '<thi') cannot itself
+      // be mistaken for a nested opener, and slicing the overlap recombines
+      // the suffix with the held prefix in the guard zone. Verbatim-emitting
+      // sub-word candidates instead concatenates the whole re-send onto the
+      // candidate and leaks raw tags on ordinary cumulative delivery
+      // (issue #9348 R11-2 entrance 1).
       const heldOpeningTagCandidate =
         requestContext.pendingThinkingTagCandidate;
       contentDeltaState.tagHoldActive =
         requestContext.inlineThinkingBlockDemoted !== true &&
         heldOpeningTagCandidate !== undefined &&
         heldOpeningTagCandidate.closingTagName === undefined &&
-        !heldOpeningTagCandidate.text.trimStart().startsWith('</');
+        !heldOpeningTagCandidate.text.trimStart().startsWith('</') &&
+        OPENING_THINKING_TAG_WORD_PATTERN.test(heldOpeningTagCandidate.text);
       const normalizedContent = normalizeStreamingTextDelta(
         choice.delta.content,
         contentDeltaState,
       );
+      // Capture the normalizer's regime signal for the guard zone below:
+      // true when this delta was emitted verbatim by a tag-hold overlap
+      // guard, i.e. it is a cumulative re-send candidate rather than a
+      // genuinely fresh delta (issue #9348 R11-2).
+      tagHoldVerbatimEmission =
+        contentDeltaState.tagHoldVerbatimEmission === true;
       // Skip empty-string push mid-stream; still call on finish_reason to
       // flush any buffered tagged-thinking content.
       if (normalizedContent || choice.finish_reason) {
@@ -1860,18 +1888,22 @@ export function convertOpenAIChunkToGemini(
     //   reassembles an early-balancing block whose leftover stray closer
     //   fails the turn mid-stream; appending it lets the depth-counting
     //   scanner absorb the nested block instead.
-    // - Never strip when the bytes immediately after the held candidate's
-    //   prefix form a closing tag: that shape (a net-zero delta, so the
-    //   net-closing guard lets it through) is a genuine nested block whose
-    //   opener + partial body coincidentally re-spell the held candidate —
-    //   e.g. held '<thinking>b' and a nested '<thinking>b</thinking>' chunk.
-    //   Stripping merges the nested closer against the candidate's opener
-    //   into an early-balancing flat block, corrupting a real thinking block
-    //   chunking-dependently (the single-chunk twin demotes cleanly), so
-    //   append it instead and let the depth-counting scanner absorb the
-    //   nested block. A renormalized re-send that EXTENDS the candidate's
-    //   body ('<thinking>x' re-sent as '<thinking>xyz…') still strips: its
-    //   remainder starts with body text, not a closer (issue #9348 R8-1).
+    // - On a genuinely fresh delta, never strip when the bytes immediately
+    //   after the held candidate's prefix form a closing tag: that shape (a
+    //   net-zero delta, so the net-closing guard lets it through) is a
+    //   genuine nested block whose opener + partial body coincidentally
+    //   re-spell the held candidate — e.g. held '<thinking>b' and a nested
+    //   '<thinking>b</thinking>' chunk. Stripping merges the nested closer
+    //   against the candidate's opener into an early-balancing flat block,
+    //   corrupting a real thinking block chunking-dependently (the
+    //   single-chunk twin demotes cleanly), so append it instead and let the
+    //   depth-counting scanner absorb the nested block. On the tag-hold
+    //   overlap-verbatim regime the identical shape is the held block's own
+    //   cumulative snapshot completing its closer, so it strips instead —
+    //   see entrance 2 below (issue #9348 R8-1, R11-2). A re-send that
+    //   EXTENDS the candidate's body ('<thinking>x' re-sent as
+    //   '<thinking>xyz…') still strips: its remainder starts with body
+    //   text, not a closer.
     // - Closing-shaped candidates ('</think…' held before the '>' arrives)
     //   have no open depth: their renormalized re-send IS net-closing, and
     //   the net-closing guard would skip the strip and concatenate the
@@ -1901,7 +1933,19 @@ export function convertOpenAIChunkToGemini(
         //    opening-word equal re-send the equality drop deliberately
         //    appended; stripping would empty it and lose the block;
         //  (entrance 2) the bytes right after the candidate prefix open with
-        //    a closing tag — held '<thinking>b' + nested '<thinking>b</thinking>';
+        //    a closing tag — held '<thinking>b' + nested '<thinking>b</thinking>'.
+        //    The anchor is whitespace-tolerant so a nested body ending in
+        //    whitespace ('<thinking>b </thinking>') still matches. This
+        //    entrance applies only to genuinely fresh deltas: on the
+        //    tag-hold overlap-verbatim regime the same shape is the held
+        //    block's OWN cumulative snapshot completing its closer —
+        //    ordinary per-token cumulative delivery — and appending it
+        //    re-spells the block's opener+body into the candidate so the
+        //    block never balances and the turn fails closed at finish.
+        //    Overlap-regime deltas therefore strip: the remainder carries
+        //    exactly the completing bytes (issue #9348 R11-2 entrance 2).
+        //    A fresh delta re-spelling the candidate stays undecidable and
+        //    keeps the R8-1 append direction;
         //  (entrance 3) the candidate is a bare opener and the delta is a
         //    complete balanced block — held '<thinking>' + nested
         //    '<thinking>inner</thinking>'.
@@ -1916,7 +1960,8 @@ export function convertOpenAIChunkToGemini(
         const genuineNestedRespell =
           !stripCandidateIsClosingShaped &&
           (remainder === '' ||
-            /^<\/think(?:ing)?\s*>/i.test(remainder) ||
+            (!tagHoldVerbatimEmission &&
+              /^\s*<\/think(?:ing)?\s*>/i.test(remainder)) ||
             (candidateIsBareOpener &&
               deltaBalancedBlocks !== undefined &&
               deltaBalancedBlocks.rest === ''));

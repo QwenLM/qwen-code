@@ -46,6 +46,16 @@ export interface StreamingTextDeltaState {
    * is undecidable from a cumulative re-send by prefix comparison alone.
    */
   tagHoldActive?: boolean;
+  /**
+   * Per-delta regime signal written by normalizeStreamingTextDelta: true
+   * when the last delta was emitted verbatim by one of the tag-hold overlap
+   * guards (prefix overlap against the baseline while `tagHoldActive` was
+   * set). The guard zone reads it to decide strip-vs-append for shapes that
+   * are byte-identical between a cumulative re-send of the held block and a
+   * genuinely fresh nested respell — content comparison alone cannot tell
+   * them apart (issue #9348 R11-2).
+   */
+  tagHoldVerbatimEmission?: boolean;
 }
 
 export interface RequestContext {
