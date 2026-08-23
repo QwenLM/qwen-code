@@ -137,6 +137,8 @@ export const playgroundMessagingHandle: PlaygroundMessagingHandle = {
 export const mockElectronAPI = {
   isDebugMode: async () => true,
 
+  copyToClipboard: (text: string) => navigator.clipboard.writeText(text),
+
   // Called at module-load time by SessionFilesSection.tsx (and others) to
   // branch between Electron and web-UI rendering. Must be synchronous.
   getRuntimeEnvironment: (): 'electron' | 'web' => 'electron',

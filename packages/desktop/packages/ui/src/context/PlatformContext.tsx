@@ -69,7 +69,7 @@ export interface PlatformActions {
 
   /**
    * Copy text to clipboard
-   * Uses the native platform clipboard when available, with browser fallback.
+   * Uses the clipboard implementation provided by the host platform.
    */
   onCopyToClipboard?: (text: string) => Promise<void>
 
@@ -137,7 +137,7 @@ export interface PlatformProviderProps {
  * <PlatformProvider actions={{
  *   onOpenFile: (path) => window.electronAPI.openFile(path),
  *   onOpenUrl: (url) => window.electronAPI.openUrl(url),
- *   onCopyToClipboard: (text) => navigator.clipboard.writeText(text),
+ *   onCopyToClipboard: (text) => window.electronAPI.copyToClipboard(text),
  * }}>
  *   <SessionViewer session={session} />
  * </PlatformProvider>

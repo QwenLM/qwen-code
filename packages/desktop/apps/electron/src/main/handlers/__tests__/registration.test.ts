@@ -10,7 +10,6 @@ mock.module('electron', () => ({
     handle: () => {},
     on: () => {},
   },
-  clipboard: { writeText: () => {} },
   // Minimal stubs for symbols imported by IPC domain modules
   app: {
     isPackaged: false,

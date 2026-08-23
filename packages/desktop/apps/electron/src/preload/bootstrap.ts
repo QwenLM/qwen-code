@@ -17,7 +17,7 @@
  */
 
 import '@sentry/electron/preload'
-import { contextBridge, ipcRenderer, shell, webUtils } from 'electron'
+import { clipboard, contextBridge, ipcRenderer, shell, webUtils } from 'electron'
 import { WsRpcClient, type TransportConnectionState } from '../transport/client'
 import { RoutedClient } from '../transport/routed-client'
 import { buildClientApi } from '../transport/build-api'
@@ -187,6 +187,9 @@ client.handleCapability(CLIENT_OPEN_FILE_DIALOG, async (spec: FileDialogSpec) =>
 const api = buildClientApi(client, CHANNEL_MAP, (ch) => client.isChannelAvailable(ch))
 
 ;(api as any).getRuntimeEnvironment = (): 'electron' | 'web' => 'electron'
+;(api as ElectronAPI).copyToClipboard = async (text: string) => {
+  clipboard.writeText(text)
+}
 
 // ---------------------------------------------------------------------------
 // Transport connection state logging (for remote connections)

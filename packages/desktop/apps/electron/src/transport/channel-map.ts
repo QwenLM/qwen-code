@@ -106,7 +106,6 @@ export const CHANNEL_MAP = {
 
   // System
   getVersions: invoke(RPC_CHANNELS.system.VERSIONS),
-  copyToClipboard: invoke(RPC_CHANNELS.system.COPY_TO_CLIPBOARD),
   getHomeDir: invoke(RPC_CHANNELS.system.HOME_DIR),
   isDebugMode: invoke(RPC_CHANNELS.system.IS_DEBUG_MODE),
 
