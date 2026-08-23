@@ -3,6 +3,10 @@
 Agent Board lets independently started agents share work through files on the
 same machine. It does not start, join, monitor, or send input to agent processes.
 
+It is a low-level interoperability surface, not the Qwen Agent Team scheduler or
+the cross-session messaging transport. A task owner is only a recorded label;
+it does not start or wake a Qwen Code, Codex, or other agent process.
+
 > Experimental. The on-disk format may change between releases.
 
 ## Use a board

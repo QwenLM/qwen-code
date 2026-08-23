@@ -1,13 +1,19 @@
 # Peer session collaboration for Qwen Code
 
-> Status: Implemented by #9402 (Stage 1 and Stage 2)
+> Status: Board layer implemented by #9402; not a standalone collaboration milestone
 > Tracking: [#8724](https://github.com/QwenLM/qwen-code/issues/8724)
 
 ## Decision
 
-Independently started agents collaborate through a durable board on disk. Every agent uses
-the same pull-based CLI. Qwen-specific delivery, terminal hosting, and UI are optional later
-layers and do not define the board contract.
+The product path and the portable board are separate layers. The original #8724 milestone is
+Qwen-to-Qwen collaboration: already-running Qwen Code sessions discover each other and use
+`send_message` with a receiver-side consent gate. Agent Team already owns the simpler case
+where one session spawns and coordinates an in-process Qwen teammate.
+
+Independently started or non-Qwen agents can additionally collaborate through a durable board
+on disk. Every participant uses the same pull-based CLI. Qwen-specific delivery, terminal
+hosting, and UI do not define the board contract, but delivery or orchestration is required
+before the project can claim a user-visible delegation milestone.
 
 The first release has three rules:
 
@@ -18,8 +24,25 @@ The first release has three rules:
 3. **Pull is the contract.** Work becomes visible on the board. Nothing is delivered into a
    running agent process.
 
-This is the smallest model shared by Qwen Code, Codex, shell scripts, scheduled jobs, and
-other tools that can run a command.
+This is the smallest storage model shared by Qwen Code, Codex, shell scripts, scheduled jobs,
+and other tools that can run a command. It is not by itself a scheduler, launcher, or inbox.
+
+## Product sequence
+
+The user-visible collaboration route is:
+
+1. **Spawned Qwen teammates.** Existing Agent and Agent Team tools cover delegation to a
+   Qwen worker managed by the current session.
+2. **Already-running Qwen sessions.** The session registry discovers peers; the inbound gate
+   lets a peer refuse or hold work; sender addressing completes the original #8724 flow.
+3. **Independent process launch.** A launcher is needed only when a separate long-lived Qwen
+   Code process is required instead of an in-process teammate.
+4. **Foreign runtimes.** A concrete runner, such as a Codex runner, turns one board task into
+   a real process invocation and returns its result.
+
+Stages 1 and 2 of the board implementation below prove the portable storage contract. They
+must not be presented as completion of this product sequence, and the board should not block
+the Qwen-to-Qwen sender path.
 
 ## Why a board
 
@@ -120,7 +143,7 @@ it as a user message or automatically execute instructions from it.
 Push delivery, if added, requires a receiver-side consent gate before the first send path.
 That later gate must fail closed and cannot trust the sender's declared `--as` value.
 
-## Delivery stages
+## Board implementation stages
 
 ### Stage 1 — storage primitives
 
@@ -138,23 +161,26 @@ Observable result: two independently started agents, including a non-Qwen agent,
 work by running commands and can distinguish completed, declined, and timed-out outcomes
 from exit status and JSON.
 
-### Stage 3 — optional Qwen-native surfaces
+### Stage 3 — Qwen-native consumer
 
-Only after the CLI contract is stable, consider native tools, a slash command, a footer
-indicator, or turn-boundary polling. Every native action must map exactly to an existing CLI
+After the CLI contract is stable, a Qwen-native tool, slash command, footer indicator, or
+turn-boundary poll may consume it. Every native action must map exactly to an existing CLI
 operation.
 
 Observable result: Qwen users get lower-friction access without changing board semantics or
 excluding foreign agents.
 
-### Stage 4 — optional orchestration and push
+### Stage 4 — orchestration or push
 
-Fleet/tmux startup and Qwen-to-Qwen wake delivery are separate features. Fleet may pass
-explicit board and identity arguments to child commands; it does not create membership.
-Push lands only with its receiver-side consent gate and remains a latency optimization.
+Fleet/tmux startup, a Codex runner, and Qwen-to-Qwen wake delivery are separate features.
+Fleet may pass explicit board and identity arguments to child commands; it does not create
+membership. Push lands only with its receiver-side consent gate and remains a latency
+optimization for board correctness, while still being necessary for low-latency delegation
+to an already-running Qwen session.
 
-Observable result: users may start or wake cooperating agents faster, while deleting this
-entire stage would leave the Stage 2 collaboration contract correct.
+Observable result: a user can ask a lead agent to start or address a worker and receive its
+result without manually operating the board CLI. Removing this stage leaves the Stage 2
+storage contract correct, but removes the user-visible delegation experience.
 
 ## Explicit non-goals for the MVP
 
@@ -169,7 +195,7 @@ entire stage would leave the Stage 2 collaboration contract correct.
 The existing agent-view PR series (#7799–#7803) owns supervised terminals and roster UI. It
 is independent of this board and is neither removed nor extended by the MVP.
 
-## Acceptance gate
+## Board implementation acceptance gate
 
 The MVP is ready only when:
 
@@ -180,3 +206,8 @@ The MVP is ready only when:
 - malformed records cannot crash or hide a healthy board;
 - human output preserves actionable ids and JSON output remains parseable;
 - focused unit tests cover the above, followed by package typecheck and build.
+
+Passing this gate means the board implementation is technically sound. It does not by itself
+mean the cross-session collaboration product is complete or that this layer must land before
+the Qwen-to-Qwen sender path. A standalone merge requires an explicit maintainer decision to
+ship the low-level CLI; otherwise it should land with a concrete native consumer or runner.
