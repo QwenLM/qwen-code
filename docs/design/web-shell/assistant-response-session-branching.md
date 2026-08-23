@@ -702,7 +702,8 @@ Core fork input includes that title, and Core appends its `custom_title` record
 inside the staged transcript. There is no post-publication rename transaction.
 Use the source session's picker display name (`customTitle || prompt`) as the
 base, remove an existing generated fork suffix, and append the lowest available
-numeric suffix: `Title(1)`, `Title(2)`, and so on.
+numeric suffix: `Title(1)`, `Title(2)`, and so on. Explicitly requested names
+remain unchanged before suffix allocation.
 
 ### 14.2 Temporary resources
 

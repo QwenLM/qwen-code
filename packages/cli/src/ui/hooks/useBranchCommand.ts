@@ -12,6 +12,7 @@ import {
   type ResumedSessionData,
   SessionStartSource,
   computeUniqueBranchTitle,
+  normalizeDerivedBranchTitle,
 } from '@qwen-code/qwen-code-core';
 import {
   buildResumedHistoryItems,
@@ -140,6 +141,7 @@ export function useBranchCommand(
         //    a stale `lastCompletedUuid` and the next user message attaches
         //    its parentUuid to a record that's no longer the JSONL tail.
         const outgoingRecording = config.getChatRecordingService();
+        const sourceCustomTitle = outgoingRecording?.getCurrentCustomTitle();
         outgoingRecording?.finalize();
         await outgoingRecording?.flush();
 
@@ -168,7 +170,10 @@ export function useBranchCommand(
         //    title write leaves the parent active and the catch path removes
         //    the incomplete fork.
         const baseName =
-          name ?? deriveFirstPrompt(provisional.conversation.messages);
+          name ??
+          (sourceCustomTitle
+            ? normalizeDerivedBranchTitle(sourceCustomTitle)
+            : deriveFirstPrompt(provisional.conversation.messages));
         const effectiveTitle = await computeUniqueBranchTitle(
           baseName,
           sessionService,

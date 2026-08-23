@@ -126,6 +126,7 @@ test('branches from an earlier completed Assistant response and resumes the fork
     `/session/${encodeURIComponent(scenario.sessionId)}/branch`,
   );
   expect(requestBodyRecord(branchRequest)).toEqual({
+    name: 'E2E Harness Session',
     atRecordId: branchRecordId,
   });
   await expect(page).toHaveURL(

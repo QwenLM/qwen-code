@@ -2608,25 +2608,35 @@ export class SessionService {
     return this.readSessionTitleFromFile(filePath);
   }
 
+  private async readSessionDisplayNameFromFile(
+    filePath: string,
+    titleInfo = this.readSessionTitleInfoFromFile(filePath),
+  ): Promise<string | undefined> {
+    const records = await jsonl.readLines<ChatRecord>(
+      filePath,
+      titleInfo.title ? 1 : MAX_PROMPT_SCAN_LINES,
+    );
+    if (records.length === 0) return undefined;
+    if (
+      !(await this.sessionBelongsToCurrentProject(
+        records[0].sessionId,
+        records[0].cwd,
+      ))
+    ) {
+      return undefined;
+    }
+    return (
+      titleInfo.title ||
+      this.extractFirstPromptFromRecords(records) ||
+      undefined
+    );
+  }
+
   async getSessionDisplayName(sessionId: string): Promise<string | undefined> {
     if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) return undefined;
     const filePath = path.join(this.getChatsDir(), `${sessionId}.jsonl`);
     try {
-      const title = this.readSessionTitleFromFile(filePath);
-      const records = await jsonl.readLines<ChatRecord>(
-        filePath,
-        title ? 1 : MAX_PROMPT_SCAN_LINES,
-      );
-      if (records.length === 0) return undefined;
-      if (
-        !(await this.sessionBelongsToCurrentProject(
-          records[0].sessionId,
-          records[0].cwd,
-        ))
-      ) {
-        return undefined;
-      }
-      return title || this.extractFirstPromptFromRecords(records) || undefined;
+      return await this.readSessionDisplayNameFromFile(filePath);
     } catch {
       return undefined;
     }
@@ -2771,22 +2781,12 @@ export class SessionService {
       }
 
       try {
-        const records = await jsonl.readLines<ChatRecord>(
+        const displayName = await this.readSessionDisplayNameFromFile(
           filePath,
-          titleInfo.title ? 1 : MAX_PROMPT_SCAN_LINES,
+          titleInfo,
         );
-        if (records.length === 0) continue;
-        const displayName =
-          titleInfo.title || this.extractFirstPromptFromRecords(records);
+        if (!displayName) continue;
         if (!displayName.toLowerCase().trim().startsWith(normalizedPrefix)) {
-          continue;
-        }
-        if (
-          !(await this.sessionBelongsToCurrentProject(
-            records[0].sessionId,
-            records[0].cwd,
-          ))
-        ) {
           continue;
         }
         titles.push(displayName);
@@ -3071,4 +3071,12 @@ export async function computeUniqueBranchTitle(
     const candidate = `${trimmed}(${n})`;
     if (!taken.has(candidate.toLowerCase())) return candidate;
   }
+}
+
+export function normalizeDerivedBranchTitle(baseName: string): string {
+  return baseName
+    .trim()
+    .replace(/\s*\(Branch(?:\s+\d+)?\)$/, '')
+    .replace(/(\S)\(\d+\)$/, '$1')
+    .trim();
 }

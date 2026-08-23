@@ -622,6 +622,13 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     readonly errorKind = 'session_writer_unavailable';
   },
   computeUniqueBranchTitle: vi.fn(async (baseName: string) => `${baseName}(1)`),
+  normalizeDerivedBranchTitle: vi.fn((baseName: string) =>
+    baseName
+      .trim()
+      .replace(/\s*\(Branch(?:\s+\d+)?\)$/, '')
+      .replace(/(\S)\(\d+\)$/, '$1')
+      .trim(),
+  ),
   Storage: {
     getGlobalQwenDir: vi.fn(() => '/tmp/qwen-global-test'),
     getGlobalTempDir: vi.fn(() => '/tmp/qwen-global-temp'),
@@ -15653,24 +15660,75 @@ describe('QwenAgent extMethod renameSession routing', () => {
     {
       sourceTitle: 'Source session(2)',
       name: undefined,
+      atRecordId: undefined,
+      persistedDisplayName: undefined,
+      expectedTitle: 'Source session(1)',
+    },
+    {
+      sourceTitle: 'Source session(2)',
+      name: 'Source session(2)',
+      atRecordId: 'checkpoint-1',
       persistedDisplayName: undefined,
       expectedTitle: 'Source session(1)',
     },
     {
       sourceTitle: 'Recorder title',
       name: 'Picker title(2)',
+      atRecordId: undefined,
       persistedDisplayName: undefined,
-      expectedTitle: 'Picker title(1)',
+      expectedTitle: 'Picker title(2)(1)',
+    },
+    {
+      sourceTitle: 'Recorder title',
+      name: 'Roadmap (2026)',
+      atRecordId: undefined,
+      persistedDisplayName: undefined,
+      expectedTitle: 'Roadmap (2026)(1)',
+    },
+    {
+      sourceTitle: 'Source session (Branch)',
+      name: undefined,
+      atRecordId: undefined,
+      persistedDisplayName: undefined,
+      expectedTitle: 'Source session(1)',
+    },
+    {
+      sourceTitle: 'Source session (Branch 2)',
+      name: undefined,
+      atRecordId: undefined,
+      persistedDisplayName: undefined,
+      expectedTitle: 'Source session(1)',
     },
     {
       sourceTitle: undefined,
       name: undefined,
+      atRecordId: undefined,
       persistedDisplayName: 'Prompt session',
       expectedTitle: 'Prompt session(1)',
     },
+    {
+      sourceTitle: undefined,
+      name: 'Sprint (2)',
+      atRecordId: 'checkpoint-2',
+      persistedDisplayName: 'Sprint (2)',
+      expectedTitle: 'Sprint (2)(1)',
+    },
+    {
+      sourceTitle: undefined,
+      name: undefined,
+      atRecordId: undefined,
+      persistedDisplayName: undefined,
+      expectedTitle: '550e8400(1)',
+    },
   ])(
     'derives the branch title from $sourceTitle',
-    async ({ sourceTitle, name, persistedDisplayName, expectedTitle }) => {
+    async ({
+      sourceTitle,
+      name,
+      atRecordId,
+      persistedDisplayName,
+      expectedTitle,
+    }) => {
       const recording = makeRecordingService();
       recording.getCurrentCustomTitle.mockReturnValue(sourceTitle);
       const sessionService = {
@@ -15693,20 +15751,27 @@ describe('QwenAgent extMethod renameSession routing', () => {
           cwd: '/tmp',
           sessionId: liveSessionId,
           ...(name !== undefined ? { name } : {}),
+          ...(atRecordId !== undefined ? { atRecordId } : {}),
         },
       );
 
       expect(sessionService.forkSession).toHaveBeenCalledWith(
         liveSessionId,
         expect.any(String),
-        { title: expectedTitle },
+        {
+          title: expectedTitle,
+          ...(atRecordId !== undefined ? { atRecordId } : {}),
+        },
       );
       expect(result).toMatchObject({
         title: expectedTitle,
         displayName: expectedTitle,
       });
       expect(sessionService.getSessionDisplayName).toHaveBeenCalledTimes(
-        sourceTitle === undefined && name === undefined ? 1 : 0,
+        sourceTitle === undefined &&
+          (name === undefined || atRecordId !== undefined)
+          ? 1
+          : 0,
       );
 
       mockConnectionState.resolve();

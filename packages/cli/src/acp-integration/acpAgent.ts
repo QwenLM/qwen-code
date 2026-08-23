@@ -77,6 +77,7 @@ import {
   subagentGenerator,
   redactUrlCredentials,
   computeUniqueBranchTitle,
+  normalizeDerivedBranchTitle,
   BranchPointInvalidError,
   parseGoalSnapshotV2,
   parseGoalStateCause,
@@ -1137,11 +1138,9 @@ function getLoadReplayPageSize(params: LoadSessionRequest): number | undefined {
   return value as number;
 }
 
-function normalizeBranchBaseName(value: unknown): string | undefined {
+function normalizeRequestedBranchName(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
-  const normalized = value
-    .replace(/\s*(?:\(Branch(?:\s+\d+)?\)|\(\d+\))\s*$/, '')
-    .trim();
+  const normalized = value.trim();
   return normalized || undefined;
 }
 function createHiddenWorkspaceMemoryConfig(config: Config): Config {
@@ -12002,15 +12001,27 @@ class QwenAgent implements Agent {
                   const recording = sourceConfig.getChatRecordingService();
                   const sessionService = sourceConfig.getSessionService();
 
+                  const requestedName = normalizeRequestedBranchName(name);
+                  const resolveSourceDisplayName =
+                    requestedName === undefined || atRecordId !== undefined;
+                  const sourceCustomTitle = resolveSourceDisplayName
+                    ? recording?.getCurrentCustomTitle()
+                    : undefined;
+                  const persistedDisplayName =
+                    resolveSourceDisplayName && sourceCustomTitle === undefined
+                      ? await sessionService.getSessionDisplayName(sessionId)
+                      : undefined;
+                  const sourceDisplayName =
+                    sourceCustomTitle ?? persistedDisplayName;
+                  const derivedBaseName = sourceCustomTitle
+                    ? normalizeDerivedBranchTitle(sourceCustomTitle)
+                    : sourceDisplayName;
                   const baseName =
-                    normalizeBranchBaseName(name) ??
-                    normalizeBranchBaseName(
-                      recording?.getCurrentCustomTitle(),
-                    ) ??
-                    normalizeBranchBaseName(
-                      await sessionService.getSessionDisplayName(sessionId),
-                    ) ??
-                    sessionId.slice(0, 8);
+                    requestedName === undefined
+                      ? (derivedBaseName ?? sessionId.slice(0, 8))
+                      : requestedName === sourceDisplayName
+                        ? (derivedBaseName ?? requestedName)
+                        : requestedName;
 
                   const title = await computeUniqueBranchTitle(
                     baseName,
@@ -12048,11 +12059,14 @@ class QwenAgent implements Agent {
         const recording = sourceConfig.getChatRecordingService();
         if (recording) await recording.flush();
         const sessionService = sourceConfig.getSessionService();
-        const title =
-          typeof name === 'string' && name.trim().length > 0
-            ? name.trim()
-            : (normalizeBranchBaseName(recording?.getCurrentCustomTitle()) ??
-              sessionId.slice(0, 8));
+        const requestedName = normalizeRequestedBranchName(name);
+        let title = requestedName;
+        if (title === undefined) {
+          const sourceCustomTitle = recording?.getCurrentCustomTitle();
+          title = sourceCustomTitle
+            ? normalizeDerivedBranchTitle(sourceCustomTitle)
+            : sessionId.slice(0, 8);
+        }
         const newSessionId = randomUUID();
         const fork = () =>
           sessionService.forkSession(sessionId, newSessionId, {

@@ -20,6 +20,7 @@ describe('useBranchCommand', () => {
   let renameSession: ReturnType<typeof vi.fn>;
   let finalize: ReturnType<typeof vi.fn>;
   let flush: ReturnType<typeof vi.fn>;
+  let getCurrentCustomTitle: ReturnType<typeof vi.fn>;
   let startNewSessionConfig: ReturnType<typeof vi.fn>;
   let getGoalRuntimeReady: ReturnType<typeof vi.fn>;
   let startNewSessionUI: ReturnType<typeof vi.fn>;
@@ -94,6 +95,7 @@ describe('useBranchCommand', () => {
     });
     finalize = vi.fn();
     flush = vi.fn().mockResolvedValue(undefined);
+    getCurrentCustomTitle = vi.fn().mockReturnValue(undefined);
     findSessionTitlesByPrefix = vi.fn().mockResolvedValue([]);
     startNewSessionConfig = vi.fn();
     getGoalRuntimeReady = vi.fn().mockResolvedValue({});
@@ -133,7 +135,11 @@ describe('useBranchCommand', () => {
         renameSession,
         findSessionTitlesByPrefix,
       }),
-      getChatRecordingService: () => ({ finalize, flush }),
+      getChatRecordingService: () => ({
+        finalize,
+        flush,
+        getCurrentCustomTitle,
+      }),
       getGeminiClient: () => ({ initialize: vi.fn() }),
       getBackgroundTaskRegistry: () => backgroundTaskRegistry,
       getMonitorRegistry: () => monitorRegistry,
@@ -377,6 +383,57 @@ describe('useBranchCommand', () => {
       expect.any(String),
       'help me fix the login bug(1)',
       'auto',
+    );
+  });
+
+  it('prefers the source custom title when no name is given', async () => {
+    getCurrentCustomTitle.mockReturnValue('My Project');
+
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch();
+    });
+
+    expect(renameSession).toHaveBeenCalledWith(
+      expect.any(String),
+      'My Project(1)',
+      'auto',
+    );
+  });
+
+  it.each([
+    ['My Project(2)', 'My Project(1)'],
+    ['My Project (Branch)', 'My Project(1)'],
+    ['My Project (Branch 2)', 'My Project(1)'],
+    ['My Project (2)', 'My Project (2)(1)'],
+  ])(
+    'normalizes the derived source title %s',
+    async (sourceTitle, expectedTitle) => {
+      getCurrentCustomTitle.mockReturnValue(sourceTitle);
+
+      const { result } = renderHook(() => useBranchCommand(makeOptions()));
+      await act(async () => {
+        await result.current.handleBranch();
+      });
+
+      expect(renameSession).toHaveBeenCalledWith(
+        expect.any(String),
+        expectedTitle,
+        'auto',
+      );
+    },
+  );
+
+  it('preserves a numeric token in an explicit branch name', async () => {
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch('Roadmap (2026)');
+    });
+
+    expect(renameSession).toHaveBeenCalledWith(
+      expect.any(String),
+      'Roadmap (2026)(1)',
+      'manual',
     );
   });
 

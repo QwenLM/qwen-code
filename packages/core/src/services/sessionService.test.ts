@@ -23,6 +23,7 @@ import {
   SessionService,
   buildApiHistoryFromConversation,
   computeUniqueBranchTitle,
+  normalizeDerivedBranchTitle,
   getResumePromptTokenCount,
   getResumeTokenCounts,
   type ConversationRecord,
@@ -5996,6 +5997,23 @@ describe('SessionService', () => {
 
       const titles = await service.findSessionTitlesByPrefix('shared(');
       expect(titles).toEqual(['shared(1)']);
+      await expect(
+        service.getSessionDisplayName('22222222-2222-2222-2222-222222222222'),
+      ).resolves.toBeUndefined();
+    });
+
+    it('returns undefined for an empty session file', async () => {
+      const sessionId = '11111111-1111-1111-1111-111111111111';
+      const chatsDir = realPath.join(
+        service['storage'].getProjectDir(),
+        'chats',
+      );
+      fs.mkdirSync(chatsDir, { recursive: true });
+      fs.writeFileSync(realPath.join(chatsDir, `${sessionId}.jsonl`), '');
+
+      await expect(service.getSessionDisplayName(sessionId)).resolves.toBe(
+        undefined,
+      );
     });
 
     it('uses the picker prompt when a session has no custom title', async () => {
@@ -6050,6 +6068,15 @@ describe('SessionService', () => {
       expect(service.findSessionTitlesByPrefix).toHaveBeenCalledWith(
         '创建 MR 描述生成 Skill(',
       );
+    });
+
+    it.each([
+      ['Source session (Branch)', 'Source session'],
+      ['Source session (Branch 2)', 'Source session'],
+      ['Source session(2)', 'Source session'],
+      ['Sprint (2)', 'Sprint (2)'],
+    ])('normalizes derived branch title %s', (title, expected) => {
+      expect(normalizeDerivedBranchTitle(title)).toBe(expected);
     });
   });
 
