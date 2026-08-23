@@ -78,7 +78,10 @@ import { GeminiChat } from '../../core/geminiChat.js';
 import { assembleSystemPrompt } from '../../core/prompts.js';
 import {
   dedupeToolCallsById,
+  getFunctionCallFingerprint,
   getProviderToolCallId,
+  isReplayOfHandledToolCall,
+  recordHandledToolCall,
 } from '../../core/toolCallIdUtils.js';
 import type {
   PromptConfig,
@@ -866,7 +869,11 @@ export class AgentCore {
     let turnCounter = 0;
     let finalText = '';
     let terminateMode: AgentTerminateMode | null = null;
-    const handledProviderToolCallIds = chat.getHistoryFunctionResponseIds();
+    // Fresh map per call today; copy so a future cached accessor cannot
+    // turn this loop's cross-round recording into shared-state mutation.
+    const handledToolCallFingerprints = new Map(
+      chat.getHistoryToolCallFingerprints(),
+    );
     // Scoped to this reasoning loop. A second duplicate response for the same
     // provider id would keep deterministic providers in a tool-result loop.
     const duplicateProviderToolCallResponseIds = new Set<string>();
@@ -1135,7 +1142,7 @@ export class AgentCore {
             toolsList,
             currentResponseId,
             wasOutputTruncated,
-            handledProviderToolCallIds,
+            handledToolCallFingerprints,
             duplicateProviderToolCallResponseIds,
           );
           if (toolCallResult.repeatedDuplicateProviderToolCall) {
@@ -1471,6 +1478,25 @@ export class AgentCore {
     );
   }
 
+  /**
+   * Whether the model can actually invoke a skill: declared AND executable.
+   *
+   * Takes the declaration set rather than reading one, so the caller passes
+   * the list it just sent to the model and no second copy exists. A named
+   * method rather than an inline closure so a test can read the ANSWER — a
+   * test that only checks the two inputs separately stays green when the gate
+   * stops combining them, which is how the first version of these tests
+   * missed both mutations.
+   */
+  private canInvokeSkill(
+    declaredToolNames: ReadonlySet<string | undefined>,
+  ): boolean {
+    return (
+      declaredToolNames.has(ToolNames.SKILL) &&
+      this.isToolExecutionAllowed(ToolNames.SKILL)
+    );
+  }
+
   private isToolExecutionAllowed(toolName: string): boolean {
     if (this.executionAllowedTools === undefined) {
       return true;
@@ -1543,7 +1569,7 @@ export class AgentCore {
     toolsList: FunctionDeclaration[],
     responseId?: string,
     wasOutputTruncated = false,
-    handledProviderToolCallIds = new Set<string>(),
+    handledToolCallFingerprints = new Map<string, string>(),
     duplicateProviderToolCallResponseIds = new Set<string>(),
   ): Promise<{
     messages: Content[];
@@ -1573,10 +1599,20 @@ export class AgentCore {
     // forks keep the parent's declaration prefix for cache sharing while
     // optionally narrowing which declared tools may actually run.
     const declaredToolNames = new Set(toolsList.map((t) => t.name));
+    const isReplayOfHandledCall = (fc: FunctionCall): boolean => {
+      const providerCallId = getProviderToolCallId(fc) ?? fc.id;
+      return providerCallId
+        ? isReplayOfHandledToolCall(
+            handledToolCallFingerprints,
+            providerCallId,
+            getFunctionCallFingerprint(fc),
+          )
+        : false;
+    };
     const repeatedDuplicateCall = findRepeatedDuplicateProviderToolCall(
       uniqueFunctionCalls,
       (fc) => getProviderToolCallId(fc) ?? fc.id,
-      handledProviderToolCallIds,
+      isReplayOfHandledCall,
       duplicateProviderToolCallResponseIds,
     );
     if (repeatedDuplicateCall) {
@@ -1645,7 +1681,7 @@ export class AgentCore {
       }
 
       if (providerCallId) {
-        if (handledProviderToolCallIds.has(providerCallId)) {
+        if (isReplayOfHandledCall(fc)) {
           markDuplicateProviderToolCallResponseSent(
             providerCallId,
             duplicateProviderToolCallResponseIds,
@@ -1691,7 +1727,11 @@ export class AgentCore {
           });
           continue;
         }
-        handledProviderToolCallIds.add(providerCallId);
+        recordHandledToolCall(
+          handledToolCallFingerprints,
+          providerCallId,
+          getFunctionCallFingerprint(fc),
+        );
       }
       authorizedCalls.push(fc);
     }
@@ -1711,6 +1751,10 @@ export class AgentCore {
     const scheduler = new CoreToolScheduler({
       config: this.runtimeContext,
       shouldObserveProducer: (callId) => !emittedCallIds.has(callId),
+      // `declaredToolNames` is the batch's own list, computed above from the
+      // `toolsList` sent to the model. See `CoreToolSchedulerOptions.hasSkillTool`
+      // for why the registry cannot answer this and what the predicate owes.
+      hasSkillTool: () => this.canInvokeSkill(declaredToolNames),
       outputUpdateHandler: (callId, outputChunk) => {
         // Shell liveness heartbeats have no subagent consumer; broadcasting
         // one would overwrite the live output view kept in liveOutputs.

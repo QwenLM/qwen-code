@@ -35,6 +35,7 @@ const goalRecord = (overrides: Partial<GoalRecord> = {}): GoalRecord => ({
   evidenceCursor: { recordId: 'r-100' },
   turnCount: 0,
   activeTimeMs: 0,
+  tokensUsed: 0,
   createdAt: 100,
   updatedAt: 100,
   ...overrides,
@@ -523,6 +524,7 @@ describe('goal reducer', () => {
       revision: 1,
       turnCount: 150,
       activeTimeMs: 150,
+      tokensUsed: 0,
       evidenceCursor: { recordId: 'r-100' },
     });
   });
@@ -533,6 +535,7 @@ describe('goal reducer', () => {
       status: 'paused',
       turnCount: 2,
       activeTimeMs: 60,
+      tokensUsed: 0,
       updatedAt: 160,
     });
 
@@ -544,8 +547,45 @@ describe('goal reducer', () => {
       evidenceCursor: { recordId: 'r-100' },
       turnCount: 3,
       activeTimeMs: 60,
+      tokensUsed: 0,
       updatedAt: 225,
     });
+  });
+
+  it('accumulates per-turn token spend across finished turns', () => {
+    let goal = goalRecord({ tokensUsed: 0 });
+
+    goal = reduceGoalTurnFinished(goal, { now: 200, tokensUsed: 1_200 });
+    goal = reduceGoalTurnFinished(goal, { now: 300, tokensUsed: 800 });
+
+    expect(goal).toMatchObject({ turnCount: 2, tokensUsed: 2_000 });
+  });
+
+  it.each([
+    ['a turn with no ledger entry', undefined],
+    ['a negative reading', -50],
+  ])('adds nothing for %s', (_label, tokensUsed) => {
+    const finished = reduceGoalTurnFinished(goalRecord({ tokensUsed: 700 }), {
+      now: 200,
+      ...(tokensUsed === undefined ? {} : { tokensUsed }),
+    });
+
+    expect(finished).toMatchObject({ turnCount: 1, tokensUsed: 700 });
+  });
+
+  it('migrates a snapshot persisted before spend was recorded', () => {
+    const goal = goalRecord();
+    delete (goal as Partial<GoalRecord>).tokensUsed;
+
+    expect(parseGoalSnapshotV2(snapshot(goal))).toMatchObject({
+      goal: { tokensUsed: 0 },
+    });
+  });
+
+  it('rejects a snapshot carrying negative spend', () => {
+    expect(
+      parseGoalSnapshotV2(snapshot(goalRecord({ tokensUsed: -1 }))),
+    ).toBeUndefined();
   });
 
   it.each(['blocked', 'usage_limited', 'complete'] as const)(
@@ -624,6 +664,23 @@ describe('goal reducer', () => {
       expect(parseGoalSnapshotV2(value)).toEqual(value);
     },
   );
+
+  it('parses clear snapshots with their cleared goal order', () => {
+    const value = {
+      v: 2,
+      goal: null,
+      activity: 'idle',
+      clearedGoal: { goalId: 'g-1', revision: 3, updatedAt: 42 },
+    } as const;
+
+    expect(parseGoalSnapshotV2(value)).toEqual(value);
+    expect(
+      parseGoalSnapshotV2({
+        ...value,
+        clearedGoal: { ...value.clearedGoal, revision: 0 },
+      }),
+    ).toBeUndefined();
+  });
 
   it.each(['evidence_catalog', 'checkpoint_request'] as const)(
     'round-trips a %s limitKind through a persisted snapshot',

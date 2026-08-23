@@ -35,6 +35,8 @@ export interface GoalControlTransition {
 export interface GoalTurnFinishedTransition {
   now: number;
   lastReason?: string;
+  /** Tokens billed to the turn that just finished. */
+  tokensUsed?: number;
 }
 
 export class GoalConflictError extends Error {
@@ -158,6 +160,7 @@ export function reduceGoalTurnFinished(
   }
   return transitionGoal(current, transition.now, {
     turnCount: current.turnCount + 1,
+    tokensUsed: current.tokensUsed + Math.max(0, transition.tokensUsed ?? 0),
     ...(transition.lastReason === undefined
       ? {}
       : { lastReason: transition.lastReason }),
@@ -268,23 +271,46 @@ export function parseGoalSnapshotV2(
 ): GoalSnapshotV2 | undefined {
   if (
     !isRecord(value) ||
-    !hasOnlyKeys(value, ['v', 'goal', 'activity']) ||
+    !hasOnlyKeys(value, ['v', 'goal', 'activity', 'clearedGoal']) ||
     value['v'] !== GOAL_STATE_VERSION ||
     !isGoalActivity(value['activity'])
   ) {
     return undefined;
   }
   if (value['goal'] === null) {
+    const clearedGoal = parseGoalOrder(value['clearedGoal']);
+    if (value['clearedGoal'] !== undefined && !clearedGoal) return undefined;
     return {
       v: GOAL_STATE_VERSION,
       goal: null,
       activity: value['activity'],
+      ...(clearedGoal ? { clearedGoal } : {}),
     };
   }
+  if (value['clearedGoal'] !== undefined) return undefined;
   const goal = parseGoalRecord(value['goal']);
   return goal
     ? { v: GOAL_STATE_VERSION, goal, activity: value['activity'] }
     : undefined;
+}
+
+function parseGoalOrder(value: unknown): GoalSnapshotV2['clearedGoal'] {
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, ['goalId', 'revision', 'updatedAt']) ||
+    typeof value['goalId'] !== 'string' ||
+    !value['goalId'] ||
+    !isNonNegativeInteger(value['revision']) ||
+    value['revision'] === 0 ||
+    !isFiniteNumber(value['updatedAt'])
+  ) {
+    return undefined;
+  }
+  return {
+    goalId: value['goalId'],
+    revision: value['revision'],
+    updatedAt: value['updatedAt'],
+  };
 }
 
 export function parseGoalStateCause(
@@ -307,6 +333,7 @@ function createGoal(
     evidenceCursor: copyCursor(cursor),
     turnCount: 0,
     activeTimeMs: 0,
+    tokensUsed: 0,
     createdAt: now,
     updatedAt: now,
   };
@@ -407,6 +434,7 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
       'evidenceCursor',
       'turnCount',
       'activeTimeMs',
+      'tokensUsed',
       'createdAt',
       'updatedAt',
       'evidenceCheckpoint',
@@ -423,6 +451,8 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
     !isTranscriptCursor(value['evidenceCursor']) ||
     !isNonNegativeInteger(value['turnCount']) ||
     !isNonNegativeNumber(value['activeTimeMs']) ||
+    (value['tokensUsed'] !== undefined &&
+      !isNonNegativeNumber(value['tokensUsed'])) ||
     !isFiniteNumber(value['createdAt']) ||
     !isFiniteNumber(value['updatedAt']) ||
     !isGoalEvidenceCheckpoint(value['evidenceCheckpoint']) ||
@@ -449,6 +479,8 @@ function parseGoalRecord(value: unknown): GoalRecord | undefined {
     evidenceCursor: copyCursor(value['evidenceCursor']),
     turnCount: value['turnCount'],
     activeTimeMs: value['activeTimeMs'],
+    // Goals persisted before `tokensUsed` existed carry no spend to restore.
+    tokensUsed: value['tokensUsed'] ?? 0,
     createdAt: value['createdAt'],
     updatedAt: value['updatedAt'],
     ...(value['evidenceCheckpoint'] === undefined

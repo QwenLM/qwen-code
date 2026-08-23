@@ -20,7 +20,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import yargs from 'yargs';
 import type { Argv } from 'yargs';
-import { buildReport, type Finding } from './findings.js';
+import { buildReport, type Finding } from '../../utils/findings.js';
 import { saveArtifactCommand, saveReviewArtifact } from './save-artifact.js';
 
 // On a case-sensitive filesystem the alias below never exists, so that test
@@ -69,9 +69,17 @@ const verdict = {
   deferredCount: 2,
   // Non-empty for the same reason — absent defaults to [].
   floorEnforced: [1],
-  // Non-zero for the same reason — absent defaults to 0.
+  // Non-zero on purpose too, but for the OPPOSITE reason to its siblings:
+  // this field's absence is preserved, not defaulted, so the fixture value
+  // proves passthrough against a validator that would otherwise omit the
+  // field entirely.
   postedInline: 3,
-  // Also non-default on purpose, for the same reason.
+  // Also non-default on purpose — and on the DEFAULTING side, with
+  // `deferredCount` and `floorEnforced`: an absent `bodyTrim` reads as an
+  // untrimmed one and the field is always emitted. Spelled out rather than
+  // said as "the same reason", which would now resolve against the
+  // preserved-absence block above it and teach the opposite of what
+  // `save-artifact.ts` does.
   bodyTrim: { sections: 2, deferralList: true, fold: true, truncated: true },
   lowSignal: { agents: 4, srcDiffLines: 120 },
   // Populated on purpose, like `deferredCount` above: the copy test then
@@ -448,6 +456,99 @@ describe('saveReviewArtifact', () => {
     expect(
       JSON.parse(readFileSync(paths.out, 'utf8')).verdict.postedInline,
     ).toBe(0);
+  });
+
+  it('carries the fresh count and the convergence paragraph into the artifact', () => {
+    // Both are new surfaces on the composed result, and the allow-list is
+    // where a new field silently stops existing. The paragraph matters most:
+    // the overflow ladder sheds it LAST, so a round that lost it from the
+    // body lost every other rank too, and the artifact may be the only
+    // durable copy.
+    const paths = fixture();
+    writeJson(paths.composed, {
+      ...verdict,
+      postedFresh: 2,
+      convergence: { en: 'Convergence: …', zh: '收敛情况：…' },
+    });
+    saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+    const saved = JSON.parse(readFileSync(paths.out, 'utf8'));
+    expect(saved.verdict.postedFresh).toBe(2);
+    expect(saved.verdict.convergence.en).toBe('Convergence: …');
+    expect(saved.verdict.convergence.zh).toBe('收敛情况：…');
+  });
+
+  it('carries the matched recommendation codes into the artifact', () => {
+    // The machine-readable half. Dropped by the allow-list, a caller reading
+    // the durable record sees the prose and not the codes it would key on.
+    const paths = fixture();
+    writeJson(paths.composed, {
+      ...verdict,
+      recommendations: [
+        { code: 'root-cause-triage', basis: '2 file(s) …' },
+        { code: 'land-and-defer', basis: 'this round posts no Critical …' },
+      ],
+    });
+    saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+    const saved = JSON.parse(readFileSync(paths.out, 'utf8'));
+    expect(
+      saved.verdict.recommendations.map((r: { code: string }) => r.code),
+    ).toEqual(['root-cause-triage', 'land-and-defer']);
+    expect(saved.verdict.recommendations[0].basis).toBe('2 file(s) …');
+    rmSync(paths.out, { force: true });
+
+    // A present value of the wrong shape is refused like every sibling.
+    writeJson(paths.composed, { ...verdict, recommendations: 'nope' });
+    expect(() =>
+      saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' }),
+    ).toThrow(/recommendations/);
+
+    // ...and the code is checked against the closed set, not cast into it: a
+    // set a caller wires actions to is a contract, and a cast writes
+    // whatever string it was handed under a type that says otherwise.
+    writeJson(paths.composed, {
+      ...verdict,
+      recommendations: [{ code: 'make-coffee', basis: 'x' }],
+    });
+    expect(() =>
+      saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' }),
+    ).toThrow(/recommendation codes/);
+  });
+
+  it('carries the mechanism-health note into the artifact', () => {
+    // The first clause the overflow ladder sheds, so the artifact may be its
+    // only durable copy on the rounds it fires.
+    const paths = fixture();
+    writeJson(paths.composed, {
+      ...verdict,
+      health: { en: 'Mechanism health: …', zh: '机制健康：…' },
+    });
+    saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+    const saved = JSON.parse(readFileSync(paths.out, 'utf8'));
+    expect(saved.verdict.health.en).toBe('Mechanism health: …');
+    expect(saved.verdict.health.zh).toBe('机制健康：…');
+    rmSync(paths.out, { force: true });
+
+    // A present value of the wrong shape is refused, like every sibling.
+    writeJson(paths.composed, { ...verdict, health: { en: 'x' } });
+    expect(() =>
+      saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' }),
+    ).toThrow(/health\.zh/);
+  });
+
+  it('PRESERVES an absent postedFresh and refuses a present one of the wrong shape', () => {
+    // Same distinction as its sibling: a round that recorded no fresh count
+    // is not a round that produced none.
+    const paths = fixture();
+    saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' });
+    expect(
+      'postedFresh' in JSON.parse(readFileSync(paths.out, 'utf8')).verdict,
+    ).toBe(false);
+    rmSync(paths.out, { force: true });
+
+    writeJson(paths.composed, { ...verdict, postedFresh: -1 });
+    expect(() =>
+      saveReviewArtifact({ ...paths, target: 'local', effort: 'medium' }),
+    ).toThrow(/postedFresh/);
   });
 
   it('reads an absent or null floorEnforced as empty — a pre-enforcement composed file must still save', () => {

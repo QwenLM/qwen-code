@@ -50,7 +50,9 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, normalize, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { gh, setGhHost } from './lib/gh.js';
-import { git } from './lib/git.js';
+import { getPlatformReader } from './lib/platform/registry.js';
+import { isGitIgnored } from '@qwen-code/qwen-code-core';
+import { GIT_TIMEOUT_MS } from './lib/git.js';
 import { diffHashOf } from './script-lint.js';
 import {
   hasUnmodeledWorkspaceGlob,
@@ -463,7 +465,9 @@ function normalizeClaimPath(text: string): string {
 /**
  * Is `path` gitignored in `worktree`? One `git` spawn per distinct path, memoed
  * for the process — a Test Plan naming the same artifact in its Evidence and
- * its Environment sections should not pay twice.
+ * its Environment sections should not pay twice. The memo stays caller-side:
+ * the shared helper is fresh-by-default because the audit guard's remedy
+ * re-check must observe a flip.
  *
  * `--` before the path is belt-and-braces, and measured as such: `PATH_RE`'s
  * class admits a leading `-`, but no `-`-leading text survives extraction today
@@ -473,23 +477,17 @@ function normalizeClaimPath(text: string): string {
  * ignored" or "no git here"; both fall through to the ordinary ruling, which is
  * why this returns a plain boolean.
  *
- * Spawned through the package's own `git` helper rather than a bare
- * `execFileSync`, for the deadline it carries: every other git invocation in
- * these commands runs under `GIT_TIMEOUT_MS` because, as that constant's
- * comment puts it, "a hang must still end". This was the one without it, and
- * it runs against a worktree the review does not control.
+ * The probe runs under GIT_TIMEOUT_MS, the same generous deadline every other
+ * git invocation in these commands uses — it runs against a worktree the
+ * review does not control, and a kill on a short deadline reads as "not
+ * ignored", which turns a gitignored build output into a false `contradicted`
+ * ruling in the presubmit report.
  */
-function isGitIgnored(worktree: string, path: string): boolean {
+function isGitIgnoredCached(worktree: string, path: string): boolean {
   const key = `${worktree}\0${path}`;
   const memo = ignoreCache.get(key);
   if (memo !== undefined) return memo;
-  let ignored: boolean;
-  try {
-    git('-C', worktree, 'check-ignore', '-q', '--', path);
-    ignored = true;
-  } catch {
-    ignored = false;
-  }
+  const ignored = isGitIgnored(worktree, path, GIT_TIMEOUT_MS);
   ignoreCache.set(key, ignored);
   return ignored;
 }
@@ -529,7 +527,7 @@ function rulePath(
   // unreachable and silently retired its note, which is the distinction a
   // reader needs: a tracked file that is present is state at the reviewed
   // commit, an ignored file that is present is something this run produced.
-  const ignored = isGitIgnored(worktree, path);
+  const ignored = isGitIgnoredCached(worktree, path);
   if (existsSync(join(worktree, path))) {
     return {
       kind: 'path',
@@ -768,8 +766,8 @@ export interface TestPlanArgs {
   host?: string;
 }
 
-/** Production reader: one `gh pr view` for the description body. */
-function fetchPrBody(ownerRepo: string, prNumber: string): string {
+/** Production reader for GitHub: one `gh pr view` for the description body. */
+export function fetchPrBody(ownerRepo: string, prNumber: string): string {
   return gh(
     'pr',
     'view',
@@ -781,6 +779,43 @@ function fetchPrBody(ownerRepo: string, prNumber: string): string {
     '--jq',
     '.body',
   );
+}
+
+/**
+ * The body fetcher the target's platform backs: on Aone, the MR description
+ * from the platform reader's fetch metadata — the same `a1 repo mr view`
+ * fetch the read path already relies on, so routing the Test Plan through
+ * it adds no new API surface; on GitHub, the `gh pr view` above. Detection
+ * is the registry's (`--host` hint, else the cwd clone's origin).
+ */
+export function platformBodyFetcher(
+  host?: string,
+): (ownerRepo: string, prNumber: string) => string {
+  const platform = getPlatformReader({ host });
+  if (platform.kind !== 'aone') return fetchPrBody;
+  // The auth gate every other a1-backed flow runs BEFORE its platform call
+  // — presence, the version floor, and the login check. Without it a
+  // standalone invocation on a missing/stale/logged-out a1 exits 0 with the
+  // generic "could not be fetched" note and no remedy; with it, the three
+  // states fail with the actionable install/upgrade/login messages the user
+  // docs promise ("at authentication time"). The GitHub arm keeps its
+  // historical degrade (a failed `gh pr view` reads as the unchecked note).
+  platform.ensureAuthenticated();
+  return (ownerRepo: string, prNumber: string): string => {
+    // The a1 seam is addressed by number; classify a malformed id before
+    // the fetch so the degraded note names the invocation, not a platform
+    // error. Decimal shape first — a bare `Number()` admits '0x10'/'1e3'/
+    // ' 7 ' and would silently fetch a DIFFERENT MR; isSafeInteger (the
+    // pipeline's isDiffLine gate) rejects a digit run past 2^53 that would
+    // double-round the same way.
+    const n = Number(prNumber);
+    if (!/^\d+$/.test(prNumber) || !Number.isSafeInteger(n) || n <= 0) {
+      throw new TypeError(
+        `expected a positive MR id, got ${JSON.stringify(prNumber)}`,
+      );
+    }
+    return platform.getFetchMeta(n, ownerRepo).body ?? '';
+  };
 }
 
 export function runTestPlan(
@@ -897,13 +932,14 @@ export const testPlanCommand: CommandModule = {
       .option('out', { type: 'string', describe: 'Write the JSON report here' })
       .option('host', {
         type: 'string',
-        describe: 'GitHub host for GitHub Enterprise (routes every gh call)',
+        describe:
+          "The host the target lives on. The canonical Aone hosts (code.alibaba-inc.com / gitlab.alibaba-inc.com) select the a1 backend (the body is the MR description) — a non-canonical *.alibaba-inc.com host is a GitHub Enterprise instance and stays on gh; omitted: detected from the clone's origin, else GitHub (GH_HOST, then github.com).",
       }),
   handler: (argv) => {
     const args = argv as unknown as TestPlanArgs;
     setGhHost(args.host);
     try {
-      const report = runTestPlan(args);
+      const report = runTestPlan(args, platformBodyFetcher(args.host));
       if (args.out) {
         mkdirSync(dirname(resolve(args.out)), { recursive: true });
         writeFileSync(resolve(args.out), JSON.stringify(report, null, 2));

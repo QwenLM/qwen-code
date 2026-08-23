@@ -2614,6 +2614,28 @@ const SETTINGS_SCHEMA = {
           },
         },
       },
+      listDirectory: {
+        type: 'object',
+        label: 'List Directory',
+        category: 'Tools',
+        requiresRestart: true,
+        default: {},
+        description:
+          'Settings for the built-in list_directory tool. Opt-in: the tool is disabled by default because glob covers directory listing in most cases.',
+        showInDialog: false,
+        properties: {
+          enabled: {
+            type: 'boolean',
+            label: 'Enable ListDirectory',
+            category: 'Tools',
+            requiresRestart: true,
+            default: false,
+            description:
+              'Enable the built-in list_directory tool. Disabled by default; it is also re-enabled automatically when explicitly listed in the coreTools allowlist (--core-tools / tools.core).',
+            showInDialog: true,
+          },
+        },
+      },
       shell: {
         type: 'object',
         label: 'Shell',
@@ -2794,6 +2816,21 @@ const SETTINGS_SCHEMA = {
         description:
           'Use the bundled ripgrep binary. When set to false, the system-level "rg" command will be used instead. This setting is only effective when useRipgrep is true.',
         showInDialog: false,
+      },
+      workflowsEnabled: {
+        type: 'boolean',
+        label: 'Dynamic Workflows',
+        category: 'Tools',
+        // The Workflow tool is registered once while building the tool
+        // registry and /workflows is gated when commands load. Keyword
+        // steering reads the same startup-built Config on each submission,
+        // so changing the settings file mid-session cannot update any of the
+        // three surfaces until the next launch.
+        requiresRestart: true,
+        default: false,
+        description:
+          'Enable the Workflow tool, which lets the model author and run a script that orchestrates subagents in parallel. Off by default; a run can dispatch many subagents and spend tokens accordingly. The QWEN_CODE_ENABLE_WORKFLOWS=1 and QWEN_CODE_DISABLE_WORKFLOWS=1 environment variables override this setting (disable wins). Unrelated to the Session Workflow plan-and-review view; to stop the "workflow" keyword from steering a turn, see Disable Workflow Keyword Trigger.',
+        showInDialog: true,
       },
       truncateToolOutputThreshold: {
         type: 'number',

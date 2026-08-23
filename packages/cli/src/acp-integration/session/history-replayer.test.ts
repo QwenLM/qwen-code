@@ -402,6 +402,33 @@ describe('HistoryReplayer', () => {
       });
     });
 
+    it('does not fail a skipped ask_user_question dangling call', async () => {
+      const record: ChatRecord = {
+        ...createAssistantRecord(''),
+        message: {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-auq',
+                name: 'ask_user_question',
+                args: {},
+              },
+            },
+          ],
+        },
+      };
+
+      await replayer.replay([record], undefined, {
+        skipFinalizeCallIds: new Set(['call-auq']),
+      });
+
+      const updates = sentUpdates();
+      expect(updates.map((update) => update['sessionUpdate'])).toEqual([
+        'tool_call',
+      ]);
+    });
+
     it('should carry dangling function calls across replay pages', async () => {
       const record: ChatRecord = {
         ...createAssistantRecord(''),
@@ -1103,6 +1130,24 @@ describe('HistoryReplayer', () => {
         subtype: 'chat_compression',
         cwd: '/test',
         version: '1.0.0',
+      };
+
+      await replayer.replay([systemRecord]);
+
+      expect(sendUpdateSpy).not.toHaveBeenCalled();
+    });
+
+    it('skips session_model system records', async () => {
+      const systemRecord: ChatRecord = {
+        uuid: 'system-uuid',
+        parentUuid: null,
+        sessionId: 'test-session',
+        timestamp: new Date().toISOString(),
+        type: 'system',
+        subtype: 'session_model',
+        cwd: '/test',
+        version: '1.0.0',
+        systemPayload: { modelId: 'qwen3-coder-plus', authType: 'openai' },
       };
 
       await replayer.replay([systemRecord]);

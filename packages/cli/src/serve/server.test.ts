@@ -80,14 +80,19 @@ import {
   BTW_MAX_INPUT_LENGTH,
   ExtensionManager,
   ExtensionUpdateState,
+  SessionIdCaseConflictError,
   SessionService,
   Storage,
   TrustGateError,
+  readSessionPrs,
+  upsertSessionPr,
   type Extension,
   type CommittedExtensionMutation,
   type PrepareExtensionInstallOptions,
   type PreparedExtensionMutation,
   type SessionListItem,
+  type GoalControlRequest,
+  type GoalSnapshotV2,
 } from '@qwen-code/qwen-code-core';
 import * as qwenCore from '@qwen-code/qwen-code-core';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
@@ -199,6 +204,7 @@ import {
 } from './live/types.js';
 import { WorkspaceVoiceCoordinator } from './voice/workspace-voice-coordinator.js';
 import { getActiveSseCount } from './routes/sse-events.js';
+import { SessionArchiveCoordinator } from './server/session-archive.js';
 
 // ── Worktree mock infrastructure ────────────────────────────────────
 // GitWorktreeService's constructor calls simpleGit() which validates
@@ -537,7 +543,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_side_task',
   'session_prompt',
   'session_turn_status',
-  'session_media',
+  'session_attachments',
   'session_mid_turn_message_mutation',
   'session_mid_turn_message_query',
   'session_cancel',
@@ -608,6 +614,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_tool_toggle',
   'workspace_skill_toggle',
   'workspace_skill_batch_toggle',
+  'extension_batch_activation_v2',
   'workspace_skill_manage',
   'workspace_permissions',
   'workspace_trust',
@@ -643,6 +650,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_display_name',
   'workspace_qualified_rest_core',
   'extension_management_v2',
+  'extension_git_credentials',
   'workspace_persisted_transcript',
   'workspace_session_export',
   'workspace_archived_session_export',
@@ -704,6 +712,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_display_name' &&
       f !== 'workspace_qualified_rest_core' &&
       f !== 'extension_management_v2' &&
+      f !== 'extension_git_credentials' &&
       f !== 'workspace_persisted_transcript' &&
       f !== 'workspace_session_export' &&
       f !== 'workspace_archived_session_export' &&
@@ -761,6 +770,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_qualified_voice',
   'workspace_qualified_memory',
   'extension_management_v2',
+  'extension_git_credentials',
   'workspace_persisted_transcript',
   'workspace_session_export',
   'workspace_archived_session_export',
@@ -791,6 +801,7 @@ interface FakeBridgeOpts {
     message: string,
     context?: BridgeClientRequestContext,
     messageId?: string,
+    options?: Parameters<AcpSessionBridge['enqueueMidTurnMessage']>[4],
   ) => { accepted: boolean; messageId?: string };
   removeMidTurnImpl?: (
     sessionId: string,
@@ -909,6 +920,12 @@ interface FakeBridgeOpts {
   clearSessionGoalImpl?: (
     sessionId: string,
   ) => Promise<{ cleared: boolean; condition?: string }>;
+  controlSessionGoalImpl?: (
+    sessionId: string,
+    request: GoalControlRequest,
+    context?: BridgeClientRequestContext,
+  ) => Promise<{ snapshot: GoalSnapshotV2 }>;
+  getSessionGoalImpl?: AcpSessionBridge['getSessionGoal'];
   continueSessionImpl?: (sessionId: string) => Promise<{
     accepted: boolean;
     interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
@@ -1110,6 +1127,7 @@ interface FakeBridge extends AcpSessionBridge {
     message: string;
     context?: BridgeClientRequestContext;
     messageId?: string;
+    options?: Parameters<AcpSessionBridge['enqueueMidTurnMessage']>[4];
   }>;
   removeMidTurnCalls: Array<{
     sessionId: string;
@@ -1196,6 +1214,11 @@ interface FakeBridge extends AcpSessionBridge {
     taskKind: 'agent' | 'shell' | 'monitor';
   }>;
   clearSessionGoalCalls: string[];
+  controlSessionGoalCalls: Array<{
+    sessionId: string;
+    request: GoalControlRequest;
+    context?: BridgeClientRequestContext;
+  }>;
   continueSessionCalls: string[];
   continueSessionContexts: Array<BridgeClientRequestContext | undefined>;
   sessionHooksCalls: string[];
@@ -1284,6 +1307,10 @@ interface FakeBridge extends AcpSessionBridge {
     metadata: SessionMetadataUpdate;
     context?: BridgeClientRequestContext;
   }>;
+  seedSessionPrsCalls: Array<{
+    sessionId: string;
+    prs: Array<{ number: number; url: string }>;
+  }>;
   heartbeatCalls: Array<{
     sessionId: string;
     context?: BridgeClientRequestContext;
@@ -1313,7 +1340,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     worktree: { slug: string; path: string; branch: string };
   }> = [];
   const enqueueMidTurnCalls: FakeBridge['enqueueMidTurnCalls'] = [];
-  const sessionMedia = new Map<string, { data: Buffer; mimeType: string }>();
+  const sessionAttachments = new Map<
+    string,
+    { data: Buffer; mimeType: string }
+  >();
   const enqueueMidTurnImpl =
     opts.enqueueMidTurnImpl ??
     (() => ({ accepted: true, messageId: 'mid-default' }));
@@ -1372,6 +1402,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const sessionTranscriptCalls: FakeBridge['sessionTranscriptCalls'] = [];
   const cancelSessionTaskCalls: FakeBridge['cancelSessionTaskCalls'] = [];
   const clearSessionGoalCalls: string[] = [];
+  const controlSessionGoalCalls: FakeBridge['controlSessionGoalCalls'] = [];
   const continueSessionCalls: string[] = [];
   const continueSessionContexts: Array<BridgeClientRequestContext | undefined> =
     [];
@@ -1385,6 +1416,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   let workspaceMemoryDreamCalls = 0;
   const closeCalls: FakeBridge['closeCalls'] = [];
   const updateMetadataCalls: FakeBridge['updateMetadataCalls'] = [];
+  const seedSessionPrsCalls: FakeBridge['seedSessionPrsCalls'] = [];
   const heartbeatCalls: FakeBridge['heartbeatCalls'] = [];
   const heartbeatStateCalls: string[] = [];
   let shutdownCalls = 0;
@@ -1713,6 +1745,34 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     opts.cancelSessionTaskImpl ?? (async () => ({ cancelled: true }));
   const clearSessionGoalImpl =
     opts.clearSessionGoalImpl ?? (async () => ({ cleared: true }));
+  const controlSessionGoalImpl =
+    opts.controlSessionGoalImpl ??
+    (async (_sessionId, request) => ({
+      snapshot: {
+        v: 2 as const,
+        activity: 'idle' as const,
+        goal:
+          request.action === 'create'
+            ? null
+            : {
+                goalId: request.expectedGoalId,
+                revision: request.expectedRevision,
+                objective: 'ship it',
+                status: 'active' as const,
+                evidenceCursor: { recordId: null },
+                turnCount: 0,
+                activeTimeMs: 0,
+                createdAt: 1,
+                updatedAt: 1,
+              },
+      },
+    }));
+  const getSessionGoalImpl =
+    opts.getSessionGoalImpl ??
+    (async () => ({
+      snapshot: { v: 2 as const, activity: 'idle' as const, goal: null },
+      active: null,
+    }));
   const continueSessionImpl =
     opts.continueSessionImpl ??
     (async () => ({ accepted: false, interruption: 'none' as const }));
@@ -1855,6 +1915,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     opts.updateMetadataImpl ??
     ((_sid: string, m: SessionMetadataUpdate) => ({
       displayName: m.displayName,
+      ...(m.pr ? { prs: [m.pr] } : {}),
     }));
   const heartbeatImpl =
     opts.heartbeatImpl ??
@@ -1954,6 +2015,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     sessionTranscriptCalls,
     cancelSessionTaskCalls,
     clearSessionGoalCalls,
+    controlSessionGoalCalls,
     continueSessionCalls,
     continueSessionContexts,
     sessionHooksCalls,
@@ -1975,6 +2037,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     removeRuntimeMcpServerCalls,
     closeCalls,
     updateMetadataCalls,
+    seedSessionPrsCalls,
     heartbeatCalls,
     heartbeatStateCalls,
     get shutdownCalls() {
@@ -2246,6 +2309,17 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       clearSessionGoalCalls.push(sessionId);
       return clearSessionGoalImpl(sessionId);
     },
+    async controlSessionGoal(sessionId, request, context) {
+      controlSessionGoalCalls.push({
+        sessionId,
+        request,
+        ...(context ? { context } : {}),
+      });
+      return controlSessionGoalImpl(sessionId, request, context);
+    },
+    async getSessionGoal(sessionId) {
+      return getSessionGoalImpl(sessionId);
+    },
     async continueSession(sessionId, context) {
       continueSessionCalls.push(sessionId);
       continueSessionContexts.push(context);
@@ -2327,21 +2401,35 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async isWorkspaceMemoryRememberAvailable() {
       return true;
     },
-    async storeSessionMedia(_sessionId, data, mimeType) {
-      const mediaId = `media-${sessionMedia.size + 1}`;
-      sessionMedia.set(mediaId, { data: Buffer.from(data), mimeType });
+    async storeSessionAttachment(_sessionId, data, mimeType, _context, name) {
+      const attachmentId = name ?? `image-${sessionAttachments.size + 1}.png`;
+      sessionAttachments.set(attachmentId, {
+        data: Buffer.from(data),
+        mimeType,
+      });
       return {
-        type: 'image',
-        mediaId,
+        type: [
+          'image/bmp',
+          'image/gif',
+          'image/jpeg',
+          'image/png',
+          'image/webp',
+        ].includes(mimeType)
+          ? 'image'
+          : 'resource',
+        attachmentId,
         mimeType,
         size: data.byteLength,
       };
     },
-    async readSessionMedia(_sessionId, mediaId) {
-      return sessionMedia.get(mediaId);
+    async readSessionAttachment(_sessionId, attachmentId) {
+      return sessionAttachments.get(attachmentId);
     },
-    async removeSessionMedia(_sessionId, mediaId) {
-      return sessionMedia.delete(mediaId);
+    async removeSessionAttachment(_sessionId, attachmentId) {
+      return sessionAttachments.delete(attachmentId);
+    },
+    async deleteSessionAttachments() {
+      sessionAttachments.clear();
     },
     enqueueMidTurnMessage(sessionId, message, context, messageId, options) {
       enqueueMidTurnCalls.push({
@@ -2351,7 +2439,13 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         ...(messageId ? { messageId } : {}),
         ...(options ? { options } : {}),
       });
-      return enqueueMidTurnImpl(sessionId, message, context, messageId);
+      return enqueueMidTurnImpl(
+        sessionId,
+        message,
+        context,
+        messageId,
+        options,
+      );
     },
     removeMidTurnMessage(sessionId, messageId, context) {
       removeMidTurnCalls.push({
@@ -2449,6 +2543,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         ...(context ? { context } : {}),
       });
       return updateMetadataImpl(sessionId, metadata, context);
+    },
+    seedSessionPrs(sessionId, prs) {
+      seedSessionPrsCalls.push({ sessionId, prs });
     },
     recordHeartbeat(sessionId, context) {
       heartbeatCalls.push({
@@ -5225,6 +5322,42 @@ describe('createServeApp', () => {
       }
     });
 
+    it('omits source and updates for one-time snapshot status', async () => {
+      const restore = mockExtensionManagerMethods({
+        getLoadedExtensions: () => [
+          {
+            ...testExtension('snapshot-ext'),
+            installMetadata: {
+              source: 'snapshot',
+              type: 'snapshot',
+              installId: 'a'.repeat(64),
+            },
+          },
+        ],
+      });
+      try {
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge: fakeBridge() },
+        );
+
+        const res = await request(app)
+          .get('/workspace/extensions')
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+        expect(res.status).toBe(200);
+        expect(res.body.extensions[0]).toMatchObject({
+          installType: 'snapshot',
+          credentialPersistence: 'one_time',
+          updateState: 'not updatable',
+        });
+        expect(res.body.extensions[0]).not.toHaveProperty('source');
+      } finally {
+        restore();
+      }
+    });
+
     const testExtension = (name = 'test-ext'): Extension =>
       ({
         name,
@@ -7587,7 +7720,75 @@ describe('createServeApp', () => {
       expect(res.body.error).toBe('`ref` must not start with "-"');
     });
 
-    it('rejects extension source URLs with credentials', async () => {
+    it.each([
+      { persistence: undefined, expected: 'one_time' as const },
+      { persistence: 'stored' as const, expected: 'stored' as const },
+    ])(
+      'accepts extension source credentials with $expected persistence',
+      async ({ persistence, expected }) => {
+        let captured: PrepareExtensionInstallOptions | undefined;
+        const restore = mockExtensionManagerMethods({
+          async prepareExtensionInstall(options) {
+            captured = options;
+            return testExtension('credentialed-extension');
+          },
+        });
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        try {
+          const res = await request(app)
+            .post('/workspace/extensions/install')
+            .set('Host', `127.0.0.1:${tokenOpts.port}`)
+            .set('Authorization', 'Bearer secret')
+            .set('X-Qwen-Client-Id', 'client-1')
+            .send({
+              source:
+                'https://user:fine-grained-token@example.com/repository.git',
+              consent: true,
+              ...(persistence ? { credentialPersistence: persistence } : {}),
+            });
+
+          expect(res.status).toBe(202);
+          await vi.waitFor(() => expect(captured).toBeDefined());
+          expect(captured).toMatchObject({
+            installMetadata: {
+              source: 'https://example.com/repository.git',
+              type: 'git',
+            },
+            gitCredential: {
+              username: 'user',
+              password: 'fine-grained-token',
+              persistence: expected,
+            },
+          });
+          await vi.waitFor(() =>
+            expect(bridge.extensionEvents.at(-1)).toMatchObject({
+              status: 'installed',
+              credentialPersistence: expected,
+              ...(expected === 'one_time'
+                ? {}
+                : { source: 'https://example.com/repository.git' }),
+            }),
+          );
+          expect(JSON.stringify(bridge.extensionEvents)).not.toContain(
+            'fine-grained-token',
+          );
+          if (expected === 'one_time') {
+            expect(bridge.extensionEvents.at(-1)).not.toHaveProperty('source');
+          }
+        } finally {
+          restore();
+        }
+      },
+    );
+
+    it('rejects credential persistence without URL credentials', async () => {
       const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
       const bridge = fakeBridge({ knownClientIds: ['client-1'] });
       const app = createServeApp(
@@ -7602,13 +7803,68 @@ describe('createServeApp', () => {
         .set('Authorization', 'Bearer secret')
         .set('X-Qwen-Client-Id', 'client-1')
         .send({
-          source: 'https://user:pass@example.com/repo',
+          source: 'https://example.com/repository.git',
+          credentialPersistence: 'stored',
           consent: true,
         });
 
       expect(res.status).toBe(400);
-      expect(res.body.error).toBe('`source` must not include credentials');
+      expect(res.body.error).toContain('requires source URL credentials');
     });
+
+    it.each([
+      {
+        body: {
+          source: 'https://user:token@example.com/repository.git',
+          credentialPersistence: 'forever',
+        },
+        error: '`credentialPersistence` must be "stored" or "one_time"',
+      },
+      {
+        body: { source: 'https://@example.com/repository.git' },
+        error: '`source` credentials are invalid',
+      },
+      {
+        body: { source: 'https://user:token%0D@example.com/repository.git' },
+        error: '`source` credentials are invalid',
+      },
+      {
+        body: { source: 'https://user:token%C2%85@example.com/repository.git' },
+        error: '`source` credentials are invalid',
+      },
+      {
+        body: { source: 'https://user:token@example.com/extension.zip' },
+        error: 'Git credentials require an HTTPS Git install source.',
+      },
+      {
+        body: {
+          source: 'https://user:token@example.com/repository.git',
+          autoUpdate: true,
+        },
+        error: '`autoUpdate` is not supported with one-time credentials',
+      },
+    ])(
+      'rejects invalid credentialed install input',
+      async ({ body, error }) => {
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const bridge = fakeBridge({ knownClientIds: ['client-1'] });
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        const res = await request(app)
+          .post('/workspace/extensions/install')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .set('X-Qwen-Client-Id', 'client-1')
+          .send({ ...body, consent: true });
+
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe(error);
+      },
+    );
 
     it('rejects an npm extension install with ref before queuing', async () => {
       const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
@@ -9208,6 +9464,86 @@ describe('createServeApp', () => {
       expect(bridge.clearSessionGoalCalls).toEqual(['s-1']);
     });
 
+    it('reads and controls the canonical session Goal', async () => {
+      const snapshot: GoalSnapshotV2 = {
+        v: 2,
+        activity: 'idle',
+        goal: {
+          goalId: 'goal-1',
+          revision: 3,
+          objective: 'ship it',
+          status: 'active',
+          evidenceCursor: { recordId: null },
+          turnCount: 1,
+          activeTimeMs: 1000,
+          createdAt: 1,
+          updatedAt: 2,
+        },
+      };
+      const bridge = fakeBridge({
+        getSessionGoalImpl: async () => ({ snapshot, active: null }),
+        controlSessionGoalImpl: async () => ({ snapshot }),
+        knownClientIds: ['client-1'],
+      });
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const read = await request(app)
+        .get('/session/s-1/goal')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      const controlled = await request(app)
+        .post('/session/s-1/goal')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({
+          action: 'pause',
+          expectedGoalId: 'goal-1',
+          expectedRevision: 3,
+        });
+
+      expect(read.status).toBe(200);
+      expect(read.body).toEqual({ snapshot });
+      expect(controlled.status).toBe(200);
+      expect(controlled.body).toEqual({ snapshot });
+      expect(bridge.controlSessionGoalCalls).toEqual([
+        {
+          sessionId: 's-1',
+          request: {
+            action: 'pause',
+            expectedGoalId: 'goal-1',
+            expectedRevision: 3,
+          },
+          context: { clientId: 'client-1' },
+        },
+      ]);
+    });
+
+    it('rejects an invalid Goal control before bridge dispatch', async () => {
+      const bridge = fakeBridge();
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const res = await request(app)
+        .post('/session/s-1/goal')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({ action: 'pause', expectedGoalId: 'goal-1' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_goal_control_request');
+      expect(bridge.controlSessionGoalCalls).toEqual([]);
+    });
+
     it('maps goal clear bridge errors', async () => {
       const bridge = fakeBridge({
         clearSessionGoalImpl: async (sessionId) => {
@@ -9385,7 +9721,119 @@ describe('createServeApp', () => {
     });
   });
 
-  describe('session media', () => {
+  describe('session attachments', () => {
+    it('uploads session-scoped text attachments', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge: fakeBridge() },
+      );
+      const uploaded = await request(app)
+        .post('/session/s-1/attachments')
+        .query({ name: 'notes 你好.txt' })
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'text/plain')
+        .send(Buffer.from('hello'));
+
+      expect(uploaded.status).toBe(201);
+      expect(uploaded.body).toEqual({
+        type: 'resource',
+        attachmentId: 'notes 你好.txt',
+        mimeType: 'text/plain',
+        size: 5,
+      });
+    });
+
+    it('uploads empty files', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge: fakeBridge() },
+      );
+      const uploaded = await request(app)
+        .post('/session/s-1/attachments')
+        .query({ name: 'empty.txt' })
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'text/plain')
+        .set('Content-Length', '0')
+        .send(Buffer.alloc(0));
+
+      expect(uploaded.status).toBe(201);
+      expect(uploaded.body).toEqual({
+        type: 'resource',
+        attachmentId: 'empty.txt',
+        mimeType: 'text/plain',
+        size: 0,
+      });
+    });
+
+    it('rejects empty images as a bad request', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge: fakeBridge() },
+      );
+      const uploaded = await request(app)
+        .post('/session/s-1/attachments')
+        .query({ name: 'empty.png' })
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'image/png')
+        .set('Content-Length', '0')
+        .send(Buffer.alloc(0));
+
+      expect(uploaded.status).toBe(400);
+      expect(uploaded.body).toEqual({
+        error: 'Image attachments cannot be empty',
+      });
+    });
+
+    it('accepts attachment uploads through case-insensitive routes', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge: fakeBridge() },
+      );
+      const uploaded = await request(app)
+        .post('/SESSION/s-1/ATTACHMENTS')
+        .query({ name: 'notes.txt' })
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'text/plain')
+        .send(Buffer.from('hello'));
+
+      expect(uploaded.status).toBe(201);
+      expect(uploaded.body).toMatchObject({
+        type: 'resource',
+        attachmentId: 'notes.txt',
+      });
+    });
+
+    it('uploads session-scoped JSON attachments as raw bytes', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge: fakeBridge() },
+      );
+      const uploaded = await request(app)
+        .post('/session/s-1/attachments')
+        .query({ name: 'data.json' })
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'application/json')
+        .send('{"enabled":true}');
+
+      expect(uploaded.status).toBe(201);
+      expect(uploaded.body).toEqual({
+        type: 'resource',
+        attachmentId: 'data.json',
+        mimeType: 'application/json',
+        size: 16,
+      });
+    });
+
     it('uploads and reads session-scoped binary media', async () => {
       const app = createServeApp(
         { ...baseOpts, token: 'secret', workspace: WS_BOUND },
@@ -9394,7 +9842,8 @@ describe('createServeApp', () => {
       );
       const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
       const uploaded = await request(app)
-        .post('/session/s-1/media')
+        .post('/session/s-1/attachments')
+        .query({ name: 'image.png' })
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('Content-Type', 'image/png')
@@ -9403,13 +9852,13 @@ describe('createServeApp', () => {
       expect(uploaded.status).toBe(201);
       expect(uploaded.body).toEqual({
         type: 'image',
-        mediaId: 'media-1',
+        attachmentId: 'image.png',
         mimeType: 'image/png',
         size: bytes.length,
       });
 
       const downloaded = await request(app)
-        .get('/session/s-1/media/media-1')
+        .get('/session/s-1/attachments/image.png')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .buffer(true);
@@ -9418,53 +9867,102 @@ describe('createServeApp', () => {
       expect(downloaded.body).toEqual(bytes);
 
       const removed = await request(app)
-        .delete('/session/s-1/media/media-1')
+        .delete('/session/s-1/attachments/image.png')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret');
       expect(removed.status).toBe(200);
       expect(removed.body).toEqual({ removed: true });
 
       const missing = await request(app)
-        .get('/session/s-1/media/media-1')
+        .get('/session/s-1/attachments/image.png')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret');
       expect(missing.status).toBe(404);
     });
 
-    it('rejects non-image uploads', async () => {
+    it('requires a name for uploads', async () => {
       const app = createServeApp(
         { ...baseOpts, token: 'secret', workspace: WS_BOUND },
         undefined,
         { bridge: fakeBridge() },
       );
       const response = await request(app)
-        .post('/session/s-1/media')
+        .post('/session/s-1/attachments')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
-        .set('Content-Type', 'audio/wav')
+        .set('Content-Type', 'text/plain')
         .send(Buffer.from([1]));
 
       expect(response.status).toBe(400);
     });
 
-    it('rejects SVG uploads', async () => {
-      // SVG can carry scripts and the bytes are served back to browsers on
-      // the same origin as the daemon API and Web Shell UI.
+    it('rejects repeated attachment name query parameters', async () => {
       const app = createServeApp(
         { ...baseOpts, token: 'secret', workspace: WS_BOUND },
         undefined,
         { bridge: fakeBridge() },
       );
       const response = await request(app)
-        .post('/session/s-1/media')
+        .post('/session/s-1/attachments')
+        .query({ name: ['one.txt', 'two.txt'] })
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'text/plain')
+        .send('hello');
+
+      expect(response.status).toBe(400);
+      expect(response.body).toEqual({
+        error:
+          'request body, Content-Type, and name query parameter are required',
+      });
+    });
+
+    it('maps attachment name and Content-Type mismatches to 400', async () => {
+      const bridge = fakeBridge();
+      bridge.storeSessionAttachment = vi.fn(async () => {
+        throw new TypeError('Attachment name and Content-Type do not match');
+      });
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const response = await request(app)
+        .post('/session/s-1/attachments')
+        .query({ name: 'screenshot.png' })
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .set('Content-Type', 'text/plain')
+        .send('hello');
+
+      expect(response.status).toBe(400);
+      expect(response.body).toEqual({
+        error: 'Attachment name and Content-Type do not match',
+      });
+    });
+
+    it('uploads SVG as an ordinary file resource', async () => {
+      const app = createServeApp(
+        { ...baseOpts, token: 'secret', workspace: WS_BOUND },
+        undefined,
+        { bridge: fakeBridge() },
+      );
+      const response = await request(app)
+        .post('/session/s-1/attachments')
+        .query({ name: 'image.svg' })
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('Content-Type', 'image/svg+xml')
         .send(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>'));
 
-      expect(response.status).toBe(415);
+      expect(response.status).toBe(201);
       expect(response.body).toEqual({
-        error: 'SVG uploads are not supported',
+        type: 'resource',
+        attachmentId: 'image.svg',
+        mimeType: 'image/svg+xml',
+        size: Buffer.byteLength(
+          '<svg xmlns="http://www.w3.org/2000/svg"></svg>',
+        ),
       });
     });
 
@@ -9476,7 +9974,8 @@ describe('createServeApp', () => {
       );
       const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
       const uploaded = await request(app)
-        .post('/session/s-1/media')
+        .post('/session/s-1/attachments')
+        .query({ name: 'image.png' })
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('Content-Type', 'image/png')
@@ -9484,7 +9983,7 @@ describe('createServeApp', () => {
       expect(uploaded.status).toBe(201);
 
       const downloaded = await request(app)
-        .get('/session/s-1/media/media-1')
+        .get('/session/s-1/attachments/image.png')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .buffer(true);
@@ -9500,7 +9999,8 @@ describe('createServeApp', () => {
         { bridge: fakeBridge() },
       );
       const response = await request(app)
-        .post('/session/s-1/media')
+        .post('/session/s-1/attachments')
+        .query({ name: 'image.png' })
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .set('Authorization', 'Bearer secret')
         .set('Content-Type', 'image/png')
@@ -9555,6 +10055,7 @@ describe('createServeApp', () => {
           message: 'hello',
           context: { clientId: 'client-9' },
           messageId: 'client-mid-1',
+          options: { rejectIfIdle: true },
         },
       ]);
     });
@@ -9571,8 +10072,36 @@ describe('createServeApp', () => {
       );
       expect(res.status).toBe(200);
       expect(bridge.enqueueMidTurnCalls).toEqual([
-        { sessionId: 's-1', message: 'hi', context: { clientId: 'client-9' } },
+        {
+          sessionId: 's-1',
+          message: 'hi',
+          context: { clientId: 'client-9' },
+          options: { rejectIfIdle: true },
+        },
       ]);
+    });
+
+    it('rejects an in-flight enqueue that reaches an idle session', async () => {
+      const bridge = fakeBridge({
+        enqueueMidTurnImpl: (
+          _sessionId,
+          _message,
+          _context,
+          _messageId,
+          options,
+        ) => (options?.rejectIfIdle ? { accepted: false } : { accepted: true }),
+      });
+
+      const res = await midTurnPost(midTurnApp(bridge), 's-1', {
+        message: 'late steering',
+        messageId: 'late-steering-1',
+      });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ accepted: false });
+      expect(bridge.enqueueMidTurnCalls[0]?.options).toEqual({
+        rejectIfIdle: true,
+      });
     });
 
     it.each([[''], [123], ['x'.repeat(129)]])(
@@ -9627,8 +10156,34 @@ describe('createServeApp', () => {
           sessionId: 's-1',
           message: 'see this',
           options: {
+            rejectIfIdle: true,
             content: [{ type: 'image', data: 'aW1n', mimeType: 'image/png' }],
           },
+        },
+      ]);
+    });
+
+    it('forwards inline resource blocks to the bridge', async () => {
+      const bridge = fakeBridge();
+      const resource = {
+        type: 'resource',
+        resource: {
+          uri: 'attachment:///notes.txt',
+          mimeType: 'text/plain',
+          text: 'hello',
+        },
+      };
+      const res = await midTurnPost(midTurnApp(bridge), 's-1', {
+        message: 'read this',
+        content: [resource],
+      });
+
+      expect(res.status).toBe(200);
+      expect(bridge.enqueueMidTurnCalls).toEqual([
+        {
+          sessionId: 's-1',
+          message: 'read this',
+          options: { rejectIfIdle: true, content: [resource] },
         },
       ]);
     });
@@ -9656,6 +10211,22 @@ describe('createServeApp', () => {
         { message: 'hi', content: [{ type: 'image', mimeType: 'image/png' }] },
       ],
       [
+        'resource with both text and blob',
+        {
+          message: 'hi',
+          content: [
+            {
+              type: 'resource',
+              resource: {
+                uri: 'attachment:///notes.txt',
+                text: 'hello',
+                blob: 'aGVsbG8=',
+              },
+            },
+          ],
+        },
+      ],
+      [
         'mismatched mimeType',
         {
           message: 'hi',
@@ -9676,9 +10247,8 @@ describe('createServeApp', () => {
     ])(
       '400 when `content` carries an SVG block: %s (raster-only policy)',
       async (_label, mimeType) => {
-        // The upload route rejects SVG after normalizing the media type;
-        // the inline-block gate must reject the same spelling variants — an
-        // exact-string match lets standards-conformant variants through.
+        // SVG files are ordinary resources, but an inline image block must
+        // reject spelling variants that could bypass an exact-string match.
         const bridge = fakeBridge();
         const res = await midTurnPost(midTurnApp(bridge), 's-1', {
           message: 'hi',
@@ -9690,12 +10260,23 @@ describe('createServeApp', () => {
       },
     );
 
-    it('forwards reference-form media blocks to the bridge verbatim', async () => {
+    it('forwards reference-form attachment blocks to the bridge verbatim', async () => {
       const bridge = fakeBridge();
       const res = await midTurnPost(midTurnApp(bridge), 's-1', {
         message: 'see this',
         content: [
-          { type: 'image', mediaId: 'media-1', mimeType: 'image/png', size: 4 },
+          {
+            type: 'image',
+            attachmentId: 'media-1',
+            mimeType: 'image/png',
+            size: 4,
+          },
+          {
+            type: 'resource',
+            attachmentId: 'notes.txt',
+            mimeType: 'text/plain',
+            size: 0,
+          },
         ],
       });
       expect(res.status).toBe(200);
@@ -9704,12 +10285,19 @@ describe('createServeApp', () => {
           sessionId: 's-1',
           message: 'see this',
           options: {
+            rejectIfIdle: true,
             content: [
               {
                 type: 'image',
-                mediaId: 'media-1',
+                attachmentId: 'media-1',
                 mimeType: 'image/png',
                 size: 4,
+              },
+              {
+                type: 'resource',
+                attachmentId: 'notes.txt',
+                mimeType: 'text/plain',
+                size: 0,
               },
             ],
           },
@@ -10339,9 +10927,9 @@ describe('createServeApp', () => {
         undefined,
         { workspaceRegistry },
       );
-      const scan = deferred<undefined>();
-      const locationSpy = vi
-        .spyOn(SessionService.prototype, 'getSessionLocation')
+      const scan = deferred<string | undefined>();
+      const resolverSpy = vi
+        .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
         .mockReturnValue(scan.promise);
 
       try {
@@ -10350,7 +10938,7 @@ describe('createServeApp', () => {
           .set('Host', `127.0.0.1:${baseOpts.port}`)
           .send({ sessionId: '550e8400-e29b-41d4-a716-446655440004' })
           .then((response) => response);
-        await vi.waitFor(() => expect(locationSpy).toHaveBeenCalledOnce());
+        await vi.waitFor(() => expect(resolverSpy).toHaveBeenCalledOnce());
         expect(
           workspaceRegistry.beginReplacement(
             workspaceRegistry.primaryEntry,
@@ -10365,7 +10953,7 @@ describe('createServeApp', () => {
         expect(bridge.calls).toEqual([]);
       } finally {
         scan.resolve(undefined);
-        locationSpy.mockRestore();
+        resolverSpy.mockRestore();
       }
     });
 
@@ -10422,6 +11010,24 @@ describe('createServeApp', () => {
 
       expect(res.status).toBe(400);
       expect(res.body.code).toBe('reserved_session_source');
+      expect(bridge.calls).toHaveLength(0);
+    });
+
+    it('rejects the reserved standalone source before validating sourceId', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sourceType: 'standalone', sourceId: 42 });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('reserved_session_source');
+      expect(res.body.error).toContain('standalone');
       expect(bridge.calls).toHaveLength(0);
     });
 
@@ -10527,9 +11133,9 @@ describe('createServeApp', () => {
         undefined,
         { bridge },
       );
-      const locationSpy = vi
-        .spyOn(SessionService.prototype, 'getSessionLocation')
-        .mockResolvedValue('active');
+      const resolverSpy = vi
+        .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+        .mockImplementation(async (sessionId) => sessionId);
       try {
         const res = await request(app)
           .post('/session')
@@ -10540,7 +11146,7 @@ describe('createServeApp', () => {
         expect(res.body.code).toBe('session_id_conflict');
         expect(bridge.calls).toHaveLength(0);
       } finally {
-        locationSpy.mockRestore();
+        resolverSpy.mockRestore();
       }
     });
 
@@ -10551,8 +11157,8 @@ describe('createServeApp', () => {
         undefined,
         { bridge },
       );
-      const locationSpy = vi
-        .spyOn(SessionService.prototype, 'getSessionLocation')
+      const resolverSpy = vi
+        .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
         .mockRejectedValue(new Error('EACCES: runtime directory unreadable'));
       try {
         const res = await request(app)
@@ -10567,7 +11173,7 @@ describe('createServeApp', () => {
         });
         expect(bridge.calls).toHaveLength(0);
       } finally {
-        locationSpy.mockRestore();
+        resolverSpy.mockRestore();
       }
     });
 
@@ -10578,9 +11184,9 @@ describe('createServeApp', () => {
         undefined,
         { bridge },
       );
-      const locationSpy = vi
-        .spyOn(SessionService.prototype, 'getSessionLocation')
-        .mockResolvedValue('active');
+      const resolverSpy = vi
+        .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+        .mockImplementation(async (sessionId) => sessionId);
       const runWithSpy = vi.spyOn(Storage, 'runWithRuntimeBaseDir');
       try {
         const res = await request(app)
@@ -10593,7 +11199,7 @@ describe('createServeApp', () => {
         expect(runWithSpy).not.toHaveBeenCalled();
         expect(bridge.calls).toHaveLength(0);
       } finally {
-        locationSpy.mockRestore();
+        resolverSpy.mockRestore();
         runWithSpy.mockRestore();
       }
     });
@@ -12348,6 +12954,200 @@ describe('createServeApp', () => {
       }
     });
 
+    it.each(['load', 'resume'] as const)(
+      'restores legacy reserved-source transcripts on ordinary workspace runtimes (%s)',
+      async (action) => {
+        const bridge = fakeBridge();
+        const readCreationMetadata = vi
+          .spyOn(SessionService.prototype, 'readCreationMetadata')
+          .mockResolvedValue({ sourceType: 'standalone' });
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        try {
+          const res = await request(app)
+            .post(`/session/explicit-standalone/${action}`)
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .send({});
+
+          // Create-side admission already blocks new reserved-source
+          // transcripts, so one found on an ordinary store predates the
+          // gate and stays loadable; only the internal Conversations
+          // runtime hides it.
+          expect(res.status).toBe(200);
+          const calls =
+            action === 'load' ? bridge.loadCalls : bridge.resumeCalls;
+          expect(calls).toHaveLength(1);
+        } finally {
+          readCreationMetadata.mockRestore();
+        }
+      },
+    );
+
+    it.each(['load', 'resume'] as const)(
+      'restores mixed-case reserved-source transcripts on ordinary workspace runtimes (%s)',
+      async (action) => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440140';
+        const storageSessionId = sessionId.toUpperCase();
+        const bridge = fakeBridge();
+        const findSessionId = vi
+          .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+          .mockResolvedValue(storageSessionId);
+        const readCreationMetadata = vi
+          .spyOn(SessionService.prototype, 'readCreationMetadata')
+          .mockImplementation(async (candidateId) =>
+            candidateId === storageSessionId
+              ? { sourceType: 'standalone' }
+              : {},
+          );
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        try {
+          const res = await request(app)
+            .post(`/session/${sessionId}/${action}`)
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .send({});
+
+          expect(res.status).toBe(200);
+          expect(findSessionId).toHaveBeenCalledWith(sessionId);
+          expect(readCreationMetadata).toHaveBeenCalledWith(storageSessionId);
+          const calls =
+            action === 'load' ? bridge.loadCalls : bridge.resumeCalls;
+          expect(calls).toHaveLength(1);
+        } finally {
+          findSessionId.mockRestore();
+          readCreationMetadata.mockRestore();
+        }
+      },
+    );
+
+    it.each(['load', 'resume'] as const)(
+      'takes the %s shared restore guard on the request session id',
+      async (action) => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440144';
+        const storageSessionId = sessionId.toUpperCase();
+        const bridge = fakeBridge();
+        const findSessionId = vi
+          .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+          .mockResolvedValue(storageSessionId);
+        const readCreationMetadata = vi
+          .spyOn(SessionService.prototype, 'readCreationMetadata')
+          .mockResolvedValue({});
+        const runSharedMany = vi.spyOn(
+          SessionArchiveCoordinator.prototype,
+          'runSharedMany',
+        );
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        try {
+          const res = await request(app)
+            .post(`/session/${sessionId}/${action}`)
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .send({});
+
+          expect(res.status).toBe(200);
+          // The coordinator canonicalizes lock keys, so holding the
+          // request spelling alone contends with the raw-spelled
+          // exclusive batch locks (pinned in session-archive.test.ts).
+          expect(runSharedMany).toHaveBeenCalledWith(
+            [sessionId],
+            expect.any(Function),
+          );
+          expect(findSessionId).toHaveBeenCalledTimes(1);
+        } finally {
+          runSharedMany.mockRestore();
+          findSessionId.mockRestore();
+          readCreationMetadata.mockRestore();
+        }
+      },
+    );
+
+    it.each(['load', 'resume'] as const)(
+      'keeps a differently spelled both-states %s conflict strict',
+      async (action) => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440147';
+        const storageSessionId = sessionId.toUpperCase();
+        const bridge = fakeBridge();
+        const conflict = new SessionIdCaseConflictError(
+          sessionId,
+          storageSessionId,
+        );
+        const findSessionId = vi
+          .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+          .mockRejectedValue(conflict);
+        const getSessionLocation = vi
+          .spyOn(SessionService.prototype, 'getSessionLocation')
+          .mockRejectedValue(
+            Object.assign(new Error('catalog failed'), { code: 'EIO' }),
+          );
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        try {
+          const res = await request(app)
+            .post(`/session/${sessionId}/${action}`)
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .send({});
+
+          expect(res.status).toBe(409);
+          expect(res.body.code).toBe('session_conflict');
+          expect(getSessionLocation).not.toHaveBeenCalled();
+          expect(bridge.loadCalls).toEqual([]);
+          expect(bridge.resumeCalls).toEqual([]);
+        } finally {
+          getSessionLocation.mockRestore();
+          findSessionId.mockRestore();
+        }
+      },
+    );
+
+    it.each(['load', 'resume'] as const)(
+      'rejects ordinary %s case conflicts before bridge dispatch',
+      async (action) => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440141';
+        const bridge = fakeBridge();
+        const findSessionId = vi
+          .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+          .mockRejectedValue(new SessionIdCaseConflictError(sessionId));
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+
+        try {
+          const res = await request(app)
+            .post(`/session/${sessionId}/${action}`)
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .send({});
+
+          expect(res.status).toBe(409);
+          expect(res.body).toMatchObject({
+            code: 'session_conflict',
+            sessionId,
+          });
+          expect(bridge.loadCalls).toEqual([]);
+          expect(bridge.resumeCalls).toEqual([]);
+        } finally {
+          findSessionId.mockRestore();
+        }
+      },
+    );
+
     it('releases restore ownership after invalid approvalMode', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(
@@ -13385,7 +14185,7 @@ describe('createServeApp', () => {
       expect(bridge.promptCalls).toHaveLength(1);
     });
 
-    it('202 accepts valid inline and reference media blocks', async () => {
+    it('202 accepts valid inline and reference attachment blocks', async () => {
       const bridge = fakeBridge({
         promptImpl: async () => ({ stopReason: 'end_turn' }),
       });
@@ -13399,9 +14199,15 @@ describe('createServeApp', () => {
             { type: 'image', data: 'aW1n', mimeType: 'image/png' },
             {
               type: 'image',
-              mediaId: 'media-1',
+              attachmentId: 'media-1',
               mimeType: 'image/png',
               size: 4,
+            },
+            {
+              type: 'resource',
+              attachmentId: 'notes.txt',
+              mimeType: 'text/plain',
+              size: 0,
             },
           ],
         });
@@ -13411,7 +14217,18 @@ describe('createServeApp', () => {
       expect(bridge.promptCalls[0]?.req.prompt).toEqual([
         { type: 'text', text: 'hi' },
         { type: 'image', data: 'aW1n', mimeType: 'image/png' },
-        { type: 'image', mediaId: 'media-1', mimeType: 'image/png', size: 4 },
+        {
+          type: 'image',
+          attachmentId: 'media-1',
+          mimeType: 'image/png',
+          size: 4,
+        },
+        {
+          type: 'resource',
+          attachmentId: 'notes.txt',
+          mimeType: 'text/plain',
+          size: 0,
+        },
       ]);
     });
 
@@ -14583,6 +15400,175 @@ describe('createServeApp', () => {
       expect(res.status).toBe(200);
       expect(res.body.sessions).toHaveLength(1);
       expect(res.body.sessions[0].sessionId).toBe(id);
+    });
+
+    it('merges sidecar pr history with the live entry bindings on list', async () => {
+      // The live entry only knows bindings from this daemon lifetime; the
+      // sidecar holds the full history. Binding A pre-restart, restarting
+      // (live entry resets), then binding B must still list [A, B] — the
+      // stacked-PR-across-restart case.
+      const id = '550e8400-e29b-41d4-a716-446655440003';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('2026-05-17T12:00:05.000Z'),
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 9500,
+        url: 'https://github.com/o/r/pull/9500',
+      });
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            prs: [{ number: 9517, url: 'https://github.com/o/r/pull/9517' }],
+          },
+        ],
+      });
+
+      const result = await listWorkspaceSessionsForResponse(bridge, WS_BOUND);
+
+      const merged = result.sessions.find((s) => s.sessionId === id);
+      expect(merged?.prs?.map((p) => p.number)).toEqual([9500, 9517]);
+    });
+
+    it('dedupes by number on merge, preferring the live url', async () => {
+      // Overlap is the common production case (a route binding is persisted
+      // AND enters the live entry). Without the number-keyed filter the
+      // merged list duplicates the number and the badge renders `#9517 +1`
+      // for a one-PR session.
+      const id = '550e8400-e29b-41d4-a716-446655440004';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('2026-05-17T12:00:05.000Z'),
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 9517,
+        url: 'https://github.com/o/r/pull/9517',
+      });
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: id,
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-05-17T12:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            prs: [
+              { number: 9517, url: 'https://github.com/o/r/pull/9517?v=2' },
+            ],
+          },
+        ],
+      });
+
+      const result = await listWorkspaceSessionsForResponse(bridge, WS_BOUND);
+
+      const merged = result.sessions.find((s) => s.sessionId === id);
+      expect(merged?.prs).toEqual([
+        { number: 9517, url: 'https://github.com/o/r/pull/9517?v=2' },
+      ]);
+    });
+
+    it('survives PR sidecars on the organized listing path', async () => {
+      const id = '550e8400-e29b-41d4-a716-446655440005';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('2026-05-17T12:00:05.000Z'),
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 9500,
+        url: 'https://github.com/o/r/pull/9500',
+      });
+
+      const result = await listWorkspaceSessionsForResponse(
+        fakeBridge(),
+        WS_BOUND,
+        { view: 'organized', group: 'all' },
+      );
+
+      const listed = result.sessions.find((s) => s.sessionId === id);
+      expect(listed?.prs?.map((p) => p.number)).toEqual([9500]);
+    });
+
+    it('survives PR sidecars on the archived listing path', async () => {
+      const id = '550e8400-e29b-41d4-a716-446655440006';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('2026-05-17T12:00:05.000Z'),
+        state: 'archived',
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(
+        id,
+        'archived',
+      );
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 9500,
+        url: 'https://github.com/o/r/pull/9500',
+      });
+
+      const result = await listWorkspaceSessionsForResponse(
+        fakeBridge(),
+        WS_BOUND,
+        { archiveState: 'archived' },
+      );
+
+      const listed = result.sessions.find((s) => s.sessionId === id);
+      expect(listed?.prs?.map((p) => p.number)).toEqual([9500]);
+    });
+
+    it('survives PR sidecars on the metadata-filtered listing path', async () => {
+      const id = '550e8400-e29b-41d4-a716-446655440007';
+      await writeStoredSession({
+        sessionId: id,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored prompt',
+        mtime: new Date('2026-05-17T12:00:05.000Z'),
+        sourceType: 'scheduled_task',
+        sourceId: 'task-1',
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(id, 'active');
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 9500,
+        url: 'https://github.com/o/r/pull/9500',
+      });
+
+      const result = await listWorkspaceSessionsForResponse(
+        fakeBridge(),
+        WS_BOUND,
+        { sourceType: 'scheduled_task', sourceId: 'task-1' },
+      );
+
+      const listed = result.sessions.find((s) => s.sessionId === id);
+      expect(listed?.prs?.map((p) => p.number)).toEqual([9500]);
     });
 
     it('passes fractional cursor values to SessionService without truncating', async () => {
@@ -22907,6 +23893,36 @@ describe('createServeApp', () => {
       expect(bridge.resumeCalls).toHaveLength(0);
     });
 
+    it('reads and exports the active copy of an exact persisted conflict', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaac';
+      await writeTranscriptSession(sid);
+      await writeTranscriptSession(sid, 'archived');
+      const bridge = fakeBridge({
+        sessionTranscriptImpl: async (req) => ({
+          v: 1,
+          sessionId: req.sessionId,
+          events: [],
+          hasMore: false,
+        }),
+      });
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+
+      const transcript = await request(app)
+        .get(`/session/${sid}/transcript`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const exported = await request(app)
+        .get(`/session/${sid}/export?format=json`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(transcript.status).toBe(200);
+      expect(exported.status).toBe(200);
+      expect(exported.text).toContain(sid);
+      expect(bridge.sessionTranscriptCalls).toEqual([{ sessionId: sid }]);
+    });
+
     it('redacts skill bodies from flat transcript events (#9234)', async () => {
       const sid = '55555555-bbbb-cccc-dddd-aaaaaaaaaaab';
       const bridge = fakeBridge({
@@ -24484,27 +25500,27 @@ describe('createServeApp', () => {
       expect(bridge.resumeCalls).toHaveLength(0);
     });
 
-    it('rejects load for active/archive conflicts with session_conflict', async () => {
-      const sid = '44444444-bbbb-cccc-dddd-eeeeeeeeeeef';
-      await writeSession(sid);
-      await writeSession(sid, 'archived');
-      const bridge = fakeBridge();
-      const app = createArchiveApp(bridge);
+    it.each(['load', 'resume'] as const)(
+      '%s restores active/archive conflicted sessions from the active copy',
+      async (action) => {
+        const sid = '44444444-bbbb-cccc-dddd-eeeeeeeeeeef';
+        await writeSession(sid);
+        await writeSession(sid, 'archived');
+        const bridge = fakeBridge();
+        const app = createArchiveApp(bridge);
 
-      const loadRes = await request(app)
-        .post(`/session/${sid}/load`)
-        .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .send({ cwd: wsDir });
-      expect(loadRes.status).toBe(409);
-      expect(loadRes.body).toMatchObject({
-        code: 'session_conflict',
-        sessionId: sid,
-      });
-      expect(loadRes.body.error).toContain(
-        'Delete the session with POST /sessions/delete',
-      );
-      expect(bridge.loadCalls).toHaveLength(0);
-    });
+        const response = await request(app)
+          .post(`/session/${sid}/${action}`)
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: wsDir });
+        // Loads read the active copy (CLI resume parity): a session left in
+        // both states by a crashed archive stays loadable.
+        expect(response.status).toBe(200);
+        expect(
+          action === 'load' ? bridge.loadCalls : bridge.resumeCalls,
+        ).toHaveLength(1);
+      },
+    );
 
     it('returns session_archiving for prompt while archive is in flight', async () => {
       const sid = '55555555-bbbb-cccc-dddd-eeeeeeeeeeee';
@@ -24866,15 +25882,19 @@ describe('createServeApp', () => {
       const bridge = fakeBridge();
       const app = createServeApp(tokenOpts, undefined, { bridge });
       const res = await auth(
-        request(app).patch('/session/session-A/metadata'),
+        request(app).patch(
+          '/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+        ),
       ).send({ displayName: 'My Session' });
       expect(res.status).toBe(200);
       expect(res.body).toEqual({
-        sessionId: 'session-A',
+        sessionId: '550e8400-e29b-41d4-a716-446655440321',
         displayName: 'My Session',
       });
       expect(bridge.updateMetadataCalls).toHaveLength(1);
-      expect(bridge.updateMetadataCalls[0]?.sessionId).toBe('session-A');
+      expect(bridge.updateMetadataCalls[0]?.sessionId).toBe(
+        '550e8400-e29b-41d4-a716-446655440321',
+      );
       expect(bridge.updateMetadataCalls[0]?.metadata).toEqual({
         displayName: 'My Session',
       });
@@ -24885,7 +25905,7 @@ describe('createServeApp', () => {
       const noTokenApp = createServeApp(baseOpts, undefined, { bridge });
 
       const noToken = await request(noTokenApp)
-        .patch('/session/session-A/metadata')
+        .patch('/session/550e8400-e29b-41d4-a716-446655440321/metadata')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({ displayName: 'blocked' });
       expect(noToken.status).toBe(401);
@@ -24894,7 +25914,9 @@ describe('createServeApp', () => {
 
       const app = createServeApp(tokenOpts, undefined, { bridge });
       const authed = await auth(
-        request(app).patch('/session/session-A/metadata'),
+        request(app).patch(
+          '/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+        ),
       ).send({ displayName: 'allowed' });
       expect(authed.status).toBe(200);
       expect(bridge.updateMetadataCalls).toHaveLength(1);
@@ -24906,7 +25928,11 @@ describe('createServeApp', () => {
     it('passes client identity context', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(tokenOpts, undefined, { bridge });
-      const res = await auth(request(app).patch('/session/session-A/metadata'))
+      const res = await auth(
+        request(app).patch(
+          '/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+        ),
+      )
         .set('X-Qwen-Client-Id', 'client-1')
         .send({ displayName: 'test' });
       expect(res.status).toBe(200);
@@ -24919,11 +25945,483 @@ describe('createServeApp', () => {
       const bridge = fakeBridge();
       const app = createServeApp(tokenOpts, undefined, { bridge });
       const res = await auth(
-        request(app).patch('/session/session-A/metadata'),
+        request(app).patch(
+          '/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+        ),
       ).send({ displayName: 123 });
       expect(res.status).toBe(400);
       expect(res.body.code).toBe('invalid_metadata');
       expect(res.body.field).toBe('displayName');
+    });
+
+    it('200 on pr-only update and echoes the pr binding', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge,
+        boundWorkspace: WS_BOUND,
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(
+        '550e8400-e29b-41d4-a716-446655440321',
+        'active',
+      );
+      await fsp.rm(sidecarPath, { force: true });
+      const pr = { number: 9517, url: 'https://github.com/o/r/pull/9517' };
+      const res = await auth(
+        request(app).patch(
+          '/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+        ),
+      ).send({ pr });
+      expect(res.status).toBe(200);
+      expect(res.body.sessionId).toBe('550e8400-e29b-41d4-a716-446655440321');
+      expect(res.body.prs).toEqual([pr]);
+      expect(bridge.updateMetadataCalls).toHaveLength(1);
+      expect(bridge.updateMetadataCalls[0]?.metadata).toEqual({
+        displayName: undefined,
+        pr,
+      });
+      // The echoed list reflects the sidecar actually written to disk.
+      expect(
+        (await readSessionPrs(sidecarPath))?.map(({ number, url }) => ({
+          number,
+          url,
+        })),
+      ).toEqual([pr]);
+      await fsp.rm(sidecarPath, { force: true });
+    });
+
+    it('echoes the sidecar list, not the bridge echo, when they disagree on the primary route', async () => {
+      // Without the persisted-readback overwrite the primary route would
+      // echo the bridge's live list; without the sidecar hydration before
+      // the bridge call the published event would drop persisted history.
+      const bridge = fakeBridge({
+        updateMetadataImpl: (_sid, m) => ({
+          displayName: m.displayName,
+          ...(m.pr
+            ? {
+                prs: [
+                  {
+                    number: 9001,
+                    url: 'https://github.com/o/r/pull/9001',
+                  },
+                ],
+              }
+            : {}),
+        }),
+      });
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge,
+        boundWorkspace: WS_BOUND,
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(
+        '550e8400-e29b-41d4-a716-446655440321',
+        'active',
+      );
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 9000,
+        url: 'https://github.com/o/r/pull/9000',
+      });
+      try {
+        const res = await auth(
+          request(app).patch(
+            '/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+          ),
+        ).send({
+          pr: { number: 9002, url: 'https://github.com/o/r/pull/9002' },
+        });
+        expect(res.status).toBe(200);
+        expect(res.body.prs.map((p: { number: number }) => p.number)).toEqual([
+          9000, 9002,
+        ]);
+        expect(
+          bridge.seedSessionPrsCalls.map((call) =>
+            call.prs.map((p) => p.number),
+          ),
+        ).toEqual([[9000]]);
+      } finally {
+        await fsp.rm(sidecarPath, { force: true });
+      }
+    });
+
+    it('400 invalid_metadata for a malformed pr', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).patch(
+          '/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+        ),
+      ).send({ pr: { number: 'x', url: 'https://github.com/o/r/pull/1' } });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_metadata');
+      expect(res.body.field).toBe('pr');
+      const nonHttp = await auth(
+        request(app).patch(
+          '/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+        ),
+      ).send({ pr: { number: 1, url: 'javascript:alert(1)' } });
+      expect(nonHttp.status).toBe(400);
+      expect(nonHttp.body.code).toBe('invalid_metadata');
+      expect(nonHttp.body.field).toBe('pr');
+      expect(bridge.updateMetadataCalls).toHaveLength(0);
+    });
+
+    it('400 invalid_metadata when the pr url exceeds the length cap', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge,
+        boundWorkspace: WS_BOUND,
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(
+        '550e8400-e29b-41d4-a716-446655440321',
+        'active',
+      );
+      await fsp.rm(sidecarPath, { force: true });
+      const res = await auth(
+        request(app).patch(
+          '/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+        ),
+      ).send({
+        pr: {
+          number: 9517,
+          url: `https://github.com/o/r/pull/${'a'.repeat(2048)}`,
+        },
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_metadata');
+      expect(res.body.field).toBe('pr');
+      expect(bridge.updateMetadataCalls).toHaveLength(0);
+      expect(await readSessionPrs(sidecarPath)).toBeNull();
+    });
+
+    it('does not persist the pr sidecar when the bridge rejects a combined request', async () => {
+      const bridge = fakeBridge({
+        updateMetadataImpl: () => {
+          throw new InvalidSessionMetadataError(
+            'displayName',
+            'must not contain control characters',
+          );
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge,
+        boundWorkspace: WS_BOUND,
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(
+        '550e8400-e29b-41d4-a716-446655440321',
+        'active',
+      );
+      await fsp.rm(sidecarPath, { force: true });
+      const res = await auth(
+        request(app).patch(
+          '/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+        ),
+      ).send({
+        displayName: 'bad\u0001name',
+        pr: { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+      });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_metadata');
+      // A rejected request must not leave a durable binding behind.
+      expect(await readSessionPrs(sidecarPath)).toBeNull();
+    });
+
+    it('does not persist the pr sidecar for a session the bridge does not know', async () => {
+      const bridge = fakeBridge({
+        updateMetadataImpl: (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge,
+        boundWorkspace: WS_BOUND,
+      });
+      const service = new SessionService(WS_BOUND);
+      const sidecarPath = service.getPrSessionPathForArchiveState(
+        '550e8400-e29b-41d4-a716-446655440999',
+        'active',
+      );
+      await fsp.rm(sidecarPath, { force: true });
+      const res = await auth(
+        request(app).patch(
+          '/session/550e8400-e29b-41d4-a716-446655440999/metadata',
+        ),
+      ).send({ pr: { number: 9517, url: 'https://github.com/o/r/pull/9517' } });
+      expect(res.status).toBe(404);
+      expect(await readSessionPrs(sidecarPath)).toBeNull();
+    });
+
+    it('400 invalid_session_id and no escaped write for a traversal session id', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge,
+        boundWorkspace: WS_BOUND,
+      });
+      const service = new SessionService(WS_BOUND);
+      const escapedPath = service.getPrSessionPathForArchiveState(
+        '../../pwn',
+        'active',
+      );
+      await fsp.rm(escapedPath, { force: true });
+      const res = await auth(
+        request(app).patch('/session/..%2F..%2Fpwn/metadata'),
+      ).send({ pr: { number: 1, url: 'https://evil.example/x' } });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_session_id');
+      expect(bridge.updateMetadataCalls).toHaveLength(0);
+      await expect(fsp.access(escapedPath)).rejects.toThrow();
+    });
+
+    it('400 invalid_session_id for a traversal id on a multi-workspace registry', async () => {
+      // The gate sits before runtime resolution, so the answer is 400 even
+      // when the registry has two entries (runtime resolution would
+      // otherwise 404 the unknown id first, making the error contract
+      // configuration-dependent).
+      const secondaryBridge = fakeBridge();
+      const { app } = createWorkspaceMetadataApp(secondaryBridge);
+      const res = await auth(
+        request(app).patch('/session/..%2F..%2Fpwn/metadata'),
+      ).send({ pr: { number: 1, url: 'https://evil.example/x' } });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_session_id');
+      expect(secondaryBridge.updateMetadataCalls).toHaveLength(0);
+    });
+
+    it('200 on pr-only update on the workspace route', async () => {
+      const secondaryBridge = fakeBridge();
+      const { app } = createWorkspaceMetadataApp(secondaryBridge);
+      const pr = { number: 9517, url: 'https://github.com/o/r/pull/9517' };
+      const service = new SessionService(WS_DIFFERENT);
+      await fsp.rm(
+        service.getPrSessionPathForArchiveState(
+          '550e8400-e29b-41d4-a716-446655440321',
+          'active',
+        ),
+        {
+          force: true,
+        },
+      );
+      const res = await auth(
+        request(app).patch(
+          '/workspaces/ws-secondary/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+        ),
+      ).send({ pr });
+      expect(res.status).toBe(200);
+      expect(res.body.prs).toEqual([pr]);
+      expect(secondaryBridge.updateMetadataCalls).toEqual([
+        {
+          sessionId: '550e8400-e29b-41d4-a716-446655440321',
+          metadata: { displayName: undefined, pr },
+          context: undefined,
+        },
+      ]);
+      const sidecar = await readSessionPrs(
+        service.getPrSessionPathForArchiveState(
+          '550e8400-e29b-41d4-a716-446655440321',
+          'active',
+        ),
+      );
+      expect(sidecar?.map((p) => p.number)).toEqual([9517]);
+    });
+
+    it('accumulates multiple pr bindings on the workspace route', async () => {
+      const secondaryBridge = fakeBridge();
+      const { app } = createWorkspaceMetadataApp(secondaryBridge);
+      const service = new SessionService(WS_DIFFERENT);
+      await fsp.rm(
+        service.getPrSessionPathForArchiveState(
+          '550e8400-e29b-41d4-a716-446655440321',
+          'active',
+        ),
+        {
+          force: true,
+        },
+      );
+      for (const number of [9600, 9601]) {
+        const res = await auth(
+          request(app).patch(
+            '/workspaces/ws-secondary/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+          ),
+        ).send({
+          pr: { number, url: `https://github.com/o/r/pull/${number}` },
+        });
+        expect(res.status).toBe(200);
+      }
+      const last = await auth(
+        request(app).patch(
+          '/workspaces/ws-secondary/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+        ),
+      ).send({ pr: { number: 9602, url: 'https://github.com/o/r/pull/9602' } });
+      // The sidecar persists the full history, so the response echoes every
+      // binding in binding order.
+      expect(last.body.prs.map((p: { number: number }) => p.number)).toEqual([
+        9600, 9601, 9602,
+      ]);
+    });
+
+    it('echoes the sidecar list, not the bridge echo, when they disagree', async () => {
+      const secondaryBridge = fakeBridge({
+        updateMetadataImpl: (_sid, m) => ({
+          displayName: m.displayName,
+          ...(m.pr
+            ? {
+                prs: [
+                  {
+                    number: 9001,
+                    url: 'https://github.com/o/r/pull/9001',
+                  },
+                ],
+              }
+            : {}),
+        }),
+      });
+      const { app } = createWorkspaceMetadataApp(secondaryBridge);
+      const service = new SessionService(WS_DIFFERENT);
+      const sidecarPath = service.getPrSessionPathForArchiveState(
+        '550e8400-e29b-41d4-a716-446655440321',
+        'active',
+      );
+      await fsp.rm(sidecarPath, { force: true });
+      await upsertSessionPr(sidecarPath, {
+        number: 9000,
+        url: 'https://github.com/o/r/pull/9000',
+      });
+      const res = await auth(
+        request(app).patch(
+          '/workspaces/ws-secondary/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+        ),
+      ).send({ pr: { number: 9002, url: 'https://github.com/o/r/pull/9002' } });
+      expect(res.status).toBe(200);
+      // The bridge (this-daemon memory) only knows 9001; the sidecar is the
+      // complete history and wins the echo.
+      expect(res.body.prs.map((p: { number: number }) => p.number)).toEqual([
+        9000, 9002,
+      ]);
+      // The route re-hydrates the bridge entry from the sidecar BEFORE the
+      // mutation, so the session_metadata_updated event the bridge publishes
+      // carries the full history too, not just this daemon lifetime's share.
+      expect(
+        secondaryBridge.seedSessionPrsCalls.map((call) =>
+          call.prs.map((p) => p.number),
+        ),
+      ).toEqual([[9000]]);
+    });
+
+    it('binds an archived session at the archived sidecar without orphaning an active one', async () => {
+      const secondaryBridge = fakeBridge({
+        updateMetadataImpl: (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const { app } = createWorkspaceMetadataApp(secondaryBridge);
+      const service = new SessionService(WS_DIFFERENT);
+      const activeSidecar = service.getPrSessionPathForArchiveState(
+        '550e8400-e29b-41d4-a716-446655440321',
+        'active',
+      );
+      const archivedSidecar = service.getPrSessionPathForArchiveState(
+        '550e8400-e29b-41d4-a716-446655440321',
+        'archived',
+      );
+      await fsp.rm(activeSidecar, { force: true });
+      await fsp.rm(archivedSidecar, { force: true });
+      const locationSpy = vi
+        .spyOn(SessionService.prototype, 'getSessionLocation')
+        .mockResolvedValue('archived');
+      try {
+        const pr = { number: 9517, url: 'https://github.com/o/r/pull/9517' };
+        const res = await auth(
+          request(app).patch(
+            '/workspaces/ws-secondary/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+          ),
+        ).send({ pr });
+        expect(res.status).toBe(200);
+        expect(res.body.prs).toEqual([pr]);
+        // The binding lands at the located (archived) state only — no
+        // orphan in the active chats dir that an unarchive would later
+        // conflict with.
+        const archived = await readSessionPrs(archivedSidecar);
+        expect(archived?.map((p) => p.number)).toEqual([9517]);
+        expect(await readSessionPrs(activeSidecar)).toBeNull();
+      } finally {
+        locationSpy.mockRestore();
+        await fsp.rm(archivedSidecar, { force: true });
+      }
+    });
+
+    it('400 invalid_session_id and no escaped write for a traversal id on the workspace route', async () => {
+      const secondaryBridge = fakeBridge();
+      const { app } = createWorkspaceMetadataApp(secondaryBridge);
+      const service = new SessionService(WS_DIFFERENT);
+      const escapedPath = service.getPrSessionPathForArchiveState(
+        '../../pwn',
+        'active',
+      );
+      await fsp.rm(escapedPath, { force: true });
+      const res = await auth(
+        request(app).patch(
+          '/workspaces/ws-secondary/session/..%2F..%2Fpwn/metadata',
+        ),
+      ).send({ pr: { number: 1, url: 'https://evil.example/x' } });
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_session_id');
+      expect(secondaryBridge.updateMetadataCalls).toHaveLength(0);
+      await expect(fsp.access(escapedPath)).rejects.toThrow();
+    });
+
+    it('400 when neither displayName nor pr is provided on the workspace route', async () => {
+      const secondaryBridge = fakeBridge();
+      const { app } = createWorkspaceMetadataApp(secondaryBridge);
+      const res = await auth(
+        request(app).patch(
+          '/workspaces/ws-secondary/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+        ),
+      ).send({});
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('invalid_metadata');
+      expect(secondaryBridge.updateMetadataCalls).toHaveLength(0);
+    });
+
+    it('200 on pr-only update for a persisted (non-live) session', async () => {
+      const secondaryBridge = fakeBridge({
+        updateMetadataImpl: (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const { app } = createWorkspaceMetadataApp(secondaryBridge);
+      const locationSpy = vi
+        .spyOn(SessionService.prototype, 'getSessionLocation')
+        .mockResolvedValue('active');
+      try {
+        const pr = { number: 9517, url: 'https://github.com/o/r/pull/9517' };
+        const service = new SessionService(WS_DIFFERENT);
+        await fsp.rm(
+          service.getPrSessionPathForArchiveState(
+            '550e8400-e29b-41d4-a716-446655440321',
+            'active',
+          ),
+          { force: true },
+        );
+        const res = await auth(
+          request(app).patch(
+            '/workspaces/ws-secondary/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+          ),
+        ).send({ pr });
+        expect(res.status).toBe(200);
+        expect(res.body.prs).toEqual([pr]);
+        const sidecar = await readSessionPrs(
+          service.getPrSessionPathForArchiveState(
+            '550e8400-e29b-41d4-a716-446655440321',
+            'active',
+          ),
+        );
+        expect(sidecar?.map((p) => p.number)).toEqual([9517]);
+      } finally {
+        locationSpy.mockRestore();
+      }
     });
 
     it('404 on unknown session', async () => {
@@ -24934,10 +26432,12 @@ describe('createServeApp', () => {
       });
       const app = createServeApp(tokenOpts, undefined, { bridge });
       const res = await auth(
-        request(app).patch('/session/missing/metadata'),
+        request(app).patch(
+          '/session/550e8400-e29b-41d4-a716-446655440999/metadata',
+        ),
       ).send({ displayName: 'test' });
       expect(res.status).toBe(404);
-      expect(res.body.sessionId).toBe('missing');
+      expect(res.body.sessionId).toBe('550e8400-e29b-41d4-a716-446655440999');
     });
 
     it('400 invalid_metadata when displayName exceeds max length', async () => {
@@ -24951,7 +26451,9 @@ describe('createServeApp', () => {
       });
       const app = createServeApp(tokenOpts, undefined, { bridge });
       const res = await auth(
-        request(app).patch('/session/session-A/metadata'),
+        request(app).patch(
+          '/session/550e8400-e29b-41d4-a716-446655440321/metadata',
+        ),
       ).send({ displayName: 'x'.repeat(300) });
       expect(res.status).toBe(400);
       expect(res.body.code).toBe('invalid_metadata');
@@ -24963,7 +26465,7 @@ describe('createServeApp', () => {
         createWorkspaceMetadataApp(secondaryBridge);
       const res = await auth(
         request(app).patch(
-          '/workspaces/ws-secondary/session/session-A/metadata',
+          '/workspaces/ws-secondary/session/550e8400-e29b-41d4-a716-446655440321/metadata',
         ),
       )
         .set('X-Qwen-Client-Id', 'client-1')
@@ -24972,7 +26474,7 @@ describe('createServeApp', () => {
       expect(res.status).toBe(200);
       expect(secondaryBridge.updateMetadataCalls).toEqual([
         {
-          sessionId: 'session-A',
+          sessionId: '550e8400-e29b-41d4-a716-446655440321',
           metadata: { displayName: 'Secondary session' },
           context: { clientId: 'client-1' },
         },
@@ -24989,7 +26491,7 @@ describe('createServeApp', () => {
 
       const res = await auth(
         request(app).patch(
-          '/workspaces/ws-secondary/session/session-A/metadata',
+          '/workspaces/ws-secondary/session/550e8400-e29b-41d4-a716-446655440321/metadata',
         ),
       ).send({ displayName: 'Blocked' });
 
@@ -25012,7 +26514,7 @@ describe('createServeApp', () => {
 
       const res = await auth(
         request(app).patch(
-          '/workspaces/ws-secondary/session/session-A/metadata',
+          '/workspaces/ws-secondary/session/550e8400-e29b-41d4-a716-446655440321/metadata',
         ),
       ).send({ displayName: 'Blocked' });
 
@@ -25033,7 +26535,7 @@ describe('createServeApp', () => {
         const { app } = createWorkspaceMetadataApp(secondaryBridge);
         const res = await auth(
           request(app).patch(
-            '/workspaces/ws-secondary/session/session-A/metadata',
+            '/workspaces/ws-secondary/session/550e8400-e29b-41d4-a716-446655440321/metadata',
           ),
         ).send(body);
 
@@ -25048,18 +26550,18 @@ describe('createServeApp', () => {
       const { app } = createWorkspaceMetadataApp(secondaryBridge);
       const res = await auth(
         request(app).patch(
-          '/workspaces/ws-secondary/session/session-A/metadata',
+          '/workspaces/ws-secondary/session/550e8400-e29b-41d4-a716-446655440321/metadata',
         ),
       ).send({ displayName: 'x'.repeat(300) });
 
       expect(res.status).toBe(200);
       expect(res.body).toEqual({
-        sessionId: 'session-A',
+        sessionId: '550e8400-e29b-41d4-a716-446655440321',
         displayName: 'x'.repeat(256),
       });
       expect(secondaryBridge.updateMetadataCalls).toEqual([
         {
-          sessionId: 'session-A',
+          sessionId: '550e8400-e29b-41d4-a716-446655440321',
           metadata: { displayName: 'x'.repeat(256) },
         },
       ]);
@@ -25072,7 +26574,7 @@ describe('createServeApp', () => {
       });
       const res = await auth(
         request(app).patch(
-          '/workspaces/ws-secondary/session/session-A/metadata',
+          '/workspaces/ws-secondary/session/550e8400-e29b-41d4-a716-446655440321/metadata',
         ),
       ).send({ displayName: 'Blocked' });
 
@@ -25143,6 +26645,99 @@ describe('createServeApp', () => {
         }
       },
     );
+
+    it('applies no durable rename when the pr sidecar write fails in the non-live fallback', async () => {
+      // A combined displayName+pr PATCH on a non-live session persists two
+      // writes sequentially and advances the catalog revision only after
+      // BOTH succeed. The sidecar write must run first: when it fails, the
+      // client receives a total-failure response, and nothing durable may
+      // be left behind unannounced.
+      const runtimeBaseDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-workspace-metadata-prfail-'),
+      );
+      const sessionId = '550e8400-e29b-41d4-a716-446655440035';
+      const chatsDir = path.join(
+        new Storage(WS_DIFFERENT, runtimeBaseDir).getProjectDir(),
+        'chats',
+      );
+      const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
+      await fsp.mkdir(chatsDir, { recursive: true });
+      await fsp.writeFile(
+        filePath,
+        `${JSON.stringify({
+          uuid: 'record-1',
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-05-17T12:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'original' }] },
+          cwd: WS_DIFFERENT,
+        })}\n`,
+        'utf8',
+      );
+      const secondaryBridge = fakeBridge({
+        updateMetadataImpl: () => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const { app } = createWorkspaceMetadataApp(secondaryBridge, {
+        sessionRuntimeBaseDir: runtimeBaseDir,
+      });
+      const service = new SessionService(WS_DIFFERENT, {
+        runtimeBaseDir,
+      });
+      const sidecarPath = service.getPrSessionPathForArchiveState(
+        sessionId,
+        'active',
+      );
+      // Force the sidecar write to fail: a directory squatting the file
+      // path makes both the read and the write fail with EISDIR.
+      await fsp.mkdir(sidecarPath, { recursive: true });
+
+      try {
+        const versionBefore = secondaryBridge.getSessionCatalogVersion();
+        const res = await auth(
+          request(app).patch(
+            `/workspaces/ws-secondary/session/${sessionId}/metadata`,
+          ),
+        ).send({
+          displayName: 'Doomed rename',
+          pr: { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+        });
+        expect(res.status).toBe(500);
+        // The failed sidecar write must not strand a durable rename that
+        // the 500 response never announces.
+        expect(await fsp.readFile(filePath, 'utf8')).not.toContain(
+          'Doomed rename',
+        );
+        expect(secondaryBridge.getSessionCatalogVersion().revision).toBe(
+          versionBefore.revision,
+        );
+
+        // CONTROL: once the sidecar path is writable, the same combined
+        // request applies both mutations and advances the catalog revision.
+        await fsp.rm(sidecarPath, { recursive: true, force: true });
+        const retry = await auth(
+          request(app).patch(
+            `/workspaces/ws-secondary/session/${sessionId}/metadata`,
+          ),
+        ).send({
+          displayName: 'Doomed rename',
+          pr: { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+        });
+        expect(retry.status).toBe(200);
+        expect(retry.body.displayName).toBe('Doomed rename');
+        expect(retry.body.prs).toEqual([
+          { number: 9517, url: 'https://github.com/o/r/pull/9517' },
+        ]);
+        expect(await fsp.readFile(filePath, 'utf8')).toContain('Doomed rename');
+        expect(
+          secondaryBridge.getSessionCatalogVersion().revision,
+        ).toBeGreaterThan(versionBefore.revision);
+      } finally {
+        await fsp.rm(runtimeBaseDir, { recursive: true, force: true });
+      }
+    });
 
     it('returns 404 for a missing persisted session and 409 for a store conflict', async () => {
       const runtimeBaseDir = await fsp.mkdtemp(
@@ -32065,6 +33660,7 @@ describe('Live conversation runtime lifecycle', () => {
       canonicalRoot: string;
       device: number;
       inode: number;
+      inodeVerifiable: boolean;
     }> = {},
   ) {
     const primaryBridge = fakeBridge();
@@ -32081,6 +33677,7 @@ describe('Live conversation runtime lifecycle', () => {
       canonicalRoot: '/work/live-conversations',
       device: 1,
       inode: 2,
+      inodeVerifiable: true,
       ...rootOverrides,
     };
     const conversationWorkspace = {
@@ -32462,8 +34059,8 @@ describe('Live conversation runtime lifecycle', () => {
   it('boots an exact Conversations restore target before source proof', async () => {
     const restoreLiveSettings = await disableLiveVoiceAtBoot();
     const setup = setupLiveRuntime();
-    const getLocation = vi
-      .spyOn(SessionService.prototype, 'getSessionLocation')
+    const findSessionId = vi
+      .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
       .mockResolvedValue(undefined);
     mockWt.realpath = (candidate) => candidate;
     try {
@@ -32481,10 +34078,10 @@ describe('Live conversation runtime lifecycle', () => {
       expect(response.status).toBe(404);
       expect(response.body.code).toBe('session_not_found');
       expect(setup.liveBridge.loadCalls).toHaveLength(0);
-      expect(getLocation).toHaveBeenCalled();
+      expect(findSessionId).toHaveBeenCalled();
     } finally {
       mockWt.realpath = undefined;
-      getLocation.mockRestore();
+      findSessionId.mockRestore();
       await restoreLiveSettings();
     }
   });
@@ -32538,6 +34135,9 @@ describe('Live conversation runtime lifecycle', () => {
         sourceType: 'default',
         sourceId: `realtime_voice:p1:h1:a1:${sessionId}`,
       });
+    const readMetadataIfReadable = vi
+      .spyOn(SessionService.prototype, 'readCreationMetadataIfReadable')
+      .mockImplementation(async (candidateId) => readMetadata(candidateId));
     const updateOrganization = vi
       .spyOn(
         qwenCore.SessionOrganizationService.prototype,
@@ -32630,6 +34230,7 @@ describe('Live conversation runtime lifecycle', () => {
       getLocation.mockRestore();
       sessionExists.mockRestore();
       readMetadata.mockRestore();
+      readMetadataIfReadable.mockRestore();
       updateOrganization.mockRestore();
     }
   });
@@ -32754,7 +34355,18 @@ describe('Live conversation runtime lifecycle', () => {
       .spyOn(SessionService.prototype, 'readCreationMetadata')
       .mockImplementation(async (sessionId) => {
         if (sessionId === 'worker-session') {
-          return { parentSessionId: 'live-load' };
+          return {
+            parentSessionId: '550e8400-e29b-41d4-a716-446655440001',
+          };
+        }
+        if (sessionId === '550e8400-e29b-41d4-a716-446655440001') {
+          return {
+            sourceType: 'default',
+            sourceId: 'realtime_voice:p1:h1:a1:live-load',
+          };
+        }
+        if (sessionId === 'explicit-standalone') {
+          return { sourceType: 'standalone' };
         }
         return sessionId.startsWith('live-')
           ? {
@@ -32763,9 +34375,15 @@ describe('Live conversation runtime lifecycle', () => {
             }
           : {};
       });
+    const readCreationMetadataIfReadable = vi
+      .spyOn(SessionService.prototype, 'readCreationMetadataIfReadable')
+      .mockImplementation(async (sessionId) => readCreationMetadata(sessionId));
     const getLocation = vi
       .spyOn(SessionService.prototype, 'getSessionLocation')
       .mockResolvedValue('active');
+    const findSessionId = vi
+      .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+      .mockImplementation(async (sessionId) => sessionId);
     try {
       const rejectedNew = await request(setup.app)
         .post('/session')
@@ -32795,6 +34413,21 @@ describe('Live conversation runtime lifecycle', () => {
         sessionId: 'generic-session',
         path: `${setup.root.canonicalRoot}/conversation-generic-session`,
       });
+
+      const loadCountBeforeExplicit = setup.liveBridge.loadCalls.length;
+      const materializeCountBeforeExplicit =
+        setup.conversationWorkspace.materializeConversationDirectory.mock.calls
+          .length;
+      const explicitStandaloneRestore = await request(setup.app)
+        .post('/session/explicit-standalone/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: setup.root.canonicalRoot });
+      expect(explicitStandaloneRestore.status).toBe(404);
+      expect(explicitStandaloneRestore.body.code).toBe('session_not_found');
+      expect(setup.liveBridge.loadCalls).toHaveLength(loadCountBeforeExplicit);
+      expect(
+        setup.conversationWorkspace.materializeConversationDirectory,
+      ).toHaveBeenCalledTimes(materializeCountBeforeExplicit);
 
       for (const action of ['load', 'resume'] as const) {
         const sessionId = `live-${action}`;
@@ -32843,8 +34476,82 @@ describe('Live conversation runtime lifecycle', () => {
       expect(setup.liveBridge.loadCalls).toHaveLength(5);
       expect(setup.liveBridge.resumeCalls).toHaveLength(1);
     } finally {
+      findSessionId.mockRestore();
       getLocation.mockRestore();
       readCreationMetadata.mockRestore();
+      readCreationMetadataIfReadable.mockRestore();
+      await (
+        setup.app.locals['sealAndWaitLiveCoordinator'] as () => Promise<void>
+      )();
+    }
+  });
+
+  it('reads the authoritative persisted spelling for internal restore while keeping the private directory canonical, and rejects case conflicts', async () => {
+    const setup = setupLiveRuntime();
+    setup.registry.add(setup.liveRuntime);
+    const canonicalSessionId = '550e8400-e29b-41d4-a716-446655440000';
+    const storageSessionId = canonicalSessionId.toUpperCase();
+    const findSessionId = vi
+      .spyOn(SessionService.prototype, 'findSessionIdIgnoringCase')
+      .mockImplementation(async (sessionId) =>
+        sessionId === canonicalSessionId ? storageSessionId : sessionId,
+      );
+    const getLocation = vi
+      .spyOn(SessionService.prototype, 'getSessionLocation')
+      .mockResolvedValue('active');
+    const readCreationMetadata = vi
+      .spyOn(SessionService.prototype, 'readCreationMetadata')
+      .mockResolvedValue({
+        sourceType: 'default',
+        sourceId: `realtime_voice:p1:h1:a1:${canonicalSessionId}`,
+      });
+    const readCreationMetadataIfReadable = vi
+      .spyOn(SessionService.prototype, 'readCreationMetadataIfReadable')
+      .mockImplementation(async (sessionId) => readCreationMetadata(sessionId));
+    try {
+      const restored = await request(setup.app)
+        .post(`/session/${canonicalSessionId}/load`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: setup.root.canonicalRoot });
+
+      expect(restored.status).toBe(200);
+      expect(setup.liveBridge.loadCalls).toContainEqual(
+        expect.objectContaining({ sessionId: canonicalSessionId }),
+      );
+      expect(
+        setup.conversationWorkspace.materializeConversationDirectory,
+      ).toHaveBeenCalledWith(canonicalSessionId);
+      expect(
+        setup.conversationWorkspace.materializeConversationDirectory,
+      ).not.toHaveBeenCalledWith(storageSessionId);
+      expect(setup.liveBridge.changeSessionCwdCalls).toContainEqual({
+        sessionId: canonicalSessionId,
+        path: `${setup.root.canonicalRoot}/conversation-${canonicalSessionId}`,
+      });
+      // Storage-facing reads still follow the persisted spelling.
+      expect(readCreationMetadataIfReadable).toHaveBeenCalledWith(
+        storageSessionId,
+        'active',
+      );
+
+      findSessionId.mockRejectedValueOnce(
+        new SessionIdCaseConflictError(canonicalSessionId),
+      );
+      const conflict = await request(setup.app)
+        .post(`/session/${canonicalSessionId}/resume`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ cwd: setup.root.canonicalRoot });
+      expect(conflict.status).toBe(409);
+      expect(conflict.body).toMatchObject({
+        code: 'session_conflict',
+        sessionId: canonicalSessionId,
+      });
+      expect(setup.liveBridge.resumeCalls).toHaveLength(0);
+    } finally {
+      readCreationMetadata.mockRestore();
+      readCreationMetadataIfReadable.mockRestore();
+      getLocation.mockRestore();
+      findSessionId.mockRestore();
       await (
         setup.app.locals['sealAndWaitLiveCoordinator'] as () => Promise<void>
       )();
