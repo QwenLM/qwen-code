@@ -10976,6 +10976,96 @@ describe('Session', () => {
           expect(loopState.loopDetected).toBe(false);
           expect(loopState.totalToolCalls).toBeGreaterThan(20);
         });
+
+        it('still halts a frozen daemon poller when replay-only rounds are interleaved in the streak (issue #9450)', async () => {
+          // CLI defaults: skipLoopDetection=true, adaptive soft cap — the
+          // cap's stateful stuck signal is the ONLY live halt path. A
+          // replay-suppressed round (every call pushed as a duplicate batch)
+          // executes nothing and records zero results BY DESIGN; the
+          // batch-boundary decay must not mistake it for abandonment and
+          // wipe the live frozen-board streak. Pre-fix, replays interleaved
+          // at <=5-poll intervals kept statefulMaxResultRepeat below the
+          // stuck threshold indefinitely while the replay batches added 0
+          // to totalToolCalls — the detected stuck loop ran to the hard
+          // backstop instead of halting just past the soft cap.
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+          mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(20);
+          mockConfig.isMaxToolCallsPerTurnExplicit = vi
+            .fn()
+            .mockReturnValue(false);
+          mockConfig.getSkipLoopDetection = vi.fn().mockReturnValue(true);
+          const execute = installTaskListTool(() => 'frozen board');
+          // Each replay round replays a DISTINCT already-handled id with the
+          // same (name, args) fingerprint, so its batch is suppressed whole
+          // without tripping the repeated-duplicate breaker (which fires on
+          // a second replay of the SAME id — a different, also-correct halt).
+          const fingerprint = core.getToolCallFingerprint(
+            'task_list',
+            TASK_LIST_ARGS,
+          );
+          vi.mocked(mockChat.getHistoryToolCallFingerprints).mockReturnValue(
+            new Map(
+              Array.from({ length: 15 }, (_, index) => [
+                `replayed_task_list_${index}`,
+                fingerprint,
+              ]),
+            ),
+          );
+          const loopState = freshLoopState();
+
+          let replayOrdinal = 0;
+          const runReplayRound = (round: number) =>
+            (
+              session as unknown as {
+                runToolCalls: (
+                  abortSignal: AbortSignal,
+                  promptId: string,
+                  calls: unknown[],
+                  loopState: ReturnType<typeof freshLoopState>,
+                ) => Promise<{ loopDetected?: boolean; parts: Part[] }>;
+              }
+            ).runToolCalls(
+              new AbortController().signal,
+              `prompt-replay-${round}`,
+              [
+                {
+                  id: `replayed_task_list_${replayOrdinal++}`,
+                  name: 'task_list',
+                  args: TASK_LIST_ARGS,
+                },
+              ],
+              loopState,
+            );
+
+          let fired = false;
+          for (let round = 0; round < 60 && !fired; round++) {
+            if (round > 0 && round % 5 === 4) {
+              // Every fifth round is a replay-only round: zero executable
+              // calls, zero recorded results (four executed polls between
+              // replays, matching the finding's <=5-poll interleave).
+              const replayResult = await runReplayRound(round);
+              expect(replayResult.loopDetected ?? false).toBe(false);
+              expect(
+                (replayResult.parts[0]?.functionResponse?.response?.[
+                  'error'
+                ] as string) ?? '',
+              ).toContain('Duplicate provider tool call id');
+              continue;
+            }
+            const result = await runTaskListPoll(loopState, round);
+            fired = result.loopDetected ?? false;
+          }
+
+          // The streak survives the replay rounds and arms the cap's stuck
+          // signal: the halt lands at totalToolCalls 21 (soft cap 20 + 1),
+          // before the 21st poll executes.
+          expect(fired).toBe(true);
+          expect(loopState.loopType).toBe(core.LoopType.TURN_TOOL_CALL_CAP);
+          expect(loopState.totalToolCalls).toBe(21);
+          expect(execute).toHaveBeenCalledTimes(20);
+        });
       });
     });
 

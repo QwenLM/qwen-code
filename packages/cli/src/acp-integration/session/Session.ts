@@ -897,6 +897,23 @@ function recordDaemonToolCalls(
 ): boolean {
   if (!loopState || loopState.loopDetected)
     return loopState?.loopDetected ?? false;
+  // A batch that executes nothing — every call suppressed as a replay of an
+  // already-handled provider call id (pushDuplicateBatch) — records zero
+  // results BY DESIGN (the result-recording filter excludes
+  // providerDuplicate / not_started records). Running the abandonment decay
+  // for it would mistake that for the model moving on: the next batch's
+  // decay would find the live frozen-board key absent and wipe its streak,
+  // letting replays interleaved at ≤5-poll intervals keep
+  // statefulMaxResultRepeat below the stuck threshold indefinitely —
+  // disarming the cap's stuck signal while the replay batches also add 0 to
+  // totalToolCalls and push the hard backstop away (issue #9450). Skip it:
+  // the still-populated statefulResultKeysSinceLastBatch set carries the
+  // last EXECUTED round's keys through the empty batch, so abandonment
+  // decay still runs (and clears) on the next non-empty batch. The cap
+  // check cannot newly fire on an empty batch: totalToolCalls is unchanged
+  // and skipping the decay can only keep the repeat peak higher, which a
+  // prior non-halting check at the same total already tolerated.
+  if (calls.length === 0) return false;
   // Batch boundary: the previous batch's results have all been recorded by
   // now (results are recorded during execution, before the next batch is
   // streamed), so this is the safe point to decay stateful keys absent from
