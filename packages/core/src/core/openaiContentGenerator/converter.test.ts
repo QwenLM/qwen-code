@@ -2004,6 +2004,88 @@ describe('OpenAIContentConverter', () => {
       ]);
     });
 
+    it('re-assembles a renormalized re-send onto a closing-shaped candidate (issue #9348 R10-1)', () => {
+      // An incomplete stray closer '\n</thinki' is held without
+      // closingTagName (the '>' has not arrived). Its renormalized
+      // cumulative re-send '</thinking>' (the leading '\n' dropped by the
+      // transport) IS net-closing — a closing-shaped candidate has no open
+      // depth — so the entrance-C net-closing direction guard must not
+      // apply to it: the guard's premise (a re-send re-opens at least as
+      // much as it closes) holds only for opening-block candidates. With
+      // the guard skipped the superset strip re-assembles the re-send onto
+      // the closingTagName route instead of concatenating raw
+      // '\n</thinki</thinking>' garbage into visible output.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const prefix = converter.convertOpenAIChunkToGemini(
+        streamChunk('closer-prefix', { content: '\n</thinki' }),
+        stream,
+      );
+      expect(prefix.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingThinkingTagCandidate).toEqual({
+        text: '\n</thinki',
+      });
+
+      const resend = converter.convertOpenAIChunkToGemini(
+        streamChunk('closer-resend', { content: '</thinking>' }),
+        stream,
+      );
+      expect(resend.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingThinkingTagCandidate).toEqual({
+        text: '</thinking>',
+        closingTagName: 'thinking',
+      });
+
+      // The stray closer resolves via the closingTagName route (fail-closed
+      // at a plain 'stop' finish), never as raw released text.
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('finish', {}, 'stop'),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('re-assembles a chunk-split closing tag continuation onto the closingTagName route (issue #9348 R10-1 twin)', () => {
+      // Chunk-split twin of the renormalized re-send: '\n</thinki' followed
+      // by the genuine continuation 'ng>'. Both routes must land on the
+      // closingTagName machinery regardless of stream chunking.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const prefix = converter.convertOpenAIChunkToGemini(
+        streamChunk('closer-prefix', { content: '\n</thinki' }),
+        stream,
+      );
+      expect(prefix.candidates?.[0]?.content?.parts).toEqual([]);
+
+      const continuation = converter.convertOpenAIChunkToGemini(
+        streamChunk('closer-rest', { content: 'ng>' }),
+        stream,
+      );
+      expect(continuation.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingThinkingTagCandidate).toEqual({
+        text: '</thinking>',
+        closingTagName: 'thinking',
+      });
+
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('finish', {}, 'stop'),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
     it('keeps genuine content intact when a sub-word "<" candidate is held (issue #9348)', () => {
       // The held-candidate prefix strip fired on sub-word candidates too:
       // with a lone '<' held, a genuine '<EOF' delta lost its leading '<'

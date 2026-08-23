@@ -1130,11 +1130,14 @@ const MAX_THINKING_TAG_CANDIDATE_LENGTH = 128;
 
 /**
  * True when `text` carries more closing than opening thinking tags. The
- * held-candidate superset strip uses this as a direction guard: a genuine
- * continuation that re-starts with the held candidate's text must net-close
- * the candidate's still-open depth (more closers than openers), while a
- * renormalized re-send of the candidate re-opens at least as much as it
- * closes — see the strip's comment.
+ * held-candidate superset strip uses this as a direction guard for
+ * opening-block candidates: a genuine continuation that re-starts with the
+ * held candidate's text must net-close the candidate's still-open depth
+ * (more closers than openers), while a renormalized re-send of an
+ * opening-block candidate re-opens at least as much as it closes — see the
+ * strip's comment. The premise holds only for opening-block candidates; a
+ * closing-shaped candidate has no open depth, so its renormalized re-send
+ * IS net-closing and the guard must not apply to it.
  */
 function carriesNetClosingTagSurplus(text: string): boolean {
   const openers = text.match(/<think(?:ing)?\s*>/gi)?.length ?? 0;
@@ -1775,13 +1778,24 @@ export function convertOpenAIChunkToGemini(
     // Stripping the net-closing shape reassembles an early-balancing block
     // whose leftover stray closer fails the turn mid-stream; appending it
     // lets the depth-counting scanner absorb the nested block instead.
+    // Closing-shaped candidates ('</think…' held before the '>' arrives) are
+    // exempt from the net-closing guard: they have no open depth, so their
+    // renormalized re-send IS net-closing, the guard skips the strip, and
+    // the re-send is concatenated onto the held fragment into raw
+    // '</thinki</thinking>' garbage released as visible text. Stripping
+    // re-assembles the re-send onto the closingTagName route instead
+    // (issue #9348 R10-1).
+    const stripCandidateIsClosingShaped =
+      pendingTagCandidate !== undefined &&
+      pendingTagCandidate.text.trimStart().startsWith('</');
     if (
       pendingTagCandidate &&
       !pendingTagCandidate.closingTagName &&
       /\S/.test(pendingTagCandidate.text) &&
       /<\/?think(?:ing)?/i.test(pendingTagCandidate.text) &&
       visibleText &&
-      !carriesNetClosingTagSurplus(visibleText)
+      (stripCandidateIsClosingShaped ||
+        !carriesNetClosingTagSurplus(visibleText))
     ) {
       const alignedCandidateText = pendingTagCandidate.text.trimStart();
       const alignedVisibleText = visibleText.trimStart();
