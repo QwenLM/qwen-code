@@ -522,6 +522,7 @@ type TodoStopGuardBackgroundBaseline = {
   agents: Set<string>;
   shells: Set<string>;
   monitors: Set<string>;
+  workflows: Set<string>;
   wakeups: Set<string>;
 };
 
@@ -1850,13 +1851,14 @@ export class Session implements SessionContext {
   private notificationAbortController: AbortController | null = null;
   private notificationCompletion: Promise<void> | null = null;
   private currentAgentNotificationTaskId: string | null = null;
+  private currentWorkflowNotificationTaskId: string | null = null;
   private currentShellNotificationActive = false;
   private readonly persistedBackgroundNotificationTaskIds = new Set<string>();
   private readonly backgroundNotificationAcceptances = new Map<
     string,
     Promise<boolean>
   >();
-  private readonly activeAgentNotificationAcceptances = new Set<string>();
+  private readonly activeNotificationAcceptances = new Set<string>();
 
   private readonly goalQueue: AcpGoalTurn[] = [];
   private goalProcessing = false;
@@ -2772,6 +2774,7 @@ export class Session implements SessionContext {
     const agents = this.config.getBackgroundTaskRegistry?.()?.getAll?.() ?? [];
     const shells = this.config.getBackgroundShellRegistry?.()?.getAll?.() ?? [];
     const monitors = this.config.getMonitorRegistry?.()?.getAll?.() ?? [];
+    const workflows = this.config.getWorkflowRunRegistry?.()?.list?.() ?? [];
     const wakeups = this.config.isCronEnabled?.()
       ? (this.config.getCronScheduler?.()?.list?.() ?? []).filter(
           (job) => job.cronExpr === '@wakeup',
@@ -2797,6 +2800,7 @@ export class Session implements SessionContext {
           .filter((item) => item.kind === 'monitor')
           .map((item) => item.taskId),
       ]),
+      workflows: new Set(workflows.map((task) => task.runId)),
       wakeups: new Set([
         ...wakeups.map((job) => job.id),
         ...this.cronQueue.flatMap((item) =>
@@ -2894,6 +2898,17 @@ export class Session implements SessionContext {
             task.id,
             task.ownerAgentId,
           ) && task.status === 'running',
+      )
+    ) {
+      return true;
+    }
+
+    const workflows = this.config.getWorkflowRunRegistry?.()?.list?.() ?? [];
+    if (
+      workflows.some(
+        (task) =>
+          !baseline.workflows.has(task.runId) &&
+          !isTerminalWorkflowStatus(task.status),
       )
     ) {
       return true;
@@ -3153,7 +3168,14 @@ export class Session implements SessionContext {
   }
 
   async refreshWorkflowHistory(): Promise<readonly WorkflowSnapshot[]> {
-    this.workflowHistory = await listWorkflowSnapshots(this.config);
+    const persisted = await listWorkflowSnapshots(this.config);
+    const byRunId = new Map(
+      this.workflowHistory.map((snapshot) => [snapshot.runId, snapshot]),
+    );
+    for (const snapshot of persisted) byRunId.set(snapshot.runId, snapshot);
+    this.workflowHistory = [...byRunId.values()]
+      .sort((a, b) => b.startTime - a.startTime)
+      .slice(0, MAX_RETAINED_SNAPSHOTS);
     return this.workflowHistory;
   }
 
@@ -3265,13 +3287,18 @@ export class Session implements SessionContext {
     }
     const notificationIds = new Set<string>();
     for (const item of this.notificationQueue) {
-      if (item.kind === 'agent') notificationIds.add(item.taskId);
+      if (item.kind === 'agent' || item.kind === 'workflow') {
+        notificationIds.add(item.taskId);
+      }
     }
-    for (const taskId of this.activeAgentNotificationAcceptances) {
+    for (const taskId of this.activeNotificationAcceptances) {
       notificationIds.add(taskId);
     }
     if (this.currentAgentNotificationTaskId !== null) {
       notificationIds.add(this.currentAgentNotificationTaskId);
+    }
+    if (this.currentWorkflowNotificationTaskId !== null) {
+      notificationIds.add(this.currentWorkflowNotificationTaskId);
     }
     for (const taskId of notificationIds) {
       holds.push({ category: 'notification', id: taskId });
@@ -3282,6 +3309,11 @@ export class Session implements SessionContext {
       this.currentShellNotificationActive;
     if (shellActive) {
       holds.push({ category: 'shell', id: 'background-shells' });
+    }
+    for (const task of this.config.getWorkflowRunRegistry().list()) {
+      if (!isTerminalWorkflowStatus(task.status)) {
+        holds.push({ category: 'workflow', id: task.runId });
+      }
     }
     return holds;
   }
@@ -8227,7 +8259,8 @@ export class Session implements SessionContext {
         taskId: meta.runId,
         status: meta.status,
         kind: 'workflow',
-        continuesTodoStopGuardWorkChain: meta.todoWorkChainId !== undefined,
+        continuesTodoStopGuardWorkChain:
+          !this.todoStopGuardBackgroundBaseline.workflows.has(meta.runId),
         todoWorkChainId: meta.todoWorkChainId,
       });
     });
@@ -8319,8 +8352,8 @@ export class Session implements SessionContext {
 
     const acceptance = this.#persistDaemonBackgroundNotification(item);
     this.backgroundNotificationAcceptances.set(item.taskId, acceptance);
-    if (item.kind === 'agent') {
-      this.activeAgentNotificationAcceptances.add(item.taskId);
+    if (item.kind === 'agent' || item.kind === 'workflow') {
+      this.activeNotificationAcceptances.add(item.taskId);
       this.#activeWorkChanged();
     }
     try {
@@ -8330,8 +8363,8 @@ export class Session implements SessionContext {
         this.backgroundNotificationAcceptances.get(item.taskId) === acceptance
       ) {
         this.backgroundNotificationAcceptances.delete(item.taskId);
-        if (item.kind === 'agent') {
-          this.activeAgentNotificationAcceptances.delete(item.taskId);
+        if (item.kind === 'agent' || item.kind === 'workflow') {
+          this.activeNotificationAcceptances.delete(item.taskId);
           this.#activeWorkChanged();
         }
       }
@@ -8453,6 +8486,8 @@ export class Session implements SessionContext {
         if (!item) break;
         this.currentAgentNotificationTaskId =
           item.kind === 'agent' ? item.taskId : null;
+        this.currentWorkflowNotificationTaskId =
+          item.kind === 'workflow' ? item.taskId : null;
         this.currentShellNotificationActive = item.kind === 'shell';
         this.#activeWorkChanged();
         try {
@@ -8463,6 +8498,7 @@ export class Session implements SessionContext {
           );
         } finally {
           this.currentAgentNotificationTaskId = null;
+          this.currentWorkflowNotificationTaskId = null;
           this.currentShellNotificationActive = false;
           this.#activeWorkChanged();
         }

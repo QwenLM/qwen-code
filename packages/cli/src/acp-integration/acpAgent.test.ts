@@ -10336,6 +10336,102 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it.each(['retry', 'rerun'] as const)(
+    'admits only one overlapping %s request for a workflow task',
+    async (action) => {
+      const sessionId = '11111111-1111-1111-1111-111111111111';
+      const innerConfig = await setupSessionMocks(sessionId);
+      innerConfig.isWorkflowsEnabled.mockReturnValue(true);
+      const task = {
+        id: 'wf_1234abcd',
+        runId: 'wf_1234abcd',
+        kind: 'workflow' as const,
+        status: 'failed' as 'failed' | 'running',
+        script: 'return await agent(args.prompt)',
+        args: { prompt: 'retry this path' },
+      };
+      const rerunTask = {
+        ...task,
+        id: 'wf_5678efab',
+        runId: 'wf_5678efab',
+        status: 'running' as const,
+      };
+      let releaseStart!: () => void;
+      const startGate = new Promise<void>((resolve) => {
+        releaseStart = resolve;
+      });
+      let rerunStarted = false;
+      const registry = {
+        get: vi.fn((runId: string) => {
+          if (runId === task.runId) return task;
+          if (rerunStarted && runId === rerunTask.runId) return rerunTask;
+          return undefined;
+        }),
+        getHandle: vi.fn(() => undefined),
+        setLineage: vi.fn().mockReturnValue(true),
+      };
+      const execute = vi.fn().mockImplementation(async () => {
+        await startGate;
+        if (action === 'retry') task.status = 'running';
+        else rerunStarted = true;
+        return {
+          llmContent: 'started',
+          ...(action === 'rerun' ? { workflowRunId: rerunTask.runId } : {}),
+        };
+      });
+      const buildSessionOwnedBackground = vi.fn().mockReturnValue({ execute });
+      Object.assign(innerConfig, {
+        getWorkflowRunRegistry: vi.fn().mockReturnValue(registry),
+        getToolRegistry: vi.fn().mockReturnValue({
+          getTool: vi.fn((name: string) =>
+            name === 'workflow' ? { buildSessionOwnedBackground } : undefined,
+          ),
+        }),
+      });
+
+      const agentPromise = runAcpAgent(
+        mockConfig,
+        makeSessionSettings(),
+        mockArgv,
+      );
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+      const first = agent.extMethod(
+        SERVE_CONTROL_EXT_METHODS.sessionWorkflowTaskAction,
+        { sessionId, taskId: task.runId, action },
+      );
+      await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionWorkflowTaskAction, {
+          sessionId,
+          taskId: task.runId,
+          action,
+        }),
+      ).resolves.toEqual({ changed: false, status: 'failed' });
+      expect(execute).toHaveBeenCalledOnce();
+
+      releaseStart();
+      await expect(first).resolves.toEqual(
+        action === 'retry'
+          ? { changed: true, status: 'running' }
+          : {
+              changed: true,
+              status: 'running',
+              taskId: rerunTask.runId,
+            },
+      );
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
+
   it('reruns a terminal workflow from scratch with a new run id', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);

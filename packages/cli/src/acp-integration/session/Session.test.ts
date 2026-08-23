@@ -495,6 +495,7 @@ describe('Session', () => {
     resolvePendingApproval: ReturnType<typeof vi.fn>;
     get: ReturnType<typeof vi.fn>;
     getHandle: ReturnType<typeof vi.fn>;
+    list: ReturnType<typeof vi.fn>;
   };
   let mockGoalRuntime: {
     getSnapshot: ReturnType<typeof vi.fn>;
@@ -715,6 +716,7 @@ describe('Session', () => {
       resolvePendingApproval: vi.fn().mockResolvedValue(true),
       get: vi.fn().mockReturnValue(undefined),
       getHandle: vi.fn().mockReturnValue(undefined),
+      list: vi.fn().mockReturnValue([]),
     };
 
     mockChatRecordingService = {
@@ -1020,7 +1022,9 @@ describe('Session', () => {
       );
     }
 
-    function holdIds(category: 'agent' | 'notification' | 'shell'): string[] {
+    function holdIds(
+      category: 'agent' | 'notification' | 'shell' | 'workflow',
+    ): string[] {
       return session
         .collectActiveWorkHolds()
         .filter((hold) => hold.category === category)
@@ -1091,6 +1095,23 @@ describe('Session', () => {
       expect(session.isIdle()).toBe(false);
 
       mockBackgroundShellRegistry.getAll.mockReturnValue([]);
+      expect(session.collectActiveWorkHolds()).toEqual([]);
+      expect(session.isIdle()).toBe(true);
+      session.dispose();
+    });
+
+    it('holds each non-terminal workflow run', () => {
+      mockWorkflowRunRegistry.list.mockReturnValue([
+        { runId: 'wf-running', status: 'running' },
+        { runId: 'wf-paused', status: 'paused' },
+        { runId: 'wf-complete', status: 'completed' },
+      ]);
+      createReportingSession();
+
+      expect(holdIds('workflow')).toEqual(['wf-running', 'wf-paused']);
+      expect(session.isIdle()).toBe(false);
+
+      mockWorkflowRunRegistry.list.mockReturnValue([]);
       expect(session.collectActiveWorkHolds()).toEqual([]);
       expect(session.isIdle()).toBe(true);
       session.dispose();
@@ -1177,6 +1198,37 @@ describe('Session', () => {
         expect(session.collectActiveWorkHolds()).toEqual([]),
       );
       expect(session.isIdle()).toBe(true);
+      session.dispose();
+    });
+
+    it('holds a queued workflow completion notification', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      createReportingSession();
+      const releaseCloseGate = session.beginClose();
+      const notify =
+        mockWorkflowRunRegistry.setCompletionCallback.mock.calls.at(
+          -1,
+        )?.[0] as (
+          displayText: string,
+          modelText: string,
+          meta: { runId: string; status: 'completed' },
+        ) => void;
+
+      notify('Workflow completed.', '<task-notification />', {
+        runId: 'wf-queued',
+        status: 'completed',
+      });
+
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      expect(holdIds('notification')).toEqual(['wf-queued']);
+      expect(session.isIdle()).toBe(false);
+
+      releaseCloseGate();
+      await vi.waitFor(() =>
+        expect(session.collectActiveWorkHolds()).toEqual([]),
+      );
       session.dispose();
     });
 
@@ -2282,6 +2334,47 @@ describe('Session', () => {
         description: 'Review and fix',
         status: 'completed',
       }),
+    ]);
+  });
+
+  it('keeps cached terminal workflow history when its disk write is missing', async () => {
+    const callback = mockWorkflowRunRegistry.setStatusChangeCallback.mock
+      .calls[0][0] as (entry: core.WorkflowTask) => void;
+    callback({
+      id: 'wf-unpersisted',
+      kind: 'workflow',
+      runId: 'wf-unpersisted',
+      description: 'Unpersisted run',
+      meta: null,
+      status: 'completed',
+      startTime: 1_000,
+      endTime: 2_000,
+      outputFile: '',
+      outputOffset: 0,
+      notified: true,
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      currentPhase: null,
+      phases: [],
+      phaseVisits: [],
+      currentPhaseVisitId: null,
+      dispatches: [],
+      agentsDispatched: 0,
+      agentsCompleted: 0,
+      recentLogs: [],
+      events: [],
+      tokensSpent: 0,
+      tokenBudgetTotal: null,
+      perPhaseTokens: new Map(),
+      pendingApprovals: [],
+      script: 'return 1;',
+    });
+    listWorkflowSnapshotsSpy.mockResolvedValueOnce([]);
+
+    await session.refreshWorkflowHistory();
+
+    expect(session.getWorkflowHistory()).toEqual([
+      expect.objectContaining({ runId: 'wf-unpersisted' }),
     ]);
   });
 
@@ -33667,6 +33760,55 @@ describe('Session', () => {
         }),
         expect.objectContaining({
           taskId: 'baseline-monitor',
+          continuesTodoStopGuardWorkChain: true,
+        }),
+      ]);
+      internals.notificationProcessing = false;
+    });
+
+    it('classifies workflow notifications from the captured baseline', () => {
+      mockWorkflowRunRegistry.list.mockReturnValue([
+        { runId: 'baseline-workflow', status: 'running' },
+      ]);
+      rebuildSessionWithGuard();
+      const internals = session as unknown as {
+        notificationProcessing: boolean;
+        notificationQueue: Array<{
+          taskId: string;
+          continuesTodoStopGuardWorkChain: boolean;
+        }>;
+      };
+      internals.notificationProcessing = true;
+      const callback =
+        mockWorkflowRunRegistry.setCompletionCallback.mock.calls.at(
+          -1,
+        )?.[0] as (
+          displayText: string,
+          modelText: string,
+          meta: {
+            runId: string;
+            status: 'completed';
+            todoWorkChainId?: string;
+          },
+        ) => void;
+
+      callback('baseline result', '<baseline-workflow />', {
+        runId: 'baseline-workflow',
+        status: 'completed',
+        todoWorkChainId: 'stale-chain',
+      });
+      callback('new result', '<new-workflow />', {
+        runId: 'new-workflow',
+        status: 'completed',
+      });
+
+      expect(internals.notificationQueue).toEqual([
+        expect.objectContaining({
+          taskId: 'baseline-workflow',
+          continuesTodoStopGuardWorkChain: false,
+        }),
+        expect.objectContaining({
+          taskId: 'new-workflow',
           continuesTodoStopGuardWorkChain: true,
         }),
       ]);

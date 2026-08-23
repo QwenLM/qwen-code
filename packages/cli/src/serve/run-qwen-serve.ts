@@ -4450,6 +4450,8 @@ async function runQwenServeImpl(
             workspace,
             trustedWorkspace,
           );
+          primaryRuntimeEnv.workflowsEnabledBySettings =
+            fresh.merged.tools?.workflowsEnabled === true;
           let refreshedRuntimeEnv: ReturnType<
             EnvironmentRuntime['buildRuntimeEnvironment']
           >;
@@ -4882,6 +4884,8 @@ async function runQwenServeImpl(
               workspace,
               secondaryTrusted,
             );
+            secondaryEnv.metadata.workflowsEnabledBySettings =
+              fresh.merged.tools?.workflowsEnabled === true;
             try {
               const refreshedRuntimeEnv =
                 settingsRuntime.environment.buildRuntimeEnvironment(
@@ -5467,6 +5471,8 @@ async function runQwenServeImpl(
                 workspace,
                 trusted,
               );
+              wsEnv.metadata.workflowsEnabledBySettings =
+                fresh.merged.tools?.workflowsEnabled === true;
               // Mirror the startup secondary-workspace path: rebuild the runtime
               // env snapshot and update the metadata so `.env` changes actually
               // propagate to child processes spawned by this workspace's bridge.

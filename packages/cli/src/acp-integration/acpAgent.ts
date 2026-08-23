@@ -3967,6 +3967,7 @@ class QwenAgent implements Agent {
   private sessions: Map<string, Session> = new Map();
   private readonly historyMutationTails = new Map<string, Promise<void>>();
   private readonly startingSessionIds = new Set<string>();
+  private readonly startingWorkflowTaskIds = new Set<string>();
   private activePromptCalls = new Map<string, Set<ActivePromptCall>>();
   private workspaceMcpDiscoveryConfig: Config | undefined;
   private workspaceMcpDiscoveryPromise: Promise<void> | undefined;
@@ -11384,42 +11385,51 @@ class QwenAgent implements Agent {
           if (!canStart || !task.script) {
             return { changed: false, status: task.status };
           }
-          const workflowTool = config
-            .getToolRegistry()
-            .getTool(ToolNames.WORKFLOW);
-          if (!isSessionOwnedWorkflowTool(workflowTool)) {
-            throw RequestError.invalidParams(
-              undefined,
-              `The workflow tool is unavailable; cannot ${action} this run.`,
-            );
+          const startClaim = `${sessionId}\0${taskId}`;
+          if (this.startingWorkflowTaskIds.has(startClaim)) {
+            return { changed: false, status: task.status };
           }
-          const startParams: Omit<WorkflowParams, 'run_in_background'> = {
-            script: task.script,
-            args: task.args,
-            ...(action === 'retry' ? { resumeFromRunId: task.runId } : {}),
-          };
-          const result = (await workflowTool
-            .buildSessionOwnedBackground(startParams)
-            .execute(new AbortController().signal)) as WorkflowToolResult;
-          if (action === 'rerun') {
-            const rerunTask = result.workflowRunId
-              ? registry.get(result.workflowRunId)
-              : undefined;
-            if (rerunTask) {
-              registry.setLineage(rerunTask.runId, task.runId, 'rerun');
+          this.startingWorkflowTaskIds.add(startClaim);
+          try {
+            const workflowTool = config
+              .getToolRegistry()
+              .getTool(ToolNames.WORKFLOW);
+            if (!isSessionOwnedWorkflowTool(workflowTool)) {
+              throw RequestError.invalidParams(
+                undefined,
+                `The workflow tool is unavailable; cannot ${action} this run.`,
+              );
             }
-            return rerunTask
-              ? {
-                  changed: true,
-                  status: rerunTask.status,
-                  taskId: rerunTask.runId,
-                }
-              : { changed: false, status: task.status };
+            const startParams: Omit<WorkflowParams, 'run_in_background'> = {
+              script: task.script,
+              args: task.args,
+              ...(action === 'retry' ? { resumeFromRunId: task.runId } : {}),
+            };
+            const result = (await workflowTool
+              .buildSessionOwnedBackground(startParams)
+              .execute(new AbortController().signal)) as WorkflowToolResult;
+            if (action === 'rerun') {
+              const rerunTask = result.workflowRunId
+                ? registry.get(result.workflowRunId)
+                : undefined;
+              if (rerunTask) {
+                registry.setLineage(rerunTask.runId, task.runId, 'rerun');
+              }
+              return rerunTask
+                ? {
+                    changed: true,
+                    status: rerunTask.status,
+                    taskId: rerunTask.runId,
+                  }
+                : { changed: false, status: task.status };
+            }
+            return {
+              changed: true,
+              status: registry.get(taskId)?.status,
+            };
+          } finally {
+            this.startingWorkflowTaskIds.delete(startClaim);
           }
-          return {
-            changed: true,
-            status: registry.get(taskId)?.status,
-          };
         }
         const changed =
           action === 'pause' ? registry.pause(taskId) : registry.resume(taskId);
