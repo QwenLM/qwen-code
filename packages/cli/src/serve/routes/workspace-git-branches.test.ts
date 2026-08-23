@@ -192,13 +192,26 @@ describe('legacy route trust guard', () => {
 
 const tmpRoots: string[] = [];
 
-// Ambient git config (a host-wide `merge.ff = only`, pull policies, hooks)
-// must not reach the fixtures or the git invocations of the code under test:
-// point HOME and the XDG config home at an empty directory for this file's
-// lifetime, and GIT_CONFIG_* at an empty file for the fixture helper, which
-// does not go through gitEnv().
+// Ambient git config must not reach the fixtures or the git invocations
+// of the code under test through any channel this file controls: point
+// HOME and the XDG config home at an empty directory for this file's
+// lifetime, GIT_CONFIG_GLOBAL/SYSTEM at an empty file for the fixture
+// helper (which does not go through gitEnv()), and clear the env-injected
+// config channels plus the repo selectors the fixture helper would
+// otherwise inherit. The host's compiled-in system config (/etc/gitconfig)
+// stays reachable for the code under test because gitEnv() strips the very
+// variables that would redirect it; none of the pull shapes below depends
+// on the merge fast-forward policy, so no test is gated on it.
 const hermeticHome = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-githome-'));
 const savedAmbientGitEnv: Record<string, string | undefined> = {};
+const GIT_ENV_VARS_TO_CLEAR = [
+  'GIT_CONFIG_COUNT',
+  'GIT_CONFIG_NOSYSTEM',
+  'GIT_DIR',
+  'GIT_WORK_TREE',
+  'GIT_INDEX_FILE',
+];
+const GIT_ENV_PREFIXES_TO_CLEAR = ['GIT_CONFIG_KEY_', 'GIT_CONFIG_VALUE_'];
 beforeAll(() => {
   fs.writeFileSync(path.join(hermeticHome, 'gitconfig'), '');
   for (const key of [
@@ -207,8 +220,17 @@ beforeAll(() => {
     'XDG_CONFIG_HOME',
     'GIT_CONFIG_GLOBAL',
     'GIT_CONFIG_SYSTEM',
+    ...GIT_ENV_VARS_TO_CLEAR,
   ]) {
     savedAmbientGitEnv[key] = process.env[key];
+  }
+  for (const key of Object.keys(process.env)) {
+    if (GIT_ENV_PREFIXES_TO_CLEAR.some((prefix) => key.startsWith(prefix))) {
+      savedAmbientGitEnv[key] = process.env[key];
+    }
+  }
+  for (const key of Object.keys(savedAmbientGitEnv)) {
+    delete process.env[key];
   }
   process.env['HOME'] = hermeticHome;
   process.env['USERPROFILE'] = hermeticHome;
@@ -468,7 +490,7 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
     expect(response.body.stashRestoreConflict).toBe(true);
   });
 
-  it('classifies a conflicting stash pull as dirty_working_tree and restores the state', async () => {
+  it('classifies a conflicting stash pull as diverged and restores the state', async () => {
     const dir = makeRepo();
     const remote = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitbranch-remote-')),
@@ -503,8 +525,11 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
       .post('/workspace/git/pull')
       .send({ stash: true });
 
+    // The merge conflicts on committed content the stash cannot influence,
+    // so the route reports the terminal diverged state instead of a panel
+    // whose actions all fail.
     expect(response.status).toBe(409);
-    expect(response.body.error).toBe('dirty_working_tree');
+    expect(response.body.error).toBe('diverged');
     const body = JSON.stringify(response.body);
     expect(body).not.toContain(dir);
     // The recovery restored the pre-pull state.
@@ -517,7 +542,7 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
     expect(git(dir, 'stash', 'list').trim()).toBe('');
   });
 
-  it('classifies the diverged-branch force refusal as dirty_working_tree', async () => {
+  it('classifies the diverged-branch force refusal as diverged', async () => {
     const dir = makeDirtyPullRepo();
     // A divergent local commit: force must refuse before discarding anything.
     fs.writeFileSync(path.join(dir, 'c.txt'), 'local commit file\n');
@@ -529,7 +554,7 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
       .send({ force: true });
 
     expect(response.status).toBe(409);
-    expect(response.body.error).toBe('dirty_working_tree');
+    expect(response.body.error).toBe('diverged');
     expect(response.body.message).toContain('diverged');
     const body = JSON.stringify(response.body);
     expect(body).not.toContain(dir);
@@ -540,8 +565,80 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
     );
   });
 
-  it('classifies a pull blocked by unmerged files as dirty_working_tree', async () => {
+  it('classifies a pull blocked by an in-progress merge as merge_in_progress', async () => {
     const dir = makeUnmergedRepo();
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/pull')
+      .send({});
+
+    // MERGE_HEAD exists: no panel action can resolve the state, so it is
+    // terminal guidance, not the stash/discard panel.
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe('merge_in_progress');
+    const body = JSON.stringify(response.body);
+    expect(body).not.toContain(dir);
+  });
+
+  it('classifies a stash pull refused on an in-progress merge as merge_in_progress', async () => {
+    const dir = makeUnmergedRepo();
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/pull')
+      .send({ stash: true });
+
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe('merge_in_progress');
+    const body = JSON.stringify(response.body);
+    expect(body).not.toContain(dir);
+  });
+
+  it('classifies a rebase-worded failure on a dirty tree as dirty_working_tree', async () => {
+    const dir = makeDirtyPullRepo();
+
+    // `pull --rebase` fails with "cannot pull with rebase: You have
+    // unstaged changes."; the classification comes from the repository
+    // state, so the wording cannot fall through to an untyped 500.
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/pull')
+      .send({ rebase: true });
+
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe('dirty_working_tree');
+    expect(response.body.unmerged).toBeUndefined();
+  });
+
+  it('does not report unmerged state for a dirty file whose name matches unmerged wording', async () => {
+    const dir = makeRepo();
+    // A tracked file whose NAME contains the old client regex's wording:
+    // the structured flag must come from the index state, not the message.
+    fs.writeFileSync(path.join(dir, 'needs merge.txt'), 'one\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'add needs merge.txt');
+    const remote = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitbranch-remote-')),
+    );
+    tmpRoots.push(remote);
+    git(remote, 'init', '-q', '--bare');
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+    const clone = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitbranch-clone-')),
+    );
+    tmpRoots.push(clone);
+    git(clone, 'clone', '-q', remote, '.');
+    git(clone, 'config', 'user.email', 'other@example.com');
+    git(clone, 'config', 'user.name', 'Other');
+    git(clone, 'config', 'commit.gpgsign', 'false');
+    // The incoming commit touches the awkwardly named file, so the plain
+    // pull refuses on it and the error text carries the name.
+    fs.writeFileSync(path.join(clone, 'needs merge.txt'), 'remote edit\n');
+    git(clone, 'add', '.');
+    git(clone, 'commit', '-q', '-m', 'remote commit');
+    git(clone, 'push', '-q', 'origin', 'HEAD');
+
+    fs.writeFileSync(path.join(dir, 'needs merge.txt'), 'local edit\n');
 
     const response = await request(appWithWorkspace(dir))
       .post('/workspace/git/pull')
@@ -549,22 +646,153 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
 
     expect(response.status).toBe(409);
     expect(response.body.error).toBe('dirty_working_tree');
-    const body = JSON.stringify(response.body);
-    expect(body).not.toContain(dir);
+    // The error text carries the file name, but the index has no
+    // unmerged entries, so the structured flag must stay absent.
+    expect(response.body.message).toContain('needs merge.txt');
+    expect(response.body.unmerged).toBeUndefined();
   });
 
-  it('classifies a stash pull refused on unmerged files as dirty_working_tree', async () => {
-    const dir = makeUnmergedRepo();
+  it('classifies a multi-file conflicting stash pull regardless of the message cap', async () => {
+    const dir = makeRepo();
+    // 13 files modified on both sides: git's per-file diagnostics push the
+    // conflict keywords past the 512-char payload cap. State-based
+    // classification cannot miss them the way text matching did.
+    const files = Array.from({ length: 13 }, (_, i) => {
+      const rel = `src/features/module-${String(i + 1).padStart(2, '0')}.txt`;
+      return rel;
+    });
+    for (const rel of files) {
+      fs.mkdirSync(path.join(dir, path.dirname(rel)), { recursive: true });
+      fs.writeFileSync(path.join(dir, rel), 'base\n');
+    }
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'add files');
+    const remote = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitbranch-remote-')),
+    );
+    tmpRoots.push(remote);
+    git(remote, 'init', '-q', '--bare');
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+    const clone = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitbranch-clone-')),
+    );
+    tmpRoots.push(clone);
+    git(clone, 'clone', '-q', remote, '.');
+    git(clone, 'config', 'user.email', 'other@example.com');
+    git(clone, 'config', 'user.name', 'Other');
+    git(clone, 'config', 'commit.gpgsign', 'false');
+    for (const rel of files) {
+      fs.writeFileSync(path.join(clone, rel), 'remote version\n');
+    }
+    git(clone, 'add', '.');
+    git(clone, 'commit', '-q', '-m', 'remote edits');
+    git(clone, 'push', '-q', 'origin', 'HEAD');
+
+    for (const rel of files) {
+      fs.writeFileSync(path.join(dir, rel), 'local version\n');
+    }
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'local edits');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'dirty edit\n');
 
     const response = await request(appWithWorkspace(dir))
       .post('/workspace/git/pull')
       .send({ stash: true });
 
-    // `stash push` refuses unmerged entries; the resolution panel must
-    // still reappear for the state it can act on.
     expect(response.status).toBe(409);
-    expect(response.body.error).toBe('dirty_working_tree');
-    expect(response.body.message).toContain('needs merge');
+    expect(response.body.error).toBe('diverged');
+    // The payload stays capped even though classification saw the whole
+    // output.
+    expect(response.body.message.length).toBeLessThanOrEqual(512);
+    const body = JSON.stringify(response.body);
+    expect(body).not.toContain(dir);
+  });
+
+  it('classifies a pull while a rebase is in progress as rebase_in_progress', async () => {
+    const dir = makeRepo();
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'two\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'second');
+    // An interactive rebase stopped at an edit step: no unmerged entries,
+    // so the old auto-stash recovery ran and aborted the user's rebase.
+    git(dir, 'config', 'sequence.editor', "sed -i '1s/^pick/edit/'");
+    git(dir, 'rebase', '-i', 'HEAD~1');
+    expect(fs.existsSync(path.join(dir, '.git', 'rebase-merge'))).toBe(true);
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'uncommitted edit\n');
+    fs.writeFileSync(path.join(dir, 'u.txt'), 'untracked edit\n');
+
+    for (const body of [{}, { stash: true }, { force: true }]) {
+      const response = await request(appWithWorkspace(dir))
+        .post('/workspace/git/pull')
+        .send(body);
+
+      expect(response.status).toBe(409);
+      expect(response.body.error).toBe('rebase_in_progress');
+    }
+
+    // The refusal precedes any action: the rebase state and both edits
+    // survive, and nothing was moved into the auto-stash.
+    expect(fs.existsSync(path.join(dir, '.git', 'rebase-merge'))).toBe(true);
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+      'uncommitted edit\n',
+    );
+    expect(fs.readFileSync(path.join(dir, 'u.txt'), 'utf8')).toBe(
+      'untracked edit\n',
+    );
+    expect(git(dir, 'stash', 'list').trim()).toBe('');
+  });
+
+  it('classifies an ignored-file collision before stashing or discarding', async () => {
+    const dir = makeRepo();
+    fs.writeFileSync(path.join(dir, '.gitignore'), 'config.json\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'ignore config.json');
+    const remote = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitbranch-remote-')),
+    );
+    tmpRoots.push(remote);
+    git(remote, 'init', '-q', '--bare');
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+    const clone = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitbranch-clone-')),
+    );
+    tmpRoots.push(clone);
+    git(clone, 'clone', '-q', remote, '.');
+    git(clone, 'config', 'user.email', 'other@example.com');
+    git(clone, 'config', 'user.name', 'Other');
+    git(clone, 'config', 'commit.gpgsign', 'false');
+    fs.writeFileSync(path.join(clone, 'a.txt'), 'remote edit\n');
+    fs.writeFileSync(path.join(clone, 'config.json'), 'incoming\n');
+    git(clone, 'add', '.');
+    git(clone, 'add', '-f', 'config.json');
+    git(clone, 'commit', '-q', '-m', 'remote commit');
+    git(clone, 'push', '-q', 'origin', 'HEAD');
+
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+    fs.writeFileSync(path.join(dir, 'config.json'), 'local secret\n');
+
+    for (const body of [{ stash: true }, { force: true }]) {
+      const response = await request(appWithWorkspace(dir))
+        .post('/workspace/git/pull')
+        .send(body);
+
+      expect(response.status).toBe(409);
+      expect(response.body.error).toBe('ignored_collision');
+      expect(response.body.message).toContain('config.json');
+    }
+
+    // Neither option touched the local files.
+    expect(fs.readFileSync(path.join(dir, 'config.json'), 'utf8')).toBe(
+      'local secret\n',
+    );
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+      'local edit\n',
+    );
+    expect(git(dir, 'stash', 'list').trim()).toBe('');
   });
 
   it('rejects force pull from a subdirectory workspace without discarding', async () => {

@@ -23,13 +23,26 @@ import { getDefaultBranch } from './github-prs.js';
 
 const tmpRoots: string[] = [];
 
-// Ambient git config (a host-wide `merge.ff = only`, pull policies, hooks)
-// must not reach the fixtures or the git invocations of the code under test:
-// point HOME and the XDG config home at an empty directory for this file's
-// lifetime, and GIT_CONFIG_* at an empty file for the fixture helper, which
-// does not go through gitEnv().
+// Ambient git config must not reach the fixtures or the git invocations
+// of the code under test through any channel this file controls: point
+// HOME and the XDG config home at an empty directory for this file's
+// lifetime, GIT_CONFIG_GLOBAL/SYSTEM at an empty file for the fixture
+// helper (which does not go through gitEnv()), and clear the env-injected
+// config channels plus the repo selectors the fixture helper would
+// otherwise inherit. The host's compiled-in system config (/etc/gitconfig)
+// stays reachable for the code under test because gitEnv() strips the very
+// variables that would redirect it; the divergent-merge tests below are
+// gated on its absence.
 const hermeticHome = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-githome-'));
 const savedAmbientGitEnv: Record<string, string | undefined> = {};
+const GIT_ENV_VARS_TO_CLEAR = [
+  'GIT_CONFIG_COUNT',
+  'GIT_CONFIG_NOSYSTEM',
+  'GIT_DIR',
+  'GIT_WORK_TREE',
+  'GIT_INDEX_FILE',
+];
+const GIT_ENV_PREFIXES_TO_CLEAR = ['GIT_CONFIG_KEY_', 'GIT_CONFIG_VALUE_'];
 beforeAll(() => {
   fs.writeFileSync(path.join(hermeticHome, 'gitconfig'), '');
   for (const key of [
@@ -38,8 +51,17 @@ beforeAll(() => {
     'XDG_CONFIG_HOME',
     'GIT_CONFIG_GLOBAL',
     'GIT_CONFIG_SYSTEM',
+    ...GIT_ENV_VARS_TO_CLEAR,
   ]) {
     savedAmbientGitEnv[key] = process.env[key];
+  }
+  for (const key of Object.keys(process.env)) {
+    if (GIT_ENV_PREFIXES_TO_CLEAR.some((prefix) => key.startsWith(prefix))) {
+      savedAmbientGitEnv[key] = process.env[key];
+    }
+  }
+  for (const key of Object.keys(savedAmbientGitEnv)) {
+    delete process.env[key];
   }
   process.env['HOME'] = hermeticHome;
   process.env['USERPROFILE'] = hermeticHome;
@@ -60,6 +82,23 @@ afterAll(() => {
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' });
+}
+
+// A system-wide git config (e.g. `[merge] ff = only`) changes how the
+// divergent-merge pulls below behave; gitEnv() strips the redirect
+// variables, so detect the host's compiled-in system file the way the
+// code under test sees it.
+function hostHasSystemGitConfig(): boolean {
+  try {
+    execFileSync('git', ['config', '--system', '--list'], {
+      encoding: 'utf8',
+      env: gitEnv(),
+      stdio: ['ignore', 'ignore', 'ignore'],
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function makeRepo(): string {
@@ -729,68 +768,6 @@ describe('gitPull', () => {
     );
   });
 
-  it('merge pull reconciles divergent branches when no pull policy is configured', async () => {
-    const dir = makeRepo();
-    const remote = makeBareRemote();
-    git(dir, 'remote', 'add', 'origin', remote);
-    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
-
-    const clone = makeClone(remote);
-    fs.writeFileSync(path.join(clone, 'remote-only.txt'), 'remote\n');
-    git(clone, 'add', '.');
-    git(clone, 'commit', '-q', '-m', 'remote commit');
-    git(clone, 'push', '-q', 'origin', 'HEAD');
-
-    // A divergent local commit; with pull.rebase/pull.ff unset a bare
-    // `git pull` here fatals with "Need to specify how to reconcile
-    // divergent branches" unless the merge default is pinned explicitly.
-    fs.writeFileSync(path.join(dir, 'local-only.txt'), 'local\n');
-    git(dir, 'add', '.');
-    git(dir, 'commit', '-q', '-m', 'local commit');
-
-    const result = await gitPull(dir);
-
-    expect(result.success).toBe(true);
-    expect(fs.existsSync(path.join(dir, 'remote-only.txt'))).toBe(true);
-    expect(fs.existsSync(path.join(dir, 'local-only.txt'))).toBe(true);
-    expect(git(dir, 'log', '--merges', '--oneline').trim()).not.toBe('');
-  });
-
-  it('stash pull merges divergent branches and restores the local changes', async () => {
-    const dir = makeRepo();
-    const remote = makeBareRemote();
-    git(dir, 'remote', 'add', 'origin', remote);
-    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
-
-    const clone = makeClone(remote);
-    fs.writeFileSync(path.join(clone, 'remote-only.txt'), 'remote\n');
-    git(clone, 'add', '.');
-    git(clone, 'commit', '-q', '-m', 'remote commit');
-    git(clone, 'push', '-q', 'origin', 'HEAD');
-
-    fs.writeFileSync(path.join(dir, 'local-only.txt'), 'local\n');
-    git(dir, 'add', '.');
-    git(dir, 'commit', '-q', '-m', 'local commit');
-    const headBefore = headSha(dir);
-    fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
-
-    const result = await gitPull(dir, { stash: true });
-
-    expect(result.success).toBe(true);
-    expect(fs.existsSync(path.join(dir, 'remote-only.txt'))).toBe(true);
-    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
-      'local edit\n',
-    );
-    expect(git(dir, 'stash', 'list').trim()).toBe('');
-    // The divergent local commit must survive the merge: a destructive
-    // reset to the upstream tip would drop it and its file.
-    expect(() =>
-      git(dir, 'merge-base', '--is-ancestor', headBefore, 'HEAD'),
-    ).not.toThrow();
-    expect(fs.existsSync(path.join(dir, 'local-only.txt'))).toBe(true);
-    expect(git(dir, 'log', '--merges', '--oneline').trim()).not.toBe('');
-  });
-
   it('a conflicting stash pull aborts the partial merge and restores the dirty state', async () => {
     const dir = makeRepo();
     const remote = makeBareRemote();
@@ -811,7 +788,12 @@ describe('gitPull', () => {
     const headBefore = headSha(dir);
     fs.writeFileSync(path.join(dir, 'b.txt'), 'dirty edit\n');
 
-    await expect(gitPull(dir, { stash: true })).rejects.toThrow();
+    // The merge conflicts on committed content the stash cannot influence,
+    // so the failure is classified as the terminal diverged state rather
+    // than a panel-recoverable dirty tree.
+    await expect(gitPull(dir, { stash: true })).rejects.toMatchObject({
+      code: 'diverged',
+    });
 
     expect(fs.readFileSync(path.join(dir, 'b.txt'), 'utf8')).toBe(
       'dirty edit\n',
@@ -971,6 +953,75 @@ describe('gitPull', () => {
     expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe('one\n');
   });
 });
+
+// Gated: a host system config such as `[merge] ff = only` fatals these
+// merges before the pinned `--no-rebase --no-edit` behavior applies.
+describe.runIf(!hostHasSystemGitConfig())(
+  'gitPull divergent-branch merges',
+  () => {
+    it('merge pull reconciles divergent branches when no pull policy is configured', async () => {
+      const dir = makeRepo();
+      const remote = makeBareRemote();
+      git(dir, 'remote', 'add', 'origin', remote);
+      git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+      const clone = makeClone(remote);
+      fs.writeFileSync(path.join(clone, 'remote-only.txt'), 'remote\n');
+      git(clone, 'add', '.');
+      git(clone, 'commit', '-q', '-m', 'remote commit');
+      git(clone, 'push', '-q', 'origin', 'HEAD');
+
+      // A divergent local commit; with pull.rebase/pull.ff unset a bare
+      // `git pull` here fatals with "Need to specify how to reconcile
+      // divergent branches" unless the merge default is pinned explicitly.
+      fs.writeFileSync(path.join(dir, 'local-only.txt'), 'local\n');
+      git(dir, 'add', '.');
+      git(dir, 'commit', '-q', '-m', 'local commit');
+
+      const result = await gitPull(dir);
+
+      expect(result.success).toBe(true);
+      expect(fs.existsSync(path.join(dir, 'remote-only.txt'))).toBe(true);
+      expect(fs.existsSync(path.join(dir, 'local-only.txt'))).toBe(true);
+      expect(git(dir, 'log', '--merges', '--oneline').trim()).not.toBe('');
+    });
+
+    it('stash pull merges divergent branches and restores the local changes', async () => {
+      const dir = makeRepo();
+      const remote = makeBareRemote();
+      git(dir, 'remote', 'add', 'origin', remote);
+      git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+      const clone = makeClone(remote);
+      fs.writeFileSync(path.join(clone, 'remote-only.txt'), 'remote\n');
+      git(clone, 'add', '.');
+      git(clone, 'commit', '-q', '-m', 'remote commit');
+      git(clone, 'push', '-q', 'origin', 'HEAD');
+
+      fs.writeFileSync(path.join(dir, 'local-only.txt'), 'local\n');
+      git(dir, 'add', '.');
+      git(dir, 'commit', '-q', '-m', 'local commit');
+      const headBefore = headSha(dir);
+      fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+
+      const result = await gitPull(dir, { stash: true });
+
+      expect(result.success).toBe(true);
+      expect(fs.existsSync(path.join(dir, 'remote-only.txt'))).toBe(true);
+      expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+        'local edit\n',
+      );
+      expect(git(dir, 'stash', 'list').trim()).toBe('');
+      // The divergent local commit must survive the merge: a destructive
+      // reset to the upstream tip would drop it and its file.
+      expect(() =>
+        git(dir, 'merge-base', '--is-ancestor', headBefore, 'HEAD'),
+      ).not.toThrow();
+      expect(fs.existsSync(path.join(dir, 'local-only.txt'))).toBe(true);
+      expect(git(dir, 'log', '--merges', '--oneline').trim()).not.toBe('');
+    });
+  },
+);
 
 describe('gitCommit index rollback (R10 #1)', () => {
   it('restores the original index when the commit fails after add -A', async () => {
@@ -1151,5 +1202,188 @@ describe('getDefaultBranch (R10 #3)', () => {
   it('returns null when origin/HEAD is not set', async () => {
     const dir = makeRepo();
     expect(await getDefaultBranch(dir)).toBeNull();
+  });
+});
+
+describe('gitPull state guards', () => {
+  function makeDivergedPairOn(dir: string, remote: string): void {
+    const clone = makeClone(remote);
+    fs.writeFileSync(path.join(clone, 'a.txt'), 'remote version\n');
+    git(clone, 'add', '.');
+    git(clone, 'commit', '-q', '-m', 'remote commit');
+    git(clone, 'push', '-q', 'origin', 'HEAD');
+
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local version\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'local commit');
+  }
+
+  it('refuses to pull while a merge is already in progress', async () => {
+    const dir = makeRepo();
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+    makeDivergedPairOn(dir, remote);
+    git(dir, 'fetch', '-q', 'origin');
+    let mergeFailed = false;
+    try {
+      git(dir, 'merge', 'origin/master');
+    } catch {
+      mergeFailed = true;
+    }
+    expect(mergeFailed).toBe(true);
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'uncommitted edit\n');
+
+    for (const opts of [{}, { stash: true }, { force: true }] as const) {
+      await expect(gitPull(dir, opts)).rejects.toMatchObject({
+        code: 'merge_in_progress',
+      });
+    }
+
+    // The refusal precedes any action: the merge state and the edit are
+    // untouched and nothing was stashed.
+    expect(() =>
+      git(dir, 'rev-parse', '-q', '--verify', 'MERGE_HEAD'),
+    ).not.toThrow();
+    expect(fs.readFileSync(path.join(dir, 'b.txt'), 'utf8')).toBe(
+      'uncommitted edit\n',
+    );
+    expect(git(dir, 'stash', 'list').trim()).toBe('');
+  });
+
+  it('refuses a stash pull while a rebase is in progress, keeping the rebase and the edits', async () => {
+    const dir = makeRepo();
+    for (const [file, content] of [
+      ['b.txt', 'two\n'],
+      ['c.txt', 'three\n'],
+    ] as const) {
+      fs.writeFileSync(path.join(dir, file), content);
+      git(dir, 'add', '.');
+      git(dir, 'commit', '-q', '-m', `add ${file}`);
+    }
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+    // Stop the interactive rebase after the first commit (an edit/break
+    // stop carries no unmerged entries, so `stash push` would succeed and
+    // the old failure recovery aborted the user's rebase).
+    git(dir, 'config', 'sequence.editor', "sed -i '1s/^pick/edit/'");
+    git(dir, 'rebase', '-i', 'HEAD~2');
+    expect(fs.existsSync(path.join(dir, '.git', 'rebase-merge'))).toBe(true);
+    const headAtStop = headSha(dir);
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'uncommitted edit\n');
+    fs.writeFileSync(path.join(dir, 'u.txt'), 'untracked edit\n');
+
+    await expect(gitPull(dir, { stash: true })).rejects.toMatchObject({
+      code: 'rebase_in_progress',
+    });
+
+    // The pre-existing rebase survives: its state dir is intact, HEAD is
+    // still at the stop, both edits are in the worktree, and nothing was
+    // moved into the auto-stash.
+    expect(fs.existsSync(path.join(dir, '.git', 'rebase-merge'))).toBe(true);
+    expect(headSha(dir)).toBe(headAtStop);
+    expect(fs.readFileSync(path.join(dir, 'b.txt'), 'utf8')).toBe(
+      'uncommitted edit\n',
+    );
+    expect(fs.readFileSync(path.join(dir, 'u.txt'), 'utf8')).toBe(
+      'untracked edit\n',
+    );
+    expect(git(dir, 'stash', 'list').trim()).toBe('');
+  });
+
+  it('classifies a plain pull that conflicts mid-merge as merge_in_progress', async () => {
+    const dir = makeRepo();
+    fs.writeFileSync(path.join(dir, 'c.txt'), 'shared\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'add c.txt');
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+    makeDivergedPairOn(dir, remote);
+    // Dirty a file the merge does not touch, so the pull starts the merge
+    // (conflicting on the committed content) instead of refusing on dirt.
+    fs.writeFileSync(path.join(dir, 'c.txt'), 'dirty edit\n');
+
+    await expect(gitPull(dir)).rejects.toMatchObject({
+      code: 'merge_in_progress',
+    });
+
+    // The failed pull leaves MERGE_HEAD behind; the classification says
+    // terminal instead of offering panel actions that all fail on it.
+    expect(() =>
+      git(dir, 'rev-parse', '-q', '--verify', 'MERGE_HEAD'),
+    ).not.toThrow();
+    expect(fs.readFileSync(path.join(dir, 'c.txt'), 'utf8')).toBe(
+      'dirty edit\n',
+    );
+  });
+
+  it('refuses a stash pull when incoming changes would overwrite a local ignored file', async () => {
+    const dir = makeRepo();
+    fs.writeFileSync(path.join(dir, '.gitignore'), 'config.json\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'ignore config.json');
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+    const clone = makeClone(remote);
+    fs.writeFileSync(path.join(clone, 'a.txt'), 'remote edit\n');
+    fs.writeFileSync(path.join(clone, 'config.json'), 'incoming\n');
+    git(clone, 'add', '.');
+    // The clone shares the .gitignore, so the new path needs a force-add.
+    git(clone, 'add', '-f', 'config.json');
+    git(clone, 'commit', '-q', '-m', 'remote commit');
+    git(clone, 'push', '-q', 'origin', 'HEAD');
+
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+    fs.writeFileSync(path.join(dir, 'config.json'), 'local secret\n');
+
+    await expect(gitPull(dir, { stash: true })).rejects.toMatchObject({
+      code: 'ignored_collision',
+    });
+
+    // The refusal precedes any action: nothing was stashed or overwritten.
+    expect(fs.readFileSync(path.join(dir, 'config.json'), 'utf8')).toBe(
+      'local secret\n',
+    );
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+      'local edit\n',
+    );
+    expect(git(dir, 'stash', 'list').trim()).toBe('');
+  });
+
+  it('refuses a force pull when incoming changes would overwrite a local ignored file', async () => {
+    const dir = makeRepo();
+    fs.writeFileSync(path.join(dir, '.gitignore'), 'config.json\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'ignore config.json');
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+    const clone = makeClone(remote);
+    fs.writeFileSync(path.join(clone, 'config.json'), 'incoming\n');
+    git(clone, 'add', '-f', 'config.json');
+    git(clone, 'commit', '-q', '-m', 'remote commit');
+    git(clone, 'push', '-q', 'origin', 'HEAD');
+
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+    fs.writeFileSync(path.join(dir, 'config.json'), 'local secret\n');
+
+    await expect(gitPull(dir, { force: true })).rejects.toMatchObject({
+      code: 'ignored_collision',
+    });
+
+    // The "ignored files are kept" guarantee holds even against the
+    // destructive option.
+    expect(fs.readFileSync(path.join(dir, 'config.json'), 'utf8')).toBe(
+      'local secret\n',
+    );
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+      'local edit\n',
+    );
   });
 });

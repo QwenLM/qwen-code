@@ -35,29 +35,39 @@ import styles from './BranchPickerPopover.module.css';
 // the request is not aborted while the daemon keeps mutating the repository.
 const GIT_PULL_FETCH_TIMEOUT_MS = 300_000;
 
-function isDirtyWorkingTreeError(err: unknown): boolean {
-  if (!(err instanceof DaemonHttpError) || err.status !== 409) return false;
+function pullErrorBody(err: unknown): Record<string, unknown> | undefined {
+  if (!(err instanceof DaemonHttpError) || err.status !== 409) return undefined;
   const body = err.body;
-  return (
-    typeof body === 'object' &&
-    body !== null &&
-    (body as Record<string, unknown>)['error'] === 'dirty_working_tree'
-  );
+  return typeof body === 'object' && body !== null
+    ? (body as Record<string, unknown>)
+    : undefined;
 }
 
-// A dirty-tree 409 whose message carries an unmerged/conflict state: stash
-// cannot recover it (git refuses to stash unmerged entries), only discard.
+function isDirtyWorkingTreeError(err: unknown): boolean {
+  return pullErrorBody(err)?.['error'] === 'dirty_working_tree';
+}
+
+// A dirty-tree 409 whose index carries unmerged entries: stash cannot
+// recover it (git refuses to stash unmerged entries), only discard. The
+// route sets the structured flag from its repository-state probe.
 function isUnmergedStateError(err: unknown): boolean {
-  if (!(err instanceof DaemonHttpError)) return false;
-  const body = err.body;
-  const message =
-    typeof body === 'object' && body !== null
-      ? (body as Record<string, unknown>)['message']
-      : undefined;
-  return (
-    typeof message === 'string' &&
-    /unmerged files|have not concluded your merge|needs merge/i.test(message)
-  );
+  return pullErrorBody(err)?.['unmerged'] === true;
+}
+
+// Pull-blocking states no panel action can resolve — an in-progress
+// merge/rebase, a diverged branch whose committed content conflicts, or
+// incoming changes colliding with local ignored files. They get terminal
+// guidance instead of the stash/discard buttons.
+const TERMINAL_PULL_STATE_KEYS: Record<string, string> = {
+  merge_in_progress: 'branchPicker.pullTerminalMergeInProgress',
+  rebase_in_progress: 'branchPicker.pullTerminalRebaseInProgress',
+  diverged: 'branchPicker.pullTerminalDiverged',
+  ignored_collision: 'branchPicker.pullTerminalIgnoredCollision',
+};
+
+function terminalPullGuidanceKey(err: unknown): string | undefined {
+  const code = pullErrorBody(err)?.['error'];
+  return typeof code === 'string' ? TERMINAL_PULL_STATE_KEYS[code] : undefined;
 }
 
 interface BranchPickerPopoverProps {
@@ -292,7 +302,11 @@ export function BranchPickerPopover({
         await fetchBranches();
         onBranchChanged?.();
       } catch (err) {
-        if (isDirtyWorkingTreeError(err)) {
+        const guidanceKey = terminalPullGuidanceKey(err);
+        if (guidanceKey) {
+          clearPullPanel();
+          showStatus(t(guidanceKey), 'error');
+        } else if (isDirtyWorkingTreeError(err)) {
           setPullBlocked(true);
           setConfirmDiscard(false);
           setPullBlockedUnmerged(isUnmergedStateError(err));

@@ -5,6 +5,8 @@
  */
 
 import { execFile } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { promisify } from 'node:util';
 import { isValidGitSha, isValidRefName } from './gitDirect.js';
 
@@ -519,6 +521,32 @@ export interface GitPullOptions {
   force?: boolean;
 }
 
+export type GitPullFailureCode =
+  | 'dirty_working_tree'
+  | 'merge_in_progress'
+  | 'rebase_in_progress'
+  | 'diverged'
+  | 'ignored_collision';
+
+/**
+ * A pull refusal or failure classified from repository state instead of
+ * git's rendered diagnostics, which vary by version and locale and embed
+ * arbitrary file names. `message` carries the redaction-ready detail
+ * (output of the failed git invocation, or authored text for the state
+ * guards); `code` is what callers switch on. `unmerged` marks a dirty
+ * tree whose index carries unmerged entries, where stashing cannot help.
+ */
+export class GitPullFailure extends Error {
+  constructor(
+    readonly code: GitPullFailureCode,
+    message: string,
+    readonly unmerged: boolean = false,
+  ) {
+    super(message);
+    this.name = 'GitPullFailure';
+  }
+}
+
 async function currentStashSha(
   cwd: string,
   env?: Readonly<Record<string, string | undefined>>,
@@ -528,6 +556,151 @@ async function currentStashSha(
       () => '',
     )
   ).trim();
+}
+
+async function hasMergeHead(
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<boolean> {
+  return runGit(cwd, ['rev-parse', '-q', '--verify', 'MERGE_HEAD'], env)
+    .then(() => true)
+    .catch(() => false);
+}
+
+async function hasInProgressRebase(
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<boolean> {
+  for (const stateDir of ['rebase-merge', 'rebase-apply']) {
+    // --git-path resolves the state directory for linked worktrees too.
+    const rel = (
+      await runGit(cwd, ['rev-parse', '--git-path', stateDir], env).catch(
+        () => '',
+      )
+    ).trim();
+    if (rel && fs.existsSync(path.resolve(cwd, rel))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+async function hasUnmergedEntries(
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<boolean> {
+  return (
+    (
+      await runGit(cwd, ['ls-files', '--unmerged'], env).catch(() => '')
+    ).trim() !== ''
+  );
+}
+
+async function isDirtyTree(
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<boolean> {
+  return (
+    (
+      await runGit(cwd, ['status', '--porcelain'], env).catch(() => '')
+    ).trim() !== ''
+  );
+}
+
+async function aheadBehind(
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<{ ahead: number; behind: number } | null> {
+  const counts = (
+    await runGit(
+      cwd,
+      ['rev-list', '--left-right', '--count', 'HEAD...@{u}'],
+      env,
+    ).catch(() => '')
+  ).trim();
+  if (!counts) return null;
+  const [ahead, behind] = counts.split(/\s+/).map((n) => parseInt(n, 10) || 0);
+  return { ahead: ahead ?? 0, behind: behind ?? 0 };
+}
+
+// Paths the incoming merge would add that exist locally as IGNORED files:
+// git silently checks an incoming tracked file out over a local ignored
+// file of the same path, and neither the auto-stash (--include-untracked
+// skips ignored files) nor the force reset/clean protects them.
+async function incomingIgnoredPaths(
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<string[]> {
+  const added = (
+    await runGit(
+      cwd,
+      ['diff', '--diff-filter=A', '--name-only', 'HEAD', '@{u}'],
+      env,
+    ).catch(() => '')
+  ).trim();
+  if (!added) return [];
+  const paths = added.split('\n').filter(Boolean);
+  const ignored = (
+    await runGit(cwd, ['check-ignore', '--', ...paths], env).catch(() => '')
+  ).trim();
+  return ignored ? ignored.split('\n') : [];
+}
+
+function refusedIgnoredCollision(paths: string[]): GitPullFailure {
+  return new GitPullFailure(
+    'ignored_collision',
+    `cannot pull: the incoming changes add files that exist locally as ignored files and would be overwritten silently: ${paths.join(', ')}`,
+  );
+}
+
+function gitFailureDetail(err: unknown): string {
+  if (err && typeof err === 'object' && ('stdout' in err || 'stderr' in err)) {
+    const e = err as { stdout?: string; stderr?: string };
+    return `${e.stdout ?? ''}\n${e.stderr ?? ''}`;
+  }
+  return err instanceof Error ? err.message : String(err);
+}
+
+async function classifyPullFailure(
+  cwd: string,
+  env: Readonly<Record<string, string | undefined>> | undefined,
+  err: unknown,
+  wasStashPull: boolean,
+): Promise<unknown> {
+  const detail = gitFailureDetail(err);
+  if (await hasMergeHead(cwd, env)) {
+    return new GitPullFailure('merge_in_progress', detail);
+  }
+  if (await hasInProgressRebase(cwd, env)) {
+    return new GitPullFailure('rebase_in_progress', detail);
+  }
+  const unmerged = await hasUnmergedEntries(cwd, env);
+  const counts = await aheadBehind(cwd, env);
+  if (!counts) {
+    // No upstream tracking: the pull's own error names the cause better
+    // than any state classification; keep it unless unmerged entries make
+    // the tree unambiguously panel-recoverable by discard.
+    return unmerged
+      ? new GitPullFailure('dirty_working_tree', detail, true)
+      : err;
+  }
+  const diverged = counts.ahead > 0 && counts.behind > 0;
+  const dirty = await isDirtyTree(cwd, env);
+  // A stash pull that still failed conflicted on committed content, and in
+  // a diverged tree neither stashing nor discarding can converge, so the
+  // state must be resolved from a terminal. A plain pull on a diverged but
+  // dirty tree stays panel-recoverable: the stash option can still succeed
+  // when the local commits do not conflict.
+  if (diverged && (wasStashPull || unmerged || !dirty)) {
+    return new GitPullFailure('diverged', detail);
+  }
+  if (unmerged) {
+    return new GitPullFailure('dirty_working_tree', detail, true);
+  }
+  if (dirty) {
+    return new GitPullFailure('dirty_working_tree', detail);
+  }
+  return err;
 }
 
 /**
@@ -544,6 +717,23 @@ export async function gitPull(
   if (opts?.fetchOnly) {
     const output = await runGit(cwd, ['fetch', '--all', '--prune'], env);
     return { success: true, output: output.trim() };
+  }
+  // A pull must never run into a merge or rebase that predates it: the
+  // failure recovery below aborts merge/rebase state indiscriminately and
+  // would destroy the user's in-progress operation, stranding any
+  // auto-stashed changes. This guard is also what makes that recovery safe
+  // — any state it aborts was started by this pull.
+  if (await hasMergeHead(cwd, env)) {
+    throw new GitPullFailure(
+      'merge_in_progress',
+      'cannot pull: a merge is already in progress — finish or abort it before updating',
+    );
+  }
+  if (await hasInProgressRebase(cwd, env)) {
+    throw new GitPullFailure(
+      'rebase_in_progress',
+      'cannot pull: a rebase is already in progress — finish or abort it before updating',
+    );
   }
   if (opts?.force) {
     // `reset --hard` resets the whole repository regardless of cwd, and so
@@ -564,26 +754,40 @@ export async function gitPull(
     // branch is refused because the post-discard pull would have to merge
     // the local commits and could wedge the repository mid-merge.
     await runGit(cwd, ['fetch'], env);
-    const counts = (
+    // Without a catch: a missing upstream must surface here, before
+    // anything is discarded.
+    const countsRaw = (
       await runGit(
         cwd,
         ['rev-list', '--left-right', '--count', 'HEAD...@{u}'],
         env,
       )
     ).trim();
-    const [ahead, behind] = counts
+    const [ahead, behind] = countsRaw
       .split(/\s+/)
       .map((n) => parseInt(n, 10) || 0);
     if ((ahead ?? 0) > 0 && (behind ?? 0) > 0) {
-      throw new Error(
+      throw new GitPullFailure(
+        'diverged',
         'cannot discard changes and update: the branch has diverged from its upstream, so the update would still need to merge your local commits; merge or rebase them manually first',
       );
+    }
+    const ignored = await incomingIgnoredPaths(cwd, env);
+    if (ignored.length > 0) {
+      throw refusedIgnoredCollision(ignored);
     }
     await runGit(cwd, ['reset', '--hard'], env);
     await runGit(cwd, ['clean', '-fd'], env);
   }
   let stashed = false;
   if (opts?.stash) {
+    // Fetch before stashing so the collision probe sees the incoming
+    // commits and any later failure surfaces while the tree is intact.
+    await runGit(cwd, ['fetch'], env);
+    const ignored = await incomingIgnoredPaths(cwd, env);
+    if (ignored.length > 0) {
+      throw refusedIgnoredCollision(ignored);
+    }
     // Compare refs/stash before/after instead of parsing the push output,
     // which differs between git versions and locales.
     const before = await currentStashSha(cwd, env);
@@ -626,7 +830,7 @@ export async function gitPull(
         await runGit(cwd, ['stash', 'pop'], env).catch(() => {});
       }
     }
-    throw err;
+    throw await classifyPullFailure(cwd, env, err, opts?.stash === true);
   }
   if (stashed) {
     let stashRestoreConflict = false;

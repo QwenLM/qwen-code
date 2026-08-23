@@ -59,7 +59,15 @@ const EN: Messages = {
   'branchPicker.pullUnmergedHint':
     'Stashing is unavailable while conflicts are unresolved. Discard resets the workspace to its last commit.',
   'branchPicker.pullStashConflict':
-    'Updated, but restoring your stashed changes failed. Resolve any conflict markers in your files; the stash entry is kept.',
+    'Updated, but restoring your stashed changes failed. Your changes are kept in the stash entry — resolve any conflict markers or colliding files, then restore the stash manually.',
+  'branchPicker.pullTerminalMergeInProgress':
+    'Update blocked: a merge is in progress. Finish or abort it from a terminal, then try again.',
+  'branchPicker.pullTerminalRebaseInProgress':
+    'Update blocked: a rebase is in progress. Finish or abort it from a terminal, then try again.',
+  'branchPicker.pullTerminalDiverged':
+    'Update blocked: the branch has diverged from its upstream and the update conflicts with your local commits. Merge or rebase them from a terminal first.',
+  'branchPicker.pullTerminalIgnoredCollision':
+    'Update blocked: the incoming changes would silently overwrite local ignored files. Move or remove those files from a terminal first.',
   'branchPicker.pullStash': 'Stash Changes and Update',
   'branchPicker.pullDiscard': 'Discard Changes and Update…',
   'branchPicker.pullDiscardConfirm':
@@ -3089,7 +3097,15 @@ const ZH: Messages = {
   'branchPicker.pullUnmergedHint':
     '冲突未解决时无法使用 Stash。放弃会将工作区重置为最近一次提交。',
   'branchPicker.pullStashConflict':
-    '更新成功，但恢复 Stash 中的修改失败。请解决文件中的冲突标记（如有）；Stash 条目已保留。',
+    '更新成功，但恢复 Stash 中的修改失败。你的修改保留在 Stash 条目中 —— 请解决冲突标记或撞名文件（如有），然后手动恢复 Stash。',
+  'branchPicker.pullTerminalMergeInProgress':
+    '无法更新：存在进行中的合并。请先在终端完成或中止该合并，然后重试。',
+  'branchPicker.pullTerminalRebaseInProgress':
+    '无法更新：存在进行中的变基。请先在终端完成或中止该变基，然后重试。',
+  'branchPicker.pullTerminalDiverged':
+    '无法更新：分支已与上游分叉，且更新与本地提交冲突。请先在终端合并或变基本地提交。',
+  'branchPicker.pullTerminalIgnoredCollision':
+    '无法更新：传入的改动会静默覆盖本地被忽略的文件。请先在终端移动或删除这些文件。',
   'branchPicker.pullStash': 'Stash 修改并更新',
   'branchPicker.pullDiscard': '放弃修改并更新…',
   'branchPicker.pullDiscardConfirm':

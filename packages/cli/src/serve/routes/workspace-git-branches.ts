@@ -13,6 +13,7 @@ import {
   gitPush,
   gitPull,
   gitCommit,
+  GitPullFailure,
   isValidRefName,
   isValidCheckoutRef,
 } from '@qwen-code/qwen-code-core';
@@ -50,13 +51,23 @@ function sendGitError(
   sendBridgeError: SendBridgeError,
   cwd: string,
 ): void {
+  // Typed pull failures already carry a repository-state classification
+  // from core; everything else is classified from git's rendered output
+  // below.
+  const typed = err instanceof GitPullFailure ? err : undefined;
   // Classify on the path-redacted message (derived from stdout + stderr),
   // not err.message, which embeds the full command line and would
   // false-positive on flags like --set-upstream present in every push
   // invocation. Testing the redacted form also avoids false positives
   // when the workspace path itself contains a keyword (e.g. "dirty").
   let detail: string;
-  if (err && typeof err === 'object' && ('stdout' in err || 'stderr' in err)) {
+  if (typed) {
+    detail = typed.message;
+  } else if (
+    err &&
+    typeof err === 'object' &&
+    ('stdout' in err || 'stderr' in err)
+  ) {
     const e = err as { stdout?: string; stderr?: string };
     detail = `${e.stdout ?? ''}\n${e.stderr ?? ''}`;
   } else {
@@ -64,38 +75,46 @@ function sendGitError(
   }
 
   // Redact the workspace path and the git root (which may be an ancestor
-  // of cwd when the workspace is a sub-directory or a symlink), then cap the
-  // length once, on every response — including the unclassified 500
-  // fall-through. Raw git output embeds absolute paths (e.g. a wedged
-  // `.git/index.lock`) that must never reach the client.
+  // of cwd when the workspace is a sub-directory or a symlink).
   const gitRoot = findGitRoot(cwd);
   let message = detail.split(cwd).join('<workspace>');
   if (gitRoot && gitRoot !== cwd) {
     message = message.split(gitRoot).join('<workspace>');
   }
-  message = message.slice(0, GIT_ERROR_MESSAGE_MAX);
 
+  if (typed) {
+    res.status(409).json({
+      error: typed.code,
+      message: message.slice(0, GIT_ERROR_MESSAGE_MAX),
+      ...(typed.unmerged ? { unmerged: true } : {}),
+    });
+    return;
+  }
+
+  // Classify on the full redacted string; the cap applies to the payload
+  // only, so a long `Auto-merging <path>` preamble cannot push the
+  // keywords out of the classifier's view.
   if (
     /not a git repository/i.test(message) ||
     /invalid reference/i.test(message)
   ) {
+    message = message.slice(0, GIT_ERROR_MESSAGE_MAX);
     res.status(404).json({ error: 'not_a_git_repository', message });
     return;
   }
-  // Recovery-panel entrance states beyond a plain dirty tree: an unresolved
-  // merge (`unmerged files`, `have not concluded your merge`, `needs merge`),
-  // a stash pull whose merge conflicted and was aborted back to the dirty
-  // state (`CONFLICT (`, `Automatic merge failed`), and the diverged-branch
-  // force refusal (`has diverged from its upstream`), where the panel's
-  // stash option still works.
   if (
     /dirty|uncommitted|would be overwritten|unmerged files|have not concluded your merge|needs merge|CONFLICT \(|Automatic merge failed|has diverged from its upstream/i.test(
       message,
     )
   ) {
+    message = message.slice(0, GIT_ERROR_MESSAGE_MAX);
     res.status(409).json({ error: 'dirty_working_tree', message });
     return;
   }
+  // Cap every remaining response, including the unclassified 500
+  // fall-through. Raw git output embeds absolute paths (e.g. a wedged
+  // `.git/index.lock`) that must never reach the client.
+  message = message.slice(0, GIT_ERROR_MESSAGE_MAX);
   if (/already exists/i.test(message)) {
     res.status(409).json({ error: 'branch_already_exists', message });
     return;

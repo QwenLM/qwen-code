@@ -48,6 +48,20 @@ passes `--no-rebase --no-edit` when rebase is not requested, so divergent
 branches merge instead of fataling on git builds without a `pull.rebase`
 / `pull.ff` policy.
 
+Pulls are refused while a merge or rebase is already in progress
+(`MERGE_HEAD` or the rebase state directories): the failure recovery
+aborts merge/rebase state indiscriminately, so it must only ever abort
+state the pull itself started. Stash and force pulls are also refused
+when the incoming commits add paths that exist locally as ignored files:
+git would silently check the incoming file out over the ignored one, and
+neither the auto-stash (`--include-untracked` skips ignored files) nor
+the force reset/clean protects it.
+
+Failures are classified from repository state (`MERGE_HEAD`, rebase
+state, unmerged index entries, ahead/behind counts, dirtiness) into
+typed codes instead of matching git's rendered error text, which varies
+by version and locale and embeds arbitrary file names.
+
 ## UI
 
 When the plain pull fails with `409 dirty_working_tree`, the branch picker
@@ -61,12 +75,21 @@ footer switches from the status line to a resolution panel offering:
 
 The panel stays mounted (with a spinner on the clicked button) while its
 own stash/discard pull is in flight, and resets whenever the popover is
-reopened. When the blocking state is an unmerged working tree (conflicting
-restore or abandoned merge), the stash option is replaced by an
+reopened. The 409 body carries a structured `unmerged: true` flag (from
+the route's repository-state probe, not the error text) when the index
+has unmerged entries; the stash option is then replaced by an
 explanation — `git stash push` refuses unmerged entries — leaving discard
-as the recovery path, except in workspaces below the repository root,
-where discarding is unsupported and the conflicts must be resolved from
+as the recovery path. In workspaces below the repository root discarding
+is unsupported: the discard confirm is still offered but the daemon
+refuses it with an error, so conflicts there must be resolved from
 a terminal.
+
+States no panel action can resolve — an in-progress merge or rebase,
+a diverged branch whose update conflicts with the local commits, or
+incoming changes colliding with local ignored files — return their own
+409 codes (`merge_in_progress`, `rebase_in_progress`, `diverged`,
+`ignored_collision`) and render terminal guidance instead of the
+stash/discard buttons.
 
 ## Ownership
 

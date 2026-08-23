@@ -87,6 +87,7 @@ async function flush(): Promise<void> {
 
 function mount(
   overrides: Partial<{
+    open: boolean;
     onOpenDiff: () => void;
     onOpenCommit: () => void;
     onOpenChange: (open: boolean) => void;
@@ -96,7 +97,7 @@ function mount(
     root.render(
       <I18nProvider language="en">
         <BranchPickerPopover
-          open
+          open={overrides.open ?? true}
           onOpenChange={overrides.onOpenChange ?? vi.fn()}
           workspaceCwd="/repo"
           onOpenDiff={overrides.onOpenDiff}
@@ -393,10 +394,7 @@ describe('BranchPickerPopover actions', () => {
     workspaceGitPull.mockRejectedValueOnce(
       new DaemonHttpError(
         409,
-        {
-          error: 'dirty_working_tree',
-          message: 'Pulling is not possible because you have unmerged files.',
-        },
+        { error: 'dirty_working_tree', unmerged: true, message: '' },
         'POST /workspaces/:workspace/git/pull: dirty_working_tree',
       ),
     );
@@ -417,6 +415,216 @@ describe('BranchPickerPopover actions', () => {
     // an explanation; discard remains available.
     expect(document.body.textContent).not.toContain('Stash Changes and Update');
     expect(document.body.textContent).toContain('Discard Changes and Update');
+  });
+
+  it('shows terminal guidance instead of the panel for a merge in progress', async () => {
+    workspaceGitBranches.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      local: [{ name: 'main', isHead: true }],
+      remote: [],
+      tags: [],
+      recent: [],
+      head: 'main',
+      detached: false,
+    });
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    workspaceGitPull.mockRejectedValue(
+      new DaemonHttpError(
+        409,
+        { error: 'merge_in_progress', message: '' },
+        'POST /workspaces/:workspace/git/pull: merge_in_progress',
+      ),
+    );
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    mount({});
+    await flush();
+    clickButton('Update Project');
+    await flush();
+
+    // The state cannot be resolved by any panel action: guidance instead
+    // of stash/discard buttons, on the first pull and every retry.
+    expect(document.body.textContent).toContain(
+      'a merge is in progress. Finish or abort it from a terminal',
+    );
+    expect(document.body.textContent).not.toContain('Stash Changes and Update');
+    expect(document.body.textContent).not.toContain(
+      'Discard Changes and Update',
+    );
+
+    clickButton('Update Project');
+    await flush();
+
+    expect(workspaceGitPull).toHaveBeenCalledTimes(2);
+    expect(document.body.textContent).not.toContain('Stash Changes and Update');
+  });
+
+  it('shows terminal guidance for a diverged branch without panel actions', async () => {
+    workspaceGitBranches.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      local: [{ name: 'main', isHead: true }],
+      remote: [],
+      tags: [],
+      recent: [],
+      head: 'main',
+      detached: false,
+    });
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    workspaceGitPull.mockRejectedValueOnce(
+      new DaemonHttpError(
+        409,
+        { error: 'diverged', message: '' },
+        'POST /workspaces/:workspace/git/pull: diverged',
+      ),
+    );
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    mount({});
+    await flush();
+    clickButton('Update Project');
+    await flush();
+
+    expect(document.body.textContent).toContain('diverged from its upstream');
+    expect(document.body.textContent).toContain('from a terminal');
+    expect(document.body.textContent).not.toContain('Stash Changes and Update');
+    expect(document.body.textContent).not.toContain(
+      'Discard Changes and Update',
+    );
+  });
+
+  it('resets the resolution panel when the popover is reopened', async () => {
+    workspaceGitBranches.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      local: [{ name: 'main', isHead: true }],
+      remote: [],
+      tags: [],
+      recent: [],
+      head: 'main',
+      detached: false,
+    });
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    workspaceGitPull.mockRejectedValueOnce(
+      new DaemonHttpError(
+        409,
+        { error: 'dirty_working_tree', message: 'would be overwritten' },
+        'POST /workspaces/:workspace/git/pull: dirty_working_tree',
+      ),
+    );
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    mount({});
+    await flush();
+    clickButton('Update Project');
+    await flush();
+    expect(document.body.textContent).toContain(
+      'Update blocked by uncommitted changes',
+    );
+
+    mount({ open: false });
+    await flush();
+    mount({ open: true });
+    await flush();
+
+    // The reopen must not resurface the stale blocked panel or its hidden
+    // status line.
+    expect(document.body.textContent).not.toContain(
+      'Update blocked by uncommitted changes',
+    );
+    expect(document.body.textContent).not.toContain('Stash Changes and Update');
+  });
+
+  it('dismisses the resolution panel via Cancel without another pull', async () => {
+    workspaceGitBranches.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      local: [{ name: 'main', isHead: true }],
+      remote: [],
+      tags: [],
+      recent: [],
+      head: 'main',
+      detached: false,
+    });
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    workspaceGitPull.mockRejectedValueOnce(
+      new DaemonHttpError(
+        409,
+        { error: 'dirty_working_tree', message: 'would be overwritten' },
+        'POST /workspaces/:workspace/git/pull: dirty_working_tree',
+      ),
+    );
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    mount({});
+    await flush();
+    clickButton('Update Project');
+    await flush();
+    expect(document.body.textContent).toContain('Stash Changes and Update');
+
+    clickButton('Cancel');
+    await flush();
+
+    expect(document.body.textContent).not.toContain(
+      'Update blocked by uncommitted changes',
+    );
+    expect(document.body.textContent).not.toContain('Stash Changes and Update');
+    expect(workspaceGitPull).toHaveBeenCalledTimes(1);
+  });
+
+  it('backs out of the discard confirm step via Cancel without pulling', async () => {
+    workspaceGitBranches.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      local: [{ name: 'main', isHead: true }],
+      remote: [],
+      tags: [],
+      recent: [],
+      head: 'main',
+      detached: false,
+    });
+    const { DaemonHttpError } = await import('@qwen-code/sdk/daemon');
+    workspaceGitPull.mockRejectedValueOnce(
+      new DaemonHttpError(
+        409,
+        { error: 'dirty_working_tree', message: 'would be overwritten' },
+        'POST /workspaces/:workspace/git/pull: dirty_working_tree',
+      ),
+    );
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    mount({});
+    await flush();
+    clickButton('Update Project');
+    await flush();
+    clickButton('Discard Changes and Update');
+    await flush();
+    expect(document.body.textContent).toContain('cannot be undone');
+
+    clickButton('Cancel');
+    await flush();
+
+    // The back-out returns to the panel's action row; no force pull ran.
+    expect(document.body.textContent).not.toContain('cannot be undone');
+    expect(document.body.textContent).toContain('Stash Changes and Update');
+    expect(document.body.textContent).toContain('Discard Changes and Update');
+    expect(workspaceGitPull).toHaveBeenCalledTimes(1);
   });
 
   it('does not offer the resolution panel for non-dirty pull errors', async () => {
