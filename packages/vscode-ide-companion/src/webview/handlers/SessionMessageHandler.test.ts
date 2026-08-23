@@ -810,6 +810,9 @@ describe('SessionMessageHandler', () => {
         role: 'assistant',
         content:
           'Session exported to HTML: [export.html](file:///workspace/export.html)',
+        // The confirmation never flows through ACP transcriptUpdate; without
+        // localOnly the WebShell transcript renders it nowhere.
+        localOnly: true,
       }),
     });
   });
@@ -923,6 +926,142 @@ describe('SessionMessageHandler', () => {
     expect(sendToWebView).toHaveBeenCalledWith({
       type: 'error',
       data: { message: 'Failed to export session: disk full' },
+    });
+    expect(agentManager.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('tags the timeout message localOnly so the notice slot renders it', async () => {
+    mockProcessImageAttachments.mockResolvedValue({
+      formattedText: 'hello',
+      displayText: 'hello',
+      savedImageCount: 0,
+      promptImages: [],
+    });
+
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      sendMessage: vi.fn().mockRejectedValue(new Error('Request timeout')),
+    };
+    const conversationStore = {
+      createConversation: vi.fn().mockResolvedValue({ id: 'conversation-1' }),
+      getConversation: vi.fn().mockResolvedValue(null),
+      addMessage: vi.fn(),
+      renameConversationId: vi.fn().mockResolvedValue(true),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'conversation-1',
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: { text: 'hello' },
+    });
+
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'message',
+      data: expect.objectContaining({
+        role: 'assistant',
+        content:
+          'Request timed out. This may be due to a network issue. Please try again.',
+        localOnly: true,
+      }),
+    });
+  });
+
+  it('re-surfaces the user message as a local notice when the agent is not connected', async () => {
+    mockProcessImageAttachments.mockResolvedValue({
+      formattedText: 'hello',
+      displayText: 'hello',
+      savedImageCount: 0,
+      promptImages: [],
+    });
+
+    const agentManager = {
+      isConnected: false,
+      currentSessionId: 'session-1',
+      sendMessage: vi.fn(),
+    };
+    const conversationStore = {
+      createConversation: vi.fn().mockResolvedValue({ id: 'conversation-1' }),
+      getConversation: vi.fn().mockResolvedValue(null),
+      addMessage: vi.fn(),
+      renameConversationId: vi.fn().mockResolvedValue(true),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'conversation-1',
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: { text: 'hello' },
+    });
+
+    // The eager echo stays untagged (the transcript renders it on
+    // successful sends); the aborted send re-posts a tagged copy so the
+    // user's own message is visible in the notice slot.
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'message',
+      data: expect.objectContaining({
+        role: 'user',
+        content: 'hello',
+        localOnly: true,
+      }),
+    });
+    expect(agentManager.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('re-surfaces the user message as a local notice when session creation fails', async () => {
+    mockProcessImageAttachments.mockResolvedValue({
+      formattedText: 'hello',
+      displayText: 'hello',
+      savedImageCount: 0,
+      promptImages: [],
+    });
+
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: null,
+      createNewSession: vi.fn().mockRejectedValue(new Error('spawn failed')),
+      sendMessage: vi.fn(),
+    };
+    const conversationStore = {
+      createConversation: vi.fn().mockResolvedValue({ id: 'conversation-1' }),
+      getConversation: vi.fn().mockResolvedValue(null),
+      addMessage: vi.fn(),
+      renameConversationId: vi.fn().mockResolvedValue(true),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'conversation-1',
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: { text: 'hello' },
+    });
+
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'message',
+      data: expect.objectContaining({
+        role: 'user',
+        content: 'hello',
+        localOnly: true,
+      }),
     });
     expect(agentManager.sendMessage).not.toHaveBeenCalled();
   });
