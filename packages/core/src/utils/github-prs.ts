@@ -481,3 +481,52 @@ export function fetchRemoteWebUrl(
     );
   });
 }
+
+/**
+ * Resolves the PR gh associates with the current branch of the repo
+ * containing `cwd` (`gh pr view` with no argument names one), best-effort:
+ * undefined when the branch has no PR, gh is unavailable, or the repo
+ * cannot be resolved. Used to attribute a `gh pr create` run to the PR it
+ * created — command/output text alone cannot prove which printed URL gh
+ * itself produced.
+ */
+export function fetchCurrentBranchPullRequest(
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<{ number: number; url: string } | undefined> {
+  const gitRoot = findGitRoot(cwd);
+  if (!gitRoot) return Promise.resolve(undefined);
+  return new Promise((resolve) => {
+    execFile(
+      'gh',
+      ['pr', 'view', '--json', 'number,url'],
+      {
+        cwd: gitRoot,
+        timeout: GH_TIMEOUT_MS,
+        maxBuffer: GH_MAX_BUFFER,
+        windowsHide: true,
+        encoding: 'utf8',
+        env: gitEnv(env),
+      },
+      (error, stdout) => {
+        if (error) {
+          resolve(undefined);
+          return;
+        }
+        try {
+          const parsed = JSON.parse(stdout) as {
+            number?: number;
+            url?: string;
+          };
+          resolve(
+            typeof parsed.number === 'number' && typeof parsed.url === 'string'
+              ? { number: parsed.number, url: parsed.url }
+              : undefined,
+          );
+        } catch {
+          resolve(undefined);
+        }
+      },
+    );
+  });
+}

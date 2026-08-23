@@ -8,7 +8,6 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { Application, RequestHandler } from 'express';
 import {
-  detectGhPrCreateBinding,
   fetchGitHubPullRequests,
   fetchRemoteWebUrl,
   readSessionPrs,
@@ -69,8 +68,6 @@ interface BackfillCandidate {
   conventionNumber: number | undefined;
   /** Worktree branch plus every `gitBranch` seen in the transcript. */
   branches: readonly string[];
-  /** PRs the session created via `gh pr create` (number → printed URL). */
-  direct: ReadonlyMap<number, string>;
 }
 
 // Transcript records carry the branch the session was on; the set is small
@@ -87,68 +84,6 @@ function collectTranscriptBranches(raw: string): readonly string[] {
   return [...branches];
 }
 
-interface TranscriptToolPart {
-  functionCall?: {
-    id?: string;
-    name?: string;
-    args?: { command?: string };
-  };
-  functionResponse?: {
-    id?: string;
-    name?: string;
-    response?: { output?: string };
-  };
-}
-
-/**
- * Recovers PRs the session created by running `gh pr create` in the shell:
- * pairs each `run_shell_command` call (by part id) with its response and
- * applies the same command+URL gate as the live shell-tool binding. Covers
- * sessions that predate the live hook.
- */
-function collectGhPrCreateBindings(raw: string): ReadonlyMap<number, string> {
-  const commandById = new Map<string, string>();
-  const bindings = new Map<number, string>();
-  for (const line of raw.split('\n')) {
-    if (!line.includes('run_shell_command')) continue;
-    let parts: unknown;
-    try {
-      parts = (JSON.parse(line) as { message?: { parts?: unknown } })?.message
-        ?.parts;
-    } catch {
-      continue;
-    }
-    if (!Array.isArray(parts)) continue;
-    for (const part of parts as TranscriptToolPart[]) {
-      const call = part.functionCall;
-      if (
-        call?.name === 'run_shell_command' &&
-        typeof call.id === 'string' &&
-        typeof call.args?.command === 'string'
-      ) {
-        commandById.set(call.id, call.args.command);
-        continue;
-      }
-      const response = part.functionResponse;
-      if (
-        response?.name !== 'run_shell_command' ||
-        typeof response.id !== 'string' ||
-        typeof response.response?.output !== 'string'
-      ) {
-        continue;
-      }
-      const command = commandById.get(response.id);
-      if (command === undefined) continue;
-      const binding = detectGhPrCreateBinding(
-        command,
-        response.response.output,
-      );
-      if (binding) bindings.set(binding.number, binding.url);
-    }
-  }
-  return bindings;
-}
-
 /**
  * Backfills PR bindings onto a workspace's persisted sessions. Sources, in
  * priority order: the worktree slug/branch convention (names the number
@@ -157,6 +92,11 @@ function collectGhPrCreateBindings(raw: string): ReadonlyMap<number, string> {
  * `gitBranch` recorded in the session's transcript — to PR numbers and URLs.
  * The URL comes from `gh` when available, else from the git remote web URL
  * (convention numbers only). A session may bind several PRs.
+ *
+ * URLs printed in transcripts are NOT a source: text cannot attribute a
+ * printed URL to the session's own `gh pr create`, so persisting one would
+ * let forged bindings survive retroactively. What gh itself cannot vouch
+ * for stays unbound.
  */
 export async function backfillWorkspaceSessionPrs(
   runtime: WorkspaceRuntime,
@@ -208,15 +148,10 @@ export async function backfillWorkspaceSessionPrs(
           ...(worktree ? [worktree.worktreeBranch] : []),
           ...collectTranscriptBranches(transcriptRaw),
         ];
-        const direct = collectGhPrCreateBindings(transcriptRaw);
         const conventionNumber = worktree
           ? parsePrNumberFromWorktree(worktree.slug, worktree.worktreeBranch)
           : undefined;
-        if (
-          branches.length === 0 &&
-          conventionNumber === undefined &&
-          direct.size === 0
-        ) {
+        if (branches.length === 0 && conventionNumber === undefined) {
           continue;
         }
         candidates.push({
@@ -224,13 +159,20 @@ export async function backfillWorkspaceSessionPrs(
           archiveState,
           conventionNumber,
           branches,
-          direct,
         });
       }
       cursor = page.nextCursor;
     } while (cursor !== undefined);
   }
   if (candidates.length === 0) return result;
+
+  // One remote lookup per backfill run; async so the daemon event loop is
+  // never blocked by it.
+  const remote = await fetchRemoteWebUrl(
+    runtime.workspaceCwd,
+    runtime.env.effectiveEnv,
+  );
+  const workspaceRepoKey = remote ? repoKeyFromWebUrl(remote) : undefined;
 
   const numberToUrl = new Map<number, string>();
   const numberToState = new Map<number, 'open' | 'merged' | 'closed'>();
@@ -242,6 +184,16 @@ export async function backfillWorkspaceSessionPrs(
   );
   if (prs.kind === 'ok') {
     for (const pr of prs.pullRequests) {
+      // Fork layout: gh resolves the PARENT repo for list queries when the
+      // origin is a fork, so the page can hold another repository's PRs. A
+      // bare head-branch collision with one of them would bind a stranger's
+      // PR into this workspace's sessions — reject every foreign URL.
+      if (
+        workspaceRepoKey !== undefined &&
+        repoKeyFromWebUrl(pr.url) !== workspaceRepoKey
+      ) {
+        continue;
+      }
       numberToUrl.set(pr.number, pr.url);
       // The sidecar snapshot has no 'draft' variant — a draft is still open.
       numberToState.set(pr.number, pr.state === 'draft' ? 'open' : pr.state);
@@ -254,47 +206,18 @@ export async function backfillWorkspaceSessionPrs(
     }
   }
 
-  // One remote lookup per backfill run, cached by ATTEMPT (a failed lookup
-  // must not re-spawn git for every candidate); async so the daemon event
-  // loop is never blocked by it.
-  let remoteWebUrl: string | undefined;
-  let remoteAttempted = false;
-  const resolveRemoteWebUrl = async (): Promise<string | undefined> => {
-    if (!remoteAttempted) {
-      remoteAttempted = true;
-      remoteWebUrl = await fetchRemoteWebUrl(
-        runtime.workspaceCwd,
-        runtime.env.effectiveEnv,
-      );
-    }
-    return remoteWebUrl;
-  };
-
   for (const candidate of candidates) {
     // Insert in ASCENDING authority so the strongest bindings survive the
     // sidecar's tail-10 cap: branch-mapped first (a head-branch name
-    // collision is the weakest signal), then `gh pr create` evidence, and
-    // the worktree slug/branch convention last (the session exists FOR that
-    // PR, so it must never be evicted by weaker numbers).
+    // collision is the weakest signal) and the worktree slug/branch
+    // convention last (the session exists FOR that PR, so it must never be
+    // evicted by weaker numbers).
     const numbers: number[] = [];
     for (const branch of candidate.branches) {
       const mapped = branchToNumber.get(branch);
       if (mapped !== undefined && !numbers.includes(mapped)) {
         numbers.push(mapped);
       }
-    }
-    let repoKey: string | undefined;
-    if (candidate.direct.size > 0) {
-      const remote = await resolveRemoteWebUrl();
-      repoKey = remote ? repoKeyFromWebUrl(remote) : undefined;
-    }
-    for (const [directNumber, directUrl] of candidate.direct) {
-      // A transcript URL from another repository must not bind this
-      // session; an unresolvable workspace remote cannot vouch for it.
-      if (repoKey === undefined || repoKeyFromWebUrl(directUrl) !== repoKey) {
-        continue;
-      }
-      if (!numbers.includes(directNumber)) numbers.push(directNumber);
     }
     if (candidate.conventionNumber !== undefined) {
       const conventionNumber = candidate.conventionNumber;
@@ -315,14 +238,19 @@ export async function backfillWorkspaceSessionPrs(
     }
     const have = new Set(existing?.map((pr) => pr.number));
     for (const number of numbers) {
+      const isConvention = number === candidate.conventionNumber;
       if (have.has(number)) {
         result.alreadyBound += 1;
-        continue;
+        // Cross-run eviction: an already-bound convention number keeps its
+        // original position unless re-upserted, while newly bound weaker
+        // numbers append after it and push it past the tail cap. The
+        // re-upsert moves it to the end with a fresh createdAt; a
+        // branch-mapped number keeps the plain skip.
+        if (!isConvention) continue;
       }
-      let url = numberToUrl.get(number) ?? candidate.direct.get(number);
-      if (url === undefined && number === candidate.conventionNumber) {
-        const remote = await resolveRemoteWebUrl();
-        if (remote !== undefined) url = `${remote}/pull/${number}`;
+      let url = numberToUrl.get(number);
+      if (url === undefined && isConvention && remote !== undefined) {
+        url = `${remote}/pull/${number}`;
       }
       if (url === undefined) {
         result.unresolved += 1;
@@ -334,8 +262,10 @@ export async function backfillWorkspaceSessionPrs(
         url,
         ...(state ? { state } : {}),
       });
-      have.add(number);
-      result.bound += 1;
+      if (!have.has(number)) {
+        have.add(number);
+        result.bound += 1;
+      }
     }
   }
   return result;

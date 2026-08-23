@@ -488,6 +488,10 @@ export class SessionService {
   private readonly projectRoot: string;
   private readonly onWarning: ((message: string) => void) | undefined;
   private readonly transcriptReader: SessionTranscriptReader;
+  private sessionPrBoundCallback?: (
+    sessionId: string,
+    pr: { number: number; url: string },
+  ) => void;
 
   constructor(cwd: string, options: SessionServiceOptions = {}) {
     this.storage = new Storage(cwd, options.runtimeBaseDir);
@@ -670,6 +674,26 @@ export class SessionService {
     state: SessionArchiveState,
   ): string {
     return this.getPrSessionPathForState(sessionId, state);
+  }
+
+  /**
+   * Fires when the shell tool persists a `gh pr create` binding for a
+   * session (agent process). The serve host wires this to mark the session
+   * catalog so clients refetch the binding; unwired it is a no-op.
+   */
+  setSessionPrBoundCallback(
+    callback:
+      | ((sessionId: string, pr: { number: number; url: string }) => void)
+      | undefined,
+  ): void {
+    this.sessionPrBoundCallback = callback;
+  }
+
+  emitSessionPrBound(
+    sessionId: string,
+    pr: { number: number; url: string },
+  ): void {
+    this.sessionPrBoundCallback?.(sessionId, pr);
   }
 
   private async readProjectSessionHead(

@@ -37,10 +37,10 @@ import {
 } from '../services/commitAttribution.js';
 import { buildGitNotesCommand } from '../services/attributionTrailer.js';
 import {
-  detectGhPrCreateBinding,
+  commandRunsGhPrCreate,
   upsertSessionPr,
 } from '../services/session-pr-service.js';
-import { fetchRemoteWebUrl, repoKeyFromWebUrl } from '../utils/github-prs.js';
+import { fetchCurrentBranchPullRequest } from '../utils/github-prs.js';
 import type {
   ShellExecutionConfig,
   ShellExecutionResult,
@@ -3066,29 +3066,33 @@ export class ShellToolInvocation extends BaseToolInvocation<
    * Best-effort PR binding for agents that create PRs via `gh pr create` in
    * the shell (the GitDialog binds at creation; this covers the shell path).
    * Writes the session's PR sidecar directly, mirroring the worktree sidecar
-   * pattern; a failure must never shadow the tool result. The URL must
-   * belong to the workspace's own repository — a compound command can print
-   * foreign URLs that must not bind.
+   * pattern; a failure must never shadow the tool result. gh itself is the
+   * attribution authority: the binding is the PR gh resolves for the working
+   * branch, accepted only when this command's output carries gh's URL —
+   * command/output text alone cannot attribute a printed URL to gh's own
+   * execution, so a text-matched URL never binds on its own.
    */
   private bindGhPrCreate(command: string, output: string): void {
     void (async () => {
       try {
-        const remoteWebUrl = await fetchRemoteWebUrl(
+        if (!commandRunsGhPrCreate(command)) return;
+        const created = await fetchCurrentBranchPullRequest(
           this.config.getTargetDir(),
         );
-        const repoKey = remoteWebUrl
-          ? repoKeyFromWebUrl(remoteWebUrl)
-          : undefined;
-        if (!repoKey) return;
-        const binding = detectGhPrCreateBinding(command, output, repoKey);
-        if (!binding) return;
+        if (!created || !output.includes(created.url)) return;
         const prPath = this.config
           .getSessionService()
           .getPrSessionPathForArchiveState(
             this.config.getSessionId(),
             'active',
           );
-        await upsertSessionPr(prPath, { ...binding, state: 'open' });
+        await upsertSessionPr(prPath, { ...created, state: 'open' });
+        // The daemon never sees this write; the notification carries the
+        // catalog mark so live-state clients refetch it (~2s) instead of
+        // waiting for unrelated catalog churn.
+        this.config
+          .getSessionService()
+          .emitSessionPrBound(this.config.getSessionId(), created);
       } catch {
         /* best-effort binding */
       }

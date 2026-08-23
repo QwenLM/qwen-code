@@ -460,7 +460,11 @@ describe('backfillWorkspaceSessionPrs', () => {
     });
   }
 
-  it('recovers PRs created via gh pr create in the session shell', async () => {
+  it('does not bind transcript gh pr create URLs that gh cannot vouch for', async () => {
+    // A URL printed in a historical transcript cannot be attributed to the
+    // session's own create without gh's confirmation, so the transcript
+    // source stays silent instead of persisting unverifiable URLs
+    // retroactively (forged bindings would otherwise survive forever).
     const sessionId = '00000000-0000-4000-8000-000000000008';
     seedWorkspaceRemote();
     await seedSession(sessionId);
@@ -469,24 +473,18 @@ describe('backfillWorkspaceSessionPrs', () => {
       'gh pr create --title x --body y',
       `created\nhttps://github.com/o/r/pull/99\n`,
     );
-    // gh is unavailable: the URL printed at create time is the only source.
     fetchGitHubPullRequestsMock.mockResolvedValue({
       kind: 'cli_unavailable',
     });
 
     const result = await backfillWorkspaceSessionPrs(runtime);
 
-    expect(result).toMatchObject({ bound: 1 });
-    const prs = await readSessionPrs(
-      sessionService.getPrSessionPathForArchiveState(sessionId, 'active'),
-    );
-    expect(prs).toEqual([
-      {
-        number: 99,
-        url: 'https://github.com/o/r/pull/99',
-        createdAt: expect.any(String),
-      },
-    ]);
+    expect(result).toMatchObject({ bound: 0, alreadyBound: 0 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(sessionId, 'active'),
+      ),
+    ).toBeNull();
   });
 
   it('does not recover a transcript URL from another repository', async () => {
@@ -593,6 +591,85 @@ describe('backfillWorkspaceSessionPrs', () => {
     // survives the tail-10 cap instead of being evicted by branch matches.
     expect(prs?.map((p) => p.number)).toContain(42);
     expect(prs?.[9]?.number).toBe(42);
+  });
+
+  it('keeps an already-bound convention PR across runs that bind weaker numbers', async () => {
+    // Run 1 binds only the convention (gh unavailable); run 2 then binds 11
+    // branch-mapped PRs. The convention must be repositioned on run 2, or
+    // the sidecar's tail cap evicts the PR the session exists for.
+    seedWorkspaceRemote();
+    await seedSession(SESSION_A);
+    await seedWorktreeSidecar(SESSION_A, 'pr-42', 'worktree-pr-42');
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    const branchRecords = Array.from({ length: 11 }, (_, i) =>
+      JSON.stringify({
+        uuid: `${SESSION_A}-branch-${i}`,
+        parentUuid: `${SESSION_A}-user-1`,
+        sessionId: SESSION_A,
+        timestamp: '2026-08-02T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: `on b${i}` }] },
+        cwd: workspaceCwd,
+        gitBranch: `fix/b${i}`,
+      }),
+    ).join('\n');
+    await fsp.appendFile(
+      path.join(chatsDir, `${SESSION_A}.jsonl`),
+      `${branchRecords}\n`,
+      'utf8',
+    );
+
+    // RUN 1: gh unavailable — convention only.
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'cli_unavailable',
+    });
+    await backfillWorkspaceSessionPrs(runtime);
+
+    // RUN 2: gh available — 11 branch-mapped PRs plus the convention PR.
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [
+        pr(42, 'worktree-pr-42'),
+        ...Array.from({ length: 11 }, (_, i) => pr(101 + i, `fix/b${i}`)),
+      ],
+    });
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 11, alreadyBound: 1 });
+    const prs = await readSessionPrs(
+      sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+    );
+    expect(prs).toHaveLength(10);
+    expect(prs?.[9]?.number).toBe(42);
+  });
+
+  it('does not branch-map PRs whose URL belongs to another repository', async () => {
+    // Fork layout: gh resolves the PARENT repo for list queries when the
+    // origin is a fork; a bare head-branch collision with one of those PRs
+    // must not bind this workspace's session to it.
+    seedWorkspaceRemote();
+    await seedSession(SESSION_G, 'fix/login');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [
+        {
+          ...pr(31415, 'fix/login'),
+          url: 'https://github.com/parent/repo/pull/31415',
+        },
+      ],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ scanned: 1, bound: 0 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_G, 'active'),
+      ),
+    ).toBeNull();
   });
 
   it('resolves the git remote at most once per backfill run', async () => {

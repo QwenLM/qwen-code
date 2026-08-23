@@ -6,9 +6,9 @@
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import lockfile from 'proper-lockfile';
 import { isNodeError } from '../utils/errors.js';
 import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
-import { repoKeyFromWebUrl } from '../utils/github-prs.js';
 
 /**
  * Persisted GitHub pull request binding for a session. Written by the daemon
@@ -130,51 +130,16 @@ export async function writeSessionPrs(
 // `gh pr create` must START a command segment: a search like
 // `grep -rn 'gh pr create'` mentions the phrase as an argument and must not
 // count, while `cd /w && gh pr create` or `FOO=bar gh pr create | tee log`
-// do.
+// do. This is only the execution gate — it cannot attribute any printed URL
+// to gh's own run, so callers must verify the binding with gh itself before
+// persisting it.
 const GH_PR_CREATE_SEGMENT_PATTERN =
   /^\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*gh(?:\.exe)?\s+pr\s+create\b/;
-// The host must start with an alphanumeric so placeholder hosts never bind.
-const GH_PR_CREATE_URL_PATTERN =
-  /https?:\/\/[A-Za-z0-9][^\s"'<>)]*\/pull\/(\d+)/g;
 
-function commandRunsGhPrCreate(command: string): boolean {
+export function commandRunsGhPrCreate(command: string): boolean {
   return command
     .split(/&&|\|\||[;|]/)
     .some((segment) => GH_PR_CREATE_SEGMENT_PATTERN.test(segment));
-}
-
-/**
- * Recognizes a `gh pr create` run from the shell tool: some command segment
- * executes the action and gh prints the new PR's URL on success. Failed or
- * `--dry-run` runs print no URL, which is the base false-positive gate.
- *
- * A compound command can still print foreign URLs, so two more gates apply:
- * the LAST matching URL wins (gh prints the new PR's URL at the end of its
- * own output, while echoed text typically precedes it), and when
- * `expectedRepoKey` is given the URL must belong to that repository
- * (`host/owner/repo`) — URLs from other hosts or repos never bind.
- */
-export function detectGhPrCreateBinding(
-  command: string,
-  output: string,
-  expectedRepoKey?: string,
-): { number: number; url: string } | undefined {
-  if (!commandRunsGhPrCreate(command)) return undefined;
-  if (command.includes('--dry-run')) return undefined;
-  let binding: { number: number; url: string } | undefined;
-  for (const match of output.matchAll(GH_PR_CREATE_URL_PATTERN)) {
-    // Summarized output elides owner/repo (`https://github.com/.../pull/N`);
-    // such a URL is not a usable link target.
-    if (match[0].includes('...')) continue;
-    if (
-      expectedRepoKey !== undefined &&
-      repoKeyFromWebUrl(match[0]) !== expectedRepoKey
-    ) {
-      continue;
-    }
-    binding = { number: Number(match[1]), url: match[0] };
-  }
-  return binding;
 }
 
 /**
@@ -200,10 +165,57 @@ export function mergeSessionPrLists(
     .slice(-SESSION_PR_LIST_LIMIT);
 }
 
-// Serializes read-modify-write cycles per sidecar path: concurrent mutations
-// for the same session must not interleave (read [] → read [] → write [A] →
-// write [B] would silently drop A). A failed predecessor must not block
-// later mutations.
+// Cross-process file lock around every sidecar mutation. The live shell
+// binder runs in the session child process while GitDialog, backfill, and
+// the refresh sweep write from the daemon; the in-process queue below only
+// serializes one of those processes, and `atomicWriteJSON`'s temp+rename
+// carries no cross-process exclusion — an interleaved sweep rename would
+// replace the file with a list computed before a concurrent create landed,
+// silently dropping the new binding. Mirrors the mailbox two-tier pattern
+// (in-process serialization inside, `proper-lockfile` outside).
+const LOCK_OPTIONS: lockfile.LockOptions = {
+  retries: {
+    retries: 10,
+    minTimeout: 5,
+    maxTimeout: 100,
+    factor: 2,
+    randomize: true,
+  },
+  stale: 5000,
+  onCompromised: () => {
+    // A stale-lock takeover is expected after a crashed holder; the
+    // mutation still proceeds, so there is nothing to surface.
+  },
+};
+
+async function withSidecarLock<T>(
+  filePath: string,
+  run: () => Promise<T>,
+): Promise<T> {
+  // proper-lockfile locks by creating a sibling `<path>.lock` directory —
+  // the atomic rename swap never disturbs it — but the guarded path itself
+  // must exist. An empty file still reads as "no bindings"
+  // (readSessionPrs fails the JSON parse and returns null).
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.appendFile(filePath, '');
+  const release = await lockfile.lock(filePath, LOCK_OPTIONS);
+  try {
+    return await run();
+  } finally {
+    try {
+      await release();
+    } catch {
+      // Already released or compromised — never fail the mutation for the
+      // lock teardown.
+    }
+  }
+}
+
+// Serializes read-modify-write cycles per sidecar path WITHIN this process:
+// concurrent mutations for the same session must not interleave (read [] →
+// read [] → write [A] → write [B] would silently drop A), and the queue
+// keeps same-process writers from stampeding the file lock. A failed
+// predecessor must not block later mutations.
 const mutationQueue = new Map<string, Promise<unknown>>();
 
 function enqueuePrMutation<T>(
@@ -211,7 +223,9 @@ function enqueuePrMutation<T>(
   run: () => Promise<T>,
 ): Promise<T> {
   const previous = mutationQueue.get(filePath) ?? Promise.resolve();
-  const next = previous.catch(() => undefined).then(run);
+  const next = previous
+    .catch(() => undefined)
+    .then(() => withSidecarLock(filePath, run));
   mutationQueue.set(filePath, next);
   // The cleanup chain must absorb `next`'s rejection too — a derived
   // finally/catch promise would otherwise reject unhandled whenever the
@@ -228,6 +242,10 @@ function enqueuePrMutation<T>(
  * keeping at most {@link SESSION_PR_LIST_LIMIT} latest entries. A re-bound
  * number moves to the end (latest) with a fresh createdAt. An omitted
  * `state` preserves the existing entry's state on re-bind.
+ *
+ * Entries the read-side shape check would reject are declined here: the
+ * reader fails the WHOLE list closed, so persisting one poisoned entry would
+ * erase every earlier binding until the next successful write.
  */
 export function upsertSessionPr(
   filePath: string,
@@ -236,18 +254,17 @@ export function upsertSessionPr(
   return enqueuePrMutation(filePath, async () => {
     const existing = (await readSessionPrs(filePath)) ?? [];
     const known = existing.find((entry) => entry.number === pr.number);
-    const rest = existing.filter((entry) => entry.number !== pr.number);
-    const next = [
-      ...rest,
-      {
-        number: pr.number,
-        url: pr.url,
-        createdAt: new Date().toISOString(),
-        ...((pr.state ?? known?.state)
-          ? { state: (pr.state ?? known?.state) as SessionPrState }
-          : {}),
-      },
-    ].slice(-SESSION_PR_LIST_LIMIT);
+    const entry: SessionPr = {
+      number: pr.number,
+      url: pr.url,
+      createdAt: new Date().toISOString(),
+      ...((pr.state ?? known?.state)
+        ? { state: (pr.state ?? known?.state) as SessionPrState }
+        : {}),
+    };
+    if (!isValidSessionPr(entry)) return existing;
+    const rest = existing.filter((e) => e.number !== pr.number);
+    const next = [...rest, entry].slice(-SESSION_PR_LIST_LIMIT);
     await writeSessionPrs(filePath, next);
     return next;
   });
