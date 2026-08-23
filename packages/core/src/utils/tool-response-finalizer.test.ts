@@ -5,17 +5,19 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createHash } from 'node:crypto';
 import type { Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { getPlanModeSystemReminder } from '../core/prompts.js';
 import { ToolNames } from '../tools/tool-names.js';
 import {
+  BATCH_BUDGET_FIT_PREFIX,
   enforceFunctionResponseBudget,
   finalizeToolResponses,
   toolResponseTextLength,
   type ToolResponseBudgetEntry,
 } from './tool-response-finalizer.js';
-import { persistAndTruncateToolResult } from './truncation.js';
+import { buildStub, persistAndTruncateToolResult } from './truncation.js';
 
 const debugLogger = vi.hoisted(() => ({
   debug: vi.fn(),
@@ -798,5 +800,113 @@ describe('tool response finalization', () => {
 
     expect(output.startsWith(reminder)).toBe(true);
     expect(output.length).toBeLessThanOrEqual(reminder.length + 2 + 100);
+  });
+
+  describe('batch-budget fits over already-persisted stubs (issue #9450)', () => {
+    // The scheduler persists oversized results BEFORE the batch budget runs,
+    // so the text a fit wraps can itself be a `<persisted-output>` stub whose
+    // envelope embeds the per-call unique `<toolResultsDir>/<callId>.txt`
+    // path. Hashing that envelope would fingerprint every poll of an
+    // unchanged board uniquely and silently disable the result-aware loop
+    // guards; the fit must carry the stub's inner digest instead.
+    const boardDigest = (board: string): string =>
+      createHash('sha256').update(board).digest('hex');
+
+    const fittedDigest = (text: string | undefined): string => {
+      const match = /Full output sha256: ([0-9a-f]{64})/.exec(text ?? '');
+      return match?.[1] ?? '';
+    };
+
+    const stubEntry = (callId: string, board: string) => {
+      const stub = buildStub(
+        board,
+        Buffer.byteLength(board),
+        `/tmp/tool-results/${callId}.txt`,
+      );
+      return entry(
+        callId,
+        [
+          {
+            functionResponse: {
+              id: callId,
+              name: 'task_list',
+              response: { output: stub },
+            },
+          },
+        ],
+        [`/tmp/tool-results/${callId}.txt`],
+      );
+    };
+
+    it('carries the inner stub digest through the fit instead of hashing the unique envelope', async () => {
+      const board = `#1 [in_progress] @peer-a — ship it\n${'board line\n'.repeat(300)}`;
+      const entries = [stubEntry('call-a', board), stubEntry('call-b', board)];
+
+      // Budget 600 over two ~2.3K stubs → each allocation (300) is below the
+      // stub length, so both are fitted.
+      const finalized = await finalizeToolResponses(
+        config(600),
+        entries,
+        new Map(),
+      );
+      const outputs = finalized.map(
+        (finalizedEntry) =>
+          finalizedEntry.responseParts[0].functionResponse?.response?.[
+            'output'
+          ],
+      );
+      for (const output of outputs) {
+        expect(typeof output).toBe('string');
+        expect(output as string).toContain(BATCH_BUDGET_FIT_PREFIX);
+      }
+      // Both polls of the frozen board must carry the board's digest — the
+      // per-envelope hashes differ (unique callId paths), so pre-fix each
+      // header carried a unique digest and the two assertions below failed.
+      expect(fittedDigest(outputs[0] as string)).toBe(boardDigest(board));
+      expect(fittedDigest(outputs[1] as string)).toBe(boardDigest(board));
+    });
+
+    it('keeps the carried digest stable when a fit is fitted again', async () => {
+      // geminiChat's send guard runs the same allocator on the fitted output
+      // of a later batch; the reduction must stay idempotent across that
+      // second nesting (the first fit's header is per-call unique via its
+      // artifact note, so it too must be reduced to the carried digest).
+      const board = `#2 [in_progress] @peer-b — verify\n${'board line\n'.repeat(300)}`;
+
+      const once = await finalizeToolResponses(
+        config(400),
+        [stubEntry('call-a', board)],
+        new Map(),
+      );
+      const firstFit = once[0].responseParts[0].functionResponse?.response?.[
+        'output'
+      ] as string;
+      expect(firstFit).toContain(BATCH_BUDGET_FIT_PREFIX);
+
+      const twice = await finalizeToolResponses(
+        config(250),
+        [
+          entry(
+            'call-a',
+            [
+              {
+                functionResponse: {
+                  id: 'call-a',
+                  name: 'task_list',
+                  response: { output: firstFit },
+                },
+              },
+            ],
+            ['/tmp/tool-results/call-a.txt'],
+          ),
+        ],
+        new Map(),
+      );
+      const secondFit = twice[0].responseParts[0].functionResponse?.response?.[
+        'output'
+      ] as string;
+      expect(secondFit).toContain(BATCH_BUDGET_FIT_PREFIX);
+      expect(fittedDigest(secondFit)).toBe(boardDigest(board));
+    });
   });
 });

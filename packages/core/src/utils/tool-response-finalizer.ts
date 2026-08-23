@@ -17,6 +17,8 @@ import {
   type ToolResultBoundaryStage,
 } from './tool-result-boundary-diagnostics.js';
 import {
+  extractAnchoredStubDigest,
+  extractPersistedStubDigest,
   FULL_OUTPUT_DIGEST_LABEL,
   normalizeToolResultCallId,
   persistAndTruncateToolResult,
@@ -231,7 +233,22 @@ function fitText(
   // loop guards for exactly these oversized batch-budget results (issue
   // #9450). The digest sits right after the constant prefix so it survives
   // even when a tiny allocation slices the header.
-  const digest = createHash('sha256').update(text).digest('hex');
+  //
+  // Idempotence across nesting: the scheduler persists oversized results
+  // BEFORE the batch budget runs, so the text fitted here can itself be an
+  // already-persisted stub whose envelope embeds the per-call unique
+  // `<toolResultsDir>/<callId>.txt` path. Hashing THAT envelope would
+  // fingerprint every poll of an unchanged board uniquely and disable the
+  // result-aware guards again (the guards' digest-first reduction would take
+  // this header's outer digest), so carry the inner stub's own digest
+  // instead — and likewise the digest of a prior batch-budget fit, whose
+  // header is per-call unique via its artifact note.
+  const digest =
+    extractPersistedStubDigest(text) ??
+    (text.startsWith(BATCH_BUDGET_FIT_PREFIX)
+      ? extractAnchoredStubDigest(text)
+      : null) ??
+    createHash('sha256').update(text).digest('hex');
   const digestLine = `${FULL_OUTPUT_DIGEST_LABEL}${digest}`;
   const artifactNote =
     persistedOutputFiles && persistedOutputFiles.length > 0

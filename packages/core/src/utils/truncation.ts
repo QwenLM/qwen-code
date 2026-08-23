@@ -52,6 +52,60 @@ export const TRUNCATED_PART_MARKER = 'Truncated part of the output:\n';
 export const FULL_OUTPUT_DIGEST_LABEL = 'Full output sha256: ';
 
 /**
+ * Extracts the sha256 digest a stub producer embedded for the FULL
+ * pre-truncation output, anchored to a producer line: the label must start
+ * its line and be followed by exactly 64 hex chars ending the line. A
+ * mid-string mention of the label (e.g. board content quoting a stub) never
+ * matches. Returns null when no anchored digest is present. Exported so the
+ * batch-budget finalizer can carry a nested stub's digest through a fit
+ * (see fitText there) instead of hashing the per-call unique envelope
+ * (issue #9450); the loop guards keep their own private copy because they
+ * already import from this module and the recognition must not drift from
+ * the producer constants above.
+ */
+export function extractAnchoredStubDigest(value: string): string | null {
+  let searchFrom = 0;
+  for (;;) {
+    const index = value.indexOf(FULL_OUTPUT_DIGEST_LABEL, searchFrom);
+    if (index < 0) return null;
+    const digestStart = index + FULL_OUTPUT_DIGEST_LABEL.length;
+    const lineAnchored = index === 0 || value[index - 1] === '\n';
+    if (lineAnchored) {
+      const digest = value.slice(digestStart, digestStart + 64);
+      const terminator = value[digestStart + 64];
+      if (
+        /^[0-9a-f]{64}$/.test(digest) &&
+        (terminator === undefined || terminator === '\n' || terminator === '\r')
+      ) {
+        return digest;
+      }
+    }
+    searchFrom = index + 1;
+  }
+}
+
+/**
+ * Returns the embedded full-output digest when `text` itself is an
+ * oversized-result stub produced by this module: a `<persisted-output>`
+ * envelope, an unwrapped `Output too large (...)` stub, or a
+ * `truncateAndSaveToFile` wrapper. Returns null for any other text. Used by
+ * the batch-budget finalizer's fitText to make stub reduction idempotent
+ * across nesting: the scheduler persists oversized results BEFORE the batch
+ * budget runs, so a fit wrapping an already-persisted stub must carry the
+ * stub's inner digest into its header instead of hashing the stub envelope,
+ * which embeds a per-call unique `<toolResultsDir>/<callId>.txt` path and
+ * would fingerprint every poll of an unchanged board uniquely (issue #9450).
+ */
+export function extractPersistedStubDigest(text: string): string | null {
+  const isProducerStub =
+    text.startsWith(PERSISTED_OUTPUT_OPEN_TAG) ||
+    text.startsWith(OUTPUT_TOO_LARGE_PREFIX) ||
+    text.startsWith(TOOL_OUTPUT_TRUNCATED_PREFIX);
+  if (!isProducerStub) return null;
+  return extractAnchoredStubDigest(text);
+}
+
+/**
  * Tolerance factor applied by the scheduler's combined (second) pass:
  * metadata appended after truncation is only re-bounded above 2x the
  * applicable budget, so compliant retained content can legitimately
