@@ -13,7 +13,7 @@ import type {
   Part,
 } from '@google/genai';
 import { ApiError } from '@google/genai';
-import { AuthType, type ContentGenerator } from '../core/contentGenerator.js';
+import { AuthType, type ContentGenerator } from './contentGenerator.js';
 import {
   GeminiChat,
   InvalidStreamError,
@@ -43,7 +43,7 @@ import {
   estimateContentTokens,
   estimatePromptTokens,
 } from '../services/tokenEstimation.js';
-import { SYSTEM_REMINDER_OPEN } from '../utils/environmentContext.js';
+import { SYSTEM_REMINDER_OPEN } from './environmentContext.js';
 import { SessionStartSource } from '../hooks/types.js';
 import * as sideQueryModule from '../utils/sideQuery.js';
 import {

@@ -93,7 +93,7 @@ import {
   promptIdContext,
   todoWorkChainContext,
 } from '../utils/promptIdContext.js';
-import type { ToolResultBoundaryObservation } from '../utils/tool-result-boundary-diagnostics.js';
+import type { ToolResultBoundaryObservation } from '../tools/tool-result-boundary-diagnostics.js';
 
 type ToolSpanRecord = {
   name: string;
@@ -149,7 +149,7 @@ vi.mock(
   '../utils/tool-result-boundary-diagnostics.js',
   async (importOriginal) => ({
     ...(await importOriginal<
-      typeof import('../utils/tool-result-boundary-diagnostics.js')
+      typeof import('../tools/tool-result-boundary-diagnostics.js')
     >()),
     isToolResultBoundaryDiagnosticsEnabled: () =>
       boundaryDiagnosticsEnabled.value,

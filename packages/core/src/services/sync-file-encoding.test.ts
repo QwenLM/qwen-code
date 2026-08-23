@@ -5,8 +5,8 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { encodeTextFileContentAsync } from '../services/fileSystemService.js';
-import { decodeBufferWithEncodingInfoAsync } from './fileUtils.js';
+import { encodeTextFileContentAsync } from './fileSystemService.js';
+import { decodeBufferWithEncodingInfoAsync } from '../utils/fileUtils.js';
 import {
   decodeBufferWithEncodingInfo,
   encodeTextFileContent,

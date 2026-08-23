@@ -16,9 +16,9 @@ import {
   setGeminiMdFilename,
   DEFAULT_CONTEXT_FILENAME,
   LOCAL_CONTEXT_FILENAME,
-} from '../memory/const.js';
+} from '../utils/memory-constants.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
-import { QWEN_DIR } from './paths.js';
+import { QWEN_DIR } from '../utils/paths.js';
 import type { InstructionsLoadedNotification } from './memoryDiscovery.js';
 
 const mockLogger = vi.hoisted(() => ({
@@ -27,7 +27,7 @@ const mockLogger = vi.hoisted(() => ({
   error: vi.fn(),
 }));
 
-vi.mock('./debugLogger.js', () => ({
+vi.mock('../utils/debugLogger.js', () => ({
   createDebugLogger: () => mockLogger,
 }));
 

@@ -11,15 +11,15 @@ import {
   createDebugLogger,
   isDebugLogFileEnabled,
   type DebugLogger,
-} from './debugLogger.js';
-import { promptIdContext } from './promptIdContext.js';
-import { sessionIdContext } from './sessionIdContext.js';
+} from '../utils/debugLogger.js';
+import { promptIdContext } from '../utils/promptIdContext.js';
+import { sessionIdContext } from '../utils/sessionIdContext.js';
 import type {
   ToolArtifactKind,
   ToolResultArtifactState,
   ToolResultBoundaryArtifact,
-} from '../tools/tools.js';
-import { canonicalToolName } from '../tools/tool-names.js';
+} from './tools.js';
+import { canonicalToolName } from './tool-names.js';
 
 export const TOOL_RESULT_BOUNDARY_EVENT_NAME = 'qwen-code.tool_result.boundary';
 export const TOOL_RESULT_BOUNDARY_JSON_BYTE_THRESHOLD = 65_536;

@@ -6,7 +6,7 @@
 
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { runForkedAgent, getCacheSafeParams } from '../utils/forkedAgent.js';
+import { runForkedAgent, getCacheSafeParams } from '../agents/forkedAgent.js';
 import { buildFunctionResponseParts } from '../tools/agent/fork-subagent.js';
 import type { Content } from '@google/genai';
 import {

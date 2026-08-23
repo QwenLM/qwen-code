@@ -18,7 +18,7 @@ import type {
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { createUserContent, FinishReason } from './genai-compat.js';
-import { enforceFunctionResponseBudget } from '../utils/tool-response-finalizer.js';
+import { enforceFunctionResponseBudget } from '../tools/tool-response-finalizer.js';
 import {
   retryWithBackoff,
   isUnattendedMode,
@@ -109,7 +109,7 @@ import { getContextLengthExceededInfo } from '../utils/contextLengthError.js';
 import {
   getStartupContextLength,
   isSystemReminderContent,
-} from '../utils/environmentContext.js';
+} from './environmentContext.js';
 import type { SessionStartSource } from '../hooks/types.js';
 import {
   getCustomSystemPrompt,

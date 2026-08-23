@@ -7,16 +7,13 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import { Config as ConfigImpl, ApprovalMode } from '../config/config.js';
-import { AgentHeadless } from '../agents/runtime/agent-headless.js';
+import { AgentHeadless } from './runtime/agent-headless.js';
 import {
   AgentEventType,
   type AgentEventEmitter,
-} from '../agents/runtime/agent-events.js';
-import { AgentTerminateMode } from '../agents/runtime/agent-types.js';
-import type {
-  ModelConfig,
-  PromptConfig,
-} from '../agents/runtime/agent-types.js';
+} from './runtime/agent-events.js';
+import { AgentTerminateMode } from './runtime/agent-types.js';
+import type { ModelConfig, PromptConfig } from './runtime/agent-types.js';
 import { runForkedAgent } from './forkedAgent.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { EditTool } from '../tools/edit.js';
@@ -25,7 +22,7 @@ import {
   TOOL_REGISTRY_REBUILT,
 } from '../tools/agent/agent.js';
 import { AuthType } from '../core/contentGenerator.js';
-import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
+import type { RuntimeContentGeneratorView } from './runtime/agent-context.js';
 import { createRuntimeContentGeneratorView } from '../models/content-generator-config.js';
 
 vi.mock('../models/content-generator-config.js', async (importOriginal) => {

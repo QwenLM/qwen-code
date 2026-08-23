@@ -8,21 +8,21 @@ import {
   iconvDecode,
   iconvEncode,
   iconvEncodingExists,
-} from './iconvHelper.js';
+} from '../utils/iconvHelper.js';
 import {
   bomEncodingToName,
   decodeBOMBuffer,
   detectBOM,
   isValidUtf8,
   type FileReadResult,
-} from './fileUtils.js';
+} from '../utils/fileUtils.js';
 import {
   prepareTextFileContent,
   type ReadTextFileResponse,
-} from '../services/fileSystemService.js';
-import { detectEncodingFromBuffer } from './systemEncoding.js';
-import { isUtf8CompatibleEncoding } from './encoding.js';
-import { createDebugLogger } from './debugLogger.js';
+} from './fileSystemService.js';
+import { detectEncodingFromBuffer } from '../utils/systemEncoding.js';
+import { isUtf8CompatibleEncoding } from '../utils/encoding.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('SYNC_FILE_ENCODING');
 

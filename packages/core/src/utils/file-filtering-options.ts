@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES } from '../utils/qwenIgnoreParser.js';
+import { DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES } from './qwenIgnoreParser.js';
 
 export interface FileFilteringOptions {
   respectGitIgnore: boolean;

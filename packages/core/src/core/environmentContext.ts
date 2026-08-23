@@ -11,9 +11,9 @@ import type {
   DeferredToolSummary,
   ToolRegistry,
 } from '../tools/tool-registry.js';
-import { createDebugLogger } from './debugLogger.js';
-import { getFolderStructure } from './getFolderStructure.js';
-import { escapeSystemReminderTags } from './xml.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+import { getFolderStructure } from '../utils/getFolderStructure.js';
+import { escapeSystemReminderTags } from '../utils/xml.js';
 import {
   collectAvailableSkillEntries,
   renderAvailableSkillsBlock,

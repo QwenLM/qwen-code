@@ -5,10 +5,11 @@
  */
 
 import { expect, describe, it } from 'vitest';
-import { doesToolInvocationMatch, isToolEnabled } from './tool-utils.js';
+import { doesToolInvocationMatch } from '../utils/shell-utils.js';
+import { isToolEnabled } from './tool-utils.js';
 import type { AnyToolInvocation, Config } from '../index.js';
-import { ReadFileTool } from '../tools/read-file.js';
-import { ToolNames } from '../tools/tool-names.js';
+import { ReadFileTool } from './read-file.js';
+import { ToolNames } from './tool-names.js';
 
 describe('doesToolInvocationMatch', () => {
   it('should not match a partial command prefix', () => {

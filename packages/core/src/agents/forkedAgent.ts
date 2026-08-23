@@ -38,12 +38,12 @@ import type {
 import {
   runWithRuntimeContentGenerator,
   type RuntimeContentGeneratorView,
-} from '../agents/runtime/agent-context.js';
+} from './runtime/agent-context.js';
 import { ApprovalMode, type Config } from '../config/config.js';
 import { GeminiChat, StreamEventType } from '../core/geminiChat.js';
 import { createRuntimeContentGeneratorView } from '../models/content-generator-config.js';
 import { createApprovalModeOverride } from '../tools/agent/agent.js';
-import { createDebugLogger } from './debugLogger.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   AgentHeadless,
   AgentEventEmitter,
@@ -54,16 +54,16 @@ import {
   type PromptConfig,
   type RunConfig,
   type ToolConfig,
-} from '../agents/index.js';
-import { toModelVisibleSubagentResult } from '../agents/subagent-result.js';
+} from './index.js';
+import { toModelVisibleSubagentResult } from './subagent-result.js';
 import {
   buildModelIdContext,
   resolveModelId,
   type ResolvedModelId,
-} from './modelId.js';
+} from '../utils/modelId.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { getFunctionResponseParts } from '../services/compactionInputSlimming.js';
-import { runWithChatRecordingSuppressed } from './chat-recording-suppression-context.js';
+import { runWithChatRecordingSuppressed } from '../utils/chat-recording-suppression-context.js';
 
 const debugLogger = createDebugLogger('FORKED_AGENT');
 

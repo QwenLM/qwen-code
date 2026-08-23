@@ -10,14 +10,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { getShellContextEnvVars } from './shellContextEnv.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
-import { promptIdContext } from './promptIdContext.js';
+import { promptIdContext } from '../utils/promptIdContext.js';
 import {
   sessionIdContext,
   registerSessionProjectDir,
   unregisterSessionProjectDir,
   registerSessionModel,
   unregisterSessionModel,
-} from './sessionIdContext.js';
+} from '../utils/sessionIdContext.js';
 import {
   isShellTracePropagationEnabled,
   getTraceContext,

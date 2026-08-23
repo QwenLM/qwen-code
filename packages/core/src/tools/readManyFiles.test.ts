@@ -17,11 +17,11 @@ import { StandardFileSystemService } from '../services/fileSystemService.js';
 import type { Config } from '../config/config.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { FileReadCache } from '../services/fileReadCache.js';
-import { checkPriorRead } from '../tools/priorReadEnforcement.js';
-import { getPDFPageCount, isPdftotextAvailable } from './pdf.js';
+import { checkPriorRead } from './priorReadEnforcement.js';
+import { getPDFPageCount, isPdftotextAvailable } from '../utils/pdf.js';
 
-vi.mock('./pdf.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('./pdf.js')>();
+vi.mock('../utils/pdf.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../utils/pdf.js')>();
   return {
     ...actual,
     getPDFPageCount: vi.fn(),

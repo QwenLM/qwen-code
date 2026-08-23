@@ -23,7 +23,7 @@ import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionServic
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { setGeminiMdFilename as mockSetGeminiMdFilename } from '../memory/const.js';
+import { setGeminiMdFilename as mockSetGeminiMdFilename } from '../utils/memory-constants.js';
 import {
   DEFAULT_TELEMETRY_TARGET,
   DEFAULT_OTLP_ENDPOINT,
@@ -65,8 +65,8 @@ import {
   type HookExecutionRequest,
   type HookExecutionResponse,
 } from '../confirmation-bus/types.js';
-import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
-import type { LoadServerHierarchicalMemoryOptions } from '../utils/memoryDiscovery.js';
+import { loadServerHierarchicalMemory } from '../memory/memoryDiscovery.js';
+import type { LoadServerHierarchicalMemoryOptions } from '../memory/memoryDiscovery.js';
 import {
   readAutoMemoryIndexWithStats,
   readUserAutoMemoryIndexWithStats,
@@ -185,7 +185,7 @@ vi.mock('../tools/tool-registry', () => {
   return { ToolRegistry: ToolRegistryMock };
 });
 
-vi.mock('../utils/memoryDiscovery.js', () => ({
+vi.mock('../memory/memoryDiscovery.js', () => ({
   loadServerHierarchicalMemory: vi.fn().mockResolvedValue({
     memoryContent: '',
     fileCount: 0,
@@ -286,7 +286,7 @@ vi.mock('../tools/web-fetch', () => ({
 vi.mock('../tools/read-many-files', () => ({
   ReadManyFilesTool: createToolMock('read_many_files'),
 }));
-vi.mock('../memory/const.js', () => ({
+vi.mock('../utils/memory-constants.js', () => ({
   setGeminiMdFilename: vi.fn(),
   getCurrentGeminiMdFilename: vi.fn(() => 'QWEN.md'), // Mock the original filename
   getAllGeminiMdFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
