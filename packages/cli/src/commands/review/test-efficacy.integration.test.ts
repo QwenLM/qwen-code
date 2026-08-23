@@ -397,6 +397,75 @@ process.stdout.write(JSON.stringify({
     ).toContain('content filter');
   });
 
+  it('refuses the REVERT checkout when the suite rewrote the .git gitfile — the main index survives', async () => {
+    // The probe tree carries its `.git` as a gitfile naming the pipeline's
+    // own admin entry; the suite has full write access to the tree, and one
+    // plain write rewrites it at the common dir. The restore DETECTS the
+    // rewrite for its own phase — the identity gate refuses — but the
+    // revert phase had no such gate: its screen ran rev-parse with
+    // cwd=probeTree, followed the rewritten gitfile, and CERTIFIED the
+    // attacker-chosen repository's config, and the revert's checkout then
+    // staged the base blob into the user's MAIN index (measured live). The
+    // revert now runs the restore's identity gate beside the re-check,
+    // before its screen and checkout.
+    const { wt, base } = scaffoldModifiedPr();
+    writeFileSync(
+      vitestScript(),
+      String.raw`#!/usr/bin/env node
+import { execSync } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+import path from 'node:path';
+const common = execSync('git rev-parse --path-format=absolute --git-common-dir', { encoding: 'utf8' }).trim();
+writeFileSync('.git', 'gitdir: ' + common + '\n');
+const files = process.argv.slice(2).filter((a) => a.includes('.test.'));
+process.stdout.write(JSON.stringify({
+  numPassedTests: files.length,
+  numFailedTests: 0,
+  testResults: files.map((f) => ({
+    name: path.resolve(f),
+    assertionResults: [{ status: 'passed' }],
+  })),
+}));
+`,
+    );
+
+    const mainEntryBefore = git(
+      repo,
+      'ls-files',
+      '-s',
+      'packages/lib/src/f.ts',
+    ).trim();
+
+    await runHandler({
+      report: join(repo, 'report.json'),
+      worktree: wt,
+      base,
+      out: join(repo, 'out.json'),
+    });
+
+    const out = JSON.parse(readFileSync(join(repo, 'out.json'), 'utf8'));
+    expect(
+      out.probed.every(
+        (p: { verdict: string }) => p.verdict === 'inconclusive',
+      ),
+    ).toBe(true);
+    expect(
+      out.probed.map((p: { detail: string }) => p.detail).join('\n'),
+    ).toMatch(
+      /not the root of its own checkout|does not point back|\.git.gitdir/,
+    );
+    // The user's main repository survived: its index still carries the
+    // HEAD blob for the PR-modified file, and its status never names it —
+    // the measured corruption staged the BASE blob there (`MM f.txt`),
+    // silently, and it survived the cleanup.
+    expect(git(repo, 'ls-files', '-s', 'packages/lib/src/f.ts').trim()).toBe(
+      mainEntryBefore,
+    );
+    expect(git(repo, 'status', '--porcelain')).not.toContain(
+      'packages/lib/src/f.ts',
+    );
+  });
+
   it('the creation and revert checkouts are INERT — a planted post-checkout hook never fires', async () => {
     // The screens certify FILTERS only; hooks are the spawn's own job.
     // `worktree add` and a pathspec checkout both fire `post-checkout` from

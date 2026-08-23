@@ -589,10 +589,13 @@ describe('fetch-pr report assembly', () => {
     // and it rewrites every fetched file, executing a planted filter. A
     // screen hit must refuse the fetch before the checkout, roll the fetched
     // ref back, release the lease, and write no report.
-    producerMocks.localFilterRefusal.mockReturnValue(
-      "the repository's local config defines content filter(s) " +
-        'filter.evil.smudge (in /repo/.git/config) — the review worktree’s ' +
-        'creation checkout would EXECUTE them',
+    producerMocks.localFilterRefusal.mockImplementation(
+      (_cwd: unknown, checkout: unknown) =>
+        checkout === "the review worktree's creation checkout"
+          ? "the repository's local config defines content filter(s) " +
+            'filter.evil.smudge (in /repo/.git/config) — the review worktree’s ' +
+            'creation checkout would EXECUTE them'
+          : null,
     );
 
     await expect(reportFor({})).rejects.toThrow(
@@ -617,6 +620,44 @@ describe('fetch-pr report assembly', () => {
     );
     expect(reportCall).toBeUndefined();
     // The lease this run created is rolled back with every other failure.
+    expect(clearReviewWorktreeLeaseIfOwned).toHaveBeenCalled();
+  });
+
+  it('refuses the head fetch when the local filter screen refuses — before any fetch runs', async () => {
+    // The step-2 fetch is the pipeline's first network operation and
+    // EXECUTES the command-valued config keys the screen names (measured:
+    // a planted core.sshCommand ran during a pipeline-shaped fetch) — a key
+    // an earlier malicious PR's probe planted in the never-wiped common dir
+    // runs during it. The screen reads only repo-local config and needs
+    // nothing the fetch produces, so it runs FIRST: the refusal precedes
+    // every fetch spawn, the way step 4's screen precedes the creation
+    // checkout.
+    producerMocks.localFilterRefusal.mockImplementation(
+      (_cwd: unknown, checkout: unknown) =>
+        checkout === "the review worktree's head fetch"
+          ? "the repository's local config names command-execution key(s) " +
+            'core.sshcommand (in /repo/.git/config) — a checkout that ' +
+            'lazy-fetches EXECUTES the commands they name'
+          : null,
+    );
+
+    await expect(reportFor({})).rejects.toThrow(/command-execution key/);
+    expect(producerMocks.localFilterRefusal).toHaveBeenCalledWith(
+      process.cwd(),
+      "the review worktree's head fetch",
+    );
+    // The fetch itself never ran — and nothing downstream of it: no
+    // worktree add, no report. The refusal is a hard stop; the outer catch
+    // releases the lease.
+    expect(
+      producerMocks.git.mock.calls.some((args: unknown[]) =>
+        args.includes('fetch'),
+      ),
+    ).toBe(false);
+    const reportCall = producerMocks.writeFileSync.mock.calls.find(
+      ([path]) => path === '/tmp/fetch-report.json',
+    );
+    expect(reportCall).toBeUndefined();
     expect(clearReviewWorktreeLeaseIfOwned).toHaveBeenCalled();
   });
 

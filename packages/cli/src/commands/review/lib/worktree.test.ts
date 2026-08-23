@@ -1655,4 +1655,35 @@ describe('localFilterRefusal', () => {
     expect(r).not.toContain('defines content filter(s)');
     expect(r).not.toContain('names include directive(s)');
   });
+
+  it('refuses the fetch trigger and the keys the first cut missed — promisor, URL-scoped helper, askpass, uploadpack, bare protocol.allow', () => {
+    // The trigger itself was never screened: a promisor remote —
+    // `remote.<name>.promisor`, with or without `extensions.partialClone`
+    // — makes a certified checkout that hits a missing object lazy-fetch
+    // (measured: promisor alone suffices), at which point the whole
+    // transport surface is live. The URL-scoped credential helper,
+    // `core.askpass` (the config twin of the GIT_ASKPASS env var
+    // `sanitizedGitEnv` strips), `remote.<name>.uploadpack`, and the bare
+    // `protocol.allow` that lifts ext's default-deny join it — each
+    // planted alone certified the checkout before this closure (measured).
+    const g = (...args: string[]) =>
+      execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim();
+    g('config', 'remote.origin.promisor', 'true');
+    g('config', 'credential.http://127.0.0.1:9/.helper', 'evil');
+    g('config', 'core.askpass', 'evil-askpass');
+    g('config', 'remote.origin.uploadpack', 'evil-uploadpack');
+    g('config', 'protocol.allow', 'always');
+
+    const r = localFilterRefusal(tree, 'the probe checkout');
+
+    expect(r).not.toBeNull();
+    expect(r).toContain('command-execution key(s)');
+    expect(r).toContain('remote.origin.promisor');
+    expect(r).toContain('credential.http://127.0.0.1:9/.helper');
+    expect(r).toContain('core.askpass');
+    expect(r).toContain('remote.origin.uploadpack');
+    expect(r).toContain('protocol.allow');
+    expect(r).not.toContain('defines content filter(s)');
+    expect(r).not.toContain('names include directive(s)');
+  });
 });

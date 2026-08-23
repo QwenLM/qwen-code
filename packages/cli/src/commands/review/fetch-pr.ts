@@ -903,7 +903,20 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
 
     // 2. Fetch PR HEAD into a unique local ref. The refspec source is
     //    platform-specific: GitHub `pull/<n>/head`, Aone
-    //    `refs/merge-requests/<global-id>/head`.
+    //    `refs/merge-requests/<global-id>/head`. Screen BEFORE the fetch:
+    //    this is the pipeline's first network operation, and it EXECUTES the
+    //    command-valued config keys the screen names (`core.sshCommand`,
+    //    `credential.*.helper`, an `ext::` remote under
+    //    `protocol.ext.allow`) — a key an earlier malicious PR's probe
+    //    planted in the never-wiped common dir runs during THIS fetch
+    //    (measured live). The screen reads only repo-local config and needs
+    //    nothing the fetch produces, so running it first loses nothing; a
+    //    hit throws through the outer catch, which releases the lease.
+    const headFetchRefusal = localFilterRefusal(
+      process.cwd(),
+      "the review worktree's head fetch",
+    );
+    if (headFetchRefusal) throw new Error(headFetchRefusal);
     try {
       git(
         'fetch',
@@ -976,9 +989,9 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     //    file the fetched head carries — which EXECUTES a planted content
     //    filter — and it is the pipeline's actual FIRST checkout: every other
     //    screen runs inside the tree this call creates, so none exists yet in
-    //    this run. A screen hit refuses the fetch the way the probe-creation
-    //    screen refuses its checkout; the rollback below then removes the
-    //    fetched ref and the outer catch releases the lease. The spawn
+    //    this run. A screen hit refuses the creation the way step 2's screen
+    //    refuses the head fetch; the rollback below then removes the fetched
+    //    ref and the outer catch releases the lease. The spawn
     //    carries INERT_GIT_ARGS because the screen reads filters only, while
     //    `worktree add` ALSO fires `post-checkout` from the shared common
     //    hooks dir and runs a repo-local `core.fsmonitor` — both plantable

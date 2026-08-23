@@ -652,13 +652,16 @@ function nameScreenKeys(
  * safely wiped, so a hit is a refusal upstream, not a cleanup here.
  *
  * The transport-command keys a lazy-fetch EXECUTES ride this screen for the
- * same reason filters do: `extensions.partialClone` + a promisor remote +
- * one deleted loose object makes a certified checkout fetch, and
- * `core.sshCommand`, `core.gitProxy`, `credential.helper`, and `ext::`
- * remote URLs under `protocol.ext.allow` are commands `INERT_GIT_ARGS`
- * cannot neutralize — two are list-valued or fall back when emptied — so
- * repo-local hits refuse fail-closed too (measured live through all three
- * pipeline spawn shapes).
+ * same reason filters do: a promisor remote — `remote.<name>.promisor`,
+ * with or without `extensions.partialClone` — makes a checkout that hits a
+ * missing object fetch (measured: promisor alone suffices), and
+ * `core.sshCommand`, `core.gitProxy`, `core.askpass`, bare and URL-scoped
+ * `credential.*.helper`, `remote.<name>.uploadpack`, and `ext::` remote
+ * URLs — `protocol.allow` lifts the default-deny beside the
+ * `protocol.ext.allow` that names the protocol — are commands
+ * `INERT_GIT_ARGS` cannot neutralize: two are list-valued or fall back
+ * when emptied. Repo-local hits refuse fail-closed, the trigger keys
+ * included (measured live through all three pipeline spawn shapes).
  */
 export function localFilterRefusal(
   worktree: string,
@@ -765,7 +768,7 @@ export function localFilterRefusal(
         // reason the docstring gives — a checkout that hits a missing object
         // in a promisor-configured repo fetches through whatever command
         // these name (measured live on all three pipeline spawn shapes).
-        '^(filter\\..*\\.(smudge|clean|process)|include\\.path|includeif\\..+\\.path|extensions\\.partialclone|core\\.sshcommand|core\\.gitproxy|credential\\.helper|protocol\\.ext\\.allow)$',
+        '^(filter\\..*\\.(smudge|clean|process)|include\\.path|includeif\\..+\\.path|extensions\\.partialclone|remote\\..+\\.promisor|core\\.sshcommand|core\\.gitproxy|core\\.askpass|credential(\\..+)?\\.helper|remote\\..+\\.uploadpack|protocol\\.(ext\\.)?allow)$',
       ],
       {
         cwd: worktree,

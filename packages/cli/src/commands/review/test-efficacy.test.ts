@@ -30,6 +30,7 @@ import {
   MAX_MUTANTS,
   runControlMutant,
   runOneMutant,
+  runProbeSuite,
   runOneHunkProbe,
   committedSymlinkProbes,
 } from './test-efficacy.js';
@@ -2461,7 +2462,7 @@ describe('probe runner teardown hook', () => {
 
   function hookSignals(onSpy: { mock: { calls: unknown[][] } }): unknown[][] {
     return onSpy.mock.calls.filter(([sig]) =>
-      ['SIGHUP', 'SIGINT', 'SIGTERM'].includes(sig as string),
+      ['SIGHUP', 'SIGINT', 'SIGTERM', 'SIGQUIT'].includes(sig as string),
     );
   }
 
@@ -2471,9 +2472,24 @@ describe('probe runner teardown hook', () => {
     const dir = mkdtempSync(join(tmpdir(), 'qwen-hook-'));
     try {
       writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      // A shadow vitest whose `exports` hide `./package.json`: this throw
+      // must not depend on nothing providing vitest above os.tmpdir() — a
+      // node_modules up-tree of the runner's TMPDIR (observed on
+      // self-hosted CI) resolves the host's vitest, runOneMutant then
+      // RETURNS an inconclusive result instead of throwing, and this test
+      // goes red on that fleet (measured). The innermost node_modules wins
+      // resolution on every host, so the shadow makes findVitestBin throw
+      // deterministically — the same defense runControlMutant's suite
+      // plants. The hook is installed before that throw: it is the spawn
+      // the throw never reaches that is about to need it.
+      const vitestDir = join(dir, 'node_modules', 'vitest');
+      mkdirSync(vitestDir, { recursive: true });
+      writeFileSync(
+        join(vitestDir, 'package.json'),
+        JSON.stringify({ name: 'vitest', exports: { '.': './index.js' } }),
+      );
+      writeFileSync(join(vitestDir, 'index.js'), '');
       asCheckout(dir);
-      // No vitest anywhere up-tree: findVitestBin throws — but only after
-      // the hook the spawn is about to need was installed.
       expect(() =>
         mod.runOneMutant(
           dir,
@@ -2485,6 +2501,7 @@ describe('probe runner teardown hook', () => {
       expect(signals).toContain('SIGHUP');
       expect(signals).toContain('SIGINT');
       expect(signals).toContain('SIGTERM');
+      expect(signals).toContain('SIGQUIT');
     } finally {
       for (const [sig, fn] of hookSignals(onSpy)) {
         process.removeListener(sig as NodeJS.Signals, fn as never);
@@ -2500,6 +2517,15 @@ describe('probe runner teardown hook', () => {
     const dir = mkdtempSync(join(tmpdir(), 'qwen-hook-'));
     try {
       writeFileSync(join(dir, 'a.ts'), 'gone.clear();\n');
+      // The same shadow vitest the sibling test plants: the throw must be
+      // deterministic on a host with vitest above os.tmpdir() too.
+      const vitestDir = join(dir, 'node_modules', 'vitest');
+      mkdirSync(vitestDir, { recursive: true });
+      writeFileSync(
+        join(vitestDir, 'package.json'),
+        JSON.stringify({ name: 'vitest', exports: { '.': './index.js' } }),
+      );
+      writeFileSync(join(vitestDir, 'index.js'), '');
       asCheckout(dir);
       expect(() =>
         mod.runOneMutant(
@@ -2518,7 +2544,7 @@ describe('probe runner teardown hook', () => {
       expect(
         hookSignals(onSpy).filter(([sig]) => sig === 'SIGINT'),
       ).toHaveLength(1);
-      expect(hookSignals(onSpy)).toHaveLength(3);
+      expect(hookSignals(onSpy)).toHaveLength(4);
     } finally {
       for (const [sig, fn] of hookSignals(onSpy)) {
         process.removeListener(sig as NodeJS.Signals, fn as never);
@@ -2550,6 +2576,8 @@ describe('probe runner teardown hook', () => {
       expect(exitSpy).toHaveBeenNthCalledWith(2, 143);
       handler('SIGHUP');
       expect(exitSpy).toHaveBeenNthCalledWith(3, 129);
+      handler('SIGQUIT');
+      expect(exitSpy).toHaveBeenNthCalledWith(4, 131);
 
       // Between spawns there is no group: the handler exits without killing,
       // and a recycled pid is never signalled as if it were this group.
@@ -2557,7 +2585,7 @@ describe('probe runner teardown hook', () => {
       mod.setRunnerTeardownGroup(undefined);
       handler('SIGINT');
       expect(killSpy).not.toHaveBeenCalled();
-      expect(exitSpy).toHaveBeenNthCalledWith(4, 130);
+      expect(exitSpy).toHaveBeenNthCalledWith(5, 130);
     } finally {
       for (const [sig, fn] of hookSignals(onSpy)) {
         process.removeListener(sig as NodeJS.Signals, fn as never);
@@ -2565,6 +2593,46 @@ describe('probe runner teardown hook', () => {
       onSpy.mockRestore();
       killSpy.mockRestore();
       exitSpy.mockRestore();
+    }
+  });
+
+  it('the deadline kills a SIGTERM-resistant runner — the timeout is unconditional', () => {
+    const onSpy = vi.spyOn(process, 'on');
+    // A fake vitest that resists SIGTERM — the shape a malicious suite
+    // commits (its own code installs the handler) to outlive the deadline:
+    // spawnSync's one-shot default kill is shrugged off, and without an
+    // unconditional killSignal the spawn waits for an exit that never comes
+    // while the runner keeps executing PR code (measured live). SIGKILL
+    // returns the spawn at the deadline, not at the sleeper's end.
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-deadline-'));
+    try {
+      const vitestDir = join(dir, 'node_modules', 'vitest');
+      mkdirSync(vitestDir, { recursive: true });
+      writeFileSync(
+        join(vitestDir, 'package.json'),
+        JSON.stringify({ name: 'vitest', bin: { vitest: './sleeper.mjs' } }),
+      );
+      writeFileSync(
+        join(vitestDir, 'sleeper.mjs'),
+        "process.removeAllListeners('SIGTERM');\n" +
+          "process.on('SIGTERM', () => {});\n" +
+          'setTimeout(() => {}, 6000);\n',
+      );
+      const started = Date.now();
+      expect(() => runProbeSuite(dir, ['a.test.ts'], started + 1500)).toThrow(
+        /ETIMEDOUT/,
+      );
+      // The deadline, not the sleeper: the kill returns at ~1.5s. The
+      // default killSignal waits the sleeper's full 6s before the same
+      // throw — and a suite that never schedules an end never returns at
+      // all.
+      expect(Date.now() - started).toBeLessThan(4500);
+    } finally {
+      for (const [sig, fn] of hookSignals(onSpy)) {
+        process.removeListener(sig as NodeJS.Signals, fn as never);
+      }
+      onSpy.mockRestore();
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

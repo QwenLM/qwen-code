@@ -1494,6 +1494,87 @@ export function probeCleanupFailureDetail(
 }
 
 /**
+ * The probe tree must still BE the probe tree before any checkout runs in it:
+ * its own checkout root, its own admin entry pointing back, no redirected
+ * ancestor between it and the repository it belongs to. The restore gates on
+ * this for its reset; the revert phase gates on the same question before its
+ * screen and checkout — a rewritten `.git` gitfile naming another repository
+ * passes a root lstat while `rev-parse` follows it, and a checkout run under
+ * that discovery writes THAT repository's index and certifies its config
+ * (measured live: the user's MAIN index staged the base blob for a
+ * PR-modified file). Returns null when the tree is itself, or the reason it
+ * is not.
+ */
+function probeTreeIdentityRefusal(probeTree: string): string | null {
+  const top = spawnSync(
+    'git',
+    [
+      'rev-parse',
+      '--path-format=absolute',
+      '--show-toplevel',
+      '--git-common-dir',
+      '--git-dir',
+    ],
+    { cwd: probeTree, encoding: 'utf8', env: sanitizedGitEnv() },
+  );
+  if (top.error || top.status !== 0 || typeof top.stdout !== 'string') {
+    return top.error
+      ? top.error.message
+      : (top.stderr ?? '').toString().trim() ||
+          `git rev-parse exited ${top.status}`;
+  }
+  const [toplevel, commonDir, gitDir] = top.stdout.trim().split('\n');
+  try {
+    // The LEAF first. Every comparison below realpaths both sides, so a probe
+    // tree that is itself a symlink into the shared review worktree agrees
+    // with itself all the way down — and a checkout would then run in the
+    // tree every other agent is reading.
+    if (lstatSync(probeTree).isSymbolicLink()) {
+      return `${probeTree} is a symlink, so the checkout would land wherever it points`;
+    }
+    if (realpathSync(toplevel) !== realpathSync(probeTree)) {
+      return `the tree at ${probeTree} is not the root of its own checkout`;
+    }
+    // `--show-toplevel` prints the directory the `.git` FILE sits in, whatever
+    // that file points at — so a rewritten gitfile naming another repository
+    // passes the check above while a checkout run here writes THAT
+    // repository's content into this tree and certifies it. `scratch-tree`
+    // gates its own reset on the admin entry pointing back; this gate asks
+    // the same question — of the shape that HAS an answer. A probe tree the
+    // pipeline built is a linked worktree and carries its `.git` as a
+    // gitfile; a plain checkout has a `.git` DIRECTORY and no admin entry to
+    // round-trip, and demanding one there would refuse every ordinary
+    // repository.
+    if (lstatSync(join(probeTree, '.git')).isFile()) {
+      const backpointer = readFileSync(join(gitDir, 'gitdir'), 'utf8').trim();
+      if (
+        realpathSync(dirname(resolve(gitDir, backpointer))) !==
+        realpathSync(probeTree)
+      ) {
+        return `${probeTree}'s admin entry does not point back at it`;
+      }
+      // And every ancestor between the tree and the repository it belongs to:
+      // a link above the tree redirects the checkout and any clean beside it
+      // together, while every check here resolves through it and agrees with
+      // itself. Only for a LINKED worktree — a standalone checkout IS the
+      // repository root, so there is nothing between it and the stop point to
+      // walk, and an unbounded walk above it meets the system links (`/var`
+      // on macOS) this bound exists to stay below.
+      const redirected = redirectedAncestor(
+        dirname(resolve(probeTree)),
+        dirname(realpathSync(commonDir)),
+      );
+      if (redirected !== null) {
+        return `${redirected} is a symlink, so the checkout would land wherever it points`;
+      }
+    }
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e);
+  }
+  return null;
+}
+
+/**
  * Put the probe tree's TRACKED files back to the commit, before a run.
  *
  * The tree is reused across the baseline, the control, every mutant and every
@@ -1528,71 +1609,8 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
   if (!existsSync(join(probeTree, '.git'))) {
     return `${probeTree} carries no .git, so there is no commit to put it back to`;
   }
-  const top = spawnSync(
-    'git',
-    [
-      'rev-parse',
-      '--path-format=absolute',
-      '--show-toplevel',
-      '--git-common-dir',
-      '--git-dir',
-    ],
-    { cwd: probeTree, encoding: 'utf8', env: sanitizedGitEnv() },
-  );
-  if (top.error || top.status !== 0 || typeof top.stdout !== 'string') {
-    return top.error
-      ? top.error.message
-      : (top.stderr ?? '').toString().trim() ||
-          `git rev-parse exited ${top.status}`;
-  }
-  const [toplevel, commonDir, gitDir] = top.stdout.trim().split('\n');
-  try {
-    // The LEAF first. Every comparison below realpaths both sides, so a probe
-    // tree that is itself a symlink into the shared review worktree agrees
-    // with itself all the way down — and the restore's `checkout --force` and
-    // `clean -ffdx` would then run in the tree every other agent is reading.
-    if (lstatSync(probeTree).isSymbolicLink()) {
-      return `${probeTree} is a symlink, so the restore would land wherever it points`;
-    }
-    if (realpathSync(toplevel) !== realpathSync(probeTree)) {
-      return `the tree at ${probeTree} is not the root of its own checkout`;
-    }
-    // `--show-toplevel` prints the directory the `.git` FILE sits in, whatever
-    // that file points at — so a rewritten gitfile naming another repository
-    // passes the check above while the checkout below writes THAT repository's
-    // content into this tree and certifies it. `scratch-tree` gates its own
-    // reset on the admin entry pointing back, and this function is the same
-    // reset one directory over; it now asks the same question — of the shape
-    // that HAS an answer. A probe tree the pipeline built is a linked worktree
-    // and carries its `.git` as a gitfile; a plain checkout has a `.git`
-    // DIRECTORY and no admin entry to round-trip, and demanding one there
-    // would refuse every ordinary repository.
-    if (lstatSync(join(probeTree, '.git')).isFile()) {
-      const backpointer = readFileSync(join(gitDir, 'gitdir'), 'utf8').trim();
-      if (
-        realpathSync(dirname(resolve(gitDir, backpointer))) !==
-        realpathSync(probeTree)
-      ) {
-        return `${probeTree}'s admin entry does not point back at it`;
-      }
-      // And every ancestor between the tree and the repository it belongs to:
-      // a link above the tree redirects the checkout and the clean together,
-      // while every check here resolves through it and agrees with itself.
-      // Only for a LINKED worktree — a standalone checkout IS the repository
-      // root, so there is nothing between it and the stop point to walk, and
-      // an unbounded walk above it meets the system links (`/var` on macOS)
-      // this bound exists to stay below.
-      const redirected = redirectedAncestor(
-        dirname(resolve(probeTree)),
-        dirname(realpathSync(commonDir)),
-      );
-      if (redirected !== null) {
-        return `${redirected} is a symlink, so the restore would land wherever it points`;
-      }
-    }
-  } catch (e) {
-    return e instanceof Error ? e.message : String(e);
-  }
+  const identityRefusal = probeTreeIdentityRefusal(probeTree);
+  if (identityRefusal) return identityRefusal;
   // A pathspec checkout still fires `post-checkout` — measured for both the
   // `checkout <base> -- <file>` and the `--force HEAD -- .` shapes — but the
   // config that decides that lives in a tree this code is defending against,
@@ -1660,18 +1678,24 @@ function restoreProbeTreeTracked(probeTree: string): string | null {
   return null;
 }
 
-// The teardown signals that reach a terminal or a cancelling parent — the
-// same set run.ts forwards — and its exit-code contract for a run ended by
-// one of them (128 + signum).
+// The teardown signals that reach a terminal or a cancelling parent, and
+// run.ts's exit-code contract for a run ended by one of them (128 + signum).
+// SIGQUIT joins the three run.ts forwards: its default action kills this
+// process inside the blocking spawnSync and orphans the detached runner the
+// hook exists to contain — a Ctrl-\ is what a user reaches for when the
+// queued SIGINT shows no visible effect during a probe run — and no other
+// layer handles it (measured live).
 const RUNNER_TEARDOWN_SIGNALS: NodeJS.Signals[] = [
   'SIGHUP',
   'SIGINT',
   'SIGTERM',
+  'SIGQUIT',
 ];
 const RUNNER_TEARDOWN_EXIT_CODES: Record<string, number> = {
   SIGHUP: 129,
   SIGINT: 130,
   SIGTERM: 143,
+  SIGQUIT: 131,
 };
 
 let runnerGroupPid: number | undefined;
@@ -1731,8 +1755,12 @@ export function setRunnerTeardownGroup(pid: number | undefined): void {
  * cannot together exceed {@link TOTAL_BUDGET_MS}: the baseline and mutant
  * runs share a window that reserves the revert probe's full slot, and the
  * revert probe gets the remainder of the whole budget.
+ *
+ * Exported for its tests: the deadline's unconditional-kill contract needs a
+ * timeout no production caller can pass — theirs are clamped no lower than a
+ * full PROBE_RUN_TIMEOUT_MS slot.
  */
-function runProbeSuite(
+export function runProbeSuite(
   probeTree: string,
   probes: string[],
   deadlineAt?: number,
@@ -1769,6 +1797,14 @@ function runProbeSuite(
     cwd: probeTree,
     encoding: 'utf8',
     timeout,
+    // The timeout's one-shot kill defaults to SIGTERM, and a suite that
+    // resists it — the PR's own code installs the handler — leaves nothing
+    // that can stop the pipeline: spawnSync waits for an exit that never
+    // comes, no in-process timer can fire while it blocks the event loop,
+    // and the runner keeps executing the PR's test code unboundedly after
+    // cancellation was already reported (measured live). SIGKILL makes the
+    // deadline's kill unconditional; the group kill below reaps the rest.
+    killSignal: 'SIGKILL',
     // Vitest's JSON reporter on a large suite easily exceeds spawnSync's
     // 1 MiB default stdout buffer, which returns ENOBUFS and turns every
     // probe `inconclusive`. Match the 64 MiB ceiling the gh wrapper uses.
@@ -2958,6 +2994,15 @@ async function runTestEfficacy(args: TestEfficacyArgs): Promise<void> {
               'root), so the revert would run against whatever it points at',
           );
         }
+        // The identity gate the restore applies, beside the re-check and
+        // BEFORE the screen below: a rewritten `.git` gitfile passes the root
+        // lstat while the screen's rev-parse — and the checkout under it —
+        // follow it into another repository, certifying that repository's
+        // config and writing its index (measured: the user's MAIN index
+        // staged the base blob for a PR-modified file, silently, surviving
+        // the cleanup).
+        const revertIdentityRefusal = probeTreeIdentityRefusal(probeTree);
+        if (revertIdentityRefusal) throw new Error(revertIdentityRefusal);
         // Re-screen beside that re-check: the suite that ran between the entry
         // screen and this checkout has a shell in this repository and can plant
         // a filter after one and before the other — the per-restore screens
