@@ -13187,6 +13187,166 @@ describe('Session', () => {
         );
       });
 
+      it('keeps completed transcripts when a cancellation lands during the finalize re-bridge', async () => {
+        const executeSpy = vi.fn().mockResolvedValue({
+          llmContent: [
+            { text: 'captured screen' },
+            { inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' } },
+          ],
+          returnDisplay: 'captured screen',
+        });
+        mockToolRegistry.getTool.mockReturnValue({
+          name: 'screenshot_tool',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: {},
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Capture screen'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: executeSpy,
+          }),
+        });
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+        mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+          id: 'vision-agent',
+          baseUrl: 'https://vision.example.com/v1',
+          agentCapable: true,
+        });
+        // The first audio probe (first voice note) validates the audio-capable
+        // route; the second probe (second voice note) fails closed and clears
+        // the override, so the finalize loop re-bridges the first note's still
+        // raw audio against the primary route.
+        // Probe sequencing: the resolve loop probes both notes successfully
+        // (audio-capable route → raw audio kept), the audioChecked loop probes
+        // note 1 successfully (still raw) and note 2's probe then fails closed
+        // transiently, clearing the override. The finalize loop therefore
+        // re-bridges note 1's still-raw audio against the primary route — and
+        // the cancellation lands during that re-bridge.
+        let resolveCalls = 0;
+        const resolveForModel = vi
+          .fn()
+          .mockImplementation(async (_selector: string) => {
+            resolveCalls += 1;
+            if (resolveCalls <= 3) {
+              return {
+                contentGenerator: {},
+                contentGeneratorConfig: {
+                  model: 'voice-agent',
+                  modalities: { audio: true },
+                },
+                model: 'voice-agent',
+              };
+            }
+            throw new Error('route unavailable');
+          });
+        mockConfig.getBaseLlmClient = vi
+          .fn()
+          .mockReturnValue({ resolveForModel });
+        bridgeToolResultImagesSpy.mockImplementation(
+          async ({
+            responseParts,
+            onFullTurnModel: selectFullTurnModel,
+          }: {
+            responseParts: Part[];
+            onFullTurnModel?: (model: string) => boolean;
+          }) => {
+            selectFullTurnModel?.(
+              'voice-agent\0https://voice.example.com/v1\0',
+            );
+            return responseParts.map((part) =>
+              'inlineData' in part ? { text: 'captured screen' } : part,
+            );
+          },
+        );
+        Object.assign(mockSettings.merged as Record<string, unknown>, {
+          voiceModel: 'qwen3-asr-flash',
+          env: { OPENAI_API_KEY: 'test-key' },
+        });
+        // The cancellation lands AFTER the first note's first transcription
+        // completes (its transcript is already paid for) but before the second
+        // part settles: the conversion's own abort return keeps the completed
+        // transcript, so the finalize loop must not recompute from the raw
+        // pre-conversion parts and discard it.
+        let transcribeCalls = 0;
+        transcribeVoiceAudioSpy.mockImplementation(async () => {
+          transcribeCalls += 1;
+          if (transcribeCalls === 3) {
+            await session.cancelPendingPrompt();
+            return 'late transcript';
+          }
+          return transcribeCalls === 1
+            ? 'note-2 transcript'
+            : 'note-1 transcript-a';
+        });
+        mockClient.extMethod = vi.fn().mockResolvedValue({
+          items: [
+            {
+              content: [
+                {
+                  type: 'audio',
+                  mimeType: 'audio/wav',
+                  data: 'UklGRgTm90ZTE=',
+                },
+                {
+                  type: 'audio',
+                  mimeType: 'audio/wav',
+                  data: 'UklGRgTm90ZTI=',
+                },
+              ],
+              displayText: 'first voice note',
+            },
+            {
+              content: [
+                {
+                  type: 'audio',
+                  mimeType: 'audio/wav',
+                  data: 'UklGRgTm90ZTM=',
+                },
+              ],
+              displayText: 'second voice note',
+            },
+          ],
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    { id: 'call-screen', name: 'screenshot_tool', args: {} },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'capture a screen' }],
+          }),
+        ).resolves.toEqual({ stopReason: 'cancelled' });
+
+        expect(transcribeVoiceAudioSpy).toHaveBeenCalledTimes(3);
+        const preservedUserEntries = vi
+          .mocked(mockChat.addHistory)
+          .mock.calls.map(([entry]) => entry)
+          .filter((entry) => (entry as { role?: string }).role === 'user');
+        expect(preservedUserEntries.length).toBeGreaterThan(0);
+        const preservedJson = JSON.stringify(preservedUserEntries);
+        // The completed transcript survives; only the still-pending part
+        // becomes the cancellation marker, and no raw audio persists.
+        expect(preservedJson).toContain('note-1 transcript-a');
+        expect(preservedJson).toContain('note-2 transcript');
+        expect(preservedJson).toContain('transcription was cancelled');
+        expect(preservedJson).not.toContain('UklGRgTm90ZTE=');
+        expect(preservedJson).not.toContain('audio/wav');
+      });
+
       it('keeps mixed audio and image raw when the active full-turn model supports both', async () => {
         const inlineMediaLimit =
           process.env['QWEN_CODE_MAX_INLINE_MEDIA_BYTES'];
@@ -32510,6 +32670,60 @@ describe('Session', () => {
               params.update._meta?.['source'] === 'todo_stop_guard',
           ),
       ).toBe(false);
+    });
+
+    it('preserves drained mid-turn messages when a cancellation races the continuation claim', async () => {
+      rebuildSessionWithGuard();
+      installPendingTodoTool();
+      queuePendingTodoThenNaturalStops();
+      let claimStarted!: () => void;
+      const claimStartedPromise = new Promise<void>((resolve) => {
+        claimStarted = resolve;
+      });
+      let releaseClaim!: () => void;
+      const claimGate = new Promise<void>((resolve) => {
+        releaseClaim = resolve;
+      });
+      let drainCalls = 0;
+      mockGuardBridge(
+        async () => {
+          drainCalls += 1;
+          if (drainCalls === 1) {
+            // The tool-loop drain consumes nothing; the stop-loop drain
+            // below dequeues the mid-turn message.
+            return { messages: [], hasQueuedPrompt: false };
+          }
+          return {
+            messages: ['raced mid-turn note'],
+            hasQueuedPrompt: true,
+          };
+        },
+        async () => {
+          claimStarted();
+          await claimGate;
+          return { claimed: true, hasQueuedPrompt: false };
+        },
+      );
+
+      const prompt = runGuardPrompt();
+      await claimStartedPromise;
+      // The cancellation lands inside the awaited claim. The claim converts
+      // the abort to 'unavailable', and #runStopContinuation's initial-send
+      // preservation is a no-op — so the drain branch must re-check the
+      // signal after the claim await and persist the dequeued message
+      // itself, or the message is lost from both queues.
+      await session.cancelPendingPrompt();
+      releaseClaim();
+      await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+
+      expect(mockChat.addHistory).toHaveBeenCalledWith({
+        role: 'user',
+        parts: expect.arrayContaining([
+          expect.objectContaining({
+            text: expect.stringContaining('raced mid-turn note'),
+          }),
+        ]),
+      });
     });
 
     it('preserves queued-prompt priority when hard-suspended during claim', async () => {

@@ -5458,6 +5458,19 @@ export class Session implements SessionContext {
               this.todoStopGuard.blockUntilOrdinaryPromptStarts();
             }
           }
+          if (pendingSend.signal.aborted) {
+            // Cancellation raced the claim await above (the claim converts an
+            // abort to 'unavailable'): the dequeued messages must not be lost
+            // — #runStopContinuation's initial-send preservation is a no-op,
+            // and nothing re-queues what the drain already took from the host
+            // queue. Persist for replay and settle as cancelled.
+            this.todoStopGuard.suspend();
+            this.#preserveUnsentMessageHistory(
+              { role: 'user', parts: drained.parts },
+              true,
+            );
+            return { stopReason: 'cancelled' };
+          }
           this.todoStopGuard.acceptMidTurnUserInput();
           const continuation = await this.#runStopContinuation(
             pendingSend,
@@ -5571,6 +5584,18 @@ export class Session implements SessionContext {
               if (claim === 'unavailable') {
                 this.todoStopGuard.blockUntilOrdinaryPromptStarts();
               }
+            }
+            if (pendingSend.signal.aborted) {
+              // Cancellation raced the claim await above (the claim converts
+              // an abort to 'unavailable'): persist the dequeued messages for
+              // replay and settle as cancelled (see the matching pre-hook
+              // drain branch above).
+              this.todoStopGuard.suspend();
+              this.#preserveUnsentMessageHistory(
+                { role: 'user', parts: drained.parts },
+                true,
+              );
+              return { stopReason: 'cancelled' };
             }
             this.todoStopGuard.acceptMidTurnUserInput();
             const continuation = await this.#runStopContinuation(
@@ -7448,20 +7473,24 @@ export class Session implements SessionContext {
     }
     const parts: Part[] = [];
     for (const resolved of audioCheckedMessages) {
-      let finalized =
+      const conversionRan =
         !abortSignal.aborted &&
         modelOverrideResolutionFailed &&
-        (hasImageParts(resolved.parts) || hasAudioParts(resolved.parts))
-          ? await this.#applyBridgeConversionsIfNeeded(
-              resolved.parts,
-              abortSignal,
-            )
-          : resolved.parts;
-      // Abort arriving during the awaited bridge/conversion: substitute the
+        (hasImageParts(resolved.parts) || hasAudioParts(resolved.parts));
+      let finalized = conversionRan
+        ? await this.#applyBridgeConversionsIfNeeded(
+            resolved.parts,
+            abortSignal,
+          )
+        : resolved.parts;
+      // Abort arriving while the conversion did NOT run: substitute the
       // fail-closed cancellation marker for any still-raw audio and strip any
       // still-raw images (mirrors #applyBridgeConversionsIfNeeded) so the
-      // preserved history never carries unbridged media.
-      if (abortSignal.aborted) {
+      // preserved history never carries unbridged media. When the conversion
+      // DID run, its own abort return already fail-closed the parts while
+      // keeping any transcripts it completed — recomputing from the raw
+      // pre-conversion parts here would discard that completed work.
+      if (abortSignal.aborted && !conversionRan) {
         finalized = replaceAudioPartsWithUnavailable(
           splitImageParts(resolved.parts).nonImageParts,
           'transcription was cancelled',

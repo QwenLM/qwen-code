@@ -1029,10 +1029,13 @@ describe('useGeminiStream', () => {
     const sent = JSON.stringify(mockSendMessageStream.mock.calls[0]?.[0]);
     expect(sent).toContain('Media omitted');
     expect(sent).not.toContain('inlineData');
-    // Nothing media-shaped survived the clamp, so the selector stays bare.
-    expect(mockSendMessageStream.mock.calls[0]?.[3]?.modelOverride).toBe(
-      'image-model',
-    );
+    // The capability probe fails closed (no base LLM client in this harness),
+    // and R42-3 clears the inline override on a resolution failure so the turn
+    // degrades to the session model instead of carrying the unresolvable
+    // selector (R33-2 invariant, mirroring the audio branch).
+    expect(
+      mockSendMessageStream.mock.calls[0]?.[3]?.modelOverride,
+    ).toBeUndefined();
   });
 
   it('fails closed when an inline model override does not support audio', async () => {
@@ -1155,6 +1158,110 @@ describe('useGeminiStream', () => {
       }),
       expect.any(Number),
     );
+  });
+
+  it('keeps a gated tool-result image retryable from the pristine payload', async () => {
+    const audioPart = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    mockConfig.getModel = vi.fn(() => 'session-model');
+    mockConfig.getEffectiveInputModalities = vi.fn(() => ({ audio: true }));
+    mockConfig.getContentGeneratorConfig = vi.fn(
+      () => ({ authType: AuthType.QWEN_OAUTH }) as never,
+    );
+    mockConfig.getAvailableModelsForAuthType = vi.fn(
+      () =>
+        [
+          {
+            id: 'audio-model',
+            authType: AuthType.QWEN_OAUTH,
+            modalities: { audio: true },
+          },
+        ] as never,
+    );
+    const resolveForModel = vi.fn().mockResolvedValue({
+      contentGeneratorConfig: { modalities: { audio: true } },
+    });
+    mockConfig.getBaseLlmClient = vi.fn(() => ({ resolveForModel }) as never);
+    mockHandleSlashCommand.mockResolvedValue({
+      type: 'submit_prompt',
+      content: [{ text: 'listen' }, audioPart],
+      modelOverride: 'audio-model',
+    });
+    const { result, mockSendMessageStream } = renderTestHook();
+    mockSendMessageStream
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      )
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'partial response',
+          };
+          throw new Error('stream failed');
+        })(),
+      )
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+    await act(async () => {
+      await result.current.submitQuery('/model audio-model listen');
+    });
+    expect(mockSendMessageStream.mock.calls[0]?.[3]?.modelOverride).toBe(
+      'audio-model\0',
+    );
+
+    // Mid-turn a tool returns an image nested in the function response; the
+    // audio-only override cannot see it, so the gate substitutes the marker —
+    // and the send then fails.
+    await act(async () => {
+      await result.current.submitQuery(
+        [
+          {
+            functionResponse: {
+              id: 'tool-call',
+              name: 'read_file',
+              response: { output: 'screenshot attached' },
+              parts: [
+                { inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' } },
+              ],
+            },
+          } as never,
+        ],
+        SendMessageType.ToolResult,
+      );
+    });
+    expect(JSON.stringify(mockSendMessageStream.mock.calls[1]?.[0])).toContain(
+      'was not sent',
+    );
+
+    // Ctrl+Y drops the one-shot inline override. The retry store must hold
+    // the pristine nested payload (not the marker text), so the re-gated
+    // retry re-derives: with the override gone the nested image flows to
+    // the session model instead of resending the marker forever.
+    await act(async () => {
+      await result.current.retryLastPrompt();
+    });
+    const retried = JSON.stringify(mockSendMessageStream.mock.calls[2]?.[0]);
+    expect(retried).toContain('screenshot attached');
+    expect(retried).toContain('image/png');
+    expect(retried).toContain('aW1hZ2U=');
+    expect(retried).not.toContain('was not sent');
+    expect(
+      mockSendMessageStream.mock.calls[2]?.[3]?.modelOverride,
+    ).toBeUndefined();
   });
 
   it('retries the original audio after an inline override fails closed', async () => {
@@ -1554,6 +1661,183 @@ describe('useGeminiStream', () => {
     expect(sent).toContain('Media omitted');
     expect(sent).not.toContain('inlineData');
     expect(sent).toContain('active model override could not be resolved');
+  });
+
+  it('clears the inline override when an image-only capability probe fails', async () => {
+    const imagePart = {
+      inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' },
+    };
+    mockConfig.getModel = vi.fn(() => 'session-model');
+    // The session model accepts images, so once the override is cleared the
+    // images flow straight through to it.
+    mockConfig.getEffectiveInputModalities = vi.fn(() => ({ image: true }));
+    mockConfig.getContentGeneratorConfig = vi.fn(
+      () => ({ authType: AuthType.QWEN_OAUTH }) as never,
+    );
+    mockConfig.getAvailableModelsForAuthType = vi.fn(
+      () => [{ id: 'image-model', authType: AuthType.QWEN_OAUTH }] as never,
+    );
+    mockConfig.getBaseLlmClient = vi.fn(
+      () =>
+        ({
+          resolveForModel: vi
+            .fn()
+            .mockRejectedValue(new Error('route unavailable')),
+        }) as never,
+    );
+    mockHandleSlashCommand.mockResolvedValue({
+      type: 'submit_prompt',
+      content: [{ text: 'look at this' }, imagePart],
+      modelOverride: 'image-model',
+    });
+    const { result, mockSendMessageStream } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery('/model image-model look at this');
+    });
+
+    // R33-2 invariant, mirroring the audio twin: the fail-closed resolution
+    // failure must clear the inline override so the turn degrades to the
+    // session model instead of sending the bare unresolvable selector.
+    expect(mockRunVisionBridge).not.toHaveBeenCalled();
+    expect(
+      mockSendMessageStream.mock.calls[0]?.[3]?.modelOverride,
+    ).toBeUndefined();
+    const sent = JSON.stringify(mockSendMessageStream.mock.calls[0]?.[0]);
+    expect(sent).toContain('image/png');
+    expect(sent).toContain('aW1hZ2U=');
+  });
+
+  it('fails image closure closed when a resolution failure leaves no delivery path', async () => {
+    const imagePart = {
+      inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' },
+    };
+    mockConfig.getModel = vi.fn(() => 'session-model');
+    // Text-only session model and no vision bridge: nothing can deliver the
+    // images once the override fails resolution.
+    mockConfig.getEffectiveInputModalities = vi.fn(() => ({}));
+    mockConfig.getDefaultVisionBridgeModel = vi.fn(() => undefined);
+    mockConfig.getContentGeneratorConfig = vi.fn(
+      () => ({ authType: AuthType.QWEN_OAUTH }) as never,
+    );
+    mockConfig.getAvailableModelsForAuthType = vi.fn(
+      () => [{ id: 'image-model', authType: AuthType.QWEN_OAUTH }] as never,
+    );
+    mockConfig.getBaseLlmClient = vi.fn(
+      () =>
+        ({
+          resolveForModel: vi
+            .fn()
+            .mockRejectedValue(new Error('route unavailable')),
+        }) as never,
+    );
+    mockHandleSlashCommand.mockResolvedValue({
+      type: 'submit_prompt',
+      content: [{ text: 'look at this' }, imagePart],
+      modelOverride: 'image-model',
+    });
+    const { result, mockSendMessageStream } = renderTestHook();
+    mockSendMessageStream
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'partial response',
+          };
+          throw new Error('stream failed');
+        })(),
+      )
+      .mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Finished,
+            value: { reason: 'STOP', usageMetadata: undefined },
+          };
+        })(),
+      );
+
+    await act(async () => {
+      await result.current.submitQuery('/model image-model look at this');
+    });
+
+    // Visible fail-close (not silent route slimming) with the honest reason,
+    // and the override cleared so the send degrades to the session model.
+    expect(
+      mockSendMessageStream.mock.calls[0]?.[3]?.modelOverride,
+    ).toBeUndefined();
+    const sent = JSON.stringify(mockSendMessageStream.mock.calls[0]?.[0]);
+    expect(sent).not.toContain('inlineData');
+    expect(sent).toContain(
+      'the active model override could not be resolved, and the session model cannot view images',
+    );
+    expect(mockAddItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: MessageType.ERROR,
+        text: expect.stringContaining(
+          'Image was not sent: the active model override could not be resolved.',
+        ),
+      }),
+      expect.any(Number),
+    );
+
+    // The pristine capture keeps the image retryable: Ctrl+Y re-derives from
+    // the original parts instead of resending the marker text.
+    await act(async () => {
+      await result.current.retryLastPrompt();
+    });
+    const retried = JSON.stringify(mockSendMessageStream.mock.calls[1]?.[0]);
+    expect(retried).toContain('image/png');
+    expect(retried).toContain('aW1hZ2U=');
+    expect(retried).not.toContain('was not sent');
+  });
+
+  it('keeps a routed audio route intact when the image probe fails', async () => {
+    const audioPart = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    const imagePart = {
+      inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' },
+    };
+    mockConfig.getModel = vi.fn(() => 'session-model');
+    mockConfig.getEffectiveInputModalities = vi.fn(() => ({}));
+    mockConfig.getDefaultVisionBridgeModel = vi.fn(() => undefined);
+    mockConfig.getContentGeneratorConfig = vi.fn(
+      () => ({ authType: AuthType.QWEN_OAUTH }) as never,
+    );
+    mockConfig.getAvailableModelsForAuthType = vi.fn(
+      () => [{ id: 'voice-model', authType: AuthType.QWEN_OAUTH }] as never,
+    );
+    // The audio probe succeeds and routes the audio; only the image probe
+    // rejects. The fail-closed image handling must NOT clear the override —
+    // that would wipe the media-routed marker state and strand the raw audio
+    // on the session model.
+    const resolveForModel = vi
+      .fn()
+      .mockResolvedValueOnce({
+        contentGeneratorConfig: { modalities: { audio: true } },
+      })
+      .mockRejectedValueOnce(new Error('route unavailable'));
+    mockConfig.getBaseLlmClient = vi.fn(() => ({ resolveForModel }) as never);
+    mockHandleSlashCommand.mockResolvedValue({
+      type: 'submit_prompt',
+      content: [{ text: 'listen and look' }, audioPart, imagePart],
+      modelOverride: 'voice-model',
+    });
+    const { result, mockSendMessageStream } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery('/model voice-model listen and look');
+    });
+
+    // Audio stays raw on its exact route; the image fails closed visibly.
+    expect(mockSendMessageStream.mock.calls[0]?.[3]?.modelOverride).toBe(
+      'voice-model\0',
+    );
+    const sent = JSON.stringify(mockSendMessageStream.mock.calls[0]?.[0]);
+    expect(sent).toContain('audio/wav');
+    expect(sent).toContain('UklGRg==');
+    expect(sent).not.toContain('aW1hZ2U=');
+    expect(sent).toContain('was not sent');
   });
 
   it('does not send bridge output when cancellation lands during conversion', async () => {
@@ -6131,11 +6415,14 @@ describe('useGeminiStream', () => {
     expect(retrySent).not.toContain('could not transcribe');
   });
 
-  it('drops the stored client-steer retry payload when the drain is restored', async () => {
+  it('restores the outer retry payload when the client-steer drain is restored', async () => {
     // When settle restores the boundary drain (the push never landed), the
-    // re-queue owns recovery; the stored retry payload must be invalidated so
+    // re-queue owns recovery: the stored steer payload must be dropped so
     // Ctrl+Y cannot also deliver the steer (or duplicate the already-sent
-    // original turn).
+    // original turn). But the store must hand back the outer turn's payload
+    // it superseded — the nested failure surfaces in the outer turn with the
+    // Ctrl+Y hint, and nulling the store would answer "No failed request to
+    // retry." while the hint promises a retry.
     mockSendMessageStream.mockReturnValueOnce(
       (async function* () {
         yield {
@@ -6208,8 +6495,14 @@ describe('useGeminiStream', () => {
     await act(async () => {
       await result.current.retryLastPrompt();
     });
-    // The retry channel is inert now: nothing is re-sent.
-    expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    // The errored outer turn stays retryable: Ctrl+Y re-sends the outer
+    // payload exactly once — never the restored steer content (the re-queue
+    // owns that).
+    expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+    expect(mockSendMessageStream.mock.calls[1]?.[0]).toBe('start the analysis');
+    expect(
+      JSON.stringify(mockSendMessageStream.mock.calls[1]?.[0]),
+    ).not.toContain('audio/wav');
   });
 
   it('rechecks earlier drained audio against a later full-turn vision route', async () => {
@@ -6758,6 +7051,183 @@ describe('useGeminiStream', () => {
       }
     },
   );
+
+  it('keeps the exact route when retrying a failed continuation that nests routed media', async () => {
+    const queuedPrompt = 'listen @/tmp/recording.wav';
+    const resolvedTextPart: Part = { text: queuedPrompt };
+    const resolvedAudioPart: Part = {
+      inlineData: { mimeType: 'audio/wav', data: 'UklGRg==' },
+    };
+    const nestedAudioPart: Part = {
+      inlineData: { mimeType: 'audio/wav', data: 'bmVzdGVk' },
+    };
+    const resolveForModel = vi.fn().mockResolvedValue({
+      contentGeneratorConfig: { modalities: { audio: true } },
+    });
+    Object.assign(mockConfig, {
+      getEffectiveInputModalities: () => ({}),
+      getDefaultVisionBridgeModel: () => undefined,
+      getBaseLlmClient: () => ({ resolveForModel }),
+    });
+    vi.spyOn(atCommandProcessor, 'resolveAtCommandQuery').mockResolvedValue({
+      processedQuery: [resolvedTextPart, resolvedAudioPart],
+      shouldProceed: true,
+    });
+    const firstResponseParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'call1',
+          name: 'testTool',
+          response: { result: 'ok' },
+        },
+      },
+    ];
+    const firstToolCalls: TrackedToolCall[] = [
+      {
+        request: {
+          callId: 'call1',
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-nested-route-retry',
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId: 'call1',
+          responseParts: firstResponseParts,
+          errorType: undefined,
+          // Skill-tool override: survives Retry (not an inline one-shot).
+          modelOverride: 'skill-model',
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => 'Mock description',
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    const nestedResponseParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'call2',
+          name: 'testTool',
+          response: { output: 'recording attached' },
+          parts: [nestedAudioPart],
+        },
+      } as never,
+    ];
+    const secondToolCalls: TrackedToolCall[] = [
+      {
+        request: {
+          callId: 'call2',
+          name: 'testTool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-nested-route-retry',
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId: 'call2',
+          responseParts: nestedResponseParts,
+          errorType: undefined,
+        },
+        tool: { displayName: 'MockTool' },
+        invocation: {
+          getDescription: () => 'Mock description',
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+    const midTurnDrainRef = {
+      current: vi
+        .fn<() => string[]>()
+        .mockReturnValueOnce([queuedPrompt])
+        .mockReturnValue([]),
+    };
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        midTurnDrainRef,
+      ),
+    );
+
+    // First continuation: drains the queued audio under the skill override —
+    // the audio probe validates the route, the raw audio is routed, and the
+    // continuation's prompt owns the media-routed stamp.
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete(firstToolCalls);
+      }
+    });
+    await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalledTimes(1));
+    expect(mockSendMessageStream.mock.calls[0]?.[3]).toMatchObject({
+      modelOverride: 'skill-model\0',
+    });
+
+    // Second continuation nests audio in functionResponse.parts; the gate
+    // validates it against the route, and the prompt stamp keeps the exact
+    // route. This send fails, leaving the nested payload retryable.
+    mockSendMessageStream.mockReturnValueOnce(
+      (async function* () {
+        yield {
+          type: ServerGeminiEventType.Content,
+          value: 'partial response',
+        };
+        throw new Error('stream failed');
+      })(),
+    );
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete(secondToolCalls);
+      }
+    });
+    await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalledTimes(2));
+    expect(mockSendMessageStream.mock.calls[1]?.[3]).toMatchObject({
+      modelOverride: 'skill-model\0',
+    });
+
+    // Ctrl+Y Retry mints a fresh prompt_id and never re-stamps the
+    // media-routed marker; the nested media is invisible to the top-level
+    // has* checks. The send must still carry the trailing-NUL exact-route
+    // marker — with the bare selector core would placeholder-substitute the
+    // nested media against the session modalities.
+    await act(async () => {
+      await result.current.retryLastPrompt();
+    });
+    await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalledTimes(3));
+    expect(mockSendMessageStream.mock.calls[2]?.[3]).toMatchObject({
+      modelOverride: 'skill-model\0',
+    });
+    const retried = JSON.stringify(mockSendMessageStream.mock.calls[2]?.[0]);
+    expect(retried).toContain('audio/wav');
+    expect(retried).toContain('bmVzdGVk');
+  });
 
   it('keeps an image-only mid-turn message when a bridge failure returns no replacement parts', async () => {
     const queuedPrompt = 'inspect @/tmp/screenshot.png and summarize';

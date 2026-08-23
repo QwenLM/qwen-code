@@ -1733,6 +1733,19 @@ export const useGeminiStream = (
             runtimeView.contentGeneratorConfig.modalities?.image === true;
         } catch (error) {
           modelOverrideResolutionFailed = true;
+          if (!mediaRouted) {
+            // R33-2 invariant, mirroring the audio branch: a fail-closed
+            // resolution failure clears the inline override so the turn
+            // degrades to the session model instead of sending the bare
+            // unresolvable selector. When media already routed, the route
+            // stays valid for it and only the images fail closed below.
+            clearModelOverride(
+              modelOverrideRef,
+              inlineModelOverrideActiveRef,
+              mediaRoutedOverrideRef,
+              mediaRoutedPromptIdRef,
+            );
+          }
           debugLogger.warn(
             `image route capability check failed for '${routeSelector}': ${
               error instanceof Error ? error.message : String(error)
@@ -1777,12 +1790,41 @@ export const useGeminiStream = (
         modelOverrideResolutionFailed &&
         hasImageParts(nextParts)
       ) {
-        nextParts = (Array.isArray(nextParts) ? nextParts : [nextParts]).map(
-          (part) =>
-            typeof part === 'string' || !hasImageParts([part])
-              ? part
-              : clampInlineMediaPart(part),
+        const pristineParts = nextParts;
+        const clampedParts = (
+          Array.isArray(nextParts) ? nextParts : [nextParts]
+        ).map((part) =>
+          typeof part === 'string' || !hasImageParts([part])
+            ? part
+            : clampInlineMediaPart(part),
         );
+        if (
+          !shouldRunVisionBridge(config) &&
+          config.getEffectiveInputModalities?.()?.image !== true
+        ) {
+          // The session model cannot view the images and no vision bridge is
+          // configured to describe them, so forwarding the clamped images
+          // would have the route slimming placeholder-substitute them
+          // silently. Fail closed visibly instead and keep the pristine parts
+          // so Retry re-derives (mirrors the audio branch's fail-closed
+          // capture).
+          preOverrideParts = preOverrideParts ?? pristineParts;
+          nextParts = [
+            ...splitImageParts(clampedParts).nonImageParts,
+            {
+              text: '[Image was not sent: the active model override could not be resolved, and the session model cannot view images.]',
+            },
+          ];
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: 'Image was not sent: the active model override could not be resolved.',
+            },
+            timestamp,
+          );
+        } else {
+          nextParts = clampedParts;
+        }
       }
       const visionResult = await applyVisionBridgeIfNeeded(
         nextParts,
@@ -1821,9 +1863,12 @@ export const useGeminiStream = (
   // continuations run through the same fail-closed resolution with the NUL
   // marker stripped.
   const applyToolResultMediaGate = useCallback(
-    async (query: PartListUnion, timestamp: number): Promise<PartListUnion> => {
+    async (
+      query: PartListUnion,
+      timestamp: number,
+    ): Promise<{ parts: PartListUnion; preOverrideParts?: PartListUnion }> => {
       const nested = detectNestedFunctionResponseMedia(query);
-      if (!nested.hasImage && !nested.hasAudio) return query;
+      if (!nested.hasImage && !nested.hasAudio) return { parts: query };
       // Only a media-routed override exact-routes this continuation; without
       // one the send goes to the session model where normal bridging/slimming
       // applies. The NUL marker is NOT a bypass: full-turn vision selectors
@@ -1835,7 +1880,7 @@ export const useGeminiStream = (
         activeOverride === undefined ||
         mediaRoutedOverrideRef.current !== activeOverride
       ) {
-        return query;
+        return { parts: query };
       }
       const routeSelector = activeOverride.endsWith('\0')
         ? activeOverride.slice(0, -1)
@@ -1861,12 +1906,14 @@ export const useGeminiStream = (
         );
       }
       let result: PartListUnion = query;
+      let substituted = false;
       if (nested.hasImage && !supportsImage) {
         result = replaceNestedFunctionResponseMedia(
           result,
           'image',
           '[Image content returned by a tool was not sent: the active model override does not support images.]',
         );
+        substituted = true;
         addItem(
           {
             type: MessageType.ERROR,
@@ -1881,6 +1928,7 @@ export const useGeminiStream = (
           'audio',
           '[Audio content returned by a tool was not sent: the active model override does not support audio.]',
         );
+        substituted = true;
         addItem(
           {
             type: MessageType.ERROR,
@@ -1889,7 +1937,16 @@ export const useGeminiStream = (
           timestamp,
         );
       }
-      return result;
+      return {
+        parts: result,
+        // The substitution irreversibly strips the nested media: keep the
+        // pristine payload so the retry store saves it instead of the marker
+        // text. Retry drops the one-shot inline override and re-gates the
+        // pristine media — without the capture every retry would resend the
+        // marker forever (the exact anti-pattern the top-level audio/image
+        // fail-closed branches capture preOverrideParts to prevent).
+        ...(substituted ? { preOverrideParts: query } : {}),
+      };
     },
     [addItem, config],
   );
@@ -2132,11 +2189,15 @@ export const useGeminiStream = (
         // It's a function response (PartListUnion that isn't a string). Gate
         // nested tool-result media against the active media-routed override so
         // an unvalidated modality is fail-closed visibly instead of being
-        // exact-routed and silently placeholder-substituted.
-        localQueryToSendToGemini = await applyToolResultMediaGate(
+        // exact-routed and silently placeholder-substituted. Surface the
+        // gate's pristine capture so the retry store saves the media-bearing
+        // payload, not the marker text.
+        const gated = await applyToolResultMediaGate(
           query,
           userMessageTimestamp,
         );
+        localQueryToSendToGemini = gated.parts;
+        preOverrideParts = gated.preOverrideParts;
       }
 
       if (localQueryToSendToGemini === null) {
@@ -3912,13 +3973,20 @@ export const useGeminiStream = (
   const handleResolvedSteer = useCallback((steerInput: SteerInput) => {
     if (!steerInput.retryParts || steerInput.retryParts.length === 0) return;
     const stored = normalizePartList(steerInput.retryParts);
+    // The store holds the outer turn's payload until the drain supersedes it;
+    // if the Steer send fails before its history push lands, settle restores
+    // the drain and this store must hand the outer payload back — nulling it
+    // would leave the errored outer turn with the Ctrl+Y hint but a dead
+    // retry store ("No failed request to retry.").
+    const previous = lastPromptRef.current;
     lastPromptRef.current = stored;
     steerInput.onRestore = () => {
       // The re-queue owns recovery once restore settles the input: drop the
-      // stored payload so Ctrl+Y neither re-delivers the steer alongside the
-      // re-drain nor duplicates the already-delivered original turn.
+      // steer's payload so Ctrl+Y neither re-delivers the steer alongside the
+      // re-drain nor duplicates the already-delivered original turn, and
+      // reinstate whatever the store held before the drain superseded it.
       if (lastPromptRef.current === stored) {
-        lastPromptRef.current = null;
+        lastPromptRef.current = previous;
       }
     };
   }, []);
@@ -4236,7 +4304,7 @@ export const useGeminiStream = (
                         shouldProceed,
                         preOverrideParts,
                         mediaRouted,
-                      }) => ({
+                      }) => {
                         // A stored retry payload can also nest tool-result
                         // media in functionResponse.parts (invisible to the
                         // top-level has* checks above); gate it exactly like
@@ -4244,29 +4312,43 @@ export const useGeminiStream = (
                         // active media-routed override never exact-routes
                         // unvalidated nested media into silent route
                         // slimming.
-                        queryToSend:
+                        const gated =
                           shouldProceed && parts !== null
                             ? await applyToolResultMediaGate(
                                 parts,
                                 userMessageTimestamp,
                               )
-                            : parts,
-                        shouldProceed,
-                        // Carry the fresh pre-override parts so a retry whose
-                        // re-bridge fails again stores the original media in
-                        // lastPromptRef (not the marker text), keeping the
-                        // recording/image retryable instead of stranded.
-                        preOverrideParts,
-                        mediaRouted,
-                      }),
+                            : { parts, preOverrideParts: undefined };
+                        return {
+                          queryToSend: gated.parts,
+                          shouldProceed,
+                          // When the gate substituted nested media, the retry's
+                          // input payload is the pristine capture (it still
+                          // carries any top-level media alongside it);
+                          // otherwise the bridge's own capture applies. Either
+                          // way a retry whose re-bridge/re-gate fails again
+                          // stores the original media in lastPromptRef (not
+                          // the marker text), keeping it retryable instead of
+                          // stranded.
+                          preOverrideParts:
+                            gated.preOverrideParts !== undefined
+                              ? query
+                              : preOverrideParts,
+                          mediaRouted,
+                        };
+                      },
                     )
-                  : {
-                      queryToSend: await applyToolResultMediaGate(
+                  : await (async () => {
+                      const gated = await applyToolResultMediaGate(
                         query,
                         userMessageTimestamp,
-                      ),
-                      shouldProceed: true,
-                    }
+                      );
+                      return {
+                        queryToSend: gated.parts,
+                        shouldProceed: true,
+                        preOverrideParts: gated.preOverrideParts,
+                      };
+                    })()
                 : await prepareQueryForGemini(
                     query,
                     userMessageTimestamp,
@@ -4530,8 +4612,18 @@ export const useGeminiStream = (
           // A send still carrying raw media belongs to the route that put it
           // there even if the prompt stamp moved (concurrent sends); a
           // media-free send must match the stamp to keep the exact route.
+          // Nested tool-result media counts too: it is invisible to the
+          // top-level has* checks, and a Retry of a failed media-bearing
+          // continuation mints a fresh prompt_id, so without this the retry
+          // would send the bare selector and core would placeholder-substitute
+          // the nested media against the session modalities.
+          const nestedRoutedMedia =
+            detectNestedFunctionResponseMedia(finalQueryToSend);
           const payloadCarriesRoutedMedia =
-            hasAudioParts(finalQueryToSend) || hasImageParts(finalQueryToSend);
+            hasAudioParts(finalQueryToSend) ||
+            hasImageParts(finalQueryToSend) ||
+            nestedRoutedMedia.hasImage ||
+            nestedRoutedMedia.hasAudio;
           const sendOptions = {
             type: submitType,
             notificationDisplayText: metadata?.notificationDisplayText,
