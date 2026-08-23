@@ -769,6 +769,50 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it.each([
+      {
+        count: ACTIVE_WORK_MAX_SESSION_HOLDS,
+        expectedActiveWork: true,
+      },
+      {
+        count: ACTIVE_WORK_MAX_SESSION_HOLDS + 1,
+        expectedActiveWork: false,
+      },
+    ])(
+      'bounds close-refusal adoption at $count holds',
+      async ({ count, expectedActiveWork }) => {
+        const refusalHolds = Array.from({ length: count }, (_unused, index) =>
+          agentHold(`h${index}`),
+        );
+        const handle = makeChannel({
+          initializeImpl: () => activeWorkInitializeResponse(),
+          extMethodImpl: async (method, params) => {
+            if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+            if (params?.[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] === true) {
+              return { closed: false, holds: refusalHolds };
+            }
+            return { closed: true };
+          },
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+          sessionReapIntervalMs: 0,
+        });
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        await sendActiveWorkSnapshot(handle, 1, [
+          { sessionId: session.sessionId, holds: [] },
+        ]);
+
+        await bridge.detachClient(session.sessionId, session.clientId);
+
+        expect(bridge.sessionCount).toBe(1);
+        expect(bridge.activeWork).toBe(expectedActiveWork);
+        expect(reportingGrade(bridge)).toBe('full');
+
+        await bridge.shutdown();
+      },
+    );
+
     it('leaves the session in place when the close request never resolves', async () => {
       let closeAttempts = 0;
       const handle = makeChannel({
