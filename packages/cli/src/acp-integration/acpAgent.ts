@@ -4979,6 +4979,21 @@ class QwenAgent implements Agent {
     return runWithAcpRuntimeOutputDir(settings, cwd, operation);
   }
 
+  /**
+   * Whether a restore replay may finalize dangling tool calls. A session
+   * with an active turn — a client prompt or an autonomous goal/cron/
+   * notification turn — may still owe the trailing call's result, so the
+   * replay keeps it pending and lets the live stream deliver it (#9704).
+   * Samples the turn state before the transcript read and again at replay
+   * time so a turn that starts or settles inside the read window is seen.
+   */
+  private finalizeDanglingForRestore(
+    session: Session | undefined,
+    turnIdleBeforeRead: boolean,
+  ): boolean {
+    return turnIdleBeforeRead && (session?.isTurnIdle() ?? true);
+  }
+
   private async assertLiveSessionScope(
     config: Config,
     settings: LoadedSettings,
@@ -5370,7 +5385,7 @@ class QwenAgent implements Agent {
         loadSettingsCached(params.cwd),
       );
       const liveConfig = liveSession.getConfig();
-      const activePromptBeforeRead = this.activePromptCalls.has(sessionId);
+      const turnIdleBeforeRead = liveSession.isTurnIdle();
       return profiler.time('live_restore', async () => {
         await this.assertLiveSessionScope(liveConfig, settings, params.cwd);
         return this.withLiveSessionRestore(
@@ -5407,12 +5422,14 @@ class QwenAgent implements Agent {
                 goalBootstrap: replayGoalBootstrap(projection),
                 suppressRestoreAskUserQuestion,
                 // A trailing unmatched call is in-flight, not abandoned,
-                // while a prompt is still running in this process (#9704);
-                // keep it pending instead of finalizing it as a permanent
-                // failure. Mirrors the transcript paging guard below.
-                finalizeDangling:
-                  !activePromptBeforeRead &&
-                  !this.activePromptCalls.has(sessionId),
+                // while the session still has an active turn (#9704); keep
+                // it pending instead of finalizing it as a permanent
+                // failure. The paged transcript read applies the same
+                // guard on its own predicate.
+                finalizeDangling: this.finalizeDanglingForRestore(
+                  liveSession,
+                  turnIdleBeforeRead,
+                ),
                 ...(restoreOptions.replay.kind === 'recent'
                   ? {
                       limits: {
@@ -11884,7 +11901,7 @@ class QwenAgent implements Agent {
         }
 
         const liveSession = this.sessions.get(sessionId);
-        const activePromptBeforeRead = this.activePromptCalls.has(sessionId);
+        const turnIdleBeforeRead = liveSession?.isTurnIdle() ?? true;
         let replayConfig = this.config;
         let sessionData: ResumedSessionData | undefined;
         if (liveSession) {
@@ -11927,8 +11944,10 @@ class QwenAgent implements Agent {
           // finalize only on load/resume that will actually restore.
           suppressRestoreAskUserQuestion: true,
           // Same in-flight guard as the session-load replay (#9704).
-          finalizeDangling:
-            !activePromptBeforeRead && !this.activePromptCalls.has(sessionId),
+          finalizeDangling: this.finalizeDanglingForRestore(
+            liveSession,
+            turnIdleBeforeRead,
+          ),
         });
 
         return {

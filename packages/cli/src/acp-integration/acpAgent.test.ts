@@ -12078,6 +12078,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         }
       ).loadSession(params);
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    lastSessionMock!.isTurnIdle.mockReturnValue(false);
     let finishPrompt: ((value: unknown) => void) | undefined;
     lastSessionMock!.prompt.mockImplementation(
       () =>
@@ -12103,6 +12104,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     finishPrompt?.({ stopReason: 'end_turn' });
     await prompt;
+    lastSessionMock!.isTurnIdle.mockReturnValue(true);
 
     await loadSession({
       cwd: '/tmp',
@@ -12114,6 +12116,52 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect.anything(),
       expect.anything(),
       expect.objectContaining({ finalizeDangling: true }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('live session load keeps a dangling call pending when a turn settles during the restore read', async () => {
+    const innerConfig = await setupSessionMocks(VALID_SESSION_ID);
+    innerConfig.getSessionRuntimeBaseDir = vi
+      .fn()
+      .mockReturnValue('/tmp/qwen-runtime-test');
+    vi.mocked(SessionService).mockImplementation(
+      () =>
+        ({
+          readLiveRestoreProjection: vi.fn().mockResolvedValue({
+            replay: {
+              records: [{ role: 'user' }],
+              gaps: [],
+            },
+          }),
+        }) as unknown as InstanceType<typeof SessionService>,
+    );
+    mockHistoryReplay.mockResolvedValue(undefined);
+    const { agent, agentPromise } = await bootAcpAgent();
+    const loadSession = (params: Record<string, unknown>) =>
+      (
+        agent as unknown as {
+          loadSession: (p: Record<string, unknown>) => Promise<unknown>;
+        }
+      ).loadSession(params);
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    // A turn that is active before the transcript read but settles inside
+    // the restore window: only the before-read sample keeps the trailing
+    // call pending.
+    lastSessionMock!.isTurnIdle.mockReturnValueOnce(false);
+
+    await loadSession({
+      cwd: '/tmp',
+      sessionId: VALID_SESSION_ID,
+      mcpServers: [],
+    });
+    expect(mockHistoryReplay).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({ finalizeDangling: false }),
     );
 
     mockConnectionState.resolve();
@@ -12135,6 +12183,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     mockHistoryReplay.mockResolvedValue(undefined);
     const { agent, agentPromise } = await bootAcpAgent();
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    lastSessionMock!.isTurnIdle.mockReturnValue(false);
     let finishPrompt: ((value: unknown) => void) | undefined;
     lastSessionMock!.prompt.mockImplementation(
       () =>
@@ -12159,6 +12208,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     finishPrompt?.({ stopReason: 'end_turn' });
     await prompt;
+    lastSessionMock!.isTurnIdle.mockReturnValue(true);
 
     await agent.extMethod('qwen/session/loadUpdates', {
       sessionId: VALID_SESSION_ID,
@@ -12169,6 +12219,40 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       expect.anything(),
       undefined,
       expect.objectContaining({ finalizeDangling: true }),
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/session/loadUpdates keeps a dangling call pending when a turn settles during the read', async () => {
+    const innerConfig = await setupSessionMocks(VALID_SESSION_ID);
+    innerConfig.getSessionRuntimeBaseDir = vi
+      .fn()
+      .mockReturnValue('/tmp/qwen-runtime-test');
+    mockSessionServiceLoad({
+      conversation: {
+        messages: [{ role: 'user' }],
+        startTime: 'start',
+        lastUpdated: 'end',
+      },
+    });
+    mockHistoryReplay.mockResolvedValue(undefined);
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    // Active before the read, idle by replay time: the before-read sample
+    // alone must keep the trailing call pending.
+    lastSessionMock!.isTurnIdle.mockReturnValueOnce(false);
+
+    await agent.extMethod('qwen/session/loadUpdates', {
+      sessionId: VALID_SESSION_ID,
+      cwd: '/tmp',
+    });
+    expect(mockHistoryReplay).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.anything(),
+      undefined,
+      expect.objectContaining({ finalizeDangling: false }),
     );
 
     mockConnectionState.resolve();
@@ -17031,6 +17115,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
         cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
         assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
+        isTurnIdle: vi.fn().mockReturnValue(true),
         sendUpdate: opts.recoveredGoalSendError
           ? vi.fn().mockRejectedValue(opts.recoveredGoalSendError)
           : vi.fn().mockResolvedValue(undefined),
@@ -18151,6 +18236,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
       beginClose: vi.fn().mockReturnValue(vi.fn()),
       waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
+      isTurnIdle: vi.fn().mockReturnValue(true),
       sendUpdate: vi.fn().mockResolvedValue(undefined),
       clearActiveTodoPlanRevision: vi.fn(),
     };
@@ -19163,6 +19249,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       waitForCloseGateToRelease: vi.fn().mockResolvedValue(undefined),
       cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
       waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
+      isTurnIdle: vi.fn().mockReturnValue(true),
       dispose: replacementDispose,
     } as unknown as InstanceType<typeof Session>;
     const sessions = (
