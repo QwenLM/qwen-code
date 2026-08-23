@@ -380,7 +380,18 @@ export class Storage {
     // own configured location, not a path this method invents. It is created
     // recursively when missing — matching every other writer under it — and
     // only `audits` and the project leaf below are validated components.
-    fs.mkdirSync(baseDir, { recursive: true });
+    try {
+      fs.mkdirSync(baseDir, { recursive: true });
+    } catch (err) {
+      // A dangling symlink, symlink loop, or symlink-to-file as the tail
+      // fails resolution here, before any adoption check can own the state;
+      // classify it like every other refusal this method owns.
+      throw new FatalConfigError(
+        `audit: the QWEN_HOME base ${baseDir} could not be created as a ` +
+          `directory (${(err as Error).message}) — remove what stands at ` +
+          `that path and re-run.`,
+      );
+    }
     // Re-check now that the base exists: the check above resolves through
     // the deepest EXISTING ancestor, so a not-yet-existing QWEN_HOME passed
     // it, and a same-UID process can plant that tail as a symlink into the
@@ -397,10 +408,11 @@ export class Storage {
     // same-UID swap landing in a window between checks passes the check that
     // already ran. Re-validate with everything in place: re-adoption
     // lstat-refuses a swapped `audits` or leaf, and the containment re-check
-    // catches a swapped ancestor the lstats cannot see.
+    // catches a swapped ancestor the lstats cannot see — failing closed when
+    // the swap makes resolution itself impossible.
     Storage.adoptDirectory(auditsDir, 'the audit artifact directory');
     Storage.adoptDirectory(dir, 'the fallback landing');
-    Storage.assertAuditLandingIsOutsideRepo(dir, resolved);
+    Storage.assertAuditLandingIsOutsideRepo(dir, resolved, true);
     return dir;
   }
 
@@ -455,6 +467,12 @@ export class Storage {
    * A hardlinked regular file is the same story for reads: an existing name
    * reopened with O_TRUNC writes into the planter's inode.
    *
+   * Directory children are validated recursively: a planted real
+   * subdirectory holding a symlinked file is the same escape. Entries that
+   * are neither regular files nor directories (a FIFO, socket, or device)
+   * are refused outright: opening one for the report would block, or stream
+   * the content to whoever holds the other end.
+   *
    * The landing is REUSED across runs (the report and its sidecar are the
    * durable artifacts), so this cannot refuse a non-empty landing — only
    * entries that are not what a previous run of this tool would have left.
@@ -493,7 +511,20 @@ export class Storage {
             `the landing. Remove it and re-run.`,
         );
       }
-      if (!(entry.isFile() || stat?.isFile())) continue;
+      if (entry.isDirectory() || stat?.isDirectory()) {
+        // Artifacts nest BELOW the leaf, so a directory child is validated
+        // like the leaf itself — a planted real subdirectory holding a
+        // symlinked file is the same escape.
+        Storage.assertAuditLandingIsClean(path.join(dir, entry.name));
+        continue;
+      }
+      if (!(entry.isFile() || stat?.isFile())) {
+        throw new FatalConfigError(
+          `audit: the fallback landing ${dir} contains a special file ` +
+            `(${entry.name}) — a write to it would block or be captured by ` +
+            `whoever holds the other end. Remove it and re-run.`,
+        );
+      }
       // A hardlink twin proves another name for the same inode exists
       // somewhere this check can never see.
       let links: number;
@@ -515,18 +546,28 @@ export class Storage {
   /**
    * Refuse a fallback landing that resolves inside the audited repository.
    * A resolution failure (a non-directory component, a symlink loop, an
-   * unreadable ancestor) falls through instead of escaping as a raw errno:
-   * such a path cannot resolve to a usable landing, and the adoption checks
-   * own that state with the actionable message.
+   * unreadable ancestor) falls through at the pre-adoption sites: such a
+   * path cannot resolve to a usable landing, and the adoption checks that
+   * still run afterwards own that state with the actionable message. At the
+   * final site nothing runs afterwards, so the same failure fails closed
+   * instead of returning an unvalidated landing.
    */
   private static assertAuditLandingIsOutsideRepo(
     dir: string,
     resolvedProjectRoot: string,
+    finalCheck = false,
   ): void {
     let contained = false;
     try {
       contained = Storage.isPathWithinDirectory(dir, resolvedProjectRoot);
-    } catch {
+    } catch (err) {
+      if (finalCheck) {
+        throw new FatalConfigError(
+          `audit: the fallback landing ${dir} could not be validated as ` +
+            `outside the audited project root (${(err as Error).message}) — ` +
+            `remove it and re-run.`,
+        );
+      }
       // Unresolvable: the adoption checks own this state (see above).
     }
     if (contained) {
