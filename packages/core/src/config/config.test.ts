@@ -85,6 +85,7 @@ import {
 import { syncTeamMemory } from '../memory/team-memory-sync.js';
 import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-status.js';
 import * as runtimeStatus from '../utils/runtimeStatus.js';
+import * as processLiveness from '../utils/process-liveness.js';
 import * as sessionRegistry from '../services/session-registry.js';
 import { ExtensionManager } from '../extension/extensionManager.js';
 import { SkillManager } from '../skills/skill-manager.js';
@@ -1703,64 +1704,93 @@ describe('Server Config (config.ts)', () => {
 
       writeSpy.mockRestore();
     });
+
+    it('leaves a live foreign claim untouched instead of overwriting it (R15-1)', async () => {
+      // Concurrent --resume (writer lease off) lets another process
+      // serve this very session id; overwriting its claim would
+      // destroy its only liveness evidence. Go without a claim, the
+      // same posture as a failed claim write.
+      const config = new Config({ ...baseParams, chatRecording: true });
+      const foreignPid = process.pid + 7777;
+      const readSpy = vi
+        .spyOn(runtimeStatus, 'readRuntimeStatus')
+        .mockResolvedValue({
+          schemaVersion: 1,
+          pid: foreignPid,
+          sessionId: config.getSessionId(),
+          workDir: '/work',
+          hostname: 'host',
+          startedAt: 0,
+          qwenVersion: null,
+        });
+      const aliveSpy = vi
+        .spyOn(processLiveness, 'isPidAlive')
+        .mockImplementation((pid) => pid === foreignPid);
+      const writeSpy = vi
+        .spyOn(runtimeStatus, 'writeRuntimeStatus')
+        .mockResolvedValue('');
+
+      await config.initialize();
+
+      expect(writeSpy).not.toHaveBeenCalled();
+
+      readSpy.mockRestore();
+      aliveSpy.mockRestore();
+      writeSpy.mockRestore();
+    });
+
+    it('claims over a foreign sidecar whose pid is dead (R15-1)', async () => {
+      // A dead pid is a stale record (clean quit elsewhere or crash),
+      // not a live sibling — the claim must proceed.
+      const config = new Config({ ...baseParams, chatRecording: true });
+      const readSpy = vi
+        .spyOn(runtimeStatus, 'readRuntimeStatus')
+        .mockResolvedValue({
+          schemaVersion: 1,
+          pid: process.pid + 7777,
+          sessionId: config.getSessionId(),
+          workDir: '/work',
+          hostname: 'host',
+          startedAt: 0,
+          qwenVersion: null,
+        });
+      const aliveSpy = vi
+        .spyOn(processLiveness, 'isPidAlive')
+        .mockReturnValue(false);
+      const writeSpy = vi
+        .spyOn(runtimeStatus, 'writeRuntimeStatus')
+        .mockResolvedValue('');
+
+      await config.initialize();
+
+      expect(writeSpy).toHaveBeenCalled();
+
+      readSpy.mockRestore();
+      aliveSpy.mockRestore();
+      writeSpy.mockRestore();
+    });
   });
 
   describe('shutdown() runtime sidecar release', () => {
-    const sidecarOf = (
-      config: Config,
-      pid: number,
-    ): runtimeStatus.RuntimeStatus => ({
-      schemaVersion: 1,
-      pid,
-      sessionId: config.getSessionId(),
-      workDir: '/work',
-      hostname: 'host',
-      startedAt: 0,
-      qwenVersion: null,
-    });
-
-    it('clears the sidecar so a closed session stops claiming a live pid', async () => {
+    it('releases the sidecar claim so a closed session stops claiming a live pid', async () => {
       // In multi-session processes (the `qwen serve` ACP child) the pid
-      // outlives the session; a leftover sidecar would shield the closed
-      // session's entry from the sweep forever.
+      // outlives the session; a leftover live claim would shield the
+      // closed session's entry from the sweep forever. The release
+      // demotes the claim (sentinel pid) rather than unlinking it, and
+      // protects a sibling's claim — both pinned in runtimeStatus.test.ts.
       const config = new Config(baseParams);
       config.markRuntimeStatusEnabled(); // models the successful claim
-      const readSpy = vi
-        .spyOn(runtimeStatus, 'readRuntimeStatus')
-        .mockResolvedValue(sidecarOf(config, process.pid));
-      const clearSpy = vi
-        .spyOn(runtimeStatus, 'clearRuntimeStatus')
+      const releaseSpy = vi
+        .spyOn(runtimeStatus, 'releaseRuntimeStatus')
         .mockResolvedValue(undefined);
 
       await config.shutdown();
 
-      expect(clearSpy).toHaveBeenCalledWith(
+      expect(releaseSpy).toHaveBeenCalledWith(
         config.storage.getRuntimeStatusPath(config.getSessionId()),
       );
 
-      readSpy.mockRestore();
-      clearSpy.mockRestore();
-    });
-
-    it('keeps a sidecar recorded by a sibling process (R14-1)', async () => {
-      // Concurrent --resume (writer lease off) lets two processes serve
-      // one session id; unlinking the sibling's claim would destroy its
-      // only liveness evidence.
-      const config = new Config(baseParams);
-      config.markRuntimeStatusEnabled();
-      const readSpy = vi
-        .spyOn(runtimeStatus, 'readRuntimeStatus')
-        .mockResolvedValue(sidecarOf(config, process.pid + 12345));
-      const clearSpy = vi
-        .spyOn(runtimeStatus, 'clearRuntimeStatus')
-        .mockResolvedValue(undefined);
-
-      await config.shutdown();
-
-      expect(clearSpy).not.toHaveBeenCalled();
-
-      readSpy.mockRestore();
-      clearSpy.mockRestore();
+      releaseSpy.mockRestore();
     });
 
     it('keeps the sidecar when a session-writer handoff was requested', async () => {
@@ -1771,15 +1801,15 @@ describe('Server Config (config.ts)', () => {
       (
         config as unknown as { sessionWriterHandoffRequested: boolean }
       ).sessionWriterHandoffRequested = true;
-      const clearSpy = vi
-        .spyOn(runtimeStatus, 'clearRuntimeStatus')
+      const releaseSpy = vi
+        .spyOn(runtimeStatus, 'releaseRuntimeStatus')
         .mockResolvedValue(undefined);
 
       await config.shutdown();
 
-      expect(clearSpy).not.toHaveBeenCalled();
+      expect(releaseSpy).not.toHaveBeenCalled();
 
-      clearSpy.mockRestore();
+      releaseSpy.mockRestore();
     });
   });
 
@@ -7388,6 +7418,46 @@ describe('Server Config (config.ts)', () => {
           config.storage.getProjectDir(),
           false,
         );
+        expect(rmSpy).not.toHaveBeenCalledWith(
+          config.storage.getProjectDir(),
+          expect.anything(),
+        );
+      } finally {
+        guardSpy.mockRestore();
+        cwdSpy.mockRestore();
+        liveSpy.mockRestore();
+      }
+    });
+
+    it('keeps the project dir when a sibling lands during salvage (R15-2)', async () => {
+      // The liveness gate passes before salvage, but a concurrent
+      // --resume of this very session id completes its claim during
+      // the salvage await. Its artifacts are named exactly like ours,
+      // so the ownership re-check alone passes; the post-salvage
+      // re-check must re-run the windowless liveness gate.
+      const guardSpy = vi
+        .spyOn(Storage, 'containsOnlySessionArtifacts')
+        .mockReturnValue(true);
+      const cwdSpy = vi.spyOn(Storage, 'collectRecordedCwds').mockReturnValue({
+        cwds: [path.join(os.tmpdir(), 'qwen-sess-cwd')],
+        incomplete: false,
+      });
+      const liveSpy = vi
+        .spyOn(Storage, 'hasLiveSession')
+        .mockReturnValueOnce(false) // disposable predicate
+        .mockReturnValue(true); // post-salvage: the sibling's claim
+      try {
+        const tmpCwd = path.join(os.tmpdir(), 'qwen-salvage-race-entry');
+        const config = new Config({
+          ...baseParams,
+          cwd: tmpCwd,
+          targetDir: tmpCwd,
+        });
+        config['initialized'] = true;
+
+        await config.shutdown();
+
+        expect(liveSpy).toHaveBeenCalledTimes(2);
         expect(rmSpy).not.toHaveBeenCalledWith(
           config.storage.getProjectDir(),
           expect.anything(),

@@ -216,9 +216,10 @@ import {
 } from '../services/chatRecordingService.js';
 import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
 import { isTempDirPath, sanitizeCwd } from '../utils/paths.js';
+import { isPidAlive } from '../utils/process-liveness.js';
 import {
-  clearRuntimeStatus,
   readRuntimeStatus,
+  releaseRuntimeStatus,
   writeRuntimeStatus,
 } from '../utils/runtimeStatus.js';
 import {
@@ -2692,18 +2693,28 @@ export class Config {
       // block session startup.
       if (this.chatRecordingEnabled) {
         try {
-          await writeRuntimeStatus(
-            this.storage.getRuntimeStatusPath(this.sessionId),
-            {
+          const sidecarPath = this.storage.getRuntimeStatusPath(this.sessionId);
+          const existing = await readRuntimeStatus(sidecarPath);
+          // Ownership-aware claim: a live foreign claim means another
+          // process already serves this session id (concurrent
+          // --resume, writer lease off); overwriting it would destroy
+          // that process's only liveness evidence. Go without a claim
+          // — the same posture as a failed claim write.
+          const foreignClaimLive =
+            existing !== null &&
+            existing.pid !== process.pid &&
+            isPidAlive(existing.pid);
+          if (!foreignClaimLive) {
+            await writeRuntimeStatus(sidecarPath, {
               sessionId: this.sessionId,
               workDir: this.getTargetDir(),
               qwenVersion: this.cliVersion ?? null,
-            },
-          );
-          // Arm the session-swap refresh for every kind, not just the
-          // interactive UI: /clear, /resume and ACP session switches
-          // must keep the sidecar on the session this pid now serves.
-          this.markRuntimeStatusEnabled();
+            });
+            // Arm the session-swap refresh for every kind, not just the
+            // interactive UI: /clear, /resume and ACP session switches
+            // must keep the sidecar on the session this pid now serves.
+            this.markRuntimeStatusEnabled();
+          }
         } catch {
           // ignored: best-effort, never block session startup.
         }
@@ -4149,7 +4160,10 @@ export class Config {
         const workDir = this.targetDir;
         const newSessionId = this.sessionId;
         this.queueRuntimeStatusWrite(async () => {
-          await clearRuntimeStatus(oldPath);
+          // Demote (never unlink) so a /cd-relocated outgoing session
+          // keeps its membership evidence; the pid gate inside
+          // releaseRuntimeStatus protects a foreign claim.
+          await releaseRuntimeStatus(oldPath);
           await writeRuntimeStatus(newPath, {
             sessionId: newSessionId,
             workDir,
@@ -5500,16 +5514,16 @@ export class Config {
       // ACP child) the pid stays alive for the next sessions, and the
       // sweep's windowless pid re-check would otherwise protect this
       // closed session's entry forever. A handoff keeps the sidecar:
-      // the successor resumes from this very entry. Release only the
-      // claim THIS process established: a sibling serving the same
-      // session id (concurrent --resume, writer lease off) may hold
-      // the sidecar, and unlinking it would destroy the sibling's
-      // only liveness evidence.
+      // the successor resumes from this very entry. The release demotes
+      // our own claim to the non-live sentinel pid (keeping the
+      // membership evidence for /cd-relocated sessions) and leaves a
+      // sibling's claim untouched — a sibling serving the same session
+      // id (concurrent --resume, writer lease off) must keep its only
+      // liveness evidence.
       if (this.runtimeStatusEnabled && !this.sessionWriterHandoffRequested) {
-        const sidecarPath = this.storage.getRuntimeStatusPath(this.sessionId);
-        if ((await readRuntimeStatus(sidecarPath))?.pid === process.pid) {
-          await clearRuntimeStatus(sidecarPath);
-        }
+        await releaseRuntimeStatus(
+          this.storage.getRuntimeStatusPath(this.sessionId),
+        );
       }
 
       if (Object.hasOwn(this, 'goalRuntime')) {
@@ -5589,11 +5603,16 @@ export class Config {
               }
               // The salvage await (and the transcript streaming above)
               // widens the check-then-delete window: a sibling session
-              // sharing this entry — concurrent temp sessions or a
-              // sanitized-cwd collision — may have started writing
-              // since the guard ran. Re-check before the irreversible
-              // step, mirroring the sweep-side removeEntry.
+              // sharing this entry — concurrent temp sessions, a
+              // sanitized-cwd collision, or a concurrent --resume of
+              // this very session id — may have started writing since
+              // the guard ran. Re-check before the irreversible step,
+              // mirroring the sweep-side removeEntry: a sibling past
+              // its claim has its sidecar on disk before any record
+              // append, so the windowless liveness gate sees it, and
+              // the ownership gate catches differently-named artifacts.
               if (
+                !Storage.hasLiveSession(projectDir, false) &&
                 Storage.containsOnlySessionArtifacts(projectDir, this.sessionId)
               ) {
                 fs.rmSync(projectDir, {

@@ -19,15 +19,19 @@
  * cross-platform signal.
  *
  * Lifecycle:
- * - Written on session start (clean launch or resume); the resume case
- *   atomically overwrites whatever the previous PID wrote.
- * - **Not** deleted on clean `/quit` or on crash. From an external
- *   observer's standpoint the recorded PID no longer exists in either
- *   case, so a liveness check is sufficient and an explicit cleanup
- *   adds nothing.
- * - `clearRuntimeStatus` exists for the narrow case where the same PID
- *   keeps running while no longer serving the recorded session
- *   (e.g. a hypothetical future mode-switch). Not currently invoked.
+ * - Written on session start (clean launch or resume), unless another
+ *   process already holds a live claim for the same session id
+ *   (concurrent --resume); a foreign live claim is left untouched.
+ * - On clean exit of the claiming process the record is demoted, not
+ *   deleted: `releaseRuntimeStatus` rewrites it with the non-live
+ *   sentinel pid 0, keeping the `session_id`/`work_dir` membership
+ *   evidence that session lookup consults for `/cd`-relocated sessions
+ *   (the sweep's liveness gates reject pid <= 0, so the session is
+ *   seen as closed). Crashed processes skip the demotion; a liveness
+ *   check suffices there.
+ * - `clearRuntimeStatus` remains for the narrow case where the same
+ *   PID keeps running while no longer serving the recorded session
+ *   and no membership evidence needs to survive.
  *
  * The file is written via `atomicWriteJSON` (write-to-temp + rename,
  * with in-place fallback when ownership differs).
@@ -202,6 +206,66 @@ export async function clearRuntimeStatus(filePath: string): Promise<void> {
     await fs.unlink(filePath);
   } catch {
     // ignored: best-effort cleanup
+  }
+}
+
+/**
+ * Release the runtime claim at `filePath` on clean session shutdown.
+ *
+ * Demotes rather than deletes: the record is rewritten with the
+ * non-live sentinel pid 0, so liveness gates see the session as closed
+ * while the `session_id`/`work_dir` membership evidence survives for
+ * `/cd`-relocated session lookup. Only the claim THIS process
+ * established is released — a record holding a foreign pid is put back
+ * untouched.
+ *
+ * The release is fenced by a rename: a claim landing on the original
+ * path after the fence belongs to a sibling and wins, so a racing
+ * claim cannot be destroyed between the ownership check and the
+ * rewrite. Best-effort throughout; never throws.
+ */
+export async function releaseRuntimeStatus(filePath: string): Promise<void> {
+  const stagingPath = `${filePath}.releasing`;
+  try {
+    try {
+      await fs.rename(filePath, stagingPath);
+    } catch {
+      return; // already gone — nothing to release
+    }
+    const claim = await readRuntimeStatus(stagingPath);
+    // A claim landing on the original path while we held the staging
+    // copy belongs to a sibling — it wins; drop our staged copy.
+    let siblingClaimed = false;
+    try {
+      await fs.stat(filePath);
+      siblingClaimed = true;
+    } catch {
+      // original path still ours to decide
+    }
+    if (siblingClaimed) {
+      await fs.unlink(stagingPath).catch(() => {});
+      return;
+    }
+    if (claim === null || claim.pid !== process.pid) {
+      // Not our claim (or unreadable) — put it back exactly as found.
+      await fs.rename(stagingPath, filePath).catch(() => {});
+      return;
+    }
+    try {
+      await writeRuntimeStatus(filePath, {
+        sessionId: claim.sessionId,
+        workDir: claim.workDir,
+        pid: 0,
+        qwenVersion: claim.qwenVersion,
+      });
+    } catch {
+      // Rewrite failed — restore the original claim rather than lose it.
+      await fs.rename(stagingPath, filePath).catch(() => {});
+      return;
+    }
+    await fs.unlink(stagingPath).catch(() => {});
+  } catch {
+    // ignored: best-effort release
   }
 }
 

@@ -12,6 +12,7 @@ import {
   RUNTIME_STATUS_SCHEMA_VERSION,
   clearRuntimeStatus,
   readRuntimeStatus,
+  releaseRuntimeStatus,
   writeRuntimeStatus,
 } from './runtimeStatus.js';
 
@@ -279,20 +280,22 @@ describe('clearRuntimeStatus', () => {
 
 describe('same-PID session swap', () => {
   // Models the /clear, /reset, /new and /resume flow: same PID transitions
-  // from session A to session B. The old sidecar must be removed before the
-  // new one is written so external observers can't double-claim the PID.
-  it('clears the old sidecar before writing the new one', async () => {
+  // from session A to session B. The old sidecar must stop claiming a live
+  // pid before the new one is written so external observers can't
+  // double-claim the PID — demoted to the non-live sentinel, keeping its
+  // membership evidence (R15-4).
+  it('demotes the old sidecar before writing the new one', async () => {
     const oldPath = path.join(tmpDir, 'session-a.runtime.json');
     const newPath = path.join(tmpDir, 'session-b.runtime.json');
     await writeRuntimeStatus(oldPath, {
       sessionId: 'session-a',
       workDir: '/w',
-      pid: 4242,
+      pid: process.pid,
       qwenVersion: '0.0.0-test',
     });
     expect(await readRuntimeStatus(oldPath)).not.toBeNull();
 
-    await clearRuntimeStatus(oldPath);
+    await releaseRuntimeStatus(oldPath);
     await writeRuntimeStatus(newPath, {
       sessionId: 'session-b',
       workDir: '/w',
@@ -300,9 +303,61 @@ describe('same-PID session swap', () => {
       qwenVersion: '0.0.0-test',
     });
 
-    expect(await readRuntimeStatus(oldPath)).toBeNull();
+    const old = await readRuntimeStatus(oldPath);
+    expect(old?.pid).toBe(0);
+    expect(old?.sessionId).toBe('session-a');
     const after = await readRuntimeStatus(newPath);
     expect(after?.sessionId).toBe('session-b');
     expect(after?.pid).toBe(4242);
+  });
+});
+
+describe('releaseRuntimeStatus', () => {
+  it('demotes our own claim to the non-live sentinel, keeping membership evidence (R15-4)', async () => {
+    await writeRuntimeStatus(targetPath(), {
+      sessionId: 'abc',
+      workDir: '/relocated',
+      pid: process.pid,
+      qwenVersion: '9.9.9',
+    });
+
+    await releaseRuntimeStatus(targetPath());
+
+    const after = await readRuntimeStatus(targetPath());
+    // pid 0 fails every isPidAlive gate (session seen as closed) while
+    // sessionBelongsToCurrentProject keeps reading sessionId/workDir.
+    expect(after?.pid).toBe(0);
+    expect(after?.sessionId).toBe('abc');
+    expect(after?.workDir).toBe('/relocated');
+    expect(after?.qwenVersion).toBe('9.9.9');
+    expect(await readdir(tmpDir)).not.toContain('r.json.releasing');
+  });
+
+  it('puts a foreign claim back untouched (R15-1)', async () => {
+    await writeRuntimeStatus(targetPath(), {
+      sessionId: 'abc',
+      workDir: '/w',
+      pid: 4242,
+    });
+
+    await releaseRuntimeStatus(targetPath());
+
+    const after = await readRuntimeStatus(targetPath());
+    expect(after?.pid).toBe(4242);
+    expect(await readdir(tmpDir)).not.toContain('r.json.releasing');
+  });
+
+  it('restores an unreadable record instead of destroying it', async () => {
+    await writeFile(targetPath(), '{not json');
+
+    await releaseRuntimeStatus(targetPath());
+
+    expect(await readFile(targetPath(), 'utf8')).toBe('{not json');
+    expect(await readdir(tmpDir)).not.toContain('r.json.releasing');
+  });
+
+  it('is a no-op on a missing file', async () => {
+    await releaseRuntimeStatus(targetPath());
+    expect(await readdir(tmpDir)).toEqual([]);
   });
 });
