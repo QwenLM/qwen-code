@@ -45,7 +45,10 @@ export function cachedMessageToNotification(
   message: CachedTranscriptMessage,
   sessionId: string,
 ): SessionNotification | null {
-  if (typeof message?.content !== 'string' || message.content.length === 0) {
+  if (
+    typeof message?.content !== 'string' ||
+    message.content.trim().length === 0
+  ) {
     return null;
   }
   const content = { type: 'text' as const, text: message.content };
