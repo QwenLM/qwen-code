@@ -236,8 +236,10 @@ describe('defaultModalities', () => {
       expect(m.audio).toBeUndefined();
     });
 
-    it('returns text-only for kimi-k2.6 (matches #5328 presets)', () => {
-      expect(defaultModalities('kimi-k2.6')).toEqual({});
+    it('returns image + video for kimi-k2.6 (multimodal per Moonshot docs)', () => {
+      const m = defaultModalities('kimi-k2.6');
+      expect(m.image).toBe(true);
+      expect(m.video).toBe(true);
     });
 
     it('returns text-only for kimi-k2', () => {

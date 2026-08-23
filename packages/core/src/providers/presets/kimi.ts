@@ -61,6 +61,9 @@ const KIMI_API_MODELS = [
   {
     id: 'kimi-k2.6',
     contextWindowSize: 262144,
+    // Explicit capability declaration (K2.6 is multimodal per Moonshot's
+    // model docs) rather than inheritance from the heuristic table.
+    modalities: { image: true, video: true },
   },
 ];
 
