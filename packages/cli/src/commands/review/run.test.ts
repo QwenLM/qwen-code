@@ -336,6 +336,27 @@ describe('exitCodeFor', () => {
     // read as "the review blocked".
     expect(exitCodeFor(false, 'REQUEST_CHANGES', 'request-changes')).toBe(1);
   });
+
+  it('blocks a stop round only on DATED standing blockers', () => {
+    // R8-1: a decided stop completes with `event: null`, so `--fail-on`
+    // could never fire on a stop round — including the exact stops SKILL.md
+    // defines as carrying standing blockers. A stop blocks now when the
+    // capture DATED the ledger's open Criticals against the tree
+    // (`standingBlockers` — the count the caller passes only when
+    // `blockersStand` held), never on a bare count: undated, the ledger's
+    // `open` entry survives a fix-and-commit for ever (a stop never
+    // rewrites it), and mapping it straight to REQUEST_CHANGES produced a
+    // failure no action could clear.
+    expect(exitCodeFor(true, null, 'request-changes', 2)).toBe(3);
+    expect(exitCodeFor(true, null, 'request-changes', 0)).toBe(0);
+    expect(exitCodeFor(true, null, 'none', 2)).toBe(0);
+    // An incomplete run never blocks, whatever a sidecar carried.
+    expect(exitCodeFor(false, null, 'request-changes', 2)).toBe(1);
+    // A composed verdict's round has no standing-blocker state: the count
+    // must not leak onto a non-null event.
+    expect(exitCodeFor(true, 'COMMENT', 'request-changes', 2)).toBe(0);
+    expect(exitCodeFor(true, 'REQUEST_CHANGES', 'request-changes', 0)).toBe(3);
+  });
 });
 
 describe('killProcessGroup', () => {
@@ -1158,5 +1179,202 @@ describe('review run (handler)', () => {
     const result = JSON.parse(outs.join(''));
     expect(result.timedOut).toBe(true);
     expect(process.exitCode).toBe(1);
+  });
+
+  it('keeps a stop verdict a concurrent run overwrote before the child exited', async () => {
+    // The stop sidecar is the shared per-target name, written with plain
+    // `writeFileSync` — no per-run component, no O_EXCL. A concurrent run of
+    // the same target truncated-overwrites it with its own runId stamp while
+    // this run's child still lives, and the single post-close read then saw
+    // the foreign stamp: the runId fence correctly refused it as THIS run's
+    // verdict but turned a round the capture decided into "Review did not
+    // complete" (exit 1). The window spans the whole child session, so no
+    // micro-timing is needed. The capture poll snapshots the sidecar in-run,
+    // the same protection the composed verdict gets.
+    vi.useFakeTimers();
+    let child!: FakeChild;
+    spawnMock.mockImplementation(
+      (
+        _cmd: unknown,
+        _argv: unknown,
+        opts: { env: Record<string, string> },
+      ) => {
+        // Step 1: the capture decides nothing to review and writes the stop
+        // sidecar, stamped by THIS run.
+        mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+        writeFileSync(
+          join(REVIEW_TMP_DIR, 'qwen-review-local-stop.json'),
+          JSON.stringify({
+            reason: 'clean-tree',
+            openBlockers: 0,
+            runId: opts.env['QWEN_REVIEW_RUN_ID'],
+          }),
+          'utf8',
+        );
+        child = new FakeChild();
+        return child;
+      },
+    );
+
+    const done = runHandler();
+    // The capture poll snapshots the sidecar while the child still runs...
+    await vi.advanceTimersByTimeAsync(1_000);
+    // ...then a concurrent run of the same target stamps the shared sidecar
+    // its own before the child exits.
+    writeFileSync(
+      join(REVIEW_TMP_DIR, 'qwen-review-local-stop.json'),
+      JSON.stringify({
+        reason: 'scope-emptied',
+        openBlockers: 2,
+        runId: 'another-run',
+      }),
+      'utf8',
+    );
+    child.emit('close', 0);
+    await done;
+
+    const result = JSON.parse(outs.join(''));
+    expect(result.completed).toBe(true);
+    expect(process.exitCode).toBe(0);
+  });
+
+  it('keeps a stop verdict a same-stem cleanup swept before the child exited', async () => {
+    // The sibling shape of the overwrite race: the sidecar sits under the
+    // same `qwen-review-<target>-` prefix the Step 9 cleanup sweep unlinks,
+    // and a same-stem full round can sweep it while the stop round's child
+    // is still alive. The in-run snapshot holds the verdict either way.
+    vi.useFakeTimers();
+    let child!: FakeChild;
+    spawnMock.mockImplementation(
+      (
+        _cmd: unknown,
+        _argv: unknown,
+        opts: { env: Record<string, string> },
+      ) => {
+        mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+        writeFileSync(
+          join(REVIEW_TMP_DIR, 'qwen-review-local-stop.json'),
+          JSON.stringify({
+            reason: 'clean-tree',
+            openBlockers: 0,
+            runId: opts.env['QWEN_REVIEW_RUN_ID'],
+          }),
+          'utf8',
+        );
+        child = new FakeChild();
+        return child;
+      },
+    );
+
+    const done = runHandler();
+    await vi.advanceTimersByTimeAsync(1_000);
+    rmSync(join(REVIEW_TMP_DIR, 'qwen-review-local-stop.json'));
+    child.emit('close', 0);
+    await done;
+
+    const result = JSON.parse(outs.join(''));
+    expect(result.completed).toBe(true);
+    expect(process.exitCode).toBe(0);
+  });
+
+  it('exits 3 under --fail-on for a stop whose blockers still stand', async () => {
+    // R8-1: a decided stop completes with `event: null`, so `--fail-on`
+    // could never fire on a stop round — including the exact stops SKILL.md
+    // defines as carrying standing blockers (the common shape: a user who
+    // commits without fixing a Critical, leaving a permanently clean tree).
+    // The sidecar carries the ledger's open-Critical count DATED against
+    // the tree by the capture; a standing count blocks exactly like a
+    // REQUEST_CHANGES event.
+    spawnMock.mockImplementation(
+      (
+        _cmd: unknown,
+        _argv: unknown,
+        opts: { env: Record<string, string> },
+      ) => {
+        const child = new FakeChild();
+        setImmediate(() => {
+          mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+          writeFileSync(
+            join(REVIEW_TMP_DIR, 'qwen-review-local-stop.json'),
+            JSON.stringify({
+              reason: 'clean-tree',
+              openBlockers: 1,
+              blockersStand: true,
+              runId: opts.env['QWEN_REVIEW_RUN_ID'],
+            }),
+            'utf8',
+          );
+          child.emit('close', 0);
+        });
+        return child;
+      },
+    );
+
+    await runHandler({ 'fail-on': 'request-changes' });
+
+    const result = JSON.parse(outs.join(''));
+    expect(result.completed).toBe(true);
+    expect(result.event).toBeNull();
+    expect(result.openBlockers).toBe(1);
+    expect(result.blockersStand).toBe(true);
+    expect(process.exitCode).toBe(3);
+  });
+
+  it('does not block a stop whose blockers no longer match the tree', async () => {
+    // The other half of the dating: the user FIXED the blocker and
+    // committed, so the ledger still says `open` (a stop round never
+    // rewrites it) but the capture dated the recorded state as moved.
+    // Blocking here would fail the gate over code that no longer contains
+    // the defect — a false failure no action clears.
+    spawnMock.mockImplementation(
+      (
+        _cmd: unknown,
+        _argv: unknown,
+        opts: { env: Record<string, string> },
+      ) => {
+        const child = new FakeChild();
+        setImmediate(() => {
+          mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+          writeFileSync(
+            join(REVIEW_TMP_DIR, 'qwen-review-local-stop.json'),
+            JSON.stringify({
+              reason: 'clean-tree',
+              openBlockers: 1,
+              blockersStand: false,
+              runId: opts.env['QWEN_REVIEW_RUN_ID'],
+            }),
+            'utf8',
+          );
+          child.emit('close', 0);
+        });
+        return child;
+      },
+    );
+
+    await runHandler({ 'fail-on': 'request-changes' });
+
+    const result = JSON.parse(outs.join(''));
+    expect(result.completed).toBe(true);
+    expect(result.openBlockers).toBe(1);
+    expect(result.blockersStand).toBe(false);
+    expect(process.exitCode).toBe(0);
+  });
+});
+
+describe('classifyRunTarget — a trailing backslash is a POSIX filename character', () => {
+  it('keeps the backslash: the child derivation never strips it', () => {
+    // The trim used to strip trailing backslashes too, but the child's
+    // `sourcePath` derivation (`repoRelativeOf` → `safeTarget`) never does,
+    // and on POSIX a backslash is an ordinary filename character: for a file
+    // literally named `notes\` the parent pinned `qwen-review-notes-…` while
+    // every child artifact carried `notes_` — the review ran (and with
+    // --comment posted) while the parent reported no verdict, every run, for
+    // that target. Only forward slashes are separators both sides strip.
+    expect(classifyRunTarget('notes\\')).toEqual({
+      kind: 'file',
+      base: 'notes_',
+    });
+    // A tab-completed trailing separator still classifies:
+    expect(classifyRunTarget('src/')).toEqual({ kind: 'file', base: 'src' });
   });
 });

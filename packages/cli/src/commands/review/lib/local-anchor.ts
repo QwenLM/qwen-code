@@ -26,7 +26,7 @@
 import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, readlinkSync } from 'node:fs';
 import { join } from 'node:path';
-import { gitOpt, gitWithInput, gitWithInputRaw } from './git.js';
+import { gitOpt, gitRaw, gitWithInput, gitWithInputRaw } from './git.js';
 
 /**
  * Per-file identity for a path whose state CANNOT be captured: a directory
@@ -228,7 +228,16 @@ export function hashWorktreeFiles(
     // to read the attributes would compare "unchanged" and certify a
     // rendering neither had seen — the same fail-open this whole field
     // exists to close. UNHASHABLE re-reviews it instead.
-    out[p] = a === undefined ? UNHASHABLE : `${out[p]}:${a}`;
+    //
+    // …and when the answer ITSELF is UNHASHABLE — a driver name that did not
+    // survive the decode — the WHOLE identity takes it: appending the slot
+    // composed `100644:<blob>:unhashable`, which equals itself across
+    // rounds, so a rendering flip moved nothing and the section was sliced
+    // out of scope carrying the previous verdict. What cannot be named
+    // faithfully cannot be certified — the module's own standard, applied
+    // to the identity and not just the slot.
+    out[p] =
+      a === undefined || a === UNHASHABLE ? UNHASHABLE : `${out[p]}:${a}`;
   }
   return out;
 }
@@ -368,6 +377,82 @@ export function renderingAttributes(
         out[path] = `${attrs},${driver}.binary=${binary}`;
       }
     }
+  }
+  return out;
+}
+
+/**
+ * Per-file identities at a REVISION, in the exact format `hashWorktreeFiles`
+ * computes for the worktree — so a file a cached round reviewed WITHOUT
+ * hashing it can still be dated. The live shape is the no-diff whole-file
+ * review: the capture hashed no plan paths and Step 8 promoted an empty
+ * files map, but a no-diff capture means the bytes the round read WERE the
+ * cached HEAD's own bytes for the file.
+ *
+ * A path the tree does not name comes back absent, never an identity: the
+ * caller's `movedSince` comparison reads absent-on-one-side as a move.
+ * Gitlinks, trees, and names that did not survive the decode take
+ * UNHASHABLE exactly as the worktree hasher does, and the same rendering
+ * suffix joins the same way — byte equality under an attribute flip is NOT
+ * an identical change, so the two formats must agree on it too. An
+ * unreadable revision dates nothing.
+ */
+export function revisionIdentities(
+  repoRoot: string,
+  headSha: string | null,
+  paths: readonly string[],
+): Record<string, string> {
+  // Null prototype: the `__proto__`-as-a-filename discipline of
+  // `hashWorktreeFiles` — a revision can name one too.
+  const out: Record<string, string> = Object.create(null) as Record<
+    string,
+    string
+  >;
+  if (headSha === null || paths.length === 0) return out;
+  let raw: Buffer;
+  try {
+    raw = gitRaw('-C', repoRoot, 'ls-tree', '-z', headSha, '--', ...paths);
+  } catch {
+    return out;
+  }
+  const regular: string[] = [];
+  for (const record of raw.toString('utf8').split('\0')) {
+    if (record === '') continue;
+    // `<mode> SP <type> SP <oid> TAB <path>`: the path is everything after
+    // the FIRST tab, so a name holding further tabs survives; `-z` disables
+    // C-quoting, so the NUL-separated records carry raw bytes.
+    const tab = record.indexOf('\t');
+    if (tab < 0) continue;
+    const path = record.slice(tab + 1);
+    if (path === '') continue;
+    if (path.includes('\ufffd')) {
+      out[path] = UNHASHABLE;
+      continue;
+    }
+    const meta = record.slice(0, tab).split(' ') as Array<string | undefined>;
+    const [mode, type, oid] = meta;
+    if (mode === undefined || type === undefined || oid === undefined) {
+      out[path] = UNHASHABLE;
+      continue;
+    }
+    if (type === 'blob' && (mode === '100644' || mode === '100755')) {
+      out[path] = `${mode}:${oid}`;
+      regular.push(path);
+    } else if (type === 'blob' && mode === '120000') {
+      // A symlink's identity is its stored blob — the link text's bytes —
+      // with no rendering suffix: the worktree hasher's exact shape.
+      out[path] = `120000:${oid}`;
+    } else {
+      // Trees, gitlinks (submodules), and any other shape: not capturable.
+      out[path] = UNHASHABLE;
+    }
+  }
+  const attrs = renderingAttributes(repoRoot, regular);
+  for (const p of regular) {
+    if (out[p] === UNHASHABLE) continue;
+    const a = attrs[p];
+    out[p] =
+      a === undefined || a === UNHASHABLE ? UNHASHABLE : `${out[p]}:${a}`;
   }
   return out;
 }

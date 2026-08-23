@@ -979,4 +979,42 @@ describe('bundled review skill', () => {
       'WARNING: 0 chunks, but the working tree changed while the capture was being hashed',
     );
   });
+  it('keys the local cache write to the marker\u2019s withholding conditions', () => {
+    // R8-2: the local fail-closed LIST was "completed" three times and a
+    // fourth shape walked through it each time — the last one an Uncoverable
+    // chunk and a whiffed lens, which withheld the PR marker's `sha` but
+    // never this write, so a local round promoted the candidate over scope
+    // nobody reviewed and the next round's scoping sliced it out of scope.
+    // The rule now KEYS the write to the marker paragraph's withholding
+    // conditions instead of re-enumerating them, so one definition serves
+    // both writes and the two cannot drift.
+    const body = skillBody();
+    // Located by THIS branch's opening for the same paragraph: the write
+    // became one command (`cache-commit`) for both flows, so the sentence the
+    // rule lives under changed while the rule did not.
+    const start = body.indexOf(
+      '**The write is one command, for PR and local alike',
+    );
+    const end = body.indexOf(
+      '**The cache advances exactly when the marker anchored',
+    );
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const section = body.slice(start, end);
+    // The mechanical rule — a reference to the marker's withholding set,
+    // not a second list.
+    expect(section).toContain(
+      "skip this write under any condition that would withhold the PR marker's `sha`",
+    );
+    // Applied as CONDITIONS, not a marker check — a local round posts
+    // nothing, and a literal marker check would skip every write.
+    expect(section).toContain('no marker to read');
+    // The two shapes the enumeration missed, named in the examples.
+    expect(section).toContain('Uncoverable chunk');
+    expect(section).toContain('whiffed lens');
+    // The anti-drift clause that makes the examples non-authoritative.
+    expect(section).toContain(
+      'The examples are the set as written, not the gate',
+    );
+  });
 });

@@ -86,6 +86,19 @@ export interface RunReviewResult {
    */
   expectedComposedName: string;
   reportPath: string | null;
+  /**
+   * The stop sidecar's count of the cache ledger's open Criticals — 0 when
+   * the round composed a verdict or the ledger held none. Informational on
+   * its own: an undated count is the stale-ledger shape and never gates.
+   */
+  openBlockers: number;
+  /**
+   * True only when a stop's open blockers were DATED against this tree: the
+   * capture compared the cache's recorded per-file state with the working
+   * tree and found it byte-identical, so the blockers still stand. Under
+   * `--fail-on request-changes` such a stop exits 3.
+   */
+  blockersStand: boolean;
   childExitCode: number | null;
   childSignal: string | null;
   timedOut: boolean;
@@ -144,7 +157,7 @@ export function classifyRunTarget(target?: string): RunTargetClass {
     // `qwen-review-src_index.ts-composed.json` while the parent polled
     // `qwen-review-index.ts-composed.json`, never matched, and reported "no
     // composed verdict was produced" over a review that had already run (and
-    // with `--comment`, already posted). Trailing separators are stripped
+    // with `--comment`, already posted). Trailing slashes are stripped
     // first: a tab-completed `src/` classifies as a file target and reviews
     // the directory, and the empty remainder would pin a name no child
     // artifact can ever carry.
@@ -156,7 +169,16 @@ export function classifyRunTarget(target?: string): RunTargetClass {
     // path, a `src/../src/foo.ts`, or a path typed from a subdirectory each
     // produced a pin the child never writes: the same never-matching poll
     // this pin was just fixed to avoid, for a new input class.
-    const trimmed = t.path.replace(/[\\/]+$/, '') || t.path;
+    //
+    // Trailing FORWARD slashes only: the child's derivation never strips,
+    // and on POSIX a backslash is an ordinary filename character — stripping
+    // it spelled one file two ways (a file literally named `notes\` pinned
+    // `notes` while every child artifact carried `notes_`), so the poll
+    // never matched and a review that ran — and with --comment posted —
+    // reported no verdict, every run, for that target. On Windows
+    // `resolve` normalizes a trailing backslash away, so nothing needs it
+    // stripped here.
+    const trimmed = t.path.replace(/\/+$/, '') || t.path;
     return { kind: 'file', base: safeTarget(repoRelative(trimmed)) };
   }
   return { kind: 'local' };
@@ -192,44 +214,96 @@ const escapeRe = (s: string): string =>
  * Only a per-run nonce in the child's artifact names could key these
  * apart, and the bundled skill, not this command, would have to mint it.
  */
+/** The stop sidecar's exact filename for a target class. */
+function stopNameFor(cls: RunTargetClass): string {
+  // The capture's sidecar, not the plan: `--out` is the orchestrator's to
+  // choose, so the plan has no name the parent can predict. This one is
+  // derived from the same target the parent derives.
+  return `qwen-review-${planStemFor(cls)}-stop.json`;
+}
+
+/** The stop sidecar's verdict-bearing shape. */
+interface StopVerdict {
+  reason: string;
+  /** The cache ledger's open-Critical count — undated, never a gate alone. */
+  openBlockers: number;
+  /**
+   * The capture dated the cache's open blockers against THIS tree — each
+   * against its own file's recorded identity (or the cached round's HEAD
+   * tree for a file it never hashed), never against the whole cached state —
+   * and at least one still stands. False — or absent, a sidecar from before
+   * the field — leaves the count informational only.
+   */
+  blockersStand: boolean;
+}
+
+/**
+ * The sidecar's verdict, fenced by the run that asks.
+ *
+ * Stamped by THIS run, or it is not this run's verdict. The name is a
+ * flattened target token and that token is not injective, so a concurrent
+ * review whose path flattens alike writes the same file — and its verdict
+ * would decide this run's exit code. Absent stamp, foreign stamp,
+ * unreadable or not JSON: no claim either way.
+ *
+ * The blocker state rides the same fence: a foreign run's open-Critical
+ * count would otherwise decide this run's gate. An undated count
+ * (`blockersStand` false or absent) never blocks — it is the stale-ledger
+ * shape, where the blocker was fixed and committed but the ledger, which a
+ * stop never rewrites, still says `open`.
+ */
+function readStopSidecar(path: string, runId: string): StopVerdict | null {
+  try {
+    const stop = JSON.parse(readFileSync(path, 'utf8')) as {
+      reason?: unknown;
+      runId?: unknown;
+      openBlockers?: unknown;
+      blockersStand?: unknown;
+    };
+    if (stop.runId !== runId) return null;
+    if (typeof stop.reason !== 'string' || stop.reason === '') return null;
+    const rawBlockers = stop.openBlockers;
+    const openBlockers =
+      typeof rawBlockers === 'number' &&
+      Number.isFinite(rawBlockers) &&
+      rawBlockers > 0
+        ? Math.floor(rawBlockers)
+        : 0;
+    return {
+      reason: stop.reason,
+      openBlockers,
+      blockersStand: openBlockers > 0 && stop.blockersStand === true,
+    };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * The capture's own "nothing to review" verdict for this target, if it wrote
  * one this run.
  *
  * Read off a sidecar the CLI writes beside the plan, and fenced by the run
  * epoch the same way every other artifact here is: a stop left by an earlier
- * run must not make this one look decided.
+ * run must not make this one look decided. This POST-CLOSE read is only the
+ * fallback — the sidecar is snapshotted in-run first, because a concurrent
+ * run of the same target can truncate-overwrite the shared name (and a
+ * same-stem cleanup sweep can unlink it) any time before this read: the
+ * fence correctly refuses a foreign stamp, but that refusal turns a round
+ * the capture decided into "Review did not complete".
  */
 function nothingToReviewFrom(
   cls: RunTargetClass,
   cutoffMs: number,
   runId: string,
-): { reason: string } | null {
-  // The capture's sidecar, not the plan: `--out` is the orchestrator's to
-  // choose, so the plan has no name the parent can predict. This one is
-  // derived from the same target the parent derives.
-  const name = `qwen-review-${planStemFor(cls)}-stop.json`;
+): StopVerdict | null {
   const found = newestArtifactSince(
     REVIEW_TMP_DIR,
-    new RegExp(`^${escapeRe(name)}$`),
+    new RegExp(`^${escapeRe(stopNameFor(cls))}$`),
     cutoffMs,
   );
   if (!found) return null;
-  try {
-    const stop = JSON.parse(readFileSync(found.path, 'utf8')) as {
-      reason?: unknown;
-      runId?: unknown;
-    };
-    // Stamped by THIS run, or it is not this run's verdict. The name is a
-    // flattened target token and that token is not injective, so a concurrent
-    // review whose path flattens alike writes the same file — and its
-    // its verdict would decide this run's exit code.
-    if (stop.runId !== runId) return null;
-    if (typeof stop.reason !== 'string' || stop.reason === '') return null;
-    return { reason: stop.reason };
-  } catch {
-    return null; // unreadable or not JSON: no claim either way
-  }
+  return readStopSidecar(found.path, runId);
 }
 
 /** The `<target>` slot in the plan's filename, per target class. */
@@ -387,17 +461,24 @@ export function newestArtifactSince(
  * Exit code contract: 0 = the review completed (whatever it decided); 1 = it
  * never reached a verdict (child failed, timed out with no verdict captured,
  * or left no composed artifact); 3 = it completed AND the caller asked
- * --fail-on request-changes AND the event is REQUEST_CHANGES. 3, not 2 — yargs
- * exits 1 on usage errors and some shells reserve 2, so a CI gate can tell
- * "review is blocking" from "the tool broke" without parsing anything.
+ * --fail-on request-changes AND either the event is REQUEST_CHANGES or the
+ * round stopped with `standingBlockers` — open Criticals the capture DATED
+ * against the tree (a stop carries no composed verdict; an undated ledger
+ * count is the stale-ledger false positive and never blocks). 3, not 2 —
+ * yargs exits 1 on usage errors and some shells reserve 2, so a CI gate can
+ * tell "review is blocking" from "the tool broke" without parsing anything.
  */
 export function exitCodeFor(
   completed: boolean,
   event: string | null,
   failOn: 'none' | 'request-changes',
+  standingBlockers = 0,
 ): number {
   if (!completed) return 1;
-  if (failOn === 'request-changes' && event === 'REQUEST_CHANGES') return 3;
+  if (failOn === 'request-changes') {
+    if (event === 'REQUEST_CHANGES') return 3;
+    if (event === null && standingBlockers > 0) return 3;
+  }
   return 0;
 }
 
@@ -585,7 +666,26 @@ async function runReview(args: RunReviewArgs): Promise<void> {
   let capturedPath: string | null = null;
   let capturedVerdict: ComposedVerdict | null = null;
   let capturedMtime = -Infinity;
+  // The stop sidecar needs the same in-run snapshot as the composed verdict:
+  // it sits under the same shared, non-injective target name and the child
+  // writes it with plain `writeFileSync` — no per-run name, no O_EXCL — so
+  // a concurrent run of the same target can truncate-overwrite it, and a
+  // same-stem cleanup sweep can unlink it, any time during this child's
+  // session. The post-close read alone turned that foreign stamp or missing
+  // file into "Review did not complete" over a round the capture decided.
+  const stopPattern = new RegExp(`^${escapeRe(stopNameFor(targetClass))}$`);
+  let capturedStop: StopVerdict | null = null;
   const captureTimer = setInterval(() => {
+    if (capturedStop === null) {
+      const stopHit = newestArtifactSince(
+        REVIEW_TMP_DIR,
+        stopPattern,
+        cutoffMs,
+      );
+      if (stopHit !== null) {
+        capturedStop = readStopSidecar(stopHit.path, runId);
+      }
+    }
     const best = newestArtifactSince(REVIEW_TMP_DIR, composedPattern, cutoffMs);
     if (best === null || best.mtime <= capturedMtime) return;
     // A half-written file fails to parse; the next tick retries it.
@@ -680,24 +780,39 @@ async function runReview(args: RunReviewArgs): Promise<void> {
   // decided — a cached second round on an unchanged tree, or a clean tree
   // whose earlier blocker the ledger still renders as standing. The signal is
   // a field the CLI wrote into its own plan, not a sentence the model chose.
-  const stop = nothingToReviewFrom(targetClass, cutoffMs, runId);
+  // The in-run snapshot first: it holds the stamped verdict even if a
+  // concurrent run overwrote or swept the shared sidecar since. The
+  // post-close scan covers a child that wrote the sidecar and exited inside
+  // one poll tick.
+  const stop =
+    capturedStop ?? nothingToReviewFrom(targetClass, cutoffMs, runId);
   const completed = composed !== null || stop !== null;
-  // A stop carries NO synthesised verdict, deliberately.
+  // A stop carries NO synthesised event, deliberately — what it carries is
+  // the ledger's open-blocker count DATED against this tree: the capture
+  // compared the cache's recorded per-file state with the working tree, and
+  // `blockersStand` is true only where they byte-compare equal, so a
+  // blocker it names still stands in THIS tree. Under `--fail-on` such a
+  // stop exits 3, closing the hole where a user who commits without fixing
+  // a Critical leaves a permanently clean tree, and every later stop
+  // rendered the blocker as standing while the gate exited 0 — passed the
+  // moment the author stopped touching the tree.
   //
-  // An earlier attempt mapped the cache's open-Critical count to
-  // REQUEST_CHANGES, reasoning that a stop round rendering standing blockers
-  // should not pass `--fail-on`. It is the wrong direction of wrong. The
-  // ledger is only rewritten by a round that writes the cache, and a stop
-  // round does not — so once a user FIXES the blocker and commits (the
-  // ordinary workflow), every later round reads the same stale `open` entry,
-  // fails the gate over code that no longer contains the defect, and nothing
-  // the user can do clears it. A false failure that no action clears is worse
-  // than a false pass beside a rendered blocker list, and the CLI cannot tell
-  // the two cases apart: both leave a clean tree and a moved HEAD.
-  //
-  // The real answer to the gate question is a composed verdict on the stop
-  // path — a verdict the model produces after re-ruling the ledger, not one
-  // this process invents from a file it cannot date against the code.
+  // The DATING is what keeps this from the stale-ledger false positive an
+  // undated count fell to: the ledger is rewritten only by a round that
+  // writes the cache, a stop never does, and the date is per BLOCKER — each
+  // open Critical is compared against its own file's recorded identity (or
+  // the cached round's HEAD tree, for a file that round reviewed without
+  // hashing), never against the whole cached state. A fix that moves no
+  // cached byte still clears the gate, because a file ADDED since the
+  // cached round withholds every blocker — the fix may be the new file. The
+  // residual is a false PASS — an unrelated new file withholds a standing
+  // blocker, and an undatable blocker leans the same way — never a false
+  // failure no action clears, and the stop's rendered blocker list still
+  // names it. A composed verdict on the stop path — the model re-ruling the
+  // ledger — remains the stronger answer; this is the one the process can
+  // prove.
+  const standingBlockers =
+    stop !== null && stop.blockersStand ? stop.openBlockers : 0;
 
   const result: RunReviewResult = {
     completed,
@@ -711,6 +826,8 @@ async function runReview(args: RunReviewArgs): Promise<void> {
     composedPath: composedPath ? resolve(composedPath) : null,
     expectedComposedName: composedNameFor(targetClass),
     reportPath: reportPath ? resolve(reportPath) : null,
+    openBlockers: stop?.openBlockers ?? 0,
+    blockersStand: stop?.blockersStand ?? false,
     childExitCode,
     childSignal,
     timedOut,
@@ -721,7 +838,12 @@ async function runReview(args: RunReviewArgs): Promise<void> {
   // (EPIPE once the pipe reader exits), and the exit code — not the prose — is
   // the contract a CI gate reads. A throw must not downgrade a blocking verdict
   // (exit 3) to yargs' generic failure (exit 1).
-  process.exitCode = exitCodeFor(completed, result.event, args.failOn);
+  process.exitCode = exitCodeFor(
+    completed,
+    result.event,
+    args.failOn,
+    standingBlockers,
+  );
 
   try {
     if (args.json) {

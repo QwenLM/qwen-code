@@ -19,6 +19,7 @@
 import type { CommandModule } from 'yargs';
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   rmSync,
@@ -54,15 +55,17 @@ import {
 } from './lib/report.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
 import { hasReviewDeadline } from './lib/deadline.js';
-import { gitOpt } from './lib/git.js';
+import { gitOpt, gitRaw } from './lib/git.js';
 import { certifierMatchesRound, roundModelIdFrom } from './lib/round-model.js';
 import {
   changedSince,
   movedSince,
   hashWorktreeFiles,
   readLocalCache,
+  revisionIdentities,
   stateIdOf,
   type LocalCacheCandidate,
+  type LocalReviewCache,
 } from './lib/local-anchor.js';
 import {
   dependentsOfChanged,
@@ -128,6 +131,65 @@ function display(path: string): string {
 }
 
 /**
+ * Cached paths that dropped out of THIS capture while still on disk — and
+ * that the base HEAD does not certify.
+ *
+ * A path the cached round hashed that this one no longer sees is normally a
+ * deletion, which the symmetric difference rightly treats as a change. But
+ * "still on disk and out of the capture" is not a deletion — it is a capture
+ * that stopped SEEING the path: an ignore rule added between rounds is the
+ * live case (`ls-files --others --exclude-standard` stops enumerating it),
+ * and the flag clause in `anchorRefusalReason` cannot see it because no flag
+ * changed. Such a path reads as "vanished", the slice keeps zero sections,
+ * and the scope-emptied stop fires over bytes no round captured — decided,
+ * and repeated every round, because a stop never advances the cache.
+ *
+ * The discriminator is the base HEAD: a TRACKED path that left the diff did
+ * so because its bytes now equal the tree the diff is taken against — HEAD
+ * itself certifies it, and its vanishing is the designed discarded-change
+ * shape the scope-emptied stop decides. What is NOT in HEAD's tree is
+ * untracked invisible content — refused, at the cost of a full round.
+ */
+function vanishedStillOnDisk(
+  repoRoot: string,
+  cachedFiles: Record<string, string>,
+  currentHashes: Record<string, string>,
+): string[] {
+  const onDisk: string[] = [];
+  for (const p of Object.keys(cachedFiles)) {
+    if (Object.hasOwn(currentHashes, p)) continue;
+    try {
+      lstatSync(join(repoRoot, p));
+    } catch {
+      continue; // genuinely gone — the symmetric difference owns it
+    }
+    onDisk.push(p);
+  }
+  if (onDisk.length === 0) return [];
+  // RAW, like every other listing in this module: a name may legally begin
+  // or end with whitespace, which the trimming wrappers eat.
+  let listing: string;
+  try {
+    listing = gitRaw(
+      '-C',
+      repoRoot,
+      'ls-tree',
+      '-r',
+      '-z',
+      '--name-only',
+      'HEAD',
+    ).toString('utf8');
+  } catch {
+    // An unborn HEAD has no tree: nothing is certified, and everything
+    // still on disk is invisible content. A failed listing refuses the same
+    // way — over-review is the affordable direction.
+    listing = '';
+  }
+  const inHead = new Set(listing.split('\0'));
+  return onDisk.filter((path) => !inHead.has(path));
+}
+
+/**
  * Why the previous round's anchor cannot scope this capture — or null when it
  * can. Every reason is said out loud: an anchor silently ignored looks
  * exactly like an anchor honoured over a full-size diff.
@@ -144,6 +206,11 @@ function anchorRefusalReason(
   treeHeldStill: boolean,
   /** Did THIS capture include untracked files? */
   untracked: boolean,
+  /**
+   * Cached paths still on disk but gone from this capture and not certified
+   * by the base HEAD — see `vanishedStillOnDisk`.
+   */
+  vanishedStillPresent: readonly string[],
 ): string | null {
   if (!treeHeldStill) {
     // The hashes this scoping would compare against were computed over a tree
@@ -213,6 +280,17 @@ function anchorRefusalReason(
     // worktree bytes describe a different change under review.
     return 'HEAD moved since the last local round';
   }
+  if (vanishedStillPresent.length > 0) {
+    // Visibility narrowed without any flag moving — an ignore rule added
+    // between rounds is the live case. The path's absence from this capture
+    // is scope, not a deletion, and honouring the anchor would stop decided
+    // over bytes no round captured.
+    return `${
+      vanishedStillPresent.length
+    } cached path(s) dropped out of this capture while still on disk (e.g. ${display(
+      vanishedStillPresent[0].slice(0, 96),
+    )})`;
+  }
   return null;
 }
 
@@ -245,17 +323,20 @@ function resolveCachePath(
 }
 
 /**
- * How many blockers the cached ledger still holds open — REPORTING only.
+ * The cache's still-open Critical entries — `{ file }` where the ledger
+ * names one, `{}` where it does not.
  *
- * `run` deliberately does not turn this into a verdict: the ledger is
- * rewritten only by a round that writes the cache, and a stop round does not,
- * so a blocker the user has since FIXED and committed stays `open` for ever.
- * Mapped to an exit code it produced a failure no action could clear. It is
- * here because the orchestrator's stop branches render these entries, and a
- * count beside them tells a human reader whether the round had any.
+ * A raw list — undated, and never a gate on its own: the ledger is
+ * rewritten only by a round that writes the cache, and a stop round does
+ * not, so a blocker the user has since FIXED and committed stays `open` in
+ * it for ever. Mapped straight to an exit code it produced a failure no
+ * action could clear. `run` gates on the count only beside the DATED state
+ * the sidecar carries (`blockersStand`, from `blockerStateStillMatchesTree`
+ * below), which tells the fixed-and-committed shape from the
+ * committed-without-fixing one where the count cannot.
  *
- * A decided stop is not necessarily a CLEAN one: SKILL.md's two stop branches
- * both open by rendering the cache's still-open findings, and the common shape
+ * A decided stop is not necessarily a CLEAN one: SKILL.md's stop branches
+ * open by rendering the cache's still-open findings, and the common shape
  * is a user who commits without fixing a Critical — leaving a permanently
  * clean tree that stops every later round. Without this the stop reached
  * `qwen review run` with no verdict at all, so `--fail-on request-changes`
@@ -264,30 +345,155 @@ function resolveCachePath(
  * inverse of its purpose.
  *
  * Read from the same file the skill's stop branches read. Unreadable, absent
- * or malformed answers 0 — the round is then no worse off than it was.
+ * or malformed answers empty — the round is then no worse off than it was.
  */
-function openBlockersInCache(
-  cacheArg: string | undefined,
-  target: string,
-  source: string | undefined,
-): number {
-  const path =
-    cacheArg !== undefined
-      ? resolveCachePath(cacheArg, target, source)
-      : cachePathFor(target, source);
-  if (path === null) return 0;
+function openCriticalsInCache(
+  cachePath: string | null,
+): Array<{ file?: string }> {
+  if (cachePath === null) return [];
   try {
-    const raw = JSON.parse(readFileSync(path, 'utf8')) as {
+    const raw = JSON.parse(readFileSync(cachePath, 'utf8')) as {
       findings?: unknown;
     };
-    if (!Array.isArray(raw.findings)) return 0;
-    return raw.findings.filter((f) => {
-      const e = f as { severity?: unknown; status?: unknown };
-      return e?.severity === 'Critical' && e?.status === 'open';
-    }).length;
+    if (!Array.isArray(raw.findings)) return [];
+    const open: Array<{ file?: string }> = [];
+    for (const f of raw.findings) {
+      const e = f as { severity?: unknown; status?: unknown; file?: unknown };
+      if (e?.severity !== 'Critical' || e?.status !== 'open') continue;
+      open.push(
+        typeof e.file === 'string' && e.file !== '' ? { file: e.file } : {},
+      );
+    }
+    return open;
   } catch {
-    return 0;
+    return [];
   }
+}
+
+/**
+ * Whether at least one of the cache's still-open blockers still stands in
+ * THIS tree — the DATE a stop's open blockers are held against.
+ *
+ * The ledger count alone cannot gate: a blocker fixed and committed stays
+ * `open` in it for ever, because a stop never rewrites the ledger. The date
+ * tells the fixed-and-committed shape from the committed-without-fixing one
+ * where the count cannot — and it is taken per BLOCKER, not per state. A
+ * whole-state comparison keyed the gate on bytes a blocker has no relation
+ * to, and failed permanently in BOTH directions: a fix that moved no cached
+ * byte (a new test file, a fix in a file the cached round never hashed)
+ * left every blocker "standing" for ever — a failure no action clears —
+ * while one cached path unhashable on both sides, or an empty files map,
+ * withheld every blocker for ever with the blocker's own file byte-equal.
+ *
+ * A blocker stands when its own file still byte-compares equal to the
+ * identity the cached round recorded for it — or, for a file that round
+ * never hashed (a no-diff whole-file review promotes an empty map), to its
+ * identity in the cached round's HEAD tree, where a no-diff capture's bytes
+ * stood. UNHASHABLE on both sides is "still unreadable", not "moved"
+ * (`movedSince` semantics). A blocker with no file, or one no baseline can
+ * date, is undatable and does not stand.
+ *
+ * A file ADDED to the captured population since the cached round withholds
+ * every blocker: a fix can land in a brand-new file no cached byte records,
+ * and a stop cannot attribute it. The residual is therefore a false PASS —
+ * an unrelated new file clears standing blockers — beside the rendered
+ * blocker list; never a false failure no action clears.
+ */
+function blockerStateStillMatchesTree(
+  repoRoot: string,
+  cachePath: string | null,
+): boolean {
+  if (cachePath === null) return false;
+  const cache = readLocalCache(cachePath);
+  if (cache === null) return false;
+  const blockers = openCriticalsInCache(cachePath)
+    .map((b) => b.file)
+    .filter((f): f is string => f !== undefined);
+  if (blockers.length === 0) return false;
+  const added = filesAddedSince(repoRoot, cache);
+  if (added === null || added.length > 0) return false;
+  // A file the cached round never hashed — the no-diff whole-file review
+  // shape — dates against that round's HEAD tree instead.
+  const missing = blockers.filter((p) => !Object.hasOwn(cache.files, p));
+  const atRevision = revisionIdentities(repoRoot, cache.headSha, missing);
+  const current = hashWorktreeFiles(repoRoot, blockers);
+  return blockers.some((p) => {
+    const before = Object.hasOwn(cache.files, p)
+      ? cache.files[p]
+      : Object.hasOwn(atRevision, p)
+        ? atRevision[p]
+        : undefined;
+    if (before === undefined) return false; // undatable: does not stand
+    const then: Record<string, string> = Object.create(null) as Record<
+      string,
+      string
+    >;
+    const now: Record<string, string> = Object.create(null) as Record<
+      string,
+      string
+    >;
+    then[p] = before;
+    now[p] = current[p];
+    return movedSince(then, now).length === 0;
+  });
+}
+
+/**
+ * Files in the captured population now that were not there when the cache
+ * was written: tracked or untracked-but-not-ignored now, minus the cached
+ * HEAD's tree and every path the cache hashed. `.gitignore`d names are not
+ * subjects and never count.
+ *
+ * Null when the population cannot be listed — an undatable stop leans the
+ * same way an undatable blocker does (pass), never into a failure no action
+ * clears.
+ */
+function filesAddedSince(
+  repoRoot: string,
+  cache: LocalReviewCache,
+): string[] | null {
+  let listing: Buffer;
+  try {
+    listing = gitRaw(
+      '-C',
+      repoRoot,
+      'ls-files',
+      '-z',
+      '--cached',
+      '--others',
+      '--exclude-standard',
+    );
+  } catch {
+    return null;
+  }
+  const current = new Set(
+    listing
+      .toString('utf8')
+      .split('\0')
+      .filter((p) => p !== ''),
+  );
+  let treePaths: string[] = [];
+  if (cache.headSha !== null) {
+    try {
+      treePaths = gitRaw(
+        '-C',
+        repoRoot,
+        'ls-tree',
+        '-r',
+        '-z',
+        '--name-only',
+        cache.headSha,
+      )
+        .toString('utf8')
+        .split('\0')
+        .filter((p) => p !== '');
+    } catch {
+      // An unlistable revision contributes no baseline: whatever the capture
+      // sees beyond the cached paths then reads as added.
+    }
+  }
+  const baseline = new Set([...Object.keys(cache.files), ...treePaths]);
+  return [...current].filter((p) => !baseline.has(p));
 }
 
 /**
@@ -582,6 +788,9 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
       capture.skipped.length,
       treeHeldStill,
       args.untracked !== false,
+      cache === null
+        ? []
+        : vanishedStillOnDisk(capture.repoRoot, cache.files, hashes),
     );
     if (refusal !== null) {
       writeStderrLine(
@@ -778,12 +987,24 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   // every file review and reported "Review did not complete" over a decided
   // round. This name is derived from the same `target` the parent derives.
   if (nothingToReview) {
+    const resolvedCache =
+      args.cache !== undefined
+        ? resolveCachePath(args.cache, target, sourcePath)
+        : cachePathFor(target, sourcePath);
+    const openCriticals = openCriticalsInCache(resolvedCache);
     writeFileSync(
       tmpFile(target, 'stop.json'),
       `${JSON.stringify(
         {
           ...nothingToReview,
-          openBlockers: openBlockersInCache(args.cache, target, sourcePath),
+          openBlockers: openCriticals.length,
+          // Dated, not counted — and dated per BLOCKER, each against its own
+          // file plus files added since — see `blockerStateStillMatchesTree`.
+          // An undated count never gates.
+          blockersStand: blockerStateStillMatchesTree(
+            capture.repoRoot,
+            resolvedCache,
+          ),
           // The parent's stamp, echoed back. This file decides `completed`
           // and can carry a REQUEST_CHANGES event, while its NAME is the
           // flattened target token — not injective, so a concurrent review
