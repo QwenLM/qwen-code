@@ -96,7 +96,7 @@ describe('useMessageHandling', () => {
     expect(rendered.api).not.toHaveProperty('loadingMessage');
 
     act(() => {
-      rendered.api.setWaitingForResponse('Loading hint');
+      rendered.api.setWaitingForResponse();
     });
     expect(rendered.api.isWaitingForResponse).toBe(true);
     expect(rendered.api).not.toHaveProperty('loadingMessage');
