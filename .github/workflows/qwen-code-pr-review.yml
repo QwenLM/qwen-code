@@ -1838,29 +1838,66 @@ jobs:
             --body "$body"
 
       # Preserve the review's machine record for later consumers — an agent
-      # collecting deferred Suggestions, a maintainer auditing the run. Two
-      # shapes: a finished run's durable `.qwen/reviews/` report + saved
-      # findings artifact, and a killed run's raw `.qwen/tmp` side files
-      # (the body's "…and N more (see the run report)" overflow pointer is a
-      # dead end once the runner wipes them — this upload is what it
-      # resolves to in CI). Runs BEFORE 'Clean review worktrees', which
-      # deletes those side files; never fails the job: a run that wrote
-      # nothing uploads nothing, and an upload error must not flip an
-      # already-posted review red.
+      # collecting deferred Suggestions, a maintainer auditing the run. What
+      # is staged decides what a fork PR can do with this step, so these
+      # rules are load-bearing:
+      #  - NEVER the review worktree (.qwen/tmp/review-pr-<N>/): it is a
+      #    checkout of the PR head, i.e. contributor-controlled. A
+      #    force-committed symlink there is FOLLOWED by upload-artifact
+      #    (exfiltration of anything the runner user can read), and a
+      #    force-committed regular file becomes a forged entry in the
+      #    record this step publishes about the run.
+      #  - Regular files only (`-type f`, no -L): a symlink planted in the
+      #    main checkout by a prompt-injected agent never matches, so its
+      #    target cannot ride the upload either.
+      # The cost: a run killed before Step 8 leaves its findings/composed
+      # side files inside the worktree and they are NOT salvaged. A finished
+      # run's durable record (`.qwen/reviews/` report + saved findings
+      # artifact + cost ledger) and the main checkout's own early side
+      # files (plan, context) are unaffected.
+      - name: 'Stage review artifacts'
+        if: 'always()'
+        continue-on-error: true
+        env:
+          PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
+        run: |-
+          set -uo pipefail
+          # The value rides find's -name patterns — pin it to digits so a
+          # dispatch-supplied string can never widen the glob.
+          case "${PR_NUMBER}" in
+            ''|*[!0-9]*)
+              echo "no valid PR number resolved; nothing to stage"
+              exit 0
+              ;;
+          esac
+          STAGE="${RUNNER_TEMP:?}/qwen-review-upload"
+          rm -rf "$STAGE" 2>/dev/null || true
+          mkdir -p "$STAGE"
+          find .qwen/reviews -maxdepth 1 -type f \
+            \( -name "*-pr-${PR_NUMBER}.*" -o -name "*-pr-${PR_NUMBER}-cost-ledger.json" \) \
+            -exec cp -p {} "$STAGE/" \; 2>/dev/null || true
+          find .qwen/tmp -maxdepth 1 -type f \
+            -name "qwen-review-pr-${PR_NUMBER}-*" \
+            -exec cp -p {} "$STAGE/" \; 2>/dev/null || true
+          ls -l "$STAGE" || true
+
+      # The upload reads only the staged directory, never a
+      # contributor-writable tree. The name carries run_attempt: a re-run
+      # keeps the run_id, and without the suffix the second attempt 409s on
+      # the first attempt's artifact while continue-on-error leaves the
+      # STALE one as the only record (qwen-triage.yml names its re-runnable
+      # uploads the same way). Runs BEFORE 'Clean review worktrees'; never
+      # fails the job — a run that wrote nothing uploads nothing, and an
+      # upload error must not flip an already-posted review red.
       - name: 'Upload review artifacts'
         if: 'always()'
         continue-on-error: true
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
-          name: 'qwen-review-pr-${{ steps.context.outputs.pr_number }}'
-          # .qwen/ is a dotfile tree — excluded from artifacts by default.
-          include-hidden-files: true
+          name: 'qwen-review-pr-${{ steps.context.outputs.pr_number }}-attempt-${{ github.run_attempt }}'
+          path: '${{ runner.temp }}/qwen-review-upload/'
+          retention-days: 90
           if-no-files-found: 'ignore'
-          path: |
-            .qwen/reviews/*-pr-${{ steps.context.outputs.pr_number }}.*
-            .qwen/reviews/*-pr-${{ steps.context.outputs.pr_number }}-cost-ledger.json
-            .qwen/tmp/qwen-review-pr-${{ steps.context.outputs.pr_number }}-*
-            .qwen/tmp/review-pr-${{ steps.context.outputs.pr_number }}/.qwen/tmp/qwen-review-*
 
       # A cancelled or timed-out review may not reach the CLI's process cleanup.
       # Remove both the worktree directories and Git's worktree registrations so

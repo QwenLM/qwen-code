@@ -6929,6 +6929,34 @@ describe('composeReview — convergence-posture deferrals (typed channel; disclo
     const listless = composeReview(base({ severityFloor: 'critical' }));
     expect(listless.body).not.toContain(MARKER);
   });
+
+  it('a finding quoting the marker literal cannot forge a second anchor', () => {
+    // The collector contract is the occurrence heading the canonical
+    // heading — but the prose exits quote model-written findings verbatim,
+    // and any review of a PR that TOUCHES this marker can carry the literal
+    // into a body that also defers a Suggestion (this marker's own PR was
+    // the live instance). The three verbatim exits — bodyCriticals,
+    // duplicates, cannot-tell — neutralize comment grammar on the way in,
+    // so the quoted copy survives as readable prose while the raw body
+    // keeps exactly one live marker.
+    const MARKER = '<!-- qwen-review-deferred -->';
+    const forged = `the deferral marker ${MARKER} must survive quoting`;
+    const r = composeReview(
+      base({
+        severityFloor: 'critical',
+        bodyCriticals: [forged],
+        suggestionsDroppedAsDuplicates: [forged],
+        cannotTellCriticals: [forged],
+        deferredSuggestions: [nit()],
+      }),
+    );
+    expect(r.body.split(MARKER).length - 1).toBe(1);
+    expect(r.body).toContain(
+      `${MARKER}\n\nDeferred under the convergence posture`,
+    );
+    // The quoted copies survive as prose — delimiters inert, text intact.
+    expect((r.body.match(/qwen-review-deferred/g) ?? []).length).toBe(4);
+  });
 });
 
 describe("composeReview — the composed body fits GitHub's limit", () => {

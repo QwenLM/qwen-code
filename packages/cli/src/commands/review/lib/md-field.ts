@@ -41,3 +41,17 @@ export function mdField(s: unknown): string {
   // is PR-controlled like every other input here.
   return '`' + (inner === '' ? '(unnamed)' : inner) + '`';
 }
+
+/**
+ * The comment-grammar half of mdField, for the prose exits that quote
+ * model-written text verbatim (blockers, duplicate and cannot-tell
+ * entries) where a code span is not an option. The posted body is a
+ * machine-read channel — the ledger marker is recovered from raw text and
+ * the deferred-list block is located by its marker — so a literal
+ * `<!--`/`-->` pair in quoted prose is a forgery vector (a fake marker
+ * occurrence, a fake ledger), never formatting the reader needs. The text
+ * between the delimiters survives; only the grammar goes inert.
+ */
+export function stripCommentGrammar(s: string): string {
+  return s.replace(/<!--|-->/g, ' ');
+}

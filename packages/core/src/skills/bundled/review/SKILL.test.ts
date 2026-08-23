@@ -513,6 +513,10 @@ describe('bundled review skill', () => {
     // Pin both halves of that qualification, or the paragraph drifts back
     // to a page-side promise.
     expect(body).toContain('<!-- qwen-review-deferred -->');
+    // And the retention half: the artifact expires while the body's
+    // overflow pointer persists, so an unqualified "keeps a recoverable
+    // record" overstates the mechanism — the sentence must name the window.
+    expect(body).toContain('90-day retention window');
     expect(body).toContain(
       'keeps a recoverable record even though the PR page never shows it',
     );

@@ -86,7 +86,7 @@ import {
   type Ledger,
   type LedgerFinding,
 } from './lib/ledger.js';
-import { mdField } from './lib/md-field.js';
+import { mdField, stripCommentGrammar } from './lib/md-field.js';
 import {
   diagnoseConvergence,
   isFreshDraft,
@@ -1131,10 +1131,13 @@ function linkifyCommentRefs(text: string, pr: PrIdentity | null): string {
  * A model-written entry flattened to one renderable list line, its `comment
  * <id>` refs linked to the PR's anchors. Entries render as one-line list
  * items: an unindented newline ends a list item (CommonMark), so an entry
- * spanning lines would leak its continuation out of the list.
+ * spanning lines would leak its continuation out of the list. Comment
+ * grammar goes inert too — a quoted `<!-- qwen-review-… -->` literal would
+ * otherwise forge a second marker occurrence in the raw body the pipeline's
+ * own readers scan (md-field.ts documents the shipped ledger-marker case).
  */
 function asListLine(text: string, pr: PrIdentity | null): string {
-  return linkifyCommentRefs(collapseToLine(text), pr);
+  return linkifyCommentRefs(collapseToLine(stripCommentGrammar(text)), pr);
 }
 
 /**
@@ -3843,9 +3846,16 @@ function composeReviewBody(
   // attributed template's severity signal; an unattributed post quotes the
   // blocker through the full fixpoint sanitation — no prefix, no forged
   // footer in any position (the body carries no canonical footer here, so
-  // a surviving forged one would be the post's only attribution).
+  // a surviving forged one would be the post's only attribution). "As-is"
+  // stops at comment grammar either way: a literal `<!-- qwen-review-… -->`
+  // in blocker prose would forge a second marker in the channel the
+  // pipeline's own readers scan raw.
   const bodyCriticalBlock: Bi[] = bodyCriticals
-    .map((l) => (attribution ? withMarker(l) : stripForUnattributedPost(l)))
+    .map((l) =>
+      stripCommentGrammar(
+        attribution ? withMarker(l) : stripForUnattributedPost(l),
+      ),
+    )
     .map((l) => ({ keep: 2, en: l, zh: l }));
 
   // Confirmed-but-duplicate Suggestions — dropped from the payload by the
