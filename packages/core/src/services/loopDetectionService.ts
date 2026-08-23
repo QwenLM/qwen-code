@@ -452,6 +452,17 @@ export class LoopDetectionService {
   // its own requests produced.
   private statefulAlternationHistory = new Map<string, string[]>();
 
+  // Per-key count of stateful requests fed to the heuristic tier whose
+  // results have NOT landed yet (incremented in addAndCheckHeuristicLoops,
+  // decremented in recordToolResult). With parallel tool batches both
+  // requests of a round reach the guard before that round's results land,
+  // so a window judged on args alone would skip the exonerating result
+  // check for occurrences still in flight and false-halt a productive
+  // poller; the carve-out subtracts these from its expected results (issue
+  // #9450). Reduces to the sequential arithmetic when results land before
+  // the next request is fed.
+  private statefulInFlight = new Map<string, number>();
+
   // Loop type of the most recent firing. Bubbled up through the
   // LoopDetected event so callers (non-interactive CLI, telemetry) can tell
   // the user which detector actually fired.
@@ -512,6 +523,15 @@ export class LoopDetectionService {
     // round, so the Finished-boundary decay must not treat it as abandoned
     // (see statefulResultKeysSinceLastFinished).
     this.statefulResultKeysSinceLastFinished.add(key);
+
+    // One in-flight request for this key has landed: unreserve it for the
+    // alternating-pattern carve-out (see statefulInFlight). Floored at zero
+    // because results can be recorded without a heuristic feed when
+    // skipLoopDetection keeps the heuristic tier off.
+    const inFlight = this.statefulInFlight.get(key) ?? 0;
+    if (inFlight > 0) {
+      this.statefulInFlight.set(key, inFlight - 1);
+    }
 
     // Rolling result history for the alternating-pattern carve-out (see
     // checkAlternatingPattern), capped at one window's occurrences per key.
@@ -666,6 +686,13 @@ export class LoopDetectionService {
         const stateful = this.isStatefulReadTool(event.value.name);
         if (stateful) {
           this.statefulRepeatKeys.add(toolCallKey);
+          // This request is now in flight: its result has not landed yet,
+          // so the alternating-pattern carve-out must not expect it (see
+          // statefulInFlight). recordToolResult decrements when it lands.
+          this.statefulInFlight.set(
+            toolCallKey,
+            (this.statefulInFlight.get(toolCallKey) ?? 0) + 1,
+          );
         }
         const globalDup = stateful
           ? false
@@ -690,6 +717,7 @@ export class LoopDetectionService {
         this.recentToolCallKeys = [];
         this.statefulAlternationHistory.clear();
         this.statefulRepeatKeys.clear();
+        this.statefulInFlight.clear();
         break;
       }
       case GeminiEventType.Content: {
@@ -762,6 +790,7 @@ export class LoopDetectionService {
       this.statefulResultKeysSinceLastFinished.clear();
       this.statefulAlternationHistory.clear();
       this.statefulRepeatKeys.clear();
+      this.statefulInFlight.clear();
       return false;
     }
 
@@ -1497,20 +1526,26 @@ export class LoopDetectionService {
     // identical arguments do not imply an identical result, so an ABAB
     // poller is only stuck when its observed results corroborate it. For
     // every stateful participant require the results produced by the
-    // window's own prior requests (all of them for the key that opened the
-    // window, all but the in-flight last request for the other); if ANY
+    // window's own prior requests, minus the requests still in flight (fed
+    // to this tier but not yet answered — with parallel tool batches BOTH
+    // requests of a round reach the guard before that round's results land,
+    // so more than just the window-tail request can be in flight); if ANY
     // recorded result changed, the alternation is making observable
     // progress and the window restarts. Missing result evidence (results
     // never recorded) fails safe and keeps the argument-only halt, so a
-    // wiring gap never loosens the guard.
-    const windowTail = this.recentToolCallKeys[maxLen - 1];
+    // wiring gap never loosens the guard. The per-key in-flight count
+    // reduces to the sequential arithmetic (tail request in flight) when
+    // each result lands before the next request is fed.
     for (const altKey of [a, b]) {
       if (!this.statefulRepeatKeys.has(altKey)) continue;
       const occurrences = this.recentToolCallKeys.filter(
         (windowKey) => windowKey === altKey,
       ).length;
-      const expectedResults =
-        altKey === windowTail ? occurrences - 1 : occurrences;
+      const inFlight = Math.min(
+        this.statefulInFlight.get(altKey) ?? 0,
+        occurrences,
+      );
+      const expectedResults = occurrences - inFlight;
       if (expectedResults <= 0) continue;
       const history = this.statefulAlternationHistory.get(altKey);
       if (!history || history.length < expectedResults) {
@@ -1561,6 +1596,7 @@ export class LoopDetectionService {
     this.statefulResultKeysSinceLastFinished.clear();
     this.statefulRepeatKeys.clear();
     this.statefulAlternationHistory.clear();
+    this.statefulInFlight.clear();
     this.requestByCallId.clear();
   }
 

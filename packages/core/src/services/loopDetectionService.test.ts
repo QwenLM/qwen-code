@@ -2535,6 +2535,94 @@ describe('LoopDetectionService', () => {
       );
     });
 
+    it('does not halt a batched [task_list, tool_b] ABAB poller whose results keep changing', () => {
+      // Parallel batches feed BOTH requests of a round to the heuristic
+      // tier before that round's results land, with the stateful call
+      // LEADING the batch. Pre-fix the carve-out encoded a strictly
+      // sequential in-flight model (only the window-tail key got
+      // occurrences - 1): when the 6th request filled the window, the
+      // leading key's 3rd occurrence was still in flight, history held 2
+      // fingerprints but expectedResults=3, the exonerating check was
+      // skipped, and the guard halted ALTERNATING_TOOL_CALL_PATTERN on
+      // args alone despite every result having changed (issue #9450). The
+      // run stays at 4 rounds so tool_b's constant-args request count (4)
+      // stays below the global-duplicate threshold.
+      const heuristicService = new LoopDetectionService(
+        makeConfig(DEFAULT_MAX_TOOL_CALLS_PER_TURN, false, false),
+      );
+      heuristicService.reset('batched-alternating-productive');
+
+      let fired = false;
+      for (let round = 0; round < 4 && !fired; round++) {
+        fired = heuristicService.addAndCheck(taskListEvent(`tl-${round}`));
+        if (fired) break;
+        fired = heuristicService.addAndCheck(
+          createToolCallRequestEvent('tool_b', { step: 'work' }),
+        );
+        if (fired) break;
+        fired = heuristicService.recordToolResult(
+          { name: 'task_list', args: TASK_LIST_ARGS },
+          taskListResult(`board state v${round}`),
+        );
+      }
+      expect(fired).toBe(false);
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
+    it('keeps the batched [tool_b, task_list] ordering exonerated', () => {
+      // Ordering twin: with the stateful call TRAILING the batch the
+      // window fills on a task_list request, which was already exonerated
+      // pre-fix (the tail key lost one expected result). Pins that the
+      // in-flight counter does not regress this ordering.
+      const heuristicService = new LoopDetectionService(
+        makeConfig(DEFAULT_MAX_TOOL_CALLS_PER_TURN, false, false),
+      );
+      heuristicService.reset('batched-alternating-reversed');
+
+      let fired = false;
+      for (let round = 0; round < 4 && !fired; round++) {
+        fired = heuristicService.addAndCheck(
+          createToolCallRequestEvent('tool_b', { step: 'work' }),
+        );
+        if (fired) break;
+        fired = heuristicService.addAndCheck(taskListEvent(`tl-${round}`));
+        if (fired) break;
+        fired = heuristicService.recordToolResult(
+          { name: 'task_list', args: TASK_LIST_ARGS },
+          taskListResult(`board state v${round}`),
+        );
+      }
+      expect(fired).toBe(false);
+    });
+
+    it('still halts a batched ABAB pattern when the stateful results are frozen (fail-safe)', () => {
+      // Fail-safe twin of the batched regression: with an unchanged board
+      // the recorded results corroborate the alternation, so the halt must
+      // still fire under the batched [task_list, tool_b] ordering.
+      const heuristicService = new LoopDetectionService(
+        makeConfig(DEFAULT_MAX_TOOL_CALLS_PER_TURN, false, false),
+      );
+      heuristicService.reset('batched-alternating-frozen');
+
+      let fired = false;
+      for (let round = 0; round < 4 && !fired; round++) {
+        fired = heuristicService.addAndCheck(taskListEvent(`tl-${round}`));
+        if (fired) break;
+        fired = heuristicService.addAndCheck(
+          createToolCallRequestEvent('tool_b', { step: 'work' }),
+        );
+        if (fired) break;
+        fired = heuristicService.recordToolResult(
+          { name: 'task_list', args: TASK_LIST_ARGS },
+          taskListResult('frozen board'),
+        );
+      }
+      expect(fired).toBe(true);
+      expect(heuristicService.getLastLoopType()).toBe(
+        LoopType.ALTERNATING_TOOL_CALL_PATTERN,
+      );
+    });
+
     it('treats changed results as progress for action stagnation', () => {
       const heuristicService = new LoopDetectionService(
         makeConfig(DEFAULT_MAX_TOOL_CALLS_PER_TURN, false, false),
