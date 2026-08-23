@@ -2879,11 +2879,21 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     // the check would refuse every healthy run (#9742). Absent or malformed,
     // nothing is welded — the record-less refusal is the fail-closed shape.
     const sha = 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef';
+    // Pin the JOINED fragment, not the bare flag: without the continuation
+    // after `--label` the snippet is two statements — the command runs
+    // unpinned and the sha line dies as command-not-found — while
+    // `toContain('--fetched-sha …')` still passes.
     expect(
       buildRoleBrief({ ...PR_PLAN, fetchedSha: sha }, 'verify', {
         key: 'verify--round-2--deadbeef1234',
       }),
-    ).toContain(`--fetched-sha ${sha}`);
+    ).toContain(
+      `--label verify--round-2--deadbeef1234 \\
+  --fetched-sha ${sha}`,
+    );
+    // And the sha-less brief must not carry a continuation after the label
+    // either — a dangling one would glue the closing fence onto the command.
+    expect(p).not.toMatch(/--label verify--round-2--deadbeef1234 \\/);
     expect(p).not.toContain('--fetched-sha');
     expect(
       buildRoleBrief({ ...PR_PLAN, fetchedSha: 'not-a-sha' }, 'verify', {

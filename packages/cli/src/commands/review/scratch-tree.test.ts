@@ -35,7 +35,12 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
-import { runScratchTree, scratchTreeCommand } from './scratch-tree.js';
+import yargs, { type Argv } from 'yargs';
+import {
+  runScratchTree,
+  scratchTreeCommand,
+  type ScratchTreeArgs,
+} from './scratch-tree.js';
 import { scratchWorktreePath } from './lib/paths.js';
 import { isolateHostGitConfig } from './lib/test-utils.js';
 
@@ -882,6 +887,54 @@ describe('runScratchTree', () => {
       }
     },
   );
+
+  describe('the CLI option contract', () => {
+    // Every fetchedSha test above builds its args by hand, but the only
+    // production delivery of the sha is the `--fetched-sha` flag, read off
+    // yargs' camel-cased parse as `fetchedSha`. If the option key and the
+    // field ever drift, every real invocation arrives unpinned and the suite
+    // stays green — the bug class `--build-test` shipped into `test-plan`,
+    // pinned here the same way: parse through the real builder, and assert on
+    // what the run does with the parse rather than on the parse's shape.
+    it('parses --fetched-sha into the field runScratchTree actually reads', () => {
+      // .strict() matters: a lenient parser camel-cases unknown flags and
+      // passes them through, so dropping the --fetched-sha registration from
+      // the builder would keep this test green while the real command (whose
+      // root parser IS strict) rejects the flag.
+      const parse = (argv: string[]) =>
+        (scratchTreeCommand.builder as (y: Argv) => Argv)(
+          yargs([]).strict(),
+        ).parseSync(argv) as unknown as ScratchTreeArgs;
+
+      // Reachable only if the parsed field reached the residue anchor: the
+      // identical call without it answers unmeasured instead of clean.
+      const clean = runScratchTree(
+        parse([
+          '--worktree',
+          worktree,
+          '--label',
+          'verify--round-1--cli',
+          '--fetched-sha',
+          headSha,
+        ]),
+      );
+      expect(clean.sharedTreeUnmeasured).toBeUndefined();
+      expect(clean.sharedTreeResidue).toEqual([]);
+
+      // And a wrong sha still reaches the pin through the same parse.
+      const forged = runScratchTree(
+        parse([
+          '--worktree',
+          worktree,
+          '--label',
+          'verify--round-1--cli-forged',
+          '--fetched-sha',
+          `deadbeef${'0'.repeat(32)}`,
+        ]),
+      );
+      expect(forged.sharedTreeUnmeasured).toContain('not the fetched PR head');
+    });
+  });
 
   describe('the command handler', () => {
     beforeEach(() => {
