@@ -30,8 +30,9 @@
 //
 // SCOPE, so silence is not read as more than it is: the roots are the review
 // commands, the file that registers them, the review-only lease they import
-// from `services/`, the three review helpers lifted into `utils/`, and the
-// bundled skill — not the modules those import. Editing
+// from `services/`, the two review helpers left in `utils/`, and the bundled
+// skill — not the modules those import. The validator itself is back under
+// `commands/review/`, which the directory root covers. Editing
 // `utils/stdioHelpers.ts` or a core helper on a review path and skipping the
 // rebuild produces no warning. The line drawn here is the code
 // whose behaviour a review is about; a quiet run means that code matches the
