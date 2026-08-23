@@ -66,6 +66,7 @@ const buildOrder = [
   'packages/channels/gitlab',
   'packages/channels/plugin-example',
   'packages/audio-capture',
+  'packages/node-repl',
   'packages/acp-bridge',
   'packages/sdk-typescript',
   'packages/cli',
