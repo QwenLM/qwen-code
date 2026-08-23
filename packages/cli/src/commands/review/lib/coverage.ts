@@ -885,6 +885,25 @@ export function coverageFromTranscripts(
       ? chunkSatisfied(chunk, rec, current)
       : keySatisfied(rec, current);
   };
+  // A RETURNED spanning read refutes an `Uncoverable:` declaration: the
+  // declaration claims no read can span the chunk, and a read that
+  // demonstrably did proves it wrong. `chunkSatisfied` cannot see this
+  // case when the relaunch that spanned the chunk was delivered with a
+  // rewritten prompt — the walk credits a rewritten launch that still
+  // read the diff, but the supersession bar (verbatim launch) fails it,
+  // and the post-loop subtraction would delete the very coverage the walk
+  // credited. `returned`, not merely live: an unreturned relaunch earns
+  // told-range coverage on its way to dying, and that presumption must
+  // not refute an honest declaration.
+  const refutedByReturnedSpanningRead = (chunkId: number): boolean => {
+    const c = plan.chunks.find((k) => k.id === chunkId);
+    if (c === undefined) return false;
+    return records.some(
+      (r) =>
+        r.returned &&
+        merge(r.diffReads).some(([s, e]) => s <= c.startLine && e >= c.endLine),
+    );
+  };
 
   // Parsed once per record: the gap scan also feeds the supersession check
   // below, and the parse is not free on a long return.
@@ -963,8 +982,16 @@ export function coverageFromTranscripts(
 
     const given = wasGivenTheDiff(rec, plan.diffPathAbsolute);
     if (chunk !== null && !given) {
-      if (!superseded(rec, chunk)) blindAgents.push(name);
-      noteChunkCause(chunk, 'blind-prompt');
+      // The cause is gated with the same supersession check as its prose
+      // flag: a relaunch that satisfied the chunk already rebuilt the
+      // prompt, and a cause that outlives its suppression makes
+      // `classify()` diagnose the chunk with a repaired problem — leaving
+      // the 'unknown' class that documents exactly that residue
+      // unreachable.
+      if (!superseded(rec, chunk)) {
+        blindAgents.push(name);
+        noteChunkCause(chunk, 'blind-prompt');
+      }
       continue; // Its silence proves nothing about the diff; the prompt failed.
     }
 
@@ -975,8 +1002,11 @@ export function coverageFromTranscripts(
     // is too long. A zero-tool-call agent that merely copied the template must not
     // be credited with a disclosed gap — that is the whiff wearing a costume.
     if (rec.successfulToolCalls === 0) {
-      if (!superseded(rec, chunk)) idleAgents.push(name);
-      noteChunkCause(chunk, 'idle');
+      // Same supersession gate as the blind arm above.
+      if (!superseded(rec, chunk)) {
+        idleAgents.push(name);
+        noteChunkCause(chunk, 'idle');
+      }
       continue;
     }
 
@@ -1116,6 +1146,11 @@ export function coverageFromTranscripts(
       // other — the chunk lands in `missingChunks`, whose remediation
       // relaunches an agent that re-declares, forever. `gapsSuperseded`
       // below excludes same-shape records for exactly this reason.
+      //
+      // Refuted outright by a returned spanning read — see
+      // `refutedByReturnedSpanningRead`. Without the conjunct, a relaunch
+      // that ACTUALLY spanned the chunk on a paraphrased prompt still
+      // capped the verdict on lines this run demonstrably read.
       // The id comes from launch text the orchestrator wrote, which a
       // re-plan (or a resumed attempt's transcripts from a re-chunked diff)
       // can leave pointing at a chunk this PLAN does not carry. Such a
@@ -1126,7 +1161,8 @@ export function coverageFromTranscripts(
       // rewritten-launch disclosure above already names the record.
       if (
         plan.chunks.some((c) => c.id === chunk) &&
-        !chunkSatisfied(chunk, rec, (r) => !declaresOwnUncoverable(r, chunk))
+        !chunkSatisfied(chunk, rec, (r) => !declaresOwnUncoverable(r, chunk)) &&
+        !refutedByReturnedSpanningRead(chunk)
       ) {
         uncoverable.add(chunk);
         noteChunkCause(chunk, 'declared-uncoverable');
@@ -1871,6 +1907,15 @@ export interface VerificationReport {
     reason: string;
     subjectZh: string;
     reasonZh: string;
+    /**
+     * True when the gap is a tier's BY-DESIGN omission rather than a
+     * repairable floor failure — the balanced (medium) tier's skipped
+     * reverse audit. No verification clears it and no repair lifts it,
+     * so `compose-review` routes the cap it fires onto the posture axis
+     * instead of sending an automated caller to relaunch verification
+     * against a permanently uncleared axis.
+     */
+    byDesign?: boolean;
   }>;
   /**
    * The per-shape fix for each gap, in the same order — for stderr, where the
@@ -2222,6 +2267,7 @@ export function verificationGaps(
       subjectZh: '反向审计',
       reasonZh:
         '未运行——均衡（medium）档跳过二次审查步骤，因此本次判定上限为 Comment，不会 Approve',
+      byDesign: true,
     });
   }
 

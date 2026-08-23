@@ -11543,6 +11543,72 @@ describe('capAxes — three kinds of cap, three repairs', () => {
     expect(r.capAxes.verification).toContain('unreviewed-dimension');
   });
 
+  it('keeps a prefix-reshaped budget-stop relay on the verification axis', () => {
+    // The splice retires a 'step 5 — …' reshaped relay by substring, but
+    // the reshaped entry then fails all three depth exemptions — it no
+    // longer starts with `reverse audit — `, `step 5` is no non-diff
+    // head, and the exact-text set does not carry it — so the same
+    // underlying stop classified as coverage with the prefix and
+    // verification without it. The splice retains an entry only when it
+    // contains the full machine-minted canonical stop text, and the stop
+    // fact itself is marker-proven: a depth fact whichever prefix the
+    // orchestrator added.
+    const p = coveredPlan(['verify', 'reverse-audit'], {
+      prNumber: 8255,
+      fetchedSha: 'deadbeef00112233',
+    });
+    writeBudgetStop(
+      p,
+      {
+        remainingSeconds: 900,
+        reserveSeconds: 3600,
+        expectedRoundSeconds: 1800,
+      },
+      4,
+    );
+    // Built directly, not through base(): its default `planPath:
+    // coveredPlan()` rewrites the shared plan.json fixture, dropping this
+    // test's prNumber/fetchedSha before the override takes effect.
+    const r = composeReview({
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      unreviewedDimensions: [
+        'step 5 — reverse audit — stopped before round 4 by the review time budget',
+      ],
+    });
+    expect(r.terminalState).toBe('complete');
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.capAxes.coverage).toEqual([]);
+    expect(r.capAxes.verification).toContain('unreviewed-dimension');
+    // The axis split leaves the anchor's exact-text rule untouched: a
+    // reshaped relay still withholds the incremental anchor.
+    expect(parseLedger(r.body)?.round).toBe(1);
+    expect(parseLedger(r.body)?.sha).toBeUndefined();
+  });
+
+  it('keeps a prefix-reshaped round-cap relay on the verification axis', () => {
+    // The round-cap twin: the identical run with the relay verbatim
+    // classifies as verification (the test above this pair), so the
+    // orchestrator's prefix alone must not move the axis.
+    const p = coveredPlan();
+    writeRoundCapStop(p, 3, 4);
+    const r = composeReview(
+      base({
+        planPath: p,
+        unreviewedDimensions: [
+          'step 5 — reverse audit — did not converge within the reverse-audit round cap of 3',
+        ],
+      }),
+    );
+    expect(r.terminalState).toBe('complete');
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.capAxes.coverage).toEqual([]);
+    expect(r.capAxes.verification).toContain('unreviewed-dimension');
+  });
+
   it('keeps a coverage-fired cap on the coverage axis', () => {
     const r = composeReview({
       criticalsInline: 0,
@@ -11639,5 +11705,43 @@ describe('capAxes — three kinds of cap, three repairs', () => {
     expect(r.cappedBy).toContain('unreviewed-dimension');
     expect(r.capAxes.coverage).toEqual([]);
     expect(r.capAxes.verification).toContain('unreviewed-dimension');
+  });
+
+  it('puts the medium tier by-design reverse-audit skip on the posture axis', () => {
+    // A clean balanced-medium review caps on the tier's own by-design
+    // omission: no verification can clear it and no repair lifts it — the
+    // tier skip is unfixable by construction. Routing it as a verification
+    // gap sends an automated caller to relaunch verification against a
+    // permanently uncleared axis.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: coveredPlan(['verify'], { effort: 'medium' }),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.terminalState).toBe('complete');
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.capAxes.coverage).toEqual([]);
+    expect(r.capAxes.verification).toEqual([]);
+    expect(r.capAxes.posture).toContain('unreviewed-dimension');
+  });
+
+  it('keeps a repairable floor gap on the verification axis beside the medium skip', () => {
+    // Medium runs Step 4: a verify floor that actually failed is
+    // repairable and shares the cap with the by-design skip. The axis
+    // names what a repair can lift, so a mixed entry set stays on the
+    // verification axis.
+    const r = composeReview({
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      planPath: coveredPlan([], { effort: 'medium' }),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.capAxes.coverage).toEqual([]);
+    expect(r.capAxes.verification).toContain('unreviewed-dimension');
+    expect(r.capAxes.posture).toEqual([]);
   });
 });

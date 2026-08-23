@@ -2793,6 +2793,38 @@ describe('coverage — a stale Uncoverable declaration cannot cap live coverage'
     expect(r.coveredChunks).not.toContain(1);
   });
 
+  it('a returned spanning read refutes a stale declaration the relaunch was too paraphrased to supersede', () => {
+    // Attempt 1 declared chunk 1 unreachable; the continuation relaunched
+    // chunk 1 with a paraphrased prompt, and the agent read lines spanning
+    // the chunk. The walk credits a rewritten launch that still read the
+    // diff — coverage WAS earned — but the guard's supersession bar
+    // (returned + VERBATIM launch + diff call) diverges from that
+    // coverage-earning bar: the paraphrase fails `chunkSatisfied`, the
+    // stale declaration passed the guard, and the post-loop subtraction
+    // deleted the very coverage the walk credited. The verbatim control
+    // above reports the identical spanning read as covered; the ledger
+    // must not say "no read can span it" of a chunk this session
+    // demonstrably spanned.
+    const p = plan();
+    ledger(p, 'S0', 'S1');
+    transcript('a1old', good(1), {
+      calls: 1,
+      text: 'Uncoverable: chunk 1 — line exceeds the read limit',
+    });
+    moveToSession('a1old', 'S0');
+    const paraphrased =
+      `Please review chunk 1 of 2 carefully.\n` +
+      `read_file(file_path="${chunkBrief(1)}")\n` +
+      `read_file(file_path="${DIFF}", offset=0, limit=100)`;
+    transcript('a1relaunch', paraphrased, { calls: 1, range: [0, 100] });
+    transcript('a2', good(2), { calls: 2 });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.uncoverableChunks).toEqual([]);
+    expect(r.coveredChunks).toEqual([1, 2]);
+    expect(r.ok).toBe(true);
+  });
+
   it('does not count a prior agent that declared ITS OWN chunk unreachable', () => {
     // The veto on the recovery count, pinned: the declaration is a disclosed
     // gap, and counting the record beside the cap would announce work
@@ -2998,6 +3030,57 @@ describe('the chunk ledger', () => {
     expect(entryFor(r, 2)).toMatchObject({
       outcome: 'missing',
       classification: 'blind-prompt',
+    });
+  });
+
+  it('does not classify a chunk by a blind cause its superseding relaunch repaired', () => {
+    // Chunk 2's first agent was launched blind; the operator followed
+    // check-coverage's own FIX — rebuilt the prompt, relaunched verbatim.
+    // The relaunch read the diff but mis-paged its lines, so it passes
+    // every guard, records no cause, and `chunkSatisfied` suppresses
+    // `blindAgents` — yet the stale cause survived in the ledger, and
+    // `classify()` diagnosed the chunk with a problem the relaunch already
+    // repaired. The `'unknown'` class whose doc describes exactly this
+    // residue was unreachable while the superseded cause kept the set
+    // non-empty.
+    const p = plan();
+    const mispaged =
+      `You are reviewing chunk 2 of 2.\n` +
+      `read_file(file_path="${chunkBrief(2)}")\n` +
+      `read_file(file_path="${DIFF}", offset=0, limit=50)`;
+    built(p, 2, mispaged);
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2blind', blind(2), { calls: 0 });
+    transcript('a2fix', mispaged, { calls: 1, range: [0, 50] });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.blindAgents).toEqual([]);
+    expect(entryFor(r, 2)).toMatchObject({
+      outcome: 'missing',
+      classification: 'unknown',
+    });
+  });
+
+  it('does not classify a chunk idle when its superseding relaunch worked', () => {
+    // The same supersession shape on the idle arm: the first attempt never
+    // made a tool call; the verbatim relaunch worked but mis-paged, so the
+    // chunk is still missing — and the ledger must name the residue
+    // ('unknown'), not the cause the relaunch repaired.
+    const p = plan();
+    const mispaged =
+      `You are reviewing chunk 2 of 2.\n` +
+      `read_file(file_path="${chunkBrief(2)}")\n` +
+      `read_file(file_path="${DIFF}", offset=0, limit=50)`;
+    built(p, 2, mispaged);
+    transcript('a1', good(1), { calls: 2 });
+    transcript('a2idle', good(2), { calls: 0 });
+    transcript('a2fix', mispaged, { calls: 1, range: [0, 50] });
+
+    const r = coverageFromTranscripts(p, ENV);
+    expect(r.idleAgents).toEqual([]);
+    expect(entryFor(r, 2)).toMatchObject({
+      outcome: 'missing',
+      classification: 'unknown',
     });
   });
 

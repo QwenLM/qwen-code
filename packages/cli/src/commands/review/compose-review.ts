@@ -2480,6 +2480,11 @@ function composeReviewBody(
   // they are verification facts, not coverage facts — the axis view below
   // must not classify the cap they fire as "the diff was not fully read".
   const verificationFloorEntries = new Set<(typeof coverageEntries)[number]>();
+  // The floor's BY-DESIGN entries, tracked by reference the same way: the
+  // medium tier's skipped reverse audit caps a clean verdict at Comment,
+  // but no repair lifts that cap and no verification clears it — the axis
+  // view below routes it to posture, not verification.
+  const byDesignFloorEntries = new Set<(typeof coverageEntries)[number]>();
   // The budget-stop marker: when the reverse-audit round builder refused a
   // round on the review's time budget, it recorded the refusal beside the
   // prompt records. Synthesizing the disclosure from the marker makes the
@@ -2977,6 +2982,7 @@ function composeReviewBody(
         };
         coverageEntries.push(entry);
         verificationFloorEntries.add(entry);
+        if (gap.byDesign === true) byDesignFloorEntries.add(entry);
       }
       remediation.push(...verification.remediation);
       criticalsUnverified =
@@ -3261,30 +3267,61 @@ function composeReviewBody(
         entry === e.subject ||
         (e !== budgetEntry && entry.startsWith(`${e.subject} — `)),
     );
-  const dimensionGapsAreDepthOnly = [...unreviewed, ...splicedForBudgetPhrase]
-    .filter((entry) => !echoesCoverageEntry(entry))
-    .every(
-      (entry) => isNonDiffDimensionGap(entry) || isRelayedStopEntry(entry),
-    );
+  const nonEchoedDimensionGaps = [
+    ...unreviewed,
+    ...splicedForBudgetPhrase,
+  ].filter((entry) => !echoesCoverageEntry(entry));
+  const dimensionGapsAreDepthOnly = nonEchoedDimensionGaps.every(
+    (entry) => isNonDiffDimensionGap(entry) || isRelayedStopEntry(entry),
+  );
+  // The AXIS decision treats spliced relays as depth-only, ahead of the
+  // exact-text exemption: the splice retains an entry only when it contains
+  // the full machine-minted canonical stop text, and the stop fact itself
+  // is marker-proven — a depth fact whichever prefix the orchestrator
+  // added. Without this, a 'step 5 — …' reshaped relay failed all three
+  // exemptions and the same underlying stop landed on the coverage axis
+  // with the prefix, the verification axis without it. The ANCHOR keeps
+  // reading the exact-text predicate above: a reshaped relay still
+  // withholds it, over-withholding being the safe direction.
+  const axisDimensionGapsAreDepthOnly = nonEchoedDimensionGaps.every(
+    (entry) =>
+      splicedForBudgetPhrase.includes(entry) ||
+      isNonDiffDimensionGap(entry) ||
+      isRelayedStopEntry(entry),
+  );
 
   // The axis `unreviewed-dimension` lands on, derived from the facts that
   // fired it rather than read off its name: a doubt that any line was read
   // puts it on the coverage axis, and when nothing but verification facts
   // back it — the Step 4/5 floor, or the reverse audit's budget stop — the
-  // diff WAS read and the cap belongs on the verification axis instead. The
-  // fixed map sent every backing fact to coverage, and an automated caller
-  // routing repairs by axis was told to relaunch Step 3 agents that had read
-  // everything. Coverage doubt wins when both hold: its repair subsumes the
-  // other's, the same precedence `coverage.ts`'s `classify()` applies.
+  // diff WAS read and the cap belongs on the verification axis instead. A
+  // third fact is the medium tier's by-design reverse-audit skip: no
+  // verification clears it and no repair lifts it, so when it is the only
+  // non-budget backing fact the cap belongs on the posture axis — routing
+  // it as a verification gap would send an automated caller to relaunch
+  // verification against a permanently uncleared axis. A repairable floor
+  // gap beside the skip keeps the verification axis: the axis names what a
+  // repair can lift. The fixed map sent every backing fact to coverage,
+  // and an automated caller routing repairs by axis was told to relaunch
+  // Step 3 agents that had read everything. Coverage doubt wins when both
+  // hold: its repair subsumes the other's, the same precedence
+  // `coverage.ts`'s `classify()` applies.
+  const nonBudgetCoverageEntries = coverageEntries.filter(
+    (entry) => entry !== budgetEntry,
+  );
   const capAxes = groupCapAxes(
     cappedBy,
-    !dimensionGapsAreDepthOnly ||
-      coverageEntries.some(
-        (entry) =>
-          entry !== budgetEntry && !verificationFloorEntries.has(entry),
+    !axisDimensionGapsAreDepthOnly ||
+      nonBudgetCoverageEntries.some(
+        (entry) => !verificationFloorEntries.has(entry),
       )
       ? 'coverage'
-      : 'verification',
+      : nonBudgetCoverageEntries.length > 0 &&
+          nonBudgetCoverageEntries.every((entry) =>
+            byDesignFloorEntries.has(entry),
+          )
+        ? 'posture'
+        : 'verification',
   );
 
   const diagnosis = convergence
