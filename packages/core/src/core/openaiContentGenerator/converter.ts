@@ -133,6 +133,26 @@ function normalizeStreamingTextDelta(
 
   if (state.cumulativeMode) {
     if (rawDelta.startsWith(state.emittedText)) {
+      if (
+        state.tagHoldActive &&
+        OPENING_THINKING_TAG_WORD_PATTERN.test(rawDelta)
+      ) {
+        // A prefix-overlapping chunk arriving while the converter holds a
+        // pre-demotion opening-tag candidate may be genuine incremental
+        // content whose leading bytes coincidentally repeat the baseline —
+        // e.g. a nested '<thinking>' arriving as its own delta is
+        // undecidable from a cumulative re-send of the held bytes by
+        // prefix comparison alone. Slicing the overlap would silently
+        // consume the nested opener before the guard zone ever sees it,
+        // corrupting a real thinking block chunking-dependently, so emit
+        // the chunk verbatim instead. A true cumulative rewind then
+        // degrades to duplicated content inside the hidden thought
+        // channel, which the depth-counting scanner absorbs, rather than
+        // failing a legitimate turn (issue #9348 R8-1).
+        state.emittedText = rawDelta;
+        state.emittedLength = rawDelta.length;
+        return rawDelta;
+      }
       const suffix = rawDelta.slice(state.emittedText.length);
       state.emittedText = rawDelta;
       state.emittedLength = rawDelta.length;
@@ -164,6 +184,22 @@ function normalizeStreamingTextDelta(
     rawDelta.length > state.emittedText.length &&
     rawDelta.startsWith(state.emittedText)
   ) {
+    if (
+      state.tagHoldActive &&
+      OPENING_THINKING_TAG_WORD_PATTERN.test(rawDelta)
+    ) {
+      // Held-candidate twin of the cumulative-mode guard above: the overlap
+      // being sliced is the still-held candidate's bytes, which were never
+      // emitted to the user, so a chunk re-starting with them while
+      // carrying a full opening tag word is undecidable between a
+      // cumulative re-send and genuine new content (a nested opener).
+      // Emit it verbatim; the guard zone recombines it with the held
+      // candidate and the depth-counting scanner absorbs any duplication
+      // a true rewind introduces (issue #9348 R8-1).
+      state.emittedText = rawDelta;
+      state.emittedLength += rawDelta.length;
+      return rawDelta;
+    }
     const baselineLen = state.emittedText.length;
     // The baseline may have been frozen at CUMULATIVE_DETECTION_WINDOW_BYTES
     // during a long incremental phase. If the cap actually kicked in and the
@@ -1126,6 +1162,7 @@ const LEADING_CLOSING_THINKING_TAG_PATTERN =
 const LEADING_THINKING_TAG_PATTERN = /^\s*<\/?think(?:ing)?\s*>/i;
 const STANDALONE_CLOSING_THINKING_TAG_PATTERN =
   /^\s*<\/(think|thinking)\s*>\s*$/i;
+const OPENING_THINKING_TAG_WORD_PATTERN = /<think(?:ing)?\s*>/i;
 const MAX_THINKING_TAG_CANDIDATE_LENGTH = 128;
 
 /**
@@ -1507,13 +1544,26 @@ export function convertOpenAIChunkToGemini(
 
     // Handle text content
     if (typeof choice.delta?.content === 'string') {
+      const contentDeltaState = (requestContext.textDeltaState ??= {
+        emittedText: '',
+        emittedLength: 0,
+        cumulativeMode: false,
+      });
+      // While a pre-demotion opening-shaped tag candidate is held, the held
+      // bytes are in the normalizer baseline but were never emitted to the
+      // user; a prefix-overlapping chunk carrying a full opening tag word is
+      // then undecidable between a cumulative re-send and a genuine nested
+      // opener, so emit it verbatim instead of slicing it (issue #9348 R8-1).
+      const heldOpeningTagCandidate =
+        requestContext.pendingThinkingTagCandidate;
+      contentDeltaState.tagHoldActive =
+        requestContext.inlineThinkingBlockDemoted !== true &&
+        heldOpeningTagCandidate !== undefined &&
+        heldOpeningTagCandidate.closingTagName === undefined &&
+        !heldOpeningTagCandidate.text.trimStart().startsWith('</');
       const normalizedContent = normalizeStreamingTextDelta(
         choice.delta.content,
-        (requestContext.textDeltaState ??= {
-          emittedText: '',
-          emittedLength: 0,
-          cumulativeMode: false,
-        }),
+        contentDeltaState,
       );
       // Skip empty-string push mid-stream; still call on finish_reason to
       // flush any buffered tagged-thinking content.
@@ -1680,22 +1730,26 @@ export function convertOpenAIChunkToGemini(
     }
 
     const pendingTagCandidate = requestContext.pendingThinkingTagCandidate;
-    // Replay recognition keys on the accepted/emission sequence: pre-demotion
-    // the held candidate is the accepted sequence, and an equal re-send is an
-    // exact replay. A proper-prefix re-send is NOT dropped: content equality
-    // and prefix comparison cannot tell a provider rewind apart from a
-    // genuine nested opening tag arriving as its own delta (arbitrary
+    // Replay recognition keys on the accepted/emission sequence:
+    // pre-demotion the held candidate is the accepted sequence. Content
+    // equality and prefix comparison cannot tell a provider rewind apart
+    // from a genuine nested opening tag arriving as its own delta (arbitrary
     // chunking of arbitrary content is undecidable against content
     // comparison — a full tag word CAN legitimately re-arrive while the
     // block it nests in is still held), and dropping the genuine shape
-    // corrupts a real thinking block. Such deltas are appended instead: a
-    // true rewind then degrades to duplicated content inside the hidden
-    // thought channel, which the depth-counting scanner absorbs, rather than
-    // failing a legitimate turn.
+    // corrupts a real thinking block. Re-sends are therefore dropped only
+    // while they carry NO full opening tag word (sub-word fragments like
+    // '<think' can no longer be a genuine nested opener at this layer); an
+    // equal re-send carrying a full opening tag word is appended instead,
+    // exactly like a proper-prefix re-send. A true rewind then degrades to
+    // duplicated content inside the hidden thought channel — which the
+    // depth-counting scanner absorbs — or to the fail-closed finish check
+    // when it never re-balances, rather than failing a legitimate turn.
     const replayedTagPrefix =
       !pendingTagCandidate?.closingTagName &&
       /\S/.test(pendingTagCandidate?.text ?? '') &&
-      pendingTagCandidate?.text === visibleText;
+      pendingTagCandidate?.text === visibleText &&
+      !OPENING_THINKING_TAG_WORD_PATTERN.test(visibleText);
     const replayedClosingTag =
       STANDALONE_CLOSING_THINKING_TAG_PATTERN.exec(
         visibleText,
@@ -1710,7 +1764,17 @@ export function convertOpenAIChunkToGemini(
     }
     // Short cumulative replays can pass through normalizeStreamingTextDelta
     // verbatim. Detect them only from the complete accepted post-demotion
-    // sequence: equality is an exact replay, and a prefix-extending chunk is
+    // sequence: equality is an exact replay — EXCEPT when the accepted
+    // sequence consists of balanced thinking blocks only: a genuine
+    // consecutive block can be byte-identical to the blocks accepted so
+    // far, and no visible content has been emitted yet, so the equality is
+    // undecidable between a replay and a genuine consecutive identical
+    // block. Dropping it silently loses the genuine block (the single-chunk
+    // twin yields two thought parts), so a blocks-only equality is
+    // appended; a true rewind then degrades to a duplicated thought inside
+    // the hidden channel. Equality against a baseline that already carries
+    // visible content is unambiguous (a genuine block can never re-send the
+    // accepted visible tail) and stays dropped. A prefix-extending chunk is
     // a cumulative superset whose already-accepted prefix must be stripped.
     // A proper prefix of the sequence is NOT dropped: every demotion-seeded
     // baseline starts with an opening tag, so a lone genuine consecutive
@@ -1738,12 +1802,19 @@ export function convertOpenAIChunkToGemini(
       const alignedVisibleText = visibleText.trimStart();
       const alignedReplayText =
         requestContext.postDemotionReplayText.trimStart();
-      if (alignedVisibleText === alignedReplayText) {
+      const baselineBlocksOnly = (() => {
+        if (alignedVisibleText !== alignedReplayText) return false;
+        const baselineBlocks =
+          extractLeadingBalancedThinkingBlocks(alignedReplayText);
+        return baselineBlocks !== undefined && baselineBlocks.rest === '';
+      })();
+      if (alignedVisibleText === alignedReplayText && !baselineBlocksOnly) {
         parts = parts.filter((part) => !getVisibleText(part));
         visibleText = '';
       } else if (
         alignedReplayText.length > 0 &&
-        alignedVisibleText.startsWith(alignedReplayText)
+        alignedVisibleText.startsWith(alignedReplayText) &&
+        alignedVisibleText !== alignedReplayText
       ) {
         const leadingLength = visibleText.length - alignedVisibleText.length;
         visibleText = visibleText.slice(
@@ -1770,21 +1841,34 @@ export function convertOpenAIChunkToGemini(
     // genuine '<' or reassembles the remainder into a block that gets
     // demoted into the hidden thought channel. Without the strip a sub-word
     // candidate still recombines correctly with its genuine continuation.
-    // Never strip a delta carrying more closing than opening tags either: a
-    // genuine nested continuation whose prefix coincidentally equals the
-    // held candidate (the inner block re-starts with the candidate's bytes)
-    // must net-close the candidate's still-open depth, while a renormalized
-    // re-send of the candidate re-opens at least as much as it closes.
-    // Stripping the net-closing shape reassembles an early-balancing block
-    // whose leftover stray closer fails the turn mid-stream; appending it
-    // lets the depth-counting scanner absorb the nested block instead.
-    // Closing-shaped candidates ('</think…' held before the '>' arrives) are
-    // exempt from the net-closing guard: they have no open depth, so their
-    // renormalized re-send IS net-closing, the guard skips the strip, and
-    // the re-send is concatenated onto the held fragment into raw
-    // '</thinki</thinking>' garbage released as visible text. Stripping
-    // re-assembles the re-send onto the closingTagName route instead
-    // (issue #9348 R10-1).
+    // Direction guards on the delta:
+    // - Never strip a net-closing delta against an opening-block candidate:
+    //   a genuine nested continuation whose prefix coincidentally equals the
+    //   held candidate (the inner block re-starts with the candidate's
+    //   bytes) must net-close the candidate's still-open depth, while a
+    //   renormalized re-send of an opening-block candidate re-opens at
+    //   least as much as it closes. Stripping the net-closing shape
+    //   reassembles an early-balancing block whose leftover stray closer
+    //   fails the turn mid-stream; appending it lets the depth-counting
+    //   scanner absorb the nested block instead.
+    // - Never strip when the bytes immediately after the held candidate's
+    //   prefix form a closing tag: that shape (a net-zero delta, so the
+    //   net-closing guard lets it through) is a genuine nested block whose
+    //   opener + partial body coincidentally re-spell the held candidate —
+    //   e.g. held '<thinking>b' and a nested '<thinking>b</thinking>' chunk.
+    //   Stripping merges the nested closer against the candidate's opener
+    //   into an early-balancing flat block, corrupting a real thinking block
+    //   chunking-dependently (the single-chunk twin demotes cleanly), so
+    //   append it instead and let the depth-counting scanner absorb the
+    //   nested block. A renormalized re-send that EXTENDS the candidate's
+    //   body ('<thinking>x' re-sent as '<thinking>xyz…') still strips: its
+    //   remainder starts with body text, not a closer (issue #9348 R8-1).
+    // - Closing-shaped candidates ('</think…' held before the '>' arrives)
+    //   have no open depth: their renormalized re-send IS net-closing, and
+    //   the net-closing guard would skip the strip and concatenate the
+    //   re-send into raw garbage, so both direction guards are skipped for
+    //   them and the strip re-assembles the re-send onto the closingTagName
+    //   route (issue #9348 R10-1).
     const stripCandidateIsClosingShaped =
       pendingTagCandidate !== undefined &&
       pendingTagCandidate.text.trimStart().startsWith('</');
@@ -1800,9 +1884,38 @@ export function convertOpenAIChunkToGemini(
       const alignedCandidateText = pendingTagCandidate.text.trimStart();
       const alignedVisibleText = visibleText.trimStart();
       if (alignedVisibleText.startsWith(alignedCandidateText)) {
-        visibleText = alignedVisibleText.slice(alignedCandidateText.length);
-        parts = parts.filter((part) => !getVisibleText(part));
-        if (visibleText) parts.push({ text: visibleText });
+        const remainder = alignedVisibleText.slice(alignedCandidateText.length);
+        // R8-1: these shapes mark the delta as genuine content that must be
+        // kept whole (the depth-counting scanner absorbs it) rather than
+        // stripped against the candidate:
+        //  (entrance 1) the delta equals the candidate (remainder '') — an
+        //    opening-word equal re-send the equality drop deliberately
+        //    appended; stripping would empty it and lose the block;
+        //  (entrance 2) the bytes right after the candidate prefix open with
+        //    a closing tag — held '<thinking>b' + nested '<thinking>b</thinking>';
+        //  (entrance 3) the candidate is a bare opener and the delta is a
+        //    complete balanced block — held '<thinking>' + nested
+        //    '<thinking>inner</thinking>'.
+        // Closing-shaped candidates are exempt: their re-send MUST strip to
+        // re-assemble the closingTagName route (R10-1).
+        const candidateIsBareOpener = /^\s*<think(?:ing)?\s*>$/i.test(
+          pendingTagCandidate.text,
+        );
+        const deltaBalancedBlocks = candidateIsBareOpener
+          ? extractLeadingBalancedThinkingBlocks(alignedVisibleText)
+          : undefined;
+        const genuineNestedRespell =
+          !stripCandidateIsClosingShaped &&
+          (remainder === '' ||
+            /^<\/think(?:ing)?\s*>/i.test(remainder) ||
+            (candidateIsBareOpener &&
+              deltaBalancedBlocks !== undefined &&
+              deltaBalancedBlocks.rest === ''));
+        if (!genuineNestedRespell) {
+          visibleText = remainder;
+          parts = parts.filter((part) => !getVisibleText(part));
+          if (visibleText) parts.push({ text: visibleText });
+        }
       }
     }
     // Accumulate the baseline AFTER the superset strip above: accumulating

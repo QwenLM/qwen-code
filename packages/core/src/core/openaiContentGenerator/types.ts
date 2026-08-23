@@ -37,6 +37,15 @@ export interface StreamingTextDeltaState {
   /** Integer token-estimate units accumulated from normalized emitted text. */
   emittedTokenUnits?: number;
   cumulativeMode: boolean;
+  /**
+   * Set per chunk by the converter on the content channel while a
+   * pre-demotion opening-shaped thinking-tag candidate is held (issue
+   * #9348 R8-1): prefix-overlapping chunks carrying a full opening tag
+   * word must be emitted verbatim instead of sliced against the baseline,
+   * because the held bytes were never emitted and a genuine nested opener
+   * is undecidable from a cumulative re-send by prefix comparison alone.
+   */
+  tagHoldActive?: boolean;
 }
 
 export interface RequestContext {
@@ -110,11 +119,14 @@ export interface RequestContext {
    * Full accepted content-channel sequence since the first inline thinking
    * demotion (issue #9348). Short cumulative replays can pass through
    * normalizeStreamingTextDelta verbatim, so this sequence provides exact
-   * replay evidence: an equal sequence is dropped, a prefix-extending
-   * sequence contributes only its new suffix, and a proper-prefix re-send
-   * (rewind replay) carrying a full tag word is dropped. Individual suffix
-   * equality is deliberately insufficient because genuine adjacent deltas
-   * may repeat.
+   * replay evidence: an equal sequence is dropped unless it consists of
+   * balanced thinking blocks only (a genuine consecutive identical block
+   * is undecidable from a replay of a blocks-only sequence and is appended
+   * instead), and a prefix-extending sequence contributes only its new
+   * suffix. A proper-prefix re-send (rewind replay) is appended, not
+   * dropped — it is indistinguishable from a genuine consecutive/nested
+   * block opener by content comparison. Individual suffix equality is
+   * deliberately insufficient because genuine adjacent deltas may repeat.
    */
   postDemotionReplayText?: string;
   /**

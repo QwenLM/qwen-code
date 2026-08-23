@@ -1824,15 +1824,20 @@ describe('OpenAIContentConverter', () => {
       ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
     });
 
-    it('keeps the baseline intact when a superset resend arrives while a post-demotion rest is held (issue #9348 R9-3)', () => {
-      // The baseline accumulation must run AFTER the held-candidate superset
-      // strip: chunks '<thinking>a</thinking><thinking>b' demote block 1 and
-      // hold rest '<thinking>b'; the renormalized resend
-      // '<thinking>b</thinking>X' (the exact anomaly the strip was built
-      // for) used to be appended unstripped, double-counting '<thinking>b'
-      // into the baseline, so a later genuine cumulative redelivery matched
-      // no branch and threw PROTOCOL_TAG_LEAK. With post-strip accumulation
-      // the baseline stays the accepted sequence and step 3 strips cleanly.
+    it('fails closed when a superset resend arrives while a post-demotion rest is held (issue #9348 R9-3 accepted degradation)', () => {
+      // The R9-3 scenario (chunks '<thinking>a</thinking><thinking>b' demote
+      // block 1 and hold rest '<thinking>b', then the renormalized resend
+      // '<thinking>b</thinking>X' followed by a cumulative redelivery) is
+      // undecidable against content comparison from the R8-1 genuine nested
+      // shape: the resend carries a full opening tag word while an
+      // opening-block rest is held, exactly like a genuine nested block
+      // restarting with the held candidate's bytes. The strip no longer
+      // reassembles that shape (it consumed genuine nested openers), the
+      // resend is appended instead, and the compounded renormalized-resend
+      // + cumulative-redelivery anomaly degrades to fail-closed at finish —
+      // the same degradation the inversion accepts for the sibling
+      // undecidable corners. The baseline still accumulates the accepted
+      // (appended) content.
       const stream = withStreamParser();
       stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
 
@@ -1846,6 +1851,7 @@ describe('OpenAIContentConverter', () => {
         }),
         stream,
       );
+      // The demoted thought is buffered behind the held rest, not emitted.
       expect(demoted.candidates?.[0]?.content?.parts).toEqual([]);
       expect(stream.pendingThinkingTagCandidate).toEqual({
         text: '<thinking>b',
@@ -1857,29 +1863,24 @@ describe('OpenAIContentConverter', () => {
         }),
         stream,
       );
-      expect(resend.candidates?.[0]?.content?.parts).toEqual([
-        { thought: true, text: 'a' },
-        { thought: true, text: 'b' },
-        { text: 'X' },
-      ]);
+      expect(resend.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingThinkingTagCandidate).toEqual({
+        text: '<thinking>b<thinking>b</thinking>X',
+      });
       expect(stream.postDemotionReplayText).toBe(
-        '<thinking>a</thinking><thinking>b</thinking>X',
+        '<thinking>a</thinking><thinking>b<thinking>b</thinking>X',
       );
 
-      const redelivery = converter.convertOpenAIChunkToGemini(
-        streamChunk(
-          'cumulative-redelivery',
-          { content: '<thinking>a</thinking><thinking>b</thinking>XY' },
-          'stop',
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk(
+            'cumulative-redelivery',
+            { content: '<thinking>a</thinking><thinking>b</thinking>XY' },
+            'stop',
+          ),
+          stream,
         ),
-        stream,
-      );
-      expect(redelivery.candidates?.[0]?.content?.parts).toEqual([
-        { text: 'Y' },
-      ]);
-      expect(stream.postDemotionReplayText).toBe(
-        '<thinking>a</thinking><thinking>b</thinking>XY',
-      );
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
     });
 
     it('demotes genuine consecutive inline thinking blocks split one opener per chunk (issue #9348 inverted direction)', () => {
@@ -2084,6 +2085,189 @@ describe('OpenAIContentConverter', () => {
           stream,
         ),
       ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('appends an equal re-send carrying a full opening tag word while the block is held (issue #9348 R8-1)', () => {
+      // Entrance 1: content equality cannot tell a provider rewind apart
+      // from a genuine nested opening tag arriving as its own delta —
+      // chunks '<thinking>' / '<thinking>' /
+      // 'inner</thinking>outer</thinking>Answer' used to drop the second
+      // '<thinking>' (byte-equal to the held candidate) and throw
+      // PROTOCOL_TAG_LEAK at finish, while the identical bytes in one chunk
+      // demote cleanly. An equal re-send carrying a full opening tag word
+      // is appended instead; a true rewind degrades to duplicated hidden
+      // channel content (or fail-closed if it never re-balances), matching
+      // the direction the inversion chose for the sibling undecidable case.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const opening = converter.convertOpenAIChunkToGemini(
+        streamChunk('opening', { content: '<thinking>' }),
+        stream,
+      );
+      expect(opening.candidates?.[0]?.content?.parts).toEqual([]);
+
+      const repeated = converter.convertOpenAIChunkToGemini(
+        streamChunk('repeated-opening', { content: '<thinking>' }),
+        stream,
+      );
+      expect(repeated.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingThinkingTagCandidate).toEqual({
+        text: '<thinking><thinking>',
+      });
+
+      const rest = converter.convertOpenAIChunkToGemini(
+        streamChunk(
+          'rest',
+          { content: 'inner</thinking>outer</thinking>Answer' },
+          'stop',
+        ),
+        stream,
+      );
+      expect(rest.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: '<thinking>inner</thinking>outer' },
+        { text: 'Answer' },
+      ]);
+    });
+
+    it('appends a consecutive block equal to a blocks-only post-demotion baseline (issue #9348 R8-1)', () => {
+      // Post-demotion twin of the equality entrance: after a demotion that
+      // ended exactly on a block boundary the baseline is balanced blocks
+      // only, and a genuine consecutive identical block arriving as one
+      // delta is byte-equal to it. Dropping the equality silently loses the
+      // second block (the single-chunk twin yields two thought parts), so a
+      // blocks-only baseline equality is appended; equality against a
+      // baseline that already carries visible content remains an exact
+      // replay and is still dropped.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const first = converter.convertOpenAIChunkToGemini(
+        streamChunk('first-block', { content: '<thinking>a</thinking>' }),
+        stream,
+      );
+      expect(first.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'a' },
+      ]);
+
+      const second = converter.convertOpenAIChunkToGemini(
+        streamChunk('second-block', { content: '<thinking>a</thinking>' }),
+        stream,
+      );
+      expect(second.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'a' },
+      ]);
+      expect(stream.postDemotionReplayText).toBe(
+        '<thinking>a</thinking><thinking>a</thinking>',
+      );
+
+      const finish = converter.convertOpenAIChunkToGemini(
+        streamChunk('finish', {}, 'stop'),
+        stream,
+      );
+      expect(finish.candidates?.[0]?.content?.parts ?? []).toEqual([]);
+    });
+
+    it('appends a net-zero superset delta carrying a full opening tag word instead of stripping it (issue #9348 R8-1)', () => {
+      // Entrance 2: a genuine nested block can restart with the held
+      // candidate's bytes — chunks '<thinking>a</thinking><thinking>b' /
+      // '<thinking>b</thinking>' / 'c</thinking>Answer' used to be stripped
+      // (the still-open nested block is net-zero, so the net-closing guard
+      // let the strip fire), consuming the nested opener and throwing
+      // PROTOCOL_TAG_LEAK at finish, while the single-chunk twin demotes
+      // cleanly. A superset delta carrying a full opening tag word is
+      // appended instead while an opening-block candidate is held; a true
+      // renormalized re-send degrades to fail-closed at finish — accepted
+      // trade, see the R9-3 degradation test.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const demoted = converter.convertOpenAIChunkToGemini(
+        streamChunk('first-block', {
+          content: '<thinking>a</thinking><thinking>b',
+        }),
+        stream,
+      );
+      // The demoted thought is buffered behind the held rest (the standard
+      // pending-candidate parts hold), not emitted yet.
+      expect(demoted.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingThinkingTagCandidate).toEqual({
+        text: '<thinking>b',
+      });
+
+      const nested = converter.convertOpenAIChunkToGemini(
+        streamChunk('nested-restart', { content: '<thinking>b</thinking>' }),
+        stream,
+      );
+      expect(nested.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingThinkingTagCandidate).toEqual({
+        text: '<thinking>b<thinking>b</thinking>',
+      });
+
+      const rest = converter.convertOpenAIChunkToGemini(
+        streamChunk('rest', { content: 'c</thinking>Answer' }, 'stop'),
+        stream,
+      );
+      expect(rest.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: 'a' },
+        { thought: true, text: 'b<thinking>b</thinking>c' },
+        { text: 'Answer' },
+      ]);
+    });
+
+    it('does not slice a nested opener off a prefix-overlapping chunk while an opening block is held (issue #9348 R8-1)', () => {
+      // Entrance 3: the normalizer's prefix-overlap branch sliced the
+      // nested opener off before the guard zone ever saw it — chunks
+      // '<thinking>' / '<thinking>inner</thinking>' /
+      // 'outer</thinking>Answer' used to throw PROTOCOL_TAG_LEAK while the
+      // identical bytes in one chunk demote cleanly. While a pre-demotion
+      // opening-block candidate is held, a prefix-overlapping chunk
+      // carrying a full opening tag word is emitted verbatim instead of
+      // being sliced against the baseline; a true cumulative rewind then
+      // degrades to duplicated hidden-channel content absorbed by the
+      // depth-counting scanner.
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      converter.convertOpenAIChunkToGemini(
+        streamChunk('reasoning', { reasoning_content: 'Let me think.' }),
+        stream,
+      );
+      const opening = converter.convertOpenAIChunkToGemini(
+        streamChunk('opening', { content: '<thinking>' }),
+        stream,
+      );
+      expect(opening.candidates?.[0]?.content?.parts).toEqual([]);
+
+      const nested = converter.convertOpenAIChunkToGemini(
+        streamChunk('nested-block', { content: '<thinking>inner</thinking>' }),
+        stream,
+      );
+      expect(nested.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(stream.pendingThinkingTagCandidate).toEqual({
+        text: '<thinking><thinking>inner</thinking>',
+      });
+
+      const rest = converter.convertOpenAIChunkToGemini(
+        streamChunk('rest', { content: 'outer</thinking>Answer' }, 'stop'),
+        stream,
+      );
+      expect(rest.candidates?.[0]?.content?.parts).toEqual([
+        { thought: true, text: '<thinking>inner</thinking>outer' },
+        { text: 'Answer' },
+      ]);
     });
 
     it('keeps genuine content intact when a sub-word "<" candidate is held (issue #9348)', () => {
