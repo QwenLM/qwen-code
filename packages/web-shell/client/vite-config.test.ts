@@ -40,6 +40,15 @@ describe('Web Shell Voice development proxy', () => {
   });
 });
 
+describe('Web Shell MCP App development proxy', () => {
+  it('proxies the sandbox document to the daemon', () => {
+    const sandboxProxy = loadConfig().server?.proxy?.['/mcp-app-sandbox'];
+    expect(sandboxProxy).not.toBeTypeOf('string');
+    expect(sandboxProxy).toBeDefined();
+    expect((sandboxProxy as ProxyOptions).bypass).toBeUndefined();
+  });
+});
+
 describe('Web Shell client source proxy bypass', () => {
   it('serves session catalog source modules instead of proxying them', () => {
     const sessionProxy = loadConfig().server?.proxy?.['/session'];

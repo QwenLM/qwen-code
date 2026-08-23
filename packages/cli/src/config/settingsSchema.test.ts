@@ -25,6 +25,21 @@ import {
 
 describe('SettingsSchema', () => {
   describe('getSettingsSchema', () => {
+    it('should describe prompt hooks supported by the runtime', () => {
+      const hookProperties =
+        getSettingsSchema().hooks.properties.PreToolUse.items.properties?.[
+          'hooks'
+        ]?.items?.properties;
+
+      expect(hookProperties?.['type']?.enum).toEqual([
+        'command',
+        'http',
+        'prompt',
+      ]);
+      expect(hookProperties?.['prompt']).toMatchObject({ type: 'string' });
+      expect(hookProperties?.['model']).toMatchObject({ type: 'string' });
+    });
+
     it('should contain all expected top-level settings', () => {
       const expectedSettings: Array<keyof Settings> = [
         'mcpServers',
