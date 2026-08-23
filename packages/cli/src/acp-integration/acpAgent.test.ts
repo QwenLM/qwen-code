@@ -21108,6 +21108,108 @@ describe('sessionLanguage multi-session propagation', () => {
     await agentPromise;
   });
 
+  it('does not re-pin or clear live sessions when a reload diff fires against a stale settings view', async () => {
+    // The child boots with the gate off on disk; its settings view only
+    // syncs through reloadScopeFromDisk, and the UI write path never
+    // triggers one — so after a UI toggle the first reload diffs the new
+    // merged view against a stale clone.
+    let viewEnabled = false;
+    const settings = {
+      get merged() {
+        return { experimental: { sessionWorkflow: viewEnabled } };
+      },
+      reloadScopeFromDisk: vi.fn(() => {
+        viewEnabled = true; // the UI write persisted true behind the child's back
+      }),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings;
+
+    let installedProvider: (() => boolean) | undefined;
+    const setSessionWorkflowEnabledProvider = vi.fn(
+      (provider?: () => boolean) => {
+        installedProvider = provider;
+      },
+    );
+    const isSessionWorkflowEnabled = vi.fn(
+      () => installedProvider?.() ?? viewEnabled,
+    );
+    const cfg = makeConfig({
+      getSessionId: vi.fn().mockReturnValue('s-workflow-stale-reload'),
+      setSessionWorkflowEnabledProvider,
+      isSessionWorkflowEnabled,
+    });
+    const clearActiveTodoPlanRevision = vi.fn();
+
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    vi.mocked(loadCliConfig).mockResolvedValue(cfg as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      () =>
+        ({
+          getId: vi.fn().mockReturnValue('s-workflow-stale-reload'),
+          getConfig: vi.fn().mockReturnValue(cfg),
+          isIdle: vi.fn().mockReturnValue(true),
+          clearActiveTodoPlanRevision,
+          clearTodoStopGuardTrust: vi.fn(),
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          installGoalTerminalObserver: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+    vi.mocked(buildAvailableCommandsSnapshot).mockResolvedValue({
+      availableCommands: [],
+      availableSkills: [],
+    });
+
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+
+    await agent.newSession({ cwd: '/reload', mcpServers: [] });
+
+    // UI toggle ON: the serve route persists the write and pushes the
+    // effective value; the child pins the override while its own settings
+    // view still reads false.
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceSessionWorkflow, {
+      enabled: true,
+    });
+    expect(setSessionWorkflowEnabledProvider).toHaveBeenCalledTimes(1);
+    expect(clearActiveTodoPlanRevision).toHaveBeenCalledTimes(1);
+
+    // The session approves a workflow plan (revision bound, execution under
+    // way). Any later POST /workspace/reload diffs oldMerged cloned from the
+    // stale view (false) against the reloaded disk state (true), so the
+    // re-derivation condition fires — but every session's provider already
+    // returns the pushed true, so neither a re-pin nor a revision clear may
+    // happen.
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(setSessionWorkflowEnabledProvider).toHaveBeenCalledTimes(1);
+    expect(clearActiveTodoPlanRevision).toHaveBeenCalledTimes(1);
+
+    // A genuine disk flip away from the pinned value must still reach the
+    // live session.
+    settings.reloadScopeFromDisk = vi.fn(() => {
+      viewEnabled = false;
+    });
+    await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceReload, {});
+    expect(setSessionWorkflowEnabledProvider).toHaveBeenCalledTimes(2);
+    expect(installedProvider?.()).toBe(false);
+    expect(clearActiveTodoPlanRevision).toHaveBeenCalledTimes(2);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('refreshes busy skill sessions and reports per-session failures', async () => {
     const bootstrapSettings = {
       merged: {},
