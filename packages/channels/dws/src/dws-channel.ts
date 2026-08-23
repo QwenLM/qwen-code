@@ -92,8 +92,11 @@ interface PersistedDocumentNotification {
   nextRetryAt?: number;
 }
 
-interface PersistedGroupMessage {
-  source: { kind: 'group-all' } | { kind: 'group'; conversationId: string };
+interface PersistedPendingMessage {
+  source:
+    | { kind: 'direct' }
+    | { kind: 'group-all' }
+    | { kind: 'group'; conversationId: string };
   message: DwsImMessage;
 }
 
@@ -107,7 +110,7 @@ interface DwsCursor {
   notificationCheckpoint?: PersistedNotificationCheckpoint;
   mentionCheckpoint?: PersistedNotificationCheckpoint;
   pendingDocumentNotifications?: PersistedDocumentNotification[];
-  pendingGroupMessages?: PersistedGroupMessage[];
+  pendingMessages?: PersistedPendingMessage[];
   processedMessages: string[];
   imTargets: PersistedImTarget[];
   todosInitialized?: boolean;
@@ -144,8 +147,6 @@ interface ImSubscriptionState {
   lastError?: DwsEventProcessError;
   restartAttempts: number;
 }
-
-type SyntheticInboundOutcome = 'allowed' | 'pairing' | 'denied';
 
 function configuredString(value: unknown, field: string): string | undefined {
   if (value === undefined || value === null || value === '') return undefined;
@@ -301,12 +302,13 @@ function isPendingDocumentNotification(
   );
 }
 
-function isPendingGroupMessage(value: unknown): value is PersistedGroupMessage {
+function isPendingMessage(value: unknown): value is PersistedPendingMessage {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     return false;
   }
-  const pending = value as PersistedGroupMessage;
+  const pending = value as PersistedPendingMessage;
   const sourceValid =
+    pending.source?.kind === 'direct' ||
     pending.source?.kind === 'group-all' ||
     (pending.source?.kind === 'group' &&
       typeof pending.source.conversationId === 'string' &&
@@ -316,7 +318,9 @@ function isPendingGroupMessage(value: unknown): value is PersistedGroupMessage {
     return false;
   }
   return (
-    (message.type === 'user_im_message_receive_group' ||
+    (message.type === 'user_im_message_receive_o2o' ||
+      message.type === 'user_im_message_receive_o2o_all' ||
+      message.type === 'user_im_message_receive_group' ||
       message.type === 'user_im_message_receive_group_all') &&
     [
       message.type,
@@ -404,8 +408,15 @@ function stableUuid(value: string): string {
 
 function isNoReply(text: string): boolean {
   const trimmed = text.trim();
-  const fenced = trimmed.match(/^```[^\n]*\n([\s\S]*?)\n```$/u);
-  return NO_REPLY_SENTINEL_PATTERN.test((fenced?.[1] ?? trimmed).trim());
+  const fenced =
+    trimmed.match(/^```[^\n]*\n([\s\S]*?)\n```$/u) ??
+    trimmed.match(/^```([^`\n]*)```$/u);
+  const candidate = (fenced?.[1] ?? trimmed).trim();
+  const unwrapped = candidate.replace(/^`{1,3}([^`]*)`{1,3}$/u, '$1').trim();
+  return (
+    NO_REPLY_SENTINEL_PATTERN.test(candidate) ||
+    NO_REPLY_SENTINEL_PATTERN.test(unwrapped)
+  );
 }
 
 function sourceLabel(source: DwsImSource): string {
@@ -496,10 +507,6 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
   >();
   private readonly notifiedSenderPairingNotifications = new Set<string>();
   private readonly processingMessages = new Map<string, Promise<void>>();
-  private readonly syntheticInboundOutcomes = new WeakMap<
-    Envelope,
-    SyntheticInboundOutcome
-  >();
   private pollAbortController = new AbortController();
   private lifecycleGeneration = 0;
   private connectionStartedAt = 0;
@@ -579,7 +586,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       mentionWatermark: undefined,
       mentionCheckpoint: undefined,
       pendingDocumentNotifications: [],
-      pendingGroupMessages: [],
+      pendingMessages: [],
       processedMessages: [],
       imTargets: [],
       todosInitialized: false,
@@ -629,9 +636,9 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
           !cursor.pendingDocumentNotifications.every(
             isPendingDocumentNotification,
           ))) ||
-      (cursor.pendingGroupMessages !== undefined &&
-        (!Array.isArray(cursor.pendingGroupMessages) ||
-          !cursor.pendingGroupMessages.every(isPendingGroupMessage))) ||
+      (cursor.pendingMessages !== undefined &&
+        (!Array.isArray(cursor.pendingMessages) ||
+          !cursor.pendingMessages.every(isPendingMessage))) ||
       !Array.isArray(cursor.processedMessages) ||
       !cursor.processedMessages.every((item) => typeof item === 'string') ||
       !Array.isArray(cursor.imTargets) ||
@@ -663,7 +670,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       pendingDocumentNotifications: (
         cursor.pendingDocumentNotifications ?? []
       ).slice(-MAX_PROCESSED_ITEMS),
-      pendingGroupMessages: (cursor.pendingGroupMessages ?? []).slice(
+      pendingMessages: (cursor.pendingMessages ?? []).slice(
         -MAX_PROCESSED_ITEMS,
       ),
       processedMessages: cursor.processedMessages.slice(-MAX_PROCESSED_ITEMS),
@@ -708,7 +715,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       this.cursor.todoTasks = [];
       this.cursor.documentIds = [];
       this.cursor.pendingDocumentNotifications = [];
-      this.cursor.pendingGroupMessages = [];
+      this.cursor.pendingMessages = [];
       this.cursor.imTargets = [];
       this.cursor.processedMessages = [];
       this.cursor.notificationWatermark = undefined;
@@ -832,12 +839,10 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     const result = this.gate.check(envelope.senderId, envelope.senderName);
     const source = this.todoTargets.has(envelope.chatId) ? 'todo' : 'document';
     if (result.allowed) {
-      this.syntheticInboundOutcomes.set(envelope, 'allowed');
       this.markPreflighted(envelope);
       return true;
     }
     if (result.pairing) {
-      this.syntheticInboundOutcomes.set(envelope, 'pairing');
       this.logPreflightRejected(`${source}_sender_pairing_required`);
       return this.onPairingRequired(
         envelope.chatId,
@@ -847,7 +852,6 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         .then(() => false)
         .catch(() => false);
     }
-    this.syntheticInboundOutcomes.set(envelope, 'denied');
     this.logPreflightRejected(`${source}_sender_denied`);
     return false;
   }
@@ -1028,7 +1032,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     const signal = this.pollAbortController.signal;
     if (!this.connected || signal.aborted) return;
     const endTime = Date.now();
-    await this.replayPendingGroupMessages(signal);
+    await this.replayPendingMessages(signal);
     if (signal.aborted || !this.connected) return;
     await this.replayPendingDocumentNotifications(signal);
     if (signal.aborted || !this.connected) return;
@@ -1532,8 +1536,13 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     try {
       await this.handleInbound(envelope);
     } catch (error) {
-      if (source.kind === 'group' || source.kind === 'group-all') {
-        this.rememberPendingGroupMessage(source, message);
+      if (source.kind !== 'at') {
+        // R12-1: park failed direct messages next to ambient group ones.
+        // The DM history loop dispatches document-mention notifications
+        // only, so nothing else ever re-drove a plain DM whose turn threw
+        // once. `at` messages need no parking: the pinned mention
+        // checkpoint re-fetches them.
+        this.rememberPendingMessage(source, message);
       }
       // Under budget the throw propagates exactly as before, so redelivery
       // and concurrent-duplicate retry keep their contracts. Once the budget
@@ -1542,7 +1551,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       if (
         this.recordInboundFailure(key, error, () => {
           this.markProcessedMessage(key);
-          this.removePendingGroupMessage(key);
+          this.removePendingMessage(key);
         })
       ) {
         throw error;
@@ -1550,7 +1559,7 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
       return;
     }
     this.clearInboundFailure(key);
-    this.removePendingGroupMessage(key);
+    this.removePendingMessage(key);
     this.markProcessedMessage(key);
     this.saveCursor();
   }
@@ -1620,30 +1629,30 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     );
   }
 
-  private rememberPendingGroupMessage(
-    source: Extract<DwsImSource, { kind: 'group' | 'group-all' }>,
+  private rememberPendingMessage(
+    source: PersistedPendingMessage['source'],
     message: DwsImMessage,
   ): void {
     const key = messageKey(message);
-    const pending = this.cursor.pendingGroupMessages ?? [];
+    const pending = this.cursor.pendingMessages ?? [];
     if (pending.some((item) => messageKey(item.message) === key)) return;
     while (pending.length >= MAX_PROCESSED_ITEMS) {
       const dropped = pending.shift();
       if (!dropped) break;
       this.clearInboundFailure(messageKey(dropped.message));
       process.stderr.write(
-        `[Channel:${this.name}] dropping the oldest pending DWS group ` +
-          `message because the retry queue reached ${MAX_PROCESSED_ITEMS}.\n`,
+        `[Channel:${this.name}] dropping the oldest pending DWS message ` +
+          `because the retry queue reached ${MAX_PROCESSED_ITEMS}.\n`,
       );
     }
     pending.push({ source, message });
-    this.cursor.pendingGroupMessages = pending;
+    this.cursor.pendingMessages = pending;
   }
 
-  private removePendingGroupMessage(key: string): void {
-    this.cursor.pendingGroupMessages = (
-      this.cursor.pendingGroupMessages ?? []
-    ).filter((pending) => messageKey(pending.message) !== key);
+  private removePendingMessage(key: string): void {
+    this.cursor.pendingMessages = (this.cursor.pendingMessages ?? []).filter(
+      (pending) => messageKey(pending.message) !== key,
+    );
   }
 
   private async processDocumentNotification(
@@ -1735,7 +1744,6 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
         ].join('\n'),
       };
       await this.handleInbound(envelope);
-      this.syntheticInboundOutcomes.delete(envelope);
       this.markProcessedMessage(notificationKey);
       this.removePendingDocumentNotification(notificationKey);
     })();
@@ -1780,18 +1788,18 @@ export class DwsChannel extends PollingChannelBase<DwsCursor> {
     }
   }
 
-  private async replayPendingGroupMessages(signal: AbortSignal): Promise<void> {
-    for (const pending of [...(this.cursor.pendingGroupMessages ?? [])]) {
+  private async replayPendingMessages(signal: AbortSignal): Promise<void> {
+    for (const pending of [...(this.cursor.pendingMessages ?? [])]) {
       if (signal.aborted || !this.connected) return;
       const key = messageKey(pending.message);
       try {
         await this.handleImMessage(pending.source, pending.message, true);
-        this.removePendingGroupMessage(key);
+        this.removePendingMessage(key);
         this.saveCursor();
       } catch (error) {
         if (signal.aborted || !this.connected) return;
         process.stderr.write(
-          `[Channel:${this.name}] pending DWS group message remains degraded: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
+          `[Channel:${this.name}] pending DWS message remains degraded: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 300)}\n`,
         );
       }
     }

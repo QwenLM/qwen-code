@@ -375,12 +375,13 @@ class PolicyDwsChannel extends DwsChannel {
       (_unused, index) => ({
         documentId: `parked-doc-${index}`,
         commentKey: `parked-comment-${index}`,
+        request: `parked request ${index}`,
         messageId: `parked-message-${index}`,
         conversationId: 'cid-parked',
         senderId: 'open-unpaired',
         senderName: 'Unpaired Member',
       }),
-    ) as never;
+    );
     this.saveCursor();
   }
 
@@ -2566,6 +2567,38 @@ describe('DwsChannel', () => {
     await delivery;
   });
 
+  it('removes an active working reaction when the agent session dies', async () => {
+    const client = new FakeDwsClient();
+    const { channel, bridge } = await readyPolicyChannel(client);
+    let finishPrompt!: (value: string) => void;
+    const prompt = bridge.prompt as ReturnType<typeof vi.fn>;
+    prompt.mockImplementation(
+      async () =>
+        new Promise<string>((resolve) => {
+          finishPrompt = resolve;
+        }),
+    );
+    const delivery = client
+      .emit(
+        1,
+        message('user_im_message_receive_o2o_all', 'running', 'do the task'),
+      )
+      .catch(() => undefined);
+
+    await vi.waitFor(() => expect(client.addImReaction).toHaveBeenCalledOnce());
+    channel.onSessionDied('session-1');
+
+    await vi.waitFor(() => {
+      expect(client.removeImReaction).toHaveBeenCalledWith(
+        'cid-1',
+        'running',
+        '暗中观察',
+      );
+    });
+    finishPrompt('done');
+    await delivery;
+  });
+
   it('does not add a working reaction to a message rejected by pairing', async () => {
     const client = new FakeDwsClient();
     await readyPolicyChannel(client, makeConfig({ senderPolicy: 'pairing' }));
@@ -3502,6 +3535,81 @@ describe('DwsChannel', () => {
     expect(channel.inboundAttempts).toBe(5);
   });
 
+  // R12-1: a plain direct message whose turn throws had no redelivery path —
+  // the at-most-once event stream already consumed it, the DM history loop
+  // dispatches only document-mention notifications, and the pending queue
+  // parked only group sources. One transient failure lost it forever.
+  it('replays a failed direct message on the next poll', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    channel.inboundError = new Error('agent unavailable');
+    const event = message(
+      'user_im_message_receive_o2o_all',
+      'direct-retry',
+      'please retry this direct request',
+    );
+
+    await expect(client.emit(1, event)).rejects.toThrow('agent unavailable');
+    channel.inboundError = undefined;
+    await channel.poll();
+
+    expect(channel.inboundAttempts).toBe(2);
+    expect(channel.inbound).toEqual([
+      expect.objectContaining({
+        chatId: 'cid-1',
+        messageId: 'direct-retry',
+      }),
+    ]);
+  });
+
+  it('replays a failed direct message after restart', async () => {
+    const config = makeConfig();
+    const name = 'pending-direct-dws';
+    const firstClient = new FakeDwsClient();
+    const first = await readyChannel(firstClient, config, name);
+    first.inboundError = new Error('agent unavailable');
+    const event = message(
+      'user_im_message_receive_o2o',
+      'direct-restart-retry',
+      'please retry this direct request after restart',
+    );
+
+    await expect(firstClient.emit(1, event)).rejects.toThrow(
+      'agent unavailable',
+    );
+    first.disconnect();
+
+    const restartedClient = new FakeDwsClient();
+    const restarted = await readyChannel(restartedClient, config, name);
+    await restarted.poll();
+
+    expect(restarted.inboundAttempts).toBe(1);
+    expect(restarted.inbound).toEqual([
+      expect.objectContaining({
+        chatId: 'cid-1',
+        messageId: 'direct-restart-retry',
+      }),
+    ]);
+  });
+
+  it('caps retries for a persistently failing direct message', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    channel.inboundError = new Error('agent unavailable');
+    const event = message(
+      'user_im_message_receive_o2o_all',
+      'direct-poison',
+      'this direct request keeps failing',
+    );
+
+    await expect(client.emit(1, event)).rejects.toThrow('agent unavailable');
+    for (let round = 0; round < 7; round += 1) {
+      await channel.poll();
+    }
+
+    expect(channel.inboundAttempts).toBe(5);
+  });
+
   // R4-1: the budget above was wired into the mention path only. A document
   // notification whose turn throws escaped `pollOnce`'s sorted loop, so
   // nothing was marked processed, the checkpoint and watermark never advanced,
@@ -3721,6 +3829,96 @@ describe('DwsChannel', () => {
     );
   });
 
+  // R1-7: the unknown-outcome swallow decides whether a finished task is
+  // rerun and its final comment posted twice. Pin both directions: an
+  // ambiguous CLI outcome resolves the turn, a definitive rejection
+  // rethrows so the inbound budget can retry.
+  it('keeps a todo task finished when the final comment outcome is unknown', async () => {
+    const client = new FakeDwsClient();
+    client.todoTasks = [todoTask('task-1', 'Ambiguous task')];
+    const channel = await readyChannel(
+      client,
+      makeConfig({ watchTodos: true }),
+    );
+    await channel.poll();
+    // The first poll only baselines todos; the second registers the target.
+    await channel.poll();
+    client.addTodoComment.mockRejectedValue(
+      new DwsCommandError('timed out', 'unknown'),
+    );
+
+    await expect(
+      channel.respond('todo:task-1', 'the answer'),
+    ).resolves.toBeUndefined();
+
+    expect(client.addTodoComment).toHaveBeenCalledOnce();
+  });
+
+  it('rethrows a definitive todo comment rejection', async () => {
+    const client = new FakeDwsClient();
+    client.todoTasks = [todoTask('task-1', 'Rejected task')];
+    const channel = await readyChannel(
+      client,
+      makeConfig({ watchTodos: true }),
+    );
+    await channel.poll();
+    // The first poll only baselines todos; the second registers the target.
+    await channel.poll();
+    client.addTodoComment.mockRejectedValue(
+      new DwsCommandError('comment rejected', 'not_sent'),
+    );
+
+    await expect(channel.respond('todo:task-1', 'the answer')).rejects.toThrow(
+      'comment rejected',
+    );
+  });
+
+  it('keeps a document task finished when the final reply outcome is unknown', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    const commentKey = '1786589783750e2a797d2c2c141c295519dbcb07f2274';
+    await client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'notification-ambiguous',
+        documentMentionCard('doc-1', commentKey),
+      ),
+    );
+    client.replyToComment.mockRejectedValue(
+      new DwsCommandError('timed out', 'unknown'),
+    );
+
+    channel.responseThreadId = commentKey;
+    await expect(
+      channel.respond('doc-1', 'the code is 42'),
+    ).resolves.toBeUndefined();
+
+    expect(client.replyToComment).toHaveBeenCalledOnce();
+  });
+
+  it('rethrows a definitive document reply rejection', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    const commentKey = '1786589783750e2a797d2c2c141c295519dbcb07f2274';
+    await client.emit(
+      1,
+      message(
+        'user_im_message_receive_o2o_all',
+        'notification-rejected',
+        documentMentionCard('doc-1', commentKey),
+      ),
+    );
+    client.replyToComment.mockRejectedValue(
+      new DwsCommandError('comment deleted', 'not_sent'),
+    );
+
+    channel.responseThreadId = commentKey;
+    await expect(channel.respond('doc-1', 'the code is 42')).rejects.toThrow(
+      'comment deleted',
+    );
+  });
+
   it('suppresses the no-reply sentinel for every DWS source', async () => {
     const client = new FakeDwsClient();
     const channel = await readyChannel(client);
@@ -3730,6 +3928,28 @@ describe('DwsChannel', () => {
     await channel.respond('cid-1', '[NO_REPLY]');
 
     expect(client.replyToImMessage).not.toHaveBeenCalled();
+    expect(client.sendImMessage).not.toHaveBeenCalled();
+  });
+
+  it('suppresses the no-reply sentinel wrapped in fences or inline code', async () => {
+    const client = new FakeDwsClient();
+    const channel = await readyChannel(client);
+    channel.responseMessageId = 'message-1';
+    channel.responseSenderId = 'open-alice';
+
+    for (const wrapped of [
+      '```\n[NO_REPLY]\n```',
+      '```md\n[NO_REPLY]\n```',
+      '```[NO_REPLY]```',
+      '`[NO_REPLY]`',
+      '``[NO_REPLY]``',
+    ]) {
+      await channel.respond('cid-1', wrapped);
+    }
+    // A fenced reply that is NOT the sentinel must still be published.
+    await channel.respond('cid-1', '```\nreal answer\n```');
+
+    expect(client.replyToImMessage).toHaveBeenCalledOnce();
     expect(client.sendImMessage).not.toHaveBeenCalled();
   });
 
