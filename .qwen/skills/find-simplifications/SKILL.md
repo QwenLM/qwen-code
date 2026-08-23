@@ -164,16 +164,19 @@ SURVEY="$SURVEY_PARENT/main"
 # path: remove resolves symlinks, so a planted link to another registered
 # worktree of this repo would force-delete that foreign tree, uncommitted
 # work included. rm -rf unlinks a symlink without following it; prune
-# then clears the stale registration.
-rm -rf "$SURVEY_PARENT"
+# then clears the stale registration. Fail closed on removal errors: a
+# leftover that cannot be deleted is owned by someone else, and the
+# checkout must never go into a parent this user does not control.
+rm -rf "$SURVEY_PARENT" || exit 1
 # Close the create side too: `git worktree add` accepts a planted EMPTY
 # directory (exit 0, the planter keeps ownership and mode) and a symlink to
 # an empty directory (exit 0, the checkout written through the link), so
-# recreate the parent as a 0700 dir owned by the running user — no other
-# local user can then plant the worktree path — and refuse to add over
-# anything still at the path.
-install -d -m 0700 "$SURVEY_PARENT"
-[ ! -e "$SURVEY" ] && [ ! -L "$SURVEY" ] || exit 1
+# recreate the parent as a fresh 0700 dir owned by the running user — no
+# other local user can then plant the worktree path. mkdir, not install -d:
+# install -d exits 0 adopting an existing directory and following a planted
+# symlink, so no exit-status check could tell creation from adoption; mkdir
+# fails when anything is still at the path, aborting the block instead.
+mkdir -m 0700 "$SURVEY_PARENT" || exit 1
 git worktree prune
 git worktree add --detach "$SURVEY" origin/main || exit 1
 # Slice from the month, not the ISO week: a monthly run advances ISO weeks
